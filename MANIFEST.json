@@ -5,162 +5,162 @@
   "year": 2026,
   "source": {
     "repo": "Papercusp/papercup",
-    "ref": "d20b360237373f31326a9ba287086b625dd8624d",
-    "commit": "d20b360237373f31326a9ba287086b625dd8624d"
+    "ref": "6e5179874104e97720c7e781d80b247f53eae6e1",
+    "commit": "6e5179874104e97720c7e781d80b247f53eae6e1"
   },
   "submodules": [
     {
       "path": "libs/agent-chat",
-      "sha": "2e2de7639c654d7e26b7a0733cc3790bad015205"
+      "sha": "9b3c74f0b7fb75a8df4dc0ebc58a836b34d5874d"
     },
     {
       "path": "libs/generic/cache",
-      "sha": "4c32764ecf742eead930c346f3a4f73f630c6e41"
+      "sha": "6fb88cb19fb339cb7f230bab9004304eb4105973"
     },
     {
       "path": "libs/generic/card-stack",
-      "sha": "7c0dec78a9fa0d6553bf6908bb06a9e81f153496"
+      "sha": "66fe6981418eefd3283877f088a81459de77fc5c"
     },
     {
       "path": "libs/generic/chat-protocol",
-      "sha": "4b17dcaec785f86747ffc0b3ce593de78322c4ad"
+      "sha": "70dc432e361b7748043590e6c156af569f2f4548"
     },
     {
       "path": "libs/generic/control-mutation",
-      "sha": "ae8d65376c178d3f89b56bc4918af7f1736c83c0"
+      "sha": "a5a799dc594754d4f8a0c253f61d02844ceeb455"
     },
     {
       "path": "libs/generic/debounce-coalesce",
-      "sha": "7f5be7375cc9420b3f446724542a70d1b382c953"
+      "sha": "d27adc741ffea8d5e6b7aef2e71aeba51d71e78f"
     },
     {
       "path": "libs/generic/desktop-ipc",
-      "sha": "bdee3b752a4be2dba93439a03d3825b395b2e48f"
+      "sha": "d54f79e2785b92b22a52578aa7ea5b61613637e0"
     },
     {
       "path": "libs/generic/dock-workbench",
-      "sha": "b2cc3751bdd90ac4c24995271b8e6d97d71ab1f5"
+      "sha": "9bebec1de001ece29bd5f393a7d3fa703aea22a8"
     },
     {
       "path": "libs/generic/embedded-pg-discovery",
-      "sha": "1dc55adb817f6e5ab75fb64f3703d1773972a8c5"
+      "sha": "29937c205f3ec6a4dfee574ca1c7bcf98af46f98"
     },
     {
       "path": "libs/generic/failure-detector",
-      "sha": "3edf6df7f3e4bcd2a0abaac863bd1e8a57410cb2"
+      "sha": "dc1586c1b2f1195ea4f527f1e431b64b26ac5481"
     },
     {
       "path": "libs/generic/git-graph",
-      "sha": "a19025b74001cb510258c8de9cb20faa605f6616"
+      "sha": "2ca138ffcae22876528a67b7207578e741d4c1d6"
     },
     {
       "path": "libs/generic/ipc-endpoint-server",
-      "sha": "8c9d16efec9a6da86556ec9ebb122ade4d84fd43"
+      "sha": "04cd9c8e9cc60f6e9bc9d84e45c94d13e7a81116"
     },
     {
       "path": "libs/generic/ipc-framing",
-      "sha": "82a623665508fbf907fdf5c6fc8cb3b980f6ea85"
+      "sha": "9b614cd6daf325a22b187a7949d0682e27d3a5f5"
     },
     {
       "path": "libs/generic/memory",
-      "sha": "b301f060a6c8494dc43ef90d712fd80726218e4c"
+      "sha": "b67e0cadd75caa9edc5cdd84f67a2a4b1cbcf84a"
     },
     {
       "path": "libs/generic/model-pricing",
-      "sha": "a854eb0cc88ca64e0cc68130fe97217f701ada06"
+      "sha": "59bb731cb0c57921e197a27d7ee2b9932659cc32"
     },
     {
       "path": "libs/generic/papergrid",
-      "sha": "b5a9d8c264ef9476eb1184d274f00cc161c36601"
+      "sha": "6b262514ff7a77ba61f2d6e2817774f6548c2897"
     },
     {
       "path": "libs/generic/plan-parser",
-      "sha": "2492e7011c5b693324233a6c0130607694749a4c"
+      "sha": "7eee9032461e6d4710a4bc08e1111c094019d522"
     },
     {
       "path": "libs/generic/rate-limit",
-      "sha": "aabd6edd33e5f1dbf0c437d3a21f0cbf79881852"
+      "sha": "b456025fca567129a0348c51434f1d66aee99667"
     },
     {
       "path": "libs/generic/rerank",
-      "sha": "670332d5a41ca83a3fff013dffc646ae2bc89e94"
+      "sha": "65201fb8f0deeac32d54a8919f4c7d1fe5bbdf43"
     },
     {
       "path": "libs/generic/resumable-download",
-      "sha": "e3c6c87e5a89803d91f5254d742702a3500c8fac"
+      "sha": "f4ce7fadb1fc3714546f652116b7bc4aa403ff45"
     },
     {
       "path": "libs/generic/rrf",
-      "sha": "c0a44046b76f169ea7b5bec267b8db5cfb776f26"
+      "sha": "d76b57ec0cb661fadbe59b6f500b8c9c103650e6"
     },
     {
       "path": "libs/generic/rules",
-      "sha": "d1bd7540fac6e09e1d9ec9a2cc74e2b4a13b7310"
+      "sha": "953cac4dc165d654e01ff5338c728d38bb335535"
     },
     {
       "path": "libs/generic/search",
-      "sha": "8f866234346bc3f26b4aa1a5413edfaebe80314d"
+      "sha": "c4f2c6e22f04f121b7a652f3e40dbd55320d0361"
     },
     {
       "path": "libs/generic/search-core",
-      "sha": "3edb2d87f18ffb797a5430a1b3704bde1af89e14"
+      "sha": "c619fbacdf2d20c70e2a18b8a492a7c3d3d2cf9f"
     },
     {
       "path": "libs/generic/sse",
-      "sha": "2a1ca663b9acd87f09c4139037a95a45c56db16c"
+      "sha": "4de91e64ab6eb210497826be700b51062126f924"
     },
     {
       "path": "libs/generic/sync",
-      "sha": "9a48c472929b44c095f031e9aa24ce86616f2b57"
+      "sha": "9f02da4de0e5e946c1fc1ee89e9207b42e2dafe7"
     },
     {
       "path": "libs/generic/tauri-release-kit",
-      "sha": "de8b89d6ee245baa9caf600b4998e21d67c593b3"
+      "sha": "71cd24d93e341dacccaf6b5f96b89b1a45c5ea9b"
     },
     {
       "path": "libs/generic/token-kit",
-      "sha": "02eea9fd505ef8271d49b122ca7c115fe5af7501"
+      "sha": "209ee35a28f23e75b1d4d6ab498fe78b5e376fe7"
     },
     {
       "path": "libs/generic/tooldef",
-      "sha": "7fca396a0ef7d81010ceddbb8f71756cf024495c"
+      "sha": "bb2f98d8ce9fdc816865995fbd6f36432d15fb65"
     },
     {
       "path": "libs/generic/tooldef-http",
-      "sha": "859806f8b7a88b69970e615f6373301d788200e8"
+      "sha": "7be8d5cc3c7dc781bb0f4c9ed93a5394ed1433d5"
     },
     {
       "path": "libs/generic/ui-primitives",
-      "sha": "826a55ea0394ac43774338689bbe238cbd10106d"
+      "sha": "b479ccca46f1ca1165f703f1f57ada6152ec5a33"
     },
     {
       "path": "libs/papercusp",
-      "sha": "c8da1a3476756bcf171e592876e66719f613c583"
+      "sha": "2ead15ee6b1eda468c9ec888ddb7fbc2593f1adf"
     },
     {
       "path": "libs/papercusp-db",
-      "sha": "d4d3da8a9a42453ad179e1e3d56bc697ab9867ce"
+      "sha": "500c0860e9ad723055f8a0e809e8fa627f352e50"
     },
     {
       "path": "libs/papercusp-shared",
-      "sha": "f6622fd6df1e01ed020e7be5bc6cf902410bbac1"
+      "sha": "9e25d4ade23cda9578bf5c74c053e722e3be9b5c"
     },
     {
       "path": "libs/test-config",
-      "sha": "2fcab943fd54434a0f3111337eab7764c465d7a3"
+      "sha": "74d8095e5f4022b4348df3c06de264a2bc04f079"
     },
     {
       "path": "libs/testing-shell",
-      "sha": "54009dddd7fae504eb35115ef85938476dbd2951"
+      "sha": "52d222798862ee53e74253a35633df9850bd8ac8"
     },
     {
       "path": "papercusp-desktop",
-      "sha": "30549970f3bcb193b6b1cf19db1e106531d2a047"
+      "sha": "2d3cd3c871f6c001d3861783af4857ded973ea32"
     }
   ],
   "notShipped": [
     "libs/generic/prospect-contract"
   ],
-  "fileCount": 16264,
+  "fileCount": 17195,
   "generatedBy": "scripts/source-preview.mjs"
 }

@@ -538,6 +538,7 @@ const createHiveFromRepoRoute = defineTool({
       intoHive?: string;
       progressId?: string;
       knowledgePack?: string | null;
+      integrationMode?: string;
     } = {};
     try { body = (await req.json()) as typeof body; } catch { /* empty body */ }
     const githubUrl = String(body.githubUrl ?? '').trim();
@@ -546,6 +547,8 @@ const createHiveFromRepoRoute = defineTool({
     }
     const { createPotFromRepo } = await import('../../../agent-tools/pot/_create_from_repo');
     const { activeWorkspaceId } = await import('../../../workspace-registry');
+    const { parseIntegrationModeAnswer } = await import('../../../harness/git-sync/integration-mode-question');
+    const integrationMode = parseIntegrationModeAnswer(body.integrationMode);
     const res = await createPotFromRepo({
       githubUrl,
       ...(typeof body.slug === 'string' && body.slug.trim() ? { slug: body.slug.trim() } : {}),
@@ -565,6 +568,9 @@ const createHiveFromRepoRoute = defineTool({
       ...(typeof body.progressId === 'string' && /^[A-Za-z0-9-]{8,64}$/.test(body.progressId)
         ? { progressId: body.progressId }
         : {}),
+      // P-017 (D-007): the "where should the agents' work go" answer. Only a
+      // known mode is forwarded; anything else reads as unanswered (direct).
+      ...(integrationMode ? { integrationMode } : {}),
       workspaceId: activeWorkspaceId(),
     });
     if (!res.ok) {

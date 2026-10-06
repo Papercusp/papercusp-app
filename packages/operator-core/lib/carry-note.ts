@@ -115,6 +115,11 @@ export interface CheckEntry {
   claim: string;
   /** A concrete probe a successor runs to falsify/confirm the claim before relying on it. */
   recheck?: string;
+  /** EI-23771449112267271: the concrete result or observation that means this claim is FALSE
+   *  and must be retracted or corrected — the same contract `facts:assert`'s `falsifier` ships.
+   *  A probe says how to LOOK; only a falsifier says what would mean you are WRONG, so without
+   *  one any non-contradicting observation reads as confirmation. */
+  falsifier?: string;
   /** Optional typed, schema-versioned replay probe. `recheck` remains the human
    * explanation; this envelope is data-only and is validated by checkpoint writers. */
   probe?: ContinuityProbe;
@@ -214,7 +219,43 @@ export const CHECKPOINT_BODY_CAP_CHARS = 32000;
  * must not re-create is EI-18723223344390510, where a nested row quietly dropped
  * fields and destroyed a verified check's evidence with no signal.
  */
-export const CARRY_ROW_SOFT_CAPS = { claim: 500, recheck: 300, verified: 300, observed: 300, contested: 300 } as const;
+export const CARRY_ROW_SOFT_CAPS = {
+  claim: 500,
+  recheck: 300,
+  falsifier: 300,
+  verified: 300,
+  observed: 300,
+  contested: 300,
+} as const;
+
+/** EI-23771449112267271: prefix the writer stamps on evidence recorded with
+ *  `sampleAdequate: false` — "probed, but the sample could not discriminate the claim from its
+ *  negation". The evidence is kept as CONTEXT on a `?` row (see {@link CheckEntry.observed}), never
+ *  as a ✓, and the prefix is what keeps that state visible at the point of reading. */
+export const SAMPLE_INCONCLUSIVE_PREFIX = 'sample inconclusive: ';
+
+/** Warn-only advisory text for a VERIFIED row that carries no `falsifier` — the same contract
+ *  `facts:assert` enforces with `recheckMissing`. A probe says how to LOOK; only a falsifier says
+ *  what would mean the claim is WRONG, so a ✓ without one cannot expose an inadequate sample. */
+export const FALSIFIER_MISSING_NOTE =
+  'Verified (✓) check row(s) carry no `falsifier`. A probe alone says how to look, never what would mean the ' +
+  'claim is FALSE, so any non-contradicting sample reads as confirmation. Add `falsifier` (the concrete result ' +
+  'that means the claim is false and must be retracted or corrected); if you probed but the sample could not ' +
+  'discriminate (e.g. both samples sat on the same side of the boundary the claim is about), pass ' +
+  '`sampleAdequate:false` so the row renders ? instead of ✓. Advisory only — the write was accepted.';
+
+/** Labels (`#id`, else a clipped claim) of VERIFIED rows with no falsifier — drives the warn-only
+ *  `falsifierMissing` advisory on both checkpoint writers. Never refuses a write. */
+export function checksMissingFalsifier(checks: ReadonlyArray<CheckEntry & { sampleAdequate?: boolean }>): string[] {
+  const out: string[] = [];
+  for (const c of checks) {
+    // `sampleAdequate:false` rows are already downgraded to `?` by the normalizer — not a ✓ to flag.
+    if (c.sampleAdequate === false || !(c.verified ?? '').trim() || (c.falsifier ?? '').trim()) continue;
+    const id = sanitizeCarryRowId(c.id);
+    out.push(id ? `#${id}` : c.claim.trim().slice(0, 80));
+  }
+  return out;
+}
 
 /** Soft cap on each narrative field (`did`/`left`/`insight`/`next`), same contract. */
 export const CARRY_TEXT_SOFT_CAP = 8000;
@@ -1394,6 +1435,7 @@ export function parseWallLine(line: string): WallEntry | null {
  *  of growing the claim by one marker per wake. */
 export function renderCheckLine(c: CheckEntry): string {
   const recheck = (c.recheck ?? '').trim();
+  const falsifier = (c.falsifier ?? '').trim();
   const verified = (c.verified ?? '').trim();
   const observed = (c.observed ?? '').trim();
   const contested = (c.contested ?? '').trim();
@@ -1407,8 +1449,8 @@ export function renderCheckLine(c: CheckEntry): string {
   return `- ${marker} ${scope ? `${renderProbeScopeMarker(scope)} ` : ''}${
     id ? `[#${id}] ` : ''
   }${stripProbeScopeMarker(c.claim.trim())}${recheck ? ` — re-check: ${recheck}` : ''}${
-    probe ? ` — probe: ${probe}` : ''
-  }${evidence ? ` — evidence: ${evidence}` : ''}${since}`;
+    falsifier ? ` — falsifier: ${falsifier}` : ''
+  }${probe ? ` — probe: ${probe}` : ''}${evidence ? ` — evidence: ${evidence}` : ''}${since}`;
 }
 
 /**
@@ -1423,7 +1465,8 @@ export function renderCheckLine(c: CheckEntry): string {
  */
 const CHECK_LINE_RE = new RegExp(
   `^-\\s+(?:([✓?⚠])\\s+)?(?:${PROBE_SCOPE_MARKER_RE.source}\\s+)?(?:\\[#([A-Za-z0-9._:-]{1,40})\\]\\s+)?(.+?)` +
-    `(?:\\s+—\\s+re-check:\\s+(.+?))?(?:\\s+—\\s+probe:\\s+([A-Za-z0-9_-]+))?` +
+    `(?:\\s+—\\s+re-check:\\s+(.+?))?(?:\\s+—\\s+falsifier:\\s+(.+?))?` +
+    `(?:\\s+—\\s+probe:\\s+([A-Za-z0-9_-]+))?` +
     `(?:\\s+—\\s+evidence:\\s+(.+?))?(?:\\s+\\(since\\s+([^)]+)\\))?\\s*$`,
 );
 
@@ -1464,9 +1507,11 @@ export function parseCheckLine(line: string): CheckEntry | null {
   if (id) out.id = id;
   const recheck = (m[4] ?? '').trim();
   if (recheck) out.recheck = recheck;
-  const probe = decodeContinuityProbe((m[5] ?? '').trim());
+  const falsifier = (m[5] ?? '').trim();
+  if (falsifier) out.falsifier = falsifier;
+  const probe = decodeContinuityProbe((m[6] ?? '').trim());
   if (probe) out.probe = probe;
-  const evidence = (m[6] ?? '').trim();
+  const evidence = (m[7] ?? '').trim();
   if (evidence) {
     // The rendered marker is the authority tier. In particular, `?` evidence is
     // deliberately context ABOUT an unverified claim and commonly says "pending"
@@ -1477,8 +1522,8 @@ export function parseCheckLine(line: string): CheckEntry | null {
     else if (m[1] === '⚠' || findVerificationConflict(evidence, claim)) out.contested = evidence;
     else out.verified = evidence;
   }
-  if (m[7]) {
-    const t = Date.parse(m[7]);
+  if (m[8]) {
+    const t = Date.parse(m[8]);
     if (Number.isFinite(t)) out.sinceMs = t;
   }
   return out;
@@ -1785,6 +1830,9 @@ export function normalizeCheckEntries(
     id?: string;
     claim: string;
     recheck?: string;
+    falsifier?: string;
+    /** `false` = probed, but the sample could not discriminate the claim from its negation. */
+    sampleAdequate?: boolean;
     verified?: string;
     observed?: string;
     contested?: string;
@@ -1808,6 +1856,7 @@ export function normalizeCheckEntries(
     const existing = priorRowForIncoming(e, prior, priorByKey);
     const id = sanitizeCarryRowId(e.id) ?? existing?.id;
     const recheck = (e.recheck ?? existing?.recheck ?? '').trim();
+    const falsifier = (e.falsifier ?? existing?.falsifier ?? '').trim();
     const probe = e.probe ?? existing?.probe;
     // An explicit evidence field is an update, including an empty string that
     // deliberately clears inherited evidence. Exactly one authority slot survives:
@@ -1836,6 +1885,17 @@ export function normalizeCheckEntries(
       contested = '';
     }
     if (e.verified !== undefined) observed = '';
+    // EI-23771449112267271: a probe whose SAMPLE could not discriminate the claim from its
+    // negation is not verification — the evidence stays visible as CONTEXT on a `?` row
+    // (never ✓), tagged so the successor sees the state at the badge. Same downgrade shape as
+    // the contradiction check below; the state lives in the text so render→parse stays stable.
+    if (e.sampleAdequate === false) {
+      const evidence = verified || observed;
+      if (evidence && !evidence.startsWith(SAMPLE_INCONCLUSIVE_PREFIX)) {
+        observed = `${SAMPLE_INCONCLUSIVE_PREFIX}${evidence}`;
+        verified = '';
+      }
+    }
     const conflict = findVerificationConflict(verified, claim);
     if (conflict) {
       contested = verified;
@@ -1862,6 +1922,7 @@ export function normalizeCheckEntries(
       ...(id ? { id } : {}),
       claim,
       ...(recheck ? { recheck } : {}),
+      ...(falsifier ? { falsifier } : {}),
       ...(probe ? { probe } : {}),
       ...(contested ? { contested } : {}),
       ...(verified ? { verified } : {}),
@@ -1891,6 +1952,9 @@ export function patchExistingCheckEntries(
     id?: string;
     claim: string;
     recheck?: string;
+    falsifier?: string;
+    /** `false` = probed, but the sample could not discriminate the claim from its negation. */
+    sampleAdequate?: boolean;
     verified?: string;
     observed?: string;
     contested?: string;
@@ -2888,6 +2952,15 @@ export async function setCarryNoteWithPrior(
      */
     transform?: (priorNote: string | null, note: string | null | undefined) => string | null | undefined;
     /**
+     * personal-data-reader-set-labels P-012 / D-006: replace the note about to be
+     * stored with what may be shared (a sealed stub when the writer holds a
+     * restricted disclosure). Runs AFTER `guard` and `transform` — so the guards
+     * judge the authored text, not the stub — and BEFORE journaling, so neither the
+     * note nor its journal entry keeps the text. It receives this transaction, so
+     * the sealed row commits or rolls back with the note. Not called for a clear.
+     */
+    seal?: (tx: Sql | TransactionSql, note: string) => Promise<string>;
+    /**
      * Optimistic-CAS baseline for a replace/patch. `undefined` keeps the legacy
      * unconditional write contract; `null` asserts that no note existed. The
      * comparison runs after SELECT FOR UPDATE and before guard/transform, so a
@@ -2960,7 +3033,8 @@ export async function setCarryNoteWithPrior(
     // write must not transform — and BEFORE journaling, so the ring records what was
     // actually stored rather than the caller's pre-merge draft.
     const effectiveNote = opts?.transform ? opts.transform(priorNote, note) : note;
-    const trimmed = (effectiveNote ?? '').trim();
+    let trimmed = (effectiveNote ?? '').trim();
+    if (trimmed && opts?.seal) trimmed = (await opts.seal(tx, trimmed)).trim();
     // journaling ON: append (blank ⇒ unchanged ring); OFF: never keep a ring.
     const journal = journalEnabled ? appendCarryJournal(prevJournal, trimmed, now, opts?.workItem) : [];
     const noteCol = trimmed.length > 0 ? trimmed : null;

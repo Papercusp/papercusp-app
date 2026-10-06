@@ -408,7 +408,20 @@ export function normalizeNextFireAt(raw: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? NEXT_FIRE_PARKED : d;
 }
 
-function rowToRoutine(row: any): RoutineRow {
+/**
+ * last_fired_at as a real Date (WI-10005062). RoutineRow promises `Date | null`, but on
+ * the operator connection this column arrives as a string, and passing it through raw made
+ * routinesTick's claim-skip classifier throw `lastFiredAt.toISOString is not a function`.
+ * That throw aborted dispatch for every later due routine in that tick. An unparseable
+ * value reads as null ("no recorded fire"), never as a fabricated timestamp.
+ */
+export function normalizeLastFiredAt(raw: unknown): Date | null {
+  if (raw == null) return null;
+  const d = raw instanceof Date ? raw : new Date(raw as string);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+export function rowToRoutine(row: any): RoutineRow {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -424,7 +437,7 @@ function rowToRoutine(row: any): RoutineRow {
     // (or a hand-built test row) has no `tier` → treat as durable (the column default).
     tier: row.tier ?? 'durable',
     active: row.active,
-    lastFiredAt: row.last_fired_at,
+    lastFiredAt: normalizeLastFiredAt(row.last_fired_at),
     nextFireAt: normalizeNextFireAt(row.next_fire_at),
     rescheduleIntervalSec:
       row.reschedule_interval_sec == null ? null : Number(row.reschedule_interval_sec),

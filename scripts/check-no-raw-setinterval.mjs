@@ -121,6 +121,15 @@ export const SEPARATE_PROCESS_ALLOWLIST = new Set([
   // in-host twin (createTestProcessDemandSampler in agent-tools/testing/run.ts)
   // IS registered via managedSetInterval. [P-018]
   'scripts/lib/governed-test-process.mjs',
+  // WI-10004963: the RSS sampler inside collectSidecarPerformance. It runs only in the
+  // embedder-eval bench CLI (`npx tsx .../bench/embedder-eval-cli.ts`), which no host
+  // module imports, and it samples THAT process's own memory, so a registry entry would
+  // sit in a per-process inventory schedule:inventory never serves.
+  'packages/operator-core/lib/memory/bench/sidecar-performance.ts',
+  // WI-10004963: the stats logger of the standalone relay daemon. build-relay-daemon.mjs
+  // bundles it for a relay VM with only hyperdht + blind-relay as runtime deps and no
+  // operator, so @papercusp/scheduled-registry is neither available nor meaningful there.
+  'scripts/relay/blind-relay-daemon.ts',
 ]);
 
 /** Permanently-allowed individual files (rare; prefer ALLOWLIST_DIRS). */

@@ -153,6 +153,46 @@ export function clearGoalPause(
 }
 
 /**
+ * The metadata keys `applyGoalDisposition` stamps on a wind-down
+ * (`operator-core/lib/goals/wind-down-disposition.ts`). Mirrored here, not
+ * imported: that module pulls the org-pg handle and flag reads into this pure
+ * file's graph, and the write side is a single `||` merge of exactly these keys.
+ */
+const GOAL_DISPOSITION_KEYS = ['disposition', 'dispositionBy', 'dispositionAt', 'handoffTo'] as const;
+
+/**
+ * Drop the wind-down disposition stamp when a goal LEAVES a terminal status.
+ * PURE. EI-24732367604234855.
+ *
+ * `loop:end` / `session:end` stamp `metadata.disposition` on the goal row and
+ * flip `status` to `killed`/`achieved`. `goals:update { status:'active' }` then
+ * reactivates the goal but — before this — left the stamp behind, and
+ * `recordedDispositionCoversNonActiveEnd` (loop/end.ts) and `session/end.ts`
+ * treat ANY recorded disposition as covering an inactive-loop end. A
+ * reactivated goal still carrying `disposition:'killed'` would therefore wave a
+ * later `loop:end` straight through the disposition gate: the stale record
+ * answers a question about a wind-down that no longer applies.
+ *
+ * Only a terminal → non-terminal transition clears. A `handoff` disposition
+ * leaves the goal ACTIVE (someone else continues it), so `active → active`
+ * keeps its stamp, and a goal that stays terminal (`killed → killed`) keeps the
+ * record that explains why. Every other metadata key survives — the same
+ * spread-don't-replace discipline as {@link stampGoalPause}.
+ */
+export function clearGoalDispositionOnReactivation(
+  metadata: Record<string, unknown> | null | undefined,
+  prevStatus: string | null | undefined,
+  nextStatus: string | null | undefined,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  const wasTerminal = prevStatus === 'killed' || prevStatus === 'achieved';
+  const isTerminal = nextStatus === 'killed' || nextStatus === 'achieved';
+  if (!wasTerminal || isTerminal) return next;
+  for (const key of GOAL_DISPOSITION_KEYS) delete next[key];
+  return next;
+}
+
+/**
  * Is this goal DELIBERATELY paused? RE-EXPORTED — the definition moved to
  * `@papercusp/operator-core`'s `lib/goals/activity.ts` (plan D-011), which is
  * where the status/liveness fold that needs it lives.

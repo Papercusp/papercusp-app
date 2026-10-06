@@ -11,13 +11,29 @@
  */
 import type { AgentObligation, AgentObligationAgenda } from './agent-obligations';
 import { captureWakeHandleForOwner } from './events/await/handle';
-import { cancelAwait, listLifecycleBoundAwaits, registerAwait } from './events/await/store';
+import { cancelAwait, listLifecycleBoundAwaits, registerAwait, type AwaitCancelReason } from './events/await/store';
 import type { AwaitRow, LifecycleBinding } from './events/await/types';
 
 export const AGENT_OBLIGATION_REMINDER_BINDING_KIND = 'agent-obligation';
 export const AGENT_OBLIGATION_REMINDER_MIN_SLEEP_SEC = 60;
 const DEADLINE_EVENT_PREFIX = 'agent-obligation:deadline:';
 const DEADLINE_MATCH_TOLERANCE_MS = 2_000;
+/**
+ * P-010 (goal-holder-plans-ideation-truthful-reports-2026-10-03). An obligation
+ * that this turn did NOT evaluate (outside a bounded window such as
+ * PLAN_CONTEXT_MAX, or behind a degraded read) is unknown, not resolved. Its
+ * pending reminder is kept for up to this long, so a holder who takes turns more
+ * often than the reminder's lead time is still reminded. Measured before the
+ * fix (goal holder su-9e72a11f, 2026-10-02 21:00Z-03:00Z): ALL of its pending
+ * plan-acceptance, placement and planning reminders dropped to zero at once on
+ * some turns (21:47-22:07Z, 22:37-22:57Z, 02:57Z) and were re-armed a turn later,
+ * so an event landing in that gap was never delivered. [inferred] cause: a turn
+ * whose agenda did not evaluate them (900ms portfolio read timeout, or the plan
+ * rotating out of PLAN_CONTEXT_MAX). Most of those rows are EVENT watches, so a
+ * low fired share is not itself a defect; cancel_reason is what makes delivery
+ * measurable.
+ */
+export const AGENT_OBLIGATION_UNEVALUATED_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 export interface AgentObligationReminderReceipt {
   desired: number;
@@ -25,6 +41,8 @@ export interface AgentObligationReminderReceipt {
   retained: number;
   alreadyDelivered: number;
   cancelled: number;
+  /** Pending reminders kept because their obligation was not evaluated (or was unknown) this turn. */
+  retainedUnevaluated: number;
   invalidDeadlines: string[];
   error?: string;
 }
@@ -121,6 +139,7 @@ export async function reconcileAgentObligationReminders(
     retained: 0,
     alreadyDelivered: 0,
     cancelled: 0,
+    retainedUnevaluated: 0,
     invalidDeadlines: [],
   };
 
@@ -139,6 +158,7 @@ export async function reconcileAgentObligationReminders(
       deps.listHistory(input.ownerId, AGENT_OBLIGATION_REMINDER_BINDING_KIND),
     ]);
     const activeRows = history.filter(active);
+    await retireUndesiredReminderRows(input, deps, activeRows, desiredByRef, nowMs, receipt);
 
     for (const [ref, desired] of desiredByRef) {
       const episodeRows = history.filter((row) => row.boundTo?.ref === ref);
@@ -150,13 +170,13 @@ export async function reconcileAgentObligationReminders(
       if (settled) {
         receipt.alreadyDelivered += 1;
         for (const row of activeEpisodeRows) {
-          if (await deps.cancel({ awaitId: row.id, subscriberId: input.ownerId })) receipt.cancelled += 1;
+          if (await deps.cancel({ awaitId: row.id, subscriberId: input.ownerId, reason: 'obligation-delivered' })) receipt.cancelled += 1;
         }
         continue;
       }
 
       for (const row of activeEpisodeRows) {
-        if (row.id !== keep?.id && (await deps.cancel({ awaitId: row.id, subscriberId: input.ownerId }))) {
+        if (row.id !== keep?.id && (await deps.cancel({ awaitId: row.id, subscriberId: input.ownerId, reason: 'obligation-superseded' }))) {
           receipt.cancelled += 1;
         }
       }
@@ -181,17 +201,52 @@ export async function reconcileAgentObligationReminders(
       });
       receipt.registered += 1;
     }
-
-    // Anything absent from the newly evaluated agenda is resolved, cancelled,
-    // or out of scope. Retire only its still-pending delivery row; fired history
-    // remains the existing durable proof that a prior episode was handled.
-    for (const row of activeRows) {
-      const ref = row.boundTo?.ref;
-      if (ref && desiredByRef.has(ref)) continue;
-      if (await deps.cancel({ awaitId: row.id, subscriberId: input.ownerId })) receipt.cancelled += 1;
-    }
   } catch (error) {
     receipt.error = error instanceof Error ? error.message : String(error);
   }
   return receipt;
+}
+
+/**
+ * Retire pending rows whose obligation wants no reminder now. Runs BEFORE any
+ * new registration: a registration for the same event key retires the old row
+ * itself (registerAwait exact one-shot dedup), so classifying afterwards would
+ * find it already cancelled and drop this measured reason (WI-10005938).
+ */
+async function retireUndesiredReminderRows(
+  input: { ownerId: string; agenda: AgentObligationAgenda },
+  deps: AgentObligationReminderDeps,
+  activeRows: readonly AwaitRow[],
+  desiredByRef: ReadonlyMap<string, DesiredReminder>,
+  nowMs: number,
+  receipt: AgentObligationReminderReceipt,
+): Promise<void> {
+    // A pending row whose obligation wants no reminder now is retired only when
+    // this turn actually MEASURED that obligation: satisfied/not-applicable is a
+    // discharge, any other measured status is a superseded route. An obligation
+    // absent from the evaluated set (bounded window, degraded read) or measured
+    // as unknown is NOT resolved: its row is kept until the retention horizon
+    // (P-010). Fired history remains the durable proof an episode was handled.
+    const evaluationById = new Map(input.agenda.evaluations.map((obligation) => [obligation.id, obligation]));
+    for (const row of activeRows) {
+      const ref = row.boundTo?.ref;
+      if (ref && desiredByRef.has(ref)) continue;
+      const evaluated = ref ? evaluationById.get(ref) : undefined;
+      let reason: AwaitCancelReason;
+      if (evaluated && evaluated.status !== 'unknown') {
+        reason = evaluated.status === 'satisfied' || evaluated.status === 'not-applicable'
+          ? 'obligation-discharged'
+          : 'obligation-superseded';
+      } else if (ref) {
+        const createdMs = Date.parse(row.createdAt);
+        if (Number.isFinite(createdMs) && nowMs - createdMs < AGENT_OBLIGATION_UNEVALUATED_RETENTION_MS) {
+          receipt.retainedUnevaluated += 1;
+          continue;
+        }
+        reason = 'obligation-unevaluated-expired';
+      } else {
+        reason = 'obligation-superseded';
+      }
+      if (await deps.cancel({ awaitId: row.id, subscriberId: input.ownerId, reason })) receipt.cancelled += 1;
+    }
 }

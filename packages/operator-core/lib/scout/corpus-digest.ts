@@ -752,6 +752,22 @@ function buildRecurringFriction(
     const newest = [...members].sort((a, b) => lastSeenMsOf(b) - lastSeenMsOf(a))[0];
     const lastSeenMs = newest ? lastSeenMsOf(newest) : 0;
     const decayDays = lastSeenMs ? round((nowMs - lastSeenMs) / DAY_MS, 1) : 0;
+    // EI-24726268610417103: label + ref come from the member that carries the REPORTS,
+    // not the member seen most recently. A mixed cluster (one lexical group spanning two
+    // different tools' failures) used to be named by whichever member was newest even when
+    // that member held 0.2% of the cluster's reports (152 of 66,044), so a 5-day-quiet
+    // hotspot rendered as the top CURRENT friction under another tool's name. Ties break
+    // to the newest member, so a corpus with no ledger skew (every member floors at 1)
+    // resolves to `newest` and renders byte-identically to before.
+    const flowOfMember = (m: ImprovementCandidate): number => Math.max(1, occurrencesById.get(m.id) ?? 1);
+    const dominant = members.reduce<ImprovementCandidate | undefined>((best, m) => {
+      if (!best) return m;
+      const f = flowOfMember(m);
+      const bf = flowOfMember(best);
+      return f > bf || (f === bf && lastSeenMsOf(m) > lastSeenMsOf(best)) ? m : best;
+    }, undefined);
+    const mixed = dominant !== undefined && newest !== undefined && dominant.id !== newest.id;
+    const head = mixed ? dominant : newest;
     const openBoost = openCount > 0 ? 1 + openCount / members.length : 0.5;
     // Salience and the owner-facing "recurred N×" now read the SAME flow count. They
     // have to move together: quoting stock in the string while ranking on flow would
@@ -761,14 +777,19 @@ function buildRecurringFriction(
       salience: recurrence * openBoost,
       pattern: {
         category: 'recurring-friction' as MetaPatternCategory,
-        summary: newest ? truncate(newest.title) : cluster.signature,
+        summary: head ? truncate(head.title) : cluster.signature,
         detail:
           `recurred ${recurrence}× (${openCount} open), last ${decayDays}d ago${originTag}${observationSourceDetail(members)}` +
           // Name the two axes only when they disagree, so an ordinary multi-row
           // cluster's line is unchanged and a ledger-only recurrence is legible
           // rather than looking like a one-row cluster inexplicably ranked first.
-          (recurrence !== members.length ? ` · ${members.length} row(s), ${recurrence} report(s)` : ''),
-        ref: newest ? `wi:${newest.id}` : `friction:${cluster.signature.slice(0, 40)}`,
+          (recurrence !== members.length ? ` · ${members.length} row(s), ${recurrence} report(s)` : '') +
+          (mixed && dominant && newest
+            ? ` · mixed cluster: labelled by its dominant member (${flowOfMember(dominant)} of ${recurrence} report(s), ` +
+              `last ${round((nowMs - lastSeenMsOf(dominant)) / DAY_MS, 1)}d ago); the newest member ` +
+              `"${truncate(newest.title, 60)}" (last ${decayDays}d ago) is where "last" above is measured`
+            : ''),
+        ref: head ? `wi:${head.id}` : `friction:${cluster.signature.slice(0, 40)}`,
       },
     };
   });

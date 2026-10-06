@@ -20,6 +20,13 @@ import {
 } from '@/app/_components/voice/voice-mode';
 import { setVoicePrefsClient } from '@/app/_components/voice/voice-prefs-client';
 import type { VoicePrefs, SttEngineKind, TtsEngineKind } from '@papercusp/operator-core/lib/voice-prefs';
+import {
+  RELEASE_UNAVAILABLE_LABEL,
+  isFullAgentEngineUnavailable,
+  isTtsEngineUnavailable,
+  isWakeEngineUnavailable,
+  releaseUnavailableMessage,
+} from '@papercusp/operator-core/lib/voice-release-availability';
 import type { TtsSpendState } from '@papercusp/operator-core/lib/tts-spend';
 import type { SttSpendState } from '@papercusp/operator-core/lib/stt-spend';
 import { useSyncQuery } from '@papercusp/sync';
@@ -50,7 +57,6 @@ const FULL_AGENT_KEY: Record<string, {
   helpUrl: string;
 }> = {
   'openai-realtime':           { service: 'openai',     field: 'openaiApiKey',     label: 'OpenAI',    placeholder: 'sk-…',  helpUrl: 'https://platform.openai.com/api-keys' },
-  'gemini-live':               { service: 'google',     field: 'googleApiKey',     label: 'Google AI', placeholder: 'AIza…', helpUrl: 'https://aistudio.google.com/app/apikey' },
   'elevenlabs-conv':           { service: 'elevenlabs', field: 'elevenlabsApiKey', label: 'ElevenLabs', placeholder: 'sk_…', helpUrl: 'https://elevenlabs.io/app/settings/api-keys' },
   // Legacy alias for 'elevenlabs-conv' — kept so a stored value still resolves,
   // but deliberately NOT offered in the engine picker's option list.
@@ -376,37 +382,44 @@ export default function VoiceSettingsPage() {
                 <label style={lbl}>Full-agent engine</label>
                 <Select
                   value={fullAgentVal}
-                  onChange={(v) => savePrefsPatch({ fullAgentEngine: v as VoicePrefs['fullAgentEngine'] })}
+                  onChange={(v) => {
+                    if (!isFullAgentEngineUnavailable(v)) void savePrefsPatch({ fullAgentEngine: v as VoicePrefs['fullAgentEngine'] });
+                  }}
                   ariaLabel="Full-agent engine"
                   disabled={savingPrefs}
                   triggerStyle={sel as React.CSSProperties}
+                  // Release scope (voice-final-public-release-2026-10-01#D-005): each
+                  // full-agent engine below is visible but disabled when the release
+                  // list marks it unavailable; a saved value is kept and explained.
                   options={[
                     { value: 'off', label: 'Off — use the STT + TTS pair below' },
-                    {
-                      value: 'openai-realtime',
-                      label: `OpenAI Realtime (gpt-4o-realtime)${!allCreds?.openai?.configured ? ' — needs OpenAI key' : ''}`,
-                    },
-                    {
-                      value: 'gemini-live',
-                      label: `Google Gemini Live (multimodal)${!allCreds?.google?.configured ? ' — needs Google AI key' : ''}`,
-                    },
-                    {
-                      value: 'elevenlabs-conv',
-                      label: `ElevenLabs Conversational AI (Claude Haiku)${!allCreds?.elevenlabs?.configured ? ' — needs ElevenLabs key' : ''}`,
-                    },
+                    ...([
+                      ['openai-realtime', 'OpenAI Realtime (gpt-4o-realtime)'],
+                      ['gemini-live', 'Google Gemini Live'],
+                      ['elevenlabs-conv', 'ElevenLabs Conversational AI (Claude Haiku)'],
+                    ] as const).map(([value, name]) => ({
+                      value,
+                      label: isFullAgentEngineUnavailable(value) ? `${name} — ${RELEASE_UNAVAILABLE_LABEL}` : name,
+                      disabled: isFullAgentEngineUnavailable(value),
+                    })),
                     // 'elevenlabs-conversational' is a legacy alias for 'elevenlabs-conv'
                     // (design memo: accept it when stored, never offer it). Only included
                     // when it IS the stored value so the trigger can render a label.
                     ...(fullAgentVal === 'elevenlabs-conversational'
-                      ? [{ value: 'elevenlabs-conversational', label: 'ElevenLabs Conversational AI (legacy)' }]
+                      ? [{ value: 'elevenlabs-conversational', label: `ElevenLabs Conversational AI (legacy) — ${RELEASE_UNAVAILABLE_LABEL}`, disabled: true }]
                       : []),
                   ]}
                 />
                 <p style={hint}>
                   Full-agent mode replaces the STT + TTS pair with a single conversational session.
-                  Recommended: ElevenLabs Conv AI with Claude Haiku underneath — best voice quality,
-                  delegates complex tasks to Claude. OpenAI Realtime is a working fallback.
+                  This release supports voice through the STT + TTS pair below.
                 </p>
+                {isFullAgentEngineUnavailable(fullAgentVal) && (
+                  <p role="alert" style={hint}>
+                    {releaseUnavailableMessage(fullAgentVal)} Choose Off to use the STT + TTS pair.
+                    Your saved engine preference has been kept.
+                  </p>
+                )}
               </div>
 
               {/* ── CLOUD API KEYS POINTER ────────────────────────────────
@@ -498,11 +511,22 @@ export default function VoiceSettingsPage() {
                     options={[
                       { value: 'kokoro', label: 'Kokoro (Voicemode, local) — recommended' },
                       { value: 'browser', label: 'Browser (OS voices)' },
-                      { value: 'elevenlabs', label: 'ElevenLabs Turbo v2.5 (cloud, BYO key)' },
-                      { value: 'openai', label: 'OpenAI tts-1 (cloud, BYO key)' },
-                      { value: 'cartesia', label: 'Cartesia Sonic-2 (cloud, BYO key)' },
+                      ...([
+                        ['elevenlabs', 'ElevenLabs Turbo v2.5 (cloud, BYO key)'],
+                        ['openai', 'OpenAI tts-1 (cloud, BYO key)'],
+                        ['cartesia', 'Cartesia Sonic-2 (cloud, BYO key)'],
+                      ] as const).map(([value, name]) => ({
+                        value,
+                        label: isTtsEngineUnavailable(value) ? `${name} — ${RELEASE_UNAVAILABLE_LABEL}` : name,
+                        disabled: isTtsEngineUnavailable(value),
+                      })),
                     ]}
                   />
+                  {isTtsEngineUnavailable(prefs?.ttsEngine) && (
+                    <p role="alert" style={hint}>
+                      {releaseUnavailableMessage(String(prefs?.ttsEngine))} Your saved engine preference has been kept.
+                    </p>
+                  )}
                   <EnginePreview engine={prefs?.ttsEngine ?? 'kokoro'} />
                   <p style={hint}>
                     Kokoro uses a local server (port 8880) when one is running, else the built-in
@@ -959,11 +983,13 @@ export default function VoiceSettingsPage() {
             options={[
               { value: 'off', label: 'Off — string-match wake word in transcript' },
               { value: 'openwakeword', label: 'openWakeWord (Apache 2.0, no key)' },
-              {
-                value: 'porcupine',
-                label: `Porcupine (Picovoice, BYO key${!allCreds?.picovoice?.configured ? ' — not configured' : ''})`,
-                disabled: !allCreds?.picovoice?.configured,
-              },
+              isWakeEngineUnavailable('porcupine')
+                ? { value: 'porcupine', label: `Porcupine (Picovoice) — ${RELEASE_UNAVAILABLE_LABEL}`, disabled: true }
+                : {
+                    value: 'porcupine',
+                    label: `Porcupine (Picovoice, BYO key${!allCreds?.picovoice?.configured ? ' — not configured' : ''})`,
+                    disabled: !allCreds?.picovoice?.configured,
+                  },
             ]}
           />
           <p style={hint}>

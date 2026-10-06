@@ -84,6 +84,8 @@ export interface TestingRunInvocation {
   invokedAt: Date;
   /** Null when the invocation never recorded a duration; the window then uses slack alone. */
   durationMs: number | null;
+  /** Explicit work-item id extracted from args_json; null means the run is unattributed. */
+  workItemId: string | null;
   /** `args_json.files` — the exact paths that run executed. */
   files: readonly string[];
 }
@@ -94,7 +96,7 @@ export interface TestResultBindingProbe {
    * cannot be determined. `null` means "looked, found none" — both are silence here, but
    * the distinction is kept so a caller can log them apart.
    */
-  latestTestingRun: () => Promise<TestingRunInvocation | null | undefined>;
+  latestTestingRun: (workItemId: string) => Promise<TestingRunInvocation | null | undefined>;
   /** Ledger rows for `paths` whose `finished_at` falls inside `[from, to]`. */
   ledgerRowsInWindow: (
     paths: readonly string[],
@@ -127,15 +129,21 @@ const FAILING_STATUSES: ReadonlySet<string> = new Set(['fail', 'error']);
  */
 export async function testResultContradictedByRun(
   evidence: CompletionVerificationEvidence | null | undefined,
+  workItemId: string,
   probe: TestResultBindingProbe,
 ): Promise<TestResultContradiction | undefined> {
+  if (!workItemId.trim()) return undefined;
+
   // Nothing was claimed about tests, so there is nothing to contradict. The missing-field
   // gate (`no-test-run-or-result`) already owns that case and reports a better remedy.
   if (!evidence?.testsRun?.trim() && !evidence?.testResult?.trim()) return undefined;
 
   try {
-    const run = await probe.latestTestingRun();
-    if (!run) return undefined;
+    const run = await probe.latestTestingRun(workItemId);
+    // The caller's exact item id must match the invocation's recorded attribution. This
+    // second check protects the decision if a query/mock ever returns an unbound or
+    // cross-item row despite the lookup's own SQL filter.
+    if (!run || run.workItemId !== workItemId) return undefined;
 
     const files = (run.files ?? []).map((f) => f?.trim()).filter((f): f is string => !!f);
     if (files.length === 0) return undefined;

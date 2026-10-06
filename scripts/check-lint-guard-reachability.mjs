@@ -55,9 +55,10 @@
  * detector was silently blind to 13 real escapes (EI-20059456952698638).
  * A green logic test and a rotting guard are perfectly compatible states.
  *
- * The discriminator is therefore whether the test EXECUTES the guard against real
- * repository files (`ENFORCING_TEST_RE`) — spawning it, or driving its scan over a
- * repo-root path — not merely whether a test mentions it.
+ * `ENFORCING_TEST_RE` is only a candidate-suite prefilter. The `test` tier is credited
+ * only when a TypeScript AST shows an execution call whose actual command or argv names
+ * this guard's npm script or implementation path. Each test file is parsed separately,
+ * so a fixture string or another suite's same-named local constant cannot supply evidence.
  *
  * ── KNOWN LIMITATION: the `ci` tier is credited GENEROUSLY ───────────────────
  * `ci` counts as blocking here, and on this box that is arguably too kind.
@@ -124,6 +125,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, resolve, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import ts from 'typescript';
 import { listTrackedFiles } from './lib/tracked-files.mjs';
 import {
   assessGraphHealth,
@@ -747,9 +749,269 @@ export function referencedScripts(command) {
   return [...String(command).matchAll(/npm run ([\w:.-]+)/g)].map((m) => m[1]);
 }
 
-/** Escape a guard name for embedding in a RegExp. */
-function escapeRe(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const TEST_PROCESS_CALLS = new Set([
+  'exec',
+  'execFile',
+  'execFileSync',
+  'execSync',
+  'execa',
+  'execaSync',
+  'runGuardScript',
+  'spawn',
+  'spawnSync',
+]);
+const NODE_VALUE_FLAGS = new Set([
+  '--conditions',
+  '--experimental-loader',
+  '--import',
+  '--inspect-port',
+  '--loader',
+  '--max-http-header-size',
+  '--openssl-config',
+  '--redirect-warnings',
+  '--require',
+  '--tsconfig',
+  '--title',
+  '-r',
+]);
+
+function callExpressionName(expression) {
+  while (
+    ts.isParenthesizedExpression(expression) ||
+    ts.isAsExpression(expression) ||
+    ts.isNonNullExpression(expression)
+  ) {
+    expression = expression.expression;
+  }
+  if (ts.isIdentifier(expression)) return expression.text;
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+  return null;
+}
+
+function isPathResolverCall(expression, pathImports) {
+  if (ts.isIdentifier(expression)) return pathImports.named.has(expression.text);
+  if (
+    ts.isPropertyAccessExpression(expression) &&
+    ['join', 'resolve'].includes(expression.name.text) &&
+    ts.isIdentifier(expression.expression)
+  ) {
+    return pathImports.namespaces.has(expression.expression.text);
+  }
+  return false;
+}
+
+function appendStaticPath(prefix, part) {
+  const value = String(part).replaceAll('\\', '/');
+  if (!value) return prefix;
+  if (value.startsWith('/') || /^[A-Za-z]:\//.test(value)) return value;
+  if (!prefix) return value;
+  return `${prefix.replace(/\/+$/, '')}/${value}`;
+}
+
+function staticStringValues(node, constants, pathImports) {
+  if (!node) return [];
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+  if (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) ||
+    ts.isSatisfiesExpression(node)
+  ) {
+    return staticStringValues(node.expression, constants, pathImports);
+  }
+  if (ts.isIdentifier(node)) return constants.get(node.text) ?? [];
+  if (ts.isArrayLiteralExpression(node)) {
+    return node.elements.flatMap((element) => staticStringValues(element, constants, pathImports));
+  }
+  if (
+    ts.isBinaryExpression(node) &&
+    [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken].includes(node.operatorToken.kind)
+  ) {
+    return [
+      ...staticStringValues(node.left, constants, pathImports),
+      ...staticStringValues(node.right, constants, pathImports),
+    ];
+  }
+  if (ts.isCallExpression(node) && isPathResolverCall(node.expression, pathImports)) {
+    // A composed path is one argv entry. Flattening its arguments turns a root's `..`
+    // segments into apparent script arguments before the distinguishing suffix, so the
+    // actual guard call is lost (EI-24958947185653426).
+    const argumentValues = node.arguments.map((argument) =>
+      staticStringValues(argument, constants, pathImports),
+    );
+    if (!argumentValues.length || !argumentValues.at(-1)?.length) return [];
+    let candidates = [''];
+    for (const values of argumentValues) {
+      if (!values.length) continue; // Dynamic roots can be omitted; preserve known suffixes.
+      candidates = candidates.flatMap((prefix) =>
+        values.map((value) => appendStaticPath(prefix, value)),
+      );
+    }
+    return [...new Set(candidates.filter(Boolean))];
+  }
+  return [];
+}
+
+function commandBase(command) {
+  return String(command ?? '')
+    .replaceAll('\\', '/')
+    .split('/')
+    .at(-1)
+    .replace(/\.cmd$/i, '')
+    .toLowerCase();
+}
+
+function firstScriptArgument(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i];
+    if (value === '-e' || value === '--eval' || value === '-p' || value === '--print') return null;
+    if (value === '--') return args[i + 1] ?? null;
+    if (NODE_VALUE_FLAGS.has(value)) {
+      i += 1;
+      continue;
+    }
+    if (value.startsWith('-')) continue;
+    return value;
+  }
+  return null;
+}
+
+function recordTestProcessInvocation(executable, args, evidence) {
+  const base = commandBase(executable);
+  if ((base === 'npm' || base === 'yarn' || base === 'pnpm') && args[0] === 'run' && args[1]) {
+    evidence.scriptNames.add(args[1]);
+    return;
+  }
+
+  if (base === 'node') {
+    const npmCli = args.findIndex((value) => /(?:^|\/)npm-cli\.js$/i.test(value.replaceAll('\\', '/')));
+    if (npmCli >= 0 && args[npmCli + 1] === 'run' && args[npmCli + 2]) {
+      evidence.scriptNames.add(args[npmCli + 2]);
+      return;
+    }
+  }
+
+  let scriptArgs = args;
+  if (base === 'npx') {
+    const runner = args.findIndex((value) => ['tsx', 'ts-node'].includes(commandBase(value)));
+    if (runner < 0) return;
+    scriptArgs = args.slice(runner + 1);
+  } else if (!['node', 'tsx', 'ts-node', 'bun', 'deno'].includes(base)) {
+    return;
+  }
+
+  const entry = firstScriptArgument(scriptArgs);
+  if (entry) evidence.implementationPaths.add(entry);
+}
+
+function shellTokens(command) {
+  return (String(command).match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? []).map((token) =>
+    token.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, (_match, doubleQuoted, singleQuoted) =>
+      doubleQuoted ?? singleQuoted,
+    ),
+  );
+}
+
+function recordShellInvocation(command, evidence) {
+  // Only inspect the command's executable and its argv. A guard name elsewhere in a
+  // test fixture, or in an `echo`, is not evidence that the guard ran.
+  for (const segment of String(command).split(/&&|\|\||[;|]/)) {
+    const tokens = shellTokens(segment);
+    let executableIndex = 0;
+    while (
+      executableIndex < tokens.length &&
+      (tokens[executableIndex] === 'env' || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[executableIndex]))
+    ) executableIndex += 1;
+    if (executableIndex >= tokens.length) continue;
+    recordTestProcessInvocation(tokens[executableIndex], tokens.slice(executableIndex + 1), evidence);
+  }
+}
+
+/** Extract only guard names/paths supplied to real execution calls in a test AST. */
+export function extractTestExecutionEvidence(sourceText, testFilePath = null) {
+  const source = ts.createSourceFile(
+    'guard-test-corpus.tsx',
+    String(sourceText ?? ''),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const constants = new Map();
+  const evidence = { scriptNames: new Set(), implementationPaths: new Set() };
+  const scannerImports = new Map();
+  const pathImports = { named: new Set(), namespaces: new Set() };
+  const pathModules = new Set(['path', 'node:path', 'path/posix', 'node:path/posix']);
+
+  const collectScannerImports = (node) => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && node.importClause) {
+      const bindings = node.importClause.namedBindings;
+      if (pathModules.has(node.moduleSpecifier.text)) {
+        if (node.importClause.name) pathImports.namespaces.add(node.importClause.name.text);
+        if (bindings && ts.isNamespaceImport(bindings)) {
+          pathImports.namespaces.add(bindings.name.text);
+        } else if (bindings && ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            const imported = element.propertyName?.text ?? element.name.text;
+            if (['join', 'resolve'].includes(imported)) pathImports.named.add(element.name.text);
+          }
+        }
+      }
+
+      if (testFilePath && bindings && ts.isNamedImports(bindings)) {
+        const modulePath = relative(
+          ROOT,
+          resolve(dirname(resolve(ROOT, testFilePath)), node.moduleSpecifier.text),
+        ).split(sep).join('/');
+        for (const element of bindings.elements) {
+          const imported = element.propertyName?.text ?? element.name.text;
+          if (imported === 'scanTree') scannerImports.set(element.name.text, modulePath);
+        }
+      }
+    }
+    ts.forEachChild(node, collectScannerImports);
+  };
+  collectScannerImports(source);
+
+  const collectConstants = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      const values = staticStringValues(node.initializer, constants, pathImports);
+      if (values.length) constants.set(node.name.text, values);
+    }
+    ts.forEachChild(node, collectConstants);
+  };
+  collectConstants(source);
+
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const name = callExpressionName(node.expression);
+      const importedScannerPath = name ? scannerImports.get(name) : null;
+      if (importedScannerPath) evidence.implementationPaths.add(importedScannerPath);
+      if (name && TEST_PROCESS_CALLS.has(name)) {
+        const args = node.arguments;
+        if (name === 'exec' || name === 'execSync') {
+          const command = staticStringValues(args[0], constants, pathImports)[0];
+          if (command) recordShellInvocation(command, evidence);
+        } else {
+          let executable = staticStringValues(args[0], constants, pathImports)[0];
+          if (!executable && args[0]?.getText(source) === 'process.execPath') executable = 'node';
+          const commandArgs = staticStringValues(args[1], constants, pathImports);
+          if (name === 'runGuardScript' || executable) {
+            recordTestProcessInvocation(executable, commandArgs, evidence);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return evidence;
+}
+
+function implementationPathMatches(candidate, implementation) {
+  const normalizePath = (value) => String(value).replaceAll('\\', '/').replace(/^(?:\.\/)+/, '');
+  const actual = normalizePath(candidate);
+  const expected = normalizePath(implementation);
+  return actual === expected || actual.endsWith(`/${expected}`);
 }
 
 /**
@@ -799,10 +1061,10 @@ export function sharedImplementationPaths(scripts, names = selectGuardScripts(sc
  * enforcing marker and the mention already co-occur in the SAME file. The defect is
  * evidence QUALITY, not attribution granularity.
  *
- * Execution evidence is therefore: a DISTINGUISHING implementation path (see
- * `sharedImplementationPaths`), or an `npm run <name>` invocation — tolerant of argv
- * spelling (`'npm', 'run', 'lint:x'`) and closed against name nesting, since
- * `lint:no-retired` is a prefix of `lint:no-retired-resurrection`.
+ * Execution evidence is AST-extracted from process calls: a distinguishing implementation
+ * path as the executed script argument (see `sharedImplementationPaths`), or the exact
+ * script name in `npm run <name>` argv. Fixture strings and unrelated child processes do
+ * not count, and exact argv tokens keep nested guard names distinct.
  */
 export function classifyGuard({
   name,
@@ -811,17 +1073,23 @@ export function classifyGuard({
   repoWideRegistered = new Set(),
   sharedImpls = new Set(),
   trackedTestFiles = new Set(),
+  testExecutionEvidence = null,
 }) {
   const impls = resolveImplementationPaths(command);
   const tiers = [];
   const mentions = (text) => text.includes(name) || impls.some((p) => p && text.includes(p));
-  // The separator bound spans the argv spelling `'npm', ['run', 'lint:x'` — five
-  // non-word chars between tokens, not the one a shell string has.
-  const npmRun = new RegExp(`npm\\W{1,8}run\\W{1,8}${escapeRe(name)}(?![\\w:.-])`);
-  const runsGuard = (text) =>
-    npmRun.test(text) || impls.some((p) => p && !sharedImpls.has(p) && text.includes(p));
+  const executionEvidence = testExecutionEvidence ?? extractTestExecutionEvidence(corpora.test);
+  const runsGuard = () =>
+    executionEvidence.scriptNames.has(name) ||
+    impls.some(
+      (implementation) =>
+        !sharedImpls.has(implementation) &&
+        [...executionEvidence.implementationPaths].some((candidate) =>
+          implementationPathMatches(candidate, implementation),
+        ),
+    );
   for (const [tier, text] of Object.entries(corpora)) {
-    if (tier === 'test' ? runsGuard(text) : mentions(text)) tiers.push(tier);
+    if (tier === 'test' ? runsGuard() : mentions(text)) tiers.push(tier);
   }
   // THE OTHER HALF OF THE SAME DEFECT (WI-39832). Three guards — `lint:tool-prompts`,
   // `lint:plane-guards`, `lint:design-primitives` — are IMPLEMENTED AS *.test.ts files
@@ -1047,6 +1315,7 @@ export function buildReachabilityCensus({
   corpora,
   acknowledged = new Map(),
   coverage = null,
+  testExecutionEvidence = null,
   // Defaults to the coverage axis's own set so an existing caller that passes registrations
   // only under `coverage` keeps the same behaviour on BOTH axes. Accepted at the top level
   // too because enforcement is measurable without the coverage inputs, and conflating them
@@ -1060,8 +1329,17 @@ export function buildReachabilityCensus({
   // rivals (WI-39832).
   const guardNames = selectGuardScripts(scripts);
   const sharedImpls = sharedImplementationPaths(scripts, guardNames);
+  const executionEvidence = testExecutionEvidence ?? extractTestExecutionEvidence(corpora.test);
   const rows = guardNames.map((name) =>
-    classifyGuard({ name, command: scripts[name], corpora, repoWideRegistered, sharedImpls, trackedTestFiles }),
+    classifyGuard({
+      name,
+      command: scripts[name],
+      corpora,
+      repoWideRegistered,
+      sharedImpls,
+      trackedTestFiles,
+      testExecutionEvidence: executionEvidence,
+    }),
   );
 
   // A `chained` guard inherits reachability from whatever reachable script runs it.
@@ -1176,6 +1454,14 @@ function buildCorpora() {
   const enforcingTests = testTexts.filter((t) => ENFORCING_TEST_RE.test(t.text));
   const test = enforcingTests.map((t) => t.text).join('\n');
   const logicTest = testTexts.filter((t) => !ENFORCING_TEST_RE.test(t.text)).map((t) => t.text).join('\n');
+  // Parse each file independently so constants and identifiers keep their file-local
+  // meaning instead of allowing a declaration in one suite to vouch for another.
+  const testExecutionEvidence = { scriptNames: new Set(), implementationPaths: new Set() };
+  for (const { path, text } of enforcingTests) {
+    const evidence = extractTestExecutionEvidence(text, path);
+    for (const name of evidence.scriptNames) testExecutionEvidence.scriptNames.add(name);
+    for (const path of evidence.implementationPaths) testExecutionEvidence.implementationPaths.add(path);
+  }
 
   const hook = [
     ...files.filter((f) => f.includes('/hooks/') && !f.endsWith('.test.ts')),
@@ -1190,7 +1476,13 @@ function buildCorpora() {
   // runs those by existence, so they need no mention anywhere (WI-39832).
   const trackedTestFiles = new Set(testTexts.map((t) => t.path));
 
-  return { corpora: { gate, ci, test, hook, 'logic-test': logicTest }, enforcingTests, files, trackedTestFiles };
+  return {
+    corpora: { gate, ci, test, hook, 'logic-test': logicTest },
+    enforcingTests,
+    files,
+    trackedTestFiles,
+    testExecutionEvidence,
+  };
 }
 
 /**
@@ -1202,14 +1494,7 @@ function buildCorpora() {
  * file, and reading the whole file would silently over-credit unrelated guards.
  */
 export function parseRepoWideRegistrations(affectedTestsSource) {
-  const text = String(affectedTestsSource);
-  const start = text.indexOf('const REPO_WIDE_INVARIANT_GUARDS');
-  if (start < 0) return new Set();
-  const block = text.slice(start);
-  const end = block.indexOf('\n];');
-  return new Set(
-    [...block.slice(0, end < 0 ? undefined : end).matchAll(/script:\s*['"]([^'"]+)['"]/g)].map((m) => m[1]),
-  );
+  return new Set(parseRepoWideRegistrationPairs(affectedTestsSource).map(({ script }) => script));
 }
 
 /**
@@ -1220,17 +1505,50 @@ export function parseRepoWideRegistrations(affectedTestsSource) {
  * a prose mention of a script name would otherwise be parsed as a registration.
  */
 export function parseRepoWideRegistrationPairs(affectedTestsSource) {
-  const text = String(affectedTestsSource);
-  const start = text.indexOf('const REPO_WIDE_INVARIANT_GUARDS');
-  if (start < 0) return [];
-  const block = text.slice(start);
-  const end = block.indexOf('\n];');
-  const body = block.slice(0, end < 0 ? undefined : end).replace(/^\s*\/\/.*$/gm, '');
+  const source = ts.createSourceFile(
+    'affected-tests.mjs',
+    String(affectedTestsSource ?? ''),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const constants = new Map();
+  const pathImports = { named: new Set(), namespaces: new Set() };
+  let registrations = null;
+
+  // Resolve module-level static strings the same way the execution-evidence parser does.
+  // Runtime registrations may name a script through a constant instead of repeating a
+  // literal; source-text matching silently missed those live entries (EI-24958947185653426).
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+      if (
+        declaration.name.text === 'REPO_WIDE_INVARIANT_GUARDS' &&
+        ts.isArrayLiteralExpression(declaration.initializer)
+      ) {
+        registrations = declaration.initializer;
+      }
+      const values = staticStringValues(declaration.initializer, constants, pathImports);
+      if (values.length) constants.set(declaration.name.text, values);
+    }
+  }
+  if (!registrations) return [];
+
   const pairs = [];
-  for (const chunk of body.split(/\n\s{2}\{/)) {
-    const ws = /workspace:\s*['"]([^'"]+)['"]/.exec(chunk);
-    const sc = /script:\s*['"]([^'"]+)['"]/.exec(chunk);
-    if (ws && sc) pairs.push({ workspace: ws[1], script: sc[1] });
+  for (const entry of registrations.elements) {
+    if (!ts.isObjectLiteralExpression(entry)) continue;
+    const properties = new Map();
+    for (const property of entry.properties) {
+      if (!ts.isPropertyAssignment(property)) continue;
+      const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)
+        ? property.name.text
+        : null;
+      if (name === 'workspace' || name === 'script') properties.set(name, property.initializer);
+    }
+    const workspace = staticStringValues(properties.get('workspace'), constants, pathImports)[0];
+    const script = staticStringValues(properties.get('script'), constants, pathImports)[0];
+    if (workspace && script) pairs.push({ workspace, script });
   }
   return pairs;
 }
@@ -1470,7 +1788,7 @@ function main() {
   const pkgPath = process.env.LINT_GUARD_REACHABILITY_PACKAGE_JSON || resolve(ROOT, 'package.json');
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
   const scripts = pkg.scripts ?? {};
-  const { corpora, enforcingTests, files, trackedTestFiles } = buildCorpora();
+  const { corpora, enforcingTests, files, trackedTestFiles, testExecutionEvidence } = buildCorpora();
 
   // Implementation sources for the coverage scan. Only guards the census actually has a
   // row for are read, so this adds a handful of file reads, not a second tree walk.
@@ -1539,6 +1857,7 @@ function main() {
   const census = buildReachabilityCensus({
     scripts,
     corpora,
+    testExecutionEvidence,
     // Both populations silence the "runs on NO blocking path" failure; only the DEBT set
     // is rationed by the watermark below (WI-39832).
     acknowledged: new Map([...ACKNOWLEDGED_UNREACHABLE, ...ACKNOWLEDGED_UNGATEABLE]),

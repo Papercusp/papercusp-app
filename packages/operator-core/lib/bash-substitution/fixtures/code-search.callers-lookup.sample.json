@@ -1,0 +1,208 @@
+{
+  "evidenceRef": "gitnexus-deterministic-integration-2026-10-05 P-002(d) / D-010(d) (WI-10006282): recursive caller-shaped greps (quoted `IDENT(` pattern) from harness_shared.session_turn_parts tool_use Bash/capability:bash/exec_command calls, 30 days to extractedAt, atomized, filtered by graphCallersLookup.bashPattern. Sample = 40 identifiers by sampleDistinct over the distinct identifiers, one atom each (the lexically first). Graph outcomes for these identifiers: CALLERS_GRAPH_OUTCOMES.",
+  "extractedAt": "2026-10-06T08:00:00Z",
+  "totalAtoms": 462,
+  "totalSessions": 131,
+  "sample": [
+    {
+      "sid": "su-4f968faa-adbb-4de7-97e7-b3314e842678",
+      "ts": "2026-10-01T04:46:18.456-04:00",
+      "atom": "grep -rn \"DBOSUnexpectedStepError(\" --include=*.js ."
+    },
+    {
+      "sid": "su-0301e142-a512-411d-b8a6-c2d933c5ace9",
+      "ts": "2026-09-26T12:58:16.783-04:00",
+      "atom": "grep -rn --include=*.ts -E \"acknowledgeControlTransition\\(\" packages apps scripts 2>/dev/null"
+    },
+    {
+      "sid": "su-6b10f0a6-c0f4-4f83-b1ee-c1694697fb31",
+      "ts": "2026-09-07T15:59:50.54-04:00",
+      "atom": "grep -rn \"amendRubric(\" --include=*.ts packages"
+    },
+    {
+      "sid": "su-9dfd3ffc-fb7b-40bf-b625-d93dbab9f002",
+      "ts": "2026-10-01T15:07:42.311-04:00",
+      "atom": "grep -rn --include=*.ts -E 'applyShippedDocVectorSeed\\(' packages apps bin"
+    },
+    {
+      "sid": "su-87a3826a-7c37-4bea-8cb2-2f87a93d23a5",
+      "ts": "2026-10-06T00:40:36.071-04:00",
+      "atom": "grep -rn \"attributionMapForRepo(\" --include=*.ts packages/operator-core/lib"
+    },
+    {
+      "sid": "su-7f549ee4-98fb-4a57-8522-cb18f9e2a10f",
+      "ts": "2026-09-20T08:43:14.954-04:00",
+      "atom": "grep -rln 'buildCarryBrief(' --include=*.ts packages libs apps"
+    },
+    {
+      "sid": "su-b5bfd66d-53cb-458b-9e32-cc219cea230f",
+      "ts": "2026-10-01T11:20:00.984-04:00",
+      "atom": "grep -rn \"bulkDedupInFlight(\" --include=*.ts packages/operator-core/lib"
+    },
+    {
+      "sid": "su-respawn-d8948c12806f312313f974555e268c6e",
+      "ts": "2026-09-23T23:03:31.938-04:00",
+      "atom": "grep -rn \"claimAdvSessionResume(\" --include=*.ts --include=*.mjs packages apps libs scripts bin 2>/dev/null"
+    },
+    {
+      "sid": "su-b48451ff-a428-4deb-b138-f41d782bc5e6",
+      "ts": "2026-09-30T12:31:08.312-04:00",
+      "atom": "grep -rn \"compileLaunchSpecificationArtifact(\" --include=*.ts . ../../../apps/operator/lib ../../../apps/operator/bin 2>/dev/null"
+    },
+    {
+      "sid": "su-7273d7a5-ed8f-4ca4-ac4d-d31fc4e8c396",
+      "ts": "2026-09-23T18:56:14.119-04:00",
+      "atom": "grep -rln \"createHostedDesktopBackend(\" --include=*.ts packages apps 2>/dev/null"
+    },
+    {
+      "sid": "su-fcbb3fed-83b5-4c34-9dab-72e191d76491",
+      "ts": "2026-09-28T00:34:55.757-04:00",
+      "atom": "grep -rlE 'createOrgTestDb\\(' packages apps libs 2>/dev/null"
+    },
+    {
+      "sid": "su-139b1fc5-0af0-4ce2-a2a7-be07d516a10b",
+      "ts": "2026-10-02T19:06:24.857-04:00",
+      "atom": "grep -rn \"deriveSessionState(\" packages apps libs/papercusp --include=*.ts 2>/dev/null"
+    },
+    {
+      "sid": "su-07b72cf6-b471-4dfa-b1e5-069cde1f8a23",
+      "ts": "2026-09-24T11:17:19.008-04:00",
+      "atom": "grep -n -E \"drainQueuedEpochContent\\(\" --include=*.ts -r ."
+    },
+    {
+      "sid": "su-5b9cde39-3b1c-45ad-bd5c-3f6aa0e0cff9",
+      "ts": "2026-09-27T03:07:00.228-04:00",
+      "atom": "grep -n 'ensureHeapSampling(' -r --include=*.ts packages/operator-core/lib apps/operator/bin apps/operator/lib"
+    },
+    {
+      "sid": "su-4d390264-fc3c-4875-a655-a71b0afcd6ef",
+      "ts": "2026-10-01T19:50:02.856-04:00",
+      "atom": "grep -rn \"estimatePrice(\" --include=*.ts ."
+    },
+    {
+      "sid": "su-6e9bdedd-7a2c-424d-b7d4-173eabd54f88",
+      "ts": "2026-10-02T12:50:19.934-04:00",
+      "atom": "grep -rln \"fetch(\" packages/operator-core/lib/sync/ apps/operator/bin/ 2>/dev/null"
+    },
+    {
+      "sid": "su-e2e9218f-45dc-4fb9-9569-797a4b8652b7",
+      "ts": "2026-09-23T23:07:40.351-04:00",
+      "atom": "grep -rn \"gcVerifyInstances(\" --include=*.ts packages apps 2>/dev/null"
+    },
+    {
+      "sid": "su-bbee4f64-5f43-40f2-bbfe-84bfcb27c409",
+      "ts": "2026-09-23T07:27:41.099-04:00",
+      "atom": "grep -rn \"gitSidecarEnabled(\" --include=*.ts packages apps 2>/dev/null"
+    },
+    {
+      "sid": "su-4d390264-fc3c-4875-a655-a71b0afcd6ef",
+      "ts": "2026-10-02T22:40:54.427-04:00",
+      "atom": "grep -rn \"hostedAwsHostStackFragment(\" --include=*.ts packages apps libs"
+    },
+    {
+      "sid": "su-fd916e65-7aa6-4c61-9a19-9712841e4ae8",
+      "ts": "2026-10-01T12:54:49.521-04:00",
+      "atom": "grep -rn \"intakeConfidenceRefusal(\" --include=*.ts packages/operator-core/lib"
+    },
+    {
+      "sid": "su-07b72cf6-b471-4dfa-b1e5-069cde1f8a23",
+      "ts": "2026-09-26T12:15:21.225-04:00",
+      "atom": "grep -rn \"joinSharedHarness(\" --include=*.ts . ../../../apps/operator/lib ../../../papercusp-desktop/src 2>/dev/null"
+    },
+    {
+      "sid": "su-bbee4f64-5f43-40f2-bbfe-84bfcb27c409",
+      "ts": "2026-09-22T21:18:52.183-04:00",
+      "atom": "grep -rn \"listLiveSessionPresence(\" packages/operator-core/lib --include=*.ts"
+    },
+    {
+      "sid": "su-3ee17ad9-e8f0-4145-bce5-732819d9ea4e",
+      "ts": "2026-09-28T16:30:07.062-04:00",
+      "atom": "grep -rn \"mapLiveLockHoldingsForRepo(\" packages/operator-core/lib/harness/git-sync/*.ts"
+    },
+    {
+      "sid": "su-e445ff19-9904-4cb9-9694-88cb40f1ec82",
+      "ts": "2026-09-30T08:52:32.462-04:00",
+      "atom": "grep -rn \"openAppChannel(\" --include=*.ts ."
+    },
+    {
+      "sid": "su-7273d7a5-ed8f-4ca4-ac4d-d31fc4e8c396",
+      "ts": "2026-09-22T09:01:39.175-04:00",
+      "atom": "grep -rn \"planWorkspaceHostRecovery(\" --include=*.ts packages libs 2>/dev/null"
+    },
+    {
+      "sid": "su-5283c1ba-7842-42f4-9922-e33056c7e635",
+      "ts": "2026-09-28T08:43:10.708-04:00",
+      "atom": "grep -rln \"promotePlanItems(\" packages/operator-core/lib apps/operator/lib --include=*.ts"
+    },
+    {
+      "sid": "su-9390fc63-26a0-46a9-95d1-805705cc5e2d",
+      "ts": "2026-09-22T15:08:11.812-04:00",
+      "atom": "grep -rn \"readCell(\" packages/operator-core/lib/cell-read.ts"
+    },
+    {
+      "sid": "su-da584eff-1ba0-4420-856f-ec5290ad740a",
+      "ts": "2026-10-01T10:16:13.503-04:00",
+      "atom": "grep -rn \"readSocialPost(\" --include=*.ts packages"
+    },
+    {
+      "sid": "su-87a3826a-7c37-4bea-8cb2-2f87a93d23a5",
+      "ts": "2026-10-06T00:48:38.055-04:00",
+      "atom": "grep -rn \"recordEditAttribution(\" --include=*.ts packages/operator-core/lib apps/operator/lib"
+    },
+    {
+      "sid": "su-7273d7a5-ed8f-4ca4-ac4d-d31fc4e8c396",
+      "ts": "2026-09-23T09:04:13.522-04:00",
+      "atom": "grep -n \"registerDesktopSession(\" -r packages/operator-core/lib apps/operator --include=*.ts"
+    },
+    {
+      "sid": "su-e445ff19-9904-4cb9-9694-88cb40f1ec82",
+      "ts": "2026-09-30T07:20:57.878-04:00",
+      "atom": "grep -rlE \"requirePrincipal\\(\" --include=index.ts packages/operator-core/lib/endpoint-route/routes"
+    },
+    {
+      "sid": "su-415552e6-9f99-46c7-b29c-3a757e67cc62",
+      "ts": "2026-09-29T16:37:02.807-04:00",
+      "atom": "grep -rn \"resolveClassFireTarget(\" --include=*.ts ."
+    },
+    {
+      "sid": "su-4d390264-fc3c-4875-a655-a71b0afcd6ef",
+      "ts": "2026-10-01T19:19:53.529-04:00",
+      "atom": "grep -rn \"resolveWorkspaceHostInitializationOperationsForHost(\" --include=*.ts ../../../.. 2>/dev/null"
+    },
+    {
+      "sid": "su-1ffa73d2-eeb2-42f9-b1ff-59f60ad9daae",
+      "ts": "2026-10-02T01:35:32.861-04:00",
+      "atom": "grep -rn \"runGoldSet(\" libs packages scripts apps --include=*.ts --include=*.mjs 2>/dev/null"
+    },
+    {
+      "sid": "su-7273d7a5-ed8f-4ca4-ac4d-d31fc4e8c396",
+      "ts": "2026-09-22T21:48:03.286-04:00",
+      "atom": "grep -rln \"runWorkspaceHostDestroy(\" --include=*.test.ts packages/operator-core/lib"
+    },
+    {
+      "sid": "su-da584eff-1ba0-4420-856f-ec5290ad740a",
+      "ts": "2026-10-01T11:55:47.29-04:00",
+      "atom": "grep -rln \"sendMessage(\" packages/operator-core/lib --include=*.ts"
+    },
+    {
+      "sid": "su-4d323aa8-c757-4171-a620-89e113e43b3f",
+      "ts": "2026-09-26T11:37:01.383-04:00",
+      "atom": "grep -rn \"setKernelEnforcementResolver(\" --include=*.ts apps packages libs/generic 2>/dev/null"
+    },
+    {
+      "sid": "su-075445e6-540e-4f8d-b350-608f9cae12a9",
+      "ts": "2026-09-29T16:44:54.06-04:00",
+      "atom": "grep -rn \"splitMarkdown(\" --include=*.ts packages/operator-core/lib libs/generic/search/src"
+    },
+    {
+      "sid": "su-fbd9dd96-f2fb-42a0-8a65-591fc81f2f29",
+      "ts": "2026-10-05T20:41:21.734-04:00",
+      "atom": "grep -rn \"supportsContext1m(\" --include=*.test.ts packages"
+    },
+    {
+      "sid": "su-25eb2e26-6180-4d2d-a021-e93f854b2db0",
+      "ts": "2026-09-27T13:12:08.995-04:00",
+      "atom": "grep -rn \"validateScorecardCompleteness(\" packages libs apps --include=*.ts 2>/dev/null"
+    }
+  ]
+}

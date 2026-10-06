@@ -23,7 +23,7 @@ import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { killProcess } from '../../process-kill';
 import { killScopeUnit, killTask } from '../../task-manager/control';
-import { toList, runBulk, bulkContent } from '@papercusp/agent-mcp/_bulk';
+import { toList, runBulk, mergeBulkEnvelopes, bulkContent } from '@papercusp/agent-mcp/_bulk';
 
 /**
  * Independent top-level task scopes may be torn down together, but keep the
@@ -172,14 +172,8 @@ export default defineTool({
     // Multiple addressing modes in one call: merge the keyed result lists rather than picking one,
     // so a mixed batch reports every item instead of silently dropping half.
     const envs = [taskEnv, pidEnv, scopeEnv].filter(Boolean) as Array<NonNullable<typeof taskEnv>>;
-    const base = envs[0]!;
-    return bulkContent({
-      ...base,
-      results: envs.flatMap((env) => env.results ?? []),
-      counts: {
-        ok: envs.reduce((n, env) => n + (env.counts?.ok ?? 0), 0),
-        failed: envs.reduce((n, env) => n + (env.counts?.failed ?? 0), 0),
-      },
-    } as typeof taskEnv);
+    // ok is DERIVED from the merged counts by the shared envelope-layer helper — never inherited
+    // from envs[0] (WI-10002111 / R-2; guarded in _bulk.test.ts).
+    return bulkContent(mergeBulkEnvelopes(envs));
   },
 });

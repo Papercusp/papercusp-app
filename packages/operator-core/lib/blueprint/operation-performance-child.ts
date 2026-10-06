@@ -27,9 +27,10 @@ try {
   // fixture arm swaps in the deterministic in-process embedder BEFORE the tool
   // graph loads (the helper wires the operator memory host first, so a later
   // lazy import cannot restore the real embedder).
-  const fixtureEmbedder = process.env.P013_FIXTURE_EMBEDDER === '1'
-    ? await (await import('../../test/_deterministic-embedder')).installDeterministicEmbedder()
+  const fixtureModule = process.env.P013_FIXTURE_EMBEDDER === '1'
+    ? await import('../../test/_deterministic-embedder')
     : undefined;
+  const fixtureEmbedder = fixtureModule ? await fixtureModule.installDeterministicEmbedder() : undefined;
   process.send?.({ kind: 'p013-stage', stage: 'loading-tools' });
   const [create, claim, complete, get, submit, events, result] = await Promise.all([
     import('../agent-tools/work_items/create'),
@@ -75,7 +76,15 @@ try {
   if (!process.send) throw new Error('P-013 cold child requires an IPC channel');
   // Sent BEFORE the sample: the parent resolves on the sample, so the call
   // count must already be recorded by then.
-  if (fixtureEmbedder) process.send({ kind: 'p013-embedder', calls: fixtureEmbedder.calls() });
+  // EI-24688584300743328: with the fixture also report whether this child
+  // loaded a real local model anyway (the parent asserts it did not).
+  if (fixtureEmbedder) {
+    process.send({
+      kind: 'p013-embedder',
+      calls: fixtureEmbedder.calls(),
+      localModel: fixtureModule!.localModelLoadEvidence(),
+    });
+  }
   await new Promise<void>((resolve, reject) => process.send!({ kind: 'p013-sample', sample }, (error) =>
     error ? reject(error) : resolve()));
   process.send?.({ kind: 'p013-stage', stage: 'sample-sent' });

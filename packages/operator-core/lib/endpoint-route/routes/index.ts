@@ -18,6 +18,7 @@ import desktopVersion from './desktop/version';
 import deployFrameView from './deploy/frame-view';
 import deployFrames from './deploy/frames';
 import deployLocalDesktops from './deploy/local-desktops';
+import deployLocalDesktopThumbnail from './deploy/local-desktop-thumbnail';
 import discoveryPots from './discovery/pots';
 import discoveryFederationStatus from './discovery/federation-status';
 import discoveryPotMeta from './discovery/pot-meta';
@@ -106,6 +107,7 @@ import harnessBlueprintParams from './harness/blueprint-params';
 import harnessWorkItems from './harness/work-items';
 import promptStudio from './prompt-studio';
 import harnessDiscord from './harness/discord';
+import harnessIntegrationMode from './harness/integration-mode';
 import harnessAssertion from './harness/assertion';
 import harnessTextViews from './harness/text-views';
 import harnessRuns from './harness/runs';
@@ -214,6 +216,7 @@ import agentMcp_bootstrapRole from './agent-mcp/bootstrap-role';
 import agentMcp_sessionRecoveryBrief from './agent-mcp/session-recovery-brief';
 import agentMcp_contextEpochBump from './agent-mcp/context-epoch-bump';
 import agentMcp_turnEndDirectiveCheck from './agent-mcp/turn-end-directive-check';
+import agentMcp_restrictedEgressCheck from './agent-mcp/restricted-egress-check';
 import agentMcp_turnStartMemory from './agent-mcp/turn-start-memory';
 import agentMcp_midTurnContext from './agent-mcp/mid-turn-context';
 import agentMcp_identityHookSinks from './agent-mcp/identity-hook-sinks';
@@ -433,10 +436,12 @@ import workspaces from './workspaces/index';
 import workspaceById from './workspaces/by-id';
 import workspaceSwitch from './workspaces/switch';
 import workspaceHostAudit from './workspace-hosts/audit';
+import workspaceHostAwsSetupTemplate from './workspace-hosts/aws-setup-template';
 import workspaceHostAction from './workspace-hosts/action';
 import workspaceHostAgentCredentials from './workspace-hosts/agent-credentials';
 import workspaceHostCanary from './workspace-hosts/canary';
 import workspaceHostConnection from './workspace-hosts/connection';
+import workspaceHostByocClientKey from './workspace-hosts/byoc-client-key';
 import workspaceHostCredentialLifecycle from './workspace-hosts/credential-lifecycle';
 import workspaceHostInitialize from './workspace-hosts/initialize';
 import workspaceHostDesktopPack from './workspace-hosts/desktop-pack';
@@ -452,6 +457,8 @@ import devicePair from './device/pair';
 import connectedApps from './connected-apps';
 import connectedAppsOAuth from './connected-apps/oauth';
 import ownTunnel from './own-tunnel';
+import portalRelay from './portal-relay';
+import webhookIngress from './webhooks';
 import remoteAccess from './remote-access';
 import deviceVoice from './device/voice';
 import deviceOperator from './device/operator';
@@ -528,6 +535,7 @@ export const ALL_ROUTES: ReadonlyArray<AnyRoute> = [
   ...flatten(deployFrameView as AnyRoute),
   ...flatten(deployFrames as AnyRoute),
   ...flatten(deployLocalDesktops as AnyRoute),
+  ...flatten(deployLocalDesktopThumbnail as AnyRoute),
   ...flatten(discoveryPots as AnyRoute),
   ...flatten(discoveryFederationStatus as AnyRoute),
   ...flatten(discoveryPotMeta as AnyRoute),
@@ -549,6 +557,7 @@ export const ALL_ROUTES: ReadonlyArray<AnyRoute> = [
   ...flatten(agentMcp_sessionRecoveryBrief as AnyRoute[]),
   ...flatten(agentMcp_contextEpochBump as AnyRoute[]),
   ...flatten(agentMcp_turnEndDirectiveCheck as AnyRoute[]),
+  ...flatten(agentMcp_restrictedEgressCheck as AnyRoute[]),
   ...flatten(agentMcp_turnStartMemory as AnyRoute[]),
   ...flatten(agentMcp_midTurnContext as AnyRoute[]),
   ...flatten(agentMcp_identityHookSinks as AnyRoute[]),
@@ -694,6 +703,7 @@ export const ALL_ROUTES: ReadonlyArray<AnyRoute> = [
   ...flatten(harnessWorkItems as AnyRoute[]),
   ...flatten(promptStudio as AnyRoute[]),
   ...flatten(harnessDiscord as AnyRoute[]),
+  ...flatten(harnessIntegrationMode as AnyRoute[]),
   harnessAssertion as AnyRoute,
   ...flatten(harnessTextViews as AnyRoute[]),
   ...flatten(harnessRuns as AnyRoute[]),
@@ -936,10 +946,12 @@ export const ALL_ROUTES: ReadonlyArray<AnyRoute> = [
   ...flatten(workspaceById as AnyRoute[]),
   ...flatten(workspaceSwitch as AnyRoute),
   ...flatten(workspaceHostAudit as AnyRoute),
+  ...flatten(workspaceHostAwsSetupTemplate as AnyRoute),
   ...flatten(workspaceHostAction as AnyRoute),
   ...flatten(workspaceHostAgentCredentials as AnyRoute),
   ...flatten(workspaceHostCanary as AnyRoute),
   ...flatten(workspaceHostConnection as AnyRoute),
+  ...flatten(workspaceHostByocClientKey as AnyRoute[]),
   ...flatten(workspaceHostCredentialLifecycle as AnyRoute),
   ...flatten(workspaceHostInitialize as AnyRoute),
   ...flatten(workspaceHostDesktopPack as AnyRoute),
@@ -955,6 +967,8 @@ export const ALL_ROUTES: ReadonlyArray<AnyRoute> = [
   ...flatten(connectedApps as AnyRoute[]),
   ...flatten(connectedAppsOAuth as AnyRoute[]),
   ...flatten(ownTunnel as AnyRoute[]),
+  ...flatten(portalRelay as AnyRoute[]),
+  ...flatten(webhookIngress as AnyRoute[]),
   ...flatten(remoteAccess as AnyRoute[]),
   ...flatten(deviceVoice as AnyRoute[]),
   ...flatten(deviceOperator as AnyRoute[]),

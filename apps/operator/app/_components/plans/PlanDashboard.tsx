@@ -59,19 +59,22 @@ import { toast } from 'sonner';
 import { FLAGS } from '@papercusp/flags';
 import { launchAgent } from '@papercusp/operator-core/lib/launch-agent';
 import { useSyncQuery } from '@papercusp/sync';
+import { preparePlanDocument } from '@papercusp/ui-primitives';
 import { useFlag } from '@/lib/flag-hooks';
 import { useWorkspaceId } from '@/lib/use-workspace-id';
 import { Button } from '@/app/harness/Button';
 import { preloadVditor } from '@/app/_components/MarkdownEditor';
 import { bucketOf, usePlan } from '@/app/admin/plans/plans-api';
+import { stripFrontmatter } from '@/app/admin/plans/plan-renderers';
 import { effectiveTier, useInboxAttention } from '../inbox/use-inbox-pending';
 import SessionChatModal from '../chat/SessionChatModal';
+import { preloadPlanPopupModal } from '../chat/ChatRefPopupHost';
 import {
   CHAT_PLAN_POPUP_PARAM,
   CHAT_WORK_ITEM_POPUP_PARAM,
   encodeScopedRef,
 } from '../chat/chat-ref-popup-params';
-import { beginInteraction, PERF_INTERACTIONS } from '../perf/perf-marks';
+import { beginInteraction, markInteractionPhase, PERF_INTERACTIONS } from '../perf/perf-marks';
 import { agoLabel, agoLabelMs, WORK_HOT_MS } from './PlansPane';
 import {
   collapsePlanActivity,
@@ -123,6 +126,8 @@ interface PlanWorkActivityRow {
  * mark (not a budgeted interaction): it proves the async Vditor/Lute warm-up
  * finished before a warm-route sample starts. */
 const VDITOR_READY_MARK = 'plan-dashboard-vditor-ready-success-v1';
+const DOCUMENT_READY_MARK = 'plan-dashboard-document-ready-success-v1';
+const POPUP_MODULE_READY_MARK = 'plan-dashboard-popup-module-ready-success-v1';
 
 /** "2m" → "2m ago", "now" → "just now" — hover-title phrasing. */
 function agoPhrase(label: string): string {
@@ -294,6 +299,34 @@ export default function PlanDashboard({
     });
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    try { performance.clearMarks?.(POPUP_MODULE_READY_MARK); } catch { /* diagnostics only */ }
+    void preloadPlanPopupModal().then(() => {
+      if (cancelled) return;
+      try { performance.mark(POPUP_MODULE_READY_MARK); } catch { /* diagnostics only */ }
+    }).catch(() => {
+      // The popup's existing lazyWithRetry owns recovery on the actual click.
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const documentSource = plan?.raw ?? plan?.prose;
+  const legacyDocument = plan?.legacy;
+  useEffect(() => {
+    let cancelled = false;
+    try { performance.clearMarks?.(DOCUMENT_READY_MARK); } catch { /* diagnostics only */ }
+    if (documentSource === undefined) return;
+    // Match PlanDetail's read body exactly; the live plan query already owns
+    // freshness, so a changed body naturally replaces the previous preparation.
+    const body = legacyDocument ? documentSource : stripFrontmatter(documentSource);
+    void preparePlanDocument(body).then((prepared) => {
+      if (!prepared || cancelled) return;
+      try { performance.mark(DOCUMENT_READY_MARK); } catch { /* diagnostics only */ }
+    });
+    return () => { cancelled = true; };
+  }, [documentSource, legacyDocument]);
+
   const openFullPlan = useCallback(() => {
     // Time the current "open a plan" path (WI-5547): the sidebar row now
     // lands on this dashboard first, so THIS button is the event that opens
@@ -305,6 +338,9 @@ export default function PlanDashboard({
       ppv: "plan",
       jump: null,
     });
+    // Native required-phase checks distinguish this atomic transition from a
+    // stale packaged client still issuing three independent URL updates.
+    markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'popup-url-update-queued');
   }, [setPlanPopupState, harness, planSlug]);
 
   const openPlanTarget = useCallback(
@@ -315,6 +351,7 @@ export default function PlanDashboard({
         ppv: "plan",
         jump: target,
       });
+      markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'popup-url-update-queued');
     },
     [setPlanPopupState, harness, planSlug],
   );

@@ -415,8 +415,11 @@ export interface ProposalConsultation {
    * is NOT a synonym for `no_qualified_responder`: the latter is a measured finding
    * that nobody cleared the floor, the former means the embedder was down so nothing
    * was measured. Both yield status 'unavailable', which is why they were collapsed
-   * here until EI-21485716602970457 — but only one of them justifies a retry. */
-  verdict: 'routed' | 'served_from_archive' | 'no_qualified_responder' | 'relevance_unmeasured' | 'failed';
+   * here until EI-21485716602970457 — but only one of them justifies a retry.
+   * `retrieval_only` means the caller forbade any responder launch, so the core
+   * returned its ranked menu without attempting a review: also 'unavailable', and
+   * not a failed launch. */
+  verdict: 'routed' | 'served_from_archive' | 'no_qualified_responder' | 'relevance_unmeasured' | 'retrieval_only' | 'failed';
   /** Selected/answering reviewer when known. */
   reviewerId?: string;
   /** Critique folded into the routed artifact once an answer is available. */

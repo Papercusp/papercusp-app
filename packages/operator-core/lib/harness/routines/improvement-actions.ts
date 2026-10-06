@@ -247,10 +247,11 @@ registerSystemAction('improvement-triage', async (_ctx: SystemActionCtx) => {
   // Best-effort — never fails the triage pass.
   try {
     const esc = await runRecurrenceEscalation();
-    if (esc.escalated || esc.gymRouted || esc.promotionsSuggested) {
+    if (esc.escalated || esc.gymRouted || esc.promotionsSuggested || esc.severityProposed) {
       console.log(
         `[improvement-triage] recurrence escalation: ${esc.escalated} severity-escalated, ` +
-          `${esc.gymRouted} routed to gym, ${esc.promotionsSuggested} lesson-promotion(s) proposed`,
+          `${esc.gymRouted} routed to gym, ${esc.promotionsSuggested} lesson-promotion(s) proposed, ` +
+          `${esc.severityProposed} instance-evidence severity proposal(s) posted`,
       );
     }
   } catch (e) {

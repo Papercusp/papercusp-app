@@ -40,7 +40,7 @@ through a warm intro rather than this path wherever a warm path exists.
 ## Phase 3 — Draft and request approval
 
 - **P-007** `todo` Verify every factual claim in the draft against the deal record and the research brief. Traction numbers, customer names, round size, committed investors, and timelines may appear ONLY if they are recorded facts. Omit rather than estimate: a number a partner later finds to be inflated ends the conversation and the relationship. blocked-by: P-006
-- **P-008** `todo` Create the draft with `gmail:create-draft` using `planRunId=payload.plan_run.runId`. Complete only after the tool reports `created:true` or `alreadyCreated:true`. blocked-by: P-007
+- **P-008** `todo` Create the draft with `mail:draft`: `to` is the counterparty address recorded on the deal's `contacts`, with `addressee` declaring that provenance, plus the `subject` and `text` from P-004..P-007. A first touch is a new email, so there is no thread to reply into; `mail:draft` never sends. Complete only after the tool returns a `draftId`, and check that its echoed recipients are exactly the counterparty. blocked-by: P-007
 - **P-009** `todo` Set the deal's `outreachApproval` to `{ state: 'pending', scope: 'first-touch', draftRef: <the created draft id> }`. Never write `state: 'approved'` — approval is a human act, and an agent granting itself approval defeats the only control standing between the pipeline and a partner's inbox. blocked-by: P-008
 - **P-010** `todo` Notify the owner with `notifications:send_owner` on a stable `dedupeKey`: counterparty, the opening observation and its source, the ask, and that the draft awaits approval. Leave `stage` at `qualified` and `lastOutboundAt` unset — both move only when a human actually sends. blocked-by: P-009
 

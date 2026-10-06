@@ -1014,13 +1014,16 @@ export function formatUncoveredFilesBanner({ label, uncovered, suggestions, fata
  * declarations.test.ts` already duplicates `BANNER_MARKER` for the identical reason; this
  * follows the same precedent rather than introducing a new one.
  *
- * Fails open (empty array) on any read/parse error — this is a supplementary freshness
- * SIGNAL, not a hard dependency, and a missing/malformed config must never crash the gate.
+ * By default, read/parse errors return an empty array for the supplementary freshness
+ * signal. Publishing callers use strict mode so unreadable enrollment fails the preflight.
  *
  * @param {string} root
+ * @param {{ strict?: boolean }} [options] - Publishing callers must reject unreadable enrollment.
  * @returns {string[]} repo-relative `.d.mts` paths
  */
-export function declarationFilesFromConfig(root: string): string[];
+export function declarationFilesFromConfig(root: string, { strict }?: {
+    strict?: boolean;
+}): string[];
 /**
  * The freshness watermark this run may safely replay a COALESCED compile from
  * (epoch seconds), or `null` to opt out of sharing entirely.
@@ -1413,6 +1416,11 @@ export type RunTscBaselineGateOptions = {
      * - e.g. 'npx tsc -p apps/foo/tsconfig.json --noEmit --incremental false'.
      */
     tscCommand: string;
+    /**
+     * - Optional generated-input preflight. The standard
+     * declaration generator publishes only explicitly selected modules on a scoped run.
+     */
+    preTscCommand?: string | null | undefined;
     /**
      * - Absolute path to this project's `.tsc-baseline.json`.
      */

@@ -1,0 +1,126 @@
+# Process-lifecycle judging: four traps that produce a confident wrong verdict
+URL: /internal/docs/agent-insights/process-lifecycle-judge-verdict-traps
+
+Why process-lifecycle judge items pile up unworked, and the four measured traps that each yield a plausible-looking wrong verdict: a keep→gone flip inside a 3-minute window, claimSubjectMismatch as the DEFAULT completion outcome (7 Queen spawns, 0 verdicts), gone-protocol checks naming fields the deployed build does not emit, and a silently-capped sleep() that makes a working positive control read as broken.
+
+All four traps below were measured in one judging pass on 2026-10-05 (WI-10006061 / WI-10006062, tasks `0muvg6x2hxbjajqcc7r` and `0muvg6xd1159fapeoy0`). Each one, left unhandled, yields a **well-formed wrong verdict** rather than an error — which is why they are expensive.
+
+## 1. The verdict can flip `keep` → `gone` inside three minutes
+
+Both candidates were present and CPU-active at 17:05:50Z:
+
+| task                  | pids             | cpuSec | ageSec | rssMb | cpu.stat           |
+| --------------------- | ---------------- | ------ | ------ | ----- | ------------------ |
+| `0muvg6x2hxbjajqcc7r` | 3989002, 3989864 | 72     | 3035   | 268   | +6.43 CPU-s / 320s |
+| `0muvg6xd1159fapeoy0` | 3989017, 3989866 | 69     | 3035   | 280   | +6.33 CPU-s / 321s |
+
+By 17:08:41Z both were **gone** — they exited on their own inside a \~3-minute window.
+
+So never compose a `keep` payload from the work-item's `payload.metrics` and write it a few turns later. The payload metrics are a *past* host observation; `liveness.status: "present"` means "seen at `observedAt`", not "present now". **Derive the decision in code from the fresh census, immediately before the write**, and make the script refuse to verdict when presence is not proven:
+
+```js
+const match = (live.exactScopeUnitMatches ?? [])
+  .find((e) => e.scopeUnit === scopeUnit && e.kind === 'unaccounted');
+const healthy = live.degraded === false
+  && live.ownedTruncated === false && live.foreignTruncated === false;
+const present = Boolean(match) && (match?.pids?.length ?? 0) > 0 && healthy;
+// present === false  =>  leave UNKNOWN. Never fall through to the decision you
+// formed before the evidence pass.
+```
+
+That guard is what caught the flip here. Without it the run would have written a `keep` carrying real pids, real CPU deltas and real timestamps — evidence that was simply three minutes stale.
+
+## 2. `claimSubjectMismatch` is the DEFAULT completion outcome, not an edge case
+
+This is why judge items accumulate unworked. Terminal completion is refused with:
+
+> refusing terminal completion for 'WI-10006061': claimed subject changed after claim (mismatched summary, body) … No completion record or state transition was written.
+
+**Cause.** The task-lifecycle reconcile upsert rewrites the candidate's `summary`/`body` on every \~5 min tick, and the text embeds a volatile timestamp — *"Healthy host reconciliation observed this candidate scope as present at `<ISO>`"*. The claim-subject baseline captured at claim time is therefore invalidated by the next tick **by construction**. Any judge whose evidence pass crosses a tick — the normal case, since the brief mandates a `processes:list` re-verification and, for `gone`, a double-read positive control — is guaranteed the refusal.
+
+**Measured cost.** `WI-10006061.priorWork` showed **6 prior workers**, `attempts: 0`, `hasCheckpoint: false`, spawn epochs \~16:28:51Z, 16:34:22Z, 16:39:28Z, 16:44:29Z, 16:49:44Z, 16:55:36Z — one fresh judge per reconcile tick. Every one released without completing and `previousVerdict` stayed `null` throughout: **7 Queen spawns, 0 verdicts.**
+
+**What works.** Force-re-claim and complete with no model turn in between:
+
+```js
+await tools.workItems.claim({ ids, harness, force: true, reason: '…re-baseline…' });
+// …immediately, same script:
+await Promise.all(items.map((p) => tools.workItems.complete({ /* … */ })));
+```
+
+Both calls must be in the **same `code:run`** so the gap is milliseconds. Re-claiming and completing across separate model turns can still lose the race. Result here: `claim ok:2 failed:0`, both completes `ok:true`, both items `state=done`.
+
+Related: EI-23476131268587322 ("re-claim is a no-op for the current holder") is **done**, and that fix is precisely what makes `force: true` re-baseline work. The remaining upsert-side driver is filed as EI-25160357547180442.
+
+## 3. The gone-protocol checks name fields the deployed build does not emit
+
+The brief (generated at `task-manager/lifecycle-judgement.ts:736`) requires:
+
+> `live.unaccountedCount` matching `live.unaccountedGroups.length`, and `live.unaccountedPidCount` matching the listed PIDs
+
+Those names are **real and deliberate in source** — `agent-tools/processes/list.ts:282` builds `liveSummary` with the rationale *"Unsuffixed names such as `unaccounted` are easy for consumers to treat as lists, then silently turn into `[]` through an `Array.isArray` fallback"* — and `doc-claims/lifecycle-judge-pid-namespace-claims.test.ts:44-46` pins the brief to contain them. Brief and source agree, so **do not "fix" this by renaming the brief.**
+
+But the build serving agent MCP calls did not emit them (measured 2026-10-05T17:15:56Z):
+
+| tree / host                        | HEAD / health sha | `grep -c unaccountedCount list.ts` |
+| ---------------------------------- | ----------------- | ---------------------------------- |
+| served the MCP calls (9071 → 3070) | `d740fc3802`      | —                                  |
+| `papercup-release` (serves :3070)  | `d740fc3802`      | **0 — absent**                     |
+| `papercusp-staging`                | `69e387c499`      | 1                                  |
+| canonical staging tree             | `27fbe2a0b3`      | 1                                  |
+
+The rename sits in staging unable to promote (the watchdog reported green-checkpoint RED, \~77h since last green). The serving build returns the **un-suffixed** `live.unaccounted` / `live.unaccountedPids`.
+
+**Read both spellings, and distinguish absent from unequal:**
+
+```js
+const groupCount = live.unaccountedCount ?? live.unaccounted;
+const pidCount   = live.unaccountedPidCount ?? live.unaccountedPids;
+if (groupCount == null || pidCount == null) return 'unknown'; // not a failed check
+```
+
+`undefined === groups.length` is `false`, which silently downgrades a true `gone` to `unknown`. Worse, a falsy-guard spelling (`if (!live.unaccountedCount)`) lets a judge believe it verified self-consistency while comparing nothing — an unchecked check that reads as checked, which is exactly the hazard the deliberate `*Count` suffix was introduced to prevent, reintroduced one layer up by version skew. Filed as EI-25160373421434383.
+
+The structural gap worth closing: the doc-claims test asserts the brief *string* contains these names, so it passes happily while the serving build emits different keys. A claim test that drives `processes:list` and asserts each mandated field name is actually present in the **response** would catch this; the current one cannot, by construction. This is the [derived-truth ladder](/internal/docs/agent-insights/derived-truth-ladder) gap — code-describing prose pinned to source rather than derived from the response.
+
+## 4. `code:run` has no `setTimeout`, and `sleep(ms)` is silently capped
+
+The `gone` protocol requires a double-read of a known-present same-kind control with `tasks[].ageSec` advancing by elapsed wall time. Two traps in one:
+
+* `setTimeout` does not exist in the sandbox — it throws `setTimeout_unsupported`, and **any `tools.*` call ordered after that point is never dispatched** (check `strandedWrites`).
+* `sleep(ms)` is **capped**: a requested 45000 ms actually waited 10000 ms.
+
+So divide by the measured elapsed, never the requested:
+
+```js
+const t0 = Date.now();
+await sleep(45000);          // may return early; it resolves with the actual ms
+const elapsedSec = (Date.now() - t0) / 1000;
+const advanced = Math.abs(ageDelta - elapsedSec) <= 10 && ageDelta > 0;
+```
+
+Against the requested 45 s, a healthy control advancing +12 s looks badly wrong, and a working instrument reads as broken — which under the protocol's own "if a check is missing or inconsistent, leave the result unknown" rule blocks a correct `gone`. The control that worked: `pc-0muvhfgqc1bfhfg11qq.scope` (whisper-server), kind `unaccounted`, `ageSec 1349 → 1361` (+12 s) across a measured 10.79 s.
+
+## Prefer arithmetic corroboration over a bare non-match
+
+For a `gone` verdict, an empty exact-scope result is explicitly *not* proof. Stronger: show the census arithmetic accounting for the disappearance. Here the unfiltered census went `unaccounted: 3 / unaccountedPids: 5` → `1 / 1`, with only the control group remaining:
+
+* 3 − 2 = 1 groups
+* 5 − 4 = 1 PIDs
+
+That **positively accounts** for both two-PID candidates exiting, rather than merely failing to find them — which is the difference between "absent" and "my probe returned nothing".
+
+## Reading the work item without overflowing the result door
+
+`work_items:get { payloadTier: 'full' }` overflows on these items. Use a projection:
+
+```
+projection: { pick: [
+  "results[].workItem.state",
+  "results[].workItem.terminalOwner",
+  "results[].workItem.payload.processLifecycleCandidate",
+  "results[].completion"
+] }
+```
+
+Read `state` and `terminalOwner` **first**: a post-compaction continuation re-renders the Queen brief verbatim, so a re-delivered "handle EVERY candidate below" is byte-identical to a fresh assignment even when this same session already committed the verdict. `terminalOwner == your own ownerId` plus a completion timestamp preceding your first call this turn means you are a continuation, not a fresh judge — re-judging then burns a full evidence pass and ends in a terminal-item rejection with nothing writable.

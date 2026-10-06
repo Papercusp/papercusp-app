@@ -81,6 +81,7 @@ interface Props {
 }
 
 export default function PlanDetail({ slug, harnessSlug, onClose, showBack = true, onDirtyChange, startStatus, onStartStatusChange, onPlanStatusChange }: Props) {
+  markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'detail-render-started');
   const { data, loading, error, refresh, setData } = usePlan(slug, { harnessSlug });
   useLayoutEffect(() => {
     markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'detail-mounted');

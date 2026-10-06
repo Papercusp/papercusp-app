@@ -296,10 +296,16 @@ export async function pgMutateQuery(
   const startedAt = Date.now();
   const callDeadlineMs = timeoutMs + PG_READ_QUERY_CALL_OVERHEAD_MS;
 
-  const work = sql.begin(async (tx) => {
+  const work = (assertActive: () => void) => sql.begin(async (tx) => {
+    assertActive();
     await tx.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    assertActive();
     await tx.unsafe(SET_LOCAL_UTC);
+    assertActive();
     const resultRows = (await tx.unsafe(query)) as unknown as Record<string, unknown>[] & { count?: number };
+    // If the caller expired while DML ran, throw inside begin() so PostgreSQL
+    // rolls back instead of committing an abandoned mutation.
+    assertActive();
     const rowsAffected = typeof resultRows.count === 'number' ? resultRows.count : resultRows.length;
 
     if (rowsAffected > maxAffected) {
@@ -347,6 +353,7 @@ export async function pgMutateQuery(
         },
       );
     }
+    assertActive();
     return payload;
   });
 

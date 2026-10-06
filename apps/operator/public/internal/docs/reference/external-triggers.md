@@ -40,7 +40,7 @@ With the Slack source connected and the flagship binding armed, mention `@paperc
 
 ## Live Gmail acceptance
 
-With the Gmail source connected and the draft-response binding armed, send an inbound message to the connected account. Verify one `ext:gmail:message.received` delivery, one succeeded trigger/plan run, and one Gmail draft anchored to the originating thread with resolved recipient and reply headers. The workflow creates a draft only; it never sends. Reprocessing the same message/dedupe key must return the existing draft rather than create a second one.
+With the Gmail source connected and a draft-response binding armed (for example from the `email-draft-responder` trigger pack — nothing is armed by default, and connecting Google no longer creates a binding), send an inbound message to the connected account. Verify one `ext:gmail:message.received` delivery, one succeeded trigger/plan run, and one Gmail draft, created by `mail:reply { planRunId }`, anchored to the originating thread with resolved recipient and reply headers. The workflow creates a draft only; it never sends. Reprocessing the same message/dedupe key must return the existing draft rather than create a second one.
 
 ## Provider-independent regression layer
 
@@ -50,8 +50,13 @@ When live provider credentials are unavailable, run the real-Postgres flagship i
 cd packages/operator-core
 npx vitest run --config vitest.integration.config.ts \
   lib/external-triggers/slack-flagship.integration.test.ts \
-  lib/external-triggers/gmail-flagship.integration.test.ts \
-  lib/external-triggers/google-gmail.integration.test.ts
+  lib/providers/connector-runtime.integration.test.ts
+```
+
+Gmail's sync, cursor adoption and wake are covered by the provider-contract tests under `lib/providers/gmail/` (run with the default `vitest.config.ts`), since Gmail now runs as the bundled `gmail` provider plugin rather than a host-side adapter.
+
+```bash
+npx vitest run lib/providers/gmail
 ```
 
 This layer is necessary but does not substitute for a live Slack workspace or Gmail account. Record missing Slack tokens, Google OAuth client material, or Pub/Sub IAM as explicit acceptance residue rather than silently relabeling simulated evidence as live.

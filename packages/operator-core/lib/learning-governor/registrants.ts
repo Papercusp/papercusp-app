@@ -40,6 +40,8 @@ import {
   type RegisterLearningLoopInput,
   type ReserveLearningSpendInput,
   type ReserveLearningSpendResult,
+  type LearningReservationResources,
+  type LearningSpendReservation,
   type SettleLearningSpendInput,
   type SettleLearningSpendResult,
 } from './store';
@@ -124,11 +126,25 @@ export async function learningGovernorPreflight(
 
 /** What the wrapped work reports back. `cancelled` closes the attempt without charging it as work done. */
 export interface SpendAttemptReport<T> {
-  /** What the attempt actually cost. Partial work reports its partial cost. */
+  /** Reported cost, or the known subtotal when usage evidence is incomplete. */
   costUsd: number;
   value: T;
+  /** The subtotal cannot establish total spend; retain the reservation for reconciliation. */
+  costUsdMeasurementMissing?: boolean;
   /** The attempt stopped deliberately (a gate closed, nothing left to do) rather than completing. */
   cancelled?: boolean;
+}
+
+/** The immutable reservation snapshot available BEFORE spending starts.
+ * The ID links a dispatch to its durable row; it is not an authentication
+ * token or proof that a provider enforces the reserved monetary amount.
+ */
+export interface SpendAttemptGrant {
+  readonly reservationId: string;
+  readonly reservedUsd: number;
+  readonly clamped: boolean;
+  /** Actual store-admitted bounds, frozen independently of the adapter's row. */
+  readonly resources?: Readonly<LearningReservationResources>;
 }
 
 export interface GovernedSpendAttemptInput<T> {
@@ -138,6 +154,10 @@ export interface GovernedSpendAttemptInput<T> {
   attemptKind: SpendAttemptKind;
   /** What this attempt asks the governor to set aside up front. */
   requestedUsd: number;
+  /** Forward the existing store contract for single-use manifest/resource admission. */
+  exact?: ReserveLearningSpendInput['exact'];
+  /** Same floor as reserveLearningSpend; omission preserves its default. */
+  floorUsd?: number;
   signalOrigin?: 'organic' | 'drill' | 'replay' | 'shadow';
   runRef?: string | null;
   note?: string | null;
@@ -147,31 +167,72 @@ export interface GovernedSpendAttemptInput<T> {
    * The work. `grant.reservedUsd` is what the governor set aside — bound the
    * work to it. `grant.clamped` says the grant was smaller than the request.
    *
-   * If this throws, the attempt settles as `failed`. Attach a `costUsd`
-   * property to the thrown error to declare money that was burned before the
-   * failure — that is the proposer-call case P-005 names, where tokens are
-   * spent and then the parse blows up.
+   * If this throws, attach a finite nonnegative `costUsd` (including an
+   * explicit zero) to establish the charge. Missing/invalid cost, or
+   * `costUsdMeasurementMissing:true`, leaves the reservation OPEN. A known
+   * subtotal is retained without settling it as the full charge.
    */
-  run: (grant: { reservedUsd: number; clamped: boolean }) => Promise<SpendAttemptReport<T>>;
+  run: (grant: SpendAttemptGrant) => Promise<SpendAttemptReport<T>>;
 }
 
 export type GovernedSpendAttemptOutcome<T> =
-  | { ok: true; value: T; costUsd: number; reservationId: string; clamped: boolean; cancelled: boolean }
+  | { ok: true; value: T; costUsd: number; reservationId: string; clamped: boolean; cancelled: boolean;
+      /** Actual store response, including refusals. Null means the outcome could not be confirmed. */
+      settlement: SettleLearningSpendResult | null; settlementError?: string; costUsdMeasurementMissing?: true }
   /** The governor refused BEFORE the work ran — nothing was spent. */
   | { ok: false; reason: 'refused'; refusal: Extract<ReserveLearningSpendResult, { ok: false }>['reason']; headroomUsd: number | null }
   /** The governor is dark (kill-switch) — the work did not run. */
   | { ok: false; reason: 'governor-dark' }
-  /** The work threw. The attempt is settled 'failed' with whatever it burned. */
-  | { ok: false; reason: 'failed'; error: string; costUsd: number; reservationId: string | null };
+  /** The work threw. Complete usage settles 'failed'; incomplete usage remains OPEN. */
+  | { ok: false; reason: 'failed'; error: string; costUsd: number; reservationId: string | null;
+      settlement: SettleLearningSpendResult | null; settlementError?: string; costUsdMeasurementMissing?: true };
 
-function burnedCostOf(e: unknown): number {
-  const c = (e as { costUsd?: unknown } | null)?.costUsd;
-  return typeof c === 'number' && Number.isFinite(c) && c > 0 ? c : 0;
+function costEvidenceOf(value: unknown): { costUsd: number; missing: boolean } {
+  const report = value as { costUsd?: unknown; costUsdMeasurementMissing?: unknown } | null;
+  const c = report?.costUsd;
+  const valid = typeof c === 'number' && Number.isFinite(c) && c >= 0;
+  return { costUsd: valid ? c : 0, missing: !valid || report?.costUsdMeasurementMissing === true };
+}
+
+/** Immutability is not admission: a stale, foreign or malformed successful
+ * adapter receipt must not become the authority for a paid dispatch. */
+function validDispatchReservation<T>(
+  reservation: LearningSpendReservation | null,
+  input: GovernedSpendAttemptInput<T>,
+  clamped: boolean,
+  headroomUsd: number | null,
+): reservation is LearningSpendReservation {
+  const amount = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  if (!reservation || typeof reservation.id !== 'string' || !reservation.id.trim() ||
+    reservation.workspaceId !== input.workspaceId || reservation.loopId !== input.loopId ||
+    reservation.attemptKind !== input.attemptKind || reservation.status !== 'open' ||
+    reservation.usedUsd !== 0 || reservation.settledAt !== null ||
+    !amount(input.requestedUsd) || reservation.requestedUsd !== input.requestedUsd ||
+    !amount(reservation.reservedUsd) || reservation.reservedUsd > input.requestedUsd ||
+    !amount(headroomUsd) || reservation.reservedUsd > headroomUsd ||
+    typeof clamped !== 'boolean' || clamped !== (reservation.reservedUsd < input.requestedUsd) ||
+    reservation.signalOrigin !== (input.signalOrigin ?? 'organic') ||
+    (input.potSlug !== undefined && reservation.potSlug !== input.potSlug)) return false;
+  const resources = reservation.resources;
+  if (resources !== undefined && (!resources || typeof resources !== 'object' ||
+    typeof resources.armId !== 'string' || !resources.armId.trim() ||
+    !Number.isSafeInteger(resources.inputTokens) || resources.inputTokens < 0 ||
+    !Number.isSafeInteger(resources.outputTokens) || resources.outputTokens <= 0)) return false;
+  if (!input.exact) return reservation.runRef === (input.runRef ?? null);
+  const exact = input.exact;
+  const expectedResources = exact.resources;
+  return reservation.id.toLowerCase() === exact.reservationId.toLowerCase() &&
+    reservation.runRef === `manifest:${exact.binding}/attempt:${exact.reservationId.toLowerCase()}` &&
+    reservation.reservedUsd === input.requestedUsd && !clamped &&
+    (expectedResources === undefined ? resources === undefined :
+      resources !== undefined && resources.armId === expectedResources.armId &&
+      resources.inputTokens === expectedResources.inputTokens && resources.outputTokens === expectedResources.outputTokens);
 }
 
 /**
- * Run one spending call inside a governor reservation, and settle it EXACTLY
- * once on every path — success, partial, cancellation, or throw.
+ * Run one spending call inside a governor reservation. Complete usage settles
+ * exactly once — success, partial, cancellation, or throw. Incomplete usage
+ * leaves the reservation OPEN rather than declaring a subtotal to be the total.
  *
  * This is the answer to the shape the mirrors below still have: they ledger
  * only `if (costUsd > 0)`, so a proposer call that burned tokens and then threw
@@ -181,14 +242,24 @@ function burnedCostOf(e: unknown): number {
  * whole.
  *
  * A settlement failure never masks the work: the value is returned and the
- * failure is logged. That leaves the reservation OPEN, which is the honest
- * state — it shows up in `unsettledUsd` as work whose cost is unknown, rather
- * than silently reading as free.
+ * failure is logged. The actual store response is retained separately from
+ * the work's reported cost. If the call throws, settlement stays unknown: a
+ * transport error may occur before or after commit, so it cannot prove that
+ * the reservation is either open or closed.
  */
 export async function runGovernedSpendAttempt<T>(
   input: GovernedSpendAttemptInput<T>,
   deps?: GovernorGlueDeps,
 ): Promise<GovernedSpendAttemptOutcome<T>> {
+  // An async flag/pool preflight must not let the caller replace the manifest,
+  // resource policy, dispatch callback or settlement identity after admission
+  // begins. The store validates this snapshot against the registered policy.
+  input = { ...input, ...(input.exact ? { exact: { ...input.exact,
+    ...(input.exact.resources ? { resources: { ...input.exact.resources } } : {}),
+    ...(input.exact.expectedResourceBudget ? { expectedResourceBudget: { ...input.exact.expectedResourceBudget,
+      armIds: Array.isArray(input.exact.expectedResourceBudget.armIds) ? [...input.exact.expectedResourceBudget.armIds] : [],
+    } } : {}),
+  } } : {}) };
   const d = resolve(deps);
   if (!(await d.enabled())) return { ok: false, reason: 'governor-dark' };
   const sql = await d.getSql();
@@ -198,6 +269,8 @@ export async function runGovernedSpendAttempt<T>(
     ...(input.potSlug === undefined ? {} : { potSlug: input.potSlug }),
     attemptKind: input.attemptKind,
     requestedUsd: input.requestedUsd,
+    ...(input.exact === undefined ? {} : { exact: input.exact }),
+    ...(input.floorUsd === undefined ? {} : { floorUsd: input.floorUsd }),
     ...(input.signalOrigin ? { signalOrigin: input.signalOrigin } : {}),
     runRef: input.runRef ?? null,
     note: input.note ?? null,
@@ -205,14 +278,33 @@ export async function runGovernedSpendAttempt<T>(
   if (!reserved.ok) {
     return { ok: false, reason: 'refused', refusal: reserved.reason, headroomUsd: reserved.headroomUsd };
   }
-  const reservationId = reserved.reservation.id;
+  // Copy once before validating, then dispatch only that snapshot. Never try
+  // to settle an invalid receipt: its id may belong to another live attempt.
+  const row = reserved.reservation;
+  const reservation = row && typeof row === 'object' ? { ...row,
+    ...(row.resources ? { resources: { ...row.resources } } : {}),
+  } : null;
+  const clamped = reserved.clamped;
+  if (!validDispatchReservation(reservation, input, clamped, reserved.headroomUsd)) {
+    const error = 'governor reservation receipt does not match request';
+    d.log(error);
+    return { ok: false, reason: 'failed', error, costUsd: 0, reservationId: null,
+      settlement: null, settlementError: 'invalid reservation receipt; dispatch and settlement not attempted' };
+  }
+  const reservationId = reservation.id;
+  const grant: SpendAttemptGrant = Object.freeze({
+    reservationId, reservedUsd: reservation.reservedUsd, clamped,
+    ...(reservation.resources ? { resources: Object.freeze({ ...reservation.resources }) } : {}),
+  });
+  let settlement: SettleLearningSpendResult | null = null;
+  let settlementError: string | undefined;
   const settle = async (
     disposition: 'used' | 'cancelled' | 'failed',
     usedUsd: number,
     note?: string,
   ): Promise<void> => {
     try {
-      await d.settle(sql, {
+      settlement = await d.settle(sql, {
         workspaceId: input.workspaceId,
         reservationId,
         disposition,
@@ -220,31 +312,48 @@ export async function runGovernedSpendAttempt<T>(
         ...(note ? { note } : {}),
         ...(input.accumulate === undefined ? {} : { accumulate: input.accumulate }),
       });
+      if (!settlement.ok) {
+        d.log(`settlement refused for reservation ${reservationId}: ${settlement.reason} ` +
+          `(stored status: ${settlement.reservation?.status ?? 'unknown'})`);
+      }
     } catch (e) {
+      settlementError = e instanceof Error ? e.message : String(e);
       d.log(
-        `settlement failed for reservation ${reservationId} (${disposition}, $${usedUsd}) — ` +
-          `it stays OPEN and visible as unsettled spend: ${e instanceof Error ? e.message : e}`,
+        `settlement outcome unconfirmed for reservation ${reservationId} (${disposition}, $${usedUsd}): ` +
+          settlementError,
       );
     }
   };
   let report: SpendAttemptReport<T>;
+  const incompleteUsage = () => {
+    settlementError = 'usage measurement incomplete; reservation remains open';
+    d.log(`reservation ${reservationId}: ${settlementError}`);
+  };
   try {
-    report = await input.run({ reservedUsd: reserved.reservation.reservedUsd, clamped: reserved.clamped });
+    report = await input.run(grant);
   } catch (e) {
-    const burned = burnedCostOf(e);
+    const { costUsd: burned, missing } = costEvidenceOf(e);
     const error = e instanceof Error ? e.message : String(e);
-    await settle('failed', burned, `attempt failed: ${error}`);
-    return { ok: false, reason: 'failed', error, costUsd: burned, reservationId };
+    if (missing) incompleteUsage();
+    else await settle('failed', burned, `attempt failed: ${error}`);
+    return { ok: false, reason: 'failed', error, costUsd: burned, reservationId,
+      settlement, ...(settlementError === undefined ? {} : { settlementError }),
+      ...(missing ? { costUsdMeasurementMissing: true } : {}) };
   }
+  const { costUsd, missing } = costEvidenceOf(report);
   const cancelled = report.cancelled === true;
-  await settle(cancelled ? 'cancelled' : 'used', report.costUsd);
+  if (missing) incompleteUsage();
+  else await settle(cancelled ? 'cancelled' : 'used', costUsd);
   return {
     ok: true,
     value: report.value,
-    costUsd: report.costUsd,
+    costUsd,
     reservationId,
-    clamped: reserved.clamped,
+    clamped: grant.clamped,
     cancelled,
+    settlement,
+    ...(settlementError === undefined ? {} : { settlementError }),
+    ...(missing ? { costUsdMeasurementMissing: true } : {}),
   };
 }
 

@@ -47,6 +47,8 @@ import {
   detectSafetySlotKeyIntent,
 } from './safety-slot-key-intent';
 import { detectUndeliverableGuardRail } from './undeliverable-guard-rail';
+import { detectWallPlanStateGap, readWalledItemStatusesPg } from './wall-plan-state';
+import { activeWorkspaceId } from '../../workspace-registry';
 import { resolveConcreteHarnessSlug } from '../_harness-scope';
 import {
   carryProvenanceFields,
@@ -61,13 +63,16 @@ import { cellReaderFromCtx } from '../cell-reader-ctx';
 import {
   suggestDependsOnCells,
   type DependsOnSuggestion,
+  type DetectOptions,
 } from '../../cell-transcription-detector';
+import { resolveCellTranscriptionCommits } from '../../git-commit-resolver';
 import { boundedOrgTxn } from '../../pg-bounded-txn';
 import { acquireWithContentionRetry } from '../locks/contention-retry';
 import {
   evaluateFrozenLineageCarryText,
   frozenLineageCarryViolationPayload,
 } from '../../release/frozen-lineage-execution-policy';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
 
 const FACT_LIFETIME_CALL_CONSTRAINT =
   "Declare exactly one lifetime: ordinary facts, including verified conclusions, require ttlSec; omit it only for kind:'convention', wall:/dead-end:/guard-rail: keys, or confidence:'provisional'|'suspected'. permanent:true is allowed only for conventions/typed keys; never combine it with ttlSec or a volatile measurement.";
@@ -306,13 +311,14 @@ export function dependsOnSuggestionField(
   body: string,
   declaredDependencies: readonly DependsOnInput[],
   reader: CellReader = EMPTY_CELL_READER,
+  options: DetectOptions = {},
 ): DependsOnSuggestionField | null {
   const declaredCells = declaredDependencies.map((dependency) =>
     typeof dependency === 'string' ? dependency : dependency.cell,
   );
   let suggested: DependsOnSuggestion[] = [];
   try {
-    suggested = suggestDependsOnCells(body, declaredCells);
+    suggested = suggestDependsOnCells(body, declaredCells, options);
   } catch {
     return null;
   }
@@ -358,6 +364,17 @@ export function dependsOnSuggestionField(
       'NOTHING was attached or changed by this suggestion; ' +
       'if you are deliberately recording HISTORICAL state, ignore it.',
   };
+}
+
+/** The facts receipt uses the same bounded commit verification as coord hints. */
+export async function dependsOnSuggestionFieldResolvingCommits(
+  body: string,
+  declaredDependencies: readonly DependsOnInput[],
+  reader: CellReader = EMPTY_CELL_READER,
+  resolve?: Parameters<typeof resolveCellTranscriptionCommits>[1],
+): Promise<DependsOnSuggestionField | null> {
+  const options = await resolveCellTranscriptionCommits(body, resolve);
+  return dependsOnSuggestionField(body, declaredDependencies, reader, options);
 }
 
 export function truncationField(
@@ -457,15 +474,20 @@ type FactSafetySlot = 'dead-end' | 'wall' | 'guard-rail';
  * prefixes and tool-call neutralization. Shared by schema preflight and the
  * handler so a caller cannot pass validation and then discover a different
  * length contract at the write boundary. */
-function normalizeFactInput(key: string, body: string, slot?: FactSafetySlot): { key: string; body: string } {
+function normalizeFactInput(
+  key: string,
+  body: string,
+  slot?: FactSafetySlot,
+): { key: string; body: string; authoredBody: string } {
   const safeBody = neutralizeToolCallTags(body);
-  return slot === 'dead-end'
+  const normalized = slot === 'dead-end'
     ? normalizeDeadEndSlot(key, safeBody)
     : slot === 'wall'
       ? normalizeWallSlot(key, safeBody)
       : slot === 'guard-rail'
         ? normalizeGuardRailSlot(key, safeBody)
         : { key, body: safeBody };
+  return { ...normalized, authoredBody: safeBody };
 }
 
 /** The actionable pre-write refusal shared by args validation and the handler's
@@ -758,7 +780,33 @@ export default defineTool({
       shareable: z.boolean().optional().describe(shareableDescription),
     });
 
-    return flatArgs
+    /**
+     * WI-10005668 — `value` is the one wrong spelling of `body` callers reach for
+     * overwhelmingly (measured 2026-10-02: 32 refusals / 14 distinct owners in 24h on
+     * `facts:assert`, the same contract shape as the `memory:remember`/`work_items:*`
+     * families). The refusal was a dead end for them, so accept it as an ALIAS: when the
+     * caller supplied a string `value` and NO `body`, treat the string as the body.
+     *
+     * Deliberately narrow: only `value` (not `claim`, 8 refusals/5 owners — too ambiguous
+     * with the claim/evidence vocabulary elsewhere), only a string, and never when `body`
+     * is present — so a call that names both still reaches the strict-object refusal for the
+     * stray key instead of silently choosing one. A `z.preprocess` wrapper is transparent to
+     * the published JSON Schema (the alias is NOT advertised — the canonical field is still
+     * `body`, so the tool prompt does not grow), and it adds no `ctx.addIssue`, so it cannot
+     * mask sibling field issues the way an issue-raising preprocess does.
+     */
+    const foldValueAliasIntoBody = (data: unknown): unknown => {
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+      const record = data as Record<string, unknown>;
+      if (typeof record.value !== 'string' || record.body !== undefined) return data;
+      const { value, ...rest } = record;
+      return { ...rest, body: value };
+    };
+
+    return z
+      .preprocess(
+        foldValueAliasIntoBody,
+        flatArgs
       .superRefine((value, ctx) => {
         if (!value || typeof value !== 'object') return;
         const v = value as {
@@ -904,7 +952,8 @@ export default defineTool({
           ctx.addIssue({ code: 'custom', path, message: lifetimeError });
         }
       })
-      .meta({ 'x-papercusp-call-constraint': FACT_LIFETIME_CALL_CONSTRAINT });
+      .meta({ 'x-papercusp-call-constraint': FACT_LIFETIME_CALL_CONSTRAINT }),
+      );
   })(),
   async handler(args, ctx) {
     const { resolveAgentIdentity, deriveAgentRole } = await import('../coordination/identity');
@@ -987,7 +1036,8 @@ export default defineTool({
           ...(args.recheck.exec ? { exec: args.recheck.exec } : {}),
         }
       : null;
-    const slotted = normalizeFactInput(args.key, args.body, args.slot);
+    const normalizedInput = normalizeFactInput(args.key, args.body, args.slot);
+    const slotted = { key: normalizedInput.key, body: normalizedInput.body };
     // frozen-candidate-carry-and-launch-fail-closed P-002: a standing fact is
     // injected verbatim into every future orient, so persisting a positive
     // instruction to recut the judged candidate from a moving source is already
@@ -996,6 +1046,7 @@ export default defineTool({
     const frozenCarryVerdict = evaluateFrozenLineageCarryText({
       surface: 'fact',
       text: slotted.body,
+      target: resolveHomeGateVerdictTarget(),
     });
     if (!frozenCarryVerdict.allowed) {
       return {
@@ -1062,7 +1113,11 @@ export default defineTool({
     // structurally invisible to it. Absence is the claim most worth expiring —
     // it is read as "already checked" and suppresses the next check — so it gets
     // its own advisory on the same fail-soft write-boundary channel.
-    const absenceWarning = factAbsenceHint(slotted.body);
+    // Scan the neutralized caller-authored text. Safety-slot prefixes are
+    // serialized storage boilerplate, not claims the author made; in
+    // particular, "do not repeat" must not turn nearby positive result prose
+    // into an absence warning. Persist the normalized slot body unchanged.
+    const absenceWarning = factAbsenceHint(normalizedInput.authoredBody);
     // EI-18685042986450096 (owner-flagged): the old behavior wrote the
     // clipped body UNCONDITIONALLY and only disclosed the loss AFTER the write
     // (truncationField below) — silently dropping the OPERATIVE clause 3x,
@@ -1147,6 +1202,8 @@ export default defineTool({
       // enforcement above.
       ...(args.permanent !== undefined ? { permanent: args.permanent } : {}),
       createdBy: identity.ownerId,
+      // P-012 / D-006: a writer holding a restricted disclosure stores a sealed stub.
+      writerOwnerId: identity.ownerId,
       ...(args.shareable !== undefined ? { shareable: args.shareable } : {}),
       ...(potHomeSlug ? { potHomeSlug } : {}),
     };
@@ -1177,6 +1234,18 @@ export default defineTool({
     const fact = await acquireWithContentionRetry(() =>
       boundedOrgTxn((tx) => assertFact(factInput, tx)),
     );
+    // WI-10005685: a wall: fact that names a plan item does not bind placement —
+    // goal placement obligations, launch admission and claims read plan STATE.
+    // Name every cited item still marked placeable, with the write that binds it.
+    // Fail-soft: a read error leaves the receipt without the field.
+    const wallPlanState = slotted.key.startsWith('wall:')
+      ? await detectWallPlanStateGap(
+          slotted.key,
+          slotted.body,
+          identity.workspaceId?.trim() || activeWorkspaceId(),
+          readWalledItemStatusesPg,
+        )
+      : null;
     // P-009 / D-011: an ASSUMPTION advances this agent's assumption watermark,
     // which every subsequent tool call is stamped with. `fact.id` is the
     // append-versioned row id P-008(a) made immutable — that immutability is
@@ -1240,7 +1309,10 @@ export default defineTool({
     // warn-only: no field at all on the clean case.
     const unresolvedDeps = fact.dependsOn.filter((d) => !d.digest);
     const droppedDeps = declaredCells.filter((c) => !fact.dependsOn.some((d) => d.cell === c.trim()));
-    const dependsOnSuggestion = dependsOnSuggestionField(slotted.body, args.dependsOn ?? [], cellReader);
+    // Coordination already verifies SHA-shaped tokens against the integration
+    // tree. Reuse its bounded, fail-soft resolver so message/artifact IDs cannot
+    // become Git dependencies merely because nearby prose says "live".
+    const dependsOnSuggestion = await dependsOnSuggestionFieldResolvingCommits(slotted.body, args.dependsOn ?? [], cellReader);
     const dependencyWarning =
       unresolvedDeps.length > 0 || droppedDeps.length > 0
         ? {
@@ -1395,6 +1467,7 @@ export default defineTool({
             ...(truncation ? { truncated: truncation } : {}),
             ...(sourceQuoteRedacted ? { sourceQuoteRedacted } : {}),
             ...(slotIntentWarning ? { slotIntentWarning } : {}),
+            ...(wallPlanState ? { wallPlanState } : {}),
             ...(undeliverableGuardRail ? { undeliverableGuardRail } : {}),
             ...(dependencyWarning ? { dependenciesUnresolved: dependencyWarning } : {}),
             ...(dependsOnSuggestion ? { dependsOnSuggestion } : {}),

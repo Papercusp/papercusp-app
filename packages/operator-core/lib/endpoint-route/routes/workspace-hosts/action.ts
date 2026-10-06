@@ -15,11 +15,16 @@ import type {
   WorkspaceHostImageRef,
   WorkspaceHostSnapshotRef,
 } from '@papercusp/deployment-driver';
-import { dbosStarted } from '../../../dbos/bootstrap';
+import { awaitDbosLaunchInFlight, dbosStarted } from '../../../dbos/bootstrap';
+
+/** Bounded wait for an in-flight DBOS launch (DBOS_LAUNCH_IN_FLIGHT_WAIT_MS). */
+const defaultAwaitProvisioning = () => awaitDbosLaunchInFlight();
 import { activeWorkspaceId } from '../../../workspace-registry';
 import {
   readWorkspaceHostConnection,
   readWorkspaceHostDestroyTarget,
+  WORKSPACE_HOST_FENCE_REFUSED_CODE,
+  WorkspaceHostControllerFenceError,
   type StoredWorkspaceHostConnection,
   type StoredWorkspaceHostDestroyTarget,
 } from '../../../workspace-host/observability-store';
@@ -41,6 +46,7 @@ import {
   workspaceHostTeardownBillingSubject,
   workspaceHostTeardownReleaseRefusal,
 } from '../../../workspace-host/teardown-release-receipt';
+import { findWorkspaceHostCensusProfile } from '../../../workspace-host/census-profiles';
 import {
   recordWorkspaceHostCustomerAcceptance,
   WorkspaceHostCustomerAcceptanceError,
@@ -183,6 +189,11 @@ function parseCanaryEvidence(value: unknown): WorkspaceHostDestroyCanaryEvidence
 export interface WorkspaceHostActionRouteDependencies {
   activeWorkspaceId: () => string;
   provisioningAvailable: () => boolean;
+  /**
+   * WI-10004957: when provisioning is not yet available, wait (bounded) for a DBOS launch already
+   * in flight on this host before refusing 503. Resolves to whether provisioning became available.
+   */
+  awaitProvisioning?: () => Promise<boolean>;
   readTarget: (workspaceId: string, hostId: string) => Promise<StoredWorkspaceHostDestroyTarget | null>;
   readConnection: (workspaceId: string, connectionId: string) => Promise<StoredWorkspaceHostConnection | null>;
   startDestroy: (input: StartWorkspaceHostDestroyInput) => ReturnType<typeof startWorkspaceHostDestroyWorkflow>;
@@ -406,7 +417,10 @@ export function createWorkspaceHostActionRoute(
           return requestError('workspace-host release shipment could not be recorded', 500);
         }
       }
-      if (!dependencies.provisioningAvailable()) {
+      if (
+        !dependencies.provisioningAvailable() &&
+        !(await (dependencies.awaitProvisioning ?? defaultAwaitProvisioning)())
+      ) {
         try {
           const forwarded = await (dependencies.forwardRequest ?? defaultWorkspaceHostRequestForwarder)(
             '/api/workspace-hosts/action',
@@ -434,17 +448,36 @@ export function createWorkspaceHostActionRoute(
           ...(stored.statusDetail ? { detail: stored.statusDetail } : {}),
         });
       }
-      if (stored.target !== target.target || target.target !== 'gcp') {
+      // Lifecycle actions are offered for every provider whose destroy has a controller-independent
+      // census (GCP, AWS): the runner refuses any other destroy, so admitting it here would only
+      // strand a host that can be provisioned but never safely torn down.
+      if (stored.target !== target.target || !findWorkspaceHostCensusProfile(target.target)) {
         return requestError('workspace-host lifecycle target is not implemented', 501, { target: target.target });
       }
 
       try {
         const releaseTaskId = typeof body.releaseTaskId === 'string' ? body.releaseTaskId : undefined;
         const restoreCanary = action === 'restore' ? body.canary as WorkspaceHostCanaryAdmission | undefined : undefined;
+        // The desktop submits only the new host identity. Resolve the rest from persisted state,
+        // retaining explicit restore overrides while rebinding credentials on the control plane.
+        const restoreDesired = action === 'restore' && isRecord(body.desired)
+          ? {
+              ...target.desired,
+              ...body.desired,
+              credentials: { ...target.desired.credentials, ...(isRecord(body.desired.credentials) ? body.desired.credentials : {}),
+                cloudCredentialRef: stored.connection.cloudCredentialRef },
+              ...(target.desired.provider || body.desired.provider || stored.connection.provider
+                ? { provider: { ...target.desired.provider, ...(isRecord(body.desired.provider) ? body.desired.provider : {}), ...stored.connection.provider } }
+                : {}),
+            } as WorkspaceHostDesiredSpec
+          : undefined;
         if (action === 'restore' && isRecord(body.desired)) {
+          if (typeof restoreDesired!.hostId !== 'string' || !SAFE_ID.test(restoreDesired!.hostId) || restoreDesired!.hostId === hostId) {
+            return requestError('restore must name a distinct valid desired.hostId', 422);
+          }
           validateWorkspaceHostCanaryAdmission({
             workspaceId,
-            desired: body.desired as unknown as WorkspaceHostDesiredSpec,
+            desired: restoreDesired!,
             connection: stored.connection,
             canary: restoreCanary,
             sourceLabels: target.desired.labels,
@@ -460,6 +493,7 @@ export function createWorkspaceHostActionRoute(
             workspaceId,
             hostId,
             operationId: operationId!,
+            provider: target.target,
             billing: workspaceHostTeardownBillingSubject(destroyAdmission!.canary!),
           });
         }
@@ -492,7 +526,7 @@ export function createWorkspaceHostActionRoute(
                 ? { rollbackImage: body.rollbackImage as unknown as WorkspaceHostImageRef }
                 : {}),
               ...(isRecord(body.snapshot) ? { snapshot: body.snapshot as unknown as WorkspaceHostSnapshotRef } : {}),
-              ...(isRecord(body.desired) ? { desired: body.desired as unknown as WorkspaceHostDesiredSpec } : {}),
+              ...(restoreDesired ? { desired: restoreDesired } : isRecord(body.desired) ? { desired: body.desired as unknown as WorkspaceHostDesiredSpec } : {}),
               ...(restoreCanary ? { canary: restoreCanary } : {}),
             });
         if (isWorkspaceHostOperationAcceptance(result)) {
@@ -576,6 +610,14 @@ export function createWorkspaceHostActionRoute(
         }
         if (error instanceof WorkspaceHostProvisioningConflictError) {
           return requestError('workspace host already has an operation in progress', 409);
+        }
+        if (error instanceof WorkspaceHostControllerFenceError) {
+          // WI-10005474: refused before it began; this operation id replays the refusal.
+          return requestError(`workspace-host ${action} refused: a newer operation or controller holds this host`, 409, {
+            reason: WORKSPACE_HOST_FENCE_REFUSED_CODE,
+            hostId: error.hostId,
+            auditUrl: workspaceHostAuditUrl(error.hostId),
+          });
         }
         if (error instanceof WorkspaceHostProvisioningConnectionError) {
           return requestError('workspace-host connection validation failed', 409, { problems: error.problems });

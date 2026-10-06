@@ -22,13 +22,27 @@
  * emptied on its own.
  */
 
-import { execFile } from 'node:child_process';
 import { uptime } from 'node:os';
-import { promisify } from 'node:util';
+import { execFileViaSidecar } from '../fleet/git-via-sidecar';
 import type { TaskTerminalProvenance } from './types';
 
-let execFileAsyncImpl: ((...args: any[]) => Promise<any>) | undefined;
-const execFileAsync = (...args: any[]) => (execFileAsyncImpl ??= promisify(execFile) as any)(...args);
+/** Per-site kill-switch for this module's sidecar route (`0` = force a local spawn). */
+export const SCOPE_TERMINAL_SIDECAR_VAR = 'PAPERCUSP_SCOPE_TERMINAL_SPAWN_SIDECAR';
+
+/**
+ * The production exec: `systemctl` forked by the spawner sidecar where this host has one
+ * (WI-10004975 — reconcileTick's per-task systemctl calls were ~31% of a 13 GB bg-host's
+ * spawn samples, because every local fork pays a cost proportional to the parent's RSS).
+ * Same promisified-execFile contract, so the call sites below are unchanged.
+ */
+export const defaultScopeTerminalExec: ExecFileFn = (file, args, options) =>
+  execFileViaSidecar(file, [...args], {
+    timeoutMs: options.timeout ?? 10_000,
+    subsystem: 'task-manager-scope-terminal',
+    sidecarVar: SCOPE_TERMINAL_SIDECAR_VAR,
+    ...(options.maxBuffer !== undefined ? { maxBuffer: options.maxBuffer } : {}),
+  });
+const execFileAsync: ExecFileFn = (file, args, options) => defaultScopeTerminalExec(file, args, options);
 
 /** Injectable for tests — same shape `node:util`'s promisified `execFile` returns. */
 export type ExecFileFn = (

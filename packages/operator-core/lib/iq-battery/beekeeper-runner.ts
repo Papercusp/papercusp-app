@@ -98,6 +98,8 @@ export interface BeekeeperRunOutcome {
   composite: number;
   costUsd: number;
   judgeUsd: number;
+  /** False means judgeUsd is only the known lower bound. */
+  judgeCostMeasured?: boolean;
   status?: 'scored' | 'rate_limited' | 'errored';
   error?: string;
 }
@@ -109,6 +111,7 @@ export interface BeekeeperResult {
   passedCases: number;
   meanComposite: number;
   rubricHash: string;
+  costMeasured?: boolean;
 }
 
 export async function runBeekeeperBattery(config: BeekeeperConfig, deps: BeekeeperDeps): Promise<BeekeeperResult> {
@@ -146,7 +149,7 @@ export async function runBeekeeperBattery(config: BeekeeperConfig, deps: Beekeep
   }
 
   const results = await runBattery<BeekeeperRunInput, InstanceRunHandle, Partial<MetricCollectorInput>, IQBatteryMetrics>(
-    { cells, rubric: config.rubric, maxDistillChars: config.maxDistillChars },
+    { cells, rubric: config.rubric, maxDistillChars: config.maxDistillChars, stopOnUnmeasuredJudgeCost: true },
     {
       subject,
       llmCall: deps.llmCall,
@@ -200,6 +203,7 @@ export async function runBeekeeperBattery(config: BeekeeperConfig, deps: Beekeep
       repeat: r.cell.repeat,
       runId: r.runId,
       instanceId,
+      judgeCostMeasured: r.judgeCostMeasured,
     };
     if (r.status === 'scored' && r.score) {
       return {
@@ -210,7 +214,7 @@ export async function runBeekeeperBattery(config: BeekeeperConfig, deps: Beekeep
         d3: r.score.d3,
         composite: r.score.composite,
         costUsd: r.handle!.costUsd,
-        judgeUsd: r.score.costUsd,
+        judgeUsd: r.judgeCostUsd,
         status: 'scored' as const,
       };
     }
@@ -222,7 +226,7 @@ export async function runBeekeeperBattery(config: BeekeeperConfig, deps: Beekeep
       d3: 0,
       composite: 0,
       costUsd: r.handle?.costUsd ?? 0,
-      judgeUsd: 0,
+      judgeUsd: r.judgeCostUsd,
       status: r.status,
       error: r.error,
     };
@@ -242,6 +246,7 @@ export async function runBeekeeperBattery(config: BeekeeperConfig, deps: Beekeep
     passedCases,
     meanComposite,
     rubricHash: rh,
+    costMeasured: results.every((r) => r.judgeCostMeasured),
   };
 }
 

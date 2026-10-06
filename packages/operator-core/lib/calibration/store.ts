@@ -16,6 +16,7 @@ import type { Sql } from 'postgres';
 import { ORGANIC_ONLY, type SignalOrigin } from '../harness/improvements/provenance';
 import { calibrationWeight } from './scoring';
 import type { CalibrationScore, PredictionRow } from './types';
+import { recordProducerObservation, withProducerLifecycleWrite } from '../experiment/producer-lifecycle-store';
 
 type Row = Record<string, unknown>;
 const ts = (v: unknown): number => new Date(v as string | Date).getTime();
@@ -77,6 +78,7 @@ export async function insertPrediction(
   sql: Sql,
   q: InsertPredictionInput,
 ): Promise<{ created: boolean; id: string | null }> {
+  return withProducerLifecycleWrite(sql, async (sql) => {
   const rows = await sql`
     INSERT INTO harness_shared.calibration_predictions
       (workspace_id, predictor, domain, subject_kind, subject_id, claim, probability, stated,
@@ -88,7 +90,10 @@ export async function insertPrediction(
       WHERE resolved_at IS NULL DO NOTHING
     RETURNING id
   `;
-  return rows.length > 0 ? { created: true, id: String(rows[0].id) } : { created: false, id: null };
+  const id = rows.length > 0 ? String(rows[0].id) : null;
+  await recordProducerObservation(sql, { producer: 'calibration', workspaceId: q.workspaceId, sourceId: id });
+  return id !== null ? { created: true, id } : { created: false, id: null };
+  });
 }
 
 /** Open bets whose horizon has passed — the sweep's work list (oldest first). */
@@ -111,13 +116,18 @@ export async function resolvePrediction(
   sql: Sql,
   q: { id: string; outcome: boolean; note?: string; nowIso: string },
 ): Promise<boolean> {
+  return withProducerLifecycleWrite(sql, async (sql) => {
   const rows = await sql`
     UPDATE harness_shared.calibration_predictions
        SET resolved_at = ${q.nowIso}, outcome = ${q.outcome}, resolution_note = ${q.note ?? null}
      WHERE id = ${q.id} AND resolved_at IS NULL
-     RETURNING id
+     RETURNING id, workspace_id
   `;
+  if (rows.length) await recordProducerObservation(sql, {
+    producer: 'calibration', workspaceId: String(rows[0].workspace_id), sourceId: q.id,
+  });
   return rows.length > 0;
+  });
 }
 
 /** Close a matured bet as unscorable (probe undeterminable past grace) — outcome stays NULL, never scored. */
@@ -125,13 +135,18 @@ export async function voidPrediction(
   sql: Sql,
   q: { id: string; note: string; nowIso: string },
 ): Promise<boolean> {
+  return withProducerLifecycleWrite(sql, async (sql) => {
   const rows = await sql`
     UPDATE harness_shared.calibration_predictions
        SET resolved_at = ${q.nowIso}, resolution_note = ${q.note}
      WHERE id = ${q.id} AND resolved_at IS NULL
-     RETURNING id
+     RETURNING id, workspace_id
   `;
+  if (rows.length) await recordProducerObservation(sql, {
+    producer: 'calibration', workspaceId: String(rows[0].workspace_id), sourceId: q.id,
+  });
   return rows.length > 0;
+  });
 }
 
 /** Open bets on the given subjects (the ranker feature's lookup). */

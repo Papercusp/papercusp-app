@@ -870,6 +870,14 @@ const WORKER_SRC = `(() => {
       errorMessage.indexOf('Unexpected identifier') >= 0 ||
       errorMessage.indexOf('Invalid or unexpected token') >= 0;
     const likelyNestedShellQuoteSyntax = hasShellBashCall && unexpectedTokenSyntax && shellQuoteCount >= 4;
+    // EI-23755181123699088: a STATIC import/export is the one place V8's wording is actively
+    // misleading. "Cannot use import statement outside a module" is Node's ESM/CJS message, whose
+    // universal remedy is "use require instead" -- but the sandbox has no module loader in EITHER
+    // format, so following that remedy just trades this error for "require is not defined". Say
+    // the real constraint at the first failure instead of letting the caller burn a second round.
+    const staticModuleSyntax =
+      errorMessage.indexOf('Cannot use import statement outside a module') >= 0 ||
+      errorMessage.indexOf("Unexpected token 'export'") >= 0;
     // A raw line terminator inside a JavaScript single/double-quoted string is a syntax
     // error, but V8's generic "Invalid or unexpected token" does not explain the extra
     // string layer that usually caused it. Detect this narrow shape lexically so a shell
@@ -956,6 +964,9 @@ const WORKER_SRC = `(() => {
         (tsSyntax
           ? ' -- code:run scripts are plain JavaScript only (no TypeScript type annotations, interfaces, or "as" casts); strip them and retry'
           : '') +
+        (staticModuleSyntax
+          ? ' -- code:run scripts are NOT modules: there is no import/export and no require() either (no node builtins, no module loader, in any format), so rewriting import as require will fail too. Only tools.ns.verb(args) is exposed; for files, shell, git or the database call the matching tool (tools.capability.read / tools.capability.bash / tools.dev.pg_query), or run capability:bash + npx tsx for direct module access.'
+          : '') +
         (regexFlagsSyntax
           ? ' -- an over-escaped slash in a regex literal can close the literal early and make the remaining path look like flags; prefer String.includes(...) or new RegExp("...") when composing code:run scripts through another string layer'
           : '') +
@@ -1011,12 +1022,19 @@ const WORKER_SRC = `(() => {
       const bufferMatch = /^Buffer is not defined$/.exec(msg);
       const structuredCloneMatch = /^structuredClone is not defined$/.exec(msg);
       const timerMatch = /^(setTimeout|setInterval) is not defined$/.exec(msg);
+      // EI-23755181123699088: require/module/process/__dirname/__filename are the CommonJS and
+      // Node ambient names a caller reaches for next -- including right after a static import
+      // failed to compile. Same rewrite pattern as the dynamic-import case: name the sandbox
+      // boundary and the supported route instead of a bare ReferenceError.
+      const nodeAmbientMatch = /^(require|module|process|__dirname|__filename) is not defined$/.exec(msg);
       const friendly = /dynamic import callback/i.test(msg)
         ? 'dynamic_import_unsupported: code:run cannot import()/require() repo modules or node builtins -- only tools.ns.verb(args) is exposed (the role tool whitelist IS the sandbox security boundary, same reason require/process are absent). Use capability:bash + npx tsx for direct module/DB access outside that whitelist.'
         : bufferMatch
         ? 'buffer_unsupported: code:run has no ambient Buffer -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only, but VM-local browser-style codecs are installed in BOTH directions. To DECODE base64 pages returned by capability:read or result-door recovery, use atob(page.data), Uint8Array.from(binary, (character) => character.charCodeAt(0)), and new TextDecoder("utf-8").decode(bytes). To ENCODE -- for example a snapshot to hand to capability:bash -- use new TextEncoder().encode(text) then btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join("")); btoa alone is Latin1-only and throws InvalidCharacterError on any non-ASCII text, so encode to UTF-8 bytes first.'
         : structuredCloneMatch
         ? 'structured_clone_unsupported: code:run has no ambient structuredClone -- scripts run in a restricted VM with JSON/Math/Promise intrinsics only; for JSON-only tool results and args, use JSON.parse(JSON.stringify(value)).'
+        : nodeAmbientMatch
+        ? 'node_ambient_unsupported: code:run has no ambient ' + nodeAmbientMatch[1] + ' -- scripts run in a restricted VM that is not a Node module (no require, import, module, process, __dirname or __filename; the role tool whitelist IS the sandbox security boundary). Only tools.ns.verb(args) is exposed: read files with tools.capability.read, run shell with tools.capability.bash, query the database with tools.dev.pg_query, or run capability:bash + npx tsx for direct module access. Any tools.*/capability:* calls ordered after this point in the script were never dispatched -- check strandedWrites in the result.'
         : timerMatch
         ? timerMatch[1] + '_unsupported: code:run has no ambient ' + timerMatch[1] + ' -- the vm sandbox exposes only await sleep(ms) for a bounded async delay (capped per call; resolves with the actual ms waited, so a careful script can self-correct). For a REPEATING delay, loop with await sleep(ms) between iterations instead of setInterval. Any tools.*/capability:* calls ordered after this point in the script were never dispatched -- check strandedWrites in the result.'
         : msg;

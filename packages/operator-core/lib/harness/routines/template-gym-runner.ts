@@ -13,6 +13,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../../module-repo-root';
 import { createTextCollector } from '../../child-output';
 import {
   PAPERCUSP_ANDROID_APP_TEMPLATE,
@@ -132,7 +133,8 @@ export function capabilitySetsDiffer(a: readonly string[], b: readonly string[])
 }
 
 function repoRootFromHere(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', '..');
+  // Not a fixed `../` climb: inside the host bundle that lands outside the checkout (P-016).
+  return moduleRepoRoot(import.meta.url);
 }
 
 function readJson(file: string): Record<string, any> {

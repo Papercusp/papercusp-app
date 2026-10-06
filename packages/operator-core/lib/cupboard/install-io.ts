@@ -12,6 +12,7 @@
  * manifest — base D-006 item 3), so one installer covers both.
  */
 import { spawn } from 'node:child_process';
+import type { Sql } from 'postgres';
 import { tmpdir } from 'node:os';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -30,6 +31,7 @@ import {
 import type { InstallableUnitRef } from './resolve-and-install';
 import type { TreeDigestEntry } from '@papercusp/artifact-registry';
 import type { InstallSelfDescribingDeps } from './install-self-describing-core';
+import { fetchSelfDescribingArtifact } from './self-describing-release';
 
 /** Shallow `git clone --depth 1 url dest`. Rejects on non-zero exit. */
 export function gitCloneShallow(url: string, dest: string): Promise<void> {
@@ -102,7 +104,15 @@ export async function gitListTreeBlobs(cloneDir: string, sha: string, ref: strin
 
 /** The real git-backed deps every self-describing Cupboard installer shares. */
 export function cupboardGitDeps(): InstallSelfDescribingDeps {
-  return { cloneRepo: gitCloneShallow, fetchAtSha: gitFetchAtSha, listTreeBlobs: gitListTreeBlobs, tmpDir: tmpdir };
+  return {
+    cloneRepo: gitCloneShallow,
+    fetchAtSha: gitFetchAtSha,
+    listTreeBlobs: gitListTreeBlobs,
+    tmpDir: tmpdir,
+    // P-011: prefer the R2 origin's release bytes; the installer verifies their Merkle root.
+    fetchArtifact: (contentHash) =>
+      fetchSelfDescribingArtifact({ baseUrl: resolveCupboardBaseUrl(), contentHash }),
+  };
 }
 
 /** Drop the in-memory plugin-host + api-route caches so a new unit goes live. */
@@ -160,6 +170,19 @@ export function buildInstallPluginDeps(): InstallPluginCoreDeps {
     tmpDir: tmpdir,
     grant: (args) => grantCapabilities({ ...args, grantedBy: 'user', reason: 'cupboard install-consent' }),
     invalidateHost: invalidatePluginHost,
+    // P-012 (D-013): a trigger pack installed into a harness materializes as its
+    // plans and DISARMED bindings in the active workspace.
+    materializeTriggerPack: async (args) => {
+      const [{ getOrgPg }, { activeWorkspaceId }, { materializeTriggerPack }] = await Promise.all([
+        import('@papercusp/db-org'),
+        import('../workspace-registry'),
+        import('./trigger-pack-materialize'),
+      ]);
+      return materializeTriggerPack(getOrgPg().sql as unknown as Sql, activeWorkspaceId(), {
+        ...args,
+        createdBy: 'cupboard-install',
+      });
+    },
     validateDependencies: async (deps) => {
       const { validateBlueprintDependencies, resolveEventProvider } = await import('@papercusp/blueprint-distribution');
       const { derivePackCatalog, depHostSetsFromCatalog } = await import('./pack-catalog');
@@ -212,7 +235,16 @@ export function buildInstallPluginDeps(): InstallPluginCoreDeps {
 
 export type InstallPluginFromCupboardResult =
   | { ok: true; result: InstallPluginCoreResult }
-  | { ok: false; status: number; error: string; detail?: string };
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      detail?: string;
+      /** Stable refusal code (e.g. `provider_install_consent_required`). */
+      code?: string;
+      /** Structured refusal payload — for a provider consent refusal, `{ review }`. */
+      data?: Record<string, unknown>;
+    };
 
 /**
  * The ONE orchestrated path that installs a plugin/pack from the Cupboard by
@@ -229,6 +261,14 @@ export async function installPluginFromCupboard(input: {
   listingRef?: string;
   harness?: string;
   acceptCapabilities?: boolean;
+  /**
+   * The provider review the caller consented to — echo back the `data.review`
+   * from a `provider_install_consent_required` refusal. The core refuses with
+   * `plugin_review_changed` if the cloned manifest no longer matches it.
+   */
+  expectedReview?: InstallPluginManifestReview;
+  /** Installer-local trigger-pack source mappings + inputs (P-012). */
+  triggerPackConfig?: InstallPluginCoreInput['triggerPackConfig'];
 }): Promise<InstallPluginFromCupboardResult> {
   let githubUrl = typeof input.githubUrl === 'string' ? input.githubUrl.trim() : '';
   let listingRef = typeof input.listingRef === 'string' ? input.listingRef.trim() : undefined;
@@ -246,6 +286,8 @@ export async function installPluginFromCupboard(input: {
     listingRef,
     harness: typeof input.harness === 'string' ? input.harness.trim() : undefined,
     acceptCapabilities: input.acceptCapabilities === true,
+    ...(input.expectedReview ? { expectedReview: input.expectedReview } : {}),
+    ...(input.triggerPackConfig ? { triggerPackConfig: input.triggerPackConfig } : {}),
   };
 
   try {
@@ -277,7 +319,13 @@ export async function installPluginFromCupboard(input: {
     return { ok: true, result };
   } catch (e) {
     if (e instanceof InstallPluginError) {
-      return { ok: false, status: e.status, error: e.message };
+      return {
+        ok: false,
+        status: e.status,
+        error: e.message,
+        ...(e.code ? { code: e.code } : {}),
+        ...(e.data ? { data: e.data } : {}),
+      };
     }
     return {
       ok: false,

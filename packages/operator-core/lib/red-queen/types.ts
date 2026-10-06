@@ -15,9 +15,10 @@
  * workspace_id. Every v1 collector family is workspace-scoped, so the live
  * watchdog (which sweeps the live workspace) is structurally blind to planted
  * artifacts — zero-leak by partition, asserted per run on top (leak_check).
- * The captured engineer_issues rows DO share the live store; their partition
- * is origin='drill' + scope='harness:red-queen-sandbox' (the provenance
- * read-seam filter every organic consumer inherits).
+ * The captured engineer_issues rows DO share the live store. Their provenance
+ * partition is signal_origin='drill'; storage uses the valid operator scope,
+ * which auto-homes to the workspace platform Pot. Organic consumers exclude
+ * drill rows at the provenance read seam.
  *
  * The DrillOutcome shape is a CONTRACT with FB-23 (drills-as-gym-corpus,
  * P-048): gym judging signals read these rows as ground truth (resolve rate,
@@ -32,9 +33,9 @@ import type { TriageDecision } from '../harness/improvements/triage';
 
 /** The workspace every drill artifact is planted under — never the live one. */
 export const SANDBOX_WORKSPACE_ID = 'red-queen-sandbox';
-/** The harness scope drill captures file under ('harness:<slug>'). */
+/** Issue scope for drill captures. The operator scope auto-homes to the workspace Pot. */
 export const SANDBOX_HARNESS_SLUG = 'red-queen-sandbox';
-export const SANDBOX_SCOPE = `harness:${SANDBOX_HARNESS_SLUG}`;
+export const SANDBOX_SCOPE = 'operator';
 
 /** Governor registry identity — one Red Queen per workspace (D-004). */
 export const RED_QUEEN_LOOP_ID = 'red-queen';
@@ -110,7 +111,7 @@ export interface PlantedDrill extends DrillGroundTruth {
  * One drill class — a synthetic-friction recipe per watchdog collector family
  * (plus the out-of-band engine-death class). plant/heal/cleanup write ONLY
  * sandbox-workspace rows; collectors() returns the REAL collector functions
- * scoped to the sandbox, with origin='drill' + sandbox scope stamped on every
+ * scoped to the sandbox, with origin='drill' + valid operator storage scope stamped on every
  * signal.
  */
 export interface DrillClass {
@@ -124,8 +125,8 @@ export interface DrillClass {
   /**
    * The collectors that should detect this friction — thin wrappers over the
    * REAL collector functions, run against the GIVEN workspace. The sandbox
-   * tick passes SANDBOX_WORKSPACE_ID (signals get origin='drill' + the sandbox
-   * scope stamped); the zero-leak check passes the LIVE workspace id and
+   * tick passes SANDBOX_WORKSPACE_ID (signals get origin='drill' + the valid
+   * operator storage scope); the zero-leak check passes the LIVE workspace id and
    * asserts the same sweep comes back empty.
    */
   collectors: (sql: Sql, planted: PlantedDrill, workspaceId: string) => WatchdogCollector[];

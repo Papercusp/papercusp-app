@@ -17,14 +17,38 @@
  * one-way — a process that has begun draining never un-drains, it exits. The only
  * un-set is the test-reset seam.
  */
-let _shuttingDown = false;
+import { pinModuleState } from '@papercusp/module-singleton';
+
+interface BeforeHostExitHook {
+  label: string;
+  run: () => void;
+}
+
+interface ShutdownState {
+  shuttingDown: boolean;
+  /** Set once installGracefulShutdown has armed a drain in THIS process. */
+  gracefulDrainInstalled: boolean;
+  beforeHostExitHooks: BeforeHostExitHook[];
+  beforeHostExitRan: boolean;
+}
+
+// Pinned (not a bare module `let`): the drain flag is WRITTEN by host-recycle.ts and
+// READ by sidecar shutdown listeners in other modules. A split module record would
+// leave the reader on a copy that never sees the write — a sidecar would then stop at
+// SIGTERM again, or a before-exit hook would register where exitOnce never looks.
+const state = pinModuleState<ShutdownState>('@papercusp/operator-core.shutdownState', () => ({
+  shuttingDown: false,
+  gracefulDrainInstalled: false,
+  beforeHostExitHooks: [],
+  beforeHostExitRan: false,
+}));
 
 /**
  * True once this process has begun a graceful drain (SIGTERM/SIGINT). One-way in
  * production (a draining process is on its way out). Cheap — a bare boolean read.
  */
 export function isShuttingDown(): boolean {
-  return _shuttingDown;
+  return state.shuttingDown;
 }
 
 /**
@@ -32,10 +56,58 @@ export function isShuttingDown(): boolean {
  * handlers (installGracefulShutdown's drainAndExit + the cluster-primary shutdown).
  */
 export function markShuttingDown(): void {
-  _shuttingDown = true;
+  state.shuttingDown = true;
+}
+
+/**
+ * EI-24863236643374267: record that this process has a bounded graceful drain armed
+ * (host-recycle.ts installGracefulShutdown). Set at INSTALL time, not at SIGTERM,
+ * because listeners registered before the drain's own SIGTERM listener (a sidecar's
+ * shutdown hook) run first and must already know a drain is coming.
+ */
+export function markGracefulDrainInstalled(): void {
+  state.gracefulDrainInstalled = true;
+}
+
+/** True when a graceful drain is armed in this process (see markGracefulDrainInstalled). */
+export function isGracefulDrainInstalled(): boolean {
+  return state.gracefulDrainInstalled;
+}
+
+/**
+ * Register a SYNCHRONOUS hook that runs right before the host process exits from a
+ * graceful drain or recycle (host-recycle.ts gracefulHostRecycle → exitOnce). That
+ * exit is usually a SIGKILL of itself, so Node's 'exit' event never fires — this is
+ * the last point where the process can still act. The hook must not await: nothing
+ * after it gets another turn. Re-registering the same label replaces the old hook.
+ */
+export function onBeforeHostExit(label: string, run: () => void): void {
+  const i = state.beforeHostExitHooks.findIndex((h) => h.label === label);
+  if (i >= 0) state.beforeHostExitHooks[i] = { label, run };
+  else state.beforeHostExitHooks.push({ label, run });
+}
+
+/**
+ * Run every before-host-exit hook once, in registration order. A throwing hook is
+ * logged and skipped so it cannot stop the exit or the hooks after it. Idempotent:
+ * a second call (the hard-exit timer racing the clean path) runs nothing.
+ */
+export function runBeforeHostExitHooks(): void {
+  if (state.beforeHostExitRan) return;
+  state.beforeHostExitRan = true;
+  for (const hook of state.beforeHostExitHooks) {
+    try {
+      hook.run();
+    } catch (err) {
+      console.warn(`[shutdown-state] before-exit hook '${hook.label}' threw: ${String(err)}`);
+    }
+  }
 }
 
 /** Test seam ONLY — reset the flag between cases. Never call in production code. */
 export function __resetShutdownStateForTest(): void {
-  _shuttingDown = false;
+  state.shuttingDown = false;
+  state.gracefulDrainInstalled = false;
+  state.beforeHostExitHooks = [];
+  state.beforeHostExitRan = false;
 }

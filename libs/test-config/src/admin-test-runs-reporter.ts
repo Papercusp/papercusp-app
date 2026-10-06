@@ -31,7 +31,7 @@
 import type { Reporter, TestModule, Vitest } from 'vitest/node';
 import { pinModuleState } from '@papercusp/module-singleton';
 import { exec } from 'node:child_process';
-import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { TEST_RUN_EXECUTION_DETAILS_SCHEMA_VERSION, recordedTestLayer, type TestRunExecutionDetails } from './execution-details.ts';
@@ -384,19 +384,170 @@ async function resolveGitContext(): Promise<GitContext> {
 }
 
 /**
+ * WI-10004898 — which checkout's git state proves (or disproves) a run clean.
+ *
+ * Normally the record root: the checkout the tests came from. A COPY-OUT
+ * mutation probe is the one runner whose record root cannot answer. It runs the
+ * guard inside `/tmp/mutation-probe.XXXXXX/mirror`, which deliberately has no `.git`.
+ * The mirror holds the origin checkout's files as symlinks, plus the probe's own
+ * scratch copy of the subject. So `git status` there fails, and every
+ * copy-out row recorded `commit_sha=NULL, worktree_dirty=true` even when the
+ * origin was a pristine checkout of one commit. Spec-evidence freshness rates a
+ * dirty run `unknown` (EI-24159008584241244), so no mutation row was usable
+ * from any tree.
+ *
+ * mutation-probe.sh exports the origin checkout as
+ * PAPERCUSP_MUTATION_PROBE_ORIGIN_ROOT for copy-out guards. Snapshotting it answers
+ * the question freshness asks: did every file the run could load, apart from the
+ * mutated subject, come from one commit? The deliberate mutation is still
+ * labelled by mutationPhase. A probe whose origin is the shared tree is still
+ * dirty, so the change only lets a clean origin (an as-committed clone) prove it.
+ * It is honoured ONLY inside a probe run and only for an absolute path; otherwise
+ * the record root stands.
+ */
+export function resolveWorktreeSnapshotRoot(): string {
+  const origin = process.env.PAPERCUSP_MUTATION_PROBE_ORIGIN_ROOT?.trim();
+  if (origin && isAbsolute(origin) && isMutationProbeRun()) return origin;
+  return resolveRecordRoot();
+}
+
+/**
  * Snapshot the whole shared tree rather than only the currently reported
  * module. Vitest's onInit hook runs before module discovery, and an unrelated
  * generated artifact can still invalidate the commit identity stamped on a
  * row. The fail-safe null handling in computeWorktreeDirty makes git timeout
  * or failure visible as dirty instead of silently restoring the old default.
  */
-export async function captureWorktreeSnapshot(): Promise<WorktreeGitSnapshot> {
-  const root = resolveRecordRoot();
+export async function captureWorktreeSnapshot(run: WorktreeGitRunner = runGit): Promise<WorktreeGitSnapshot> {
+  const root = resolveWorktreeSnapshotRoot();
   const [commit, porcelain] = await Promise.all([
-    runGit('git rev-parse HEAD', root, 2_000),
-    runGit('git status --porcelain --untracked-files=all', root, 2_000),
+    runGitWithRetry(run, 'git rev-parse HEAD', root),
+    runGitWithRetry(run, 'git status --porcelain --untracked-files=all', root),
   ]);
-  return { commit, porcelain };
+  if (!porcelain) return { commit, porcelain };
+  const exemption = await resolveProbeSubjectExemption(root, run);
+  return { commit, porcelain: exemption ? exemptProbeSubject(porcelain, exemption) : porcelain };
+}
+
+/**
+ * WI-10004952: the one path an IN-TREE mutation probe is entitled to leave modified.
+ *
+ * A copy-out probe mutates a scratch copy, so its origin checkout stays clean and
+ * PAPERCUSP_MUTATION_PROBE_ORIGIN_ROOT lets a clean clone prove the row clean. An
+ * in-tree probe mutates the subject IN the checkout, so the porcelain snapshot always
+ * showed that subject and every in-tree row landed worktree_dirty=true, even from a
+ * pristine `lint:as-committed --keep` clone. mutation-probe.sh now names the subject
+ * (PAPERCUSP_MUTATION_PROBE_SUBJECT, absolute) in in-tree mode; the snapshot drops
+ * exactly that path's modification line and nothing else, which answers the same
+ * question the origin-root rule answers: did every file the run could load, apart
+ * from the mutated subject, come from one commit?
+ *
+ * A subject inside a submodule shows in the superproject as ONE line for the
+ * submodule. That line is exempt only when the submodule still sits at the commit
+ * the superproject pins AND its own porcelain is exactly the subject; a moved
+ * gitlink or any other dirt keeps the row dirty.
+ */
+export interface ProbeSubjectExemption {
+  /** Subject path relative to the snapshot root (POSIX). */
+  subjectRel: string;
+  nested: {
+    /** The nested repository's path relative to the snapshot root (POSIX). */
+    repoRel: string;
+    /** Subject path relative to the nested repository (POSIX). */
+    subjectRelInRepo: string;
+    /** The nested repository's own porcelain, or null when unreadable. */
+    porcelain: string | null;
+    /** Its HEAD equals the gitlink the snapshot root's HEAD pins. */
+    gitlinkMatches: boolean;
+  } | null;
+}
+
+/** Porcelain v1 modification codes only: an added, deleted, renamed or untracked
+ * subject is not the in-place edit a probe makes, so it is never exempt. Lowercase
+ * `m` is the short-format submodule-modified-content code. */
+const PROBE_SUBJECT_EXEMPT_STATUS = /^[Mm]{1,2}$/;
+
+function parsePorcelainLine(line: string): { status: string; path: string } | null {
+  // runGit trims stdout, so the FIRST line's leading space is gone (" M a" reads "M a");
+  // split on the status token instead of fixed columns.
+  const m = line.trim().match(/^(\S{1,2})\s+(.+)$/);
+  return m ? { status: m[1], path: m[2] } : null;
+}
+
+export function exemptProbeSubject(porcelain: string, ex: ProbeSubjectExemption): string {
+  return porcelain
+    .split('\n')
+    .filter((line) => {
+      if (!line.trim()) return false;
+      const p = parsePorcelainLine(line);
+      if (!p || !PROBE_SUBJECT_EXEMPT_STATUS.test(p.status)) return true;
+      if (ex.nested === null) return p.path !== ex.subjectRel;
+      if (p.path !== ex.nested.repoRel) return true;
+      if (!ex.nested.gitlinkMatches || ex.nested.porcelain === null) return true;
+      return exemptProbeSubject(ex.nested.porcelain, { subjectRel: ex.nested.subjectRelInRepo, nested: null }) !== '';
+    })
+    .join('\n');
+}
+
+function toPosixPath(p: string): string {
+  return p.split('\\').join('/');
+}
+
+function realOrSelf(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+export async function resolveProbeSubjectExemption(
+  root: string,
+  run: WorktreeGitRunner = runGit,
+): Promise<ProbeSubjectExemption | null> {
+  const subject = process.env.PAPERCUSP_MUTATION_PROBE_SUBJECT?.trim();
+  if (!subject || !isAbsolute(subject) || !isMutationProbeRun()) return null;
+  const subjectReal = realOrSelf(subject);
+  const subjectRepo = await runGitWithRetry(run, 'git rev-parse --show-toplevel', dirname(subjectReal));
+  if (!subjectRepo) return null;
+  const rootReal = realOrSelf(root);
+  const repoRel = toPosixPath(relative(rootReal, subjectRepo));
+  if (repoRel.startsWith('..') || isAbsolute(repoRel) || repoRel.includes("'")) return null;
+  const subjectRel = toPosixPath(relative(rootReal, subjectReal));
+  if (repoRel === '') return { subjectRel, nested: null };
+  const [porcelain, head, gitlink] = await Promise.all([
+    runGitWithRetry(run, 'git status --porcelain --untracked-files=all', subjectRepo),
+    runGitWithRetry(run, 'git rev-parse HEAD', subjectRepo),
+    runGitWithRetry(run, `git rev-parse 'HEAD:${repoRel}'`, rootReal),
+  ]);
+  return {
+    subjectRel,
+    nested: {
+      repoRel,
+      subjectRelInRepo: toPosixPath(relative(subjectRepo, subjectReal)),
+      porcelain,
+      gitlinkMatches: !!head && head === gitlink,
+    },
+  };
+}
+
+/**
+ * WI-10004931: per-attempt budgets for each snapshot git read. A timed-out read
+ * returns null, and null is dirty by design (D-007), so a single 2s budget let
+ * fleet IO load stamp a provably clean tree dirty: a ~38-submodule clone's
+ * `git status` measured 1.8s while vitest ran beside it. Only a read that fails
+ * on EVERY attempt stays null, so missing proof still records dirty.
+ */
+export const WORKTREE_SNAPSHOT_GIT_BUDGETS_MS: readonly number[] = [2_000, 8_000];
+
+export type WorktreeGitRunner = (cmd: string, cwd: string, timeoutMs: number) => Promise<string | null>;
+
+async function runGitWithRetry(run: WorktreeGitRunner, cmd: string, cwd: string): Promise<string | null> {
+  for (const budget of WORKTREE_SNAPSHOT_GIT_BUDGETS_MS) {
+    const out = await run(cmd, cwd, budget);
+    if (out !== null) return out;
+  }
+  return null;
 }
 
 export interface TestRunRow {
@@ -965,7 +1116,11 @@ export async function insertTestRunRowsWithSql(
         rss_mb: context.rssMb,
         is_scratch_config: row.isScratchConfig,
         worktree_dirty: row.worktreeDirty,
-        execution_details: row.executionDetails ? JSON.stringify(row.executionDetails) : null,
+        // EI-24799048791133095: pass the OBJECT. This client keeps postgres-js's
+        // default jsonb serializer (JSON.stringify), so a pre-stringified value was
+        // encoded twice and stored as a jsonb STRING scalar; every
+        // `execution_details->>'key'` read then returned NULL.
+        execution_details: row.executionDetails ?? null,
       }));
     const query = sql`
       INSERT INTO harness_shared.test_runs

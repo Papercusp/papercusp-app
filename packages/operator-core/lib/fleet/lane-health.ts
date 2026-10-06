@@ -195,6 +195,14 @@ export interface ReadClaimSpecLaneHealthArgs {
    * statement bounds instead of the standalone 15s aggregate.
    */
   issueFamilyTotalBudgetMs?: number;
+  /**
+   * Rethrow a read failure instead of answering `null`. `null` means "not
+   * measured" and carries no cause, so a caller that must REFUSE on an
+   * unmeasured lane (plans:start's exact-plan preflight) needs the error itself
+   * to tell a statement timeout from a bad spec (EI-24700545763161721).
+   * Fail-soft observability callers leave it unset.
+   */
+  throwOnError?: boolean;
 }
 
 export interface ReadFleetLaneHealthArgs {
@@ -311,25 +319,48 @@ export async function readClaimSpecLaneHealth(args: ReadClaimSpecLaneHealthArgs)
     const { aggregateIssueClaimExclusions } = await import('../scheduler/get-next');
     const ws = resolveClaimSpecWorkspace(args.workspaceId ?? undefined);
     const familyReachability = claimSpecFamilyReachability(args.spec);
-    const issueBreakdown = familyReachability.issue
+    // The two family reads are independent; issuing them together keeps an
+    // exact-plan preflight (both families reachable, ~350ms each measured
+    // 2026-09-30) inside the obligation reader's 900ms optional-read budget.
+    // Resolve the admission module ONCE, before issuing the reads. Two
+    // concurrent import() calls of it left the feature read unissued under a
+    // vi.mock'd module (WI-10004356); one resolved module serves both reads.
+    const needsAdmission = Boolean(ws) && (
+      familyReachability.feature ||
+      (familyReachability.issue && args.issueFamilyTotalBudgetMs !== undefined)
+    );
+    const admission = needsAdmission ? await import('../scheduler/fleet-scope-admission') : null;
+    const issueRead = familyReachability.issue
       ? args.issueFamilyTotalBudgetMs === undefined
-        ? await aggregateIssueClaimExclusions(args.spec.view.filter, {
+        ? aggregateIssueClaimExclusions(args.spec.view.filter, {
             harness: args.harness, workspaceId: ws, states: args.spec.states,
             assignee: args.assignee, rigAvailable: args.rigAvailable,
           })
-        : ws
-          ? await import('../scheduler/fleet-scope-admission').then(({ diagnoseFleetScopeIssueFloorMiss }) =>
-              diagnoseFleetScopeIssueFloorMiss({
-                scope: {
-                  ownerId: args.assignee ?? '', fleetSlug: args.fleet, fleetRole: 'member',
-                  record: args.record, workspaceId: ws,
-                },
-                harness: args.harness, workspaceId: ws, states: args.spec.states,
-                rigAvailable: args.rigAvailable, totalBudgetMs: args.issueFamilyTotalBudgetMs,
-              }),
-            )
+        : admission && ws
+          ? admission.diagnoseFleetScopeIssueFloorMiss({
+              scope: {
+                ownerId: args.assignee ?? '', fleetSlug: args.fleet, fleetRole: 'member',
+                record: args.record, workspaceId: ws,
+              },
+              harness: args.harness, workspaceId: ws, states: args.spec.states,
+              rigAvailable: args.rigAvailable, totalBudgetMs: args.issueFamilyTotalBudgetMs,
+            })
           : null
       : null;
+    const featureRead = familyReachability.feature && admission && ws
+      ? admission.diagnoseFleetScopeFeatureFamilyExclusions({
+          scope: {
+            // Population reads deliberately carry no claimant. The diagnostic's
+            // explicit null override below keeps caller-relative floors out of the
+            // fleet-wide total.
+            ownerId: args.assignee ?? '', fleetSlug: args.fleet, fleetRole: 'member',
+            record: args.record, workspaceId: ws,
+          },
+          harness: args.harness, workspaceId: ws, states: args.spec.states,
+          rigAvailable: args.rigAvailable, cooldownAssignee: args.assignee ?? null,
+        })
+      : null;
+    const [issueBreakdown, featureBreakdown] = await Promise.all([issueRead, featureRead]);
     if (familyReachability.issue && issueBreakdown == null) return null;
     const issueFamily = issueBreakdown
       ? {
@@ -339,25 +370,9 @@ export async function readClaimSpecLaneHealth(args: ReadClaimSpecLaneHealthArgs)
         }
       : { claimable: 0, matchedByFilter: 0, excluded: {} };
 
-    let featureFamily: FleetLaneHealth['featureFamily'] = null;
-    if (familyReachability.feature) {
-      const featureBreakdown = ws
-        ? await import('../scheduler/fleet-scope-admission').then(({ diagnoseFleetScopeFeatureFamilyExclusions }) =>
-            diagnoseFleetScopeFeatureFamilyExclusions({
-              scope: {
-                // Population reads deliberately carry no claimant. The diagnostic's
-                // explicit null override below keeps caller-relative floors out of the
-                // fleet-wide total.
-                ownerId: args.assignee ?? '', fleetSlug: args.fleet, fleetRole: 'member',
-                record: args.record, workspaceId: ws,
-              },
-              harness: args.harness, workspaceId: ws, states: args.spec.states,
-              rigAvailable: args.rigAvailable, cooldownAssignee: args.assignee ?? null,
-            }),
-          )
-        : null;
-      featureFamily = featureBreakdown ?? { claimable: null, matchedByFilter: null, excluded: null };
-    }
+    const featureFamily: FleetLaneHealth['featureFamily'] = familyReachability.feature
+      ? featureBreakdown ?? { claimable: null, matchedByFilter: null, excluded: null }
+      : null;
 
     const effective: FleetLaneHealth['effective'] = familyReachability.issue && familyReachability.feature
       ? featureFamily?.claimable == null || featureFamily.matchedByFilter == null || featureFamily.excluded == null
@@ -391,7 +406,8 @@ export async function readClaimSpecLaneHealth(args: ReadClaimSpecLaneHealthArgs)
           claimSpecReferencesField(args.spec, 'plan') || claimSpecReferencesField(args.spec, 'plan_item'),
       },
     };
-  } catch {
+  } catch (error) {
+    if (args.throwOnError) throw error;
     return null;
   }
 }
@@ -429,7 +445,15 @@ export async function readClaimSpecLaneHealthDiagnosed(
     }
   }
 
-  const laneHealth = await readClaimSpecLaneHealth(args);
+  // Read with throwOnError so the unavailable result can name its cause; a bare
+  // null here used to discard it (EI-24700545763161721).
+  let laneHealth: FleetLaneHealth | null = null;
+  let readError: string | null = null;
+  try {
+    laneHealth = await readClaimSpecLaneHealth({ ...args, throwOnError: true });
+  } catch (error) {
+    readError = error instanceof Error ? error.message : String(error);
+  }
   if (laneHealth?.effective.claimable != null) return { laneHealth, unavailable: null };
   const stage: FleetLaneHealthUnavailable['stage'] = familyReachability.issue
     ? 'issue-family'
@@ -443,7 +467,8 @@ export async function readClaimSpecLaneHealthDiagnosed(
       stage,
       detail:
         'A reachable storage-family diagnostic did not produce an exact measurement; ' +
-        'the lane remains UNKNOWN and no zero was inferred.',
+        'the lane remains UNKNOWN and no zero was inferred.' +
+        (readError ? ` Cause: ${readError}` : ''),
     }),
   };
 }

@@ -193,7 +193,9 @@ export type GateOwnershipAssessment =
  * Order is load-bearing: duplicates outrank whichever canonical row happened to
  * be selected, and a held claim is not called live until the independent
  * session oracle positively says so. A positively-live claim is only called
- * `held-stalled` when the shared critical-claim progress lease has expired;
+ * `held-stalled` when the effective shared critical-claim lease has expired;
+ * that deadline includes a bounded extension for the same holder's pending
+ * checkpoint-outcome wait.
  * presence alone is not evidence that this item is moving. A new claim or
  * session state is therefore a compile-time exhaustiveness failure rather than
  * a reassuring default.
@@ -205,6 +207,8 @@ export function assessGateOwnership(input: {
   /** Genuine item progress, with takenAt as the new-claim fallback anchor. */
   takenAt?: string | Date | null;
   lastProgressAt?: string | Date | null;
+  /** Resolved condition lease deadline, including any matching in-flight gate wait. */
+  effectiveLeaseExpiresAt?: string | Date | null;
   /** Injected for deterministic callers/tests; defaults inside the shared helper. */
   nowMs?: number;
 }): GateOwnershipAssessment | null {
@@ -220,18 +224,28 @@ export function assessGateOwnership(input: {
       return 'hold-blocked';
     case 'lease-expired':
       return 'lease-expired';
-    case 'held':
+    case 'held': {
       switch (input.holderSessionState) {
         case 'live':
         case 'parked':
-        case 'recorded':
-          return assessCriticalClaimProgressLease({
-            takenAt: input.takenAt ?? null,
-            lastProgressAt: input.lastProgressAt ?? null,
-            nowMs: input.nowMs,
-          }).expired
-            ? 'held-stalled'
-            : 'held-live';
+        case 'recorded': {
+          const nowMs = input.nowMs ?? Date.now();
+          const expired = input.effectiveLeaseExpiresAt === undefined
+            ? assessCriticalClaimProgressLease({
+                takenAt: input.takenAt ?? null,
+                lastProgressAt: input.lastProgressAt ?? null,
+                nowMs,
+              }).expired
+            : (() => {
+                const expiryMs = input.effectiveLeaseExpiresAt instanceof Date
+                  ? input.effectiveLeaseExpiresAt.getTime()
+                  : input.effectiveLeaseExpiresAt == null
+                    ? Number.NaN
+                    : Date.parse(input.effectiveLeaseExpiresAt);
+                return Number.isFinite(expiryMs) && expiryMs <= nowMs;
+              })();
+          return expired ? 'held-stalled' : 'held-live';
+        }
         case 'draining':
         case 'suspect':
         case null:
@@ -243,6 +257,7 @@ export function assessGateOwnership(input: {
           return exhaustive;
         }
       }
+    }
     default: {
       const exhaustive: never = input.claimState;
       return exhaustive;
@@ -264,6 +279,7 @@ export function toCellOwnership(
       duplicates: obj.duplicates,
       takenAt: obj.takenAt,
       lastProgressAt: obj.lastProgressAt,
+      effectiveLeaseExpiresAt: obj.expiresAt,
       nowMs,
     }),
     eventKey: obj.conditionKey,

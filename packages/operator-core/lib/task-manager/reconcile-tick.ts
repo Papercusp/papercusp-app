@@ -28,7 +28,7 @@ import {
   type ResidueGroup,
   type ScannedProcess,
 } from './reconcile';
-import { scanProcesses, type ScanOptions, type ScanResult } from './scan';
+import { scanProcessesAsync, type ScanOptions, type ScanResult } from './scan';
 import { inspectTaskUnitTerminals, resetFailedTaskUnit } from './scope-terminal-state';
 import { readJobLogTerminal, type JobLogTerminal } from './job-log-terminal';
 import {
@@ -117,7 +117,13 @@ export interface ReconcileTickResult {
 export async function reconcileTick(deps: ReconcileTickDeps = {}): Promise<ReconcileTickResult> {
   const fs = deps.fs ?? nodeCgroupFs;
   const now = deps.now ?? Date.now;
-  const scanFn = deps.scan ?? scanProcesses;
+  // jev-memory-timeouts-to-zero-2026-10-01 P-004: the default scan yields its
+  // kernel IO. The synchronous walk froze bg-host's event loop for 150-185 ms
+  // per tick (782 processes, measured 2026-10-01), stalling every request and
+  // Jev call that host had in flight. The async scanner prefetches the same
+  // files and classifies with the same rules; an injected non-node `fs` without
+  // an `asyncFs` still takes the synchronous path.
+  const scanFn = deps.scan ?? scanProcessesAsync;
   const listLive = deps.listLive ?? listLiveTasks;
 
   const scan = await scanFn({ fs, ...(deps.scanOptions ?? {}) });
@@ -158,7 +164,12 @@ export async function reconcileTick(deps: ReconcileTickDeps = {}): Promise<Recon
           .map(([unit]) => unit),
       );
 
-  const result = reconcile(live, scan.processes, { now: now(), graceMs: deps.graceMs, releasedScopes });
+  const result = reconcile(live, scan.processes, {
+    now: now(),
+    graceMs: deps.graceMs,
+    releasedScopes,
+    unlistedIdentityByPid: scan.unlistedIdentityByPid,
+  });
   const summary = summarizeReconcile(result);
 
   // ── is this scan trustworthy enough to CLOSE rows? ───────────────────────
@@ -291,15 +302,27 @@ export async function reconcileTick(deps: ReconcileTickDeps = {}): Promise<Recon
       }
     }
 
-    const groups = result.unaccounted.map((g) => ({
+    const groups = result.unaccounted.map((g) => {
       // A scope of OURS whose row already closed keeps its own id, so the history
       // stays attached to the real task instead of forking a phantom one.
-      taskId: (g.scopeUnit && taskIdFromScopeUnit(g.scopeUnit)) || residueTaskId(g.cgroupPath),
-      cgroupPath: g.cgroupPath,
-      scopeUnit: g.scopeUnit,
-      pids: g.pids,
-      sampleCmdline: g.sampleCmdline,
-    }));
+      // Sample the same cgroup source as owned tasks: `/proc` membership proves
+      // presence, while cpu.stat / memory.current / pids.current provide the
+      // activity and resource measurements shown to the lifecycle judge.
+      const sample = sampleCgroup(absCgroupDir(g.cgroupPath), fs);
+      return {
+        taskId: (g.scopeUnit && taskIdFromScopeUnit(g.scopeUnit)) || residueTaskId(g.cgroupPath),
+        cgroupPath: g.cgroupPath,
+        scopeUnit: g.scopeUnit,
+        pids: g.pids,
+        sampleCmdline: g.sampleCmdline,
+        metrics: {
+          lastMemoryBytes: sample.memoryBytes,
+          peakMemoryBytes: sample.peakMemoryBytes,
+          cpuUsec: sample.cpuUsec,
+          pidsCurrent: sample.pidsCurrent,
+        },
+      };
+    });
     const persisted = await upsertUnaccounted(groups, { workspaceId: deps.workspaceId });
     unaccountedPersisted = persisted.length;
     residueCleared = await clearVanishedUnaccounted(persisted, { workspaceId: deps.workspaceId });

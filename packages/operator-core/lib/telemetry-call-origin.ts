@@ -77,6 +77,18 @@ const HOOK_CLIENT_UA_PREFIXES = ["python-urllib/"] as const;
 /** The desktop command-palette / dock bridge stamps this spawn id (see isPaletteUiPollRead). */
 const PALETTE_SPAWN_ID = "palette";
 
+/**
+ * These ids are assigned by server-owned machine dispatchers. They identify a system-chosen
+ * tool call only when the dispatcher has no caller request metadata to preserve. Do not infer
+ * system origin from transport === "in_process": that transport also carries caller-triggered
+ * calls, including cell reads that retain callerContext.
+ */
+const SYSTEM_IN_PROCESS_SPAWN_IDS = new Set<string>([
+  "event-reaction",
+  "predicate-watch",
+  "cell-read",
+]);
+
 export interface CallOriginInput {
   requestOrigin?: {
     query?: Record<string, string> | null;
@@ -106,8 +118,13 @@ export function classifyCallOrigin(input: CallOriginInput): CallOriginVerdict {
   const declared = declaredOrigin(input);
   if (declared) return { origin: declared, source: "declared" };
 
-  if ((input.spawnId ?? "") === PALETTE_SPAWN_ID) {
+  const spawnId = input.spawnId ?? "";
+  if (spawnId === PALETTE_SPAWN_ID) {
     return { origin: "ui", source: "derived" };
+  }
+
+  if (!input.requestOrigin && SYSTEM_IN_PROCESS_SPAWN_IDS.has(spawnId)) {
+    return { origin: "system", source: "derived" };
   }
 
   const ro = input.requestOrigin;

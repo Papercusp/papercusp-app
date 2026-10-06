@@ -320,6 +320,9 @@ async function runGit(repoPath: string, args: string[], opts: { timeoutMs?: numb
       encoding: 'utf8',
       timeout: opts.timeoutMs ?? COMMAND_TIMEOUT_MS,
       maxBuffer: opts.maxBuffer ?? MAX_COMMAND_BUFFER,
+      ...(args[0] === 'status'
+        ? { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } }
+        : {}),
     },
   );
   return String(stdout);

@@ -9,6 +9,7 @@
  *   description?: string,
  *   inputSchema?: Record<string, unknown>,
  *   outputSchema?: Record<string, unknown>,
+ *   _meta?: Record<string, unknown> & {'papercusp/servingGeneration'?: string},
  *   annotations?: {readOnlyHint?: boolean},
  * }} ToolCatalogEntry
  */
@@ -33,6 +34,8 @@ export function resolvePtoolOperatorCandidates(env?: EnvironmentMap, explicitUrl
  * callers can then explicitly pin that host with --url for a subsequent call.
  */
 export function resolvePtoolInvocationCandidates(args?: {}, env?: NodeJS.ProcessEnv): string[];
+/** A changed operator is safe for dispatch only when the catalog marks the tool read-only. */
+export function canDispatchOnFallbackOperator(tool: any, fallbackUsed: any): boolean;
 /**
  * Whether the operator URL came from implicit local discovery and may follow a
  * packaged operator that restarts onto a different port. Explicit CLI/env
@@ -42,15 +45,21 @@ export function resolvePtoolInvocationCandidates(args?: {}, env?: NodeJS.Process
 export function shouldRediscoverOperatorUrl(args?: {}, env?: NodeJS.ProcessEnv): boolean;
 /**
  * Pinned operator URLs are caller-selected endpoints, not managed launcher
- * routes. A dead pin must report its connection failure promptly instead of
- * spending the managed route's 120s recovery budget retrying an endpoint that
- * cannot be rediscovered or rebased. Managed/discoverable routes retain their
- * bounded retry loop for operator restarts.
+ * routes. Keep the selected host authoritative: a retry may reconnect to that
+ * same local direct operator, but must never rediscover or move to a fallback.
+ * Remote pins and local proxy pins keep one initialize attempt; a direct local
+ * operator gets a short retry window for brief listener restarts, separate
+ * from the managed route's 120s recovery budget.
  */
 export function ptoolConnectionRetryOptions(args?: {}, env?: NodeJS.ProcessEnv): {
     maxAttempts?: undefined;
+    totalTimeoutMs?: undefined;
 } | {
     maxAttempts: number;
+    totalTimeoutMs: number;
+} | {
+    maxAttempts: number;
+    totalTimeoutMs?: undefined;
 };
 /**
  * Parse argv into the ptool invocation shape. The first non-flag positional
@@ -144,7 +153,7 @@ export function resolveContextTier({ contextTier, env }?: {
  *   'inline' — a normal `--json '<...>'` / `--args '<...>'` value.
  *   null     — no JSON source given; caller should prompt interactively.
  */
-export function jsonSourceKind(args: any): "file" | "inline" | "stdin" | null;
+export function jsonSourceKind(args: any): "file" | "stdin" | "inline" | null;
 /**
  * Escape literal JSON control characters that occur inside quoted strings.
  * JSON requires those characters to be represented as escapes, but a heredoc
@@ -155,13 +164,6 @@ export function jsonSourceKind(args: any): "file" | "inline" | "stdin" | null;
  * @returns {string}
  */
 export function escapeJsonStringControls(text: string): string;
-/**
- * Parse a ptool JSON payload after normalizing heredoc-friendly string controls.
- * An empty stdin stream is equivalent to omitting JSON args, which lets callers
- * use the standard quoting-safe `--json -` shape for zero-argument tools. Files
- * and inline payloads remain strict so an accidentally empty payload still
- * fails loudly. Pure.
- */
 export function parseJsonInput(text: any, { emptyAsObject }?: {
     emptyAsObject?: boolean | undefined;
 }): any;
@@ -178,7 +180,7 @@ export function formatJsonInputError(jsonKind: any, error: any): string;
  *   'inline' — a normal `--script '<source>'` value.
  *   null     — no direct script source was given.
  */
-export function scriptSourceKind(args: any): "file" | "inline" | "stdin" | null;
+export function scriptSourceKind(args: any): "file" | "stdin" | "inline" | null;
 /**
  * Decide whether the human-readable invocation line belongs on stderr.
  * Scripted JSON mode must leave stdout/stderr suitable for machine capture;
@@ -373,13 +375,14 @@ export function resolveTokenPath(options?: {
  *  so ptool still emits a lossless scripting payload.
  *  @param {string} toolName
  *  @param {any} callArgs
- *  @param {{outputSchema?: {type?: string}, idempotencyKey?: string}} [options]
+ *  @param {{outputSchema?: {type?: string}, idempotencyKey?: string, servingGeneration?: string}} [options]
  */
-export function buildCallToolParams(toolName: string, callArgs: any, { outputSchema, idempotencyKey }?: {
+export function buildCallToolParams(toolName: string, callArgs: any, { outputSchema, idempotencyKey, servingGeneration }?: {
     outputSchema?: {
         type?: string;
     };
     idempotencyKey?: string;
+    servingGeneration?: string;
 }): {
     name: string;
     arguments: any;
@@ -411,6 +414,31 @@ export function timeoutForTool(toolName: string, callArgs?: (Record<string, unkn
  * staging/release recovery, so it must provide the same bounded absorption.
  */
 export function isLoopPressureShed(error: any): boolean;
+/** A serving-generation mismatch is a server-side pre-dispatch rejection. */
+export function isStaleToolContractFailure(error: any): boolean;
+/**
+ * Whether a connection was rejected because this bearer is invalid for the
+ * selected operator. Only this typed refusal may advance to another implicit
+ * token file; explicit token overrides remain authoritative.
+ */
+export function isInvalidSuperuserBearerFailure(error: any): boolean;
+/** Retry connection setup with the next bearer only after a typed invalid-bearer rejection. */
+export function connectWithTokenFallback(connectOnce: any, tokenCandidates: any): Promise<any>;
+/**
+ * Retry read-only tools/list discovery with the next implicit token file when
+ * the selected operator rejects its bearer. Some operators authenticate the
+ * first request after MCP initialize, so connect-time fallback alone is not
+ * enough. Keep this before any tools/call.
+ */
+export function listToolsWithTokenFallback(initialClient: any, tokenPaths: any, initialTokenPath: any, reconnectWithTokenPath: any, listTools: any): Promise<{
+    client: any;
+    tools: any;
+    error: null;
+} | {
+    client: any;
+    tools: null;
+    error: unknown;
+}>;
 /**
  * Add bounded positive jitter AFTER a retry minimum, without overrunning the
  * caller's remaining total deadline. Returns null when even the minimum cannot
@@ -498,13 +526,18 @@ export function formatOperatorConnectFailure(operatorUrl: any, error: any): stri
  * session. A failed replay client is closed before the error is surfaced.
  * @param {any} client
  * @param {any} params
- * @param {{reconnect?: () => Promise<any>, maxAttempts?: number, timeoutMs?: number, replayProof?: unknown}} [options]
+ * @param {{reconnect?: () => Promise<any>, maxAttempts?: number, timeoutMs?: number, replayProof?: unknown, onStaleToolContract?: (context: {client: any, params: any, error: unknown}) => Promise<any>}} [options]
  */
-export function callToolWithReplayRecovery(client: any, params: any, { reconnect, maxAttempts, timeoutMs, replayProof, }?: {
+export function callToolWithReplayRecovery(client: any, params: any, { reconnect, maxAttempts, timeoutMs, replayProof, onStaleToolContract, }?: {
     reconnect?: () => Promise<any>;
     maxAttempts?: number;
     timeoutMs?: number;
     replayProof?: unknown;
+    onStaleToolContract?: (context: {
+        client: any;
+        params: any;
+        error: unknown;
+    }) => Promise<any>;
 }): Promise<{
     client: any;
     result: any;
@@ -541,6 +574,28 @@ export function dispatchScriptedToolWithoutCatalog(client: any, toolName: any, c
     result: any;
 }>;
 /**
+ * Dispatch a catalog-bypass call and advance through only the remaining
+ * implicit token files when the operator returns its exact pre-dispatch
+ * invalid-bearer CallToolResult. Rebuild every attempt with the same key so
+ * the logical invocation identity remains stable. Explicit token overrides
+ * resolve to one path and therefore cannot fall through.
+ * @param {any} client
+ * @param {string} toolName
+ * @param {any} callArgs
+ * @param {{idempotencyKey?: string, tokenPaths?: string[], initialTokenPath?: string|null,
+ * reconnectWithTokenPath?: (tokenFile: string) => Promise<any>, timeoutMs?: number}} [options]
+ */
+export function dispatchScriptedToolWithoutCatalogWithTokenFallback(client: any, toolName: string, callArgs: any, { idempotencyKey, tokenPaths, initialTokenPath, reconnectWithTokenPath, timeoutMs, }?: {
+    idempotencyKey?: string;
+    tokenPaths?: string[];
+    initialTokenPath?: string | null;
+    reconnectWithTokenPath?: (tokenFile: string) => Promise<any>;
+    timeoutMs?: number;
+}): Promise<{
+    client: any;
+    result: any;
+}>;
+/**
  * A local operator restart can make the initial MCP handshake race the brief
  * socket-down window. Retrying the connection is safe because no tool has been
  * dispatched yet; never extend this to a tools/call transport failure, whose
@@ -569,21 +624,23 @@ export function connectWithLocalRetry<T>(connectOnce: (url: string, scope: objec
 }): Promise<any>;
 /**
  * Connect to the first reachable operator candidate. Later candidates are
- * used only for pre-dispatch transport failures, so authentication and HTTP
- * failures do not silently route a caller to another operator.
+ * used only for pre-dispatch transport failures, plus an opted-in HTTP 404
+ * from an implicit endpoint route; authenticated and other HTTP failures do
+ * not silently route a caller to another operator.
  *
  * @template T
- * @param {(url: string, scope: object, options?: {timeoutMs: number}) => Promise<T>} connectOnce
+ * @param {(url: string, scope: object, options?: {timeoutMs: number}, connectionContext?: unknown) => Promise<T>} connectOnce
  * @param {string[]} operatorUrls
  * @param {object} scope
- * @param {Record<string, any> & {primaryAttemptOptions?: object, onFallback?: ((url: string, error: unknown) => void) | null}} [options]
+ * @param {Record<string, any> & {primaryAttemptOptions?: object, onFallback?: ((url: string, error: unknown) => void) | null, prepareConnection?: (scope: object) => Promise<unknown> | unknown}} [options]
  * @returns {Promise<{client: T, operatorUrl: string}>}
  */
 export function connectWithOperatorCandidates<T>(connectOnce: (url: string, scope: object, options?: {
     timeoutMs: number;
-}) => Promise<T>, operatorUrls: string[], scope: object, { primaryAttemptOptions, onFallback, ...retryOptions }?: Record<string, any> & {
+}, connectionContext?: unknown) => Promise<T>, operatorUrls: string[], scope: object, { primaryAttemptOptions, onFallback, allowHttpNotFoundFallback, prepareConnection, ...retryOptions }?: Record<string, any> & {
     primaryAttemptOptions?: object;
     onFallback?: ((url: string, error: unknown) => void) | null;
+    prepareConnection?: (scope: object) => Promise<unknown> | unknown;
 }): Promise<{
     client: T;
     operatorUrl: string;
@@ -624,40 +681,58 @@ export function listToolsWithLocalRetry(client: any, params?: {}, { timeoutMs, m
  * Accept either an operator base URL or an already-qualified `/api/mcp`
  * endpoint; explicit endpoint URLs must not receive a second MCP path.
  * @param {string} operatorUrl
- * @param {{workspace?: string, harness?: string, client?: string, contextTier?: string}} [options]
+ * @param {{workspace?: string, harness?: string, client?: string, contextTier?: string, env?: EnvironmentMap}} [options]
  */
-export function buildMcpUrl(operatorUrl: string, { workspace, harness, client, contextTier, }?: {
+export function buildMcpUrl(operatorUrl: string, { workspace, harness, client, contextTier, env, }?: {
     workspace?: string;
     harness?: string;
     client?: string;
     contextTier?: string;
+    env?: EnvironmentMap;
 }): URL;
 /**
- * EI-21860372620642128 — `npm run install:safe` rewrites shared node_modules
- * IN PLACE while holding a repo-keyed fs mutex (scripts/lib/fs-mutex.mjs), so
- * a ptool invocation launched during that window can hit a transiently
- * missing `@modelcontextprotocol/sdk` deep import and fail outright, even
- * though the identical import succeeds moments later once the install
- * finishes (reproduced 2026-08-30: five ptool calls retried ~78-81 times over
- * ~120s, then failed `Cannot find module`).
+ * EI-21860372620642128 — install:safe reifies shared node_modules in place
+ * while holding a repo-keyed fs mutex. A ptool import can race that rewrite;
+ * the 2026-10-01 reproduction kept the SDK entrypoint unavailable across a
+ * 330-second ptool wait.
  *
- * ptool itself must never be wrapped in install:safe's own reader guard
- * (EI-21267836337650976 / EI-21250765620092599 — that swallowed a completed
- * write into a near-silent no-op), so this coordinates IN-PROCESS instead:
- * on a MODULE_NOT_FOUND for one of these deep SDK imports, confirm — via the
- * mutex's own non-blocking `peekFsMutexSync` diagnostic peek, never a
- * blocking reader marker, which would reintroduce that exact class of hang —
- * that an install:safe write is ACTUALLY in flight for this repo before
- * retrying. A MODULE_NOT_FOUND with no install in flight is a genuine
- * missing dependency and is rethrown immediately, unretried.
+ * Hold the same mutex's reader lease only while loading the SDK module graph.
+ * This makes an import wait for an active install and makes a later install
+ * wait until Node has cached the loaded modules. Release the lease before
+ * tools/call: wrapping all of ptool would deadlock a tool handler that starts
+ * install:safe (EI-21267836337650976 / EI-21250765620092599).
+ *
+ * A child launched by install:safe --exec-under-lock already holds that
+ * reader lease and inherits PAPERCUSP_INSTALL_MUTEX_HELD; do not nest another
+ * lease, since a queued installer could otherwise wait on the outer reader.
+ * The finite 10-minute wait covers the observed rewrite duration while still
+ * surfacing a stuck installer as an error.
  */
-export function importSdkModuleWithInstallAwareness(specifier: any, { doImport, sleep, loadInstallMutex, totalMs, intervalMs, }?: {
+export function importSdkModuleWithInstallAwareness(specifier: any, { doImport, loadInstallMutex, }?: {
     doImport?: ((spec: any) => Promise<any>) | undefined;
-    sleep?: ((ms: any) => Promise<any>) | undefined;
     loadInstallMutex?: (() => Promise<[typeof import("../../../scripts/lib/fs-mutex.mjs"), typeof import("../../../scripts/npm-install-safe.mjs")]>) | undefined;
-    totalMs?: number | undefined;
-    intervalMs?: number | undefined;
 }): Promise<any>;
+/**
+ * Load the transport implementation before starting the network handshake
+ * retry budget. SDK imports can wait for install:safe's repo reader lease for
+ * up to ten minutes; that wait is bootstrap time, not operator network time.
+ *
+ * @param {{transport?: string}} [scope]
+ * @param {{importSdkModule?: (specifier: string) => Promise<object>}} [options]
+ */
+export function preparePtoolConnectionModules({ transport: requestedTransport }?: {
+    transport?: string;
+}, { importSdkModule }?: {
+    importSdkModule?: (specifier: string) => Promise<object>;
+}): Promise<{
+    mode: string;
+    Client?: undefined;
+    StreamableHTTPClientTransport?: undefined;
+} | {
+    mode: string;
+    Client: any;
+    StreamableHTTPClientTransport: any;
+}>;
 /**
  * List every tool, following pagination if the server returns a cursor.
  * @param {{listTools: (params?: {cursor?: string}, options?: {timeout?: number,
@@ -686,6 +761,25 @@ export function listAllTools(client: {
     rand?: () => number;
     retryJitterMs?: number;
 }): Promise<any[]>;
+/**
+ * Refresh a stale call's catalog entry and prepare one exact retry. A changed
+ * or missing input schema is surfaced for an explicit caller retry instead of
+ * dispatching arguments against a contract the user did not see.
+ * @param {{client: any, toolName: string, previousTool: any, callArgs: any, idempotencyKey: string, listTools?: (client: any) => Promise<any[]>, error?: unknown}} options
+ * @returns {Promise<{tool: any, params: any}>}
+ */
+export function refreshToolCallAfterStaleContract({ client, toolName, previousTool, callArgs, idempotencyKey, listTools, error, }?: {
+    client: any;
+    toolName: string;
+    previousTool: any;
+    callArgs: any;
+    idempotencyKey: string;
+    listTools?: (client: any) => Promise<any[]>;
+    error?: unknown;
+}): Promise<{
+    tool: any;
+    params: any;
+}>;
 /** The live stdout delivery-failure probe (injectable in printResult for tests).
  *  Node SWALLOWS EPIPE on process.stdout by design: when the consumer of a
  *  captured/piped stdout dies mid-invocation (a wake-harness capture, `| head`),
@@ -733,6 +827,8 @@ export const PTOOL_CONNECT_TIMEOUT_MS: number;
 export const PTOOL_DIRECT_CONNECT_ATTEMPT_TIMEOUT_MS: 15000;
 export const PTOOL_CONNECT_RETRY_DELAY_MS: 1000;
 export const PTOOL_CONNECT_MAX_ATTEMPTS: number;
+export const PTOOL_PINNED_LOCAL_CONNECT_TOTAL_TIMEOUT_MS: number;
+export const PTOOL_PINNED_LOCAL_CONNECT_MAX_ATTEMPTS: number;
 export const PTOOL_PROXY_UPSTREAM_ERROR_MAX_ATTEMPTS: 2;
 export const PTOOL_RETRY_JITTER_MS: 1000;
 export const PTOOL_LIST_TOOLS_RETRY_DELAY_MS: 1000;
@@ -771,6 +867,7 @@ export const PTOOL_HEARTBEAT_RESOURCE_TIMEOUT_MS: 60000;
  * immediate retry can overlap the original handler before its receipt exists.
  */
 export const PTOOL_POST_CONNECT_RETRIES: 0;
+export const PTOOL_PRE_CONNECT_CALL_RETRIES: 1;
 /**
  * Explicitly replay one exact code:run body after an unknown transport result.
  * This is intentionally separate from normal recovery so catalog annotations
@@ -799,13 +896,16 @@ export function replayCodeRunWithProof(client: any, params: any, replayProof: an
  *  (EI-24654733539966460: a physical drill waited its full 900s bound on a
  *  work_items:create the operator had rejected). */
 export const PTOOL_TOOL_NOT_OK_EXIT: 5;
-export const PTOOL_USAGE: "ptool \u2014 call any Papercusp defineTool endpoint from the terminal.\n\n  ptool                         interactive: pick service \u2192 endpoint \u2192 args\n  ptool <group:verb>            skip the pickers, prompt for that tool's args\n  ptool <group:verb> --json - <<'EOF'  read JSON args from stdin (safe)\n  {\"copy\": \"it's fine now\"}\n  EOF\n  ptool <group:verb> --json-file payload.json   read JSON args from a file (safe)\n  ptool <group:verb> --json '<args>'   inline, quote-free JSON only\n  ptool <group:verb> --projection '<spec>'  bound the result at dispatch time\n  ptool code:run --script-file batch.js   read the script from a file\n  ptool code:run --script - <<'EOF'      read the script from stdin\n  return await tools.dev.build_status({});\n  EOF\n  ptool --list [filter]         print the catalog (optionally name-filtered)\n  ptool <tool> --transport=uds  require direct local MCP (http and auto also accepted)\n\nPrefer --json-file or --json - for any payload that is not a trivial,\nquote-free literal \u2014 especially loop:checkpoint checks/walls with recheck text.\nA shell-quoted --json '<inline>' cannot safely carry an apostrophe (the quote\nterminates early). For code:run, prefer --script-file or --script - for source\nthat contains nested shell commands or quoted strings.\n\nFlags:\n  --json <json> / --args <json>   args object for a direct (non-interactive) call;\n                                   '-' reads the JSON from stdin instead\n  --json-file <path>              read the args JSON from a file (quoting-free)\n  --projection <json>             dispatch-level result projection (quote-free JSON)\n  --script <source>               direct code:run JavaScript source; '-' reads stdin\n  --script-file <path>            direct code:run JavaScript source (quoting-free)\n  --workspace <ws>                scope the session (needed for harness:*, features:*, \u2026)\n  --all-workspaces                use an unscoped superuser session (workspace=*)\n  --harness <slug>                scope the session to a harness\n  --idempotency-key <key>         reuse one logical tools/call receipt after reconciling an unknown outcome\n  --token-file <path>             bearer token file (default $PAPERCUSP_MCP_TOKEN_FILE, $PAPERCUSP_HOME/superuser-token, or ~/.papercusp/superuser-token)\n  PAPERCUSP_CONTEXT_TIER=full     explicit escape hatch for unshaped MCP payloads (default: trimmed)\n  --raw                           print the raw result text (no JSON pretty-print)\n  --url=<http://host:port>        operator URL (default current PAPERCUSP_HONO_PORT host, then $PAPERCUSP_OPERATOR_URL or :3070)\n  -h, --help                      this help\n\nExit status:\n  0  the tool answered and its result is ok (or carries no ok field)\n  1  the call failed or produced no usable result (tool error, empty or\n     truncated result, stdout lost)\n  5  the call was delivered but the tool answered ok:false (a refusal, a\n     missing id, a failed batch entry); the complete result is still on stdout\n";
+export const PTOOL_USAGE: "ptool \u2014 call any Papercusp defineTool endpoint from the terminal.\n\n  ptool                         interactive: pick service \u2192 endpoint \u2192 args\n  ptool <group:verb>            skip the pickers, prompt for that tool's args\n  ptool <group:verb> --json - <<'EOF'  read JSON args from stdin (safe)\n  {\"copy\": \"it's fine now\"}\n  EOF\n  ptool <group:verb> --json-file payload.json   read JSON args from a file (safe)\n  ptool <group:verb> --json '<args>'   inline, quote-free JSON only\n  ptool <group:verb> --projection '<spec>'  bound the result at dispatch time\n  ptool code:run --script-file batch.js   read the script from a file\n  ptool code:run --script - <<'EOF'      read the script from stdin\n  return await tools.dev.build_status({});\n  EOF\n  ptool --list [filter]         print the catalog (optionally name-filtered)\n  ptool <tool> --transport=uds  require direct local MCP (http and auto also accepted)\n\nPrefer --json-file or --json - for any payload that is not a trivial,\nquote-free literal \u2014 especially loop:checkpoint checks/walls with recheck text.\nA shell-quoted --json '<inline>' cannot safely carry an apostrophe (the quote\nterminates early). For code:run, prefer --script-file or --script - for source\nthat contains nested shell commands or quoted strings.\n\nFlags:\n  --json <json> / --args <json>   JSON object of args for a direct call;\n                                   '-' reads stdin; JSON strings/arrays are rejected\n  --json-file <path>              read the args JSON from a file (quoting-free)\n  --projection <json>             dispatch-level result projection (quote-free JSON)\n  --script <source>               direct code:run JavaScript source; '-' reads stdin\n  --script-file <path>            direct code:run JavaScript source (quoting-free)\n  --workspace <ws>                scope the session (needed for harness:*, features:*, \u2026)\n  --all-workspaces                use an unscoped superuser session (workspace=*)\n  --harness <slug>                scope the session to a harness\n  --idempotency-key <key>         reuse one logical tools/call receipt after reconciling an unknown outcome\n  --token-file <path>             bearer token file (default $PAPERCUSP_MCP_TOKEN_FILE, $PAPERCUSP_HOME/superuser-token, or ~/.papercusp/superuser-token)\n  PAPERCUSP_CONTEXT_TIER=full     explicit escape hatch for unshaped MCP payloads (default: trimmed)\n  --raw                           print the raw result text (no JSON pretty-print)\n  --url=<http://host:port>        operator URL (default current PAPERCUSP_HONO_PORT host, then $PAPERCUSP_OPERATOR_URL or :3070)\n  -h, --help                      this help\n\nExit status:\n  0  the tool answered and its result is ok (or carries no ok field)\n  1  the call failed or produced no usable result (tool error, empty or\n     truncated result, stdout lost)\n  5  the call was delivered but the tool answered ok:false (a refusal, a\n     missing id, a failed batch entry); the complete result is still on stdout\n";
 export type EnvironmentMap = Record<string, string | undefined>;
 export type ToolCatalogEntry = {
     name: string;
     description?: string;
     inputSchema?: Record<string, unknown>;
     outputSchema?: Record<string, unknown>;
+    _meta?: Record<string, unknown> & {
+        "papercusp/servingGeneration"?: string;
+    };
     annotations?: {
         readOnlyHint?: boolean;
     };

@@ -12,6 +12,8 @@ import {
   SU_SESSION_PROTOCOL_VERSION,
   SU_SESSION_SCHEMA,
   isSuSessionCommandType,
+  isSuApprovalsMode,
+  type SuApprovalsMode,
   type SuSessionBackend,
   type SuSessionCommand,
   type SuSessionCommandResultEvent,
@@ -328,6 +330,27 @@ export class SuSessionHost<B extends SuSessionBackend = SuSessionBackend> {
     } as SuSessionEventInput<B>);
   }
 
+  /** P-026: publish the model the engine now runs on, after it applied an
+   * owner's switch, so the footer and /status read the engine's model rather
+   * than the PUI's guess. */
+  updateModel(model: string | null): SuSessionEvent<B> | null {
+    if (this.descriptorValue.model === model) return null;
+    return this.emit({
+      type: 'session',
+      descriptor: { ...this.descriptorValue, model },
+    } as SuSessionEventInput<B>);
+  }
+
+  /** D-026: publish the approvals mode the engine now runs in, after it applied
+   * an owner's switch, so /status reads the engine's mode. */
+  updateApprovals(approvals: SuApprovalsMode): SuSessionEvent<B> | null {
+    if (this.descriptorValue.approvals === approvals) return null;
+    return this.emit({
+      type: 'session',
+      descriptor: { ...this.descriptorValue, approvals },
+    } as SuSessionEventInput<B>);
+  }
+
   /** Attach one replacement engine to a descriptor-only restored host. Keep
    * its channel and replay receipts; an existing executor cannot be displaced. */
   attachRuntime(options: Pick<SuSessionHostOptions<B>, 'descriptor' | 'executeCommand' | 'runtimeReady'>): void {
@@ -419,6 +442,16 @@ export class SuSessionHost<B extends SuSessionBackend = SuSessionBackend> {
       streamReady: Boolean(this.descriptorValue.identity.nativeSessionId) && !this.disposed && this.runtimeReady(),
       runtimeReconciliation: this.runtimeReconciliation,
     };
+  }
+
+  /**
+   * True when THIS process holds an engine for the session (an executor was
+   * attached at launch or by a resume). A descriptor-only host rebuilt from the
+   * durable row is false: on a clustered operator that is the signal to route
+   * the request to the worker that does hold it (WI-10003879).
+   */
+  hasRuntime(): boolean {
+    return Boolean(this.executeCommand) && !this.disposed;
   }
 
   get subscriberCount(): number {
@@ -556,6 +589,14 @@ export class SuSessionHost<B extends SuSessionBackend = SuSessionBackend> {
     if (command.type !== 'owner_turn') return this.startCommand(command);
     if (typeof command.content !== 'string' || !command.content.trim() || !command.turnId) {
       throw new SuSessionHostError('invalid_command', 'owner turn requires turnId and non-empty content');
+    }
+    // P-026: an omitted model keeps the current one; a present one must be a spec.
+    if (command.model !== undefined && (typeof command.model !== 'string' || !command.model.trim())) {
+      throw new SuSessionHostError('invalid_command', 'owner turn model must be a non-empty model[:effort] spec');
+    }
+    // D-026: an omitted approvals mode keeps the current one.
+    if (command.approvals !== undefined && !isSuApprovalsMode(command.approvals)) {
+      throw new SuSessionHostError('invalid_command', 'owner turn approvals must be one of ask, auto-edit, read-only');
     }
     const fingerprint = canonicalJson(command);
     const pending = this.durableCommands.get(command.commandId);

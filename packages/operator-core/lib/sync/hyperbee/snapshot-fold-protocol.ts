@@ -60,6 +60,8 @@ export type SnapshotFoldRequest =
       schema_version: number;
       maxChunkBytes?: number;
       excludeTables: string[];
+      /** WI-10005425 — see `SnapshotPayload.ownPrefix`. */
+      ownPrefix?: boolean;
     };
 
 export type SnapshotFoldResponse =
@@ -309,6 +311,7 @@ export function createSnapshotFoldHandler(
             schema_version: req.schema_version,
             maxChunkBytes: req.maxChunkBytes,
             excludeTables: req.excludeTables,
+            ...(req.ownPrefix ? { ownPrefix: true } : {}),
           });
           const packed = packBlocks(blocks);
           folder = null; // release the live-key Map before the reply crosses back

@@ -139,6 +139,13 @@ export interface FlagOverrideReadAttestation {
   cacheAgeMs: number | null;
   ttlMs: number;
   ttlRemainingMs: number;
+  /**
+   * Why the store load failed — `store-error` / `stale-cache-fallback` only, null
+   * otherwise. Without it a degraded read cannot say whether the store timed out,
+   * refused, or was forbidden by policy (WI-10006242: the unit-layer no-real-PG rail
+   * made every read in a unit test process degrade, and the warn could not say so).
+   */
+  loadError: string | null;
 }
 
 /** What this exact process resolved, through the same precedence path as getFlag(). */
@@ -275,6 +282,7 @@ function overrideReadAttestation(
   cacheKey: string,
   entry: OverrideCacheEntry | undefined,
   now: number,
+  loadError: string | null = null,
 ): FlagOverrideReadAttestation {
   const ttlMs = overrideCacheTtlMs();
   const ageMs = entry ? Math.max(0, now - entry.ts) : null;
@@ -287,7 +295,14 @@ function overrideReadAttestation(
     cacheAgeMs: ageMs,
     ttlMs,
     ttlRemainingMs: ageMs === null ? 0 : Math.max(0, ttlMs - ageMs),
+    loadError,
   };
+}
+
+/** One line naming a failed store load, for FlagOverrideReadAttestation.loadError. */
+function describeLoadError(err: unknown): string {
+  if (err instanceof Error) return `${err.name}: ${err.message}`;
+  return String(err);
 }
 
 function inspectOverrideReadWithoutLoading(
@@ -340,9 +355,10 @@ async function loadStoredOverridesWithAttestation(): Promise<StoredOverrideRead>
       flags,
       attestation: overrideReadAttestation("store-load", ck, entry, Date.now()),
     };
-  } catch {
+  } catch (err) {
     // Store unreachable OR too slow — serve the last good map for THIS scope (or
-    // none); never block flag evaluation on the override layer.
+    // none); never block flag evaluation on the override layer. The cause rides on
+    // the attestation so a caller that reports a degraded read can say WHY.
     const stale = overrideCache.get(ck);
     return {
       flags: stale?.flags ?? {},
@@ -351,6 +367,7 @@ async function loadStoredOverridesWithAttestation(): Promise<StoredOverrideRead>
         ck,
         stale,
         Date.now(),
+        describeLoadError(err),
       ),
     };
   }

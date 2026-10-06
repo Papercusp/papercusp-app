@@ -26,6 +26,39 @@ type TextContent = Extract<NonNullable<ToolResult['content']>[number], { type: '
 const FORMAT_MARKER_RE = /^format: (\S+)\n/;
 
 /**
+ * Keep MCP envelope metadata available to scripts after the content body is
+ * unwrapped. Pagination cursors are emitted in `_meta.nextCursor`, while the
+ * in-process facade otherwise exposes only the body; dropping that envelope
+ * makes a paged script repeat its first page forever.
+ */
+function withResultMetadata(value: unknown, metadata: Record<string, unknown> | undefined): unknown {
+  if (!metadata || Object.keys(metadata).length === 0 || value === null || typeof value !== 'object') {
+    return value;
+  }
+
+  const body = Array.isArray(value) ? null : value as Record<string, unknown>;
+  const bodyMetadata = body?._meta;
+  const mergedMetadata = {
+    ...metadata,
+    ...(bodyMetadata !== null && typeof bodyMetadata === 'object' && !Array.isArray(bodyMetadata)
+      ? bodyMetadata as Record<string, unknown>
+      : {}),
+  };
+  const enriched = (body ? { ...body } : [...value as unknown[]]) as Record<string, unknown>;
+  for (const key of ['nextCursor', 'degraded', 'degradedReasons'] as const) {
+    if (enriched[key] === undefined && mergedMetadata[key] !== undefined) {
+      enriched[key] = mergedMetadata[key];
+    }
+  }
+  enriched._meta = mergedMetadata;
+  return enriched;
+}
+
+function unwrapValue(result: ToolResult, value: unknown): unknown {
+  return withIsErrorOk(withResultMetadata(value, result._meta), result.isError);
+}
+
+/**
  * Unwrap a settled `ToolResult` into the plain value the script should receive:
  * `structuredContent` if present, else the decoded text payload, else the raw text.
  *
@@ -51,7 +84,7 @@ const FORMAT_MARKER_RE = /^format: (\S+)\n/;
 export function unwrapToolResult(result: ToolResult | undefined): unknown {
   if (!result) return undefined;
   if (result.structuredContent !== undefined) {
-    return withIsErrorOk(result.structuredContent, result.isError);
+    return unwrapValue(result, result.structuredContent);
   }
   // Narrow on the `type` discriminant — the prior `c is { text: string }` predicate was not a
   // subtype of the content union (TS2677) so it failed to narrow, leaving `.text` unreadable on
@@ -62,17 +95,17 @@ export function unwrapToolResult(result: ToolResult | undefined): unknown {
   const marker = FORMAT_MARKER_RE.exec(text);
   if (marker && isResultFormat(marker[1]) && marker[1] !== 'md') {
     try {
-      return withIsErrorOk(decode(text.slice(marker[0].length), marker[1]), result.isError);
+      return unwrapValue(result, decode(text.slice(marker[0].length), marker[1]));
     } catch {
       // Fall through to the JSON/raw-text attempts below — never let a decode
       // edge case throw here where the old behavior returned SOMETHING.
     }
   }
   try {
-    return withIsErrorOk(JSON.parse(text), result.isError);
+    return unwrapValue(result, JSON.parse(text));
   } catch {
     const withTrailer = parseJsonWithTrailer(text);
-    if (withTrailer) return withIsErrorOk(withTrailer.value, result.isError);
+    if (withTrailer) return unwrapValue(result, withTrailer.value);
     return text;
   }
 }

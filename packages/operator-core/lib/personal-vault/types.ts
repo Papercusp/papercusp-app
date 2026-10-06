@@ -9,6 +9,8 @@ export interface PersonalDocumentInput {
   source: string;
   sourceId?: string | null;
   providerAccountId?: string | null;
+  /** Canonical datatype registry id; the routing key stored as documents.datatype_id (D-010). */
+  datatypeId?: string | null;
   kind: string;
   externalId?: string | null;
   occurredAt?: string | Date | null;

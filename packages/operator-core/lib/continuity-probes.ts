@@ -12,20 +12,20 @@ import { Buffer } from 'node:buffer';
 import { z } from 'zod';
 import { listAllProjectedTools, projectedToolRegistryRevision, type ProjectedTool } from '@papercusp/agent-mcp';
 import { checkAgainstJsonSchema } from './json-schema-validation';
-import { parseProjection } from './result-projection';
+import { classifyProjectionBody, parseProjection } from './result-projection';
 import { redactSensitiveText, redactSensitiveValue } from './sensitive-text';
 import { getCellUnchecked } from './cell-registry';
 import { withBoundedTimeout } from './bounded-timeout';
 import { mapWithConcurrency } from './gym/concurrency';
 import type { CheckEntry } from './carry-note';
-import { LIMITS } from './agent-tools/limits';
+import { CONTINUITY_PROBE_MAX_PER_WAKE, LIMITS } from './agent-tools/limits';
+export { CONTINUITY_PROBE_MAX_PER_WAKE } from './agent-tools/limits';
 
 export const CONTINUITY_PROBE_MAX_BYTES = 12_000;
 export const CONTINUITY_PROBE_ARGS_MAX_BYTES = 8_000;
 export const CONTINUITY_PROBE_PROJECTION_MAX_BYTES = 2_000;
 export const CONTINUITY_PROBE_RESULT_MAX_BYTES = 16_000;
 export const CONTINUITY_PROBE_BATCH_MAX_BYTES = 24_000;
-export const CONTINUITY_PROBE_MAX_PER_WAKE = 8;
 export const CONTINUITY_PROBE_CONCURRENCY = 4;
 export const CONTINUITY_PROBE_TIMEOUT_MS = 2_500;
 
@@ -540,19 +540,22 @@ function decodeToolResult(result: unknown): unknown {
   if ('structuredContent' in row) return row.structuredContent;
   const content = row.content;
   if (!Array.isArray(content)) return result;
-  const texts = content.flatMap((entry) => {
+  const textItems = content.flatMap((entry) => {
     if (!entry || typeof entry !== 'object') return [];
     const text = (entry as { text?: unknown }).text;
-    return typeof text === 'string' ? [text] : [];
+    return typeof text === 'string' ? [{ text }] : [];
   });
-  if (texts.length === 1) {
-    try {
-      return JSON.parse(texts[0]);
-    } catch {
-      return texts[0];
-    }
-  }
-  return texts;
+  if (textItems.length === 0) return [];
+  // WI-10004343: a structured result is routinely NOT one text item — the JSON
+  // payload is followed by advisory text items (a tool's guidance.seeAlso
+  // "See also: …"). Parsing only a lone item handed the predicate a string[]
+  // whenever an advisory was present, so every path read undefined (a true
+  // value read `stale`) and the byte budget was charged for the prose too.
+  // Use the SAME classifier projection uses (D-012), so the probe and `pick`
+  // agree on which item is the payload.
+  const { json } = classifyProjectionBody(textItems);
+  if (json) return json.parsed;
+  return textItems.length === 1 ? textItems[0].text : textItems.map((item) => item.text);
 }
 
 function observedScalar(value: unknown): unknown {
@@ -564,6 +567,14 @@ function observedScalar(value: unknown): unknown {
 
 export interface ContinuityProbeDispatchContext {
   dispatchTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Per-probe dispatch budget. Defaults to CONTINUITY_PROBE_TIMEOUT_MS, which is
+   * sized for the wake/orient replay path where every probe sits on a turn's
+   * critical path. A deliberate fail-closed caller (scorecard criterion probes)
+   * must pass a budget sized to the dispatched tool's measured tail latency, or
+   * a slow-but-healthy read is refused as unjudgeable (EI-24809550207915153).
+   */
+  timeoutMs?: number;
 }
 
 async function runOne(
@@ -631,9 +642,10 @@ async function runOne(
     probe.kind === 'tool'
       ? { ...probe.args, ...(probe.projection !== undefined ? { projection: probe.projection } : {}) }
       : { cell: probe.cell, ...(probe.as ? { as: probe.as } : {}) };
+  const timeoutMs = ctx.timeoutMs ?? CONTINUITY_PROBE_TIMEOUT_MS;
   const dispatched = await withBoundedTimeout(ctx.dispatchTool(name, args), {
     fallback: null,
-    timeoutMs: CONTINUITY_PROBE_TIMEOUT_MS,
+    timeoutMs,
     label: `continuity-probe:${name}`,
   });
   if (dispatched.degraded || dispatched.value === null) {
@@ -643,7 +655,7 @@ async function runOne(
       executed: true,
       diagnostic: {
         code: dispatched.reason ?? 'empty_result',
-        message: dispatched.errorMessage ?? `probe ${name} did not return within its budget`,
+        message: dispatched.errorMessage ?? `probe ${name} did not return within its ${timeoutMs}ms budget`,
       },
     };
   }
@@ -657,19 +669,26 @@ async function runOne(
     };
   }
   const decoded = decodeToolResult(dispatched.value);
-  const decodedBytes = jsonBytes(decoded);
-  if (decodedBytes === null || decodedBytes > CONTINUITY_PROBE_RESULT_MAX_BYTES) {
+  // WI-10005537: the budget bounds what the predicate JUDGES, not the whole tool
+  // body. The body is already materialized by the time we get here, so charging
+  // it bought no protection; it only refused a healthy probe whenever the read
+  // tool's full result was large (dev:pipeline_position runs ~20KB+ with no
+  // projection), and scorecard criterion probes fail closed on that refusal, so
+  // no independent acceptance card could be filed. A selected value that is
+  // itself over budget (e.g. `exists` on a huge subtree) is still refused.
+  const verdict = evaluateContinuityPredicate(probe.expect, decoded);
+  const judgedBytes = verdict.actual === undefined ? 0 : jsonBytes(verdict.actual);
+  if (judgedBytes === null || judgedBytes > CONTINUITY_PROBE_RESULT_MAX_BYTES) {
     return {
       ...base,
       status: 'error',
       executed: true,
       diagnostic: {
         code: 'result_too_large',
-        message: `decoded probe result exceeded the ${CONTINUITY_PROBE_RESULT_MAX_BYTES}-byte budget`,
+        message: `the value at ${probe.expect.path} exceeded the ${CONTINUITY_PROBE_RESULT_MAX_BYTES}-byte budget`,
       },
     };
   }
-  const verdict = evaluateContinuityPredicate(probe.expect, decoded);
   const observed = observedScalar(verdict.actual);
   return {
     ...base,
@@ -713,7 +732,7 @@ export async function runContinuityProbeBatch(
     limits: {
       maxProbes: CONTINUITY_PROBE_MAX_PER_WAKE,
       concurrency: CONTINUITY_PROBE_CONCURRENCY,
-      timeoutMs: CONTINUITY_PROBE_TIMEOUT_MS,
+      timeoutMs: ctx.timeoutMs ?? CONTINUITY_PROBE_TIMEOUT_MS,
       maxResultBytes: CONTINUITY_PROBE_RESULT_MAX_BYTES,
       maxBatchBytes: CONTINUITY_PROBE_BATCH_MAX_BYTES,
     },

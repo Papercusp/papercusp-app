@@ -405,6 +405,50 @@ export async function readCodexRolloutTail(
   }
 }
 
+/**
+ * The latest Codex terminal after a loop fire, when that terminal is a structured
+ * provider error. A later successful terminal clears an earlier failure; a terminal
+ * with no usable timestamp also clears it because its ordering against the fire is
+ * unknown. This is deliberately narrower than the watchdog's recurrence scan: the
+ * loop reconciler needs the cause of this fire, not a session-wide failure streak.
+ */
+export function latestCodexProviderErrorAfter(
+  tailText: string,
+  afterMs: number,
+): CodexProviderError | null {
+  if (!Number.isFinite(afterMs)) return null;
+  let latest: CodexProviderError | null = null;
+  for (const line of tailText.split(/\r?\n/)) {
+    const error = classifyCodexProviderError(line);
+    if (!error && !isCodexSuccessfulTerminal(line)) continue;
+
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      latest = null;
+      continue;
+    }
+    const payload = asRecord(record.payload);
+    const timestamp = firstString(record.timestamp, payload?.timestamp);
+    const timestampMs = timestamp ? Date.parse(timestamp) : Number.NaN;
+    latest = Number.isFinite(timestampMs) && timestampMs > afterMs ? error : null;
+  }
+  return latest;
+}
+
+/** Read the latest native Codex provider error tied to one loop fire. */
+export async function readCodexProviderErrorAfter(
+  sessionKey: string | number,
+  afterMs: number,
+): Promise<CodexProviderError | null> {
+  if (!Number.isFinite(afterMs)) return null;
+  const rollout = await latestRollout(codexHomeForSessionKey(sessionKey));
+  if (!rollout || rollout.mtimeMs <= afterMs) return null;
+  const tail = await readCodexRolloutTail(rollout.path);
+  return tail == null ? null : latestCodexProviderErrorAfter(tail, afterMs);
+}
+
 async function readSnapshot(
   row: { id: number; owner_id: string; pid: number | null },
   pidAlive: (pid: number) => boolean,

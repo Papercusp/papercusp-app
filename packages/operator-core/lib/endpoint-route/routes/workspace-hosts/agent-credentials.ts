@@ -19,6 +19,15 @@
  * would only surface as that other host failing to bind, or as this one silently never finding
  * material. Both are expensive to diagnose from the far end, so they are refused here.
  *
+ * NEVER INTO A CUSTOMER WORKSPACE (open-source-release R-24). Every source this route can read is
+ * SERVICE-HELD: `operator-home-file` is the operator's own CLI login and `integration-key` is the
+ * operator's own stored key; `absent` delivers nothing. So a host bound to a customer workspace —
+ * including one whose workspace was since deleted — is refused BEFORE any source is read, dry run
+ * included. A customer brings their own API key through a provider delegation, or signs in with
+ * the unmodified CLI on the host. The check fails CLOSED: if the binding cannot be read, nothing
+ * service-held is delivered. Before this guard the property held only by operator discipline, and
+ * a live census found a customer-bound host (avi-test) holding the operator's login.
+ *
  * DRY RUN IS NOT A COURTESY. `dryRun: true` resolves the sources, runs the encoder AND the host's
  * own admission gate, derives the key, and writes nothing. That exercises every failure this route
  * can produce except the store write itself, which is exactly what a caller wants before pointing
@@ -26,9 +35,11 @@
  * before the credential is forwarded rather than after.
  */
 import { defineTool } from '@papercusp/agent-mcp';
+import { withWorkspace } from '@papercusp/db-org';
 import { parseWorkspaceHostCredentialReference } from '@papercusp/deployment-driver';
 
 import { writeIntegrationCredentials } from '../../../integration-credentials';
+import { activeWorkspaceId } from '../../../workspace-registry';
 import {
   WorkspaceHostAgentCredentialMaterialError,
   buildWorkspaceHostAgentCredentialMaterial,
@@ -46,15 +57,50 @@ const SAFE_ID = /^[a-z0-9][a-z0-9._:-]{0,159}$/i;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/** The customer workspace a host serves (or served — a deleted binding still counts). */
+export interface CustomerWorkspaceHostBinding {
+  readonly customerWorkspaceId: string;
+  readonly organizationId: string;
+  readonly deleted: boolean;
+}
+
 export interface WorkspaceHostAgentCredentialsRouteDependencies {
   resolveSources: typeof resolveWorkspaceHostAgentCredentialSources;
   storeMaterial: typeof storeWorkspaceHostAgentCredentialMaterial;
   buildMaterial: typeof buildWorkspaceHostAgentCredentialMaterial;
   deriveKey: typeof workspaceHostAgentCredentialMaterialKey;
   writeKey: (name: string, value: string) => Promise<void>;
+  /** R-24: the customer workspace bound to this host, or null when the host serves none. */
+  findCustomerWorkspaceForHost: (hostId: string) => Promise<CustomerWorkspaceHostBinding | null>;
+}
+
+/**
+ * Reads the binding from `customer_workspaces.workspace_host_id` — the column every hosted and
+ * linked customer workspace must set — WITHOUT a `deleted_at` filter: a host that ever served a
+ * customer is not re-purposed as an operator host by deleting the workspace row.
+ */
+export async function findCustomerWorkspaceForHost(
+  hostId: string,
+): Promise<CustomerWorkspaceHostBinding | null> {
+  const workspaceId = activeWorkspaceId();
+  return withWorkspace(workspaceId, async (tx) => {
+    const rows = await tx<{ id: string; organization_id: string; deleted: boolean }[]>`
+      SELECT id, organization_id, deleted_at IS NOT NULL AS deleted
+        FROM harness_shared.customer_workspaces
+       WHERE workspace_id = ${workspaceId}
+         AND workspace_host_id = ${hostId}
+       ORDER BY created_at DESC
+       LIMIT 1
+    `;
+    const row = rows[0];
+    return row
+      ? { customerWorkspaceId: row.id, organizationId: row.organization_id, deleted: row.deleted }
+      : null;
+  });
 }
 
 const DEFAULT_DEPENDENCIES: WorkspaceHostAgentCredentialsRouteDependencies = {
+  findCustomerWorkspaceForHost,
   resolveSources: resolveWorkspaceHostAgentCredentialSources,
   storeMaterial: storeWorkspaceHostAgentCredentialMaterial,
   buildMaterial: buildWorkspaceHostAgentCredentialMaterial,
@@ -148,6 +194,51 @@ export function createWorkspaceHostAgentCredentialsRoute(
           },
           { status: 400 },
         );
+      }
+
+      // R-24: decide BEFORE any source is read, and for a dry run too — a dry run reads the same
+      // service-held bytes. Any slot whose source is not exactly `absent` is service-held, so an
+      // unknown kind is treated as service-held rather than waved through to the resolver.
+      const serviceHeldSlots = Object.entries(body.sources)
+        .filter(([, source]) => !(isRecord(source) && source.kind === 'absent'))
+        .map(([slot]) => slot);
+      if (serviceHeldSlots.length > 0) {
+        let binding: CustomerWorkspaceHostBinding | null;
+        try {
+          binding = await dependencies.findCustomerWorkspaceForHost(hostId);
+        } catch (error) {
+          return Response.json(
+            {
+              ok: false,
+              errorKind: 'customer_binding_unverified',
+              error:
+                `could not verify that host '${hostId}' serves no customer workspace, so no ` +
+                `service-held agent credential is delivered: ${
+                  error instanceof Error ? error.message : 'unknown error'
+                }`,
+            },
+            { status: 503 },
+          );
+        }
+        if (binding) {
+          return Response.json(
+            {
+              ok: false,
+              errorKind: 'customer_workspace_service_credential_refused',
+              customerWorkspaceId: binding.customerWorkspaceId,
+              slots: serviceHeldSlots,
+              error:
+                `host '${hostId}' serves customer workspace '${binding.customerWorkspaceId}'` +
+                `${binding.deleted ? ' (deleted)' : ''}. This route delivers only service-held ` +
+                `credentials (the operator's own CLI login or an operator integration key) for ` +
+                `slot(s) ${serviceHeldSlots.join(', ')}, and the hosted tier never provisions ` +
+                'service-owned subscriptions into a customer workspace. The customer supplies ' +
+                'their own API key through a provider delegation, or signs in with the unmodified ' +
+                'CLI on the host.',
+            },
+            { status: 409 },
+          );
+        }
       }
 
       const dryRun = body.dryRun === true;

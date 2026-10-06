@@ -86,6 +86,23 @@ export const FLAGS = {
   // and audience, and returns that echo with `withheld` set — only the outbound
   // call is withheld. So OFF is a publish kill-switch, not a hidden feature.
   SOCIAL_AUTO_PUBLISH: "papercusp-social-auto-publish",
+  // stripe-subscription-signup-2026-10-01 P-004 (owner directive #1102): LIVE-MODE
+  // Stripe charging for hosted organization subscriptions. DEFAULT OFF in DARK_FLAGS
+  // (owner-authority), the same category as GMAIL_AUTO_SEND: a live key charges real
+  // cards. Test-mode subscription signup (checkout, portal, webhooks, state) is live
+  // and unflagged; with this OFF the hosted billing runtime refuses an sk_live_/rk_live_
+  // key and reports `live_mode_not_allowed`, so OFF withholds ONLY real charging.
+  HOSTED_BILLING_LIVE_MODE: "papercusp-hosted-billing-live-mode",
+  // enterprise-data-sources-2026-10-01 P-016: the Slack ORGANIZATION connector
+  // (the customer's own internal Slack app as the credential model — connect,
+  // channel-membership sync into permission lists, paced history backfill).
+  // Default ON since 2026-10-06 (slack-messages-to-bug-reports-2026-10-05 P-001):
+  // the plan's GATE, a legal read of Slack's 2025 API terms for the
+  // customer-internal-app model, is on record (enterprise-data-sources-2026-10-01
+  // D-029) and the owner approved switching it on (directive #1417). Flip OFF via
+  // /admin/features to make every entry point in data-sources/slack-org-connector.ts
+  // refuse before any Slack call.
+  SLACK_ORG_CONNECTOR: "papercusp-slack-org-connector",
   // RES — the workspace-scoped Resources section (top-level nav CTA next to OPS
   // + the /res allocation board): hand account pools + local GPUs to the fleets
   // inside the workspace hive tree, each with a share %. Default ON (derived
@@ -838,6 +855,14 @@ export const FLAGS = {
   // stopped instantly without a deploy — and its guard fails CLOSED (a
   // flag-read error captures nothing), unlike the retention prunes' fail-safe.
   MEMORY_RECALL_QUERY_TEXT: "papercusp-memory-recall-query-text",
+  // jev-performance-improvements-2026-09-30 P-010 (owner directive #1050): memory:remember
+  // refuses, once at save time, a new memory that only claims its own relevance or
+  // importance (Jev's substance question, asked in the same request as the conflict
+  // check; refused with reason content_free and the usual force override). Default ON
+  // (derived FLAG_DEFAULTS — not in DARK_FLAGS): the threshold was chosen on a measured
+  // real-memory sample (at most 1% refused, plan R-3). OFF is the kill switch — the
+  // write path returns to the conflict-only request.
+  MEMORY_CONTENT_FREE_REFUSAL: "papercusp-memory-content-free-refusal",
   // context-injection-audit-2026-07-28 P-039 / D-012: the presence-transition
   // emitter — the missing FEEDER for the mid-turn coord rail. Automatic
   // injection carried zero liveness, and every coord_event_log writer was an
@@ -1703,7 +1728,7 @@ export const FLAGS = {
   // deterministic read-time deactivation and liveness reporting remain live.
   GOAL_HOLDER_RESPAWN: "papercusp-goal-holder-respawn",
   // work-on-everything-goal-2026-08-23 P-011 (retirement doc open loss #3,
-  // owner:owner 2026-08-23): the operator-boot arm — a BOUNDED window at operator
+  // owner:Avi 2026-08-23): the operator-boot arm — a BOUNDED window at operator
   // start that respawns the LOST holder of an ACTIVE, un-paused STANDING goal
   // (goals.standing=true) that earned recovery via holder.onLoss='respawn'.
   // Restores the retired Mug's cold-start autonomy as an owner CHOICE.
@@ -1806,7 +1831,7 @@ export const FLAGS = {
   // drainless goal is only ever REPORTED after the kickoff grace — exactly the
   // pre-P-001 behavior.
   GOAL_DRAIN_FLEET_AUTOMINT: "papercusp-goal-drain-fleet-automint",
-  // WI-2140699 (card 4 goal-mode-e2e, owner:owner 2026-09-01 grade+fix mandate): gates
+  // WI-2140699 (card 4 goal-mode-e2e, owner:Avi 2026-09-01 grade+fix mandate): gates
   // the goal-drain-fleet watchdog's RELAUNCH leg — for a STANDING, live-held goal whose
   // declared drain fleet has read dead/missing for a full sweep (10 min, durable
   // metadata.drainRespawn.deadSinceMs), re-mint the goal-scoped lane and launch ONE
@@ -1883,11 +1908,10 @@ export const FLAGS = {
   // goal-mode-design-intent-hardening-2026-08-16 P-005 (D-003): gates the goal
   // spend-rollup tick — a recurring platform sweep (operator-core
   // lib/goals/spend-rollup.ts, managedSetInterval like the goal watchdog family)
-  // that aggregates the cost ledger (agent_usage_samples) per ACTIVE goal — the
-  // pot leg (goalSpend over goal_pots) PLUS the subject/descendant session leg
-  // (agent_modes/session_briefs → adv_sessions → session_id, pot-harness rows
-  // excluded so the union never double-counts) — and writes
-  // goals.metadata.spentCents (+Source 'goal-spend-tick' +At +Breakdown)
+  // that aggregates the cost ledger (agent_usage_samples) per ACTIVE goal over
+  // its budget window — the goal_id-attributed stream is authoritative (D-011),
+  // the pot and session legs ride along as diagnostics — and writes
+  // goals.metadata.spentCents (+Source 'goal-lineage-rollup' +At +Breakdown)
   // platform-side. D-003: agents never hand-write spentCents; before this tick
   // only 3 of 17 goals ever carried one. DEFAULT ON. OFF = the kill-switch: the
   // timer still ticks but every sweep no-ops before reading the goals table.
@@ -3176,7 +3200,7 @@ export const DARK_FLAGS: ReadonlyMap<
     {
       case: "incomplete",
       reason:
-        "owner-directed 2026-07-04 (deterministic-onboarding-tutorial P-001): gates onboarding-tutorial items whose backing feature is NOT ready — telemetry consent, mobile pairing (phone notifications / remote control), auto-update channel. OFF ⇒ a fresh install never sees them (the intended default); ON ⇒ testers exercise the preview surfaces. Graduates per-item as each backing feature ships.",
+        "owner-directed 2026-07-04 (deterministic-onboarding-tutorial P-001): gates onboarding-tutorial items whose backing feature is NOT ready — mobile pairing (phone notifications / remote control), auto-update channel. Telemetry consent shipped and is no longer preview-gated (optional-setup-items.ts). OFF ⇒ a fresh install never sees the remaining preview items (the intended default); ON ⇒ testers exercise the preview surfaces. Graduates per-item as each backing feature ships.",
     },
   ],
   // TASK_MANAGER GRADUATED 2026-08-02 (WI-6844) on an explicit owner directive:
@@ -3216,7 +3240,7 @@ export const DARK_FLAGS: ReadonlyMap<
     {
       case: "owner-authority",
       reason:
-        "external-triggers-gmail-slack-2026-08-22 P-011: automatic Gmail sending is an outward-facing owner-authority action. The shipped gmail:create-draft tool has no send branch and remains live independently; OFF reserves the separate auto-send capability until the owner ratifies its review, recipient, and failure policy.",
+        "external-triggers-gmail-slack-2026-08-22 P-011: automatic Gmail sending is an outward-facing owner-authority action. Enforced by mail:reply's trigger-run path (capability-verbs/mail.ts replyToTriggerPlanRun), which refuses mode:'send' from a triggered run while this is OFF; drafting stays live independently. OFF reserves auto-send until the owner ratifies its review, recipient, and failure policy.",
     },
   ],
   [
@@ -3225,6 +3249,14 @@ export const DARK_FLAGS: ReadonlyMap<
       case: "owner-authority",
       reason:
         "social-platform-integrations-2026-08-23 P-006 / D-004(b): create-shaped publishing to the owner's real public social identity. A public post differs from a mail send in KIND, not degree — unbounded in audience, permanently indexable, attributed to the owner, and not correctable by a follow-up; and its inbound corpus is untrusted text authored by strangers at volume with an incentive to manipulate. OFF withholds ONLY the outbound call: social:reply (rail 1, bounded blast radius) is unaffected and unflagged, and social:post itself still runs both rails and returns the resolved account + audience echo, so flipping this ON is one owner decision over a fully-built, fully-tested verb rather than a hand-off of unfinished work.",
+    },
+  ],
+  [
+    FLAGS.HOSTED_BILLING_LIVE_MODE,
+    {
+      case: "owner-authority",
+      reason:
+        "stripe-subscription-signup-2026-10-01 / papercusp-monetization-2026-09-04 D-004+D-010: live-mode Stripe charging of hosted organizations is an outward-facing money movement the owner authorizes, after P-003 pricing and the P-009 pilot-readiness gate. Test-mode signup ships ON and unflagged; OFF refuses only a live key.",
     },
   ],
   [
@@ -3799,7 +3831,25 @@ export function darkFlagReviewLane(c: DarkCase): "parking" | "owner" {
 //     candidate for the next reviewer.
 // VERDICT: zero graduations; membership and watermark unchanged. `npm run audit:dark-flags`
 // was NOT re-run (host load1 ≈170 at review time). Next parking review 2026-10-06.
-export const DARK_FLAGS_PARKING_REVIEW_BY = "2026-10-06";
+// ─── REVIEW 2026-10-06 (WI-10006316, D-021 tutorial verification) — re-derived
+// the current parking lane: parked 8 + incomplete 4 = 12/12. SUBSTRATE_LOG_SNAPSHOT
+// already graduated on 09-24; it is not an outstanding thirteenth entry.
+// Parked: CLOUDFLARE_PUBLISH, HARNESS_PHASES, DESIGN and TESTING retain their V1
+// cuts; THE_HIVE retains the public Pot lexicon; CONVERSATIONS_RAIL_TAB retains
+// the explicit owner-requested park; TEMPLATES_MARKETPLACE and RUBRICS_MARKETPLACE
+// retain the local-first v1/v2 marketplace boundary. No new graduation authority.
+// Incomplete: EXTERNAL_BENCH remains retired; ONBOARDING_PREVIEW_FEATURES still
+// gates mobile-pairing and update-channel preview inputs (telemetry already ships);
+// CAPABILITY_EXEC_SANDBOX still needs its live background-lifetime validation and
+// owner activation (existing WI-10002560 is now claimed); SUBSTRATE_SIDECAR still
+// has no completed replacement implementation. Zero new graduations this review.
+// Ran the maintained live audit (task 0muw7vo2qyx9g3c1s1e): its three CRITICAL
+// incomplete overrides remain confined to generic-test, as on 09-03. Their origin
+// is an accountable follow-up on WI-10006316; they are not assumed harmless or
+// used to justify defaults. PG + this process's env checked; PostHog not probed.
+// Membership, watermark and owner review clock unchanged. Renew only after this
+// substantive review; the production-defaults hard-deadline guard remains active.
+export const DARK_FLAGS_PARKING_REVIEW_BY = "2026-10-20";
 export const DARK_FLAGS_OWNER_REVIEW_BY = "2026-10-01";
 // 2026-07-12 (WI-4238, su-00a91): 25 → 26 for papercusp-queen-full-autonomy.
 //

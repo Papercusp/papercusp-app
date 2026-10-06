@@ -25,7 +25,7 @@ import {
 import { canonicalJson } from '../authority/authority-rpc-envelope';
 import { wornRulePins } from '../agent-identities/sync-hook-rules';
 import type { KnowledgePack } from '../knowledge-packs/pack-format';
-import type { BlueprintReleaseArchive, BlueprintReleaseSourceSnapshot } from './blueprint-release';
+import { releaseBurnKnobs, type BlueprintReleaseArchive, type BlueprintReleaseSourceSnapshot } from './blueprint-release';
 import { identityConsentSubjects, identityPermissionLines } from './identity-install-consent';
 import {
   IDENTITY_LISTING_SURFACE_MAX_CHARS,
@@ -138,6 +138,11 @@ export function identityListingSurface(input: IdentityListingSurfaceInput): Iden
       .map(({ ref, contractHash }) => ({ ref, contractHash }))
       .sort((a, b) => a.ref.localeCompare(b.ref)),
     grants: { requires: sorted(input.grants?.requires ?? []), optional: sorted(input.grants?.optional ?? []) },
+    // Declared beside grants and diffed between releases like them: the same
+    // derivation the upgrade diff compares (agent-economy-flywheel P-015).
+    burnKnobs: [...releaseBurnKnobs(input.archive)]
+      .map(([path, value]) => ({ path, value: value === undefined ? null : value }))
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
     permissions: identityPermissionLines(subjects),
     consent: subjects.contentOnly ? 'content-only' : 'required',
   };

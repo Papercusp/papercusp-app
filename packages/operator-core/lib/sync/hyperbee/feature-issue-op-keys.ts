@@ -1305,7 +1305,7 @@ export function outboxRowToLocalWriteOp(outboxRow: OutboxRow): LocalWriteOp {
     // replicates. Strip the private payload, keep the routing fields and the row.
     // Nothing downstream consumes the federated copy: the private args live in the
     // owner-local, UNFEDERATED harness_shared.trigger_runs.args, and the write-side
-    // tools (gmail:create-draft, slack:respond-in-thread) already resolve recipient,
+    // tools (mail:reply { planRunId }, slack:respond-in-thread) already resolve recipient,
     // thread, headers and OAuth credential from THERE by planRunId, on the operator
     // that holds the credential. Identity-preserving: an ordinary row is returned
     // unchanged, by reference.

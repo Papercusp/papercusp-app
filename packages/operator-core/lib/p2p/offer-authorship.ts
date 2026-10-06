@@ -41,6 +41,8 @@
 import { verifyEd25519 } from '../identity/ed25519';
 import { canonicalJson } from '../authority/authority-rpc-envelope';
 import type { WorkOffer } from './offer-budget';
+// Type-only: the contract SHAPE is shared with the identity gate; no runtime coupling.
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
 
 /* ─────────────────────────────────────────────────────────────────────────
  * The signed authorship envelope that rides on an offer
@@ -153,6 +155,12 @@ export type AuthorshipVerdict =
       readonly code: AuthorshipRefusalCode;
       /** The exact link that failed — carried verbatim into a P-004 refusal receipt (D-004). */
       readonly detail: string;
+      /**
+       * WI-10005197: what would LIFT this refusal. Present only on refusals a host/owner can
+       * actually remedy (today: `capability_unsatisfied`); a cryptographic failure
+       * (`device_sig_invalid`, …) has no lift short of a different, correctly-signed offer.
+       */
+      readonly refusal?: RefusalContract;
     };
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -290,6 +298,14 @@ export function verifyOfferAuthorship(input: AuthorshipVerifyInput): AuthorshipV
       ok: false,
       code: 'capability_unsatisfied',
       detail: `host lacks isolation capabilit${missing.length === 1 ? 'y' : 'ies'} [${missing.join(', ')}] required by offer ${offer.offerId} (C5: refuse rather than launch unclamped).`,
+      refusal: {
+        observed: { offerId: offer.offerId, missingCapabilities: missing.join(',') },
+        liftsWhen:
+          'this host advertises every isolation capability the offer requires. Retrying the same ' +
+          'offer cannot lift it: provision the missing isolation capability on this host, or ' +
+          'accept an offer whose isolationReqs this host already satisfies',
+        whoCanMakeItTrue: ['host', 'owner'],
+      },
     };
   }
 

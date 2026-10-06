@@ -1,6 +1,6 @@
 # Change queue admission and bulk cleanup audit — September 5, 2026
 
-Prepared for owner under **WI-2146744**. This is an audit and recommendation report; it does not authorize or record dispositions of the existing backlog.
+Prepared for Avi under **WI-2146744**. This is an audit and recommendation report; it does not authorize or record dispositions of the existing backlog.
 
 **Finding: the backlog combines delivery demand, review work, repeated reports, and stale obligations. Its size proves neither that the system is performing well nor that most changes are worthless. More implementation capacity alone will not resolve it.** Feature/change drain fleets existed: the September 1 final ledger records resuming `feature-change-drain-2026-09-01-v2`, and the September 5 reconciliation concerns the later `nonp2p-feature-change-drain-2026-09-04-v3`. Thus “we never had a fleet draining these” is not the full explanation. This investigation did not reconstruct a complete historical arrivals-versus-completions series and cannot assign a percentage of the backlog to insufficient capacity.
 

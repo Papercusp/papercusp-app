@@ -1,0 +1,20 @@
+# Self-test: runs the reusable workflow against this repository's own fixture so a
+# real Sigstore bundle exists for the Worker's verifier tests, and so a break in
+# the workflow shows up here before a publisher hits it.
+name: cupboard-attest-selftest
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  attest:
+    uses: ./.github/workflows/verify.yml
+    with:
+      listing_ref: fixtures/sample-recipe

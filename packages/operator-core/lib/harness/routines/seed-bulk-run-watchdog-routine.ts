@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     `[seed-bulk-run-watchdog-routine] seeded "${NAME}" for "${SLUG}" (ws=${ws}, active=${active}, ` +
       `tier=ephemeral, interval=${BULK_RUN_WATCHDOG_INTERVAL_SEC}s) — bulk-run stall + counter-drift sweep. ` +
       (active
-        ? 'Cadence seeded ACTIVE — restart papercup-bg-host to live-arm on a host that was already up.'
+        ? 'Cadence seeded ACTIVE — restart papercusp-bg-host to live-arm on a host that was already up.'
         : 'Inactive — enable via the routines admin or re-run without --inactive.'),
   );
 }

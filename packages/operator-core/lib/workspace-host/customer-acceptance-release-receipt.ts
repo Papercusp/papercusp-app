@@ -134,12 +134,21 @@ function prerequisiteReceipts(
   const required = [build, publication, rootBootstrap, fixedAgentInitialization];
   if (required.some((receipt) => !receipt)) return [];
   const settled = required as Array<NonNullable<(typeof required)[number]>>;
+  // The real publisher names the bundle on the UPLOAD receipts (publish.multipart.complete, or
+  // publish.multipart.initiate for a deduplicated upload) and only `provider:finalization:<manifest>`
+  // on publish.finalize (WI-10004946). So publish.finalize proves publication COMPLETED, and the
+  // published bytes are read from every committed publish.* receipt — the same population
+  // releaseJournalBundleDigests binds the release to.
+  const publishedRefs = journal.receipts
+    .filter((receipt) => receipt.state === 'committed' && receipt.stage.startsWith('publish.'))
+    .flatMap(bundleRefs);
   if (
     !settled.every((receipt) =>
       bundleRefs(receipt).every((ref) => ref.endsWith(bundleSha256)),
     ) ||
+    !publishedRefs.every((ref) => ref.endsWith(bundleSha256)) ||
     !bundleRefs(build!).some((ref) => ref === `bundle:sha256:${bundleSha256}`) ||
-    !bundleRefs(publication!).some(
+    !publishedRefs.some(
       (ref) => ref === `bundle:sha256:${bundleSha256}` || ref === `provider:bundle:${bundleSha256}`,
     )
   ) {

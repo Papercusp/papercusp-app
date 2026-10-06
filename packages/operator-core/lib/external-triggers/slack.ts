@@ -2,8 +2,11 @@
 import type postgres from 'postgres';
 import type { TokenStorage } from '../oauth/token';
 import { fsTokenStorage } from '../oauth/storage-fs';
+import { SLACK_SOCKET_PLUGIN, slackSocketCredentialRef, slackSocketCredentialField } from './slack-credential-ref';
+export { SLACK_SOCKET_PLUGIN, slackSocketCredentialRef, slackSocketCredentialField } from './slack-credential-ref';
 import {
   ingestExternalTriggerEvent,
+  type ExternalTriggerSink,
   type IngestExternalTriggerInput,
   type IngestExternalTriggerResult,
 } from './ingestion';
@@ -12,17 +15,22 @@ import {
   upsertOwnedExternalTriggerSource,
   updateExternalTriggerSourceSyncState,
 } from './source-store';
+import {
+  classifySlackReportBugEnvelope,
+  slackReportBugConfig,
+  slackReportBugModalView,
+  SLACK_REPORT_BUG_SHORTCUT_CALLBACK_ID,
+  type SlackReportModalRequest,
+} from './slack-report-bug';
 
-export const SLACK_SOCKET_PLUGIN = 'slack-socket';
 export const SLACK_HISTORY_MIN_INTERVAL_MS = 60_000;
 const SLACK_API_ORIGIN = 'https://slack.com';
-const FIELD = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export const SLACK_APP_MANIFEST_TEMPLATE = {
   _metadata: { major_version: 2 },
   display_information: {
     name: 'Papercusp Triggers',
-    description: 'Starts Papercusp triggered plans from Slack mentions, direct messages, and slash commands.',
+    description: 'Starts Papercusp triggered plans from Slack mentions, direct messages, and slash commands, and reports bugs from flagged messages.',
     background_color: '#312e81',
   },
   features: {
@@ -31,6 +39,13 @@ export const SLACK_APP_MANIFEST_TEMPLATE = {
       command: '/papercusp',
       description: 'Start a Papercusp triggered plan',
       should_escape: false,
+    }],
+    // slack-messages-to-bug-reports P-002: the "Report a bug" entry in a message's ⋯ menu.
+    shortcuts: [{
+      name: 'Report a bug',
+      type: 'message',
+      callback_id: SLACK_REPORT_BUG_SHORTCUT_CALLBACK_ID,
+      description: 'Report this message to Papercusp as a bug',
     }],
   },
   oauth_config: {
@@ -43,13 +58,20 @@ export const SLACK_APP_MANIFEST_TEMPLATE = {
         'mpim:history',
         'commands',
         'chat:write',
+        // Report-bug gestures: the bug-emoji reaction, and the files a reporter consents to attach.
+        'reactions:read',
+        'files:read',
       ],
     },
   },
   settings: {
     socket_mode_enabled: true,
     token_rotation_enabled: false,
-    event_subscriptions: { bot_events: ['app_mention', 'message.im'] },
+    // reaction_added, message.channels and message.groups carry the report-bug gestures
+    // (slack-report-bug.ts); each is ignored unless a channel rule turns its gesture on.
+    event_subscriptions: {
+      bot_events: ['app_mention', 'message.im', 'reaction_added', 'message.channels', 'message.groups'],
+    },
     interactivity: { is_enabled: true },
   },
 } as const;
@@ -68,7 +90,7 @@ export interface SlackSocketEnvelope {
 }
 
 export interface SlackNormalizedEvent {
-  event: 'mention' | 'dm' | 'slash-command';
+  event: 'mention' | 'dm' | 'slash-command' | 'report-bug';
   externalId: string;
   dedupeKey: string;
   occurredAt: string | null;
@@ -77,19 +99,6 @@ export interface SlackNormalizedEvent {
 }
 
 type Ingest = (sql: postgres.Sql, input: IngestExternalTriggerInput) => Promise<IngestExternalTriggerResult>;
-
-export function slackSocketCredentialRef(field: string): string {
-  if (!FIELD.test(field)) throw new Error('slack_socket_credential_field_invalid');
-  return `${SLACK_SOCKET_PLUGIN}:${field}`;
-}
-
-export function slackSocketCredentialField(ref: string | null): string {
-  const prefix = `${SLACK_SOCKET_PLUGIN}:`;
-  if (!ref?.startsWith(prefix) || !FIELD.test(ref.slice(prefix.length))) {
-    throw new Error('slack_socket_credential_ref_invalid');
-  }
-  return ref.slice(prefix.length);
-}
 
 function assertToken(value: string, prefix: 'xapp-' | 'xoxb-', name: string): string {
   const token = value.trim();
@@ -277,6 +286,18 @@ export function normalizeSlackSocketEnvelope(envelope: SlackSocketEnvelope): Sla
         occurredAt: occurredAt ?? undefined,
         mentions: mentions(message),
         slackEventType: text(event.type),
+        // The message itself, in the shape report-bug signals use, so the chat admission sink
+        // can name it and tell a top-level post from a reply (slack-messages-to-bug-reports D-008).
+        ...(channelId && text(event.ts)
+          ? {
+              target: {
+                channelId,
+                ts: text(event.ts),
+                ...(text(event.thread_ts) && text(event.thread_ts) !== text(event.ts) ? { threadTs: text(event.thread_ts) } : {}),
+                text: message,
+              },
+            }
+          : {}),
       },
     };
   }
@@ -304,13 +325,25 @@ export function normalizeSlackSocketEnvelope(envelope: SlackSocketEnvelope): Sla
   return null;
 }
 
+/**
+ * Ingest one Socket Mode envelope. Report-bug gestures (slack-report-bug.ts) are
+ * classified first: a gesture becomes one `report-bug` chat event, and an envelope the
+ * report-bug path consumes emits nothing. The "Report a bug" shortcut itself emits
+ * nothing here either: SlackSocketManager opens its form BEFORE the serialized ingest
+ * chain, because Slack's trigger_id expires 3 seconds after the click; the form's
+ * submission is the signal.
+ */
 export async function ingestSlackSocketEnvelope(
   sql: postgres.Sql,
   source: ExternalTriggerSourceRow,
   envelope: SlackSocketEnvelope,
   ingest: Ingest = (db, event) => ingestExternalTriggerEvent(db, event),
+  /** Sinks beyond the event bus and binding engine — the chat admission sink (D-009). */
+  additionalSinks: ExternalTriggerSink[] = [],
 ): Promise<SlackNormalizedEvent | null> {
-  const normalized = normalizeSlackSocketEnvelope(envelope);
+  const reportBug = classifySlackReportBugEnvelope(envelope, slackReportBugConfig(source.config));
+  if (reportBug && reportBug.kind !== 'signal') return null;
+  const normalized = reportBug?.event ?? normalizeSlackSocketEnvelope(envelope);
   if (!normalized) return null;
   const result = await ingest(sql, {
     workspaceId: source.workspaceId,
@@ -323,8 +356,15 @@ export async function ingestSlackSocketEnvelope(
     normalize: () => normalized.payload,
     occurredAt: normalized.occurredAt,
     dedupeKey: normalized.dedupeKey,
+    ...(additionalSinks.length > 0 ? { additionalSinks } : {}),
   });
-  if (!result.ok) throw new Error(`slack_canonical_payload_invalid:${result.validationErrors?.join(';') ?? 'unknown'}`);
+  if (!result.ok) {
+    if (result.validationErrors?.length) throw new Error(`slack_canonical_payload_invalid:${result.validationErrors.join(';')}`);
+    // A sink failure is already recorded on its own trigger_deliveries row; name it truthfully
+    // instead of reporting the (valid) payload as invalid.
+    const failed = result.deliveries.filter((d) => d.outcome === 'failed').map((d) => `${d.sinkKind}:${d.error ?? 'failed'}`);
+    throw new Error(`slack_event_delivery_failed:${failed.join(';') || 'unknown'}`);
+  }
   return normalized;
 }
 
@@ -342,6 +382,28 @@ export async function openSlackSocketUrl(
   );
   if (!body.url?.startsWith('wss://')) throw new Error('slack_socket_url_missing');
   return body.url;
+}
+
+/** Open the "Report a bug" form for a message-shortcut click (Slack views.open). */
+export async function openSlackReportBugModal(
+  botToken: string,
+  request: SlackReportModalRequest,
+  deps: { fetch?: typeof fetch; apiOrigin?: string } = {},
+): Promise<void> {
+  if (!request.triggerId.trim()) throw new Error('slack_report_bug_trigger_missing');
+  const origin = (deps.apiOrigin ?? SLACK_API_ORIGIN).replace(/\/$/, '');
+  await slackJson<{ ok?: boolean }>(
+    await (deps.fetch ?? fetch)(`${origin}/api/views.open`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${assertToken(botToken, 'xoxb-', 'bot_token')}`,
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ trigger_id: request.triggerId, view: slackReportBugModalView(request) }),
+    }),
+    'views_open',
+  );
 }
 
 export interface SlackThreadMessageResult {

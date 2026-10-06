@@ -17,15 +17,15 @@
  * experts are now handled identically, so there is no liveness branch left to
  * get wrong, no per-responder load cap to tune, and no woken-but-silent case.
  *
- * THE WALK (D-009, measured — not a guess about what the platform can do):
- *   1. rank's backend === source's backend  → FORK (claude/codex). OMP has no
- *      native branch command, so an OMP source cannot fork at all.
- *   2. Claude source, different backend     → CONVERT (session port), and only
- *      while the source is NOT live — see `convert-needs-live-source-identity`.
- *   3. non-Claude source, different backend → NOT REACHABLE. The session-port
- *      transform is claude-source-only BY CONSTRUCTION (one adapter exists), so
- *      this is a SKIP, exactly like a walled account — never an error, and never
- *      the end of the consult.
+ * THE WALK (D-009's source-adapter follow-up, WI-10002749):
+ *   1. Current tracked Claude source, Claude rank → FORK.
+ *   2. Every other supported Claude/Codex/OMP pair, including historical
+ *      evidence and same-backend native sources → CONVERT via the maintained
+ *      session port, with a preparation-bound independent answering owner.
+ * The source keeps its coordination identity and claims, including when live.
+ * Both paths require exact tracked source evidence; an older native incarnation
+ * must still belong to that source owner. Unsupported or untracked sources are
+ * recorded skips, and the walk continues.
  *
  * FAILURE IS A STEP, NOT A STOP. Every skip/failure reason is recorded on the
  * attempt and the walk continues; only an exhausted list is terminal
@@ -39,7 +39,9 @@
  */
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { Sql } from 'postgres';
+import { evidenceIncarnationOwnedBy } from '../session-port/source';
 import {
   buildAgentLaunchCommand,
   injectLaunchedByArg,
@@ -47,7 +49,15 @@ import {
   verifyResumeStarted,
   type ResumeTarget,
 } from '../agent-launch-core';
-import { fetchContextPressure } from '../agent-tools/coordination/context-pressure';
+import {
+  bucketTokensAgainstOwnerLimit,
+  fetchContextPressure,
+} from '../agent-tools/coordination/context-pressure';
+import { tokensFromFileSize } from '../compaction-usage';
+import {
+  analyzeClaudeResumeTranscriptFile,
+  type ClaudeResumeTranscriptAnalysis,
+} from '../claude-resume-tool-references.mjs';
 import { buildConsoleEnvelope } from '../console-launcher';
 import { spawnHeadless, type SpawnChildExit } from '../console-spawn';
 import { resolveSpawnHostOperatorBaseUrl } from '../mcp-base-url';
@@ -68,6 +78,18 @@ import { ACCEPTANCE_BAR_AMENDMENT_REVIEW_POLICY } from './selection-policies';
  * requester's critical path, and null is an honest "still booting", never a
  * failure — the cascade expiry guards the reply. */
 export const DISPATCH_VERIFY_TIMEOUT_MS = 15_000;
+
+/**
+ * How long after its kickoff lands a Claude fork gets to write its first reply
+ * before the dispatch stops waiting to judge it (WI-10004645). A provider
+ * "Tool reference … not found" 400 is a request-validation failure, so it lands
+ * within seconds of the kickoff (measured: 2s and 8s). The bound is measured
+ * from the kickoff, so it overlaps the host verification wait rather than
+ * adding to it. Expiry keeps the dispatch: no reply yet is not a rejection.
+ */
+export const FIRST_TURN_WAIT_MS = 20_000;
+/** Re-read interval for that wait; the analyzer caches by size + mtime. */
+export const FIRST_TURN_POLL_MS = 500;
 
 export type DispatchOperation = 'fork' | 'convert';
 
@@ -90,6 +112,26 @@ export interface ConsultEvidenceSource {
 export function selectConsultEvidenceSource(
   refs: readonly ConsultDispatchEvidenceRef[] | undefined,
 ): ConsultEvidenceSource | null {
+  return rankConsultEvidenceSources(refs)[0] ?? null;
+}
+
+/**
+ * Every evidence session, best first, in the order {@link selectConsultEvidenceSource}
+ * takes its head from.
+ *
+ * EI-24833606853730057: one turn is routinely indexed under SEVERAL native session ids.
+ * A consult fork's seed copy, and every fork/carry descendant after it, replays its
+ * source's history with the same `ts` and `turn_idx`, so a candidate's evidence ties
+ * across sessions owned by DIFFERENT agents and the session-id tie-break picks one of
+ * them arbitrarily. Measured on two rubric-vetting consults: every walk took a foreign
+ * seed copy (`0b0ccf95…` over the expert's own `1010aec4…`) and was refused on
+ * ownership before any launch, so the whole menu ended `no_qualified_responder`. The
+ * dispatcher therefore walks this list and takes the first session that resolves to the
+ * candidate itself.
+ */
+export function rankConsultEvidenceSources(
+  refs: readonly ConsultDispatchEvidenceRef[] | undefined,
+): ConsultEvidenceSource[] {
   const groups = new Map<string, ConsultDispatchEvidenceRef[]>();
   for (const ref of refs ?? []) {
     if (!ref || typeof ref.session_id !== 'string' || !ref.session_id.trim() ||
@@ -105,9 +147,55 @@ export function selectConsultEvidenceSource(
     const bestB = Math.max(...b.map(score));
     return bestB - bestA || b.length - a.length || sessionA.localeCompare(sessionB);
   });
-  const [sessionId, evidence] = ranked[0] ?? [];
-  if (!sessionId || !evidence) return null;
-  return { sessionId, evidence: [...evidence].sort((a, b) => a.turn_idx - b.turn_idx) };
+  return ranked.map(([sessionId, evidence]) => ({
+    sessionId,
+    evidence: [...evidence].sort((a, b) => a.turn_idx - b.turn_idx),
+  }));
+}
+
+type ResolvedResumeTarget = Extract<Awaited<ReturnType<typeof resolveResumeTarget>>, { ok: true }>;
+
+/**
+ * Resolve the session a consult dispatch launches from (EI-24833606853730057).
+ *
+ * With evidence, each ranked evidence session is resolved in turn and the first one
+ * whose native session and coord owner both match the candidate wins. A foreign seed
+ * copy that merely tied on the measured hit is skipped instead of refusing the expert.
+ * Only when NO evidence session belongs to the candidate is the walk refused, and the
+ * refusal names every session tried so the walk record shows why.
+ */
+async function resolveDispatchSource(
+  opts: { sourceOwnerId: string; evidence?: readonly ConsultDispatchEvidenceRef[] },
+  d: Pick<ConsultDispatchDeps, 'resolveResumeTarget'>,
+): Promise<{ target: ResolvedResumeTarget; evidenceSource: ConsultEvidenceSource | null } | { refusal: string }> {
+  const sources = rankConsultEvidenceSources(opts.evidence);
+  if (sources.length === 0) {
+    const target = await d.resolveResumeTarget({ agentId: opts.sourceOwnerId });
+    return target.ok ? { target, evidenceSource: null } : { refusal: `source session unresolvable: ${target.detail}` };
+  }
+  const rejected: string[] = [];
+  for (const source of sources) {
+    const target = await d.resolveResumeTarget({ sessionId: source.sessionId });
+    if (!target.ok) {
+      rejected.push(`source session unresolvable: ${target.detail}`);
+    } else if (target.sessionId !== source.sessionId) {
+      rejected.push(
+        `evidence session mismatch: requested ${source.sessionId}, resolved ${target.sessionId ?? 'no native session'}`,
+      );
+    } else if (target.ownerId !== opts.sourceOwnerId) {
+      rejected.push(
+        `evidence session ownership changed: ${source.sessionId} resolves to ${target.ownerId ?? 'no owner'}, ` +
+          `expected ${opts.sourceOwnerId}`,
+      );
+    } else {
+      return { target, evidenceSource: source };
+    }
+  }
+  return {
+    refusal: rejected.length === 1
+      ? rejected[0]!
+      : `no evidence session resolves to ${opts.sourceOwnerId} (${rejected.length} tried): ${rejected.join('; ')}`,
+  };
 }
 
 /**
@@ -120,13 +208,16 @@ export function selectConsultEvidenceSource(
 export type DispatchSkipReason =
   | 'fork-unsupported'
   | 'conversion-unavailable'
+  | 'source-session-untracked'
   | 'convert-needs-live-source-identity'
   | 'account-walled'
   | 'source-context-critical'
+  | 'source-transcript-poisoned'
   | 'evidence-span-unavailable'
   | 'launch-failed'
   | 'kickoff-not-persisted'
-  | 'launch-exited';
+  | 'launch-exited'
+  | 'first-turn-rejected';
 
 export interface ConsultDispatchAttempt {
   rank: number;
@@ -144,6 +235,8 @@ export interface ConsultDispatchAttempt {
    * Absent when the log holds no recognisable failure line.
    */
   launchError?: string;
+  /** The durable launch log used to identify a failed spawned rank. */
+  launchLogPath?: string;
 }
 
 export interface ConsultDispatchResult {
@@ -153,9 +246,9 @@ export interface ConsultDispatchResult {
    * its responder, so the answering session's first `consult:reply` has a
    * participant gate to pass.
    *
-   * A FORK is a genuinely new session, so this is a freshly pre-pinned id. A
-   * CONVERT continues the source's identity onto the other backend (the session
-   * port's authority-continuity invariant), so this is the source's own id.
+   * Both FORK and CONVERT use an independent, freshly pre-pinned answering id.
+   * CONVERT ports the source's evidence into that isolated session; it does
+   * not transfer the source's coordination identity or claims.
    * Either way the caller writes what it is TOLD, never what it assumed.
    */
   answeringOwnerId: string | null;
@@ -188,13 +281,38 @@ export interface ConsultDispatchDeps extends ExpertModelAllowlistDeps {
   /** Test seam for the saved per-review model, read again on every cascade leg. */
   readReviewerModel?: (workspaceId: string, conversationId: string) => Promise<ConsultReviewerModel | null>;
   resolveResumeTarget: typeof resolveResumeTarget;
-  checkResumeTranscript: (target: ResumeTarget) => Promise<{ available: boolean; detail: string }>;
+  /** Reuse the port route's exact backend/owner guard for an older incarnation. */
+  checkEvidenceIncarnationOwnedBy: (target: ResumeTarget, sessionId: string) => Promise<boolean>;
+  checkResumeTranscript: (
+    target: ResumeTarget,
+  ) => Promise<{ available: boolean; detail: string; transcriptPath?: string }>;
+  /**
+   * Read a Claude transcript's tail for provider "Tool reference … not found"
+   * rejections (WI-10004260). Used twice: on the SOURCE before forking it (a
+   * fork replays the source history, so a source whose latest assistant output
+   * is such a rejection yields a fork that fails the same way), and on the
+   * answering session's own transcript after its kickoff lands (a first turn
+   * that is such a rejection is a dead responder, not a dispatch). Returns
+   * null when unreadable.
+   */
+  analyzeClaudeTranscript: (
+    transcriptPath: string,
+  ) => Pick<
+    ClaudeResumeTranscriptAnalysis,
+    'trailingMissingToolReferenceTurns' | 'lastMissingToolReferenceName' | 'assistantTurnsSinceLastPrompt'
+  > | null;
+  /** Wait seam for the first-turn poll (WI-10004645); tests resolve it at once. */
+  sleepMs: (ms: number) => Promise<void>;
   buildAgentLaunchCommand: typeof buildAgentLaunchCommand;
   injectLaunchedByArg: typeof injectLaunchedByArg;
   buildConsoleEnvelope: typeof buildConsoleEnvelope;
   spawnHeadless: typeof spawnHeadless;
   verifyResumeStarted: typeof verifyResumeStarted;
   fetchContextPressure: typeof fetchContextPressure;
+  /** WI-10004888: the canonical transcript estimator, applied to the fork SOURCE transcript. */
+  estimateTranscriptTokens: (transcriptPath: string) => Promise<number | null>;
+  /** WI-10004888: bucket that estimate against the source owner's own compaction limit. */
+  bucketTranscriptPressure: typeof bucketTokensAgainstOwnerLimit;
   /** Is there budget to run this backend at all right now? (D-004 walls.) */
   probeBackendAvailable: (agent: ExpertBackend, workspaceId: string) => Promise<BackendAvailability>;
   mintOwnerId: () => string;
@@ -265,6 +383,7 @@ export function dispatchRecordEntry(input: ConsultDispatchRecordInput, nowIso: s
       ...(a.reason ? { reason: a.reason } : {}),
       detail: clip(a.detail),
       ...(a.launchError ? { launchError: clip(a.launchError, 300) } : {}),
+      ...(a.launchLogPath ? { launchLogPath: clip(a.launchLogPath) } : {}),
     })),
   };
 }
@@ -422,6 +541,7 @@ const LAUNCH_FAILURE_REASONS: ReadonlySet<string> = new Set<DispatchSkipReason>(
   'launch-failed',
   'kickoff-not-persisted',
   'launch-exited',
+  'first-turn-rejected',
 ]);
 
 /** The fields of a persisted walk ({@link dispatchRecordEntry}) the cool-down reads. */
@@ -429,7 +549,15 @@ export interface PersistedDispatchRecord {
   at: string;
   sourceOwnerId?: string;
   dispatched?: boolean;
-  attempts?: Array<{ outcome?: string; reason?: string; agent?: string; model?: string; launchError?: string; detail?: string }>;
+  attempts?: Array<{
+    outcome?: string;
+    reason?: string;
+    agent?: string;
+    model?: string;
+    launchError?: string;
+    launchLogPath?: string;
+    detail?: string;
+  }>;
 }
 
 export interface SourceCooldown {
@@ -537,7 +665,7 @@ function stripTerminalControl(text: string): string {
 
 /** psu prints its own refusals as whole `psu: …` lines, so the whole line is the reason. */
 const PSU_FAILURE_LINE =
-  /^psu(?:-pty-host)?: .*(?:refus|requires|could not|cannot|can only|failed|no session|not found|unavailable|DROPPED|still in progress)/i;
+  /^psu(?:-pty-host)?: .*(?:refus|requires|must|could not|cannot|can only|failed|no session|not found|not all present|unavailable|DROPPED|still in progress)/i;
 /**
  * The CLI's own failures arrive inside TUI output drawn with cursor-movement
  * escapes, not newlines, so they sit mid-way through one long rendered "line"
@@ -697,66 +825,49 @@ function childExitFailure(exit: SpawnChildExit): string | null {
 
 /** The operation a rank implies against this source, or the reason there is none. */
 export function planDispatchOperation(
-  source: { agent: string | null; live: boolean },
+  source: { agent: string | null; live: boolean; tracked?: boolean; historical?: boolean },
   rank: Pick<AllowedExpertModel, 'agent'>,
 ): { operation: DispatchOperation } | { operation: null; reason: DispatchSkipReason; detail: string } {
   const sourceAgent = (source.agent ?? '').toLowerCase();
-  if (sourceAgent === rank.agent) {
-    // D-009 §1: OMP has no native branch command (`resumeArgsFor` throws
-    // forkUnsupportedMessage), so a same-backend OMP rank is unreachable even
-    // though the backends match.
-    if (rank.agent === 'omp') {
-      return {
-        operation: null,
-        reason: 'fork-unsupported',
-        detail: 'OMP has no native branch command, so an OMP source cannot be forked',
-      };
-    }
-    // A consult fork PRE-PINS its answering identity (--owner-id), and the
-    // launcher carries a pre-pinned identity only on the TRACKED fork, which is
-    // claude-only (psu-launcher `launchTrackedFork`). It refuses the untracked
-    // fallback for a pinned id, so a codex fork dies at boot every time — and
-    // launching it anyway costs a session and strands the consult on a
-    // responder that never existed (conv-muhi8wkf, 2026-09-25).
-    if (rank.agent !== 'claude') {
-      return {
-        operation: null,
-        reason: 'fork-unsupported',
-        detail:
-          `a consult fork needs a tracked fork to carry its pre-pinned identity, and tracked forks ` +
-          `are claude-only, so a ${rank.agent} source cannot be forked`,
-      };
-    }
-    return { operation: 'fork' };
-  }
-  // D-009 §3: the session-port transform is claude-source-only by construction
-  // (one adapter, and acquireTrackedClaudeSource throws for any other source).
-  if (sourceAgent !== 'claude') {
+  if (!['claude', 'codex', 'omp'].includes(sourceAgent)) {
     return {
       operation: null,
       reason: 'conversion-unavailable',
       detail:
-        `no ${sourceAgent || 'unknown'} → ${rank.agent} transform exists (session ports are ` +
-        'claude-source-only), so this rank is skipped rather than failed',
+        `unsupported source backend ${sourceAgent || 'unknown'}`,
     };
   }
-  // A session port CONTINUES the source's coordination identity onto the target
-  // backend — deliberately, so the ported session keeps its own loop/claims/
-  // locks/awaits. That is exactly right for a dead source and a collision for a
-  // live one, and D-002 forbids ever colliding with a live agent. The
-  // independent answering identity that would lift this is P-004's (the port's
-  // authority invariant is enforced server-side, in bootstrap-su, and is bound
-  // into the prepared port's idempotency hash — it is not a launcher flag).
-  if (source.live) {
+  if (source.tracked === false) {
     return {
       operation: null,
-      reason: 'convert-needs-live-source-identity',
+      reason: 'source-session-untracked',
       detail:
-        'a session port continues the SOURCE coord identity, which would collide with the live source; ' +
-        'skipped in favour of the next rank',
+        'a cross-backend session port needs an exact psu-tracked source session; this raw native session ' +
+        'can only be resumed or forked in place, so the rank is skipped before launch',
     };
   }
-  return { operation: 'convert' };
+  // Tracked Claude forks already preserve the live expert. Every other pair
+  // uses the maintained port with a preparation-bound independent answer owner.
+  return { operation: sourceAgent === 'claude' && rank.agent === 'claude' && !source.historical ? 'fork' : 'convert' };
+}
+
+/**
+ * `resolveResumeTarget` can exact-pin an older/native transcript while its
+ * `binding` describes the owner's current adv_sessions incarnation. A consult
+ * fork or session port needs the exact source itself to be psu-tracked; the
+ * launcher rejects a raw native source after spawn, so compare the pin with the
+ * persisted binding before any rank is launched.
+ */
+function isExactTrackedResumeTarget(target: Pick<ResumeTarget, 'ownerId' | 'sessionId' | 'ompThreadId' | 'agent' | 'binding'>): boolean {
+  const nativeId = target.sessionId ?? (target.agent === 'omp' ? target.ompThreadId : null);
+  const boundNativeId = target.agent === 'omp'
+    ? target.binding?.ompThreadId ?? target.binding?.sessionId : target.binding?.sessionId;
+  return Boolean(
+    target.ownerId &&
+      nativeId &&
+      target.binding?.coordOwnerId === target.ownerId &&
+      boundNativeId === nativeId,
+  );
 }
 
 /**
@@ -782,11 +893,10 @@ export async function dispatchConsultResponder(
      */
     brief: string | ((operation: DispatchOperation) => string);
     /**
-     * Called with the answering identity the INSTANT that session is running
-     * with its brief submitted — before the bounded verification wait, because
-     * the session can post during it and the consult's reply gate refuses an
-     * author the row does not name yet. The caller persists the identity here;
-     * the post-dispatch stamp remains the backstop, so a throw is swallowed.
+     * Called with the answering identity before a fork is launched, because
+     * the child can post while spawnHeadless is still waiting for its kickoff
+     * receipt. For conversions, the identity is already known and is stamped
+     * after launch. The caller persists it here; failures are best-effort.
      */
     onAnsweringOwner?: (answeringOwnerId: string) => void | Promise<void>;
   },
@@ -795,13 +905,21 @@ export async function dispatchConsultResponder(
 ): Promise<ConsultDispatchResult> {
   const d: ConsultDispatchDeps = {
     resolveResumeTarget,
+    checkEvidenceIncarnationOwnedBy: async (target, sessionId) => {
+      const { getOrgPg } = await import('@papercusp/db-org');
+      return evidenceIncarnationOwnedBy(getOrgPg().sql as unknown as Sql,
+        { coordOwnerId: target.ownerId, agent: target.agent }, sessionId);
+    },
     checkResumeTranscript: defaultCheckResumeTranscript,
+    analyzeClaudeTranscript: analyzeClaudeResumeTranscriptFile,
     buildAgentLaunchCommand,
     injectLaunchedByArg,
     buildConsoleEnvelope,
     spawnHeadless,
     verifyResumeStarted,
     fetchContextPressure,
+    estimateTranscriptTokens: (transcriptPath) => tokensFromFileSize(transcriptPath),
+    bucketTranscriptPressure: bucketTokensAgainstOwnerLimit,
     probeBackendAvailable: defaultProbeBackendAvailable,
     mintOwnerId: () => `su-${randomUUID()}`,
     stopFailedLaunch: defaultStopFailedLaunch,
@@ -809,6 +927,7 @@ export async function dispatchConsultResponder(
     recordDispatchAttempts: defaultRecordDispatchAttempts,
     readSourceDispatchRecords: defaultReadSourceDispatchRecords,
     nowMs: () => Date.now(),
+    sleepMs: (ms: number) => sleep(ms),
     ...deps,
   };
   const result = await walkConsultDispatch(opts, ctx, d);
@@ -869,19 +988,25 @@ async function walkConsultDispatch(
       );
     }
 
-    const evidenceSource = selectConsultEvidenceSource(opts.evidence);
-    const target = await d.resolveResumeTarget(
-      evidenceSource ? { sessionId: evidenceSource.sessionId } : { agentId: opts.sourceOwnerId },
-    );
-    if (!target.ok) return give(`source session unresolvable: ${target.detail}`);
-    if (evidenceSource && target.sessionId !== evidenceSource.sessionId) {
-      return give(`evidence session mismatch: requested ${evidenceSource.sessionId}, resolved ${target.sessionId ?? 'no native session'}`);
-    }
-    if (evidenceSource && target.ownerId !== opts.sourceOwnerId) {
-      return give(`evidence session ownership changed: ${evidenceSource.sessionId} resolves to ${target.ownerId ?? 'no owner'}, expected ${opts.sourceOwnerId}`);
-    }
+    const source = await resolveDispatchSource(opts, d);
+    if ('refusal' in source) return give(source.refusal);
+    const { target, evidenceSource } = source;
+    const exactTracked = isExactTrackedResumeTarget(target);
+    const boundNativeId = target.agent === 'omp'
+      ? target.binding?.ompThreadId ?? target.binding?.sessionId : target.binding?.sessionId;
+    // The port route already reads older evidence incarnations under their
+    // tracked row. Use that seam instead of treating a rotated id as raw native
+    // or silently forking the row's newer transcript. Both checks run again at
+    // inspection, so an ownership change between resolution and spawn refuses.
+    const historical = !exactTracked && evidenceSource !== null &&
+      target.binding?.coordOwnerId === target.ownerId && Boolean(boundNativeId) &&
+      target.sessionId === evidenceSource.sessionId &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(evidenceSource.sessionId) &&
+      Number.isSafeInteger(target.advSessionId) && target.advSessionId > 0 &&
+      await d.checkEvidenceIncarnationOwnedBy(target, evidenceSource.sessionId);
+    const launchTarget = historical ? { ...target, resumeId: String(target.advSessionId) } : target;
 
-    let transcript: { available: boolean; detail: string };
+    let transcript: { available: boolean; detail: string; transcriptPath?: string };
     try {
       transcript = await d.checkResumeTranscript(target);
     } catch (e) {
@@ -918,6 +1043,54 @@ async function walkConsultDispatch(
       }
     }
 
+    // WI-10004888: the owner-level read above measures the owner's CURRENT
+    // native session, but a fork replays the evidence-selected session (pinned
+    // to target.sessionId above), which can be an older, larger transcript from
+    // before a carry-respawn. Measured: owner at 81% ('high') while the forked
+    // session estimated 407,627 tokens, 90.6% of the same 450K limit, and the
+    // fork started over its limit and could only decline. So bucket the
+    // transcript the fork will actually replay, against the same limit and
+    // bands. An unknown estimate does not block: the owner-level gate above
+    // already fails closed, and conversion legs are unaffected either way.
+    if (!forkBlockedByPressure && target.ownerId && transcript.transcriptPath) {
+      try {
+        const tokens = await d.estimateTranscriptTokens(transcript.transcriptPath);
+        if (tokens != null && (await d.bucketTranscriptPressure(target.ownerId, tokens)) === 'critical') {
+          forkBlockedByPressure =
+            `the fork source transcript for ${target.ownerId} (session ${target.sessionId ?? 'unknown'}) ` +
+            `estimates ${tokens} tokens, at or above 90% of its compaction limit, so a fork would inherit ` +
+            'a transcript with no room to answer';
+        }
+      } catch {
+        // Fail open on this leg only; see the comment above.
+      }
+    }
+
+    // WI-10004260: a Claude source whose LATEST assistant output is a provider
+    // "Tool reference … not found in available tools" 400 is a poisoned
+    // transcript. A FORK replays that exact history, so it inherits the poison
+    // and 400s on its first turn — measured twice on one acceptance consult,
+    // where the dead forks held the grading slot for ~30 minutes each. A
+    // CONVERT re-renders the history and does not inherit it, so, like the
+    // pressure gate above, this skips the fork legs only. An unreadable
+    // transcript is not evidence of poison: the kickoff proof still guards it.
+    let forkBlockedByPoison: string | null = null;
+    const sourceAgent = (target.agent ?? '').toLowerCase();
+    if ((sourceAgent === 'claude' || sourceAgent === 'claude-code') && transcript.transcriptPath) {
+      try {
+        const analysis = d.analyzeClaudeTranscript(transcript.transcriptPath);
+        if (analysis && analysis.trailingMissingToolReferenceTurns > 0) {
+          forkBlockedByPoison =
+            `${target.ownerId ?? 'the source'}'s transcript ends in ${analysis.trailingMissingToolReferenceTurns} ` +
+            `provider "Tool reference not found" rejection(s)` +
+            (analysis.lastMissingToolReferenceName ? ` (last: '${analysis.lastMissingToolReferenceName}')` : '') +
+            ', so a fork would replay the same history and fail on its first turn';
+        }
+      } catch {
+        // Fail open on the analysis only — see the comment above.
+      }
+    }
+
     const allowedRanks = await resolveExpertModelAllowlist(ctx.workspaceId, d);
     const requested = opts.reviewerModel;
     const ranks = requested
@@ -934,7 +1107,15 @@ async function walkConsultDispatch(
     }
 
     for (const rank of ranks) {
-      const plan = planDispatchOperation(target, rank);
+      const plan = planDispatchOperation(
+        {
+          agent: target.agent,
+          live: target.live,
+          tracked: exactTracked || historical,
+          historical,
+        },
+        rank,
+      );
       if (plan.operation === null) {
         attempts.push({
           rank: rank.rank,
@@ -972,6 +1153,18 @@ async function walkConsultDispatch(
         });
         continue;
       }
+      if (operation === 'fork' && forkBlockedByPoison) {
+        attempts.push({
+          rank: rank.rank,
+          agent: rank.agent,
+          model: rank.model,
+          operation,
+          outcome: 'skipped',
+          reason: 'source-transcript-poisoned',
+          detail: forkBlockedByPoison,
+        });
+        continue;
+      }
 
       const capacity = await d.probeBackendAvailable(rank.agent, ctx.workspaceId);
       if (!capacity.available) {
@@ -990,8 +1183,20 @@ async function walkConsultDispatch(
       const attempt = await launchAnsweringSession({
         ...opts,
         ...(evidenceSource ? { evidenceSource } : {}),
-      }, ctx, d, target, rank, operation);
+      }, ctx, d, launchTarget, rank, operation);
       attempts.push(attempt.record);
+      // WI-10004645: every fork rank replays the SAME source history, and a
+      // "Tool reference … not found" first reply comes from a reference in that
+      // history the fork's toolset lacks. Once one fork of this source is
+      // rejected that way, the other fork ranks would be too (measured: rank 2
+      // re-forked the source rank 1 had just failed on, and died identically).
+      // Conversions re-render the history, so they stay eligible.
+      if (operation === 'fork' && attempt.record.reason === 'first-turn-rejected' && !forkBlockedByPoison) {
+        forkBlockedByPoison =
+          `rank #${rank.rank} (${rank.agent}/${rank.model}) forked ${target.ownerId ?? 'the source'} and its ` +
+          'first reply was a provider "Tool reference not found" rejection; every fork replays the same ' +
+          'source history, so the remaining fork ranks would fail the same way';
+      }
       if (attempt.record.outcome === 'dispatched') {
         return {
           dispatched: true,
@@ -1038,11 +1243,9 @@ async function launchAnsweringSession(
     verified: null,
   });
 
-  // A fork mints a NEW identity, so pre-pin it: the consult row has to name its
-  // responder before this session exists. A convert continues the source's own
-  // identity (the port's authority invariant), so there is nothing to pin and
-  // the answering id is already known.
-  const answeringOwnerId = operation === 'fork' ? d.mintOwnerId() : target.ownerId;
+  // Both the tracked fork and the prepared port bind a new answering identity
+  // before the child can reply; the expert retains its own identity and work.
+  const answeringOwnerId = d.mintOwnerId();
   if (!answeringOwnerId) {
     return failed(
       'launch-failed',
@@ -1067,7 +1270,7 @@ async function launchAnsweringSession(
       // The wall probe measures the provider pool. Route pooled Claude/Codex
       // launches through that same pool so another account's headroom is usable.
       account: providerForBackend(rank.agent) ? 'auto' : 'default',
-      ...(operation === 'fork' ? { ownerId: answeringOwnerId } : {}),
+      ownerId: answeringOwnerId,
     });
   } catch (e) {
     // The composer refuses commands psu would reject at boot (an impossible
@@ -1075,14 +1278,21 @@ async function launchAnsweringSession(
     // the consult's.
     return failed('launch-failed', `launch command could not be composed: ${(e as Error)?.message ?? String(e)}`);
   }
+  // Both operations mint a child answering identity, so the requester is its
+  // launch parent. The expert remains the transcript source only.
   cmd = d.injectLaunchedByArg(cmd, ctx.launchedBy).command;
 
   let envelope: Awaited<ReturnType<typeof buildConsoleEnvelope>>;
   try {
+    const operatorBaseUrl = resolveSpawnHostOperatorBaseUrl();
     envelope = await d.buildConsoleEnvelope({
       workspaceId: ctx.workspaceId,
       slug: ctx.harnessSlug,
-      operatorBaseUrl: resolveSpawnHostOperatorBaseUrl(),
+      operatorBaseUrl,
+      // The default console MCP endpoint is the long-lived live proxy. A
+      // consult must prepare and answer on its spawning runtime: staging and
+      // background source guards may differ from the deployed live build.
+      agentMcpBaseUrl: operatorBaseUrl,
       // The answering session is an MCP-connected agent (it must call
       // consult:reply), not a bare command.
       skipMcpJson: false,
@@ -1095,6 +1305,20 @@ async function launchAnsweringSession(
   // read that exact root, so carry it through the detached psu boundary or psu
   // can resume against a different home and report the source rollout missing.
   const codexHome = target.agent === 'codex' ? codexHomeForSessionKey(target.advSessionId) : null;
+  // A fork can run its first turn before spawnHeadless returns: it starts the
+  // child, then waits for boot/kickoff receipts. Publish the new identity before
+  // crossing that boundary so consult:reply already recognizes the child.
+  // Keep the post-receipt write below as a retry if this best-effort stamp fails.
+  let answeringOwnerStamped = false;
+  if (opts.onAnsweringOwner) {
+    try {
+      await opts.onAnsweringOwner(answeringOwnerId);
+      answeringOwnerStamped = true;
+    } catch {
+      /* retry after the kickoff receipt */
+    }
+  }
+
   const spawn = await d.spawnHeadless({
     envelope: {
       ...envelope,
@@ -1123,6 +1347,10 @@ async function launchAnsweringSession(
       greetingCmd: cmd,
       cwd: target.cwd ?? envelope.cwd,
     },
+    // The envelope contains the superuser MCP door, but spawnHeadless only
+    // materializes it in the fork's cwd when explicitly enabled. The answer
+    // session must be able to call consult:reply from its first turn.
+    writeMcpJson: true,
     label: `consult-${operation} · ${answeringOwnerId.slice(0, 16)}`,
     logDir: join(papercuspPathForWorkspace(ctx.workspaceId), 'fleet-logs'),
     launchedBy: ctx.launchedBy ?? undefined,
@@ -1148,7 +1376,21 @@ async function launchAnsweringSession(
     kickoffProof: true,
   });
   if (spawn.status !== 'ok') {
-    return failed('launch-failed', `spawn failed (code ${spawn.code}): ${spawn.error}`);
+    const launchError = await d.readLaunchLogReason(spawn.logPath);
+    const result = failed(
+      'launch-failed',
+      `spawn failed (code ${spawn.code}): ${spawn.error}` +
+        (spawn.logPath ? `; log ${spawn.logPath}` : '') +
+        (launchError ? `; launcher said: ${launchError}` : ''),
+    );
+    return {
+      ...result,
+      record: {
+        ...result.record,
+        ...(spawn.logPath ? { launchLogPath: spawn.logPath } : {}),
+        ...(launchError ? { launchError } : {}),
+      },
+    };
   }
   // A detached spawn can report `ok` after the shell starts even when the
   // command never submitted the brief. Require the host's parent-visible native
@@ -1165,19 +1407,25 @@ async function launchAnsweringSession(
         `(${spawn.kickoffProof?.reason ?? 'kickoff-proof-missing'}; log ${spawn.logPath ?? '?'}); ${stopped}` +
         (launchError ? `; launcher said: ${launchError}` : ''),
     );
-    return launchError ? { ...result, record: { ...result.record, launchError } } : result;
+    return {
+      ...result,
+      record: {
+        ...result.record,
+        ...(spawn.logPath ? { launchLogPath: spawn.logPath } : {}),
+        ...(launchError ? { launchError } : {}),
+      },
+    };
   }
+  // The first-turn wait below is bounded from this instant (WI-10004645).
+  const kickoffSeenAtMs = d.nowMs();
 
-  // The brief is submitted and the session is running, so from HERE it can post
-  // — and the reply gate refuses an author the consult row does not name yet.
-  // Announce the answering identity BEFORE the verification wait (up to
-  // DISPATCH_VERIFY_TIMEOUT_MS), not after it, or a fast first turn races the
-  // stamp and is refused `not_a_participant` by its own launcher. Best-effort
-  // by contract: a persistence failure here must not fail a live dispatch.
-  try {
-    await opts.onAnsweringOwner?.(answeringOwnerId);
-  } catch {
-    /* the post-verify stamp is the backstop */
+  // Retry a failed pre-spawn stamp before the bounded verification wait.
+  if (!answeringOwnerStamped) {
+    try {
+      await opts.onAnsweringOwner?.(answeringOwnerId);
+    } catch {
+      /* the caller's post-dispatch stamp is the backstop */
+    }
   }
 
   // Race host registration against a durable child-death observation, so the
@@ -1205,6 +1453,7 @@ async function launchAnsweringSession(
               `${failure} before ${answeringOwnerId} registered a live host (log ${spawn.logPath ?? '?'})` +
               (launchError ? `; launcher said: ${launchError}` : ''),
             ...(launchError ? { launchError } : {}),
+            ...(spawn.logPath ? { launchLogPath: spawn.logPath } : {}),
           },
           answeringOwnerId: null,
           verified: false,
@@ -1220,16 +1469,94 @@ async function launchAnsweringSession(
     verify = await verifyPromise;
   }
 
+  // WI-10004260 (part B): the kickoff receipt names the answering session's own
+  // native transcript. If its first reply is already a provider "Tool reference
+  // … not found" 400, this session is dead on arrival, even though its host
+  // may register as live: Claude Code shows the error and waits for input. Measured
+  // on an acceptance consult: the fork recorded 'dispatched', then held the
+  // grading slot silently until its cascade expiry.
+  //
+  // WI-10004645: reading once, right after the verification wait, was not
+  // enough. That wait can return in milliseconds, before the reply exists — a
+  // fork recorded 'dispatched' 2.2s before its 400 landed. And a fork's file
+  // carries the source's copied history, so an assistant record does not by
+  // itself mean the fork has replied. So: wait, bounded from the kickoff, for
+  // the first assistant record AFTER the fork's own prompt, then judge that
+  // reply. Expiry or an unreadable transcript keeps the dispatch (no reply yet
+  // is not a rejection), so this can turn a dead dispatch into a fast cascade
+  // but never refuse a good one.
+  const answeringTranscript = spawn.kickoffProof?.nativeRef;
+  // Set when the transcript was readable but no reply had landed by the bound;
+  // the dispatch stands, and its record says the first turn was not judged.
+  let firstTurnUnjudgedAfterMs: number | null = null;
+  if (rank.agent === 'claude' && typeof answeringTranscript === 'string' && answeringTranscript.endsWith('.jsonl')) {
+    let rejection: { turns: number; tool: string | null } | null = null;
+    const deadline = kickoffSeenAtMs + FIRST_TURN_WAIT_MS;
+    // The read-count bound is independent of the clock, so a stalled clock
+    // cannot turn this into an unbounded loop.
+    const maxPolls = Math.ceil(FIRST_TURN_WAIT_MS / FIRST_TURN_POLL_MS);
+    let readable = true;
+    let replied = false;
+    for (let poll = 0; ; poll += 1) {
+      let analysis: ReturnType<ConsultDispatchDeps['analyzeClaudeTranscript']> = null;
+      try {
+        analysis = d.analyzeClaudeTranscript(answeringTranscript);
+      } catch {
+        analysis = null;
+      }
+      if (!analysis) {
+        // Unreadable is not evidence of a rejection; keep the dispatch.
+        readable = false;
+        break;
+      }
+      if (analysis.assistantTurnsSinceLastPrompt > 0) {
+        replied = true;
+        if (analysis.trailingMissingToolReferenceTurns > 0) {
+          rejection = {
+            turns: analysis.trailingMissingToolReferenceTurns,
+            tool: analysis.lastMissingToolReferenceName,
+          };
+        }
+        break;
+      }
+      const remainingMs = deadline - d.nowMs();
+      if (poll >= maxPolls || remainingMs <= 0) break;
+      await d.sleepMs(Math.min(FIRST_TURN_POLL_MS, remainingMs));
+    }
+    if (readable && !replied) firstTurnUnjudgedAfterMs = Math.max(0, d.nowMs() - kickoffSeenAtMs);
+    if (rejection) {
+      const stopped = await d.stopFailedLaunch(spawn.taskId);
+      return {
+        record: {
+          ...base,
+          outcome: 'failed',
+          reason: 'first-turn-rejected',
+          detail:
+            `${operation} of ${opts.sourceOwnerId} → ${rank.agent}/${rank.model} as ${answeringOwnerId}: ` +
+            `its first reply was a provider "Tool reference not found" rejection` +
+            (rejection.tool ? ` ('${rejection.tool}')` : '') +
+            ` in ${answeringTranscript}; ${stopped}`,
+        },
+        answeringOwnerId: null,
+        verified: false,
+      };
+    }
+  }
+
+  const firstTurnNote = firstTurnUnjudgedAfterMs === null
+    ? ''
+    : ` First reply not written ${firstTurnUnjudgedAfterMs}ms after kickoff, so it was not checked for a ` +
+      'provider rejection.';
   return {
     record: {
       ...base,
       outcome: 'dispatched',
-      detail: verify.started
+      detail: (verify.started
         ? `${operation} of ${opts.sourceOwnerId} → ${rank.agent}/${rank.model} as ${answeringOwnerId}: ` +
           `live host registered after ${verify.waitedMs}ms (log ${spawn.logPath ?? '?'}).`
         : `${operation} of ${opts.sourceOwnerId} → ${rank.agent}/${rank.model} as ${answeringOwnerId}: ` +
           `spawned, no live host after ${verify.waitedMs}ms — still booting (NOT a failure; the cascade ` +
-          `expiry guards the reply). Log ${spawn.logPath ?? '?'}.`,
+          `expiry guards the reply). Log ${spawn.logPath ?? '?'}.`) + firstTurnNote,
     },
     answeringOwnerId,
     verified: verify.started ? true : null,
@@ -1267,8 +1594,9 @@ export function consultDispatchBrief(input: {
       ? `You are a FORK of ${input.sourceOwnerId}'s session: their history is above, and you are a NEW ` +
         `identity running alongside them. They were NOT notified and must not be — you answer from the ` +
         `transcript you inherited.`
-      : `You are ${input.sourceOwnerId}'s session CONVERTED onto another backend: their history was carried ` +
-        `across for you. Answer from it.`;
+      : `You are an isolated answering session using ${input.sourceOwnerId}'s exact transcript: their history ` +
+        `was carried across as evidence. You are a NEW identity; their claims, locks, modes and work stay ` +
+        `with them. They were NOT notified and must not be. Answer from the transcript.`;
   return (
     `🧭 CONSULT — you were launched to answer ONE question, on consult conversation ${input.conversationId}.\n` +
     `${provenance}\n\n` +
@@ -1312,9 +1640,8 @@ export function makeConsultReachDispatcher(
   summary: string;
   body: string;
   evidence?: ConsultDispatchEvidenceRef[];
-  /** Persist the answering identity the moment the session starts — passed
-   *  straight through to `dispatchConsultResponder`, which calls it before the
-   *  verification wait so a fast first reply is not refused. */
+  /** Persist the answering identity before a fork is launched, or before a
+   *  conversion's verification wait, so the first reply is already authorized. */
   onAnsweringOwner?: (answeringOwnerId: string) => void | Promise<void>;
 }) => Promise<{
   queued: number;

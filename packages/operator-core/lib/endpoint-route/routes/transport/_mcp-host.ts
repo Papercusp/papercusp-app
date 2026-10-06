@@ -23,6 +23,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createHash } from 'node:crypto';
 // STATIC value import, deliberately not `createRequire(import.meta.url)(…)`.
 // The packed desktop sidecar is a single esbuild bundle with NO node_modules
 // tree beside it (build-desktop-sidecar.sh: "serve.mjs has every inlinable
@@ -50,6 +51,7 @@ import {
   lookupByMcpName,
   resolveMcpName,
   listMcpProjections,
+  projectedToolRegistryRevision,
   applyToolManifest,
   papercuspGateBypass,
   sanitizeToolSchema,
@@ -66,6 +68,7 @@ import {
   type RequestOriginMetadata,
   type DeltaResponse,
 } from '@papercusp/agent-mcp';
+import { readServingGeneration, type ServingGeneration } from '../../../serving-generation';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import {
@@ -85,9 +88,14 @@ import {
   dispatchProjectedToolToMcp,
   isDispatchValidationFailure,
 } from '@papercusp/tooldef-mcp';
-import { mcpDataPlaneDegradedAtFromExtra, mcpTraceIdFromExtra } from '../../../mcp-request-trace';
+import {
+  buildMcpSessionSurfaceTraceEvent,
+  logMcpRequestTrace,
+  mcpDataPlaneDegradedAtFromExtra,
+  mcpTraceIdFromExtra,
+} from '../../../mcp-request-trace';
 import { getOrgPg, retryOnRetryableDbDeadline, withWorkspace } from '@papercusp/db-org';
-import { applyResultDoor, beginResultDoorAggregate, measureResultContextBytes } from '../../../result-door';
+import { applyResultDoorAsync, beginResultDoorAggregate, measureResultContextBytes } from '../../../result-door';
 import { annotateStoreIdentitySuspectResult, mayAnnotateResultText } from './store-identity-suspect';
 import {
   MAX_PICK_PATHS,
@@ -146,7 +154,7 @@ import {
   type AdmissionAuthorityContext,
   type AdmissionRecoveryAuthority,
 } from '../../../work-item-admission-authority';
-import { workspaceForCoordOwner } from '../../../adv-sessions';
+import { classifyOwnerNativeSession, workspaceForCoordOwner } from '../../../adv-sessions';
 import { activeWorkspaceId } from '../../../workspace-registry';
 import { PLATFORM_POT_SLUG } from '../../../platform-pot-slug';
 import { isReservedHarnesslessRoutineHost } from '../../../harness/routines/routine-host';
@@ -173,6 +181,8 @@ import {
   filterListingsByAllowlist,
   getSessionSurface,
   activateSessionTools,
+  rememberSessionToolRegistryRevision,
+  sessionToolRegistryRevisionState,
 } from './tool-allowlist';
 import { validIdempotencyKey, lookupStoredMcpResult, storeMcpResult, type StoredMcpResult } from './_mcp-result-replay';
 import {
@@ -429,6 +439,7 @@ async function recordMcpAuthFailureTelemetry(
   reason: string,
   projected: ReturnType<typeof lookupByMcpName>,
   callStartedAt: number,
+  nativeSessionFailure?: NativeSessionAuthFailureMetadata,
 ): Promise<void> {
   const ctx = mcpAuthFailureContext(extra);
   if (!ctx) return;
@@ -444,7 +455,13 @@ async function recordMcpAuthFailureTelemetry(
       errorCode: 'mcp_auth_failed',
       errorMessage: reason,
       // Auth failed before input validation; do not persist untrusted args.
-      metadataJson: { mcpAuthFailure: { reason, contextVerified: false } },
+      metadataJson: {
+        mcpAuthFailure: {
+          reason,
+          contextVerified: false,
+          ...(nativeSessionFailure ? { nativeSession: nativeSessionFailure } : {}),
+        },
+      },
     });
   } catch (error) {
     // Telemetry is best-effort and must never change the auth rejection seen by
@@ -664,6 +681,10 @@ const SCOPED_SAFE_CROSSWORKSPACE: ReadonlySet<string> = new Set([
   'memory:remember',
   'memory:update',
   'memory:forget',
+  // EI-247550: memory:get resolves ids across the backend, but its handler returns shared rows
+  // only when the scope belongs to this workspace (and, with the clamp on, this session's Hive).
+  // Other users' rows and out-of-scope ids remain indistinguishable from missing ids.
+  'memory:get',
   // search:* prose recall (session-search-scope-2026-07-05 live-smoke finding) —
   // read-only; crossWorkspace ONLY so an unscoped psu gets the admin handle for
   // the non-workspace-scoped operator_turns table (P-062 Phase 4). From a SCOPED
@@ -969,6 +990,8 @@ export interface BuiltSpawnContext {
   runId: string;
   spawnId: string;
   parentSpawnId: string | null;
+  /** Verified adv_sessions row for this caller's native CLI incarnation. */
+  advSessionId?: number;
   uiClientId: string | null;
   /** Private detector-only session key; never used as public coordination identity. */
   detectorSessionKey: string | null;
@@ -1472,10 +1495,16 @@ async function applyScopedSuperuserTransportClamp(
  *   - `failed` — URL claimed a spawn ctx but verification failed.
  *               Caller MUST reject (do NOT fall through to bearer).
  */
+type NativeSessionAuthFailureMetadata = {
+  carrier: 'header:x-papercusp-native-session' | 'query:native_session';
+  valueFingerprint: string;
+  candidateAdvSessionId: number | null;
+};
+
 export type TrySpawnContextResult =
   | { kind: 'none' }
   | { kind: 'ok'; ctx: BuiltSpawnContext }
-  | { kind: 'failed'; reason: string };
+  | { kind: 'failed'; reason: string; nativeSessionFailure?: NativeSessionAuthFailureMetadata };
 
 // In-process, per-request authority carrier for authenticated connection
 // transports. Never read a client-supplied `_meta` field as a verified context.
@@ -1576,6 +1605,66 @@ export async function tryBuildSpawnContext(
     const headerClient = (headers.get('x-papercusp-client') ?? '').trim();
     const mcpSessionId = (headers.get('mcp-session-id') ?? '').trim();
     const suIdentity = headerClient || clientParam || mcpSessionId;
+    // The owner SID is inherited by child processes. Keep it as the coordination
+    // identity (hooks and MCP calls must share lock ownership), but independently
+    // verify the CLI's native incarnation before allowing it to act as that owner.
+    // Claude carries its session id in the URL; Codex supplies it dynamically in
+    // this header. No native id means a legacy/non-CLI caller and retains the
+    // established identity path.
+    const nativeSessionHeader = (headers.get('x-papercusp-native-session') ?? '').trim();
+    const nativeSessionQuery = (url.searchParams.get('native_session') ?? '').trim();
+    const nativeSessionId = nativeSessionHeader || nativeSessionQuery;
+    const nativeSessionCarrier: NativeSessionAuthFailureMetadata['carrier'] | null = nativeSessionHeader
+      ? 'header:x-papercusp-native-session'
+      : nativeSessionQuery
+        ? 'query:native_session'
+        : null;
+    const nativeSessionFailure = (candidateAdvSessionId: number | null): NativeSessionAuthFailureMetadata | undefined => {
+      if (!nativeSessionId || !nativeSessionCarrier) return undefined;
+      return {
+        carrier: nativeSessionCarrier,
+        valueFingerprint: createHash('sha256').update(nativeSessionId, 'utf8').digest('hex'),
+        candidateAdvSessionId:
+          candidateAdvSessionId != null && Number.isSafeInteger(candidateAdvSessionId) && candidateAdvSessionId > 0
+            ? candidateAdvSessionId
+            : null,
+      };
+    };
+    let verifiedAdvSessionId: number | null = null;
+    let nativeSessionAudit: RequestOriginMetadata['nativeSession'];
+    if (suIdentity && nativeSessionId) {
+      try {
+        const binding = await classifyOwnerNativeSession({ ownerId: suIdentity, sessionId: nativeSessionId });
+        if (binding.binding === 'foreign') {
+          return {
+            kind: 'failed',
+            reason: 'superuser_foreign_native_session',
+            nativeSessionFailure: nativeSessionFailure(binding.advSessionId),
+          };
+        }
+        const observation = nativeSessionFailure(binding.advSessionId);
+        if (observation) {
+          nativeSessionAudit = { ...observation, binding: binding.binding };
+        }
+        if (
+          binding.binding === 'bound' &&
+          binding.advSessionId != null &&
+          Number.isSafeInteger(binding.advSessionId) &&
+          binding.advSessionId > 0
+        ) {
+          verifiedAdvSessionId = binding.advSessionId;
+        }
+      } catch {
+        // A supplied native-session claim is meaningful only when the binding
+        // check succeeds. Failing open here would restore the inherited-SID bug
+        // exactly when its verifier is unavailable.
+        return {
+          kind: 'failed',
+          reason: 'superuser_native_session_unverified',
+          nativeSessionFailure: nativeSessionFailure(null),
+        };
+      }
+    }
     // Workspace, in precedence order (psu-workspace-scoping fix — without
     // this, every claude/omp SU session ran as '*' and workspace-scoped
     // tools failed "no workspace transaction" regardless of the psu picker):
@@ -1715,6 +1804,7 @@ export async function tryBuildSpawnContext(
           .map((b) => b.toString(16).padStart(2, '0'))
           .join('')}`,
         parentSpawnId: null,
+        ...(verifiedAdvSessionId !== null ? { advSessionId: verifiedAdvSessionId } : {}),
         uiClientId: suIdentity.length > 0 ? suIdentity : null,
         detectorSessionKey,
         // Caller backend + model (fleet-launch-agent-inheritance-2026-07-03): psu stamps them onto
@@ -1739,7 +1829,9 @@ export async function tryBuildSpawnContext(
         // Session payload tier (context-trimming-tiers D-004) — env-expanded by
         // psu into the user-level MCP URL, like `tools=`.
         contextTier: parsePayloadTier(url.searchParams.get('ctx_tier')),
-        requestOrigin,
+        requestOrigin: nativeSessionAudit
+          ? { ...requestOrigin, transport: 'mcp', nativeSession: nativeSessionAudit }
+          : requestOrigin,
       },
     };
   }
@@ -2653,19 +2745,23 @@ async function buildMcpToolContext(
       effectiveWs === spawn.workspaceId && clampResult.effectiveHarnessSlug === spawn.harnessSlug
         ? spawn
         : { ...spawn, workspaceId: effectiveWs, harnessSlug: clampResult.effectiveHarnessSlug };
-    const baseCtx: UnifiedToolContext =
-      effectiveWs === ctxRef.current!.workspaceId && clampResult.effectiveHarnessSlug === ctxRef.current!.harnessSlug
+    const baseCtx: UnifiedToolContext = {
+      ...(effectiveWs === ctxRef.current!.workspaceId && clampResult.effectiveHarnessSlug === ctxRef.current!.harnessSlug
         ? ctxRef.current!
-        : { ...ctxRef.current!, workspaceId: effectiveWs, harnessSlug: clampResult.effectiveHarnessSlug };
-    const dispatched = (await dispatchWithSynthesizedTx(target, spawnCtx, baseCtx, (ctx) => {
-      const materializationCtx = projectionMaterializationContext(
-        ctx,
-        projectionNeedsFullSource,
-        projectionSpec?.pick !== undefined,
-        projectionSpec,
-      );
-      return dispatchProjectedToolToMcp(target, canonicalName, dispatchToolArgs, materializationCtx, PROJECTED_DEPS);
-    })) as McpCallResult;
+        : { ...ctxRef.current!, workspaceId: effectiveWs, harnessSlug: clampResult.effectiveHarnessSlug }),
+      indirectDispatch: true,
+    };
+    const dispatched = await dispatchNestedWithMcpDeadline(canonicalName, target.timeoutSec, async () =>
+      (await dispatchWithSynthesizedTx(target, spawnCtx, baseCtx, (ctx) => {
+        const materializationCtx = projectionMaterializationContext(
+          ctx,
+          projectionNeedsFullSource,
+          projectionSpec?.pick !== undefined,
+          projectionSpec,
+        );
+        return dispatchProjectedToolToMcp(target, canonicalName, dispatchToolArgs, materializationCtx, PROJECTED_DEPS);
+      })) as McpCallResult,
+    );
     const freeFormProjected = projectionSpec
       ? applyResultProjection(dispatched, projectionSpec, { toolName: canonicalName, effect: target.effect })
       : dispatched;
@@ -2722,6 +2818,7 @@ async function buildMcpToolContext(
     runId: spawn.runId,
     spawnId: spawn.spawnId,
     parentSpawnId: spawn.parentSpawnId,
+    advSessionId: spawn.advSessionId,
     uiClientId: spawn.uiClientId,
     failureLoopSessionKey: spawn.detectorSessionKey,
     callerAgent: spawn.callerAgent ?? null,
@@ -2970,18 +3067,24 @@ async function resolveVisibleToolListings(extra: unknown): Promise<
   const profile = rawProfile === 'generic' ? 'engineer' : rawProfile;
   const bypass = urlFromExtra(extra)?.searchParams.get('manifestBypass') === '1';
   let result = applyToolManifest(listMcpProjections(role, profile), { bypass });
-  if (spawnRes.kind === 'ok' && spawnRes.ctx.authenticatedPrincipal) {
-    const caps = spawnRes.ctx.authenticatedPrincipal.capabilities;
+  const principal = spawnRes.kind === 'ok' ? spawnRes.ctx.authenticatedPrincipal : undefined;
+  if (spawnRes.kind === 'ok' && principal) {
+    // Bind the narrowed principal to a const: property narrowing on
+    // spawnRes.ctx.authenticatedPrincipal does not survive into the filter callback (TS18048).
+    const caps = principal.capabilities;
+    const allowedTools = principal.allowedTools;
     result = result.filter((listing) => {
       const name = (listing as { name?: unknown }).name;
       if (typeof name !== 'string') return false;
       const projected = lookupByMcpName(name);
-      return projected !== undefined && projected.capabilities.every((capability) => caps.has(capability));
+      return projected !== undefined &&
+        (allowedTools === undefined || allowedTools.has(name)) &&
+        projected.capabilities.every((capability) => caps.has(capability));
     });
     // external-app-access P-003: an app key sees only the tools its scopes let it call —
     // the same policy the dispatch kernel seat enforces (connected-apps/enforce.ts).
     const appFilter = await appKeyToolListFilter(
-      spawnRes.ctx.authenticatedPrincipal,
+      principal,
       spawnRes.ctx.workspaceId,
     );
     if (appFilter) {
@@ -2991,6 +3094,15 @@ async function resolveVisibleToolListings(extra: unknown): Promise<
       });
     }
   }
+  // P-012 / D-040(b): a governed identity wearer lists exactly what its kernel
+  // admits, and that set REPLACES the seed below. A seed could otherwise hide a
+  // class-granted tool the wearer has no other route to (tools:find and
+  // tools:invoke are themselves outside its grants) and show tools every call
+  // will refuse. Ungoverned and unresolved sessions come back null: unchanged.
+  const identityListings = spawnRes.kind === 'ok'
+    ? await identityAdmittedListings(spawnRes.ctx, result, extra)
+    : null;
+  if (identityListings) result = identityListings;
   // `?tools=` is the SEED, not a hard cap (dynamic-tool-surface-2026-07-01): a
   // seeded session's surface GROWS at runtime via ctx.activateTools (tools:find)
   // + notifications/tools/list_changed. getSessionSurface returns that live set
@@ -2999,7 +3111,7 @@ async function resolveVisibleToolListings(extra: unknown): Promise<
   // there's no seed at all. Keyed by the su session identity (uiClientId).
   const seed = parseToolsAllowlist(urlFromExtra(extra)?.searchParams.get('tools'));
   const sessionKey = spawnRes.kind === 'ok' ? spawnRes.ctx.uiClientId : null;
-  const allow = getSessionSurface(sessionKey, seed);
+  const allow = identityListings ? null : getSessionSurface(sessionKey, seed);
   // `?tools_compact=` is the SECOND axis of the same decision (deterministic-
   // tool-definition-delivery-2026-09-21): `?tools=` says WHICH tools are
   // advertised, this says HOW MUCH of each one ships. A named tool keeps its
@@ -3020,6 +3132,183 @@ async function resolveVisibleToolListings(extra: unknown): Promise<
       summaryGuidanceDescription,
     ),
   };
+}
+
+/**
+ * The identity-kernel view of a transport session: the fields the kernel's
+ * state read and grant gate resolve identity and workspace from, set exactly as
+ * `buildMcpToolContext` sets them for a real call.
+ */
+function identitySurfaceContext(spawn: BuiltSpawnContext): UnifiedToolContext {
+  return {
+    workspaceId: spawn.workspaceId,
+    harnessSlug: spawn.harnessSlug,
+    principal: synthesizeTransportPrincipal(spawn),
+    role: spawn.role,
+    advSessionId: spawn.advSessionId,
+    uiClientId: spawn.uiClientId,
+    sigVerifiedSpawn: spawn.sigVerifiedSpawn ?? false,
+    isSuperuser: spawn.isSuperuser ?? false,
+    isPowerUser: spawn.isPowerUser ?? false,
+    log: () => {},
+    progress: () => {},
+    emit: () => {},
+    signal: new AbortController().signal,
+  } as UnifiedToolContext;
+}
+
+/** The MCP session a listing belongs to; tools/call on it rechecks the listing. */
+function mcpSessionKey(extra: unknown): string | null {
+  const sessionId = (extra as { sessionId?: unknown } | undefined)?.sessionId;
+  return typeof sessionId === 'string' && sessionId ? sessionId : null;
+}
+
+/**
+ * The serving generation a tools/call says its client listed, echoed from the
+ * `papercusp/servingGeneration` meta every tools/list entry carries. This is how
+ * a STATELESS transport, which has no session key, opts into the fence.
+ */
+function declaredServingGeneration(req: unknown): string | null {
+  const meta = (req as { params?: { _meta?: unknown } } | undefined)?.params?._meta;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  const declared = (meta as Record<string, unknown>)['papercusp/servingGeneration'];
+  return typeof declared === 'string' && declared.trim() ? declared.trim() : null;
+}
+
+/**
+ * P-012 / D-040(b): the listings a governed identity's kernel admits, or null
+ * to leave the listing unchanged. Records what was shown so a later attach can
+ * be re-announced (D-040(c)). Visibility only: a failure here lists as before
+ * and every call is still gated by the kernel.
+ */
+async function identityAdmittedListings(
+  spawn: BuiltSpawnContext,
+  listings: ReturnType<typeof listMcpProjections>,
+  extra: unknown,
+): Promise<ReturnType<typeof listMcpProjections> | null> {
+  const nameOf = (listing: unknown) => (listing as { name?: unknown }).name;
+  const candidates = listings.flatMap((listing) => {
+    const name = nameOf(listing);
+    return typeof name === 'string' ? [{ name, capabilities: lookupByMcpName(name)?.capabilities ?? [] }] : [];
+  });
+  try {
+    const surfaceModule = await import('../../../capability-envelope/identity-tool-surface');
+    const ctx = identitySurfaceContext(spawn);
+    const surface = await surfaceModule.resolveIdentityToolSurface(ctx, candidates);
+    const sessionKey = mcpSessionKey(extra);
+    if (sessionKey) surfaceModule.rememberListedIdentitySurface(sessionKey, { ctx, candidates, surface });
+    if (surface.kind !== 'governed') return null;
+    return listings.filter((listing) => {
+      const name = nameOf(listing);
+      return typeof name === 'string' && surface.admitted.has(name);
+    });
+  } catch (err) {
+    console.warn(`[mcp-host] identity tool surface unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * A tools/call is admitted only against the exact serving generation the
+ * session last received from tools/list. A notification is a hint to list
+ * again; it never changes the session baseline. The post-call check catches a
+ * generation that moved during dispatch, while the pre-call check prevents a
+ * known-stale or unknown session from dispatching in the first place.
+ */
+function withMcpSessionSurfaceRecheck<Req, Res>(
+  handler: (req: Req, extra: unknown) => Promise<Res>,
+  readGeneration: () => Promise<ServingGeneration> = readServingGeneration,
+): (req: Req, extra: unknown) => Promise<Res> {
+  return async (req, extra) => {
+    const checkStartedAt = Date.now();
+    const sessionKey = mcpSessionKey(extra);
+    const sendNotification = (
+      extra as { sendNotification?: (n: { method: string; params: Record<string, unknown> }) => Promise<void> } | undefined
+    )?.sendNotification;
+    let listChangedSent = false;
+    const notifyListChanged = async () => {
+      if (!sessionKey || !sendNotification || listChangedSent) return;
+      await sendNotification({ method: 'notifications/tools/list_changed', params: {} });
+      listChangedSent = true;
+    };
+
+    // Refuse only what is PROVABLY stale (WI-10006051). The HTTP transport is
+    // STATELESS: mcp-handler builds a fresh server per POST with no
+    // sessionIdGenerator, so extra.sessionId is always absent there and no
+    // server-side tools/list baseline can exist for it. Treating "no session key"
+    // as stale refused EVERY HTTP tools/call, even straight after a successful
+    // tools/list. A stateless call can still opt into the fence by echoing the
+    // generation its listing carried (`_meta['papercusp/servingGeneration']`,
+    // stamped on every tools/list entry). An undeclared stateless call has
+    // nothing to compare against, so it is dispatched without the per-call
+    // generation read; argument validation and the kernel preflight still gate it.
+    const declaredGeneration = declaredServingGeneration(req);
+    if (!sessionKey && declaredGeneration === null) return handler(req, extra);
+
+    const before = await readGeneration();
+    if (before.state !== 'known') {
+      throw new Error(`serving_generation_unknown: ${before.reason}; tools/call is blocked before dispatch`);
+    }
+    const baselineState = sessionToolRegistryRevisionState(sessionKey, before.revision);
+    const staleBaseline = baselineState.status === 'missing' || baselineState.status === 'stale';
+    const staleDeclaration = declaredGeneration !== null && declaredGeneration !== before.revision;
+    if (staleBaseline || staleDeclaration) {
+      try {
+        await notifyListChanged();
+      } catch (err) {
+        console.warn(`[mcp-host] stale serving-generation notification failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const requestedName = (req as { params?: { name?: unknown } } | null)?.params?.name;
+      logMcpRequestTrace(buildMcpSessionSurfaceTraceEvent({
+        traceId: mcpTraceIdFromExtra(extra) ?? globalThis.crypto.randomUUID(),
+        toolName: typeof requestedName === 'string' ? requestedName : 'tools/call',
+        stage: 'stale_contract_rejected',
+        elapsedMs: Math.max(0, Date.now() - checkStartedAt),
+        extra,
+        sessionKey,
+        sessionBaseline: baselineState.status,
+        servingGeneration: before.revision,
+        ...(baselineState.status === 'current' || baselineState.status === 'stale'
+          ? { previousGeneration: baselineState.revision }
+          : {}),
+        ...(declaredGeneration !== null ? { declaredGeneration } : {}),
+        phase: 'pre_dispatch',
+        outcome: 'rejected',
+      }));
+      throw new Error(
+        staleBaseline
+          ? `stale_tool_contract: this MCP session has no tools/list baseline for the current serving generation ` +
+              `${before.revision}; call tools/list before retrying tools/call`
+          : `stale_tool_contract: this call declares serving generation ${declaredGeneration}, but the server now serves ` +
+              `${before.revision}; call tools/list before retrying tools/call`,
+      );
+    }
+
+    const result = await handler(req, extra);
+    if (sessionKey) {
+      const after = await readGeneration();
+      try {
+        if (after.state !== 'known' || after.revision !== before.revision) await notifyListChanged();
+      } catch (err) {
+        console.warn(`[mcp-host] serving-generation recheck failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      try {
+        const { recheckListedIdentitySurface } = await import('../../../capability-envelope/identity-tool-surface');
+        await recheckListedIdentitySurface(sessionKey, notifyListChanged);
+      } catch (err) {
+        console.warn(`[mcp-host] identity surface recheck failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return result;
+  };
+}
+
+/** The real call wrapper with a controllable revision source for focused tests. */
+export function __withMcpSessionSurfaceRecheckForTests<Req, Res>(
+  handler: (req: Req, extra: unknown) => Promise<Res>,
+  readGeneration: () => Promise<ServingGeneration>,
+): (req: Req, extra: unknown) => Promise<Res> {
+  return withMcpSessionSurfaceRecheck(handler, readGeneration);
 }
 
 /**
@@ -3062,6 +3351,7 @@ export function mcpHostServerOptions() {
 /** Register the complete operator protocol on a transport-independent SDK server. */
 export function registerMcpHost(server: McpServer): void {
   server.server.setRequestHandler(sdk.ListToolsRequestSchema, async (_req: unknown, extra: unknown) => {
+    const listStartedAt = Date.now();
     // Shared visibility walk — see resolveVisibleToolListings above
     // (strict-mode + manifest + allowlist semantics documented there).
     const vis = await resolveVisibleToolListings(extra);
@@ -3079,88 +3369,114 @@ export function registerMcpHost(server: McpServer): void {
       );
     }
     const filtered = vis.listings;
+    const listedRegistryRevision =
+      filtered.map(listingRegistryRevision).find((revision) => revision !== 'unknown') ??
+      projectedToolRegistryRevision();
+    const servingGeneration = await readServingGeneration({ toolRegistryRevision: listedRegistryRevision });
+    if (servingGeneration.state !== 'known') {
+      throw new Error(`serving_generation_unknown: ${servingGeneration.reason}; tools/list cannot establish a baseline`);
+    }
     // Objectify boolean sub-schemas (z.unknown() → `true`) so strict
     // consumers (Ollama) can parse the surface. This is THE tools/list
     // the HTTP MCP transport serves (OMP/Claude/Codex bundles); applied
     // post-manifest so pinned schemas are covered too. tool-schema-sanitize.ts.
-    return {
-      tools: await Promise.all(
-        filtered.map(async (t) => {
-          const tt = t as { name?: string; inputSchema?: unknown; outputSchema?: unknown };
-          const out: Record<string, unknown> = { ...t };
-          // MCP clients use the standard annotation to decide whether a
-          // failed connection can safely replay a call. Keep the listing
-          // spread above so registry metadata in `_meta` survives while
-          // adding the effect-derived hint to the standard field.
-          const projected = typeof tt.name === 'string' ? lookupByMcpName(tt.name) : undefined;
-          const registryRevision = listingRegistryRevision(t);
-          const listingVariant = projected && tt.inputSchema === projected.inputSchema ? 'full' : 'derived';
-          if (projected?.effect) {
-            const existingAnnotations =
-              out.annotations && typeof out.annotations === 'object' && !Array.isArray(out.annotations)
-                ? (out.annotations as Record<string, unknown>)
-                : {};
-            out.annotations = {
-              ...existingAnnotations,
-              readOnlyHint: projected.effect === 'read',
-            };
-          }
-          if (tt.inputSchema) {
-            // Registry write-positional tools advertise a single `row` string
-            // (token-efficient-agent-io P-008) so the model emits a positional
-            // row; every other tool advertises its real args schema. Applied
-            // before sanitize so the swapped schema is objectified too.
-            const advertised =
-              typeof tt.name === 'string'
-                ? advertisedArgsSchema(tt.name, tt.inputSchema as Record<string, unknown>)
-                : (tt.inputSchema as Record<string, unknown>);
-            // Publish small entity vocabularies as enums (P-004b). The listing
-            // carries only the CONVERTED schema, so the entity-ref sites are
-            // read back off the tool's live args schema by name; a listing with
-            // no resolvable def (a plugin/pinned entry) simply gets no overlay.
-            // Entity-ref markers are WeakMap-keyed on the RAW Zod args-schema object
-            // identity (entity-ref.ts), so this needs the raw `ToolDefinition.args`
-            // from the legacy tool registry — `ProjectedTool` (lookupByMcpName) only
-            // carries the already-converted JSON `inputSchema`, a different object
-            // that was never entityRef()-marked, so it can never match here.
-            const def = typeof tt.name === 'string' ? lookupToolDefinitionByName(tt.name) : null;
-            const hasLiveEntityOverlay = Boolean(def?.args && hasEntityRefSchema(def.args));
-            if (hasLiveEntityOverlay) {
-              // Enum fragments can change while the process stays live, so this
-              // deliberately remains uncached. It is a small minority of the
-              // catalog; caching the static majority removes the reconnect-time
-              // deep-clone/GC burst without serving a stale vocabulary.
-              await applyEntityRefEnums(def!.args, advertised);
-              out.inputSchema = sanitizeToolSchema(advertised);
-            } else {
-              out.inputSchema = sanitizeToolSchemaCached(
-                `${registryRevision}:${tt.name ?? '(anonymous)'}:${listingVariant}`,
-                advertised,
-              );
-            }
-          }
-          // outputSchema (P-010) gets the same boolean-subschema objectification,
-          // but with position:'output' (EI-22064217935223876): unlike inputSchema,
-          // outputSchema is read back by the MCP client SDK to validate the tool's
-          // REAL return value, so it must NOT force `type: 'object'` onto a
-          // z.unknown()/z.any() result field whose actual value is a string, number,
-          // array, or boolean — see tool-schema-sanitize.ts's `SanitizePosition` doc.
-          if (tt.outputSchema) {
-            out.outputSchema = sanitizeToolSchemaCached(
-              `${registryRevision}:${tt.name ?? '(anonymous)'}:output`,
-              tt.outputSchema,
-              'output',
+    const tools = await Promise.all(
+      filtered.map(async (t) => {
+        const tt = t as { name?: string; inputSchema?: unknown; outputSchema?: unknown };
+        const out: Record<string, unknown> = { ...t };
+        // MCP clients use the standard annotation to decide whether a
+        // failed connection can safely replay a call. Keep the listing
+        // spread above so registry metadata in `_meta` survives while
+        // adding the effect-derived hint to the standard field.
+        const projected = typeof tt.name === 'string' ? lookupByMcpName(tt.name) : undefined;
+        const registryRevision = listingRegistryRevision(t);
+        const listingVariant = projected && tt.inputSchema === projected.inputSchema ? 'full' : 'derived';
+        if (projected?.effect) {
+          const existingAnnotations =
+            out.annotations && typeof out.annotations === 'object' && !Array.isArray(out.annotations)
+              ? (out.annotations as Record<string, unknown>)
+              : {};
+          out.annotations = {
+            ...existingAnnotations,
+            readOnlyHint: projected.effect === 'read',
+          };
+        }
+        if (tt.inputSchema) {
+          // Registry write-positional tools advertise a single `row` string
+          // (token-efficient-agent-io P-008) so the model emits a positional
+          // row; every other tool advertises its real args schema. Applied
+          // before sanitize so the swapped schema is objectified too.
+          const advertised =
+            typeof tt.name === 'string'
+              ? advertisedArgsSchema(tt.name, tt.inputSchema as Record<string, unknown>)
+              : (tt.inputSchema as Record<string, unknown>);
+          // Publish small entity vocabularies as enums (P-004b). The listing
+          // carries only the CONVERTED schema, so the entity-ref sites are
+          // read back off the tool's live args schema by name; a listing with
+          // no resolvable def (a plugin/pinned entry) simply gets no overlay.
+          // Entity-ref markers are WeakMap-keyed on the RAW Zod args-schema object
+          // identity (entity-ref.ts), so this needs the raw `ToolDefinition.args`
+          // from the legacy tool registry — `ProjectedTool` (lookupByMcpName) only
+          // carries the already-converted JSON `inputSchema`, a different object
+          // that was never entityRef()-marked, so it can never match here.
+          const def = typeof tt.name === 'string' ? lookupToolDefinitionByName(tt.name) : null;
+          const hasLiveEntityOverlay = Boolean(def?.args && hasEntityRefSchema(def.args));
+          if (hasLiveEntityOverlay) {
+            // Enum fragments can change while the process stays live, so this
+            // deliberately remains uncached. It is a small minority of the
+            // catalog; caching the static majority removes the reconnect-time
+            // deep-clone/GC burst without serving a stale vocabulary.
+            await applyEntityRefEnums(def!.args, advertised);
+            out.inputSchema = sanitizeToolSchema(advertised);
+          } else {
+            out.inputSchema = sanitizeToolSchemaCached(
+              `${registryRevision}:${tt.name ?? '(anonymous)'}:${listingVariant}`,
+              advertised,
             );
           }
-          return out;
-        }),
-      ),
-    };
+        }
+        // outputSchema (P-010) gets the same boolean-subschema objectification,
+        // but with position:'output' (EI-22064217935223876): unlike inputSchema,
+        // outputSchema is read back by the MCP client SDK to validate the tool's
+        // REAL return value, so it must NOT force `type: 'object'` onto a
+        // z.unknown()/z.any() result field whose actual value is a string, number,
+        // array, or boolean — see tool-schema-sanitize.ts's `SanitizePosition` doc.
+        if (tt.outputSchema) {
+          out.outputSchema = sanitizeToolSchemaCached(
+            `${registryRevision}:${tt.name ?? '(anonymous)'}:output`,
+            tt.outputSchema,
+            'output',
+          );
+        }
+        const existingMeta =
+          out._meta && typeof out._meta === 'object' && !Array.isArray(out._meta)
+            ? (out._meta as Record<string, unknown>)
+            : {};
+        out._meta = { ...existingMeta, 'papercusp/servingGeneration': servingGeneration.revision };
+        return out;
+      }),
+    );
+    // This handler is the sole baseline writer: a list_changed notification or
+    // observation from tools/call cannot prove that the client fetched this list.
+    const sessionKey = mcpSessionKey(extra);
+    rememberSessionToolRegistryRevision(sessionKey, servingGeneration.revision);
+    logMcpRequestTrace(buildMcpSessionSurfaceTraceEvent({
+      traceId: mcpTraceIdFromExtra(extra) ?? globalThis.crypto.randomUUID(),
+      toolName: 'tools/list',
+      stage: 'tools_list_completed',
+      elapsedMs: Math.max(0, Date.now() - listStartedAt),
+      extra,
+      sessionKey,
+      sessionBaseline: sessionKey ? 'recorded' : 'unavailable',
+      servingGeneration: servingGeneration.revision,
+      outcome: 'success',
+    }));
+    return { tools };
   });
 
   server.server.setRequestHandler(
     sdk.CallToolRequestSchema,
-    withFuzzyToolName(
+    withMcpSessionSurfaceRecheck(withFuzzyToolName(
     async (
       req: {
         params: {
@@ -3180,13 +3496,30 @@ export function registerMcpHost(server: McpServer): void {
       },
       extra: unknown,
     ) => {
-      await ensureOperatorToolsLoaded();
       const toolName = req.params.name;
       // Wall-clock at handler entry. The dispatcher stamps its own startedAt for
       // a real dispatch; this one exists for the paths that answer WITHOUT
       // dispatching — today the idempotency replay branch, whose telemetry row
       // records how long serving the stored result took (WI-6792).
       const callStartedAt = Date.now();
+      // The local proxy owns and overwrites this UUID before forwarding. Keep a
+      // generated fallback for direct/native callers, then carry the same value
+      // through request, dispatch and deadline evidence without logging args.
+      const traceId = mcpTraceIdFromExtra(extra) ?? globalThis.crypto.randomUUID();
+      const trace = (
+        stage: Parameters<typeof logMcpRequestTrace>[0]['stage'],
+        details: Omit<Parameters<typeof logMcpRequestTrace>[0], 'traceId' | 'toolName' | 'stage' | 'elapsedMs'> = {},
+      ): void => {
+        logMcpRequestTrace({
+          traceId,
+          toolName: toolName.slice(0, 120),
+          stage,
+          elapsedMs: Math.max(0, Date.now() - callStartedAt),
+          ...details,
+        });
+      };
+      trace('request_started');
+      await ensureOperatorToolsLoaded();
       // `let` (not const): the scoped-superuser clamp may RE-RESOLVE a wildcard
       // `harness:'all'` on plans:list into a workspace-wide read of the session's
       // own workspace (F-A1) before dispatch — see the clamp block below.
@@ -3264,7 +3597,14 @@ export function registerMcpHost(server: McpServer): void {
       // to legacy bearer dispatch. That's the whole point of the
       // verification step.
       if (spawnRes.kind === 'failed') {
-        await recordMcpAuthFailureTelemetry(toolName, extra, spawnRes.reason, projected, callStartedAt);
+        await recordMcpAuthFailureTelemetry(
+          toolName,
+          extra,
+          spawnRes.reason,
+          projected,
+          callStartedAt,
+          spawnRes.nativeSessionFailure,
+        );
         return {
           isError: true,
           content: [
@@ -3967,7 +4307,7 @@ export function registerMcpHost(server: McpServer): void {
               // retry fan-out can bypass the one-budget invariant entirely.
               const replayedResult = projected.skipResultDoor
                 ? storedResult
-                : applyResultDoor(storedResult, {
+                : await applyResultDoorAsync(storedResult, {
                     toolName,
                     workspaceId: dispatchSpawnCtx.workspaceId,
                     runId: dispatchSpawnCtx.runId ?? null,
@@ -4044,7 +4384,8 @@ export function registerMcpHost(server: McpServer): void {
            * blocking the response on a tool that is still running server-side.
            */
           deadlineFired: boolean;
-        } = { toolOutcome: null, deadlineFired: false };
+          innerDispatchStarted: boolean;
+        } = { toolOutcome: null, deadlineFired: false, innerDispatchStarted: false };
         // P2-5 must cover workspace/principal synthesis as well as the tool
         // handler. Keep one deadline result and one deadline origin for both
         // races so a slow pre-dispatch acquisition cannot start a handler
@@ -4052,7 +4393,13 @@ export function registerMcpHost(server: McpServer): void {
         const deadlineMs = effectiveMcpDeadlineMs(projected.timeoutSec);
         const deadlineAt = deadlineMs > 0 ? Date.now() + deadlineMs : null;
         const timeoutResult = (): McpCallResult => {
-          raced.deadlineFired = true;
+          if (!raced.deadlineFired) {
+            raced.deadlineFired = true;
+            trace('deadline', {
+              deadlineMs,
+              phase: raced.innerDispatchStarted ? 'inner_dispatch' : 'pre_dispatch',
+            });
+          }
           return {
             isError: true,
             content: [
@@ -4161,7 +4508,7 @@ export function registerMcpHost(server: McpServer): void {
                 : (projected.skipResultDoor ?? nestedResultDoorSkipReason(doorInput));
             const doored = resultDoorSkipReason
               ? doorInput
-              : applyResultDoor(doorInput, {
+              : await applyResultDoorAsync(doorInput, {
                   toolName,
                   workspaceId: dispatchSpawnCtx.workspaceId,
                   runId: dispatchSpawnCtx.runId ?? null,
@@ -4330,6 +4677,14 @@ export function registerMcpHost(server: McpServer): void {
                   args,
                   canCodeRun: canCodeRunHere,
                   codeRunInSurface,
+                  // The explicit request group is authoritative for calls nested in one
+                  // functions.exec/model turn, even when their sequential durations exceed the
+                  // timing heuristic used for clients that do not supply one.
+                  turnId: req.params._meta?.outputGroupId ?? req.params._meta?.turnId,
+                  // EI-23761431768707969: the door spilled THIS call because its output cohort's
+                  // shared fan-out budget was already spent. The door tells the agent to re-issue
+                  // it, so the nudge must not count that forced re-issue as a chosen round-trip.
+                  aggregateSpill: doorMeta?.reason === 'aggregate-output-budget-exceeded',
                   // clusterTurns models inference turns from DISPATCH proximity.
                   // Completion time is duration-skewed, so parallel heterogeneous
                   // calls would otherwise look like several sequential turns.
@@ -4492,6 +4847,18 @@ export function registerMcpHost(server: McpServer): void {
             () => {
               const outcome = execute();
               raced.toolOutcome = outcome;
+              void outcome.then(
+                (result) =>
+                  trace('inner_dispatch_settled', {
+                    outcome: result.isError ? 'tool_error' : 'success',
+                    afterDeadline: raced.deadlineFired,
+                  }),
+                () =>
+                  trace('inner_dispatch_settled', {
+                    outcome: 'rejected',
+                    afterDeadline: raced.deadlineFired,
+                  }),
+              );
               return outcome;
             },
             timeoutResult,
@@ -4522,10 +4889,15 @@ export function registerMcpHost(server: McpServer): void {
               // handler after that point; only a dispatch that had already
               // started is allowed to continue server-side after timeout.
               if (raced.deadlineFired || (deadlineAt !== null && Date.now() >= deadlineAt)) {
-                raced.deadlineFired = true;
+                if (!raced.deadlineFired) {
+                  raced.deadlineFired = true;
+                  trace('deadline', { deadlineMs, phase: 'pre_dispatch' });
+                }
                 throw new Error(`MCP dispatch deadline expired before tool "${toolName}" started`);
               }
               dispatchStarted = true;
+              raced.innerDispatchStarted = true;
+              trace('inner_dispatch_started', { deadlineMs });
               return runDispatch(ctx);
             });
           } catch (error) {
@@ -4645,7 +5017,7 @@ export function registerMcpHost(server: McpServer): void {
       };
     },
     MCP_FUZZY_DEPS,
-    ),
+    )),
   );
 
   // ── Resources ────────────────────────────────────────────────────
@@ -4951,6 +5323,44 @@ export async function raceDeadline<T>(deadlineMs: number, run: () => Promise<T>,
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * Apply the MCP request deadline to a target dispatched from tools:invoke.
+ * The target dispatcher also aborts its signal at `timeoutSec`, but a handler
+ * that ignores that signal can keep its promise pending. Direct tools/call
+ * requests have the outer P2-5 race below; without this nested race, the
+ * tools:invoke wrapper's 660s budget was the only hard bound for its target.
+ *
+ * The nested target has no independent transport replay record. If this race
+ * wins, its operation may still finish server-side, so the result explicitly
+ * reports unknown commit state and tells the caller to inspect state before a
+ * retry that could repeat a mutation.
+ */
+export function dispatchNestedWithMcpDeadline(
+  toolName: string,
+  toolTimeoutSec: number | null | undefined,
+  run: () => Promise<McpCallResult>,
+  baseDeadlineMs: number = MCP_DEADLINE_MS,
+): Promise<McpCallResult> {
+  const deadlineMs = effectiveMcpDeadlineMs(toolTimeoutSec, baseDeadlineMs);
+  return raceDeadline(
+    deadlineMs,
+    run,
+    () => ({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text:
+            `request_timeout: nested tool "${toolName}" exceeded ${deadlineMs}ms via tools:invoke ` +
+            `(commit status is UNKNOWN: the target may still be running server-side. This nested call has no ` +
+            `independent idempotent replay. Re-read the target's state before retrying; a blind retry may ` +
+            `repeat a mutation.`,
+        },
+      ],
+    }),
+  );
 }
 
 /**

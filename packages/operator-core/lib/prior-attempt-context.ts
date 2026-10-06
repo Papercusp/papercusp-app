@@ -237,7 +237,7 @@ export interface PriorAttemptWorkedVerbs {
   /**
    * Read/write comes from the tool registry's own effect field (`@papercusp/tooldef`
    * `inferCapabilityEffect`, the one effect oracle). A name the registry does not know is
-   * never listed, so a prose token such as `owner:owner` cannot pose as a verb.
+   * never listed, so a prose token such as `owner:Avi` cannot pose as a verb.
    */
   classifier: 'tool-registry-effect';
   /** `unavailable` = the call ledger could not be read, so `calls` are 0 by absence of

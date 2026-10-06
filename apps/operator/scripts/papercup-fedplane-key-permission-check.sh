@@ -148,7 +148,7 @@ mkdir -p "$STATE_DIR" 2>/dev/null || true
 #      .rustup, .npm, .pnpm-store, __pycache__).
 # The cache half is what makes a widened KEYPERM_DEEP_ROOTS survivable; see the
 # measurement on KEYPERM_DEEP_ROOTS below.
-EXCLUDE_DIRS_DEFAULT='node_modules node_modules.deploy-tmp.* node_modules.deploy-old.* node_modules.generation-tmp.* node_modules.generation-old.* gomodcache* .git target dependency-generations openssl-src postgresql-src hetzner-rescue testdata vendor site-packages dist-packages .venv venv .cargo-target .cache .cargo .rustup .npm .pnpm-store __pycache__'
+EXCLUDE_DIRS_DEFAULT='node_modules node_modules.deploy-tmp.* node_modules.deploy-old.* node_modules.generation-tmp.* node_modules.generation-old.* gomodcache* .git target intermediates dependency-generations openssl-src postgresql-src hetzner-rescue testdata vendor site-packages dist-packages .venv venv .cargo-target .cache .cargo .rustup .npm .pnpm-store __pycache__'
 KEYPERM_EXCLUDE_DIRS="${KEYPERM_EXCLUDE_DIRS-$EXCLUDE_DIRS_DEFAULT}"
 
 log() { echo "[fedplane-key-perm $(date +%H:%M:%S 2>/dev/null || true)] $*" >&2; }
@@ -307,6 +307,8 @@ add_finding() { FINDINGS="${FINDINGS}$1"$'\n'; FINDING_COUNT=$((FINDING_COUNT + 
 
 # ── TIER 1: .ssh directories ────────────────────────────────────────────────
 # Cheap, depth-bounded, and the tier that would have caught the 2026-09-03 key.
+# Apply the same configured directory-name exclusions used by tier 2 so this
+# walk does not spend minutes descending vendored and cache trees.
 # It checks BOTH halves of that finding: the containing directory's mode (0775)
 # and each contained private key's mode (0664). A 0700 directory holding a 0644
 # key is still an exposure to anything running as the owner's group inside it,
@@ -345,7 +347,7 @@ for root in $KEYPERM_SSH_ROOTS; do
         *)           add_finding "KEY  mode=${fmode} ${f} — encryption state UNKNOWN (unrecognised key format); treat as unencrypted until checked" ;;
       esac
     done < <(find "$sshdir" -maxdepth 1 -type f ! -name '*.pub' ! -name 'known_hosts*' ! -name 'config' ! -name 'authorized_keys*' 2>/dev/null)
-  done < <(find "$root" -maxdepth "$KEYPERM_SSH_MAXDEPTH" -type d -name .ssh 2>/dev/null)
+  done < <(find "$root" -maxdepth "$KEYPERM_SSH_MAXDEPTH" "${PRUNE_ARGS[@]}" -type d -name .ssh -print 2>/dev/null)
 done
 
 # ── POSITIVE CONTROL — constraint (3) ───────────────────────────────────────
@@ -402,7 +404,10 @@ if [ "$KEYPERM_DEEP" = 1 ]; then
     # extra process.
     deep_out="$(timeout "$KEYPERM_DEEP_TIMEOUT_S" nice -n 19 ionice -c 3 bash -c '
         re="$1"; shift
-        find "$@" -print0 2>/dev/null | xargs -0 -r -n 200 grep -laIE -m1 "$re" 2>/dev/null
+        # The current workspace population is over 1.1M eligible files; batches
+        # of 200 start nearly 6,000 grep processes per run. Larger batches cut
+        # process startup overhead; xargs still enforces system argument-size limits.
+        find "$@" -print0 2>/dev/null | xargs -0 -r -n 1000 grep -laIE -m1 "$re" 2>/dev/null
       ' _ "$KEY_HEADER_RE" "$root" "${PRUNE_ARGS[@]}" -type f -size -64k -size +100c)"
     rc=$?
     # 124 is timeout(1)'s own "the command timed out" status. Partial output from

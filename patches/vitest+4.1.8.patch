@@ -1,0 +1,22 @@
+diff --git a/node_modules/vitest/dist/chunks/startVitestModuleRunner.bRl2_oI_.js b/node_modules/vitest/dist/chunks/startVitestModuleRunner.bRl2_oI_.js
+index 37b4b690284e68263811ae9e02b613c1c09cdbb8..b2825c14a0d415bb6dae8b863a0fa43cf90a888c 100644
+--- a/node_modules/vitest/dist/chunks/startVitestModuleRunner.bRl2_oI_.js
++++ b/node_modules/vitest/dist/chunks/startVitestModuleRunner.bRl2_oI_.js
+@@ -599,7 +599,7 @@ function getCachedVitestImport(id, state) {
+ 	// always externalize Vitest because we import from there before running tests
+ 	// so we already have it cached by Node.js
+ 	const root = state().config.root;
+-	const relativeRoot = relativeIds[root] ?? (relativeIds[root] = normalizedDistDir.slice(root.length));
++	const relativeRoot = relativeIds[root] ?? (relativeIds[root] = normalizedDistDir.startsWith(root + "/") ? normalizedDistDir.slice(root.length) : "");
+ 	if (id.includes(distDir) || id.includes(normalizedDistDir)) {
+ 		const externalize = id.startsWith("file://") ? id : pathToFileURL(id).toString();
+ 		externalizeMap.set(id, externalize);
+@@ -608,7 +608,7 @@ function getCachedVitestImport(id, state) {
+ 			type: "module"
+ 		};
+ 	}
+-	if (relativeRoot && relativeRoot !== "/" && id.startsWith(relativeRoot)) {
++	if (relativeRoot && relativeRoot !== "/" && id.startsWith(relativeRoot + "/")) {
+ 		const externalize = pathToFileURL(join(root, id)).toString();
+ 		externalizeMap.set(id, externalize);
+ 		return {

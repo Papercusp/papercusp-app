@@ -12,6 +12,12 @@ import { withWorkspace } from '@papercusp/db-org';
 import { readArchivedSessionTurns } from '../../session-archive-read';
 import { refreshTargetSessionBeforeRead } from '../sessions/_shared';
 import {
+  countRestrictedTurnsInScope,
+  loadTranscriptExclusion,
+  restrictedTurnSql,
+  withheldReceipt,
+} from '../../personal-vault/transcript-exclusion';
+import {
   clampTranscriptLimit,
   escapeLikePattern,
   type PlanRunTranscriptPage,
@@ -30,12 +36,19 @@ export function isIndexedAgentSessionKind(
   return kind === 'claude' || kind === 'omp' || kind === 'codex';
 }
 
+/**
+ * `readerOwnerIds` are the caller's identities. D-006: a turn another agent
+ * recorded inside one of its disclosure windows is excluded before the query
+ * filter and paging, so it never competes for a slot; the reported count covers
+ * the whole session, independent of the query. No reader ids = fail closed.
+ */
 export async function readAgentSessionTranscript(
   workspaceId: string,
   sourceKind: IndexedAgentSessionKind,
   sessionId: string,
   opts: ReadPlanRunTranscriptOpts = {},
-): Promise<PlanRunTranscriptPage> {
+  readerOwnerIds: ReadonlyArray<string | null | undefined> = [],
+): Promise<PlanRunTranscriptPage & ReturnType<typeof withheldReceipt>> {
   const limit = clampTranscriptLimit(opts.limit);
   const cursor =
     typeof opts.cursor === 'number' && Number.isFinite(opts.cursor)
@@ -74,6 +87,7 @@ export async function readAgentSessionTranscript(
          AND session_id = ${sessionId}
          AND speaker IN ('user', 'assistant')
          AND turn_idx > ${cursor}
+         AND NOT ${restrictedTurnSql(tx, 'session_turns', readerOwnerIds)}
          ${queryFilter} ${beforeFilter}
        ORDER BY turn_idx ASC
        LIMIT ${limit + 1}`;
@@ -81,6 +95,11 @@ export async function readAgentSessionTranscript(
     if (rows.length > 0) {
       const hasMore = rows.length > limit;
       const page = rows.slice(0, limit);
+      const scopeTally = await countRestrictedTurnsInScope(tx, {
+        selfOwnerIds: readerOwnerIds,
+        scope: tx`(st.workspace_id = ${workspaceId} OR st.workspace_id = 'default')
+                  AND st.source_kind = ${sourceKind} AND st.session_id = ${sessionId}` as never,
+      });
       return {
         turns: page.map((row) => ({
           seq: Number(row.turn_idx),
@@ -89,6 +108,7 @@ export async function readAgentSessionTranscript(
           createdAt: Number(row.created_at),
         })),
         nextCursor: hasMore ? Number(page[page.length - 1]!.turn_idx) : null,
+        ...withheldReceipt(scopeTally),
       };
     }
 
@@ -98,9 +118,16 @@ export async function readAgentSessionTranscript(
     if (!archive || archive.sourceKind !== sourceKind) {
       return { turns: [], nextCursor: null };
     }
+    // D-006 on the archive too, decided per session before the query filter.
+    const exclusion = await loadTranscriptExclusion(tx, {
+      selfOwnerIds: readerOwnerIds,
+      stamps: archive.turns.map((turn) => ({ owner: turn.owner ?? archive.owner, at: turn.ts })),
+    });
+    const archiveTally = exclusion.partition(archive.turns, (turn) => ({ owner: turn.owner ?? archive.owner, at: turn.ts })).withheld;
     let turns = archive.turns.filter(
       (turn) =>
-        turn.turn_idx > cursor
+        exclusion.withholds({ owner: turn.owner ?? archive.owner, at: turn.ts }) === null
+        && turn.turn_idx > cursor
         && (turn.speaker === 'user' || turn.speaker === 'assistant')
         && (!query || turn.text.toLowerCase().includes(query.toLowerCase()))
         && (
@@ -119,6 +146,7 @@ export async function readAgentSessionTranscript(
         createdAt: turn.ts ? Date.parse(turn.ts) : 0,
       })),
       nextCursor: hasMore ? turns[turns.length - 1]!.turn_idx : null,
+      ...withheldReceipt(archiveTally),
     };
   });
 }

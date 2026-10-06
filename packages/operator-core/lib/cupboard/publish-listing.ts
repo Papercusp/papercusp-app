@@ -15,6 +15,7 @@ import { resolveCupboardBaseUrl } from './base-url';
 import { listingManifestDigest, unsignedListingManifest } from './listing-manifest';
 import { prepareReleaseForPublish, type ReleaseGateInput } from './publish-release-gate';
 import { resolvePublisherAttestation } from './publisher-attestation';
+import { putSelfDescribingArtifact } from './self-describing-release';
 import type { ListingKind, ListingVisibility, RubricRequirement } from './types';
 import type { ProvidedEventFamily, RequiredEventFamily } from '@papercusp/blueprint-distribution';
 
@@ -158,6 +159,11 @@ export interface CupboardListingInput {
    * `publishListingToCupboard` strips it from the request body by construction.
    */
   release?: ReleaseGateInput;
+  /** P-011: ship the PUBLIC release's package bytes to the Worker's R2 origin
+   *  (`PUT /artifacts/sha256/<hex>`) after the release gate passes and BEFORE the
+   *  listing POST pins `release_content_hash`. Publisher-only (stripped from the body
+   *  like `release`). Without it a pin could name bytes no origin holds. */
+  uploadReleaseBytes?: boolean;
 }
 
 export type CupboardPublishResult =
@@ -218,7 +224,7 @@ export async function publishListingToCupboard(
 ): Promise<CupboardPublishResult> {
   // Strip the publisher-only release block up front, so no later edit can leak
   // plaintext or the content key into the request body by adding a spread.
-  const { release, ...listing } = input;
+  const { release, uploadReleaseBytes, ...listing } = input;
 
   // Refuse locally what the worker would refuse anyway, but with the reason.
   // A private row is scoped to its tenant, so a private listing with no tenant
@@ -261,6 +267,20 @@ export async function publishListingToCupboard(
       // on the row, so without this a verifier cannot re-derive the bytes at all.
       release_manifest: JSON.stringify(releaseManifest),
     };
+    // P-011: the bytes reach the R2 ORIGIN before the Worker pins their hash, so a pinned
+    // `release_content_hash` always names bytes the origin holds. The Worker re-derives the
+    // Merkle root on PUT (content-address-mismatch otherwise) — the pin is not our say-so.
+    if (uploadReleaseBytes && release.visibility === 'public' && release.bytes) {
+      const uploaded = await putSelfDescribingArtifact({
+        baseUrl: resolveCupboardBaseUrl(),
+        token: tokenRes.token,
+        contentHash: releaseManifest.contentHash,
+        bytes: release.bytes,
+      });
+      if (!uploaded.ok) {
+        return { ok: false, status: uploaded.status, error: 'release_artifact_upload_failed', detail: uploaded.detail ?? uploaded.error };
+      }
+    }
   }
 
   // Best-effort channel-2 attestation (idempotent device-binding gist). null on

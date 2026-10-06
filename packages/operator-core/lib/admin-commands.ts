@@ -164,7 +164,7 @@ $SSH_WIN "powershell -NoProfile -Command \\"& { \\$msi = \\"\\$env:USERPROFILE\\
     id: 'restart-3055',
     label: 'Restart dev stack (3055 + 3070)',
     section: 'running',
-    description: 'Restarts the operator dev stack — papercup-dev (Vite frontend on :3055) and papercup-dev-api (Hono on :3070). The /admin page goes offline for a few seconds while the Hono host re-imports; the Vite side comes back via HMR almost immediately.',
+    description: 'Restarts the operator dev stack — papercup-dev (Vite frontend on :3055) and papercusp-dev-api (Hono on :3070). The /admin page goes offline for a few seconds while the Hono host re-imports; the Vite side comes back via HMR almost immediately.',
     command: 'bin/dev 2>&1',
     cwd: PAPERCUSP_REPO,
   },

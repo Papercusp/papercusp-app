@@ -1084,6 +1084,12 @@ export const BundleRefSchema = z
  * input always records the exact `class@version` the pot selected. */
 export const CAPABILITY_CLASS_MAJOR_REF = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+@(?:0|[1-9][0-9]*)$/;
 
+/** An exact registered class version — the key a pot binding is stored under:
+ * the registry's class id grammar + `@` + its semver grammar (operator-core
+ * capability-class-registry-store, pinned by a test there). Grants name these;
+ * a tool id is never a capability need (portable-identity-packages D-040). */
+export const CAPABILITY_CLASS_EXACT_REF = /^[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
 /** One component contribution bound to an existing compiled input. The source and
  * refresh metadata describe how the input is produced; they never grant authority.
  * Package refs use `<packageKind>:<ref>` so the exact package pin is unambiguous. */
@@ -1214,9 +1220,12 @@ export const BlueprintModeDeclarationSchema = z.object({
  * Install-time resolution and provider selection are P-017; runtime grants still
  * narrow the pot/role ceiling and never widen it (D-004/D-005).
  */
+const GrantClassRefSchema = z.string().regex(CAPABILITY_CLASS_EXACT_REF,
+  'a grant names a capability class at an exact class@version, never a tool id');
+
 export const GrantsSchema = z.object({
-  requires: z.array(z.string().min(1)).default([]),
-  optional: z.array(z.string().min(1)).default([]),
+  requires: z.array(GrantClassRefSchema).default([]),
+  optional: z.array(GrantClassRefSchema).default([]),
   suggestedProviders: z.record(z.string(), z.string()).default({}),
 });
 

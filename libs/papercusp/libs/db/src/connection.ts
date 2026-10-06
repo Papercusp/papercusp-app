@@ -25,7 +25,7 @@
  *   $HARNESS_DATABASE_URL  (defaults to harness_app role on localhost)
  */
 import { createRequire } from 'node:module';
-import postgres, { Sql } from 'postgres';
+import postgres, { type Sql } from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import * as sharedSchema from './schema';
 import {

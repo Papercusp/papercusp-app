@@ -14,26 +14,40 @@
  * dev:pipeline_position.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { listRuntimeVintage, type RuntimeVintageRow } from '../../runtime-vintage';
 import { devDeployState } from '../../dev-deploy-state';
-
-const pexec = promisify(execFile);
+import { execFileViaSidecar } from '../../fleet/git-via-sidecar';
 
 /** Injectable git runner (returns trimmed stdout, or null on any failure). */
 export type GitRunner = (repo: string, args: string[]) => Promise<string | null>;
 
-export const realGit: GitRunner = async (repo, args) => {
-  try {
-    const { stdout } = await pexec('git', ['-C', repo, ...args], { maxBuffer: 16 * 1024 * 1024 });
-    return stdout.trim();
-  } catch {
-    return null;
-  }
-};
+/** The vintage probe's per-git-call kill timeout. */
+export const VINTAGE_GIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Build the real git runner over an execFile-shaped seam. The default seam is
+ * {@link execFileViaSidecar}: on bg-host a direct fork stalls the main thread for
+ * ~40 ms per GB of RSS (WI-10006307 measured one deploys:vintage call at 68% of a
+ * 706 ms-p95 loop-saturation profile inside spawn < execFile < realGit).
+ */
+export function createRealGit(exec: typeof execFileViaSidecar = execFileViaSidecar): GitRunner {
+  return async (repo, args) => {
+    try {
+      const { stdout } = await exec('git', ['-C', repo, ...args], {
+        timeoutMs: VINTAGE_GIT_TIMEOUT_MS,
+        subsystem: 'deploys-vintage',
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      return stdout.trim();
+    } catch {
+      return null;
+    }
+  };
+}
+
+export const realGit: GitRunner = createRealGit();
 
 export interface VintageRowReport {
   workspaceId: string;

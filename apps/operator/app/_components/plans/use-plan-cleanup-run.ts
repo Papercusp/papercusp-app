@@ -114,8 +114,42 @@ export interface PlanCleanupStartResult {
     failed: number;
   };
   launchError?: string;
+  /** P-005: how many shown plans the run actually carries. `truncated > 0`
+   *  means the server kept the least-recently-scanned `accepted` of
+   *  `requested`; the strip says "first N of M" instead of cutting silently. */
+  coverage?: PlanCleanupCoverage;
   preservedOutcomes?: number;
   error?: string;
+}
+
+export interface PlanCleanupCoverage {
+  requested: number;
+  accepted: number;
+  truncated: number;
+}
+
+/** Parse the start response's coverage triple; absent/malformed → undefined. */
+export function parsePlanCleanupCoverage(
+  json: Record<string, unknown>,
+): PlanCleanupCoverage | undefined {
+  const requested = Number(json.requested);
+  const accepted = Number(json.accepted);
+  const truncated = Number(json.truncated);
+  if (![requested, accepted, truncated].every((n) => Number.isFinite(n) && n >= 0)) {
+    return undefined;
+  }
+  return { requested, accepted, truncated };
+}
+
+/** The strip's "first N of M" line, or null when the run carries every shown plan. */
+export function planCleanupCoverageNotice(
+  coverage: PlanCleanupCoverage | undefined,
+): string | null {
+  if (!coverage || coverage.truncated <= 0) return null;
+  return (
+    `Scanning the first ${coverage.accepted} of ${coverage.requested} shown plans ` +
+    `(least recently scanned first) — run Clean-up again to cover the other ${coverage.truncated}.`
+  );
 }
 
 export interface PlanCleanupCounts {
@@ -394,6 +428,7 @@ export function usePlanCleanupOps(): {
               : undefined,
           launchError:
             typeof json.launchError === "string" ? json.launchError : undefined,
+          coverage: parsePlanCleanupCoverage(json),
         };
       } catch (error) {
         return {

@@ -59,7 +59,6 @@ import {
   updateDrillTriaged,
 } from './store';
 import {
-  SANDBOX_HARNESS_SLUG,
   SANDBOX_WORKSPACE_ID,
   type DrillClass,
   type LeakCheckResult,
@@ -225,7 +224,6 @@ export async function runDrillCycle(cls: DrillClass, deps: DrillCycleDeps): Prom
     const candidates = await deps.readItems({
       state: 'open',
       origins: ['drill'],
-      harnessSlug: SANDBOX_HARNESS_SLUG,
     });
     const digest = buildDigest(candidates, { nowMs: deps.now() });
     const scored = [...digest.autoEligible, ...digest.humanQueue].find((s) => s.id === issue.id);
@@ -239,6 +237,7 @@ export async function runDrillCycle(cls: DrillClass, deps: DrillCycleDeps): Prom
       id: issue.id,
       decision: decision.decision,
       reason: `red-queen drill triage: ${decision.reason}`,
+      target: decision.target,
       by: 'red-queen-sandbox',
       comment: false,
     });

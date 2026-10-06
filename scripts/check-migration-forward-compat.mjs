@@ -380,6 +380,8 @@ const SIDECAR_HEX40 = /^[0-9a-f]{40}$/;
 const SIDECAR_HEX64 = /^[0-9a-f]{64}$/;
 const SIDECAR_WORK_ITEM = /^(?:WI|EI|F)-\d+$/;
 const SIDECAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const DEFAULT_REVIEW_WARNING_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * Prose that carries no information. This is the specific weakness of ACK_MARKER
  * (`-- FORWARD-COMPAT: TODO` satisfies it) that D-092 requires the typed route to
@@ -544,6 +546,30 @@ export function evaluateForwardCompatSidecar({
 }
 
 /**
+ * Parse the frozen repair queue's persisted openedAtMs. An absent value keeps the
+ * historical wall-clock evaluation; a malformed supplied value must fail closed.
+ *
+ * @param {string | undefined} raw
+ * @returns {Date | undefined}
+ */
+export function parseFrozenCandidateOpenedAtMs(raw) {
+  if (raw == null || raw.trim() === '') return undefined;
+  const value = raw.trim();
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new TypeError('frozen candidate openedAtMs must be a positive integer');
+  }
+  const openedAtMs = Number(value);
+  const date = new Date(openedAtMs);
+  if (
+    !Number.isSafeInteger(openedAtMs) ||
+    !Number.isFinite(date.getTime())
+  ) {
+    throw new TypeError('frozen candidate openedAtMs is outside the valid date range');
+  }
+  return date;
+}
+
+/**
  * Read + evaluate the sidecar for one migration artifact on disk.
  *
  * @param {string} directory
@@ -585,6 +611,101 @@ export function readForwardCompatSidecar(
     now,
   });
   return { ...verdict, sidecarFile };
+}
+
+/**
+ * Cheaply find sidecars whose review date is approaching, without reading
+ * migrations or resolving the required commit ancestry. The staging sync timer
+ * uses this advisory scan on every pass, including checkout no-ops; the full
+ * migration lint remains the fail-closed gate before a restart.
+ *
+ * @param {string} directory
+ * @param {{ now?: Date, warningDays?: number, readdir?: Function, readFile?: Function }} [options]
+ * @returns {Array<{kind: 'expiring'|'expired'|'invalid', file: string, reviewBy?: string, detail?: string}>}
+ */
+export function forwardCompatReviewWarnings(
+  directory,
+  {
+    now = new Date(),
+    warningDays = DEFAULT_REVIEW_WARNING_DAYS,
+    readdir = readdirSync,
+    readFile = readFileSync,
+  } = {},
+) {
+  if (!Number.isSafeInteger(warningDays) || warningDays < 1 || warningDays > 3650) {
+    throw new RangeError('warningDays must be an integer between 1 and 3650');
+  }
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) throw new TypeError('now must be a valid Date');
+
+  const warnings = [];
+  for (const file of readdir(directory).filter((name) => name.endsWith(SIDECAR_SUFFIX)).sort()) {
+    let sidecarText;
+    try {
+      sidecarText = readFile(join(directory, file), 'utf8');
+    } catch (error) {
+      warnings.push({ kind: 'invalid', file, detail: `could not read sidecar (${error.message})` });
+      continue;
+    }
+
+    let sidecar;
+    try {
+      sidecar = JSON.parse(sidecarText);
+    } catch {
+      warnings.push({ kind: 'invalid', file, detail: 'sidecar is not valid JSON' });
+      continue;
+    }
+
+    const reviewBy = sidecar && typeof sidecar.reviewBy === 'string' ? sidecar.reviewBy : null;
+    if (!reviewBy || !SIDECAR_DATE.test(reviewBy)) {
+      warnings.push({ kind: 'invalid', file, detail: 'reviewBy is missing or is not YYYY-MM-DD' });
+      continue;
+    }
+
+    const reviewStartMs = Date.parse(`${reviewBy}T00:00:00.000Z`);
+    const expiryMs = Date.parse(`${reviewBy}T23:59:59.999Z`);
+    if (
+      !Number.isFinite(reviewStartMs) ||
+      !Number.isFinite(expiryMs) ||
+      new Date(reviewStartMs).toISOString().slice(0, 10) !== reviewBy
+    ) {
+      warnings.push({ kind: 'invalid', file, reviewBy, detail: 'reviewBy is not a real date' });
+      continue;
+    }
+    if (expiryMs < nowMs) {
+      warnings.push({ kind: 'expired', file, reviewBy });
+    } else if (reviewStartMs - warningDays * DAY_MS <= nowMs) {
+      warnings.push({ kind: 'expiring', file, reviewBy });
+    }
+  }
+  return warnings;
+}
+
+function formatReviewWarning(warning, warningDays) {
+  if (warning.kind === 'expired') {
+    return `WARNING: ${warning.file} reviewBy ${warning.reviewBy} has passed; renew or remove the sidecar.`;
+  }
+  if (warning.kind === 'invalid') {
+    return `WARNING: ${warning.file} ${warning.detail}; forward-compat lint will refuse it.`;
+  }
+  return `WARNING: ${warning.file} reviewBy ${warning.reviewBy} is within ${warningDays} days; renew or remove the sidecar before expiry.`;
+}
+
+function parseReviewWarningArgs(args) {
+  if (!args.some((arg) => arg.startsWith('--warn-review-by-days') || arg.startsWith('--sidecar-directory='))) {
+    return null;
+  }
+  if (args.length !== 2) throw new Error('warning mode requires --warn-review-by-days=N and --sidecar-directory=PATH');
+  const daysMatch = /^--warn-review-by-days=(\d+)$/.exec(args[0]);
+  const directoryMatch = /^--sidecar-directory=(.+)$/.exec(args[1]);
+  if (!daysMatch || !directoryMatch) {
+    throw new Error('warning mode requires --warn-review-by-days=N followed by --sidecar-directory=PATH');
+  }
+  const warningDays = Number(daysMatch[1]);
+  if (!Number.isSafeInteger(warningDays) || warningDays < 1 || warningDays > 3650) {
+    throw new Error('--warn-review-by-days must be an integer between 1 and 3650');
+  }
+  return { warningDays, directory: directoryMatch[1] };
 }
 
 /**
@@ -1098,6 +1219,27 @@ function selfTest() {
 }
 
 function main() {
+  let reviewWarningOptions;
+  try {
+    reviewWarningOptions = parseReviewWarningArgs(process.argv.slice(2));
+  } catch (error) {
+    console.error(`check-migration-forward-compat: ${error.message}`);
+    process.exit(2);
+  }
+  if (reviewWarningOptions) {
+    let warnings;
+    try {
+      warnings = forwardCompatReviewWarnings(reviewWarningOptions.directory, reviewWarningOptions);
+    } catch (error) {
+      console.error(`check-migration-forward-compat: review warning scan failed: ${error.message}`);
+      process.exit(1);
+    }
+    for (const warning of warnings) {
+      console.log(`check-migration-forward-compat: ${formatReviewWarning(warning, reviewWarningOptions.warningDays)}`);
+    }
+    return;
+  }
+
   const selfTestFailures = selfTest();
   if (selfTestFailures.length > 0) {
     console.error('check-migration-forward-compat: SELF-TEST FAILED -- the checker itself is broken.');
@@ -1134,6 +1276,26 @@ function main() {
     .sort((a, b) => a.num - b.num);
 
   const isAncestorOfHead = makeAncestorResolver();
+  let frozenCandidateOpenedAt;
+  try {
+    frozenCandidateOpenedAt = parseFrozenCandidateOpenedAtMs(
+      process.env.PAPERCUSP_FROZEN_CANDIDATE_OPENED_AT_MS,
+    );
+  } catch (error) {
+    console.error(
+      'check-migration-forward-compat: invalid PAPERCUSP_FROZEN_CANDIDATE_OPENED_AT_MS (' +
+        String(error instanceof Error ? error.message : error) +
+        ')',
+    );
+    process.exit(2);
+    return;
+  }
+  if (frozenCandidateOpenedAt) {
+    console.log(
+      'check-migration-forward-compat: evaluating reviewBy as of frozen candidate selection ' +
+        frozenCandidateOpenedAt.toISOString(),
+    );
+  }
   const offenders = [];
   const acknowledged = [];
   for (const { file, text } of readScannedFiles(SQL_DIR, inScope.map(({ file }) => file))) {
@@ -1144,7 +1306,11 @@ function main() {
     // The migration itself is immutable once applied, so the acknowledgement may
     // live in a typed sidecar beside it (D-092). Any defect refuses the WHOLE
     // sidecar — a partially-valid one never waves a migration through.
-    const sidecar = readForwardCompatSidecar(SQL_DIR, file, { migrationText: text, isAncestorOfHead });
+    const sidecar = readForwardCompatSidecar(SQL_DIR, file, {
+      migrationText: text,
+      isAncestorOfHead,
+      now: frozenCandidateOpenedAt,
+    });
     if (sidecar.honored) {
       acknowledged.push({ file, sidecarFile: sidecar.sidecarFile });
       continue;

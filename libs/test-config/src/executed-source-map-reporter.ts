@@ -30,15 +30,17 @@
  */
 import type { Reporter, TestModule, Vitest } from 'vitest/node';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { inputsFilePath, PC_EXECUTED_INPUTS_DIR_ENV, type InputsRecord } from './executed-inputs-capture';
-import { isAbsolute, posix, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   captureWorktreeSnapshot,
   closeSharedPgIfUnheld,
   computeWorktreeDirty,
+  collectModuleExecution,
   retainSharedPg,
   inferWorkspaceRoot,
   isMutationProbeRun,
@@ -46,7 +48,8 @@ import {
   type PgHandle,
   type WorktreeGitSnapshot,
 } from './admin-test-runs-reporter';
-import { executedSourceMapArmed } from './vitest-config';
+import { executedSourceMapArmed, PC_EXECUTED_SOURCE_ORIGINAL_META } from './vitest-config';
+import { qualifyLoadedConfigSources, qualifyLoadedMainProcessSources } from './executed-config-load-capture.ts';
 
 export interface ExecutedSourceRow {
   workspaceName: string;
@@ -60,6 +63,8 @@ export interface ExecutedSourceRow {
   inputsCaptured?: boolean;
   /** P-009: why this pass cannot be reused whatever the drift. */
   opaqueReasons?: string[];
+  /** Optional OUT-only diagnostics; never a replacement for the clean-checkout reuse stamp. */
+  sourceEvidence?: ExecutedSourceEvidence;
 }
 
 export interface ExecutedSourceFlush {
@@ -109,6 +114,38 @@ export function classifyReadPaths(
     opaqueReasons.push(`untracked-read:+${untracked.length - UNTRACKED_REASON_CAP} more`);
   }
   return { readPaths: [...readPaths].sort(), opaqueReasons };
+}
+
+interface ConfigDepsSource {
+  vite?: { config?: { configFileDependencies?: unknown } };
+  projects?: Array<{ vite?: { config?: { configFileDependencies?: unknown } } }>;
+}
+
+/**
+ * gate-test-reuse-yield-2026-10-01 P-001: every vitest config this run loaded, plus the files those
+ * configs import by RELATIVE path, as absolute paths — vite's `configFileDependencies` of the root
+ * project and of each project. Vite bundles a config's relative imports (recorded) and externalizes
+ * its bare ones (not recorded); test-pass-reuse.mjs isGlobalRunnerInput explains why the bare ones
+ * are covered. Measured 2026-10-01 (vitest 4.1.8, vite 7.3.5): a workspace config yields
+ * `[<its config>]`, and one importing `./helper` yields `[<helper>, <its config>]`.
+ *
+ * @returns sorted unique absolute paths, or null when no config dependency is visible (an unknown
+ *          config, which the caller must treat as opaque — never as "no config input").
+ */
+export function resolveConfigDependencies(ctx: unknown): string[] | null {
+  const deps = new Set<string>();
+  const add = (v: unknown): void => {
+    if (!Array.isArray(v)) return;
+    for (const p of v) if (typeof p === 'string' && isAbsolute(p)) deps.add(p);
+  };
+  try {
+    const c = ctx as ConfigDepsSource | null | undefined;
+    add(c?.vite?.config?.configFileDependencies);
+    for (const project of Array.isArray(c?.projects) ? c.projects : []) add(project?.vite?.config?.configFileDependencies);
+  } catch {
+    return null; // a getter that throws (server not ready) is an unknown config
+  }
+  return deps.size > 0 ? [...deps].sort() : null;
 }
 
 /** Build `isTracked` from `git ls-files` output: a tracked file, or a directory holding one. */
@@ -209,6 +246,233 @@ export function collectExecutedModules(
   return [...out].sort();
 }
 
+interface SourceFingerprint {
+  path: string;
+  sha256: string;
+  basis?: 'vite-pre-transform';
+}
+
+interface CollectedModuleSources {
+  sources: SourceFingerprint[];
+  reasons: string[];
+}
+
+/** Original Vite source-map bytes captured before the test bodies execute. */
+export interface CollectedSourceEvidence {
+  modules: Map<string, CollectedModuleSources>;
+  reasons: string[];
+}
+
+export interface ExecutedSourceEvidence {
+  schemaVersion: 'vite-collected-source-evidence-v1';
+  /** This measures repository worker modules, not native dependencies, runner code or runtime reads. */
+  scope: 'repository-worker-vite-original-sources';
+  status: 'stable' | 'changed' | 'unknown';
+  sources: Array<SourceFingerprint & { currentSha256: string | null }>;
+  reasons: string[];
+}
+
+interface SourceGraphNode {
+  id: string | null;
+  meta?: Record<string, unknown>;
+  info?: { meta?: Record<string, unknown> };
+  transformResult?: { map?: unknown } | null;
+}
+
+const sourceHash = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex');
+
+/** Disk observations AFTER Vite loaded its config, never original loaded-source proof. */
+export interface ConfigSourceSnapshots {
+  schemaVersion: 'vitest-config-disk-snapshots-v1';
+  scope: 'repository-vite-config-dependencies';
+  basis: 'reporter-init-disk';
+  status: 'unchanged' | 'changed' | 'unknown';
+  sources: Array<{ path: string; sha256: string | null; currentSha256: string | null }>;
+  reasons: string[];
+}
+
+interface ConfigSourceCapture {
+  sources: Array<{ path: string; sha256: string | null }>;
+  reasons: string[];
+}
+
+export function captureConfigSources(
+  paths: string[] | null,
+  o: { repoRoot: string; readSource?: (absolutePath: string) => Buffer },
+): ConfigSourceCapture {
+  const sources = new Map<string, string | null>();
+  const reasons = new Set<string>();
+  const readSource = o.readSource ?? readFileSync;
+  if (!paths?.length) reasons.add('config-dependencies-unavailable');
+  for (const absolute of paths ?? []) {
+    const path = normalizeExecutedKey(absolute, o.repoRoot);
+    if (!path) { reasons.add(`config-dependency-outside-repository:${absolute}`); continue; }
+    try { sources.set(path, sourceHash(readSource(resolve(o.repoRoot, path)))); }
+    catch { sources.set(path, null); reasons.add(`config-source-unreadable:${path}`); }
+  }
+  return { sources: [...sources].sort(([a], [b]) => a.localeCompare(b)).map(([path, sha256]) => ({ path, sha256 })),
+    reasons: [...reasons].sort() };
+}
+
+export function qualifyConfigSources(
+  captured: ConfigSourceCapture | undefined,
+  o: { repoRoot: string; readSource?: (absolutePath: string) => Buffer },
+): ConfigSourceSnapshots {
+  const reasons = new Set(captured?.reasons ?? ['config-snapshots-unavailable']);
+  const readSource = o.readSource ?? readFileSync;
+  let changed = false;
+  const sources = (captured?.sources ?? []).map(source => {
+    let currentSha256: string | null = null;
+    try { currentSha256 = sourceHash(readSource(resolve(o.repoRoot, source.path))); }
+    catch { reasons.add(`config-source-unreadable:${source.path}`); }
+    if (source.sha256 !== null && currentSha256 !== null && source.sha256 !== currentSha256) {
+      changed = true;
+      reasons.add(`config-source-changed:${source.path}`);
+    }
+    return { ...source, currentSha256 };
+  });
+  if (sources.length === 0) reasons.add('config-sources-unavailable');
+  return { schemaVersion: 'vitest-config-disk-snapshots-v1', scope: 'repository-vite-config-dependencies',
+    basis: 'reporter-init-disk', status: changed ? 'changed' : reasons.size > 0 ? 'unknown' : 'unchanged',
+    sources, reasons: [...reasons].sort() };
+}
+
+/**
+ * EI-24827847586322829: importDurations grows as tests run. Snapshot this module's existing
+ * environment graph at collection, then select the actually reported modules at end. Never
+ * reconstruct original bytes from end-of-run disk or a graph entry replaced during the test.
+ * This diagnostic is deliberately independent of HEAD and never authorizes database reuse.
+ */
+export function captureCollectedSources(
+  graph: Iterable<SourceGraphNode> | undefined,
+  o: { repoRoot: string; readSource?: (absolutePath: string) => Buffer },
+): CollectedSourceEvidence {
+  const modules = new Map<string, CollectedModuleSources>();
+  const readSource = o.readSource ?? readFileSync;
+  const reasons: string[] = [];
+  if (!graph) return { modules, reasons: ['collection-graph-unavailable'] };
+  try {
+    for (const node of graph) {
+      const rel = node.id && normalizeExecutedKey(node.id, o.repoRoot);
+      if (!rel) continue;
+      const entry: CollectedModuleSources = { sources: [], reasons: [] };
+      const map = node.transformResult?.map as {
+        sources?: unknown; sourcesContent?: unknown; sourceRoot?: unknown;
+      } | null | undefined;
+      const original = node.info?.meta?.[PC_EXECUTED_SOURCE_ORIGINAL_META] as {
+        version?: unknown; id?: unknown; sha256?: unknown;
+      } | undefined;
+      // An erased type-only module has no original map entry. Use the exact transform input
+      // receipt when available, never current disk bytes as a substitute for missing originals.
+      if ((!map || !Array.isArray(map.sources) || map.sources.length === 0) && original?.version === 1 &&
+          typeof original.id === 'string' && normalizeExecutedKey(original.id, o.repoRoot) === rel &&
+          typeof original.sha256 === 'string' && /^[a-f0-9]{64}$/.test(original.sha256)) {
+        entry.sources.push({ path: rel, sha256: original.sha256, basis: 'vite-pre-transform' });
+        try {
+          if (sourceHash(readSource(resolve(o.repoRoot, rel))) !== original.sha256) {
+            entry.reasons.push(`collection-source-mismatch:${rel}`);
+          }
+        } catch {
+          entry.reasons.push(`collection-source-unreadable:${rel}`);
+        }
+      } else if (!map || !Array.isArray(map.sources) || !Array.isArray(map.sourcesContent)) {
+        entry.reasons.push(`source-map-unavailable:${rel}`);
+      } else {
+        for (let i = 0; i < map.sources.length; i++) {
+          const source = map.sources[i];
+          const content = map.sourcesContent[i];
+          if (typeof source !== 'string' || typeof content !== 'string' ||
+              (map.sourceRoot !== undefined && typeof map.sourceRoot !== 'string')) {
+            entry.reasons.push(`source-map-content-unavailable:${rel}`);
+            continue;
+          }
+          const abs = source.startsWith('file://') ? source : resolve(
+            dirname(resolve(o.repoRoot, rel)), typeof map.sourceRoot === 'string' ? map.sourceRoot : '', source,
+          );
+          const path = normalizeExecutedKey(abs, o.repoRoot);
+          if (!path) {
+            entry.reasons.push(`source-map-path-unresolved:${rel}`);
+            continue;
+          }
+          const sha256 = sourceHash(content);
+          entry.sources.push({ path, sha256 });
+          try {
+            if (sourceHash(readSource(resolve(o.repoRoot, path))) !== sha256) {
+              entry.reasons.push(`collection-source-mismatch:${path}`);
+            }
+          } catch {
+            entry.reasons.push(`collection-source-unreadable:${path}`);
+          }
+        }
+        if (!entry.sources.some(source => source.path === rel)) {
+          entry.reasons.push(`module-source-unresolved:${rel}`);
+        }
+      }
+      const prior = modules.get(rel);
+      if (prior) {
+        prior.sources.push(...entry.sources);
+        prior.reasons.push(...entry.reasons);
+      } else modules.set(rel, entry);
+    }
+  } catch {
+    reasons.push('collection-graph-unreadable');
+  }
+  return { modules, reasons };
+}
+
+/** Compare captured ORIGINAL bytes with disk; late imports and repository externals are gaps. */
+export function qualifyCollectedSources(
+  collected: CollectedSourceEvidence | undefined,
+  importDurations: Record<string, ImportDurationLike> | undefined,
+  o: { repoRoot: string; testFile: string; readSource?: (absolutePath: string) => Buffer },
+): ExecutedSourceEvidence {
+  const reasons = new Set(collected?.reasons ?? ['collection-evidence-unavailable']);
+  const fingerprints = new Map<string, SourceFingerprint>();
+  const readSource = o.readSource ?? readFileSync;
+  if (!importDurations || Object.keys(importDurations).length === 0) reasons.add('import-record-unavailable');
+  const modules = collectExecutedModules(importDurations, o);
+  if (modules.length === 0) reasons.add('repository-modules-unavailable');
+  for (const [key, info] of Object.entries(importDurations ?? {})) {
+    const path = normalizeExecutedKey(key, o.repoRoot);
+    if (path && info?.external === true) reasons.add(`repository-external:${path}`);
+  }
+  for (const path of modules) {
+    const entry = collected?.modules.get(path);
+    if (!entry) {
+      reasons.add(`module-not-captured-at-collection:${path}`);
+      continue;
+    }
+    for (const reason of entry.reasons) reasons.add(reason);
+    for (const source of entry.sources) {
+      const previous = fingerprints.get(source.path);
+      if (previous && previous.sha256 !== source.sha256) reasons.add(`conflicting-source-maps:${source.path}`);
+      else fingerprints.set(source.path, source);
+    }
+  }
+  let changed = false;
+  const sources = [...fingerprints.values()].sort((a, b) => a.path.localeCompare(b.path)).map(source => {
+    const { path, sha256 } = source;
+    let currentSha256: string | null = null;
+    try {
+      currentSha256 = sourceHash(readSource(resolve(o.repoRoot, path)));
+      if (currentSha256 !== sha256) {
+        changed = true;
+        reasons.add(`source-changed:${path}`);
+      }
+    } catch {
+      reasons.add(`source-unreadable:${path}`);
+    }
+    return { ...source, currentSha256 };
+  });
+  return {
+    schemaVersion: 'vite-collected-source-evidence-v1',
+    scope: 'repository-worker-vite-original-sources',
+    status: changed ? 'changed' : reasons.size > 0 ? 'unknown' : 'stable',
+    sources,
+    reasons: [...reasons].sort(),
+  };
+}
+
 /** Only a module vitest reports as PASSED is recorded (see the header). */
 export function shouldRecordModule(state: string): boolean {
   return state === 'passed';
@@ -232,9 +496,10 @@ function moduleIsIsolated(testModule: TestModule): boolean {
 }
 
 /**
- * Default writer: one bounded transaction per chunk. The upsert keeps the newest observation
- * for (workspace, file, sha); the trailing delete retires rows at OTHER shas for the same
- * files, so the table holds one row per test file per workspace rather than one per gate run.
+ * Default writer, per chunk: replace this run context's row for (workspace, file, sha) with
+ * the newest observation (delete + target-less insert, WI-10004880), then retire this
+ * context's rows at OTHER shas for the same files, so the table holds one row per test file
+ * per workspace per run context rather than one per gate run.
  */
 export async function writeExecutedSourceRows(flush: ExecutedSourceFlush, pg?: PgHandle): Promise<void> {
   const handle = pg ?? (await tryGetPg());
@@ -251,6 +516,20 @@ export async function writeExecutedSourceRows(flush: ExecutedSourceFlush, pg?: P
     // boolean to boolean[]" (WI-10003597 — it silently recorded zero pass proofs at the gate).
     const captured = chunk.map((r) => (r.inputsCaptured === true ? 'true' : 'false'));
     const workspaceName = chunk[0]!.workspaceName;
+    // WI-10004880: replace only THIS context's row at this sha, then insert with a target-less
+    // ON CONFLICT DO NOTHING. The old `ON CONFLICT (workspace_name, test_file, recorded_sha) DO
+    // UPDATE SET run_context = EXCLUDED.run_context` let a clean-local run at a gate candidate sha
+    // flip the gate's pass proof to clean-local, hiding it from loadReuseProofs. The target-less
+    // form is deliberately schema-agnostic: under today's 3-column key a cross-context collision
+    // keeps the existing row, and once the key gains run_context both contexts' rows coexist,
+    // with no writer change and no deploy-ordering window in which writes fail.
+    await sql`
+      DELETE FROM harness_shared.test_executed_sources
+       WHERE workspace_name = ${workspaceName}
+         AND test_file = ANY(${files}::text[])
+         AND recorded_sha = ${flush.recordedSha}
+         AND run_context IS NOT DISTINCT FROM ${flush.runContext ?? null}::text
+    `;
     await sql`
       INSERT INTO harness_shared.test_executed_sources
         (workspace_name, test_file, recorded_sha, executed_modules, module_count, run_group_id,
@@ -266,16 +545,7 @@ export async function writeExecutedSourceRows(flush: ExecutedSourceFlush, pg?: P
              ${flush.runnerIdentity ?? null}
         FROM unnest(${files}::text[], ${modules}::text[], ${reads}::text[], ${captured}::text[], ${opaque}::text[])
           AS u(f, m, r, c, o)
-      ON CONFLICT (workspace_name, test_file, recorded_sha) DO UPDATE
-        SET executed_modules = EXCLUDED.executed_modules,
-            module_count = EXCLUDED.module_count,
-            run_group_id = EXCLUDED.run_group_id,
-            read_paths = EXCLUDED.read_paths,
-            inputs_captured = EXCLUDED.inputs_captured,
-            opaque_reasons = EXCLUDED.opaque_reasons,
-            run_context = EXCLUDED.run_context,
-            runner_identity = EXCLUDED.runner_identity,
-            recorded_at = now()
+      ON CONFLICT DO NOTHING
     `;
     // Scoped to this run context (plus legacy pre-1236 NULL rows): a clean-local recording must
     // not erase the green-checkpoint's pass proof for the same file, since reuse only ever
@@ -322,9 +592,41 @@ export interface ExecutedSourceMapResult {
   dirty: boolean;
   /** The writer's error message for `failed`; null otherwise. */
   error: string | null;
+  /** Named results from THIS Vitest process, independent of proof persistence.
+   * The launcher must snapshot its initial result file before any separate retry. */
+  fileResults?: {
+    version: 1;
+    runnerIdentity: string;
+    runContext: string;
+    runGroupId: string | null;
+    files: Array<{ testFile: string; verdict: 'pass' | 'fail' | 'unknown' }>;
+  };
 }
 
 const RESULT_ERROR_MAX_CHARS = 500;
+
+/** A final passing module is insufficient: skips and retries can hide its first attempt. */
+function firstAttemptModuleVerdict(testModule: TestModule, state: string): 'pass' | 'fail' | 'unknown' {
+  if (state === 'failed') return 'fail';
+  const execution = collectModuleExecution(testModule);
+  if (execution?.failed || execution?.collectionFailed) return 'fail';
+  let unmeasured = false;
+  try {
+    if (typeof testModule.children?.allTests !== 'function') return 'unknown';
+    for (const test of testModule.children.allTests()) {
+      const diagnostic = test.diagnostic();
+      if (!diagnostic) { unmeasured = true; continue; }
+      // Vitest retries only after a failed attempt. A later pass cannot erase that miss.
+      if (diagnostic.flaky === true || diagnostic.retryCount > 0) return 'fail';
+      if (!Number.isSafeInteger(diagnostic.retryCount) || diagnostic.retryCount !== 0 ||
+          diagnostic.flaky !== false) unmeasured = true;
+    }
+  } catch {
+    return 'unknown';
+  }
+  return state === 'passed' && execution && execution.passed > 0 && execution.skipped === 0 && !unmeasured
+    ? 'pass' : 'unknown';
+}
 
 /** Append the flush outcome to the runner's result file. Fail-soft: a lost line is logged. */
 export function appendExecutedSourceMapResult(resultPath: string | null, result: ExecutedSourceMapResult): void {
@@ -351,6 +653,11 @@ export default class ExecutedSourceMapReporter implements Reporter {
   private readonly inputsDir = process.env[PC_EXECUTED_INPUTS_DIR_ENV]?.trim() || null;
   private skipped = 0;
   private flushed = false;
+  private collectedSources = new WeakMap<TestModule, CollectedSourceEvidence>();
+  // OUT diagnostics describe executions, including failed or incomplete ones.
+  // They never enter the reusable-pass table or the selector's rows.
+  private diagnostics: Array<{ testFile: string; state: string; sourceEvidence: ExecutedSourceEvidence }> = [];
+  private fileResults: NonNullable<ExecutedSourceMapResult['fileResults']>['files'] = [];
 
   private discardInputs(moduleId: string): void {
     if (!this.inputsDir) return;
@@ -375,14 +682,45 @@ export default class ExecutedSourceMapReporter implements Reporter {
    *  onTestRunEnd cannot end it while this reporter's chunked flush is still writing. */
   private pgLease: (() => Promise<void>) | null = null;
 
-  onInit(_ctx: Vitest): void {
+  /** P-001: absolute paths of the vitest config(s) this run loaded + their relative imports; null = unknown. */
+  private configDeps: string[] | null = null;
+  private configSourceCapture: ConfigSourceCapture | undefined;
+
+  onInit(ctx: Vitest): void {
     if (!this.armed) return;
+    this.configDeps = resolveConfigDependencies(ctx);
+    this.configSourceCapture = this.armed.outPath
+      ? captureConfigSources(this.configDeps, { repoRoot: this.repoRoot }) : undefined;
     this.pgLease ??= retainSharedPg();
     this.worktreeBefore = this.readWorktreeSnapshot();
     this.pending = [];
     this.retired = [];
     this.skipped = 0;
     this.flushed = false;
+    this.collectedSources = new WeakMap();
+    this.diagnostics = [];
+    this.fileResults = [];
+  }
+
+  onTestModuleCollected(testModule: TestModule): void {
+    // Fingerprinting has a cost. Only the existing optional diagnostic OUT channel requests it.
+    if (!this.armed?.outPath || isMutationProbeRun()) return;
+    try {
+      const imports = testModule.diagnostic().importDurations as Record<string, ImportDurationLike> | undefined;
+      const reported = new Set(collectExecutedModules(imports, { repoRoot: this.repoRoot, testFile: testModule.moduleId }));
+      const graph = testModule.viteEnvironment?.moduleGraph.idToModuleMap;
+      // The server graph may contain another file's transforms. Those do not establish when
+      // THIS file imported a module; a later import must remain a gap even if already cached.
+      const nodes = graph && [...graph.values()].filter(node => {
+        const path = node.id && normalizeExecutedKey(node.id, this.repoRoot);
+        return path && reported.has(path);
+      });
+      const captured = captureCollectedSources(nodes, { repoRoot: this.repoRoot });
+      if (!imports || Object.keys(imports).length === 0) captured.reasons.push('collection-import-record-unavailable');
+      this.collectedSources.set(testModule, captured);
+    } catch {
+      this.collectedSources.set(testModule, { modules: new Map(), reasons: ['collection-graph-unreadable'] });
+    }
   }
 
   onTestModuleEnd(testModule: TestModule): void {
@@ -394,6 +732,22 @@ export default class ExecutedSourceMapReporter implements Reporter {
         state = testModule.state();
       } catch {
         /* fail-soft: treat as not recordable */
+      }
+      const resultFile = normalizeExecutedKey(testModule.moduleId, this.repoRoot);
+      if (resultFile) this.fileResults.push({ testFile: resultFile, verdict: firstAttemptModuleVerdict(testModule, state) });
+      if (this.armed.outPath) {
+        const testFile = normalizeExecutedKey(testModule.moduleId, this.repoRoot);
+        if (testFile) {
+          let imports: Record<string, ImportDurationLike> | undefined;
+          try { imports = testModule.diagnostic().importDurations as typeof imports; } catch { /* unknown */ }
+          const sourceEvidence = qualifyCollectedSources(this.collectedSources.get(testModule), imports,
+            { repoRoot: this.repoRoot, testFile: testModule.moduleId });
+          if (!moduleIsIsolated(testModule)) {
+            sourceEvidence.status = sourceEvidence.status === 'changed' ? 'changed' : 'unknown';
+            sourceEvidence.reasons.push('worker-not-isolated');
+          }
+          this.diagnostics.push({ testFile, state, sourceEvidence });
+        }
       }
       if (!shouldRecordModule(state)) {
         this.skipped += 1;
@@ -437,14 +791,23 @@ export default class ExecutedSourceMapReporter implements Reporter {
       // P-009: the worker's runtime-inputs record. Absent = inputs unknown = never reusable.
       const inputs = readInputsRecord(this.inputsDir, testModule.moduleId);
       this.discardInputs(testModule.moduleId);
+      // P-001 (proof-v2): the config that ran this file is one of its inputs. Without it the
+      // selector could not scope a nested vitest config change to the proofs it affects, so a
+      // captured row whose config is unknown is made opaque (never reused) rather than recorded
+      // as if the config did not matter.
+      const configDeps = inputs !== null ? this.configDeps : [];
       this.pending.push({
         workspaceName: this.armed.workspaceName,
         testFile,
         executedModules,
         inputsCaptured: inputs !== null,
         // Absolute until flush, where classifyReadPaths relativises them against the tracked tree.
-        readPaths: inputs?.reads ?? [],
-        opaqueReasons: inputs?.opaque ?? [],
+        readPaths: [...(inputs?.reads ?? []), ...(configDeps ?? [])],
+        opaqueReasons: [...(inputs?.opaque ?? []), ...(configDeps === null ? ['config-deps-unavailable'] : [])],
+        ...(this.armed.outPath ? { sourceEvidence: qualifyCollectedSources(
+          this.collectedSources.get(testModule), importDurations,
+          { repoRoot: this.repoRoot, testFile: testModule.moduleId },
+        ) } : {}),
       });
     } catch {
       /* swallow — D-007 */
@@ -470,7 +833,11 @@ export default class ExecutedSourceMapReporter implements Reporter {
       try {
         writeFileSync(
           this.armed.outPath,
-          JSON.stringify({ workspaceName: this.armed.workspaceName, recordedSha, worktreeDirty, skipped: this.skipped, rows }, null, 1),
+          JSON.stringify({ workspaceName: this.armed.workspaceName, recordedSha, worktreeDirty,
+            skipped: this.skipped, rows, diagnostics: this.diagnostics,
+            configSources: qualifyConfigSources(this.configSourceCapture, { repoRoot: this.repoRoot }),
+            configLoadedSources: qualifyLoadedConfigSources(this.configDeps, this.repoRoot),
+            mainProcessLoadedSources: qualifyLoadedMainProcessSources(this.configDeps, this.repoRoot) }, null, 1),
         );
       } catch (e) {
         log(`out-file write failed (${e instanceof Error ? e.message : String(e)}) ${summary}`);
@@ -488,6 +855,13 @@ export default class ExecutedSourceMapReporter implements Reporter {
         sha: recordedSha,
         dirty: worktreeDirty,
         error,
+        fileResults: {
+          version: 1,
+          runnerIdentity: executedSourceRunnerIdentity(),
+          runContext: executedSourceRunContext(),
+          runGroupId: process.env.PAPERCUSP_TEST_RUN_GROUP ?? null,
+          files: [...this.fileResults],
+        },
       });
     if (rows.length === 0 && retiredFiles.length === 0) {
       log(`nothing to record ${summary}`);
@@ -527,7 +901,8 @@ export default class ExecutedSourceMapReporter implements Reporter {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const settled = await Promise.race<{ outcome: ExecutedSourceMapOutcome; error: string | null }>([
       this.writeRows({
-        rows,
+        // Source diagnostics belong only to OUT. Preserve the existing persisted row contract.
+        rows: rows.map(({ sourceEvidence: _sourceEvidence, ...row }) => row),
         recordedSha,
         runGroupId,
         retiredFiles,

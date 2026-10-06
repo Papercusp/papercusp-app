@@ -5,6 +5,23 @@ import { runWithWorkspace } from '../../workspace-als';
 import { captureToolInvocationFriction, type ToolInvocationFriction } from './capture-core';
 
 type Sql = ReturnType<typeof getOrgPg>['sql'];
+const PENDING_RECOVERY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const PENDING_RECOVERY_BATCH_SIZE = 100;
+const SAFE_FAILURE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+function safeFailureDetails(error: unknown): { name: string; code: string | null; label: string } {
+  const candidate = error && typeof error === 'object'
+    ? error as { name?: unknown; code?: unknown }
+    : {};
+  const name = typeof candidate.name === 'string' && SAFE_FAILURE_TOKEN.test(candidate.name)
+    ? candidate.name
+    : 'NonError';
+  const code = typeof candidate.code === 'string' && SAFE_FAILURE_TOKEN.test(candidate.code)
+    ? candidate.code
+    : null;
+  return { name, code, label: code ? `${name}/${code}` : name };
+}
+
 export interface InvocationFrictionRef { id: string; workspaceId: string }
 interface InvocationRow {
   id: string;
@@ -56,12 +73,19 @@ export async function captureInvocationFriction(
       failure: { toolName: row.tool_name, status: row.status, errorCode: row.error_code ?? undefined,
         message: (row.error_message ?? '').split(String.fromCharCode(0)).join('').slice(0, 8192),
         schemaRevision, runtimeVersion: row.serving_build_sha ?? undefined },
+      // D-011: the ledger row itself is the reproduction receipt for a bug-class failure.
+      invocationId: row.id, servingBuildSha: row.serving_build_sha,
     };
     const result = await runWithWorkspace(row.workspace_id,
       () => (deps.capture ?? captureToolInvocationFriction)(input));
-    if (!result?.ok || !result.issue?.id) throw new Error('Invocation friction capture did not persist an issue');
+    // An accepted coalesced capture can persist an occurrence without returning
+    // the canonical issue row (for example, when the selected canonical row was
+    // not reloaded). `ok` is the capture contract; requiring `issue.id` would
+    // keep a successfully recorded invocation pending and make the collector fail.
+    if (!result?.ok) throw new Error('Invocation friction capture did not accept the report');
     await tx.unsafe(`UPDATE harness_shared.tool_invocations
-      SET metadata_json = jsonb_set(metadata_json, '{frictionCapture}', '"delivered"'::jsonb)
+      SET metadata_json = (COALESCE(metadata_json, '{}'::jsonb) - 'frictionFailureClass' - 'frictionFailureCode')
+        || jsonb_build_object('frictionCapture', 'delivered')
       WHERE workspace_id = $1 AND id = $2::bigint`, [ref.workspaceId, ref.id]);
     return true;
   });
@@ -73,27 +97,70 @@ export async function captureInvocationFriction(
 export async function recoverInvocationFriction(
   workspaceId: string,
   deps: { sql?: Sql; capture?: typeof captureToolInvocationFriction } = {},
-): Promise<{ delivered: number; pending: number }> {
+): Promise<{ delivered: number; pending: number; expired: number }> {
   const sql = deps.sql ?? getOrgPg().sql;
+  // Match the repeated-tool-error collector's 24-hour evidence horizon: once a pending
+  // failure is older than that, replaying it can resurrect a signature after reviewers
+  // already dropped its stale report. Expire in bounded batches so old rows cannot starve
+  // recent recovery work.
+  const staleBefore = new Date(Date.now() - PENDING_RECOVERY_MAX_AGE_MS).toISOString();
+  const expiredRows = await sql.unsafe<{ id: string }[]>(`
+    WITH stale AS (
+      SELECT id FROM harness_shared.tool_invocations
+       WHERE workspace_id = $1 AND metadata_json->>'frictionCapture' = 'pending'
+         AND invoked_at < $2::timestamptz
+       ORDER BY invoked_at, id LIMIT ${PENDING_RECOVERY_BATCH_SIZE}
+       FOR UPDATE SKIP LOCKED
+    )
+    UPDATE harness_shared.tool_invocations AS invocation
+       SET metadata_json = COALESCE(invocation.metadata_json, '{}'::jsonb) ||
+         jsonb_build_object('frictionCapture', 'expired', 'frictionExpiredAt', now(),
+           'frictionExpiredReason', 'older-than-24-hours')
+      FROM stale
+     WHERE invocation.workspace_id = $1 AND invocation.id = stale.id
+       AND invocation.metadata_json->>'frictionCapture' = 'pending'
+    RETURNING invocation.id::text AS id`, [workspaceId, staleBefore]);
   const refs = await sql.unsafe<{ id: string }[]>(`
     SELECT id::text FROM harness_shared.tool_invocations
      WHERE workspace_id = $1 AND metadata_json->>'frictionCapture' = 'pending'
-     ORDER BY COALESCE(metadata_json->>'frictionAttemptAt', ''), invoked_at, id LIMIT 100`, [workspaceId]);
+        AND invoked_at >= $2::timestamptz
+      ORDER BY COALESCE(metadata_json->>'frictionAttemptAt', ''), invoked_at, id
+      LIMIT ${PENDING_RECOVERY_BATCH_SIZE}`, [workspaceId, staleBefore]);
   let delivered = 0;
   let failed = 0;
+  const failureClasses = new Map<string, number>();
   for (const ref of refs) {
     try {
       if (await captureInvocationFriction({ ...ref, workspaceId }, { ...deps, sql })) delivered++;
-    } catch {
+    } catch (error) {
       failed++;
+      const failure = safeFailureDetails(error);
+      failureClasses.set(failure.label, (failureClasses.get(failure.label) ?? 0) + 1);
       // Rotate a failed row behind unattempted work. A permanently failing
       // first batch must not starve every later report on every watchdog tick.
       await sql.unsafe(`UPDATE harness_shared.tool_invocations
-        SET metadata_json = jsonb_set(metadata_json, '{frictionAttemptAt}', to_jsonb($3::text))
+        SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || jsonb_build_object(
+          'frictionAttemptAt', $3::text,
+          'frictionFailureClass', $4::text,
+          'frictionFailureCode', $5::text
+        )
         WHERE workspace_id = $1 AND id = $2::bigint
-          AND metadata_json->>'frictionCapture' = 'pending'`, [workspaceId, ref.id, new Date().toISOString()]);
+          AND metadata_json->>'frictionCapture' = 'pending'`, [
+        workspaceId, ref.id, new Date().toISOString(), failure.name, failure.code,
+      ]);
     }
   }
-  if (failed) throw new Error(`Invocation friction recovery: ${failed} failed, ${delivered} delivered; failed rows remain pending`);
-  return { delivered, pending: refs.length - delivered };
+  if (failed) {
+    const failureSummary = [...failureClasses.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .slice(0, 8)
+      .map(([label, count]) => `${label}=${count}`)
+      .join(',');
+    const omittedClasses = Math.max(0, failureClasses.size - 8);
+    const classNote = failureSummary
+      ? `; failure classes: ${failureSummary}${omittedClasses ? `,+${omittedClasses} more` : ''}`
+      : '';
+    throw new Error(`Invocation friction recovery: ${failed} failed, ${delivered} delivered, ${expiredRows.length} expired; failed rows remain pending${classNote}`);
+  }
+  return { delivered, pending: refs.length - delivered, expired: expiredRows.length };
 }

@@ -201,6 +201,22 @@ export async function runBulk<I, R extends BulkItemResult>(
 }
 
 /**
+ * Merge several bulk envelopes (a tool that accepts more than one addressing mode runs one
+ * `runBulk` per mode) into ONE envelope. The merged `ok` is DERIVED from the merged counts
+ * exactly as `runBulk` derives it — never inherited from any constituent envelope, because
+ * spreading the first one forwards ITS `ok` and a clean first batch then reports `ok:true`
+ * beside a later batch's failures (WI-10002111 / R-2).
+ */
+export function mergeBulkEnvelopes<R extends { ok: boolean }>(
+  envs: ReadonlyArray<{ results: R[]; counts: { ok: number; failed: number } }>,
+): { ok: boolean; results: R[]; counts: { ok: number; failed: number } } {
+  const results = envs.flatMap((env) => env.results);
+  const ok = envs.reduce((n, env) => n + env.counts.ok, 0);
+  const failed = envs.reduce((n, env) => n + env.counts.failed, 0);
+  return { ok: failed === 0, results, counts: { ok, failed } };
+}
+
+/**
  * Wrap a bulk envelope (or any JSON payload) in the framework's NATIVE canonical
  * `ToolResponse` shape `{ data }` — the SAME shape a `defineTool` handler returns
  * to opt into format-aware serialization.

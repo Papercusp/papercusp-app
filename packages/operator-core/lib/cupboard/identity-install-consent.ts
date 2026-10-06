@@ -50,7 +50,8 @@ export const identityInstallConsentSchema = z.object({
   subjectsHash: z.string().regex(/^[a-f0-9]{64}$/i),
 }).strict();
 
-const SHARED_CONTENT_KINDS = new Set(['recipe', 'rubric']);
+// An event package claims a workspace-wide vocabulary key at install (D-042).
+const SHARED_CONTENT_KINDS = new Set(['recipe', 'rubric', 'event']);
 
 function sorted(values: Iterable<string>): string[] {
   return [...new Set(values)].sort();

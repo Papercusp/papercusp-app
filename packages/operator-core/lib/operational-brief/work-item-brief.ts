@@ -72,6 +72,8 @@ export type WorkItemOperationalBrief = OperationalBrief<WorkItemBriefFacts>;
 export interface ProjectWorkItemBriefOptions {
   /** True when the row was read with `detail:true`, so `workItem.links` is present. */
   linksRead: boolean;
+  /** Hash-validated current authored span from getWorkItemCheckpointWithMeta. */
+  latestUpdate?: { status: 'available' | 'unknown'; text: string | null };
 }
 
 function rec(value: unknown): Rec | null {
@@ -180,8 +182,29 @@ export function projectWorkItemOperationalBrief(row: Rec, options: ProjectWorkIt
   );
 
   const checkpointText = typeof row.checkpoint === 'string' ? row.checkpoint : null;
-  const fields: CarryNoteFields = checkpointText ? parseCarryNote(checkpointText) : {};
-  const structured = checkpointText !== null && isStructured(fields);
+  const fullFields: CarryNoteFields = checkpointText ? parseCarryNote(checkpointText) : {};
+  const latestUpdate = options.latestUpdate;
+  let latestUpdateUnknown = false;
+  let fields: CarryNoteFields;
+  if (latestUpdate?.status === 'unknown') {
+    latestUpdateUnknown = true;
+    fields = {};
+  } else if (latestUpdate?.status === 'available') {
+    if (!latestUpdate.text) {
+      latestUpdateUnknown = true;
+      fields = {};
+    } else {
+      fields = parseCarryNote(latestUpdate.text);
+    }
+  } else if (!latestUpdate && /^---\s*$/m.test(checkpointText ?? '')) {
+    // A preserved-history separator without a valid span makes the current
+    // section unknowable; older carry instructions must not become current.
+    latestUpdateUnknown = true;
+    fields = {};
+  } else {
+    fields = fullFields;
+  }
+  const structured = checkpointText !== null && isStructured(latestUpdateUnknown ? fullFields : fields);
 
   let checkpoint: BriefField<WorkItemBriefCheckpoint>;
   if (row.checkpointReadFailed === true) {
@@ -206,6 +229,8 @@ export function projectWorkItemOperationalBrief(row: Rec, options: ProjectWorkIt
     successorResidue = unknown(checkpoint.reason);
   } else if (checkpointAbsent) {
     successorResidue = unknown('no checkpoint is recorded, so no successor residue was handed over');
+  } else if (latestUpdateUnknown) {
+    successorResidue = unknown('the latest checkpoint update is missing or invalid, so preserved history cannot establish current residue');
   } else if (!structured) {
     successorResidue = unknown('the checkpoint is free-form prose (no carry-note sections); read it directly');
   } else {
@@ -222,6 +247,8 @@ export function projectWorkItemOperationalBrief(row: Rec, options: ProjectWorkIt
     nextAction = known(`none — the item is terminal (${state})`, 'work_items:get.workItem.state');
   } else if (checkpoint.status === 'unknown') {
     nextAction = unknown(checkpoint.reason);
+  } else if (latestUpdateUnknown) {
+    nextAction = unknown('the latest checkpoint update is missing or invalid, so preserved history cannot establish a current next action');
   } else if (fields.next?.trim()) {
     nextAction = known(fields.next.trim(), 'checkpoint carry-note ## Next action');
   } else if (checkpointAbsent && assignee === null) {

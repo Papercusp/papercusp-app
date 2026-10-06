@@ -1,6 +1,6 @@
 /** Exact goal-plan exposure + native final-turn receipts, on existing stores. */
 import { z } from 'zod';
-import { formatAgentObligationLine } from './agent-obligations';
+import { formatAgentObligationLine, type AgentObligation } from './agent-obligations';
 import type { AgentObligationBrief, AgentObligationAgendaRead } from './agent-obligation-reader';
 import type { TranscriptTailTurn } from './turn-journal';
 import type { SelfSession } from './search/self-session';
@@ -8,6 +8,7 @@ import type { ActivityRecord } from '@papercusp/activity-bridge';
 import type { ExactPlanAdmissionReason } from './agent-tools/plans/plan-admission-preflight';
 import type { GovernorStateSnapshot } from './resource-governor/state-snapshot';
 import type { GoalPlacementOpportunity } from './goal-placement-progress';
+import { goalPlacementCandidates } from './agent-obligation-providers';
 
 export const GOAL_PLACEMENT_DELIVERY_KEY = 'goalPlacementDeliveryV1';
 const nonempty = z.string().trim().min(1).max(1000);
@@ -42,6 +43,8 @@ type AdmissionInput = { ownerId: string; workspaceId: string; row: PlacementRow;
 export interface GoalPlacementAdmissionDeps {
   preflight: (input: AdmissionInput) => Promise<{ ready: boolean; reason: ExactPlanAdmissionReason; plan: string }>;
   governor: (workspaceId: string) => Promise<GovernorStateSnapshot | null>;
+  /** Whether the governor can restrict an agent launch at all (D-031; spawn-execution.ts). */
+  agentGovernorBinding: () => Promise<'observe-only' | 'binding'>;
   attempts: (input: AdmissionInput, now: number) => Promise<string[]>;
   now: () => number;
 }
@@ -83,6 +86,7 @@ export async function observeGoalPlacementAdmission(input: AdmissionInput, deps:
   },
   governor: async (workspaceId) => (await (await import('./resource-governor/state-snapshot'))
     .readGovernorStateSnapshot(workspaceId))?.payload ?? null,
+  agentGovernorBinding: async () => (await import('./resource-governor/spawn-execution')).AGENT_ADMISSION_GOVERNOR_BINDING,
   attempts: readGoalPlacementAdmissionAttempts, now: Date.now,
 }): Promise<GoalPlacementAdmissionObservation> {
   const now = deps.now();
@@ -91,8 +95,8 @@ export async function observeGoalPlacementAdmission(input: AdmissionInput, deps:
     ...(input.row.launch ? { launch: { ...input.row.launch } } : {}) };
   if (!input.row.launch || (input.window && (!Number.isFinite(Date.parse(input.window.offeredAt)) ||
     !Number.isFinite(Date.parse(input.window.completedAt)) || Date.parse(input.window.offeredAt) > Date.parse(input.window.completedAt)))) return out;
-  const [plan, governor, attempts] = await Promise.allSettled([
-    deps.preflight(input), deps.governor(input.workspaceId), deps.attempts(input, now),
+  const [plan, governor, binding, attempts] = await Promise.allSettled([
+    deps.preflight(input), deps.governor(input.workspaceId), deps.agentGovernorBinding(), deps.attempts(input, now),
   ]);
   if (plan.status === 'fulfilled' && plan.value.plan === input.row.planSlug &&
     plan.value.ready === (plan.value.reason === 'ready')) {
@@ -107,6 +111,12 @@ export async function observeGoalPlacementAdmission(input: AdmissionInput, deps:
         (snapshot.admission.state === 'constrained' && snapshot.admission.constrainedClasses.includes('agent')) ? 'restricted' : 'open';
       out.evidenceRefs.push(snapshot.evidenceRef);
     }
+  }
+  // D-031: with no published agent-class decision, the leg reads the door's own binding. An
+  // observe-only governor cannot hold or refuse an agent launch; a binding one stays unmeasured.
+  if (out.governor === 'unknown' && binding.status === 'fulfilled' && binding.value === 'observe-only') {
+    out.governor = 'open';
+    out.evidenceRefs.push('governor:agent:observe-only');
   }
   if (attempts.status === 'fulfilled') {
     out.attempts = attempts.value.length ? 'present' : 'none';
@@ -125,6 +135,7 @@ export const GOAL_PLACEMENT_TURN_END_SETTLE_POLLS = 10;
 export const GOAL_PLACEMENT_TURN_END_SETTLE_POLL_MS = 200;
 export interface GoalPlacementTurnEndDeps extends Pick<GoalPlacementTurnReceiptDeps, 'current' | 'tail' | 'append' | 'now'> {
   goalSubject: (ownerId: string, workspaceId: string) => Promise<string | null>;
+  goalHarness: (goalId: string, workspaceId: string) => Promise<string | null>;
   agenda: (ownerId: string, workspaceId: string) => Promise<AgentObligationAgendaRead>;
   pending?: (ownerId: string, workspaceId: string) => Promise<unknown>;
   admission?: (input: AdmissionInput) => Promise<GoalPlacementAdmissionObservation>;
@@ -177,13 +188,53 @@ function latestCompletedDecision(session: SelfSession, turns: TranscriptTailTurn
   return latest && completedRef(session, latest) ? latest : null;
 }
 
+/** No-progress age as the provider measured it, plus the anchor instant it was measured from.
+ * An absent age stays absent: an unmeasured row must never read as a zero-age success. */
+export function noProgressAge(ageMs: number | undefined, observedAt: string):
+  { noProgressAgeMs: number; noProgressSince: string } | Record<string, never> {
+  const at = Date.parse(observedAt);
+  if (ageMs == null || !Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(at)) return {};
+  return { noProgressAgeMs: ageMs, noProgressSince: new Date(at - ageMs).toISOString() };
+}
+
+export const GOAL_PLACEMENT_TURN_END_MAX_ALTERNATIVES = 8;
+type PlacementAlternative = { planSlug: string; planRef: string; placementState: string;
+  admission: ExactPlanAdmissionReason | 'unread' };
+
+/** D-030: the selected plan's admission verdict and the other candidates the selector weighed, in
+ * canonical worklist order, from the same snapshot it selected against. Without them a row cannot
+ * tell an alternate-lane choice from a changed admission. Omitted when nothing was selected. */
+export function placementSelection(read: Pick<AgentObligationAgendaRead, 'portfolio' | 'placementAdmissions'>,
+  planSlug: string | null): { selectedAdmission: PlacementAlternative['admission']; alternatives?: PlacementAlternative[] }
+  | Record<string, never> {
+  if (!read.portfolio || !planSlug) return {};
+  const verdict = (ref: string): PlacementAlternative['admission'] => read.placementAdmissions?.[ref]?.reason ?? 'unread';
+  const { candidates } = goalPlacementCandidates(read.portfolio);
+  const selected = read.portfolio.worklist.find((plan) => plan.slug === planSlug);
+  if (!selected) return {};
+  const alternatives = candidates.filter((plan) => plan.slug !== planSlug)
+    .slice(0, GOAL_PLACEMENT_TURN_END_MAX_ALTERNATIVES).map((plan) => ({ planSlug: plan.slug, planRef: plan.ref,
+      placementState: plan.placement.state, admission: verdict(plan.ref) }));
+  return { selectedAdmission: verdict(selected.ref), ...(alternatives.length ? { alternatives } : {}) };
+}
+
 /** Sample policy at the native turn-end seam, independently of the next-turn ACK.
  * This is descriptive policy evidence, not a grade or a delivery receipt. Its
  * observedAt remains explicit; a later replay cannot masquerade as timely proof. */
+/** WI-10004818: the goal's filing harness (`goals.install_slug`) — the turn-end row's scope. */
+export async function readGoalHarness(goalId: string, workspaceId: string): Promise<string | null> {
+  const { getOrgPg } = await import('@papercusp/db-org');
+  const rows = await getOrgPg().sql<Array<{ install_slug: string | null }>>`
+    SELECT install_slug FROM harness_shared.goals
+      WHERE workspace_id = ${workspaceId} AND id = ${goalId}`;
+  return rows[0]?.install_slug ?? null;
+}
+
 export async function recordGoalPlacementTurnEnd(input: {
   ownerId: string; workspaceId: string; nativeSessionId: string; sourceKind: SelfSession['sourceKind'];
 }, deps: GoalPlacementTurnEndDeps = { ...defaults,
   pending: readPendingDelivery,
+  goalHarness: readGoalHarness,
   goalSubject: async (ownerId, workspaceId) =>
     (await import('./agent-obligation-reader')).defaultAgentObligationReaderDeps().goalSubject(workspaceId, ownerId),
   agenda: async (ownerId, workspaceId) => (await import('./agent-obligation-reader')).readAgentObligationAgenda({ ownerId, workspaceId }),
@@ -214,6 +265,9 @@ export async function recordGoalPlacementTurnEnd(input: {
   const endedAt = completed.ts!.getTime();
   const timely = (now: number) => Number.isFinite(now) && now >= endedAt && now - endedAt <= GOAL_PLACEMENT_TURN_END_MAX_LAG_MS;
   if (!timely(deps.now())) return { recorded: false, reason: 'turn-end-observation-stale' };
+  // WI-10004818: scope belongs to the goal's filing harness, even when its portfolio
+  // is unreadable, empty, or lists plans from other harnesses.
+  const harness = await deps.goalHarness(goalId, input.workspaceId);
   const read = await deps.agenda(input.ownerId, input.workspaceId);
   if (!read.goalId) return { recorded: false, reason: 'no-canonical-goal' };
   if (read.goalId !== goalId) return { recorded: false, reason: 'goal-scope-changed-during-observation' };
@@ -231,6 +285,11 @@ export async function recordGoalPlacementTurnEnd(input: {
       planRef: row.action?.targetRef?.startsWith('plan:') ? row.action.targetRef : null,
       status: row.status, applicableDemand: row.applicableDemand, actionKind: row.action?.kind ?? null,
       obligationId: row.id, sourceGeneration: row.sourceGeneration, ruleRevision: row.ruleRevision,
+      // The provider derives ageMs from the scoped progress receipt (last verified effect, else the
+      // first completed eligible opportunity) at read.observedAt, so the anchor is recoverable exactly
+      // and an audit can check that only a canonical effect ever moves it.
+      ...noProgressAge(row.ageMs, read.observedAt),
+      ...placementSelection(read, row.scope.planSlug ?? null),
       // An `unknown` row is only diagnosable with its reason: without the code a
       // no-opportunity trial cannot tell a failed read from a genuinely unplaced plan.
       ...(row.measurementFailure ? { measurementFailure: {
@@ -251,7 +310,7 @@ export async function recordGoalPlacementTurnEnd(input: {
     return { recorded: false, reason: 'native-decision-advanced-during-observation' };
   }
   await deps.append({ workspaceId: input.workspaceId, owner: input.ownerId, agent: session.sourceKind,
-    sessionId: session.sessionId, scope: read.portfolio?.worklist[0]?.harness ?? null,
+    sessionId: session.sessionId, scope: harness,
     kind: 'lifecycle', toolName: null, phase: null, toolUseId: `goal-placement-turn-end:${completedRef(session, completed)}`,
     summary: 'Goal placement policy observed at native turn end', status: 'ok', cwd: null,
     detail: { goalPlacementTurnEnd: { version: 1, goalId: read.goalId,
@@ -275,15 +334,130 @@ export async function boundedRecordGoalPlacementTurnEnd(input: Parameters<typeof
   })).value;
 }
 
+/** Persist why the turn-end policy was not recorded without creating a receipt
+ * that could be mistaken for eligibility evidence. No-goal callers are the
+ * normal case and intentionally produce no diagnostic row. */
+export async function recordGoalPlacementTurnEndOutcome(
+  input: Parameters<typeof recordGoalPlacementTurnEnd>[0],
+  outcome: { recorded: boolean; reason: string },
+  deps: Pick<GoalPlacementTurnReceiptDeps, 'append' | 'now'> = defaults,
+): Promise<boolean> {
+  if (outcome.recorded || outcome.reason === 'no-canonical-goal') return false;
+  const observedAt = new Date(deps.now()).toISOString();
+  try {
+    await deps.append({
+      workspaceId: input.workspaceId,
+      owner: input.ownerId,
+      agent: input.sourceKind,
+      sessionId: input.nativeSessionId,
+      scope: null,
+      kind: 'lifecycle',
+      toolName: null,
+      phase: null,
+      toolUseId: `goal-placement-turn-end-outcome:${input.sourceKind}:${input.nativeSessionId}:${observedAt}`,
+      summary: 'Goal placement policy turn-end observation was not recorded',
+      status: null,
+      cwd: null,
+      detail: { goalPlacementTurnEndOutcome: { version: 1, recorded: false, reason: outcome.reason, observedAt } },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Fail-soft lifecycle append used by the bounded journal hook. */
+export async function boundedRecordGoalPlacementTurnEndOutcome(
+  input: Parameters<typeof recordGoalPlacementTurnEnd>[0],
+  outcome: { recorded: boolean; reason: string },
+): Promise<boolean> {
+  if (outcome.recorded || outcome.reason === 'no-canonical-goal') return false;
+  try {
+    const [{ withBoundedTimeout }, { trackDetached }] = await Promise.all([
+      import('./bounded-timeout'), import('./detached-imports'),
+    ]);
+    return (await withBoundedTimeout(trackDetached(recordGoalPlacementTurnEndOutcome(input, outcome)), {
+      timeoutMs: 500,
+      label: 'goal-placement-turn-end-outcome',
+      fallback: false,
+    })).value;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a staged turn-start goal-placement delivery stopped short of a receipt. */
+export type GoalPlacementDeliveryOutcomeStage = 'confirm' | 'late-upgrade';
+
+function candidateFields(candidate: unknown): {
+  token: string | null; nativeSessionId: string | null; sourceKind: string | null;
+  unavailable: boolean; candidateReason: string | null; planSlugs: string[];
+} {
+  const value = candidate && typeof candidate === 'object' ? candidate as Record<string, unknown> : {};
+  const text = (key: string) => typeof value[key] === 'string' ? (value[key] as string).slice(0, 200) : null;
+  const rows = Array.isArray(value.rows) ? value.rows : [];
+  return {
+    token: text('token'), nativeSessionId: text('nativeSessionId'), sourceKind: text('sourceKind'),
+    unavailable: value.unavailable === true, candidateReason: text('reason'),
+    planSlugs: rows.slice(0, 3).flatMap((row) => row && typeof row === 'object' &&
+      typeof (row as Record<string, unknown>).planSlug === 'string'
+      ? [((row as Record<string, unknown>).planSlug as string).slice(0, 200)] : []),
+  };
+}
+
+/** Persist why a staged turn-start delivery produced no goalPlacementTurn receipt
+ * (WI-10005636). Before this, both drop sites discarded the reason, so a missing
+ * receipt could not be told apart from an absent opportunity. The row is a
+ * diagnostic under its own detail key and is never read as eligibility evidence. */
+export async function recordGoalPlacementDeliveryOutcome(input: {
+  ownerId: string; workspaceId: string; stage: GoalPlacementDeliveryOutcomeStage;
+  reason: string; candidate: unknown;
+}, deps: Pick<GoalPlacementTurnReceiptDeps, 'append' | 'now'> = defaults): Promise<boolean> {
+  const observedAt = new Date(deps.now()).toISOString();
+  const fields = candidateFields(input.candidate);
+  try {
+    await deps.append({
+      workspaceId: input.workspaceId,
+      owner: input.ownerId,
+      agent: fields.sourceKind,
+      sessionId: fields.nativeSessionId,
+      scope: fields.planSlugs[0] ?? null,
+      kind: 'lifecycle',
+      toolName: null,
+      phase: null,
+      toolUseId: `goal-placement-delivery-outcome:${input.stage}:${fields.token ?? 'no-token'}:${observedAt}`,
+      summary: 'Goal placement delivery produced no receipt',
+      status: null,
+      cwd: null,
+      detail: { goalPlacementDeliveryOutcome: {
+        version: 1, stage: input.stage, recorded: false, reason: input.reason.slice(0, 500), observedAt,
+        token: fields.token, unavailable: fields.unavailable, candidateReason: fields.candidateReason,
+        planSlugs: fields.planSlugs,
+      } },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The owner-free half of the receipt gate: a due, actionable goal placement row.
+ * The turn-start composer reserves budget for exactly these rows, so it must ask
+ * this same predicate — a composer that guessed would protect one set and the
+ * receipt below would measure another. */
+export function isGoalPlacementReceiptCandidate(row: AgentObligation): boolean {
+  return row.family === 'plan-placement' && row.status === 'due' && row.applicableDemand > 0 &&
+    Boolean(row.scope.goalId) && Boolean(row.scope.planSlug) && row.action !== undefined &&
+    ['delegate', 'continue', 'repair'].includes(row.action.kind);
+}
+
 /** Only whole, actually rendered actionable rows may become receipt candidates. */
 export function deliveredGoalPlacementRows(input: {
   ownerId: string; workspaceId: string; brief: AgentObligationBrief | null | undefined; block: string;
 }): GoalPlacementDelivery['rows'] {
   return (input.brief?.projection.entries ?? []).flatMap((row) => {
-    if (row.family !== 'plan-placement' || row.status !== 'due' || row.applicableDemand <= 0 ||
+    if (!isGoalPlacementReceiptCandidate(row) || !row.action || !row.scope.goalId || !row.scope.planSlug ||
       row.scope.ownerId !== input.ownerId || row.scope.workspaceId !== input.workspaceId ||
-      !row.scope.goalId || !row.scope.planSlug || !row.action ||
-      !['delegate', 'continue', 'repair'].includes(row.action.kind) ||
       !input.block.includes(formatAgentObligationLine(row, 'action'))) return [];
     const parsed = rowSchema.safeParse({ goalId: row.scope.goalId, planSlug: row.scope.planSlug,
       planRef: row.action.targetRef, obligationId: row.id, sourceGeneration: row.sourceGeneration,
@@ -391,6 +565,10 @@ const turnEndSchema = z.object({ version: z.literal(1), goalId: nonempty, comple
     status: z.enum(['due', 'in-progress', 'blocked', 'satisfied', 'not-applicable', 'unknown']),
     applicableDemand: z.number(), actionKind: z.string().nullable(), obligationId: nonempty,
     sourceGeneration: nonempty, ruleRevision: nonempty,
+    noProgressAgeMs: z.number().nonnegative().optional(), noProgressSince: dateTime.optional(),
+    selectedAdmission: nonempty.optional(),
+    alternatives: z.array(z.object({ planSlug: nonempty, planRef: planRefSchema, placementState: nonempty,
+      admission: nonempty })).max(GOAL_PLACEMENT_TURN_END_MAX_ALTERNATIVES).optional(),
     measurementFailure: z.object({ code: nonempty, detail: z.string() }).optional() })),
   admissions: z.array(z.object({ planRef: planRefSchema, admission: admissionSchema })).optional(),
 });
@@ -435,7 +613,10 @@ export function qualifyGoalPlacementTurn(input: {
   if (row.status !== 'due' || row.applicableDemand <= 0 || !['delegate', 'repair'].includes(row.actionKind ?? '')) {
     eligibleAtCompletion = false;
   } else {
-    if (row.obligationId !== receipt.obligationId || row.sourceGeneration !== receipt.sourceGeneration) return null;
+    // The same plan's demand, not the same digest: sourceGeneration (and an episode
+    // keyed on it) hashes every worklist plan, lease and budget sample, so it moves
+    // within almost any real turn. Plan, rule revision, launch binding and the
+    // completion-time admission below identify the opportunity.
     const admissions = end.admissions?.filter((entry) => entry.planRef === receipt.planRef) ?? [];
     if (admissions.length !== 1) return null;
     const finish = admissions[0]!.admission;

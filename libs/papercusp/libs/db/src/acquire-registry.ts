@@ -98,7 +98,7 @@ interface PoolState {
   totalAcquired: number;
   lastAcquiredAt: number | null;
   /** Optional for in-place upgrade of a PoolState pinned by older live code. */
-  pgResults?: PgResultDiagnostic[];
+  pgResults?: Array<PgResultDiagnostic & { objectRefs?: PgDiagnosticObjectRefs }>;
   totalPgResults?: number;
 }
 
@@ -131,10 +131,13 @@ export interface PgResultDiagnosticInput {
   rowCount: number;
   wireBytes: number;
   elapsedMs?: number | null;
+  preBuildMs?: number | null;
   status: 'ok' | 'error';
   errorCode?: string | null;
   /** Opaque to postgres.js; sanitized both at capture and retention. */
   context?: unknown;
+  /** Exact fulfilled postgres-js object; consumed synchronously into a WeakRef only. */
+  result?: object;
 }
 
 export type PgDiagnosticBoundary = 'await' | 'sync';
@@ -159,6 +162,9 @@ export interface PgResultDiagnosticCorrelation {
   hopId: number | null;
   stage: string | null;
   boundary: PgDiagnosticBoundary | null;
+  /** Server-created request identity and source-registered operation; never caller args. */
+  requestId?: string;
+  operation?: string;
 }
 
 export type PgDiagnosticCorrelationState = 'linked' | 'unobserved' | 'unknown';
@@ -202,6 +208,8 @@ export interface PgResultDiagnostic {
   rowCount: number;
   wireBytes: number;
   elapsedMs: number | null;
+  /** Execution start to build, including queue/connect/preparation, not CPU or pure acquisition. */
+  preBuildMs: number | null;
   status: 'ok' | 'error';
   errorCode: string | null;
   recordedAt: number;
@@ -214,7 +222,14 @@ export interface PgResultDiagnosticSnapshot {
   capacity: number;
   totalRecorded: number;
   dropped: number;
-  results: PgResultDiagnostic[];
+  results: Array<PgResultDiagnostic & { objectRefs?: PgDiagnosticObjectRefs }>;
+}
+
+/** Local inspector opt-in only. Dereferencing temporarily keeps the target alive. */
+export interface PgDiagnosticObjectRefs {
+  decodedResult?: WeakRef<object>;
+  resolvedRows?: WeakRef<object>;
+  responseValue?: WeakRef<object>;
 }
 
 function boundedWholeNumber(value: number, nullable = false): number | null {
@@ -268,6 +283,10 @@ function sanitizePgCorrelation(
         : null;
   const boundary =
     value.boundary === 'await' || value.boundary === 'sync' ? value.boundary : null;
+  const requestId = typeof value.requestId === 'string' && /^[a-f0-9-]{36}$/i.test(value.requestId)
+    ? value.requestId : null;
+  const operation = requestId && typeof value.operation === 'string' &&
+    /^[a-z][a-z0-9_.-]{0,119}$/i.test(value.operation) ? value.operation : null;
   return Object.freeze({
     processInstanceId,
     buildSha,
@@ -276,6 +295,8 @@ function sanitizePgCorrelation(
     hopId,
     stage,
     boundary,
+    ...(requestId ? { requestId } : {}),
+    ...(operation ? { operation } : {}),
   });
 }
 
@@ -323,13 +344,22 @@ function normalizePgDiagnosticContext(input: unknown): PgDiagnosticLink {
 
 /** One identity per physical pool construction, even when labels are reused. */
 export function createPgDiagnosticHooks(pool: string) {
-  const source: PgDiagnosticSource = Object.freeze({
+  let source: PgDiagnosticSource = Object.freeze({
     ...pgDiagnosticIdentity(),
     poolInstanceId: randomUUID(),
   });
   return {
     onquerycontext: capturePgDiagnosticContext,
-    onresult: (diagnostic: PgResultDiagnosticInput) => recordPgResult(pool, diagnostic, source),
+    onresult: (diagnostic: PgResultDiagnosticInput) => {
+      // Pools can be constructed before the host installs its loaded-build
+      // resolver. Fill an unknown stamp once; keep the process/pool identities
+      // and every already-recorded diagnostic unchanged.
+      if (source.buildSha === null) {
+        const buildSha = pgDiagnosticIdentity().buildSha;
+        if (buildSha !== null) source = Object.freeze({ ...source, buildSha });
+      }
+      recordPgResult(pool, diagnostic, source);
+    },
   };
 }
 
@@ -460,7 +490,7 @@ export function recordPgResult(
   const s = poolState(pool);
   const results = (s.pgResults ??= []);
   const correlation = normalizePgDiagnosticContext(input.context);
-  const diagnostic: PgResultDiagnostic = {
+  const diagnostic: PgResultDiagnostic & { objectRefs?: PgDiagnosticObjectRefs } = {
     pool,
     source: { ...source },
     connectionId: boundedWholeNumber(input.connectionId) ?? 0,
@@ -475,11 +505,17 @@ export function recordPgResult(
       input.elapsedMs === null || input.elapsedMs === undefined
         ? null
         : boundedWholeNumber(input.elapsedMs, true),
+    preBuildMs:
+      input.preBuildMs === null || input.preBuildMs === undefined
+        ? null
+        : boundedWholeNumber(input.preBuildMs, true),
     status: input.status === 'error' ? 'error' : 'ok',
     errorCode: safeToken(input.errorCode, 16),
     recordedAt: Date.now(),
     correlationState: correlation.state,
     ...(correlation.correlation ? { correlation: correlation.correlation } : {}),
+    ...(input.status === 'ok' && input.result && typeof input.result === 'object'
+      ? { objectRefs: { decodedResult: new WeakRef(input.result) } } : {}),
   };
   results.push(diagnostic);
   s.totalPgResults = (s.totalPgResults ?? 0) + 1;
@@ -488,10 +524,34 @@ export function recordPgResult(
   }
 }
 
+/**
+ * Link an observed response object to this request's retained query records.
+ * Request + process identity is an exact join, never a row-count/time match.
+ * No record is invented when the request made no query or its record was evicted.
+ */
+export function recordPgDiagnosticResponse(
+  context: PgResultDiagnosticCorrelation,
+  phase: 'resolvedRows' | 'responseValue',
+  value: unknown,
+): void {
+  if (!context.requestId || !value || typeof value !== 'object') return;
+  for (const s of STATE.pools.values()) {
+    for (const diagnostic of s.pgResults ?? []) {
+      if (diagnostic.correlation?.requestId !== context.requestId ||
+          diagnostic.correlation.processInstanceId !== context.processInstanceId ||
+          diagnostic.correlation.buildSha !== context.buildSha ||
+          diagnostic.source.processInstanceId !== context.processInstanceId ||
+          (diagnostic.source.buildSha !== null && diagnostic.source.buildSha !== context.buildSha)) continue;
+      (diagnostic.objectRefs ??= {})[phase] = new WeakRef(value);
+    }
+  }
+}
+
 /** Read newest retained results for one pool without exposing mutable state. */
 export function pgResultDiagnosticSnapshot(
   pool: string,
   limit = PG_RESULT_DIAGNOSTIC_LIMIT,
+  options: { includeObjectRefs?: boolean } = {},
 ): PgResultDiagnosticSnapshot {
   const s = STATE.pools.get(pool);
   const all = s?.pgResults ?? [];
@@ -500,10 +560,11 @@ export function pgResultDiagnosticSnapshot(
   const results =
     appliedLimit === 0
       ? []
-      : all.slice(-appliedLimit).map((item) => ({
+      : all.slice(-appliedLimit).map(({ objectRefs, ...item }) => ({
           ...item,
           source: { ...item.source },
           ...(item.correlation ? { correlation: { ...item.correlation } } : {}),
+          ...(options.includeObjectRefs && objectRefs ? { objectRefs: { ...objectRefs } } : {}),
         }));
   return {
     pool,

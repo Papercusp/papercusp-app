@@ -32,7 +32,7 @@
  * the options object, a dynamically built config — is invisible here. This
  * narrows the class; it does not eliminate it.
  */
-import { stripComments } from './gate-candidate-ref';
+import { stripCommentsOnly } from '../../../../scripts/lib/strip-comments-and-strings.mjs';
 
 /** How a `WebSocketServer` obtains the socket it listens on. */
 export type WsServerBinding =
@@ -111,7 +111,7 @@ export function classifyWsBinding(window: string): WsServerBinding {
 
 /** Every WebSocket-server construction and upgrade route in one file. */
 export function findWsSites(file: string, source: string): WsSite[] {
-  const lines = stripComments(source);
+  const lines = stripCommentsOnly(source).split('\n');
   const sites: WsSite[] = [];
   lines.forEach((line, index) => {
     if (WS_SERVER_CTOR.test(line)) {

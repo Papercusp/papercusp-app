@@ -79,6 +79,7 @@ export const WORK_ITEMS_LIST_UI_FIELDS = [
   'origin',
   'auditVerdict',
   'verifiedAuthorGithubUserId',
+  'presentation',
 ] as const;
 
 /**

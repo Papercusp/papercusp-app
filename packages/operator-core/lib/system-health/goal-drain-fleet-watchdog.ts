@@ -74,7 +74,11 @@ import { goalPlanPlacementChangedKey } from '../agent-obligations';
 import type { GoalSqlTag } from '@papercusp/agent-mcp/goals';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
 import { openEscalation } from '../agent-tools/coordination/escalations';
+import { takeFleetLeadership } from '../agent-tools/fleet_registry/take-leadership-core';
 import { listCouplingsFor, peerOf } from '../coord/couplings';
+import { getFleet } from '../agent-fleets-store';
+import { fleetEverMembers } from '../fleet-membership-store';
+import { listFleetRosterDiagnosed, type FleetRosterEntry } from '../fleet/fleet-roster';
 import type { AgentIdentity } from '../agent-tools/coordination/identity';
 import type { LivenessVerdict } from '../agent-tools/coordination/liveness-oracle';
 // P-001: holder rows, the alive predicate and the oracle fold all come from the
@@ -96,6 +100,8 @@ import {
 } from '../scheduler/claim-spec';
 
 export const GOAL_DRAIN_FLEET_SWEEP_INTERVAL_MS = 10 * 60_000;
+/** A live drain fleet with no successful scheduler pull across this window is stalled. */
+export const GOAL_DRAIN_FLEET_PULL_STALL_WINDOW_MS = 10 * 60_000;
 
 /**
  * How long after goal creation a missing drainFleet declaration stays silent.
@@ -127,6 +133,44 @@ export const GOAL_DRAIN_FLEET_DEAD_GRACE_MS = GOAL_DRAIN_FLEET_SWEEP_INTERVAL_MS
 export const GOAL_DRAIN_FLEET_RELAUNCH_RATE_LIMIT = 3;
 export const GOAL_DRAIN_FLEET_RELAUNCH_RATE_WINDOW_MS = 60 * 60_000;
 
+/**
+ * WI-10004623: the spend fraction (spentCents / budgetCents) at or above which the platform
+ * will NOT auto-relaunch a dead drain fleet. Observed 2026-10-01: a steward deliberately
+ * narrowed a drain fleet to leader-only at ~73% of the weekly ceiling and the relaunch leg —
+ * which only knew grace + rate limit — re-added a worker anyway. A relaunch is a spend
+ * decision; above this fraction it is a holder/owner decision, so the leg stands down and the
+ * report-only drain-dead alert (which fires before this gate) is the only signal.
+ */
+export const GOAL_DRAIN_RELAUNCH_SPEND_CEILING = 0.9;
+
+/**
+ * PURE: spentCents / budgetCents, or null when either side is unmeasured or the budget is not
+ * positive. Null means "cannot tell" — callers must NOT read it as 0% (it fails OPEN here only
+ * because refusing a relaunch off an unmeasured number would strand every unbudgeted goal).
+ */
+export function goalSpendFraction(goal: Pick<GoalDrainRowLike, 'spentCents' | 'budgetCents'>): number | null {
+  const { spentCents, budgetCents } = goal;
+  if (typeof spentCents !== 'number' || !Number.isFinite(spentCents) || spentCents < 0) return null;
+  if (typeof budgetCents !== 'number' || !Number.isFinite(budgetCents) || budgetCents <= 0) return null;
+  return spentCents / budgetCents;
+}
+
+/**
+ * WI-10004626: the steward's "hold the drain WORKER" mark. A goal steward pacing spend needs a leader-only drain
+ * fleet, but the contract ("one standing drain fleet per goal, always maintained") makes that read as
+ * `drain-fleet-dead`, and the launch-settings floor (DRAIN_FLEET_MIN_CEILINGS) forbids lowering maxAgents below
+ * holder + leader + one worker. The writer is the EXISTING standing-facts verb, no new surface:
+ * `facts:assert { scope:'workspace', key:'drain-worker-throttle:<goalId>', body:<reason>, ttlSec:<how long> }`;
+ * `facts:retract` lifts it early. Expiry is the fact's own `expires_at`, so a forgotten mark cannot permanently
+ * disable the always-maintained invariant. Reuse-first: fleet:pause's `winding-down` was the other candidate and
+ * does not fit — it stops the whole fleet from pulling work (leader included), where this holds only the relaunch.
+ */
+export const DRAIN_WORKER_THROTTLE_FACT_KEY_PREFIX = 'drain-worker-throttle:';
+
+export function drainWorkerThrottleFactKey(goalId: string): string {
+  return `${DRAIN_WORKER_THROTTLE_FACT_KEY_PREFIX}${goalId}`;
+}
+
 const WATCHDOG_IDENTITY: AgentIdentity = {
   ownerId: 'goal-drain-fleet-watchdog',
   ownerLabel: 'system · goal drain fleet',
@@ -150,6 +194,20 @@ export interface GoalDrainRowLike {
   installSlug?: string | null;
   /** metadata->'drainRespawn': the durable relaunch ledger (WI-2140699). */
   drainRespawn?: GoalDrainRespawnLedgerLike | null;
+  /**
+   * metadata->>'spentCents' — the goal's AUTHORITATIVE spend (the lineage rollup; see
+   * `spentCentsBreakdown.lineageScope`). Null/absent = unmeasured. WI-10004623: the relaunch leg
+   * reads it so an auto-respawn is not blind to the goal's budget.
+   */
+  spentCents?: number | null;
+  /** goals.budget_cents — the goal's budget for its window. Null/absent = no declared budget. */
+  budgetCents?: number | null;
+  /**
+   * WI-10004626: a LIVE (unexpired, unretracted, current-version) `drain-worker-throttle:<goalId>` standing fact
+   * exists for this goal — a steward has asked the relaunch leg to hold. Resolved at READ time against the fact's
+   * own `expires_at`, so the pure gate carries no second clock. Absent = not throttled.
+   */
+  workerThrottled?: boolean;
 }
 
 /** The slice of `goals.metadata.drainRespawn` the verdict reads. */
@@ -164,7 +222,7 @@ export interface GoalDrainRespawnLedgerLike {
  * The drain-fleet WORKER leg's liveness verdict, resolved per declared fleet.
  * `unknown` exists so a degraded read suppresses rather than false-alarms.
  */
-export type DrainFleetLiveness = 'alive' | 'dead' | 'not-found' | 'unknown';
+export type DrainFleetLiveness = 'alive' | 'dead' | 'not-found' | 'unknown' | 'uncoupled';
 
 /**
  * P-014: a live fleet LEADER is supervision, not proof that a drain WORKER is
@@ -201,10 +259,18 @@ export function classifyDelegatedDrainFleetLiveness(
   if (!leaderOwnerId || leaderOwnerId === holderOwnerId) return 'dead';
   const leader = verdicts.get(leaderOwnerId);
   if (!leader) return 'unknown';
-  if (!holderCountsAsAlive(leader) || !coupled) return 'dead';
-  return classifyDrainWorkerLiveness(
+  if (!holderCountsAsAlive(leader)) return 'dead';
+  const workers = classifyDrainWorkerLiveness(
     leaderOwnerId, memberOwnerIds.filter((id) => id !== holderOwnerId), verdicts,
   );
+  // EI-24556293106348130: a live leader and a live worker that merely lack the
+  // holder coupling are UNCOUPLED, not dead. That is the normal state right after
+  // a goal-holder lease handoff (the edge names the predecessor), and the fix is an
+  // in-place coupling repair. Reporting it as 'dead' alarmed the holder with a false
+  // drain-fleet-dead and sent it down the relaunch path, whose preconditions could
+  // fail before the coupling repair ever ran (measured 2026-09-30, goal 60d3a8).
+  if (!coupled) return workers === 'alive' ? 'uncoupled' : 'dead';
+  return workers;
 }
 
 export type GoalDrainReason =
@@ -424,7 +490,10 @@ export async function readGoalPlanFleetCohort(
           FROM harness_shared.plan_items
          WHERE workspace_id = ANY(${workspaceIds}::text[])
            AND plan_slug = ANY(${planSlugs}::text[])
-           AND status NOT IN ('done', 'dropped')`,
+           -- WI-10005657: a needs-human item is reserved to the owner; no fleet can claim
+           -- it, so it is not "unstaffed work". A plan whose only open items are needs-human
+           -- (owner-walled) therefore has no itemIds and raises no coverage alert.
+           AND status NOT IN ('done', 'dropped', 'needs-human', 'needs_human')`,
       sql<{ workspace_id: string; harness_slug: string; plan_slug: string; item_id: string; owner: string }[]>`
         SELECT workspace_id, harness_slug, plan_slug, item_id, owner
           FROM harness_shared.plan_item_claims
@@ -711,7 +780,9 @@ export function classifyGoalDrainFleet(
   }
 
   const verdict = fleetLiveness.get(fleetKey(goal.workspaceId, goal.drainFleet)) ?? 'unknown';
-  if (verdict === 'unknown') return null;
+  // 'uncoupled' is repaired in place by the sweep (EI-24556293106348130); it is not
+  // a dead fleet and never alarms or charges the relaunch budget.
+  if (verdict === 'unknown' || verdict === 'uncoupled') return null;
   if (verdict !== 'alive') {
     return {
       ...base,
@@ -760,7 +831,11 @@ export type GoalDrainRelaunchIneligibility =
   /** Outcome goals keep the report-only posture; their holder decides. */
   | 'not-standing'
   /** The budget was spent and a human has not cleared `drainRespawn.needsHuman`. */
-  | 'needs-human';
+  | 'needs-human'
+  /** WI-10004623: the goal's own spend is at/over GOAL_DRAIN_RELAUNCH_SPEND_CEILING of its budget. */
+  | 'spend-ceiling'
+  /** WI-10004626: a steward holds the worker via a live `drain-worker-throttle:<goalId>` fact. */
+  | 'steward-throttle';
 
 /**
  * PURE gate: may this alert enter the relaunch leg at all? Evaluated BEFORE any
@@ -768,13 +843,22 @@ export type GoalDrainRelaunchIneligibility =
  */
 export function goalDrainRelaunchEligibility(
   alert: Pick<GoalDrainAlert, 'reason'>,
-  goal: Pick<GoalDrainRowLike, 'standing' | 'drainRespawn'>,
+  goal: Pick<GoalDrainRowLike, 'standing' | 'drainRespawn' | 'spentCents' | 'budgetCents' | 'workerThrottled'>,
 ): { eligible: true } | { eligible: false; why: GoalDrainRelaunchIneligibility } {
   if (alert.reason !== 'drain-fleet-dead' && alert.reason !== 'drain-fleet-not-found') {
     return { eligible: false, why: 'reason-not-relaunchable' };
   }
   if (goal.standing !== true) return { eligible: false, why: 'not-standing' };
   if (goal.drainRespawn?.needsHuman === true) return { eligible: false, why: 'needs-human' };
+  // WI-10004626: explicit steward intent outranks the spend heuristic (a steward who throttled below the ceiling
+  // meant it), and like it is evaluated before any ledger write.
+  if (goal.workerThrottled === true) return { eligible: false, why: 'steward-throttle' };
+  // WI-10004623: spend-aware. Evaluated before any ledger write, so a goal at its ceiling neither
+  // charges the rate-limit ledger nor stamps a dead episode it will never act on.
+  const spendFraction = goalSpendFraction(goal);
+  if (spendFraction !== null && spendFraction >= GOAL_DRAIN_RELAUNCH_SPEND_CEILING) {
+    return { eligible: false, why: 'spend-ceiling' };
+  }
   return { eligible: true };
 }
 
@@ -845,11 +929,19 @@ export interface GoalDrainFleetSweepDeps {
   clearDrainLedger: (goal: GoalDrainRowLike) => Promise<void>;
   /** Mint rows (idempotent) + launch one headless member into the lane. Throws on failure. */
   relaunchDrainFleet: (alert: GoalDrainAlert, goal: GoalDrainRowLike) => Promise<GoalDrainRelaunchResult>;
+  /** EI-24556293106348130: re-couple a live holder with its live drain leader in place. True when an edge now exists. */
+  repairDrainCoupling: (goal: GoalDrainRowLike & { drainFleet: string }, holderOwnerId: string) => Promise<boolean>;
   /** Tell the live holder(s) what the platform just did for them. Fail-soft. */
   notifyRelaunch: (alert: GoalDrainAlert, goal: GoalDrainRowLike, result: GoalDrainRelaunchResult) => Promise<void>;
   /** The budget is spent: ONE deduped human-facing escalation. */
   escalateRelaunchExhausted: (alert: GoalDrainAlert, attemptsInWindow: number) => Promise<void>;
   deadGraceMs: number;
+  /** After the dead-fleet grace, promote the oldest positively-live member if the registered leader is explicitly ended. */
+  promoteDrainLeader: (alert: GoalDrainAlert, goal: GoalDrainRowLike) => Promise<boolean>;
+  /** Current active registered fleets with live members but no successful get_next in the stall window. */
+  readPullStallAlerts: (goals: readonly GoalDrainRowLike[], nowMs: number) => Promise<GoalDrainFleetPullStallAlert[]>;
+  /** Deduped watchdog alarm for a stalled drain-fleet pull lane. */
+  escalatePullStall: (alert: GoalDrainFleetPullStallAlert) => Promise<void>;
 
   // ── goal-plan-fleet-obligation-detector P-002: the plan-fleet leg ──
   /** The canonical, fail-closed plan-fleet cohort read ({@link readGoalPlanFleetCohort}). */
@@ -863,6 +955,54 @@ export interface GoalDrainFleetSweepDeps {
   emitPlanFleet: (alert: GoalPlanFleetAlert) => Promise<void>;
   /** Message + directed wake to the live holders — only on a NEWLY opened escalation. */
   notifyPlanFleetHolders: (alert: GoalPlanFleetAlert) => Promise<void>;
+}
+
+export interface GoalDrainFleetPullStallAlert {
+  workspaceId: string;
+  fleetSlug: string;
+  goalId?: string;
+  title?: string;
+  liveMemberIds: string[];
+  stalledForMs: number;
+}
+
+/**
+ * Pure watchdog rule. Unknown liveness or start time suppresses the alarm; a
+ * successful `get_next` counts only when its recorded status is `ok` and its
+ * scheduler disposition is `claimed` or `no-claim`.
+ */
+export function classifyGoalDrainFleetPullStall(input: {
+  members: readonly Pick<FleetRosterEntry, 'agentId' | 'agentRole' | 'sessionState' | 'startedAt'>[];
+  successfulPullOwnerIds: ReadonlySet<string>;
+  nowMs: number;
+  windowMs?: number;
+}): { liveMemberIds: string[]; stalledForMs: number } | null {
+  const windowMs = input.windowMs ?? GOAL_DRAIN_FLEET_PULL_STALL_WINDOW_MS;
+  const liveMembers = input.members.filter((member) => member.agentRole === 'su' && member.sessionState === 'live');
+  if (liveMembers.length === 0 || liveMembers.some((member) => !member.startedAt)) return null;
+  const startedAtMs = liveMembers.map((member) => Date.parse(member.startedAt!));
+  if (startedAtMs.some((value) => !Number.isFinite(value))) return null;
+  const oldestLiveStartMs = Math.min(...startedAtMs);
+  const stalledForMs = input.nowMs - oldestLiveStartMs;
+  if (stalledForMs < windowMs || input.successfulPullOwnerIds.size > 0) return null;
+  return { liveMemberIds: liveMembers.map((member) => member.agentId), stalledForMs };
+}
+
+/** Select a successor only from positively-live su members; null/unknown rows never win. */
+export function oldestLiveDrainFleetMember(
+  leaderOwnerId: string,
+  holderOwnerIds: readonly string[],
+  members: readonly Pick<FleetRosterEntry, 'agentId' | 'agentRole' | 'fleetRole' | 'sessionState' | 'startedAt'>[],
+): string | null {
+  const excluded = new Set([leaderOwnerId, ...holderOwnerIds]);
+  const candidates = members
+    .filter((member) =>
+      member.agentRole === 'su' && member.fleetRole === 'member' &&
+      member.sessionState === 'live' && !excluded.has(member.agentId) && Boolean(member.startedAt))
+    .map((member) => ({ ownerId: member.agentId, startedAtMs: Date.parse(member.startedAt!) }))
+    .filter((member) => Number.isFinite(member.startedAtMs))
+    .sort((a, b) => a.startedAtMs - b.startedAtMs || a.ownerId.localeCompare(b.ownerId));
+  return candidates[0]?.ownerId ?? null;
 }
 
 async function defaultFlagEnabled(): Promise<boolean> {
@@ -889,6 +1029,38 @@ export function parseGoalDrainRespawnLedger(raw: unknown): GoalDrainRespawnLedge
   return { deadSinceMs, needsHuman: rec.needsHuman === true };
 }
 
+/** A text/bigint cents column → a finite number, or null (unmeasured). Never coerces junk to 0. */
+export function parseCentsColumn(raw: string | number | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'string' && raw.trim() === '') return null;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** The membership key {@link readLiveDrainWorkerThrottles} returns: workspace + goal, NUL-joined (neither can hold NUL). */
+export function drainWorkerThrottleSetKey(workspaceId: string, goalId: string): string {
+  return `${workspaceId}\u0000${goalId}`;
+}
+
+/**
+ * WI-10004626: every goal with a LIVE steward throttle mark, as {@link drainWorkerThrottleSetKey} members.
+ * "Live" mirrors agent-facts' own fold predicate (`liveFactPredicate` in agent-facts/store.ts: current version,
+ * unretracted, unexpired) and is PINNED against the canonical reader (`listFacts`) by
+ * goal-drain-fleet-watchdog.throttle.integration.test.ts — so a new lifecycle column on agent_facts that the fold
+ * learns about fails there instead of silently making this reader disagree with `facts:list`.
+ */
+export async function readLiveDrainWorkerThrottles(sql: Sql): Promise<Set<string>> {
+  const rows = await sql<{ workspace_id: string; goal_id: string }[]>`
+    SELECT workspace_id, substr(key, ${DRAIN_WORKER_THROTTLE_FACT_KEY_PREFIX.length + 1}) AS goal_id
+      FROM harness_shared.agent_facts
+     WHERE scope = 'workspace'
+       AND key LIKE ${DRAIN_WORKER_THROTTLE_FACT_KEY_PREFIX + '%'}
+       AND superseded_at IS NULL
+       AND retracted_at IS NULL
+       AND expires_at > now()`;
+  return new Set(rows.map((t) => drainWorkerThrottleSetKey(t.workspace_id, t.goal_id)));
+}
+
 function makeReadGoals(sql: Sql): GoalDrainFleetSweepDeps['readGoals'] {
   return async () => {
     const goalRows = await sql<
@@ -901,14 +1073,21 @@ function makeReadGoals(sql: Sql): GoalDrainFleetSweepDeps['readGoals'] {
         created_ms: string;
         drain_fleet: string | null;
         drain_respawn: unknown;
+        spent_cents: string | null;
+        budget_cents: string | null;
       }[]
     >`
       SELECT id, workspace_id, title, install_slug, standing,
              (extract(epoch FROM created_at) * 1000)::bigint AS created_ms,
              metadata->>'drainFleet' AS drain_fleet,
-             metadata->'drainRespawn' AS drain_respawn
+             metadata->'drainRespawn' AS drain_respawn,
+             metadata->>'spentCents' AS spent_cents,
+             budget_cents::text AS budget_cents
         FROM harness_shared.goals
        WHERE status = 'active'`;
+    // WI-10004626: live steward throttle marks, one query for every goal. A PG failure throws like every other
+    // read in this sweep — it is not swallowed into "not throttled".
+    const throttled = await readLiveDrainWorkerThrottles(sql);
     // P-001: the canonical holder read. Unfiltered by goal on purpose — an inner
     // join to active goals would drop the no-holder case.
     const holders = await readGoalHolderRows(sql);
@@ -922,6 +1101,9 @@ function makeReadGoals(sql: Sql): GoalDrainFleetSweepDeps['readGoals'] {
         standing: r.standing === true,
         installSlug: r.install_slug,
         drainRespawn: parseGoalDrainRespawnLedger(r.drain_respawn),
+        spentCents: parseCentsColumn(r.spent_cents),
+        budgetCents: parseCentsColumn(r.budget_cents),
+        workerThrottled: throttled.has(drainWorkerThrottleSetKey(r.workspace_id, r.id)),
       })),
       holders,
     };
@@ -1287,6 +1469,130 @@ const SUMMARY_VERDICT: Record<Exclude<GoalDrainReason, 'no-drain-fleet-declared'
   'drain-fleet-not-goal-scoped': 'not scoped to the goal (D-005)',
 };
 
+export async function readActiveFleetPullStallAlerts(
+  sql: Sql,
+  goals: readonly GoalDrainRowLike[],
+  nowMs: number,
+  readers: {
+    listRoster?: typeof listFleetRosterDiagnosed;
+    listEverMembers?: typeof fleetEverMembers;
+  } = {},
+): Promise<GoalDrainFleetPullStallAlert[]> {
+  const listRoster = readers.listRoster ?? listFleetRosterDiagnosed;
+  const listEverMembers = readers.listEverMembers ?? fleetEverMembers;
+  const activeFleets = await sql<{ workspace_id: string; fleet_slug: string }[]>`
+    SELECT workspace_id, fleet_slug
+      FROM harness_shared.agent_fleets
+     WHERE control_state = 'active'
+     ORDER BY workspace_id, fleet_slug
+  `;
+  const goalsByFleet = new Map<string, GoalDrainRowLike>();
+  for (const goal of goals) {
+    if (goal.drainFleet) goalsByFleet.set(fleetKey(goal.workspaceId, goal.drainFleet), goal);
+  }
+  const alerts: GoalDrainFleetPullStallAlert[] = [];
+  for (const fleet of activeFleets) {
+    if (!fleet.workspace_id || !fleet.fleet_slug) continue;
+    const goal = goalsByFleet.get(fleetKey(fleet.workspace_id, fleet.fleet_slug));
+    try {
+      const roster = await listRoster({
+        fleetSlug: fleet.fleet_slug,
+        workspaceId: fleet.workspace_id,
+      });
+      // Unknown liveness is not an empty fleet. This scan speaks only when all
+      // roster legs that determine presence/session truth completed cleanly.
+      if (roster.degradedLegs.length > 0) continue;
+      const suMembers = roster.entries
+        .filter((member) => member.agentRole === 'su')
+        .map((member) => member.agentId === roster.leaderLiveness?.ownerId &&
+          roster.leaderLiveness.recordedLive === true
+          ? { ...member, sessionState: 'live' as const }
+          : member);
+      const ownerIds = [...new Set([
+        ...await listEverMembers(fleet.fleet_slug, { workspaceId: fleet.workspace_id }),
+        ...suMembers.map((member) => member.agentId),
+      ])];
+      if (ownerIds.length === 0) continue;
+      const successes = await sql<{ owner_id: string }[]>`
+        SELECT DISTINCT coord_owner_id AS owner_id
+          FROM harness_shared.tool_invocations
+         WHERE workspace_id = ${fleet.workspace_id}
+           AND tool_name = 'scheduler:get_next'
+           AND coord_owner_id = ANY(${ownerIds}::text[])
+           AND invoked_at >= ${new Date(nowMs - GOAL_DRAIN_FLEET_PULL_STALL_WINDOW_MS).toISOString()}::timestamptz
+           AND status = 'ok'
+           AND metadata_json->'schedulerDisposition'->>'kind' IN ('claimed', 'no-claim')
+      `;
+      const stall = classifyGoalDrainFleetPullStall({
+        members: suMembers,
+        successfulPullOwnerIds: new Set(successes.map((row) => row.owner_id)),
+        nowMs,
+      });
+      if (stall) alerts.push({
+        workspaceId: fleet.workspace_id,
+        fleetSlug: fleet.fleet_slug,
+        ...(goal ? { goalId: goal.goalId, title: goal.title } : {}),
+        ...stall,
+      });
+    } catch {
+      // A degraded roster or invocation read is UNKNOWN, never a zero-pull alarm.
+    }
+  }
+  return alerts;
+}
+
+async function defaultEscalatePullStall(alert: GoalDrainFleetPullStallAlert): Promise<void> {
+  await openEscalation(WATCHDOG_IDENTITY, {
+    severity: 'advisory',
+    summary: `Fleet '${alert.fleetSlug}' has live members but no successful scheduler pulls for 10 minutes`,
+    body:
+      `${alert.goalId ? `Goal '${alert.goalId}' (${alert.title ?? 'untitled'}) points to this fleet. ` : ''}` +
+      `Fleet '${alert.fleetSlug}' has live member(s) ${alert.liveMemberIds.join(', ')}, but none of its ` +
+      `ever-members recorded a successful scheduler:get_next in the last ` +
+      `${Math.ceil(GOAL_DRAIN_FLEET_PULL_STALL_WINDOW_MS / 60_000)} minutes. A success is an invocation ` +
+      `with status='ok' and schedulerDisposition.kind='claimed' or 'no-claim'; errors and unrecorded calls ` +
+      `do not count. Check fleet:status and scheduler:pull_ledger { fleet: '${alert.fleetSlug}' } for the ` +
+      `blocked member and recovery path.`,
+    meta: {
+      dedupKind: 'goal-drain-fleet-pull-stall',
+      subjectSignature: `${alert.workspaceId}:${alert.fleetSlug}`,
+      ...(alert.goalId
+        ? { goalId: alert.goalId, goalWorkspaceId: alert.workspaceId, drainFleet: alert.fleetSlug }
+        : { fleetSlug: alert.fleetSlug }),
+      liveMemberIds: alert.liveMemberIds,
+      stalledForMs: alert.stalledForMs,
+    },
+  });
+}
+
+async function defaultPromoteDrainLeader(
+  alert: GoalDrainAlert,
+  goal: GoalDrainRowLike,
+): Promise<boolean> {
+  if (!alert.standing || alert.reason !== 'drain-fleet-dead' || !goal.drainFleet) return false;
+  const fleet = await getFleet(goal.workspaceId, goal.drainFleet);
+  if (!fleet?.leaderOwnerId) return false;
+  const roster = await listFleetRosterDiagnosed({
+    fleetSlug: goal.drainFleet,
+    workspaceId: goal.workspaceId,
+    leaderOwnerId: fleet.leaderOwnerId,
+  });
+  if (roster.degradedLegs.includes('presence')) return false;
+  const leader = roster.entries.find((member) => member.agentId === fleet.leaderOwnerId) ?? roster.leaderEntry;
+  // An absent row, suspect session, or degraded read is not proof the leader ended.
+  if (leader?.agentId !== fleet.leaderOwnerId || leader.sessionState !== 'ended') return false;
+  const successor = oldestLiveDrainFleetMember(fleet.leaderOwnerId, alert.liveHolders, roster.entries);
+  if (!successor) return false;
+  const transferred = await takeFleetLeadership(
+    goal.workspaceId,
+    fleet,
+    WATCHDOG_IDENTITY,
+    successor,
+    { harnessSlug: goal.installSlug ?? undefined },
+  );
+  return transferred.leader === successor && transferred.previousLeader === fleet.leaderOwnerId;
+}
+
 async function defaultEscalate(alert: GoalDrainAlert): Promise<void> {
   await openEscalation(WATCHDOG_IDENTITY, {
     severity: 'advisory',
@@ -1323,7 +1629,12 @@ async function defaultEscalate(alert: GoalDrainAlert): Promise<void> {
           `${GOAL_DRAIN_FLEET_DEAD_GRACE_MS / 60_000} min dead it re-mints the goal-scoped lane and launches one ` +
           `headless member, at most ${GOAL_DRAIN_FLEET_RELAUNCH_RATE_LIMIT} times per ` +
           `${GOAL_DRAIN_FLEET_RELAUNCH_RATE_WINDOW_MS / 60_000} min (ledger: goals.metadata.drainRespawn). ` +
-          `You are told when it does; a spent budget escalates to the owner instead.`
+          `You are told when it does; a spent budget escalates to the owner instead.\n\n` +
+          `Pacing spend and want a leader-only fleet? The relaunch also stands down by itself at ` +
+          `${GOAL_DRAIN_RELAUNCH_SPEND_CEILING * 100}% of the goal budget, and a steward can hold it earlier with ` +
+          `facts:assert { scope:'workspace', key:'${drainWorkerThrottleFactKey(alert.goalId)}', body:<reason>, ` +
+          `ttlSec:<how long> } (facts:retract lifts it; the mark expires on its own, so the always-maintained ` +
+          `contract resumes without anyone remembering).`
         : `Reported + event-emitted (goal:drain-dead), never auto-launched for an outcome goal: standing a ` +
           `fleet up is the goal holder's authority, noticing its absence is this watchdog's.`),
     meta: {
@@ -1364,6 +1675,33 @@ async function defaultRelaunchFlagEnabled(): Promise<boolean> {
  * is what makes bootstrap-su stamp membership and auto-kick the member so it
  * pulls instead of parking (see goals:start §3.5).
  */
+/**
+ * EI-24556293106348130: re-couple a live holder with the fleet's recorded leader,
+ * in place. Deliberately NOT the relaunch path: no mint, no claim-spec or launch
+ * preconditions, no dead stamp and no budget charge, because nothing is dead —
+ * the successor of a holder handoff simply has no edge yet. Idempotent.
+ */
+export async function defaultRepairDrainCoupling(
+  goal: GoalDrainRowLike & { drainFleet: string },
+  holderOwnerId: string,
+): Promise<boolean> {
+  const [{ ensureGoalDrainLeaderCoupling }, { getFleet }] = await Promise.all([
+    import('../goals/drain-fleet-mint'),
+    import('../agent-fleets-store'),
+  ]);
+  const fleet = await getFleet(goal.workspaceId, goal.drainFleet);
+  const leaderOwnerId = fleet?.leaderOwnerId ?? null;
+  if (!leaderOwnerId || leaderOwnerId === holderOwnerId) return false;
+  return await ensureGoalDrainLeaderCoupling({
+    workspaceId: goal.workspaceId,
+    goalId: goal.goalId,
+    fleetSlug: goal.drainFleet,
+    holderOwnerId,
+    leaderOwnerId,
+    declaredBy: WATCHDOG_IDENTITY.ownerId,
+  });
+}
+
 export async function defaultRelaunchDrainFleet(
   sql: Sql,
   alert: GoalDrainAlert,
@@ -1402,6 +1740,7 @@ export async function defaultRelaunchDrainFleet(
       ? (
           await mintDrainFleetForGoal({
             workspaceId: goal.workspaceId,
+            harnessSlug: installSlug,
             goalId: goal.goalId,
             goalTitle: goal.title,
             agentOwnerId: holderOwnerId,
@@ -1449,6 +1788,10 @@ export async function defaultRelaunchDrainFleet(
       compactionLimit: leaderPolicy.effective.compactionLimit,
       headless: true,
       fleet: fleetSlug,
+      // WI-10004787: launched ON BEHALF OF the holder, exactly as goals:start
+      // injects `--launched-by=<holder>`. Without it bootstrap-su inherits no
+      // goal and every call this session makes is stamped goal_id NULL.
+      launchedBy: holderOwnerId,
       mode: 'auto',
       label: `goal-drain leader · ${goal.title.slice(0, 34)}`,
       kickoffPrompt:
@@ -1534,6 +1877,9 @@ export async function defaultRelaunchDrainFleet(
     compactionLimit: resolved.effective.compactionLimit,
     headless: true,
     fleet: fleetSlug,
+    // WI-10004787: see the leader launch above — the worker inherits the goal
+    // only through --launched-by.
+    launchedBy: holderOwnerId,
     label: `goal-drain · ${goal.title.slice(0, 40)}`,
   });
   if (!launched.ok || !launched.ownerId || launched.warning) {
@@ -1737,9 +2083,13 @@ function sweepDeps(sql: Sql, overrides: Partial<GoalDrainFleetSweepDeps>): GoalD
     reserveRelaunchSlot: (goal, nowMs) => reserveGoalDrainFleetRelaunchSlot(sql, goal, nowMs),
     clearDrainLedger: (goal) => clearGoalDrainFleetLedger(sql, goal),
     relaunchDrainFleet: (alert, goal) => defaultRelaunchDrainFleet(sql, alert, goal),
+    repairDrainCoupling: (goal, holderOwnerId) => defaultRepairDrainCoupling(goal, holderOwnerId),
     notifyRelaunch: defaultNotifyRelaunch,
     escalateRelaunchExhausted: defaultEscalateRelaunchExhausted,
     deadGraceMs: GOAL_DRAIN_FLEET_DEAD_GRACE_MS,
+    promoteDrainLeader: (alert, goal) => defaultPromoteDrainLeader(alert, goal),
+    readPullStallAlerts: (goals, nowMs) => readActiveFleetPullStallAlerts(sql, goals, nowMs),
+    escalatePullStall: defaultEscalatePullStall,
     readPlanFleetCohort: (goals, resolveFleetLiveness) => readGoalPlanFleetCohort(sql, goals, resolveFleetLiveness),
     escalatePlanFleet: defaultEscalatePlanFleet,
     emitPlanFleet: defaultEmitPlanFleet,
@@ -1838,7 +2188,7 @@ async function runRelaunchLeg(
   alert: GoalDrainAlert,
   goal: GoalDrainRowLike,
   relaunchFlag: () => Promise<boolean>,
-): Promise<'ineligible' | 'flag-off' | 'wait' | 'relaunched' | 'capped' | 'failed'> {
+): Promise<'ineligible' | 'flag-off' | 'wait' | 'relaunched' | 'promoted' | 'capped' | 'failed'> {
   const gate = goalDrainRelaunchEligibility(alert, goal);
   if (!gate.eligible) return 'ineligible';
   if (!(await relaunchFlag())) return 'flag-off';
@@ -1847,6 +2197,15 @@ async function runRelaunchLeg(
   if (deadSinceMs === null) return 'ineligible';
   const decision = decideGoalDrainFleetRelaunch(deadSinceMs, nowMs, deps.deadGraceMs);
   if (decision.kind === 'wait') return 'wait';
+  try {
+    if (await deps.promoteDrainLeader(alert, goal)) {
+      return 'promoted';
+    }
+  } catch (e) {
+    console.warn(
+      `[goal-drain-fleet-watchdog] leader succession failed for ${goal.goalId} (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
   const slot = await deps.reserveRelaunchSlot(goal, nowMs);
   if (slot.kind === 'ineligible') return 'ineligible';
   if (slot.kind === 'capped') {
@@ -1894,11 +2253,12 @@ export async function runGoalDrainFleetSweepOnce(
   if (!(await deps.flagEnabled())) return { scanned: 0, escalated: 0, skipped: true, ...none };
 
   const { goals, holders } = await deps.readGoals();
-  if (goals.length === 0) return { scanned: 0, escalated: 0, skipped: false, ...none };
 
   const activeKeys = new Set(goals.map((g) => fleetKey(g.workspaceId, g.goalId)));
   const relevant = holders.filter((h) => activeKeys.has(fleetKey(h.workspaceId, h.goalId)));
-  const verdicts = await deps.resolveLiveness([...new Set(relevant.map((h) => h.ownerId))]);
+  const verdicts = relevant.length
+    ? await deps.resolveLiveness([...new Set(relevant.map((h) => h.ownerId))])
+    : new Map<string, LivenessVerdict>();
 
   const declaredGoals = goals.filter((g): g is GoalDrainRowLike & { drainFleet: string } => g.drainFleet !== null);
   const declared = declaredGoals.map((g) => ({
@@ -1906,14 +2266,39 @@ export async function runGoalDrainFleetSweepOnce(
     holderOwnerId: relevant.find((h) => h.goalId === g.goalId && h.workspaceId === g.workspaceId &&
       !!verdicts.get(h.ownerId) && holderCountsAsAlive(verdicts.get(h.ownerId)!))?.ownerId,
   }));
-  const fleetLiveness = await deps.resolveFleetLiveness(declared);
+  const fleetLiveness = declared.length
+    ? await deps.resolveFleetLiveness(declared)
+    : new Map<string, DrainFleetLiveness>();
+
+  // EI-24556293106348130: an UNCOUPLED fleet (live leader + live worker, no edge
+  // to the live holder) is repaired in place — never alarmed, never relaunched.
+  // A repaired fleet reads 'alive' on the next tick, which also clears any open
+  // dead episode through the ledger loop below.
+  for (const [i, goal] of declaredGoals.entries()) {
+    const holderOwnerId = declared[i]?.holderOwnerId;
+    if (!holderOwnerId) continue;
+    if (fleetLiveness.get(fleetKey(goal.workspaceId, goal.drainFleet)) !== 'uncoupled') continue;
+    try {
+      const repaired = await deps.repairDrainCoupling(goal, holderOwnerId);
+      console.warn(
+        `[goal-drain-fleet-watchdog] ${goal.goalId}: drain fleet ${goal.drainFleet} was uncoupled from live holder ` +
+          `${holderOwnerId}; coupling ${repaired ? 'repaired in place' : 'NOT repaired (no distinct live leader)'}`,
+      );
+    } catch (e) {
+      console.warn(
+        `[goal-drain-fleet-watchdog] coupling repair failed for ${goal.goalId} (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
 
   // D-005: scope is judged only where it can change the verdict — a fleet that
   // is dead/missing/unknown already has its (more urgent, or suppressed) answer.
   const alivePairs = declaredGoals
     .filter((g) => fleetLiveness.get(fleetKey(g.workspaceId, g.drainFleet)) === 'alive')
     .map((g) => ({ workspaceId: g.workspaceId, fleetSlug: g.drainFleet, goalId: g.goalId }));
-  const specScopes = await deps.resolveFleetSpecScopes(alivePairs);
+  const specScopes = alivePairs.length
+    ? await deps.resolveFleetSpecScopes(alivePairs)
+    : new Map<string, DrainFleetSpecScope>();
 
   const alerts = scanGoalDrainFleets(goals, relevant, verdicts, fleetLiveness, specScopes, deps.now(), deps.graceMs);
   let escalated = 0;
@@ -1923,6 +2308,25 @@ export async function runGoalDrainFleetSweepOnce(
   let relaunchFlagValue: Promise<boolean> | null = null;
   const relaunchFlag = () => (relaunchFlagValue ??= deps.relaunchFlagEnabled());
   const goalByKey = new Map(goals.map((g) => [fleetKey(g.workspaceId, g.goalId), g]));
+
+  // The 10-minute pull alarm is independent of the liveness verdict: a fleet can
+  // have live sessions that are all being refused by scheduler admission.
+  try {
+    const pullStalls = await deps.readPullStallAlerts(declaredGoals, deps.now());
+    for (const alert of pullStalls) {
+      try {
+        await deps.escalatePullStall(alert);
+      } catch (e) {
+        console.warn(
+          `[goal-drain-fleet-watchdog] pull-stall escalation failed for ${alert.fleetSlug} (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+  } catch (e) {
+    console.warn(
+      `[goal-drain-fleet-watchdog] pull-stall read failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
 
   for (const alert of alerts) {
     try {

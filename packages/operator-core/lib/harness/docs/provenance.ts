@@ -60,8 +60,11 @@ export async function recordGeneratedDoc(input: RecordGeneratedDocInput): Promis
 
   const paths = await resolveHarnessDocPaths(input.harnessSlug);
   if (!paths) return { ok: false, error: 'unknown_harness' };
-  const { repoRoot, docsRoot } = paths;
-  if ((await readDocBody(docsRoot, docId)) === null) return { ok: false, error: 'unknown_doc' };
+  const { repoRoot } = paths;
+  if (paths.sources && Object.hasOwn(paths.sources, docId.split('/')[0])) {
+    return { ok: false, error: 'file_authoritative_source — use manual anchoring, not generated content' };
+  }
+  if ((await readDocBody(paths.sources ? paths : paths.docsRoot, docId)) === null) return { ok: false, error: 'unknown_doc' };
 
   // A harness's docs live in its workspace — derive it (never a silent 'default'); the
   // repo-root check above already validated the harness, so this resolves (P-002 / D-003).

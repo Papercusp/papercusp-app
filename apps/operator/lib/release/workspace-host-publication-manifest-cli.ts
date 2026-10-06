@@ -111,7 +111,12 @@ export const WORKSPACE_HOST_PROVENANCE_BUILD_TYPE =
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const NODE_VERSION = /^v(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
-const execFile = promisify(execFileCallback);
+// Lazy + memoized, NOT promisified at module scope (EI-10161): under a narrow
+// `vi.mock("node:child_process")` `execFile` is undefined, and an eager `promisify` throws at
+// IMPORT time — crashing every test file that reaches this module, even one that never calls it.
+let execFileMemo: typeof execFileCallback.__promisify__ | null = null;
+const execFile = ((...args: unknown[]) =>
+  Reflect.apply((execFileMemo ??= promisify(execFileCallback)), undefined, args)) as typeof execFileCallback.__promisify__;
 // A gzip tar must be decompressed to locate a member, even when the listing is narrowed to
 // `bin/node`. The audited P-003 bundle takes ~37s on the release host; keep the probe bounded but
 // leave measured headroom for slower builders instead of rejecting a valid multi-gigabyte bundle.

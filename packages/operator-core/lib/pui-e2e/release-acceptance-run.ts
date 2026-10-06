@@ -11,9 +11,9 @@
  * only with a passing acceptance file for that same archive digest. The
  * committed compatibility.json never advertises anything (D-017).
  */
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type SpawnOptions } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -22,6 +22,33 @@ import {
   type AcceptanceMatrixFile, type Candidate, type EvidenceRow, type Verdict,
 } from './release-acceptance';
 import type { EvidenceFile } from './release-acceptance-reporter';
+import { startDedicatedNativePg } from '@papercusp/test-config/pg';
+
+/**
+ * One dedicated native Postgres shared by every leg (WI-10004247 H4). Without
+ * it each leg resolves the fleet's shared, reused Docker test-PG container,
+ * which can be recreated between legs: rehearsal 0f06f9d5d6 lost every omp test
+ * to `ECONNREFUSED 127.0.0.1:32785` after the claude leg had passed on the same
+ * container. Docker container creation also stalls on this host
+ * (WI-10003403). Host PG binaries need neither. A caller that already set
+ * PAPERCUSP_TEST_PG_ADMIN_URL keeps its own server.
+ */
+async function startAcceptancePg(work: string): Promise<{ env: Record<string, string>; stop(): Promise<void> }> {
+  if (process.env.PAPERCUSP_TEST_PG_ADMIN_URL) return { env: {}, stop: async () => {} };
+  const pg = await startDedicatedNativePg({
+    baseDir: work,
+    settings: {
+      max_connections: '500',
+      fsync: 'off',
+      synchronous_commit: 'off',
+      full_page_writes: 'off',
+      // Keep PostgreSQL logs in the collector so they do not interleave with
+      // the acceptance leg's live stdout/stderr log.
+      logging_collector: 'on',
+    },
+  });
+  return { env: { PAPERCUSP_TEST_PG_ADMIN_URL: pg.getConnectionUri() }, stop: () => pg.stop() };
+}
 
 export const RELEASE_SUITES = [
   'packages/operator-core/lib/pui-e2e/agent-chat-pty.integration.test.ts',
@@ -37,6 +64,51 @@ const ACCEPTANCE_SOURCES = [
 const REPORTER = path.join(REPO_ROOT, 'packages/operator-core/lib/pui-e2e/release-acceptance-reporter.ts');
 const VITEST = path.join(REPO_ROOT, 'node_modules/.bin/vitest');
 const OPERATOR_CORE = path.join(REPO_ROOT, 'packages/operator-core');
+
+export interface LoggedChildResult {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error: Error | null;
+}
+
+/**
+ * Run a child with stdout and stderr sent directly to a live log file. The file
+ * is created before spawn and the child inherits its descriptor, so long test
+ * legs remain observable while they run instead of only after exit.
+ */
+export function runChildWithLiveLog(
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+  logPath: string,
+): Promise<LoggedChildResult> {
+  writeFileSync(logPath, `--- live child output started ${new Date().toISOString()} ---\n`);
+  const logFd = openSync(logPath, 'a');
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(command, args, { ...options, stdio: ['ignore', logFd, logFd] });
+  } catch (caught) {
+    closeSync(logFd);
+    const error = caught instanceof Error ? caught : new Error(String(caught));
+    appendFileSync(logPath, `\n--- child spawn error: ${error.message} ---\n`);
+    return Promise.resolve({ status: null, signal: null, error });
+  }
+  closeSync(logFd);
+
+  return new Promise((resolve, reject) => {
+    let processError: Error | null = null;
+    child.once('error', (error) => { processError = error; });
+    child.once('close', (status, signal) => {
+      try {
+        appendFileSync(logPath,
+          `\n--- child exit: code=${status ?? 'null'} signal=${signal ?? 'none'}${processError ? ` error=${processError.message}` : ''} ---\n`);
+        resolve({ status, signal, error: processError });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
 
 export interface RealLeg {
   /** PUI_REAL_BACKEND: claude | codex | omp. */
@@ -66,10 +138,18 @@ export interface RunResult {
   stockMachines: StockMachineResult[];
   cloudDeviceStart: CloudDeviceStartResult;
   suiteProvenance: Array<{ file: string; candidateBlob: string | null; runBlob: string | null }>;
+  runnerTree: { before: RunnerTree; after: RunnerTree };
 }
 
 export interface StockMachineResult {
   image: string;
+  /**
+   * True when the host could not start a container at all (the create/start
+   * preflight refused), so the image never ran the candidate. That says
+   * nothing about the binary: it must not stop the PTY legs, which need no
+   * Docker, and the smoke is measured again after them (WI-10004247 run 7).
+   */
+  unmeasured?: boolean;
   status: number | null;
   output: string;
 }
@@ -118,6 +198,57 @@ export async function runCloudDeviceStartSmoke(origin = 'https://app.papercusp.c
     result.problem = 'device authorization request failed, timed out, redirected, or returned invalid JSON';
   }
   return result;
+}
+
+/**
+ * A 5xx, or no usable answer at all, says the public ingress was not serving at
+ * that moment. It says nothing about whether the cloud refuses device starts:
+ * WI-10004247 run 13 lost every leg to a single HTTP 502 at 01:12Z, and the same
+ * endpoint answered 200 three times at 01:24Z. A 4xx or a malformed grant is a
+ * measured refusal and stays one.
+ */
+export function cloudDeviceStartTransient(result: CloudDeviceStartResult): boolean {
+  return !result.ok && (result.status === null || result.status >= 500);
+}
+
+/** Only a measured refusal skips the legs; the verdict refuses either way. */
+export function cloudDeviceStartBlocksLegs(result: CloudDeviceStartResult): boolean {
+  return !result.ok && !cloudDeviceStartTransient(result);
+}
+
+export const CLOUD_DEVICE_START_ATTEMPTS = 3;
+const CLOUD_DEVICE_START_PAUSE_MS = 20_000;
+
+/** Run the smoke, asking again after a pause while the failure is transient. */
+export async function measureCloudDeviceStart(
+  smoke: () => Promise<CloudDeviceStartResult> = () => runCloudDeviceStartSmoke(),
+  attempts = CLOUD_DEVICE_START_ATTEMPTS,
+  pauseMs = CLOUD_DEVICE_START_PAUSE_MS,
+): Promise<CloudDeviceStartResult[]> {
+  const history: CloudDeviceStartResult[] = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const result = await smoke();
+    history.push(result);
+    if (!cloudDeviceStartTransient(result) || attempt === attempts) break;
+    await new Promise((resolve) => setTimeout(resolve, pauseMs));
+  }
+  return history;
+}
+
+/**
+ * Measure a transient failure once more, after the legs, as the stock smoke is.
+ * The verdict judges the latest measurement; every attempt stays in the record.
+ */
+export async function remeasureCloudDeviceStart(
+  history: CloudDeviceStartResult[], measure: () => Promise<CloudDeviceStartResult[]> = () => measureCloudDeviceStart(),
+): Promise<CloudDeviceStartResult[]> {
+  const latest = history[history.length - 1];
+  return latest && cloudDeviceStartTransient(latest) ? [...history, ...await measure()] : history;
+}
+
+/** Whether a precheck taken before the legs should stop them. */
+export function legsBlocked(stockMachines: StockMachineResult[], cloudDeviceStart: CloudDeviceStartResult): boolean {
+  return stockMachinesBlockLegs(stockMachines) || cloudDeviceStartBlocksLegs(cloudDeviceStart);
 }
 
 const STOCK_LINUX_IMAGES = ['ubuntu:24.04', 'debian:stable-slim'];
@@ -218,13 +349,46 @@ case "$psu_version" in
   *) echo 'psu --version did not print a version' >&2; exit 1 ;;
 esac`;
 
+/**
+ * Only a smoke that RAN and failed says the binary cannot start on stock
+ * Linux. One the host never started is unmeasured, and skipping every PTY leg
+ * for it threw away whole acceptance runs to a Docker stall on the host
+ * (WI-10003403) that had nothing to do with the candidate.
+ */
+export function stockMachinesBlockLegs(machines: StockMachineResult[]): boolean {
+  return machines.some((machine) => !machine.unmeasured && machine.status !== 0);
+}
+
+/**
+ * Measure an unmeasured smoke once more, after the legs. The stalls seen on
+ * the release host cleared within about half an hour, and the legs take
+ * longer than that, so this usually turns a stall into a delay. A smoke that
+ * ran is kept as it was.
+ */
+export function remeasureStockMachines(
+  machines: StockMachineResult[], smoke: () => StockMachineResult[],
+): StockMachineResult[] {
+  return machines.some((machine) => machine.unmeasured) ? smoke() : machines;
+}
+
+/** The refusal a stock smoke contributes to the verdict, or null when it passed. */
+export function stockMachineRefusal(machine: StockMachineResult): string | null {
+  if (machine.unmeasured) {
+    return `stock-machine smoke on ${machine.image} was not measured: the host could not start a container `
+      + `before or after the legs: ${machine.output.slice(-1_000)}`;
+  }
+  return machine.status === 0
+    ? null
+    : `stock-machine smoke on ${machine.image} failed (status ${machine.status}): ${machine.output.slice(-1_000)}`;
+}
+
 /** Exercise the shipped unit on stock Linux, without host libraries or network. */
 export function runStockMachineSmoke(
   unit: string, images = STOCK_LINUX_IMAGES, probe = probeDockerCreateStart,
 ): StockMachineResult[] {
   const dockerProblem = probe();
   if (dockerProblem) {
-    return images.map((image) => ({ image, status: null, output: dockerProblem }));
+    return images.map((image) => ({ image, unmeasured: true, status: null, output: dockerProblem }));
   }
   return images.map((image) => {
     const run = spawnSync('docker', [
@@ -240,6 +404,56 @@ export function runStockMachineSmoke(
       output: `${run.stdout ?? ''}\n${run.stderr ?? ''}${run.error ? `\n${run.error.message}` : ''}`.slice(-8_000),
     };
   });
+}
+
+/** The checkout the stage ran from: its HEAD and every tracked path that differs from it. */
+export interface RunnerTree {
+  root: string;
+  head: string | null;
+  /** `git status --porcelain` lines for tracked changes, submodule pins and content included. */
+  changed: string[];
+  /** Set when git could not answer; the tree is then unmeasured, never assumed clean. */
+  problem: string | null;
+}
+
+export function measureRunnerTree(root = REPO_ROOT): RunnerTree {
+  const gitIn = (...args: string[]) => spawnSync('git', ['-C', root, ...args], {
+    encoding: 'utf8', timeout: 300_000, maxBuffer: 64 * 1024 * 1024,
+  });
+  const head = gitIn('rev-parse', 'HEAD');
+  const status = gitIn('status', '--porcelain=v1', '--untracked-files=no', '--ignore-submodules=untracked');
+  const failed = [head, status].find((run) => run.status !== 0 || run.error);
+  return {
+    root,
+    head: head.status === 0 ? head.stdout.trim() : null,
+    changed: status.status === 0 ? status.stdout.split('\n').filter((line) => line.trim()) : [],
+    problem: failed ? `git exited ${failed.status ?? 'none'}${failed.error ? `: ${failed.error.message}` : ''}: ${(failed.stderr ?? '').trim().slice(-500)}` : null,
+  };
+}
+
+/**
+ * Whether the run's own code was the candidate's (EI-24692155752067316). The
+ * suites, the operator fixture they start, and every module those load come
+ * from the runner's checkout, not the archive. ACCEPTANCE_SOURCES pins only the
+ * suites and the runner, so a peer's mid-edit to operator-core or scripts/ in a
+ * shared tree changed rehearsal 37bc2d4c32's legs without tripping it. Measured
+ * before and after the legs, since an edit can land at any point in between.
+ * apps/tui/scripts/release-acceptance.sh runs the stage from an isolated
+ * checkout at the source commit, which passes both measurements.
+ */
+export function runnerTreeRefusals(tree: RunnerTree, sourceSha: string, when: string): string[] {
+  if (tree.problem) return [`the runner checkout ${tree.root} could not be measured ${when} (${tree.problem}), so the evidence may describe other code`];
+  const refusals: string[] = [];
+  if (tree.head !== sourceSha) {
+    refusals.push(`the runner checkout ${tree.root} was at ${tree.head ?? 'no commit'} ${when}, not the candidate source ${sourceSha}, `
+      + 'so the suites and operator fixture ran other code (run apps/tui/scripts/release-acceptance.sh, which checks the candidate out in isolation)');
+  }
+  if (tree.changed.length) {
+    const shown = tree.changed.slice(0, 5).map((line) => line.trim()).join('; ');
+    refusals.push(`the runner checkout ${tree.root} had ${tree.changed.length} uncommitted tracked change(s) ${when} (${shown}`
+      + `${tree.changed.length > 5 ? '; ...' : ''}), so the suites and operator fixture ran other code`);
+  }
+  return refusals;
 }
 
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
@@ -328,8 +542,9 @@ export async function runReleaseAcceptance(options: RunOptions): Promise<RunResu
     target: string; source: { commit: string };
   };
   const sourceSha = provenance.source.commit;
-  const stockMachines = provenance.target.startsWith('linux-') ? runStockMachineSmoke(unit) : [];
-  const cloudDeviceStart = await runCloudDeviceStartSmoke();
+  const runnerTreeBefore = measureRunnerTree();
+  let stockMachines = provenance.target.startsWith('linux-') ? runStockMachineSmoke(unit) : [];
+  let cloudDeviceStartHistory = await measureCloudDeviceStart();
 
   const home = path.join(work, 'home');
   mkdirSync(path.join(home, 'tmp'), { recursive: true });
@@ -358,22 +573,28 @@ export async function runReleaseAcceptance(options: RunOptions): Promise<RunResu
   // When the stage itself runs under vitest (its R-12 test), the outer worker's
   // VITEST_* markers must not leak into the suites' own run.
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST')));
-  // A binary that cannot start on stock Linux cannot earn PTY evidence. Keep
-  // writing the acceptance verdict, but avoid launching expensive live legs.
-  const legsToRun = !cloudDeviceStart.ok || stockMachines.some((machine) => machine.status !== 0)
+  // A binary that cannot start on stock Linux, or a cloud that measurably refuses
+  // device starts, cannot earn a passing verdict. Keep writing the verdict, but
+  // avoid launching expensive live legs. A precheck the host or the ingress
+  // could not answer (Docker stall, 5xx) does not stop them: it is measured again
+  // after the legs instead.
+  const legsToRun = legsBlocked(stockMachines, cloudDeviceStartHistory[cloudDeviceStartHistory.length - 1])
     ? [] : [null, ...(options.real ?? [])];
+  const acceptancePg = legsToRun.length ? await startAcceptancePg(work) : { env: {}, stop: async () => {} };
+  try {
   for (const leg of legsToRun) {
     const engine = leg ? leg.backend : 'scripted';
     const evidence = path.join(work, `evidence-${engine}.json`);
-    const run = spawnSync(VITEST, [
+    const run = await runChildWithLiveLog(VITEST, [
       'run', '--config', 'vitest.integration.config.ts',
       ...suites.map((file) => path.join(REPO_ROOT, file)),
       ...(options.testFilter ? ['-t', options.testFilter] : []),
       '--reporter=default', `--reporter=${REPORTER}`,
     ], {
-      cwd: OPERATOR_CORE, encoding: 'utf8', timeout: 90 * 60_000, maxBuffer: 512 * 1024 * 1024,
+      cwd: OPERATOR_CORE, timeout: 90 * 60_000,
       env: {
         ...inherited,
+        ...acceptancePg.env,
         PUI_BIN: installed,
         // The store install.sh wrote. Suites run PUI under their own HOME, so a
         // journey that reads the release store must be pointed at this one.
@@ -383,11 +604,13 @@ export async function runReleaseAcceptance(options: RunOptions): Promise<RunResu
         ...(leg ? { PUI_REAL_ENGINE: '1', PUI_REAL_BACKEND: leg.backend, ...(leg.model ? { PUI_REAL_MODEL: leg.model } : {}), ...leg.env }
           : { PUI_REAL_ENGINE: '' }),
       },
-    });
-    writeFileSync(path.join(work, `vitest-${engine}.log`), `${run.stdout ?? ''}\n--- stderr\n${run.stderr ?? ''}`);
+    }, path.join(work, `vitest-${engine}.log`));
     const harvested = existsSync(evidence) ? (JSON.parse(readFileSync(evidence, 'utf8')) as EvidenceFile).rows : [];
     rows.push(...harvested);
     legs.push({ engine, status: run.status, evidence, rows: harvested.length });
+  }
+  } finally {
+    await acceptancePg.stop();
   }
 
   const candidate: Candidate = {
@@ -397,15 +620,22 @@ export async function runReleaseAcceptance(options: RunOptions): Promise<RunResu
   const contract = committed(sourceSha, 'apps/tui/PUBLIC_RELEASE_UX.md');
   const matrixText = committed(sourceSha, 'apps/tui/release/acceptance-matrix.json');
   const extra: string[] = [];
+  cloudDeviceStartHistory = await remeasureCloudDeviceStart(cloudDeviceStartHistory);
+  const cloudDeviceStart = cloudDeviceStartHistory[cloudDeviceStartHistory.length - 1];
   if (!cloudDeviceStart.ok) extra.push(`public cloud device-start smoke failed: ${cloudDeviceStart.problem}`);
   if (!contract) extra.push(`candidate ${sourceSha} carries no apps/tui/PUBLIC_RELEASE_UX.md`);
   if (!matrixText) extra.push(`candidate ${sourceSha} carries no apps/tui/release/acceptance-matrix.json`);
   if (!platform) extra.push(`this host (${process.platform}/${process.arch}) is not a platform in the release matrix`);
+  stockMachines = remeasureStockMachines(stockMachines, () => runStockMachineSmoke(unit));
   for (const machine of stockMachines) {
-    if (machine.status !== 0) {
-      extra.push(`stock-machine smoke on ${machine.image} failed (status ${machine.status}): ${machine.output.slice(-1_000)}`);
-    }
+    const refusal = stockMachineRefusal(machine);
+    if (refusal) extra.push(refusal);
   }
+  const runnerTree = { before: runnerTreeBefore, after: measureRunnerTree() };
+  extra.push(...new Set([
+    ...runnerTreeRefusals(runnerTree.before, sourceSha, 'before the legs'),
+    ...runnerTreeRefusals(runnerTree.after, sourceSha, 'after the legs'),
+  ]));
   const suiteProvenance = ACCEPTANCE_SOURCES.map((file) => ({ file, candidateBlob: blob(sourceSha, file), runBlob: blob(null, file) }));
   for (const entry of suiteProvenance) {
     if (!entry.candidateBlob || entry.candidateBlob !== entry.runBlob) {
@@ -423,8 +653,11 @@ export async function runReleaseAcceptance(options: RunOptions): Promise<RunResu
   writeFileSync(out, `${JSON.stringify({
     schemaVersion: 1,
     checkedAt: new Date().toISOString(),
-    runner: { head: git('rev-parse', 'HEAD'), platform, legs, stockMachines, cloudDeviceStart, suiteProvenance, work },
+    runner: {
+      head: git('rev-parse', 'HEAD'), platform, legs, stockMachines, cloudDeviceStart, cloudDeviceStartHistory,
+      suiteProvenance, runnerTree, work,
+    },
     ...verdict,
   }, null, 2)}\n`);
-  return { verdict, out, legs, stockMachines, cloudDeviceStart, suiteProvenance };
+  return { verdict, out, legs, stockMachines, cloudDeviceStart, suiteProvenance, runnerTree };
 }

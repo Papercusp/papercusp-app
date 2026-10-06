@@ -30,8 +30,10 @@
  *     possible there; here `selectFailover` must decline instead, which is
  *     why it consults `triedRouteKeys` rather than just the current id.
  */
+import { describeFetchError } from '../loopback-fetch';
 import type { GatewayTransportId } from './provider-adapters';
 import type { AccountPool, ActiveAccount } from './provider-contracts';
+import { presentedSecretsFromHeaders, scrubbedErrorBody } from './error-body-scrub';
 import {
   GatewayRequestKernelError,
   withPromiseDeadline,
@@ -335,8 +337,8 @@ export function createCodexBearerKernelAdapter(opts: CodexBearerAdapterOptions):
         if (error instanceof GatewayRequestKernelError && !error.retryable) throw error;
         account.invalidateToken?.();
         throw new GatewayRequestKernelError(
-          `inference-gateway: Codex upstream failed: ${(error as Error).message}`,
-          { code: 'upstream-error', outcome: 'upstream-error', status: 502, retryable: true },
+          `inference-gateway: Codex upstream failed: ${describeFetchError(error)}`,
+          { code: 'upstream-error', outcome: 'upstream-error', status: 502, retryable: true, cause: error },
         );
       }
 
@@ -356,7 +358,11 @@ export function createCodexBearerKernelAdapter(opts: CodexBearerAdapterOptions):
         streaming: shapeOnce(context).shape.streaming,
         transport: BEARER_TRANSPORT,
         metadata: { accountId: account.accountId, headers, pinYieldedFrom },
-        body: upstream.body,
+        // WI-10004561: an upstream error body may echo the bearer this attempt presented.
+        body:
+          upstream.status >= 400 && upstream.body
+            ? scrubbedErrorBody(upstream.body, presentedSecretsFromHeaders(prepared.headers))
+            : upstream.body,
         // 429 is the route-around case; everything else is forwarded as-is
         // so the caller's own client sees the real upstream status.
         retryable: upstream.status === 429,

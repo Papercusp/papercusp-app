@@ -11,6 +11,7 @@ import {
   type PromptWeightBreakdown,
 } from './tool-guidance-budget';
 import { writeStdoutSync } from '../../../../scripts/lib/write-stdout-sync.mjs';
+import { describeFloorHeadroom, type DeliverySummary } from './tool-delivery-policy';
 
 export interface ToolWeightRow {
   name: string;
@@ -149,8 +150,9 @@ export function measureToolWeights(
 export function formatToolWeightReport(
   rows: readonly ToolWeightRow[],
   catalogSize: number,
-  options: { json?: boolean; selector?: string } = {},
+  options: { json?: boolean; selector?: string; delivery?: DeliverySummary } = {},
 ): string {
+  const { delivery } = options;
   if (options.json) {
     return JSON.stringify(
       {
@@ -159,7 +161,15 @@ export function formatToolWeightReport(
         hardCap: HARD_CAP,
         schemaByteBudget: SCHEMA_BYTE_BUDGET,
         schemaProseShareAlert: SCHEMA_PROSE_SHARE_ALERT,
-        tools: rows,
+        // WI-10004590: present only when the caller measured delivery, so a bare
+        // fixture run omits the key rather than reporting a wrong zero.
+        ...(delivery === undefined ? {} : { floorHeadroom: delivery.headroom }),
+        tools: delivery === undefined
+          ? rows
+          : rows.map((row) => {
+              const detail = delivery.tools.get(row.name);
+              return detail === undefined ? row : { ...row, delivery: detail };
+            }),
       },
       null,
       2,
@@ -169,6 +179,11 @@ export function formatToolWeightReport(
   const lines = [
     `tool-weight: ${catalogSize} runtime-projected tools (budget ${BUDGET}, hard cap ${HARD_CAP})`,
   ];
+  // WI-10004590: the prompt-weight rows below say nothing about the OTHER byte budget a
+  // tool edit can break — the tool-delivery floor budget — which is only asserted at gate
+  // time (psu-launcher.test.ts). One catalog-wide line, printed first so it is not lost
+  // beneath the per-tool rows.
+  if (delivery !== undefined) lines.push(describeFloorHeadroom(delivery.headroom));
   for (const row of rows) {
     let status: string;
     if (row.overHardCap) {
@@ -181,6 +196,17 @@ export function formatToolWeightReport(
       status = `OK; ${BUDGET - row.weight} chars of headroom`;
     }
     lines.push(`${row.name}: ${row.weight} chars (${status})`);
+    // WI-10004590: the per-tool half of the delivery signal, for the single-tool query an
+    // author runs after editing one. A FLOOR tool is the dangerous case — its compact bytes
+    // come out of the headroom printed above — so it is labelled, not merely sized. Skipped
+    // for the multi-row listings, where it would double their length with no one asking.
+    const detail = options.selector === undefined ? undefined : delivery?.tools.get(row.name);
+    if (detail !== undefined) {
+      const role = detail.isFloor ? 'FLOOR tool (counts against the headroom above)' : 'not a floor tool';
+      lines.push(
+        `  delivery ${detail.tier} · ${role} · compact ${detail.compactBytes} B · full ${detail.fullBytes} B`,
+      );
+    }
     // EI-19418721410168539: the total alone tells a trimmer HOW MUCH to cut but
     // not WHICH field to cut, which is what made trims guesswork. Every field is
     // printed even at 0, so the columns stay fixed-shape and greppable.
@@ -236,6 +262,9 @@ export function runToolWeightCli(
   weights: readonly NamedToolWeight[],
   write: (text: string) => void = writeStdoutSync,
   error: (text: string) => void = console.error,
+  /** Measured tool-delivery context (WI-10004590). Optional so fixtures and the
+   *  registration self-check keep their weight-only behaviour. */
+  delivery?: DeliverySummary,
 ): number {
   let parsed: ToolWeightCliArgs;
   try {
@@ -254,7 +283,13 @@ export function runToolWeightCli(
   const rows = parsed.selector || parsed.all
     ? [...measured].sort((a, b) => b.weight - a.weight)
     : [...measured].sort((a, b) => b.weight - a.weight).slice(0, 20);
-  write(formatToolWeightReport(rows, weights.length, { json: parsed.json, selector: parsed.selector }));
+  write(
+    formatToolWeightReport(rows, weights.length, {
+      json: parsed.json,
+      selector: parsed.selector,
+      ...(delivery === undefined ? {} : { delivery }),
+    }),
+  );
 
   // EI-21863941004984235 / EI-21863792505619206: a budget or hard-cap violation
   // in the MEASURED set (not just the truncated `rows` slice shown, which top-20
@@ -266,6 +301,10 @@ export function runToolWeightCli(
   // an agent can (and did — EI-21863792505619206) cite as "0 violations" when
   // deciding whether a real gate breach exists. Make the exit code agree with
   // the report it just printed.
-  const hasViolation = measured.some((row) => row.overBudget || row.overHardCap);
+  //
+  // WI-10004590: a floor OVERRUN is the same kind of statement — the report just printed
+  // "OVERRUN", and psu-launcher.test.ts will fail on it. LOW is advisory and stays 0.
+  const hasViolation =
+    measured.some((row) => row.overBudget || row.overHardCap) || delivery?.headroom.status === 'overrun';
   return hasViolation ? 1 : 0;
 }

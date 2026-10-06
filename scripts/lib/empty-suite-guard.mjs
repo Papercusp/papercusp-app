@@ -35,6 +35,22 @@ export function scriptUsesPassWithNoTests(scriptText) {
   return /--passWithNoTests\b/.test(scriptText ?? '');
 }
 
+// scripts/run-vitest-pure-lane.mjs passes --passWithNoTests on every shard it spawns, and it
+// passes an all-reused lane without spawning vitest (via reuseSkipCoversRun below), so a script
+// that invokes it runs zero files as a pass although its own text never names the flag.
+const PURE_LANE_RUNNER = /(?:^|[\s/])run-vitest-pure-lane\.mjs(?=\s|$)/;
+
+/**
+ * May a pass-reuse skip list empty this script's run? True for a script that declares
+ * --passWithNoTests, and for the pure-lane runner (gate-test-reuse-yield-2026-10-01 P-006, D-005).
+ * This is the REUSE eligibility test only: the EI-11132 guard below still keys on the literal
+ * flag (scriptUsesPassWithNoTests), because only a script that declares it can be given
+ * --no-passWithNoTests meaningfully.
+ */
+export function scriptRunsZeroFilesAsPass(scriptText) {
+  return scriptUsesPassWithNoTests(scriptText) || PURE_LANE_RUNNER.test(scriptText ?? '');
+}
+
 // Mirrors libs/test-config/src/vitest-config.ts's baseExclude — directories
 // that are never real test source regardless of workspace.
 const PRUNE_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', '.papercusp', '_retired'];
@@ -58,13 +74,8 @@ const PRUNE_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', '.papercus
  * @param {string} script the script name being run (e.g. 'test', 'test:integration')
  */
 export function hasMatchingTestFilesOnDisk(wsAbsDir, script) {
-  const wantsIntegration = /:integration$/.test(script ?? '');
-  const nameTest = wantsIntegration
-    ? `-iname '*.integration.test.*'`
-    : `\\( -iname '*.test.*' -o -iname '*.spec.*' \\) -not -iname '*.integration.test.*' -not -iname '*.browser.test.*'`;
-  const pruneArgs = PRUNE_DIRS.map((d) => `-not -path '*/${d}/*'`).join(' ');
   try {
-    const out = execSync(`find ${JSON.stringify(wsAbsDir)} -type f ${nameTest} ${pruneArgs} -print -quit`, {
+    const out = execSync(`${testFileFindCommand(wsAbsDir, script)} -quit`, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
@@ -75,14 +86,80 @@ export function hasMatchingTestFilesOnDisk(wsAbsDir, script) {
 }
 
 /**
+ * Every file the same probe matches, workspace-relative and '/'-separated.
+ * A failed census returns `null` (unknown), never `[]`, so a caller asking
+ * "is every file covered?" cannot read a broken probe as a vacuous yes.
+ *
+ * @param {string} wsAbsDir absolute path to the workspace directory
+ * @param {string} script the script name being run
+ * @returns {string[] | null}
+ */
+export function listMatchingTestFilesOnDisk(wsAbsDir, script) {
+  try {
+    const out = execSync(testFileFindCommand(wsAbsDir, script), {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    const root = `${wsAbsDir.replace(/\/+$/, '')}/`;
+    return out
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => normalizeWsRel(line.startsWith(root) ? line.slice(root.length) : line));
+  } catch {
+    return null;
+  }
+}
+
+function testFileFindCommand(wsAbsDir, script) {
+  const wantsIntegration = /:integration$/.test(script ?? '');
+  const nameTest = wantsIntegration
+    ? `-iname '*.integration.test.*'`
+    : `\\( -iname '*.test.*' -o -iname '*.spec.*' \\) -not -iname '*.integration.test.*' -not -iname '*.browser.test.*'`;
+  const pruneArgs = PRUNE_DIRS.map((d) => `-not -path '*/${d}/*'`).join(' ');
+  return `find ${JSON.stringify(wsAbsDir)} -type f ${nameTest} ${pruneArgs} -print`;
+}
+
+const normalizeWsRel = (f) => String(f).replaceAll('\\', '/').replace(/^\.\//, '');
+
+/**
+ * P-008 (gate-file-level-test-reuse-2026-09-27) makes an EMPTY run deliberate:
+ * a file with a valid pass proof is excluded via the task's skip list, and
+ * reuse arms only scripts that declare --passWithNoTests precisely so that a
+ * run with every file reused passes. Appending the guard on top of that turned
+ * every fully-reused workspace red with "No test files found" (gate candidate
+ * 599dbeeb: @papercusp/plugin-sdk, 5 of 5 files reused, exit 1 on both
+ * passes). The guard therefore stands down only when EVERY file the task would
+ * run — its related selection when narrowed, else the on-disk census — is on
+ * the skip list. A partially-reused run keeps it, so a glob that stops
+ * matching the unreused files still fails loudly.
+ *
+ * @param {{ wsAbsDir: string, script: string, reuseSkipped?: Iterable<string> | null, selectedFiles?: string[] | null }} input
+ *   `reuseSkipped` and `selectedFiles` are workspace-relative.
+ * @returns {boolean}
+ */
+export function reuseSkipCoversRun({ wsAbsDir, script, reuseSkipped = null, selectedFiles = null }) {
+  const skipped = new Set([...(reuseSkipped ?? [])].map(normalizeWsRel));
+  if (skipped.size === 0) return false;
+  const runs =
+    Array.isArray(selectedFiles) && selectedFiles.length > 0
+      ? selectedFiles
+      : listMatchingTestFilesOnDisk(wsAbsDir, script);
+  if (!runs || runs.length === 0) return false;
+  return runs.every((f) => skipped.has(normalizeWsRel(f)));
+}
+
+/**
  * The extra CLI args to append (possibly none) when spawning `script` for a
  * workspace — the composed guard decision affected-tests.mjs threads into
  * every spawn for the task, including flake-absorption retries.
  *
- * @param {{ scriptText: string, wsAbsDir: string, script: string }} input
+ * @param {{ scriptText: string, wsAbsDir: string, script: string, reuseSkipped?: Iterable<string> | null, selectedFiles?: string[] | null }} input
  * @returns {string[]}
  */
-export function emptySuiteGuardArgs({ scriptText, wsAbsDir, script }) {
+export function emptySuiteGuardArgs({ scriptText, wsAbsDir, script, reuseSkipped = null, selectedFiles = null }) {
   if (!scriptUsesPassWithNoTests(scriptText)) return [];
-  return hasMatchingTestFilesOnDisk(wsAbsDir, script) ? ['--no-passWithNoTests'] : [];
+  if (!hasMatchingTestFilesOnDisk(wsAbsDir, script)) return [];
+  if (reuseSkipCoversRun({ wsAbsDir, script, reuseSkipped, selectedFiles })) return [];
+  return ['--no-passWithNoTests'];
 }

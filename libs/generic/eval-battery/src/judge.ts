@@ -11,8 +11,15 @@
  * is unit-tested without the network; the wiring passes the real `llmCall`, which
  * routes opus-4-8 with extended thinking through the shared backend.
  */
-import { tryParseJson } from './parse-json';
-import { composite, parseJudgeOutput, rubricHash, type BatteryRubric, type DimensionWeights } from './scoring';
+import type { LlmExecutionReceipt } from '@papercusp/testing-shell/llm';
+import { tryParseJson, PARSE_JSON_SOURCE_HASH } from './parse-json';
+import { composite, parseJudgeOutput, rubricHash, SCORING_SOURCE_HASH, type BatteryRubric, type DimensionWeights } from './scoring';
+import { captureSourceHash, SOURCE_IDENTITY_HASH } from './source-identity';
+
+export const JUDGE_SOURCE_HASHES = Object.freeze({
+  judge: captureSourceHash(import.meta.url), scoring: SCORING_SOURCE_HASH,
+  parser: PARSE_JSON_SOURCE_HASH, sourceIdentity: SOURCE_IDENTITY_HASH,
+});
 
 /** The injected LLM call (structurally the llm-testing `llmCall`). */
 export interface JudgeLlmCall {
@@ -23,7 +30,9 @@ export interface JudgeLlmCall {
     responseFormat?: 'text' | 'json';
     thinkingBudgetTokens?: number;
     maxTokens?: number;
-  }): Promise<{ text: string; json?: unknown; costUsd: number; inputTokens: number; outputTokens: number }>;
+  }): Promise<{ text: string; json?: unknown; costUsd: number; inputTokens: number; outputTokens: number;
+    costUsdMeasurementMissing?: boolean; unreportedFrames?: number;
+    execution?: LlmExecutionReceipt }>;
 }
 
 /** How much of the judge's raw reply is inlined into the thrown error's `.message`. */
@@ -121,6 +130,9 @@ export interface BatteryScore {
   judgeTemp: number;
   weights: DimensionWeights;
   costUsd: number;
+  /** The cost is a known subtotal, never a complete settlement receipt. */
+  costUsdMeasurementMissing?: boolean;
+  unreportedFrames?: number;
   inputTokens: number;
   outputTokens: number;
 }
@@ -193,6 +205,36 @@ export async function judgeBatteryRun(
   let costUsd = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let costUsdMeasurementMissing = false;
+  let unreportedFrames = 0;
+  // A repair must not replace an earlier receipt. Read both successful values
+  // and thrown transport evidence, preserving explicit zero separately from
+  // absent/invalid usage and retaining every known subtotal.
+  const recordUsage = (value: unknown) => {
+    const usage = value as { costUsd?: unknown; costUsdMeasurementMissing?: unknown;
+      unreportedFrames?: unknown; inputTokens?: unknown; outputTokens?: unknown } | null;
+    const validCost = typeof usage?.costUsd === 'number' && Number.isFinite(usage.costUsd) && usage.costUsd >= 0;
+    if (validCost) costUsd += usage!.costUsd as number;
+    else costUsdMeasurementMissing = true;
+    if (usage?.costUsdMeasurementMissing !== undefined && usage.costUsdMeasurementMissing !== false) {
+      costUsdMeasurementMissing = true;
+    }
+    const frames = usage?.unreportedFrames;
+    if (frames !== undefined && frames !== 0) {
+      costUsdMeasurementMissing = true;
+      if (typeof frames === 'number' && Number.isSafeInteger(frames) && frames > 0) unreportedFrames += frames;
+    }
+    for (const key of ['inputTokens', 'outputTokens'] as const) {
+      const tokens = usage?.[key];
+      if (typeof tokens === 'number' && Number.isSafeInteger(tokens) && tokens >= 0) {
+        if (key === 'inputTokens') inputTokens += tokens;
+        else outputTokens += tokens;
+      }
+    }
+  };
+  const usageEvidence = () => ({ costUsd, inputTokens, outputTokens,
+    ...(costUsdMeasurementMissing ? { costUsdMeasurementMissing: true } : {}),
+    ...(unreportedFrames > 0 ? { unreportedFrames } : {}) });
 
   let lastRawText = '';
   let lastHadStructuredJson = false;
@@ -200,19 +242,23 @@ export async function judgeBatteryRun(
   let lastValidationError: string | undefined;
 
   for (let attempt = 0; attempt <= repairAttempts; attempt++) {
-    const res = await deps.llmCall({
-      model: rubric.model,
-      system,
-      messages: attempt === 0 ? [{ role: 'user', content: user }] : buildRepairMessages(user, lastRawText),
-      responseFormat: 'json',
-      thinkingBudgetTokens: rubric.thinkingBudgetTokens,
-      // Anthropic requires max_tokens > thinking.budget_tokens; leave room for the output.
-      maxTokens: rubric.thinkingBudgetTokens + 4096,
-    });
+    let res: Awaited<ReturnType<JudgeLlmCall>>;
+    try {
+      res = await deps.llmCall({
+        model: rubric.model,
+        system,
+        messages: attempt === 0 ? [{ role: 'user', content: user }] : buildRepairMessages(user, lastRawText),
+        responseFormat: 'json',
+        thinkingBudgetTokens: rubric.thinkingBudgetTokens,
+        // Anthropic requires max_tokens > thinking.budget_tokens; leave room for the output.
+        maxTokens: rubric.thinkingBudgetTokens + 4096,
+      });
+    } catch (error) {
+      recordUsage(error);
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), usageEvidence());
+    }
 
-    costUsd += res.costUsd;
-    inputTokens += res.inputTokens;
-    outputTokens += res.outputTokens;
+    recordUsage(res);
     lastRawText = res.text ?? '';
     lastHadStructuredJson = res.json != null;
 
@@ -243,18 +289,16 @@ export async function judgeBatteryRun(
       rubricHash: rubricHash(rubric),
       judgeTemp: rubric.temperature,
       weights: rubric.weights,
-      costUsd,
-      inputTokens,
-      outputTokens,
+      ...usageEvidence(),
     };
   }
 
-  throw new JudgeOutputContractError({
+  throw Object.assign(new JudgeOutputContractError({
     rawText: lastRawText,
     hadStructuredJson: lastHadStructuredJson,
     judgeModel: rubric.model,
     attempts: repairAttempts + 1,
     reason: lastReason,
     ...(lastValidationError !== undefined ? { validationError: lastValidationError } : {}),
-  });
+  }), usageEvidence());
 }

@@ -50,8 +50,9 @@ import {
   costPer1kSearches,
 } from './cost-model';
 import { ROUNDTRIP_SPECS } from './roundtrip-specs';
+import { BENCH_SCOPE, makeHybridBackendCtx, type PrecisionBenchBackendCtx } from './precision-hybrid-backend';
 
-export const BENCH_SCOPE = 'bench';
+export { BENCH_SCOPE };
 export type BenchBackendName = 'mem0' | 'claude-file' | 'noop' | 'hybrid' | 'hybrid-pg' | 'claude-loaded-index';
 
 export interface BenchRunOptions {
@@ -85,17 +86,7 @@ export interface BenchRunReport {
   scorecardMarkdown: string;
 }
 
-export interface BackendCtx {
-  backend: MemoryBackend;
-  /** Build a FRESH instance over the same store (restart-survival probe). */
-  reinstantiate: () => MemoryBackend;
-  cleanup: () => Promise<void>;
-  /** Static reach rows (D-004); measured rows are appended by the run. */
-  reach: Record<string, string>;
-  /** Cost-model traits. */
-  embeds: boolean;
-  extractionOnRemember: boolean;
-}
+export type BackendCtx = PrecisionBenchBackendCtx;
 
 /** Exported for the T3 judged tier (./judged), which seeds the same isolated contexts. */
 export async function makeBackendCtx(name: BenchBackendName, keep: boolean): Promise<BackendCtx> {
@@ -147,44 +138,7 @@ export async function makeBackendCtx(name: BenchBackendName, keep: boolean): Pro
     };
   }
   if (name === 'hybrid') {
-    // The hybrid fuses a LEXICAL leg (claude-file temp dir — exact-id) and a
-    // COSINE leg (mem0 over the bench PG schema — paraphrase). HybridBackend
-    // write-throughs each seed to BOTH legs, so the standard seedCorpus path
-    // populates both; search then fuses (cosine-gated RRF + the FP floor).
-    setupBenchMemoryHost();
-    const pg = await benchPgClient();
-    await ensureBenchSchema(pg);
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-bench-hybrid-'));
-    const make = () =>
-      new HybridBackend(
-        new ClaudeFileMemoryBackend({ memoryDir: dir, createIfMissing: true }),
-        new Mem0Backend(),
-      );
-    return {
-      backend: make(),
-      reinstantiate: () => {
-        invalidateMemoryClient(); // rebuild the mem0 client over the same PG store
-        return make();
-      },
-      cleanup: async () => {
-        // Awaited pool-close before drop — same 55P03 protection as the mem0 ctx.
-        await disposeMemoryClient();
-        if (!keep) {
-          await releaseBenchSchema(pg);
-          fs.rmSync(dir, { recursive: true, force: true });
-        }
-        await pg.end();
-      },
-      reach: {
-        'readable from codex/omp/operator/memory-tab':
-          'yes — canonical writes land in PG (cosine leg); the lexical claude-file leg is a write-through projection for exact-id recall',
-        'concurrent multi-agent writes': 'yes — PG row-per-fact (canonical); lexical projection is best-effort per-file',
-        'restart survival': 'yes — Postgres (canonical) + plain files (projection)',
-        requires: 'PG + pgvector + embedder key (cosine leg); nothing for the lexical leg',
-      },
-      embeds: true,
-      extractionOnRemember: true,
-    };
+    return makeHybridBackendCtx(keep);
   }
   if (name === 'hybrid-pg') {
     // The SELF-OWNED hybrid (memory-pg-lexical-own-injection-2026-07-13

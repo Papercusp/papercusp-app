@@ -15,6 +15,7 @@ import {
   validateCommerceEvent,
   type CommerceEvent,
 } from '@papercusp/operator-core/lib/p2p/commerce-events.ts';
+import { witnessAfterAppend } from './ledger-chain-store.ts';
 
 export interface StoredCommerceEvent {
   readonly event: CommerceEvent;
@@ -135,6 +136,7 @@ export async function appendCommerceEvent(
         nowMs,
       )
       .run();
+    await witnessAfterAppend(db, 'commerce.event-log', nowMs);
   } catch (error) {
     // A unique-index collision here is a DIFFERENT fact claiming an occupied
     // (stream, sequence) or idempotency key — the durable half of

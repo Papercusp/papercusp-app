@@ -1,6 +1,6 @@
 /** Unified authoring over the existing criterion fields. No second persisted BAR. */
 import type { RubricCriterionCheck } from './agent-tools/plans/rubric-template';
-import type { ServingRuntimeId } from './serving-runtimes';
+import type { EvidenceRuntimeId } from './serving-runtimes';
 
 export interface RequirementIntent {
   request: string;
@@ -15,7 +15,7 @@ export interface RequirementAcceptance {
   requiredScope?: string[];
   evidencePlane?: 'tree' | 'deployed' | 'live';
   /** WHICH runtime a deployed/live promise is measured on (acceptance-runtime-plane P-002). */
-  evidenceRuntime?: ServingRuntimeId;
+  evidenceRuntime?: EvidenceRuntimeId;
   /** Required depth of outcome proof; changing this changes the promise. */
   requiredTestLayers?: string[];
   passRatings?: string[];
@@ -40,7 +40,7 @@ export interface RequirementSectionInput {
   driftMarkers?: string;
   requiredScope?: string[];
   evidencePlane?: 'tree' | 'deployed' | 'live';
-  evidenceRuntime?: ServingRuntimeId;
+  evidenceRuntime?: EvidenceRuntimeId;
   requiredTestLayers?: string[];
   passRatings?: string[];
   mandatory?: boolean;

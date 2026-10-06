@@ -297,6 +297,11 @@ export async function scoutOutcomeRefreshSweep(
         )({ workspaceId, limit: SCOUT_PORTFOLIO_FRONTIER_CANDIDATE_CAP });
         const itemBudget = scoutPortfolioFrontierItemBudget();
         const timeBudgetMs = scoutPortfolioFrontierTimeBudgetMs();
+        // WI-10005247: rows never verified, or not verified within the same
+        // window the stale-pending alert uses, jump the cursor so a new or
+        // su-ideate route is not parked behind a ~5-day round-robin lap. A
+        // disabled alert (`thresholdSec <= 0`) still gets the default window.
+        const staleBeforeMs = now - (thresholdSec > 0 ? thresholdSec : 86_400) * 1_000;
         let planned = planPortfolioFrontierStep({
           gradingBacklog,
           pending,
@@ -304,6 +309,7 @@ export async function scoutOutcomeRefreshSweep(
           itemBudget,
           timeBudgetMs,
           nowMs: now,
+          staleBeforeMs,
         });
 
         // Re-read at the write boundary. A route can become grade-eligible
@@ -324,6 +330,7 @@ export async function scoutOutcomeRefreshSweep(
               itemBudget,
               timeBudgetMs,
               nowMs: now,
+              staleBeforeMs,
             });
           }
         }
@@ -351,9 +358,12 @@ export async function scoutOutcomeRefreshSweep(
             evidence.push(...(report.refreshed ?? []));
           }
           if (processed.length !== selected.length) {
-            const lastProcessed = processed.at(-1);
+            // Staleness-tier rows lead `selected` and never move the cursor;
+            // rebase it only to the last ROUND-ROBIN row actually processed.
+            const lastProcessed = processed.slice(planned.priorityCount).at(-1);
             planned = {
               selected: processed,
+              priorityCount: Math.min(planned.priorityCount, processed.length),
               checkpoint: {
                 ...planned.checkpoint,
                 cursorIdeaId: lastProcessed?.ideaId ?? previous?.cursorIdeaId ?? null,

@@ -40,6 +40,7 @@ import { isChromelessPath } from '@papercusp/operator-core/lib/chromeless-routes
 // Intentional cross-tree import: operator-vite's `@` points at apps/operator,
 // where the shared two-dock layout contract lives.
 import { isCompactDockViewport } from '@/app/_components/operator-chat-layout';
+import { beginInteraction, endInteraction } from '@/app/_components/perf/perf-marks';
 import { useLexicon } from '@/lib/useLexicon';
 import type { BoundLexicon } from '@papercusp/lexicon';
 // `Target` left with the Goals tab (2026-08-09) — it was that tab's icon and
@@ -71,7 +72,16 @@ import { LEFT_SIDEBAR_CSS } from './left-sidebar.styles';
 // 🔑 Accounts — the owner's session-now account override (which Max accounts the fleet
 // may use right now), beside Mug as a sibling owner-steering lever (accounts-pool-tab
 // P-005; promoted to the LEFTMOST sidebar tab by owner request 2026-06-17).
-const AccountsTab = lazy(() => import('./AccountsTab'));
+// Keep the lazy boundary, and measure only its module fetch/evaluation. The
+// startup trace separately records when the Accounts DOM first appears, so a
+// delayed import cannot be mistaken for later React/WebKit font work.
+const AccountsTab = lazy(() => {
+  beginInteraction('accounts-tab-import');
+  return import('./AccountsTab').then((module) => {
+    endInteraction('accounts-tab-import');
+    return module;
+  });
+});
 // (👑 Mug steering — the owner's focus/pause controls for the autonomous Mug —
 // sat HERE until 2026-08-12. RETIRED with its tier to
 // `_retired/mug-kettle-deciders/` by retire-mug-kettle-su-only-2026-08-09

@@ -391,6 +391,18 @@ export async function runDocSectionsSyncOnce(): Promise<DocSyncStats[] | { skipp
       // must never cost the engineering corpus its sync.
       console.warn('[doc-embed-sync] guidance corpus sync failed:', (err as Error).message);
     }
+    // WI-10004455: fill the shipped corpora's NULL embeddings from the
+    // release's precomputed seed BEFORE the backfill sweep that follows this
+    // sync, so a fresh install does not spend hours embedding docs identical
+    // on every install. Rows match on page_sha, so only unchanged text gets a
+    // seeded vector. Fail-open: a bad seed costs only the saving, never the sync.
+    try {
+      const { applyShippedDocVectorSeed } = await import('./doc-vector-seed');
+      const { resolveDocVectorSeedDir } = await import('./doc-vector-seed-dir');
+      await applyShippedDocVectorSeed(sql, { seedDir: () => resolveDocVectorSeedDir() });
+    } catch (err) {
+      console.warn('[doc-embed-sync] doc vector seed failed:', (err as Error).message);
+    }
     __docSyncState.done = true;
     const changed = all.reduce((a, s) => a + s.changed, 0);
     if (changed > 0) {

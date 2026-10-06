@@ -36,11 +36,10 @@ import type { InvalidInputCorrection } from './dispatch-types';
  * dropped key is us asserting the caller wanted it gone. Auto-running those is P-016's
  * separate, narrower mandate, and it is gated on a different rule than this one.
  *
- * HONESTY BOUND. A corrected call fixes the keys that were REJECTED. It cannot promise the
- * result validates: the same payload may still carry a bad value, a missing required field,
- * or a nested shape error the unrecognized-key branch never inspected. The rendering says
- * so rather than implying a green light — an over-promise here costs the same wasted
- * round-trip the whole mechanism exists to remove.
+ * HONESTY BOUND. A corrected call fixes the keys that were REJECTED, and is withheld when
+ * the resulting args still omit a root-level required key exposed by the projected schema.
+ * It still cannot promise the result validates: a supplied value may be bad, or a nested
+ * constraint may remain. The rendering says so rather than implying a green light.
  */
 
 /** What happened to one key the caller sent that the tool did not accept. */
@@ -510,6 +509,25 @@ export function buildCorrectedCall(params: {
       reason: repair.kind,
       expectedType: repair.expectedType,
     });
+  }
+
+  // Do not advertise a call that is known to miss a required argument. Some required
+  // values (notably enum-valued scopes) cannot be safely filled by declaredKeyRepairs:
+  // guessing one would change the caller's intent, while emitting `{}` sends them straight
+  // into the same refusal again. Leave the original validation error and accepted-key hint
+  // to explain what value is still needed.
+  const schema =
+    params.targetSchema &&
+    typeof params.targetSchema === 'object' &&
+    !Array.isArray(params.targetSchema)
+      ? (params.targetSchema as Record<string, unknown>)
+      : undefined;
+  const required = schema?.required;
+  if (
+    Array.isArray(required) &&
+    required.some((key) => typeof key === 'string' && args[key] === undefined)
+  ) {
+    return null;
   }
 
   if (steps.length === 0) return null;

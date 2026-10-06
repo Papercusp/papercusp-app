@@ -3,7 +3,7 @@
  * does to ship READINESS, computed for the `rubrics:amend { dryRun }` preview.
  *
  * WHY. The preview already said which proof an amendment carries or invalidates (P-002), but
- * not what it does to the gate. Measured 2026-09-23 (owner #302): a 14-criterion amendment on
+ * not what it does to the gate. Measured 2026-09-23 (Avi #302): a 14-criterion amendment on
  * consult-expert-routing-2026-09-22 would have flipped 13 manual (`instrumentKey:'none'`) BARs to
  * automated proof with no test layers, adding up to 13 blocking codes to a gate that read "0 of
  * 14 BARs blocking". Nothing said so before the outside countersignature was requested.

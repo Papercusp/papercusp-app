@@ -25,8 +25,8 @@ import type { CodeIntelBackend, CodeIntelIntent } from './contracts.ts';
  * The commit the ground truth below was measured against.
  * Re-pin this together with any fixture re-measurement.
  */
-export const CORPUS_BASELINE_COMMIT = 'e443b3026823fd8b5ff23d9d22b27d61606a3464';
-export const CORPUS_BASELINE_MEASURED_AT = '2026-09-04T17:47:50Z';
+export const CORPUS_BASELINE_COMMIT = 'e3dbfa8012b01a3df65a0dec91fc77f1e45109b5';
+export const CORPUS_BASELINE_MEASURED_AT = '2026-10-05T21:30:41Z';
 
 /**
  * A location this corpus asserts exists in the tree, ONE-indexed.
@@ -177,7 +177,7 @@ export const ACCEPTANCE_CORPUS: readonly CorpusCase[] = Object.freeze([
     expectedSites: [
       {
         path: 'libs/generic/scheduled-registry/src/index.ts',
-        line1: 338,
+        line1: 410,
         symbolOnLine: 'export function managedSetInterval',
       },
     ],
@@ -234,12 +234,12 @@ export const ACCEPTANCE_CORPUS: readonly CorpusCase[] = Object.freeze([
     expectedSites: [
       {
         path: 'packages/operator-core/lib/voice-node/local-whisper-service.ts',
-        line1: 406,
+        line1: 411,
         symbolOnLine: 'await managedSpawn',
       },
       {
         path: 'packages/operator-core/lib/fleet/spawner-sidecar-spawn.ts',
-        line1: 347,
+        line1: 353,
         symbolOnLine: 'await managedSpawn',
       },
     ],

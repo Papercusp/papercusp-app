@@ -24,7 +24,8 @@ import { pinModuleState } from '@papercusp/module-singleton';
 import { idempotentRegisterWorkflow } from './idempotent-register-workflow';
 import type { PgssBaseline } from '../system-health/hot-seq-scan-detector';
 import { flushTelemetry } from '../telemetry-flush';
-import { runScratchGc } from '../scratch-gc';
+import { runScratchGc, SCRATCH_GC_CRONTAB } from '../scratch-gc';
+import { runLocksCacheGc } from '../locks-cache-gc';
 import { runEmbedBackfillOnce } from '../search/embed-backfill';
 import { runEmbedSpaceSelfCheckTick } from '../search/embed-space-self-check';
 import { runDeadWorkflowMonitorOnce } from './dead-workflow-monitor';
@@ -40,7 +41,12 @@ import { expireStaleAdvisoryEscalations } from '../agent-tools/coordination/esca
 import { gcOldPlanRevisions } from '../agent-tools/plans/revisions-gc';
 import { gcOldDecisionLedgerRows } from '../agent-tools/coordination/decision-ledger-gc';
 import { gcOldOperatorTurns } from '../operator-turns-gc';
-import { runFleetLogsGc, runLaunchContextGc, runPapercuspWorkdirGc } from '../fleet-logs-gc';
+import {
+  runFleetLogsGc,
+  runLaunchContextGc,
+  runPapercuspWorkdirGc,
+  runWindowsBuildScratchGc,
+} from '../fleet-logs-gc';
 import { listLiveSessionRenders } from '../stale-prompt-render-sweep';
 import { gcLedgerDir } from '../turn-provenance/turn-provenance';
 import { readRegistry } from '../workspace-registry';
@@ -120,15 +126,32 @@ const telemetryFlushWorkflow = idempotentRegisterWorkflow('telemetryFlush', () =
 );
 DBOS.registerScheduled(telemetryFlushWorkflow, { name: 'telemetryFlush', crontab: '0 0 * * * *' });
 
-// Daily 03:00: scratch-storage GC sweep (retention + dead-workspace + quota).
+// Daily 03:00 (SCRATCH_GC_CRONTAB — the schedule's single source, in scratch-gc.ts):
+// scratch-storage GC sweep (retention + dead-workspace + quota).
 async function scratchGcTick(): Promise<void> {
   if (!(await retentionEnabled(FLAGS.STORAGE_RETAIN_SCRATCH))) return;
   await DBOS.runStep(
     async () => {
       const workspaceRegistry = readRegistry().workspaces.map((w) => w.id);
-      runScratchGc({ workspaceRegistry });
+      await runScratchGc({ workspaceRegistry });
     },
     { name: 'scratch-gc' },
+  );
+  // WI-10005187: the hooks' per-owner state in ~/.papercusp/locks-cache is the same
+  // class of agent-local ephemeral storage and had no GC at all (32k entries).
+  // Fail-soft: a sweep error is logged, never thrown into a workflow retry.
+  await DBOS.runStep(
+    async () => {
+      try {
+        const r = await runLocksCacheGc();
+        console.log(
+          `[locks-cache-gc] ${r.dir}: scanned=${r.scanned} removed=${r.removed} kept=${r.kept} skipped=${r.skipped}${r.error ? ` error=${r.error}` : ''}`,
+        );
+      } catch (err) {
+        console.warn(`[locks-cache-gc] sweep failed (non-fatal): ${(err as Error).message}`);
+      }
+    },
+    { name: 'locks-cache-gc' },
   );
 }
 const scratchGcWorkflow = idempotentRegisterWorkflow('scratchGc', () =>
@@ -137,7 +160,7 @@ const scratchGcWorkflow = idempotentRegisterWorkflow('scratchGc', () =>
     maxRecoveryAttempts: 5,
   }),
 );
-DBOS.registerScheduled(scratchGcWorkflow, { name: 'scratchGc', crontab: '0 0 3 * * *' });
+DBOS.registerScheduled(scratchGcWorkflow, { name: 'scratchGc', crontab: SCRATCH_GC_CRONTAB });
 
 // (The 6-hourly mem0 ephemeral-TTL sweep was removed — the `ephemeral` kind is
 // retired, so nothing carries expires_at; ephemeral state lives in coord now.
@@ -547,6 +570,32 @@ const decisionLedgerGcWorkflow = idempotentRegisterWorkflow('decisionLedgerGc', 
 );
 DBOS.registerScheduled(decisionLedgerGcWorkflow, { name: 'decisionLedgerGc', crontab: '0 50 4 * * *' });
 
+// Every 15 min: payload retention for harness_shared.trigger_deliveries (WI-10004921,
+// migration 1306). Strips the payload — never the row, which is each sink's dedupe
+// identity — from delivered non-event-bus rows (no reader at all) and from any finished
+// row past the 30-day replay horizon. Batch-limited, so the ~330k-row legacy backlog
+// (7.4 GB, each event stored once per sink) drains over a few hours instead of in one
+// long UPDATE on a table ingestion writes constantly. Detail in delivery-retention.ts.
+async function triggerDeliveryRetentionTick(): Promise<void> {
+  await DBOS.runStep(
+    async () => {
+      const { pruneTriggerDeliveryPayloads } = await import('../external-triggers/delivery-retention');
+      return pruneTriggerDeliveryPayloads();
+    },
+    { name: 'trigger-delivery-payload-retention' },
+  );
+}
+const triggerDeliveryRetentionWorkflow = idempotentRegisterWorkflow('triggerDeliveryRetention', () =>
+  DBOS.registerWorkflow(triggerDeliveryRetentionTick, {
+    name: 'triggerDeliveryRetention',
+    maxRecoveryAttempts: 5,
+  }),
+);
+DBOS.registerScheduled(triggerDeliveryRetentionWorkflow, {
+  name: 'triggerDeliveryRetention',
+  crontab: '0 */15 * * * *',
+});
+
 // Hourly @:05: retention GC for the `fleet-logs/` directories headless-spawn
 // launch paths write to (WI-224710 cause #2 — "fleet-logs grows without
 // bound"). Measured live 2026-08-30: 25G / 2,946 files in ONE such directory
@@ -586,7 +635,7 @@ async function fleetLogsGcTick(): Promise<void> {
       // are eligible and the age bound is the RECURSIVE newest mtime, never the
       // directory's own (see fleet-logs-gc.ts for why that distinction is
       // load-bearing rather than pedantic).
-      const workdirs = runPapercuspWorkdirGc();
+      const workdirs = await runPapercuspWorkdirGc({ dryRun: false });
       const skipped = workdirs.candidates.filter((c) => !c.removed);
       console.log(
         `[papercusp-workdir-gc] considered ${workdirs.scanned} mktemp dir(s) → ` +
@@ -623,6 +672,20 @@ async function fleetLogsGcTick(): Promise<void> {
           : `[launch-context-gc] scanned ${renders.scanned} render(s) → removed ` +
               `${renders.removed}, freed ${Math.round(renders.bytesFreed / (1024 * 1024))}MB, ` +
               `held ${renders.liveHeld} in use by live session(s)`,
+      );
+
+      // Reclaim interrupted Windows cross-build containers after 48 hours.
+      // The helper checks recursive mtimes, live writers, and the linked
+      // worktree's Git lock before removing its exact registration.
+      const windowsBuildScratch = await runWindowsBuildScratchGc({ dryRun: false });
+      const buildScratchSkipped = windowsBuildScratch.candidates.filter((candidate) => !candidate.removed);
+      console.log(
+        `[windows-build-scratch-gc] considered ${windowsBuildScratch.scanned} producer dir(s) → ` +
+          `removed ${windowsBuildScratch.removed}, freed ` +
+          `${Math.round(windowsBuildScratch.bytesFreed / (1024 * 1024))}MB` +
+          (buildScratchSkipped.length
+            ? `, kept ${buildScratchSkipped.length} (${buildScratchSkipped.map((candidate) => candidate.skipped ?? 'unknown').join(',')})`
+            : ''),
       );
     },
     { name: 'fleet-logs-gc' },
@@ -661,7 +724,7 @@ DBOS.registerScheduled(fleetLogsGcWorkflow, { name: 'fleetLogsGc', crontab: '0 5
 async function turnProvenanceGcTick(): Promise<void> {
   await DBOS.runStep(
     async () => {
-      const { filesRemoved, rowsDropped } = gcLedgerDir();
+      const { filesRemoved, rowsDropped } = await gcLedgerDir();
       console.log(
         `[turn-provenance-gc] removed ${filesRemoved} dead ledger file(s), dropped ${rowsDropped} expired row(s)`,
       );
@@ -1622,7 +1685,7 @@ async function sessionIngestTick(): Promise<void> {
     async () => {
       if (shouldShedHeavyTick('session-ingest')) return;
       try {
-        const { runSessionIngestOnce } = await import('../search/session-ingest');
+        const { runSessionIngestOnce, sessionIngestLogLine } = await import('../search/session-ingest');
         const r = await runSessionIngestOnce();
         // `parts` is in BOTH the predicate and the line on purpose
         // (session-turn-storage-2026-07-28 P-001). The faithful-parts writer is
@@ -1632,13 +1695,10 @@ async function sessionIngestTick(): Promise<void> {
         // It went unnoticed for a full night exactly this way: bg-host was
         // running a pre-parts build, wrote 0 parts on every tick, and logged a
         // perfectly healthy-looking "+N turn(s)" each time.
-        const parts = r.partsInserted ?? 0;
-        if (!r.skipped && (r.turnsInserted > 0 || parts > 0 || r.errors > 0)) {
-          console.log(
-            `[session-ingest] +${r.turnsInserted} turn(s) +${parts} part(s) from ${r.filesIngested} file(s) ` +
-              `+ ${r.chatsIngested} chat turn(s) (${r.filesScanned} scanned, ${r.errors} error(s), ${r.durationMs}ms)`,
-          );
-        }
+        // A slow no-progress pass needs attribution too; otherwise discovery
+        // and unchanged-file metadata work disappear from the journal.
+        const line = sessionIngestLogLine(r);
+        if (line) console.log(line);
       } catch (err) {
         console.warn(`[session-ingest] sweep skipped (non-fatal): ${(err as Error).message}`);
       }
@@ -1814,6 +1874,60 @@ const dbIndexBloatReindexWorkflow = idempotentRegisterWorkflow('dbIndexBloatRein
   }),
 );
 DBOS.registerScheduled(dbIndexBloatReindexWorkflow, { name: 'dbIndexBloatReindex', crontab: '0 50 4 * * *' });
+
+// Every 15 min: the DEFERRED online build of the session transcript search indexes + term
+// vocabulary (session-transcript-exact-fuzzy-search-2026-09-14 P-002; plan D-004/D-005).
+// Migration 1273 creates only the two small vocabulary tables on a populated database — the
+// 744 MB exact-tier trigram GIN (358 s) and the vocabulary's first full build (352 s) are far too
+// slow for the migration transaction, so this durable tick issues CREATE INDEX CONCURRENTLY IF NOT
+// EXISTS outside any transaction, drops invalid leftovers of an interrupted build, and keeps each
+// workspace's vocabulary current with a watermark-incremental refresh. Every step is idempotent and
+// a no-op once current, so the steady-state cost is three catalog reads + one index-backed EXISTS
+// probe per workspace. The read path degrades (skips the tier, reports why) while a build is
+// pending — it never falls back to a sequential scan. Never throws: a thrown step would mark the
+// workflow permanently dead.
+async function sessionSearchIndexBuildTick(): Promise<void> {
+  await DBOS.runStep(
+    async () => {
+      if (shouldShedHeavyTick('session-search-index-build')) return;
+      try {
+        const { runSessionSearchIndexBuildOnce } = await import('../session-search-index-build');
+        const { sql } = getOrgPg();
+        const r = await runSessionSearchIndexBuildOnce(sql);
+        if (r.skipped) {
+          console.log(`[session-search-index-build] skipped: ${r.skipped}`);
+          return;
+        }
+        const built = r.indexes.filter((x) => x.action === 'built').length;
+        const failed =
+          r.indexes.filter((x) => x.action === 'failed').length +
+          r.vocab.filter((x) => x.action === 'failed').length;
+        const vocabBuilt = r.vocab.filter((x) => x.action === 'full' || x.action === 'incremental');
+        if (built > 0 || vocabBuilt.length > 0 || r.invalidDropped.length > 0 || failed > 0) {
+          console.log(
+            `[session-search-index-build] built ${built} index(es), refreshed ${vocabBuilt.length} vocabulary(ies)` +
+              `${r.invalidDropped.length > 0 ? `, dropped ${r.invalidDropped.length} invalid leftover(s)` : ''}` +
+              `${failed > 0 ? `, ${failed} failed` : ''}` +
+              `${r.truncated ? ' (truncated by budget)' : ''}`,
+          );
+        }
+      } catch (err) {
+        console.warn(`[session-search-index-build] run skipped (non-fatal): ${(err as Error).message}`);
+      }
+    },
+    { name: 'session-search-index-build' },
+  );
+}
+const sessionSearchIndexBuildWorkflow = idempotentRegisterWorkflow('sessionSearchIndexBuild', () =>
+  DBOS.registerWorkflow(sessionSearchIndexBuildTick, {
+    name: 'sessionSearchIndexBuild',
+    maxRecoveryAttempts: 5,
+  }),
+);
+DBOS.registerScheduled(sessionSearchIndexBuildWorkflow, {
+  name: 'sessionSearchIndexBuild',
+  crontab: '0 7,22,37,52 * * * *',
+});
 
 // pg_stat_statements has no DROP DATABASE hook: entries keyed to a dropped dbid are
 // retained forever, and backups/dumps run against TRANSIENT databases, so every dump

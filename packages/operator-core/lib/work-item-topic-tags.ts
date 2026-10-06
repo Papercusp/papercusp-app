@@ -46,6 +46,7 @@
  * are different answers and must never again share a return value.
  */
 import { getOrgPg } from '@papercusp/db-org';
+import { selfHealOwnNodeOriginIfStranded } from './work-items-admission';
 
 /**
  * The tag set after adding/removing `topic` — pure, so the set semantics
@@ -186,8 +187,8 @@ export async function syncTopicTagToClaimTags(args: SyncTopicTagArgs): Promise<T
   // against a plain-table fixture instead of only against the real view. NULL origin
   // is legacy-local and stays writable, which IS DISTINCT FROM gets right and `<>`
   // would not.
-  const rows = remove
-    ? await sql<{ issue_id: string }[]>`
+  const writeIssueTag = () => remove
+    ? sql<{ issue_id: string }[]>`
         UPDATE harness_shared.engineer_issues
            SET payload = COALESCE(payload, '{}'::jsonb)
                          || jsonb_build_object('tags', (payload -> 'tags') - ${topic}),
@@ -198,7 +199,7 @@ export async function syncTopicTagToClaimTags(args: SyncTopicTagArgs): Promise<T
            AND origin IS DISTINCT FROM 'remote'
            AND ${hasIssueTagSql(sql, topic)}
         RETURNING issue_id`
-    : await sql<{ issue_id: string }[]>`
+    : sql<{ issue_id: string }[]>`
         UPDATE harness_shared.engineer_issues
            SET payload = COALESCE(payload, '{}'::jsonb)
                          || jsonb_build_object(
@@ -213,17 +214,32 @@ export async function syncTopicTagToClaimTags(args: SyncTopicTagArgs): Promise<T
            AND origin IS DISTINCT FROM 'remote'
            AND NOT ${hasIssueTagSql(sql, topic)}
         RETURNING issue_id`;
-  if (rows.length > 0) return mirrorResult('applied');
   // 0 rows on the issue side has THREE distinct causes and the SQL layer reports
   // them identically (EI-18810823481386446). Probe once — `origin` is read from the
   // same view the UPDATE targeted, so it is exactly the value the INSTEAD OF
   // trigger's own guard consults.
-  const probe = await sql<{ origin: string | null; has_tag: boolean }[]>`
+  const probeIssue = () => sql<{ origin: string | null; has_tag: boolean }[]>`
       SELECT origin, ${hasIssueTagSql(sql, topic)} AS has_tag
         FROM harness_shared.engineer_issues
        WHERE workspace_id = ${workspaceId}
          AND issue_id = ${id}`;
+
+  if ((await writeIssueTag()).length > 0) return mirrorResult('applied');
+  let probe = await probeIssue();
   if (probe.length === 0) return mirrorResult('no-row');
-  if (probe.some((r) => r.origin === 'remote')) return mirrorResult('remote-origin');
+  if (probe.some((r) => r.origin === 'remote')) {
+    // WI-10006515: origin records how a row ARRIVED, not who wrote it (WI-10003565). A row
+    // THIS node authored can sit at origin='remote' after a federation round-trip, and
+    // answering 'remote-origin' for it tells the caller "its authoring peer owns it" when
+    // that peer is us — the tag is then never mirrored. Heal it first; the identity check
+    // is inside selfHealOwnNodeOriginIfStranded's WHERE, so a true peer's row is never
+    // touched. Fail-closed: any heal failure keeps the remote-origin answer.
+    const healed = await selfHealOwnNodeOriginIfStranded(workspaceId, id).catch(() => false);
+    if (!healed) return mirrorResult('remote-origin');
+    if ((await writeIssueTag()).length > 0) return mirrorResult('applied');
+    probe = await probeIssue();
+    if (probe.length === 0) return mirrorResult('no-row');
+    if (probe.some((r) => r.origin === 'remote')) return mirrorResult('remote-origin');
+  }
   return mirrorResult(probe.every((r) => r.has_tag === desiredHasTag) ? 'already' : 'blocked');
 }

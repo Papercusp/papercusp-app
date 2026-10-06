@@ -4,6 +4,8 @@ import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { getSessionUserOrDefault } from '../../auth';
 import { authorizePersonalAccess } from '../../personal-vault/authorization';
 import { parseSocialPostRef, replyToCanonicalSocialPost } from '../../capability-verbs/social';
+import { DisclosureRefused, disclosureRefusalData } from '../../personal-vault/disclosure-ledger';
+import { disclosureSubject } from '../_disclosure-subject';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 
 export default defineTool({
@@ -45,13 +47,19 @@ export default defineTool({
       `personal:${ref.platform}`,
     ]);
     if (!auth.allowed) return { data: { allowed: false, refusal: auth.reason } };
-    const result = await replyToCanonicalSocialPost(ctx.tx as unknown as postgres.Sql, {
-      workspaceId,
-      userId: user.id,
-      ref,
-      text: args.text,
-      visibility: args.visibility ?? null,
-    });
-    return { data: { ok: true, ...result } };
+    try {
+      const result = await replyToCanonicalSocialPost(ctx.tx as unknown as postgres.Sql, {
+        workspaceId,
+        userId: user.id,
+        ref,
+        text: args.text,
+        visibility: args.visibility ?? null,
+        agentOwnerId: disclosureSubject(ctx),
+      });
+      return { data: { ok: true, ...result } };
+    } catch (error) {
+      if (error instanceof DisclosureRefused) return { data: disclosureRefusalData(error) };
+      throw error;
+    }
   },
 });

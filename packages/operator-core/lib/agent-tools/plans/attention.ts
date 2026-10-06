@@ -77,6 +77,7 @@ import {
 import { runWithWorkspace } from '../../workspace-als';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { ownerAttentionSourcesFor, type OwnerAttentionSource } from '../../interest-profiles';
+import { ownerAskDefaultDisclosure } from '../../external-blockers';
 import { attachListMeta } from '../../sync-resolver/list-meta';
 import { deriveAttentionCounts, deriveAttentionRefs } from '../../sync-resolver/attention-counts';
 
@@ -464,8 +465,25 @@ export default defineTool({
                   readAckedMsgIds(ADMIN_COORD_UI_OWNER),
                 ]),
               );
-              for (const m of msgs.slice(-WINDOW)) {
-                if (acked.has(m.msg_id)) continue;
+              const page = msgs.slice(-WINDOW).filter((m) => !acked.has(m.msg_id));
+              // personal-data-reader-set-labels P-006 / D-006: a restricted sender's
+              // message is persisted as a sealed stub. The owner is always a
+              // permitted reader, so the Inbox shows what was written; if the
+              // sealed store cannot be read, the stub is shown instead.
+              const { COORD_SEAL_STORE, mergeUnsealed, sealMarkerOf } = await import('../../personal-vault/coord-seal');
+              const sealedRefs = page.filter((m) => sealMarkerOf(m)).map((m) => m.msg_id);
+              const opened = sealedRefs.length
+                ? await import('../../personal-vault/sealed-contents')
+                    .then(async ({ openSealedForOwner }) =>
+                      (await import('@papercusp/db-org')).withWorkspace(conversationsWorkspace, (tx) =>
+                        openSealedForOwner(tx, { workspaceId: conversationsWorkspace, store: COORD_SEAL_STORE, refs: sealedRefs }),
+                      ),
+                    )
+                    .catch(() => new Map<string, Record<string, unknown>>())
+                : new Map<string, Record<string, unknown>>();
+              for (const raw of page) {
+                const content = opened.get(raw.msg_id);
+                const m = content ? mergeUnsealed(raw, content) : raw;
                 const mm = m as typeof m & {
                   auto?: unknown;
                   lifecycle?: unknown;
@@ -699,9 +717,16 @@ export default defineTool({
                     workItemId: r.feature_id,
                     itemKind: r.item_kind ?? 'unknown',
                     title: r.title ?? r.feature_id,
-                    body: r.summary,
                     harnessSlug: resolveHarness(r.harness_slug, null),
                     ownerAgentId: r.taken_by,
+                    // Owner-attention ledger (EI-23783029010995961): say what the system
+                    // will do if the owner never answers, in the card the owner reads.
+                    body: [
+                      (r.summary ?? '').trim() || r.title || r.feature_id,
+                      ownerAskDefaultDisclosure(r.payload),
+                    ]
+                      .filter(Boolean)
+                      .join('\n\n'),
                     // P-003: WHICH leg of the source query admitted this row —
                     // the terminal action clears a different gate for each.
                     status: r.status,
@@ -826,6 +851,8 @@ export default defineTool({
                     refId: g.ref_id,
                     gateKind: g.kind,
                     question: g.question,
+                    decideBy: g.decide_by,
+                    defaultIfUnanswered: g.default_if_unanswered,
                     ownerAgentId: g.owner_id,
                     harnessSlug: resolveHarness(g.harness_slug, null),
                     waitingHours,

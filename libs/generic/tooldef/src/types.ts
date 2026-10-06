@@ -91,6 +91,13 @@ export interface Principal<TKind extends string = PrincipalKind> {
   /** Granted capability strings (e.g. `tasks:read`). Freeform; namespacing convention only. */
   capabilities: ReadonlySet<string>;
   /**
+   * Optional exact canonical MCP tool-name scope (for example `tasks:list`).
+   * `undefined` leaves the capability-only policy unchanged; an empty set
+   * grants no tools. This is a second, narrower authorization axis for
+   * short-lived principals whose capabilities are shared by multiple tools.
+   */
+  allowedTools?: ReadonlySet<string>;
+  /**
    * RBAC roles the caller holds (e.g. `'staff'`, `'admin'`) — RFC tooldef-auth Phase 2.
    * A DISTINCT axis from `kind` (how the caller authenticated), from `capabilities`
    * (OAuth-scope-like grants), and from agent `tool.roles` (the orchestration allowlist
@@ -342,6 +349,14 @@ export interface ToolResponse<T = unknown> {
   explicitFullRequest?: boolean;
   /** Pagination cursor (for list tools that support it). */
   nextCursor?: string;
+  /**
+   * A base-rate stamp the HANDLER computed (enterprise-data-sources-2026-10-01 D-041):
+   * what this result shows against the set it was filtered from. Use it when the count
+   * is only knowable inside the handler, e.g. rows a default filter WITHHELD. The
+   * result-callback `guidance.denominator` cannot see such a count. Rendered by the
+   * same seam (`_meta._denominator` + one text line), so it reads identically.
+   */
+  denominator?: import('./denominator').Denominator;
   /**
    * Optional mcp-ui UI fragments returned alongside the JSON `data`.
    * The HTTP MCP transport pushes these into the tool result's `content`

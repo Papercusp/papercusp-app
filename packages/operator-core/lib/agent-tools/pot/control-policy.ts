@@ -53,6 +53,8 @@ export default defineTool({
       recoveryDebounceMs: z.number().int().min(0).max(DAY_MS).optional(),
       dormancyGraceMs: z.number().int().min(0).max(DAY_MS).optional(),
       infraBreakerThreshold: z.number().int().min(1).max(1000).optional(),
+      /** P-018: default answer to "Where should the agents' work go?" for new pots. */
+      newPotIntegrationMode: z.enum(['direct', 'review']).optional(),
       dryRun: z.boolean().optional(),
     }),
   ]),
@@ -74,8 +76,9 @@ export default defineTool({
     if (args.recoveryDebounceMs !== undefined) patch.recoveryDebounceMs = args.recoveryDebounceMs;
     if (args.dormancyGraceMs !== undefined) patch.dormancyGraceMs = args.dormancyGraceMs;
     if (args.infraBreakerThreshold !== undefined) patch.infraBreakerThreshold = args.infraBreakerThreshold;
+    if (args.newPotIntegrationMode !== undefined) patch.newPotIntegrationMode = args.newPotIntegrationMode;
     if (Object.keys(patch).length === 0) {
-      throw new Error('set requires at least one of breakerThreshold / recoveryDebounceMs / dormancyGraceMs / infraBreakerThreshold');
+      throw new Error('set requires at least one of breakerThreshold / recoveryDebounceMs / dormancyGraceMs / infraBreakerThreshold / newPotIntegrationMode');
     }
 
     const outcome = await runControlMutation<PotControlPolicy>(

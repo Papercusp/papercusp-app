@@ -29,6 +29,7 @@ import {
   type WorkspaceHostBootstrapRelease,
   type WorkspaceHostBootstrapService,
   type WorkspaceHostModel,
+  workspaceHostBootcPinnedImageRef,
 } from "./workspace-host-bootstrap";
 import type {
   WorkspaceHostImageRef,
@@ -1153,7 +1154,8 @@ export function workspaceHostCleanRoomFixtureAttestation(
       bootcBaseImage: bootc.baseImage ?? WORKSPACE_HOST_BOOTC_BASE_IMAGE,
       release: {
         version: fixture.bootstrapInput.release.version,
-        source: bootc.image,
+        // What `bootc status` reports on a correct host: the digest-pinned ref (WI-10006339).
+        source: workspaceHostBootcPinnedImageRef(bootc),
         imageDigest: bootc.imageDigest,
         signaturePolicyPath: bootc.signaturePolicyPath,
         signatureVerified: true,

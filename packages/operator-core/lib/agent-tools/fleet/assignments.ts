@@ -12,6 +12,7 @@
 import { z } from 'zod';
 import { defineTool, readJsonResult, type SeeAlsoEntry } from '@papercusp/agent-mcp';
 import { resolveConcreteWorkspaceId } from '../../workspace-registry';
+import { fleetSlugFromName, getFleet } from '../../agent-fleets-store';
 import { resolveAgentIdentity } from '../coordination/identity';
 import { resolveSelfRef, markSelfRows } from '../coordination/self-marker';
 import { selectFleetPopulation, withShownCount, withLivenessComposition } from './fleet-population';
@@ -50,8 +51,8 @@ import {
   type HolderActivity,
 } from '../../fleet/assignments';
 import {
-  getAllWakeModeOverrides,
   getDefaultWakeMode,
+  getWakeModeOverridesFor,
   resolveWakeModeFrom,
   type WakeMode,
 } from '../coordination/wake-mode';
@@ -643,7 +644,7 @@ export async function decorateMemberVerdicts<
 >(
   agents: T[],
   fetchLastToolCalls: (ownerIds: string[]) => Promise<Map<string, string>> = lastToolCallAtByOwner,
-  fetchWakeModeOverrides: () => Promise<Map<string, WakeMode>> = getAllWakeModeOverrides,
+  fetchWakeModeOverrides: (ownerIds: string[]) => Promise<Map<string, WakeMode>> = getWakeModeOverridesFor,
   fetchDefaultWakeMode: () => Promise<WakeMode> = getDefaultWakeMode,
   nowMs: number = Date.now(),
   // WI-42457: appended AFTER `nowMs` on purpose — inserting it earlier would
@@ -655,7 +656,8 @@ export async function decorateMemberVerdicts<
   if (agents.length === 0) return agents;
   const [lastCalls, overrides, defaultMode, productiveCallsOrUnknown] = await Promise.all([
     fetchLastToolCalls(agents.map((a) => a.agentId)),
-    fetchWakeModeOverrides(),
+    // WI-10005228: only the members being decorated, never every override ever written.
+    fetchWakeModeOverrides(agents.map((a) => a.agentId)),
     fetchDefaultWakeMode(),
     // A THROWN fetch is "unknown", not "nobody worked": resolving it to null for
     // every member would flip a whole healthy fleet to `joined`. Unknown feeds
@@ -1077,6 +1079,28 @@ export default defineTool({
     // falls through to the concrete active workspace instead of leaking the
     // sentinel into the query.
     const workspaceId = resolveConcreteWorkspaceId(args.workspace, actorWorkspace);
+    // A fleet name supplied to launch-on-plan is normalized and truncated to the
+    // durable fleet_slug. Resolve that same user-facing name here before filtering;
+    // otherwise an untruncated launch name produces a confident empty roster. Also
+    // reject unknown names explicitly so an invalid fleet never looks measured-empty.
+    const requestedFleetSlug = args.fleet === undefined ? undefined : fleetSlugFromName(args.fleet);
+    let fleetFilter = requestedFleetSlug;
+    if (requestedFleetSlug !== undefined) {
+      const fleet = await getFleet(workspaceId, requestedFleetSlug);
+      if (!fleet) {
+        return {
+          data: {
+            ok: false,
+            error: 'unknown_fleet',
+            fleet: args.fleet,
+            normalizedFleetSlug: requestedFleetSlug,
+            workspaceSearched: workspaceId,
+            message: `No fleet '${args.fleet}' (resolved as '${requestedFleetSlug}') in this workspace — see fleet:list.`,
+          },
+        };
+      }
+      fleetFilter = fleet.fleetSlug;
+    }
     const degradedLegs = new Set<string>();
     const boundedRead = async <T>(
       label: string,
@@ -1102,7 +1126,7 @@ export default defineTool({
           workspaceId,
           agent: queryAgent,
           plan: args.plan,
-          fleet: args.fleet,
+          fleet: fleetFilter,
           harness: args.harness,
           activeOnly: !args.include_lapsed,
         }),
@@ -1110,7 +1134,7 @@ export default defineTool({
     );
     const coveragePromise = boundedRead(
       'coverage',
-      () => getAllPlanItemCoverage(),
+      () => getAllPlanItemCoverage(args.plan ? { planSlug: args.plan } : {}),
       new Map<string, PlanItemCoverage>(),
     );
     const harnessPlansPromise =
@@ -1254,10 +1278,10 @@ export default defineTool({
             () => lastToolCallAtByOwner(ids),
             new Map<string, string>(),
           ),
-        () =>
+        (ids) =>
           boundedRead(
             'wakeModeOverrides',
-            () => getAllWakeModeOverrides(),
+            () => getWakeModeOverridesFor(ids),
             new Map<string, WakeMode>(),
           ),
         () =>
@@ -1711,7 +1735,7 @@ export default defineTool({
         scope: {
           agent: args.agent ?? null,
           plan: args.plan ?? null,
-          fleet: args.fleet ?? null,
+          fleet: fleetFilter ?? null,
           harness: args.harness ?? null,
           /** True when narrowed to the caller itself — then `summary.agents` is at
            *  most 1 BY CONSTRUCTION and says nothing about the fleet. For fleet-wide

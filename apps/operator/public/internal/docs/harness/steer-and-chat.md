@@ -97,16 +97,19 @@ You cannot interrupt your own turn.
 
 ## Human gates: questions, escalations, approvals
 
-Agents pause for humans through structured gates rather than free chat: a
+Agents request human decisions through structured gates rather than free chat: a
 mid-tool decision card (`ctx.askUser` / `chat:ask_choice`; with the
 `papercusp-inbox-durable-escalations` flag the card is also mirrored to a
 durable coord escalation so it can be answered later from the inbox),
-knowledge-first questions routed by topic (`coord:ask` → a conversation
-answered via `conversations:answer`), pipeline escalations
+durable owner questions via `coord:ask-owner`, pipeline escalations
 (`harness:escalation` surfaces the blocker; resolution re-enters the
 pipeline), and plan items marked `needs-human` (which also block a DONE
 finalization — see [Smoke-test gate](/internal/docs/harness/smoke-test) for
 the gate family).
+
+The owner's Ask-an-agent UI uses `coord:ask` for questions to a named agent.
+It is owner-UI-only; agents contact peers with `coord:send` or
+`coord:message-agent`.
 
 ## Observing without steering
 

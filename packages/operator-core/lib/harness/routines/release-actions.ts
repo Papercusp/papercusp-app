@@ -40,6 +40,7 @@ import {
   ROUTINE_FIRE_WORKFLOW_ID_ENV,
 } from '../../release/in-flight-candidate';
 import { emitAwaitedEvent } from '../../events/await/engine';
+import { withInstallBoundaryBootWindow } from '../../install-boundary-lease';
 import { gateVerdictEnv, isRecordableVerdict, type GateVerdictTarget } from '../../release/gate-verdict-target';
 import { pipelineName, pipelineRef, pipelineTag } from '../../release/pipeline-name';
 import { isAdmissionSyntheticCommitDate } from '../../release/admission-commit-date';
@@ -70,7 +71,7 @@ import { summarizeStreakCause, type StreakCauseDigest, type StreakTick } from '.
 // this module never got that treatment because the tag was believed to live in apps/operator. It
 // does not — it lives in operator-core (checkpoint-log-tags.ts, moved down by
 // EI-19395755190419540), i.e. in THIS package, so the funnel is a plain relative import.
-import { GREEN_CHECKPOINT_RESULT_MARKER, orchestratorStdoutTag } from '../../release/checkpoint-log-tags';
+import { GREEN_CHECKPOINT_RESULT_MARKER, isFixtureLogLine, orchestratorStdoutTag } from '../../release/checkpoint-log-tags';
 import { classifyGateAbort, isRecordedInconclusiveStatus } from '../../release/gate-abort-status';
 import { greenCheckpointDbPoolEnv } from '../../release/checkpoint-db-pool';
 import { admitCheckpointMemory } from '../../release/checkpoint-memory-admission';
@@ -90,6 +91,7 @@ import {
   buildIsolatedScopeArgv,
   CHECKPOINT_FORKS_BY_MODE,
   checkpointScopeMemoryMaxG,
+  checkpointScopeMemoryMaxGForGreenCmd,
   SCOPE_LAUNCH_FAILURE_RE,
   SYSTEMD_TRANSIENT_UNIT_COLLECTION_ARGS,
 } from '../../systemd-scope';
@@ -151,6 +153,127 @@ function parseMarkerLine(stdout: string, marker: string): Record<string, unknown
   } catch {
     return null;
   }
+}
+
+function parseDetailedCheckpointResult(logText: string, runId: string): Record<string, unknown> | null {
+  let cursor = 0;
+  while (cursor < logText.length) {
+    const newline = logText.indexOf('\n', cursor);
+    const lineEnd = newline < 0 ? logText.length : newline;
+    const line = logText.slice(cursor, lineEnd).replace(/\r$/, '');
+    if (line.startsWith('{')) {
+      const expectedClosers: string[] = [];
+      let inString = false;
+      let escaped = false;
+      let jsonEnd: number | null = null;
+      for (let index = cursor; index < logText.length; index += 1) {
+        const char = logText[index]!;
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') inString = false;
+          continue;
+        }
+        if (char === '"') {
+          inString = true;
+          continue;
+        }
+        if (char === '{') expectedClosers.push('}');
+        else if (char === '[') expectedClosers.push(']');
+        else if (char === '}' || char === ']') {
+          if (expectedClosers.pop() !== char) break;
+          if (expectedClosers.length === 0) {
+            jsonEnd = index + 1;
+            break;
+          }
+        }
+      }
+      if (jsonEnd !== null) {
+        try {
+          const parsed: unknown = JSON.parse(logText.slice(cursor, jsonEnd));
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            !Array.isArray(parsed) &&
+            (parsed as Record<string, unknown>).runId === runId &&
+            typeof (parsed as Record<string, unknown>).reason === 'string'
+          ) {
+            return parsed as Record<string, unknown>;
+          }
+        } catch {
+          // The log can contain unrelated JSON; only a complete matching run result is useful.
+        }
+        cursor = jsonEnd;
+        while (cursor < logText.length && (logText[cursor] === '\r' || logText[cursor] === '\n')) {
+          cursor += 1;
+        }
+        continue;
+      }
+    }
+    if (newline < 0) break;
+    cursor = newline + 1;
+  }
+  return null;
+}
+
+export function resolveCheckpointResultFromLogs(
+  primaryLog: string,
+  terminalLog?: string | null,
+  expectedRunId?: string,
+): Record<string, unknown> | null {
+  const marker =
+    parseMarkerLine(primaryLog, GREEN_CHECKPOINT_RESULT_MARKER) ??
+    parseMarkerLine(terminalLog ?? '', GREEN_CHECKPOINT_RESULT_MARKER);
+  if (!marker) return null;
+  const markerRunId = typeof marker.runId === 'string' ? marker.runId : expectedRunId;
+  const runId = expectedRunId ?? markerRunId;
+  if (!runId || (markerRunId && markerRunId !== runId)) return marker;
+  const detail = parseDetailedCheckpointResult(terminalLog ?? primaryLog, runId);
+  if (
+    !detail ||
+    detail.reason !== marker.reason ||
+    (typeof marker.candidate === 'string' &&
+      typeof detail.candidate === 'string' &&
+      marker.candidate !== detail.candidate)
+  ) {
+    return marker;
+  }
+  const resolved = { ...marker };
+  for (const field of ['failingTests', 'flakeSuspects']) {
+    if (!Array.isArray(resolved[field]) && Array.isArray(detail[field])) {
+      resolved[field] = detail[field];
+    }
+  }
+  return resolved;
+}
+
+/**
+ * WI-10005994: classify the green-checkpoint result marker in a merged run log.
+ *
+ * `parsed` — some line carries the marker token followed by an object that parses.
+ * `torn`   — the token is present but no carrying line parses: the CLI REACHED its terminal
+ *            seam and the line was damaged in transit (stdout/stderr chunk interleave in the
+ *            shared `2>&1` pipe). That is never a tooling crash, so callers must not alarm one.
+ * `absent` — no production marker line at all.
+ *
+ * The token is matched ANYWHERE in a line, not only at its start: a torn marker begins mid-line
+ * (measured: column 53 in run 014f2801). Captured suite fixtures are skipped by their stdout tag,
+ * and captured output has the token defanged, so a fixture can never pose as a verdict.
+ */
+export function checkpointResultMarkerState(log: string): 'absent' | 'parsed' | 'torn' {
+  let torn = false;
+  for (const line of log.split(/\r?\n/)) {
+    const at = line.indexOf(GREEN_CHECKPOINT_RESULT_MARKER);
+    if (at < 0 || isFixtureLogLine(line)) continue;
+    try {
+      const parsed: unknown = JSON.parse(line.slice(at + GREEN_CHECKPOINT_RESULT_MARKER.length).trim());
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return 'parsed';
+    } catch {
+      // fall through: a token without a parseable object is a torn marker
+    }
+    torn = true;
+  }
+  return torn ? 'torn' : 'absent';
 }
 
 /** Paths for the external evidence owned by a scheduled green-checkpoint wrapper. */
@@ -376,7 +499,7 @@ async function reconcileLoadedScheduledCheckpointTerminal(
     };
   }
 
-  const emitted = parseMarkerLine(logText, GREEN_CHECKPOINT_RESULT_MARKER);
+  const emitted = resolveCheckpointResultFromLogs(logText, logText, terminal.runId);
   const emittedReason = typeof emitted?.reason === 'string' && emitted.reason.trim() ? emitted.reason.trim() : null;
   const reason = emittedReason ?? checkpointFallbackStatus(false, terminal.exitCode ?? undefined, null, terminal);
   const green = typeof emitted?.green === 'boolean' ? emitted.green : null;
@@ -450,6 +573,19 @@ async function reconcileLoadedScheduledCheckpointTerminal(
       summary: typeof emitted?.summary === 'string' ? emitted.summary : undefined,
       failingTests: Array.isArray(emitted?.failingTests) ? emitted.failingTests.filter((test): test is string => typeof test === 'string') : [],
       logPath: terminal.logPath,
+    });
+  }
+  // WI-10004928 part 1: no result marker + an unexplained non-zero exit = the gate's own tooling
+  // crashed (e.g. a module-load failure). First exact-attempt transition only, like the red wake.
+  // WI-10005994: a PRESENT-but-torn marker means the run rendered a verdict that was damaged in
+  // transit; waking awaiters with "tooling crashed, no suite ran" sent its owner the wrong way.
+  if (settlement.status === 'updated' && terminal.integrationRoot && !emittedReason && reason === 'error') {
+    await emitGateToolingCrashEvent(terminal.integrationRoot, {
+      cause: checkpointResultMarkerState(logText) === 'torn' ? 'result-marker-torn' : 'tooling-crash',
+      exitCode: terminal.exitCode,
+      runId: terminal.runId,
+      logPath: terminal.logPath,
+      tail: logText ? logText.trim().split(/\r?\n/).slice(-5).join('\n') : null,
     });
   }
   if (settlement.status === 'conflict') {
@@ -761,6 +897,117 @@ async function emitLegacyRedVerdictEvent(root: string, verdict: CheckpointVerdic
   }
 }
 
+/**
+ * WI-10004928 part 1: the gate's OWN tooling died before it could report. The CLI is the only
+ * producer of `green-checkpoint:inconclusive`, so a run that crashes at module load (the
+ * 2026-10-01 top-level-await-under-CJS crash: exit 1 in ~9s, for 70+ min) emitted NOTHING and
+ * every `checkpoint:await` slept to its deadline. The routine is the only observer that outlives
+ * that crash, so it emits the inconclusive wake on the CLI's behalf, with reason
+ * `gate-tooling-crash` so a reader can tell it from an ordinary cancel/timeout.
+ * Only call this for a non-zero exit with NO result marker. Best-effort: never changes recording.
+ */
+export interface ManualCheckpointCrashSweepDeps {
+  /** The stable `/tmp/<unit>.log` symlink → the newest manual run's own log. */
+  resolveLog?: (stablePath: string) => Promise<string | null>;
+  readLog?: (logPath: string) => Promise<string | null>;
+  /** Atomic create-if-absent of the per-run sentinel; false when it already existed. */
+  claimSentinel?: (sentinelPath: string) => Promise<boolean>;
+  emit?: typeof emitAwaitedEvent;
+}
+
+export type ManualCheckpointCrashSweepResult =
+  | { status: 'no-log' | 'no-terminal-evidence' | 'not-a-tooling-crash' | 'result-marker-torn' | 'already-alarmed'; logPath: string | null }
+  | { status: 'alarmed'; logPath: string };
+
+/**
+ * WI-10004928 part 1, manual leg: a `release:checkpoint-run` suite runs as a transient systemd
+ * unit, not under the routine, so `reconcileLoadedScheduledCheckpointTerminal` never sees it.
+ * The unit's ExecStopPost (systemd-owned, so it survives the crash) appends the terminal tuple to
+ * the run's own log. A LOAD-TIME crash is that tuple abnormal, with no result marker AND no
+ * candidate line (the CLI dies before it resolves a candidate). A suite that was killed, timed
+ * out, or replaced resolved a candidate first, so it is deliberately not called a tooling crash.
+ * The sentinel `<log>.tooling-crash-alarmed` makes the sweep idempotent per run.
+ */
+export async function sweepManualCheckpointToolingCrash(
+  root: string,
+  deps: ManualCheckpointCrashSweepDeps = {},
+): Promise<ManualCheckpointCrashSweepResult> {
+  const launch = await import('../../release-checkpoint-launch');
+  const stable = launch.checkpointLatestLogPath(launch.checkpointUnitForRoot(root));
+  const { realpath, writeFile } = await import('node:fs/promises');
+  const resolveLog = deps.resolveLog ?? ((p: string) => realpath(p).catch(() => null));
+  const readLog = deps.readLog ?? (async (p: string) => launch.defaultReadLogTail(p));
+  const claimSentinel =
+    deps.claimSentinel ??
+    ((p: string) =>
+      writeFile(p, `${new Date().toISOString()}\n`, { flag: 'wx' }).then(
+        () => true,
+        () => false,
+      ));
+  const logPath = await resolveLog(stable);
+  if (!logPath) return { status: 'no-log', logPath: null };
+  const log = await readLog(logPath);
+  if (log == null) return { status: 'no-log', logPath };
+  const evidence = launch.parseCheckpointSystemdTerminalEvidence(log);
+  if (!evidence) return { status: 'no-terminal-evidence', logPath };
+  // WI-10005994: a marker anywhere in a line (a torn marker starts mid-line) means the CLI reached
+  // its terminal seam; a torn one is reported as such and never alarmed as a crash.
+  const markerState = checkpointResultMarkerState(log);
+  if (!evidence.abnormal || markerState === 'parsed' || evidence.candidate !== null) {
+    return { status: 'not-a-tooling-crash', logPath };
+  }
+  if (markerState === 'torn') return { status: 'result-marker-torn', logPath };
+  if (!(await claimSentinel(`${logPath}.tooling-crash-alarmed`))) return { status: 'already-alarmed', logPath };
+  const exitCode = /^\d+$/.test(evidence.exit_status) ? Number(evidence.exit_status) : null;
+  await emitGateToolingCrashEvent(
+    root,
+    { exitCode, runId: path.basename(logPath), logPath, tail: log.slice(-2000) },
+    deps.emit ?? emitAwaitedEvent,
+  );
+  return { status: 'alarmed', logPath };
+}
+
+export async function emitGateToolingCrashEvent(
+  root: string,
+  info: {
+    exitCode: number | null;
+    runId: string | null;
+    logPath: string | null;
+    tail: string | null;
+    /** WI-10005994: `result-marker-torn` = the run reached a verdict whose marker was damaged. */
+    cause?: 'tooling-crash' | 'result-marker-torn';
+  },
+  emit: typeof emitAwaitedEvent = emitAwaitedEvent,
+): Promise<void> {
+  const pipeline = pipelineName(root);
+  const exit = info.exitCode === null ? 'unknown exit' : `exit ${info.exitCode}`;
+  const torn = info.cause === 'result-marker-torn';
+  const summary = torn
+    ? `${pipelineTag(pipeline)} green-checkpoint: RESULT MARKER TORN (${exit}) — the run reached a verdict but ` +
+      `its result line was damaged in transit, so it was not read; read the run log ${info.logPath ?? '(path unknown)'}`
+    : `${pipelineTag(pipeline)} green-checkpoint: GATE TOOLING CRASHED (${exit}) before any verdict — ` +
+      `no suite ran; the gate is not judging anything until this is fixed`;
+  const payload = {
+    sha: null,
+    pipeline,
+    reason: torn ? 'result-marker-torn' : 'gate-tooling-crash',
+    exitCode: info.exitCode,
+    runId: info.runId,
+    logPath: info.logPath,
+    summary: info.tail ? info.tail.slice(-300) : null,
+  };
+  const cancelSiblingKeysFor = ['release:green', `release:green:${pipeline}`];
+  for (const key of ['green-checkpoint:inconclusive', `green-checkpoint:inconclusive:${pipeline}`]) {
+    try {
+      await emit({ key, summary, payload, source: 'green-checkpoint', cancelSiblingKeysFor });
+    } catch (e) {
+      console.warn(
+        `${orchestratorStdoutTag()} gate-tooling-crash ${key} emit failed: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+}
+
 /** Checkouts that must NEVER serve as the integration tree.
  *
  *  `papercup-release` / `papercusp-release` are the DEPLOY ARTIFACT (pinned to green
@@ -1000,21 +1247,36 @@ function runScript(
         ),
       );
     });
-  return wantScope
-    ? attempt(
-        buildIsolatedScopeArgv(
-          scopedPayload,
-          isolate.memoryMaxG,
-          'allow',
-          CHECKPOINT_SCOPE_RUNTIME_MAX_SEC,
-          isolate.terminalContext?.gateFireId
-            ? scheduledCheckpointScopeUnit(isolate.terminalContext.gateFireId)
-            : null,
-        ),
-        () => attempt(scopedPayload, null, checkpointPaths?.terminalPath),
-        checkpointPaths?.terminalPath,
-      )
-    : attempt(base, null);
+  const launch = (): Promise<RunResult> =>
+    wantScope
+      ? attempt(
+          buildIsolatedScopeArgv(
+            scopedPayload,
+            isolate.memoryMaxG,
+            'allow',
+            CHECKPOINT_SCOPE_RUNTIME_MAX_SEC,
+            isolate.terminalContext?.gateFireId
+              ? scheduledCheckpointScopeUnit(isolate.terminalContext.gateFireId)
+              : null,
+          ),
+          () => attempt(scopedPayload, null, checkpointPaths?.terminalPath),
+          checkpointPaths?.terminalPath,
+        )
+      : attempt(base, null);
+  // WI-10005925: the script boots from `root`'s shared node_modules via tsx. A peer's
+  // install:safe reify in that window crashed the 08:32Z gate before any verdict
+  // ("Cannot find module '@octokit/rest'"). Hold the install boundary across the boot
+  // window only. The gate runs for an hour, and holding the lease that long would
+  // block every install.
+  return withInstallBoundaryBootWindow(root, launch).then(({ value, lease }) => {
+    if (lease.outcome === 'timed-out' || lease.outcome === 'error') {
+      console.warn(
+        `[release-actions] ${relScript} launched without the install boundary (${lease.outcome}` +
+          `${lease.detail ? `: ${lease.detail}` : ''}, waited ${lease.waitedMs}ms)`,
+      );
+    }
+    return value;
+  });
 }
 
 /**
@@ -1754,6 +2016,13 @@ export function buildCheckpointDetail(v: CheckpointVerdict, fallbackGateFireId?:
       minSavedTestMs: reuse.minSavedTestMs,
       unmeasured: reuse.unmeasured,
       alarms: reuse.alarms.length,
+      // Keep the qualified measurement on the EXISTING append-only event. The capped display
+      // alarm list and 12-char display SHA cannot reconstruct the audit window later.
+      ...(reuse.audit ? { audit: { ...reuse.audit, judgedSha: reuse.judgedSha, recordedAtMs: reuse.recordedAtMs } } : {}),
+      // Named first-attempt results are acceptance evidence, not a capped display sample.
+      ...(reuse.auditedFiles === undefined ? {} : { auditedFiles: reuse.auditedFiles }),
+      ...(reuse.auditRuns === undefined ? {} : { auditRuns: reuse.auditRuns }),
+      ...(reuse.suite === undefined ? {} : { suite: reuse.suite }),
     };
   }
   // P-013: the round's phase breakdown rides the append-only event whole (it is capped at
@@ -2243,6 +2512,17 @@ registerSystemAction('green-checkpoint', async (ctx: SystemActionCtx) => {
   if (recoveredCount > 0) {
     console.log(`${orchestratorStdoutTag()} reconciled ${recoveredCount} scheduled checkpoint terminal marker(s)`);
   }
+  // WI-10004928: the same reconciliation for a MANUAL (release:checkpoint-run) unit that died at
+  // load — its only terminal evidence is the systemd ExecStopPost tuple in its own log.
+  const manualCrash = await sweepManualCheckpointToolingCrash(integrationRoot()).catch((error) => {
+    console.warn(
+      `${orchestratorStdoutTag()} manual checkpoint crash sweep failed: ${error instanceof Error ? error.message : error}`,
+    );
+    return null;
+  });
+  if (manualCrash?.status === 'alarmed') {
+    console.log(`${orchestratorStdoutTag()} gate-tooling-crash alarm emitted for manual run ${manualCrash.logPath}`);
+  }
   // per-hive-git-and-release-gate P-010: route a per-hive routine to ITS OWN checkout /
   // branches / greenCmd. Operator-home (papercusp) → default root + empty overlay = EXACT
   // current behavior (regression-safe). A non-gated installSlug (gate disabled / no repo) →
@@ -2277,7 +2557,9 @@ registerSystemAction('green-checkpoint', async (ctx: SystemActionCtx) => {
       workspaceId: ctx.workspaceId,
       installSlug: ctx.installSlug,
       kind: 'green_checkpoint',
-      status: 'skipped-disabled',
+      // WI-10006317: a gated hive whose gate can never promote is a FAULT, not a choice —
+      // record it distinctly so no surface reads it as a deliberately disabled (or healthy) gate.
+      status: routing.skip.misconfigured ? 'skipped-misconfigured' : 'skipped-disabled',
       detail: withGateFireId({ reason: routing.skip.reason }),
     });
     // EI-17065: a green-checkpoint-{stall,watchdog} escalation for THIS installSlug can
@@ -2387,7 +2669,9 @@ registerSystemAction('green-checkpoint', async (ctx: SystemActionCtx) => {
   // Unlike readQualificationAdmission above, this one FAILS OPEN — see the module note. An
   // unmeasurable probe must not be more restrictive than the unbounded status quo it replaces,
   // and a lone run is never refused.
-  const checkpointMemoryG = checkpointScopeMemoryMaxG();
+  // WI-10006274: size the request by the suite this install actually runs. The operator home
+  // runs the Papercusp Vitest fork runner; a foreign pot's own `npm test` requests the overhead.
+  const checkpointMemoryG = checkpointScopeMemoryMaxGForGreenCmd(routing.greenCmd ?? null);
   const memoryAdmission = admitCheckpointMemory({ requestG: checkpointMemoryG });
   if (!memoryAdmission.admit) {
     console.warn(`${orchestratorStdoutTag()} skip ${ctx.installSlug}: ${memoryAdmission.detail}`);
@@ -2443,13 +2727,17 @@ registerSystemAction('green-checkpoint', async (ctx: SystemActionCtx) => {
     qualificationAtLaunch.status === 'present' && qualificationAtLaunch.transaction.phase !== 'terminal'
       ? qualificationAtLaunch.transaction
       : null;
-  const qualificationBegin = activeAttempt
-    ? { status: 'idempotent' as const, transaction: activeAttempt }
-    : await beginStoredQualification(
-        ctx,
-        { attemptId: gateFireId, evidenceRefs: [`gate-fire:${gateFireId}`] },
-        { reconcileTerminalRepairQueueForSuccessor: true },
-      );
+  // Route active attempts through the same locked-row reconciliation as fresh ones. It is
+  // idempotent for a live runner, while a dead unstarted placeholder can safely adopt a newly
+  // admitted, never-judged repairHead before this fire reserves its physical slot.
+  const qualificationBegin = await beginStoredQualification(
+    ctx,
+    {
+      attemptId: activeAttempt?.attemptId ?? gateFireId,
+      evidenceRefs: [`gate-fire:${gateFireId}`],
+    },
+    { reconcileTerminalRepairQueueForSuccessor: true },
+  );
   if (qualificationBegin.status !== 'updated' && qualificationBegin.status !== 'idempotent') {
     await appendPipelineEvent({
       workspaceId: ctx.workspaceId, installSlug: ctx.installSlug, kind: 'green_checkpoint',
@@ -2575,8 +2863,11 @@ registerSystemAction('green-checkpoint', async (ctx: SystemActionCtx) => {
   let failingTests: string[] | undefined;
   let flakeSuspects: string[] | undefined;
   // P-008: parse the delimited result marker, not a brace-slice of all stdout.
-  const parsed = (parseMarkerLine(r.stdout, GREEN_CHECKPOINT_RESULT_MARKER) ??
-    parseMarkerLine(loadedTerminal?.logText ?? '', GREEN_CHECKPOINT_RESULT_MARKER)) as CheckpointVerdict | null;
+  const parsed = resolveCheckpointResultFromLogs(
+    r.stdout,
+    loadedTerminal?.logText,
+    loadedTerminal?.terminal.runId ?? r.runId,
+  ) as CheckpointVerdict | null;
   if (parsed?.reason) {
     status = parsed.reason; // advanced | up-to-date | not-green | not-fast-forward | create-failed | skipped-locked
     candidate = parsed.candidate;
@@ -2669,6 +2960,15 @@ registerSystemAction('green-checkpoint', async (ctx: SystemActionCtx) => {
       (!atomicallyRecorded || fallbackQualification?.status === 'updated')) {
     await emitLegacyRedVerdictEvent(root, parsed);
   }
+  // WI-10004928 part 1: with a terminal file the reconcile above already emitted this wake.
+  if (!r.terminalPath && !recordedByRun && !parsed?.reason && status === 'error') {
+    await emitGateToolingCrashEvent(root, {
+      exitCode: r.code ?? null,
+      runId: null,
+      logPath: null,
+      tail: (r.stderr || r.stdout || '').slice(-300) || null,
+    });
+  }
 
   // P-004: track the red streak + time-since-last-green across ticks and fire a
   // LOUDER urgent alert when the gate has been HELD too long (the "stuck for a
@@ -2744,7 +3044,9 @@ registerSystemAction('green-checkpoint', async (ctx: SystemActionCtx) => {
       console.warn(`${orchestratorStdoutTag()} flake history failed: ${e instanceof Error ? e.message : e}`),
     );
   }
-});
+  // WI-10005745: the orchestrator is tsx <integrationRoot>/apps/operator/lib/release/green-checkpoint.ts —
+  // live-tree code even though the suite it runs judges a committed candidate.
+}, { executesIntegrationTreeCode: true });
 
 /** P-004 thresholds: a gate held this many consecutive hourly checkpoints — or
  *  with no green for this long — is STALLED and worth an urgent, one-shot alert. */
@@ -3338,6 +3640,9 @@ export function classifyGateStallStatus(
     status === 'cancelled' ||
     status === 'repair-in-progress' ||
     status === 'repair-staging-mismatch' ||
+    // WI-10004108: an install with no configured integration branch cannot run this gate. It
+    // reports a durable not-applicable status, but must not create a red or no-verdict streak.
+    status === 'not-applicable' ||
     // WI-42350: the run DECLINED to re-judge a sha that already reached a red
     // verdict on a byte-identical tree. The producer says so in as many words
     // ("This is NOT a new red: it is the same one") and returns `green: null`
@@ -3620,6 +3925,14 @@ function oneLineMeasuredDetail(detail: string | null | undefined): string | null
 }
 
 export function gateStallNoopLogMessage(status: string, detail?: string | null): string {
+  if (status === 'not-applicable') {
+    const measuredDetail = oneLineMeasuredDetail(detail);
+    return (
+      `${orchestratorStdoutTag()} 'not-applicable' — green-checkpoint has no configured integration ` +
+      `branch for this installation${measuredDetail ? ` (${measuredDetail})` : ''}. This outcome is ` +
+      `recorded under gate_health.inconclusive without advancing the red or no-verdict counters.`
+    );
+  }
   if (status === 'disk-headroom') {
     return (
       // EI-23424266636870803: this said "the temp filesystem", which routes a responder
@@ -5923,7 +6236,7 @@ export async function writeFrozenCandidateRepairQueue(
   // construction: a filesystem fault must never fail a release write, and an absent marker
   // simply leaves the hook silent (today's behaviour).
   const { projectFrozenRepairMarker } = await import('../../release/frozen-repair-edit-marker');
-  projectFrozenRepairMarker(queue);
+  projectFrozenRepairMarker(queue, target);
   if (manifested) {
     try {
       await publishRepairManifestToGateWorkItem(sql, target, manifested);
@@ -6149,7 +6462,7 @@ export async function retireFrozenCandidateRepairQueue(
     // warn agents off editing paths for a candidate that no longer exists — a false positive
     // that teaches them to ignore the signal, which is worse than no signal.
     const { projectFrozenRepairMarker } = await import('../../release/frozen-repair-edit-marker');
-    projectFrozenRepairMarker(null);
+    projectFrozenRepairMarker(null, target);
     return result;
   }
   // `result.current` was read while the routine row was locked. Avoid a second liveness query
@@ -7125,4 +7438,5 @@ registerSystemAction('release-trigger', async (ctx: SystemActionCtx) => {
       resolve();
     });
   });
-});
+  // WI-10005745: the deploy is tsx <integrationRoot>/apps/operator/lib/release/deploy-cli.ts (live-tree code).
+}, { executesIntegrationTreeCode: true });

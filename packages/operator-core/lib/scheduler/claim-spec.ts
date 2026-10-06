@@ -377,6 +377,21 @@ export function claimSpecFilterPositivelyTargets(filter: unknown, field: ItemFie
 }
 
 /**
+ * Admission counterpart of {@link claimSpecFilterPositivelyTargets}: AND still
+ * narrows through any targeting conjunct, but ONE OR arm suffices, so the
+ * sanctioned `{ any: [<plan leaf>, {field:'id', ...}] }` widen keeps admitting
+ * the plan. Proves the spec CAN admit the target's items, never that it
+ * targets only them; negation is never positive scope.
+ */
+export function claimSpecFilterAdmitsTarget(filter: unknown, field: ItemField, value: string): boolean {
+  if (!filter || typeof filter !== 'object') return false;
+  const node = filter as Record<string, unknown>;
+  if (Array.isArray(node.all)) return node.all.some((n) => claimSpecFilterAdmitsTarget(n, field, value));
+  if (Array.isArray(node.any)) return node.any.some((n) => claimSpecFilterAdmitsTarget(n, field, value));
+  return claimSpecFilterPositivelyTargets(node, field, value);
+}
+
+/**
  * True when a claim spec's filter tree references `field` anywhere, including
  * below `all` / `any` / `not`. This is intentionally structural: callers that
  * use a field reference as an authorization signal must not re-implement a
@@ -507,6 +522,10 @@ export const limitsSchema = z
  * `get_next` still WINS over this (member judgment overrides the spec, same precedence as
  * every other narrowing) — this field is only the fallback when the caller omits one.
  */
+/** P-007 Phase B (D-027): the pools a claim spec can staff. */
+export const CLAIM_SPEC_LANES = ['implementation', 'verification'] as const;
+export type ClaimSpecLane = (typeof CLAIM_SPEC_LANES)[number];
+
 export const claimableStatesSchema = z
   .array(z.enum(CLAIM_STATES_ALLOWLIST as unknown as [string, ...string[]]))
   .max(20);
@@ -527,6 +546,13 @@ export const claimSpecSchema = z
     rank: rankSchema,
     limits: limitsSchema.optional(),
     states: claimableStatesSchema.optional(),
+    /**
+     * P-007 Phase B (D-027): which pool a member of this spec pulls from. Absent or
+     * 'implementation' is the ordinary claim pool. 'verification' staffs a verifier fleet:
+     * get_next serves pending agent reviews, then verification tasks, and never
+     * implementation work. Reporters and implementers are refused by the D-021 rule.
+     */
+    lane: z.enum(CLAIM_SPEC_LANES).optional(),
   })
   .strict();
 

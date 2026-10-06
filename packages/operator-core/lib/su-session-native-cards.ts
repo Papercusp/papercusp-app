@@ -3,7 +3,7 @@
 import { z } from 'zod';
 import { cancelPendingCardsForRun, registerCard, resolveCardResponse } from '@papercusp/agent-mcp';
 import type { CanUseTool, PermissionUpdate } from '@anthropic-ai/claude-agent-sdk';
-import { approvalCardText, humanToolName } from './su-session-approval-display';
+import { approvalCardText, displayPath, humanToolName } from './su-session-approval-display';
 import type { SuSessionEventInput } from './su-session-host';
 import type { RpcFrame } from './su-session-stdio-peer';
 
@@ -13,16 +13,46 @@ const text = (value: unknown): string => typeof value === 'string' ? value : '';
 /** Claude's allow suggestions, re-scoped to this runtime: a PUI card never
  * writes a settings file (D-021). */
 export function sessionAllowRules(suggestions: readonly PermissionUpdate[] | undefined): PermissionUpdate[] {
-  return (suggestions ?? []).flatMap((update) => update.type === 'addRules' && update.behavior === 'allow'
+  const rules = (suggestions ?? []).flatMap((update) => update.type === 'addRules' && update.behavior === 'allow'
     && update.rules.length ? [{ ...update, destination: 'session' as const }] : []);
+  if (rules.length) return rules;
+  // An edit offers no rule, only Claude Code's "switch to accept edits for this
+  // session" (stock 2.1.289 frame, D-028): the same session-scoped switch.
+  return (suggestions ?? []).flatMap((update) => update.type === 'setMode' && update.mode === 'acceptEdits'
+    ? [{ ...update, destination: 'session' as const }] : []);
 }
 
-/** The exact rule and lifetime the remembered choice grants, with the tool
- * named the way the card names it (P-008: never a raw MCP id). */
+/** Option 2 of an approval: what the remembered choice grants, with the tool
+ * named the way the card names it (P-008: never a raw MCP id). It lasts for
+ * this session's runtime (D-021: never a settings file). */
 export function rememberedApprovalLabel(updates: readonly PermissionUpdate[]): string | undefined {
   const rules = updates.flatMap((update) => update.type === 'addRules'
     ? update.rules.map((rule) => rule.ruleContent ? `${humanToolName(rule.toolName)}(${rule.ruleContent})` : humanToolName(rule.toolName)) : []);
-  return rules.length ? `Always allow ${rules.join(', ')} until this session's runtime stops` : undefined;
+  if (rules.length) return `Yes, and don't ask again for ${rules.join(', ')} this session`;
+  return updates.some((update) => update.type === 'setMode' && update.mode === 'acceptEdits')
+    ? 'Yes, and allow all edits this session' : undefined;
+}
+
+/** D-028: the three answers of a tool-approval card, by option id. */
+export type ApprovalAnswer = 'yes' | 'always' | 'no';
+/** One tool-approval card: the call's row title, Claude Code's question, the
+ * change between them, and option 2's label when the engine can remember. */
+export interface ApprovalRequest { title: string; question: string; body: string[]; details?: string; always?: string }
+/** What Claude is told when the owner picks No: like Claude Code, the turn
+ * stops and the owner says what to do instead in the next message. */
+export const REJECTED_TOOL_MESSAGE = 'The user said no to this tool call. Nothing was run or changed. '
+  + 'Stop here and wait for the user to say what to do instead.';
+/** OMP tools whose remembered "yes" covers only the exact same request. */
+const OMP_COMMAND_TOOL = /^(bash|shell|exec|python|eval|ssh|run)/i;
+
+export interface SuNativeCardsOptions {
+  /** The chat's launch directory; approval cards show paths relative to it. */
+  cwd?: string;
+  /** Stops the running turn after an OMP approval answered No (Claude and
+   * Codex stop their own turn from the reply). */
+  stopTurn?: () => void;
+  /** Called when option 2 switched Claude to accept-edits for the session. */
+  approvalsChanged?: (mode: 'auto-edit') => void;
 }
 
 /** What the model is told when the owner skips (Esc / Decline) a question
@@ -35,9 +65,13 @@ export const SKIPPED_QUESTION_MESSAGE = 'The user skipped this question without 
 
 export class SuNativeCards {
   private epoch = 0;
-  /** `cwd` is the chat's launch directory; approval cards show paths relative to it. */
+  private readonly cwd?: string;
+  /** OMP approvals answered "Yes, and don't ask again" in this runtime (D-028). */
+  private readonly ompAllowed = new Set<string>();
   constructor(private readonly workspaceId: string, private readonly runId: string,
-    private readonly emit: (event: SuSessionEventInput) => void, private readonly cwd?: string) {}
+    private readonly emit: (event: SuSessionEventInput) => void, private readonly options: SuNativeCardsOptions = {}) {
+    this.cwd = options.cwd;
+  }
 
   cancel(): void { this.epoch++; cancelPendingCardsForRun(this.runId); }
 
@@ -46,13 +80,36 @@ export class SuNativeCards {
     return answers?.[0] ?? null;
   }
 
+  /** D-028: one tool-approval card. `no` is also what Esc (a decline) means;
+   * null means the card was cancelled because the turn is already ending. */
+  private async askApproval(turnId: string, request: ApprovalRequest, agent: string,
+    signal?: AbortSignal): Promise<ApprovalAnswer | null> {
+    const choices = [{ id: 'yes', label: 'Yes' }, ...(request.always ? [{ id: 'always', label: request.always }] : []),
+      { id: 'no', label: `No, and tell ${agent} what to do instead` }];
+    const answer = await this.openCard(turnId, [request.question, ...request.body].join('\n'), choices, false, signal,
+      request.details, { title: request.title, question: request.question, body: request.body });
+    if (answer.action === 'decline') return 'no';
+    return answer.action === 'submit' ? answer.values[0] as ApprovalAnswer : null;
+  }
+
   private async askAnswers(turnId: string, prompt: string,
     choices?: Array<{ label: string; description?: string }>, multiSelect = false, signal?: AbortSignal,
     details?: string): Promise<string[] | null> {
-    if (signal?.aborted) return null;
+    const answer = await this.openCard(turnId, prompt, choices?.map((choice, index) => ({ id: String(index), ...choice })),
+      multiSelect, signal, details);
+    if (answer.action !== 'submit') return null;
+    return choices?.length ? answer.values.map((pick) => choices[Number(pick)].label) : answer.values;
+  }
+
+  /** Opens one card and waits. A choice card answers with the picked option
+   * ids, a text card with its one value. */
+  private async openCard(turnId: string, prompt: string,
+    choices: Array<{ id: string; label: string; description?: string }> | undefined, multiSelect: boolean,
+    signal?: AbortSignal, details?: string, approval?: { title: string; question: string; body: string[] },
+  ): Promise<{ action: 'submit'; values: string[] } | { action: 'decline' | 'cancel' }> {
+    if (signal?.aborted) return { action: 'cancel' };
     const presentation = choices?.length
-      ? { kind: multiSelect ? 'checkbox' as const : 'radio' as const,
-        options: choices.map((choice, index) => ({ id: String(index), ...choice })) }
+      ? { kind: multiSelect ? 'checkbox' as const : 'radio' as const, options: choices }
       : { kind: 'text' as const };
     const dataSchema = choices?.length
       ? z.object({ picks: z.array(z.string()).min(1).max(multiSelect ? choices.length : 1).refine((picks) => presentation.kind !== 'text'
@@ -64,13 +121,13 @@ export class SuNativeCards {
     signal?.addEventListener('abort', cancel, { once: true });
     this.emit({ type: 'card', phase: 'opened', turnId, card: {
       correlationId: card.correlationId, createdAt: Date.now(), prompt, fallbackText: prompt,
-      ...(details ? { details } : {}), presentation, allowDecline: true,
+      ...(details ? { details } : {}), ...(approval ? { approval } : {}), presentation, allowDecline: true,
     } });
     const response = await card.result.finally(() => signal?.removeEventListener('abort', cancel));
     this.emit({ type: 'card', phase: 'closed', turnId, correlationId: card.correlationId,
       resolution: response.action === 'submit' ? 'submitted' : response.action === 'decline' ? 'declined' : 'cancelled' });
-    if (response.action !== 'submit') return null;
-    return 'picks' in response.payload ? response.payload.picks.map((pick) => choices![Number(pick)].label) : [response.payload.value];
+    if (response.action !== 'submit') return { action: response.action === 'decline' ? 'decline' : 'cancel' };
+    return { action: 'submit', values: 'picks' in response.payload ? response.payload.picks : [response.payload.value] };
   }
 
   async handleClaude(toolName: string, input: Record<string, unknown>, turnId: string,
@@ -93,18 +150,20 @@ export class SuNativeCards {
       if (toolName !== 'AskUserQuestion') {
         // P-008: a readable question and the change itself; the raw arguments
         // ride as the card's details, shown only behind the PUI's Ctrl+R.
-        const { prompt, details } = approvalCardText(toolName, input, {
+        const view = approvalCardText(toolName, input, {
           title: options.title, description: options.description, decisionReason: options.decisionReason, cwd: this.cwd });
-        // The broader remembered permission is a separate, labelled choice and
-        // exists only when Claude offers one (PUBLIC_RELEASE_UX, Approvals).
+        // Option 2, the broader remembered permission, exists only when Claude
+        // offers one (PUBLIC_RELEASE_UX, Approvals; D-028).
         const remembered = sessionAllowRules(options.suggestions);
-        const rememberLabel = rememberedApprovalLabel(remembered);
-        const choice = await this.askAnswers(turnId, prompt,
-          [{ label: 'Approve' }, { label: 'Decline' }, ...(rememberLabel ? [{ label: rememberLabel }] : [])], false, options.signal, details);
-        if (epoch !== this.epoch || options.signal.aborted) return deny();
-        if (choice?.[0] === 'Approve') return { behavior: 'allow', updatedInput: input };
-        return rememberLabel && choice?.[0] === rememberLabel
-          ? { behavior: 'allow', updatedInput: input, updatedPermissions: remembered } : deny();
+        const answer = await this.askApproval(turnId, { title: view.title, question: view.question, body: view.body,
+          details: view.details, always: rememberedApprovalLabel(remembered) }, 'Claude', options.signal);
+        if (epoch !== this.epoch || options.signal.aborted || answer === null) return deny();
+        if (answer === 'yes') return { behavior: 'allow', updatedInput: input };
+        if (answer === 'always' && remembered.length) {
+          if (remembered.some((update) => update.type === 'setMode')) this.options.approvalsChanged?.('auto-edit');
+          return { behavior: 'allow', updatedInput: input, updatedPermissions: remembered };
+        }
+        return { behavior: 'deny', message: REJECTED_TOOL_MESSAGE, interrupt: true };
       }
       const questions = z.array(z.object({
         question: z.string().min(1), multiSelect: z.boolean().optional(),
@@ -144,13 +203,23 @@ export class SuNativeCards {
   handle(backend: 'codex' | 'omp', frame: RpcFrame, turnId: string, reply: (frame: RpcFrame) => void): boolean {
     const method = text(frame.method), params = record(frame.params), epoch = this.epoch;
     let run: (() => Promise<RpcFrame>) | undefined;
+    let stopAfterReply = false;
     if (backend === 'codex' && frame.id != null) {
       if (['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(method)) {
+        // D-028, mapped to Codex's own decisions: option 2 is acceptForSession,
+        // and No (or Esc) is `cancel`, which also stops the turn the way stock
+        // Codex's "No, and tell Codex what to do differently" does.
         run = async () => {
-          const prompt = [text(params.reason) || 'Approve this tool action?', text(params.command),
-            params.cwd ? `Directory: ${text(params.cwd)}` : ''].filter(Boolean).join('\n');
-          const choice = await this.ask(turnId, prompt, ['Approve', 'Decline']);
-          return { id: frame.id, result: { decision: choice === 'Approve' ? 'accept' : choice === 'Decline' ? 'decline' : 'cancel' } };
+          const files = method === 'item/fileChange/requestApproval';
+          const command = text(params.command);
+          const body = [params.reason ? `Reason: ${text(params.reason)}` : '', command ? `$ ${command}` : '',
+            params.cwd ? `Directory: ${displayPath(text(params.cwd), this.cwd)}` : ''].filter(Boolean);
+          const answer = await this.askApproval(turnId, {
+            title: files ? 'Edit files' : `Bash(${command.length > 60 ? `${command.slice(0, 59)}…` : command})`,
+            question: files ? 'Do you want to make these edits?' : 'Do you want to run this command?', body,
+            always: files ? "Yes, and don't ask again for these files this session" : "Yes, and don't ask again for this command this session",
+          }, 'Codex');
+          return { id: frame.id, result: { decision: answer === 'yes' ? 'accept' : answer === 'always' ? 'acceptForSession' : 'cancel' } };
         };
       } else if (method === 'item/tool/requestUserInput') {
         run = async () => {
@@ -172,6 +241,42 @@ export class SuNativeCards {
     } else if (backend === 'omp' && frame.type === 'extension_ui_request' && typeof frame.id === 'string') {
       if (method === 'confirm') run = async () => ({ type: 'extension_ui_response', id: frame.id,
         confirmed: await this.ask(turnId, [text(frame.title), text(frame.message)].filter(Boolean).join('\n'), ['Confirm', 'Decline']) === 'Confirm' });
+      else if (method === 'select' && text(frame.title).startsWith('Allow tool: ')
+        && JSON.stringify(frame.options) === JSON.stringify(['Approve', 'Deny'])) {
+        // D-028: OMP's always-ask approval (`ui.select(text, ['Approve','Deny'])`
+        // in OMP's tool runner). OMP cannot remember a choice, so option 2 is
+        // remembered here for this runtime: an edit-type tool by name, a
+        // command tool only for the exact same request.
+        const [head = '', ...rest] = text(frame.title).split('\n');
+        const tool = head.slice('Allow tool: '.length).trim();
+        const command = OMP_COMMAND_TOOL.test(tool);
+        const key = command ? text(frame.title) : `tool:${tool}`;
+        if (this.ompAllowed.has(key)) {
+          reply({ type: 'extension_ui_response', id: frame.id, value: 'Approve' });
+          return true;
+        }
+        // The detail lines are OMP's own formatApprovalDetails: `File: <path>`
+        // (edit), `Path:` + `Content:` (write), `Command: <cmd>` (bash).
+        const detail = (label: string) => rest.map((line) => new RegExp(`^${label}: (.+)$`).exec(line.trim())?.[1]).find(Boolean);
+        const rawFile = detail('(?:File|Path)'), commandText = detail('Command');
+        const file = rawFile ? displayPath(rawFile, this.cwd) : undefined;
+        const named = ({ edit: 'Update', write: 'Write', bash: 'Bash', read: 'Read' } as Record<string, string>)[tool.toLowerCase()] ?? tool;
+        const editing = /^(edit|write|patch|apply)/i.test(tool);
+        const target = file ?? (commandText && commandText.length > 60 ? `${commandText.slice(0, 59)}…` : commandText);
+        run = async () => {
+          const answer = await this.askApproval(turnId, {
+            title: target ? `${named}(${target})` : named,
+            question: command ? 'Do you want to run this command?' : editing ? `Do you want to make this edit to ${file ?? 'this file'}?` : 'Do you want to proceed?',
+            // The change shown once: the line the title already names is dropped.
+            body: rest.filter((line) => line.trim() && !(file && rawFile && [`File: ${rawFile}`, `Path: ${rawFile}`].includes(line.trim()))),
+            always: command ? "Yes, and don't ask again for this command this session" : `Yes, and don't ask again for ${named} this session`,
+          }, 'OMP');
+          if (answer === 'always') this.ompAllowed.add(key);
+          if (answer === 'no') stopAfterReply = true;
+          return answer === null ? { type: 'extension_ui_response', id: frame.id, cancelled: true }
+            : { type: 'extension_ui_response', id: frame.id, value: answer === 'no' ? 'Deny' : 'Approve' };
+        };
+      }
       else if (method === 'select' || method === 'input' || method === 'editor') run = async () => {
         const choices = method === 'select' && Array.isArray(frame.options) ? frame.options.map(text) : undefined;
         const value = await this.ask(turnId, text(frame.title) || 'Your response', choices);
@@ -180,7 +285,12 @@ export class SuNativeCards {
       else if (method === 'cancel') { this.cancel(); return true; }
     }
     if (!run) return false;
-    void run().then(reply).catch((error: unknown) => {
+    void run().then((response) => {
+      reply(response);
+      // OMP's "Deny" only fails the one tool call; No also stops the turn so
+      // the owner says what to do instead (D-028), after OMP has the answer.
+      if (stopAfterReply) this.options.stopTurn?.();
+    }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.emit({ type: 'error', scope: 'command', code: 'native_question_failed', message, recoverable: true });
       reply(backend === 'codex' ? { id: frame.id, error: { code: -32602, message } }

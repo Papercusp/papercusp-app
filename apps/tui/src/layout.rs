@@ -201,12 +201,126 @@ pub const DOCK_BINDS: &[DockBind] = &[
 /// Bound at the LAYOUT level so it MERGES with the user's own zellij config and
 /// applies only inside this dock session.
 pub fn dock_keybinds_kdl() -> String {
+    keybinds_kdl(DOCK_BINDS)
+}
+
+/// Render a bind slice as a layout-level KDL `keybinds` block (merged with the
+/// user's own zellij config, scoped to the one session the layout starts).
+fn keybinds_kdl(binds: &[DockBind]) -> String {
     let mut s = String::from("keybinds {\n    normal {\n");
-    for b in DOCK_BINDS {
+    for b in binds {
         s.push_str(&format!("        bind \"{}\" {{ {} }}\n", b.kdl, b.action));
     }
     s.push_str("    }\n}");
     s
+}
+
+/// The key that hides and shows the chat workbench's side panes, as hints
+/// spell it (pui-chat-first-ux P-030).
+pub const CHAT_WORKBENCH_TOGGLE_HINT: &str = "Alt+z";
+
+/// The multiplexer-level binds of the bare-`pui` chat workbench (P-030).
+///
+/// One key: `Alt+z` zooms the focused pane to the whole window and back. With
+/// the chat focused that is "collapse the side panes" / "bring them back".
+/// zellij 0.44's default config leaves `Alt z` unbound and pui binds no Alt
+/// letter, so nothing is taken from the user. `code` is `None` because
+/// [`crate::keyboard::Host::swallows`] matches a bare key code, and a plain
+/// `z` must keep reaching the message box.
+pub const CHAT_WORKBENCH_BINDS: &[DockBind] = &[DockBind {
+    kdl: "Alt z",
+    action: "ToggleFocusFullscreen;",
+    code: None,
+    reaches_pane: false,
+}];
+
+/// Session kind of the bare-`pui` chat workbench. Unlike `wb` / `dock` it is
+/// pid-keyed (`pui-chat-<pid>`, see [`chat_workbench_session_name`]).
+pub const CHAT_WORKBENCH_KIND: &str = "chat";
+
+/// The bare-`pui` chat workbench session name: `pui-chat-<launcher pid>`.
+///
+/// Deliberately NOT a stable attach-if-exists name like `pui-wb`. A chat
+/// belongs to the directory and terminal it was started in, so a second `pui`
+/// in another directory must never attach to the first one's session, and no
+/// older session (a crashed chat, an old `pui-wb`) can take a launch over.
+/// When the launcher dies without cleaning up, [`crate::reap::plan`]'s
+/// dead-owner rule sweeps the leftover on the next launch.
+pub fn chat_workbench_session_name(launcher_pid: u32) -> String {
+    format!("{}-{launcher_pid}", session_name(CHAT_WORKBENCH_KIND))
+}
+
+/// Terminals narrower than this open the chat workbench with the chat zoomed
+/// to the full window (side panes collapsed), so 80x24 still gets a usable
+/// chat. `Alt+z` brings the panes back.
+pub const CHAT_WORKBENCH_MIN_SIDE_COLS: u16 = 120;
+
+/// Environment set by the chat-workbench launcher for the session it starts.
+/// The chat pane reads it to recognise its own session (and to stop it on
+/// exit); every other pane ignores it.
+pub const CHAT_WORKBENCH_SESSION_ENV: &str = "PUI_CHAT_WORKBENCH";
+/// Set to `1` when the launch terminal was narrower than
+/// [`CHAT_WORKBENCH_MIN_SIDE_COLS`]: the chat zooms itself on start.
+pub const CHAT_WORKBENCH_ZOOM_ENV: &str = "PUI_CHAT_WORKBENCH_ZOOMED";
+/// Where the chat pane leaves its conversation text on exit, so the launcher
+/// can print it into the real terminal's scrollback after zellij is gone
+/// (the chat-first "clean scrollback" promise, P-004).
+pub const CHAT_WORKBENCH_TRANSCRIPT_ENV: &str = "PUI_CHAT_WORKBENCH_TRANSCRIPT";
+/// Undocumented flag only the layout's chat pane is started with. The
+/// session env above is inherited by EVERY pane, so a `pui --solo` typed into
+/// the work shell would otherwise also believe it owns the session and stop it
+/// on exit. The flag marks the one process that does.
+pub const CHAT_WORKBENCH_PANE_FLAG: &str = "--workbench-pane";
+
+/// The bare-`pui` layout (pui-chat-first-ux P-030 / D-020): the chat is the
+/// main, focused pane, and the workbench panes Avi asked to keep sit beside it
+/// in one stack — the full HUD (fleet/colony, plans, mail, every tab;
+/// expanded, and the owner of reactive agent-pane launches), the staged-wake
+/// board, the network board, and the work shell where agent panes open.
+///
+/// The chat runs `pui --solo`, so it can never re-enter this launcher and nest.
+/// No swap presets: they would each have to re-declare the chat pane, and the
+/// one control this surface needs is the zoom toggle in
+/// [`CHAT_WORKBENCH_BINDS`].
+pub fn chat_workbench_kdl() -> String {
+    format!(
+        r#"// Papercusp chat workbench — bare `pui` (pui-chat-first-ux P-030).
+// The chat is the main pane; {toggle} hides or shows the side panes.
+{keybinds}
+layout {{
+    pane size=1 borderless=true {{
+        plugin location="zellij:tab-bar"
+    }}
+    pane split_direction="vertical" {{
+        pane name="chat" focus=true size="65%" {{
+            command "pui"
+            args "--solo" "{pane_flag}"
+        }}
+        pane name="side" stacked=true size="35%" {{
+            pane name="hud" expanded=true {{
+                command "pui"
+                args "hud"
+            }}
+            pane name="wake" {{
+                command "pui"
+                args "wake-pane"
+            }}
+            pane name="network" {{
+                command "pui"
+                args "network-pane"
+            }}
+            pane name="work"
+        }}
+    }}
+    pane size=2 borderless=true {{
+        plugin location="zellij:status-bar"
+    }}
+}}
+"#,
+        toggle = CHAT_WORKBENCH_TOGGLE_HINT,
+        keybinds = keybinds_kdl(CHAT_WORKBENCH_BINDS),
+        pane_flag = CHAT_WORKBENCH_PANE_FLAG,
+    )
 }
 
 /// Name for an app-managed zellij session: STABLE `pui-<kind>` (kind = `wb` |
@@ -232,9 +346,12 @@ pub fn attach_argv(session: &str) -> Vec<String> {
 /// explicitly named (see [`session_name`]) so exits/crashes can be reaped
 /// instead of leaking an auto-named detached server. The `options` subcommand
 /// layers per-session config overrides WITHOUT replacing the user's config:
-/// startup tips are suppressed — these are app-managed sessions (the workbench
-/// / the desktop chat dock), and the tips pane floats over the app's panes
-/// blocking everything until dismissed.
+/// startup tips AND first-run release notes are suppressed — these are
+/// app-managed sessions (the workbench, the desktop chat dock, the bare-`pui`
+/// chat workbench), and either popup floats over the app's panes blocking
+/// everything until dismissed. On a machine that has never run this zellij
+/// version the release-notes popup ("What's new?") covers the chat on the very
+/// first `pui` (P-030 PTY acceptance, 2026-10-06).
 ///
 /// ⚠ The layout MUST be passed as `--new-session-with-layout`, NOT `--layout`:
 /// on zellij 0.44 `--layout` + `--session` does not create a session — it is
@@ -253,7 +370,29 @@ pub fn launch_argv(layout_path: &str, session: &str) -> Vec<String> {
         "options".to_string(),
         "--show-startup-tips".to_string(),
         "false".to_string(),
+        "--show-release-notes".to_string(),
+        "false".to_string(),
     ]
+}
+
+/// `PATH` for an app-managed zellij session: the directory of the `pui` that
+/// starts it goes first. Every layout runs its panes as `command "pui"`, which
+/// zellij resolves on `PATH`; without this a launch from `./target/debug/pui`
+/// (or any `pui` that is not first on the user's `PATH`) fills its panes with
+/// a DIFFERENT build — the P-030 PTY acceptance caught the chat pane running
+/// an older installed `pui` that has no `--solo` and drew the dashboard
+/// instead. Panes, and a `pui` typed in the work shell, now run the same
+/// build as the launcher. `None` when `exe` has no directory to add.
+pub fn session_path_env(
+    exe: &Path,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Option<std::ffi::OsString> {
+    let dir = exe.parent().filter(|d| !d.as_os_str().is_empty())?;
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Some(path) = inherited {
+        dirs.extend(std::env::split_paths(path).filter(|d| d != dir));
+    }
+    std::env::join_paths(dirs).ok()
 }
 
 /// Lowercase + kdl-safe a lexicon label for use as a zellij pane `name`
@@ -802,6 +941,92 @@ fn materialize_at(base: &Path) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Write the bare-`pui` chat-workbench KDL to
+/// `~/.papercusp/pui-chat-workbench.kdl` and return it (P-030).
+pub fn materialize_chat_workbench() -> std::io::Result<PathBuf> {
+    let base = base_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home dir"))?;
+    materialize_chat_workbench_at(&base)
+}
+
+fn materialize_chat_workbench_at(base: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(base)?;
+    let path = base.join("pui-chat-workbench.kdl");
+    std::fs::write(&path, chat_workbench_kdl())?;
+    Ok(path)
+}
+
+/// Is terminal pane `pane_id` fullscreen, per `zellij action list-panes
+/// --json --state` output? `None` when the output does not parse or does not
+/// list that pane (yet). Plugin panes share the id space, so only
+/// `is_plugin: false` entries match.
+pub fn pane_fullscreen(list_panes_json: &[u8], pane_id: u64) -> Option<bool> {
+    let panes: Vec<serde_json::Value> = serde_json::from_slice(list_panes_json).ok()?;
+    panes
+        .iter()
+        .find(|p| {
+            p.get("is_plugin").and_then(serde_json::Value::as_bool) == Some(false)
+                && p.get("id").and_then(serde_json::Value::as_u64) == Some(pane_id)
+        })
+        .and_then(|p| p.get("is_fullscreen").and_then(serde_json::Value::as_bool))
+}
+
+/// zellij settings for pui's own sessions, used ONLY when the user has no
+/// zellij config of their own ([`user_zellij_config_exists`]).
+pub const SESSION_ZELLIJ_CONFIG_KDL: &str = "// Papercusp: zellij settings for pui's own sessions.\n\
+// Used only while you have no zellij config of your own; create\n\
+// ~/.config/zellij/config.kdl and pui uses yours instead.\n\
+show_startup_tips false\n\
+show_release_notes false\n";
+
+/// Does the user have a zellij config of their own? Mirrors where zellij
+/// looks for `config.kdl`: `$ZELLIJ_CONFIG_FILE`, `$ZELLIJ_CONFIG_DIR`,
+/// `$XDG_CONFIG_HOME/zellij` (default `~/.config/zellij`), `/etc/zellij`.
+///
+/// With none, zellij 0.44 opens its first-run `configuration` wizard as a
+/// FOCUSED floating pane over the layout, so on a new machine the first keys
+/// typed into bare `pui` went to zellij's wizard instead of the chat, and
+/// the chat's own zoom-on-start landed on the wizard (P-030 PTY acceptance,
+/// measured 2026-10-06 with `zellij action list-panes --json --all`).
+pub fn user_zellij_config_exists(
+    env: impl Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+    is_file: impl Fn(&Path) -> bool,
+) -> bool {
+    let set = |key: &str| env(key).filter(|v| !v.is_empty());
+    if set("ZELLIJ_CONFIG_FILE").is_some() {
+        return true;
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = set("ZELLIJ_CONFIG_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    match set("XDG_CONFIG_HOME") {
+        Some(xdg) => dirs.push(Path::new(&xdg).join("zellij")),
+        None => dirs.extend(home.map(|h| h.join(".config").join("zellij"))),
+    }
+    dirs.push(PathBuf::from("/etc/zellij"));
+    dirs.iter().any(|dir| is_file(&dir.join("config.kdl")))
+}
+
+/// The `ZELLIJ_CONFIG_DIR` for an app-managed session: `None` when the user
+/// has a zellij config of their own (theirs is never overridden), otherwise
+/// `~/.papercusp/zellij` with [`SESSION_ZELLIJ_CONFIG_KDL`] written into it.
+pub fn session_config_dir() -> Option<PathBuf> {
+    let home = dirs::home_dir();
+    if user_zellij_config_exists(|k| std::env::var(k).ok(), home.as_deref(), Path::is_file) {
+        return None;
+    }
+    materialize_session_config_at(&base_dir()?).ok()
+}
+
+fn materialize_session_config_at(base: &Path) -> std::io::Result<PathBuf> {
+    let dir = base.join("zellij");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("config.kdl"), SESSION_ZELLIJ_CONFIG_KDL)?;
+    Ok(dir)
+}
+
 /// Write the chat-dock KDL (for `brain_argv`, with pane names resolved through
 /// `lex`) to `~/.papercusp/pui-chat-dock.kdl` and return it. Launched the same
 /// way as the workbench (`launch_argv`). (P-013 / pui-hive-lexicon-2026-06-06)
@@ -878,6 +1103,137 @@ mod tests {
             "the ↑/↓ rebinds DO reach the pane — if none does, `swallows` has \
              collapsed into `is bound`"
         );
+    }
+
+    /// The `command "pui"` panes of a KDL and the args line under each, in order.
+    fn pui_panes(kdl: &str) -> Vec<(String, Option<String>)> {
+        let lines: Vec<&str> = kdl.lines().map(str::trim).collect();
+        let mut out = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if *line == "command \"pui\"" {
+                let opener = lines[..i]
+                    .iter()
+                    .rev()
+                    .find(|l| l.starts_with("pane "))
+                    .copied()
+                    .unwrap_or_default()
+                    .to_string();
+                let args = lines
+                    .get(i + 1)
+                    .and_then(|l| l.strip_prefix("args "))
+                    .map(str::to_string);
+                out.push((opener, args));
+            }
+        }
+        out
+    }
+
+    /// P-030: bare `pui` opens the chat as the main FOCUSED pane, running the
+    /// chat-only mode — so it can never re-enter the launcher and nest zellij.
+    #[test]
+    fn chat_workbench_focuses_a_solo_chat_and_never_nests() {
+        let kdl = chat_workbench_kdl();
+        let panes = pui_panes(&kdl);
+        let chat = panes
+            .iter()
+            .find(|(opener, _)| opener.contains("name=\"chat\""))
+            .expect("the layout has a chat pane");
+        assert!(chat.0.contains("focus=true"), "the chat is focused: {chat:?}");
+        assert_eq!(
+            chat.1.as_deref(),
+            Some(format!("\"--solo\" \"{CHAT_WORKBENCH_PANE_FLAG}\"").as_str())
+        );
+        // Only the chat pane carries the session-owner flag.
+        assert_eq!(kdl.matches(CHAT_WORKBENCH_PANE_FLAG).count(), 1);
+        // Exactly one focused pane, and it is the chat.
+        assert_eq!(kdl.matches("focus=true").count(), 1, "{kdl}");
+        // Every pui pane carries args: a bare `pui` pane would launch this
+        // same workbench inside itself.
+        for (opener, args) in &panes {
+            assert!(args.is_some(), "pane {opener:?} runs bare `pui`");
+        }
+    }
+
+    /// P-030 / #1277 "retain the extra zellij panes": the HUD (every tab, and
+    /// the reactive agent-launch owner), the wake and network boards and the
+    /// work shell all sit beside the chat, stacked, with the HUD expanded.
+    #[test]
+    fn chat_workbench_keeps_the_workbench_panes_beside_the_chat() {
+        let kdl = chat_workbench_kdl();
+        let args: Vec<String> = pui_panes(&kdl)
+            .into_iter()
+            .filter_map(|(_, a)| a)
+            .collect();
+        for wanted in ["\"hud\"", "\"wake-pane\"", "\"network-pane\""] {
+            assert!(args.iter().any(|a| a == wanted), "missing {wanted}: {args:?}");
+        }
+        assert!(kdl.contains("pane name=\"side\" stacked=true"));
+        assert!(kdl.contains("pane name=\"hud\" expanded=true"));
+        assert!(kdl.contains("pane name=\"work\""));
+        assert!(kdl.contains("zellij:tab-bar") && kdl.contains("zellij:status-bar"));
+        // Exactly one pane is the reactive launch owner (`pui hud`): two would
+        // race to open the same agent pane (EI-358).
+        assert_eq!(args.iter().filter(|a| *a == "\"hud\"").count(), 1);
+    }
+
+    /// DRIFT GUARD: the chat workbench KDL binds exactly CHAT_WORKBENCH_BINDS,
+    /// and the one bind is the zoom toggle on Alt+z, which the hint names.
+    #[test]
+    fn chat_workbench_binds_exactly_the_zoom_toggle() {
+        let kdl = chat_workbench_kdl();
+        let bound: Vec<&str> = kdl
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("bind \""))
+            .collect();
+        assert_eq!(bound, vec!["bind \"Alt z\" { ToggleFocusFullscreen; }"]);
+        assert_eq!(CHAT_WORKBENCH_BINDS.len(), 1);
+        assert_eq!(CHAT_WORKBENCH_TOGGLE_HINT, "Alt+z");
+        // A plain `z` must still reach the message box.
+        assert!(CHAT_WORKBENCH_BINDS.iter().all(|b| b.code.is_none()));
+        assert!(kdl.find("keybinds {").unwrap() < kdl.find("layout {").unwrap());
+    }
+
+    /// The session name is pid-keyed, so the reaper's dead-owner rule applies to
+    /// it and the stable-name attach path never does.
+    #[test]
+    fn chat_workbench_session_is_pid_keyed() {
+        let name = chat_workbench_session_name(4242);
+        assert_eq!(name, "pui-chat-4242");
+        assert_eq!(crate::reap::owner_pid(&name), Some(4242));
+        assert_eq!(crate::reap::session_kind(&name), Some(CHAT_WORKBENCH_KIND));
+        assert_eq!(crate::reap::stable_kind(&name), None);
+    }
+
+    /// "A stale pui-wb session must never hijack the launch": a chat launch
+    /// sweeps a leftover chat whose launcher died, leaves a live peer chat and
+    /// the user's live `pui-wb` alone, and has nothing to attach to.
+    #[test]
+    fn chat_workbench_launch_reaps_dead_chats_and_leaves_live_sessions() {
+        let own = chat_workbench_session_name(10);
+        let list = "pui-chat-11 [Created 1h ago]\n\
+                    pui-chat-12 [Created 2h ago]\n\
+                    pui-chat-13 [Created 3h ago] (EXITED - attach to resurrect)\n\
+                    pui-wb [Created 1d ago]\n\
+                    pui-chat-10 [Created 5m ago]\n\
+                    likable-petunia [Created 1d ago]\n";
+        let actions = crate::reap::plan(list, &own, |pid| pid == 12);
+        assert_eq!(
+            actions,
+            vec![
+                crate::reap::Action::KillAndDelete("pui-chat-11".into()),
+                crate::reap::Action::Delete("pui-chat-13".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn materialize_chat_workbench_writes_the_layout() {
+        let dir = std::env::temp_dir().join(format!("pui-chat-wb-{}", std::process::id()));
+        let path = materialize_chat_workbench_at(&dir).expect("materialize");
+        assert_eq!(path.file_name().unwrap(), "pui-chat-workbench.kdl");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), chat_workbench_kdl());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -980,9 +1336,10 @@ mod tests {
         // `--new-session-with-layout` (NEVER `--layout`: combined with
         // `--session` zellij dispatches that as new-tab-in-EXISTING-session
         // and exits "There is no active session!") creates the named session;
-        // `options --show-startup-tips false` layers a per-session override
-        // (no user-config replacement): the tips pane floats over the
-        // app-managed session blocking the panes until dismissed.
+        // `options --show-startup-tips false --show-release-notes false`
+        // layers a per-session override (no user-config replacement): either
+        // popup floats over the app-managed session blocking the panes until
+        // dismissed.
         assert_eq!(
             launch_argv("/home/u/.papercusp/pui-workbench.kdl", "pui-wb-42"),
             vec![
@@ -993,9 +1350,83 @@ mod tests {
                 "/home/u/.papercusp/pui-workbench.kdl",
                 "options",
                 "--show-startup-tips",
+                "false",
+                "--show-release-notes",
                 "false"
             ]
         );
+    }
+
+    #[test]
+    fn session_path_puts_the_launching_build_first_once() {
+        let exe = Path::new("/work/target/debug/pui");
+        let inherited = std::ffi::OsString::from("/home/u/.cargo/bin:/work/target/debug:/usr/bin");
+        let path = session_path_env(exe, Some(&inherited)).unwrap();
+        assert_eq!(
+            std::env::split_paths(&path).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/work/target/debug"),
+                PathBuf::from("/home/u/.cargo/bin"),
+                PathBuf::from("/usr/bin"),
+            ],
+        );
+        assert_eq!(
+            session_path_env(exe, None).unwrap(),
+            std::ffi::OsString::from("/work/target/debug"),
+        );
+        assert_eq!(session_path_env(Path::new("pui"), Some(&inherited)), None);
+    }
+
+    #[test]
+    fn a_user_zellij_config_is_found_where_zellij_looks_for_it() {
+        let home = Path::new("/home/u");
+        let env_of = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(key, _)| *key == k).map(|(_, v)| v.to_string())
+        };
+        let only = |file: &'static str| move |p: &Path| p == Path::new(file);
+        // Default location.
+        assert!(user_zellij_config_exists(env_of(&[]), Some(home), only("/home/u/.config/zellij/config.kdl")));
+        // XDG_CONFIG_HOME moves it; the ~/.config copy is then not where zellij looks.
+        assert!(user_zellij_config_exists(
+            env_of(&[("XDG_CONFIG_HOME", "/x")]), Some(home), only("/x/zellij/config.kdl")));
+        assert!(!user_zellij_config_exists(
+            env_of(&[("XDG_CONFIG_HOME", "/x")]), Some(home), only("/home/u/.config/zellij/config.kdl")));
+        // An explicit dir or file, and the system-wide one.
+        assert!(user_zellij_config_exists(
+            env_of(&[("ZELLIJ_CONFIG_DIR", "/c")]), Some(home), only("/c/config.kdl")));
+        assert!(user_zellij_config_exists(env_of(&[("ZELLIJ_CONFIG_FILE", "/f.kdl")]), Some(home), |_| false));
+        assert!(user_zellij_config_exists(env_of(&[]), Some(home), only("/etc/zellij/config.kdl")));
+        // None anywhere (a new machine): pui supplies its own, and an EMPTY
+        // variable (as the PTY harness sets) counts as unset.
+        assert!(!user_zellij_config_exists(
+            env_of(&[("ZELLIJ_CONFIG_FILE", ""), ("ZELLIJ_CONFIG_DIR", "")]), Some(home), |_| false));
+    }
+
+    #[test]
+    fn pane_fullscreen_reads_the_terminal_pane_not_a_plugin_with_the_same_id() {
+        // Shape measured from zellij 0.44.3 `action list-panes --json --all`.
+        let listed = br#"[
+            {"id":0,"title":"(.) - zellij:link","is_plugin":true,"is_fullscreen":true},
+            {"id":1,"title":"configuration","is_plugin":true,"is_focused":true,"is_fullscreen":false},
+            {"id":0,"title":"chat","is_plugin":false,"is_focused":true,"is_fullscreen":false},
+            {"id":1,"title":"hud","is_plugin":false,"is_fullscreen":true}
+        ]"#;
+        assert_eq!(pane_fullscreen(listed, 0), Some(false));
+        assert_eq!(pane_fullscreen(listed, 1), Some(true));
+        assert_eq!(pane_fullscreen(listed, 7), None);
+        assert_eq!(pane_fullscreen(b"not json", 0), None);
+    }
+
+    #[test]
+    fn the_session_config_suppresses_both_zellij_popups() {
+        let base = std::env::temp_dir().join(format!("pui-session-config-{}", std::process::id()));
+        let dir = materialize_session_config_at(&base).unwrap();
+        assert_eq!(dir, base.join("zellij"));
+        let written = std::fs::read_to_string(dir.join("config.kdl")).unwrap();
+        assert_eq!(written, SESSION_ZELLIJ_CONFIG_KDL);
+        assert!(written.contains("show_startup_tips false"));
+        assert!(written.contains("show_release_notes false"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

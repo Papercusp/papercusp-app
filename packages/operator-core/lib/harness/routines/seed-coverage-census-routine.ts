@@ -66,7 +66,7 @@ async function main(): Promise<void> {
     `[seed-coverage-census-routine] seeded "${NAME}" for "${SLUG}" (ws=${ws}, active=${active}, ` +
       `tier=ephemeral, interval=${DEFAULT_INTERVAL_SEC}s) — testable-surface census cadence. ` +
       (active
-        ? 'Cadence seeded ACTIVE — restart papercup-bg-host to live-arm on a host that was already up.'
+        ? 'Cadence seeded ACTIVE — restart papercusp-bg-host to live-arm on a host that was already up.'
         : 'Cadence seeded DARK — flip active to arm it.'),
   );
   await sql.end({ timeout: 5 });

@@ -18,6 +18,10 @@ Only POSITIVE evidence counts; when /proc cannot answer, the verdict is None
 Hook processes run as descendants of their CLI, so the walk starts at the
 hook's parent. A contiguous chain of agent-CLI processes (Codex's node wrapper
 over its vendor-native binary) counts as ONE CLI.
+
+Per-turn hooks run this directly. Hooks that fire on EVERY tool call read a
+verdict cached per CLI process instead (pc_nested_cli.sh, WI-10004945); on a
+miss that reader runs this file with `--cache <path>` to record the verdict.
 """
 import os
 
@@ -119,9 +123,55 @@ def nested_cli_reason(start_pid=None, environ=None, proc=read_proc):
     return None
 
 
+def proc_starttime(pid):
+    """Field 22 of /proc/<pid>/stat (start time in clock ticks), or None."""
+    try:
+        with open('/proc/%d/stat' % pid, 'rb') as f:
+            stat = f.read().decode('utf-8', 'replace')
+        return stat[stat.rindex(')') + 2:].split()[19]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+MAX_CACHE_ENTRIES = 512
+
+
+def write_cache(path, reason):
+    """Persist this verdict for pc_nested_cli.sh (WI-10004945). The file name is
+    `<pid>-<starttime>` of the CLI process the bash reader keyed on; its first word
+    is `nested` or `managed`. Best-effort: any failure only costs a re-check.
+
+    Also prunes siblings whose process is gone (pid exited, or reused with a
+    different start time). That runs only here — on a cache MISS, once per CLI —
+    so the per-tool-call hit path never pays for it."""
+    try:
+        directory = os.path.dirname(path)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        tmp = '%s.tmp.%d' % (path, os.getpid())
+        with open(tmp, 'w') as f:
+            f.write(('nested ' + reason) if reason else 'managed')
+            f.write('\n')
+        os.replace(tmp, path)
+        for name in sorted(os.listdir(directory))[:MAX_CACHE_ENTRIES]:
+            pid, _, start = name.partition('-')
+            if not pid.isdigit() or '.tmp.' in name:
+                continue
+            if proc_starttime(int(pid)) != start:
+                try:
+                    os.unlink(os.path.join(directory, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 if __name__ == '__main__':
     import sys
     reason = nested_cli_reason()
+    # `--cache <dir>/<pid>-<starttime>`: pc_nested_cli.sh's cache miss. Record the
+    # verdict so later tool calls of the same CLI skip this python + /proc walk.
+    if len(sys.argv) == 3 and sys.argv[1] == '--cache':
+        write_cache(sys.argv[2], reason)
     if reason:
         sys.stdout.write(reason + '\n')
         sys.exit(0)

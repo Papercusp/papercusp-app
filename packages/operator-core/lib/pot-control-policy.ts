@@ -27,6 +27,8 @@ import { readOperatorState, writeOperatorState } from './operator-state-pg';
 import { registerOverrideConcern, type OverrideEntry } from './config-overrides/registry';
 import { lazyFlagRefresh } from './lazy-flag-refresh';
 import type { WorkScopePolicy } from './work-scope-policy';
+import type { PotGitMode } from './harness/git-sync/hive-git-mode';
+import type { PotIntegrationMode } from './harness/git-sync/pot-integration-mode';
 
 export interface PotControlPolicy {
   breakerThreshold?: number;
@@ -40,6 +42,27 @@ export interface PotControlPolicy {
    * Rides this same JSONB row so it needs no migration and shares the cache/refresh.
    */
   workScope?: WorkScopePolicy;
+  /**
+   * Default `hiveGit.mode` applied ONCE to a NEW shared coding hive at creation
+   * (p2p-public-release-endgame P-503, WI-10004765). Unset ⇒ `legacy` ⇒ nothing
+   * written (the shipped posture). Never overwrites a mode already set on a hive;
+   * see ./harness/git-sync/new-hive-git-mode-default. Set only after the P-503
+   * decision is recorded — there is no automatic flip.
+   */
+  newHiveGitMode?: PotGitMode;
+  /**
+   * Workspace default answer to "Where should the agents' work go?" for a NEW
+   * pot (pot-review-integration-mode-2026-10-05 P-018). Used when the creator
+   * does not answer and the repo's facts do not lock the answer; unset ⇒
+   * 'direct' (today's behaviour). Read via resolveNewPotIntegrationModeDefault.
+   */
+  newPotIntegrationMode?: PotIntegrationMode;
+}
+
+/** P-018: the configured new-pot integration default, or null when unset / invalid. */
+export function resolveNewPotIntegrationModeDefault(policy: PotControlPolicy | null | undefined): PotIntegrationMode | null {
+  const v = policy?.newPotIntegrationMode;
+  return v === 'direct' || v === 'review' ? v : null;
 }
 
 /** The consumers' baked defaults — for diff/display + the tool's "default" reporting. */
@@ -156,6 +179,12 @@ registerOverrideConcern({
         default: null,
         layer: 'pg-settings',
       });
+    }
+    if (c.newHiveGitMode !== undefined) {
+      entries.push({ key: 'newHiveGitMode', effective: c.newHiveGitMode, default: 'legacy', layer: 'pg-settings' });
+    }
+    if (c.newPotIntegrationMode !== undefined) {
+      entries.push({ key: 'newPotIntegrationMode', effective: c.newPotIntegrationMode, default: 'direct', layer: 'pg-settings' });
     }
     return entries;
   },

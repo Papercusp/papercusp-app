@@ -249,6 +249,17 @@ export const SEARCH_SURFACES: readonly SearchSurface[] = [
       'has neither the vault grant boundary nor its scope/participant/time filters.',
   },
   {
+    id: 'documents:search',
+    entry: 'agent-tools/documents/search.ts',
+    engine: 'none',
+    whyNotEngine:
+      'Federates the Personal Vault, source-ACL organization corpus, presence-scoped pot corpus ' +
+      'and live provider queries through their existing authorized readers. Each leg enforces ' +
+      'its own grants, identity mapping and disclosure labels before returning documents. ' +
+      'The workspace search engine does not implement those per-corpus authorization boundaries ' +
+      'or provider live-query contracts; the handler deliberately delegates to those readers.',
+  },
+  {
     id: 'social:search',
     entry: 'agent-tools/social/search.ts',
     engine: 'none',

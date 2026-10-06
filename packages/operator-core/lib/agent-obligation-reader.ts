@@ -16,6 +16,8 @@ import {
 import {
   buildAgentObligationAgenda,
   selectGoalPlacementPlan,
+  type ConsultReconciliationProviderInput,
+  type ConsultReconciliationRow,
   type WaitingOnObligationRow,
   type WaitingOnProviderInput,
   type IndependentVerificationProviderInput,
@@ -29,11 +31,12 @@ import { goalPlanningPortfolioFingerprint, parseGoalPlanningReview, type GoalPla
 import type { GoalPotPlacementAuthority } from './goal-launch-settings';
 import { GOAL_OWNER_REPORT_MAX_SILENCE_MS, GOAL_OWNER_REPORT_STANDING_MAX_SILENCE_MS } from './system-health/goal-owner-report-watchdog';
 import type { GoalLaunchResolution, GoalPortfolioBrief } from './goal-launch-settings';
-import type { PlanAcceptanceGateVerdict } from './plan-acceptance-gate';
+import type { PlanClosureGateFields } from './goals/plan-closure-observations';
 import type { GoalPlanFleetObservation } from './system-health/goal-drain-fleet-watchdog';
 import type { GoalOwnerReportObligation } from './system-health/goal-owner-report-watchdog';
 import type { GoalPlacementProgressState } from './goal-placement-progress';
 import { fleetSlugFromName } from './agent-fleets-store';
+import type { FleetStaffingRow } from './fleet/fleet-staffing-read';
 import type { ExactPlanAdmission } from './agent-tools/plans/plan-admission-preflight';
 
 export const AGENT_OBLIGATION_OPTIONAL_READ_TIMEOUT_MS = 900;
@@ -77,7 +80,14 @@ export interface AgentObligationReaderDeps {
     goalId: string,
     nowMs: number,
   ) => Promise<GoalOwnerReportObligation | null>;
-  planAcceptance: (planSlug: string) => Promise<PlanAcceptanceGateVerdict>;
+  /**
+   * The plan's PERSISTED canonical acceptance-gate verdict (D-039, WI-10004673). Never
+   * runs the gate: inline, it cost 1.0–1.8s of main-thread CPU per agenda read and
+   * lagged bg-host's event loop past every 900ms budget here. A stale or absent
+   * observation rejects — an `unknown` read — and starts the single-flight background
+   * re-evaluation that refreshes it.
+   */
+  planAcceptance: (workspaceId: string, planSlug: string) => Promise<PlanClosureGateFields>;
   /**
    * Undispositioned owner directives (`pending` + `open`) for this workspace.
    *
@@ -103,6 +113,23 @@ export interface AgentObligationReaderDeps {
    * one, and gating it would reproduce the same measured hole.
    */
   waitingOn: (workspaceId: string, ownerId: string) => Promise<WaitingOnObligationRow[]>;
+  /**
+   * Consults this session opened under `latency_contract:'proceed'` and has not
+   * reconciled (EI-23764501791910357). A `proceed` consult lets the requester act
+   * on an ASSUMPTION; this is the read that makes "reconcile it when the reply
+   * lands" an obligation with a terminal state instead of an honour-system line.
+   *
+   * REQUIRED for the same reason as `waitingOn`: an optional dep lets the family land
+   * declared and probe-covered while production populates nothing. NOT gated on an
+   * active goal — any session can open a `proceed` consult.
+   */
+  consultReconciliations: (workspaceId: string, ownerId: string) => Promise<ConsultReconciliationRow[]>;
+  /**
+   * P-005 / D-030 step 6: staffing of every active fleet this owner leads. REQUIRED
+   * for the same reason as `waitingOn`. Not gated on an active goal: any session can
+   * lead a fleet. An empty array means the owner leads no active fleet.
+   */
+  fleetStaffing: (workspaceId: string, ownerId: string) => Promise<FleetStaffingRow[]>;
 }
 
 interface ReadOutcome<T> {
@@ -167,6 +194,9 @@ export interface AgentObligationAgendaRead {
    *  Exposed so another read-side consumer can present the SAME snapshot
    *  without issuing a second portfolio query or rebuilding it client-side. */
   portfolio: GoalPortfolioBrief | null;
+  /** The exact-plan admissions the plan-placement provider selected against, from the same
+   *  snapshot as `portfolio`; null when that placement read was unknown. */
+  placementAdmissions: Readonly<Record<string, ExactPlanAdmission | null>> | null;
   observedAt: string;
   elapsedMs: number;
   degradedSources: string[];
@@ -296,8 +326,8 @@ export async function readAgentObligationAgenda(input: {
   const readAcceptance = (planSlug: string) =>
     boundedRead(
       'plan-acceptance:' + planSlug,
-      deps.planAcceptance(planSlug),
-      null as PlanAcceptanceGateVerdict | null,
+      deps.planAcceptance(input.workspaceId, planSlug),
+      null as PlanClosureGateFields | null,
       sourceTimeoutMs,
     );
   const ownAcceptancePromises = ownPlanSlugs.map(readAcceptance);
@@ -311,7 +341,7 @@ export async function readAgentObligationAgenda(input: {
   // this wave still starts immediately and runs concurrently, and the one new
   // dependency edge (portfolio -> its own plans' acceptance) is intrinsic.
   const worklistAcceptancePromise = portfolioPromise.then(async (portfolioOutcome) => {
-    const empty = { planSlugs: [] as string[], acceptances: [] as ReadOutcome<PlanAcceptanceGateVerdict | null>[] };
+    const empty = { planSlugs: [] as string[], acceptances: [] as ReadOutcome<PlanClosureGateFields | null>[] };
     const budget = PLAN_CONTEXT_MAX - ownPlanSlugs.length;
     if (budget <= 0) return empty;
     const seen = new Set(ownPlanSlugs);
@@ -353,7 +383,21 @@ export async function readAgentObligationAgenda(input: {
     [] as WaitingOnObligationRow[],
     sourceTimeoutMs,
   );
-  const [portfolio, admission, launch, fleet, report, ownAcceptances, worklistAcceptance, directives, waits, planning] =
+  // Not gated on goalId either: see AgentObligationReaderDeps.consultReconciliations.
+  const consultsPromise = boundedRead(
+    'consult-reconciliation',
+    deps.consultReconciliations(input.workspaceId, input.ownerId),
+    [] as ConsultReconciliationRow[],
+    sourceTimeoutMs,
+  );
+  // Not gated on goalId either: see AgentObligationReaderDeps.fleetStaffing.
+  const fleetStaffingPromise = boundedRead(
+    'fleet-staffing',
+    deps.fleetStaffing(input.workspaceId, input.ownerId),
+    [] as FleetStaffingRow[],
+    sourceTimeoutMs,
+  );
+  const [portfolio, admission, launch, fleet, report, ownAcceptances, worklistAcceptance, directives, waits, planning, consults, staffing] =
     await Promise.all([
       portfolioPromise,
       admissionPromise,
@@ -365,12 +409,38 @@ export async function readAgentObligationAgenda(input: {
       directivesPromise,
       waitingOnPromise,
       planningPromise,
+      consultsPromise,
+      fleetStaffingPromise,
     ]);
   const planSlugs = [...ownPlanSlugs, ...worklistAcceptance.planSlugs];
   const acceptances = [...ownAcceptances, ...worklistAcceptance.acceptances];
   degradedSources.push(...admission.failures);
   if (directives.degraded) degradedSources.push(readFailure('owner directives', directives));
   if (waits.degraded) degradedSources.push(readFailure('waiting-on', waits));
+  if (consults.degraded) degradedSources.push(readFailure('consult reconciliation', consults));
+  if (staffing.degraded) degradedSources.push(readFailure('fleet staffing', staffing));
+  const consultReconciliation: ConsultReconciliationProviderInput = {
+    workspaceId: input.workspaceId,
+    ownerId: input.ownerId,
+    observedAt,
+    // Row facts only — no observation clock — so an unchanged set of consults keeps an
+    // unchanged generation across warm turns (the turn-start cursor's dedup depends on it).
+    sourceGeneration: agentObligationSourceGeneration({
+      consults: consults.degraded
+        ? 'unknown'
+        : consults.value.map((row) => [row.consultId, row.phase, row.settledAt, row.expiresAt]),
+    }),
+    read: consults.degraded
+      ? {
+          status: 'unknown',
+          failure: {
+            code: 'canonical-consult-reconciliation-read-failed',
+            detail: readFailure('consult reconciliation', consults),
+            retry: 'retry the consult_state read for this requester (latency_contract=proceed, no outcome.reconciliation)',
+          },
+        }
+      : { status: 'known', value: consults.value },
+  };
   const waitingOn: WaitingOnProviderInput = {
     workspaceId: input.workspaceId,
     ownerId: input.ownerId,
@@ -625,14 +695,56 @@ export async function readAgentObligationAgenda(input: {
     };
   });
 
+  // P-005 / D-030 step 6. Row facts only, no clock, for the same dedup reason as
+  // waitingOn: an unchanged staffing picture keeps an unchanged generation.
+  const fleetStaffing: NonNullable<Parameters<typeof buildAgentObligationAgenda>[0]['fleetStaffing']> = {
+    workspaceId: input.workspaceId,
+    ownerId: input.ownerId,
+    observedAt,
+    sourceGeneration: agentObligationSourceGeneration({
+      fleetStaffing: staffing.degraded
+        ? 'unknown'
+        : staffing.value.map((row) => [
+            row.fleetSlug,
+            row.evaluation?.alert ?? null,
+            row.evaluation?.current ?? null,
+            row.evaluation?.target ?? null,
+            row.evaluation?.held ?? null,
+            row.evaluation?.notHeldBecause ?? null,
+            row.evaluation?.topUpRule?.status ?? null,
+            row.unknownReason ?? null,
+          ]),
+    }),
+    read: staffing.degraded
+      ? {
+          status: 'unknown',
+          failure: {
+            code: 'canonical-fleet-staffing-read-failed',
+            detail: readFailure('fleet-staffing', staffing),
+            retry: 'retry fleet:leader-brief for each fleet you lead',
+          },
+        }
+      : { status: 'known', value: staffing.value },
+  };
+
   return {
     agenda: buildAgentObligationAgenda(
-      { planPlacement, goalPlanning, ownerReport, independentVerification, ownerDirectives, waitingOn },
+      {
+        planPlacement,
+        goalPlanning,
+        ownerReport,
+        independentVerification,
+        ownerDirectives,
+        waitingOn,
+        consultReconciliation,
+        fleetStaffing,
+      },
       observedAt,
     ),
     goalId,
     planSlugs,
     portfolio: portfolio.value,
+    placementAdmissions: planPlacement?.read.status === 'known' ? planPlacement.read.value.admissions ?? null : null,
     observedAt,
     elapsedMs: Date.now() - startedAt,
     degradedSources,
@@ -798,6 +910,9 @@ export async function readAgentGoalModeState(input: {
 
 export function defaultAgentObligationReaderDeps(): AgentObligationReaderDeps {
   return {
+    // P-005 / D-030 step 6: the brief's own headcount primitives, loaded lazily.
+    fleetStaffing: async (workspaceId, ownerId) =>
+      (await import('./fleet/fleet-staffing-read')).readLedFleetStaffing({ workspaceId, ownerId }),
     goalSubject: async (workspaceId, ownerId) => {
       const [{ getModes }, { goalIdFromModes }] = await Promise.all([
         import('./modes/store'),
@@ -812,7 +927,9 @@ export function defaultAgentObligationReaderDeps(): AgentObligationReaderDeps {
     },
     goalPortfolio: async (workspaceId, goalId) => {
       const { readGoalPortfolioBrief } = await import('./goal-launch-settings');
-      return readGoalPortfolioBrief({ workspaceId, goalId });
+      // Placement and planning obligations never read queue.claimable; its
+      // per-id floor count alone exceeded AGENT_OBLIGATION_OPTIONAL_READ_TIMEOUT_MS.
+      return readGoalPortfolioBrief({ workspaceId, goalId, claimability: 'skip' });
     },
     goalPlacementProgress: async (workspaceId, ownerId, goalId, planRefs) =>
       (await import('./goal-placement-progress-store')).readGoalPlacementProgress({ workspaceId, ownerId, goalId, planRefs }),
@@ -866,9 +983,16 @@ export function defaultAgentObligationReaderDeps(): AgentObligationReaderDeps {
       ]);
       return readGoalOwnerReportObligation(getOrgPg().sql, { workspaceId, ownerId, goalId }, nowMs);
     },
-    planAcceptance: async (planSlug) => {
-      const { evaluatePlanAcceptanceGate } = await import('./plan-acceptance-gate');
-      return evaluatePlanAcceptanceGate(planSlug);
+    planAcceptance: async (workspaceId, planSlug) => {
+      // D-039: the same persisted verdict the goal portfolio's closure read serves
+      // (resolveWorklistClosures). A non-fresh observation is not a verdict, so it
+      // rejects with the observation's own detail rather than falling back inline.
+      const { readPlanClosureObservations, refreshPlanClosureObservations } =
+        await import('./goals/plan-closure-observations');
+      const observation = (await readPlanClosureObservations({ workspaceId, planSlugs: [planSlug] })).get(planSlug);
+      if (observation?.status === 'fresh') return observation.gate;
+      if (observation?.status !== 'ambiguous') refreshPlanClosureObservations([planSlug]);
+      throw new Error(observation?.detail ?? `no acceptance-gate observation was read for '${planSlug}'`);
     },
     ownerDirectives: async (workspaceId, ownerId) => {
       const [
@@ -990,5 +1114,67 @@ export function defaultAgentObligationReaderDeps(): AgentObligationReaderDeps {
         ));
       return [...awaitRows, ...lockRows];
     },
+    consultReconciliations: async (workspaceId, ownerId) => {
+      const [{ getOrgPg }, { GRADING_CASCADE_FLAVOR }] = await Promise.all([
+        import('@papercusp/db-org'),
+        import('./consult/grading-cascade'),
+      ]);
+      // The reconciliation marker lives in `consult_state.outcome` (jsonb), so there is
+      // no new table: a consult with no `outcome.reconciliation` IS the debt.
+      //  · Grading-cascade consults are excluded — they are a REQUEST to be graded, whose
+      //    verdict flows through scorecards and the plan-shipping gate, not an assumption
+      //    the requester built work on (the sweep alone opens ~80/week).
+      //  · The window is the escape hatch for a debt nobody will ever settle: past it the
+      //    row stops being an agenda obligation, but stays unreconciled in the table.
+      //  · Answered first, then newest, capped — the agenda must stay a short list.
+      const rows = (await getOrgPg().sql`
+        SELECT conversation_id, state, question, origin_task_ref, expires_at,
+               COALESCE(closed_at, updated_at) AS settled_at
+          FROM harness_shared.consult_state
+         WHERE workspace_id = ${workspaceId}
+           AND requester_id = ${ownerId}
+           AND latency_contract = 'proceed'
+           AND (outcome -> 'reconciliation') IS NULL
+           AND COALESCE(routing -> 'cascade' ->> 'flavor', '') <> ${GRADING_CASCADE_FLAVOR}
+           AND COALESCE(closed_at, updated_at) > now() - make_interval(hours => ${CONSULT_RECONCILIATION_WINDOW_HOURS}::int)
+         ORDER BY (state IN ('closed_answered', 'graduated')) DESC, COALESCE(closed_at, updated_at) DESC
+         LIMIT ${CONSULT_RECONCILIATION_MAX_ROWS}
+      `) as unknown as Array<{
+        conversation_id: string;
+        state: string;
+        question: string | null;
+        origin_task_ref: string | null;
+        expires_at: Date | string | null;
+        settled_at: Date | string | null;
+      }>;
+      const iso = (value: Date | string | null): string | null => (value ? new Date(value).toISOString() : null);
+      return rows.map((row) => {
+        const phase = consultReconciliationPhase(row.state);
+        return {
+          consultId: row.conversation_id,
+          phase,
+          assumption: row.question,
+          originTaskRef: row.origin_task_ref,
+          settledAt: phase === 'pending' ? null : iso(row.settled_at),
+          expiresAt: iso(row.expires_at),
+        };
+      });
+    },
   };
+}
+
+/** A `proceed` consult's debt is only collectable once, so the window bounds the agenda, not the debt. */
+export const CONSULT_RECONCILIATION_WINDOW_HOURS = 72;
+/** Same order of magnitude as the other per-agenda row caps; the recovery verb lists the rest. */
+export const CONSULT_RECONCILIATION_MAX_ROWS = 6;
+
+/**
+ * `consult_state.state` → what the originator owes. Exported so the mapping is pinned by a
+ * test: an unmapped NEW state must read as `unanswered` (the conservative reading — silence
+ * is not confirmation), never as `answered`.
+ */
+export function consultReconciliationPhase(state: string): ConsultReconciliationRow['phase'] {
+  if (state === 'routing' || state === 'awaiting_responder' || state === 'active') return 'pending';
+  if (state === 'closed_answered' || state === 'graduated') return 'answered';
+  return 'unanswered';
 }

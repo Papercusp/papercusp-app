@@ -81,6 +81,8 @@ export interface HostedWorkspaceSessionProps {
   routeLabel: string;
   workspaceName: string;
   onWorkspaceIdChange?: (workspaceId: string) => void;
+  /** Authenticated host-specific relay receipt; null revokes a previous binding. */
+  onWorkspaceBound?: (workspaceId: string | null) => void;
   onDesktopBridgeChange?: (bridge: HostedWorkspaceDesktopBridge | null) => void;
   onDesktopRosterChange?: (desktops: HostedDesktopRosterEntry[]) => void;
   onDesktopThumbnailChange?: (result: HostedDesktopThumbnailResult) => void;
@@ -166,6 +168,7 @@ export function HostedWorkspaceSession({
   routeLabel,
   workspaceName,
   onWorkspaceIdChange,
+  onWorkspaceBound,
   onDesktopBridgeChange,
   onDesktopRosterChange,
   onDesktopThumbnailChange,
@@ -176,7 +179,9 @@ export function HostedWorkspaceSession({
   const terminalRef = useRef<import("@xterm/xterm").Terminal | null>(null);
   const fitRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
   const resizeRef = useRef<ResizeObserver | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const ticketWorkspaceRef = useRef<string | null>(null);
   const roleRef = useRef<HostedWorkspaceTabRole | null>(null);
   /*
    * The relay's message listener is registered ONCE, inside connect(), so it
@@ -208,6 +213,7 @@ export function HostedWorkspaceSession({
   const startTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callbackRefs = useRef({
     onWorkspaceIdChange,
+    onWorkspaceBound,
     onDesktopBridgeChange,
     onDesktopRosterChange,
     onDesktopThumbnailChange,
@@ -216,6 +222,7 @@ export function HostedWorkspaceSession({
   });
   callbackRefs.current = {
     onWorkspaceIdChange,
+    onWorkspaceBound,
     onDesktopBridgeChange,
     onDesktopRosterChange,
     onDesktopThumbnailChange,
@@ -326,11 +333,20 @@ export function HostedWorkspaceSession({
       requestThumbnail: requestDesktopThumbnail,
       requestStart: requestDesktopStart,
     }),
-    [requestDesktopRoster, requestDesktopThumbnail, requestDesktopStart],
+    [requestDesktopRoster, requestDesktopThumbnail, requestDesktopStart, role],
   );
+
+  useEffect(() => {
+    if (status !== "live") return;
+    // The parent auto-starts when the roster is empty. Publish a new bridge
+    // when the tab role changes so that effect can retry after control arrives.
+    callbackRefs.current.onDesktopBridgeChange?.(desktopBridge);
+  }, [desktopBridge, status]);
 
   const dispose = useCallback((notify = true) => {
     connectEpochRef.current += 1;
+    ticketWorkspaceRef.current = null;
+    callbackRefs.current.onWorkspaceBound?.(null);
     const socket = socketRef.current;
     socketRef.current = null;
     pendingListPathsRef.current.clear();
@@ -353,6 +369,8 @@ export function HostedWorkspaceSession({
     }
     resizeRef.current?.disconnect();
     resizeRef.current = null;
+    if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = null;
     terminalRef.current?.dispose();
     terminalRef.current = null;
     fitRef.current = null;
@@ -367,6 +385,8 @@ export function HostedWorkspaceSession({
     }
     terminalRef.current?.dispose();
     resizeRef.current?.disconnect();
+    if (resizeFrameRef.current !== null) cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = null;
     const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
       import("@xterm/xterm"),
       import("@xterm/addon-fit"),
@@ -388,6 +408,12 @@ export function HostedWorkspaceSession({
       new WebLinksAddon((_, url) => window.open(url, "_blank", "noopener")),
     );
     terminal.open(terminalContainerRef.current);
+    // Read-only viewers have no PTY input to send. Preserve browser focus
+    // navigation, and give controllers a backward exit from the terminal.
+    terminal.attachCustomKeyEventHandler((event) =>
+      event.key !== "Tab" ||
+      (roleRef.current === "controller" && !event.shiftKey),
+    );
     try {
       fit.fit();
     } catch {
@@ -398,18 +424,24 @@ export function HostedWorkspaceSession({
       send({ type: "pty.input", data: utf8ToBase64(data) });
     });
     const resize = new ResizeObserver(() => {
-      try {
-        fit.fit();
-        if (roleRef.current === "controller") {
-          send({
-            type: "pty.resize",
-            cols: terminal.cols,
-            rows: terminal.rows,
-          });
+      // Fit mutates layout. Run outside observer delivery to avoid the
+      // browser's resize-loop error and coalesce one fit per animation frame.
+      if (resizeFrameRef.current !== null) return;
+      resizeFrameRef.current = requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        try {
+          fit.fit();
+          if (roleRef.current === "controller") {
+            send({
+              type: "pty.resize",
+              cols: terminal.cols,
+              rows: terminal.rows,
+            });
+          }
+        } catch {
+          // A hidden or unmounted terminal has no measurable geometry.
         }
-      } catch {
-        // A hidden or unmounted terminal has no measurable geometry.
-      }
+      });
     });
     resize.observe(terminalContainerRef.current);
     terminalRef.current = terminal;
@@ -495,6 +527,7 @@ export function HostedWorkspaceSession({
       if (!event) return;
 
       if (event.kind === "bound") {
+        if (ticketWorkspaceRef.current) callbackRefs.current.onWorkspaceBound?.(ticketWorkspaceRef.current);
         setRole(event.role);
         setMeta((current) => ({
           ...current,
@@ -522,7 +555,6 @@ export function HostedWorkspaceSession({
         uploadLimitsRef.current = event.limits ?? null;
         setMeta((current) => ({ ...current, resumed: event.resumed }));
         setStatus("live");
-        callbackRefs.current.onDesktopBridgeChange?.(desktopBridge);
         setNotice(
           event.resumed ? "Detached session resumed." : "New session ready.",
         );
@@ -658,6 +690,7 @@ export function HostedWorkspaceSession({
       }
       if (epoch !== connectEpochRef.current) return;
 
+      ticketWorkspaceRef.current = workspaceId;
       setStatus("connecting");
       setNotice("Opening the generation-bound workspace relay…");
       const socket = new WebSocket(
@@ -688,6 +721,8 @@ export function HostedWorkspaceSession({
         )
           return;
         socketRef.current = null;
+        ticketWorkspaceRef.current = null;
+        callbackRefs.current.onWorkspaceBound?.(null);
         pendingDesktopRequestsRef.current.clear();
         callbackRefs.current.onDesktopBridgeChange?.(null);
         callbackRefs.current.onDesktopQueryStateChange?.("idle");
@@ -712,10 +747,14 @@ export function HostedWorkspaceSession({
         callbackRefs.current.onDesktopBridgeChange?.(null);
         callbackRefs.current.onDesktopQueryStateChange?.("idle");
         setError("The workspace relay connection failed.");
+        ticketWorkspaceRef.current = null;
+        callbackRefs.current.onWorkspaceBound?.(null);
         setStatus("error");
       });
     } catch (cause) {
       if (epoch !== connectEpochRef.current) return;
+      ticketWorkspaceRef.current = null;
+      callbackRefs.current.onWorkspaceBound?.(null);
       callbackRefs.current.onDesktopBridgeChange?.(null);
       callbackRefs.current.onDesktopQueryStateChange?.("idle");
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -976,6 +1015,7 @@ export function HostedWorkspaceSession({
             ) : null}
           </div>
           <div className={styles.toolbar} aria-label="Terminal actions">
+            <p>Tab moves between controls while observing. Shift+Tab returns to the session controls.</p>
             <button type="button" onClick={() => void copy()} disabled={!live}>
               <Clipboard size={12} aria-hidden="true" /> Copy
             </button>

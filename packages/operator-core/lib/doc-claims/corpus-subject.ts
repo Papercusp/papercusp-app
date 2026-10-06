@@ -32,11 +32,12 @@
  * even when nothing goes wrong). P-011 uses it.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { moduleRepoRoot } from '../module-repo-root';
 
-// lib/doc-claims → lib → operator-core → packages → <repo root>
-export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+// The checkout containing this module, found by walking to `.git` rather than a fixed `..`
+// climb (which is wrong inside the esbuild host bundle, P-016). See module-repo-root.ts.
+export const ROOT = moduleRepoRoot(import.meta.url);
 
 /** The generated corpus, relative to the repo root. Mirrors `CORPUS_FILE` in the projector. */
 export const CORPUS_RELPATH = 'packages/operator-core/lib/doc-projection/claude-md-corpus.generated.md';

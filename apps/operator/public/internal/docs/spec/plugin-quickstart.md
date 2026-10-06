@@ -33,7 +33,7 @@ There is **no `index.js`** in the default scaffold. A JS entry point is optional
 
 The plugin name is always **scoped to a publisher**. `init my-tool` defaults the scope to `@local`, so the generated manifest `name` is `@local/my-tool`. Pass `--publisher <@scope>` (or edit the name afterward) to change it, and use the scoped slug everywhere downstream (publish/install).
 
-Use `--template <slug>` to pick a different starter (e.g. `--template @papercupai/jira-sync` for an OAuth plugin), or `--from-path <dir>` to fork a local checkout. The target directory (`./<name>`) must be empty.
+Use `--template <slug>` to pick a different starter (e.g. `--template @papercupai/slack-notifier`), or `--from-path <dir>` to fork a local checkout. The target directory (`./<name>`) must be empty.
 
 ## 2. Edit the manifest
 

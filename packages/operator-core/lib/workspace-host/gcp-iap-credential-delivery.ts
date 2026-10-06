@@ -40,11 +40,11 @@ import {
 } from './credential-material-source';
 import {
   NodeGcpIapWorkspaceHostInitializationCommandRunner,
-  buildGcpIapSshInvocation,
+  buildWorkspaceHostSshInvocation,
   type GcpIapWorkspaceHostInitializationCommand,
   type GcpIapWorkspaceHostInitializationCommandRunner,
   type GcpIapWorkspaceHostInitializationStep,
-  type GcpIapWorkspaceHostTransportProfile,
+  type WorkspaceHostSshTransportProfile,
 } from './gcp-iap-initialization-operations';
 
 /**
@@ -55,11 +55,10 @@ import {
  * would silently send delivery requests to the initializer — which would refuse them as a protocol
  * version mismatch, reported as a broken step rather than as a misconfigured profile.
  */
-export interface GcpIapWorkspaceHostCredentialDeliveryProfile
-  extends GcpIapWorkspaceHostTransportProfile {
+export type GcpIapWorkspaceHostCredentialDeliveryProfile = WorkspaceHostSshTransportProfile & {
   /** Absolute path to `bin/papercusp-deliver-material` in the extracted release. */
   deliveryEntrypoint: string;
-}
+};
 
 export interface GcpIapWorkspaceHostCredentialDeliveryInput {
   readonly channel: WorkspaceHostCredentialChannel;
@@ -110,7 +109,7 @@ export function buildGcpIapWorkspaceHostCredentialDeliveryCommand(
     material: input.material,
   });
 
-  return buildGcpIapSshInvocation(profile, {
+  return buildWorkspaceHostSshInvocation(profile, {
     entrypoint: profile.deliveryEntrypoint,
     entrypointLabel: 'Credential delivery entrypoint',
     // A fixed argv with no caller input spliced into it. Everything variable is in stdin.

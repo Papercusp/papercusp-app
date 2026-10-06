@@ -13,6 +13,7 @@ import type {
 } from "@papercusp/operator-core/lib/work-items-admission-promoter";
 import { Select } from "@/app/harness/Select";
 import { Table, type TableColumn } from "@/app/harness/Table";
+import { WORK_ITEM_PRESENTATION_LABELS, WORK_ITEM_PRESENTATION_STAGES } from "@papercusp/operator-core/lib/work-item-presentation-contract";
 
 type KindFilter = "all" | AdmissionRunKind;
 type StateFilter = "all" | AdmissionRunState;
@@ -103,7 +104,7 @@ const HEADLINE_COHORTS: ReadonlyArray<
   ["awaitingRevision", "Awaiting revision"],
   ["awaitingReview", "Awaiting review"],
   ["held", "Held / blocked"],
-  ["ready", "Build-ready"],
+  ["ready", "Claimable by writer policy"],
   ["unknown", "Unknown"],
 ];
 
@@ -407,12 +408,31 @@ export default function AdmissionRunsClient() {
           style={{ ...PANEL_STYLE, display: "grid", gap: 12 }}
         >
           <div>
+            {summary.readiness.presentation ? (
+              <section aria-label="Accepted work and intake" style={{ display: "grid", gap: 8, marginBottom: 16 }}>
+                <strong>Intake and accepted work</strong>
+                <p style={MUTED_STYLE}>
+                  {summary.readiness.presentation.population.toLocaleString()} root issue-family work-item rows · {summary.readiness.scope.harnessSlug ?? summary.readiness.scope.workspaceId} · stock at {when(summary.readiness.measuredAt)}.
+                  Observation evidence is excluded from this queue; triage outcomes are in the <a href="/inbox">bulk review report</a>.
+                </p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                  {WORK_ITEM_PRESENTATION_STAGES.filter(stage => stage !== 'observation').map(stage => (
+                    <Stat key={stage} label={WORK_ITEM_PRESENTATION_LABELS[stage]} value={summary.readiness!.presentation!.counts[stage].toLocaleString()} />
+                  ))}
+                  <Stat label="Remaining accepted bugs" value={summary.readiness.presentation.remainingBugs.toLocaleString()} />
+                </div>
+                <details><summary>Count definitions</summary>
+                  <p>Each row appears once. Current sealed acceptance is required for accepted work. Verified completion requires successful accepted work with committed or validated completion evidence. Duplicate closes, observations and processing counts are separate.</p>
+                  <p>Writer: {summary.readiness.presentation.writer}, projected from implementation readiness and lifecycle columns. Open a work item in its harness queue to inspect its evidence and plan decisions.</p>
+                </details>
+              </section>
+            ) : null}
             <strong style={{ fontSize: 13 }}>
               Issue-family readiness stock
             </strong>
             <div style={{ ...MUTED_STYLE, fontSize: 11, marginTop: 3 }}>
               One non-overlapping headline per row. Partition precedence:
-              terminal → active → revision → review → held → build-ready →
+              terminal → active → revision → review → held → claimable →
               unknown.
             </div>
           </div>
@@ -520,7 +540,7 @@ export default function AdmissionRunsClient() {
               detail={`${summary.readiness.flow.recurrence.rawOccurrences.toLocaleString()} raw occurrence(s) across ${summary.readiness.flow.recurrence.canonicalClusters.toLocaleString()} canonical cluster(s)`}
             />
             <Stat
-              label="Build-ready expected cost"
+              label="Claimable expected cost"
               value={
                 summary.readiness.flow.readyExpectedCost.cents == null
                   ? "Partially priced"

@@ -122,8 +122,8 @@ export interface CloudResourceObligationRow {
 
 export interface CloudResourceObligationRecordInput {
   workspaceId: string;
-  /** Only 'gcp' is accepted today; the column CHECK constraint enforces this too. */
-  provider: 'gcp';
+  /** The column CHECK constraint enforces the same set (migration 1040, widened for AWS). */
+  provider: CloudResourceObligationProvider;
   resourceKind: string;
   resourceId: string;
   /** Immutable provider allocation identity; required for GCP VMs, whose names are reusable. */
@@ -293,6 +293,8 @@ export interface CloudResourceCreatedEventLike {
 
 export interface CloudResourceObligationObserverBinding {
   sql: postgres.Sql;
+  /** Defaults to 'gcp'. The AWS factory binds 'aws' (aws-byoc-gcp-parity-2026-10-01 P-003). */
+  provider?: CloudResourceObligationProvider;
   purpose?: string;
   createdByOwnerId?: string;
   sourceWorkItemId?: string;
@@ -324,7 +326,7 @@ export function createCloudResourceObligationObserver(
   return async (event) => {
     await recordCloudResourceObligation(binding.sql, {
       workspaceId: event.workspaceId,
-      provider: 'gcp',
+      provider: binding.provider ?? 'gcp',
       resourceKind: event.resource.kind,
       resourceId: event.resource.providerId,
       ...(event.resource.incarnationId ? { incarnationId: event.resource.incarnationId } : {}),
@@ -444,8 +446,8 @@ export interface CloudResourceDestroyedEventLike {
 
 export interface CloudResourceObligationCloseObserverBinding {
   sql: postgres.Sql;
-  /** Defaults to 'gcp' — the only provider whose creation seam is currently bound. */
-  provider?: string;
+  /** Defaults to 'gcp'. Selects the delete-op vocabulary and the provider column to close. */
+  provider?: CloudResourceObligationProvider;
   /**
    * Called when a confirmed destroy matched NO open obligation row. This is deliberately a
    * seam rather than a silent `closed:false`: an unmatched close is indistinguishable from a
@@ -472,7 +474,7 @@ export function createCloudResourceObligationCloseObserver(
   binding: CloudResourceObligationCloseObserverBinding,
 ): (event: CloudResourceDestroyedEventLike) => Promise<{ closed: boolean; staleIncarnation?: boolean }> {
   return async (event) => {
-    const resourceKind = cloudResourceKindForDeleteOp(event.resource.deleteOp);
+    const resourceKind = cloudResourceKindForDeleteOp(event.resource.deleteOp, binding.provider ?? 'gcp');
     if (!resourceKind) {
       // An unmapped delete-op means the provider grew a delete this ledger cannot address.
       // Surfacing it is the whole point: silently returning `closed:false` is how the VM's
@@ -827,9 +829,43 @@ export const CLOUD_RESOURCE_DELETE_OP_KIND: Readonly<Record<string, string>> = O
   ),
 );
 
-/** Resolve a provider delete-op to the resource kind the create side recorded. */
-export function cloudResourceKindForDeleteOp(deleteOp: string): string | undefined {
-  return CLOUD_RESOURCE_DELETE_OP_KIND[deleteOp];
+/**
+ * The AWS twin of `CLOUD_RESOURCE_DELETE_CONTRACT` (aws-byoc-gcp-parity-2026-10-01 P-003). The AWS
+ * provider creates exactly two owned metered resources — an EC2 instance (`vm`) and an EBS data
+ * volume (`disk`); the VPC, subnet, security groups, instance profile and launch template are
+ * customer-owned references it never creates, so they owe no teardown. EC2 ids are region-scoped
+ * and need no zone. Parity-tested against `AwsStepInput`'s delete ops in
+ * cloud-resource-obligations.delete-contract-parity.test.ts.
+ */
+export const AWS_CLOUD_RESOURCE_DELETE_CONTRACT: Readonly<Record<string, CloudResourceDeleteContractEntry>> = {
+  vm: { op: 'terminate-instance', requires: ['region'] },
+  disk: { op: 'delete-volume', requires: ['region'] },
+};
+
+/** The providers the obligation ledger accepts (the migration's CHECK constraint is the same set). */
+export const CLOUD_RESOURCE_OBLIGATION_PROVIDERS = ['gcp', 'aws'] as const;
+export type CloudResourceObligationProvider = (typeof CLOUD_RESOURCE_OBLIGATION_PROVIDERS)[number];
+
+/** The delete contract for one provider. An unknown provider has none, so nothing addresses as deletable. */
+export function cloudResourceDeleteContract(
+  provider: string,
+): Readonly<Record<string, CloudResourceDeleteContractEntry>> {
+  if (provider === 'aws') return AWS_CLOUD_RESOURCE_DELETE_CONTRACT;
+  if (provider === 'gcp') return CLOUD_RESOURCE_DELETE_CONTRACT;
+  return {};
+}
+
+/**
+ * Resolve a provider delete-op to the resource kind the create side recorded, within ONE
+ * provider's vocabulary — the two providers reuse the kind names `vm`/`disk` with different ops.
+ */
+export function cloudResourceKindForDeleteOp(
+  deleteOp: string,
+  provider: CloudResourceObligationProvider = 'gcp',
+): string | undefined {
+  if (provider === 'gcp') return CLOUD_RESOURCE_DELETE_OP_KIND[deleteOp];
+  const match = Object.entries(cloudResourceDeleteContract(provider)).find(([, entry]) => entry.op === deleteOp);
+  return match?.[0];
 }
 
 /** The concrete arguments a provider delete step needs. Structural — no provider import. */
@@ -860,9 +896,10 @@ export function describeCloudResourceDeleteAddress(
   row: Pick<
     CloudResourceObligationRow,
     'resourceKind' | 'resourceId' | 'projectId' | 'zone' | 'region' | 'parentResourceId' | 'hostId'
-  >,
+  > & Partial<Pick<CloudResourceObligationRow, 'provider'>>,
 ): CloudResourceAddressability {
-  const entry = CLOUD_RESOURCE_DELETE_CONTRACT[row.resourceKind];
+  // `projectId` holds the GCP project or the AWS account id — the scope the delete runs in.
+  const entry = cloudResourceDeleteContract(row.provider ?? 'gcp')[row.resourceKind];
   if (!entry) return { addressable: false, op: null, missing: [`unsupported-kind:${row.resourceKind}`] };
   const missing: string[] = [];
   if (row.resourceId.trim() === '') missing.push('resourceId');
@@ -1177,7 +1214,7 @@ export async function runCloudResourceObligationSweepOnce(
         `${ageHours}h, nothing has closed it`;
       const body =
         `A ${c.provider} ${c.resourceKind} named '${c.resourceId}'` +
-        (c.projectId ? ` (project ${c.projectId})` : '') +
+        (c.projectId ? ` (${c.provider === 'aws' ? 'account' : 'project'} ${c.projectId})` : '') +
         ` was created ${ageHours}h ago and has not been marked torn down.\n\n` +
         (c.purpose ? `Purpose recorded at creation: ${c.purpose}\n\n` : '') +
         (c.sourceWorkItemId ? `Originating work-item: ${c.sourceWorkItemId}\n\n` : '') +

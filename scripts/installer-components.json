@@ -11,6 +11,7 @@
         "**/Papercusp*.app/Contents/Info.plist",
         "**/Papercusp Tutorial & Setup.app/**",
         "**/Papercusp*.exe",
+        "**/papercusp-desktop.exe",
         "**/sidecar/bin/pui",
         "**/sidecar/bin/pui.exe",
         "**/sidecar/bin/papercup",
@@ -24,7 +25,7 @@
         "**/sidecar/templates/*/package.json",
         "**/sidecar/templates/*/*/package.json"
       ],
-      "reason": "Built from this repository. Their third-party dependencies are gated by the npm and Cargo lockfile legs of the same check."
+      "reason": "Built from this repository. papercusp-desktop.exe is the first-party Rust binary declared in papercusp-desktop/src-tauri/Cargo.toml under Elastic-2.0; the terms are in scripts/public-release/LICENSE. Their third-party dependencies are gated by the npm and Cargo lockfile legs of the same check."
     },
     {
       "name": "Node.js runtime",

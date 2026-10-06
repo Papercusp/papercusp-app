@@ -68,6 +68,7 @@ export function ConfigureStage({
   onNetworkChange,
   onProvision,
   onOpenConnect,
+  onReviewConfiguration,
 }: {
   connections: readonly WorkspaceHostConnectionRow[];
   selection: ConfigureSelection;
@@ -88,6 +89,7 @@ export function ConfigureStage({
   onNetworkChange: (value: string) => void;
   onProvision: () => void;
   onOpenConnect: () => void;
+  onReviewConfiguration?: () => void;
 }) {
   const { connection, scope, region, zone, size, image, network } = selection;
   const unmet = checks.filter((check) => !check.ok);
@@ -95,6 +97,8 @@ export function ConfigureStage({
   if (connections.length === 0) {
     return (
       <section
+        data-tutorial-target="cloud-configuration"
+        tabIndex={-1}
         className={styles.stage}
         aria-labelledby="configure-stage-heading"
         data-stage="configure"
@@ -125,6 +129,8 @@ export function ConfigureStage({
 
   return (
     <section
+      data-tutorial-target="cloud-configuration"
+      tabIndex={-1}
       className={styles.stage}
       aria-labelledby="configure-stage-heading"
       data-stage="configure"
@@ -416,6 +422,8 @@ export function ConfigureStage({
                 </div>
               </dl>
             </div>
+
+            {onReviewConfiguration && <Button disabled={!canProvision} onClick={onReviewConfiguration}>I've reviewed the configuration and cost</Button>}
 
             {/*
              * The checklist. Each condition is its own line with its own fix,

@@ -25,7 +25,7 @@
  * WHY THIS CATCHES WHAT THE AUDIT CANNOT
  * The audit matches a short git name case-SENSITIVELY on a word boundary (`\b<Name>\b`)
  * and says why: matched case-INSENSITIVELY, a three-letter first name also hits things
- * like a `.owner` file extension, a longer proper noun that starts with it, and vendored
+ * like a `.avi` file extension, a longer proper noun that starts with it, and vendored
  * POS-lexicon entries — noise that gets a gate switched off. Sound for a bare word; but
  * it means the lower-case spelling of a tag slips through while the capitalised one
  * fails the cut, though both leak the same person. Anchoring on `[owner:` removes the

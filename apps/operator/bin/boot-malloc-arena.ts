@@ -28,8 +28,9 @@
  * respected, which is also the opt-out. Imported FIRST by hono-host.ts and
  * serve.ts; it must stay free of imports that do work at evaluation time.
  */
+import { readFileSync } from 'node:fs';
 import { isMainThread } from 'node:worker_threads';
-import { HOST_MALLOC_ARENA_MAX, planMallocArenaReexec } from './malloc-arena-reexec';
+import { HOST_MALLOC_ARENA_MAX, planMallocArenaReexec, planSelfOnlyPreloadScrub } from './malloc-arena-reexec';
 
 const plan = planMallocArenaReexec({
   platform: process.platform,
@@ -51,5 +52,27 @@ if (plan.action === 'reexec') {
     process.execve!(plan.file, plan.args, plan.env);
   } catch (err) {
     console.error('[boot-malloc-arena] re-exec failed; continuing without the arena cap:', err);
+  }
+}
+
+// Self-only allocator preload (WI-10005291): AFTER the re-exec decision, so a
+// re-executed image still receives LD_PRELOAD; this runs again in that image.
+const scrub = planSelfOnlyPreloadScrub(process.env);
+if (scrub) {
+  for (const [key, value] of Object.entries(scrub)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  let jemalloc = 'unknown';
+  try {
+    jemalloc = readFileSync('/proc/self/maps', 'utf8').includes('libjemalloc') ? 'active' : 'NOT loaded';
+  } catch {
+    // Not Linux /proc; the scrub itself still applied.
+  }
+  if (isMainThread) {
+    console.error(
+      `[boot-malloc-arena] self-only allocator preload: jemalloc ${jemalloc} in pid ${process.pid}; ` +
+        'removed it from the environment child processes inherit',
+    );
   }
 }

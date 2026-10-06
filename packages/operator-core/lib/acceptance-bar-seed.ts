@@ -305,7 +305,11 @@ function evidencePlaneOf(raw: string | undefined): AcceptanceEvidencePlane | nul
 export function acceptanceBarBehaviorClass(
   evidencePlane: AcceptanceEvidencePlane,
   requiredTestLayers?: readonly string[],
+  check?: Parameters<typeof isExplicitlyManualCheck>[0],
 ): SpecBehaviorClass {
+  // An explicitly manual review can concern a tree artifact too. Its plane
+  // determines where to inspect it, not whether a mutation test is owed.
+  if ((requiredTestLayers?.length ?? 0) === 0 && isExplicitlyManualCheck(check)) return 'non-automated';
   return evidencePlane === 'tree' || (requiredTestLayers?.length ?? 0) > 0
     ? 'happy-path'
     : 'non-automated';
@@ -536,6 +540,8 @@ const SEED_CODE_BY_CONTRACT_GAP: Record<AcceptanceBarContractGap, AcceptanceBarS
   check_missing: 'bar_contract_check_missing',
   test_layers_missing: 'bar_contract_test_layers_missing',
   check_layer_mismatch: 'bar_contract_check_layer_mismatch',
+  // The finding's detail names the unrecordable layer and the recorded vocabulary (WI-10006536).
+  test_layer_unrecordable: 'bar_contract_check_layer_mismatch',
 };
 
 /**
@@ -563,7 +569,6 @@ export function acceptanceBarSourceContractProblems(
     // A structured tests check owes automated proof even on a live/deployed plane,
     // whose generated clause class is otherwise non-automated. Match the projection
     // so activation cannot accept a contract that amendment would refuse.
-    const explicitlyManual = isExplicitlyManualCheck(criterion?.check) && (layers?.length ?? 0) === 0;
     const gaps = acceptanceBarContractGaps({
       role: criterion?.role ?? 'outcome',
       method: criterion?.method,
@@ -571,7 +576,7 @@ export function acceptanceBarSourceContractProblems(
       requiredTestLayers: layers,
       automatedProofRequired:
         criterion?.check?.kind === 'tests' ||
-        (!explicitlyManual && acceptanceBarBehaviorClass(evidencePlane, layers) !== 'non-automated'),
+        acceptanceBarBehaviorClass(evidencePlane, layers, criterion?.check) !== 'non-automated',
     });
     if (gaps.length === 0) continue;
     let repair: string;
@@ -622,6 +627,13 @@ export function unexpectedAcceptanceBarProjectionIds(
       !expectedProjectionIds.has(row.spec_id),
     )
     .map((row) => row.spec_id);
+}
+
+export function acceptanceBarProjectionConflictDetail(unexpected: readonly string[]): string {
+  return `stored BAR projection(s) are outside the exact current map: ${unexpected.join(', ')}. ` +
+    `To clear an intentionally removed mapping, use plans:set-specs on each current clause with ` +
+    `lifecycleStatus:'superseded' and sourceBar:null, then rerun the activation audit. ` +
+    `lifecycleStatus:'retired' with a retained sourceBar pin still counts as a live conflict.`;
 }
 
 export function buildAcceptanceBarSeed(input: AcceptanceBarSeedBuildInput): AcceptanceBarSeedBuildResult {
@@ -796,7 +808,7 @@ export function buildAcceptanceBarSeed(input: AcceptanceBarSeedBuildInput): Acce
         expectedRevision: 0,
         planItemId,
         behavior: acceptanceBarProjectedBehavior(criterion),
-        behaviorClass: acceptanceBarBehaviorClass(evidencePlane, criterion.requiredTestLayers),
+        behaviorClass: acceptanceBarBehaviorClass(evidencePlane, criterion.requiredTestLayers, criterion.check),
         requiredEvidence: [evidencePlane],
         ...(criterion.requiredTestLayers ? { requiredTestLayers: criterion.requiredTestLayers } : {}),
         lifecycleStatus: 'draft',
@@ -1204,9 +1216,7 @@ export async function seedAcceptanceBarsInTransaction(
   if (unexpected.length > 0) {
     throw new AcceptanceBarSeedAbort(refusal([{
       code: 'bar_projection_conflict',
-      detail:
-        `stored BAR projection(s) are outside the exact current map: ` +
-        unexpected.join(', '),
+      detail: acceptanceBarProjectionConflictDetail(unexpected),
     }]) as Exclude<AcceptanceBarSeedBuildResult, { ok: true }>);
   }
   const identityBySpec = new Map(identities.map((row) => [row.spec_id, row]));

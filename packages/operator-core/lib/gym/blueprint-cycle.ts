@@ -28,6 +28,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, readFileSync, 
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -38,7 +39,7 @@ import { spawnGymOperatorWithRetry } from './operator-ready';
 import { findFreeBasePort } from '../deployment/p2p-perf-tier3/free-port-base';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
 const FAKE_AGENT = join(__dirname, 'fixtures/fake-gym-agent.mjs');
 const FEATURE_ID = 'G-1';
 

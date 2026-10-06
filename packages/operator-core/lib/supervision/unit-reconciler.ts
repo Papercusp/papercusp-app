@@ -297,6 +297,14 @@ export interface UnitFlapState extends FlapDampingState {
    *  the `NRestarts` delta falls back under threshold (loop subsided / counter reset) so a fresh
    *  re-loop pages again. */
   silentLoopEscalated: boolean;
+  /** EI-24811958626062774: epoch ms the CURRENT down episode began, or null while healthy. Held
+   *  across in-flight runs like `wasDown`, so it measures the whole episode. Read only for an
+   *  entry with `notifyAfterDownMs`. */
+  downSince: number | null;
+  /** EI-24811958626062774: has the current down episode been ANNOUNCED? For a delayed-notify
+   *  entry this decides two things: fire the down broadcast once, and stay silent about a
+   *  recovery nobody was told the unit needed. */
+  downNotified: boolean;
 }
 
 export function initialFlapState(unit: string): UnitFlapState {
@@ -309,6 +317,8 @@ export function initialFlapState(unit: string): UnitFlapState {
     consecutiveDownTicks: 0,
     nRestartsObs: [],
     silentLoopEscalated: false,
+    downSince: null,
+    downNotified: false,
   };
 }
 
@@ -435,6 +445,9 @@ export type ReconcileAction =
        *  with a successful one that said `loaded`, and the notifier claims the state "could not be
        *  read" about a unit it just read. */
       confirmedLoaded?: boolean;
+      /** EI-24811958626062774: only set for an entry with `notifyAfterDownMs` — how long the
+       *  current down episode has lasted, so the (delayed) broadcast can say so. */
+      downForMs?: number;
       notify: boolean;
     }
   | { kind: 'waiting-backoff'; unit: string }
@@ -481,6 +494,10 @@ export function signalTermination(
 ): { status: number; signal: string } | undefined {
   const status = show?.execMainStatus;
   if (status === undefined || !Number.isFinite(status)) return undefined;
+  // EI-24811958626062774: systemd's OWN start-timeout kill is also a SIGTERM, and it is a real
+  // failure, not someone's deliberate stop. `Result=timeout` names it. Measured on
+  // papercup-staging-sync: 15 of 88 failed runs in 7 days ended this way (TimeoutStartUSec=15min).
+  if (show?.result === 'timeout') return undefined;
   // systemd killed it directly: status IS the signal number.
   if (show?.execMainCode === 'killed') {
     const signal = GRACEFUL_STOP_SIGNALS.get(status);
@@ -571,17 +588,22 @@ export function decideReconcile(input: DecideInput): { action: ReconcileAction; 
     // 2026-08-10: bg-host restarted 16:50Z, papercup-staging-api was healthy by 16:51Z, and its
     // give-up EI was still open ~25min later. Flag it so the caller can reconcile the orphan.
     const firstObservation = input.state.healthySince == null && !wasDown;
+    // EI-24811958626062774: a delayed-notify entry whose down episode never reached its
+    // threshold was never announced, so announcing its recovery would be a reply to nothing.
+    const quietRecovery = wasDown && entry.notifyAfterDownMs !== undefined && !state.downNotified;
     const damping = decideFlapDamping({ healthy: true, state, now });
     Object.assign(state, damping.nextState);
     state.wasDown = false;
     state.consecutiveDownTicks = 0;
+    state.downSince = null;
+    state.downNotified = false;
     if (damping.action.kind === 'healthy' && damping.action.reset) {
       // EI-20093844846536045: the unit has been healthy for the full reset window, so whatever
       // tree break drove the build-step retries is over — spend the patience budget fresh next time.
       state.buildStepRetries = 0;
     }
     return {
-      action: wasDown
+      action: wasDown && !quietRecovery
         ? // EI-21232345359778222: for an entry whose exit status encodes only whether the RUN
           // completed, this transition is NOT evidence the condition recovered. Same state
           // change, weaker claim. See `SupervisionEntry.exitEncodesRunOnly` for the measurement
@@ -601,6 +623,10 @@ export function decideReconcile(input: DecideInput): { action: ReconcileAction; 
   const justWentDown = !state.wasDown;
   state.wasDown = true;
   state.consecutiveDownTicks += 1;
+  if (justWentDown || state.downSince == null) {
+    state.downSince = now;
+    state.downNotified = false;
+  }
 
   if (!status) {
     // WI-35537: absence from `list-units` does NOT mean the unit is gone. systemd only lists units
@@ -649,13 +675,20 @@ export function decideReconcile(input: DecideInput): { action: ReconcileAction; 
   }
 
   if (!autoRestartFlagOn || !entry.autoRestart) {
+    // EI-24811958626062774: a delayed-notify entry announces ONCE, when the episode has been
+    // down for its threshold, instead of on the first failed tick.
+    const delayMs = entry.notifyAfterDownMs;
+    const downForMs = now - (state.downSince ?? now);
+    const notify = delayMs === undefined ? justWentDown : !state.downNotified && downForMs >= delayMs;
+    if (notify) state.downNotified = true;
     return {
       action: {
         kind: 'report-only',
         unit: entry.name,
         reason: 'down-report-only',
-        notify: justWentDown,
+        notify,
         terminatedBySignal: signalTermination(show),
+        ...(delayMs === undefined ? {} : { downForMs }),
       },
       nextState: state,
     };
@@ -729,6 +762,12 @@ export interface ReconcilerDeps {
    */
   readUnitJournal?: (unit: string) => Promise<string>;
   now: () => number;
+  /**
+   * D-004 (reboot-residue-service-repairs-2026-10-03): also run the host-scoped census of failed,
+   * non-transient user units the registry does not cover. Production (`supervision-reconcile-action`)
+   * sets it; registry-only callers and fixtures omit it and keep the registry-only call sequence.
+   */
+  failedUnitCensus?: boolean;
   /** Broadcast a coord message. Mirrors service-health.ts's `sendMessage(HEALTH_IDENTITY, …)`. */
   notify: (opts: { summary: string; kind?: 'message' | 'escalation'; category?: string }) => Promise<void>;
   autoRestartFlagOn: () => Promise<boolean>;
@@ -847,7 +886,39 @@ export function extractRuntimeFailureDetail(output: string): string | null {
 
 /** Prefer a compiler diagnostic, then a runtime/startup policy error. */
 export function extractActionableFailureDetail(output: string): string | null {
-  return extractBuildErrorDetail(output) ?? extractRuntimeFailureDetail(output);
+  const diagnostic = withoutCommandEchoes(output);
+  return extractBuildErrorDetail(diagnostic) ?? extractRuntimeFailureDetail(diagnostic);
+}
+
+/**
+ * EI-24811958626062774: drop npm's command echo (`> node -e "…"`, `> tsc -p …`).
+ *
+ * npm prints each script's command line before running it. That line is SOURCE, not output,
+ * and it can contain every token the error patterns look for. Measured on papercup-staging-sync:
+ * a `> node -e "const { spawnSync } = …"` echo was returned as the failure's detail while the
+ * real `FATAL: … WorkingDirectory must follow …` line sat in the same excerpt.
+ */
+function withoutCommandEchoes(output: string): string {
+  return output
+    .split('\n')
+    .filter((line) => !/^>\s/.test(stripJournalPrefix(line.trim())))
+    .join('\n');
+}
+
+/**
+ * EI-24811958626062774: keep only the excerpt lines written by the process that failed.
+ *
+ * systemd names that process on the failed `Process: <pid> Exec…=` line, and journald tags
+ * every line it wrote with `[<pid>]:`. An excerpt of an episodic unit holds many runs, each
+ * with its own pid, so this is what ties the detail to the run being reported. Falls back to
+ * the whole excerpt when no pid is named or no line carries it, so it can only narrow.
+ */
+export function scopeToFailedProcess(output: string, failedProcessLine: string | undefined): string {
+  const pid = failedProcessLine?.match(/^Process:\s+(\d+)\s/)?.[1];
+  if (!pid) return output;
+  const tag = `[${pid}]:`;
+  const own = output.split('\n').filter((line) => line.includes(tag));
+  return own.length > 0 ? own.join('\n') : output;
 }
 
 /** Pull one compact failure-cause line out of `systemctl status` output. The
@@ -909,7 +980,9 @@ export function summarizeSystemctlStatusCause(output: string): string | null {
   const controlProcess = lines.find(isFailedControlProcessLine);
   // EI-19457080109574347: the failing STEP is only half the answer \u2014 append the error that step
   // printed, so the escalation carries the fault itself instead of a pointer to where to look.
-  const actionableDetail = extractActionableFailureDetail(output);
+  // EI-24811958626062774: and take it from THAT process's own lines. A 200-line excerpt of an
+  // episodic unit spans many runs, so the first match in the window belongs to the OLDEST run.
+  const actionableDetail = extractActionableFailureDetail(scopeToFailedProcess(output, controlProcess));
   if (controlProcess) {
     const step = controlProcess.slice(0, 400);
     return actionableDetail ? `${step} \u2014 ${actionableDetail}` : step;
@@ -991,6 +1064,8 @@ export interface ReconcileTickResult {
   checked: number;
   actions: ReconcileAction[];
   degraded: boolean;
+  /** D-004 census: failed, non-transient user units no registry entry covers (absent on early return). */
+  unregisteredFailed?: string[];
 }
 
 /** systemd unit-type suffixes, so a registry entry that already names one is passed through
@@ -1484,7 +1559,14 @@ export async function reconcileTick(deps: ReconcilerDeps): Promise<ReconcileTick
                       ? `ⓘ supervision: \`${entry.unit}\` last run was STOPPED by ${action.terminatedBySignal.signal} (exit ${action.terminatedBySignal.status}) — an intentional stop/replacement, NOT a failed run; it produced no verdict (report-only)`
                       : entry.exitEncodesRunOnly
                         ? `⚠ supervision: \`${entry.unit}\` last run exited NON-ZERO (the RUN failed or reported news — read the verdict writer for the actual verdict) (report-only: ${entry.autoRestart ? 'FLAGS.supervisorAutoRestart is off' : 'entry.autoRestart:false'})`
-                        : `⚠ supervision: \`${entry.unit}\` is down (report-only: ${entry.autoRestart ? 'FLAGS.supervisorAutoRestart is off' : 'entry.autoRestart:false'})`,
+                        : action.downForMs !== undefined
+                          ? // EI-24811958626062774: a delayed alarm exists because the unit has been
+                            // failing for a sustained stretch, so say how long and WHY. The cause is
+                            // the line a responder would otherwise dig out of journalctl by hand.
+                            `⚠ supervision: \`${entry.unit}\` has been down for ${Math.round(action.downForMs / 60_000)}min ` +
+                            `(every run since ${new Date(now - action.downForMs).toISOString()} failed; report-only: entry.autoRestart:false).` +
+                            (await failureCause()).suffix
+                          : `⚠ supervision: \`${entry.unit}\` is down (report-only: ${entry.autoRestart ? 'FLAGS.supervisorAutoRestart is off' : 'entry.autoRestart:false'})`,
               category: 'supervision',
             })
             .catch(() => {});
@@ -1536,7 +1618,131 @@ export async function reconcileTick(deps: ReconcilerDeps): Promise<ReconcileTick
 
   await reconcilePauses(deps, pausedThisTick, observedThisTick, now);
 
-  return { checked: registry.length, actions, degraded: false };
+  if (!deps.failedUnitCensus) return { checked: registry.length, actions, degraded: false };
+  const unregisteredFailed = await censusUnregisteredFailedUnits(deps, registry, log);
+  return { checked: registry.length, actions, degraded: false, unregisteredFailed };
+}
+
+// ── Host-scoped failed-unit census (reboot-residue-service-repairs-2026-10-03 D-004 / R-004) ──
+//
+// WHY. After the 2026-10-02 forced reboot, `agenticmail.service` and `llama-ornith.service` sat in
+// `failed` for days and NOTHING reported either: the loop above only looks at SUPERVISED_PROCESSES,
+// a static registry that ships to every host. Both artifacts had been deleted weeks earlier (a node
+// reinstall dropped the global npm package; a disk reclamation removed the model store) while the
+// long-running processes kept serving from memory, so the reboot was the first moment they failed.
+//
+// WHY NOT ADD THEM TO THE REGISTRY. They are host-specific units. A registry entry is checked on
+// every host, and on a host without the unit it becomes a permanent phantom-DOWN — the exact class
+// NON_PROBED_UNITS records as `unit-not-installed` ("Never add these"). Asking systemd which units
+// are failed on THIS host is host-scoped by construction: a unit that is not installed never fails.
+//
+// WHAT IS EXCLUDED. (1) Registry units — the loop above already owns them, with damping and EI
+// filing; announcing them twice would double every alarm. (2) `Transient=yes` units — run-scoped
+// (`capability:bash` tasks, `systemd-run` chains, manual checkpoint runs): their names are minted per
+// run and a failed one records that RUN's exit, not a host service that is down. Measured on the dev
+// box 2026-10-06: 13 of 17 failed user units were transient; the other 4 were all real residues.
+//
+// REPORT-ONLY, ONCE PER EPISODE. It never restarts anything (a restart cannot restore a deleted
+// artifact) and announces each unit once until it leaves `failed`; a later failure re-announces.
+// The episode memory is process-local, so a process restart re-announces a unit that is still
+// failed — bounded, and a still-failed service deserves the reminder. It never fails the tick.
+
+/** Units the census announced for their CURRENT failure episode. */
+const announcedUnregisteredFailures = new Set<string>();
+
+/** Test-only reset for the census episode memory. */
+export function _resetFailedUnitCensusForTests(): void {
+  announcedUnregisteredFailures.clear();
+}
+
+const normalizeServiceUnit = (unit: string): string => unit.replace(/\.service$/, '');
+
+/**
+ * PURE: the failed units no registry entry covers and that are not run-scoped. `transientById` is
+ * keyed by systemd `Id` (the full unit name) with the `Transient` property value; a unit missing
+ * from it, or with a value other than `no`, is NOT selected — an unknown transience is not evidence
+ * of a host service, and the next tick asks again.
+ */
+export function selectUnregisteredFailedUnits(
+  failed: readonly SystemctlUnitStatus[],
+  registry: readonly { unit?: string }[],
+  transientById: ReadonlyMap<string, string>,
+): SystemctlUnitStatus[] {
+  const registered = new Set(registry.filter((e) => e.unit).map((e) => normalizeServiceUnit(e.unit as string)));
+  return failed.filter(
+    (u) =>
+      u.active === 'failed' &&
+      !registered.has(normalizeServiceUnit(u.unit)) &&
+      transientById.get(u.unit) === 'no',
+  );
+}
+
+/**
+ * List failed user units, keep the host services no registry entry covers, and announce the ones
+ * not yet announced this episode. Returns the full selected set (announced or not) for the tick
+ * result. Never throws: a census that cannot run is logged and reports nothing.
+ */
+export async function censusUnregisteredFailedUnits(
+  deps: Pick<ReconcilerDeps, 'execUser' | 'notify'>,
+  registry: readonly { unit?: string }[],
+  log: (msg: string) => void,
+): Promise<string[]> {
+  let failed: SystemctlUnitStatus[];
+  try {
+    failed = parseSystemctlListUnits(
+      await deps.execUser(['list-units', '--state=failed', '--no-legend', '--plain']),
+    ).filter((u) => u.active === 'failed');
+  } catch (err) {
+    log(`failed-unit census skipped: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+
+  const registered = new Set(registry.filter((e) => e.unit).map((e) => normalizeServiceUnit(e.unit as string)));
+  const candidates = failed.filter((u) => !registered.has(normalizeServiceUnit(u.unit)));
+  let selected: SystemctlUnitStatus[] = [];
+  if (candidates.length > 0) {
+    let transientById: Map<string, string>;
+    try {
+      const records = parseSystemctlShowRecords(
+        await deps.execUser(['show', '-p', 'Id', '-p', 'LoadState', '-p', 'Transient', ...candidates.map((u) => u.unit)]),
+      );
+      // A unit that is no longer LOADED vanished between `list-units` and `show` — typically a
+      // failed transient unit garbage-collected by `reset-failed`. systemd answers `Transient=no`
+      // for a not-found unit, so trusting that value would announce a run-scoped unit as a host
+      // service (WI-10006477). A vanished unit is not a residue: map it to an unknown transience.
+      transientById = new Map(
+        [...records].map(([id, props]) => [
+          id,
+          (props.LoadState ?? '').trim() === 'loaded' ? (props.Transient ?? '').trim() : '',
+        ]),
+      );
+    } catch (err) {
+      log(`failed-unit census could not read Transient (${err instanceof Error ? err.message : String(err)}) — reporting nothing this tick`);
+      return [];
+    }
+    selected = selectUnregisteredFailedUnits(candidates, registry, transientById);
+  }
+
+  const failedNow = new Set(selected.map((u) => u.unit));
+  // A unit that left `failed` closes its episode, so a later failure is announced again.
+  for (const unit of [...announcedUnregisteredFailures]) {
+    if (!failedNow.has(unit)) announcedUnregisteredFailures.delete(unit);
+  }
+  const fresh = selected.filter((u) => !announcedUnregisteredFailures.has(u.unit));
+  if (fresh.length > 0) {
+    const list = fresh.map((u) => `\`${u.unit}\`${u.description ? ` (${u.description})` : ''}`).join(', ');
+    await deps
+      .notify({
+        summary:
+          `⚠ supervision: ${fresh.length} unsupervised user unit(s) FAILED on this host — ${list}. ` +
+          'Not in SUPERVISED_PROCESSES, so nothing restarts them; inspect with ' +
+          '`systemctl --user status <unit>`, then fix the cause or `systemctl --user reset-failed <unit>` if retired.',
+        category: 'supervision',
+      })
+      .catch(() => {});
+    for (const u of fresh) announcedUnregisteredFailures.add(u.unit);
+  }
+  return selected.map((u) => u.unit);
 }
 
 /**

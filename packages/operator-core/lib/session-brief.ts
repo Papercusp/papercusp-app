@@ -24,9 +24,11 @@
  * the bootstrap-su adv row that records the Claude session UUID).
  */
 
+import { randomUUID } from 'node:crypto';
 import { getOrgPg } from '@papercusp/db-org';
 import type { Sql } from 'postgres';
 import type { AgentIdentity } from './agent-tools/coordination/identity';
+import { buildConsumerView, type ConsumerView } from './consumer-view';
 
 /** The subset of presence input that forms the durable brief. */
 export interface SessionBriefInput {
@@ -105,6 +107,156 @@ export interface SessionBriefRecord {
   controlState?: unknown | null;
   firstSeenAt: string;
   updatedAt: string;
+}
+
+/** One-shot payload used when a queued compaction respawn opens a fresh bootstrap. */
+export interface PendingCarryRespawn {
+  nonce: string;
+  createdAtMs: number;
+  expiresAtMs: number;
+  firstPrompt: string;
+  systemPromptAddendum: string;
+}
+
+export const PENDING_CARRY_RESPAWN_TTL_MS = 15 * 60_000;
+
+type PendingCarryRespawnSqlOptions = { sql?: Sql; nowMs?: number };
+
+function parsePendingCarryRespawn(value: unknown, nowMs: number): PendingCarryRespawn | null {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return null;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const row = parsed as Record<string, unknown>;
+  if (
+    typeof row.nonce !== 'string' || !row.nonce.trim() ||
+    typeof row.createdAtMs !== 'number' || !Number.isSafeInteger(row.createdAtMs) ||
+    typeof row.expiresAtMs !== 'number' || !Number.isSafeInteger(row.expiresAtMs) ||
+    row.expiresAtMs <= row.createdAtMs || row.expiresAtMs <= nowMs ||
+    typeof row.firstPrompt !== 'string' || !row.firstPrompt.trim() ||
+    typeof row.systemPromptAddendum !== 'string' || !row.systemPromptAddendum.trim()
+  ) return null;
+  return {
+    nonce: row.nonce,
+    createdAtMs: row.createdAtMs,
+    expiresAtMs: row.expiresAtMs,
+    firstPrompt: row.firstPrompt,
+    systemPromptAddendum: row.systemPromptAddendum,
+  };
+}
+
+/**
+ * Persist before the host socket accepts a carry-respawn. A missing brief row is
+ * created without overwriting its lane/control fields; a newer request replaces
+ * the prior slot and receives a distinct nonce for conditional cleanup.
+ */
+export async function savePendingCarryRespawn(
+  identity: Pick<AgentIdentity, 'ownerId' | 'workspaceId'>,
+  input: { firstPrompt: string; systemPromptAddendum: string },
+  options: PendingCarryRespawnSqlOptions & { nonce?: string } = {},
+): Promise<PendingCarryRespawn | null> {
+  const ownerId = identity?.ownerId?.trim();
+  if (!ownerId || !input.firstPrompt.trim() || !input.systemPromptAddendum.trim()) return null;
+  const nowMs = options.nowMs ?? Date.now();
+  const slot: PendingCarryRespawn = {
+    nonce: options.nonce ?? randomUUID(),
+    createdAtMs: nowMs,
+    expiresAtMs: nowMs + PENDING_CARRY_RESPAWN_TTL_MS,
+    firstPrompt: input.firstPrompt,
+    systemPromptAddendum: input.systemPromptAddendum,
+  };
+  const workspaceId = identity.workspaceId?.trim() || 'default';
+  const sql = options.sql ?? getOrgPg().sql;
+  const rows = await sql<Array<{ pending_carry_respawn: unknown }>>`
+    INSERT INTO harness_shared.session_briefs
+      (owner_id, workspace_id, pending_carry_respawn, first_seen_at, updated_at)
+    VALUES (${ownerId}, ${workspaceId}, ${JSON.stringify(slot)}::text::jsonb, now(), now())
+    ON CONFLICT (owner_id) DO UPDATE SET
+      pending_carry_respawn = EXCLUDED.pending_carry_respawn,
+      updated_at = now()
+    RETURNING pending_carry_respawn
+  `;
+  return parsePendingCarryRespawn(rows[0]?.pending_carry_respawn, nowMs);
+}
+
+/** Clear only the exact request that a host refused, preserving a newer retry. */
+export async function clearPendingCarryRespawn(
+  ownerId: string,
+  nonce: string,
+  options: PendingCarryRespawnSqlOptions = {},
+): Promise<boolean> {
+  if (!ownerId.trim() || !nonce.trim()) return false;
+  const sql = options.sql ?? getOrgPg().sql;
+  const rows = await sql<Array<{ owner_id: string }>>`
+    UPDATE harness_shared.session_briefs
+       SET pending_carry_respawn = NULL, updated_at = now()
+     WHERE owner_id = ${ownerId}
+       AND pending_carry_respawn->>'nonce' = ${nonce}
+    RETURNING owner_id
+  `;
+  return rows.length > 0;
+}
+
+/**
+ * Atomically lock the pending row, clear it, and return the locked pre-update
+ * value. A bare UPDATE ... RETURNING pending_carry_respawn returns the new NULL
+ * value, which would silently discard every consumed payload. Concurrent
+ * bootstrap workers cannot both receive the same payload; expired or malformed
+ * payloads are still cleared so they cannot leak into a later ordinary launch.
+ */
+export async function consumePendingCarryRespawn(
+  ownerId: string,
+  options: PendingCarryRespawnSqlOptions = {},
+): Promise<PendingCarryRespawn | null> {
+  if (!ownerId.trim()) return null;
+  const nowMs = options.nowMs ?? Date.now();
+  const sql = options.sql ?? getOrgPg().sql;
+  const rows = await sql<Array<{ pending_carry_respawn: unknown }>>`
+    WITH pending AS MATERIALIZED (
+      SELECT owner_id, pending_carry_respawn
+        FROM harness_shared.session_briefs
+       WHERE owner_id = ${ownerId}
+         AND pending_carry_respawn IS NOT NULL
+       FOR UPDATE
+    )
+    UPDATE harness_shared.session_briefs AS brief
+       SET pending_carry_respawn = NULL, updated_at = now()
+      FROM pending
+     WHERE brief.owner_id = pending.owner_id
+    RETURNING pending.pending_carry_respawn
+  `;
+  return parsePendingCarryRespawn(rows[0]?.pending_carry_respawn, nowMs);
+}
+
+/** Restore a consumed slot if bootstrap fails; never overwrite a newer request. */
+export async function restorePendingCarryRespawn(
+  ownerId: string,
+  workspaceId: string,
+  slot: PendingCarryRespawn,
+  options: PendingCarryRespawnSqlOptions = {},
+): Promise<boolean> {
+  const nowMs = options.nowMs ?? Date.now();
+  const valid = parsePendingCarryRespawn(slot, nowMs);
+  if (!ownerId.trim() || !workspaceId.trim() || !valid) return false;
+  const sql = options.sql ?? getOrgPg().sql;
+  const rows = await sql<Array<{ pending_carry_respawn: unknown }>>`
+    INSERT INTO harness_shared.session_briefs
+      (owner_id, workspace_id, pending_carry_respawn, first_seen_at, updated_at)
+    VALUES (${ownerId}, ${workspaceId}, ${JSON.stringify(valid)}::text::jsonb, now(), now())
+    ON CONFLICT (owner_id) DO UPDATE SET
+      pending_carry_respawn = COALESCE(
+        harness_shared.session_briefs.pending_carry_respawn,
+        EXCLUDED.pending_carry_respawn
+      ),
+      updated_at = now()
+    RETURNING pending_carry_respawn
+  `;
+  return parsePendingCarryRespawn(rows[0]?.pending_carry_respawn, nowMs)?.nonce === valid.nonce;
 }
 
 /**
@@ -300,6 +452,47 @@ function parseSessionBriefLifecycle(value: unknown): SessionBriefLifecycle | nul
   return Object.keys(result).length > 0 ? result : null;
 }
 
+export type SessionBriefLifecycleMarkerKind = 'released' | 'poisoned';
+
+/**
+ * Consumer attestation for a lifecycle-marker write (WI-10005195, generalizing
+ * EI-23770243810745552). The upsert only proves a row was WRITTEN; the wake
+ * executor's stop gate reads `control_state` through `parseSessionBriefLifecycle`,
+ * which silently drops a marker that fails its shape checks — so a write can
+ * return `ok` while the consumer sees no marker and reanimates the session.
+ * This compares the marker the writer meant to store with what that exact parser
+ * returns from the row the upsert produced (`RETURNING control_state`).
+ */
+export function attestLifecycleConsumerView<K extends SessionBriefLifecycleMarkerKind>(
+  kind: K,
+  written: NonNullable<SessionBriefLifecycle[K]>,
+  controlStateAfterWrite: unknown,
+): ConsumerView<SessionBriefLifecycle[K] | null> {
+  return buildConsumerView({
+    readPath: `session_briefs.control_state -> parseSessionBriefLifecycle().${kind}`,
+    written,
+    consumed: parseSessionBriefLifecycle(controlStateAfterWrite)?.[kind] ?? null,
+  });
+}
+
+/**
+ * Exception-only: an agreeing consumer read adds nothing; a diverging one is
+ * logged with its view and makes the write report failure, because a marker the
+ * consumer cannot read is not a marker (poison callers then leave the session
+ * retryable instead of declaring it stopped).
+ */
+function lifecycleWriteReadByConsumer(
+  kind: SessionBriefLifecycleMarkerKind,
+  ownerId: string,
+  view: ConsumerView<unknown>,
+): boolean {
+  if (!view.divergedFromWrite) return true;
+  console.warn(
+    `[session-brief] ${kind} marker write for ${ownerId} landed but the consumer read diverged: ${JSON.stringify(view)}`,
+  );
+  return false;
+}
+
 /**
  * Read the durable lifecycle markers used by the wake executor. Fail-soft by
  * design: a temporary brief-store outage must not turn every ordinary wake
@@ -335,7 +528,7 @@ export async function markSessionBriefReleased(
   try {
     if (!ownerId || !workspaceId || !marker.fleet || !marker.at || !marker.by) return false;
     const markerJson = JSON.stringify(marker);
-    await getOrgPg().sql`
+    const rows = await getOrgPg().sql<Array<{ control_state: unknown }>>`
       INSERT INTO harness_shared.session_briefs
         (owner_id, workspace_id, control_state, control_generation, control_updated_at)
       VALUES (
@@ -375,8 +568,18 @@ export async function markSessionBriefReleased(
           ELSE harness_shared.session_briefs.control_transition
         END,
         updated_at = now()
+      RETURNING control_state
     `;
-    return true;
+    // Attest what the stop gate will READ, not just that the upsert ran.
+    return lifecycleWriteReadByConsumer(
+      'released',
+      ownerId,
+      attestLifecycleConsumerView(
+        'released',
+        { fleet: marker.fleet, at: marker.at, by: marker.by },
+        rows[0]?.control_state,
+      ),
+    );
   } catch {
     return false;
   }
@@ -404,7 +607,7 @@ export async function markSessionBriefPoisoned(
       evidence: marker.evidence.slice(0, 400),
     };
     const markerJson = JSON.stringify(boundedMarker);
-    await getOrgPg().sql`
+    const rows = await getOrgPg().sql<Array<{ control_state: unknown }>>`
       INSERT INTO harness_shared.session_briefs
         (owner_id, workspace_id, control_state, control_generation, control_updated_at)
       VALUES (
@@ -444,8 +647,26 @@ export async function markSessionBriefPoisoned(
           ELSE harness_shared.session_briefs.control_transition
         END,
         updated_at = now()
+      RETURNING control_state
     `;
-    return true;
+    // Attest what the wake executor's stop gate will READ, not just that the upsert ran.
+    return lifecycleWriteReadByConsumer(
+      'poisoned',
+      ownerId,
+      attestLifecycleConsumerView(
+        'poisoned',
+        {
+          advSessionId: boundedMarker.advSessionId,
+          sessionId: boundedMarker.sessionId,
+          startedAt: boundedMarker.startedAt,
+          at: boundedMarker.at,
+          by: boundedMarker.by,
+          reason: boundedMarker.reason,
+          evidence: boundedMarker.evidence,
+        },
+        rows[0]?.control_state,
+      ),
+    );
   } catch {
     return false;
   }

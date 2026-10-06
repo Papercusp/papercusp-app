@@ -105,6 +105,10 @@ export default defineTool({
             // rather than `missing` is what the watchdog fires on.
             content_drift: d.contentDrift,
             content_drift_executable: d.contentDriftExecutable,
+            // WI-10004651: the executable subset minus the ACKNOWLEDGED set
+            // (migration-content-drift-acknowledged.ts) — drift nobody has
+            // repaired or proven benign yet. The watchdog files a bug per entry.
+            content_drift_new: d.contentDriftNew,
             content_drift_sql_dir: d.contentDriftSqlDir,
             // WI-5050: applied migrations numbered beyond this tree's max —
             // the shared DB was migrated by a NEWER tree, so this tree's

@@ -1,6 +1,6 @@
 # Blender self-learning audit — 4 September 2026
 
-Audit record: WI-2144472. Requested by owner. Scope: architecture, implementation, evidence quality, release readiness, and improvements. This is an audit and redesign recommendation; it does not implement the recommendations or authorize resuming paused learning routines.
+Audit record: WI-2144472. Requested by Avi. Scope: architecture, implementation, evidence quality, release readiness, and improvements. This is an audit and redesign recommendation; it does not implement the recommendations or authorize resuming paused learning routines.
 
 **Recommendation: redesign the decision and evaluation core before release, while retaining the useful execution, provenance, and experimentation infrastructure.** The product idea is sound. The present implementation has several incompatible meanings of “success,” and the final authority to change behavior does not consistently consume the evidence produced by evaluation.
 

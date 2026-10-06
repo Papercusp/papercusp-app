@@ -30,69 +30,26 @@
  * floor that clears itself, and defaulting to transient hides a genuinely stranded
  * `critical` item — which is the 19-day hide the watchdog exists to prevent.
  */
+import { claimFloorLabels } from './hold-registry';
 
 /**
  * Refusals that will NOT clear on their own. The row stays invisible to
  * `scheduler:get_next` / `work_items:claim_next` / `work_items:claimable` until someone
  * WRITES to it, so raising severity or setting a `feature_order` changes nothing.
+ *
+ * DERIVED from the hold registry (plan unified-bug-pipeline-and-honest-queue-2026-10-05
+ * D-026): each label's class, clearer, re-check time and provenance live on its
+ * `claim-floor` entry in hold-registry.ts. Change a floor's class there, never here.
  */
-export const STRUCTURAL_CLAIM_FLOORS: ReadonlySet<string> = new Set([
-  // status is terminal or otherwise outside ISSUE_FAMILY_CLAIMABLE_STATES (=['open']).
-  // `blocked` lands here: only a state write brings it back.
-  'not-claimable-status',
-  // a captured NOTE — by design never work-queue material (D-005).
-  'observation-lane',
-  // a typed capability that requires the owner; only work_items:update clears it.
-  'needs-owner-action',
-  // an active typed capability dependency recorded on the row itself.
-  'external-blocker',
-  // payload._claimHold — a durable PARK that outlives its parker's session (WI-2797).
-  // A lease expires; a park does not, which is why this is structural.
-  'claim-hold',
-  // reserved to its own plan lane while that plan is active (WI-2118/WI-3667).
-  'plan-lane-reserved',
-  // an auto-filed replication-liveness detector, gated to the p2p fleet (WI-2633).
-  'federation-detector',
-  // an AUTO-loop-iteration bookkeeping marker, not work (EI-8802).
-  'loop-noise',
-  // EI-22685972259555805: a LIVE_GATE_OPS condition singleton is reserved to the
-  // one registered gate fixer. It never becomes available to generic self-select
-  // merely by waiting; the owner/fixer must claim it explicitly by id, or the
-  // condition lifecycle must settle the row.
-  'live-gate-ops',
-  // already carries a terminal completion record (EI-8972).
-  'already-completed',
-  // needs a >=2-machine rig this caller does not have (WI-2796).
-  'cross-machine-rig',
-  // WI-2141964: a true-peer federated row is not self-selectable from THIS node, ever.
-  // No amount of waiting makes it claimable here, so it belongs with the structural set
-  // even though the previous hand-rolled copy in set_priority.ts omitted it.
-  'origin',
-]);
+export const STRUCTURAL_CLAIM_FLOORS: ReadonlySet<string> = claimFloorLabels('structural');
 
 /**
  * Refusals that CLEAR ON THEIR OWN. Alerting or warning on these is noise: the wait is
- * bounded and something else already owns ending it. Each entry names what clears it.
+ * bounded and something else already owns ending it — the registry entry names what.
+ * Claimant-specific holds (D-023 verification conflict) are excluded: they are claim-door
+ * filters, not floors the oracle reports.
  */
-export const TRANSIENT_CLAIM_FLOORS: ReadonlySet<string> = new Set([
-  // cleared when the holder releases. Steering IS effective the moment it is released,
-  // which is why set_priority has always deliberately excluded it from its warning.
-  'already-taken',
-  // cleared by the admission promoter on its own cadence (EI-21973318733042066).
-  'admission-pending',
-  // cleared by the reviewer — reserved to the peer-review lifecycle "until approved".
-  'agent-review',
-  // cleared by elapsed ticks: "wait for six complete ran ticks".
-  'watchdog-recovery-window',
-  // cleared when the blocking work-item reaches a terminal state.
-  'blocked-dep',
-  // cleared by elapsed time; the oracle's own explanation says "Both clear on their own".
-  'cooldown',
-  // EI-22172757071586188: cleared when the gate greens (the condition bridge settles the
-  // gate-red-streak item) — stopTheLineExplanation says so explicitly ("lifts on its own
-  // when the gate greens"). Nothing about a stranded row here; it is a system-wide throttle.
-  'stop-line',
-]);
+export const TRANSIENT_CLAIM_FLOORS: ReadonlySet<string> = claimFloorLabels('transient');
 
 /**
  * Not a floor at all — the oracle reports it when the id does not resolve. Classified

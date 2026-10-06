@@ -66,7 +66,7 @@ async function main(): Promise<void> {
     `[seed-account-capacity-reprobe-routine] seeded "${NAME}" for "${SLUG}" (ws=${ws}, active=${active}, ` +
       `tier=ephemeral, interval=${DEFAULT_INTERVAL_SEC}s) — scheduled walled-account re-probe cadence. ` +
       (active
-        ? 'Cadence seeded ACTIVE — restart papercup-bg-host to live-arm on a host that was already up.'
+        ? 'Cadence seeded ACTIVE — restart papercusp-bg-host to live-arm on a host that was already up.'
         : 'Inactive — enable via the routines admin or re-run without --inactive.'),
   );
 }

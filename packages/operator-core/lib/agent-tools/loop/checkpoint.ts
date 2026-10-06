@@ -33,7 +33,6 @@ import { dependsOnSpec } from '../../freshness/tool-schema';
 import {
   lintUncheckedExternalClaims,
   lintUncheckedImperativeActions,
-  lintRelativeScratchPaths,
   RELATIVE_SCRATCH_ADVISORY,
   mergeCarryRows,
   parseCarryNote,
@@ -51,6 +50,8 @@ import {
   rescueTaggedCarryNoteBlob,
   detectCarryNoteRescueSignals,
   CARRY_ROW_SOFT_CAPS,
+  FALSIFIER_MISSING_NOTE,
+  checksMissingFalsifier,
   CARRY_TEXT_SOFT_CAP,
   CARRY_CAP_HARD_MULTIPLE,
   CARRY_ROW_ID_MAX,
@@ -66,6 +67,7 @@ import {
   withCarryNoteWalls,
   type CarryArgRepair,
 } from '../../carry-note';
+import { filterTrackedRelativeScratchPaths } from '../checkpoint-relative-scratch';
 import { getOrgPg } from '@papercusp/db-org';
 import { getLoopStatus } from '../../harness/routines/loop';
 import { getSessionBrief } from '../../session-brief';
@@ -95,6 +97,7 @@ import { uncoveredAbsencePremises } from '../../premises-claim-port';
 import { detectScopeOverreach } from '../../carry-note-probe-scope';
 import { unresolvedPlanDecisionRefs } from '../coordination/decision-ref-advisory';
 import { withBoundedTimeout } from '../../bounded-timeout';
+import type { FleetZeroWorkersVerdict } from '../../fleet/fleet-zero-workers-guard';
 import { OrgTxnTimeoutError } from '../../pg-bounded-txn';
 import { listVerifiedWaitTakeoversForSubscribers } from '../../events/await/store';
 import { resolveCurrentTurnStamp } from '../../turn-provenance/turn-ref';
@@ -105,6 +108,7 @@ import {
   evaluateFrozenLineageCarryText,
   frozenLineageCarryViolationPayload,
 } from '../../release/frozen-lineage-execution-policy';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
 
 /** The continuation hint is advisory; it must never consume the checkpoint
  * tool's 60s transport budget when coordination reads are degraded. */
@@ -145,7 +149,11 @@ class FrozenCarryCheckpointError extends Error {
 function frozenLoopCarryViolation(text: string | null | undefined): FrozenCarryViolationPayload | null {
   if (!text?.trim()) return null;
   return frozenLineageCarryViolationPayload(
-    evaluateFrozenLineageCarryText({ surface: 'loop-checkpoint', text }),
+    evaluateFrozenLineageCarryText({
+      surface: 'loop-checkpoint',
+      text,
+      target: resolveHomeGateVerdictTarget(),
+    }),
   );
 }
 
@@ -329,11 +337,11 @@ export default defineTool({
   name: 'loop:checkpoint',
   profile: 'engineer',
   description:
-    'Read/write/clear COLD su loop carry-note. The carry mode belongs to loop:arm (`carry:\'cold\'|\'warm\'`); loop:checkpoint does not accept a `carry` argument. Read { read:true, ownerId?, harness? }; write { did,left,insight,next }, { note }, or { checkpoint }; blank/null clears. ' +
-    "Default rowsMode:'merge' preserves rows; rowsMode:'replace' retires rows (empty list with replace clears). Probe rows use kind:'tool' or kind:'state-cell', args, schemaRevision. Returns note metadata, walls, checks.",
+    'Read/write/clear COLD loop carry-note; carry mode belongs to loop:arm (`carry:\'cold\'|\'warm\'`); loop:checkpoint does not accept a `carry` argument. Read {read:true, ownerId?, harness?}; write {did,left,insight,next}, {note}, or {checkpoint}; blank/null clears. ' +
+    "Default rowsMode:'merge' preserves rows; rowsMode:'replace' retires rows (empty list with replace clears). `confirmShrink` is accepted by `work_items:checkpoint` only; use `confirmRetire` here. Probe rows: kind:'tool' or kind:'state-cell', args, schemaRevision.",
   guidance: {
     when:
-      "COLD: save facts; pair with work_items:checkpoint. carry mode belongs to loop:arm, not loop:checkpoint — do not retry a rejected `carry` argument here. Add same-line [turn:<session>@<iso-ts>] refs; never invent a ref. Mark [self-imposed], [peer:<sid>], or [inferred]. Default merge mode preserves them; rowsMode:'replace' retires rows. Probe kind:'tool' or kind:'state-cell' with args/schemaRevision. Before `session:request-compaction`, if `next` names an immediately runnable action, execute it (or another bounded progress read): writing this checkpoint alone is not post-note progress; `cold-successor-no-progress` refuses compaction. Scheduled loop fire/compaction is the narrow boundary exception.",
+      "COLD: save facts; pair with work_items:checkpoint; carry mode belongs to loop:arm, not loop:checkpoint — do not retry a rejected `carry` argument here. Add same-line [turn:<session>@<iso-ts>] refs; never invent a ref. Mark [self-imposed], [peer:<sid>], or [inferred]. Default merge mode preserves them; rowsMode:'replace' retires rows. Probe rows: kind:'tool' or kind:'state-cell', args, schemaRevision. Before `session:request-compaction`, if `next` names an immediately runnable action, execute it or a bounded progress read; writing this checkpoint alone is not post-note progress. `cold-successor-no-progress` refuses compaction; scheduled loop fire/compaction is the narrow boundary exception.",
     notWhen: "WARM (carry:'warm', default) use live transcript; work_items:checkpoint for state.",
     chaining:
       'Retune: read loop:status, then ' +
@@ -584,6 +592,14 @@ export default defineTool({
                   CARRY_ROW_SOFT_CAPS.recheck,
                   'Concrete probe to run before relying on the claim.',
                 ).optional(),
+                falsifier: carryRowTextSchema(
+                  CARRY_ROW_SOFT_CAPS.falsifier,
+                  'Result that would mean this claim is FALSE (as facts:assert `falsifier`). A probe says how to look; this says what refutes it.',
+                ).optional(),
+                sampleAdequate: z
+                  .boolean()
+                  .optional()
+                  .describe('`false` = probed, but the sample could not discriminate the claim from its negation; renders ? not ✓.'),
                 verified: carryRowTextSchema(
                   CARRY_ROW_SOFT_CAPS.verified,
                   'The EVIDENCE STRING itself (max 300 chars) — e.g. "Verified 15:14Z: 30/30 passed, tree clean". ' +
@@ -1117,6 +1133,53 @@ export default defineTool({
       };
     }
 
+    // P-005 / D-030 (7): a fleet-leader monitor cannot record a quiet wake (no
+    // monitorDelta) while the fleet it leads has zero productive workers. Bounded and
+    // fail-OPEN: an unmeasured fleet is allowed with a warning, never refused on a guess.
+    let fleetZeroWorkersWarning: string | undefined;
+    if (workspaceId && args.monitorDelta !== true) {
+      const guard = await withBoundedTimeout(
+        async () =>
+          (await import('../../fleet/fleet-zero-workers-guard')).checkFleetZeroWorkers({
+            workspaceId,
+            ownerId,
+            monitorDelta: false,
+          }),
+        {
+          fallback: { action: 'allow' } as FleetZeroWorkersVerdict,
+          timeoutMs: 3_000,
+          label: 'loop:checkpoint fleet_zero_workers',
+        },
+      );
+      // `value` can be absent only under a test double of withBoundedTimeout; the real
+      // helper returns the work's verdict or the fallback. Absent is read as allow, the
+      // same way the other bounded reads in this handler treat a missing value.
+      const verdict: FleetZeroWorkersVerdict | undefined = guard.value;
+      if (guard.degraded) {
+        fleetZeroWorkersWarning = `fleet_zero_workers not checked (${guard.reason ?? 'error'}); the checkpoint was allowed.`;
+      } else if (verdict?.action === 'refuse') {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                ok: false,
+                error: 'fleet_zero_workers',
+                message: verdict.message,
+                fleet: verdict.fleetSlug,
+                repairs: verdict.repairs,
+                harness,
+                ownerId,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      } else {
+        fleetZeroWorkersWarning = verdict?.warning;
+      }
+    }
+
     // EI-18833865002636933 — rescue-by-parse of a MALFORMED structured write. Seen live:
     // an agent serialized its whole note as one XML-tagged string into `did`, so the cold
     // wake got a single `## Did` section with literal `</did><left>…<checks>[…]` text in
@@ -1187,7 +1250,15 @@ export default defineTool({
       if (typeof v === 'string') fields[key] = truncateCarryField(v, CARRY_TEXT_SOFT_CAP, key, repairs);
     }
     const capRows = <
-      T extends { id?: string; claim: string; recheck?: string; verified?: string; observed?: string; contested?: string },
+      T extends {
+        id?: string;
+        claim: string;
+        recheck?: string;
+        falsifier?: string;
+        verified?: string;
+        observed?: string;
+        contested?: string;
+      },
     >(
       rows: T[] | undefined,
       label: string,
@@ -1213,6 +1284,13 @@ export default defineTool({
         out.claim = truncateCarryField(out.claim, CARRY_ROW_SOFT_CAPS.claim, `${label}[${i}].claim`, repairs);
         if (typeof out.recheck === 'string')
           out.recheck = truncateCarryField(out.recheck, CARRY_ROW_SOFT_CAPS.recheck, `${label}[${i}].recheck`, repairs);
+        if (typeof out.falsifier === 'string')
+          out.falsifier = truncateCarryField(
+            out.falsifier,
+            CARRY_ROW_SOFT_CAPS.falsifier,
+            `${label}[${i}].falsifier`,
+            repairs,
+          );
         // A ✓ is an affirmative claim. If its evidence contradicts that claim,
         // preserve the exact evidence but store it as contested so neither the
         // carry note nor a wake can present it as settled. Do this BEFORE capping
@@ -1709,18 +1787,16 @@ export default defineTool({
     // a carried claim with no probe (the phantom-re-anchor shape). Never blocks.
     const probeText = [...checks.map(renderCheckLine), ...walls.map(renderWallLine)].join('\n');
     const uncheckedClaims = hasNoteWrite ? lintUncheckedExternalClaims(narrativeBody, probeText) : [];
+    // EI-23771449112267271: warn-only — a ✓ row WRITTEN IN THIS CALL with no falsifier (same contract
+    // as facts:assert `recheckMissing`). Scoped to supplied rows so legacy carried rows never nag.
+    const falsifierMissingRows = checksMissingFalsifier(effectiveChecks ?? []);
 
     // R-6(b): a relative `scratchpad/...` reference is unresolvable to the next wake —
     // the session scratchpad is absolute and per-session, so the successor re-derives an
     // artifact that is already on disk. Advisory + fail-open, like every sibling here.
-    const relativeScratchRefs = (() => {
-      if (!hasNoteWrite) return [];
-      try {
-        return lintRelativeScratchPaths(narrativeBody);
-      } catch {
-        return []; // advisory lint must never cost the checkpoint write
-      }
-    })();
+    const relativeScratchRefs = hasNoteWrite
+      ? await filterTrackedRelativeScratchPaths(narrativeBody, { workspaceId, harness })
+      : [];
 
     // EI-20079511619330371: a carry-note's `left`/`next` is read as an
     // instruction at wake time, even though its singleton/shared-state
@@ -1946,15 +2022,24 @@ export default defineTool({
           activeLoopRewakeBlockedReason =
             loop?.active && !loopWake.guaranteed && loopWake.reason !== 'no-active-loop' ? loopWake.reason : null;
           activeInboxWakeAwait = awaits.some((a) => a.eventKey.startsWith(INBOX_WAKE_KEY_PREFIX));
+          const activeNonInboxAwaitCount = awaits.filter((a) => !a.eventKey.startsWith(INBOX_WAKE_KEY_PREFIX)).length;
           rewakeGuaranteed = isRewakeGuaranteed({
             autonomousModeActive: modes.some((m) => modeImpliesAutonomy(m.mode)),
             machineTurn: currentTurn?.verdict === 'agent-injected' || currentTurn?.verdict === 'machine-surface',
             loopActive: loopWake.guaranteed,
-            activeAwaitCount: awaits.filter((a) => !a.eventKey.startsWith(INBOX_WAKE_KEY_PREFIX)).length,
+            activeAwaitCount: activeNonInboxAwaitCount,
           });
           // A loop can guarantee another turn without guaranteeing a fresh
-          // context. Only cold carry sheds the transcript on settle.
-          nextWakeFresh = loopWake.guaranteed ? loop?.carry === 'cold' : null;
+          // context. A deliberate await can wake the same session before a cold
+          // loop fires, so cold carry proves freshness only when it is the sole
+          // non-inbox wake source; otherwise the next wake's freshness is unknown.
+          nextWakeFresh = loopWake.guaranteed
+            ? loop?.carry === 'cold'
+              ? activeNonInboxAwaitCount === 0
+                ? true
+                : null
+              : false
+            : null;
         } catch {
           rewakeGuaranteed = null;
           nextWakeFresh = null;
@@ -2133,6 +2218,8 @@ export default defineTool({
             ...(args.monitorDelta === true
               ? { monitorDelta: { recorded: monitorDeltaRoutinesStamped, requested: true } }
               : {}),
+            /** P-005 / D-030 (7): the zero-workers guard could not measure, so it allowed. */
+            ...(fleetZeroWorkersWarning ? { fleetZeroWorkersWarning } : {}),
             ...(verifiedWaitTakeoverRows.length > 0 ? { verifiedWaitTakeovers: verifiedWaitTakeoverRows } : {}),
             /** P-013: which row semantics this write actually ran under, so a caller
              *  never has to infer it from the counts. Present only when it was NOT the
@@ -2292,6 +2379,9 @@ export default defineTool({
                     lines: uncheckedClaims,
                   },
                 }
+              : {}),
+            ...(falsifierMissingRows.length > 0
+              ? { falsifierMissing: { flagged: true, note: FALSIFIER_MISSING_NOTE, rows: falsifierMissingRows } }
               : {}),
             ...(absenceClaims.length > 0
               ? {

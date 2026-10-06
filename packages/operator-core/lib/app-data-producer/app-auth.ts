@@ -21,8 +21,8 @@ import { createRequire } from 'node:module';
 import { appAudience, type ProducerApp } from './owner-mapping';
 
 /**
- * CJS interop, matching the established idiom here (device-push-dispatcher.ts,
- * google-pubsub.ts, gcp-preflight.ts). These modules are loaded as ESM by some
+ * CJS interop, matching the established idiom here (device-push-dispatcher.ts).
+ * These modules are loaded as ESM by some
  * hosts, where a bare `require` is undefined — the documented fault in WI-37482,
  * which shipped broken precisely because the affected leg was dormant.
  */

@@ -507,7 +507,7 @@ export default defineTool({
         ok: false,
         reason: 'queued_waiter',
         busy: await enrichBusy(first.busy, { ownerId }),
-        advice: 'A queued agent is ahead for this path. Coordinate with that owner or use wake_on_grant:true to join the queue.',
+        advice: 'An earlier lock-wait ticket is ahead for this path. `busy` lists active holders only; use locks:queue { paths } to inspect ticket order, or wake_on_grant:true to join the queue.',
       });
     }
 
@@ -895,7 +895,9 @@ export default defineTool({
 
       // Re-read the current busy snapshot (may differ from the initial
       // first.busy if some paths freed but others didn't).
-      let finalBusy: { won: true; lockId: string; expires: Date; held: string[] } | { won: false; busy: AcquireBusy[] };
+      let finalBusy:
+        | { won: true; lockId: string; expires: Date; held: string[] }
+        | { won: false; busy: AcquireBusy[]; reason?: 'queued_waiter' };
       try {
         finalBusy = await inWorkspaceTxn(coordinationDomain, ownerId, async (tx) => {
           const r = await tryAcquire(tx, {
@@ -911,7 +913,11 @@ export default defineTool({
             // Lucky race — got it after timeout fired but before re-read.
             return { won: true as const, lockId: r.lock_id, expires: r.expires_ts, held: r.held };
           }
-          return { won: false as const, busy: r.busy };
+          return {
+            won: false as const,
+            busy: r.busy,
+            ...('reason' in r && r.reason === 'queued_waiter' ? { reason: r.reason } : {}),
+          };
         }, { paths });
       } catch (err: unknown) {
         if (!isTransientPgConnectionError(err)) throw err;
@@ -948,7 +954,9 @@ export default defineTool({
                   }
                 : {}),
             }
-          : { reason: 'timeout' }),
+          : 'reason' in finalBusy && finalBusy.reason
+            ? { reason: finalBusy.reason }
+            : { reason: 'timeout' }),
         ...(waitClamped
           ? {
               wait_clamped: {

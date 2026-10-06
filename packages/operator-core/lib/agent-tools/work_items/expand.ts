@@ -111,6 +111,7 @@ export default defineTool({
     // Durable record on the parent's thread either way (the proposal, or the disposed set).
     await commentWorkItem(args.id, renderExpansion(plan), ident.ownerId, {
       harness: args.harness ?? parent.harness ?? undefined,
+      writerOwnerId: ident.ownerId,
     });
 
     if (plan.disposition === 'proposed') {

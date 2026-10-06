@@ -62,7 +62,11 @@ export interface AwaitingEntry {
    * held item (`work-item:<id>`) — its clearing is observable via the item.
    */
   ref: string;
-  /** 'work-item-blocker' only — the blocker's own `<kind>:<ref>` from set_blocker. */
+  /**
+   * 'work-item-blocker' only — the blocker's own `<kind>:<ref>` from set_blocker, or
+   * `blocks:<blocker ref>` for an unresolved `work_item_deps` edge (WI-10005020: a work-item
+   * dependency is stored as an edge, never as an external blocker row).
+   */
   blocker?: string;
   /** ISO — when the wait was registered, so a reader can age it. */
   since?: string;
@@ -128,6 +132,34 @@ export async function deriveAwaiting(opts: {
             blocker: `${blocker.kind}:${blocker.ref}`,
           });
         }
+      }
+    }
+
+    // Leg 3 — unresolved `blocks` edges on items the sender holds (WI-10005020, plan
+    // feature-drain-delivery-readiness-and-outcome-accounting-2026-10-01 D-008 §4a). A blocker
+    // that names another work item lives on an edge, not in externalBlockers (R-2/R-15), so
+    // without this leg a migrated wait would silently vanish from the stamp. Its own try: an
+    // edge-read failure must cost only this leg, never legs 1–2 (less information, not none).
+    // Dynamic import keeps work-items.ts out of this module's static graph.
+    if (out.length < limit) {
+      try {
+        const { readHeldUnresolvedDepBlockers } = await import('../../work-items');
+        const edges = await readHeldUnresolvedDepBlockers({
+          ownerId: opts.ownerId,
+          workspaceId: opts.workspaceId,
+          limit: limit - out.length,
+        });
+        for (const edge of edges) {
+          if (out.length >= limit) break;
+          out.push({
+            kind: 'work-item-blocker',
+            ref: `work-item:${edge.featureId}`,
+            blocker: `blocks:${edge.blockerRef}`,
+            ...(edge.since ? { since: edge.since } : {}),
+          });
+        }
+      } catch {
+        // keep what legs 1–2 found
       }
     }
 

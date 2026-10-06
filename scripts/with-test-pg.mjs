@@ -40,9 +40,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sep = process.argv.indexOf('--');
 const cmd = sep >= 0 ? process.argv.slice(sep + 1) : [];
 const options = sep >= 0 ? process.argv.slice(2, sep) : process.argv.slice(2);
-const isolatedRuntime = options.length === 1 && options[0] === '--isolated-runtime';
+const operatorApi = options.length === 1 && options[0] === '--isolated-runtime=operator-api';
+const isolatedRuntime = operatorApi || (options.length === 1 && options[0] === '--isolated-runtime');
 if (cmd.length === 0 || (options.length > 0 && !isolatedRuntime)) {
-  console.error('usage: node scripts/with-test-pg.mjs [--isolated-runtime] -- <command> [args...]');
+  console.error('usage: node scripts/with-test-pg.mjs [--isolated-runtime[=operator-api]] -- <command> [args...]');
   process.exit(2);
 }
 
@@ -81,10 +82,20 @@ const port = await freePort();
 const sqlDir = resolveSqlDir();
 
 let pg = null;
+let profileProcess = null;
 let cleanedUp = false;
 async function cleanup() {
   if (cleanedUp) return;
   cleanedUp = true;
+  if (profileProcess && profileProcess.exitCode === null && profileProcess.signalCode === null) {
+    const exited = new Promise((res) => profileProcess.once('exit', res));
+    try { process.kill(-profileProcess.pid, 'SIGTERM'); } catch { /* already exited */ }
+    await Promise.race([exited, new Promise((res) => setTimeout(res, 5000))]);
+    if (profileProcess.exitCode === null && profileProcess.signalCode === null) {
+      try { process.kill(-profileProcess.pid, 'SIGKILL'); } catch { /* already exited */ }
+      await exited;
+    }
+  }
   try {
     await pg?.stop();
   } catch {
@@ -143,9 +154,9 @@ if (runtimeRoot && runtimeId) {
     OPERATOR_DEV_PORT: String(httpPort),
     OPERATOR_DEV_PTY_PORT: String(ptyPort),
     PAPERCUSP_BIND_HOST: '127.0.0.1',
-    PAPERCUSP_BACKGROUND_WORKERS: '1',
-    PAPERCUSP_DBOS_ENABLE: '1',
-    PAPERCUSP_DBOS_ORCHESTRATOR: '1',
+    PAPERCUSP_BACKGROUND_WORKERS: operatorApi ? '0' : '1',
+    PAPERCUSP_DBOS_ENABLE: operatorApi ? '0' : '1',
+    PAPERCUSP_DBOS_ORCHESTRATOR: operatorApi ? '0' : '1',
     // The test starts explicit background work; global scheduled routines may
     // otherwise act on the shared checkout or external services during boot.
     PAPERCUSP_DBOS_ROUTINES: '0',
@@ -178,6 +189,85 @@ if (isolatedRuntime) {
     if (/^(PAPERCUSP_|HARNESS_|DBOS__|PG[A-Z]|DATABASE_URL$|AWS_|AZURE_|GOOGLE_|GCP_|OPENAI_|ANTHROPIC_|GITHUB_|GH_|CLOUDSDK_|DOCKER_|GIT_ASKPASS$|GIT_CONFIG_|SSH_AUTH_SOCK$|CODEX_HOME$|VITEST(?:_|$)|DBUS_SESSION_BUS_ADDRESS$|GNOME_KEYRING_CONTROL$)/i.test(key)) {
       delete childEnv[key];
     }
+  }
+}
+if (operatorApi) {
+  // A request journey needs the same isolation as a background test, but must
+  // not boot DBOS/substrate owners or load an ONNX model in the request host.
+  // Reuse the actual registry and sidecar factory in a separate owned process;
+  // never inherit the live sidecar, register the shared checkout, or disable
+  // the host's memory watchdog. Preflight completes BEFORE the command starts.
+  runtimeEnv.PAPERCUSP_POT_HOME_SLUG = runtimeId;
+  // Tunnel connectors must use the host's maintained no-local-trust listener,
+  // never the desktop loopback API (which can mint pairing tokens).
+  let ingressPort;
+  do { ingressPort = await freePort(); }
+  while ([port, Number(runtimeEnv.PAPERCUSP_HONO_PORT), Number(runtimeEnv.OPERATOR_DEV_PTY_PORT)].includes(ingressPort));
+  runtimeEnv.PAPERCUSP_EXTERNAL_INGRESS_PORT = String(ingressPort);
+  const profileSource = `
+    import { mkdir } from 'node:fs/promises';
+    import { join } from 'node:path';
+    import { saveHarnessRegistry, loadHarnessRegistry } from './packages/operator-core/lib/harness-registry.ts';
+    import { createEmbedSidecarServer } from './packages/operator-core/lib/memory/embed-sidecar-server.ts';
+    import { getOrgPg, upsertRoutine } from '@papercusp/db-org';
+    import { releaseGateTile } from './packages/operator-core/lib/device-monitoring.ts';
+    const id = process.env.PAPERCUSP_WORKSPACE_ID;
+    const home = join(process.env.PAPERCUSP_WORKSPACES_ROOT, id, 'operator-home');
+    await mkdir(home, { recursive: true });
+    await saveHarnessRegistry({ projects: [{ slug: id, path: home, harness_kind: 'hive' }] }, id);
+    const registry = await loadHarnessRegistry(id, { fresh: true });
+    if (!registry.projects.some(p => p.slug === id && p.path === home)) throw new Error('private home harness was not registered');
+    // Inbox refuses an unmeasured system source. An empty disposable database
+    // has no pipeline at all, so register an explicitly PAUSED fixture through
+    // the maintained routine store. Never manufacture a green verdict or arm
+    // a release action against the developer's checkout.
+    const { sql } = getOrgPg();
+    await upsertRoutine(sql, { workspaceId: id, installSlug: id,
+      name: 'green-checkpoint', triggerKind: 'api', triggerConfig: {},
+      targetRole: 'operator', active: false, nextFireAt: null }, () => null);
+    const pause = { reason: 'Disposable operator-api fixture; publication disabled',
+      pausedBy: id, pausedAtMs: Date.now() };
+    await sql\`UPDATE harness_shared.routines SET metadata = \${sql.json({ pause })}
+      WHERE workspace_id = \${id} AND install_slug = \${id} AND name = 'green-checkpoint'\`;
+    const gate = await releaseGateTile(id);
+    if (!gate || gate.gate !== 'wedged' || !gate.red) {
+      throw new Error('private paused pipeline was not measured; refusing request journey');
+    }
+    const sidecar = createEmbedSidecarServer({ port: 0, warmAtBoot: false });
+    const port = await sidecar.listening;
+    process.on('SIGTERM', async () => { await sidecar.close(); process.exit(0); });
+    process.send({ ready: true, url: 'http://127.0.0.1:' + port, homeHarness: id });
+  `;
+  try {
+    profileProcess = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', profileSource], {
+      cwd: ROOT, env: { ...childEnv, ...runtimeEnv, PAPERCUSP_PG_PORT: String(port), PAPERCUSP_SKIP_PG_DISCOVERY: '1' },
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: true,
+    });
+    let errors = '';
+    for (const stream of [profileProcess.stdout, profileProcess.stderr]) {
+      stream.on('data', (chunk) => { errors = (errors + chunk.toString()).slice(-6000); });
+    }
+    const ready = await new Promise((res, rej) => {
+      const timer = setTimeout(() => rej(new Error('operator-api profile preflight timed out: ' + errors)), 45000);
+      const failed = (error) => { clearTimeout(timer); rej(error); };
+      profileProcess.once('error', failed);
+      profileProcess.once('exit', (code, signal) => failed(new Error('operator-api profile exited ' + code + '/' + signal + ': ' + errors)));
+      profileProcess.once('message', (message) => { clearTimeout(timer); res(message); });
+    });
+    if (!ready?.ready || ready.homeHarness !== runtimeId || !/^http:\/\/127\.0\.0\.1:\d+$/.test(ready.url)) {
+      throw new Error('operator-api profile returned an invalid private identity');
+    }
+    const response = await fetch(ready.url + '/healthz', { signal: AbortSignal.timeout(5000) });
+    const health = await response.json();
+    if (!response.ok || health.pid !== profileProcess.pid || !health.capabilities?.includes('POST /embed')) {
+      throw new Error('operator-api private embedding sidecar failed capability/owner preflight');
+    }
+    runtimeEnv.PAPERCUSP_EMBED_SIDECAR_URL = ready.url;
+    console.log('[with-test-pg] operator-api preflight ready — private home harness, measured paused pipeline and embedding sidecar; background/DBOS disabled');
+  } catch (error) {
+    console.error('[with-test-pg] operator-api preflight failed: ' + (error?.stack ?? error));
+    await cleanup();
+    process.exit(1);
   }
 }
 const child = spawn(cmd[0], cmd.slice(1), {

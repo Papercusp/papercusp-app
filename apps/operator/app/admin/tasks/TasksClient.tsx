@@ -832,7 +832,7 @@ export default function TasksClient(): ReactElement {
           {schedules.length === 0 ? (
             <div style={{ ...cell, opacity: 0.8, maxWidth: 780, lineHeight: 1.5 }}>
               Nothing recurring is registered in this operator&apos;s view. That is a real answer, not a failed
-              read — but note this inventory is PER-PROCESS: sweeps that run in <code>papercup-bg-host</code>{' '}
+              read — but note this inventory is PER-PROCESS: sweeps that run in <code>papercusp-bg-host</code>{' '}
               appear only via federation, and a sibling that did not answer is reported as an unknown row rather
               than omitted.
             </div>

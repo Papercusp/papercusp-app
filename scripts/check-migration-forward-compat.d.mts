@@ -72,6 +72,14 @@ export function evaluateForwardCompatSidecar({ artifactFile, effectiveFile, side
     refusals: string[];
 };
 /**
+ * Parse the frozen repair queue's persisted openedAtMs. An absent value keeps the
+ * historical wall-clock evaluation; a malformed supplied value must fail closed.
+ *
+ * @param {string | undefined} raw
+ * @returns {Date | undefined}
+ */
+export function parseFrozenCandidateOpenedAtMs(raw: string | undefined): Date | undefined;
+/**
  * Read + evaluate the sidecar for one migration artifact on disk.
  *
  * @param {string} directory
@@ -95,6 +103,27 @@ export function readForwardCompatSidecar(directory: string, artifactFile: string
     refusals: string[];
     sidecarFile: string;
 };
+/**
+ * Cheaply find sidecars whose review date is approaching, without reading
+ * migrations or resolving the required commit ancestry. The staging sync timer
+ * uses this advisory scan on every pass, including checkout no-ops; the full
+ * migration lint remains the fail-closed gate before a restart.
+ *
+ * @param {string} directory
+ * @param {{ now?: Date, warningDays?: number, readdir?: Function, readFile?: Function }} [options]
+ * @returns {Array<{kind: 'expiring'|'expired'|'invalid', file: string, reviewBy?: string, detail?: string}>}
+ */
+export function forwardCompatReviewWarnings(directory: string, { now, warningDays, readdir, readFile, }?: {
+    now?: Date;
+    warningDays?: number;
+    readdir?: Function;
+    readFile?: Function;
+}): Array<{
+    kind: "expiring" | "expired" | "invalid";
+    file: string;
+    reviewBy?: string;
+    detail?: string;
+}>;
 /**
  * Extract column identifiers introduced by an ALTER TABLE ADD COLUMN statement.
  * Comments are masked first, while SQL string bodies remain visible so a real
@@ -289,3 +318,4 @@ export const SIDECAR_KIND: "migration-forward-compat-ack";
 export const SIDECAR_VERSION: 1;
 /** Exact permitted key set. An unknown key refuses the sidecar (no free-form fields). */
 export const SIDECAR_KEYS: readonly string[];
+export const DEFAULT_REVIEW_WARNING_DAYS: 14;

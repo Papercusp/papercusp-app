@@ -25,6 +25,15 @@
 # place after copying, so a byte comparison would never match. Hashing ~30 MB on
 # every install and build would also make the cheap path expensive.
 
+# Copy one generated runtime asset without writing through a destination that
+# another checkout may still hard-link. GNU cp --remove-destination is unavailable
+# on macOS, where these same postinstall scripts run during desktop packaging.
+mirror_copy_unlinked() {
+  local source="$1" destination="$2"
+  rm -f "$destination"
+  cp "$source" "$destination"
+}
+
 # mirror_file_set <dir> [excluded-relative-path...]
 # Print the sorted relative file paths under <dir> (./a/b.js form), excluding
 # the named paths (for a stamp file that lives inside the mirror).

@@ -1,0 +1,72 @@
+---
+title: Workspaces and agents
+description: Know where your work runs and how to direct, follow and verify an agent session.
+documents:
+  - packages/operator-core/lib/agent-tools/plans/start.ts
+  - packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.ts
+---
+
+## Workspace, project, session
+
+A **workspace** is an environment on a local or remote machine. A **harness**
+is a managed project in it. An **agent session** works on a task using the tools
+and permissions available in that environment.
+
+The portal combines apps and workspace controls in one browser. Selecting a
+different workspace changes the intended work context; it does not copy files,
+move an agent, or grant access to another user's project.
+
+## Before starting work
+
+Check the selected workspace and project, connection status and intended
+execution route. If the workspace is on your own computer, keep that computer
+awake and connected. For hosted machines, inspect the cloud/workspace control
+surface before assuming provisioning is complete.
+
+Give an agent a goal and acceptance conditions, for example:
+
+> Add export to this project. Keep existing files and authentication unchanged.
+> Show a plan first, run regression tests, and verify a real exported file.
+> Report anything that remains untested.
+
+Ask for the plan to record dependencies, decisions and verification. A
+conversation is useful context; a maintained plan and work-item ledger are
+the durable record of a multi-step task.
+
+Use [Plans and work](/docs/plans-and-work) to follow dependencies and formal
+acceptance. For coordinated workers, use
+[Agent modes and fleets](/docs/agent-modes-and-fleets) rather than launching
+unrelated sessions on the same files.
+
+## Approval, AUTO and stopping
+
+When approval is required, review both the proposed changes and who will run
+them. Explicitly enabling **AUTO** lets an agent proceed within your authorized
+scope; it does not bypass tool permissions or authorize unrelated destructive
+or public actions.
+
+You can ask to pause or stop. Check the session's acknowledgement and durable
+status. Closing your tab is not a reliable stop mechanism for a remote agent.
+Do not launch a second agent on the same task just because the first is waiting
+on a known dependency.
+
+## Understand a completion report
+
+Look for the changed files, tests and observed result. Distinguish:
+
+- **Implemented** — the intended changes exist in the working source.
+- **Verified** — the relevant behavior was actually exercised.
+- **Shipped** — the intended production destination contains the verified result.
+
+A typecheck is useful, but it is not a behavior test. A deploy request is not
+proof a deploy completed. Ask for the evidence appropriate to your goal.
+
+## Find the right documentation
+
+**Docs** opens this public product manual. **Project docs** describes the
+selected project's own generated or maintained documentation. Internal
+engineering documentation is authenticated and is not the public manual.
+
+If project docs are missing, select the intended project and ask whether its
+documentation exists, is current, and needs regeneration or manual upkeep.
+See [Troubleshooting](/docs/troubleshooting).

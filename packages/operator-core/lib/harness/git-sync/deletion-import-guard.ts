@@ -230,6 +230,154 @@ export async function detectUnsafeDeletions(deps: DeletionGuardDeps): Promise<Co
   return offenders;
 }
 
+/** A staged deletion the commit's own tree still imports (WI-10006352). */
+export interface StagedDeletionHold {
+  path: string;
+  /** Index paths whose STAGED text still imports `path` (relative specifier). */
+  importedBy: string[];
+  /** Set when the index could not be scanned for this deletion — held conservatively. */
+  scanError?: string;
+}
+
+/**
+ * WI-10006352: the INDEX-level backstop for `detectUnsafeDeletions`, run immediately before
+ * each git-sync commit (see `guardStagedIndexBeforeCommit` in run-git-sync.ts).
+ *
+ * `detectUnsafeDeletions` judges importers by their WORKING-TREE text, before the commit's
+ * exclusion set is final. Every later exclusion — a quarantined or live-lock importer, a
+ * Cargo/npm closure, a late lock or drift unstaged after `git add` — leaves that importer's
+ * HEAD text in the commit. If the working-tree edit dropped an import but the edit is held
+ * back, the deletion it made safe still commits, and HEAD imports a module that no longer
+ * exists. MEASURED 2026-10-06: e7b60f03fe deleted `agent-tools/gmail/*` while the
+ * `agent-tools/index.ts` edit removing `import './gmail/create-draft'` was held as
+ * `[quarantined-importer]`; every isolated build of staging failed on the unresolved import.
+ *
+ * The index IS the tree `git commit` records, so this reads only the index: staged deletions
+ * (`git diff --cached --diff-filter=D`), candidate importers (`git grep --cached`), and their
+ * staged text (`git show :<path>`). Unlike the pre-stage guard it never fails open: a deletion
+ * whose index scan fails is held, because holding a deletion only defers it one tick, while
+ * committing a broken one red-pins every isolated checkout.
+ */
+export async function detectStagedDeletionsStillImported(deps: {
+  runGit: RunGit;
+  repoPath: string;
+  /** The caller's own CURRENT `git diff --cached --diff-filter=D` listing, to skip re-reading it.
+   *  Omit after anything has changed the index since that listing was taken. */
+  stagedDeletions?: readonly string[];
+  log?: (m: string) => void;
+}): Promise<{ ok: true; holds: StagedDeletionHold[] } | { ok: false; error: string }> {
+  const { runGit, repoPath, log } = deps;
+  let listed = deps.stagedDeletions;
+  if (!listed) {
+    const deletedRes = await runGit(
+      ['diff', '--cached', '--name-only', '--no-renames', '-z', '--diff-filter=D'],
+      repoPath,
+    );
+    if (deletedRes.code !== 0) {
+      return { ok: false, error: `could not list staged deletions: ${(deletedRes.stderr || deletedRes.stdout).trim()}` };
+    }
+    listed = deletedRes.stdout.split('\0').filter(Boolean);
+  }
+  const deleted = listed.filter(isCheckedModuleDeletion);
+  if (deleted.length === 0) return { ok: true, holds: [] };
+
+  // A module path still provided by another indexed file (x.js -> x.ts, foo.ts <-> foo/index.ts)
+  // is not a broken import target, so its importers need no check.
+  const providedTargets = await indexedModuleTargets(runGit, repoPath, deleted, log);
+
+  const holds: StagedDeletionHold[] = [];
+  await mapPool(deleted, MAX_READ_CONCURRENCY, async (deletedPath) => {
+    const deletedNorm = normalizeModulePath(deletedPath);
+    if (providedTargets.has(deletedNorm)) return;
+    const candidates = new Set<string>();
+    for (const token of candidateSearchTokens(deletedPath)) {
+      if (!token) continue;
+      let grep: { code: number; stdout: string; stderr: string };
+      try {
+        grep = await runGit(
+          ['grep', '--cached', '-zIl', '-F', token, '--', ...RESOLVABLE_EXTS.map((ext) => `*${ext}`)],
+          repoPath,
+        );
+      } catch (e) {
+        holds.push({ path: deletedPath, importedBy: [], scanError: `git grep --cached threw: ${errMsg(e)}` });
+        return;
+      }
+      if (grep.code !== 0 && grep.code !== 1) {
+        holds.push({
+          path: deletedPath,
+          importedBy: [],
+          scanError: `git grep --cached exited ${grep.code}: ${(grep.stderr || grep.stdout).trim()}`,
+        });
+        return;
+      }
+      for (const f of grep.stdout.split('\0').filter(Boolean)) candidates.add(f);
+    }
+    const importedBy: string[] = [];
+    for (const candidate of candidates) {
+      let show: { code: number; stdout: string; stderr: string };
+      try {
+        show = await runGit(['show', `:${candidate}`], repoPath);
+      } catch (e) {
+        holds.push({ path: deletedPath, importedBy, scanError: `could not read staged ${candidate}: ${errMsg(e)}` });
+        return;
+      }
+      if (show.code !== 0) {
+        holds.push({
+          path: deletedPath,
+          importedBy,
+          scanError: `could not read staged ${candidate}: ${(show.stderr || show.stdout).trim()}`,
+        });
+        return;
+      }
+      for (const spec of extractRelativeImportSpecifiers(show.stdout)) {
+        if (resolveRelativeSpecifier(candidate, spec) === deletedNorm) {
+          importedBy.push(candidate);
+          break;
+        }
+      }
+    }
+    if (importedBy.length > 0) holds.push({ path: deletedPath, importedBy: importedBy.slice(0, MAX_IMPORTERS_REPORTED) });
+  });
+  if (holds.length > 0) {
+    log?.(
+      `[deletion-guard] staged deletion(s) still imported by the index: ` +
+        holds.map((h) => `${h.path} <- ${h.scanError ?? h.importedBy.join(', ')}`).join('; '),
+    );
+  }
+  return { ok: true, holds };
+}
+
+/** Normalized module paths that some INDEXED file still provides, for each deletion's candidates. */
+async function indexedModuleTargets(
+  runGit: RunGit,
+  repoPath: string,
+  deleted: string[],
+  log?: (m: string) => void,
+): Promise<Set<string>> {
+  const specs = new Set<string>();
+  for (const path of deleted) {
+    const norm = normalizeModulePath(path);
+    for (const ext of RESOLVABLE_EXTS) {
+      specs.add(`:(literal)${norm}${ext}`);
+      specs.add(`:(literal)${norm}/index${ext}`);
+    }
+  }
+  const out = new Set<string>();
+  let res: { code: number; stdout: string; stderr: string };
+  try {
+    res = await runGit(['ls-files', '--cached', '-z', '--', ...specs], repoPath);
+  } catch (e) {
+    log?.(`[deletion-guard] ls-files --cached threw — treating no deleted module as still provided: ${errMsg(e)}`);
+    return out;
+  }
+  if (res.code !== 0) {
+    log?.(`[deletion-guard] ls-files --cached failed — treating no deleted module as still provided: ${res.stderr || res.stdout}`);
+    return out;
+  }
+  for (const f of res.stdout.split('\0').filter(Boolean)) out.add(normalizeModulePath(f));
+  return out;
+}
+
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

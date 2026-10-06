@@ -31,7 +31,7 @@ import {
   workspaceHostSoakQualifiesForAcceptance,
 } from '../../../workspace-host/soak';
 import { redactWorkspaceHostText } from '../../../workspace-host/observability-store';
-import { resolveGcpWorkspaceHostSoakSeams } from '../../../workspace-host/soak-gcp';
+import { resolveWorkspaceHostSoakSeams } from '../../../workspace-host/soak-seams';
 import {
   WorkspaceHostReleaseBindingError,
   resolveWorkspaceHostReleaseBinding,
@@ -112,7 +112,7 @@ const start = defineTool({
       }
       // Preflight the pin so a host that cannot be soaked is refused now, not a step later in a
       // workflow nobody is watching. The workflow re-pins from its own read; this one is discarded.
-      const seams = await resolveGcpWorkspaceHostSoakSeams({ workspaceId, hostId });
+      const seams = await resolveWorkspaceHostSoakSeams({ workspaceId, hostId });
       pinWorkspaceHostSoakSubject({ workspaceId, hostId, soakId }, await seams.readInstance());
 
       const result = await startWorkspaceHostSoakWorkflow({ workspaceId, hostId, soakId, policy, releaseBinding });

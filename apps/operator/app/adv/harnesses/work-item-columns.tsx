@@ -6,6 +6,7 @@ import { IssueStatusPill, KindPill, SeverityPill, StatusPill } from '../../harne
 import { TrustBadge, trustBadgeState } from '../../harness/TrustBadge';
 import type { HarnessStatus } from '../../harness/theme';
 import type { WorkItemRow } from './WorkItemsPanel';
+import { WORK_ITEM_PRESENTATION_LABELS, WORK_ITEM_PRESENTATION_REASONS } from '@papercusp/operator-core/lib/work-item-presentation-contract';
 
 /**
  * SHARED work-item column + filter definitions (dependency-health-pane-2026-08-02
@@ -66,6 +67,17 @@ export function buildWorkItemColumns({
   isTrusted,
 }: WorkItemColumnOptions): ColumnDef<WorkItemRow>[] {
   return [
+    {
+      key: 'acceptance', header: 'Acceptance', width: 2.4,
+      toCopyText: r => r.presentation ? `${WORK_ITEM_PRESENTATION_LABELS[r.presentation.stage]} · ${r.presentation.reason}` : '',
+      render: ({ row }) => {
+        if (!row.presentation) return <>—</>;
+        const [reason, ...detail] = row.presentation.reason.split(': ');
+        return <span style={CELL_TRUNCATE} title={`${WORK_ITEM_PRESENTATION_REASONS[reason] ?? reason}${detail.length ? `: ${detail.join(': ')}` : ''} · Select this row for evidence and decisions`}>
+          {WORK_ITEM_PRESENTATION_LABELS[row.presentation.stage]}
+        </span>;
+      },
+    },
     {
       key: 'id',
       header: 'ID',

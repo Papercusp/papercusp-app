@@ -159,6 +159,8 @@ const pct = (r: Ratio): string =>
 
 export function renderConflictBenchReport(input: {
   readonly generatedAt: string;
+  /** The judge wording measured (plan jev-performance-improvements-2026-09-30, D-007); omitted on older runs. */
+  readonly wording?: string;
   readonly calls: ConflictBenchCalls;
   readonly metrics: ConflictBenchMetrics;
   readonly verdict: ReturnType<typeof evaluateD015>;
@@ -167,6 +169,7 @@ export function renderConflictBenchReport(input: {
   const { metrics: m, verdict, calls } = input;
   const lines: string[] = [];
   lines.push(`# Jev memory conflict judge — P-009 validation (${input.generatedAt})`, '');
+  if (input.wording) lines.push(`Wording: ${input.wording}.`, '');
   lines.push(`Model(s) answering: ${calls.models.join(', ') || 'none'}. Calls: ${calls.calls}, inconclusive ${calls.inconclusive}${calls.inconclusive ? ` (${Object.entries(calls.inconclusiveReasons).map(([k, v]) => `${k} ${v}`).join(', ')})` : ''}.`);
   lines.push(`Pairs: ${m.pairs} (unjudged on the primary run: ${m.unjudgedPairs}). Rule: flag when P(contradicts) >= 0.5 (D-015).`, '');
   lines.push(`## D-015 verdict: ${verdict.pass ? 'MEETS the bar' : 'does NOT meet the bar'}`, '');

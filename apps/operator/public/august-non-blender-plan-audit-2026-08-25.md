@@ -6,7 +6,7 @@ Live reconciliation checked on 2026-08-26 at approximately 00:53 EDT.
 
 This is the canonical 70-plan August closeout cohort. It excludes every canonical plan whose frontmatter contains `origin: scout`, the stored Blender/Scout provenance marker.
 
-That proves these plans are outside the Blender/Scout cohort. It does **not** prove that owner personally authored every plan: all 70 currently have a null/blank structured `origin`, so positive personal authorship is not available from the plan metadata.
+That proves these plans are outside the Blender/Scout cohort. It does **not** prove that Avi personally authored every plan: all 70 currently have a null/blank structured `origin`, so positive personal authorship is not available from the plan metadata.
 
 `Ready` is not terminal. It generally means implementation may be complete, but acceptance or lifecycle closeout remains unfinished.
 

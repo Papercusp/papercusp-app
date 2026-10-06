@@ -3,7 +3,8 @@
  *
  *   npx tsx packages/operator-core/lib/memory/bench/jev-robustness-cli.ts \
  *     [--threshold-b 0.4] [--threshold-c 0.35] [--floor-c 0.52] [--repeats 3] \
- *     [--llm-pairs 400] [--no-llm] [--concurrency 4] [--keep] [--encoding state|instructions]
+ *     [--llm-pairs 400] [--no-llm] [--concurrency 4] [--keep] [--encoding state|instructions] \
+ *     [--variant v1|v2-content|substance|score|pair]
  *
  * `--encoding` picks the PRIMARY encoding: the one the repeats, the order probe,
  * the adversarial step and the agreement step all run. Step 2 compares it with
@@ -51,11 +52,12 @@ import { loadGoldSetFixture } from './gold-set';
 import {
   alternateEncoding,
   ARM_C_FLOOR,
-  buildAdmissionRequest,
   evaluateFilterArm,
   gradeDocId,
+  judgeAdmission,
   parseAdmissionEncoding,
-  scoresFromDecision,
+  parseAdmissionVariant,
+  scoresFromJudgement,
   type AdmissionEncoding,
   type QueryScores,
 } from './jev-admission';
@@ -105,6 +107,7 @@ const concurrency = Math.max(1, Math.floor(numArg('--concurrency', 4)));
 const keep = process.argv.includes('--keep');
 const primaryEncoding = parseAdmissionEncoding(argValue('--encoding'));
 const otherEncoding = alternateEncoding(primaryEncoding);
+const variant = parseAdmissionVariant(argValue('--variant'));
 const log =(m: string) => console.log(new Date().toISOString().slice(11, 19), m);
 
 /** Bounded-concurrency map that preserves index alignment. */
@@ -156,10 +159,12 @@ async function judge(
     if (!q) throw new Error(`replayed query ${o.queryId} is not in the gold set`);
     const perm = order === 'reversed' ? reversedOrder(cands.length) : cands.map((_, i) => i);
     const shown: CandidateHit[] = permute(cands, perm);
-    const { request, questionIds } = buildAdmissionRequest(q.query, shown, encoding);
-    liveJevCalls += 1;
-    const outcome = await client.decide(request, { consumer: 'memory-bench', subjectIds: shown.map(gradeDocId) });
-    const s = scoresFromDecision(outcome, questionIds);
+    const s = scoresFromJudgement(
+      await judgeAdmission(q.query, shown, encoding, variant, (request, call) => {
+        liveJevCalls += 1; // per request: a `pair` query sends one per candidate
+        return client.decide(request, { consumer: 'memory-bench', subjectIds: call.candidates.map((ci) => gradeDocId(shown[ci])) });
+      }),
+    );
     return { ...s, scores: unpermuteScores(s.scores, perm) };
   });
 }
@@ -364,6 +369,7 @@ try {
       pushContract: `fusion ${pushFloors.fusionMode}, lexical bar ${pushFloors.minLexScore ?? 'backend default'}`,
       floors: `A/B ${floorA}, C ${floorC}`,
       encoding: `${primaryEncoding} (primary: repeats, order, adversarial, agreement); compared with ${otherEncoding} in step 2`,
+      variant,
       thresholds: `B t=${thresholdB}, C t=${thresholdC} (P-004 run 5 selections unless overridden)`,
       jevModel: JEV_PINNED_MODEL,
       filterTimeoutMs: JEV_MEMORY_TIMEOUT_MS,

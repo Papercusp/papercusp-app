@@ -35,6 +35,7 @@ import { defineTool } from '@papercusp/agent-mcp';
 import { snapshotCachedReadStats } from '../../cache';
 import { resolveClusterWorkers } from '../../cluster-fork';
 import { getResourceProfile } from '../../resource-profile';
+import { declaredResourceDomainKind, resourceDomainKindsHealth } from '../locks/resource-domain-kinds';
 
 /** Workers observed across calls in THIS process's lifetime — see the pid caveat. */
 const SEEN_PIDS = new Set<number>();
@@ -42,7 +43,7 @@ const SEEN_PIDS = new Set<number>();
 export default defineTool({
   name: 'dev:cache_stats',
   description:
-    "Live operator READ-CACHE counters (cachedRead), per tool: hits/misses/stale/bypass/deadline, miss reasons, actual factory builds and elapsed build milliseconds. Absent misses combine new/evicted/cleared keys; no key history is retained. buildMs covers buildsCompleted, including failures; builds also includes in-flight work. L2 hits and joined readers do not add factory builds. ⚠ PER-WORKER: record pid/uptime/clusterSize and aggregate distinct workers yourself; this result covers one worker. A tool absent from perTool never called cachedRead in this process lifetime. A low hitRatePct alone does not establish expensive rebuilding.",
+    "Live operator READ-CACHE counters (cachedRead), per tool: hits/misses/stale/bypass/deadline, miss reasons, actual factory builds and elapsed build milliseconds. Absent misses combine new/evicted/cleared keys; no key history is retained. buildMs covers buildsCompleted, including failures; builds also includes in-flight work. L2 hits and joined readers do not add factory builds. Also reports this process's resource declaration cache without refreshing it; resource selects one cached declaration. ⚠ PER-WORKER: record pid/uptime/clusterSize and aggregate distinct workers yourself; this result covers one worker. A tool absent from perTool never called cachedRead in this process lifetime. A low hitRatePct alone does not establish expensive rebuilding.",
   guidance: {
     when: "Diagnosing why a read is slow or a cache seems not to serve — read hit/miss here instead of inferring cache behaviour from response latency (that inference is unsound: a cheap query and a cache hit look identical, and it produced two refuted root causes on P-007). Also for confirming the CACHE_LAYER kill-switch state (`bypass`) and whether callers are hitting deadlines.",
     notWhen:
@@ -59,6 +60,10 @@ export default defineTool({
       .max(120)
       .optional()
       .describe("Only this tool's row (e.g. 'plans:attention'). Omit for all."),
+    resource: z.string().min(1).max(200).optional().describe(
+      'Inspect one cached resource domain declaration without loading or refreshing the cache. '
+      + 'A null kind means this cache has no non-default declaration, not that the effective lock domain is tree-scoped.',
+    ),
   }),
   async handler(args) {
     const pid = process.pid;
@@ -135,6 +140,18 @@ export default defineTool({
             ? `counters are THIS worker's only (pid ${pid}); ${clusterSize} workers serve :3070, so call repeatedly to sample others`
             : null,
         uptimeSec: Math.round(process.uptime()),
+        // Read the existing pinned state synchronously: diagnosing a cold or
+        // failed cache must not repair it before the caller can observe it.
+        resourceDomainKinds: {
+          source: 'current-process',
+          ...resourceDomainKindsHealth(),
+          declaration: args?.resource === undefined ? null : {
+            resource: args.resource,
+            kind: declaredResourceDomainKind(args.resource),
+          },
+          limitations: 'Cached declarations only; a cold or failed refresh may be incomplete. '
+            + 'The effective resolver also uses maintained resource-name rules. This read does not refresh the cache.',
+        },
         toolCount: rows.length,
         totals,
         killSwitchLikelyOff: totals.bypass > 0 && totals.hits + totals.misses + totals.stale === 0,

@@ -94,7 +94,7 @@ export default [
               ownerId: latestCodexSession.coordOwnerId,
               startedAt: latestCodexSession.startedAt,
               endedAt: latestCodexSession.endedAt,
-              home: readCodexHomeDiagnostics(latestCodexSession.id),
+              home: await readCodexHomeDiagnostics(latestCodexSession.id),
             }
           : null,
         effectiveBackend: effectiveBackend(cfg),

@@ -58,5 +58,6 @@ registerSystemAction(
     });
     await runSyncBatchDeltaCheck(deps);
   },
-  { routineTimeoutMs: SYNC_BATCH_DELTA_ROUTINE_TIMEOUT_MS },
+  // WI-10005745: spawns node scripts/affected-tests.mjs and test runs from the integration tree.
+  { routineTimeoutMs: SYNC_BATCH_DELTA_ROUTINE_TIMEOUT_MS, executesIntegrationTreeCode: true },
 );

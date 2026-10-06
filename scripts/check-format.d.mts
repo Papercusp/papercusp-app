@@ -15,6 +15,7 @@ export function characterRangeForLines(source: any, range: any): {
  * range ends earlier; use its first parse error to expand the range and retry.
  */
 export function applyPrettierRangeWrites(source: any, lineRanges: any, formatRange: any, repoPath?: string): any;
+export function isTracked(repoPath: any, repoRoot?: string): boolean;
 /**
  * Return added line ranges from the repository that owns the requested file.
  *

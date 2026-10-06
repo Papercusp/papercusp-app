@@ -254,9 +254,20 @@ export function hostGlobalLockDomain(): string {
 export const HOST_GLOBAL_RESOURCES: ReadonlySet<string> = new Set([
   'release-deploy',
   'dev-server',
+  // EI-25181611831349662: all operator checkouts target the same :3170
+  // systemd unit. A tree-scoped shared probe lease was invisible to the
+  // staging-sync restart served from the other checkout. Its debounce marker
+  // must use the same host-wide identity too.
+  'staging-server',
+  'staging-server-cooldown',
   // EI-24374781045212391: one physical rig is shared by callers on :3170 and
   // :3070, whose staging and release checkouts must see the same lease.
   'hive-git-physical-rig',
+  // WI-10004352: one papercusp-bg-host.service on this host. dev:restart drains it
+  // through exclusive(bg-host), and the physical drill fences it with a shared lease
+  // for the whole run. Keyed to the serving checkout, a lease taken via :3070 was
+  // invisible to a restart served by :3170, so the fence did not fence anything.
+  'bg-host',
   // EI-21270032782365521: all SO_REUSEPORT operator workers spend from one
   // optional mid-turn memory budget. A caller-tree domain would recreate the
   // exact split-brain this set exists to prevent and make locks:list lie.
@@ -337,13 +348,13 @@ export function workspaceScopedLockDomain(): string {
  * all degrade to exactly the inference above. A declaration can promote a
  * resource OUT of the caller-tree domain; nothing can demote one INTO it.
  */
-export function resourceLockDomain(resource: string): string {
+export function resourceLockDomain(resource: string, callerTree = lockCoordinationDomain()): string {
   if (HOST_GLOBAL_RESOURCES.has(resource)) return hostGlobalLockDomain();
   if (isWorkspaceScopedResource(resource)) return workspaceScopedLockDomain();
   const declared = declaredResourceDomainKind(resource);
   if (declared === 'host-global') return hostGlobalLockDomain();
   if (declared === 'workspace') return workspaceScopedLockDomain();
-  return lockCoordinationDomain();
+  return callerTree;
 }
 
 /**

@@ -14,6 +14,7 @@
 export * from './config';
 export * from './su-lock-store';
 export * from './resource-lock-store';
+export * from './resource-atomic';
 // The pure Gray-1976 matrix moved to @papercusp/locks-core (generalize-libs).
 // Re-export exactly the intention symbols so this barrel's public surface is
 // unchanged — explicit, not `export *`, to avoid leaking locks-core's HLC/CRDT

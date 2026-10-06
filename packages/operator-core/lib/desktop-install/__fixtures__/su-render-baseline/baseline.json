@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "plan": "identities-v1-2026-08-30",
   "item": "P-018",
-  "generatedAt": "2026-09-27T08:01:07.548Z",
+  "generatedAt": "2026-10-02T14:41:36.758Z",
   "inputs": {
     "base": {
       "path": "su.base.md",
@@ -37,8 +37,8 @@
   },
   "tiers": {
     "full": {
-      "totalBytes": 118192,
-      "sha256": "75c2a876e6e4320a42a2ce15b14e900e8c7a30bc88e8b6c9b7d982ce88c00192",
+      "totalBytes": 118360,
+      "sha256": "e8bc486b18f0553fbafdb3011a03dfa0dac3f836174230392f3254194f8fdb08",
       "sections": [
         {
           "heading": "(preamble)",
@@ -169,8 +169,8 @@
         {
           "heading": "## Read the value; say what you want back",
           "origin": "generated",
-          "bytes": 3783,
-          "sha256": "815275e068ef6f66d93a4f28f9481070dfd6e38d65e1465682f6f17d40bd05e6"
+          "bytes": 3951,
+          "sha256": "1e0aae3ce91cc84d742b26aea9168ef4156ae01657e4af9f20d1f2ea065a0bb6"
         },
         {
           "heading": "## Project guide — repo conventions",
@@ -181,8 +181,8 @@
       ]
     },
     "fleet": {
-      "totalBytes": 118192,
-      "sha256": "75c2a876e6e4320a42a2ce15b14e900e8c7a30bc88e8b6c9b7d982ce88c00192",
+      "totalBytes": 118360,
+      "sha256": "e8bc486b18f0553fbafdb3011a03dfa0dac3f836174230392f3254194f8fdb08",
       "sections": [
         {
           "heading": "(preamble)",
@@ -313,8 +313,8 @@
         {
           "heading": "## Read the value; say what you want back",
           "origin": "generated",
-          "bytes": 3783,
-          "sha256": "815275e068ef6f66d93a4f28f9481070dfd6e38d65e1465682f6f17d40bd05e6"
+          "bytes": 3951,
+          "sha256": "1e0aae3ce91cc84d742b26aea9168ef4156ae01657e4af9f20d1f2ea065a0bb6"
         },
         {
           "heading": "## Project guide — repo conventions",

@@ -108,6 +108,22 @@ export async function applyMigrationForTest(sql: postgres.Sql, filePath: string)
 }
 
 /**
+ * WI-10005570 (plan personal-data-reader-set-labels-2026-10-01, D-006): every
+ * agent-facing `session_turns` read consults the disclosure ledger
+ * (personal-vault/transcript-exclusion.ts `restrictedTurnSql`) and fails CLOSED,
+ * so a fixture that hand-rolls `session_turns` and drives one of those readers
+ * must stand the ledger up too. This applies the REAL migration 1302, never
+ * hand-written DDL. Its foreign keys need `harness_shared.users`; a fixture that
+ * has none gets an id-only stub (created only when absent).
+ */
+export async function applyDisclosureLedgerForTest(sql: postgres.Sql): Promise<void> {
+  await sql.unsafe(`
+    CREATE SCHEMA IF NOT EXISTS harness_shared;
+    CREATE TABLE IF NOT EXISTS harness_shared.users (id uuid PRIMARY KEY DEFAULT gen_random_uuid());`);
+  await applyMigrationForTest(sql, resolve(SQL_DIR, '1302-personal-disclosure-labels.sql'));
+}
+
+/**
  * ── EI-18808675015292160: the hand-maintained migration list, made self-checking
  *
  * Fixtures stand their schema up from a hardcoded list of migration filenames.
@@ -329,11 +345,21 @@ export function auditMigrationList(
       const migration = creatingMigration.get(table) ?? null;
       return migration && declaredSet.has(migration) ? [] : [{ table, migration }];
     });
+  // Runtime tables are measured from their CREATING migration, never from the
+  // per-table watermark (WI-10004700). The watermark is right for the plain
+  // `missing` check, where an omission below it is a deliberate choice. For a
+  // table the runtime path really writes, it is a blind spot: declaring ONE newer
+  // migration on the table silently blesses every older gap beneath it. Observed:
+  // a fixture declaring event_awaits' 1216 passed this audit while missing 953,
+  // so every key-fire latch write failed on `superseded_at`. Gaps a fixture truly
+  // cannot apply are acknowledged per file with `knownInapplicable`.
   const runtimeStale = runtimeTableNames.flatMap((table) => {
-    const tableWatermark = watermark.get(table) ?? 0;
+    const creating = creatingMigration.get(table) ?? null;
+    const floor = creating ? (migrationNumber(creating) ?? 0) : 0;
     return orderedMigrations.flatMap(([file, touched]) => {
       const n = migrationNumber(file);
-      return !declaredSet.has(file) && n !== null && n > tableWatermark && touched.tables.has(table)
+      const afterCreation = n !== null && (n > floor || (n === floor && file !== creating));
+      return !declaredSet.has(file) && afterCreation && touched.tables.has(table)
         ? [{ table, migration: file }]
         : [];
     });
@@ -421,7 +447,7 @@ export function formatStaleMigrationList(audit: MigrationListAudit, label: strin
 }
 
 /** Read every migration in sql/ as [fileName, sqlText]. */
-function readAllMigrations(): [string, string][] {
+export function readAllMigrations(): [string, string][] {
   return readdirSync(SQL_DIR)
     .filter((f) => f.endsWith('.sql'))
     .map((f) => [f, readFileSync(resolve(SQL_DIR, f), 'utf8')] as [string, string]);
@@ -485,6 +511,114 @@ export async function applyMigrationsForTest(
     await applyMigrationForTest(sql, resolve(SQL_DIR, file));
   }
 }
+
+/**
+ * The event substrate that work-item claim, release and lifecycle paths write
+ * on every emit: awaits, the key-fire latch, wake deliveries and predicate
+ * watches. Declared as runtime tables, so the audit requires every structural
+ * migration on them since creation (WI-10004700).
+ */
+export const EVENT_SUBSTRATE_RUNTIME_TABLES = [
+  'harness_shared.event_awaits',
+  'harness_shared.event_key_fires',
+  'harness_shared.event_wake_deliveries',
+  'harness_shared.predicate_watches',
+] as const;
+
+/**
+ * Every structural migration on `EVENT_SUBSTRATE_RUNTIME_TABLES`, in numeric
+ * order. ONE list, audited on every use, instead of a copy per fixture: nine
+ * fixtures each hand-rolled a prefix of it, fell behind on 953 and 1216, and
+ * their emits failed silently inside failSoft (WI-10004685, WI-10004700). A new
+ * migration on these tables turns `migration-list-audit.test.ts` red by name.
+ */
+export const EVENT_SUBSTRATE_MIGRATIONS = [
+  '163-await-event-subscriptions.sql',
+  '175-watch-floor-coalesce-cols.sql',
+  '387-event-wake-delivery-source.sql',
+  '533-add-event-awaits-payload-filter.sql',
+  '541-predicate-watches.sql',
+  '550-event-awaits-announce-scope.sql',
+  '569-event-awaits-policy-allow-announce.sql',
+  '572-event-await-nodes-threshold-tree.sql',
+  '599-event-announcement-generation.sql',
+  '632-event-key-fire-latch.sql',
+  // WI-10005224: condition-object.ts LEFT JOINs the event_awaits_effective view (710);
+  // a fixture without it degrades findConditionObjects to "no object" through a catch.
+  '710-event-awaits-effective-deadline-view.sql',
+  '825-verified-wait-producer-health.sql',
+  '869-predicate-watch-changed-op.sql',
+  '871-lifecycle-bound-watches.sql',
+  '925-fleet-leader-watch-suppression.sql',
+  '953-event-announcement-logical-gate.sql',
+  '1216-event-await-fired-delivery-intent-marker.sql',
+  '1250-predicate-watch-evaluator-baselines.sql',
+] as const;
+
+/** PURE — merge migration lists into apply order (number, then file name), deduplicated. */
+export function mergeMigrationLists(...lists: Iterable<string>[]): string[] {
+  return [...new Set(lists.flatMap((list) => [...list]))].sort(
+    (a, b) => (migrationNumber(a) ?? 0) - (migrationNumber(b) ?? 0) || a.localeCompare(b),
+  );
+}
+
+/**
+ * Apply the event substrate (plus any fixture-specific `extra` migrations,
+ * merged into numeric order) through the audited `applyMigrationsForTest`.
+ * Use this instead of hand-listing event migrations in a fixture.
+ */
+export async function applyEventSubstrateMigrationsForTest(
+  sql: postgres.Sql,
+  opts: {
+    label: string;
+    extra?: Iterable<string>;
+    knownInapplicable?: KnownInapplicableMigration[];
+    runtimeTables?: Iterable<string>;
+  },
+): Promise<void> {
+  await applyMigrationsForTest(sql, mergeMigrationLists(EVENT_SUBSTRATE_MIGRATIONS, opts.extra ?? []), {
+    label: opts.label,
+    knownInapplicable: opts.knownInapplicable,
+    runtimeTables: [...EVENT_SUBSTRATE_RUNTIME_TABLES, ...(opts.runtimeTables ?? [])],
+  });
+}
+
+/**
+ * The coordination substrate a work-item claim/lifecycle fixture needs on top of
+ * the event substrate: the key-fire latch resolves subscribers from
+ * `coord_entity_subscriptions` (created by 123, widened by 429, 568 and 1257),
+ * and 602 adds the follow-blocker kind the release path writes. ONE preset,
+ * audited by `migration-list-audit.test.ts`, instead of a copy per fixture:
+ * three fixtures each hand-copied "the same coordination extras", and each copy
+ * had drifted differently (two lacked 429/568, two lacked the 149 acknowledgement,
+ * one never declared the runtime table at all) — WI-10004742.
+ *
+ * Spread it into `applyEventSubstrateMigrationsForTest`, then add any
+ * fixture-specific `extra` / `knownInapplicable` alongside.
+ */
+export const COORD_SUBSCRIPTION_SUBSTRATE: {
+  readonly extra: readonly string[];
+  readonly runtimeTables: readonly string[];
+  readonly knownInapplicable: KnownInapplicableMigration[];
+} = {
+  extra: [
+    '123-coordination-substrate.sql',
+    '429-coord-entity-subscriptions-allow-fleet-kind.sql',
+    '568-coord-entity-subscriptions-allow-event-kind.sql',
+    '602-work-item-follow-blockers.sql',
+    '1257-coord-entity-subscriptions-allow-muted.sql',
+  ],
+  runtimeTables: ['harness_shared.coord_entity_subscriptions'],
+  knownInapplicable: [
+    {
+      file: '149-coord-threads-federation.sql',
+      reason:
+        'attaches federation outbox triggers to coord_threads/coord_thread_posts that call ' +
+        'harness_shared.capture_substrate_outbox(), created by 108-substrate-capture-reconcile ' +
+        'alongside tables a claim/lifecycle fixture does not build; those paths never write coord threads',
+    },
+  ],
+};
 
 /**
  * Apply the migrations `claims.ts`'s `acquireClaimLocal` path needs against a
@@ -581,13 +715,19 @@ export const FED_ORDER_KEY_DDL = `
  * `provisionRestartTestDb` (@papercusp/test-config) — those DO apply the actual
  * migration files.
  */
-export async function createFreshPgDb(prefix = 'eng'): Promise<FreshPgDb> {
+export async function createFreshPgDb(
+  prefix = 'eng',
+  options: { onQuery?: (query: string) => void } = {},
+): Promise<FreshPgDb> {
   const db = await createFreshTestDb({ prefix });
 
   const sql = postgres(db.url, {
     max: 4,
     onnotice: () => {},
     prepare: false,
+    // Postgres calls debug for execution, while a tagged SQL fragment is only
+    // constructed. Tests measuring round trips must observe this boundary.
+    debug: options.onQuery ? (_connection, query) => options.onQuery?.(query) : undefined,
     types: {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       bigint: { to: 20, from: [20], serialize: (x: any) => String(x), parse: (x: string) => Number(x) } as any,

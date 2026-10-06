@@ -17,7 +17,8 @@ contributions:
     refresh: turn
     inputKind: setting
     ref: mode
-    producerRef: modes/store:agent_modes
+    producerRef: papercusp.mode-state@1
+    verb: read
     availability: optional
   - id: goal-kickoff
     purpose: prompt
@@ -25,7 +26,8 @@ contributions:
     refresh: launch
     inputKind: prompt-file
     ref: provider:goal-kickoff
-    producerRef: agent-tools/goals/start:buildGoalKickoffBrief
+    producerRef: papercusp.goal-kickoff@1
+    verb: render
     availability: optional
   - id: goal-portfolio
     purpose: prompt
@@ -33,7 +35,8 @@ contributions:
     refresh: launch
     inputKind: prompt-file
     ref: provider:goal-portfolio
-    producerRef: goal-launch-settings:renderGoalPortfolioBrief
+    producerRef: papercusp.goal-portfolio@1
+    verb: render
     availability: optional
   - id: goal-obligations
     purpose: prompt
@@ -41,7 +44,8 @@ contributions:
     refresh: turn
     inputKind: prompt-file
     ref: provider:goal-obligations
-    producerRef: agent-obligation-reader:projectAgentTurnStartObligationBrief
+    producerRef: papercusp.agent-obligations@1
+    verb: render
     availability: optional
 mode:
   id: goal

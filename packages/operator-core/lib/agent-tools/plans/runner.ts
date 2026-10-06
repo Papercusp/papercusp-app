@@ -27,10 +27,10 @@
  * persists turns to `plan_run_turns`. This module is just the runner.
  */
 
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { runAgentChat, type ChatEvent } from '../../agent-chat-stream';
+// WI-10004357: the one token reader, so the launched agent presents exactly the bearer
+// `isValidSuperuserBearer` checks ($PAPERCUSP_HOME first, then ~/.papercusp).
+import { readSuperuserToken, SUPERUSER_TOKEN_PATH } from '../../superuser-token';
 import { surfaceBackend, surfaceModel } from '../../agent-config';
 import { selfUrl } from '../../self-url';
 import { activeWorkspaceId } from '../../workspace-registry';
@@ -111,20 +111,6 @@ export const PLAN_AGENT_ALLOWED_TOOLS: readonly string[] = [
   ...PLAN_AGENT_NATIVE_TOOLS,
   ...PLAN_AGENT_MCP_TOOLS,
 ];
-
-/** Read the loopback superuser token — the launched agent's credential
- *  for the operator's own MCP endpoint. Empty string when absent. */
-function readSuperuserToken(): string {
-  try {
-    const token = readFileSync(
-      join(homedir(), '.papercusp', 'superuser-token'),
-      'utf8',
-    ).trim();
-    return token.length >= 16 ? token : '';
-  } catch {
-    return '';
-  }
-}
 
 /**
  * Assemble the MCP endpoint URL for a launched plan agent. Pure — no
@@ -265,7 +251,7 @@ export async function* runPlanAgent(
   });
   if (!mcpConfig) {
     throw new Error(
-      'plan agent not provisioned: ~/.papercusp/superuser-token is missing ' +
+      `plan agent not provisioned: ${SUPERUSER_TOKEN_PATH} is missing ` +
         'or too short — the launched agent cannot reach the plans:* MCP surface.',
     );
   }

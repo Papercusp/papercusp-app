@@ -99,6 +99,12 @@ export interface UnifiedWindowState {
    *  a `UnifiedWindowState` by hand (tests, older persisted snapshots) stay valid — absence just means
    *  staleness can't be computed for that reading, not that it's fresh. */
   observedAt?: number;
+  /** True when the same response said usage credits (overage) are serving this account
+   *  (`anthropic-ratelimit-unified-overage-in-use: true`, or overage status allowed /
+   *  allowed_warning). A `rejected` allowance window then does NOT stop the account — requests are
+   *  billed from usage credits instead — so `recordHeaders` takes no pause for it, and a consumer
+   *  must not read `rejected` as "cannot serve" (anthropic-credits-gateway-2026-09-30 P-008). */
+  overage?: boolean;
 }
 
 export interface TokenEstimate {
@@ -204,17 +210,11 @@ const MAX_PACE_DELAY_MS = 5_000;
 const RPM_AIMD_DECREASE = Number(process.env.PAPERCUSP_GATEWAY_RPM_AIMD_DECREASE) || 0.5;
 const RPM_AIMD_MIN_FACTOR = Number(process.env.PAPERCUSP_GATEWAY_RPM_AIMD_MIN) || 0.1;
 const RPM_AIMD_RECOVER_MS = Number(process.env.PAPERCUSP_GATEWAY_RPM_AIMD_RECOVER_MS) || 5 * 60_000;
-// Unified (subscription) dialect: above this utilization fraction of the binding window we start
-// pre-emptively pacing — the per-request gap grows linearly from 0 at the watermark to
-// MAX_PACE_DELAY_MS as utilization → 1, so a 5-hour budget glides toward its reset instead of
-// being burned early then hard-stopping for hours. `status: rejected` still hard-pauses to reset.
-const UNIFIED_PACE_WATERMARK = 0.8;
-// PREDICTIVE pre-emptive pause (owner-requested 2026-06-18): at/above this utilization of a rolling
-// window, the NEXT request will almost certainly 429 (the window is effectively spent — e.g. a 7-day
-// opus budget at 0.97). Rather than route into it and learn via the rejection, pause the account for
-// the bounded re-probe so the failover/walk SKIPS it until the next probe shows the window freed.
-// Distinct from the soft pace (0.8–0.95: still serve, just slow): ≥ this is "predict the 429, back off".
-const UNIFIED_PREDICT_PAUSE_WATERMARK = 0.95;
+// After a REAL rejection, the utilization a rolling window must age back below before the account is
+// worth re-probing — it only scales the post-rejection re-probe interval (scaledReprobeAt). It is NOT a
+// pause trigger: the former predictive pause at ≥ this value on a still-ALLOWED window was removed
+// (owner Avi 2026-10-01, WI-10004492 — accounts serve until an actual penalty).
+const REPROBE_RECOVERY_TARGET_UTIL = 0.95;
 // Rolling-utilization (subscription) windows — Claude Max 5h/7d — recover CONTINUOUSLY as old usage
 // ages out, so the window `reset` is when it FULLY clears, NOT when you can next send. Pausing a
 // rejection to the full multi-hour reset therefore goes stale ("paused until 09:10 with zero
@@ -223,20 +223,21 @@ const UNIFIED_PREDICT_PAUSE_WATERMARK = 0.95;
 // resumes the moment the window frees. A few extra 429s under genuine sustained exhaustion is the
 // (cheap) cost; the failover/selector route traffic away in the meantime.
 export const ROLLING_WINDOW_REPROBE_MS = 2 * 60_000;
-/** Upper bound on the SCALED predictive re-probe (below). Even a fully-spent window re-probes at least this
+/** Upper bound on the SCALED post-rejection re-probe (below). Even a fully-spent window re-probes at least this
  *  often, so a faster-than-estimated recovery (the fleet stopped using the account) is still caught. Env-tunable. */
 export const ROLLING_WINDOW_REPROBE_MAX_MS = Number(process.env.PAPERCUSP_ROLLING_REPROBE_MAX_MS) || 30 * 60_000;
 
 /** Re-probe horizon SCALED to a rolling window's recovery (owner-reported 2026-06-21: agents pinned to a
  *  97%-7d account 429'd repeatedly while that account's 5h window read empty). A rolling-utilization window
- *  recovers ~linearly toward 0 by `resetAt`, so the time for it to drop back below the predict-pause
- *  watermark is ≈ (resetAt - now) × (util - watermark) / util. The 5h window (reset minutes-to-hours out)
+ *  recovers ~linearly toward 0 by `resetAt`, so the time for it to drop back below
+ *  REPROBE_RECOVERY_TARGET_UTIL is ≈ (resetAt - now) × (util - target) / util. Applied ONLY after a real
+ *  rejection (status `rejected`) — never to a still-allowed window. The 5h window (reset minutes-to-hours out)
  *  re-probes in minutes; a 7d window AT its cap (reset ~a day out) re-probes in ~tens of minutes — instead of
  *  the flat 2-min cadence, which on the 7d window just re-lured requests into a 429 every 2 minutes and never
  *  let the account stay parked so routing/failover could walk to one with weekly headroom. Clamped to
  *  [REPROBE_MS, REPROBE_MAX_MS]. */
 function scaledReprobeAt(now: number, util: number, resetAt: number): number {
-  const recover = Math.max(0, util - UNIFIED_PREDICT_PAUSE_WATERMARK) / Math.max(util, 0.01);
+  const recover = Math.max(0, util - REPROBE_RECOVERY_TARGET_UTIL) / Math.max(util, 0.01);
   const scaled = resetAt > now ? (resetAt - now) * recover : 0;
   return now + Math.min(ROLLING_WINDOW_REPROBE_MAX_MS, Math.max(ROLLING_WINDOW_REPROBE_MS, scaled));
 }
@@ -308,7 +309,7 @@ export function decideConcurrency(s: GovernorState): AcquireDecision {
 /** PURE: the RATE + PAUSE + pacing gate (everything except concurrency) — the account-wide
     budget that RB-007 shares cross-process. */
 export function decideRate(s: GovernorState, now: number, est: TokenEstimate = {}, allowSoftPaused = false): AcquireDecision {
-  // A pause blocks admission — UNLESS the caller will accept a SOFT (predictive) pause (the gateway's
+  // A pause blocks admission — UNLESS the caller will accept a SOFT pause (window still allowed; the gateway's
   // last-resort fallback: serve a serviceable near-cap account rather than shed). A HARD pause (real 429 /
   // rejected window) always blocks. The pace below still applies, so a soft-paused account serves SLOWLY.
   if (now < s.pausedUntil && !(allowSoftPaused && isSoftPause(s))) {
@@ -351,10 +352,11 @@ export function decideRate(s: GovernorState, now: number, est: TokenEstimate = {
 /** PURE: may this turn proceed at `now`? Concurrency first, then the rate/pause budget. If not,
     how long to wait before re-checking. */
 /**
- * SOFT (predictive) pause vs HARD (rejected) pause (owner-reported 2026-06-21). A predictive pause (util ≥
- * 0.95 but the window is still ALLOWED — util < 1, status not `rejected`) means Anthropic would STILL serve
- * this account; we paused it only to ROUTE AROUND it when a healthier account exists. A HARD pause (an actual
- * 429 / `rejected` window) means the account genuinely cannot serve. This predicate lets routing SERVE a
+ * SOFT pause vs HARD (rejected) pause (owner-reported 2026-06-21). A SOFT pause is a pause whose last-seen
+ * window is still ALLOWED (status not `rejected`) — Anthropic would STILL serve this account. (Since
+ * 2026-10-01, WI-10004492, recordHeaders no longer sets a predictive pause on an allowed window at all, so a
+ * soft pause now only arises when some other path — e.g. a non-window 429 via `penalize()` — paused a bucket
+ * whose window still reads allowed.) A HARD pause (a `rejected` window) means the account genuinely cannot serve. This predicate lets routing SERVE a
  * soft-paused account as a last-resort fallback (`allowSoftPaused`) instead of treating "near the cap" as
  * "down" and shedding — which manufactured "all accounts throttled" from accounts that still had residual
  * budget. No `unified` recorded yet ⇒ treat as HARD (conservative: don't override an unexplained pause).
@@ -474,14 +476,24 @@ export function recordHeaders(s: GovernorState, headers: Record<string, string |
 
   // Unified (subscription) dialect: rolling-UTILIZATION windows (5h + 7d), not per-minute
   // buckets — a Claude Max/Pro account never returns the classic `*-limit` headers. A window
-  // `status: rejected` → hard-pause to its reset; high utilization (< 1, still allowed) →
-  // pre-emptive pace that grows linearly past the watermark. The most-constraining window is
-  // recorded on `s.unified` for observability (P-014). Resets are unix seconds here.
+  // `status: rejected` → bounded re-probe pause; high utilization (< 1, still allowed) → no pause
+  // and no pace (it serves at full rate). The most-constraining window is recorded on `s.unified`
+  // for observability (P-014). Resets are unix seconds here.
   const unifiedWindows: Array<{ window: string; statusK: string; utilK: string; resetK: string }> = [
     { window: '5h', statusK: 'anthropic-ratelimit-unified-5h-status', utilK: 'anthropic-ratelimit-unified-5h-utilization', resetK: 'anthropic-ratelimit-unified-5h-reset' },
     { window: '7d', statusK: 'anthropic-ratelimit-unified-7d-status', utilK: 'anthropic-ratelimit-unified-7d-utilization', resetK: 'anthropic-ratelimit-unified-7d-reset' },
     { window: 'unified', statusK: 'anthropic-ratelimit-unified-status', utilK: 'anthropic-ratelimit-unified-utilization', resetK: 'anthropic-ratelimit-unified-reset' },
   ];
+  // Usage credits (overage) serving: past the allowance, Anthropic bills the request from usage
+  // credits instead of refusing it, so a `rejected` allowance window — or one predicted to reject —
+  // no longer means "this account cannot serve". Pausing it would strand credits the owner enabled
+  // (anthropic-credits-gateway-2026-09-30 P-008, D-003). Overage that cannot serve (status rejected,
+  // a disabled reason) is NOT this case: the allowance verdict stands and pauses as before.
+  const overageStatus = String(h['anthropic-ratelimit-unified-overage-status'] ?? '').toLowerCase();
+  const overageServes =
+    String(h['anthropic-ratelimit-unified-overage-in-use'] ?? '').toLowerCase() === 'true' ||
+    overageStatus === 'allowed' ||
+    overageStatus === 'allowed_warning';
   let binding: UnifiedWindowState | undefined;
   for (const w of unifiedWindows) {
     const status = h[w.statusK];
@@ -493,32 +505,27 @@ export function recordHeaders(s: GovernorState, headers: Record<string, string |
     // continuously, so sitting on the multi-hour reset goes stale (false exhaustion). See
     // ROLLING_WINDOW_REPROBE_MS. The real `resetAt` is still recorded on `s.unified` (observability)
     // + used by the gateway failover's rejoin time.
-    if (rejected) {
+    if (overageServes) {
+      // Usage credits carry the request past the allowance: no pause (see overageServes above).
+    } else if (rejected) {
       const reprobeAt = scaledReprobeAt(now, util ?? 1, resetAt);
       if (reprobeAt > s.pausedUntil) s.pausedUntil = reprobeAt;
     }
-    // PREDICTIVE skip: a window already at/over its cap (e.g. a 7-day opus budget at ≥0.95) will 429
-    // the next request — pause it NOW so routing/failover walks around it, instead of routing in and
-    // learning via the rejection (the owner-reported "fully-used account should be predicted to 429,
-    // not hit" gap). Same bounded re-probe as the `rejected` branch, so the account rejoins the moment
-    // the rolling window ages back below the cap. Skipped on a stale reset (resetAt 0/past): without a
-    // fresh window we can't trust the utilization fraction.
-    else if (util !== undefined && util >= UNIFIED_PREDICT_PAUSE_WATERMARK && resetAt > now) {
-      const reprobeAt = scaledReprobeAt(now, util, resetAt);
-      if (reprobeAt > s.pausedUntil) s.pausedUntil = reprobeAt;
-    }
-    if (util !== undefined && util > UNIFIED_PACE_WATERMARK && util < 1 && resetAt > now) {
-      const gap = Math.min(
-        MAX_PACE_DELAY_MS,
-        Math.round((MAX_PACE_DELAY_MS * (util - UNIFIED_PACE_WATERMARK)) / (1 - UNIFIED_PACE_WATERMARK)),
-      );
-      if (gap > pace) pace = gap;
-    }
+    // NO predictive pause on a window Anthropic still ALLOWS, however high its utilization (owner Avi,
+    // 2026-10-01, WI-10004492: "let the account keep going until we hit an actual penalty — no early
+    // pausing at 95%"). The former ≥0.95 predictive pause re-armed a 30-min park after EVERY served
+    // request on an account with weekly headroom left (ownerhandle4 at 0.96 got ~1 request per 30 min while
+    // the fleet starved), idling the last few % of each allowance. Only a real rejection (above) or a
+    // 429 via `penalize()` pauses now.
+    // NO utilization pacing either (owner Avi, 2026-10-01, WI-10004505: "remove that. keep the burn-rate
+    // shed"). The former ≥0.8 soft pace spaced requests up to 5s apart as a window filled, throttling an
+    // account that still had allowance. A high-but-allowed window now serves at full rate; the burn
+    // governor's projected-exhaustion shed (WI-41147, outside this function) is the only pre-penalty brake.
     // Most-constraining window wins for observability: a rejected window beats an allowed one;
     // among same-verdict windows, the higher utilization binds.
     const u = util ?? (rejected ? 1 : 0);
     if (!binding || (rejected && !binding.rejected) || (rejected === binding.rejected && u > binding.utilization)) {
-      binding = { window: w.window, utilization: u, resetAt, rejected, observedAt: now };
+      binding = { window: w.window, utilization: u, resetAt, rejected, observedAt: now, ...(overageServes ? { overage: true } : {}) };
     }
   }
   if (binding) s.unified = binding;

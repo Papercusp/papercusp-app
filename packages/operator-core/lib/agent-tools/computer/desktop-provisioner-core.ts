@@ -53,7 +53,7 @@ export interface SandboxDesktop {
    * THE FAILURE THIS CLOSES. The X server was spawned with `stdio: 'ignore'` and nothing
    * watched it, so when it died the worker kept its socket open and the lease kept
    * offering a `ready` desktop whose every dial failed `desktop_dial_failed`, with no
-   * trace of why in any journal (measured on owner-test 2026-09-30).
+   * trace of why in any journal (measured on avi-test 2026-09-30).
    */
   xServerExited?: Promise<DesktopXServerExit>;
   /** X display string, e.g. ":110". Set this as PAPERCUSP_COMPUTER_DISPLAY for the agent. */

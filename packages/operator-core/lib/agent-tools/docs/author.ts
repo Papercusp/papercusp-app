@@ -687,6 +687,9 @@ export default defineTool({
     // slug.
     const ref = `${section}/${slug}`;
     const docId = `${ref}.mdx`;
+    if (paths.sources?.[section.split('/')[0]]) {
+      return err('file_authoritative_source — edit the namespaced corpus source file with its file lock, then harness_docs:anchor/verify; docs:author must not create a second canonical copy');
+    }
     const abs = safeJoinUnderRoot(paths.docsRoot, docId);
     if (!abs) return err('path_traversal — section/slug resolved outside the docs root');
 

@@ -531,6 +531,9 @@ function runScheduledFetch(
   const timeoutMs = schedulerTimeoutForMethod(method);
   const runOptions: OriginSchedulerRunOptions = {
     class: requestClass,
+    // The pathname identifies the slot occupant without storing credentials,
+    // workspace/query values, headers or request bodies in page diagnostics.
+    label: `${method} ${new URL(rawUrlOf(input), window.location.href).pathname}`,
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     ...(signal ? { signal } : {}),
   };
@@ -582,7 +585,10 @@ export function installOriginSchedulerFetch(): InstallHandle | null {
 
     const { inFlightReads } = dedupeState;
     const existing = inFlightReads.get(key);
-    if (existing) return joinInFlightRead(existing, signal);
+    // The last waiter can abort synchronously (for example on StrictMode
+    // cleanup) before promise settlement drops the entry. A replacement must
+    // start fresh rather than inherit that already-cancelled transport.
+    if (existing && !existing.controller?.signal.aborted) return joinInFlightRead(existing, signal);
 
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const entry: InFlightRead = {

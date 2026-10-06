@@ -33,6 +33,9 @@ export default defineTool({
       patch: z.record(z.string(), z.unknown()),
     }),
   ]),
+  // Keep the static write classification as the safe fallback, but classify
+  // the validated read operation accurately for code:run's mutation accounting.
+  effectForCall: (args) => (args.op === 'get' ? 'read' : 'write'),
   async handler(args) {
     if (args.op === 'get') {
       const prefs = await loadVoicePrefs();

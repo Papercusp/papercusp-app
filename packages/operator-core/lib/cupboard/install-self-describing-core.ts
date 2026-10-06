@@ -30,7 +30,7 @@
  * unit-testable without real git, network, or the host filesystem layout.
  */
 import { promises as fs, existsSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   canonicalTreeDigest,
@@ -38,6 +38,7 @@ import {
   HEX_SHA256_RE,
   type TreeDigestEntry,
 } from '@papercusp/artifact-registry';
+import { fetchVerifiedReleaseFiles } from './self-describing-release';
 
 // A mirror-repo clone target. Mirrors install-blueprint-core / install-template-core.
 const GITHUB_URL_RE =
@@ -76,6 +77,10 @@ export interface ContentPinRef {
   commitSha: string;
   /** `canonicalTreeDigest` over every blob under `<ref>/` at that commit — 64-hex sha256. */
   treeDigest: string;
+  /** The Merkle root (`sha256:<hex>`) of the release bytes the publisher shipped to the R2 ORIGIN
+   *  (P-011). Present ⇒ the installer prefers the origin bytes and verifies this root; the git pin
+   *  above then only gates the GitHub FALLBACK. Absent ⇒ GitHub-only (pre-P-011 listing). */
+  releaseContentHash?: string;
 }
 
 /** What the install verified about the content it placed. `null` ⇒ the input carried
@@ -137,6 +142,9 @@ export interface InstallSelfDescribingDeps {
   listTreeBlobs: (cloneDir: string, sha: string, ref: string) => Promise<TreeDigestEntry[]>;
   /** A scratch dir for the clone (real: os.tmpdir()). */
   tmpDir: () => string;
+  /** GET the release bytes for `contentHash` from the R2 origin, or `null` when unavailable.
+   *  Optional: absent ⇒ the installer goes straight to GitHub. The caller verifies the bytes. */
+  fetchArtifact?: (contentHash: string) => Promise<Buffer | null>;
 }
 
 export interface InstallSelfDescribingResult<TMeta> {
@@ -152,6 +160,10 @@ export interface InstallSelfDescribingResult<TMeta> {
    *  branch tip was placed unverified. Never absent: a caller that forgets to look
    *  still gets an explicit "unverified" rather than a missing field. */
   pin: VerifiedContentPin | null;
+  /** Where the placed bytes came from: `r2` ⇒ the origin copy, verified against the pinned
+   *  `release_content_hash` Merkle root; `github` ⇒ the mirror (pinned commit + P-002 digest check,
+   *  or the unverified tip when the listing carries no pin). */
+  contentSource: 'r2' | 'github';
 }
 
 /** Validate a caller-supplied pin's SHAPE before spending a fetch on it. */
@@ -256,7 +268,34 @@ export async function installSelfDescribingFromCupboard<TMeta>(
 
   try {
     let verifiedPin: VerifiedContentPin | null = null;
-    if (input.pin) {
+    let contentSource: 'r2' | 'github' = 'github';
+    // P-011: the bytes the publisher shipped to the R2 ORIGIN win when they verify against the pinned
+    // release root. Unavailable / unverifiable / unplaceable origin bytes fall through to the GitHub
+    // mirror below, where the P-002 digest check still refuses mirror content that differs.
+    const releaseContentHash = input.pin?.releaseContentHash;
+    if (input.pin && releaseContentHash && deps.fetchArtifact) {
+      const files = await fetchVerifiedReleaseFiles(releaseContentHash, deps.fetchArtifact);
+      if (files) {
+        try {
+          const refDir = join(cloneDir, ref);
+          assertInside(cloneDir, refDir, `${spec.label} ref "${ref}"`);
+          for (const file of files) {
+            const dest = join(refDir, ...file.path.split('/'));
+            assertInside(refDir, dest, `${spec.label} file "${file.path}"`);
+            await fs.mkdir(dirname(dest), { recursive: true });
+            await fs.writeFile(dest, file.bytes);
+          }
+          contentSource = 'r2';
+          verifiedPin = { ...input.pin, fileCount: files.length };
+        } catch {
+          // A half-written scratch dir must not survive: the GitHub path needs a fresh dest.
+          await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    }
+    if (contentSource === 'r2') {
+      // Placed from the origin and verified against the pinned release root above.
+    } else if (input.pin) {
       // P-002: fetch EXACTLY the pinned commit — never the branch tip — and refuse
       // unless `<ref>/` still hashes to what the Worker pinned at publish. Verification
       // runs BEFORE manifest/parse validation and before anything touches the user
@@ -337,7 +376,7 @@ export async function installSelfDescribingFromCupboard<TMeta>(
       }
     }
 
-    return { ok: true, ref: targetRef, meta, source: url, installedTo: target, pin: verifiedPin };
+    return { ok: true, ref: targetRef, meta, source: url, installedTo: target, pin: verifiedPin, contentSource };
   } finally {
     await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => {});
   }

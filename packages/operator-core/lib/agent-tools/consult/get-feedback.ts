@@ -34,25 +34,27 @@ import { hardText, LIMITS } from '../limits';
 // found five hand-maintained copies of this same bound already stale in the tree.
 import { DEFAULT_MIN_RESPONDERS, DEFAULT_MAX_RESPONDERS } from '../../consult/selection-policies';
 import { reconcileInterestEventAwaits } from '../../interest-auto-arm';
+import { consultFeedbackAbortCompletionReceipt } from './abort-completion';
 
 const ok = (payload: Record<string, unknown>) => ({ data: payload });
 
 export default defineTool({
   name: 'consult:get_feedback',
   description:
-    'Open a new feedback consult for one unresolved question — a request/creation verb, not a reader for an existing conversation; use conversations:get { id } to read one. It checks the closed-consult archive first, then selects expertise from cross-agent transcripts; a fresh consult dispatches an isolated answer session and does not wake the expert’s live session. Below the relevance floor it reports the honest routing outcome instead of inventing expertise.',
+    'Request a consult (request/creation verb), not a reader for an existing conversation; use conversations:get { id }. The closed-consult archive serves matches first; otherwise transcript expertise routes to an isolated answer session and does not wake the expert’s live session. Below-floor outcomes are reported honestly.',
   guidance: {
     when:
-      'A concrete technical question survives a first-pass check of local code, docs, or search, and a peer may already have solved it. Ask once before a long re-derivation; say what you tried, what you observed, and the decision it informs.',
+      'After a first-pass check of local code, docs, or search, Ask once with a concrete question before long re-derivation; include what you tried, observed, and the decision it informs.',
     notWhen:
-      'Reading an existing conversation or consult thread (conversations:get { id }); live state (query it); owner decisions (coord:ask-owner); a known agent (coord:send); or anything code, docs or search already answer. Do not open duplicate consults or repeat an unchanged question after no_available_responder — a consult is advice, never a handoff.',
+      'Reading an existing conversation? use conversations:get { id }. Query live state; coord:ask-owner for owner decisions, coord:send for known agents. Do not consult to meet a quota or when code, docs, or search answer it. Do not open duplicate consults or repeat unchanged questions after no_available_responder; advice is not a handoff.',
     chaining:
-      "For a known id, use conversations:get { id } to read the existing conversation; this tool does not read an existing conversation. An archive match may answer without launching a session; otherwise the dispatcher already walks allowed model ranks and skips walled backends, so never retry manually. Use latency_contract:'hard-blocked' only when you cannot proceed without the answer. Declines and expiries advance the existing cascade.",
+      "This tool does not read an existing conversation; use conversations:get { id }. The dispatcher already walks allowed model ranks; do not retry. Set latency_contract:'hard-blocked' only if blocked on the answer; declines/expiries advance the cascade. After advice arrives, read the reply and compare it with the decision you took; record confirmed/rescoped/reversed/moot via consult:reconcile with a substantive note. Receipt or silence does not prove usefulness. With allow_dispatch:false, retrieval-only returns candidates but no answer session.",
     returns:
       '{ verdict, conversation_id, thread_id, responder, responder_via, remaining_candidates, latency_contract, expires_at, archive?, hint }',
   },
   capability: 'coord:write',
   requirePrincipal: false,
+  abortCompletionReceipt: consultFeedbackAbortCompletionReceipt,
   agentRoles: [...COORD_ROLES],
   args: z.object({
     question: hardText(LIMITS.ANNOTATION).describe('The new question to route. This tool opens a new consult; to read an existing conversation, use conversations:get { id }. Name concrete files/symbols where relevant — authorship of the code in question is a routing signal.'),

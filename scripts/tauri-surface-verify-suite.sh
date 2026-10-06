@@ -56,6 +56,7 @@ LEGS=(
   "login:0:scripts/tauri-surface-verify-p007-login.sh"
   "settings:0:scripts/tauri-surface-verify-p007-settings.sh"
   "embed-device:1:scripts/tauri-surface-verify-embed-device.sh"
+  "goal-report:1:scripts/tauri-surface-verify-goal-report.mts"
   "signup:0:scripts/tauri-surface-verify-p007-signup.sh"
   # Added post-P-007-expansion (gui-e2e-tauri-surface-verification-2026-08-27
   # D-012): the P-007 spec-upgrade item grew to cover 14 surfaces total, but
@@ -89,7 +90,13 @@ for entry in "${LEGS[@]}"; do
     continue
   fi
   log_file="$OUT_DIR/$leg.log"
-  if [ "$leg" = "embed-device" ]; then
+  if [ "$leg" = "goal-report" ]; then
+    VERIFY_TAURI_ISOLATED_DB=1 \
+      VERIFY_TAURI_ISOLATED_SEED=ready \
+      VERIFY_TAURI_REQUIRE_BUILT='apps/operator/app/_components/chat/ReportBlockCard.tsx libs/generic/chat-cards/src/index.tsx apps/operator/app/globals.css' \
+      VERIFY_TAURI_ASSERT_SNAPSHOT_CONTAINS='Historical snapshot' \
+      scripts/verify-tauri-headless.sh -- node --import tsx "$script" >"$log_file" 2>&1
+  elif [ "$leg" = "embed-device" ]; then
     VERIFY_TAURI_ISOLATED_DB=1 \
       VERIFY_TAURI_ISOLATED_SEED=ready \
       VERIFY_TAURI_ASSERT_SNAPSHOT_CONTAINS='Embedding device' \

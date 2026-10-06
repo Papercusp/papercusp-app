@@ -338,8 +338,15 @@ export type StripeCheckoutSessionResult =
   | { ok: true; sessionId: string; url: string }
   | { ok: false; code: 'provider-error' | 'malformed-response'; status: number | null; detail: string };
 
+export type StripeFormPostResult =
+  | { ok: true; status: number; body: Record<string, unknown> }
+  | { ok: false; code: 'provider-error' | 'malformed-response'; status: number | null; detail: string };
+
 /**
- * POST a built params object to Stripe and return the session handle.
+ * POST a params object to any Stripe REST endpoint (form-encoded) and return the
+ * parsed JSON body. The single Stripe HTTP seam: Checkout Sessions below and the
+ * hosted subscription billing client (`auth/hosted/billing/stripe-billing-client.ts`:
+ * customers, subscription Checkout, customer-portal sessions) both go through it.
  *
  * `fetchImpl` is injected so a caller can exercise this without network access,
  * and the secret key is a parameter rather than a module-scope global, so a
@@ -351,12 +358,13 @@ export type StripeCheckoutSessionResult =
  * window between the Stripe call and the ledger append; only the provider can,
  * which is what this header is for.
  */
-export async function createStripeCheckoutSession(input: {
+export async function postStripeForm(input: {
+  url: string;
   secretKey: string;
   params: Record<string, unknown>;
   fetchImpl: typeof fetch;
   idempotencyKey?: string;
-}): Promise<StripeCheckoutSessionResult> {
+}): Promise<StripeFormPostResult> {
   const headers: Record<string, string> = {
     authorization: `Bearer ${input.secretKey}`,
     'content-type': 'application/x-www-form-urlencoded',
@@ -365,7 +373,7 @@ export async function createStripeCheckoutSession(input: {
 
   let response: Response;
   try {
-    response = await input.fetchImpl(STRIPE_CHECKOUT_SESSIONS_URL, {
+    response = await input.fetchImpl(input.url, {
       method: 'POST',
       headers,
       body: encodeStripeFormParams(input.params).toString(),
@@ -388,12 +396,27 @@ export async function createStripeCheckoutSession(input: {
     return { ok: false, code: 'provider-error', status: response.status, detail };
   }
 
-  let parsed: { id?: unknown; url?: unknown };
+  let parsedBody: unknown;
   try {
-    parsed = JSON.parse(text) as { id?: unknown; url?: unknown };
+    parsedBody = JSON.parse(text);
   } catch {
     return { ok: false, code: 'malformed-response', status: response.status, detail: 'stripe response was not JSON' };
   }
+  const body = parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody) ? (parsedBody as Record<string, unknown>) : {};
+  return { ok: true, status: response.status, body };
+}
+
+/** POST a built Checkout params object to Stripe and return the session handle. */
+export async function createStripeCheckoutSession(input: {
+  secretKey: string;
+  params: Record<string, unknown>;
+  fetchImpl: typeof fetch;
+  idempotencyKey?: string;
+}): Promise<StripeCheckoutSessionResult> {
+  const posted = await postStripeForm({ ...input, url: STRIPE_CHECKOUT_SESSIONS_URL });
+  if (!posted.ok) return posted;
+  const response = { status: posted.status };
+  const parsed = posted.body as { id?: unknown; url?: unknown };
   if (typeof parsed.id !== 'string' || !parsed.id) {
     return { ok: false, code: 'malformed-response', status: response.status, detail: 'stripe response carried no session id' };
   }

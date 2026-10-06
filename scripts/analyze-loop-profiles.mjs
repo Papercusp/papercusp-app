@@ -19,7 +19,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { classifyCpuFrame } from './lib/cpu-profile.mjs';
+import { classifyCpuFrame, sampleDurations } from './lib/cpu-profile.mjs';
 
 const args = process.argv.slice(2);
 const topIdx = args.indexOf('--top');
@@ -75,6 +75,11 @@ let realMs = 0;
 let profilerMs = 0; // observer-effect (node:inspector)
 let idleMs = 0;
 let spawnMs = 0;
+// Wall time the profiles did NOT sample (WI-10005421): the lead-in before each
+// profile's first sample, and over-threshold gaps between samples. Credited to no
+// frame. On sentinel stall profiles this is usually where the stall itself sits.
+let unsampledMs = 0;
+let gapCount = 0;
 
 /** Is this frame in first-party app code (not node_modules / native / node:)? */
 const isAppFrame = (u) => /operator-core\/lib|apps\/operator|packages\//.test(shortUrl(u));
@@ -107,9 +112,11 @@ for (const file of files) {
     return '(no app ancestor)';
   };
   const samples = prof.samples ?? [];
-  const deltas = prof.timeDeltas ?? [];
+  const timing = sampleDurations(prof);
+  unsampledMs += (timing.leadInUs + timing.unsampledGapUs) / 1000;
+  gapCount += timing.gaps.length;
   for (let i = 0; i < samples.length; i++) {
-    const dt = Math.max(0, deltas[i] ?? 0); // µs
+    const dt = timing.durations[i]; // µs, the interval FOLLOWING sample i
     const n = nodes.get(samples[i]);
     if (!n) continue;
     const cf = n.callFrame;
@@ -142,6 +149,7 @@ if (asJson) {
   console.log(JSON.stringify({
     profiles: files.length,
     profilerMs: Math.round(profilerMs), idleMs: Math.round(idleMs), realMs: Math.round(realMs),
+    unsampledMs: Math.round(unsampledMs), gapCount,
     spawnMs: Math.round(spawnMs),
     buckets: buckets.map(([k, v]) => ({ bucket: k, ms: Math.round(v), pctOfReal: +(100 * v / (realMs || 1)).toFixed(1) })),
     spawnCallers: spawnCallers.map(([k, v]) => ({ caller: k, ms: Math.round(v), pctOfSpawn: +(100 * v / (spawnMs || 1)).toFixed(1), pctOfReal: +(100 * v / (realMs || 1)).toFixed(1) })),
@@ -149,6 +157,7 @@ if (asJson) {
   }, null, 2));
 } else {
   console.log(`\nProfiles: ${files.length}   on-CPU sampled — profiler(observer-effect): ${(profilerMs / 1000).toFixed(1)}s · idle/program: ${(idleMs / 1000).toFixed(1)}s · REAL workload: ${(realMs / 1000).toFixed(1)}s`);
+  console.log(`UNSAMPLED (credited to no frame): ${(unsampledMs / 1000).toFixed(1)}s — profile lead-ins + ${gapCount} over-threshold gap(s); on a stall profile this is usually the stall itself, and its cause is NOT in the frames below`);
   console.log(`(profiler frames = node:inspector capturing the profile; EXCLUDED from the % below — see the agent-insight)\n`);
   console.log('REAL workload by bucket:');
   for (const [k, v] of buckets) console.log(`  ${sec(v)}s  ${pct(v)}%  ${k}`);

@@ -133,6 +133,64 @@ export async function reserveAcceptanceReviewTarget(
   return { conditionKey: result.conditionKey, id: result.id, created: result.created };
 }
 
+/** What settling a terminal plan's review-target reservations did. */
+export interface AcceptanceReviewReservationSettlement {
+  /** Reservations this call moved to `dropped`. */
+  settled: string[];
+  /** Reservations whose terminal write failed — reported, never swallowed. */
+  failed: Array<{ id: string; error: string }>;
+}
+
+/**
+ * Close every still-open review-target reservation whose subject plan just went
+ * terminal (shipped or superseded).
+ *
+ * condition-upsert filings have no auto-settle: the FILER owns the close. A
+ * reservation's filer is the acceptance recruiter, whose job ends when the subject
+ * plan leaves the review lifecycle. Without this, a reservation closed only if the
+ * grader happened to claim and complete that exact row; a grader who graded through
+ * their own item left it open forever (EI-24654801606034099 measured 32 open,
+ * unheld reservations on shipped plans).
+ *
+ * The terminal state is `dropped`, not `done`: the reservation was not the vehicle of
+ * the review, so recording it as completed work would be false. Idempotent — a second
+ * call finds nothing open. Scoped by the typed target in the payload to (workspace,
+ * harness, plan), so a same-slug plan in another harness or workspace is untouched.
+ */
+export async function settleAcceptanceReviewReservationsForPlan(
+  planSlug: string,
+  options: { workspaceId: string; harnessSlug: string | null; terminalStatus: 'shipped' | 'superseded' },
+): Promise<AcceptanceReviewReservationSettlement> {
+  const slug = planSlug.trim();
+  const workspaceId = options.workspaceId.trim();
+  if (!slug || !workspaceId) return { settled: [], failed: [] };
+  const harnessSlug = options.harnessSlug?.trim() || null;
+  const sql = getOrgPg().sql;
+  const rows = await sql<{ feature_id: string; harness_slug: string | null }[]>`
+    SELECT feature_id, harness_slug
+      FROM harness_shared.work_items
+     WHERE workspace_id = ${workspaceId}
+       AND condition_key LIKE ${`${ACCEPTANCE_REVIEW_TARGET_NAMESPACE}:%`}
+       AND payload -> 'acceptanceReviewTarget' ->> 'planSlug' = ${slug}
+       AND (payload -> 'acceptanceReviewTarget' ->> 'harnessSlug') IS NOT DISTINCT FROM ${harnessSlug}::text
+       AND NOT (status = ANY(${ANY_FAMILY_TERMINAL_STATES as string[]}::text[]))`;
+  const settled: string[] = [];
+  const failed: Array<{ id: string; error: string }> = [];
+  for (const row of rows) {
+    try {
+      await setWorkItemState(row.feature_id, 'dropped', {
+        harness: row.harness_slug ?? undefined,
+        by: CONDITION_UPSERT_ACTOR,
+        completionRef: `review target ${slug} reached ${options.terminalStatus}; reservation settled with its plan (EI-24654801606034099)`,
+      });
+      settled.push(row.feature_id);
+    } catch (err) {
+      failed.push({ id: row.feature_id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return { settled, failed };
+}
+
 export interface ConditionUpsertResult {
   conditionKey: string;
   /** The work-item that owns the condition after this call. */
@@ -230,19 +288,31 @@ export async function settleConditionClaim(
   // A peer won the race: refresh THEIR row with this reading, settle ours.
   const winner = await findConditionKeyHolder(key, { workspaceId: input.workspaceId });
   if (winner) await refreshIncumbent(winner, key, input);
+  // WI-10004234: a single failed stand-down write used to leave the loser OPEN
+  // beside the winner, and most callers ignore `duplicateLeftOpen`, so one
+  // transient write error became a silent second open lane. Retry the write
+  // (throws only) before reporting the duplicate.
   let droppedOk = false;
-  try {
-    await setWorkItemState(itemId, 'dropped', {
-      harness: input.harness,
-      by: CONDITION_UPSERT_ACTOR,
-      completionRef: `superseded by ${winner ?? 'the concurrent owner'} — lost the condition-key claim race for '${key}'`,
-    });
-    droppedOk = true;
-  } catch {
-    // Reported, never swallowed silently — the caller can see the duplicate.
+  for (let attempt = 0; attempt < STAND_DOWN_ATTEMPTS && !droppedOk; attempt += 1) {
+    if (attempt > 0) await sleep(STAND_DOWN_BACKOFF_MS[attempt - 1] ?? 250);
+    try {
+      await setWorkItemState(itemId, 'dropped', {
+        harness: input.harness,
+        by: CONDITION_UPSERT_ACTOR,
+        completionRef: `superseded by ${winner ?? 'the concurrent owner'} — lost the condition-key claim race for '${key}'`,
+      });
+      droppedOk = true;
+    } catch {
+      // Retried above; a persistent failure is reported, never swallowed.
+    }
   }
   return { won: false, winnerId: winner ?? null, ...(droppedOk ? {} : { duplicateLeftOpen: itemId }) };
 }
+
+/** Stand-down write attempts before a lost-race row is reported as `duplicateLeftOpen`. */
+const STAND_DOWN_ATTEMPTS = 3;
+const STAND_DOWN_BACKOFF_MS = [50, 250] as const;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * File-or-refresh the work-item owning `conditionKey`.

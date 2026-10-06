@@ -92,6 +92,76 @@ export function isErrorStreak(statusesNewestFirst: readonly string[], threshold:
   return statusesNewestFirst.slice(0, threshold).every((s) => s === 'error');
 }
 
+/** The pot setting a runtime Scout model pin lives under (hive-settings-store
+ *  `localBlueprint.<section>`, read per tick by learning/pot-gate/gates.ts). */
+export const SCOUT_MODEL_PIN_SETTING_KEY = 'localBlueprint.scout';
+
+/**
+ * PURE (WI-10004548): name the runtime Scout model pins in a resolved config
+ * delta — the `{ section: delta }` map `scoutConfigDelta` returns and the tick
+ * layers over the routine payload. Returns `phase=model` entries for every
+ * string model in `scout.models`, or `[]` when nothing is pinned.
+ *
+ * WHY THE PAGER NEEDS THIS: on 2026-10-01 the Scout was down for hours on a
+ * `gpt-5.4:medium` pin written to `localBlueprint.scout` on 2026-07-01. The page
+ * fired correctly but said "investigate the transport", and nothing on it named
+ * the pin — locating it took ~20 reads across code, routines and pot_settings.
+ * A model the provider no longer serves fails identically to a dead transport,
+ * so the page must say which models are pinned at runtime, and where.
+ */
+export function describeScoutModelPins(
+  delta: Record<string, Record<string, unknown>> | null | undefined,
+): string[] {
+  const models = delta?.scout?.models;
+  if (!models || typeof models !== 'object' || Array.isArray(models)) return [];
+  return Object.entries(models as Record<string, unknown>)
+    .filter((e): e is [string, string] => typeof e[1] === 'string' && e[1].trim() !== '')
+    .map(([phase, model]) => `${phase}=${model.trim()}`);
+}
+
+/**
+ * PURE: the page text. When runtime model pins are in effect they are named
+ * BEFORE the transport advice, because a stale pin is the cheaper hypothesis to
+ * rule out: one setting read, versus a gateway/account investigation.
+ */
+export function composeErrorStreakSummary(input: {
+  threshold: number;
+  errors: readonly string[];
+  modelPins: readonly string[];
+}): string {
+  const { threshold, errors, modelPins } = input;
+  const pinNote =
+    modelPins.length > 0
+      ? ` RUNTIME MODEL PIN in effect — pot setting ${SCOUT_MODEL_PIN_SETTING_KEY} pins ` +
+        `${modelPins.join(', ')}, overriding the code default. If an error above names one of these ` +
+        `models, the pin is the likely cause: clear it (POST /api/agent-mcp/pot-override-set ` +
+        `{ potSlug, kind:'config', name:'scout', value:null }) or repin to a served model.` +
+        ` Otherwise investigate the transport`
+      : ` Investigate the transport`;
+  return (
+    `Scout cycle ERROR STREAK: the last ${threshold} ATTEMPTED cycles ALL failed — ideation is down ` +
+    `and the circuit gate is only backing off, not fixing it. Distinct errors: ` +
+    (errors.length > 0 ? errors.join(' | ') : '(no error detail recorded)') +
+    `.${pinNote} (gateway pool saturation / account limits / ideator timeouts); ` +
+    `scout_ticks has per-cycle detail. Signal is NOT lost — the accumulator watermark only ` +
+    `advances on a successful cycle — but nothing routes until a cycle lands.`
+  );
+}
+
+/**
+ * Best-effort read of the runtime Scout model pins, through the SAME resolver the
+ * tick uses (so the page reports what the failing cycles actually ran with).
+ * Never throws: an unreadable delta yields `[]`, and the page still fires.
+ */
+async function readScoutModelPins(workspaceId: string, installSlug: string): Promise<string[]> {
+  try {
+    const { scoutConfigDelta } = await import('../learning/pot-gate/gates');
+    return describeScoutModelPins(await scoutConfigDelta({ workspaceId, installSlug }));
+  } catch {
+    return [];
+  }
+}
+
 // ── the check-and-fire edge ───────────────────────────────────────────────────
 
 /**
@@ -169,13 +239,8 @@ export async function checkAndFireErrorStreakAlarm(opts: {
     const claimed = await claimWatchdogFire({ workspaceId: ws, installSlug: slug, source: 'scout-error-streak', windowHours, reason, wakeAt: null });
     if (!claimed) return;
 
-    const summary =
-      `Scout cycle ERROR STREAK: the last ${threshold} ATTEMPTED cycles ALL failed — ideation is down ` +
-      `and the circuit gate is only backing off, not fixing it. Distinct errors: ` +
-      (errors.length > 0 ? errors.join(' | ') : '(no error detail recorded)') +
-      `. Investigate the transport (gateway pool saturation / account limits / ideator timeouts); ` +
-      `scout_ticks has per-cycle detail. Signal is NOT lost — the accumulator watermark only ` +
-      `advances on a successful cycle — but nothing routes until a cycle lands.`;
+    const modelPins = await readScoutModelPins(ws, slug);
+    const summary = composeErrorStreakSummary({ threshold, errors, modelPins });
 
     // WI-37625: this used to be a bare `@role:mug` park. That slot is drained by exactly
     // one consumer (pot/mug-brief-launch.ts, which runs at Mug spawn), so with the spawn
@@ -193,7 +258,7 @@ export async function checkAndFireErrorStreakAlarm(opts: {
       source: 'scout-error-streak-alarm',
       body: summary,
       harnessSlug: nudgeHarnessSlug,
-      payload: { kind: 'scout-error-streak', threshold, errors },
+      payload: { kind: 'scout-error-streak', threshold, errors, modelPins },
       // This alarm is a pager, not a quiet review nudge. The ladder persists the
       // message first, then re-invokes the selected su so the page cannot sit unread.
       wakeSu: true,

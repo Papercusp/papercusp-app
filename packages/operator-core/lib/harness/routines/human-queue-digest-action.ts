@@ -28,10 +28,16 @@
  */
 import { registerSystemAction, type SystemActionCtx } from './system-actions';
 import { getMessageById, sendMessage } from '../../agent-tools/coordination/messages';
+import { getConversationStatesByIds } from '../../agent-tools/coordination/conversations';
 import type { AgentIdentity } from '../../agent-tools/coordination/identity';
 import { ownerNotificationMessageId } from '../../agent-tools/operator/notify_owner';
-import { readNeedsHumanWorkItems, type NeedsHumanWorkItemRow } from '../../attention/needs-human-work-items-source';
+import {
+  NEEDS_HUMAN_LIMIT,
+  readNeedsHumanWorkItems,
+  type NeedsHumanWorkItemRow,
+} from '../../attention/needs-human-work-items-source';
 import { notifyAttentionOnce } from '../../attention-notify';
+import { activeExternalBlockers, ownerAskDefaultDisclosure } from '../../external-blockers';
 import { readStructuredOwnerAsk } from '../improvements/agent-review-policy';
 import { readImprovementItems } from '../improvements/read-items';
 import { buildDigest } from '../improvements/digest';
@@ -96,6 +102,65 @@ export function staleNeedsHumanDeliveryKey(row: Pick<NeedsHumanWorkItemRow, 'fea
   return `needs-human-stale:${row.feature_id}:${new Date(row.state_changed_at).toISOString()}`;
 }
 
+const ANSWERED_CONVERSATION_REF_PREFIX = 'conversation:answered:';
+
+function answeredConversationId(ref: string): string | null {
+  if (!ref.startsWith(ANSWERED_CONVERSATION_REF_PREFIX)) return null;
+  const id = ref.slice(ANSWERED_CONVERSATION_REF_PREFIX.length);
+  return id.length > 0 ? id : null;
+}
+
+function conversationIdsReferencedByStaleRows(rows: readonly NeedsHumanWorkItemRow[]): string[] {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    for (const blocker of activeExternalBlockers(row.payload)) {
+      if (blocker.kind !== 'human') continue;
+      const id = answeredConversationId(blocker.ref);
+      if (id) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Suppress reminders whose active owner ask points at a resolved conversation.
+ * This only edits a reminder-local payload copy; persisted blockers and the
+ * work-item needs-human gate remain unchanged. A separate active structured
+ * owner ask keeps the row in the reminder batch.
+ */
+export function filterResolvedConversationAsks(
+  rows: readonly NeedsHumanWorkItemRow[],
+  resolvedConversationIds: ReadonlySet<string>,
+): NeedsHumanWorkItemRow[] {
+  if (resolvedConversationIds.size === 0) return [...rows];
+
+  return rows.flatMap((row) => {
+    if (!row.payload || typeof row.payload !== 'object' || Array.isArray(row.payload)) return [row];
+    const payload = row.payload as Record<string, unknown>;
+    if (!Array.isArray(payload.externalBlockers)) return [row];
+
+    const refsToClear = new Set<string>();
+    for (const blocker of activeExternalBlockers(row.payload)) {
+      const id = blocker.kind === 'human' ? answeredConversationId(blocker.ref) : null;
+      if (id && resolvedConversationIds.has(id)) refsToClear.add(blocker.ref);
+    }
+    if (refsToClear.size === 0) return [row];
+
+    const externalBlockers = payload.externalBlockers.map((value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+      const blocker = value as Record<string, unknown>;
+      return blocker.kind === 'human' &&
+        blocker.status === 'active' &&
+        typeof blocker.ref === 'string' &&
+        refsToClear.has(blocker.ref)
+        ? { ...blocker, status: 'cleared' }
+        : value;
+    });
+    const reminderRow = { ...row, payload: { ...payload, externalBlockers } };
+    return readStructuredOwnerAsk(reminderRow.payload) ? [reminderRow] : [];
+  });
+}
+
 /** Render the durable ask, not a generic "something is stale" nag. */
 export function composeStaleNeedsHumanReminder(
   row: NeedsHumanWorkItemRow,
@@ -115,6 +180,9 @@ export function composeStaleNeedsHumanReminder(
     `Asked by: ${askedBy}`,
     `Waiting since: ${changedAt}`,
     ...(ask ? [`Unblocked by: ${ask.unblockedBy}`, `Owner capability: ${ask.askedOf}`] : []),
+    // Owner-attention ledger (EI-23783029010995961): state what happens if this
+    // reminder is ignored, so silence is a disclosed outcome, not a hidden one.
+    ownerAskDefaultDisclosure(row.payload),
     row.harness_slug ? `Harness: ${row.harness_slug}` : null,
   ].filter((line): line is string => Boolean(line));
   return { title, summary, body: body.join('\n'), askedBy, deliveryKey };
@@ -223,12 +291,27 @@ registerSystemAction('improvement-human-digest', async (ctx: SystemActionCtx) =>
   // the improvement review queue above was empty. Metadata writes cannot make
   // an old owner ask look young because the source ages on state_changed_at.
   const stateChangedBefore = new Date(Date.now() - staleDays * DAY_MS);
-  const stale = await readNeedsHumanWorkItems({
+  const staleRows = await readNeedsHumanWorkItems({
     workspaceId: ctx.workspaceId,
     stateChangedBefore,
     oldestFirst: true,
+    limit: NEEDS_HUMAN_LIMIT,
   });
-  for (const row of stale) {
+  let reminderRows = staleRows;
+  const conversationIds = conversationIdsReferencedByStaleRows(staleRows);
+  if (conversationIds.length > 0) {
+    try {
+      const states = await getConversationStatesByIds(conversationIds, ctx.workspaceId);
+      const resolvedIds = new Set(states.filter((state) => state.state === 'resolved').map((state) => state.id));
+      reminderRows = filterResolvedConversationAsks(staleRows, resolvedIds);
+    } catch (e) {
+      console.warn(
+        '[human-queue-digest] conversation lifecycle lookup failed; stale reminders kept:',
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+  for (const row of reminderRows) {
     try {
       await deliverStaleNeedsHumanReminder(ctx, row);
     } catch (e) {
@@ -240,5 +323,5 @@ registerSystemAction('improvement-human-digest', async (ctx: SystemActionCtx) =>
       );
     }
   }
-  console.log(`[human-queue-digest] stale needs-human reminders considered: ${stale.length}`);
+  console.log(`[human-queue-digest] stale needs-human reminders considered: ${reminderRows.length}`);
 });

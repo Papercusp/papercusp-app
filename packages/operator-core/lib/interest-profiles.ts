@@ -367,7 +367,7 @@ export const INTEREST_PROFILES: readonly InterestProfileRow[] = [
     watch: { kind: 'event', family: 'fleet-claim-released' },
     tier: 'auto-arm',
     of: ['fleet.slug'],
-    why: 'A released claim is work that just became re-placeable; folding it into the leader brief is what makes reclaiming orphans a read rather than a sweep.',
+    why: 'A released claim is a TRANSITION, not an instruction: read the payload `disposition`. `replaceable` (open/failing) is work that just came back to the pool — reclaiming orphans becomes a read rather than a sweep. `held` (released while blocked/needs-human) is NOT re-placeable: it was released for hygiene, and a recorded blocker or plan Decision may forbid rebuilding it — read its checkpoint first.',
   },
   {
     context: 'fleet-leader',

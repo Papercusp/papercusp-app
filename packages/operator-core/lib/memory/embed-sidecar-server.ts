@@ -11,7 +11,7 @@
  *              →  { vectors: number[][], dims, runtime, modelRev }
  *   POST /rerank  { model?, query: string, texts: string[] }
  *              →  { scores: number[], runtime, modelRev }
- *   GET  /healthz →  { ok, pid, uptimeMs, capabilities: string[],
+ *   GET  /healthz →  { ok, pid, uptimeMs, sha, bundleStale?, capabilities: string[],
  *                      models: { '<model>:<kind>': state },
  *                      rerankExecution: { device, dtype, why },
  *                      embedExecution: { device, dtype, verified, why },
@@ -67,6 +67,7 @@
  * auto-recover (memory-write-journal-auto-recovery-2026-07-11).
  */
 import * as http from 'node:http';
+import { managedSetInterval } from '@papercusp/scheduled-registry';
 import {
   buildGemmaEmbedder,
   buildHarrierEmbedder,
@@ -100,6 +101,8 @@ import {
 } from '../resource-governor/execution';
 import type { AdmissionContext, ResourceDemand } from '../resource-governor/admission';
 import { activeWorkspaceId } from '../workspace-registry';
+import { getBuildInfo } from '../build-info';
+import { getBundleStaleness, type BundleStaleness } from '../bundle-staleness';
 import { loadEmbedDeviceSetting, type EmbedDeviceSettingLoad } from './embed-device-setting';
 
 export const EMBED_SIDECAR_DEFAULT_PORT = 3384; // mnemonic: the 384-dim space it serves
@@ -149,7 +152,7 @@ export const EMBED_SIDECAR_MODELS = ['gemma', 'local', 'harrier'] as const;
 export type EmbedSidecarModel = (typeof EMBED_SIDECAR_MODELS)[number];
 
 export interface EmbedRequest {
-  model: EmbedSidecarModel;
+  model: string;
   kind: GemmaEmbedKind;
   texts: string[];
   /** EI-19323982006772080: serve every text from the model — no LRU read, no
@@ -404,12 +407,12 @@ export function validateRerankRequest(body: unknown): RerankRequest | { error: s
  * Pure request validation (unit-tested without a server). Returns the parsed
  * request or an error string suitable for a 400 body.
  */
-export function validateEmbedRequest(body: unknown): EmbedRequest | { error: string } {
+export function validateEmbedRequest(body: unknown, permittedModels: readonly string[] = EMBED_SIDECAR_MODELS): EmbedRequest | { error: string } {
   if (typeof body !== 'object' || body === null) return { error: 'body must be a JSON object' };
   const b = body as { model?: unknown; kind?: unknown; texts?: unknown; bypassCache?: unknown };
   const model = b.model === undefined ? 'gemma' : b.model;
-  if (!EMBED_SIDECAR_MODELS.includes(model as EmbedSidecarModel)) {
-    return { error: `unknown model '${String(model)}' — expected one of: ${EMBED_SIDECAR_MODELS.join(', ')}` };
+  if (typeof model !== 'string' || !permittedModels.includes(model)) {
+    return { error: `unknown model '${String(model)}' — expected one of: ${permittedModels.join(', ')}` };
   }
   if (b.kind !== 'query' && b.kind !== 'document') {
     return { error: `kind must be 'query' or 'document' (got '${String(b.kind)}')` };
@@ -431,7 +434,7 @@ export function validateEmbedRequest(body: unknown): EmbedRequest | { error: str
     return { error: `bypassCache must be a boolean (got '${String(b.bypassCache)}')` };
   }
   return {
-    model: model as EmbedSidecarModel,
+    model,
     kind: b.kind,
     texts: b.texts as string[],
     bypassCache: b.bypassCache === true,
@@ -481,9 +484,7 @@ export function resolveWarmRerankers(env: NodeJS.ProcessEnv = process.env): Rera
 }
 
 /** Builder seam — tests inject fakes so no unit test loads a real ONNX model. */
-export type EmbedderBuilders = {
-  [M in EmbedSidecarModel]: (kind: GemmaEmbedKind) => Promise<EmbedFn>;
-};
+export type EmbedderBuilders = Record<string, (kind: GemmaEmbedKind) => Promise<EmbedFn>>;
 
 const defaultBuilders: EmbedderBuilders = {
   gemma: (kind) => Promise.resolve(buildGemmaEmbedder({ kind })),
@@ -518,9 +519,29 @@ const defaultRerankBuilders: RerankerBuilders = {
   'rerank-fast': buildSidecarReranker(FAST_RERANKER_MODEL),
 };
 
+/**
+ * WI-10005944: which code this process booted, in its own words. `sha` is the source
+ * sha bundle-host.sh baked into the bundle (null when unbundled and git is unreadable);
+ * `bundleStale` is non-null ONLY when ExecStartPre's rebuild failed and the unit booted
+ * the last-known-good bundle, the one case where start time says nothing about the code.
+ */
+export interface EmbedSidecarBuildIdentity {
+  sha: string | null;
+  bundleStale: BundleStaleness | null;
+}
+
+export function defaultBuildIdentity(): EmbedSidecarBuildIdentity {
+  return { sha: getBuildInfo().sha, bundleStale: getBundleStaleness() };
+}
+
 export interface EmbedSidecarOptions {
   port?: number;
+  /** Build identity for /healthz; resolved once at server creation. Tests inject one. */
+  buildIdentity?: () => EmbedSidecarBuildIdentity;
   builders?: EmbedderBuilders;
+  /** Explicit identities for additional injected builders (isolated candidate
+   * evaluation). A builder without a revision is refused before listening. */
+  modelRevisions?: Record<string, string>;
   /** Reranker builder seam — tests inject fakes (see `builders`). */
   rerankBuilders?: RerankerBuilders;
   /** Skip the boot warm-up (tests). Production warms gemma at boot. */
@@ -607,6 +628,48 @@ export interface EmbedSidecarHandle {
   close: () => Promise<void>;
   /** Per-`model:kind` warm state — surfaced verbatim by /healthz. */
   warmStates: () => Record<string, WarmState>;
+  /**
+   * Work-request activity for the idle exit (P-531, WI-10005523): `inFlight`
+   * counts open requests on every route EXCEPT GET /healthz, and
+   * `lastActivityAt` is the epoch ms of the last such request's start or end
+   * (server creation before the first one). /healthz is excluded so the
+   * parent's liveness probes can never keep an idle sidecar alive.
+   */
+  activity: () => EmbedSidecarActivity;
+}
+
+export interface EmbedSidecarActivity {
+  inFlight: number;
+  lastActivityAt: number;
+}
+
+/**
+ * P-531: a sidecar SPAWNED BY ITS SERVER (PAPERCUSP_EMBED_SIDECAR=1) may exit
+ * after this many ms with no work request, returning the embedding model's
+ * ~1 GB to the host; the spawner re-launches it lazily on the next embed.
+ * Unset or 0 = never exit. The supervised systemd sidecar, and any sidecar
+ * whose URL other processes share, must leave this unset: nothing would
+ * respawn it for them.
+ */
+export const EMBED_SIDECAR_IDLE_EXIT_ENV = 'PAPERCUSP_EMBED_SIDECAR_IDLE_EXIT_MS';
+/**
+ * P-532b (WI-10005630): the header a health probe sets on its functional POST /embed. Such a
+ * request still counts as in flight (an idle shutdown never cuts it mid-answer) but does NOT
+ * refresh lastActivityAt. Measured on GCP cap-p532/cap-p532b: service-health's once-a-minute
+ * functional probe kept every packaged Server's sidecar from ever reaching its 5-min idle exit.
+ */
+export const EMBED_SIDECAR_PROBE_HEADER = 'x-papercusp-health-probe';
+/** Printed on stdout just before an idle exit, so the spawner can tell it from a crash. */
+export const EMBED_SIDECAR_IDLE_EXIT_LINE = 'PAPERCUSP_EMBED_SIDECAR_IDLE_EXIT';
+
+export function resolveEmbedSidecarIdleExitMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env[EMBED_SIDECAR_IDLE_EXIT_ENV]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/** True when the sidecar has been idle (no open work request) for at least `idleMs`. */
+export function shouldIdleExit(activity: EmbedSidecarActivity, nowMs: number, idleMs: number): boolean {
+  return idleMs > 0 && activity.inFlight === 0 && nowMs - activity.lastActivityAt >= idleMs;
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -699,11 +762,20 @@ function readBody(req: http.IncomingMessage, signal?: AbortSignal): Promise<stri
  */
 export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedSidecarHandle {
   const builders = opts.builders ?? defaultBuilders;
+  const modelRevisions: Record<string, string> = { ...MODEL_REVS, ...opts.modelRevisions };
+  const permittedModels = Object.keys(builders);
+  for (const model of permittedModels) {
+    if (typeof builders[model] !== 'function' || typeof modelRevisions[model] !== 'string' || !modelRevisions[model].trim()) {
+      throw new Error(`embedder '${model}' requires a builder and explicit model revision`);
+    }
+  }
   const rerankBuilders = opts.rerankBuilders ?? defaultRerankBuilders;
   const log = opts.log ?? ((line: string) => console.log(line));
   const workerStates = opts.workerStates ?? defaultWorkerStates;
   const port = opts.port ?? Number(process.env[EMBED_SIDECAR_PORT_ENV] ?? EMBED_SIDECAR_DEFAULT_PORT);
   const startedAt = Date.now();
+  // Resolved once: /healthz must stay a synchronous, dependency-free read.
+  const buildIdentity = (opts.buildIdentity ?? defaultBuildIdentity)();
 
   // Resolve which ONNX execution providers this build actually bundles, once,
   // in the background. /healthz reads the cached answer synchronously and
@@ -718,7 +790,7 @@ export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedS
   // not brick the slot for the process lifetime).
   const embedders = new Map<string, Promise<EmbedFn>>();
   const warm: Record<string, WarmState> = {};
-  const getEmbedder = (model: EmbedSidecarModel, kind: GemmaEmbedKind): Promise<EmbedFn> => {
+  const getEmbedder = (model: string, kind: GemmaEmbedKind): Promise<EmbedFn> => {
     const key = `${model}:${kind}`;
     let p = embedders.get(key);
     if (!p) {
@@ -1091,7 +1163,7 @@ export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedS
   };
 
   const embedOneCached = (
-    model: EmbedSidecarModel,
+    model: string,
     kind: GemmaEmbedKind,
     text: string,
     signal: AbortSignal,
@@ -1181,7 +1253,7 @@ export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedS
       json(res, 400, { error: `invalid JSON body: ${e instanceof Error ? e.message : String(e)}` });
       return;
     }
-    const v = validateEmbedRequest(parsed);
+    const v = validateEmbedRequest(parsed, permittedModels);
     if ('error' in v) {
       json(res, 400, { error: v.error });
       return;
@@ -1204,7 +1276,7 @@ export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedS
         vectors,
         dims: vectors[0]?.length ?? 0,
         runtime: EMBED_SIDECAR_RUNTIME,
-        modelRev: MODEL_REVS[v.model],
+        modelRev: modelRevisions[v.model],
         cache: tally,
       };
       json(res, 200, body);
@@ -1273,10 +1345,15 @@ export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedS
         pid: process.pid,
         uptimeMs: Date.now() - startedAt,
         runtime: EMBED_SIDECAR_RUNTIME,
+        // WI-10005944: the bundle this process booted (dev:pipeline_position reads it
+        // instead of inferring from start time; see serving-runtimes.ts).
+        sha: buildIdentity.sha,
+        ...(buildIdentity.bundleStale ? { bundleStale: buildIdentity.bundleStale } : {}),
         // Everything this build can serve. A client compares its REQUIRED
         // capabilities against this before adopting the process.
         capabilities,
         models: { ...warm },
+        modelRevisions: Object.fromEntries(permittedModels.map((model) => [model, modelRevisions[model]])),
         // The (device, dtype) pair reranking is ACTUALLY running on — not the
         // one requested. A GPU host whose CUDA provider failed to load is
         // demoted to cpu/q8 silently as far as search is concerned (the engine
@@ -1408,10 +1485,25 @@ export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedS
   };
   const capabilities = Object.keys(handlers);
 
+  // P-531 idle-exit accounting: every routed request except the liveness probe. A
+  // functional health probe (EMBED_SIDECAR_PROBE_HEADER, P-532b) is in flight while it
+  // runs but never counts as activity, or a once-a-minute probe keeps the model resident.
+  let inFlight = 0;
+  let lastActivityAt = Date.now();
   const server = http.createServer((req, res) => {
     const url = (req.url ?? '').split('?')[0];
-    const handle = handlers[`${req.method} ${url}`];
+    const route = `${req.method} ${url}`;
+    const handle = handlers[route];
     if (handle) {
+      if (route !== EMBED_SIDECAR_CAP_HEALTHZ) {
+        const probe = req.headers[EMBED_SIDECAR_PROBE_HEADER] === '1';
+        inFlight += 1;
+        if (!probe) lastActivityAt = Date.now();
+        res.once('close', () => {
+          inFlight -= 1;
+          if (!probe) lastActivityAt = Date.now();
+        });
+      }
       handle(req, res);
       return;
     }
@@ -1550,6 +1642,7 @@ export function createEmbedSidecarServer(opts: EmbedSidecarOptions = {}): EmbedS
     server,
     listening,
     warmStates: () => ({ ...warm }),
+    activity: () => ({ inFlight, lastActivityAt }),
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -1574,7 +1667,10 @@ export function runEmbedSidecarServer(): void {
       process.exit(1);
     },
   );
+  let shuttingDown = false;
   const shutdown = (signal: string): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`[embed-sidecar] ${signal} received, shutting down gracefully`);
     // EI-19464316359123796: this process IS the "in-process embedding" host the
     // fallback-warning in embed-sidecar-spawn.ts tells OTHER callers to worry
@@ -1597,4 +1693,22 @@ export function runEmbedSidecarServer(): void {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // P-531: exit when idle so the model's memory returns to the host; the
+  // spawner reads the IDLE_EXIT line, skips its crash-respawn, and re-launches
+  // on the next embed. Same graceful path as SIGTERM (workers torn down first).
+  const idleMs = resolveEmbedSidecarIdleExitMs();
+  if (idleMs > 0) {
+    const tickMs = Math.max(1_000, Math.min(30_000, Math.floor(idleMs / 4)));
+    managedSetInterval(
+      'embed-sidecar-idle-exit',
+      tickMs,
+      () => {
+        if (shuttingDown || !shouldIdleExit(handle.activity(), Date.now(), idleMs)) return;
+        console.log(`${EMBED_SIDECAR_IDLE_EXIT_LINE} idleMs=${idleMs}`);
+        shutdown('idle');
+      },
+      { category: 'lifecycle', classification: 'timeout-reaper' },
+    );
+  }
 }

@@ -1,8 +1,18 @@
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import type { Writable } from 'node:stream';
+import { withFsMutex } from '../../../scripts/lib/fs-mutex.mjs';
 
 /**
  * First-boot extraction of the bundled runnable dev/local source tree (WI-3308,
@@ -57,14 +67,14 @@ interface TarLinkHeader {
  * on the first one (tar-fs index.js:264 `'<name> is not a valid symlink'` — its
  * inCwd() path-traversal guard). The monorepo's node_modules can carry dev-box-
  * local out-of-tree links (a `file:../ExternalProj` dep npm-links into
- * node_modules, e.g. `owner-libs -> ../../owner-Libs`) that can NEVER
+ * node_modules, e.g. `storewolf-libs -> ../../Storewolf-Libs`) that can NEVER
  * resolve on an install and that nothing in the app imports; without this, one
  * such link aborted the entire 11.75GB first-boot extract, so dev/local fell
  * back to 'no-source-tree' (WI-3308). We mirror tar-fs's own inCwd() check so we
  * skip EXACTLY the entries it would have rejected — every in-tree link (the
  * node_modules/.bin/* + @papercusp/* workspace links the toolchain needs) is
  * kept. Generic by construction: any future stray out-of-tree link is skipped
- * too, not just the known owner ones.
+ * too, not just the known Storewolf ones.
  */
 export function escapingLinkIgnore(
   dir: string,
@@ -77,7 +87,10 @@ export function escapingLinkIgnore(
     const linkname = header?.linkname ?? '';
     // symlink target is relative to the link's own directory (tar-fs:263);
     // hardlink target is joined from the extraction root (tar-fs:273).
-    const dst = type === 'symlink' ? resolve(dirname(name), linkname) : resolve(root, linkname);
+    const dst =
+      type === 'symlink'
+        ? resolve(dirname(name), linkname)
+        : resolve(root, linkname);
     const inside = dst === root || dst.startsWith(root + sep);
     if (!inside) {
       onSkip?.(name, linkname);
@@ -112,10 +125,21 @@ interface ArchiveStamp {
   mtimeMs: number;
 }
 
-async function readArchiveStamp(stampPath: string): Promise<ArchiveStamp | null> {
+async function readArchiveStamp(
+  stampPath: string,
+): Promise<ArchiveStamp | null> {
   try {
-    const parsed = JSON.parse(await readFile(stampPath, 'utf8')) as Partial<ArchiveStamp>;
-    if (typeof parsed.size === 'number' && typeof parsed.mtimeMs === 'number') {
+    const parsed = JSON.parse(
+      await readFile(stampPath, 'utf8'),
+    ) as Partial<ArchiveStamp>;
+    if (
+      typeof parsed.size === 'number' &&
+      Number.isFinite(parsed.size) &&
+      parsed.size >= 0 &&
+      typeof parsed.mtimeMs === 'number' &&
+      Number.isFinite(parsed.mtimeMs) &&
+      parsed.mtimeMs >= 0
+    ) {
       return { size: parsed.size, mtimeMs: parsed.mtimeMs };
     }
   } catch {
@@ -138,6 +162,36 @@ async function readArchiveStamp(stampPath: string): Promise<ArchiveStamp | null>
 export async function extractDevSourceTree(
   opts: ExtractDevSourceOpts,
 ): Promise<string | null> {
+  if (!opts.archivePath || !opts.targetDir) return null;
+  // Source extraction precedes the operator/DB. Reuse the existing filesystem
+  // mutex so concurrent sidecars cannot classify a live extract as abandoned.
+  const key = createHash('sha256')
+    .update(resolve(opts.targetDir))
+    .digest('hex');
+  try {
+    return await withFsMutex(
+      `dev-source-${key}`,
+      () => extractDevSourceTreeLocked(opts),
+      {
+        timeoutMs: 1_000,
+        staleMs: 24 * 60 * 60_000,
+        onWaiting: () =>
+          opts.log?.(
+            '[dev-source] another sidecar owns source extraction; dev/local wait for its completed tree',
+          ),
+      },
+    );
+  } catch (error) {
+    opts.log?.(
+      `[dev-source] source extraction unavailable (non-fatal): ${(error as Error)?.message ?? error}`,
+    );
+    return null;
+  }
+}
+
+async function extractDevSourceTreeLocked(
+  opts: ExtractDevSourceOpts,
+): Promise<string | null> {
   const { archivePath, targetDir, log = () => {} } = opts;
   if (!archivePath || !targetDir) return null;
   const archiveStat = await stat(archivePath).catch(() => null);
@@ -153,7 +207,77 @@ export async function extractDevSourceTree(
   };
   const stampPath = join(targetDir, SOURCE_ARCHIVE_STAMP_BASENAME);
 
+  // A source checkout is never a disposable extraction cache, with or without
+  // orphan backups or a completion stamp. .git may be a directory or a gitfile.
+  if (existsSync(join(targetDir, '.git'))) {
+    log(
+      `[dev-source] source checkout at ${targetDir} needs manual upgrade; preserving its work`,
+    );
+    return hasPapercupMarkers(targetDir) ? targetDir : null;
+  }
+
+  // A killed upgrade can leave the old tree renamed and the new tree only
+  // partly unpacked. Markers alone are insufficient: they can be early tar
+  // entries. Only a final archive stamp identifies a completed rollback tree.
+  const prefix = `${basename(targetDir)}.stale-`;
+  const entries = await readdir(dirname(targetDir), {
+    withFileTypes: true,
+  }).catch((error) => {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  });
+  const abandoned = entries
+    .filter(
+      (entry) =>
+        entry.isDirectory() &&
+        entry.name.startsWith(prefix) &&
+        /^\d+$/.test(entry.name.slice(prefix.length)),
+    )
+    .map((entry) => join(dirname(targetDir), entry.name))
+    .filter((path) => !existsSync(join(path, '.git')))
+    .sort(
+      (a, b) =>
+        Number(b.slice(b.lastIndexOf('.stale-') + 7)) -
+        Number(a.slice(a.lastIndexOf('.stale-') + 7)),
+    );
+  const cleanup = async (path: string): Promise<void> => {
+    await rm(path, { recursive: true, force: true }).catch((error) => {
+      log(
+        `[dev-source] cache cleanup failed; startup will retry: ${path} — ${(error as Error)?.message ?? error}`,
+      );
+    });
+  };
+  if (abandoned.length) {
+    const completed =
+      hasPapercupMarkers(targetDir) && (await readArchiveStamp(stampPath));
+    if (!completed) {
+      let rollback: string | undefined;
+      for (const path of abandoned) {
+        if (
+          hasPapercupMarkers(path) &&
+          (await readArchiveStamp(join(path, SOURCE_ARCHIVE_STAMP_BASENAME)))
+        ) {
+          rollback = path;
+          break;
+        }
+      }
+      await rm(targetDir, { recursive: true, force: true });
+      if (rollback) {
+        await rename(rollback, targetDir);
+        log(
+          `[dev-source] recovered completed tree from interrupted upgrade: ${rollback}`,
+        );
+      } else {
+        log(
+          '[dev-source] interrupted upgrade has no completed rollback tree; discarding incomplete caches before retry',
+        );
+      }
+    }
+    for (const path of abandoned) await cleanup(path);
+  }
+
   const doExtract = async (label: string): Promise<string | null> => {
+    let completed = false;
     try {
       await mkdir(targetDir, { recursive: true });
       const makeDecompress = opts.makeDecompress ?? (await defaultDecompress());
@@ -165,32 +289,50 @@ export async function extractDevSourceTree(
       // the BAND and say what is unavailable meanwhile (EI-19442842364710969).
       const archiveMB = Math.max(1, Math.round(archiveStat.size / 1_048_576));
       const etaFastMin = Math.max(1, Math.round(archiveMB / 40 / 60));
-      const etaSlowMin = Math.max(etaFastMin + 1, Math.round(archiveMB / 3 / 60));
+      const etaSlowMin = Math.max(
+        etaFastMin + 1,
+        Math.round(archiveMB / 3 / 60),
+      );
       log(
         `[dev-source] extracting ${archivePath} → ${targetDir} (${label}; ${archiveMB}MB compressed, ` +
           `~${etaFastMin}-${etaSlowMin} min depending on disk — dev/local stay absent until it completes)`,
       );
-      await pipeline(createReadStream(archivePath), makeDecompress(), makeExtract(targetDir));
+      await pipeline(
+        createReadStream(archivePath),
+        makeDecompress(),
+        makeExtract(targetDir),
+      );
       if (!hasPapercupMarkers(targetDir)) {
         log(
           `[dev-source] extract finished but markers missing at ${targetDir} — treating as failed (dev/local skip)`,
         );
         return null;
       }
-      await writeFile(stampPath, JSON.stringify(wanted), 'utf8').catch(() => {});
+      await writeFile(stampPath, JSON.stringify(wanted), 'utf8');
+      completed = true;
       log(`[dev-source] tree extracted → ${targetDir}`);
       return targetDir;
     } catch (e) {
-      log(`[dev-source] extract failed (non-fatal; dev/local skip): ${(e as Error)?.message ?? e}`);
+      log(
+        `[dev-source] extract failed (non-fatal; dev/local skip): ${(e as Error)?.message ?? e}`,
+      );
       return null;
+    } finally {
+      if (!completed) await cleanup(targetDir);
     }
   };
 
   if (!hasPapercupMarkers(targetDir)) return doExtract('first boot');
 
   const current = await readArchiveStamp(stampPath);
-  if (current && current.size === wanted.size && current.mtimeMs === wanted.mtimeMs) {
-    log(`[dev-source] tree already present at ${targetDir} (stamp matches bundle; reusing)`);
+  if (
+    current &&
+    current.size === wanted.size &&
+    current.mtimeMs === wanted.mtimeMs
+  ) {
+    log(
+      `[dev-source] tree already present at ${targetDir} (stamp matches bundle; reusing)`,
+    );
     return targetDir;
   }
 
@@ -214,9 +356,7 @@ export async function extractDevSourceTree(
   }
   const extracted = await doExtract('stale-tree upgrade');
   if (extracted) {
-    void rm(staleDir, { recursive: true, force: true }).catch((e) =>
-      log(`[dev-source] stale tree cleanup failed (harmless, delete by hand): ${staleDir} — ${(e as Error)?.message ?? e}`),
-    );
+    await cleanup(staleDir);
     return extracted;
   }
   // Fresh extract failed — restore the previous tree rather than leaving nothing.
@@ -237,8 +377,9 @@ export async function extractDevSourceTree(
 
 async function defaultDecompress(): Promise<() => NodeJS.ReadWriteStream> {
   const zlib = await import('node:zlib');
-  const make = (zlib as unknown as { createZstdDecompress?: () => NodeJS.ReadWriteStream })
-    .createZstdDecompress;
+  const make = (
+    zlib as unknown as { createZstdDecompress?: () => NodeJS.ReadWriteStream }
+  ).createZstdDecompress;
   if (typeof make !== 'function') {
     throw new Error(
       'node zlib lacks createZstdDecompress (needs node ≥22.15/24) — the bundled runtime has it',
@@ -252,17 +393,22 @@ type TarfsExtract = (
   opts?: { ignore?: (name: string, header?: TarLinkHeader) => boolean },
 ) => Writable;
 
-async function defaultExtract(log: (m: string) => void): Promise<(dir: string) => Writable> {
+async function defaultExtract(
+  log: (m: string) => void,
+): Promise<(dir: string) => Writable> {
   const tarfs = (await import('tar-fs')) as unknown as {
     extract?: TarfsExtract;
     default?: { extract?: TarfsExtract };
   };
   const extract = tarfs.extract ?? tarfs.default?.extract;
-  if (typeof extract !== 'function') throw new Error('tar-fs extract unavailable');
+  if (typeof extract !== 'function')
+    throw new Error('tar-fs extract unavailable');
   return (dir: string) =>
     extract(dir, {
       ignore: escapingLinkIgnore(dir, (name, linkname) =>
-        log(`[dev-source] skipping out-of-tree link ${name} → ${linkname} (unportable; omitted)`),
+        log(
+          `[dev-source] skipping out-of-tree link ${name} → ${linkname} (unportable; omitted)`,
+        ),
       ),
     });
 }

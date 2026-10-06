@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/merkle-log",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RFC 9162 (Certificate Transparency v2) Merkle tree hashing with inclusion and consistency proofs and their verifiers. Pure, zero-dependency beyond node:crypto; hashes cross the API as lowercase hex so proofs serialize as plain JSON. The caller owns the leaf encoding.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

@@ -31,6 +31,7 @@
  */
 
 import type { BudgetAxis, BudgetUnit } from './offer-budget';
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
 
 /* ─────────────────────────────────────────────────────────────────────────
  * The lease
@@ -194,6 +195,8 @@ export type LeaseRevalidation =
       readonly ok: false;
       readonly code: 'lease_expired' | 'lease_epoch_stale' | 'gate_refused';
       readonly detail: string;
+      /** WI-10005197: what would LIFT this refusal. Present on `gate_refused` (the one a retry can clear). */
+      readonly refusal?: RefusalContract;
     };
 
 /**
@@ -231,6 +234,14 @@ export function revalidateAtClaim(args: {
       ok: false,
       code: 'gate_refused',
       detail: `authoritative claim gate refuses: ${args.gate.reason ?? 'no capacity'} (leases advise, never replace the gate).`,
+      refusal: {
+        observed: { leaseId: args.lease.leaseId, gateReason: args.gate.reason ?? null },
+        liftsWhen:
+          'the authoritative claim gate admits the draw again (min(allotment-remaining, live headroom) > 0 on every ' +
+          'axis). A held lease never overrides the gate, so retrying the claim with the SAME lease is the right ' +
+          'move only after capacity returns: the host frees headroom or the owner raises the allotment',
+        whoCanMakeItTrue: ['host', 'owner'],
+      },
     };
   }
   return { ok: true, lease: args.lease };

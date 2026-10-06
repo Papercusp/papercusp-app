@@ -707,6 +707,8 @@ if (offenders.length) {
   console.error(
     `Plan: retire-mug-kettle-su-only-2026-08-09 (D-017/D-018/D-019/D-020/D-021/D-022).`,
   );
+  // Match the report: otherwise the CI guard prints a failure but exits successfully.
+  process.exitCode = 1;
 } else {
   console.log("\n✓ no new ungated mug/kettle entry points");
 }

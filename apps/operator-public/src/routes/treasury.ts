@@ -64,6 +64,7 @@ import {
   type SafeTreasuryAdapter,
 } from '../treasury-adapter.ts';
 import { resolveSplitConfig } from './settlements.ts';
+import { transferGateVerdict } from '../transfer-gate-store.ts';
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
@@ -412,6 +413,15 @@ export function treasuryRoute(
     if (!plan.ok) return c.json({ error: 'routing_refused', code: plan.code, detail: plan.detail }, 409);
 
     const nowMs = Date.now();
+    // P-043 / D-025 §4: the last precondition before money leaves the Safe. The
+    // operator's reconciliation run pushes this gate; a break, a run that never
+    // read the treasury, a gate older than the max age, or no gate at all keeps
+    // DAO transfers paused. Checked after every deterministic refusal above so
+    // those keep their own codes, and before the first transfer is submitted.
+    const gate = await transferGateVerdict(c.env.DB, c.env.RECONCILIATION_GATE_WORKSPACE, nowMs);
+    if (!gate.open) {
+      return c.json({ error: 'transfers_paused', code: gate.code, detail: gate.detail }, 409);
+    }
     const routed: Awaited<ReturnType<typeof listBatchTreasuryTransfers>>[number][] = [];
     const alreadyRouted: string[] = [];
     const unprovenTransfers: string[] = [];

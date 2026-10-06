@@ -31,6 +31,7 @@
  * exists to catch.
  */
 import { spawn as nodeSpawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isAbsolute, normalize } from "node:path";
 
@@ -418,6 +419,7 @@ export const DEFAULT_WORKSPACE_HOST_AGENT_VERIFICATION_TIMEOUT_BUDGET_MS =
 const STDERR_CLASSIFY_WINDOW_BYTES = 4096;
 
 const MAX_PROBE_OUTPUT_BYTES = 512 * 1024;
+const MAX_PROBE_STDERR_DIAGNOSTIC_BYTES = 64 * 1024;
 
 export interface WorkspaceHostAgentProbeInvocation {
   readonly command: string;
@@ -441,6 +443,10 @@ export interface WorkspaceHostAgentProbeOutcome {
   readonly exitCode: number;
   /** Consumed in-process only. It is never copied into evidence. */
   readonly stdout: string;
+  /** Number of stderr bytes observed, saturated at the diagnostic limit. */
+  readonly stderrByteCount?: number;
+  /** True when stderr continued beyond the saturated diagnostic count. */
+  readonly stderrByteCountTruncated?: boolean;
   /**
    * A CLASSIFIED cause, when the probe's own output named one — a fixed reason code, never text.
    *
@@ -557,6 +563,9 @@ export interface WorkspaceHostAgentVerificationEvidence {
   readonly endpoint: string;
   readonly exitStatus: number;
   readonly observedAt: string;
+  /** Bounded stderr volume on failure; the bytes themselves are never retained or published. */
+  readonly stderrByteCount?: number;
+  readonly stderrByteCountTruncated?: boolean;
   /** Present only for a `redacted` probe; the tool produced the redaction, not us. */
   readonly subject?: string;
   /** Always present on a successful probe: a stable digest of the parsed proof value. */
@@ -655,7 +664,31 @@ export function workspaceHostAgentSubjectDigest(subject: string): string {
  * clean failure rather than as a probe that mysteriously took a minute.
  */
 export class NodeWorkspaceHostAgentProbeRunner implements WorkspaceHostAgentProbeRunner {
-  constructor(private readonly spawnImpl: typeof nodeSpawn = nodeSpawn) {}
+  // Keep the child-process boundary independent of a host application's ambient
+  // NodeJS.ProcessEnv augmentation (Next.js makes NODE_ENV required). The child
+  // receives the complete allowlisted string map; consumer globals must not change
+  // spawn overload resolution or reduce the returned handle to `never`.
+  constructor(
+    private readonly spawnImpl: (
+      command: string,
+      args: string[],
+      options: {
+        cwd?: string;
+        detached: boolean;
+        env?: Record<string, string>;
+        stdio: ["ignore", "pipe", "pipe"];
+      },
+    ) => ChildProcess = nodeSpawn as unknown as (
+      command: string,
+      args: string[],
+      options: {
+        cwd?: string;
+        detached: boolean;
+        env?: Record<string, string>;
+        stdio: ["ignore", "pipe", "pipe"];
+      },
+    ) => ChildProcess,
+  ) {}
 
   run(
     invocation: WorkspaceHostAgentProbeInvocation,
@@ -672,20 +705,28 @@ export class NodeWorkspaceHostAgentProbeRunner implements WorkspaceHostAgentProb
       // output pipes open. This awaited probe owns one POSIX process group so its
       // deadline and output bound cover the launcher and its descendants together.
       const ownsProcessGroup = process.platform !== "win32";
+      const spawnOptions: {
+        cwd?: string;
+        detached: boolean;
+        env?: Record<string, string>;
+        stdio: ["ignore", "pipe", "pipe"];
+      } = {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: ownsProcessGroup,
+        ...(processInput.cwd ? { cwd: processInput.cwd } : {}),
+        ...(processInput.env ? { env: { ...processInput.env } } : {}),
+      };
       const child = this.spawnImpl(
         processInput.command,
         [...processInput.args],
-        {
-          stdio: ["ignore", "pipe", "pipe"],
-          detached: ownsProcessGroup,
-          ...(processInput.cwd ? { cwd: processInput.cwd } : {}),
-          ...(processInput.env ? { env: { ...processInput.env } } : {}),
-        },
+        spawnOptions,
       );
       let stdout = "";
       let bytes = 0;
       let settled = false;
       let stderrWindow = "";
+      let stderrByteCount = 0;
+      let stderrByteCountTruncated = false;
       let failureHint: WorkspaceHostAgentProbeFailureReason | undefined;
 
       const killProbe = (): void => {
@@ -738,6 +779,15 @@ export class NodeWorkspaceHostAgentProbeRunner implements WorkspaceHostAgentProb
       // destroyed here and mis-read later as a credential fault — WI-2144034, where the one line
       // that explained a two-canary failure went out on this exact stream.
       child.stderr?.on("data", (chunk: Buffer | string) => {
+        const chunkBytes =
+          typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.byteLength;
+        const observedStderrBytes = stderrByteCount + chunkBytes;
+        if (observedStderrBytes > MAX_PROBE_STDERR_DIAGNOSTIC_BYTES) {
+          stderrByteCount = MAX_PROBE_STDERR_DIAGNOSTIC_BYTES;
+          stderrByteCountTruncated = true;
+        } else {
+          stderrByteCount = observedStderrBytes;
+        }
         if (failureHint) return;
         const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
         // Carry a bounded tail across chunk boundaries so a pattern split across two reads is
@@ -752,6 +802,8 @@ export class NodeWorkspaceHostAgentProbeRunner implements WorkspaceHostAgentProb
           resolve({
             exitCode: typeof code === "number" ? code : 1,
             stdout,
+            stderrByteCount,
+            stderrByteCountTruncated,
             // stdout is classified too: a CLI that reports quota on stdout is just as opaque.
             ...((failureHint ??= classifyWorkspaceHostAgentProbeFailure(stdout))
               ? { failureHint }
@@ -761,6 +813,30 @@ export class NodeWorkspaceHostAgentProbeRunner implements WorkspaceHostAgentProb
       );
     });
   }
+}
+
+type WorkspaceHostAgentProbeStderrDiagnostics = Pick<
+  WorkspaceHostAgentVerificationEvidence,
+  "stderrByteCount" | "stderrByteCountTruncated"
+>;
+
+function probeStderrDiagnosticFields(
+  outcome: WorkspaceHostAgentProbeOutcome,
+): WorkspaceHostAgentProbeStderrDiagnostics {
+  const count = outcome.stderrByteCount;
+  if (
+    typeof count !== "number" ||
+    !Number.isSafeInteger(count) ||
+    count < 0
+  ) {
+    return {};
+  }
+  return {
+    stderrByteCount: Math.min(count, MAX_PROBE_STDERR_DIAGNOSTIC_BYTES),
+    stderrByteCountTruncated:
+      outcome.stderrByteCountTruncated === true ||
+      count > MAX_PROBE_STDERR_DIAGNOSTIC_BYTES,
+  };
 }
 
 export interface ProbeWorkspaceHostAgentInput {
@@ -799,19 +875,25 @@ export async function probeWorkspaceHostAgentVerification(
   } catch {
     // The thrown error may carry a command line or CLI text, so it is reduced to a code here and
     // never surfaced. A caller that needs to debug reads the host's own logs.
-    return {
+    const evidence: WorkspaceHostAgentVerificationEvidence = {
       ...base,
       ready: false,
       exitStatus: -1,
       observedAt: now().toISOString(),
       failure: "probe-error",
     };
+    assertWorkspaceHostSecretIsolation(
+      evidence,
+      `workspaceHost.agentAuthentication.${spec.agent}`,
+    );
+    return evidence;
   }
 
   const observedAt = now().toISOString();
   if (outcome.exitCode !== 0) {
-    return {
+    const evidence: WorkspaceHostAgentVerificationEvidence = {
       ...base,
+      ...probeStderrDiagnosticFields(outcome),
       ready: false,
       exitStatus: outcome.exitCode,
       observedAt,
@@ -820,13 +902,19 @@ export async function probeWorkspaceHostAgentVerification(
       // a reader not to go looking at the credential.
       failure: outcome.failureHint ?? "non-zero-exit",
     };
+    assertWorkspaceHostSecretIsolation(
+      evidence,
+      `workspaceHost.agentAuthentication.${spec.agent}`,
+    );
+    return evidence;
   }
 
   const match = spec.proofPattern.exec(outcome.stdout);
   const proof = match?.[1]?.trim();
   if (!proof) {
-    return {
+    const evidence: WorkspaceHostAgentVerificationEvidence = {
       ...base,
+      ...probeStderrDiagnosticFields(outcome),
       ready: false,
       exitStatus: outcome.exitCode,
       observedAt,
@@ -835,6 +923,11 @@ export async function probeWorkspaceHostAgentVerification(
       // "no proof" and sends every reader to the credentials.
       failure: outcome.failureHint ?? "no-verification-proof",
     };
+    assertWorkspaceHostSecretIsolation(
+      evidence,
+      `workspaceHost.agentAuthentication.${spec.agent}`,
+    );
+    return evidence;
   }
 
   const evidence: WorkspaceHostAgentVerificationEvidence = {

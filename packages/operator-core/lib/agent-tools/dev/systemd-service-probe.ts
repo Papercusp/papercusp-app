@@ -23,12 +23,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import {
-  gitSidecarEnabled,
-  isSidecarInfrastructureFault,
-  noteSidecarFallback,
-  runCommandViaSpawnerSidecar,
-} from '../../fleet/git-via-sidecar';
+import { execFileViaSidecar, type runCommandViaSpawnerSidecar } from '../../fleet/git-via-sidecar';
 
 const run = promisify(execFile);
 
@@ -63,27 +58,19 @@ export async function execProbeCommand(
   timeoutMs: number,
   deps: ExecProbeCommandDeps = {},
 ): Promise<{ stdout: string }> {
-  const sidecarEnabled = deps.sidecarEnabled ?? (() => gitSidecarEnabled(SYSTEMD_PROBE_SIDECAR_VAR));
-  if (sidecarEnabled()) {
-    let res: Awaited<ReturnType<typeof runCommandViaSpawnerSidecar>> | null = null;
-    try {
-      res = await (deps.viaSidecar ?? runCommandViaSpawnerSidecar)(command, args, { timeoutMs });
-    } catch (e) {
-      noteSidecarFallback('systemd-service-probe', e);
-    }
-    if (res && isSidecarInfrastructureFault(res)) {
-      noteSidecarFallback('systemd-service-probe', new Error(res.stderr));
-      res = null;
-    }
-    if (res) {
-      if (res.code !== 0) {
-        throw new Error(`${command} ${args.join(' ')} exited ${res.code} (via spawner sidecar): ${res.stderr.trim()}`);
-      }
-      return { stdout: res.stdout };
-    }
-  }
+  // The implementation is the shared seam in fleet/git-via-sidecar.ts (WI-10004975
+  // lifted it there so every short host-side spawn reuses ONE sidecar route).
   const local = deps.local ?? ((c: string, a: string[], o: { timeout: number }) => run(c, a, o));
-  const { stdout } = await local(command, args, { timeout: timeoutMs });
+  const { stdout } = await execFileViaSidecar(
+    command,
+    args,
+    { timeoutMs, subsystem: 'systemd-service-probe', sidecarVar: SYSTEMD_PROBE_SIDECAR_VAR },
+    {
+      ...(deps.sidecarEnabled ? { sidecarEnabled: deps.sidecarEnabled } : {}),
+      ...(deps.viaSidecar ? { viaSidecar: deps.viaSidecar } : {}),
+      local: (c, a, o) => local(c, a, { timeout: o.timeout }),
+    },
+  );
   return { stdout };
 }
 
@@ -498,6 +485,49 @@ async function readProcStartMs(pid: number): Promise<number | null> {
   }
 }
 
+/** Kernel USER_HZ: the fixed unit of /proc/<pid>/stat starttime on every Linux ABI. */
+const PROC_USER_HZ = 100;
+
+/** Reads one /proc text file; injectable so tests never depend on host pids. */
+export type ProcTextReader = (path: string) => Promise<string>;
+
+const readProcText: ProcTextReader = async (path) => {
+  const { readFile } = await import('node:fs/promises');
+  return readFile(path, 'utf8');
+};
+
+/**
+ * `ps -o etimes=` without the fork (jev-memory-timeouts-to-zero-2026-10-01 D-001).
+ *
+ * procps derives etimes from `/proc/uptime` and field 22 (starttime, in USER_HZ
+ * ticks) of `/proc/<pid>/stat`; reading those two files yields the same whole-
+ * second elapsed time (it can differ by procps' rounding order, at most 1 s,
+ * well inside every caller's tolerance). A local fork from a 1.5-4 GB operator host cost
+ * 16-55 ms of frozen event loop per call (bpftrace, 2026-10-01), and every
+ * unit-start probe paid one for `ps`. Returns null when /proc cannot answer
+ * (non-Linux, gone pid, unparseable); the caller then falls back to `ps`.
+ * `comm` (field 2) may contain spaces or ')', so fields are counted from the
+ * LAST ')'.
+ */
+export async function readProcElapsedSeconds(
+  pid: number,
+  readText: ProcTextReader = readProcText,
+): Promise<number | null> {
+  try {
+    const [uptimeRaw, statRaw] = await Promise.all([readText('/proc/uptime'), readText(`/proc/${pid}/stat`)]);
+    const uptime = Number(uptimeRaw.trim().split(/\s+/)[0]);
+    const close = statRaw.lastIndexOf(')');
+    if (close < 0) return null;
+    // After ") " the first field is field 3 (state), so field 22 is index 19.
+    const startTicks = Number(statRaw.slice(close + 2).split(' ')[19]);
+    if (!Number.isFinite(uptime) || !Number.isFinite(startTicks) || startTicks < 0) return null;
+    const elapsed = Math.floor(uptime - startTicks / PROC_USER_HZ);
+    return elapsed >= 0 ? elapsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The exec seam used by `probeServiceStart`; tests can avoid a real systemd. */
 export type ServiceStartExec = (
   command: string,
@@ -539,6 +569,7 @@ export async function probeSystemdDaemonReloadNeed(
 export async function probeServiceStart(
   unit: string,
   exec: ServiceStartExec = defaultServiceStartExec,
+  readElapsed: (pid: number) => Promise<number | null> = readProcElapsedSeconds,
 ): Promise<ServiceStartInfo> {
   // Linux/systemd-only (a Windows desktop runs this sidecar under WSL, still
   // process.platform === 'linux', so it is NOT short-circuited — the try/catch
@@ -593,12 +624,13 @@ export async function probeServiceStart(
     // MainPID 0 ⇒ systemd has no live main process (down / never started). That
     // is a determinate answer: there is NO recent restart to coalesce against.
     if (!Number.isFinite(mainPid) || mainPid <= 0) return { ok: true, mainPid: 0, ...startState, ...restarts };
-    const { stdout: etimesOut } = await exec(
-      'ps',
-      ['-o', 'etimes=', '-p', String(mainPid)],
-      { timeout: 3000 },
-    );
-    const etimes = Number(etimesOut.trim());
+    // D-001 (jev-memory-timeouts-to-zero-2026-10-01): /proc answers etimes with
+    // no fork; `ps` remains the fallback only when /proc cannot answer.
+    const procElapsed = await readElapsed(mainPid);
+    const etimes =
+      procElapsed !== null
+        ? procElapsed
+        : Number((await exec('ps', ['-o', 'etimes=', '-p', String(mainPid)], { timeout: 3000 })).stdout.trim());
     // WI-10550: read the EXACT start alongside etimes. Independent of etimes'
     // whole-second truncation and of the caller's Date.now() anchor, so a caller
     // comparing "started after the code changed?" is not biased toward YES.

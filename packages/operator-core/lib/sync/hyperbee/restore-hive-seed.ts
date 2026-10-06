@@ -57,7 +57,7 @@ export const SEED_MANIFEST_FILE = 'manifest.json';
  * silently cold-joined (network re-clone) with the 3.6 GB seed unused.
  * Ordered by how reliably each is set on boot.
  */
-const SEED_SIBLING_RESOURCE_ENVS = ['PAPERCUSP_PROMPTS_DIR', 'PAPERCUSP_HARNESS_DIR', 'PAPERCUSP_PG_SQL_DIR'] as const;
+export const SEED_SIBLING_RESOURCE_ENVS = ['PAPERCUSP_PROMPTS_DIR', 'PAPERCUSP_HARNESS_DIR', 'PAPERCUSP_PG_SQL_DIR'] as const;
 
 export interface ResolveSeedDirResult {
   /** The seed dir to restore from, or null ⇒ take the cold path. */

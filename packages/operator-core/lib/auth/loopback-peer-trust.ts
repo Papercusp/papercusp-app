@@ -14,7 +14,7 @@
  * A hosted workspace VM breaks that premise. The operator runs as the service
  * account, while the CUSTOMER account (the D-417 PTY identity and the D-421
  * customer-driven agent identity) runs shells and shell-capable agents on the SAME
- * loopback interface. Measured 2026-09-28 on owner-test r56: logged in as the customer
+ * loopback interface. Measured 2026-09-28 on avi-test r56: logged in as the customer
  * (uid 1001), `GET 127.0.0.1:3070/api/internal/managed-timers` (an `auth:'loopback'`
  * route) returned 200 from the operator running as uid 999. The address cannot tell
  * the two apart; the socket owner can.

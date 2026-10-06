@@ -42,6 +42,7 @@
 import { Suspense, useMemo } from 'react';
 import { parseAsString, useQueryState } from 'nuqs';
 import { lazyWithRetry as lazy } from '@papercusp/operator-core/lib/lazy-with-retry';
+import { markInteractionPhase, PERF_INTERACTIONS } from '../perf/perf-marks';
 import { useResolvedHarnessSlug } from '@/app/adv/create/use-create-data';
 import {
   CHAT_PLAN_POPUP_PARAM,
@@ -51,7 +52,44 @@ import {
 } from './chat-ref-popup-params';
 
 const WorkItemPopupModal = lazy(() => import('../work-items/WorkItemPopupModal'));
-const PlanPopupModal = lazy(() => import('../plans/PlanPopupModal'));
+type PlanPopupModule = typeof import('../plans/PlanPopupModal');
+let preparedPlanPopup: PlanPopupModule | null = null;
+let preparingPlanPopup: Promise<PlanPopupModule> | null = null;
+
+/** The dashboard already knows the next surface; resolve its code before the
+ * click. A failed warm-up remains retryable through the ordinary lazy loader. */
+export function preloadPlanPopupModal(): Promise<PlanPopupModule> {
+  if (preparedPlanPopup) return Promise.resolve(preparedPlanPopup);
+  if (!preparingPlanPopup) {
+    preparingPlanPopup = import('../plans/PlanPopupModal').then((module) => {
+      preparedPlanPopup = module;
+      return module;
+    }).catch((error: unknown) => {
+      preparingPlanPopup = null;
+      throw error;
+    });
+  }
+  return preparingPlanPopup;
+}
+
+export async function loadPlanPopupModal() {
+  markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'popup-module-requested');
+  const module = await preloadPlanPopupModal();
+  markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'popup-module-ready');
+  return module;
+}
+const LazyPlanPopupModal = lazy(loadPlanPopupModal);
+
+function PlanPopupModal(props: Parameters<PlanPopupModule['default']>[0]) {
+  if (!preparedPlanPopup) return <LazyPlanPopupModal {...props} />;
+  // Passing even an already-resolved promise to React.lazy suspends on its
+  // first render. Use the prepared component directly so a dashboard click
+  // does not enter the fallback/retry scheduling path after warming its code.
+  markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'popup-module-requested');
+  markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, 'popup-module-ready');
+  const Component = preparedPlanPopup.default;
+  return <Component {...props} />;
+}
 
 /**
  * What the click paints WHILE the lazy chunk resolves (WI-7088).

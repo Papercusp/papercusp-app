@@ -29,8 +29,19 @@
  * It also degrades safely: a worker killed mid-write leaves one unparseable
  * trailing line, which `readMeasures` skips, instead of corrupting the whole file.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { homedir } from "node:os";
+
+/** Match the operator's scoped bearer reader; a missing scoped key must not use the box key. */
+export function readPublisherToken(
+  env: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): string {
+  const operatorHome = env.PAPERCUSP_HOME || path.join(home, ".papercusp");
+  return readFileSync(path.join(operatorHome, "superuser-token"), "utf8").trim();
+}
 
 export interface PrivateIpcFixture {
   pid: number;
@@ -129,9 +140,26 @@ export interface PerfMeasure {
 }
 
 const RESULTS_DIR = path.resolve(__dirname, "results");
-const MEASURES_PATH = path.join(RESULTS_DIR, "measures.jsonl");
 
-export { MEASURES_PATH };
+// The launcher initializes this BEFORE forking spec workers; workers inherit its
+// exact path. A profile/runId may be reused for a cohort, so it cannot identify
+// one collection lifetime. Never fall back to the old shared measures.jsonl.
+export let MEASURES_PATH: string | null = process.env.PAPERCUSP_PERF_MEASURES_PATH || null;
+
+/** Allocate a fresh collection for this launcher, ignoring inherited prior runs.
+ * A failed preflight cannot consume another launcher's outcomes in onComplete.
+ * Failed publishes retain their own file for recovery instead of contaminating
+ * the next run. This extends the existing JSONL writer, not the receipt schema. */
+export function prepareMeasures(): string {
+  MEASURES_PATH = null;
+  delete process.env.PAPERCUSP_PERF_MEASURES_PATH;
+  mkdirSync(RESULTS_DIR, { recursive: true });
+  const file = path.join(RESULTS_DIR, `measures-${randomUUID()}.jsonl`);
+  writeFileSync(file, '', { flag: 'wx' });
+  process.env.PAPERCUSP_PERF_MEASURES_PATH = file;
+  MEASURES_PATH = file;
+  return file;
+}
 
 /**
  * Context-stamp prefixes: `host:` (the box) and `build:` (the artifact measured).
@@ -333,7 +361,8 @@ export function operatorBaseUrl(): string {
  */
 export function recordMeasure(measure: PerfMeasure): void {
   try {
-    mkdirSync(RESULTS_DIR, { recursive: true });
+    if (!MEASURES_PATH) throw new Error('Measure collection was not prepared by the launcher');
+    mkdirSync(path.dirname(MEASURES_PATH), { recursive: true });
     appendFileSync(MEASURES_PATH, `${JSON.stringify(measure)}\n`, "utf8");
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -478,12 +507,11 @@ export function recordHostPressure(phase: "start" | "end"): void {
 }
 
 /**
- * Discard any measures on disk. Called from `onPrepare` so a file left behind by a
- * previously CRASHED run (one that died before `onComplete` could consume and clear
- * it) is never posted as if it were this run's data — that would report stale
- * timings against the current commit, which is worse than reporting none.
+ * Discard only this launcher's measures. A crashed run's separate file is never
+ * reused, read or deleted by a later launcher, even with the same profile name.
  */
 export function resetMeasures(): void {
+  if (!MEASURES_PATH) return;
   try {
     rmSync(MEASURES_PATH, { force: true });
   } catch {
@@ -493,7 +521,7 @@ export function resetMeasures(): void {
 
 /** Read every recorded measure, skipping any unparseable (partially-written) line. */
 export function readMeasures(): PerfMeasure[] {
-  if (!existsSync(MEASURES_PATH)) return [];
+  if (!MEASURES_PATH || !existsSync(MEASURES_PATH)) return [];
   const measures: PerfMeasure[] = [];
   for (const line of readFileSync(MEASURES_PATH, "utf8").split("\n")) {
     const trimmed = line.trim();

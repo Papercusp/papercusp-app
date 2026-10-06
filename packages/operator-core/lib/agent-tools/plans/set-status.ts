@@ -22,10 +22,19 @@
 
 import { z } from 'zod';
 import { defineTool, AGENT_ROLES, HarnessRequiredError, type UnifiedToolContext } from '@papercusp/agent-mcp';
+import type { RefusalContract } from '../../capability-envelope/refusal-contract-types';
 import { resolveCtxHarnessSlug } from './_ctx-opts';
 import { harnessArg, harnessScopedCtx } from '../_harness-scope';
 import { withPlanLock, bumpUpdatedDate } from './with-plan-lock';
-import { ITEM_STATUSES, maskFences, parsePlan, NOTE_SUFFIX_RE, type Importance } from './parser';
+import {
+  findTerminalPlanChildMutations,
+  ITEM_STATUSES,
+  maskFences,
+  parsePlan,
+  NOTE_SUFFIX_RE,
+  type Importance,
+  type TerminalPlanChildMutation,
+} from './parser';
 import { emitPlanEventForCaller } from '../coordination/plan-events';
 import { emitPlanItemDoneEvent } from './plan-item-events';
 import { isPlanDrained, emitFleetDrainedForPlan } from '../../fleet-drained-events';
@@ -72,6 +81,8 @@ import { ensureAcceptanceDrainCarryInTransaction } from './acceptance-drain-fili
 import { planDrainTransitionMutation } from './plan-drain-transition';
 import { reevaluateBarReadinessOnScopeWrite, type BarReadinessResult } from './plan-scope-cascade';
 import { defaultBarReadinessDeps } from './plan-scope-cascade-deps';
+import { attestLandedPlanItemStatus } from './plan-item-consumer-view';
+import { planItemConsumerReaderFor } from './plan-item-consumer-read';
 
 // Most-permissive (owner directive 2026-06-25): open to every role; the capability envelope is the
 // real backstop. Was [...SU_ROLES, 'bee'].
@@ -272,6 +283,12 @@ type SetStatusValue =
       wipItemText?: string;
     }
   | { ok: false; code: 'not_found' | 'item_not_found' }
+  | {
+      ok: false;
+      code: 'terminal_parent_child_mutation';
+      parentStatus: string;
+      changes: TerminalPlanChildMutation[];
+    }
   /** `onlyIfNotTerminal` tripped: the item is already done/dropped and the caller
    *  asked for a non-destructive flip. Carries the CURRENT status so the caller can
    *  report what it left alone. Not an error — see the `terminal_guard` branch below. */
@@ -279,7 +296,7 @@ type SetStatusValue =
   /** `onlyIfNotBlocked` tripped: the item is already blocked/needs-human and the caller
    *  asked for a non-destructive flip. Carries the CURRENT status so the caller can
    *  report what it left alone. Not an error — see the `blocked_guard` branch below. */
-  | { ok: false; code: 'blocked_guard'; currentStatus: string | null }
+  | { ok: false; code: 'blocked_guard'; currentStatus: string | null; refusal: RefusalContract }
   /** `onlyIfNotCompleted` tripped: the item is `done` and an automated cascade tried to
    *  drop it. Not an error — see the `completed_guard` branch below. */
   | { ok: false; code: 'completed_guard'; currentStatus: string | null }
@@ -825,11 +842,35 @@ export function flipStatusInBody(
     String.raw`^(\s*[-*]\s+\*\*\s*` + itemId.replace(/-/g, '\\-') + String.raw`\s*\*\*\s+\x60)([a-z-]+)(\x60\s+.*)$`,
     'm',
   );
-  // Search the fence-masked body so a `- **P-NNN**` line inside a
-  // worked-example code fence is never targeted. Match index is valid
-  // against the real body (maskFences preserves length); the item line
-  // is outside any fence, so captured groups equal the real text.
-  const m = re.exec(maskFences(body));
+
+  // `## Now` can contain a presentation line like `- **P-001** `done` ...`
+  // before the real phase item. It is intentionally excluded from
+  // parsePlan().items and from the derived index, but a document-wide first
+  // regex match would edit it and leave the actual item unchanged. Resolve the
+  // same canonical occurrence the index writer sees (last parsed occurrence for
+  // duplicate ids), then use its physical line. Keep the legacy raw-line
+  // fallback for bodies without a parser-recognized phase item.
+  const matchingItems = parsePlan(body).items.filter((item) => item.id === itemId);
+  const parsedItem = matchingItems[matchingItems.length - 1];
+  const lines = body.split('\n');
+  const maskedLines = maskFences(body).split('\n');
+
+  // parsePlan() numbers lines in the body after frontmatter. Translate that to
+  // the original source line so the exact canonical row is edited in place.
+  let frontmatterLineOffset = 0;
+  if (body.startsWith('---')) {
+    const close = body.indexOf('\n---', 3);
+    if (close !== -1) {
+      const afterClose = body.indexOf('\n', close + 4);
+      if (afterClose !== -1) {
+        frontmatterLineOffset = (body.slice(0, afterClose + 1).match(/\n/g) ?? []).length;
+      }
+    }
+  }
+  const lineIndex = parsedItem
+    ? frontmatterLineOffset + parsedItem.lineNumber - 1
+    : maskedLines.findIndex((line) => re.test(line));
+  const m = lineIndex >= 0 && lineIndex < maskedLines.length ? re.exec(maskedLines[lineIndex] ?? '') : null;
   if (!m) return { newBody: body, found: false, oldStatus: null };
 
   const oldStatus = m[2] ?? '';
@@ -851,11 +892,11 @@ export function flipStatusInBody(
   const newLine = `${m[1] ?? ''}${newStatus}${rest}`;
   // Index-based splice rather than body.replace(re, newLine): a string
   // replacement argument would interpret dollar-sign substitution
-  // sequences in the item text as patterns, and body.replace would
-  // re-scan the real body and could hit a fenced match first. m.index
-  // and m[0].length come from the masked body but are valid against
-  // the real body since maskFences preserves length.
-  const newBody = body.slice(0, m.index) + newLine + body.slice(m.index + m[0].length);
+  // sequences in the item text as patterns. The selected physical line came
+  // from the fence-masked body, which preserves length. Preserve CRLF input.
+  const trailingCarriageReturn = lines[lineIndex]!.endsWith('\r') ? '\r' : '';
+  lines[lineIndex] = `${newLine}${trailingCarriageReturn}`;
+  const newBody = lines.join('\n');
   return { newBody, found: true, oldStatus };
 }
 
@@ -1165,43 +1206,6 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
     }
   };
 
-  // WI-2156 (completion-integrity, terminal-flip holdership): a done/dropped flip by an
-  // AGENT who is NOT the item's live claim holder is REFUSED with the same per-item
-  // claim_conflict shape as the wip path — you cannot close (and silently void the lease
-  // on) an item a live peer is mid-verifying. Humans/principal callers are exempt
-  // (agentId is null for them, above). Read-then-decide: the plan lock below still
-  // serializes the actual byte write; this pre-lock read matches the wip path's own
-  // claim-before-flip ordering, and the TTL liveness means a dead peer's lapsed claim
-  // never wedges closure. A getClaim hiccup fails OPEN (holder null → allow) so a
-  // coordination-store blip never blocks a legitimate completion.
-  if (agentId && isTerminalStatus(it.status)) {
-    const scope = await resolvePlanScope(harnessSlug ? { harnessSlug } : {});
-    const holder = await getClaim(scope.workspaceId, scope.harnessSlug, it.slug, it.itemId).catch(() => null);
-    const conflict = terminalFlipConflict({ status: it.status, agentOwnerId: agentId.ownerId, holder });
-    if (conflict) {
-      // P-027: the same disclosure on the TERMINAL-flip refusal. This is the
-      // sharper of the two cases — you believe the item is finished and the
-      // holder does not, so what they are still doing on it is exactly the
-      // disagreement to resolve before escalating.
-      const holderContext = await resolveHolderAdvisory({
-        holder: conflict.owner,
-        reader: holderContextReader(ctx as Parameters<typeof holderContextReader>[0]),
-        // The qualified ref — same reason as the wip-claim path above.
-        subjectRef: planItemRef(it.slug, it.itemId),
-      });
-      return {
-        ok: false,
-        slug: it.slug,
-        itemId: it.itemId,
-        error: 'claim_conflict',
-        reason: `${it.status} refused — ${conflict.ownerLabel ?? conflict.owner} holds a live claim on this item; only the holder closes it`,
-        holder: conflict,
-        ...(holderContext ? { holderContext } : {}),
-        hint: 'a live peer is working this item — coordinate with the holder (coord:send) and let them close it, or pick another item; fleet:assignments { plan } shows who holds what',
-      };
-    }
-  }
-
   // EI-19972048649686949: dropping ONE work-item linked to a plan item must not
   // cascade `dropped` onto the plan item when ANOTHER non-terminal work-item still
   // covers it (e.g. dropping a hand-filed duplicate of an already-claimed
@@ -1245,6 +1249,44 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
       }
     } catch (e) {
       console.warn(`[plans:set-status] coverage guard ${it.slug}#${it.itemId} failed:`, (e as Error)?.message ?? e);
+    }
+  }
+
+  // WI-2156 (completion-integrity, terminal-flip holdership): a done/dropped flip by an
+  // AGENT who is NOT the item's live claim holder is REFUSED with the same per-item
+  // claim_conflict shape as the wip path — you cannot close (and silently void the lease
+  // on) an item a live peer is mid-verifying. Humans/principal callers are exempt
+  // (agentId is null for them, above). This check follows the open-coverage guard so a
+  // harmless automated reflection can report `coverage_guard` before claim ownership is
+  // considered; it still runs before the plan lock and the actual status write.
+  // The TTL liveness means a dead peer's lapsed claim never wedges closure. A getClaim
+  // hiccup fails OPEN (holder null → allow) so a coordination-store blip never blocks a
+  // legitimate completion.
+  if (agentId && isTerminalStatus(it.status)) {
+    const scope = await resolvePlanScope(harnessSlug ? { harnessSlug } : {});
+    const holder = await getClaim(scope.workspaceId, scope.harnessSlug, it.slug, it.itemId).catch(() => null);
+    const conflict = terminalFlipConflict({ status: it.status, agentOwnerId: agentId.ownerId, holder });
+    if (conflict) {
+      // P-027: the same disclosure on the TERMINAL-flip refusal. This is the
+      // sharper of the two cases — you believe the item is finished and the
+      // holder does not, so what they are still doing on it is exactly the
+      // disagreement to resolve before escalating.
+      const holderContext = await resolveHolderAdvisory({
+        holder: conflict.owner,
+        reader: holderContextReader(ctx as Parameters<typeof holderContextReader>[0]),
+        // The qualified ref — same reason as the wip-claim path above.
+        subjectRef: planItemRef(it.slug, it.itemId),
+      });
+      return {
+        ok: false,
+        slug: it.slug,
+        itemId: it.itemId,
+        error: 'claim_conflict',
+        reason: `${it.status} refused — ${conflict.ownerLabel ?? conflict.owner} holds a live claim on this item; only the holder closes it`,
+        holder: conflict,
+        ...(holderContext ? { holderContext } : {}),
+        hint: 'a live peer is working this item — coordinate with the holder (coord:send) and let them close it, or pick another item; fleet:assignments { plan } shows who holds what',
+      };
     }
   }
 
@@ -1423,6 +1465,23 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
           },
         };
       }
+      const parentStatus = parsePlan(current, { filePath: it.slug + '.md' }).frontmatter.status;
+      const parentChildChanges = findTerminalPlanChildMutations(
+        parentStatus,
+        [{ id: it.itemId, status: oldStatus }],
+        [{ id: it.itemId, status: it.status }],
+      );
+      if (parentStatus && parentChildChanges.length > 0) {
+        return {
+          newBody: null,
+          value: {
+            ok: false,
+            code: 'terminal_parent_child_mutation',
+            parentStatus,
+            changes: parentChildChanges,
+          },
+        };
+      }
       // Non-destructive flip: refuse to move an item OFF a terminal status.
       // Read INSIDE the lock (like drainedPlan/wipItemText above) so the decision is
       // race-safe against a concurrent flip rather than a stale pre-lock read.
@@ -1458,7 +1517,19 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
           nextStatus: it.status,
         })
       ) {
-        return { newBody: null, value: { ok: false, code: 'blocked_guard', currentStatus: oldStatus } };
+        return {
+          newBody: null,
+          value: {
+            ok: false,
+            code: 'blocked_guard',
+            currentStatus: oldStatus,
+            refusal: {
+              observed: { currentStatus: oldStatus, requestedStatus: it.status, onlyIfNotBlocked: String(it.onlyIfNotBlocked ?? false) },
+              liftsWhen: 'the item leaves blocked/needs-human (its explicit gate is lifted), or the flip is made without onlyIfNotBlocked by a caller deliberately reopening or completing the gate',
+              whoCanMakeItTrue: ['owner', 'another-agent'],
+            },
+          },
+        };
       }
       // ATTRIBUTED CLEAR (D-001). The mirror of the guard above: `onlyIfNotBlocked`
       // protects a block from being weakened, this one permits exactly ONE reflection to
@@ -1500,6 +1571,22 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
       // needs-human push gate uses the same value, but callers also rely on
       // this response field for routine and terminal status updates.
       const importance = itemImportance(current, it.itemId);
+      // A repeated reflection can ask for the status and note the item already has.
+      // Treat byte-identical content as a successful no-op so an idempotent call does
+      // not bump `updated`, the plan version, or the BAR approval subject revision.
+      if (newBody === current) {
+        return {
+          newBody: null,
+          value: {
+            ok: true,
+            oldStatus,
+            newStatus: it.status,
+            itemId: it.itemId,
+            importance,
+            drainedPlan: false,
+          },
+        };
+      }
       let finalBody = bumpUpdatedDate(newBody);
       // Preserve accountability BEFORE releasing the implementation claim. The
       // same parser-owned transition serves direct writes and the backstop;
@@ -1582,6 +1669,7 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
         itemId: it.itemId,
         skipped: 'blocked_guard',
         currentStatus: result.value.currentStatus,
+        refusal: result.value.refusal,
         ...claimRollback,
         reason:
           `left at \`${result.value.currentStatus}\` — this explicit gate was preserved; ` +
@@ -1641,6 +1729,21 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
           'have overwritten newer work',
       };
     }
+    if (result.value.code === 'terminal_parent_child_mutation') {
+      return {
+        ok: false,
+        slug: it.slug,
+        itemId: it.itemId,
+        error: result.value.code,
+        parentStatus: result.value.parentStatus,
+        changes: result.value.changes,
+        ...claimRollback,
+        reason:
+          'not applied — the parent plan remains ' +
+          result.value.parentStatus +
+          '; change its lifecycle status explicitly before reopening this item',
+      };
+    }
     return { ok: false, slug: it.slug, itemId: it.itemId, error: result.value.code, ...claimRollback };
   }
 
@@ -1694,13 +1797,15 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
   }
   markPhase('autoConvert');
 
-  await emitPlanEventForCaller(ctx, {
-    planSlug: it.slug,
-    event: 'item_status_changed',
-    before: result.value.oldStatus,
-    after: it.status,
-    detail: it.itemId,
-  });
+  if (result.value.oldStatus !== it.status) {
+    await emitPlanEventForCaller(ctx, {
+      planSlug: it.slug,
+      event: 'item_status_changed',
+      before: result.value.oldStatus,
+      after: it.status,
+      detail: it.itemId,
+    });
+  }
 
   // See `shouldFirePlanItemDone` for the edge gate this call depends on.
   // P-105: plan-item:done:<slug>:<id> — wake anyone awaiting this item (a peer's lane,
@@ -2016,6 +2121,22 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
     );
   }
 
+  // WI-10005199 (generalizing EI-23770243810745552): `ok` here proves only that the plan BODY
+  // write landed. Every consumer (plans:get-item / plans:items / lane derivation / the ship
+  // gate) reads the derived `items` index + blocked-by graph instead, so re-read it the way a
+  // consumer does and surface a `consumerView` ONLY when it disagrees with what was written.
+  // One bounded, fail-soft read per landed flip (never memoized across a batch — item N+1's
+  // write invalidates a row cached after N); exception-only so an agreeing flip is unchanged.
+  const consumerAttestation = result.value.ok
+    ? await attestLandedPlanItemStatus({
+        slug: it.slug,
+        itemId: it.itemId,
+        status: it.status,
+        read: planItemConsumerReaderFor(sctx),
+      })
+    : undefined;
+  markPhase('consumerView');
+
   markPhase('finalize');
   const totalMs = Math.round(Math.max(0, lastPhaseAtMs - startedAtMs));
   const slowPathTiming = totalMs >= 10_000 ? { totalMs, phasesMs } : null;
@@ -2047,6 +2168,7 @@ async function setStatusOne(it: StatusItem, ctx: UnifiedToolContext): Promise<Bu
     ...(residualWarning ? { residualWarning } : {}),
     ...(typeEvidenceWarning ? { typeEvidenceWarning } : {}),
     ...(barReadiness ? { barReadiness } : {}),
+    ...(consumerAttestation ?? {}),
     ...(slowPathTiming ? { slowPathTiming } : {}),
     ...(noteTruncated
       ? {

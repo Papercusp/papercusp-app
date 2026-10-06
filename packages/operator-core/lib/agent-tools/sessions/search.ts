@@ -16,16 +16,25 @@
 import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { runHybridSearch } from '@papercusp/search';
+import { describeSearchLegs } from '../search/describe-leg';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 import { SEARCH_SOURCES } from '../search/sources';
 import { buildQueryEmbedder, interactiveEmbedAcquireBudgetMs } from '../search/embedder';
+import { escapeLikeLiteral } from '../search/session-turn-literal';
 import { searchFilterArgs, resolveSearchFilters } from '../search/filters';
 import { resolveAgentIdentity } from '../coordination/identity';
 import {
   sessionSearchEnabled, disabledResult, hydrateWindow, parseTurnRef,
   formatSessionTurnRef,
   refreshLiveSessionsBeforeRead, refreshTargetSessionBeforeRead, type WindowTurn,
+  loadTurnStamps, toWindowTurn, type StampedWindowTurn,
 } from './_shared';
+import { DisclosureRefused, disclosureRefusalData } from '../../personal-vault/disclosure-ledger';
+import {
+  addTally, countRestrictedTurnsInScope, emptyTally, loadTranscriptExclusion, restrictedTurnSql, withheldReceipt,
+  type TranscriptExclusion, type WithheldTally,
+} from '../../personal-vault/transcript-exclusion';
+import { sessionTurnScopeSql } from '../search/sources';
 import { decodeSessionCursor, encodeSessionCursor, sessionCursorFingerprint } from './cursor';
 import { resolveHitTurnOrigins, turnOriginKey, unknownTurnOrigin } from './turn-origin';
 import { OWNER_CANDIDATE_TURN_VERDICTS } from '../../turn-provenance/turn-ref';
@@ -179,7 +188,29 @@ export default defineTool({
     const liveRefresh = filters?.sessionId
       ? await refreshTargetSessionBeforeRead(tx, filters.sourceKind, filters.sessionId)
       : await refreshLiveSessionsBeforeRead(tx, filters?.owners ?? null);
-    const refreshDegraded = liveRefresh.attempted > liveRefresh.refreshed;
+    const refreshDegraded =
+      liveRefresh.attempted > liveRefresh.refreshed || Boolean(liveRefresh.failureReasons);
+
+    // D-006 / P-013: turns another agent recorded inside its disclosure windows
+    // are excluded INSIDE every matching query below, so they never take a
+    // result slot. The count reported for them covers this search's whole scope
+    // and does not depend on the query — a per-query count would let a caller
+    // confirm a guess about a restricted turn's text. The count runs first, so
+    // an unreadable ledger refuses the search before anything is matched.
+    const selfChain = args.session === 'self' || args.owner === 'self' ? (filters?.owners ?? []) : [];
+    const selfOwnerIds = [callerOwnerId, ...selfChain].filter((owner): owner is string => Boolean(owner));
+    let inScope: WithheldTally;
+    try {
+      inScope = await countRestrictedTurnsInScope(tx, {
+        selfOwnerIds,
+        scope: sessionTurnScopeSql({ sql: tx, workspaceId, scopeFilter: args.harness_slug ?? null, filters }) as never,
+      });
+    } catch (error) {
+      if (error instanceof DisclosureRefused) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify(disclosureRefusalData(error)) }], isError: true };
+      }
+      throw error;
+    }
 
     interface RawHit {
       sourceKind: string; sessionId: string; turnIdx: number;
@@ -187,10 +218,18 @@ export default defineTool({
       ts: string | null; excerpt: string; highlight?: string; score: number; source: string;
     }
     const hits: RawHit[] = [];
+    // WI-10005676: the engine's per-leg verdict (hybrid path only — verbatim mode
+    // never calls runHybridSearch). Kept so a degraded semantic half is visible on
+    // the RESULT, not only in a hook banner: a search that silently went
+    // lexical-only reads exactly like one that found nothing.
+    let searchLegs: Parameters<typeof describeSearchLegs>[0] | null = null;
 
     if (mode === 'verbatim') {
       const f = filters ?? {};
       const owners = f.owners && f.owners.length ? f.owners : null;
+      // Match the expression served by session_turns_text_trgm_idx. ILIKE does
+      // not use that lower(text) trigram index and can scan the entire corpus.
+      const likePattern = `%${escapeLikeLiteral(args.query.toLowerCase())}%`;
       const rows = await tx<Array<{ source_kind: string; session_id: string; turn_idx: number; speaker: string; owner: string | null; harness_slug: string | null; ts: string | null; text: string }>>`
         SELECT source_kind, session_id, turn_idx, speaker, owner, harness_slug, ts::text AS ts,
                left(text, 700) AS text
@@ -206,7 +245,8 @@ export default defineTool({
            AND (${f.sourceKind ?? null}::text IS NULL OR source_kind = ${f.sourceKind ?? null})
            AND (${f.since ?? null}::timestamptz IS NULL OR COALESCE(ts, ingested_at) >= ${f.since ?? null}::timestamptz)
            AND (${f.until ?? null}::timestamptz IS NULL OR COALESCE(ts, ingested_at) < ${f.until ?? null}::timestamptz)
-           AND text ILIKE '%' || ${args.query} || '%'
+           AND lower(text) LIKE ${likePattern}
+           AND NOT ${restrictedTurnSql(tx, 'session_turns', selfOwnerIds)}
       ORDER BY COALESCE(ts, ingested_at) DESC
          LIMIT ${limit + 1}
         OFFSET ${offset}
@@ -231,7 +271,7 @@ export default defineTool({
       const embedder = await buildQueryEmbedder({ acquireBudgetMs: interactiveEmbedAcquireBudgetMs() });
       // WI-3929 (same class as EI-9312): bound the ACTUAL per-query embed
       // call inside runHybridSearch, not just the acquisition above.
-      const { results } = await runHybridSearch(sources, {
+      const { results, legs } = await runHybridSearch(sources, {
         caller: 'sessions:search',
         sql: tx,
         query: args.query,
@@ -241,9 +281,11 @@ export default defineTool({
         mode: 'hybrid',
         embedder,
         embedTimeoutMs: interactiveEmbedAcquireBudgetMs(),
-        filters,
+        // readerIds: the session_turn source excludes restricted turns in SQL.
+        filters: { ...(filters ?? {}), readerIds: selfOwnerIds },
         log: ctx.log,
       });
+      searchLegs = legs;
       for (const r of results) {
         if (r.source === 'session_turn') {
           const ref = parseTurnRef(r.source_id);
@@ -285,8 +327,11 @@ export default defineTool({
     // failure arriving through a tool result instead of a summary.
     const staleIndexCaveat = pageHits.length === 0 && refreshDegraded
       ? `⚠ UNVERIFIABLE, NOT ABSENT: the pre-read ingest that tails live transcript(s) into the search index ` +
-        `FAILED for ${liveRefresh.attempted - liveRefresh.refreshed} of ${liveRefresh.attempted} session(s) in scope ` +
-        `(it is fail-soft and swallows its own error). Turns written since the last SUCCESSFUL ingest — including ` +
+        (liveRefresh.attempted > 0
+          ? `FAILED for ${liveRefresh.attempted - liveRefresh.refreshed} of ${liveRefresh.attempted} session(s) in scope. `
+          : `could not enumerate live sessions for refresh. `) +
+        `The refresh is fail-soft. Anonymized stage/reason counts are in indexRefresh.failureReasons; raw errors and session ids ` +
+        `are omitted. Turns written since the last SUCCESSFUL ingest — including ` +
         `ones from the session you are searching right now — are not in the index yet, so this 0 does not mean the ` +
         `text was never written. Re-running may fix it; if it still returns 0, read the transcript directly ` +
         `(sessions:read { session:'self' }) before concluding anything. Do NOT use this 0 as evidence that an owner ` +
@@ -386,10 +431,15 @@ export default defineTool({
       try {
         const pf = filters ?? {};
         const pOwners = pf.owners && pf.owners.length ? pf.owners : null;
+        // D-006 / P-013: a count over another agent's restricted tool parts is a
+        // substring ORACLE on its content, so those parts never count — the same
+        // SQL rule as the turn queries. A ledger read failure fails the probe
+        // (caught below), which shows no caveat.
         const [row] = await tx<Array<{ hits: string }>>`
           SELECT COUNT(*)::text AS hits
-            FROM harness_shared.session_turn_parts
+            FROM harness_shared.session_turn_parts p
            WHERE (workspace_id = ${workspaceId} OR workspace_id = 'default')
+             AND NOT ${restrictedTurnSql(tx, 'p', selfOwnerIds)}
              AND (${pOwners}::text[] IS NULL OR owner = ANY(${pOwners}::text[]))
              AND (${pf.sessionId ?? null}::text IS NULL OR session_id = ${pf.sessionId ?? null})
              AND (${pf.sourceKind ?? null}::text IS NULL OR source_kind = ${pf.sourceKind ?? null})
@@ -434,9 +484,67 @@ export default defineTool({
       }
     }
 
+    // D-006 / P-013: restricted turns were already excluded from matching (and
+    // counted in `inScope`). The ±context window around a kept hit is read by
+    // POSITION, not by content, so a restricted window turn is withheld and
+    // counted here. The same per-turn check runs over the hits as a second line
+    // of defence. Hybrid hits carry no owner/time, so stamp them from the index
+    // first; one ledger read then decides the whole page.
+    const turnHits = pageHits.filter((h) => h.source === 'session_turn');
+    const stampByRef = await loadTurnStamps(
+      tx,
+      workspaceId,
+      turnHits.filter((h) => h.owner === null).map((h) => ({ sourceKind: h.sourceKind, sessionId: h.sessionId, turnIdx: h.turnIdx })),
+    );
+    const hitStamp = (h: RawHit) =>
+      h.owner !== null
+        ? { owner: h.owner, at: h.ts }
+        : stampByRef.get(formatSessionTurnRef(h.sourceKind, h.sessionId, h.turnIdx)) ?? { owner: null, at: null };
+    const windowsByHit = new Map<RawHit, StampedWindowTurn[]>();
+    if (context > 0) {
+      for (const h of turnHits) {
+        try {
+          windowsByHit.set(h, await hydrateWindow(
+            tx,
+            workspaceId,
+            h.sourceKind,
+            h.sessionId,
+            h.turnIdx,
+            context,
+            SESSION_SEARCH_WINDOW_TURN_CHARS,
+          ));
+        } catch { /* window is a bonus, never fail the search */ }
+      }
+    }
+    let exclusion: TranscriptExclusion;
+    try {
+      exclusion = await loadTranscriptExclusion(tx, {
+        selfOwnerIds,
+        stamps: [...turnHits.map(hitStamp), ...[...windowsByHit.values()].flat()],
+      });
+    } catch (error) {
+      if (error instanceof DisclosureRefused) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify(disclosureRefusalData(error)) }], isError: true };
+      }
+      throw error;
+    }
+    // coord_message hits are not transcript turns: P-006 seals them at write.
+    const withheld = addTally(emptyTally(), inScope);
+    const fromWindows = emptyTally();
+    const keptHits: RawHit[] = [];
+    for (const h of pageHits) {
+      const reason = h.source === 'session_turn' ? exclusion.withholds(hitStamp(h)) : null;
+      if (reason === null) {
+        keptHits.push(h);
+      } else {
+        withheld.turns += 1;
+        withheld.byReason[reason] += 1;
+      }
+    }
+
     // Hydrate ±context windows only for this page.
     const out: SearchOutput[] = [];
-    for (const h of pageHits) {
+    for (const h of keptHits) {
       const turnOrigin = h.source === 'session_turn'
         ? turnOrigins.get(turnOriginKey({ sourceKind: h.sourceKind, sessionId: h.sessionId, turnIdx: h.turnIdx }))
           ?? unknownTurnOrigin(
@@ -446,18 +554,12 @@ export default defineTool({
           )
         : undefined;
       let window: WindowTurn[] | undefined;
-      if (h.source === 'session_turn' && context > 0) {
-        try {
-          window = await hydrateWindow(
-            tx,
-            workspaceId,
-            h.sourceKind,
-            h.sessionId,
-            h.turnIdx,
-            context,
-            SESSION_SEARCH_WINDOW_TURN_CHARS,
-          );
-        } catch { /* window is a bonus, never fail the search */ }
+      const stampedWindow = windowsByHit.get(h);
+      if (stampedWindow) {
+        const shownWindow = exclusion.partition(stampedWindow, (turn) => turn);
+        addTally(withheld, shownWindow.withheld);
+        addTally(fromWindows, shownWindow.withheld);
+        window = shownWindow.kept.map(toWindowTurn);
       }
       out.push(shapeSearchOutput({
         source: h.source,
@@ -523,11 +625,27 @@ export default defineTool({
       ...(zeroHitCaveat || staleIndexCaveat || toolPartCaveat
         ? { zeroHitCaveat: [staleIndexCaveat, toolPartCaveat, zeroHitCaveat].filter(Boolean).join(' ') }
         : {}),
+      // WI-10005676 / EI-19478862482607876: the engine's per-leg verdict, so a
+      // search that ran lexical-only (semantic leg 0 candidates / blocked / failed)
+      // says so on the result. Hybrid only — verbatim mode has no engine legs.
+      ...(searchLegs ? { legs: describeSearchLegs(searchLegs) } : {}),
       // Machine-legible receipt for the same fact, so a caller (or a later audit)
       // can distinguish a real empty from a degraded one without parsing prose.
       ...(refreshDegraded
-        ? { indexRefresh: { attempted: liveRefresh.attempted, refreshed: liveRefresh.refreshed, degraded: true } }
+        ? {
+            indexRefresh: {
+              attempted: liveRefresh.attempted,
+              refreshed: liveRefresh.refreshed,
+              degraded: true,
+              ...(liveRefresh.failureReasons ? { failureReasons: liveRefresh.failureReasons } : {}),
+            },
+          }
         : {}),
+      // D-006 / P-013: hits and window turns withheld from this caller, counted.
+      ...withheldReceipt(withheld, {
+        in_search_scope: inScope.turns,
+        from_context_windows: fromWindows.turns,
+      }),
     };
 
     const cursorFor = (resultCount: number, more: boolean): string | undefined => more

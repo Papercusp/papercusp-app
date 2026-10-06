@@ -2,7 +2,7 @@
  * P-005 — the reconcile sweep: the producer proper.
  *
  * For each configured (owner, app) pair it asks the APP where its cursor is
- * (D-002), selects canonical `personal_documents` rows after that point (D-004),
+ * (D-002), selects canonical `documents` rows after that point (D-004),
  * maps them with the SAME mapper the push sink uses (app-rows.ts), POSTs the
  * batch, and reports the outcome. Idempotent by construction: both apps upsert
  * by row id, so a replayed batch is safe and a partially-applied run self-heals
@@ -35,7 +35,7 @@ import {
 } from './live-sink';
 import { appServiceAuthHeader } from './app-auth';
 import { listAppOwnerMappings, type ProducerApp } from './owner-mapping';
-import { sourceRefForApp } from './app-rows';
+import { APP_SYNC_SOURCE_REF, DATATYPE_FOR_APP } from './app-rows';
 
 /** Rows per POST. Bounded so one pathological user cannot build an unsendable body. */
 export const RECONCILE_BATCH_SIZE = 200;
@@ -47,12 +47,6 @@ export const RECONCILE_BATCH_SIZE = 200;
  * program.
  */
 export const RECONCILE_MAX_ROWS_PER_RUN = 2_000;
-
-/** The platform `source` each app consumes, as stored on personal_documents. */
-const SOURCE_FOR_APP: Record<ProducerApp, string> = {
-  email: 'gmail',
-  calendar: 'calendar',
-};
 
 export interface ReconcileCursor {
   /** ISO time of the last delivered row, from COALESCE(occurred_at, imported_at). */
@@ -113,29 +107,29 @@ export async function selectCanonicalRowsAfter(
   sql: Sql,
   workspaceId: string,
   userId: string,
-  source: string,
+  datatypeId: string,
   cursor: ReconcileCursor | null,
   limit: number,
 ): Promise<CanonicalRow[]> {
   const rows = cursor
     ? await sql<Record<string, unknown>[]>`
-        SELECT id, source, source_id::text, provider_account_id, kind, external_id, occurred_at, title, text, metadata,
+        SELECT id, source, datatype_id, source_id::text, provider_account_id, kind, external_id, occurred_at, title, text, metadata,
                COALESCE(occurred_at, imported_at) AS cursor_at
-          FROM harness_shared.personal_documents
+          FROM harness_shared.documents
          WHERE workspace_id = ${workspaceId}
            AND user_id = ${userId}
-           AND source = ${source}
+           AND datatype_id = ${datatypeId}
            AND (COALESCE(occurred_at, imported_at), id) > (${cursor.at}::timestamptz, ${cursor.id}::uuid)
          ORDER BY COALESCE(occurred_at, imported_at) ASC, id ASC
          LIMIT ${limit}
       `
     : await sql<Record<string, unknown>[]>`
-        SELECT id, source, source_id::text, provider_account_id, kind, external_id, occurred_at, title, text, metadata,
+        SELECT id, source, datatype_id, source_id::text, provider_account_id, kind, external_id, occurred_at, title, text, metadata,
                COALESCE(occurred_at, imported_at) AS cursor_at
-          FROM harness_shared.personal_documents
+          FROM harness_shared.documents
          WHERE workspace_id = ${workspaceId}
            AND user_id = ${userId}
-           AND source = ${source}
+           AND datatype_id = ${datatypeId}
          ORDER BY COALESCE(occurred_at, imported_at) ASC, id ASC
          LIMIT ${limit}
       `;
@@ -143,6 +137,7 @@ export async function selectCanonicalRowsAfter(
   return rows.map((row) => ({
     id: String(row.id),
     source: String(row.source),
+    datatypeId: row.datatype_id === null || row.datatype_id === undefined ? null : String(row.datatype_id),
     sourceId: row.source_id === null || row.source_id === undefined ? null : String(row.source_id),
     providerAccountId: row.provider_account_id === null || row.provider_account_id === undefined ? null : String(row.provider_account_id),
     kind: String(row.kind),
@@ -176,7 +171,7 @@ export async function fetchAppCursor(
 ): Promise<FetchAppCursorResult> {
   const baseUrl = options.baseUrl?.replace(/\/+$/, '') || readAppBaseUrl(app);
   const doFetch = options.fetchImpl ?? fetch;
-  const sourceRef = sourceRefForApp(app);
+  const sourceRef = APP_SYNC_SOURCE_REF;
   try {
     const authorization = await appServiceAuthHeader(app, ownerId, { secret: options.secret });
     const response = await doFetch(
@@ -282,7 +277,7 @@ export async function reconcileOnePair(
 
   // Reachable + empty cursor is the self-healing refill case, NOT a skip.
   let cursor = parseReconcileCursor(cursorRaw);
-  const source = SOURCE_FOR_APP[app];
+  const datatypeId = DATATYPE_FOR_APP[app];
   let rowsDelivered = 0;
   let rowsRead = 0;
   let batches = 0;
@@ -301,7 +296,7 @@ export async function reconcileOnePair(
     // the regime where a long unmappable span is plausible.
     while (rowsRead < maxRows) {
       const take = Math.min(batchSize, maxRows - rowsRead);
-      const rows = await selectRows(sql, workspaceId, userId, source, cursor, take);
+      const rows = await selectRows(sql, workspaceId, userId, datatypeId, cursor, take);
       if (rows.length === 0) break;
 
       const mapped: Record<string, unknown>[] = [];

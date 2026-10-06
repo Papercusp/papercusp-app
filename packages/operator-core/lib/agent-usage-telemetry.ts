@@ -13,7 +13,7 @@
  * / API-key paths). The summary returns `usagePct: null` for subscription buckets rather than a
  * fabricated number — the surface shows throughput + $spend there instead.
  */
-import { costFromTokens } from '@papercusp/model-pricing';
+import { PRICE_TABLE_VERSION, USAGE_LEDGER_PRICING, costFromTokens } from '@papercusp/model-pricing';
 import { getOrgPg } from '@papercusp/db-org';
 import { activeWorkspaceId } from './workspace-registry';
 
@@ -102,20 +102,33 @@ export async function recordUsageSample(sample: UsageSample): Promise<void> {
     // estimated; an unpriceable sample persists NULL cost — never a fabricated zero.
     let costUsd = n(sample.costUsd);
     let costSource: string | null = sample.costSource ?? (costUsd !== null ? 'provider' : null);
+    // The usage shape here — the four counters, absent ones priced as zero — must stay in step
+    // with `storedSampleTokenUsage` ('headers'): the repricer re-derives this row from its stored
+    // columns whenever the price table changes (WI-10004517 / D-018).
+    // An aggregate of a long-context model prices at its standard-tier floor and records the
+    // bound (D-020), exactly as the repricer would re-derive it.
+    let costBound: 'lower' | null = null;
     if (costUsd === null && sample.model) {
-      const est = costFromTokens(sample.model, sample);
+      const est = costFromTokens(sample.model, {
+        inputTokens: sample.inputTokens, outputTokens: sample.outputTokens,
+        cacheReadTokens: sample.cacheReadTokens, cacheCreationTokens: sample.cacheCreationTokens,
+      }, USAGE_LEDGER_PRICING);
       if (est.priced) {
         costUsd = est.usd;
         costSource = 'estimated';
+        costBound = est.bound ?? null;
       }
     }
+    // Stamp the table version on every row that does not carry provider cost; the repricer
+    // treats any other stamp as stale. Provider cost is an observation and carries none.
+    const priceTableVersion = costSource === 'provider' ? null : PRICE_TABLE_VERSION;
     await sql`
       INSERT INTO ${sql(TABLE)}
         (workspace_id, ts, bucket_key, provider, model_class, source,
          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd,
          model, cost_source, harness_slug, run_id, role,
          rl_requests_limit, rl_requests_remaining, rl_tokens_limit, rl_tokens_remaining, rl_reset_at,
-         session_id, goal_id, tool_name, turn_trigger, account_id)
+         session_id, goal_id, tool_name, turn_trigger, account_id, price_table_version, usage_provenance)
       VALUES (
         ${ws}, ${Date.now()}, ${sample.bucketKey}, ${sample.provider}, ${sample.modelClass}, ${sample.source},
         ${n(sample.inputTokens)}, ${n(sample.outputTokens)}, ${n(sample.cacheReadTokens)}, ${n(sample.cacheCreationTokens)}, ${costUsd},
@@ -123,7 +136,8 @@ export async function recordUsageSample(sample: UsageSample): Promise<void> {
         ${n(sample.rlRequestsLimit)}, ${n(sample.rlRequestsRemaining)}, ${n(sample.rlTokensLimit)}, ${n(sample.rlTokensRemaining)}, ${n(sample.rlResetAt)},
         ${sample.sessionId ?? null},
         (SELECT harness_shared.goal_id_for_usage_session(${ws}, ${sample.sessionId ?? null})),
-        ${sample.toolName ?? null}, ${sample.turnTrigger ?? null}, ${sample.accountId ?? null}
+        ${sample.toolName ?? null}, ${sample.turnTrigger ?? null}, ${sample.accountId ?? null}, ${priceTableVersion},
+        ${costBound ? JSON.stringify({ costBound }) : null}::jsonb
       )
     `;
   } catch {

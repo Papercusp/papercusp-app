@@ -61,6 +61,7 @@ import {
 import { runPackageConstructor, type PackageConstructorResult } from './package-constructor';
 import { buildGoalKickoffBrief } from '../agent-tools/goals/start';
 import { GOAL_HOLDER_DEFAULTS } from '../goal-launch-settings-shared';
+import { drainFleetTopologyProblem } from '../goal-launch-settings';
 import { evaluateGoalStartInputs } from './goal-io-validation';
 import { ensurePlanRefListDatatype, withCanonicalWorklistDeclaration } from './package-property-datatypes';
 import { validatePropertySchemaDeclaration } from '../typed-properties-db';
@@ -544,6 +545,19 @@ export async function startGoalFromPackage(
     }
   }
 
+  // EI-24556293106348130: the same drain-topology floor goals:start enforces.
+  // This door mints the drain fleet rows below, and the watchdog then launches
+  // its leader and worker under these ceilings; below the floor the worker is
+  // refused every time and the fleet runs leader-only. Decided once and reused
+  // at the mint so the floor and the mint cannot disagree.
+  const mintsDrainFleet = await deps.drainEnabled();
+  if (mintsDrainFleet) {
+    const topologyProblem = drainFleetTopologyProblem(effective.launchSettings);
+    if (topologyProblem) {
+      return { ok: false, reason: 'launch-ceilings-too-low', detail: topologyProblem, activeInstances };
+    }
+  }
+
   // ── 4c. typed property declarations (P-025). MINT path — and, since P-022,
   // ALSO an adopt whose constructor produced the declaration: the stub's
   // schema was validated at install-seed time, but a CONSTRUCTED one never saw
@@ -689,10 +703,11 @@ export async function startGoalFromPackage(
     .catch((e) => warnings.push(`agentOwnerId stamp failed: ${(e as Error)?.message ?? e}`));
 
   let drainFleet: string | null = null;
-  if (await deps.drainEnabled()) {
+  if (mintsDrainFleet) {
     try {
       const minted = await deps.mintDrain({
         workspaceId,
+        harnessSlug: installSlug,
         goalId: goalIdStarted,
         goalTitle: effective.title,
         agentOwnerId: started.ownerId,

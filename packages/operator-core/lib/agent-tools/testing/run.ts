@@ -61,6 +61,7 @@
 import { z } from 'zod';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { createRequire } from 'node:module';
 import {
   closeSync,
@@ -100,6 +101,9 @@ import { resolveAgentWorkspaceRoot } from '../capability/base-dir';
 import { harnessArg, resolveConcreteHarnessSlug } from '../_harness-scope';
 import { REPO_ROOT } from '../docs/_repo-paths';
 import { selectUnambiguousEvidenceRoot } from '../../evidence-root-selection';
+import { loadHarnessRegistry, resolveHarnessContentPath } from '../../harness-registry';
+import { currentRequestWorkspaceId } from '../../workspace-als';
+import { workspaceDir } from '../../workspace-registry';
 import { withBoundedTimeout, type BoundedTimeoutResult } from '../../bounded-timeout';
 import {
   FOREGROUND_TERMINATION_GRACE_MS,
@@ -113,6 +117,8 @@ import { activeWorkspaceId } from '../../workspace-registry';
 import { managedSpawn, type ManagedSpawnResult } from '../../task-manager/managed-spawn';
 import { killScopeUnit, type ScopeControlOutcome } from '../../task-manager/control';
 import { mutationProbeRefusal } from './mutation-probe-fence';
+import { restrictedHoldRefusal } from './restricted-hold-fence';
+import { RESTRICTED_HOLD_PREFLIGHT_DONE, RESTRICTED_HOLD_PREFLIGHT_ENV } from '../../../../../scripts/lib/restricted-hold-preflight.mjs';
 import {
   absCgroupDir,
   nodeCgroupFs,
@@ -131,7 +137,7 @@ import {
 } from '../../resource-governor/execution';
 import type { ResourceDemand } from '../../resource-governor/admission';
 import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
-import { resolveBashTaskProvenance } from '../capability/bash-task-provenance';
+import { BashProvenanceRefusal, resolveBashTaskProvenance } from '../capability/bash-task-provenance';
 import { loopLaunchRefusal } from '../../verification-attempts/loop-gate';
 import {
   prepareTestEvidence,
@@ -143,6 +149,7 @@ import {
   remeasureTestEvidenceSchema,
   buildTestEvidenceRemeasure,
   retireRemeasuredPredecessors,
+  remeasureJudgmentLossWarning,
   retractRefusedTestEvidence,
   RECOVERY_WAIT_DEFAULT_MS,
 } from './evidence';
@@ -153,7 +160,9 @@ import {
  * (EI-24100872054224181).
  */
 const PRE_LAUNCH_REFUSALS: ReadonlySet<string> = new Set([
-  'invalid_root', 'ambiguous_workspace_path', 'mutation_probe_active', 'mutation_probe_state_unknown',
+  'invalid_root', 'ambiguous_workspace_path', 'managed_app_path_unresolved',
+  'mutation_probe_active', 'mutation_probe_state_unknown',
+  'restricted_write_held', 'restricted_hold_state_unknown',
 ]);
 
 /** Hard ceiling on a single run, so a wedged suite can never hold a turn open
@@ -164,8 +173,56 @@ const MAX_TIMEOUT_MS = 900_000;
 // The foreground transport yields below 55s, but measured integration work took 227s
 // before an adjacent unit group and startup. Give detached recovery the full bounded window.
 const DETACHED_RECOVERY_TIMEOUT_MS = MAX_TIMEOUT_MS;
+const DETACHED_RECOVERY_ROUTER_HEADROOM_MS = 30_000;
+const DETACHED_RECOVERY_ROUTER_MAX_TIMEOUT_MS = 120 * 60_000;
 const ADMIN_TEST_RUNS_REPORTER_RELATIVE_PATH = 'libs/test-config/src/admin-test-runs-reporter.ts';
 const TEST_FAILURE_DETAILS_FILENAME = 'failure-details.json';
+
+/** Bounded wall-clock phases returned by testing:run for latency attribution. */
+export interface TestingRunPhaseTimings {
+  preflightMs: number | null;
+  provenanceMs: number | null;
+  preparationMs: number | null;
+  admissionWaitMs: number | null;
+  routerExecutionMs: number | null;
+  ledgerIdReadbackMs: number | null;
+  finalizationMs: number | null;
+  totalHandlerMs: number | null;
+}
+
+function createTestingRunPhaseTimings(): TestingRunPhaseTimings {
+  return {
+    preflightMs: null,
+    provenanceMs: null,
+    preparationMs: null,
+    admissionWaitMs: null,
+    routerExecutionMs: null,
+    ledgerIdReadbackMs: null,
+    finalizationMs: null,
+    totalHandlerMs: null,
+  };
+}
+
+function elapsedTestingRunPhaseMs(startedAt: number): number {
+  return Math.round(Math.max(0, performance.now() - startedAt) * 100) / 100;
+}
+
+function setTestingRunPhaseDuration(
+  timings: TestingRunPhaseTimings | undefined,
+  phase: keyof TestingRunPhaseTimings,
+  startedAt: number,
+): void {
+  if (timings) timings[phase] = elapsedTestingRunPhaseMs(startedAt);
+}
+
+function addTestingRunPhaseDuration(
+  timings: TestingRunPhaseTimings | undefined,
+  phase: 'admissionWaitMs' | 'routerExecutionMs',
+  startedAt: number,
+): void {
+  if (!timings) return;
+  timings[phase] = Math.round(((timings[phase] ?? 0) + elapsedTestingRunPhaseMs(startedAt)) * 100) / 100;
+}
 
 /**
  * A managed Papercusp checkout owns a Vitest reporter that records its run.
@@ -219,7 +276,17 @@ function detachedRunUndurableHint(runId: string): string {
 }
 
 function detachedRecoveryRuntimeMaxSec(timeoutMs?: number): number {
-  return Math.max(1, Math.ceil(Math.max(timeoutMs ?? 0, DETACHED_RECOVERY_TIMEOUT_MS) / 1_000));
+  return Math.max(
+    1,
+    Math.ceil((detachedRecoveryRouterTimeoutMs(timeoutMs) + DETACHED_RECOVERY_ROUTER_HEADROOM_MS) / 1_000),
+  );
+}
+
+function detachedRecoveryRouterTimeoutMs(timeoutMs?: number): number {
+  return Math.min(
+    DETACHED_RECOVERY_ROUTER_MAX_TIMEOUT_MS,
+    Math.max(timeoutMs ?? 0, DETACHED_RECOVERY_TIMEOUT_MS),
+  );
 }
 
 /**
@@ -244,6 +311,12 @@ export function detachedRecoveryHint(opts: { runId?: string | undefined; durable
 export function detachedTestTimeoutHint(files: string[]): string {
   const hasIntegrationFile = files.some((file) => /\.integration\.test\.[cm]?[jt]sx?$/i.test(file));
   return hasIntegrationFile ? DETACHED_ROUTER_TEST_HINT : DETACHED_INSPECT_TEST_HINT;
+}
+
+/** Match the admin reporter's worktree-relative POSIX file_path values. */
+function requestedLedgerFilePaths(root: string, files: string[]): string[] {
+  const checkoutRoot = resolve(root);
+  return files.map((file) => relative(checkoutRoot, resolve(checkoutRoot, file)).split(sep).join('/'));
 }
 
 /**
@@ -299,13 +372,16 @@ export function buildDetachedTestRunRequest(opts: {
     ...(opts.testNamePattern ? [`--testNamePattern=${opts.testNamePattern}`] : []),
   ];
   const env: NodeJS.ProcessEnv = {
+    PAPERCUSP_TEST_FILE_TIMEOUT_MS: String(detachedRecoveryRouterTimeoutMs(opts.timeoutMs)),
     ...(opts.harnessSlug && opts.harnessSlug !== '*' ? { PAPERCUSP_TEST_RUN_HARNESS: opts.harnessSlug } : {}),
     ...(opts.workspaceId && opts.workspaceId !== '*' ? { PAPERCUSP_WORKSPACE_ID: opts.workspaceId } : {}),
   };
   return {
     kind: 'vitest',
+    testRunSource: 'local',
     label: `testing:run timeout recovery (${opts.files.join(', ')})`,
     filePath: opts.files.length === 1 ? opts.files[0] : undefined,
+    requestedFiles: requestedLedgerFilePaths(opts.root, opts.files),
     command: process.execPath,
     args: [join(opts.root, 'scripts', 'test-files.mjs'), ...opts.files, '--', ...vitestArgs],
     cwd: opts.root,
@@ -425,12 +501,15 @@ export function buildDetachedMixedTestRunRequest(opts: {
   ].join('\n');
   const root = opts.groups[0]?.root ?? resolveAgentWorkspaceRoot({});
   const env: NodeJS.ProcessEnv = {
+    PAPERCUSP_TEST_FILE_TIMEOUT_MS: String(detachedRecoveryRouterTimeoutMs(opts.timeoutMs)),
     ...(opts.harnessSlug && opts.harnessSlug !== '*' ? { PAPERCUSP_TEST_RUN_HARNESS: opts.harnessSlug } : {}),
     ...(opts.workspaceId && opts.workspaceId !== '*' ? { PAPERCUSP_WORKSPACE_ID: opts.workspaceId } : {}),
   };
   return {
     kind: 'vitest',
+    testRunSource: 'local',
     label: 'testing:run mixed-root timeout recovery (' + opts.groups.flatMap((group) => group.files).join(', ') + ')',
+    requestedFiles: opts.groups.flatMap((group) => requestedLedgerFilePaths(group.root, group.files)),
     command: process.execPath,
     args: ['-e', script],
     cwd: root,
@@ -443,7 +522,9 @@ export function buildDetachedMixedTestRunRequest(opts: {
   };
 }
 
-type TestFilePathResolution = { ok: true; files: string[] } | { ok: false; path: string; matches: string[] };
+type TestFilePathResolution =
+  | { ok: true; files: string[] }
+  | { ok: false; path: string; matches: string[]; reason?: string };
 
 /**
  * Expand the root package's declared workspace directories. The repository's root workspace
@@ -653,7 +734,12 @@ export function discoverKnownHiveCheckoutRoots(
   return [...roots];
 }
 
-export type TestFileRootSource = 'requested' | 'absolute-file-checkout' | 'hive-checkout' | 'canonical-repo';
+export type TestFileRootSource =
+  | 'requested'
+  | 'absolute-file-checkout'
+  | 'hive-checkout'
+  | 'canonical-repo'
+  | 'registered-harness';
 
 export interface SelectedTestFileRoot {
   root: string;
@@ -702,6 +788,81 @@ export function selectTestFileRoot(
   return selected ?? { root: preferredRoot, source: preferredSource };
 }
 
+export type RegisteredTestFileRootResult =
+  | { ok: true; selection: SelectedTestFileRoot }
+  | {
+      ok: false;
+      error: 'root_harness_invalid_slug' | 'root_harness_requires_concrete_workspace' | 'root_harness_not_registered';
+      rootHarnessSlug: string;
+      detail: string;
+    };
+
+/** Resolve an explicit testing:run checkout only through the caller-workspace registry. */
+export async function resolveRegisteredTestFileRoot(
+  rootHarnessSlug: string,
+  workspaceId: string | undefined,
+  loadRegistry: typeof loadHarnessRegistry = loadHarnessRegistry,
+): Promise<RegisteredTestFileRootResult> {
+  const slug = rootHarnessSlug.trim();
+  if (!slug) {
+    return {
+      ok: false,
+      error: 'root_harness_invalid_slug',
+      rootHarnessSlug,
+      detail: 'Pass a registered harness slug in `rootHarnessSlug`.',
+    };
+  }
+  if (!workspaceId || workspaceId === '*') {
+    return {
+      ok: false,
+      error: 'root_harness_requires_concrete_workspace',
+      rootHarnessSlug: slug,
+      detail: '`rootHarnessSlug` requires a concrete caller workspace so the registry lookup is bounded.',
+    };
+  }
+  const root = resolveHarnessContentPath(await loadRegistry(workspaceId), slug);
+  if (!root) {
+    return {
+      ok: false,
+      error: 'root_harness_not_registered',
+      rootHarnessSlug: slug,
+      detail: `Harness '${slug}' is not registered in the caller workspace '${workspaceId}'.`,
+    };
+  }
+  return { ok: true, selection: { root: resolve(root), source: 'registered-harness' } };
+}
+
+function realOrResolved(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+export function sameRealPath(a: string, b: string): boolean {
+  return realOrResolved(a) === realOrResolved(b);
+}
+
+/**
+ * The caller-workspace registry slug whose checkout IS `root` (EI-25203154942838341), so
+ * evidence measured there can name it in `rootHarnessSlug`. A repo-less hive borrows its
+ * member's checkout, so when several projects share the path the non-hive one wins.
+ */
+export async function registeredHarnessSlugForRoot(
+  root: string,
+  workspaceId: string,
+  loadRegistry: typeof loadHarnessRegistry = loadHarnessRegistry,
+): Promise<string | undefined> {
+  const target = realOrResolved(root);
+  const registry = await loadRegistry(workspaceId);
+  const matches = registry.projects.filter((project) => {
+    const path = resolveHarnessContentPath(registry, project.slug);
+    return path !== undefined && realOrResolved(path) === target;
+  });
+  return (matches.find((project) => project.harness_kind !== 'hive') ?? matches[0])?.slug;
+}
+
 /**
  * Accept the two path vocabularies exposed by the release pipeline:
  * repo-root-relative paths (the router's native contract) and paths relative to exactly one
@@ -713,13 +874,47 @@ export function normalizeTestFilePaths(
   files: string[],
   root: string,
   workspaceDirs: string[] = declaredWorkspaceDirs(root),
+  options: { allowSiblingCheckoutFallback?: boolean } = {},
 ): TestFilePathResolution {
   const normalized: string[] = [];
-  const siblings = independentWorkspaceCheckoutRoots(root);
+  const siblings = options.allowSiblingCheckoutFallback === false
+    ? new Map<string, string>()
+    : independentWorkspaceCheckoutRoots(root);
   for (const file of files) {
     if (isAbsolute(file)) {
       normalized.push(file);
       continue;
+    }
+
+    // Managed app citations already use workspace-relative .papercusp/apps paths.
+    // Resolve only the request's concrete workspace, never the process-global one.
+    const portable = file.replace(/\\/g, '/').replace(/^\.\//, '');
+    const appPath = /^\.papercusp\/apps\/([^/]+)\/(.+)$/.exec(portable);
+    const workspace = currentRequestWorkspaceId();
+    if (appPath && workspace && /^[A-Za-z0-9._-]+$/.test(workspace) &&
+      workspace !== '.' && workspace !== '..' &&
+      !portable.split('/').some((part) => part === '..')) {
+      try {
+        const appsRoot = realpathSync(join(workspaceDir(workspace), '.papercusp', 'apps'));
+        const appRoot = realpathSync(join(appsRoot, appPath[1]!));
+        const candidate = realpathSync(join(appRoot, appPath[2]!));
+        if (isInsideRoot(appsRoot, appRoot) && appRoot !== appsRoot &&
+          isInsideRoot(appRoot, candidate) && statSync(candidate).isFile() &&
+          statSync(join(appRoot, '.git')).isDirectory() && isWorkspaceCheckoutRoot(appRoot)) {
+          normalized.push(candidate);
+          continue;
+        }
+      } catch {
+        // Missing files, invalid checkouts and escaping symlinks remain unresolved.
+      }
+    }
+    if (appPath) {
+      return {
+        ok: false,
+        path: file,
+        matches: [],
+        reason: 'Managed app test path must resolve inside an independent npm workspace checkout in the current request workspace.',
+      };
     }
 
     const rootCandidate = resolve(root, file);
@@ -762,6 +957,7 @@ export function normalizeTestFilePaths(
  * `packages/operator-core/lib/__tests__/test-file-exit-codes.test.ts`:
  * 0 = measured pass, 1 = MEASURED and genuinely failed, 2 = NOT MEASURED
  * (route/launch/admission error, watchdog reap, or a refused false-green),
+ * 3 = measured child outcome with failed governor finalization (never green),
  * 75 = EX_TEMPFAIL, also not measured and explicitly retryable.
  *
  * This comment used to read "1 = a refused false-green OR a genuine test
@@ -774,6 +970,7 @@ export function normalizeTestFilePaths(
  * the pin test is what keeps the two copies honest.
  */
 const ROUTER_EXIT_ROUTE_ERROR = 2;
+const ROUTER_EXIT_FINALIZATION_ERROR = 3;
 
 export type RouterNotMeasuredReason = 'admission-starved' | 'undetermined' | 'router-watchdog';
 
@@ -1135,6 +1332,8 @@ export type TestFilesCoreResult =
         failuresReturned?: number;
         failuresOmitted?: number;
         truncationNote?: string;
+        /** Captured child verdict survives a governor finalization failure. */
+        routerOutput?: string;
       })
   | {
       ok: false;
@@ -1145,8 +1344,11 @@ export type TestFilesCoreResult =
       error:
         | 'invalid_root'
         | 'ambiguous_workspace_path'
+        | 'managed_app_path_unresolved'
         | 'mutation_probe_active'
         | 'mutation_probe_state_unknown'
+        | 'restricted_write_held'
+        | 'restricted_hold_state_unknown'
         | 'aborted'
         | 'timeout'
         | 'route_error'
@@ -1161,6 +1363,8 @@ export type TestFilesCoreResult =
       skipped?: number;
       files?: number;
       routerOutput?: string;
+      /** On `no_report`: what the refusal had to go on (EI-24734340317452188). */
+      diagnostics?: ReturnType<typeof noReportDiagnostics>;
       detachedRunId?: string;
       /** Whether the detached run's durable snapshot landed before we advertised its id. */
       detachedDurable?: boolean;
@@ -1619,7 +1823,7 @@ const ROUTER_PRIORITY_DIAGNOSTIC_CHARS = 1_600;
  * marker from the raw tail (EI-23084691057182393).
  */
 const ROUTER_PRIORITY_DIAGNOSTIC_RE =
-  /^\s*(?:TEST_FILE_(?:ROUTE_ERROR|NOT_MEASURED|WATCHDOG|FREEZE_QUALIFIER|MID_INSTALL_SUSPECTED|TRANSFORM_FAILURE|COLLECTION_ATTRIBUTION|GROUP_RESULT|NAME_FILTER_NO_MATCH|ALL_SKIPPED|REQUIRE_RAN|RESULT)\b|(?:Error|Caused by):\s|(?:✗\s+BROKEN|✓\s+ok|unmatched)\b)/u;
+  /^\s*(?:TEST_FILE_(?:ADMISSION_ERROR|FINALIZATION_ERROR|ROUTE_ERROR|NOT_MEASURED|WATCHDOG|FREEZE_QUALIFIER|MID_INSTALL_SUSPECTED|TRANSFORM_FAILURE|COLLECTION_ATTRIBUTION|GROUP_RESULT|NAME_FILTER_NO_MATCH|ALL_SKIPPED|REQUIRE_RAN|RESULT)\b|(?:Error|Caused by):\s|(?:✗\s+BROKEN|✓\s+ok|unmatched)\b)/u;
 
 export interface BoundedRouterOutputCapture {
   append(channel: 'stdout' | 'stderr', value: Buffer | string): void;
@@ -2022,9 +2226,11 @@ function runTestProcess(
   timeoutMs: number,
   signal?: AbortSignal,
   fileCount = 1,
+  phaseTimings?: TestingRunPhaseTimings,
 ): Promise<RouterOutcome> {
   const runGroup = env.PAPERCUSP_TEST_RUN_GROUP ?? 'unattributed';
   const plannedDemand = buildTestProcessDemand({ fileCount });
+  const admissionStartedAt = performance.now();
   return runWithTestProcessDeadline<RouterOutcome>({
     timeoutMs,
     parentSignal: signal,
@@ -2058,8 +2264,17 @@ function runTestProcess(
           settle: (outcome) => classifyTestProcessOutcome(outcome),
         },
         async (admissionContext) => {
+          addTestingRunPhaseDuration(phaseTimings, 'admissionWaitMs', admissionStartedAt);
+          const routerStartedAt = performance.now();
+          let routerTimingRecorded = false;
+          const recordRouterTiming = (): void => {
+            if (routerTimingRecorded) return;
+            routerTimingRecorded = true;
+            addTestingRunPhaseDuration(phaseTimings, 'routerExecutionMs', routerStartedAt);
+          };
           const childTimeoutMs = markAdmissionComplete();
           if (childTimeoutMs <= 0) {
+            recordRouterTiming();
             return {
               code: null,
               signal: null,
@@ -2069,6 +2284,7 @@ function runTestProcess(
             };
           }
           if (childSignal.aborted) {
+            recordRouterTiming();
             return {
               code: null,
               signal: null,
@@ -2122,6 +2338,7 @@ function runTestProcess(
             const finish = (outcome: Omit<RouterOutcome, 'actualDemand'>) => {
               if (settled) return;
               settled = true;
+              recordRouterTiming();
               // A host-shutdown handoff returns before the child finishes. Keep
               // both file-backed sinks available to the surviving child. A rare
               // handoff may leave one bounded directory in the namespaced
@@ -2260,6 +2477,7 @@ function runRouter(
   timeoutMs: number,
   signal?: AbortSignal,
   fileCount = 1,
+  phaseTimings?: TestingRunPhaseTimings,
 ): Promise<RouterOutcome> {
   return runTestProcess(
     process.execPath,
@@ -2271,6 +2489,7 @@ function runRouter(
     timeoutMs,
     signal,
     fileCount,
+    phaseTimings,
   );
 }
 
@@ -2283,6 +2502,7 @@ function runDirectVitest(
   timeoutMs: number,
   signal?: AbortSignal,
   fileCount = 1,
+  phaseTimings?: TestingRunPhaseTimings,
 ): Promise<RouterOutcome> {
   return runTestProcess(
     process.platform === 'win32' ? 'npx.cmd' : 'npx',
@@ -2294,6 +2514,7 @@ function runDirectVitest(
     timeoutMs,
     signal,
     fileCount,
+    phaseTimings,
   );
 }
 
@@ -2344,7 +2565,112 @@ export function parseRouterTestResult(
     return null;
   }
 
-  return distillNodeTestSummary(output, files, executed, status === 'failed', opts);
+  return (
+    distillNodeTestSummary(output, files, executed, status === 'failed', opts) ??
+    distillVitestSummary(output, files, executed, status === 'failed', opts)
+  );
+}
+
+const ANSI_SGR = /\x1b\[[0-9;]*m/g;
+
+/**
+ * Distill Vitest's own end-of-run summary (`Test Files  1 passed (1)` /
+ * `Tests  2 failed | 23 passed (25)`) when its JSON report is missing
+ * (EI-24734340317452188). Before this, the router fallback understood only
+ * Node's summary, so every Vitest run whose report went missing answered
+ * `no_report`, even with `TEST_FILE_RESULT ... status=passed` in hand.
+ *
+ * As strict as the Node path: every `Tests` line needs a matching `Test Files`
+ * line, each line's counts must add up to its total, the `Test Files` totals
+ * must equal the router's executed count, and at least one test must have run.
+ * Anything else returns null and the caller keeps its refusal.
+ */
+function distillVitestSummary(
+  output: string,
+  files: readonly string[],
+  executed: number,
+  routerReportedFailure: boolean,
+  opts: { maxFailures?: number } = {},
+): DistilledTestRun | null {
+  const text = output.replace(ANSI_SGR, '');
+  const counts = (label: string) => [...text.matchAll(new RegExp(`^\\s*${label}\\s+(.+?)\\s+\\((\\d+)\\)\\s*$`, 'gm'))]
+    .map((match) => {
+      const total = Number(match[2]);
+      const byKind: Record<string, number> = {};
+      for (const part of match[1]!.split('|')) {
+        const piece = /^\s*(\d+)\s+(passed|failed|skipped|todo)\s*$/.exec(part);
+        if (!piece) return null;
+        byKind[piece[2]!] = (byKind[piece[2]!] ?? 0) + Number(piece[1]);
+      }
+      const sum = Object.values(byKind).reduce((a, b) => a + b, 0);
+      return Number.isSafeInteger(total) && sum === total ? { total, byKind } : null;
+    });
+  const fileLines = counts('Test Files');
+  const testLines = counts('Tests');
+  if (!testLines.length || testLines.length !== fileLines.length) return null;
+  if ([...fileLines, ...testLines].some((line) => line === null)) return null;
+  const sum = (lines: typeof testLines, kind?: string) =>
+    lines.reduce((acc, line) => acc + (kind ? (line!.byKind[kind] ?? 0) : line!.total), 0);
+  if (sum(fileLines) !== executed) return null;
+  const total = sum(testLines);
+  if (total < 1) return null;
+
+  const passed = sum(testLines, 'passed');
+  const failed = Math.max(sum(testLines, 'failed'), routerReportedFailure ? 1 : 0);
+  const skipped = sum(testLines, 'skipped') + sum(testLines, 'todo');
+  let durationMs: number | null = null;
+  for (const match of text.matchAll(/^\s*Duration\s+([0-9]+(?:\.[0-9]+)?)(ms|s)\b/gm)) {
+    durationMs = Math.round(Number(match[1]) * (match[2] === 's' ? 1000 : 1));
+  }
+
+  const maxFailures = Math.max(1, Math.floor(opts.maxFailures ?? 20));
+  const failureFile = files.length === 1 ? files[0]! : '(vitest failure)';
+  const failureNames = [...new Set([...text.matchAll(/^\s*FAIL\s+(\S[^\r\n]*?)\s*$/gm)].map((m) => m[1]!))];
+  const missing = 'its JSON report was missing, so structured failure details are unavailable.';
+  const failures = failureNames
+    .slice(0, maxFailures)
+    .map((test) => ({ file: failureFile, test, message: `Vitest reported a failure; ${missing}` }));
+  if (failed > 0 && failures.length === 0) {
+    failures.push({
+      file: failureFile,
+      test: '(vitest failure details unavailable)',
+      message: `Vitest reported ${failed} failed test(s); ${missing}`,
+    });
+  }
+  const byFile =
+    files.length === 1 && executed === 1 ? { [files[0]!]: { passed, failed, skipped, collectionFailed: false } } : {};
+  return {
+    passed,
+    failed,
+    skipped,
+    files: executed,
+    failures,
+    failuresTruncated: failureNames.length > maxFailures,
+    durationMs,
+    byFile,
+  };
+}
+
+/**
+ * What a `no_report` refusal had to go on, so the next one can be diagnosed from
+ * the result instead of re-run (EI-24734340317452188).
+ */
+export function noReportDiagnostics(
+  output: string,
+  routerExit: number | null,
+  reportDirEntries: readonly string[],
+): { routerExit: number | null; reportDirEntries: string[]; markerSeen: boolean; summarySeen: 'node' | 'vitest' | 'none' } {
+  const text = output.replace(ANSI_SGR, '');
+  return {
+    routerExit,
+    reportDirEntries: [...reportDirEntries].slice(0, 20),
+    markerSeen: /^TEST_FILE_RESULT\b/m.test(text),
+    summarySeen: /^\s*(?:ℹ|#)?\s*tests\s+\d+\s*$/m.test(text)
+      ? 'node'
+      : /^\s*Tests\s+.+\(\d+\)\s*$/m.test(text)
+        ? 'vitest'
+        : 'none',
+  };
 }
 
 /**
@@ -2513,6 +2839,11 @@ export function parseRouterTerminalCompletion(output: string): RouterTerminalCom
   let marker: RegExpExecArray | null = null;
   for (const match of output.matchAll(markerRe)) marker = match;
   if (!marker) return null;
+
+  // A finished child is not proof that receipt finalization succeeded. This
+  // recovery path has no router exit code yet; never turn the preserved child
+  // pass into an overall green after its finalization error (WI-10004947).
+  if (/\bfinalizationError=true\b/.test(marker[0])) return null;
 
   const requested = Number(marker[1]);
   const executed = Number(marker[2]);
@@ -2690,6 +3021,8 @@ export async function runTestFilesCore(opts: {
   files: string[];
   root: string;
   timeoutMs?: number;
+  /** Original caller budget before the foreground transport clamp, for detached recovery. */
+  recoveryTimeoutMs?: number;
   maxFailures?: number;
   testNamePattern?: string;
   signal?: AbortSignal;
@@ -2701,15 +3034,21 @@ export async function runTestFilesCore(opts: {
   runId?: string;
   /** Recursive mixed-root groups defer detached recovery to their outer operation. */
   allowDetachedRecovery?: boolean;
+  /** Explicit registered roots keep relative paths inside that checkout. */
+  allowSiblingCheckoutFallback?: boolean;
+  /** Optional handler-owned timing accumulator; omitted by internal callers. */
+  phaseTimings?: TestingRunPhaseTimings;
 }): Promise<TestFilesCoreResult> {
   // Normalize once before selecting the checkout.  A workspace-relative sibling
   // spelling (for example `portal/tests/foo.test.ts`) becomes an absolute path in
   // normalizeTestFilePaths; selecting from that result lets the router switch to
   // the sibling checkout's own Vitest config instead of trying to run the path from
   // the ambient Papercusp tree.
-  const requestedPaths = normalizeTestFilePaths(opts.files, opts.root);
+  const normalizationOptions = { allowSiblingCheckoutFallback: opts.allowSiblingCheckoutFallback };
+  const requestedPaths = normalizeTestFilePaths(opts.files, opts.root, undefined, normalizationOptions);
   const runId = opts.runId ?? randomUUID();
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const recoveryTimeoutMs = opts.recoveryTimeoutMs ?? timeoutMs;
 
   if (requestedPaths.ok) {
     const groups = groupTestFilesByCheckout(requestedPaths.files, opts.root);
@@ -2739,7 +3078,7 @@ export async function runTestFilesCore(opts: {
             ...(opts.workspaceId !== undefined ? { workspaceId: opts.workspaceId } : {}),
             ...(opts.harnessSlug !== undefined ? { harnessSlug: opts.harnessSlug } : {}),
             ...(opts.workItemId !== undefined ? { workItemId: opts.workItemId } : {}),
-            timeoutMs,
+            timeoutMs: recoveryTimeoutMs,
           }),
         );
         return {
@@ -2778,6 +3117,9 @@ export async function runTestFilesCore(opts: {
   // caller and a probe that started in between.
   const mutationProbe = await mutationProbeRefusal(root, requestedPaths.ok ? requestedPaths.files : opts.files);
   if (mutationProbe) return { ok: false, runId, root, ...mutationProbe };
+  // WI-10005634 (D-012 residue): never execute, with network, code a restricted session wrote.
+  const restrictedHold = await restrictedHoldRefusal(root, requestedPaths.ok ? requestedPaths.files : opts.files);
+  if (restrictedHold) return { ok: false, runId, root, ...restrictedHold };
 
   // WI-7189 / EI-19383071792758676: a wrong-tree resolution used to be SILENT —
   // a file that happens to exist (with stale content) at the resolved root ran
@@ -2801,16 +3143,21 @@ export async function runTestFilesCore(opts: {
         `session's harness/project is registered.`,
     };
   }
-  const pathResolution = normalizeTestFilePaths(requestedPaths.ok ? requestedPaths.files : opts.files, root);
+  const pathResolution = normalizeTestFilePaths(
+    requestedPaths.ok ? requestedPaths.files : opts.files,
+    root,
+    undefined,
+    normalizationOptions,
+  );
   if (!pathResolution.ok) {
     return {
       ok: false,
       runId,
       root,
-      error: 'ambiguous_workspace_path',
+      error: pathResolution.reason ? 'managed_app_path_unresolved' : 'ambiguous_workspace_path',
       path: pathResolution.path,
       matches: pathResolution.matches,
-      hint:
+      hint: pathResolution.reason ??
         `workspace-relative test path ${JSON.stringify(pathResolution.path)} exists in multiple declared ` +
         `workspaces (${pathResolution.matches.join(', ')}). Re-run with a repo-root-relative or absolute path.`,
     };
@@ -2848,6 +3195,9 @@ export async function runTestFilesCore(opts: {
       PAPERCUSP_TEST_RUN_GROUP: runId,
       PAPERCUSP_TEST_ATTRIBUTION: '1',
       PAPERCUSP_TEST_FAILURE_DETAILS_PATH: failureDetailsPath,
+      // WI-10005713: restrictedHoldRefusal admitted exactly these files above, so the router's own
+      // raw-path preflight would only repeat it (~2s + a census read). Set ONLY here, after the fence.
+      [RESTRICTED_HOLD_PREFLIGHT_ENV]: RESTRICTED_HOLD_PREFLIGHT_DONE,
       ...(opts.harnessSlug && opts.harnessSlug !== '*' ? { PAPERCUSP_TEST_RUN_HARNESS: opts.harnessSlug } : {}),
       ...(opts.workspaceId && opts.workspaceId !== '*' ? { PAPERCUSP_WORKSPACE_ID: opts.workspaceId } : {}),
     };
@@ -2889,6 +3239,7 @@ export async function runTestFilesCore(opts: {
         timeoutMs,
         opts.signal,
         pathResolution.files.length,
+        opts.phaseTimings,
       );
     } else {
       const groups = groupDirectVitestRoutes(pathResolution.files, root);
@@ -2923,6 +3274,7 @@ export async function runTestFilesCore(opts: {
           remaining,
           opts.signal,
           group.files.length,
+          opts.phaseTimings,
         );
         outcomes.push(groupOutcome);
         if (groupOutcome.timedOut || groupOutcome.aborted) break;
@@ -2983,7 +3335,7 @@ export async function runTestFilesCore(opts: {
                 ...(opts.workspaceId !== undefined ? { workspaceId: opts.workspaceId } : {}),
                 ...(opts.harnessSlug !== undefined ? { harnessSlug: opts.harnessSlug } : {}),
                 ...(opts.workItemId !== undefined ? { workItemId: opts.workItemId } : {}),
-                timeoutMs,
+                timeoutMs: recoveryTimeoutMs,
               }),
             )
           : undefined;
@@ -3047,10 +3399,10 @@ export async function runTestFilesCore(opts: {
     }
 
     let reportTexts: string[];
+    let reportDirEntries: string[] = [];
     try {
-      const names = (await readdir(dir))
-        .filter((n) => n.endsWith('.json') && n !== TEST_FAILURE_DETAILS_FILENAME)
-        .sort();
+      reportDirEntries = (await readdir(dir)).sort();
+      const names = reportDirEntries.filter((n) => n.endsWith('.json') && n !== TEST_FAILURE_DETAILS_FILENAME);
       reportTexts = (await Promise.all(names.map((n) => readFile(join(dir, n), 'utf8').catch(() => null)))).filter(
         (t): t is string => t !== null,
       );
@@ -3069,14 +3421,24 @@ export async function runTestFilesCore(opts: {
         const executedNothing = zeroExecutedRefusal(routerResult, { runId, root });
         if (executedNothing) return executedNothing;
         return boundTestRunPayload(
-          { ok: routerResult.failed === 0 && outcome.code === 0, runId, root },
+          {
+            ok: routerResult.failed === 0 && outcome.code === 0, runId, root,
+            ...(outcome.code === ROUTER_EXIT_FINALIZATION_ERROR ? { routerOutput: outcome.output.slice(-2000) } : {}),
+          },
           routerResult,
         ) as TestFilesCoreResult;
       }
       // Exit 1 with no report is the REFUSED false-green (the router bailed
       // before running anything) — the one case where "no results" is the
       // answer, and must never read as a pass.
-      return { ok: false, runId, root, error: 'no_report', routerOutput: outcome.output.slice(-2000) };
+      return {
+        ok: false,
+        runId,
+        root,
+        error: 'no_report',
+        routerOutput: outcome.output.slice(-2000),
+        diagnostics: noReportDiagnostics(outcome.output, outcome.code, reportDirEntries),
+      };
     }
 
     let failureDetails = [] as ReturnType<typeof parseFailureDetailsSidecar>;
@@ -3153,7 +3515,10 @@ export async function runTestFilesCore(opts: {
     // LIST COUNT and so cannot bound bytes at all — one long assertion diff
     // outweighs fifty terse failures. Counts stay complete and a cut is stated
     // explicitly, so `failures.length` is never readable as "how many failed".
-    return boundTestRunPayload({ ok: run.failed === 0 && outcome.code === 0, runId, root }, run) as TestFilesCoreResult;
+    return boundTestRunPayload({
+      ok: run.failed === 0 && outcome.code === 0, runId, root,
+      ...(outcome.code === ROUTER_EXIT_FINALIZATION_ERROR ? { routerOutput: outcome.output.slice(-2000) } : {}),
+    }, run) as TestFilesCoreResult;
   } finally {
     if (!preserveRunArtifacts) {
       await rm(dir, { recursive: true, force: true }).catch(() => {
@@ -3166,7 +3531,7 @@ export async function runTestFilesCore(opts: {
 export default defineTool({
   name: 'testing:run',
   description:
-    'Run exact Vitest files through the Papercusp router or a discovered external npm-workspace Vitest checkout and return distilled counts plus bounded failures. Files may be repo-root-relative, absolute, or relative to exactly one declared npm workspace; ambiguous workspace-relative paths refuse before execution. `root` reports the checkout actually tested. Zero/partial matches and invalid checkouts refuse instead of passing vacuously. `failed` is the true total; when `failuresTruncated` is set, read `failuresOmitted`. A Papercusp-router timeout starts a pollable detached recovery, returns `detachedRunId`, and tells you to call `testing:run-status { runId }` for its snapshot. Stamps PAPERCUSP_TEST_RUN_GROUP for ledger correlation.',
+    'Run exact Vitest files through the Papercusp router or a discovered external npm-workspace Vitest checkout and return distilled counts plus bounded failures. Files may be repo-root-relative, absolute, or relative to exactly one declared npm workspace; ambiguous workspace-relative paths refuse before execution. `root` reports the checkout actually tested. Zero/partial matches and invalid checkouts refuse instead of passing vacuously. `work_item_id` explicitly attributes a run and its slow-attempt gate to a held work-item, overriding a stale session goal stamp. `failed` is the true total; when `failuresTruncated` is set, read `failuresOmitted`. A Papercusp-router timeout starts a pollable detached recovery, returns `detachedRunId`, and tells you to call `testing:run-status { runId }` for its snapshot. Stamps PAPERCUSP_TEST_RUN_GROUP for ledger correlation.',
   guidance: {
     when: 'You edited code and want to know whether specific test files pass, and which tests failed and why. The default way to run named test files.',
     notWhen:
@@ -3203,6 +3568,14 @@ export default defineTool({
       .describe(
         'Declare exact work-item/spec/test/correction mappings once; persisted before execution and returned as ledger-backed evidence for independent review. evidenceRef uses the original attempt ID and stays stable across timeout recovery; join testing:runs through rows[].testRunId or rows[].ledgerRunGroupId, which may name a detached group.',
       ),
+    work_item_id: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Explicitly attribute this test run and its slow-attempt loop gate to a work-item you hold. Overrides the session goal stamp and uses the same held-claim validation as capability:bash.',
+      ),
     recoverEvidence: recoverTestEvidenceSchema
       .optional()
       .describe(
@@ -3220,6 +3593,15 @@ export default defineTool({
       .optional()
       .describe(
         'Test file paths (repo-root-relative, absolute, or relative to exactly one declared npm workspace). Each is routed to its owning workspace + Vitest config; ambiguous workspace-relative paths and paths matching zero tests fail the call rather than passing vacuously.',
+      ),
+    rootHarnessSlug: z
+      .string()
+      .trim()
+      .min(1)
+      .max(120)
+      .optional()
+      .describe(
+        'Registered harness slug whose checkout supplies relative `files`. Requires a concrete caller workspace and exact `files`; it does not use discovered or canonical-root fallback. `harness` remains the test-ledger scope.',
       ),
     changedPaths: z
       .array(z.string().min(1))
@@ -3260,8 +3642,19 @@ export default defineTool({
     ),
   }),
   async handler(args, ctx) {
+    const handlerStartedAt = performance.now();
+    const phaseTimingsMs = createTestingRunPhaseTimings();
+    if (args.rootHarnessSlug !== undefined && !args.files) {
+      return {
+        data: {
+          ok: false,
+          error: 'root_harness_requires_files',
+          detail: '`rootHarnessSlug` selects the checkout for exact test `files`; it does not apply to changedPaths or evidence recovery.',
+        },
+      };
+    }
     if (args.recoverEvidence) {
-      if (args.files || args.changedPaths || args.evidence || args.remeasureEvidence)
+      if (args.files || args.changedPaths || args.evidence || args.remeasureEvidence || args.work_item_id)
         return { data: { ok: false, error: 'mutually_exclusive_selectors' } };
       const harnessSlug = resolveConcreteHarnessSlug(args.harness, ctx);
       if (!harnessSlug || !ctx.workspaceId || ctx.workspaceId === '*')
@@ -3283,13 +3676,17 @@ export default defineTool({
     // below — so it inherits every guard that path already has instead of forking one.
     let remeasure: Awaited<ReturnType<typeof buildTestEvidenceRemeasure>> | undefined;
     if (args.remeasureEvidence) {
-      if (args.files || args.changedPaths || args.evidence)
+      if (args.files || args.changedPaths || args.evidence || args.work_item_id)
         return { data: { ok: false, error: 'mutually_exclusive_selectors' } };
       const remeasureHarness = resolveConcreteHarnessSlug(args.harness, ctx);
       if (!remeasureHarness || !ctx.workspaceId || ctx.workspaceId === '*')
         return { data: { ok: false, error: 'evidence_requires_concrete_scope' } };
       try {
-        remeasure = await buildTestEvidenceRemeasure(args.remeasureEvidence, { harnessSlug: remeasureHarness });
+        remeasure = await buildTestEvidenceRemeasure(args.remeasureEvidence, {
+          harnessSlug: remeasureHarness,
+          workspaceId: ctx.workspaceId,
+          root: resolveAgentWorkspaceRoot(ctx),
+        });
       } catch (error) {
         return { data: { ok: false, error: 'evidence_remeasure_plan_failed', message: String(error) } };
       }
@@ -3303,13 +3700,41 @@ export default defineTool({
             mode: 'evidence-remeasure',
             ran: false,
             summary: remeasure.summary,
+            abandonedPendingBindingIds: remeasure.abandonedPendingBindingIds,
             skipped: remeasure.plan.skipped.slice(0, 20),
           },
         };
       }
     }
+    // EI-25203154942838341: a re-measure must re-run in the checkout its proofs were
+    // MEASURED in (a hive app's own repo), never the session root where those paths are absent.
+    if (remeasure && remeasure.rootHarnessSlugs.length > 1) {
+      return {
+        data: {
+          ok: false,
+          error: 'evidence_remeasure_mixed_roots',
+          rootHarnessSlugs: remeasure.rootHarnessSlugs,
+          detail:
+            'The stale proofs were measured in more than one checkout (null = this harness). Re-run remeasureEvidence with specIds narrowed to one checkout at a time.',
+        },
+      };
+    }
+    const rootHarnessSlug = args.rootHarnessSlug ?? remeasure?.rootHarnessSlugs[0] ?? undefined;
     const evidenceRequest = args.evidence ?? remeasure?.request ?? undefined;
     const selectedFiles = args.files ?? remeasure?.files;
+    if (
+      args.work_item_id &&
+      evidenceRequest?.workItemId &&
+      args.work_item_id !== evidenceRequest.workItemId
+    ) {
+      return {
+        data: {
+          ok: false,
+          error: 'work_item_id_conflicts_with_evidence',
+          detail: 'Use the same work-item in `work_item_id` and `evidence.workItemId`, or omit the top-level `work_item_id`.',
+        },
+      };
+    }
     // Exactly one selector. Both branches REFUSE rather than defaulting, because every
     // default here is a silent wrong answer: picking `files` when both were sent would
     // ignore a radius the caller asked to see, and treating neither as "run everything"
@@ -3336,6 +3761,15 @@ export default defineTool({
       };
     }
     if (args.changedPaths !== undefined) {
+      if (args.work_item_id) {
+        return {
+          data: {
+            ok: false,
+            error: 'work_item_id_requires_files',
+            detail: '`work_item_id` attributes a test run; pass `files` instead of `changedPaths`.',
+          },
+        };
+      }
       if (args.evidence) return { data: { ok: false, error: 'evidence_requires_executed_files' } };
       // The plan path deliberately does NOT go through selectTestFileRoot: that resolver
       // answers "which checkout owns these TEST files", and changedPaths are source files
@@ -3360,7 +3794,27 @@ export default defineTool({
     // `resolveCapabilityBaseDir` is the same projectDir → PAPERCUSP_INTEGRATION_ROOT
     // → cwd resolver every capability tool (read/write/edit/bash/inspect) already
     // uses, so this tool now reads the same tree those tools write.
-    const rootSelection = selectTestFileRoot(files, resolveAgentWorkspaceRoot(ctx));
+    let rootSelection: SelectedTestFileRoot;
+    if (rootHarnessSlug !== undefined) {
+      let registeredRoot: RegisteredTestFileRootResult;
+      try {
+        registeredRoot = await resolveRegisteredTestFileRoot(rootHarnessSlug, ctx.workspaceId);
+      } catch (error) {
+        return {
+          data: {
+            ok: false,
+            error: 'root_harness_resolution_failed',
+            rootHarnessSlug,
+            message: String(error),
+          },
+        };
+      }
+      if (!registeredRoot.ok) return { data: registeredRoot };
+      rootSelection = registeredRoot.selection;
+    } else {
+      rootSelection = selectTestFileRoot(files, resolveAgentWorkspaceRoot(ctx));
+    }
+    const allowSiblingCheckoutFallback = rootSelection.source !== 'registered-harness';
     // EI-18776865728050036 — same clamp as build:typecheck, for the same reason: this tool is
     // dispatched FOREGROUND over an MCP transport that hard-caps a call at ~55s (EI-6073), so a
     // suite slower than that had the call killed before the core's `error:'timeout'` branch could
@@ -3374,6 +3828,35 @@ export default defineTool({
     // receives the same scope that plans:bind-spec-evidence validates.
     const harnessSlug = resolveConcreteHarnessSlug(args.harness, ctx);
     const runId = randomUUID();
+    // EI-25203154942838341: evidence measured in a checkout other than this harness's own tree
+    // must record WHICH registered checkout, or the evaluator re-measures the paths at the plan
+    // root (ENOENT) and the binding's freshness is `unknown` forever. An external checkout the
+    // registry cannot name is refused up front rather than bound unmeasurable.
+    let evidenceRootHarnessSlug = rootHarnessSlug;
+    if (
+      evidenceRequest && evidenceRootHarnessSlug === undefined && harnessSlug
+      && ctx.workspaceId && ctx.workspaceId !== '*'
+      && !sameRealPath(rootSelection.root, resolveAgentWorkspaceRoot(ctx))
+    ) {
+      let found: string | undefined;
+      try {
+        found = await registeredHarnessSlugForRoot(rootSelection.root, ctx.workspaceId);
+      } catch (error) {
+        return { data: { ok: false, error: 'root_harness_resolution_failed', root: rootSelection.root, message: String(error) } };
+      }
+      if (!found) {
+        return {
+          data: {
+            ok: false,
+            error: 'evidence_root_unregistered',
+            root: rootSelection.root,
+            detail:
+              'These test files live in a checkout no registered harness owns, so the bound evidence could never be re-measured. Register the checkout, or pass `rootHarnessSlug` naming it.',
+          },
+        };
+      }
+      evidenceRootHarnessSlug = found === harnessSlug ? undefined : found;
+    }
     const evidenceScope =
       evidenceRequest && harnessSlug && ctx.workspaceId && ctx.workspaceId !== '*'
         ? {
@@ -3381,18 +3864,40 @@ export default defineTool({
             harnessSlug,
             workspaceId: ctx.workspaceId,
             actorId: resolveAgentIdentity(ctx).ownerId,
+            ...(evidenceRootHarnessSlug ? { rootHarnessSlug: evidenceRootHarnessSlug } : {}),
           }
         : null;
     if (evidenceRequest && !evidenceScope) return { data: { ok: false, error: 'evidence_requires_concrete_scope' } };
+    setTestingRunPhaseDuration(phaseTimingsMs, 'preflightMs', handlerStartedAt);
     // expensive-verification-loops P-001: a run that outlives the foreground clamp
     // continues detached, and that detached run is the expensive attempt the loop
-    // detector counts per work-item. An evidence request names its item explicitly;
-    // otherwise use the caller's unambiguous held claim — the same rule capability:bash
-    // applies, so one agent's runs link identically through either door.
-    const attemptWorkItemId =
-      evidenceRequest?.workItemId ??
-      (await resolveBashTaskProvenance(ctx as unknown as ResolveIdentityCtx, harnessSlug ?? null)).workItemId ??
-      undefined;
+    // detector counts per work-item. A top-level `work_item_id` uses capability:bash's
+    // held-claim check; otherwise the evidence request or unambiguous held claim supplies it.
+    const provenanceStartedAt = performance.now();
+    let attemptWorkItemId: string | undefined;
+    if (evidenceRequest?.workItemId && !args.work_item_id) {
+      attemptWorkItemId = evidenceRequest.workItemId;
+    } else {
+      try {
+        attemptWorkItemId =
+          (await resolveBashTaskProvenance(ctx as unknown as ResolveIdentityCtx, harnessSlug ?? null, undefined, {
+            explicitWorkItemId: args.work_item_id ?? null,
+          })).workItemId ?? undefined;
+      } catch (error) {
+        if (!(error instanceof BashProvenanceRefusal)) throw error;
+        return {
+          data: {
+            ok: false,
+            error: error.code,
+            message: error.message,
+            runId,
+            root: rootSelection.root,
+          },
+        };
+      }
+    }
+    setTestingRunPhaseDuration(phaseTimingsMs, 'provenanceMs', provenanceStartedAt);
+    const preparationStartedAt = performance.now();
     // P-002 (WI-10004175): the loop gate capability:bash and release:cut apply. Its budget is
     // the REQUESTED one, not the foreground clamp, because the detached run keeps going past
     // the clamp; a run asked for <= SLOW_ATTEMPT_MIN_MS stays free for an audit's quick checks.
@@ -3406,11 +3911,15 @@ export default defineTool({
     if (loopRefusal) return { data: { ...loopRefusal, runId, root: rootSelection.root } };
     let prepared: Awaited<ReturnType<typeof prepareTestEvidence>> | undefined;
     if (evidenceRequest) {
-      const selected = normalizeTestFilePaths(files, rootSelection.root);
+      const selected = normalizeTestFilePaths(files, rootSelection.root, undefined, {
+        allowSiblingCheckoutFallback,
+      });
       // EI-24100872054224181: refuse BEFORE registering pending rows. The core repeats
       // this preflight; a refusal there after preparation is retracted below.
       const mutationProbe = await mutationProbeRefusal(rootSelection.root, selected.ok ? selected.files : files);
       if (mutationProbe) return { data: { ok: false, runId, root: rootSelection.root, ...mutationProbe } };
+      const restrictedHold = await restrictedHoldRefusal(rootSelection.root, selected.ok ? selected.files : files);
+      if (restrictedHold) return { data: { ok: false, runId, root: rootSelection.root, ...restrictedHold } };
       try {
         if (!selected.ok) throw new Error('evidence_test_selection_unresolved');
         prepared = await prepareTestEvidence(evidenceRequest, runId, selected.files, evidenceScope!);
@@ -3418,18 +3927,23 @@ export default defineTool({
         return { data: { ok: false, error: 'evidence_preparation_failed', message: String(error) } };
       }
     }
+    setTestingRunPhaseDuration(phaseTimingsMs, 'preparationMs', preparationStartedAt);
     const result = await runTestFilesCore({
       files,
       runId,
       root: rootSelection.root,
       timeoutMs,
+      recoveryTimeoutMs: requestedTimeoutMs ?? DEFAULT_TIMEOUT_MS,
       signal: ctx.signal,
       ...(ctx.workspaceId && ctx.workspaceId !== '*' ? { workspaceId: ctx.workspaceId } : {}),
       ...(harnessSlug ? { harnessSlug } : {}),
       ...(attemptWorkItemId ? { workItemId: attemptWorkItemId } : {}),
       ...(args.maxFailures !== undefined ? { maxFailures: args.maxFailures } : {}),
       ...(args.testNamePattern !== undefined ? { testNamePattern: args.testNamePattern } : {}),
+      allowSiblingCheckoutFallback,
+      phaseTimings: phaseTimingsMs,
     });
+    const ledgerReadbackStartedAt = performance.now();
     const testRunIdsReadback =
       shouldResolveHarnessTestRunIds(result) && ctx.workspaceId && ctx.workspaceId !== '*' && harnessSlug
         ? await readHarnessTestRunIdsBounded({
@@ -3440,6 +3954,8 @@ export default defineTool({
             ? { root: result.root, roots: result.roots, byFile: result.byFile }
             : {})
         : null;
+    setTestingRunPhaseDuration(phaseTimingsMs, 'ledgerIdReadbackMs', ledgerReadbackStartedAt);
+    const finalizationStartedAt = performance.now();
     // Evidence needs to distinguish tests intentionally excluded by an explicit
     // name selector from tests that were actually skipped by the suite. Keep the
     // marker internal to the evidence path so the public run payload remains the
@@ -3512,27 +4028,35 @@ export default defineTool({
     };
     // Retire a replaced stale predecessor only once its fresh run has a known outcome; a
     // detached/timed-out run is recovered later through the ordinary recovery path.
+    const remeasureRetired: unknown[] =
+      remeasure && prepared && evidenceScope && result.error === undefined
+        ? await retireRemeasuredPredecessors(remeasure.plan.selected, prepared, runId, evidenceScope).catch(
+            (error) => [{ error: String(error) }],
+          )
+        : [];
+    // WI-10004452: surfaced beside the summary so it survives a truncated result.
+    const remeasureJudgmentWarning = remeasureJudgmentLossWarning(remeasureRetired);
     const remeasureReport =
       remeasure && prepared && evidenceScope
         ? {
             summary: remeasure.summary,
+            abandonedPendingBindingIds: remeasure.abandonedPendingBindingIds,
+            ...(remeasureJudgmentWarning ? { warning: remeasureJudgmentWarning } : {}),
             selected: remeasure.plan.selected
               .map(({ binding: _binding, supersedes: _supersedes, ...entry }) => entry)
               .slice(0, 20),
             skipped: remeasure.plan.skipped.slice(0, 20),
-            retired:
-              result.error === undefined
-                ? await retireRemeasuredPredecessors(remeasure.plan.selected, prepared, runId, evidenceScope).catch(
-                    (error) => [{ error: String(error) }],
-                  )
-                : [],
+            retired: remeasureRetired,
           }
         : undefined;
     const finalResult = remeasureReport ? { ...surfacedResult, remeasure: remeasureReport } : surfacedResult;
+    setTestingRunPhaseDuration(phaseTimingsMs, 'finalizationMs', finalizationStartedAt);
+    setTestingRunPhaseDuration(phaseTimingsMs, 'totalHandlerMs', handlerStartedAt);
+    const timedFinalResult = { ...finalResult, phaseTimingsMs: { ...phaseTimingsMs } };
     if (result.ok === false && result.error === 'timeout') {
       return {
         data: {
-          ...finalResult,
+          ...timedFinalResult,
           hint:
             `hit the ${(timeoutMs / 1000).toFixed(0)}s foreground cap (held below the ~55s MCP transport limit so you get this instead of an opaque CONNECTION_CLOSED). ` +
             testingRunTimeoutClampDisclosure(requestedTimeoutMs, timeoutMs) +
@@ -3549,6 +4073,6 @@ export default defineTool({
         },
       };
     }
-    return { data: finalResult };
+    return { data: timedFinalResult };
   },
 });

@@ -2,7 +2,11 @@
 import { resolveEffectiveStatusForItems, type PlanItem } from '@papercusp/plan-parser';
 import { DEFAULT_CLAIM_SPEC, validateClaimSpec, type ClaimSpec } from '../../scheduler/claim-spec';
 import type { ClaimSpecRecord } from '../../scheduler/claim-spec-store';
-import { readClaimSpecLaneHealth, type FleetLaneHealth } from '../../fleet/lane-health';
+import {
+  readClaimSpecLaneHealth,
+  readClaimSpecLaneHealthDiagnosed,
+  type FleetLaneHealth,
+} from '../../fleet/lane-health';
 import {
   ACTIVE_FEATURE_FAMILY_KINDS,
   isSettledWorkItemState,
@@ -204,6 +208,9 @@ export function evaluateExactPlanAdmission(args: {
   planItems: PlanItem[];
   workItems: AdmissionWorkItem[];
   laneHealth: FleetLaneHealth | null;
+  /** Why the lane read produced no exact measurement (from the diagnosed reader);
+   * appended to a `lane-unknown` refusal so the cause is not lost (WI-10004851). */
+  laneHealthUnavailable?: string | null;
   sourceCapExhausted?: boolean;
   requestedSeats?: number;
   /** Allow plans:start to report success when this caller already owns every ready row. */
@@ -377,7 +384,13 @@ export function evaluateExactPlanAdmission(args: {
       `Actionable plan items have duplicate promoted rows: ${duplicate.map((entry) => entry.planItemId).join(', ')}.`,
     );
   if (!args.laneHealth || args.laneHealth.effective.claimable == null)
-    return finish(base, 'refused', 'lane-unknown', 'The exact-plan claim lane could not be read completely.');
+    return finish(
+      base,
+      'refused',
+      'lane-unknown',
+      'The exact-plan claim lane could not be read completely.' +
+        (args.laneHealthUnavailable ? ` ${args.laneHealthUnavailable}` : ''),
+    );
 
   const needed = new Set(
     activePromotedRows
@@ -589,7 +602,9 @@ export async function preflightExactPlanAdmission(args: {
     harnessSlug: args.harnessSlug,
     fleetSlug: args.fleetSlug ?? `exact-plan:${args.planSlug}`,
   };
-  const laneHealth = await readClaimSpecLaneHealth({
+  // Diagnosed read: same measurement as readClaimSpecLaneHealth, but a failed
+  // read keeps its cause instead of collapsing to a bare null (WI-10004851).
+  const { laneHealth, unavailable } = await readClaimSpecLaneHealthDiagnosed({
     spec,
     record,
     fleet: record.fleetSlug!,
@@ -603,6 +618,7 @@ export async function preflightExactPlanAdmission(args: {
     planItems,
     workItems,
     laneHealth,
+    laneHealthUnavailable: unavailable?.detail ?? null,
     sourceCapExhausted,
     requestedSeats: args.requestedSeats,
     assignee: args.claimant,

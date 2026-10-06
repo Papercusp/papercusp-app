@@ -19,11 +19,13 @@ import {
   ADMISSION_COMPONENT_FLOOR,
   lexicalHardEdges,
   readAdjudicatedPairKeys,
+  readPinnedUnadjudicatedCensus,
   runWorkItemAdmissionCensus,
   type AdmissionCensusRunOptions,
   type AdmissionCensusRunResult,
 } from './work-items-admission-census';
 import {
+  admissionEndpointBlock,
   admissionPairKey,
   bindAdmissionMergeSnapshot,
   buildPromoterPrompt,
@@ -57,6 +59,8 @@ import type { OrgSql } from './work-items';
 export const WORK_ITEM_ADMISSION_BULK_DEDUP = 'work-item-admission-bulk-dedup';
 export const BULK_DEDUP_ACTOR = `system:${WORK_ITEM_ADMISSION_BULK_DEDUP}`;
 export const DEFAULT_BULK_MAX_STAGES = 12;
+/** D-009: reach a committed stage even when the full corpus needs days of judging. */
+export const DEFAULT_BULK_MAX_PAIRS_PER_STAGE = 512;
 export const DEFAULT_BULK_PAIRS_PER_CALL = 150;
 /**
  * Output-token budget for ONE judge batch, and the per-pair/overhead rates the
@@ -107,6 +111,91 @@ export const DEFAULT_BULK_SHARD_CONCURRENCY = 4;
 /** Bounded retries for a single model batch. A successful earlier batch stays
  * in memory, so only the failed batch is replayed. */
 export const DEFAULT_BULK_BATCH_RETRY_BACKOFFS_MS = [500, 1_500, 4_000] as const;
+
+/**
+ * WI-10004942: a second, longer ladder that THROWN retryable errors fall through
+ * to once the short ladder above is spent: a transport outage (gateway or sidecar
+ * socket down), not a blip. Protocol retries (a schema-invalid response) never
+ * use it. ~3.75 min in total. Measured 2026-10-01: stage-1 of the P-005 pass
+ * failed at 15:43:32Z on one UND_ERR_SOCKET once the ~6s ladder ran out, ending
+ * a ~24h fire after ~3.7h of judging.
+ */
+export const DEFAULT_BULK_TRANSPORT_RETRY_BACKOFFS_MS = [15_000, 30_000, 60_000, 120_000] as const;
+
+/**
+ * WI-10006427: per-attempt deadline on ONE bulk judge call. The codex transport
+ * reuses loopbackFetch's launch dispatcher, whose headers/body cap (46 min) is
+ * sized for queen launches, so without this one hung upstream request held a
+ * batch for 46 min per attempt — ~3h across the short ladder — while the stage
+ * lease (2h) was never renewed. Measured 2026-10-06: a healthy gpt-6.1-sol:xhigh
+ * batch lands in 2-4 min, and a stage canary sat 34+ min on a single request
+ * while a direct probe of the same model answered in 12s. A deadline hit is a
+ * retryable `TimeoutError`, so it reaches the heartbeating transport ladder.
+ */
+export const DEFAULT_BULK_JUDGE_CALL_TIMEOUT_MS = 15 * 60_000;
+/** WI-10006427: lease renewal cadence while one judge call is in flight. */
+export const DEFAULT_BULK_JUDGE_HEARTBEAT_MS = 5 * 60_000;
+
+/** WI-10006427: a bulk judge call exceeded its per-attempt deadline. Named
+ * `TimeoutError` so {@link isRetryableModelCallError} classifies it transient. */
+export class BulkJudgeCallTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`bulk judge call exceeded its ${timeoutMs}ms per-attempt deadline`);
+    this.name = 'TimeoutError';
+  }
+}
+
+/**
+ * WI-10006427: run one judge call under a per-attempt deadline, calling
+ * `heartbeat` every `heartbeatMs` while it is in flight. At the deadline the
+ * call's AbortSignal fires (freeing the socket) and this rejects with
+ * {@link BulkJudgeCallTimeoutError}, whatever the transport reports for the
+ * abort. A throwing heartbeat (a sibling shard failed the stage) aborts the call
+ * and propagates. A non-positive / non-finite `heartbeatMs` disables the ticks.
+ */
+export async function runBulkJudgeCallWithDeadline<T>(
+  call: (signal: AbortSignal) => Promise<T>,
+  opts: { timeoutMs: number; heartbeatMs: number; heartbeat: () => Promise<void> },
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = new BulkJudgeCallTimeoutError(opts.timeoutMs);
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<'deadline'>((resolve) => {
+    deadlineTimer = setTimeout(() => resolve('deadline'), opts.timeoutMs);
+  });
+  const settled = Promise.resolve()
+    .then(() => call(controller.signal))
+    .then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+  const ticks = Number.isFinite(opts.heartbeatMs) && opts.heartbeatMs > 0;
+  try {
+    for (;;) {
+      let tickTimer: ReturnType<typeof setTimeout> | undefined;
+      const tick = ticks
+        ? new Promise<'tick'>((resolve) => {
+            tickTimer = setTimeout(() => resolve('tick'), opts.heartbeatMs);
+          })
+        : null;
+      const winner = await Promise.race(tick ? [settled, deadline, tick] : [settled, deadline]);
+      clearTimeout(tickTimer);
+      if (winner === 'tick') {
+        await opts.heartbeat();
+        continue;
+      }
+      if (winner === 'deadline') {
+        controller.abort(timeout);
+        throw timeout;
+      }
+      if (winner.ok) return winner.value;
+      throw winner.error;
+    }
+  } finally {
+    clearTimeout(deadlineTimer);
+    if (!controller.signal.aborted) controller.abort();
+  }
+}
 export const BULK_STAGE_SCHEMA_VERSION = 'work-item-admission-bulk-stage-v2';
 export const BULK_BATCH_CHECKPOINT_SCHEMA_VERSION = 'work-item-admission-bulk-batch-v1';
 /** A live owner refreshes this lease before and after every batch. Two hours is
@@ -147,6 +236,8 @@ interface BulkInput {
   pairShard: Map<string, number>;
   ghostIdsByShard: Map<number, string[]>;
   memberCount: number;
+  /** The census's pinned member ids (ghost context excluded). */
+  memberIds: ReadonlySet<string>;
   fingerprint: string;
 }
 
@@ -158,6 +249,17 @@ interface BulkBatchCheckpoint {
   pairKeys: string[];
   canary: boolean;
   status: 'complete';
+  /**
+   * WI-10004862: the evidence each judgement was made against, so a stage
+   * whose corpus drifted (a DBOS recovery re-reads a live corpus) can reuse
+   * every pair whose endpoints did not change instead of discarding the whole
+   * batch map. `qualityGateKey` pins model/prompt/threshold/dataset;
+   * `pairFingerprints` maps pairKey -> digest of both endpoint merge snapshots.
+   * Absent on checkpoints written before the fix: those are reusable only on
+   * the exact-fingerprint path.
+   */
+  qualityGateKey?: string;
+  pairFingerprints?: Record<string, string>;
   judgements: PromoterJudgement[];
   modelCalls: number;
   modelRetries: number;
@@ -203,8 +305,94 @@ interface BulkStageEnvelope {
     recordedAt: string;
   }>;
   checkpoints?: { batches?: Record<string, BulkBatchCheckpoint> };
+  workBudget?: BulkStageWorkBudget;
   failure?: { class: string; message: string; retryable: boolean };
+  /** WI-10006491: present once this stage's merge transaction has committed. */
+  mergeReceipt?: BulkStageMergeReceipt;
   [key: string]: unknown;
+}
+
+interface BulkStageWorkBudget {
+  pairLimit: number;
+  availablePairs: number;
+  selectedPairs: number;
+  deferredPairs: number;
+}
+
+/** Judge spend a stage reports, carried across the merge commit by its receipt. */
+interface BulkStageJudgeSummary {
+  modelCalls: number;
+  modelRetries: number;
+  modelProtocolFailures: number;
+  modelProtocolExhaustedBatches: number;
+  modelProtocolLastError: string | null;
+  ignoredUnknownJudgements: number;
+  omittedExpectedJudgements: number;
+  tokensIn: number;
+  tokensOut: number;
+  servedAccounts: string[];
+  reusedBatches: number;
+  priorRunDonatedPairs: number;
+}
+
+export const BULK_STAGE_MERGE_RECEIPT_SCHEMA = 'work-item-admission-bulk-merge-receipt-v1';
+
+/**
+ * WI-10006491: what a stage's merge transaction committed, written by that same
+ * transaction.
+ *
+ * The stage used to run persistAdmissionPlan, a FULL post-stage census, the
+ * ratchet read and the next-input read inside ONE serializable transaction.
+ * The census reads every open work item and every dedup edge, so it conflicted
+ * with the fleet's ordinary writes. Each 40001 retry re-ran the whole census.
+ * Measured 2026-10-06: stage bulk-dedup-scheduled-1791260346916-a3ffb71a-stage-1
+ * spent 05:13Z to 06:33Z on 12 attempts, then failed with
+ * `serializable transaction failed to commit after 12 attempts (pg 40001)` and
+ * lost all of its merges.
+ *
+ * Now only the merge writes and this receipt are serializable. The census runs
+ * after commit. A retry of the post-commit half (a census error, a ratchet
+ * violation, a process death) finds this receipt and finishes from it. It does
+ * not re-judge: the committed pairs are adjudicated now, so a fresh read would
+ * select different pairs. It does not re-merge either.
+ */
+interface BulkStageMergeReceipt {
+  schemaVersion: typeof BULK_STAGE_MERGE_RECEIPT_SCHEMA;
+  /** Census the stage's pairs were drawn from; a receipt answers only for it. */
+  sourceCensusRunId: string;
+  startedAt: number;
+  committedAt: number;
+  /** Serializable attempts the merge commit took (1 = no conflict). */
+  commitAttempts: number;
+  pairs: number;
+  scopedPairsBefore: number;
+  workBudget: BulkStageWorkBudget;
+  merged: number;
+  held: number;
+  /** Pairs adjudicated by the committed transaction. */
+  successful: number;
+  uniqueRowsChanged: number;
+  verdicts: Record<string, number>;
+  judged: BulkStageJudgeSummary;
+}
+
+/**
+ * WI-10006491: wall-clock budget for the merge transaction's serialization
+ * retries. Without the census in it, one attempt takes seconds and the retry
+ * ladder (DEPENDENCY_ADMISSION_RETRY_DEFAULTS) sleeps about 4 s in total. A
+ * commit still retrying after this long is not contention. Fail the stage
+ * visibly instead of silencing it for hours.
+ */
+export const BULK_STAGE_MERGE_COMMIT_BUDGET_MS = 10 * 60_000;
+
+function committedMergeReceipt(
+  envelope: BulkStageEnvelope,
+  sourceCensusRunId: string,
+): BulkStageMergeReceipt | null {
+  const receipt = envelope.mergeReceipt;
+  if (!receipt || typeof receipt !== 'object') return null;
+  if (receipt.schemaVersion !== BULK_STAGE_MERGE_RECEIPT_SCHEMA) return null;
+  return receipt.sourceCensusRunId === sourceCensusRunId ? receipt : null;
 }
 
 export interface BulkModelFailureClassification {
@@ -275,6 +463,12 @@ export interface BulkDedupStageResult {
   servedAccounts: string[];
   /** Model batches recovered from the durable stage envelope rather than called again. */
   reusedBatches: number;
+  /**
+   * D-007: pairs whose judgement was donated by an EARLIER bulk-stage row (not
+   * re-judged, and not counted in this stage's spend). Absent on stages written
+   * before D-007.
+   */
+  priorRunDonatedPairs?: number;
   /** D-007 report for the frozen independent-label replay (non-empty stages). */
   mergeQuality?: AdmissionMergeQualityReport;
   /** Exact protected/drifted endpoints the shared writer refused. */
@@ -285,7 +479,7 @@ export interface BulkDedupRunResult {
   runId: string;
   scope: BulkDedupScope;
   converged: boolean;
-  convergenceReason: 'global-zero' | 'scope-zero';
+  convergenceReason: 'global-zero' | 'scope-zero' | 'stage-budget';
   initialCensus: number;
   finalCensus: number;
   finalScopedPairs: number;
@@ -324,13 +518,20 @@ export interface BulkDedupRunOptions {
   sql?: OrgSql;
   runId?: string;
   maxStages?: number;
+  /** Pair work before one atomic commit; residual pairs remain in the next census. */
+  maxPairsPerStage?: number;
   pairsPerCall?: number;
   shardConcurrency?: number;
   census?: Omit<AdmissionCensusRunOptions, 'workspaceId' | 'harnessSlug' | 'sql' | 'runId' | 'withinTransaction'>;
   now?: () => number;
   /** Stable owner identity for gateway attribution across retries/replays. */
   ownerId?: string;
-  /** Dependency seam used by the real-PG recurrence guard to inject a census rise. */
+  /**
+   * Dependency seam used by the real-PG recurrence guards to inject a census
+   * rise or a concurrent write. It runs AFTER the stage's merge transaction
+   * commits, on the run's own pool handle (WI-10006491), so whatever it writes
+   * is committed.
+   */
   beforePostStageCensus?: (sql: OrgSql, stageIndex: number) => Promise<void>;
   /**
    * Model spec for this run's judging calls. Defaults to {@link LEARNING_MODEL_SPEC}.
@@ -367,8 +568,18 @@ export interface BulkDedupRunOptions {
   model?: string;
   /** Injectable bounded backoff for transient model transport failures. */
   batchRetryBackoffsMs?: readonly number[];
+  /** WI-10004942: the longer ladder a thrown retryable error falls through to once
+   * `batchRetryBackoffsMs` is spent. Defaults to DEFAULT_BULK_TRANSPORT_RETRY_BACKOFFS_MS;
+   * pass `[]` for the short-ladder-only behaviour. */
+  transportRetryBackoffsMs?: readonly number[];
   /** Injectable sleep seam for retry tests; production uses setTimeout. */
   batchRetryDelay?: (ms: number) => Promise<void>;
+  /** WI-10006427: per-attempt deadline on one judge call. Defaults to
+   * DEFAULT_BULK_JUDGE_CALL_TIMEOUT_MS; a hit is retried as a transport timeout. */
+  judgeCallTimeoutMs?: number;
+  /** WI-10006427: stage-lease renewal cadence while a judge call is in flight.
+   * Defaults to DEFAULT_BULK_JUDGE_HEARTBEAT_MS. */
+  judgeHeartbeatMs?: number;
   runCensus?: CensusRunner;
   /** Model/account capacity check. Production supplies the shared probe/readers;
    * direct tests may omit it, which is recorded as unknown and then proven by
@@ -582,7 +793,7 @@ async function readBulkInput(
         .join('\x01'),
     )
     .digest('hex');
-  return { items, pairs, pairShard, ghostIdsByShard, memberCount: memberRows.length, fingerprint };
+  return { items, pairs, pairShard, ghostIdsByShard, memberCount: memberRows.length, memberIds, fingerprint };
 }
 
 export function buildBulkDedupPrompt(
@@ -876,6 +1087,8 @@ async function acquireBulkStageLease(
     nowMs: number;
     leaseMs: number;
     inputFingerprint: string;
+    /** Merge-quality gate key the stage judges under (WI-10004862 drift reuse). */
+    qualityGateKey: string;
     sourceCensusRunId: string;
     scope: BulkDedupScope;
     pairs: number;
@@ -908,6 +1121,15 @@ async function acquireBulkStageLease(
     stale && currentOwner && currentOwner !== input.ownerId
       ? Number(current.lease?.takeoverCount ?? 0) + 1
       : Number(current.lease?.takeoverCount ?? 0);
+  const fingerprintMatched = current.inputFingerprint === input.inputFingerprint;
+  // WI-10004862: a live corpus drifts between a crash and its DBOS recovery
+  // (measured: 35 adjudications + 178 item edits on the pinned members in
+  // 56 min), so wiping the map on any drift discarded every judged batch on
+  // every bg-host restart. Keep what can still be proven per pair.
+  const retainedBatches = fingerprintMatched
+    ? (current.checkpoints?.batches ?? {})
+    : retainBulkCheckpointsAcrossDrift(current.checkpoints?.batches, input.qualityGateKey);
+  const canaryRetained = Object.values(retainedBatches).some((checkpoint) => checkpoint.canary);
   const next: BulkStageEnvelope = {
     ...current,
     schemaVersion: BULK_STAGE_SCHEMA_VERSION,
@@ -924,13 +1146,8 @@ async function acquireBulkStageLease(
       takeoverCount,
     },
     canary:
-      current.inputFingerprint === input.inputFingerprint
-        ? (current.canary ?? { status: 'pending' })
-        : { status: 'pending' },
-    checkpoints:
-      current.inputFingerprint === input.inputFingerprint
-        ? { batches: current.checkpoints?.batches ?? {} }
-        : { batches: {} },
+      fingerprintMatched || canaryRetained ? (current.canary ?? { status: 'pending' }) : { status: 'pending' },
+    checkpoints: { batches: retainedBatches },
     // Capacity blocks are retryable. A re-arm must take a fresh headroom
     // reading rather than fossilizing the previous zero-capacity verdict.
     preflight: currentStatus === 'blocked' ? undefined : current.preflight,
@@ -942,6 +1159,9 @@ async function acquireBulkStageLease(
       ...(current.failure ? [{ ...current.failure, at: input.nowMs }] : []),
     ].slice(-8);
     delete next.failure;
+    // Describes the attempt that failed; its message is in failureHistory. A
+    // resumed stage keeps its mergeReceipt and finishes from it (WI-10006491).
+    delete next.failedAfterMergeCommit;
   }
   const updated = await sql`
     UPDATE harness_shared.admission_runs
@@ -965,7 +1185,7 @@ async function acquireBulkStageLease(
   }
   return {
     envelope: next,
-    reused: current.inputFingerprint === input.inputFingerprint,
+    reused: fingerprintMatched,
     complete: false,
   };
 }
@@ -999,6 +1219,116 @@ function batchCheckpointKey(stageRunId: string, shard: number, offset: number, p
     .digest('hex')
     .slice(0, 16);
   return `shard-${shard}-offset-${offset}-${digest}`;
+}
+
+/** Digest of both endpoint merge snapshots a pair judgement was made against.
+ * Null when either snapshot is missing: unprovable evidence is never reused. */
+function pairEvidenceFingerprint(pair: PromoterPair): string | null {
+  const a = pair.a.mergeSnapshot?.fingerprint;
+  const b = pair.b.mergeSnapshot?.fingerprint;
+  if (!a || !b) return null;
+  return createHash('sha256').update(`${pair.pairKey}\x00${a}\x00${b}`).digest('hex').slice(0, 32);
+}
+
+function pairFingerprintsFor(batch: readonly PromoterPair[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const pair of batch) {
+    const fp = pairEvidenceFingerprint(pair);
+    if (fp) out[pair.pairKey] = fp;
+  }
+  return out;
+}
+
+/**
+ * D-007 (plan work-queue-bulk-cleanup-remediation-2026-10-01): how far back, and
+ * how many earlier bulk-stage rows, a new stage reads for per-pair donors. Every
+ * driver fire mints a fresh runId and a pass is cancelled at the 24h fire
+ * timeout, so without cross-row donors a pass longer than one fire restarts from
+ * zero each day and never completes. The window spans several missed fires; the
+ * row cap bounds the read (a full-corpus row holds ~1,600 batch checkpoints).
+ */
+export const PRIOR_STAGE_DONOR_WINDOW_MS = 14 * 24 * 60 * 60_000;
+export const PRIOR_STAGE_DONOR_ROW_LIMIT = 8;
+
+/**
+ * Read pair-reusable batch checkpoints from EARLIER bulk-stage rows of the same
+ * workspace + harness — any outcome, since a stage cancelled at the fire timeout
+ * never persists its judgements anywhere else. Only checkpoints that could pass
+ * `checkpointSupportsPairReuse` for this stage's quality gate are returned; the
+ * per-pair evidence fingerprint is still checked against the live pair before
+ * any judgement is donated. Rows that started after this stage are excluded so a
+ * DBOS recovery of this stage reads the same donor population.
+ */
+export async function readPriorStageDonorCheckpoints(
+  sql: OrgSql,
+  input: {
+    workspaceId: string;
+    harnessSlug: string;
+    stageRunId: string;
+    qualityGateKey: string;
+    windowMs?: number;
+    rowLimit?: number;
+  },
+): Promise<BulkBatchCheckpoint[]> {
+  const windowSec = (input.windowMs ?? PRIOR_STAGE_DONOR_WINDOW_MS) / 1000;
+  const rowLimit = input.rowLimit ?? PRIOR_STAGE_DONOR_ROW_LIMIT;
+  const rows = await sql<Array<{ checkpoint: BulkBatchCheckpoint }>>`
+    WITH own AS (
+      SELECT COALESCE(
+               (SELECT started_at FROM harness_shared.admission_runs
+                 WHERE workspace_id = ${input.workspaceId} AND id = ${input.stageRunId}),
+               now()) AS started_at
+    ),
+    prior AS (
+      SELECT r.detail
+        FROM harness_shared.admission_runs r, own
+       WHERE r.workspace_id = ${input.workspaceId}
+         AND r.harness_slug = ${input.harnessSlug}
+         AND r.run_kind = 'bulk-stage'
+         AND r.id <> ${input.stageRunId}
+         AND r.started_at < own.started_at
+         AND r.started_at >= own.started_at - make_interval(secs => ${windowSec}::double precision)
+       ORDER BY r.started_at DESC
+       LIMIT ${rowLimit}
+    )
+    SELECT b.value AS checkpoint
+      FROM prior, jsonb_each(COALESCE(prior.detail->'checkpoints'->'batches', '{}'::jsonb)) b
+     WHERE b.value->>'status' = 'complete'
+       AND b.value->>'schemaVersion' = ${BULK_BATCH_CHECKPOINT_SCHEMA_VERSION}
+       AND b.value->>'qualityGateKey' = ${input.qualityGateKey}
+       AND jsonb_typeof(b.value->'pairFingerprints') = 'object'
+       AND jsonb_typeof(b.value->'pairKeys') = 'array'
+       AND jsonb_typeof(b.value->'judgements') = 'array'`;
+  return rows
+    .map((row) => row.checkpoint)
+    .filter((checkpoint) => checkpointSupportsPairReuse(checkpoint, input.qualityGateKey));
+}
+
+/** A checkpoint that can donate individual pair judgements after corpus drift. */
+function checkpointSupportsPairReuse(checkpoint: BulkBatchCheckpoint, qualityGateKey: string): boolean {
+  return (
+    checkpoint.status === 'complete' &&
+    checkpoint.schemaVersion === BULK_BATCH_CHECKPOINT_SCHEMA_VERSION &&
+    checkpoint.qualityGateKey === qualityGateKey &&
+    !!checkpoint.pairFingerprints
+  );
+}
+
+/**
+ * Checkpoints worth carrying across an input-fingerprint drift: every
+ * pair-reusable checkpoint plus the canary (it proves the canary DBOS step is
+ * already recorded, so a recovery must not re-spend or mis-replay it).
+ */
+export function retainBulkCheckpointsAcrossDrift(
+  batches: Record<string, BulkBatchCheckpoint> | undefined,
+  qualityGateKey: string,
+): Record<string, BulkBatchCheckpoint> {
+  const kept: Record<string, BulkBatchCheckpoint> = {};
+  for (const [key, checkpoint] of Object.entries(batches ?? {})) {
+    if (!checkpoint || checkpoint.status !== 'complete') continue;
+    if (checkpoint.canary || checkpointSupportsPairReuse(checkpoint, qualityGateKey)) kept[key] = checkpoint;
+  }
+  return kept;
 }
 
 function checkpointMatchesBatch(
@@ -1101,19 +1431,55 @@ async function failBulkStage(
   error: unknown,
   attempted: number | null = null,
   ownerId?: string,
+  /**
+   * WI-10006491: the stage's merge transaction already committed. The failure
+   * came after commit (post-stage census, ratchet, ledger write), so the merges
+   * are durable and the outcome reports them, not an unknown rollback.
+   */
+  committed: BulkStageMergeReceipt | null = null,
 ): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
   const cause = error && typeof error === 'object' ? (error as { cause?: unknown }).cause : undefined;
   const failure = classifyBulkModelFailure(error);
   const guardPersistence = error instanceof BulkAdmissionMergeGuardBlockedError ? error.persistence : null;
+  // A protected-only prescreen exits before model/persistence, so its zero
+  // writes are measured; they are not the unknown rollback of a model failure.
+  const prescreenNoMutation = failure.class === 'prescreen_all_pairs_protected';
   const status =
     failure.kind === 'capacity' || failure.kind === 'quality' || failure.kind === 'guard' ? 'blocked' : 'failed';
   const allowCompletedQualityDisposition = failure.kind === 'quality';
+  const outcome: AdmissionRunOutcome = committed
+    ? {
+        unit: 'pairs',
+        attempted: committed.pairs,
+        successful: committed.successful,
+        rolledBack: 0,
+        unchanged: Math.max(0, committed.pairs - committed.successful),
+        uniqueRowsChanged: committed.uniqueRowsChanged,
+        failureReason: status === 'failed' ? message : null,
+        blockedReason: status === 'blocked' ? message : null,
+      }
+    : {
+        unit: 'pairs',
+        attempted,
+        successful: guardPersistence || prescreenNoMutation ? 0 : null,
+        // A failed stage is transactionally rolled back; the
+        // exact number of writes is unknowable when the error
+        // occurs during model/protocol handling.
+        rolledBack: prescreenNoMutation ? 0 : guardPersistence ? guardPersistence.uniqueRowsChanged : null,
+        unchanged: guardPersistence || prescreenNoMutation ? attempted : null,
+        uniqueRowsChanged: guardPersistence || prescreenNoMutation ? 0 : null,
+        failureReason: status === 'failed' ? message : null,
+        blockedReason: status === 'blocked' ? message : null,
+      };
   await sql`
     UPDATE harness_shared.admission_runs
        SET finished_at = now(),
+           merged = CASE WHEN ${committed !== null} THEN ${committed?.merged ?? 0} ELSE merged END,
            held = CASE
+             WHEN ${prescreenNoMutation} THEN 0
              WHEN ${guardPersistence !== null} THEN ${guardPersistence?.guardRefusals.length ?? 0}
+             WHEN ${committed !== null} THEN ${committed?.held ?? 0}
              ELSE held
            END,
            detail = (COALESCE(detail, '{}'::jsonb) - 'errorCause') ||
@@ -1124,19 +1490,8 @@ async function failBulkStage(
                       ...(failure.class === 'canary_protocol_failure'
                         ? { canary: { status: 'failed', reason: failure.message } }
                         : {}),
-                      outcome: {
-                        unit: 'pairs',
-                        attempted,
-                        successful: guardPersistence ? 0 : null,
-                        // A failed stage is transactionally rolled back; the
-                        // exact number of writes is unknowable when the error
-                        // occurs during model/protocol handling.
-                        rolledBack: guardPersistence ? guardPersistence.uniqueRowsChanged : null,
-                        unchanged: guardPersistence ? attempted : null,
-                        uniqueRowsChanged: guardPersistence ? 0 : null,
-                        failureReason: status === 'failed' ? message : null,
-                        blockedReason: status === 'blocked' ? message : null,
-                      } satisfies AdmissionRunOutcome,
+                      outcome,
+                      ...(committed ? { failedAfterMergeCommit: true } : {}),
                       ...(guardPersistence ? { guardRefusals: guardPersistence.guardRefusals } : {}),
                       ...(cause !== undefined ? { errorCause: serializeBulkErrorCause(cause) } : {}),
                     })}::text::jsonb
@@ -1188,10 +1543,75 @@ export function isRetryableModelCallError(error: unknown): boolean {
   return isTransientNetworkError(error);
 }
 
+/**
+ * WI-10004932: thrown by a shard worker that stops because a SIBLING shard
+ * already failed the stage. It never escapes the shard runner; the runner
+ * rethrows the sibling's original error.
+ */
+class BulkStageSiblingFailedError extends Error {
+  constructor() {
+    super('bulk stage stopped: a sibling shard already failed the stage');
+    this.name = 'BulkStageSiblingFailedError';
+  }
+}
+
+/**
+ * WI-10004932: run `judge` over `entries` with at most `concurrency` in flight.
+ * The first failure stops every sibling at its next `stopIfSiblingFailed()`
+ * check, and no further entry is claimed. Settles only after EVERY worker has
+ * settled, so a caller that records the failure cannot race a sibling's late
+ * write. Rejects with the first failure, never with the stop signal.
+ *
+ * It replaces a `Promise.all` pool that rejected on the first failure but left
+ * siblings running: they kept claiming shards and writing checkpoints into a
+ * stage already marked failed (measured 2026-10-01: 8 batches over 18 min after
+ * the routineFire ERRORed).
+ */
+export async function runShardPool<E, R>(
+  entries: readonly E[],
+  concurrency: number,
+  judge: (entry: E, stopIfSiblingFailed: () => void) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(entries.length);
+  // A holder object, not a `let`: TS does not track assignments made inside
+  // the worker closures, so a narrowed `let` would read as always-unset.
+  const failure: { failed: boolean; error: unknown } = { failed: false, error: undefined };
+  const stopIfSiblingFailed = () => {
+    if (failure.failed) throw new BulkStageSiblingFailedError();
+  };
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, entries.length) }, async () => {
+    while (!failure.failed && next < entries.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = await judge(entries[index]!, stopIfSiblingFailed);
+      } catch (error) {
+        if (!failure.failed && !(error instanceof BulkStageSiblingFailedError)) {
+          failure.failed = true;
+          failure.error = error;
+        }
+        return;
+      }
+    }
+  });
+  await Promise.allSettled(workers);
+  if (failure.failed) throw failure.error;
+  return results;
+}
+
 async function callBulkModelBatchWithRetry<T>(
   call: () => Promise<BulkModelResponse>,
   validate: (response: BulkModelResponse) => T,
-  opts: { backoffsMs: readonly number[]; delay: (ms: number) => Promise<void> },
+  opts: {
+    backoffsMs: readonly number[];
+    delay: (ms: number) => Promise<void>;
+    /** WI-10004942: spent only by THROWN retryable errors, after `backoffsMs`. */
+    transportBackoffsMs?: readonly number[];
+    /** Runs before and after each transport-ladder wait. The stage uses it to
+     * renew its lease and to stop if a sibling shard already failed the stage. */
+    onTransportWait?: () => Promise<void>;
+  },
 ): Promise<{
   response: BulkModelResponse;
   value: T | null;
@@ -1202,6 +1622,8 @@ async function callBulkModelBatchWithRetry<T>(
   tokensOut: number;
 }> {
   let retries = 0;
+  let transportRetries = 0;
+  const transportBackoffsMs = opts.transportBackoffsMs ?? [];
   let protocolFailures = 0;
   let tokensIn = 0;
   let tokensOut = 0;
@@ -1210,9 +1632,20 @@ async function callBulkModelBatchWithRetry<T>(
     try {
       response = await call();
     } catch (error) {
-      if (!isRetryableModelCallError(error) || retries >= opts.backoffsMs.length) throw error;
-      await opts.delay(opts.backoffsMs[retries]!);
-      retries += 1;
+      if (!isRetryableModelCallError(error)) throw error;
+      if (retries < opts.backoffsMs.length) {
+        await opts.delay(opts.backoffsMs[retries]!);
+        retries += 1;
+        continue;
+      }
+      // The short ladder is spent, so this is an outage, not a blip: wait it out
+      // on the transport ladder (WI-10004942). `retries` is NOT advanced, so a
+      // protocol retry after the outage still gets its full short ladder.
+      if (transportRetries >= transportBackoffsMs.length) throw error;
+      await opts.onTransportWait?.();
+      await opts.delay(transportBackoffsMs[transportRetries]!);
+      transportRetries += 1;
+      await opts.onTransportWait?.();
       continue;
     }
     tokensIn += response.inputTokens;
@@ -1221,7 +1654,7 @@ async function callBulkModelBatchWithRetry<T>(
       return {
         response,
         value: validate(response),
-        retries,
+        retries: retries + transportRetries,
         protocolFailures,
         protocolError: null,
         tokensIn,
@@ -1234,7 +1667,7 @@ async function callBulkModelBatchWithRetry<T>(
         return {
           response,
           value: null,
-          retries,
+          retries: retries + transportRetries,
           protocolFailures,
           protocolError,
           tokensIn,
@@ -1257,8 +1690,11 @@ async function runAdmissionMergeQualityReplay(
     llmCall: PromoterLlmCall;
     ownerId?: string;
     batchRetryBackoffsMs: readonly number[];
+    transportRetryBackoffsMs?: readonly number[];
     batchRetryDelay: (ms: number) => Promise<void>;
     now: () => number;
+    /** WI-10006427: per-attempt deadline on the replay's judge call. */
+    judgeCallTimeoutMs?: number;
   },
 ): Promise<AdmissionMergeQualityReport> {
   const startedAtMs = opts.now();
@@ -1268,15 +1704,26 @@ async function runAdmissionMergeQualityReplay(
   let replayTokensOut = 0;
   let replayServedAccount: string | null = null;
   const replayServedAccounts = new Set<string>();
+  // WI-10006427: the same per-attempt deadline as the stage batches. The replay
+  // runs before any stage batch, so it has no lease ticks of its own.
   const callReplayModel = () =>
-    opts.llmCall({
-      model: prepared.model,
-      system: prepared.prompt.system,
-      messages: [{ role: 'user', content: prepared.prompt.user }],
-      responseFormat: 'json',
-      maxTokens: bulkJudgeMaxTokens(prepared.pairs.length),
-      ...(opts.ownerId ? { ownerId: opts.ownerId } : {}),
-    });
+    runBulkJudgeCallWithDeadline(
+      (signal) =>
+        opts.llmCall({
+          model: prepared.model,
+          system: prepared.prompt.system,
+          messages: [{ role: 'user', content: prepared.prompt.user }],
+          responseFormat: 'json',
+          maxTokens: bulkJudgeMaxTokens(prepared.pairs.length),
+          ...(opts.ownerId ? { ownerId: opts.ownerId } : {}),
+          signal,
+        }),
+      {
+        timeoutMs: opts.judgeCallTimeoutMs ?? DEFAULT_BULK_JUDGE_CALL_TIMEOUT_MS,
+        heartbeatMs: 0,
+        heartbeat: async () => undefined,
+      },
+    );
   try {
     const attempted = await callBulkModelBatchWithRetry(
       async () => {
@@ -1291,7 +1738,11 @@ async function runAdmissionMergeQualityReplay(
         return response;
       },
       (response) => parsePromoterJudgements(responsePayload(response)),
-      { backoffsMs: opts.batchRetryBackoffsMs, delay: opts.batchRetryDelay },
+      {
+        backoffsMs: opts.batchRetryBackoffsMs,
+        delay: opts.batchRetryDelay,
+        transportBackoffsMs: opts.transportRetryBackoffsMs,
+      },
     );
     return scoreAdmissionMergeQualityGate({
       prepared,
@@ -1349,6 +1800,7 @@ async function judgeBulkPairs(
     ownerId?: string;
     executionId: string;
     batchRetryBackoffsMs: readonly number[];
+    transportRetryBackoffsMs?: readonly number[];
     batchRetryDelay: (ms: number) => Promise<void>;
     stageRunId: string;
     sql: OrgSql;
@@ -1356,6 +1808,23 @@ async function judgeBulkPairs(
     now: () => number;
     step: BulkDedupStepRunner;
     checkpoints: Record<string, BulkBatchCheckpoint>;
+    /**
+     * D-007: pair-reusable checkpoints from EARLIER bulk-stage rows. Used for
+     * per-pair donation only — never offset-keyed batch reuse or the canary —
+     * and their spend is not folded into this stage's counters.
+     */
+    priorRunCheckpoints?: readonly BulkBatchCheckpoint[];
+    /** WI-10006427: per-attempt judge deadline / in-flight lease cadence. */
+    judgeCallTimeoutMs?: number;
+    judgeHeartbeatMs?: number;
+    /** Merge-quality gate key every new checkpoint is stamped with. */
+    qualityGateKey: string;
+    /**
+     * False when the stage input drifted since the checkpoints were written
+     * (WI-10004862). Batch offsets then no longer line up, so reuse switches to
+     * pair granularity, validated per pair against the recorded evidence.
+     */
+    inputFingerprintMatched: boolean;
   },
 ): Promise<{
   judgements: PromoterJudgement[];
@@ -1370,6 +1839,7 @@ async function judgeBulkPairs(
   tokensOut: number;
   servedAccounts: string[];
   reusedBatches: number;
+  priorRunDonatedPairs: number;
 }> {
   const byShard = new Map<number, PromoterPair[]>();
   for (const pair of input.pairs) {
@@ -1378,18 +1848,73 @@ async function judgeBulkPairs(
     byShard.set(shard, [...(byShard.get(shard) ?? []), pair]);
   }
 
-  const shardEntries = [...byShard.entries()].sort((a, b) => a[0] - b[0]);
+  // WI-10004862: donate individual pair judgements from any checkpoint whose
+  // recorded evidence (quality gate key + both endpoint snapshot fingerprints)
+  // still matches the live pair. Batch offsets shift whenever one earlier pair
+  // leaves the input, so offset-keyed batch reuse alone cannot survive drift.
+  // D-007: earlier bulk-stage rows donate under the same per-pair guard, so a
+  // pass cancelled at the fire timeout is continued by the next fire's fresh
+  // runId instead of restarting from zero.
+  const pairDonors = new Map<
+    string,
+    { checkpoint: BulkBatchCheckpoint; fingerprint: string; judgements: PromoterJudgement[]; priorRun: boolean }
+  >();
+  const addDonors = (checkpoints: Iterable<BulkBatchCheckpoint>, priorRun: boolean) => {
+    for (const checkpoint of checkpoints) {
+      if (!checkpointSupportsPairReuse(checkpoint, opts.qualityGateKey)) continue;
+      for (const pairKey of checkpoint.pairKeys) {
+        const fingerprint = checkpoint.pairFingerprints?.[pairKey];
+        const judgements = checkpoint.judgements.filter((judgement) => judgement.pairKey === pairKey);
+        // An omitted pair has no judgement to donate; it is judged again.
+        if (!fingerprint || judgements.length === 0) continue;
+        const prior = pairDonors.get(pairKey);
+        // The newest judgement wins; on a tie this stage's own checkpoint wins.
+        const newer =
+          !prior ||
+          checkpoint.completedAt > prior.checkpoint.completedAt ||
+          (checkpoint.completedAt === prior.checkpoint.completedAt && !priorRun && prior.priorRun);
+        if (newer) pairDonors.set(pairKey, { checkpoint, fingerprint, judgements, priorRun });
+      }
+    }
+  };
+  addDonors(opts.priorRunCheckpoints ?? [], true);
+  addDonors(Object.values(opts.checkpoints), false);
+  const shardEntries = [...byShard.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([shard, pairs]) => {
+      const donated: PromoterPair[] = [];
+      const remaining: PromoterPair[] = [];
+      for (const pair of pairs) {
+        const donor = pairDonors.get(pair.pairKey);
+        if (donor && donor.fingerprint === pairEvidenceFingerprint(pair)) donated.push(pair);
+        else remaining.push(pair);
+      }
+      return { shard, pairs, donated, remaining };
+    });
+  // The canary is a single DBOS step per stage. When a canary checkpoint is
+  // already durable, that step is recorded (or provably passed by an earlier
+  // executor): replay it as a no-op up front, exactly once, before any shard
+  // runs, so the step sequence is identical whatever the batch keys are now.
+  const canaryRecorded = Object.values(opts.checkpoints).some(
+    (checkpoint) =>
+      checkpoint.canary &&
+      checkpoint.status === 'complete' &&
+      (checkpoint.qualityGateKey === undefined || checkpoint.qualityGateKey === opts.qualityGateKey),
+  );
   const firstBatchKey = (() => {
-    const first = shardEntries[0];
+    if (canaryRecorded) return null;
+    const first = shardEntries.find((entry) => entry.remaining.length > 0);
     return first
       ? batchCheckpointKey(
           opts.stageRunId,
-          first[0],
+          first.shard,
           0,
-          first[1].slice(0, opts.pairsPerCall).map((p) => p.pairKey),
+          first.remaining.slice(0, opts.pairsPerCall).map((p) => p.pairKey),
         )
       : null;
   })();
+  if (canaryRecorded) await opts.step(`bulk:${opts.stageRunId}:canary`, async () => undefined);
+  const foldedDonors = new Set<string>();
   let resolveCanary!: () => void;
   let rejectCanary!: (error: unknown) => void;
   const canaryGate = new Promise<void>((resolve, reject) => {
@@ -1399,22 +1924,12 @@ async function judgeBulkPairs(
   // A one-batch stage has no waiter, but a failed canary still rejects the gate.
   void canaryGate.catch(() => undefined);
   if (!firstBatchKey) resolveCanary();
-  const results = new Array<{
-    judgements: PromoterJudgement[];
-    modelCalls: number;
-    modelRetries: number;
-    modelProtocolFailures: number;
-    modelProtocolExhaustedBatches: number;
-    modelProtocolLastError: string | null;
-    ignoredUnknownJudgements: number;
-    omittedExpectedJudgements: number;
-    tokensIn: number;
-    tokensOut: number;
-    servedAccounts: string[];
-    reusedBatches: number;
-  }>(shardEntries.length);
-  let nextShardIndex = 0;
-  const judgeShard = async (shard: number, shardPairs: PromoterPair[]) => {
+  // WI-10004932: runShardPool hands each shard `stopIfSiblingFailed`, checked
+  // before every batch's model call, so the first shard failure stops the rest.
+  const judgeShard = async (
+    { shard, pairs: originalPairs, donated, remaining: shardPairs }: (typeof shardEntries)[number],
+    stopIfSiblingFailed: () => void,
+  ) => {
     const judgements: PromoterJudgement[] = [];
     let modelCalls = 0;
     let modelRetries = 0;
@@ -1430,35 +1945,50 @@ async function judgeBulkPairs(
     const ghostItems = (input.ghostIdsByShard.get(shard) ?? [])
       .map((id) => input.items.get(id))
       .filter((item): item is BulkDedupItem => Boolean(item));
+    // A checkpoint is the durable accounting record for one unique batch. Fold
+    // its counters in exactly once so the terminal stage still reports the
+    // whole run after a takeover; reusedBatches separately explains how much of
+    // that work this executor recovered rather than re-issued.
+    const foldCheckpoint = (saved: BulkBatchCheckpoint) => {
+      modelCalls += saved.modelCalls;
+      modelRetries += saved.modelRetries;
+      modelProtocolFailures += saved.modelProtocolFailures;
+      modelProtocolExhaustedBatches += saved.modelProtocolExhaustedBatches;
+      if (saved.modelProtocolLastError) modelProtocolLastError = saved.modelProtocolLastError;
+      ignoredUnknownJudgements += saved.ignoredUnknownJudgements;
+      omittedExpectedJudgements += saved.omittedExpectedJudgements;
+      tokensIn += saved.tokensIn;
+      tokensOut += saved.tokensOut;
+      for (const account of saved.servedAccounts) servedAccounts.add(account);
+      reusedBatches += 1;
+    };
+    let priorRunDonatedPairs = 0;
+    for (const pair of donated) {
+      const donor = pairDonors.get(pair.pairKey)!;
+      judgements.push(...donor.judgements);
+      // An earlier row's spend belongs to that row's ledger, not this stage's.
+      if (donor.priorRun) {
+        priorRunDonatedPairs += 1;
+        continue;
+      }
+      if (!foldedDonors.has(donor.checkpoint.key)) {
+        foldedDonors.add(donor.checkpoint.key);
+        foldCheckpoint(donor.checkpoint);
+      }
+    }
     for (let offset = 0; offset < shardPairs.length; offset += opts.pairsPerCall) {
+      stopIfSiblingFailed();
       const batch = shardPairs.slice(offset, offset + opts.pairsPerCall);
       const pairKeys = batch.map((pair) => pair.pairKey);
       const checkpointKey = batchCheckpointKey(opts.stageRunId, shard, offset, pairKeys);
       const saved = opts.checkpoints[checkpointKey];
-      if (checkpointMatchesBatch(saved, batch)) {
-        if (saved.canary) {
-          // Keep the DBOS call sequence stable on a recovery replay: the first
-          // batch is always represented by the same named step, even when its
-          // parsed result is now coming from admission_runs.
-          await opts.step(`bulk:${opts.stageRunId}:canary`, async () => undefined);
-          resolveCanary();
-        }
+      // Whole-batch reuse is sound only against the exact input that wrote the
+      // checkpoint; after drift a batch can match by key while an endpoint
+      // changed underneath it (pair donation above covers the drift case).
+      if (opts.inputFingerprintMatched && checkpointMatchesBatch(saved, batch) && !foldedDonors.has(saved.key)) {
         judgements.push(...saved.judgements);
-        // A checkpoint is the durable accounting record for one unique batch.
-        // Fold its counters in exactly once so the terminal stage still reports
-        // the whole run after a takeover; reusedBatches separately explains how
-        // much of that work this executor recovered rather than re-issued.
-        modelCalls += saved.modelCalls;
-        modelRetries += saved.modelRetries;
-        modelProtocolFailures += saved.modelProtocolFailures;
-        modelProtocolExhaustedBatches += saved.modelProtocolExhaustedBatches;
-        if (saved.modelProtocolLastError) modelProtocolLastError = saved.modelProtocolLastError;
-        ignoredUnknownJudgements += saved.ignoredUnknownJudgements;
-        omittedExpectedJudgements += saved.omittedExpectedJudgements;
-        tokensIn += saved.tokensIn;
-        tokensOut += saved.tokensOut;
-        for (const account of saved.servedAccounts) servedAccounts.add(account);
-        reusedBatches += 1;
+        foldedDonors.add(saved.key);
+        foldCheckpoint(saved);
         continue;
       }
       const prompt = buildBulkDedupPrompt(batch, ghostItems);
@@ -1467,6 +1997,8 @@ async function judgeBulkPairs(
       // remaining shards spend capacity. Once it returns a schema-valid result,
       // independent shards fan out under the ordinary concurrency bound.
       if (!canary) await canaryGate;
+      // A sibling can fail while this worker is parked on the canary gate.
+      stopIfSiblingFailed();
       await heartbeatBulkStage(opts.sql, {
         id: opts.stageRunId,
         ownerId: opts.executionId,
@@ -1476,16 +2008,50 @@ async function judgeBulkPairs(
       const callBatch = () =>
         callBulkModelBatchWithRetry(
           () =>
-            opts.llmCall({
-              model: opts.model,
-              system: prompt.system,
-              messages: [{ role: 'user', content: prompt.user }],
-              responseFormat: 'json',
-              maxTokens: bulkJudgeMaxTokens(batch.length),
-              ...(opts.ownerId ? { ownerId: opts.ownerId } : {}),
-            }),
+            // WI-10006427: bound each attempt and keep the lease visibly alive
+            // while it is in flight; a hung request becomes a retryable timeout.
+            runBulkJudgeCallWithDeadline(
+              (signal) =>
+                opts.llmCall({
+                  model: opts.model,
+                  system: prompt.system,
+                  messages: [{ role: 'user', content: prompt.user }],
+                  responseFormat: 'json',
+                  maxTokens: bulkJudgeMaxTokens(batch.length),
+                  ...(opts.ownerId ? { ownerId: opts.ownerId } : {}),
+                  signal,
+                }),
+              {
+                timeoutMs: opts.judgeCallTimeoutMs ?? DEFAULT_BULK_JUDGE_CALL_TIMEOUT_MS,
+                heartbeatMs: opts.judgeHeartbeatMs ?? DEFAULT_BULK_JUDGE_HEARTBEAT_MS,
+                heartbeat: async () => {
+                  stopIfSiblingFailed();
+                  await heartbeatBulkStage(opts.sql, {
+                    id: opts.stageRunId,
+                    ownerId: opts.executionId,
+                    nowMs: opts.now(),
+                    leaseMs: opts.leaseMs,
+                  });
+                },
+              },
+            ),
           (response) => parsePromoterJudgements(responsePayload(response)),
-          { backoffsMs: opts.batchRetryBackoffsMs, delay: opts.batchRetryDelay },
+          {
+            backoffsMs: opts.batchRetryBackoffsMs,
+            delay: opts.batchRetryDelay,
+            transportBackoffsMs: opts.transportRetryBackoffsMs,
+            // A transport wait can last minutes: stop if a sibling already failed
+            // the stage (WI-10004932) and keep this stage's lease visibly alive.
+            onTransportWait: async () => {
+              stopIfSiblingFailed();
+              await heartbeatBulkStage(opts.sql, {
+                id: opts.stageRunId,
+                ownerId: opts.executionId,
+                nowMs: opts.now(),
+                leaseMs: opts.leaseMs,
+              });
+            },
+          },
         );
       // The canary is the DBOS-visible model checkpoint. Remaining batches use
       // the admission_runs checkpoints below; concurrent DBOS.runStep calls
@@ -1539,8 +2105,12 @@ async function judgeBulkPairs(
         shard,
         offset,
         pairKeys,
-        canary,
+        // A re-judged batch can land on the key of the durable canary; keep the
+        // marker, or the next recovery would mistake the canary step as unrun.
+        canary: canary || opts.checkpoints[checkpointKey]?.canary === true,
         status: 'complete',
+        qualityGateKey: opts.qualityGateKey,
+        pairFingerprints: pairFingerprintsFor(batch),
         judgements: accepted,
         modelCalls: 1,
         modelRetries: attempted.retries,
@@ -1578,6 +2148,12 @@ async function judgeBulkPairs(
         });
       }
     }
+    if (donated.length > 0) {
+      // Donated judgements were gathered ahead of the judged batches; restore
+      // the shard's pair order (stable sort keeps within-pair order).
+      const order = new Map(originalPairs.map((pair, index) => [pair.pairKey, index]));
+      judgements.sort((x, y) => (order.get(x.pairKey) ?? 0) - (order.get(y.pairKey) ?? 0));
+    }
     return {
       judgements,
       modelCalls,
@@ -1591,17 +2167,12 @@ async function judgeBulkPairs(
       tokensOut,
       servedAccounts: [...servedAccounts].sort(),
       reusedBatches,
+      priorRunDonatedPairs,
     };
   };
-  const workers = Array.from({ length: Math.min(opts.shardConcurrency, shardEntries.length) }, async () => {
-    while (nextShardIndex < shardEntries.length) {
-      const index = nextShardIndex;
-      nextShardIndex += 1;
-      const [shard, shardPairs] = shardEntries[index]!;
-      results[index] = await judgeShard(shard, shardPairs);
-    }
-  });
-  await Promise.all(workers);
+  // Settles only after every shard worker has stopped, so the caller's
+  // failBulkStage cannot race a sibling's late checkpoint write.
+  const results = await runShardPool(shardEntries, opts.shardConcurrency, judgeShard);
   return {
     judgements: results.flatMap((result) => result.judgements),
     modelCalls: results.reduce((sum, result) => sum + result.modelCalls, 0),
@@ -1619,6 +2190,7 @@ async function judgeBulkPairs(
     tokensOut: results.reduce((sum, result) => sum + result.tokensOut, 0),
     servedAccounts: [...new Set(results.flatMap((result) => result.servedAccounts))].sort(),
     reusedBatches: results.reduce((sum, result) => sum + result.reusedBatches, 0),
+    priorRunDonatedPairs: results.reduce((sum, result) => sum + result.priorRunDonatedPairs, 0),
   };
 }
 
@@ -1667,6 +2239,10 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
       : DEFAULT_BULK_STAGE_LEASE_MS;
   const step: BulkDedupStepRunner = opts.step ?? (async <T>(_name: string, fn: () => Promise<T>) => fn());
   const maxStages = Math.max(1, Math.floor(opts.maxStages ?? DEFAULT_BULK_MAX_STAGES));
+  const maxPairsPerStage = Math.max(
+    1,
+    Math.min(10_000, Math.floor(opts.maxPairsPerStage ?? DEFAULT_BULK_MAX_PAIRS_PER_STAGE)),
+  );
   // Clamp to what ONE batch's output budget can actually hold. A larger request
   // does not produce a bigger answer, it produces a TRUNCATED one that fails
   // parsing identically on every retry (see BULK_JUDGE_MAX_OUTPUT_TOKENS).
@@ -1679,6 +2255,9 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
     Math.min(16, Math.floor(opts.shardConcurrency ?? DEFAULT_BULK_SHARD_CONCURRENCY)),
   );
   const batchRetryBackoffsMs = (opts.batchRetryBackoffsMs ?? DEFAULT_BULK_BATCH_RETRY_BACKOFFS_MS).filter(
+    (delayMs) => Number.isFinite(delayMs) && delayMs >= 0,
+  );
+  const transportRetryBackoffsMs = (opts.transportRetryBackoffsMs ?? DEFAULT_BULK_TRANSPORT_RETRY_BACKOFFS_MS).filter(
     (delayMs) => Number.isFinite(delayMs) && delayMs >= 0,
   );
   const batchRetryDelay =
@@ -1744,8 +2323,10 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
               llmCall: opts.llmCall,
               ownerId: opts.ownerId,
               batchRetryBackoffsMs,
+              transportRetryBackoffsMs,
               batchRetryDelay,
               now,
+              judgeCallTimeoutMs: opts.judgeCallTimeoutMs,
             }),
       );
       mergeQualityStepSeen = true;
@@ -1841,13 +2422,36 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
   const stages: BulkDedupStageResult[] = [];
 
   for (let stageIndex = 1; stageIndex <= stageLimit; stageIndex += 1) {
-    const input = await readBulkInput(sql, {
+    const fullInput = await readBulkInput(sql, {
       workspaceId: opts.workspaceId,
       harnessSlug: opts.harnessSlug,
       censusRunId: census.runId,
       expectedMembers: census.corpusSize,
       scope,
     });
+    const scopedPairsBefore = fullInput.pairs.length;
+    // D-010: reuse the promoter's live snapshot protection before spending a
+    // bounded slot. A known protected endpoint must not roll back movable work
+    // beside it. Persistence still rechecks every selected endpoint under locks.
+    const protectedEndpoints = new Map<string, { itemId: string; reason: string; detail: string }>();
+    const movablePairs = fullInput.pairs.filter((pair) => {
+      let protectedPair = false;
+      for (const item of [pair.a, pair.b]) {
+        const block = admissionEndpointBlock(item.mergeSnapshot);
+        if (!block) continue;
+        protectedPair = true;
+        protectedEndpoints.set(item.id, { itemId: item.id, reason: block.reason, detail: block.detail });
+      }
+      return !protectedPair;
+    });
+    const prescreen = {
+      availablePairs: scopedPairsBefore,
+      movablePairs: movablePairs.length,
+      protectedPairs: scopedPairsBefore - movablePairs.length,
+      protectedEndpoints: protectedEndpoints.size,
+      samples: [...protectedEndpoints.values()].slice(0, 20),
+    };
+    const input = { ...fullInput, pairs: movablePairs.slice(0, maxPairsPerStage) };
     // Pair checkpoints are valid only for the exact quality identity that
     // admitted them. Including the gate key here prevents a model/prompt/
     // threshold/dataset drift from replaying old production judgements under a
@@ -1855,6 +2459,7 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
     const stageInputFingerprint = admissionMergeQualityHash({
       corpusFingerprint: input.fingerprint,
       mergeQualityGateKey: mergeQualityPrepared.gateKey,
+      maxPairsPerStage,
     });
     const stageRunId = `${rootRunId}-stage-${stageIndex}`;
     const leaseState = await acquireBulkStageLease(sql, {
@@ -1865,6 +2470,7 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
       sourceCensusRunId: census.runId,
       pairs: input.pairs.length,
       inputFingerprint: stageInputFingerprint,
+      qualityGateKey: mergeQualityPrepared.gateKey,
       ownerId: executionId,
       nowMs: now(),
       leaseMs,
@@ -1902,6 +2508,240 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
       }
     }
 
+    /**
+     * WI-10006491: the post-commit half of a stage. It runs on autocommit
+     * statements, not inside the serializable merge transaction. A full census
+     * reads the whole open corpus and edge set, and inside that transaction it
+     * lost every commit race against the fleet's writes. `census-after` resumes
+     * from its finished chunks (D-008) when it is interrupted.
+     *
+     * The ratchet now runs after commit. A rise still fails the stage and stops
+     * the pass. It no longer rolls back merges that persistAdmissionPlan judged
+     * and guarded, and the failure records them through the receipt.
+     */
+    const finishStageAfterMerge = async (
+      receipt: BulkStageMergeReceipt,
+      mergeQuality: AdmissionMergeQualityReport,
+    ): Promise<{ result: BulkDedupRunResult } | { census: AdmissionCensusRunResult }> => {
+      try {
+        await opts.beforePostStageCensus?.(sql, stageIndex);
+        const nextCensus = await runCensus({ ...censusBase, sql, runId: `${stageRunId}-census-after` });
+        // WI-10006336: ratchet over census-0's own members, not the live corpus.
+        // nextCensus re-reads "every open item", so it also counts items filed
+        // while this stage judged (one emitter cluster added ~9.5K edges in 50
+        // minutes). That influx is not the stage's doing; it is disclosed below
+        // and becomes the next stage's census-0.
+        const pinnedCensusAfter = await readPinnedUnadjudicatedCensus(sql, opts, {
+          pinnedRunId: census.runId,
+          currentRunId: nextCensus.runId,
+        });
+        assertAdmissionCensusRatchet(census.censusAfter, pinnedCensusAfter);
+        // before/after only. There used to be an `ok: true` here, a HARDCODED
+        // literal: this record is downstream of assertAdmissionCensusRatchet,
+        // which throws on a rise, so the field could never be anything but true.
+        // Worse, a flag named `ok` beside a merge count reads as an EFFICACY
+        // verdict when the assert it echoes is only a SAFETY one (the census did
+        // not grow). `after` is census-0's members only (WI-10006336);
+        // corpusAfter/influxEdges disclose what arrived meanwhile.
+        const ratchet = {
+          before: census.censusAfter,
+          after: pinnedCensusAfter,
+          population: 'census-0-members' as const,
+          corpusAfter: nextCensus.censusAfter,
+          influxEdges: Math.max(0, nextCensus.censusAfter - pinnedCensusAfter),
+        };
+        const nextInput = await readBulkInput(sql, {
+          workspaceId: opts.workspaceId,
+          harnessSlug: opts.harnessSlug,
+          censusRunId: nextCensus.runId,
+          expectedMembers: nextCensus.corpusSize,
+          scope,
+        });
+        const convergence: 'global-zero' | 'scope-zero' | null =
+          nextInput.pairs.length === 0 ? (nextCensus.censusAfter === 0 ? 'global-zero' : 'scope-zero') : null;
+        const stage: BulkDedupStageResult = {
+          runId: stageRunId,
+          sourceCensusRunId: census.runId,
+          resultCensusRunId: nextCensus.runId,
+          scope,
+          pairs: receipt.pairs,
+          merged: receipt.merged,
+          held: receipt.held,
+          modelCalls: receipt.judged.modelCalls,
+          modelRetries: receipt.judged.modelRetries,
+          modelProtocolFailures: receipt.judged.modelProtocolFailures,
+          modelProtocolExhaustedBatches: receipt.judged.modelProtocolExhaustedBatches,
+          ignoredUnknownJudgements: receipt.judged.ignoredUnknownJudgements,
+          omittedExpectedJudgements: receipt.judged.omittedExpectedJudgements,
+          tokensIn: receipt.judged.tokensIn,
+          tokensOut: receipt.judged.tokensOut,
+          censusBefore: census.censusAfter,
+          censusAfter: nextCensus.censusAfter,
+          scopedPairsAfter: nextInput.pairs.length,
+          servedAccounts: receipt.judged.servedAccounts,
+          reusedBatches: receipt.judged.reusedBatches,
+          priorRunDonatedPairs: receipt.judged.priorRunDonatedPairs,
+          mergeQuality,
+          // A non-empty refusal set aborts the merge transaction before a receipt exists.
+          guardRefusals: [],
+        };
+        const outcome = {
+          unit: 'pairs',
+          attempted: receipt.pairs,
+          successful: receipt.successful,
+          rolledBack: 0,
+          unchanged: Math.max(0, receipt.pairs - receipt.successful),
+          uniqueRowsChanged: receipt.uniqueRowsChanged,
+          failureReason: null,
+          blockedReason: null,
+        } satisfies AdmissionRunOutcome;
+        const finishedAt = now();
+        const completedEnvelope: BulkStageEnvelope = {
+          schemaVersion: BULK_STAGE_SCHEMA_VERSION,
+          status: 'complete',
+          convergence,
+          resultCensusRunId: nextCensus.runId,
+          stageResult: stage,
+          initialCensus,
+          runResult: convergence
+            ? {
+                runId: rootRunId,
+                scope,
+                converged: true,
+                convergenceReason: convergence,
+                initialCensus,
+                finalCensus: nextCensus.censusAfter,
+                finalScopedPairs: 0,
+                stages: [...stages, stage],
+              }
+            : undefined,
+          lease: {
+            ...(stageEnvelope.lease ?? { acquiredAt: finishedAt }),
+            ownerId: executionId,
+            heartbeatAt: finishedAt,
+            expiresAt: finishedAt + leaseMs,
+            takeoverCount: stageEnvelope.lease?.takeoverCount ?? 0,
+          },
+          outcome,
+          guardRefusals: [],
+        };
+        // Two ledger writes, one short READ COMMITTED transaction: the
+        // conditional UPDATE is the ownership fence for the envelope merge.
+        await sql.begin(async (rawTx) => {
+          const tx = rawTx as unknown as OrgSql;
+          const completedRows = await tx`
+            UPDATE harness_shared.admission_runs
+               SET finished_at = now(), promoted = 0, merged = ${receipt.merged}, held = ${receipt.held},
+                   census_before = ${census.censusAfter}, census_after = ${nextCensus.censusAfter},
+                   model_id = ${model}, tokens_in = ${receipt.judged.tokensIn}, tokens_out = ${receipt.judged.tokensOut},
+                   latency_ms = ${Math.max(0, finishedAt - receipt.startedAt)},
+                   detail = detail || ${JSON.stringify({
+                     status: 'complete',
+                     resultCensusRunId: nextCensus.runId,
+                     scopedPairsBefore: receipt.scopedPairsBefore,
+                     workBudget: receipt.workBudget,
+                     scopedPairsAfter: nextInput.pairs.length,
+                     convergence,
+                     modelCalls: receipt.judged.modelCalls,
+                     modelRetries: receipt.judged.modelRetries,
+                     modelProtocol: {
+                       failures: receipt.judged.modelProtocolFailures,
+                       exhaustedBatches: receipt.judged.modelProtocolExhaustedBatches,
+                       lastError: receipt.judged.modelProtocolLastError,
+                       ignoredUnknownJudgements: receipt.judged.ignoredUnknownJudgements,
+                       omittedExpectedJudgements: receipt.judged.omittedExpectedJudgements,
+                     },
+                     servedAccounts: receipt.judged.servedAccounts,
+                     reusedBatches: receipt.judged.reusedBatches,
+                     priorRunDonatedPairs: receipt.judged.priorRunDonatedPairs,
+                     verdicts: receipt.verdicts,
+                     ratchet,
+                     outcome,
+                     guardRefusals: [],
+                   })}::text::jsonb
+             WHERE id = ${stageRunId}
+               AND detail->'lease'->>'ownerId' = ${executionId}
+             RETURNING id`;
+          if (!completedRows?.length) throw new BulkRunActiveError('unknown-owner', now());
+          // Merge only terminal fields. Spreading the pre-judge envelope here
+          // would overwrite `checkpoints.batches` with its stale snapshot and
+          // erase every checkpoint written during this stage.
+          await writeBulkStageEnvelope(tx, stageRunId, completedEnvelope, executionId);
+        });
+        stages.push(stage);
+        if (convergence) {
+          return {
+            result: {
+              runId: rootRunId,
+              scope,
+              converged: true,
+              convergenceReason: convergence,
+              initialCensus,
+              finalCensus: nextCensus.censusAfter,
+              finalScopedPairs: 0,
+              stages,
+            },
+          };
+        }
+        // WI-10006336: judge progress on census-0's population. Pairs that touch
+        // an item filed during the stage are influx, not a stage that stalled.
+        const census0ScopedPairsAfter = nextInput.pairs.filter(
+          (pair) => fullInput.memberIds.has(pair.a.id) && fullInput.memberIds.has(pair.b.id),
+        ).length;
+        if (census0ScopedPairsAfter >= receipt.scopedPairsBefore) {
+          throw new Error(
+            `bulk dedup made no scoped progress: ${receipt.scopedPairsBefore} -> ${census0ScopedPairsAfter} pair(s) among census-0 members`,
+          );
+        }
+        return { census: nextCensus };
+      } catch (error) {
+        await failBulkStage(sql, stageRunId, error, receipt.pairs, executionId, receipt);
+        throw error;
+      }
+    };
+
+    // WI-10006491: an earlier attempt of THIS stage already committed its merges.
+    // Finish the post-commit half from its receipt; the pairs re-read above are
+    // the post-merge residue and must not be judged or merged under this row.
+    const committedReceipt = committedMergeReceipt(stageEnvelope, census.runId);
+    if (committedReceipt) {
+      let resumedQuality: AdmissionMergeQualityReport;
+      try {
+        resumedQuality = await ensureMergeQuality(stageRunId, stageEnvelope);
+        // Keep the DBOS step order of the attempt that judged this stage, as the
+        // completed-stage resume above does. The no-op returns the recorded output on replay.
+        await step(`bulk:${stageRunId}:canary`, async () => undefined);
+      } catch (error) {
+        await failBulkStage(sql, stageRunId, error, committedReceipt.pairs, executionId, committedReceipt);
+        throw error;
+      }
+      const finished = await finishStageAfterMerge(committedReceipt, resumedQuality);
+      if ('result' in finished) return finished.result;
+      census = finished.census;
+      continue;
+    }
+
+    const workBudget = {
+      pairLimit: maxPairsPerStage,
+      availablePairs: scopedPairsBefore,
+      selectedPairs: input.pairs.length,
+      deferredPairs: scopedPairsBefore - input.pairs.length,
+    };
+    if (
+      JSON.stringify(stageEnvelope.workBudget) !== JSON.stringify(workBudget) ||
+      JSON.stringify(stageEnvelope.prescreen) !== JSON.stringify(prescreen)
+    ) {
+      stageEnvelope = { ...stageEnvelope, workBudget, prescreen };
+      await writeBulkStageEnvelope(sql, stageRunId, stageEnvelope, executionId);
+    }
+    if (input.pairs.length === 0 && scopedPairsBefore > 0) {
+      const message = `bulk admission prescreen blocked: ${prescreen.protectedPairs} protected pair(s), no movable pairs`;
+      const error = new BulkAdmissionBlockedError(message, {
+        kind: 'guard', class: 'prescreen_all_pairs_protected', retryable: true, message,
+      });
+      await failBulkStage(sql, stageRunId, error, 0, executionId);
+      throw error;
+    }
     const preflightResult =
       stageEnvelope.preflight ??
       (await preflight({
@@ -2010,8 +2850,16 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
     }
 
     const startedAt = now();
+    let mergeQuality: AdmissionMergeQualityReport;
+    let receipt: BulkStageMergeReceipt;
     try {
-      const mergeQuality = await ensureMergeQuality(stageRunId, stageEnvelope);
+      mergeQuality = await ensureMergeQuality(stageRunId, stageEnvelope);
+      const priorRunCheckpoints = await readPriorStageDonorCheckpoints(sql, {
+        workspaceId: opts.workspaceId,
+        harnessSlug: opts.harnessSlug,
+        stageRunId,
+        qualityGateKey: mergeQualityPrepared.gateKey,
+      });
       const judged = await judgeBulkPairs(input, {
         llmCall: opts.llmCall,
         model,
@@ -2020,6 +2868,7 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
         ownerId: opts.ownerId,
         executionId,
         batchRetryBackoffsMs,
+        transportRetryBackoffsMs,
         batchRetryDelay,
         stageRunId,
         sql,
@@ -2027,6 +2876,11 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
         now,
         step,
         checkpoints: savedCheckpoints,
+        priorRunCheckpoints,
+        judgeCallTimeoutMs: opts.judgeCallTimeoutMs,
+        judgeHeartbeatMs: opts.judgeHeartbeatMs,
+        qualityGateKey: mergeQualityPrepared.gateKey,
+        inputFingerprintMatched: leaseState.reused,
       });
       const itemIds = new Set(input.pairs.flatMap((pair) => [pair.a.id, pair.b.id]));
       const stageItems = [...itemIds].map((id) => input.items.get(id)!).filter(Boolean);
@@ -2037,207 +2891,136 @@ export async function runWorkItemAdmissionBulkDedup(opts: BulkDedupRunOptions): 
       const reviewedReadyIds = plan.dispositions.flatMap((disposition) =>
         disposition.action === 'merge' ? [disposition.itemId, disposition.canonicalId] : [],
       );
-      let committed:
-        | { census: AdmissionCensusRunResult; scopedPairsAfter: number; stage: BulkDedupStageResult }
-        | undefined;
-
-      await withWorkItemDependencyAdmissionTransaction(sql, async (rawTx) => {
-        const tx = rawTx as unknown as OrgSql;
-        const persistence = await persistAdmissionPlan(tx, {
-          workspaceId: opts.workspaceId,
-          harnessSlug: opts.harnessSlug,
-          runId: stageRunId,
-          modelId: model,
-          nowMs: now(),
-          pending: stageItems,
-          plan,
-          snapshots: stageItems.flatMap((item) => (item.mergeSnapshot ? [item.mergeSnapshot] : [])),
-          withinTransaction: true,
-          promoteUnmerged: false,
-          mergeAnyAdmission: true,
-          requireImplementationReadiness: true,
-          reviewedReadyIds,
-          actor: BULK_DEDUP_ACTOR,
-        });
-        // A guarded refusal is an intentional no-mutation outcome for the
-        // complete stage. Throwing inside this transaction rolls back any
-        // sibling writes too; failBulkStage records the exact refusal set.
-        if (persistence.guardRefusals.length > 0) {
-          throw new BulkAdmissionMergeGuardBlockedError(persistence);
-        }
-        const merged = persistence.mergedIds.length;
-        const held = persistence.held.length;
-        await opts.beforePostStageCensus?.(tx, stageIndex);
-        const nextCensus = await runCensus({
-          ...censusBase,
-          sql: tx,
-          withinTransaction: true,
-          runId: `${stageRunId}-census-after`,
-        });
-        assertAdmissionCensusRatchet(census.censusAfter, nextCensus.censusAfter);
-        const nextInput = await readBulkInput(tx, {
-          workspaceId: opts.workspaceId,
-          harnessSlug: opts.harnessSlug,
-          censusRunId: nextCensus.runId,
-          expectedMembers: nextCensus.corpusSize,
-          scope,
-        });
-        const stage: BulkDedupStageResult = {
-          runId: stageRunId,
-          sourceCensusRunId: census.runId,
-          resultCensusRunId: nextCensus.runId,
-          scope,
-          pairs: input.pairs.length,
-          merged,
-          held,
-          modelCalls: judged.modelCalls,
-          modelRetries: judged.modelRetries,
-          modelProtocolFailures: judged.modelProtocolFailures,
-          modelProtocolExhaustedBatches: judged.modelProtocolExhaustedBatches,
-          ignoredUnknownJudgements: judged.ignoredUnknownJudgements,
-          omittedExpectedJudgements: judged.omittedExpectedJudgements,
-          tokensIn: judged.tokensIn,
-          tokensOut: judged.tokensOut,
-          censusBefore: census.censusAfter,
-          censusAfter: nextCensus.censusAfter,
-          scopedPairsAfter: nextInput.pairs.length,
-          servedAccounts: judged.servedAccounts,
-          reusedBatches: judged.reusedBatches,
-          mergeQuality,
-          guardRefusals: persistence.guardRefusals,
-        };
-        const verdicts = persistence.adjudications.reduce<Record<string, number>>((acc, row) => {
-          acc[row.verdict] = (acc[row.verdict] ?? 0) + 1;
-          return acc;
-        }, {});
-        const completedRows = await tx`
-          UPDATE harness_shared.admission_runs
-             SET finished_at = now(), promoted = 0, merged = ${merged}, held = ${held},
-                 census_before = ${census.censusAfter}, census_after = ${nextCensus.censusAfter},
-                 model_id = ${model}, tokens_in = ${judged.tokensIn}, tokens_out = ${judged.tokensOut},
-                 latency_ms = ${Math.max(0, now() - startedAt)},
-                 detail = detail || ${JSON.stringify({
-                   status: 'complete',
-                   resultCensusRunId: nextCensus.runId,
-                   scopedPairsBefore: input.pairs.length,
-                   scopedPairsAfter: nextInput.pairs.length,
-                   convergence:
-                     nextInput.pairs.length === 0
-                       ? nextCensus.censusAfter === 0
-                         ? 'global-zero'
-                         : 'scope-zero'
-                       : null,
-                   modelCalls: judged.modelCalls,
-                   modelRetries: judged.modelRetries,
-                   modelProtocol: {
-                     failures: judged.modelProtocolFailures,
-                     exhaustedBatches: judged.modelProtocolExhaustedBatches,
-                     lastError: judged.modelProtocolLastError,
-                     ignoredUnknownJudgements: judged.ignoredUnknownJudgements,
-                     omittedExpectedJudgements: judged.omittedExpectedJudgements,
-                   },
-                   servedAccounts: judged.servedAccounts,
-                   reusedBatches: judged.reusedBatches,
-                   preflight: preflightResult,
-                   verdicts,
-                   // before/after only. There used to be an `ok: true` here, a
-                   // HARDCODED literal: this write is downstream of
-                   // assertAdmissionCensusRatchet, which throws on a rise, so the
-                   // field could never be anything but true and recorded nothing.
-                   // Worse, a flag named `ok` beside a merge count reads as an
-                   // EFFICACY verdict when the assert it echoes is only a SAFETY
-                   // one (the census did not grow). Any reader wanting the verdict
-                   // derives it from the two fields that are actually measured.
-                   ratchet: { before: census.censusAfter, after: nextCensus.censusAfter },
-                   outcome: {
-                     unit: 'pairs',
-                     attempted: input.pairs.length,
-                     successful: persistence.adjudications.length,
-                     rolledBack: 0,
-                     unchanged: Math.max(0, input.pairs.length - persistence.adjudications.length),
-                     uniqueRowsChanged: persistence.uniqueRowsChanged,
-                     failureReason: null,
-                     blockedReason: null,
-                   } satisfies AdmissionRunOutcome,
-                   guardRefusals: persistence.guardRefusals,
-                 })}::text::jsonb
-           WHERE id = ${stageRunId}
-             AND detail->'lease'->>'ownerId' = ${executionId}
-           RETURNING id`;
-        if (!completedRows?.length) throw new BulkRunActiveError('unknown-owner', now());
-        const completedEnvelope: BulkStageEnvelope = {
-          schemaVersion: BULK_STAGE_SCHEMA_VERSION,
-          status: 'complete',
-          convergence:
-            nextInput.pairs.length === 0 ? (nextCensus.censusAfter === 0 ? 'global-zero' : 'scope-zero') : null,
-          resultCensusRunId: nextCensus.runId,
-          stageResult: stage,
-          initialCensus,
-          runResult:
-            nextInput.pairs.length === 0
-              ? {
-                  runId: rootRunId,
-                  scope,
-                  converged: true,
-                  convergenceReason: nextCensus.censusAfter === 0 ? 'global-zero' : 'scope-zero',
-                  initialCensus,
-                  finalCensus: nextCensus.censusAfter,
-                  finalScopedPairs: 0,
-                  stages: [...stages, stage],
-                }
-              : undefined,
-          lease: {
-            ...(stageEnvelope.lease ?? { acquiredAt: now() }),
-            ownerId: executionId,
-            heartbeatAt: now(),
-            expiresAt: now() + leaseMs,
-            takeoverCount: stageEnvelope.lease?.takeoverCount ?? 0,
-          },
-          outcome: {
-            unit: 'pairs',
-            attempted: input.pairs.length,
+      // WI-10006491: ONLY the merge writes and their receipt are serializable.
+      // persistAdmissionPlan reads the workspace dependency graph, which is the
+      // invariant this boundary protects. The post-stage census, ratchet and
+      // next-input read run after commit, in finishStageAfterMerge.
+      const commitStartedMs = now();
+      let commitAttempts = 0;
+      let retryHeartbeat: Promise<void> | null = null;
+      receipt = await withWorkItemDependencyAdmissionTransaction(
+        sql,
+        async (rawTx) => {
+          commitAttempts += 1;
+          if (retryHeartbeat) {
+            // Started by onRetry during the backoff, when no attempt held a
+            // connection. A lost lease is not retryable and stops the commit.
+            const pending = retryHeartbeat;
+            retryHeartbeat = null;
+            await pending;
+          }
+          const elapsedMs = now() - commitStartedMs;
+          if (commitAttempts > 1 && elapsedMs >= BULK_STAGE_MERGE_COMMIT_BUDGET_MS) {
+            throw new Error(
+              `bulk stage ${stageRunId} merge commit still serialization-conflicted after ` +
+                `${commitAttempts - 1} retries over ${elapsedMs}ms (budget ${BULK_STAGE_MERGE_COMMIT_BUDGET_MS}ms)`,
+            );
+          }
+          const tx = rawTx as unknown as OrgSql;
+          const persistence = await persistAdmissionPlan(tx, {
+            workspaceId: opts.workspaceId,
+            harnessSlug: opts.harnessSlug,
+            runId: stageRunId,
+            modelId: model,
+            nowMs: now(),
+            pending: stageItems,
+            plan,
+            snapshots: stageItems.flatMap((item) => (item.mergeSnapshot ? [item.mergeSnapshot] : [])),
+            withinTransaction: true,
+            promoteUnmerged: false,
+            mergeAnyAdmission: true,
+            requireImplementationReadiness: true,
+            reviewedReadyIds,
+            actor: BULK_DEDUP_ACTOR,
+          });
+          // A guarded refusal is an intentional no-mutation outcome for the
+          // complete stage. Throwing inside this transaction rolls back any
+          // sibling writes too; failBulkStage records the exact refusal set.
+          if (persistence.guardRefusals.length > 0) {
+            throw new BulkAdmissionMergeGuardBlockedError(persistence);
+          }
+          const committedAt = now();
+          const mergeReceipt: BulkStageMergeReceipt = {
+            schemaVersion: BULK_STAGE_MERGE_RECEIPT_SCHEMA,
+            sourceCensusRunId: census.runId,
+            startedAt,
+            committedAt,
+            commitAttempts,
+            pairs: input.pairs.length,
+            scopedPairsBefore,
+            workBudget,
+            merged: persistence.mergedIds.length,
+            held: persistence.held.length,
             successful: persistence.adjudications.length,
-            rolledBack: 0,
-            unchanged: Math.max(0, input.pairs.length - persistence.adjudications.length),
             uniqueRowsChanged: persistence.uniqueRowsChanged,
-            failureReason: null,
-            blockedReason: null,
-          } satisfies AdmissionRunOutcome,
-          guardRefusals: persistence.guardRefusals,
-        };
-        // Merge only terminal fields. Spreading the pre-judge envelope here
-        // would overwrite `checkpoints.batches` with its stale snapshot and
-        // erase every checkpoint written during this stage.
-        await writeBulkStageEnvelope(tx, stageRunId, completedEnvelope, executionId);
-        committed = { census: nextCensus, scopedPairsAfter: nextInput.pairs.length, stage };
-      });
-
-      if (!committed) throw new Error(`bulk stage ${stageRunId} committed without a result`);
-      stages.push(committed.stage);
-      if (committed.scopedPairsAfter === 0) {
-        const convergenceReason = committed.census.censusAfter === 0 ? 'global-zero' : 'scope-zero';
-        return {
-          runId: rootRunId,
-          scope,
-          converged: true,
-          convergenceReason,
-          initialCensus,
-          finalCensus: committed.census.censusAfter,
-          finalScopedPairs: 0,
-          stages,
-        };
-      }
-      if (committed.scopedPairsAfter >= input.pairs.length) {
-        throw new Error(
-          `bulk dedup made no scoped progress: ${input.pairs.length} -> ${committed.scopedPairsAfter} pair(s)`,
-        );
-      }
-      census = committed.census;
+            verdicts: persistence.adjudications.reduce<Record<string, number>>((acc, row) => {
+              acc[row.verdict] = (acc[row.verdict] ?? 0) + 1;
+              return acc;
+            }, {}),
+            judged: {
+              modelCalls: judged.modelCalls,
+              modelRetries: judged.modelRetries,
+              modelProtocolFailures: judged.modelProtocolFailures,
+              modelProtocolExhaustedBatches: judged.modelProtocolExhaustedBatches,
+              modelProtocolLastError: judged.modelProtocolLastError,
+              ignoredUnknownJudgements: judged.ignoredUnknownJudgements,
+              omittedExpectedJudgements: judged.omittedExpectedJudgements,
+              tokensIn: judged.tokensIn,
+              tokensOut: judged.tokensOut,
+              servedAccounts: judged.servedAccounts,
+              reusedBatches: judged.reusedBatches,
+              priorRunDonatedPairs: judged.priorRunDonatedPairs,
+            },
+          };
+          // Same transaction as the merges: a committed merge ALWAYS has its
+          // receipt, so a retry can never re-judge or re-merge this stage.
+          await writeBulkStageEnvelope(
+            tx,
+            stageRunId,
+            {
+              schemaVersion: BULK_STAGE_SCHEMA_VERSION,
+              mergeReceipt,
+              lease: {
+                ...(stageEnvelope.lease ?? { acquiredAt: committedAt }),
+                ownerId: executionId,
+                heartbeatAt: committedAt,
+                expiresAt: committedAt + leaseMs,
+                takeoverCount: stageEnvelope.lease?.takeoverCount ?? 0,
+              },
+            },
+            executionId,
+          );
+          return mergeReceipt;
+        },
+        {
+          onRetry: () => {
+            const pending = heartbeatBulkStage(sql, { id: stageRunId, ownerId: executionId, nowMs: now(), leaseMs });
+            // The next attempt awaits it; this only prevents an unhandled rejection meanwhile.
+            pending.catch(() => undefined);
+            retryHeartbeat = pending;
+          },
+        },
+      );
     } catch (error) {
       await failBulkStage(sql, stageRunId, error, input.pairs.length, executionId);
       throw error;
     }
+    const finished = await finishStageAfterMerge(receipt, mergeQuality);
+    if ('result' in finished) return finished.result;
+    census = finished.census;
   }
 
-  throw new Error(`bulk dedup did not converge within ${stageLimit} stage(s)`);
+  // A bounded pass can succeed without exhausting the corpus. Its committed
+  // stage and fresh census are useful to the digest; the next fire continues
+  // the residuals rather than treating ordinary budget exhaustion as a defect.
+  return {
+    runId: rootRunId,
+    scope,
+    converged: false,
+    convergenceReason: 'stage-budget',
+    initialCensus,
+    finalCensus: census.censusAfter,
+    finalScopedPairs: stages.at(-1)?.scopedPairsAfter ?? 0,
+    stages,
+  };
 }

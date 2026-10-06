@@ -54,6 +54,21 @@ export interface GateVerdictTarget {
   installSlug: string;
 }
 
+/** Resolve the operator-home gate identity in the current request/runtime scope. */
+export function resolveHomeGateVerdictTarget(): GateVerdictTarget | null {
+  try {
+    const { activeWorkspaceId } = require('../workspace-registry') as typeof import('../workspace-registry');
+    const { operatorHomeHarnessSlug } =
+      require('../harness/operator-home-harness') as typeof import('../harness/operator-home-harness');
+    const workspaceId = activeWorkspaceId();
+    const installSlug = operatorHomeHarnessSlug();
+    if (!workspaceId || !installSlug) return null;
+    return { workspaceId, installSlug };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Resolve the record target from the environment, or null when this run was not launched with one
  * (⇒ the CLI must NOT record; its caller will, exactly as before WI-4494).

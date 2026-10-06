@@ -87,7 +87,12 @@ interface RunResult {
   stderr: string;
 }
 
-const execFileAsync = promisify(execFile);
+// Lazy + memoized, NOT promisified at module scope (EI-10161): under a narrow
+// `vi.mock('node:child_process')` `execFile` is undefined, and an eager `promisify` throws at
+// IMPORT time — crashing every test file that reaches this module, even one that never calls it.
+let execFileAsyncMemo: typeof execFile.__promisify__ | null = null;
+const execFileAsync = ((...args: unknown[]) =>
+  Reflect.apply((execFileAsyncMemo ??= promisify(execFile)), undefined, args)) as typeof execFile.__promisify__;
 
 /** argv spawn, never a shell string. ASYNC by contract — see the ⛔ note in the module
  *  header; a sync variant here wedges bg-host's shared event loop. `null` = the spawn

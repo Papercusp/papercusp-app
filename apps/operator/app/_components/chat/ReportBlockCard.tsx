@@ -8,11 +8,16 @@
 import { useMemo, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { ReportBlock } from '@papercusp/chat-protocol';
+import { parseAsString, useQueryState } from 'nuqs';
+import { fetchSyncQuery } from '@papercusp/sync';
+import { parseGoalOwnerReportSnapshot, type GoalOwnerReportRefV1, type ReportBlock } from '@papercusp/chat-protocol';
 import {
   ReportBlockCard as SharedReportBlockCard,
   type ReportBlockRenderContext,
+  type ReportBlockCardProps as SharedReportBlockCardProps,
+  type ResolvedGoalOwnerReport,
 } from '@papercusp/chat-cards';
+import { Button } from '../../harness/Button';
 import { HydratedWorkRefPill } from './HydratedWorkRefPill';
 import { canOpenWorkRef } from './chat-ref-popup-params';
 import { remarkWorkRefs } from './remark-work-refs';
@@ -42,6 +47,40 @@ interface ReportBlockCardProps {
   harnessSlug?: string;
   planSlug?: string | null;
   onWorkRefActivate?: (ref: ReportWorkRef) => void;
+}
+
+interface GoalReportQueryRow {
+  report_id: string;
+  workspace_id: string;
+  body_md: string;
+  body_sha256: string;
+  goal_owner_report: unknown;
+  subject: { kind: string; ref: string | null };
+}
+
+async function resolveGoalReport(reference: GoalOwnerReportRefV1): Promise<ResolvedGoalOwnerReport> {
+  const rows = await fetchSyncQuery<GoalReportQueryRow>({
+    queryName: 'reports.get', args: { reportId: reference.reportId }, staleTime: Infinity,
+  });
+  const row = rows.find((candidate) => candidate.report_id === reference.reportId);
+  const snapshot = parseGoalOwnerReportSnapshot(row?.goal_owner_report);
+  if (!row || !snapshot || row.subject.kind !== 'goal' || row.subject.ref !== reference.goalId) {
+    throw new Error('The pinned report is unavailable or does not belong to this goal.');
+  }
+  return { reportId: row.report_id, workspaceId: row.workspace_id, goalId: row.subject.ref,
+    bodyMd: row.body_md, bodySha256: row.body_sha256, snapshot };
+}
+
+/** Inline reports retain their original host requirements; only pins use URL state. */
+function PinnedReportBlockCard(props: SharedReportBlockCardProps): ReactNode {
+  const [expandedReportId, setExpandedReportId] = useQueryState('goalReport', parseAsString);
+  const reportId = props.report.goalReport!.reportId;
+  return <SharedReportBlockCard {...props} resolveGoalReport={resolveGoalReport}
+    expanded={expandedReportId === reportId}
+    onExpandedChange={(open) => { void setExpandedReportId(open ? reportId : expandedReportId === reportId ? null : expandedReportId); }}
+    renderGoalReportControl={({ label, expanded, onClick }) => (
+      <Button variant="neutral" aria-expanded={expanded} onClick={onClick}>{label}</Button>
+    )} />;
 }
 
 function RichItemText({
@@ -98,8 +137,9 @@ export function ReportBlockCard({
   planSlug,
   onWorkRefActivate,
 }: ReportBlockCardProps): ReactNode {
+  const Card = report.goalReport ? PinnedReportBlockCard : SharedReportBlockCard;
   return (
-    <SharedReportBlockCard
+    <Card
       report={report}
       onDrillIn={onDrillIn}
       canDrillIn={canDrillIn}

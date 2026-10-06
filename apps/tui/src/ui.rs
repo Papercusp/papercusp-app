@@ -12,7 +12,7 @@ use crate::models::{
 use crate::semantic_tool_cards::SemanticTone;
 use crate::theme::Theme;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Position, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
@@ -71,6 +71,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     // No control character may reach the terminal (P-011): it desyncs the
     // terminal from ratatui's model and leaves stale characters behind.
     crate::glyph::scrub_control_cells(f.buffer_mut());
+    // pui-chat-first-ux P-018: a mouse drag in progress. Reverse the selected
+    // cells, and keep the frame, because releasing the button copies the text
+    // that was on screen, which only the drawn frame holds.
+    if let Some(sel) = app.mouse_selection {
+        if !sel.is_click() {
+            crate::chat_copy::paint_selection(f.buffer_mut(), &sel);
+        }
+        *app.mouse_selection_frame.borrow_mut() = Some(f.buffer_mut().clone());
+    }
 }
 
 /// The stable blocking view below the supported size: one instruction instead
@@ -230,19 +239,11 @@ fn draw_overlays(f: &mut Frame, app: &App) {
 
     // A transient toast for the latest notification sits above the body but
     // below the modal overlays (it shouldn't fight the help/palette/tutorial).
-    if let Some(t) = &app.toast {
-        if app.notify_enabled
-            && !app.show_tutorial
-            && !app.show_help
-            && !app.palette_open
-            && !app.show_notifs
-            && !app.pot_picker_open
-            && app.fleet_action_menu.is_none()
-            && app.wake_review.is_none()
-            && app.fleet_launcher.is_none()
-            && app.inbox_answer.is_none()
-            && app.lifecycle.is_none()
-        {
+    // The mute covers notifications only: an acknowledgement of the owner's
+    // own key or drag (`toast_is_ack`) is always shown.
+    if let Some(t) = visible_toast(app) {
+        // P-027 (G-10): the quiet chat shows it inside the message box.
+        if !toast_in_message_box(app) {
             draw_toast(f, t);
         }
     }
@@ -1048,21 +1049,70 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
                     app.unseen_notifs
                 };
                 if badge > 0 {
-                    Line::from(format!(" {}:{} ({}) ", k, label, badge))
+                    Line::from(format!("{}:{} ({})", k, label, badge))
                 } else {
-                    Line::from(format!(" {}:{} ", k, label))
+                    Line::from(format!("{}:{}", k, label))
                 }
             } else {
-                Line::from(format!(" {}:{} ", k, label))
+                Line::from(format!("{}:{}", k, label))
             }
         })
         .collect();
     // Selection index is the position within the VISIBLE list (which differs
     // from Tab::index() when a subset is active).
     let sel = visible.iter().position(|t| *t == app.tab).unwrap_or(0);
-    let tabs = Tabs::new(titles)
+    // Keep a contiguous window around the selected tab. Passing every title to
+    // Ratatui lets it clip a label at the terminal edge (e.g. `7:T` at 110
+    // columns), which looks like another tab exists with a broken name.
+    let divider = " │ ";
+    let divider_width = Line::from(divider).width();
+    // Ratatui adds one cell of padding on each side of every tab title.
+    let marker_width = Line::from("‹").width() + 2;
+    let title_widths: Vec<usize> = titles.iter().map(|line| line.width() + 2).collect();
+    let window_width = |start: usize, end: usize| {
+        let markers = usize::from(start > 0) + usize::from(end < titles.len());
+        let title_width = title_widths[start..end].iter().sum::<usize>();
+        let item_count = end - start + markers;
+        title_width + markers * marker_width + item_count.saturating_sub(1) * divider_width
+    };
+
+    let mut start = sel;
+    let mut end = sel + 1;
+    loop {
+        let current_width = window_width(start, end);
+        let left_width = (start > 0).then(|| window_width(start - 1, end));
+        let right_width = (end < titles.len()).then(|| window_width(start, end + 1));
+        let left_fits = left_width.is_some_and(|width| width <= area.width as usize);
+        let right_fits = right_width.is_some_and(|width| width <= area.width as usize);
+        match (left_fits, right_fits) {
+            (false, false) => break,
+            (true, false) => start -= 1,
+            (false, true) => end += 1,
+            (true, true) => {
+                let left_added = left_width.unwrap().saturating_sub(current_width);
+                let right_added = right_width.unwrap().saturating_sub(current_width);
+                if left_added <= right_added {
+                    start -= 1;
+                } else {
+                    end += 1;
+                }
+            }
+        }
+    }
+
+    let mut window = Vec::with_capacity(end - start + 2);
+    if start > 0 {
+        window.push(Line::from(Span::styled("‹", Theme::dim())));
+    }
+    window.extend(titles[start..end].iter().cloned());
+    if end < titles.len() {
+        window.push(Line::from(Span::styled("›", Theme::dim())));
+    }
+    let selected_index = sel - start + usize::from(start > 0);
+    let tabs = Tabs::new(window)
         .style(Theme::tab_bar())
-        .select(sel)
+        .divider(divider)
+        .select(selected_index)
         .highlight_style(Theme::selected());
     f.render_widget(tabs, area);
 }
@@ -1324,7 +1374,10 @@ fn goal_detail_lines(g: &crate::models::GoalSummary) -> Vec<Line<'static>> {
             Span::styled("   needs you: ", Theme::dim()),
             Span::raw(g.needs_human.to_string()),
             Span::styled("   spend: ", Theme::dim()),
-            Span::raw(format!("${:.2}", g.spend_usd)),
+            Span::raw(match g.spend_usd {
+                Some(usd) => format!("${:.2}", usd),
+                None => "unmeasured".to_string(),
+            }),
         ]),
     ];
     let sampled = g.pots.len();
@@ -2797,6 +2850,14 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // jargon. Session ids, lifecycle, reconciliation, pot/role and raw errors
     // show only in the Ctrl-O details view (on by default in the workbench).
     let details = app.chat_details_visible();
+    // pui-chat-first-ux P-017: the chat-first conversation is printed inline,
+    // the way Claude Code and Codex print theirs: no box around the transcript
+    // and only a rule above and below the composer. A side border there cost
+    // two columns and was copied into every selected reply as `│`. The docked
+    // pane and the workbench keep their boxes, because there the border is what
+    // separates the chat from the pane beside it.
+    let inline = chat_is_inline(app);
+    let side_borders: u16 = if inline { 0 } else { 2 };
     // Background reads may clear the global status error. Keep the actual
     // refusal with the unsent turn so the owner can act on it before retrying.
     // Without details it is ONE plain sentence: cause and next step.
@@ -2820,7 +2881,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         } else {
             None
         };
-        let wrap_width = area.width.saturating_sub(2).max(1) as usize;
+        let wrap_width = area.width.saturating_sub(side_borders).max(1) as usize;
         sentence
             .into_iter()
             .chain(raw)
@@ -2836,14 +2897,24 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let card_h = card_block_height(app, area);
     // Keep each selected setting together when the Presence rail or a narrow
     // terminal leaves too little room for the complete configuration row.
-    let width = area.width.saturating_sub(2).max(1) as usize;
+    let width = area.width.saturating_sub(side_borders).max(1) as usize;
+    // pui-chat-first-ux P-021: the full-screen chat's composer is quiet, the
+    // way Claude Code's is: no shortcut list in its border and no status row
+    // inside it. Model · directory · cost move to one dim footer line under
+    // the box, beside `? for shortcuts`. The details view keeps the old box.
+    let quiet = inline && !details;
     let mut selection_rows: Vec<String> = Vec::new();
     let selection = if details {
         app.agent_chat_selection_label()
     } else {
         app.chat_status_line()
     };
-    for field in selection.split(" · ") {
+    let footer_status = if quiet {
+        selection.clone()
+    } else {
+        String::new()
+    };
+    for field in selection.split(" · ").filter(|_| !quiet) {
         if let Some(last) = selection_rows.last_mut() {
             if Line::from(last.as_str()).width() + 3 + Line::from(field).width() <= width {
                 last.push_str(" · ");
@@ -2881,6 +2952,41 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
+    // P-021: `?` on an empty box lists the shortcuts in the same place the `/`
+    // menu opens, so the box grows and the cursor moves the same way.
+    if quiet
+        && app.chat_composing
+        && app.chat_shortcuts_open
+        && app.chat_input.is_empty()
+        && app.pending_approvals.is_empty()
+    {
+        let room = area
+            .height
+            .saturating_sub(card_h + turn_error.len() as u16 + 6)
+            .max(1) as usize;
+        selection_rows.extend(chat_shortcut_rows(width).into_iter().take(room));
+    }
+    // P-027 (G-10): a toast in the quiet chat is up to three wrapped rows in
+    // the same place, so the box grows around it instead of being covered.
+    if quiet && toast_in_message_box(app) {
+        if let Some(toast) = visible_toast(app) {
+            let room = area
+                .height
+                .saturating_sub(card_h + turn_error.len() as u16 + 6)
+                .max(1) as usize;
+            let mut rows = wrap_text(&toast.message, width.saturating_sub(4).max(1));
+            if rows.len() > 3 {
+                rows.truncate(3);
+                if let Some(last) = rows.last_mut() {
+                    last.push('…');
+                }
+            }
+            for (i, row) in rows.into_iter().take(room).enumerate() {
+                let lead = if i == 0 { "  • " } else { "    " };
+                selection_rows.push(trunc(&format!("{lead}{row}"), width));
+            }
+        }
+    }
     // Attachments occupy one row each ABOVE the draft, so the composer has to
     // grow by exactly that many or the draft line is pushed out of its own box.
     // The draft is a real multiline editor now. Reserve one row per logical
@@ -2891,7 +2997,8 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         + ctext_line_count(app)
         + selection_rows.len() as u16
         + app.attachments.len() as u16
-        + turn_error.len() as u16;
+        + turn_error.len() as u16
+        + u16::from(quiet); // P-021 footer line under the box
     let constraints = if card_h > 0 {
         vec![
             Constraint::Min(1),
@@ -2911,9 +3018,32 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     } else {
         (None, rows[1])
     };
+    let (composer_area, footer_area) = if quiet && composer_area.height > 1 {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(composer_area);
+        (split[0], Some(split[1]))
+    } else {
+        (composer_area, None)
+    };
 
-    let inner_w = transcript_area.width.saturating_sub(2).max(1) as usize; // minus borders
+    let inner_w = transcript_area.width.saturating_sub(side_borders).max(1) as usize;
     let mut lines: Vec<Line> = Vec::new();
+    // Inline, the transcript has no title bar to say that older turns can be
+    // loaded, so the first line of the history says it instead (it is on
+    // screen exactly when PgUp at the top would load them).
+    if inline && (app.chat_loading_earlier || app.chat_has_more_earlier) {
+        lines.push(Line::from(Span::styled(
+            if app.chat_loading_earlier {
+                "↑ loading earlier messages…"
+            } else {
+                "↑ earlier messages: PgUp"
+            },
+            Theme::dim(),
+        )));
+        lines.push(Line::from(""));
+    }
     if !details {
         // Plain progress in product words; a failure is the composer's one
         // sentence instead, so it is never shown twice.
@@ -2994,6 +3124,24 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // would actually copy.
     let copy_focus = app.effective_chat_focus();
     for (block_idx, m) in app.chat_messages.iter().enumerate() {
+        if m.role == "error" {
+            // P-025: a failed turn reads like stock Claude Code — the reason
+            // hangs under the prompt it answers (`⎿ API Error 400: …`), so the
+            // turn's blank separator is taken back first.
+            if lines.last().is_some_and(|l| l.width() == 0) {
+                lines.pop();
+            }
+            let text_w = inner_w.saturating_sub(4).max(1);
+            for (i, row) in wrap_text(&m.content, text_w).into_iter().enumerate() {
+                let lead = if i == 0 { "  ⎿ " } else { "    " };
+                lines.push(Line::from(Span::styled(
+                    format!("{lead}{row}"),
+                    Theme::danger(),
+                )));
+            }
+            lines.push(Line::from(""));
+            continue;
+        }
         let (who, who_style) = match m.role.as_str() {
             "user" => ("you", Theme::selected()),
             "assistant" => ("agent", Theme::notify()),
@@ -3008,7 +3156,16 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         // a background highlight: the transcript already spends colour on role,
         // tone and tool state, and the marker has to stay legible on a
         // monochrome or high-contrast terminal in the release matrix.
-        let focused = Some(block_idx) == copy_focus;
+        //
+        // Inline (P-019) the marker shows only once the reader has moved the
+        // cursor or left the message box: while typing, `y` goes into the draft,
+        // so a marker on the newest reply would point at nothing a key does.
+        let focused = Some(block_idx) == copy_focus
+            && (!inline || app.chat_focus.is_some() || !app.chat_composing);
+        let inline_turn = inline && matches!(m.role.as_str(), "user" | "assistant");
+        if inline_turn {
+            push_inline_turn(&mut lines, m, focused, inner_w, app.chat_tools_expanded);
+        }
         let header = if focused {
             format!("▸ {header}")
         } else {
@@ -3022,7 +3179,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         let follows_same_speaker = m.role == "assistant"
             && block_idx > 0
             && app.chat_messages[block_idx - 1].role == "assistant";
-        if !follows_same_speaker || focused {
+        if !inline_turn && (!follows_same_speaker || focused) {
             lines.push(Line::from(Span::styled(header, who_style)));
         }
         if let Some(provenance) = m.provenance.as_ref().filter(|_| details) {
@@ -3034,11 +3191,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                 Theme::dim(),
             )));
         }
-        if m.role == "assistant" && !m.reasoning.trim().is_empty() {
-            lines.push(Line::from(Span::styled("  reasoning", Theme::dim())));
-            for line in wrap_text(m.reasoning.trim(), inner_w.saturating_sub(2)) {
-                lines.push(Line::from(Span::styled(format!("  {line}"), Theme::dim())));
-            }
+        if !inline_turn && m.role == "assistant" {
+            lines.extend(reasoning_lines(
+                &m.reasoning,
+                m.streaming,
+                app.chat_tools_expanded,
+                inner_w,
+            ));
         }
         let body = if m.streaming {
             let p = crate::chat_tags::live_preview(&m.content);
@@ -3054,7 +3213,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         // types `*` means an asterisk and a pasted path means that path — and
         // showing someone their own message back restyled is a lie about what
         // was sent. Only the model's half goes through the renderer.
-        if m.role == "assistant" {
+        if inline_turn {
+            // Drawn by `push_inline_turn` above.
+        } else if m.role == "assistant" {
             lines.extend(crate::markdown::render(&body, inner_w, m.streaming));
         } else {
             for wl in wrap_text(&body, inner_w) {
@@ -3063,11 +3224,29 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         }
         for tc in &m.tools {
             let semantic = crate::semantic_tool_cards::card_for_tool(tc);
+            // P-008: a readable name + target (`Update(calc.js)`,
+            // `papercusp-su · work items claimable (MCP)`), never the wire id.
+            let display = crate::tool_display::tool_display(
+                &tc.name,
+                tc.input.as_ref(),
+                app.launch_cwd.as_deref(),
+            );
+            // P-020: while this call's approval card is open, the card shows the
+            // diff; the row says only what it waits for, so the change appears once.
+            let asked_below = matches!(tc.outcome, ToolOutcome::Pending)
+                && app.card_state.asks_about(&display.title);
             // Every label here is a RENDER concern applied from raw model fields
             // (D-017 #1): `name` stays the bare tool so the approval prompt and
             // the resolve POST both read it cleanly, and the status is derived
             // from `outcome`/`needs_approval` rather than baked into the name.
             let (status, status_style) = match &tc.outcome {
+                ToolOutcome::Pending if asked_below => (
+                    format!(
+                        "  {} waiting for your answer",
+                        crate::glyph::status::NEEDS_HUMAN
+                    ),
+                    Theme::warn(),
+                ),
                 // Parked beats running: an approval-gated call is not slow, it is
                 // STOPPED and waiting on this user, and the two must never look
                 // alike or nobody learns the turn needs them.
@@ -3095,13 +3274,6 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     Theme::dim(),
                 ),
             };
-            // P-008: a readable name + target (`Update(calc.js)`,
-            // `papercusp-su · work items claimable (MCP)`), never the wire id.
-            let display = crate::tool_display::tool_display(
-                &tc.name,
-                tc.input.as_ref(),
-                app.launch_cwd.as_deref(),
-            );
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(
@@ -3130,7 +3302,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                         style,
                     )));
                 }
-            } else if let Some(summary) = display.summary.as_deref() {
+            } else if let Some(summary) = display.summary.as_deref().filter(|_| !asked_below) {
                 lines.push(Line::from(Span::styled(
                     trunc(&format!("    {summary}"), inner_w),
                     Theme::dim(),
@@ -3150,7 +3322,12 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     )));
                 }
             }
-            if let ToolOutcome::Failed(msg) = &tc.outcome {
+            // An empty reason means the `⎿` result line below carries it.
+            let failed_reason = match &tc.outcome {
+                ToolOutcome::Failed(msg) if !msg.is_empty() => Some(msg),
+                _ => None,
+            };
+            if let Some(msg) = failed_reason {
                 for wl in wrap_text(msg, inner_w.saturating_sub(4)) {
                     lines.push(Line::from(Span::styled(
                         format!("    {wl}"),
@@ -3158,7 +3335,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     )));
                 }
             }
-            lines.extend(tool_detail_lines(tc, inner_w, app.chat_tools_expanded));
+            if !asked_below {
+                lines.extend(tool_detail_lines(tc, inner_w, app.chat_tools_expanded));
+            }
         }
         // P-007 change cards: the affordance. The diff overlay is reachable
         // only by Enter on a CURSORED block, which nothing else on this screen
@@ -3175,8 +3354,10 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             .iter()
             .filter(|t| crate::change_card::is_change_card(t))
             .count();
-        if card_count > 0 {
-            let reachable_now = app.chat_focus.is_some() && Some(block_idx) == copy_focus;
+        let reachable_now = app.chat_focus.is_some() && Some(block_idx) == copy_focus;
+        // Inline (P-019) the transcript carries no key lesson on every edited
+        // turn; the line appears on the turn the cursor is on, where Enter works.
+        if card_count > 0 && (!inline || reachable_now) {
             lines.push(Line::from(Span::styled(
                 trunc(
                     &format!(
@@ -3193,6 +3374,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                 Theme::info(),
             )));
         }
+        if let Some(worked) = m.worked_for.filter(|_| inline) {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("✻ Worked for {}", worked_for_label(worked)),
+                Theme::dim(),
+            )));
+        }
         lines.push(Line::from("")); // blank separator between turns
     }
     // pui-chat-first-ux P-012: the line the owner just sent, shown the moment
@@ -3200,18 +3388,48 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // an accepted owner line; `App::pending_owner_echo` ends it when that line
     // lands or the send fails.
     if let Some(echo) = app.pending_owner_echo() {
-        lines.push(Line::from(Span::styled("  you", Theme::selected())));
-        for wl in wrap_text(echo, inner_w) {
-            lines.push(Line::from(wl));
+        if inline {
+            push_inline_turn(
+                &mut lines,
+                &crate::models::ChatMessage::user(echo),
+                false,
+                inner_w,
+                false,
+            );
+        } else {
+            lines.push(Line::from(Span::styled("  you", Theme::selected())));
+            for wl in wrap_text(echo, inner_w) {
+                lines.push(Line::from(wl));
+            }
         }
         lines.push(Line::from(""));
     }
 
+    // Inline there is no title bar to say a turn is running, so the bottom row
+    // of the transcript area says it, the way Claude Code's spinner line sits
+    // directly above its prompt. Esc stops the turn only from the composer.
+    let (transcript_area, running_row) =
+        if inline && app.chat_streaming && transcript_area.height > 1 {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(transcript_area);
+            (split[0], Some(split[1]))
+        } else {
+            (transcript_area, None)
+        };
     let total = lines.len() as u16;
-    let visible = transcript_area.height.saturating_sub(2); // block borders
+    let visible = if inline {
+        transcript_area.height
+    } else {
+        transcript_area.height.saturating_sub(2) // block borders
+    };
     let max_top = total.saturating_sub(visible);
     // chat_scroll = lines up from the bottom; clamp so it never overscrolls.
     let top = max_top.saturating_sub(app.chat_scroll.min(max_top));
+    // Scrolling up clamps to this (App::scroll_chat_up), so the wheel stops
+    // at the top instead of banking notches past it.
+    app.chat_scroll_limit.set(Some(max_top));
 
     let earlier = if app.chat_loading_earlier {
         " · ↑ loading…"
@@ -3238,13 +3456,27 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
-    let title = format!(" {}Agent Chat{}{} ", dock_focus, earlier, streaming_title,);
-    let para = Paragraph::new(lines).scroll((top, 0)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(Line::from(title)),
-    );
-    f.render_widget(para, transcript_area);
+    if inline {
+        f.render_widget(Paragraph::new(lines).scroll((top, 0)), transcript_area);
+        if let Some(row) = running_row {
+            // P-024: spinner, phase, elapsed, output and the stop key.
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    app.chat_working_line(std::time::Instant::now()),
+                    Theme::notify(),
+                ))),
+                row,
+            );
+        }
+    } else {
+        let title = format!(" {}Agent Chat{}{} ", dock_focus, earlier, streaming_title,);
+        let para = Paragraph::new(lines).scroll((top, 0)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Line::from(title)),
+        );
+        f.render_widget(para, transcript_area);
+    }
 
     // Inline card (Phase 2a): render the focused card into its reserved strip.
     if let Some(ca) = card_area {
@@ -3265,6 +3497,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         1 => "  · 1 queued".to_string(),
         n => format!("  · {n} queued"),
     };
+    // P-021: set only by the quiet composing branch below.
+    let mut placeholder: Option<String> = None;
+    let mut footer_hint: &str = "";
     let (ctitle, ctext, cstyle) = if app.card_state.focused_answered().is_some() {
         // P-015: the answer is sent; the card is waiting for the agent to take it.
         (
@@ -3280,11 +3515,14 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             Some(_) => " · Ctrl+R details",
             None => "",
         };
-        (
-            " Card — answer above ",
-            format!("↑↓ move · Enter/number pick · Space toggle · Esc skip{details}"),
-            Theme::notify(),
-        )
+        // D-028: on an approval card Esc is No and there is nothing to toggle, so
+        // the generic hint would contradict the card's own footer.
+        let hint = if app.card_state.focused().is_some_and(|card| card.approval.is_some()) {
+            format!("Enter/number pick · Esc No, then tell it what to do{details}")
+        } else {
+            format!("↑↓ move · Enter/number pick · Space toggle · Esc skip{details}")
+        };
+        (" Card — answer above ", hint, Theme::notify())
     } else if app.voice_phase.is_active() {
         // Voice PTT in flight (voice-mode-tui-port-2026-06-05 P2) — the composer
         // line becomes the voice status: phase badge, plus a live mic meter while
@@ -3362,7 +3600,15 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         )
     } else if app.su_connection_error.is_some() {
         (
-            " Session unavailable — Esc, then l: choose session to reconnect ",
+            // The bar must follow Esc: once the owner has left the message
+            // box it names the keys that now work, not the Esc already
+            // pressed (WI-10004247: a startup resume refused before the owner
+            // touched anything left the bar saying "Esc, then l" forever).
+            if app.chat_composing {
+                " Session unavailable — Esc, then l: choose session to reconnect "
+            } else {
+                " Session unavailable — l: choose session to reconnect · i type · v speak "
+            },
             format!("> {}", app.chat_input),
             Theme::warn(),
         )
@@ -3429,11 +3675,31 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             ),
             Theme::notify(),
         )
+    } else if app.chat_composing && quiet {
+        // P-021: an empty box shows a dim placeholder and the footer says
+        // `? for shortcuts`; with a draft the footer says how to send it. The
+        // border carries no title at all.
+        if app.chat_input.is_empty() {
+            placeholder = Some(app.chat_placeholder());
+            footer_hint = QUIET_SHORTCUTS_HINT;
+        } else {
+            footer_hint = QUIET_SEND_HINT;
+        }
+        // P-027 (G-11): a first Ctrl+C armed the exit; say what the second
+        // one does, the way Claude Code and Codex do.
+        if app.chat_ctrl_c_exit_armed() {
+            footer_hint = QUIET_CTRL_C_EXIT_HINT;
+        } else if app.chat_esc_clear_armed() && !app.chat_input.is_empty() {
+            footer_hint = QUIET_ESC_CLEAR_HINT;
+        }
+        ("", format!("> {}", app.chat_input), Theme::selected())
     } else if app.chat_composing {
         (
             // Chat-first names the Ctrl-O details view (P-003): the ids and raw
             // errors moved there, so the way to them must be on screen.
-            if app.chat_first && app.chat_streaming {
+            if app.chat_first && app.chat_ctrl_c_exit_armed() {
+                " Message — Press Ctrl+C again to exit "
+            } else if app.chat_first && app.chat_streaming {
                 " Message — Enter queue · Esc stop · Ctrl+R output · Ctrl+O details "
             } else if app.chat_first {
                 " Message — Enter send · / commands · @ files · ↑↓ history · Ctrl+O details "
@@ -3508,7 +3774,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("  {text}")
         };
-        Line::from(Span::styled(rendered, cstyle))
+        match placeholder.as_ref().filter(|_| row == 0) {
+            Some(hint) => Line::from(vec![
+                Span::styled(rendered, cstyle),
+                Span::styled(hint.clone(), Theme::dim()),
+            ]),
+            None => Line::from(Span::styled(rendered, cstyle)),
+        }
     }));
     composer_lines.extend(
         turn_error
@@ -3517,10 +3789,23 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     );
     let cpara = Paragraph::new(composer_lines).block(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(if inline {
+                Borders::TOP | Borders::BOTTOM
+            } else {
+                Borders::ALL
+            })
             .title(Line::from(ctitle)),
     );
     f.render_widget(cpara, composer_area);
+    if let Some(footer) = footer_area {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                quiet_footer_line(footer_hint, &footer_status, footer.width as usize),
+                Theme::dim(),
+            ))),
+            footer,
+        );
+    }
 
     // Ratatui 0.29 exposes the terminal cursor on Frame. Keep it in the same
     // coordinate system as the rendered draft: composer border + settings /
@@ -3531,15 +3816,16 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         && app.pending_approvals.is_empty();
     if composer_editable && composer_area.height > 2 && composer_area.width > 2 {
         let (row, column) = app.chat_cursor_line_col();
+        let left_border = side_borders / 2;
         let x = composer_area
             .x
-            .saturating_add(1)
+            .saturating_add(left_border)
             .saturating_add(2)
             .saturating_add(column as u16)
             .min(
                 composer_area
                     .x
-                    .saturating_add(composer_area.width.saturating_sub(2)),
+                    .saturating_add(composer_area.width.saturating_sub(1 + left_border)),
             );
         let y = composer_area
             .y
@@ -3553,6 +3839,170 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     .saturating_add(composer_area.height.saturating_sub(2)),
             );
         f.set_cursor_position(Position::new(x, y));
+    }
+}
+
+/// pui-chat-first-ux P-017: the chat is printed inline (no side borders) when
+/// it is the whole screen, i.e. the chat-first conversation. The docked pane
+/// and the workbench's Agent Chat tab keep their boxed layout.
+fn chat_is_inline(app: &App) -> bool {
+    app.chat_first && app.tab == Tab::Operator
+}
+
+/// pui-chat-first-ux P-021: the quiet composer's footer hint on an empty box.
+pub const QUIET_SHORTCUTS_HINT: &str = "? for shortcuts";
+/// The footer hint while a draft is in the box. Not "Enter to send": the
+/// failure sentences say "press Enter to send your message again", and the
+/// PTY suite reads this hint as the composer being ready to send.
+pub const QUIET_SEND_HINT: &str = "Enter sends";
+/// The footer hint while a Ctrl+C has armed the exit (P-027, G-11).
+pub const QUIET_CTRL_C_EXIT_HINT: &str = "Press Ctrl+C again to exit";
+/// The footer hint while a first Esc has armed clearing the draft (P-027, G-3).
+pub const QUIET_ESC_CLEAR_HINT: &str = "Esc again to clear";
+
+/// The keys the chat-first message box answers to, listed by `?` (P-021).
+/// Each one is a real binding of the composing arm in `App::on_key`, or of
+/// `App::on_mouse` for the wheel and drag (P-018).
+const CHAT_SHORTCUTS: &[(&str, &str)] = &[
+    ("Enter", "send"),
+    ("Shift+Enter", "new line (or \\ then Enter)"),
+    ("/", "commands"),
+    ("@", "attach a file"),
+    ("↑ ↓", "messages you sent before"),
+    ("PgUp PgDn", "scroll the conversation"),
+    ("Wheel", "scroll the conversation"),
+    ("Drag", "select and copy"),
+    ("Shift+drag", "the terminal's own selection"),
+    ("Esc", "stop a reply, twice to clear"),
+    // D-026 (P-027 G-6): `App::cycle_approvals`.
+    ("Shift+Tab", "approvals mode"),
+    // P-027 (parity checklist row 13): `App::open_model_picker`.
+    ("Alt+P", "switch model"),
+    ("Ctrl+R", "show tool output"),
+    ("Ctrl+O", "details"),
+    ("Ctrl+Z", "undo"),
+    ("Ctrl+C", "clear, or twice to quit"),
+];
+
+/// The shortcut list as rows: two columns when both fit, else one.
+fn chat_shortcut_rows(width: usize) -> Vec<String> {
+    let cells: Vec<String> = CHAT_SHORTCUTS
+        .iter()
+        .map(|(key, what)| format!("{key:<11} {what}"))
+        .collect();
+    let cell_w = cells
+        .iter()
+        .map(|c| Line::from(c.as_str()).width())
+        .max()
+        .unwrap_or(0)
+        + 3;
+    if width >= 2 + 2 * cell_w {
+        let rows = cells.len().div_ceil(2);
+        (0..rows)
+            .map(|i| {
+                let left = &cells[i];
+                let pad = cell_w.saturating_sub(Line::from(left.as_str()).width());
+                let right = cells.get(i + rows).map(String::as_str).unwrap_or("");
+                trunc(
+                    format!("  {left}{}{right}", " ".repeat(pad)).trim_end(),
+                    width,
+                )
+            })
+            .collect()
+    } else {
+        cells
+            .iter()
+            .map(|c| trunc(&format!("  {c}"), width))
+            .collect()
+    }
+}
+
+/// The quiet composer's footer: the hint on the left, model · directory ·
+/// cost on the right. When both do not fit, the status is shortened first.
+fn quiet_footer_line(hint: &str, status: &str, width: usize) -> String {
+    let left = if hint.is_empty() {
+        String::new()
+    } else {
+        format!("  {hint}")
+    };
+    let left_w = Line::from(left.as_str()).width();
+    let room = width.saturating_sub(left_w + 2);
+    if status.is_empty() || room < 8 {
+        return trunc(&left, width);
+    }
+    let status = trunc(status, room);
+    let pad = width.saturating_sub(left_w + Line::from(status.as_str()).width());
+    format!("{left}{}{status}", " ".repeat(pad))
+}
+
+/// pui-chat-first-ux P-019: one turn printed the way Claude Code prints it: no
+/// `you`/`agent` header line; a two-cell gutter carries the speaker instead
+/// (`❯` your message, `●` the reply) and the text continues under it indented.
+/// `▸` replaces the marker on the block `y` would copy.
+fn push_inline_turn(
+    lines: &mut Vec<Line<'static>>,
+    m: &crate::models::ChatMessage,
+    focused: bool,
+    inner_w: usize,
+    expanded: bool,
+) {
+    let assistant = m.role == "assistant";
+    let (marker, marker_style) = match (focused, assistant) {
+        (true, _) => ("▸ ", Theme::selected()),
+        (false, true) => ("● ", Theme::notify()),
+        (false, false) => ("❯ ", Theme::dim()),
+    };
+    let text_w = inner_w.saturating_sub(2).max(1);
+    if assistant {
+        lines.extend(reasoning_lines(
+            &m.reasoning,
+            m.streaming,
+            expanded,
+            inner_w,
+        ));
+    }
+    let body: Vec<Line<'static>> = if assistant {
+        let text = if m.streaming {
+            let preview = crate::chat_tags::live_preview(&m.content);
+            if preview.is_empty() {
+                "…".to_string()
+            } else {
+                preview
+            }
+        } else {
+            m.content.clone()
+        };
+        if text.trim().is_empty() {
+            // A block that only carries tool calls: its rows follow, already
+            // indented under the gutter.
+            Vec::new()
+        } else {
+            crate::markdown::render(&text, text_w, m.streaming)
+        }
+    } else {
+        wrap_text(&m.content, text_w)
+            .into_iter()
+            .map(Line::from)
+            .collect()
+    };
+    for (i, mut line) in body.into_iter().enumerate() {
+        let gutter = if i == 0 {
+            Span::styled(marker, marker_style)
+        } else {
+            Span::raw("  ")
+        };
+        line.spans.insert(0, gutter);
+        lines.push(line);
+    }
+}
+
+/// "4s", "1m 12s": the running time of a finished turn (P-019).
+fn worked_for_label(worked: std::time::Duration) -> String {
+    let secs = worked.as_secs().max(1);
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
     }
 }
 
@@ -3575,25 +4025,44 @@ fn card_block_height(app: &App, area: Rect) -> u16 {
     if app.card_state.focused_answered().is_some() {
         return 1;
     }
-    let inner_w = area.width.saturating_sub(2).max(1) as usize;
-    let lines = card_lines(app, inner_w);
+    // D-028: a tool approval has only a top rule; other cards a full border.
+    let approval = app.card_state.focused().is_some_and(|c| c.approval.is_some());
+    let border = if approval { 1 } else { 2 };
+    let inner_w = area.width.saturating_sub(if approval { 0 } else { 2 }).max(1) as usize;
+    let cap = ((area.height as f32 * 0.6) as u16).max(4);
+    let lines = card_lines(app, inner_w, cap.saturating_sub(border) as usize);
     let content = lines.len() as u16;
-    let want = content.saturating_add(2); // borders
-    let cap = (area.height as f32 * 0.6) as u16;
-    want.min(cap.max(4)).max(4)
+    let want = content.saturating_add(border);
+    want.min(cap).max(4)
 }
 
 /// Build the rendered lines of the focused card (prompt · optional report ·
 /// the presentation-specific body: radio/checkbox rows, text/date/slider input).
-fn card_lines(app: &App, inner_w: usize) -> Vec<Line<'static>> {
+/// `max_rows` is the strip's inner height; a tool approval shortens its body
+/// to fit it so the question and the answers are always on screen.
+fn card_lines(app: &App, inner_w: usize, max_rows: usize) -> Vec<Line<'static>> {
     use crate::card_view::CardPresentation;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let Some(card) = app.card_state.focused() else {
         return lines;
     };
-    // Prompt (wrapped).
-    for wl in wrap_text(&card.prompt, inner_w.saturating_sub(2).max(8)) {
-        lines.push(Line::from(Span::styled(wl, Theme::header())));
+    if let Some(approval) = &card.approval {
+        return approval_card_lines(app, card, approval, inner_w, max_rows);
+    }
+    // Prompt (wrapped). P-020: a first line promoted to the border title is not
+    // repeated here; a tool approval's `- old` / `+ new` lines read as a diff.
+    let skip = usize::from(card_promoted_title(card, inner_w).is_some());
+    for raw in card.prompt.lines().skip(skip) {
+        let style = if raw.starts_with("+ ") {
+            Theme::success()
+        } else if raw.starts_with("- ") {
+            Theme::danger()
+        } else {
+            Theme::header()
+        };
+        for wl in wrap_text(raw, inner_w.saturating_sub(2).max(8)) {
+            lines.push(Line::from(Span::styled(wl, style)));
+        }
     }
     // Optional structured report block (the same two-tier render the inbox uses).
     if let Some(rep) = &card.report {
@@ -3739,7 +4208,157 @@ fn card_lines(app: &App, inner_w: usize) -> Vec<Line<'static>> {
             )));
         }
     }
+    // draw_card renders these under `Wrap { trim: false }`, where ratatui 0.29
+    // draws a whitespace-only line as two rows; card_block_height counts one
+    // per line, so a blank-but-spaced line would push the last row out of the
+    // strip (WI-10006466). Make every such line truly empty.
+    for line in &mut lines {
+        if line.spans.iter().all(|s| s.content.trim().is_empty()) && !line.spans.is_empty() {
+            *line = Line::default();
+        }
+    }
     lines
+}
+
+/// pui-chat-first-ux D-028: a tool approval drawn the way Claude Code draws its
+/// permission prompt (stock 2.1.289 frame): the call's title, the change once
+/// between dashed rules, the question, the numbered answers with their keys,
+/// and a one-line footer. The strip's top rule is the full-width line above it.
+/// When the change and the Ctrl+R arguments do not fit in `max_rows` with the
+/// question and answers, the change is cut short with a `… +N lines` row:
+/// the answers must stay on screen (a long command once pushed them out of the
+/// strip, so the prompt could not be seen or answered).
+fn approval_card_lines(
+    app: &App,
+    card: &crate::card_view::OpenCard,
+    approval: &crate::card_view::CardApproval,
+    inner_w: usize,
+    max_rows: usize,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let text_w = inner_w.saturating_sub(2).max(8);
+    // One space in from the rule. A code line keeps its indentation (a hanging
+    // indent when it wraps, tabs as four spaces), as Claude Code shows it. A
+    // blank line stays truly empty: under `Wrap { trim: false }` ratatui 0.29
+    // draws a whitespace-only line as two rows, which the strip's height math
+    // (one row per line) does not expect (WI-10006466).
+    let indented = |text: &str, style: Style, lines: &mut Vec<Line<'static>>| {
+        let text = text.replace('\t', "    ");
+        let lead = (text.len() - text.trim_start_matches(' ').len()).min(text_w / 2);
+        let pad = " ".repeat(lead);
+        for wl in wrap_text(&text[lead..], text_w - lead) {
+            if wl.trim().is_empty() {
+                lines.push(Line::default());
+            } else {
+                lines.push(Line::from(Span::styled(format!(" {pad}{wl}"), style)));
+            }
+        }
+    };
+    indented(&approval.title, Theme::header(), &mut lines);
+    // The change between dashed rules, then (Ctrl+R) the raw arguments.
+    let mut change: Vec<Line<'static>> = Vec::new();
+    for raw in &approval.body {
+        let style = if raw.starts_with("+ ") {
+            Theme::success()
+        } else if raw.starts_with("- ") {
+            Theme::danger()
+        } else {
+            Style::default()
+        };
+        indented(raw, style, &mut change);
+    }
+    // P-008: the raw arguments stay behind Ctrl+R.
+    let mut details: Vec<Line<'static>> = Vec::new();
+    if app.chat_tools_expanded {
+        if let Some(raw_details) = card.details() {
+            for raw in raw_details.lines() {
+                indented(raw, Theme::dim(), &mut details);
+            }
+        }
+    }
+    let mut tail: Vec<Line<'static>> = Vec::new();
+    indented(
+        &approval.question,
+        Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+        &mut tail,
+    );
+    for (i, opt) in card.presentation.options().iter().enumerate() {
+        let selected = i == app.card_state.sel;
+        let marker = if selected { "❯" } else { " " };
+        // The keys that pick an answer directly, as Claude Code labels them.
+        let key = match opt.id.as_str() {
+            "always" => " (shift+tab)",
+            "no" => " (esc)",
+            _ => "",
+        };
+        // A long answer wraps under its own text, inside the strip.
+        let prefix = format!(" {marker} {}. ", i + 1);
+        let prefix_w = prefix.chars().count();
+        let style = if selected { Theme::selected() } else { Style::default() };
+        let label = format!("{}{key}", opt.label);
+        for (li, wl) in wrap_text(&label, inner_w.saturating_sub(prefix_w).max(8))
+            .into_iter()
+            .enumerate()
+        {
+            let text = if li == 0 {
+                format!("{prefix}{wl}")
+            } else {
+                format!("{}{wl}", " ".repeat(prefix_w))
+            };
+            tail.push(Line::from(Span::styled(text, style)));
+        }
+    }
+    tail.push(Line::from(Span::styled(
+        " Enter to select · ↑↓ to move · Esc to cancel",
+        Theme::dim(),
+    )));
+    // Rows left for the change, the two dashed rules around it included.
+    let budget = max_rows.saturating_sub(lines.len() + tail.len());
+    let rule = Line::from(Span::styled("╌".repeat(inner_w.max(1)), Theme::dim()));
+    let rules = if change.is_empty() { 0 } else { 2 };
+    if change.len() + details.len() + rules <= budget {
+        if !change.is_empty() {
+            lines.push(rule.clone());
+            lines.extend(change);
+            lines.push(rule);
+        }
+        lines.extend(details);
+    } else if budget > rules {
+        // Cut it short: as much as fits, then one `… +N lines` row.
+        let room = budget - rules - 1;
+        let mut kept: Vec<Line<'static>> = change.into_iter().chain(details).collect();
+        let hidden = kept.len() - room;
+        kept.truncate(room);
+        let hint = if app.chat_tools_expanded {
+            ""
+        } else {
+            " (Ctrl+R to expand)"
+        };
+        kept.push(Line::from(Span::styled(
+            format!(" … +{hidden} lines{hint}"),
+            Theme::dim(),
+        )));
+        if rules > 0 {
+            lines.push(rule.clone());
+        }
+        lines.extend(kept);
+        if rules > 0 {
+            lines.push(rule);
+        }
+    }
+    // (No room for any of the change: the question and the answers alone.)
+    lines.extend(tail);
+    lines
+}
+
+/// P-020: the card's first prompt line (`Allow Update(calc.js)?`, a short
+/// question) when it fits on the card's top border with room for a queue count,
+/// so the border carries the question instead of a status banner. `None` keeps
+/// a long first line in the wrapped body.
+fn card_promoted_title(card: &crate::card_view::OpenCard, inner_w: usize) -> Option<String> {
+    let first = card.prompt.lines().next()?.trim();
+    // " {first} · NN more " between the corners.
+    (!first.is_empty() && first.chars().count() + 12 <= inner_w).then(|| first.to_string())
 }
 
 /// The single line an answered card collapses to (P-015):
@@ -3760,7 +4379,11 @@ fn answered_card_line(
     } else {
         ("✓ ", Theme::success())
     };
-    let prompt = card.prompt.lines().next().unwrap_or("").trim().to_string();
+    // D-028: an approval names the call it answered (`Update(calc.js)`).
+    let prompt = match &card.approval {
+        Some(approval) => approval.title.trim().to_string(),
+        None => card.prompt.lines().next().unwrap_or("").trim().to_string(),
+    };
     let more = if remaining > 0 {
         format!(" · {remaining} more")
     } else {
@@ -3806,18 +4429,49 @@ fn draw_card(f: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
+    let Some(card) = app.card_state.focused() else {
+        return;
+    };
+    if card.approval.is_some() {
+        // D-028: Claude Code's permission prompt sits under one full-width
+        // rule, no box; a queued approval behind it is counted on the rule.
+        let lines = card_lines(
+            app,
+            area.width.max(1) as usize,
+            area.height.saturating_sub(1) as usize,
+        );
+        let mut block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Theme::notify());
+        if remaining > 0 {
+            block = block.title(Line::from(Span::styled(
+                format!(" {remaining} more "),
+                Theme::notify(),
+            )));
+        }
+        f.render_widget(Clear, area);
+        // No re-wrap: approval_card_lines already wrapped every line to the
+        // strip, and card_block_height sized the strip one row per line.
+        f.render_widget(Paragraph::new(lines).block(block), area);
+        return;
+    }
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
-    let lines = card_lines(app, inner_w);
-    // Say what the card needs from the person, not which Papercusp component
-    // raised it: "Operator" is internal product jargon to someone who launched
-    // `pui` to chat (WI-10004211, pui-chat-first-ux-2026-09-28 R-03).
+    let lines = card_lines(app, inner_w, area.height.saturating_sub(2) as usize);
+    // Say what the card asks, not which Papercusp component raised it
+    // ("Operator" is jargon to someone who launched `pui` to chat, WI-10004211)
+    // and without a status banner (P-020): the card's own question heads it, as
+    // Claude Code's dialog does, or a plain "Approval" / "Question".
+    let head = card_promoted_title(card, inner_w).unwrap_or_else(|| {
+        if card.details().is_some() {
+            "Approval".to_string()
+        } else {
+            "Question".to_string()
+        }
+    });
     let title = if remaining > 0 {
-        format!(
-            " {} Needs your answer · {remaining} more ",
-            crate::glyph::nav::EXPANDED
-        )
+        format!(" {head} · {remaining} more ")
     } else {
-        format!(" {} Needs your answer ", crate::glyph::nav::EXPANDED)
+        format!(" {head} ")
     };
     // Clear under the strip so the transcript doesn't bleed through.
     f.render_widget(Clear, area);
@@ -4822,6 +5476,33 @@ fn draw_help(f: &mut Frame, app: &App) {
 
 /// A transient toast for the latest notification, bottom-right above the status
 /// bar (P8).
+/// The toast, when one is due on screen. The mute covers notifications only:
+/// an acknowledgement of the owner's own key or drag (`toast_is_ack`) is
+/// always shown. Modal overlays hide it.
+fn visible_toast(app: &App) -> Option<&Notif> {
+    let toast = app.toast.as_ref()?;
+    ((app.notify_enabled || app.toast_is_ack)
+        && !app.show_tutorial
+        && !app.show_help
+        && !app.palette_open
+        && !app.show_notifs
+        && !app.pot_picker_open
+        && app.fleet_action_menu.is_none()
+        && app.wake_review.is_none()
+        && app.fleet_launcher.is_none()
+        && app.inbox_answer.is_none()
+        && app.lifecycle.is_none())
+    .then_some(toast)
+}
+
+/// pui-chat-first-ux P-027 (G-10): the quiet full-screen chat shows a toast as
+/// rows inside the message box, above the draft, where the `/` menu opens.
+/// The corner popup sat on the box's bottom border and hid it (parity
+/// checklist row 20).
+fn toast_in_message_box(app: &App) -> bool {
+    chat_is_inline(app) && !app.chat_details_visible() && app.chat_composing
+}
+
 fn draw_toast(f: &mut Frame, n: &Notif) {
     let full = f.area();
     let w = 50.min(full.width.saturating_sub(2));
@@ -5005,10 +5686,19 @@ fn draw_session_setup(f: &mut Frame, app: &App) {
     let Some(setup) = &app.session_setup else {
         return;
     };
-    let area = f.area().inner(Margin {
-        horizontal: 1,
-        vertical: 1,
-    });
+    // A one-cell inset put the modal border directly beside workbench pane
+    // borders, doubling the outline at ordinary terminal sizes (WI-10003290).
+    let frame_area = f.area();
+    let area = centered_rect(84, 80, frame_area);
+    // Clear one cell around the modal as well. Pane edges immediately outside
+    // the old clear rectangle remained adjacent to its border and doubled it.
+    let clear_area = Rect::new(
+        area.x.saturating_sub(1),
+        area.y.saturating_sub(1),
+        area.width.saturating_add(2),
+        area.height.saturating_add(2),
+    )
+    .intersection(frame_area);
     let title = ["1 Context", "2 Runtime", "3 Review"][setup.step as usize];
     if let Some(field) = setup.project_entry {
         let lines = vec![
@@ -5032,7 +5722,7 @@ fn draw_session_setup(f: &mut Frame, app: &App) {
             }),
             Line::from(setup.note.clone().unwrap_or_default()),
         ];
-        f.render_widget(Clear, area);
+        f.render_widget(Clear, clear_area);
         f.render_widget(
             Paragraph::new(lines)
                 .style(Theme::popup())
@@ -5045,7 +5735,7 @@ fn draw_session_setup(f: &mut Frame, app: &App) {
     if setup.show_help {
         let text = "Setup and recovery\n\nNo operator on this computer? For a local setup, install and start the separate Papercusp Server package from your Papercusp release download page; the desktop app is optional. l signs in to Papercusp cloud in your browser, then opens PUI on one of your cloud workspaces. h connects to a remote host you saved with psu (a cloud sign-in or an SSH host). Both hand this terminal to the psu bundled with PUI; when the remote PUI exits, this one exits too. Cancel (Ctrl-C) or a failed sign-in returns you here.\n\nContext: e edits the operator address; Tab enters its token (masked). Enter reconnects this PUI; Esc cancels. A different address never receives the old operator token.\n\nRuntime: b engine, a account, m model, e effort, u mode. Default uses the operator host's credential; auto routes its configured account pool. No account? Configure one on that operator, then r refresh.\n\nAuthentication failure: enter a token issued by the selected operator. Provider login belongs on the operator host: use your engine's login or its existing account setup. PUI does not store provider keys.\n\nUnreachable: check the address and start Papercusp Server. TLS: check scheme and certificate. Missing engine: install it on the operator host. Missing capability: update that operator.\n\nManual mode is the initial setting. Review is required before any session starts.\n\nAny key returns to setup (draft retained).";
         let text = format!("{text}\n\nAccount setup: {}/settings/deploy-accounts\nOperator tokens entered here last for this PUI process only.", setup.endpoint);
-        f.render_widget(Clear, area);
+        f.render_widget(Clear, clear_area);
         f.render_widget(
             Paragraph::new(text)
                 .style(Theme::popup())
@@ -5080,7 +5770,7 @@ fn draw_session_setup(f: &mut Frame, app: &App) {
             Line::from("A changed address clears the previous operator token."),
             Line::from(setup.note.clone().unwrap_or_default()),
         ];
-        f.render_widget(Clear, area);
+        f.render_widget(Clear, clear_area);
         f.render_widget(
             Paragraph::new(lines)
                 .style(Theme::popup())
@@ -5209,7 +5899,7 @@ fn draw_session_setup(f: &mut Frame, app: &App) {
     lines.push(Line::from(
         "← / Shift-Tab back · Esc close (message retained) · r retry · ? help",
     ));
-    f.render_widget(Clear, area);
+    f.render_widget(Clear, clear_area);
     f.render_widget(
         Paragraph::new(lines)
             .style(Theme::popup())
@@ -5227,8 +5917,12 @@ fn draw_session_picker(f: &mut Frame, picker: &crate::session_config::SessionPic
         .options
         .iter()
         .map(|o| {
+            // On the conversation picker a disabled row is a status line
+            // ("Loading…", "No earlier conversations", an error), not a
+            // setting; "not settable" there misread as a fault (P-027 G-12).
+            let status_row = picker.axis == crate::session_config::PickerAxis::Conversation;
             let mut lines = vec![Line::from(Span::styled(
-                if o.disabled {
+                if o.disabled && !status_row {
                     format!("{} — not settable", o.label)
                 } else {
                     o.label.clone()
@@ -6191,8 +6885,8 @@ pub(crate) fn elide_left(s: &str, n: usize) -> String {
 /// arguments that would be pure noise: absent, `null`, or an empty object. A
 /// no-argument tool then gets a clean one-line card instead of an empty bracket
 /// pair dressed up as information.
-/// Collapsed tool output shows this many lines; Ctrl+R shows up to the cap.
-const TOOL_OUTPUT_PREVIEW_LINES: usize = 3;
+/// Collapsed tool output is one summary line; a diff previews this many lines;
+/// Ctrl+R shows either up to the cap.
 const TOOL_DIFF_PREVIEW_LINES: usize = 8;
 const TOOL_EXPANDED_LINE_CAP: usize = 400;
 
@@ -6223,9 +6917,21 @@ pub(crate) fn tool_result_text(result: &serde_json::Value) -> Option<String> {
         }
     }
     let text = match result {
-        Value::Object(o) => ["content", "text", "output", "stdout", "result"]
-            .iter()
-            .find_map(|k| o.get(*k).and_then(parts))?,
+        // P-025: Codex reports a command's output as `aggregatedOutput` and an
+        // MCP result as `result: { content: [{ type: 'text', text }] }`.
+        Value::Object(o) => [
+            "content",
+            "text",
+            "output",
+            "stdout",
+            "aggregatedOutput",
+            "result",
+        ]
+        .iter()
+        .find_map(|k| {
+            let v = o.get(*k)?;
+            parts(v).or_else(|| v.get("content").and_then(parts))
+        })?,
         other => parts(other)?,
     };
     let text = crate::glyph::terminal_safe_text(&text);
@@ -6252,8 +6958,24 @@ pub(crate) fn tool_detail_lines(
         };
         out.push(Line::from(Span::styled(trunc(&note, width), Theme::dim())));
     };
-    if let Some(card) = crate::change_card::card_for_tool(tc, 0, 0) {
-        let all: Vec<&DiffLine> = card.hunks.iter().flat_map(|h| h.lines.iter()).collect();
+    let summary_line = |summary: &str| {
+        Line::from(Span::styled(
+            trunc(&format!("    ⎿ {summary}"), width),
+            Theme::dim(),
+        ))
+    };
+    let card = crate::change_card::card_for_tool(tc, 0, 0);
+    let codex_patch = codex_patch_lines(tc);
+    let diff: Option<Vec<&DiffLine>> = card
+        .as_ref()
+        .map(|card| card.hunks.iter().flat_map(|h| h.lines.iter()).collect())
+        .or_else(|| codex_patch.as_ref().map(|lines| lines.iter().collect()));
+    if let Some(all) = diff {
+        // P-025: once the edit has run, one line says what it did (Claude's
+        // `⎿ Added 2 lines, removed 2 lines`, Codex's `(+2 -2)`), above the diff.
+        if tc.outcome != crate::models::ToolOutcome::Pending {
+            out.push(summary_line(&change_summary(&all)));
+        }
         let limit = if expanded {
             TOOL_EXPANDED_LINE_CAP
         } else {
@@ -6293,16 +7015,18 @@ pub(crate) fn tool_detail_lines(
         return out;
     };
     let body_w = width.saturating_sub(6).max(1);
-    let rows: Vec<String> = if expanded {
-        text.lines().flat_map(|l| wrap_text(l, body_w)).collect()
-    } else {
-        text.lines().map(str::to_owned).collect()
-    };
-    let limit = if expanded {
-        TOOL_EXPANDED_LINE_CAP
-    } else {
-        TOOL_OUTPUT_PREVIEW_LINES
-    };
+    if !expanded {
+        // P-025: a finished call collapses to ONE line, the way Claude Code
+        // prints `⎿ Read 40 lines`; Ctrl+R shows the output itself.
+        let more = text.lines().filter(|l| !l.trim().is_empty()).count() > 1;
+        let hint = if more { "  (Ctrl+R to expand)" } else { "" };
+        let room = body_w.saturating_sub(hint.chars().count()).max(8);
+        let summary = crate::tool_display::result_summary(&tc.name, tc.input.as_ref(), &text, room);
+        out.push(summary_line(&format!("{summary}{hint}")));
+        return out;
+    }
+    let rows: Vec<String> = text.lines().flat_map(|l| wrap_text(l, body_w)).collect();
+    let limit = TOOL_EXPANDED_LINE_CAP;
     for (i, row) in rows.iter().take(limit).enumerate() {
         let lead = if i == 0 { "    ⎿ " } else { "      " };
         out.push(Line::from(Span::styled(
@@ -6315,6 +7039,122 @@ pub(crate) fn tool_detail_lines(
         more(hidden, &mut out);
     }
     out
+}
+
+/// `Added 2 lines, removed 2 lines`: what a file change did, in one line (P-025).
+fn change_summary(lines: &[&crate::change_card::DiffLine]) -> String {
+    use crate::change_card::DiffLine;
+    let added = lines
+        .iter()
+        .filter(|l| matches!(l, DiffLine::Added(_)))
+        .count();
+    let removed = lines
+        .iter()
+        .filter(|l| matches!(l, DiffLine::Removed(_)))
+        .count();
+    let n = |count: usize| {
+        if count == 1 {
+            "1 line".to_string()
+        } else {
+            format!("{count} lines")
+        }
+    };
+    match (added, removed) {
+        (0, 0) => "No changes".to_string(),
+        (a, 0) => format!("Added {}", n(a)),
+        (0, r) => format!("Removed {}", n(r)),
+        (a, r) => format!("Added {}, removed {}", n(a), n(r)),
+    }
+}
+
+/// A Codex `fileChange` item's diffs as diff lines (P-025). An update carries a
+/// unified diff; an added or deleted file carries its whole content.
+fn codex_patch_lines(
+    tc: &crate::models::ChatToolCall,
+) -> Option<Vec<crate::change_card::DiffLine>> {
+    use crate::change_card::DiffLine;
+    let item = tc.result.as_ref().or(tc.input.as_ref())?;
+    if item.get("type")?.as_str()? != "fileChange" {
+        return None;
+    }
+    let mut out = Vec::new();
+    for change in item.get("changes")?.as_array()? {
+        let diff = change
+            .get("diff")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let kind = change
+            .pointer("/kind/type")
+            .and_then(serde_json::Value::as_str);
+        for line in diff.lines() {
+            out.push(match kind {
+                Some("add") => DiffLine::Added(line.to_string()),
+                Some("delete") => DiffLine::Removed(line.to_string()),
+                _ => {
+                    if ["+++", "---", "@@", "diff ", "index "]
+                        .iter()
+                        .any(|header| line.starts_with(header))
+                    {
+                        continue;
+                    }
+                    match line.chars().next() {
+                        Some('+') => DiffLine::Added(line[1..].to_string()),
+                        Some('-') => DiffLine::Removed(line[1..].to_string()),
+                        Some(' ') => DiffLine::Context(line[1..].to_string()),
+                        _ => DiffLine::Context(line.to_string()),
+                    }
+                }
+            });
+        }
+    }
+    Some(out)
+}
+
+/// pui-chat-first-ux P-025: reasoning is ONE dim line, the way Codex shows its
+/// reasoning summary and Claude Code its collapsed thinking: the newest heading
+/// while the reply streams, the first once it is done. Ctrl+R (the same toggle
+/// that expands tool output) shows the whole text.
+fn reasoning_lines(
+    reasoning: &str,
+    streaming: bool,
+    expanded: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let text = reasoning.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if expanded {
+        let mut out = vec![Line::from(Span::styled("  ∴ reasoning", Theme::dim()))];
+        for line in wrap_text(text, width.saturating_sub(4).max(1)) {
+            out.push(Line::from(Span::styled(
+                format!("    {line}"),
+                Theme::dim(),
+            )));
+        }
+        return out;
+    }
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let headings: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.len() > 4 && l.starts_with("**") && l.ends_with("**"))
+        .collect();
+    let pool = if headings.is_empty() {
+        &lines
+    } else {
+        &headings
+    };
+    let picked = if streaming { pool.last() } else { pool.first() };
+    let line = picked.map(|l| l.trim_matches('*').trim()).unwrap_or("");
+    vec![Line::from(Span::styled(
+        trunc(&format!("  ∴ {line}"), width),
+        Theme::dim(),
+    ))]
 }
 
 /// What a parked tool call wants to do, in words: the semantic card title or
@@ -7618,6 +8458,25 @@ mod tests {
     }
 
     #[test]
+    fn the_mute_hides_notifications_but_never_the_answer_to_your_own_action() {
+        // pui-chat-first-ux P-018: a default launch (notifications muted) must
+        // still confirm a drag-copy; before this, "Copied N characters" was set
+        // and never drawn.
+        let mut app = App::new();
+        assert!(
+            !app.notify_enabled,
+            "fixture: notifications muted by default"
+        );
+        app.chat_toast("info", "Copied 18 characters".to_string());
+        assert!(render(&app, 90, 12).contains("Copied 18 characters"));
+        // A notification replacing it is muted again.
+        app.push_notif(ui_notif("info", "build finished", None));
+        let text = render(&app, 90, 12);
+        assert!(!text.contains("build finished"), "{text}");
+        assert!(!text.contains("Copied 18 characters"), "{text}");
+    }
+
+    #[test]
     fn notifs_history_overlay_renders() {
         let mut app = App::new();
         app.show_notifs = true;
@@ -7700,6 +8559,22 @@ mod tests {
         let text = render(&app, 100, 24);
         assert!(text.contains("native transcript is unavailable"), "{text}");
         assert!(text.contains("choose session to reconnect"), "{text}");
+        // WI-10004247: the bar follows Esc. In the message box it says to
+        // press Esc first; out of it, it names the keys that work now.
+        app.chat_composing = true;
+        let composing = render(&app, 120, 24);
+        assert!(
+            composing.contains("Esc, then l: choose session"),
+            "{composing}"
+        );
+        assert!(!composing.contains("i type · v speak"), "{composing}");
+        app.chat_composing = false;
+        let normal = render(&app, 120, 24);
+        assert!(
+            normal.contains("l: choose session to reconnect · i type · v speak"),
+            "{normal}"
+        );
+        assert!(!normal.contains("Esc, then l"), "{normal}");
         app.reset_agent_chat_binding();
         assert!(!render(&app, 100, 24).contains("native transcript is unavailable"));
     }
@@ -8230,6 +9105,67 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected}:\n{text}");
         }
+    }
+
+    #[test]
+    fn session_setup_overlay_does_not_double_border_workbench_edges() {
+        let mut app = App::new();
+        app.session_setup = Some(crate::session_config::SessionSetup::new(
+            "http://127.0.0.1:3170".into(),
+            "first words".into(),
+        ));
+
+        let text = render(&app, 110, 34);
+        let chars: Vec<char> = text.chars().collect();
+        let rows: Vec<String> = chars.chunks(110).map(|row| row.iter().collect()).collect();
+
+        let top = rows
+            .iter()
+            .find(|row| row.contains("New session"))
+            .expect("setup popup title renders");
+        let title_byte = top.find("New session").unwrap();
+        let title_col = top[..title_byte].chars().count();
+        let top_left = top[..title_byte].rfind('┌').unwrap();
+        let left_col = top[..top_left].chars().count();
+        let top_right_byte = top[title_byte..].find('┐').unwrap() + title_byte;
+        let right_col = top[..top_right_byte].chars().count();
+        let top_chars: Vec<char> = top.chars().collect();
+        assert_eq!(top_chars[left_col - 1], ' ', "left title gutter: {top}");
+        assert_eq!(top_chars[right_col + 1], ' ', "right title gutter: {top}");
+        assert!(title_col > left_col);
+
+        let body = rows
+            .iter()
+            .find(|row| row.contains("Operator: http://"))
+            .expect("setup popup body renders");
+        let body_chars: Vec<char> = body.chars().collect();
+        let operator_byte = body.find("Operator:").unwrap();
+        let body_left_byte = body[..operator_byte].rfind('│').unwrap();
+        let body_left = body[..body_left_byte].chars().count();
+        let body_right_byte = body[operator_byte..].find('│').unwrap() + operator_byte;
+        let body_right = body[..body_right_byte].chars().count();
+        assert_eq!(body_chars[body_left - 1], ' ', "left body gutter: {body}");
+        assert_eq!(body_chars[body_right + 1], ' ', "right body gutter: {body}");
+    }
+
+    #[test]
+    fn tab_strip_keeps_whole_labels_and_marks_hidden_tabs() {
+        let app = App::new();
+        let text = render(&app, 110, 34);
+        let row: String = text.chars().take(110).collect();
+
+        assert!(
+            row.contains("h:Overview"),
+            "default tab remains visible: {row}"
+        );
+        assert!(
+            row.contains("›"),
+            "hidden trailing tabs are indicated: {row}"
+        );
+        assert!(
+            !row.contains("7:T") || row.contains("7:Testing"),
+            "a tab label must be fully shown or omitted, never clipped: {row}"
+        );
     }
 
     /// Owner #783: in chat-first the first Enter opened a New-session form the
@@ -9299,12 +10235,46 @@ mod tests {
     }
 
     #[test]
+    fn chat_first_failed_turn_shows_the_reason_under_its_prompt() {
+        // P-025: the Codex leg ended four turns with nothing on screen while
+        // every one had failed with this 400 (rollout 01a10f95, 2026-10-06).
+        let mut app = chat_first_bound_app();
+        app.chat_messages
+            .push(crate::models::ChatMessage::user("hi"));
+        app.chat_messages.push(crate::models::ChatMessage::turn_error(
+            r#"{"type":"error","status":400,"error":{"message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}"#,
+        ));
+        let mut term = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        term.draw(|f| draw(f, &app)).unwrap();
+        let rows: Vec<String> = term
+            .backend()
+            .buffer()
+            .content()
+            .chunks(120)
+            .map(|row| row.iter().map(|c| c.symbol()).collect())
+            .collect();
+        let frame = rows.join("\n");
+        let lines: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let prompt = lines
+            .iter()
+            .position(|l| l.contains("hi") && (l.contains('❯') || l.contains('▸')))
+            .unwrap_or_else(|| panic!("no prompt row:\n{frame}"));
+        assert!(
+            lines[prompt + 1].contains("⎿ API Error 400: The 'gpt-6.1-sol' model"),
+            "the reason must hang directly under the prompt:\n{frame}"
+        );
+        assert!(!frame.contains("\"status\""), "raw JSON leaked:\n{frame}");
+    }
+
+    #[test]
     fn chat_first_default_frame_shows_model_directory_and_only_measured_cost() {
         let mut app = chat_first_bound_app();
         let frame = render(&app, 120, 24);
         assert_no_chat_jargon(&frame);
         assert!(frame.contains("Claude · /work/demo"), "{frame}");
-        assert!(frame.contains("Ctrl+O details"), "{frame}");
+        // P-021: the way to the details view is `?` (which lists Ctrl+O),
+        // not a shortcut list packed into the composer border.
+        assert!(frame.contains(QUIET_SHORTCUTS_HINT), "{frame}");
         assert!(
             !frame.contains('$'),
             "no cost before one is measured:\n{frame}"
@@ -9314,6 +10284,430 @@ mod tests {
         let priced = render(&app, 120, 24);
         assert_no_chat_jargon(&priced);
         assert!(priced.contains("Claude · /work/demo · $0.12"), "{priced}");
+    }
+
+    /// pui-chat-first-ux P-021: the full-screen chat's message box is quiet,
+    /// the way Claude Code's is. No shortcut list in its border, a dim
+    /// placeholder in the empty box, and ONE footer line under the bottom rule:
+    /// `? for shortcuts` on the left, model · directory on the right.
+    #[test]
+    fn chat_first_composer_is_quiet_with_a_placeholder_and_one_footer_line() {
+        let app = chat_first_bound_app();
+        let (rows, cursor) = render_rows(&app, 100, 24);
+        let frame = rows.join("\n");
+        for noisy in [
+            "Enter send ·",
+            "/ commands",
+            "@ files",
+            "↑↓ history",
+            "Ctrl+O details",
+        ] {
+            assert!(
+                !frame.contains(noisy),
+                "`{noisy}` is still on screen:\n{frame}"
+            );
+        }
+        let draft = rows
+            .iter()
+            .position(|r| r.starts_with("> Message Claude"))
+            .unwrap_or_else(|| panic!("no placeholder row:\n{frame}"));
+        // The status moved out of the box: nothing sits between the top rule
+        // and the draft row.
+        assert!(rows[draft - 1].starts_with('─'), "{frame}");
+        assert!(rows[draft + 1].starts_with('─'), "{frame}");
+        let footer = &rows[draft + 2];
+        assert!(
+            footer.starts_with(&format!("  {QUIET_SHORTCUTS_HINT}")),
+            "{frame}"
+        );
+        assert!(
+            footer.trim_end().ends_with("Claude · /work/demo"),
+            "{frame}"
+        );
+        // The cursor sits where typing lands, at the start of the placeholder.
+        assert_eq!((cursor.x, cursor.y), (2, draft as u16), "{frame}");
+    }
+
+    #[test]
+    fn a_draft_replaces_the_placeholder_and_the_footer_says_how_to_send() {
+        let mut app = chat_first_bound_app();
+        app.chat_input = "fix the bug".into();
+        app.chat_cursor = app.chat_input.len();
+        let frame = render(&app, 100, 24);
+        assert!(frame.contains("> fix the bug"), "{frame}");
+        assert!(!frame.contains("Message Claude"), "{frame}");
+        assert!(frame.contains(QUIET_SEND_HINT), "{frame}");
+        assert!(!frame.contains(QUIET_SHORTCUTS_HINT), "{frame}");
+    }
+
+    /// P-027 (G-11): after a first Ctrl+C the footer says a second one exits;
+    /// once the window closes the usual hint returns.
+    #[test]
+    fn an_armed_ctrl_c_says_a_second_press_exits() {
+        let mut app = chat_first_bound_app();
+        app.chat_ctrl_c_armed = Some(std::time::Instant::now());
+        let frame = render(&app, 100, 24);
+        assert!(frame.contains(QUIET_CTRL_C_EXIT_HINT), "{frame}");
+        assert!(!frame.contains(QUIET_SHORTCUTS_HINT), "{frame}");
+        app.chat_ctrl_c_armed =
+            std::time::Instant::now().checked_sub(crate::app::CHAT_CTRL_C_EXIT_WINDOW);
+        let frame = render(&app, 100, 24);
+        assert!(!frame.contains(QUIET_CTRL_C_EXIT_HINT), "{frame}");
+        assert!(frame.contains(QUIET_SHORTCUTS_HINT), "{frame}");
+    }
+
+    /// P-027 (G-3): after a first Esc on a draft the footer says a second
+    /// one clears it.
+    #[test]
+    fn an_armed_esc_says_a_second_press_clears_the_draft() {
+        let mut app = chat_first_bound_app();
+        app.chat_input = "fix the bug".into();
+        app.chat_cursor = app.chat_input.len();
+        app.chat_esc_armed = Some(std::time::Instant::now());
+        let frame = render(&app, 100, 24);
+        assert!(frame.contains(QUIET_ESC_CLEAR_HINT), "{frame}");
+        assert!(!frame.contains(QUIET_SEND_HINT), "{frame}");
+        app.chat_esc_armed = None;
+        let frame = render(&app, 100, 24);
+        assert!(!frame.contains(QUIET_ESC_CLEAR_HINT), "{frame}");
+        assert!(frame.contains(QUIET_SEND_HINT), "{frame}");
+    }
+
+    /// P-027 (G-10): in the quiet chat a toast sits inside the message box,
+    /// above the draft, instead of a corner popup drawn over the box border.
+    #[test]
+    fn a_toast_in_the_quiet_chat_sits_inside_the_box_above_the_draft() {
+        let mut app = chat_first_bound_app();
+        app.toast = Some(ui_notif(
+            "warn",
+            "No command /nope. Type / to see the commands, or start the message with a space to send it as text.",
+            None,
+        ));
+        app.toast_is_ack = true;
+        let (rows, _) = render_rows(&app, 100, 24);
+        let frame = rows.join("\n");
+        let toast = rows
+            .iter()
+            .position(|r| r.contains("No command /nope"))
+            .unwrap_or_else(|| panic!("the toast is on screen:\n{frame}"));
+        let draft = rows
+            .iter()
+            .position(|r| r.starts_with("> "))
+            .unwrap_or_else(|| panic!("the draft row is on screen:\n{frame}"));
+        assert!(toast < draft, "the toast is above the draft:\n{frame}");
+        assert!(!frame.contains("N history"), "no corner popup:\n{frame}");
+        assert!(
+            rows[toast + 1].trim_start().starts_with("text."),
+            "it wraps onto the next row, not clips:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn question_mark_lists_every_composer_shortcut_above_the_box() {
+        let mut app = chat_first_bound_app();
+        app.chat_shortcuts_open = true;
+        let (rows, _) = render_rows(&app, 100, 30);
+        let frame = rows.join("\n");
+        for (key, what) in CHAT_SHORTCUTS {
+            assert!(
+                frame.contains(&format!("{key:<11} {what}")),
+                "`{key}` is missing:\n{frame}"
+            );
+        }
+        // Two columns at this width, all of them inside the box, above the draft.
+        let draft = rows.iter().position(|r| r.starts_with("> ")).unwrap();
+        let first = rows
+            .iter()
+            .position(|r| r.contains("Enter       send"))
+            .unwrap();
+        assert!(first < draft, "{frame}");
+        assert_eq!(draft - first, CHAT_SHORTCUTS.len().div_ceil(2), "{frame}");
+        // A narrow terminal gets one column, each row within the width.
+        let narrow = chat_shortcut_rows(40);
+        assert_eq!(narrow.len(), CHAT_SHORTCUTS.len());
+        assert!(narrow.iter().all(|r| Line::from(r.as_str()).width() <= 40));
+    }
+
+    /// The PTY suite reads either footer hint as "the composer is ready to
+    /// send" (agent-chat-pty SEND_READY_MARKERS), so neither may show while a
+    /// reply is running or the session is unavailable.
+    #[test]
+    fn quiet_footer_hints_show_only_while_the_box_is_ready_to_send() {
+        let states: [(&str, fn(&mut App)); 3] = [
+            ("running", |app| app.chat_streaming = true),
+            ("down", |app| {
+                app.su_connection_error = Some("connection refused".into())
+            }),
+            ("left", |app| app.chat_composing = false),
+        ];
+        for (state, set) in states {
+            for draft in ["", "hi"] {
+                let mut app = chat_first_bound_app();
+                set(&mut app);
+                app.chat_input = draft.into();
+                let frame = render(&app, 100, 24);
+                for hint in [QUIET_SHORTCUTS_HINT, QUIET_SEND_HINT] {
+                    assert!(
+                        !frame.contains(hint),
+                        "{state}/{draft:?}: `{hint}`\n{frame}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn details_view_keeps_the_boxed_composer_and_its_key_list() {
+        let mut app = chat_first_bound_app();
+        app.chat_details = Some(true);
+        let frame = render(&app, 120, 24);
+        assert!(frame.contains("Message — Enter send"), "{frame}");
+        assert!(!frame.contains(QUIET_SHORTCUTS_HINT), "{frame}");
+    }
+
+    #[test]
+    fn quiet_footer_shortens_the_status_before_the_hint() {
+        let line = quiet_footer_line(
+            QUIET_SHORTCUTS_HINT,
+            "Claude · ~/a/very/long/project/path",
+            40,
+        );
+        assert!(
+            line.starts_with(&format!("  {QUIET_SHORTCUTS_HINT}")),
+            "{line}"
+        );
+        assert!(Line::from(line.as_str()).width() <= 40, "{line}");
+        // No room for the status at all: the hint alone.
+        assert_eq!(
+            quiet_footer_line(QUIET_SHORTCUTS_HINT, "Claude · ~/x", 20).trim_end(),
+            format!("  {QUIET_SHORTCUTS_HINT}")
+        );
+    }
+
+    /// The frame as rows of cells, for assertions about columns and rules.
+    fn render_rows(app: &App, w: u16, h: u16) -> (Vec<String>, Position) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let rows = term
+            .backend()
+            .buffer()
+            .content()
+            .chunks(w as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect();
+        let cursor = term.get_cursor_position().unwrap();
+        (rows, cursor)
+    }
+
+    /// pui-chat-first-ux P-017: the chat-first conversation is printed inline,
+    /// like Claude Code: no box around the transcript and only a rule above and
+    /// below the composer, so a selected reply carries no `│` and its text
+    /// starts in the first column. The workbench keeps its boxes (control).
+    #[test]
+    fn chat_first_prints_the_conversation_without_side_borders() {
+        let mut app = chat_first_bound_app();
+        app.chat_input = "hey".into();
+        app.chat_cursor = 3;
+        let (rows, cursor) = render_rows(&app, 120, 24);
+        let text = rows.join("\n");
+        for border in ['│', '┌', '┐', '└', '┘'] {
+            assert!(
+                !text.contains(border),
+                "chat-first draws `{border}`:\n{text}"
+            );
+        }
+        let reply = rows
+            .iter()
+            .find(|r| r.contains("what are we working on"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            reply.starts_with("● Hi — what are we working on?"),
+            "{text}"
+        );
+        let draft = rows
+            .iter()
+            .position(|r| r.starts_with("> hey"))
+            .unwrap_or_else(|| panic!("{text}"));
+        // One plain rule directly above the draft and one directly under it;
+        // the last row is the quiet footer line (P-021), outside the rules.
+        assert!(rows[draft - 1].chars().all(|c| c == '─'), "{text}");
+        assert!(rows[draft + 1].chars().all(|c| c == '─'), "{text}");
+        assert_eq!(draft + 2, 23, "{text}");
+        assert!(
+            rows[23].starts_with(&format!("  {QUIET_SEND_HINT}")),
+            "{text}"
+        );
+        // The cursor sits after `> hey` in the first column's coordinates.
+        assert_eq!(cursor, Position::new(5, draft as u16), "{text}");
+
+        // Control: the same conversation in the workbench is still boxed.
+        app.chat_first = false;
+        let (boxed, _) = render_rows(&app, 120, 24);
+        assert!(boxed.join("\n").contains('│'), "{}", boxed.join("\n"));
+    }
+
+    /// pui-chat-first-ux P-019: turns print like Claude Code's: `❯` before your
+    /// message and `●` before the reply, no `you`/`agent` header rows, the
+    /// running time under a finished turn, and no change-card key lesson on a
+    /// turn the cursor is not on. The workbench keeps its headers (control).
+    #[test]
+    fn chat_first_prints_compact_turns_with_the_time_each_took() {
+        let mut app = chat_first_bound_app();
+        app.chat_messages[1].worked_for = Some(std::time::Duration::from_millis(4_300));
+        let mut edit = crate::models::ChatToolCall::plain("Edit".into());
+        edit.input = Some(serde_json::json!({
+            "file_path": "/work/demo/calc.js",
+            "old_string": "a + b",
+            "new_string": "a - b",
+        }));
+        edit.outcome = ToolOutcome::Ok;
+        app.chat_messages[1].tools.push(edit);
+        let (rows, _) = render_rows(&app, 120, 24);
+        let text = rows.join("\n");
+        assert!(rows.iter().any(|r| r.starts_with("❯ hello")), "{text}");
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("● Hi — what are we working on?")),
+            "{text}"
+        );
+        for header in ["you", "agent", "▸ agent"] {
+            assert!(
+                !rows.iter().any(|r| r.trim() == header),
+                "a `{header}` header row:\n{text}"
+            );
+        }
+        assert!(
+            rows.iter().any(|r| r.starts_with("✻ Worked for 4s")),
+            "{text}"
+        );
+        assert!(!text.contains("change card"), "{text}");
+
+        // Control: the workbench still prints headers and the card affordance.
+        app.chat_first = false;
+        let (boxed, _) = render_rows(&app, 120, 24);
+        let boxed = boxed.join("\n");
+        assert!(boxed.contains("agent"), "{boxed}");
+        assert!(boxed.contains("change card"), "{boxed}");
+        assert!(!boxed.contains("Worked for"), "{boxed}");
+    }
+
+    /// P-019: the reply that ends a turn carries how long the turn ran, from
+    /// the event that found it running to the one that found it settled.
+    #[test]
+    fn a_turn_that_settles_records_its_running_time_on_its_reply() {
+        let mut app = chat_first_bound_app();
+        let start = std::time::Instant::now();
+        app.chat_streaming = true;
+        app.chat_messages
+            .push(crate::models::ChatMessage::streaming_assistant());
+        app.time_chat_turn(start);
+        assert_eq!(app.chat_turn_started, Some(start));
+        let last = app.chat_messages.len() - 1;
+        app.chat_messages[last].streaming = false;
+        app.chat_messages[last].content = "done".into();
+        app.chat_streaming = false;
+        app.time_chat_turn(start + std::time::Duration::from_secs(7));
+        assert_eq!(app.chat_turn_started, None);
+        assert_eq!(
+            app.chat_messages[last].worked_for,
+            Some(std::time::Duration::from_secs(7))
+        );
+        // A turn that ends on the owner's own line (a failed send) records
+        // nothing on anyone's reply.
+        app.chat_messages
+            .push(crate::models::ChatMessage::user("again"));
+        app.chat_streaming = true;
+        app.time_chat_turn(start);
+        app.chat_streaming = false;
+        app.time_chat_turn(start + std::time::Duration::from_secs(3));
+        assert_eq!(app.chat_messages.last().unwrap().worked_for, None);
+        assert_eq!(
+            app.chat_messages[last].worked_for,
+            Some(std::time::Duration::from_secs(7))
+        );
+    }
+
+    /// P-017: inline there is no title bar, so a running turn is stated on the
+    /// row directly above the composer, with the key that stops it.
+    #[test]
+    fn chat_first_states_a_running_turn_above_the_composer() {
+        let mut app = chat_first_bound_app();
+        app.chat_streaming = true;
+        let (rows, _) = render_rows(&app, 120, 24);
+        let text = rows.join("\n");
+        let running = rows
+            .iter()
+            .position(|r| r.contains("Thinking… (0s · Esc to interrupt)"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(rows[running + 1].trim_end().ends_with('─'), "{text}");
+        assert!(!text.contains("Agent Chat"), "{text}");
+    }
+
+    /// P-024: the working line moves and says what is happening, the way
+    /// Claude Code's does: elapsed time from the turn's start, roughly how much
+    /// has been written, and a starting phase that turns plain after 5s.
+    #[test]
+    fn chat_first_working_line_counts_time_and_output() {
+        let mut app = chat_first_bound_app();
+        app.chat_streaming = true;
+        let start = std::time::Instant::now();
+        app.chat_turn_started = Some(start);
+        app.chat_messages
+            .push(crate::models::ChatMessage::streaming_assistant());
+        let at = |secs| start + std::time::Duration::from_secs(secs);
+        let first = app.chat_working_line(at(3));
+        assert!(
+            first.contains("Thinking… (3s · Esc to interrupt)"),
+            "{first}"
+        );
+        app.chat_messages.last_mut().unwrap().content = "x".repeat(4_400);
+        let later = app.chat_working_line(at(75));
+        assert!(
+            later.contains("Working… (1m 15s · ↓ ~1.1k tokens · Esc to interrupt)"),
+            "{later}"
+        );
+        // The spinner frame advances with time, so consecutive ticks differ.
+        let frame = |line: String| line.chars().next().unwrap();
+        assert_ne!(
+            frame(app.chat_working_line(start + std::time::Duration::from_millis(250))),
+            frame(app.chat_working_line(start + std::time::Duration::from_millis(500)))
+        );
+        // Each idle tick repaints while the turn runs.
+        assert_eq!(
+            app.update(crate::event::Event::Tick),
+            crate::app::Action::Render
+        );
+    }
+
+    /// P-024 / P-023: a message sent while the engine launches says so, and
+    /// after 5s says plainly that it is still starting rather than going quiet.
+    #[test]
+    fn chat_first_working_line_names_a_slow_start() {
+        let mut app = chat_first_bound_app();
+        app.chat_streaming = true;
+        let start = std::time::Instant::now();
+        app.chat_turn_started = Some(start);
+        app.su_session = None;
+        app.su_pending_turn = Some(crate::app::PendingSuTurn {
+            command_id: "c1".into(),
+            content: "hi".into(),
+            draft: "hi".into(),
+            attachment_references: Vec::new(),
+            command: None,
+            uncertain: false,
+            error: None,
+            model: None,
+            approvals: None,
+        });
+        let at = |secs| start + std::time::Duration::from_secs(secs);
+        assert!(app
+            .chat_working_line(at(2))
+            .contains("Starting Claude… (2s"));
+        let slow = app.chat_working_line(at(6));
+        assert!(
+            slow.contains("Still starting Claude; your message will send when it is ready… (6s"),
+            "{slow}"
+        );
     }
 
     #[test]
@@ -9447,6 +10841,136 @@ mod tests {
         // The draft stays visible/editable — matches the app.rs Enter-key
         // contract that a refused turn is never silently discarded.
         assert!(text.contains("> hello"), "{text}");
+    }
+
+    /// pui-chat-first-ux-2026-09-28 P-020: while an edit's approval card is
+    /// open, its diff appears once (in the card, coloured), the transcript row
+    /// says it waits for an answer, and the card is headed by its question.
+    /// Once the card closes the row shows its diff again.
+    #[test]
+    fn an_open_edit_approval_shows_its_diff_once() {
+        use crate::models::{ChatMessage, ChatToolCall};
+
+        let mut edit = ChatMessage::assistant("");
+        edit.tools.push(ChatToolCall {
+            name: "Edit".into(),
+            id: Some("call-edit".into()),
+            needs_approval: false,
+            input: Some(serde_json::json!({
+                "file_path": "calc.js",
+                "old_string": "function add(a, b) {\n  return a + b;",
+                "new_string": "function add(a, b, c = 0) {\n  return a + b + c;",
+            })),
+            result: None,
+            outcome: ToolOutcome::Pending,
+        });
+        let mut app = App::new();
+        app.tab = Tab::Operator;
+        app.set_chat_history(
+            "c1".into(),
+            vec![ChatMessage::user("add a third arg"), edit],
+            false,
+            None,
+        );
+        let title = crate::tool_display::tool_display(
+            "Edit",
+            app.chat_messages[1].tools[0].input.as_ref(),
+            app.launch_cwd.as_deref(),
+        )
+        .title;
+        assert_eq!(title, "Update(calc.js)", "fixture title");
+        let before = render(&app, 110, 40);
+        assert!(
+            before.contains("return a + b + c;"),
+            "with no card the row shows its diff: {before}"
+        );
+
+        let snap = serde_json::json!({
+            "runId": "turn-1", "workspaceId": "ws", "version": 1,
+            "snapshot": { "openCards": [{
+                "correlationId": "corr-edit",
+                "prompt": "Allow Update(calc.js)?\nAdd 2 lines, remove 2 lines\n- function add(a, b) {\n-   return a + b;\n+ function add(a, b, c = 0) {\n+   return a + b + c;",
+                "details": "Raw arguments (Edit):\n{}",
+                "presentation": { "kind": "radio", "options": [
+                    { "id": "0", "label": "Approve" }, { "id": "1", "label": "Decline" }] },
+                "allowDecline": true, "createdAt": 1.0 }] }
+        })
+        .to_string();
+        app.card_state
+            .apply_snapshot(crate::card_view::SnapshotEnvelope::from_json(&snap).unwrap());
+        let open = render(&app, 110, 40);
+        assert_eq!(
+            open.matches("return a + b + c;").count(),
+            1,
+            "the diff appears once while the card is open: {open}"
+        );
+        assert!(open.contains("waiting for your answer"), "{open}");
+        assert!(open.contains("┌ Allow Update(calc.js)? "), "{open}");
+        assert_eq!(open.matches("Allow Update(calc.js)?").count(), 1, "{open}");
+        assert!(!open.contains("Needs your answer"), "{open}");
+
+        // A card about a DIFFERENT call leaves this row's diff in place.
+        let other = snap.replace("Allow Update(calc.js)?", "Allow Update(other.js)?");
+        app.card_state = crate::card_view::CardState::new();
+        app.card_state
+            .apply_snapshot(crate::card_view::SnapshotEnvelope::from_json(&other).unwrap());
+        let unrelated = render(&app, 110, 40);
+        assert_eq!(
+            unrelated.matches("return a + b + c;").count(),
+            2,
+            "an unrelated card does not hide this row's diff: {unrelated}"
+        );
+        assert!(
+            !unrelated.contains("waiting for your answer"),
+            "{unrelated}"
+        );
+    }
+
+    /// pui-chat-first-ux-2026-09-28 P-025: a failed tool row reads like stock
+    /// Claude/Codex: a `✗` on the row and the output on its `⎿` line. It used
+    /// to add a fixed "SU-session tool failed" line under every failure, which
+    /// is internal jargon and says nothing the `✗` does not. A reason the
+    /// engine actually gave (non-empty) still renders.
+    #[test]
+    fn failed_tool_row_shows_its_output_and_no_fixed_failure_sentence() {
+        use crate::models::{ChatMessage, ChatToolCall};
+
+        let failed = |outcome: ToolOutcome| {
+            let mut calls = ChatMessage::assistant("");
+            calls.tools.push(ChatToolCall {
+                name: "Bash".into(),
+                id: Some("call-1".into()),
+                needs_approval: false,
+                input: Some(serde_json::json!({ "command": "git status --short" })),
+                result: Some(serde_json::json!("fatal: not a git repository")),
+                outcome,
+            });
+            let mut app = App::new();
+            app.tab = Tab::Operator;
+            app.set_chat_history(
+                "c1".into(),
+                vec![ChatMessage::user("status?"), calls],
+                false,
+                None,
+            );
+            render(&app, 100, 30)
+        };
+
+        // Cells from the row to its `⎿` line: a blank reason row would add a
+        // whole frame row here (wrap_text("") yields one empty line).
+        let gap = |text: &str| {
+            let row = text.find("⚙ Bash(git status --short)").expect(text);
+            let result = text.find("⎿ fatal: not a git repository").expect(text);
+            text[row..result].chars().count()
+        };
+        let text = failed(ToolOutcome::Failed(String::new()));
+        assert!(text.contains("✗"), "{text}");
+        assert!(!text.contains("SU-session"), "{text}");
+        assert_eq!(gap(&text), gap(&failed(ToolOutcome::Ok)), "{text}");
+
+        let text = failed(ToolOutcome::Failed("exit status 128".into()));
+        assert!(text.contains("exit status 128"), "{text}");
+        assert!(text.contains("⎿ fatal: not a git repository"), "{text}");
     }
 
     /// pui-chat-first-ux-2026-09-28 P-013: the tool rows render above the
@@ -9711,6 +11235,8 @@ mod tests {
             command: None,
             uncertain: false,
             error: None,
+            model: None,
+            approvals: None,
         });
         app.chat_streaming = true;
         let text = render(&app, 100, 16);
@@ -9735,6 +11261,8 @@ mod tests {
             command: None,
             uncertain: false,
             error: None,
+            model: None,
+            approvals: None,
         });
         app.chat_streaming = true;
         let text = render(&app, 100, 16);
@@ -9891,16 +11419,16 @@ mod tests {
         let mut tc = ChatToolCall::plain("Bash".into());
         tc.outcome = ToolOutcome::Ok;
         tc.result = Some(serde_json::json!("r1\nr2\nr3\nr4\nr5"));
-        let collapsed = text(tool_detail_lines(&tc, 80, false));
+        // P-025: a finished call collapses to ONE line: the first output line
+        // and how many more there are.
+        let collapsed = tool_detail_lines(&tc, 80, false);
+        assert_eq!(collapsed.len(), 1, "{}", text(collapsed.clone()));
+        let collapsed = text(collapsed);
         assert!(
-            collapsed.contains("⎿ r1") && collapsed.contains("r3"),
+            collapsed.contains("⎿ r1 … +4 lines  (Ctrl+R to expand)"),
             "{collapsed}"
         );
-        assert!(!collapsed.contains("r4"), "{collapsed}");
-        assert!(
-            collapsed.contains("+2 lines (Ctrl+R to expand)"),
-            "{collapsed}"
-        );
+        assert!(!collapsed.contains("r2"), "{collapsed}");
         let expanded = text(tool_detail_lines(&tc, 80, true));
         assert!(
             expanded.contains("r5") && !expanded.contains("Ctrl+R"),
@@ -9917,15 +11445,15 @@ mod tests {
         tc.result = Some(serde_json::json!(
             "     1\tconst test = 1;\n\u{1b}[32mok\u{1b}[0m"
         ));
-        let read = text(tool_detail_lines(&tc, 80, false));
-        assert!(
-            read.contains("⎿      1  const test = 1;") && read.contains("      ok"),
-            "{read}"
-        );
-        assert!(
-            !read.chars().any(|c| c.is_control() && c != '\n'),
-            "{read:?}"
-        );
+        for expanded in [false, true] {
+            let read = text(tool_detail_lines(&tc, 80, expanded));
+            assert!(read.contains("const test = 1;"), "{read}");
+            assert_eq!(read.contains("ok"), expanded, "{read}");
+            assert!(
+                !read.chars().any(|c| c.is_control() && c != '\n'),
+                "{read:?}"
+            );
+        }
         let mut tabbed = ChatToolCall::plain("Edit".into());
         tabbed.input = Some(serde_json::json!({
             "file_path": "a.go", "old_string": "\treturn 1", "new_string": "\treturn 2"
@@ -9945,6 +11473,147 @@ mod tests {
             diff.contains("- let a = 1;") && diff.contains("+ let a = 2;"),
             "{diff}"
         );
+    }
+
+    /// pui-chat-first-ux P-025: every engine's finished call collapses to one
+    /// `⎿` line, an edit says what it changed above its diff, and Codex items
+    /// (`commandExecution`, `fileChange`, `mcpToolCall`) render like Claude's.
+    #[test]
+    fn p025_finished_tool_calls_collapse_to_one_result_line_for_every_engine() {
+        use crate::models::{ChatToolCall, ToolOutcome};
+        use serde_json::json;
+        let text = |lines: Vec<Line<'static>>| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let done = |name: &str, input: serde_json::Value, result: serde_json::Value| {
+            let mut tc = ChatToolCall::plain(name.into());
+            tc.input = Some(input);
+            tc.result = Some(result);
+            tc.outcome = ToolOutcome::Ok;
+            tc
+        };
+
+        // Claude Read: the line count, not the file's first line.
+        let read = done(
+            "Read",
+            json!({ "file_path": "/w/calc.js" }),
+            json!("     1\tconst a = 1;\n     2\tconst b = 2;\n     3\tmodule.exports = { a, b };"),
+        );
+        assert_eq!(
+            text(tool_detail_lines(&read, 80, false)),
+            ["    ⎿ Read 3 lines  (Ctrl+R to expand)"]
+        );
+
+        // OMP read: the same row and result line.
+        let omp = done(
+            "read",
+            json!({ "path": "/w/calc.js" }),
+            json!({ "content": [{ "type": "text", "text": "1\tconst a = 1;\n2\tconst b = 2;" }] }),
+        );
+        assert_eq!(
+            text(tool_detail_lines(&omp, 80, false)),
+            ["    ⎿ Read 2 lines  (Ctrl+R to expand)"]
+        );
+
+        // Codex command: the whole item comes back; its output is `aggregatedOutput`.
+        let item = json!({
+            "type": "commandExecution", "id": "c1", "command": "/bin/bash -lc 'rg --files'",
+            "aggregatedOutput": "calc.js\ncalc.test.js\n", "exitCode": 0, "status": "completed"
+        });
+        let command = done("commandExecution", item.clone(), item);
+        assert_eq!(
+            text(tool_detail_lines(&command, 80, false)),
+            ["    ⎿ calc.js … +1 line  (Ctrl+R to expand)"]
+        );
+        let expanded = text(tool_detail_lines(&command, 80, true)).join("\n");
+        assert!(expanded.contains("calc.test.js"), "{expanded}");
+
+        // Codex MCP: the result's text parts sit under `result.content`.
+        let mcp = json!({
+            "type": "mcpToolCall", "id": "m1", "server": "papercusp-su", "tool": "plans_get",
+            "arguments": { "slug": "p" }, "status": "completed",
+            "result": { "content": [{ "type": "text", "text": "plan p: 3 items" }] }
+        });
+        let mcp = done("plans_get", mcp.clone(), mcp);
+        assert_eq!(
+            text(tool_detail_lines(&mcp, 80, false)),
+            ["    ⎿ plan p: 3 items"]
+        );
+
+        // Claude edit: once it has run, the change in one line above the diff.
+        let mut edit = ChatToolCall::plain("Edit".into());
+        edit.input = Some(json!({
+            "file_path": "calc.js", "old_string": "a + b", "new_string": "a - b"
+        }));
+        let pending = text(tool_detail_lines(&edit, 80, false));
+        assert!(!pending.iter().any(|l| l.contains("⎿")), "{pending:?}");
+        edit.outcome = ToolOutcome::Ok;
+        let ended = text(tool_detail_lines(&edit, 80, false));
+        assert_eq!(ended[0], "    ⎿ Added 1 line, removed 1 line", "{ended:?}");
+        assert!(ended.iter().any(|l| l.contains("+ a - b")), "{ended:?}");
+
+        // Codex edit: a `fileChange` item carries a unified diff per file.
+        let patch = json!({
+            "type": "fileChange", "id": "f1", "status": "completed",
+            "changes": [{
+                "path": "/w/calc.js", "kind": { "type": "update", "move_path": null },
+                "diff": "@@ -1,2 +1,2 @@\n-const a = 1;\n+const a = 2;\n keep\n+added\n"
+            }]
+        });
+        let patch = done("fileChange", patch.clone(), patch);
+        let lines = text(tool_detail_lines(&patch, 80, false));
+        assert_eq!(lines[0], "    ⎿ Added 2 lines, removed 1 line", "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("- const a = 1;"))
+                && lines.iter().any(|l| l.contains("+ const a = 2;"))
+                && !lines.iter().any(|l| l.contains("@@")),
+            "{lines:?}"
+        );
+    }
+
+    /// P-025: reasoning is one dim line (newest heading while streaming, the
+    /// first once done) and the full text only when expanded.
+    #[test]
+    fn p025_reasoning_is_one_dim_line_until_expanded() {
+        let text = |lines: Vec<Line<'static>>| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let codex = "**Reading calc.js**\n\nI will open the file.\n\n**Planning the fix**\n\nSwap the sign.";
+        assert_eq!(
+            text(reasoning_lines(codex, true, false, 80)),
+            ["  ∴ Planning the fix"]
+        );
+        assert_eq!(
+            text(reasoning_lines(codex, false, false, 80)),
+            ["  ∴ Reading calc.js"]
+        );
+        // Claude thinking has no headings: its first line, cut to the width.
+        let claude = "The user wants the sum fixed. I should read calc.js first and then edit it.\nSecond thought.";
+        let one = text(reasoning_lines(claude, false, false, 40));
+        assert_eq!(one.len(), 1, "{one:?}");
+        assert!(
+            one[0].starts_with("  ∴ The user wants") && one[0].chars().count() <= 40,
+            "{one:?}"
+        );
+        let full = text(reasoning_lines(claude, false, true, 80)).join("\n");
+        assert!(full.contains("Second thought."), "{full}");
+        assert!(reasoning_lines("  \n ", true, false, 80).is_empty());
     }
 
     #[test]
@@ -10151,9 +11820,19 @@ mod tests {
         assert!(text.contains("Approve the deploy?"), "card prompt renders");
         assert!(text.contains("1. Approve"), "option 1 renders numbered");
         assert!(text.contains("2. Reject"), "option 2 renders numbered");
+        // P-020: the question heads the card; no status banner above it.
         assert!(
-            text.contains("Needs your answer"),
-            "card block title renders"
+            text.contains("┌ Approve the deploy? "),
+            "card border carries the question: {text}"
+        );
+        assert_eq!(
+            text.matches("Approve the deploy?").count(),
+            1,
+            "the promoted question is not repeated in the body: {text}"
+        );
+        assert!(
+            !text.contains("Needs your answer"),
+            "no status banner title (P-020): {text}"
         );
         assert!(
             !text.contains("Operator asks"),
@@ -10209,6 +11888,164 @@ mod tests {
         );
         assert!(text.contains("old_string"));
         assert!(text.contains("Ctrl+R hide details"));
+    }
+
+    /// pui-chat-first-ux P-028 (WI-10006466): a long command must not push the
+    /// question and the answers out of the card strip. Observed in the Codex
+    /// leg (/tmp/pui-p028g-codex): a 20-line `python3 - <<'PY'` script filled
+    /// the strip, so '1. Yes' was never on screen and nothing could answer it.
+    #[test]
+    fn approval_card_keeps_answers_visible_under_a_long_command() {
+        let script: Vec<String> = (1..=40).map(|i| format!("line_{i} = {i}")).collect();
+        let mut body = vec!["$ /bin/bash -lc \"python3 - <<'PY'".to_string()];
+        body.extend(script.iter().cloned());
+        body.push("PY\"".to_string());
+        let mut app = App::new();
+        app.tab = Tab::Operator;
+        let snap = serde_json::json!({
+            "runId": "run-1",
+            "workspaceId": "ws-1",
+            "version": 1,
+            "snapshot": { "openCards": [{
+                "correlationId": "corr-1",
+                "prompt": "Do you want to run this command?",
+                "approval": { "title": "Bash(python3 - <<'PY' …)",
+                    "question": "Do you want to run this command?", "body": body },
+                "details": "Raw arguments (Bash):\n{\"command\": \"python3 - <<'PY'\"}",
+                "presentation": { "kind": "radio", "options": [
+                    { "id": "yes", "label": "Yes" },
+                    { "id": "always", "label": "Yes, and don't ask again for this command this session" },
+                    { "id": "no", "label": "No, and tell Codex what to do instead" }] },
+                "allowDecline": true,
+                "createdAt": 1.0
+            }]}
+        })
+        .to_string();
+        app.card_state
+            .apply_snapshot(crate::card_view::SnapshotEnvelope::from_json(&snap).unwrap());
+        for expanded in [false, true] {
+            app.chat_tools_expanded = expanded;
+            let text = render(&app, 120, 40);
+            assert!(text.contains("Do you want to run this command?"), "question shown: {text}");
+            assert!(text.contains("1. Yes"), "first answer shown: {text}");
+            assert!(text.contains("3. No, and tell Codex"), "last answer shown: {text}");
+            assert!(text.contains("Enter to select"), "footer shown: {text}");
+            assert!(text.contains("line_1 = 1"), "the command's head is kept: {text}");
+            assert!(!text.contains("line_40 = 40"), "the command is cut short: {text}");
+            assert!(text.contains(" lines"), "a … +N lines row says so: {text}");
+            assert_eq!(
+                text.contains("(Ctrl+R to expand)"),
+                !expanded,
+                "the expand hint shows only while collapsed: {text}"
+            );
+        }
+        // A short change is not cut, and gets no cut-short row.
+        let short = tool_approval_lines_for(&["- a", "+ b"], 120, 40);
+        assert!(short.contains("+ b") && !short.contains(" lines (Ctrl+R"), "{short}");
+    }
+
+    /// pui-chat-first-ux P-028 (WI-10006466): the card from the final Codex
+    /// frame (/tmp/pui-p028j-codex/13-edit-approval.txt) — a four-line title,
+    /// indented Python with two blank lines and a line longer than the strip —
+    /// lost its 'Enter to select' footer at 120×40. Same card, both layouts.
+    #[test]
+    fn approval_card_keeps_its_footer_under_a_multi_line_title() {
+        let long = "    request = urllib.request.Request('http://localhost:3070/api/mcp?superuser=1', \
+                    data=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': {}}).encode(), \
+                    headers={'Authorization': 'Bearer ' + token_path.read_text().strip(), \
+                    'Content-Type': 'application/json'})";
+        let mut body: Vec<String> = [
+            "$ /bin/bash -lc \"python3 - <<'PY'",
+            "import json",
+            "import pathlib",
+            "import urllib.request",
+            "",
+            "",
+            "token_path = pathlib.Path('~/.papercusp/superuser-token').expanduser()",
+            "if not token_path.is_file():",
+            "    print('Papercusp credentials are unavailable in this environment.')",
+            "else:",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        body.push(long.to_string());
+        for i in 0..8 {
+            body.push(format!("    print(json.dumps(item_{i}, indent=2))"));
+        }
+        body.push("PY\"".to_string());
+        let snap = serde_json::json!({
+            "runId": "run-1",
+            "workspaceId": "ws-1",
+            "version": 1,
+            "snapshot": { "openCards": [{
+                "correlationId": "corr-1",
+                "prompt": "Do you want to run this command?",
+                "approval": {
+                    "title": "Bash(/bin/bash -lc \"python3 - <<'PY'\nimport json\nimport pathlib\n…)",
+                    "question": "Do you want to run this command?", "body": body },
+                "details": "Raw arguments (Bash):\n{\"command\": \"python3 - <<'PY'\"}",
+                "presentation": { "kind": "radio", "options": [
+                    { "id": "yes", "label": "Yes" },
+                    { "id": "always", "label": "Yes, and don't ask again for this command this session" },
+                    { "id": "no", "label": "No, and tell Codex what to do instead" }] },
+                "allowDecline": true,
+                "createdAt": 1.0
+            }]}
+        })
+        .to_string();
+        let docked = {
+            let mut app = App::new();
+            app.tab = Tab::Operator;
+            app
+        };
+        for (layout, mut app) in [("docked", docked), ("chat-first", chat_first_bound_app())] {
+            app.card_state
+                .apply_snapshot(crate::card_view::SnapshotEnvelope::from_json(&snap).unwrap());
+            for (w, h) in [(120, 40), (120, 41), (100, 30), (80, 24)] {
+                let text = render(&app, w, h);
+                let rows: Vec<String> = text
+                    .chars()
+                    .collect::<Vec<_>>()
+                    .chunks(w as usize)
+                    .map(|r| r.iter().collect::<String>().trim_end().to_string())
+                    .collect();
+                let rows = rows.join("\n");
+                assert!(text.contains("3. No, and tell Codex"), "{layout} {w}x{h} last answer:\n{rows}");
+                assert!(text.contains("Enter to select"), "{layout} {w}x{h} footer:\n{rows}");
+                // (Shorter strips cut the change before this line.)
+                assert!(
+                    h < 40 || text.contains("     print('Papercusp credentials"),
+                    "{layout} {w}x{h} the code keeps its indentation:\n{rows}"
+                );
+            }
+        }
+    }
+
+    /// Render a D-028 approval card with `body` and return the frame text.
+    fn tool_approval_lines_for(body: &[&str], w: u16, h: u16) -> String {
+        let mut app = App::new();
+        app.tab = Tab::Operator;
+        let snap = serde_json::json!({
+            "runId": "run-1",
+            "workspaceId": "ws-1",
+            "version": 1,
+            "snapshot": { "openCards": [{
+                "correlationId": "corr-1",
+                "prompt": "Do you want to make this edit to calc.js?",
+                "approval": { "title": "Update(calc.js)",
+                    "question": "Do you want to make this edit to calc.js?", "body": body },
+                "presentation": { "kind": "radio", "options": [
+                    { "id": "yes", "label": "Yes" },
+                    { "id": "no", "label": "No" }] },
+                "allowDecline": true,
+                "createdAt": 1.0
+            }]}
+        })
+        .to_string();
+        app.card_state
+            .apply_snapshot(crate::card_view::SnapshotEnvelope::from_json(&snap).unwrap());
+        render(&app, w, h)
     }
 
     #[test]

@@ -51,6 +51,14 @@ export default defineTool({
           'live-dependency, or OMITTED → LEADER TRIAGE (an operational block a leader clears, not owner work). ' +
           'Only pass it when a human genuinely must act.',
       ),
+    defaultIfUnanswered: z
+      .string()
+      .max(500)
+      .optional()
+      .describe(
+        'REQUIRED with an owner-queue blockerCapability: what happens if the owner never answers ' +
+          '(e.g. "stays parked; weekly digest re-surfaces it"). Refused without it.',
+      ),
     confidence: z
       .number()
       .min(0)
@@ -69,6 +77,7 @@ export default defineTool({
       testsRun: args.testsRun,
       commit: args.commit,
       blockerCapability: args.blockerCapability,
+      defaultIfUnanswered: args.defaultIfUnanswered,
       by: id.ownerId,
     });
     // Calibration bet at the natural moment (frontier P-041 / FB-13): claiming

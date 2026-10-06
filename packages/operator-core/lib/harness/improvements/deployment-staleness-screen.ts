@@ -44,13 +44,13 @@
  * unknown rather than being silently converted into a clean bill for the taxonomy.
  */
 
-import { projectedToolSourceFile } from '@papercusp/tooldef';
 import { pinModuleState } from '@papercusp/module-singleton';
 
 import { getBuildInfo } from '../../build-info';
 import { gitReadForRepo } from '../../candidate-contains';
 import { realGit } from '../../git-pipeline-position';
 import { integrationRoot } from '../../release-deploy-launch';
+import { resolveToolSourceFile } from '../../tool-source-file';
 import {
   toolSchemaStaleness,
   type StalenessUnknownReason,
@@ -173,7 +173,9 @@ export async function deploymentStalenessScreen(
     }
 
     const verdict = await toolSchemaStaleness(toolName, {
-      sourceFileFor: deps.sourceFileFor ?? projectedToolSourceFile,
+      // Not tooldef's stack-only lookup: this screen runs in the BUNDLED bg-host, where
+      // that lookup is null for every tool (P-002 / EI-25176539351759672).
+      sourceFileFor: deps.sourceFileFor ?? resolveToolSourceFile,
       deployedSha: deployedShaFn,
       repoRoot,
       git: deps.git ?? gitReadForRepo(realGit, repoRoot),

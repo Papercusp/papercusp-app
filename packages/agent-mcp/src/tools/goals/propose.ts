@@ -38,6 +38,7 @@
 import { z } from 'zod';
 import { defineTool } from '@papercusp/tooldef';
 import { killCriterionProblem } from '@papercusp/operator-core/lib/goals/kill-criterion';
+import { unmeasuredTripwireAdvisories } from '@papercusp/operator-core/lib/goals/tripwire-refresh';
 import { SU_WRITE_ROLES } from '../../role-config';
 import { TripwireSchema } from './create';
 
@@ -167,6 +168,9 @@ export default defineTool({
     // the return is what the AGENT needs, which is different: confirmation
     // that the proposal is now in front of the owner, and an unambiguous
     // instruction not to also create the goal itself.
+    // WI-10004424: the card's button calls goals:create, which sets no budget
+    // window, so judge the proposed tripwires against a lifetime window.
+    const tripwireAdvisories = unmeasuredTripwireAdvisories(args.tripwires, { budgetWindowSec: null });
     return {
       data: {
         presented: true,
@@ -177,6 +181,7 @@ export default defineTool({
           relationship: args.relationship,
           tripwires: args.tripwires ?? null,
         },
+        ...(tripwireAdvisories.length ? { tripwire_advisories: tripwireAdvisories } : {}),
         next:
           'The owner now has an editable confirm card; its button calls goals:create with whatever they land on, so do NOT call goals:create yourself. ' +
           'They may edit any field — treat THEIR values as final, not yours. ' +

@@ -680,6 +680,33 @@ else
   bad "reasoned platform-smoke hardware override was rejected"
 fi
 
+# The incremental publisher must report the outcome produced by the runner,
+# rather than turning every successful return (including an override) into a
+# verifier PASS.
+if grep -Fq 'release_artifacts_smoke_outcome_message "$PLATFORM" "$RELEASE_ARTIFACTS_SMOKE_OUTCOME"' \
+     "$DIR/../publish-platform-incremental.sh"; then
+  ok "incremental publisher reports the shared platform-smoke outcome"
+else
+  bad "incremental publisher bypasses the shared platform-smoke outcome"
+fi
+OVERRIDE_REPORT_OUTPUT="$(
+  export PAPERCUSP_SKIP_PLATFORM_SMOKE=1
+  export PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON='self-test: no hardware'
+  if release_artifacts_run_smoke_receipts \
+       "$TAG_SMOKE-override" "$VER" "$SMOKE_GUI" "$SMOKE_SERVER"; then
+    release_artifacts_smoke_outcome_message windows "$RELEASE_ARTIFACTS_SMOKE_OUTCOME"
+  fi
+  2>&1
+)"
+OVERRIDE_REPORT_RC=$?
+if [[ "$OVERRIDE_REPORT_RC" -eq 0 \
+      && "$OVERRIDE_REPORT_OUTPUT" == *"OVERRIDDEN (no verification)"* \
+      && "$OVERRIDE_REPORT_OUTPUT" != *"verifier passed"* ]]; then
+  ok "override run reports no verification and never claims the verifier passed"
+else
+  bad "override run produced a false PASS or no override status (rc=$OVERRIDE_REPORT_RC output=$OVERRIDE_REPORT_OUTPUT)"
+fi
+
 # The Windows Server artifact published to users is a zip assembled AFTER the
 # VM exercises its Inno stub+slices. Its container bytes need not pre-exist in
 # the receipt, but every archive member must match an exercised, provenance-

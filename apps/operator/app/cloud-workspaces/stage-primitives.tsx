@@ -33,10 +33,13 @@ type FocusTargetResolver = () => HTMLElement | null | undefined;
  * Cloud Workspaces renders panels and menus conditionally, so a close action
  * can race a render that removes the element that held focus. Keeping this
  * guard in one place prevents every caller from accidentally focusing a stale
- * node (or throwing during server rendering) and preserves the user's scroll
- * position when focus is restored.
+ * node (or throwing during server rendering). Restoration preserves scroll by
+ * default; opening a surface can opt into revealing its newly mounted target.
  */
-export function focusSafely(target: HTMLElement | null | undefined): boolean {
+export function focusSafely(
+  target: HTMLElement | null | undefined,
+  options: FocusOptions = { preventScroll: true },
+): boolean {
   if (
     !target ||
     typeof document === "undefined" ||
@@ -45,7 +48,7 @@ export function focusSafely(target: HTMLElement | null | undefined): boolean {
     return false;
   }
 
-  target.focus({ preventScroll: true });
+  target.focus(options);
   return document.activeElement === target;
 }
 
@@ -110,12 +113,49 @@ export function useFocusLifecycle({
   useEffect(() => {
     const wasOpen = previousOpenRef.current;
     previousOpenRef.current = open;
-    if (open === wasOpen) return;
+    if (!open && !wasOpen) return;
 
     const resolve = open
       ? resolversRef.current.onOpenFocus
       : resolversRef.current.onCloseFocus;
-    if (resolve) focusSafely(resolve());
+    // Newly mounted forms/menus may be outside the scrollport. Reveal opening
+    // focus, but keep the user's scroll position when returning to a trigger.
+    const target = resolve?.();
+    if (open !== wasOpen && !focusSafely(target, { preventScroll: !open })) return;
+    if (!open || !target || document.activeElement !== target) return;
+
+    // Docked rails can reserve width after this commit, wrapping the provider
+    // rows above a newly focused field. Keep that field visible as its surface
+    // resizes, only while it still holds focus. Scrolling alone never triggers
+    // this, so the user can scroll away or move to another control freely.
+    let frame: number | undefined;
+    let observer: ResizeObserver | undefined;
+    let stopped = false;
+    const stop = () => {
+      stopped = true;
+      observer?.disconnect();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      window.removeEventListener("resize", revealAfterLayout);
+      target.removeEventListener("blur", stop);
+    };
+    const revealAfterLayout = () => {
+      if (stopped) return;
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        if (!target.isConnected || document.activeElement !== target) { stop(); return; }
+        const rect = target.getBoundingClientRect();
+        if (rect.top < 0 || rect.bottom > window.innerHeight || rect.left < 0 || rect.right > window.innerWidth)
+          target.scrollIntoView({ behavior: "instant", block: "nearest", inline: "nearest" });
+      });
+    };
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(revealAfterLayout);
+      observer.observe(target.closest("form, [role=menu], [role=dialog]") ?? target.parentElement ?? target);
+    }
+    window.addEventListener("resize", revealAfterLayout);
+    target.addEventListener("blur", stop, { once: true });
+    return stop;
   }, [open]);
 }
 

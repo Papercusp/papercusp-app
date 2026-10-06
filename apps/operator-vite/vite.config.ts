@@ -3,7 +3,11 @@ import react from '@vitejs/plugin-react';
 import { tanstackRouter } from '@tanstack/router-plugin/vite';
 import { resolve } from 'node:path';
 import { isDesktopHmrEnabled, NO_VITE_CLIENT_BODY, shouldServeNoopViteClient } from './dev-mode';
-import { devDistPrunePlugin, shouldRetainDistChunks } from './dev-dist-prune';
+import {
+  devDistPrunePlugin,
+  distDocsSwapLeftoverPrunePlugin,
+  shouldRetainDistChunks,
+} from './dev-dist-prune';
 import { distAtomicWritesPlugin } from './dist-atomic-writes';
 import { distWipeGuardPlugin } from './dist-wipe-guard';
 import { flagsBootstrapPlugin } from './flags-bootstrap';
@@ -278,7 +282,7 @@ export default defineConfig({
         //
         // Rollup's default `[hash]` alphabet is base64url, which includes `-`
         // and `_`. Both are regex WORD-BOUNDARY characters, so a hash like
-        // `owner-w_hC` puts `\b`-delimited tokens inside a filename that nothing
+        // `aVI-w_hC` puts `\b`-delimited tokens inside a filename that nothing
         // semantic ever produced. The release identity audit
         // (papercusp-desktop/bin/audit-release-bundle.py) word-boundaries short
         // owner-name literals precisely so it does not fire on substrings —
@@ -417,6 +421,10 @@ export default defineConfig({
     // same-dist live watcher and fails open otherwise, so it never wedges the
     // deploy pipeline. See dist-wipe-guard.ts.
     ...(retainDistChunks ? [devDistPrunePlugin()] : [distWipeGuardPlugin({ outDir: finalOutDir })]),
+    // WI-10004327: vite copies public/ wholesale, including operator-docs'
+    // transient docs.old.<pid> / docs.tmp.<pid> swap dirs (~350 MB each), and a
+    // retain-regime dist never drops them. Prune them after every build.
+    distDocsSwapLeftoverPrunePlugin(),
     // Retention stops rebuilds DELETING old chunks; this stops them CORRUPTING
     // current ones: an in-place rewrite of a same-hash asset is a non-atomic
     // truncate+write, and a webview fetching that file mid-write reads a

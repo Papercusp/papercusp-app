@@ -32,7 +32,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { parsePlan } from '@papercusp/plan-parser';
 import { activeWorkspaceId } from './workspace-registry';
 import { runWithWorkspaceIfConcrete } from './workspace-als';
-import type { ServingRuntimeId } from './serving-runtimes';
+import type { EvidenceRuntimeId } from './serving-runtimes';
 import {
   normalizeRequirementSections,
   type RequirementIntent,
@@ -61,6 +61,7 @@ import {
 import { isActivationGateRefusalValue } from './agent-tools/plans/plan-activation-gate';
 import {
   assertCriterionCheckPathsResolve,
+  normalizeCriterionProbeChecks,
   subjectPlanAllowsPlannedPaths,
   type CriterionCheckPathValidation,
 } from './rubrics-criterion-checks';
@@ -70,6 +71,7 @@ import {
 } from './rubrics-citation-checks';
 import { acceptanceBarContractGaps } from './acceptance-bar-contract-completeness';
 import { classifyAmendmentAdditivity } from './acceptance-bar-amendment-additivity';
+import { diffAmendedCriteriaAgainstRequirements } from './acceptance-bar-amendment-requirements-drift';
 import { assertRubricRatingVocabulary } from './rubric-rating-vocabulary';
 
 // Structured criterion grading-window (EI-12146): schema + the pure resolver live in
@@ -88,6 +90,7 @@ import {
   withAcceptanceBarAmendmentTransaction,
   acceptanceBarAmendmentKey,
   synchronizeAcceptanceBarRevision,
+  validateAcceptanceBarRevisionProjectionPreview,
   carryUnchangedBarEvidenceBindings,
   shouldCarryBarEvidence,
   partitionAmendmentProof,
@@ -110,10 +113,12 @@ import { setFrontmatterScalar } from './agent-tools/plans/transfer-owner';
 import { deriveIndexFromContent } from './agent-tools/plans/source';
 import { writePlanIndexRows } from './agent-tools/plans/plan-index-rows';
 import { summarizeForcedPast } from './agent-tools/plans/forced-past-stamp';
-import { recordPlanRevision } from './agent-tools/plans/revisions';
+import { recordPlanRevisionInTransaction, type PlanRevisionSql } from './agent-tools/plans/revisions';
 import {
+  applyPlanRevisionSnapshotBackfill,
   applyPlanRevisionSnapshotRepair,
   readPlanRevisionRepairTarget,
+  type PlanRevisionSnapshotBackfillPlan,
   type PlanRevisionRepairScope,
   type PlanRevisionSnapshotRepairSpec,
 } from './agent-tools/plans/revisions-repair';
@@ -199,7 +204,7 @@ export interface RubricCriterion {
   evidencePlane?: AcceptanceEvidencePlane;
   /** deployed/live BARs: the runtime whose build the evidence must be measured on
    * (acceptance-runtime-plane P-002). Absent ⇒ inferred + flagged, never :3070 by default. */
-  evidenceRuntime?: ServingRuntimeId;
+  evidenceRuntime?: EvidenceRuntimeId;
   requiredTestLayers?: string[];
   /** Ratings that satisfy this BAR. Empty/absent remains legacy/unbound. */
   passRatings?: string[];
@@ -572,7 +577,7 @@ export function planRowToRubric(row: RubricPlanRow, delegatedClassRevision?: num
         mandatory?: boolean;
         requiredScope?: string[];
         evidencePlane?: AcceptanceEvidencePlane;
-        evidenceRuntime?: ServingRuntimeId;
+        evidenceRuntime?: EvidenceRuntimeId;
         passRatings?: string[];
         coversBarKeys?: string[];
         barProvenance?: AcceptanceBarProvenance;
@@ -1359,6 +1364,19 @@ async function getRubricAtRevision(rubricId: string, revision: number): Promise<
 /** Fetch one rubric in full by its slug id — ANY kind: an explicit id is an explicit
  *  opt-in, so the shared grading path resolves acceptance rubrics through the same seam
  *  standards use (plan D-010). Returns null when no rubric carries that id. */
+/**
+ * Resolve only the existing rubric plan row. Unlike getRubric, this deliberately never
+ * falls through to loadAllRubrics, whose first-party lazy seed may write plan rows.
+ * Use it from scorecard reads and preflights that must remain replay-safe. The direct
+ * lookup and delegated-class hydration below are SELECT-only; missing, malformed, or
+ * inaccessible rows return null without attempting a seed/reclaim.
+ */
+export async function getRubricWithoutSeeding(rubricId: string): Promise<Rubric | null> {
+  const direct = await readRubricPlanRowById(rubricId);
+  if (direct.kind !== 'found') return null;
+  return (await mapRubricPlanRows([direct.row]))[0] ?? null;
+}
+
 export async function getRubric(rubricId: string, revision?: number): Promise<Rubric | null> {
   if (revision !== undefined) return getRubricAtRevision(rubricId, revision);
   // Explicit id-addressed reads are the hot path for scorecard/audit callers.
@@ -2088,6 +2106,7 @@ export function normalizeAcceptanceRubricProposal(
   ratingScale: string[];
   compatibility?: RubricCompatibilityAudit;
 } {
+  criteria = normalizeCriterionProbeChecks(criteria);
   if ((kind ?? 'standard') !== 'acceptance') {
     return { criteria, ratingScale: [...ratingScale] };
   }
@@ -2653,21 +2672,7 @@ export function preserveRubricPlanBody(
   return bumpUpdatedDate(body, opts.today ?? new Date());
 }
 
-/**
- * EI-10443 audit trail: build the `withPlanLock` afterWrite that appends ONE
- * `plan_revisions` row for a rubric propose/ratify write. The rubric write path went
- * through withPlanLock with NO afterWrite, so the plan revision spine had ZERO rows for
- * every rubric plan (`plan_slug='pot-coordination-health'` returned 0 revisions) — a
- * destructive rubric write (e.g. the loss-guard strip that filed this bug) left no audit
- * trail and could be neither detected nor recovered via `plans:revisions`. Wiring this in
- * gives rubric writes the SAME revision spine every other plans:* write already records.
- *
- * `by` is the acting identity (the proposer/ratifier ownerId the MCP handler resolves and
- * threads through); when absent the row is attributed to a stable system actor so the audit
- * row still lands (auditability > attribution precision). Best-effort by construction —
- * `recordPlanRevision` never throws, so this can never fail the rubric write (it runs
- * post-commit, and withPlanLock awaits it).
- */
+/** Strictly capture a rubric write's immutable revision inside its plan transaction. */
 export function formatRubricRevisionSnapshot(
   writtenBody: string,
   templateData: unknown,
@@ -2709,12 +2714,14 @@ export interface LegacyRubricRevisionRepairResult {
   revisionsToRepair: number;
   revisionsRepaired: number;
   currentRevision?: number;
+  revisionSeq?: number;
   reason?: string;
 }
 
 export interface PreparedLegacyRubricRevisionRepair {
   result: LegacyRubricRevisionRepairResult;
   spec?: PlanRevisionSnapshotRepairSpec;
+  backfillSpec?: PlanRevisionSnapshotBackfillPlan;
 }
 
 function legacyRubricRepairResult(
@@ -2856,8 +2863,40 @@ export async function inspectLegacyRubricRevisionRepair(
 export async function repairLegacyRubricRevisionSnapshots(
   rubricId: string,
   scope: Omit<PlanRevisionRepairScope, 'planSlug'>,
-  opts: { dryRun?: boolean } = {},
+  opts: { dryRun?: boolean; rubricRevision?: number; identity?: AgentIdentity } = {},
 ): Promise<LegacyRubricRevisionRepairResult> {
+  if (opts.rubricRevision !== undefined) {
+    const prepared = await inspectCurrentRubricRevisionBackfill(rubricId, opts.rubricRevision, scope);
+    if (!prepared.backfillSpec) return prepared.result;
+    if (opts.dryRun !== false) return { ...prepared.result, status: 'dry_run' };
+    if (!opts.identity) {
+      return {
+        ...prepared.result,
+        status: 'error',
+        reason: 'resolved writer identity is required to record a current-version backfill',
+      };
+    }
+
+    const applied = await applyPlanRevisionSnapshotBackfill({
+      ...prepared.backfillSpec,
+      identity: opts.identity,
+    });
+    if (applied.status === 'recorded') {
+      return {
+        ...prepared.result,
+        status: 'repaired',
+        revisionsRepaired: 1,
+        revisionSeq: applied.revisionSeq,
+      };
+    }
+    return {
+      ...prepared.result,
+      status: applied.status,
+      revisionsRepaired: 0,
+      ...('reason' in applied && applied.reason ? { reason: applied.reason } : {}),
+    };
+  }
+
   const prepared = await inspectLegacyRubricRevisionRepair(rubricId, scope);
   if (!prepared.spec) return prepared.result;
   if (opts.dryRun !== false) return { ...prepared.result, status: 'dry_run' };
@@ -2875,6 +2914,136 @@ export async function repairLegacyRubricRevisionSnapshots(
     status: applied.status,
     revisionsRepaired: applied.revisionsRepaired,
     ...('reason' in applied && applied.reason ? { reason: applied.reason } : {}),
+  };
+}
+
+/**
+ * Prepare an append-only snapshot for one missing CURRENT first-party revision.
+ * This does not reconstruct an older version from today's template_data: the
+ * caller must name the live plan version, which must still exactly match the
+ * bundled standard rubric under the CAS applied at write time.
+ */
+export async function inspectCurrentRubricRevisionBackfill(
+  rubricId: string,
+  rubricRevision: number,
+  scope: Omit<PlanRevisionRepairScope, 'planSlug'>,
+): Promise<PreparedLegacyRubricRevisionRepair> {
+  const planScope: PlanRevisionRepairScope = { ...scope, planSlug: rubricId };
+  const target = await readPlanRevisionRepairTarget(planScope);
+  if (!target) {
+    return { result: legacyRubricRepairResult(rubricId, 'not_found', 0, 0, 'rubric plan row not found') };
+  }
+
+  const { plan, revisions } = target;
+  const inspected = revisions.length;
+  const currentRevision = Number.isFinite(plan.version) ? plan.version : undefined;
+  const reject = (reason: string): PreparedLegacyRubricRevisionRepair => ({
+    result: legacyRubricRepairResult(rubricId, 'not_eligible', inspected, 0, reason, currentRevision),
+  });
+
+  if (!Number.isInteger(rubricRevision) || rubricRevision <= 0) {
+    return reject('rubric revision must be a positive integer');
+  }
+  if (currentRevision !== rubricRevision) {
+    return reject('only the exact current rubric revision can be backfilled');
+  }
+  if (plan.owner !== FIRST_PARTY_RUBRIC_SEED_OWNER) return reject('rubric plan is not first-party seeded');
+  if (plan.template !== RUBRIC_TEMPLATE_NAME) return reject('rubric plan does not use the rubric template');
+  if (plan.templateSlug !== null) return reject('rubric plan is a template instance, not a rubric definition');
+  if (plan.archived) return reject('rubric plan is archived');
+
+  const parsed = rubricTemplateDataSchema.safeParse(plan.templateData);
+  if (!parsed.success) return reject('current first-party rubric template_data is malformed');
+  if (rubricKindOf(parsed.data) !== 'standard') return reject('acceptance rubrics are outside this backfill');
+  if (parsed.data.classRef) return reject('delegated-class rubrics are outside this backfill');
+
+  const bundled = listLocalRubrics().find(
+    (candidate) => candidate.rubricId === rubricId && candidate.source === 'first-party',
+  );
+  if (!bundled) return reject('matching first-party bundled rubric source is unavailable');
+  const liveBundleHash = computeSeedContentHash(parsed.data);
+  if (liveBundleHash !== computeSeedContentHash(bundled)) {
+    return reject('current rubric differs from the first-party bundle');
+  }
+  if (parsed.data.seedContentHash && parsed.data.seedContentHash !== liveBundleHash) {
+    return reject('current rubric seed content hash does not match its stored fields');
+  }
+  if (plan.contentHash !== hashPlanContent(plan.content)) {
+    return reject('current rubric body hash is inconsistent');
+  }
+
+  const marker = `"rubricRevision": ${rubricRevision},`;
+  const markedRows = revisions.filter((revision) => revision.contentSnapshot.includes(marker));
+  if (markedRows.length > 0) {
+    if (markedRows.length === 1) {
+      const existing = parseRubricRevisionSnapshot(markedRows[0]!.contentSnapshot);
+      if (
+        existing?.rubricRevision === rubricRevision &&
+        markedRows[0]!.contentHash === plan.contentHash &&
+        isDeepStrictEqual(existing.templateData, parsed.data)
+      ) {
+        return {
+          result: legacyRubricRepairResult(rubricId, 'already_repaired', inspected, 0, undefined, currentRevision),
+        };
+      }
+    }
+    return reject('a conflicting or malformed snapshot already claims this rubric revision');
+  }
+
+  const latest = revisions[revisions.length - 1];
+  const latestParsed = latest ? parseRubricRevisionSnapshot(latest.contentSnapshot) : null;
+  // WI-10006335: a latest snapshot that does not parse is not evidence the rubric was
+  // already repaired, so it falls through to the repair instead of dereferencing null.
+  if (
+    latest && latestParsed && latestParsed.rubricRevision === undefined &&
+    latest.contentHash === plan.contentHash &&
+    isDeepStrictEqual(latestParsed.templateData, parsed.data)
+  ) {
+    return {
+      result: legacyRubricRepairResult(rubricId, 'already_repaired', inspected, 0, undefined, currentRevision),
+    };
+  }
+
+  const currentRubric = planRowToRubric({
+    plan_slug: rubricId,
+    workspace_id: plan.workspaceId,
+    harness_slug: plan.harnessSlug,
+    title: null,
+    status: 'active',
+    created: null,
+    updated: null,
+    updated_at: new Date(0).toISOString(),
+    version: plan.version,
+    owner: plan.owner,
+    archived: plan.archived,
+    template_data: parsed.data,
+  });
+  if (!currentRubric?.criteriaHash) return reject('current rubric criteria hash could not be computed');
+
+  const backfillSpec: PlanRevisionSnapshotBackfillPlan = {
+    scope: planScope,
+    expectedPlan: {
+      version: plan.version,
+      contentHash: plan.contentHash,
+      content: plan.content,
+      owner: plan.owner,
+      template: plan.template,
+      templateSlug: plan.templateSlug,
+      archived: plan.archived,
+      templateData: parsed.data,
+    },
+    expectedRevisionIds: revisions.map((revision) => revision.id),
+    contentSnapshot: formatRubricRevisionSnapshot(
+      plan.content,
+      parsed.data,
+      currentRubric.criteriaHash,
+      rubricRevision,
+    ),
+    rationale: `rubrics:repair backfilled missing current rubric revision ${rubricRevision} from exact first-party plan state`,
+  };
+  return {
+    result: legacyRubricRepairResult(rubricId, 'repairable', inspected, 1, undefined, currentRevision),
+    backfillSpec,
   };
 }
 
@@ -2902,13 +3071,15 @@ async function rubricRevisionCriteriaHash(
   return rubric?.criteriaHash ?? null;
 }
 
-function rubricRevisionAfterWrite(
+function rubricRevisionInTransaction(
   rubricId: string,
   by: string | undefined,
   rationale: string,
   fallbackTemplateData?: unknown,
   compatibilityAudit?: () => RubricCompatibilityAudit | undefined,
+  onRecorded?: (revision: Awaited<ReturnType<typeof recordPlanRevisionInTransaction>>) => void,
 ): (
+  tx: PlanRevisionSql,
   writtenBody: string,
   scope: { workspaceId: string; harnessSlug: string },
   committedTemplateData: unknown,
@@ -2923,29 +3094,22 @@ function rubricRevisionAfterWrite(
     workspaceId: null,
     userId: null,
   };
-  return async (writtenBody, scope, committedTemplateData, committedVersion) => {
+  return async (tx, writtenBody, scope, committedTemplateData, committedVersion) => {
     const snapshotTemplateData =
       committedTemplateData !== undefined ? committedTemplateData : fallbackTemplateData;
     const criteriaHash = await rubricRevisionCriteriaHash(snapshotTemplateData, scope);
-    // Thread the (workspaceId, harnessSlug) withPlanLock resolved for THIS write so the
-    // revision lands on the rubric plan's own PK (recordPlanRevision re-resolves through
-    // the same resolvePlanScope — the operator-home short-circuit for the rubric harness).
-    await recordPlanRevision({
+    // withPlanLock has already resolved the concrete scope and holds the plan lock. Capture
+    // the revision in that same transaction so an insert failure rolls back the rubric.
+    const recorded = await recordPlanRevisionInTransaction(tx, {
       planSlug: rubricId,
-      ...(scope?.harnessSlug ? { harnessSlug: scope.harnessSlug } : {}),
-      ...(scope?.workspaceId ? { workspaceId: scope.workspaceId } : {}),
-      // withPlanLock supplies the value committed by this exact transaction.
-      // The fallback keeps auditability best-effort for older callers/tests that
-      // invoke this helper without the third hook argument.
+      harnessSlug: scope.harnessSlug,
+      workspaceId: scope.workspaceId,
       content: formatRubricRevisionSnapshot(
         writtenBody,
         snapshotTemplateData,
         criteriaHash,
         committedVersion,
       ),
-      // The revision hash remains the canonical plan-body fingerprint used by
-      // activation/current-revision comparisons. Only content_snapshot is
-      // enriched with structured rubric data.
       contentHash: hashPlanContent(writtenBody),
       rationale: (() => {
         const compatibility = compatibilityAudit?.();
@@ -2955,6 +3119,32 @@ function rubricRevisionAfterWrite(
       })(),
       identity,
     });
+    onRecorded?.(recorded);
+  };
+}
+
+/** Build the strict rubric revision hook used by other rubric-aware plan writers. */
+export function createRubricRevisionCapture(
+  rubricId: string,
+  by: string | undefined,
+  rationale: string,
+): {
+  recorded: { current: Awaited<ReturnType<typeof recordPlanRevisionInTransaction>> | null };
+  revisionInTransaction: ReturnType<typeof rubricRevisionInTransaction>;
+} {
+  const recorded: { current: Awaited<ReturnType<typeof recordPlanRevisionInTransaction>> | null } = {
+    current: null,
+  };
+  return {
+    recorded,
+    revisionInTransaction: rubricRevisionInTransaction(
+      rubricId,
+      by,
+      rationale,
+      undefined,
+      undefined,
+      (revision) => { recorded.current = revision; },
+    ),
   };
 }
 
@@ -3108,7 +3298,7 @@ export async function proposeRubric(input: ProposeRubricInput): Promise<Rubric> 
       ...(input.by ? { actorId: input.by } : {}),
       ...scope,
       // EI-10443: record a plan_revisions audit row for the propose write.
-      afterWrite: rubricRevisionAfterWrite(
+      revisionInTransaction: rubricRevisionInTransaction(
         input.rubricId,
         input.by,
         `rubrics:propose (${rubricStatus})`,
@@ -3608,6 +3798,13 @@ export interface AcceptanceBarAmendmentPreview {
    * contract and automated proof, and `raisesProofFloorOnly` when that is its only effect.
    */
   readinessDelta: import('./acceptance-bar-amendment-readiness').AcceptanceBarAmendmentReadinessDelta;
+  /**
+   * EI-24816459669484550: ADVISORY, never a refusal. BARs whose amended text (`model`, or
+   * `driftMarkers` for a three-section R-N) disagrees with the subject plan's `## Requirements`
+   * block. The rubric is canonical after seeding and nothing re-renders that block, so the
+   * author sees the drift here instead of an outside reviewer finding it after the apply.
+   */
+  requirementsDrift: import('./acceptance-bar-amendment-requirements-drift').RequirementsDrift;
   /**
    * EI-24372605712471072: check files and method/replication citations that are not in the
    * tree yet and were accepted only because the subject plan has not started (draft/ready).
@@ -4429,7 +4626,7 @@ async function amendAcceptanceBarRubric(
       // the ship snapshot calls its depth `undeclared` even after its test runs.
       // Reuse the activation seed's completeness rule before outside approval or
       // any revision-invalidating write, while leaving unchanged legacy BARs alone.
-      const missingLayers = candidate.bars.flatMap((bar) =>
+      const changedBarGaps = candidate.bars.flatMap((bar) =>
         changedBars.includes(bar.barKey)
           ? acceptanceBarContractGaps({
               role: bar.role,
@@ -4437,13 +4634,18 @@ async function amendAcceptanceBarRubric(
               check: bar.check,
               requiredTestLayers: bar.requiredTestLayers,
               automatedProofRequired: barRequiresAutomatedProof(bar),
-            })
-              .filter((finding) => finding.gap === 'test_layers_missing')
-              .map((finding) => `${bar.barKey}: ${finding.detail}`)
+            }).map((finding) => ({ gap: finding.gap, line: `${bar.barKey}: ${finding.detail}` }))
           : [],
       );
+      const missingLayers = changedBarGaps.filter((g) => g.gap === 'test_layers_missing').map((g) => g.line);
       if (startedBar && missingLayers.length > 0) {
         throw new Error(`acceptance_bar_amendment_test_layers_missing: ${missingLayers.join('; ')}`);
+      }
+      // WI-10006536: a layer the run ledger never records can never pass correct-layer, on a
+      // started contract or not — refuse it here instead of after proof is bound against it.
+      const unrecordableLayers = changedBarGaps.filter((g) => g.gap === 'test_layer_unrecordable').map((g) => g.line);
+      if (unrecordableLayers.length > 0) {
+        throw new Error(`acceptance_bar_amendment_test_layer_unrecordable: ${unrecordableLayers.join('; ')}`);
       }
       // A classRef bind is metadata-only: it changes neither the BAR set nor any
       // criterion meaning. Do not make this repair depend on the started contract
@@ -4470,6 +4672,16 @@ async function amendAcceptanceBarRubric(
       };
 
       if (preview) {
+        if (changedBars.length > 0) {
+          await validateAcceptanceBarRevisionProjectionPreview(tx as never, {
+            workspaceId: subjectScope.workspaceId,
+            harnessSlug: subjectScope.harnessSlug,
+            rubricSlug: input.rubricId,
+            rubricRevision: nextRubricRevision,
+            templateData: guard.data,
+            previousTemplateData: rubricRow.template_data,
+          });
+        }
         const changes = diffAcceptanceBarContractSnapshots(snapshot, candidate, 'amend').changes;
         const open = changedBars.length
           ? await tx<Array<{ work_item_id: string }>>`
@@ -4605,6 +4817,12 @@ async function amendAcceptanceBarRubric(
             ...(previewImplementers ? { implementers: previewImplementers } : {}),
             ...(approverEligibility ? { approverEligibility } : {}),
             readinessDelta,
+            requirementsDrift: diffAmendedCriteriaAgainstRequirements({
+              requirementBars: requirements.bars,
+              nextCriteria: guard.data.criteria as Array<Record<string, unknown>>,
+              changedBars,
+              removedBars,
+            }),
             plannedPaths,
             nextRepair: missingMethod
               ? {
@@ -4885,6 +5103,41 @@ async function amendAcceptanceBarRubric(
         template_data: guard.data,
       });
       if (!projected) throw new Error(`acceptance_bar_amendment: amended rubric failed projection`);
+      const criteriaHash = await rubricRevisionCriteriaHash(guard.data, rubricScope);
+      if (criteriaHash) projected.criteriaHash = criteriaHash;
+      const revisionIdentity: AgentIdentity = {
+        ownerId: actorId ?? input.by ?? 'rubrics:system',
+        ownerLabel: actorId ?? input.by ?? 'rubrics:system',
+        source: 'static-client',
+        workspaceId: null,
+        userId: null,
+      };
+      const revisionRationale = `acceptance BAR amendment ${idempotencyKey}`;
+      // The custom writer updates the rubric and subject plan under both locks. Keep
+      // both revision snapshots in this transaction too, so failure on either insert
+      // rolls back both plan rows and any earlier revision insert.
+      await recordPlanRevisionInTransaction(tx, {
+        planSlug: input.rubricId,
+        harnessSlug: rubricScope.harnessSlug,
+        workspaceId: rubricScope.workspaceId,
+        content: formatRubricRevisionSnapshot(
+          rubricBody,
+          guard.data,
+          criteriaHash,
+          nextRubricRevision,
+        ),
+        contentHash: hashPlanContent(rubricBody),
+        rationale: revisionRationale,
+        identity: revisionIdentity,
+      });
+      await recordPlanRevisionInTransaction(tx, {
+        planSlug: subjectPlanHint,
+        harnessSlug: subjectScope.harnessSlug,
+        workspaceId: subjectScope.workspaceId,
+        content: subjectBody,
+        rationale: revisionRationale,
+        identity: revisionIdentity,
+      });
       return {
         rubric: projected,
         decisionId,
@@ -4908,47 +5161,6 @@ async function amendAcceptanceBarRubric(
   );
   if (!txResult) return null;
   if (txResult.replayed || txResult.preview || txResult.methodOnly) return txResult;
-  // Revision rows are audit history.  The data transaction above remains the
-  // atomic source of truth; these best-effort records make both plans visible
-  // through the existing plan-revisions reader.
-  const identity: AgentIdentity = {
-    ownerId: input.actorId ?? input.by ?? 'rubrics:system',
-    ownerLabel: input.actorId ?? input.by ?? 'rubrics:system',
-    source: 'static-client',
-    workspaceId: null,
-    userId: null,
-  };
-  const criteriaHash =
-    txResult.rubricBody && txResult.templateData
-      ? await rubricRevisionCriteriaHash(txResult.templateData, rubricScope)
-      : null;
-  // The locked projection omits the delegated class revision. Return the same
-  // resolved identity we pin in history, so an amendment receipt agrees with
-  // an immediate getRubric read (EI-24352619832794123).
-  if (criteriaHash) txResult.rubric.criteriaHash = criteriaHash;
-  await Promise.all([
-    txResult.rubricBody && txResult.templateData
-      ? recordPlanRevision({
-          planSlug: input.rubricId,
-          harnessSlug: rubricScope.harnessSlug,
-          workspaceId: rubricScope.workspaceId,
-          content: formatRubricRevisionSnapshot(txResult.rubricBody, txResult.templateData, criteriaHash, txResult.rubricRevision),
-          contentHash: hashPlanContent(txResult.rubricBody),
-          rationale: `acceptance BAR amendment ${txResult.idempotencyKey}`,
-          identity,
-        })
-      : Promise.resolve(null),
-    txResult.subjectBody
-      ? recordPlanRevision({
-          planSlug: subjectPlanHint,
-          harnessSlug: subjectScope.harnessSlug,
-          workspaceId: subjectScope.workspaceId,
-          content: txResult.subjectBody,
-          rationale: `acceptance BAR amendment ${txResult.idempotencyKey}`,
-          identity,
-        })
-      : Promise.resolve(null),
-  ]);
   return txResult;
 }
 
@@ -5123,7 +5335,7 @@ export async function amendRubric(input: AmendRubricInput): Promise<Rubric | nul
       intent: `rubrics:amend ${input.rubricId}`,
       ...(input.by ? { actorId: input.by } : {}),
       ...scope,
-      afterWrite: rubricRevisionAfterWrite(
+      revisionInTransaction: rubricRevisionInTransaction(
         input.rubricId,
         input.by,
         'rubrics:amend',
@@ -5280,7 +5492,7 @@ export async function ratifyRubric(rubricId: string, by?: string): Promise<Rubri
       // EI-10443: record a plan_revisions audit row for the status-flip write. afterWrite
       // only fires when a body was actually written (a no-op ratify — no frontmatter status
       // line — returns newBody:null and records nothing).
-      afterWrite: rubricRevisionAfterWrite(
+      revisionInTransaction: rubricRevisionInTransaction(
         rubricId,
         by,
         'rubrics:ratify → active',
@@ -5326,7 +5538,7 @@ export async function retireAcceptanceRubricForPlan(
         slug: rubric.rubricId,
         intent: `acceptance-rubric retire (subject plan '${planSlug}' ${terminalStatus})`,
         ...scope,
-        afterWrite: rubricRevisionAfterWrite(
+        revisionInTransaction: rubricRevisionInTransaction(
           rubric.rubricId,
           by,
           `acceptance rubric retired with its ${terminalStatus} subject plan`,
@@ -5395,7 +5607,7 @@ export async function retireRubric(rubricId: string, by?: string, reason?: strin
       slug: rubricId,
       intent: `rubrics:retire ${rubricId}`,
       ...scope,
-      afterWrite: rubricRevisionAfterWrite(rubricId, by, `rubrics:retire → retired${reason ? ` (${reason})` : ''}`),
+      revisionInTransaction: rubricRevisionInTransaction(rubricId, by, `rubrics:retire → retired${reason ? ` (${reason})` : ''}`),
     },
     async (current) => {
       if (current === null) return { newBody: null, value: false };
@@ -5453,7 +5665,7 @@ export async function setRubricHistoryReset(rubricId: string, at: string, by?: s
       slug: rubricId,
       intent: `rubrics:set-history-reset ${rubricId}`,
       ...scope,
-      afterWrite: rubricRevisionAfterWrite(rubricId, by, `rubrics:set-history-reset → ${iso}`, {
+      revisionInTransaction: rubricRevisionInTransaction(rubricId, by, `rubrics:set-history-reset → ${iso}`, {
         ...rawData,
         historyResetAt: iso,
       }),

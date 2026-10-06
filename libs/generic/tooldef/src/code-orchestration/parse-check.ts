@@ -43,10 +43,21 @@ let _ts: TsModule | null = null;
 export async function ensureParseCheckReady(): Promise<void> {
   if (!_ts) {
     const m = (await import('typescript')) as unknown as { default?: TsModule } & TsModule;
-    _ts = (m.default ?? m) as TsModule;
+    const candidate = (m.default ?? m) as TsModule;
+    // P-007 / cupboard D-010: a bundle that cannot initialise the compiler (e.g. a Cloudflare
+    // Worker ESM bundle with no CJS `__filename`, which typescript.js reads at init) used to
+    // leave a half-initialised module here (`{}`), after which every checkScript() silently took
+    // the REGEX FALLBACK — which misses destructured calls (`const {coord}=tools; coord.send()`),
+    // the exact evasion class authority analysis exists to catch. Refuse loudly instead: never
+    // cache a module that cannot parse, so a failed init can never degrade to regex unnoticed.
+    if (typeof (candidate as { createSourceFile?: unknown }).createSourceFile !== 'function') {
+      throw new Error(
+        'parse-check: the TypeScript compiler loaded without createSourceFile (half-initialised module — in a bundled Worker, define __filename/__dirname); refusing to fall back to regex analysis',
+      );
+    }
+    _ts = candidate;
   }
 }
-
 function tsc(): TsModule {
   if (!_ts) {
     throw new Error(
@@ -82,6 +93,27 @@ export interface StaticToolCall {
   args: unknown | null;
   /** True when any part of the argument expression was dynamic/unresolved. */
   dynamicArgs: boolean;
+  /** 1-based script location of the call expression. */
+  position?: StaticSourcePosition;
+  /** Local identifiers directly bound to this call's awaited result. */
+  resultBindings?: string[];
+  /** Statically-read result paths rooted in one of the bound identifiers. */
+  resultReads?: StaticToolResultRead[];
+}
+
+export interface StaticSourcePosition {
+  line: number;
+  column: number;
+  /** Zero-based offset in the original script. */
+  offset: number;
+}
+
+export interface StaticToolResultRead {
+  /** Property segments, kept separate so literal keys containing dots remain unambiguous. */
+  path: string[];
+  position: StaticSourcePosition;
+  /** Optional result ancestors whose absence is guarded by nearby short-circuit syntax. */
+  safeOptionalPaths?: string[][];
 }
 
 export function checkScript(
@@ -197,7 +229,7 @@ export function checkScript(
   let source: SourceFile;
   let hasParseErrors = false;
   try {
-    source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+    source = ts.createSourceFile('script.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     // TypeScript deliberately recovers from syntax errors so callers can inspect a partial AST.
     // That recovery is useful for the advisory tool-reference scan, but it is not trustworthy
     // enough for literal argument/schema validation: an unescaped quote inside a shell command
@@ -212,6 +244,12 @@ export function checkScript(
     // unparseable so consumers still skip schema validation.
     return regexFallback(script, memberToName, fullNames, true);
   }
+
+  const positionFor = (node: Node): StaticSourcePosition => {
+    const offset = node.getStart(source);
+    const { line, character } = source.getLineAndCharacterOfPosition(offset);
+    return { line: line + 1, column: character + 1, offset };
+  };
 
   // Binding maps, populated in source order during the walk. Straight-line scripts declare an
   // alias (`const t = tools`) before they use it, and chained bindings (`const w = tools.x; const
@@ -312,7 +350,12 @@ export function checkScript(
           const parsed = node.arguments[1]
             ? readStaticValue(node.arguments[1])
             : { value: null, complete: node.arguments.length < 2 };
-          calls.push({ tool: name, args: parsed.value ?? null, dynamicArgs: !parsed.complete });
+          calls.push({
+            tool: name,
+            args: parsed.value ?? null,
+            dynamicArgs: !parsed.complete,
+            position: positionFor(node),
+          });
         }
       } else if (r?.kind === 'member') {
         recordMember(r.member);
@@ -323,6 +366,7 @@ export function checkScript(
           tool: canonicalMemberName(r.member),
           args: parsed.value ?? null,
           dynamicArgs: !parsed.complete,
+          position: positionFor(node),
         });
       }
     } else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
@@ -333,6 +377,385 @@ export function checkScript(
     ts.forEachChild(node, visit);
   };
   visit(source);
+
+  // Associate simple awaited call results with their local identifiers. This is deliberately
+  // limited to syntax whose correspondence is explicit: `const result = await tools.x(...)` and
+  // positional destructuring of `await Promise.all([tools.x(...), tools.y(...)])`. Runtime and
+  // aliased/dynamic calls remain the orchestration VM's responsibility.
+  if (!hasParseErrors && calls.length > 0) {
+    const callByOffset = new Map<number, StaticToolCall>();
+    for (const call of calls) {
+      if (call.position) callByOffset.set(call.position.offset, call);
+    }
+    const unwrap = (expression: Expression): Expression => {
+      let current = expression;
+      while (
+        ts.isParenthesizedExpression(current) ||
+        ts.isNonNullExpression(current) ||
+        ts.isAsExpression(current) ||
+        ts.isTypeAssertionExpression(current) ||
+        ts.isSatisfiesExpression(current)
+      ) {
+        current = current.expression;
+      }
+      return current;
+    };
+    const recordedCall = (expression: Expression): StaticToolCall | undefined => {
+      const unwrapped = unwrap(expression);
+      if (!ts.isCallExpression(unwrapped)) return undefined;
+      return callByOffset.get(unwrapped.getStart(source));
+    };
+    const awaitedCall = (expression: Expression): StaticToolCall | undefined => {
+      const unwrapped = unwrap(expression);
+      return ts.isAwaitExpression(unwrapped) ? recordedCall(unwrapped.expression) : undefined;
+    };
+    const promiseAllCalls = (expression: Expression): Array<StaticToolCall | null> | null => {
+      const unwrapped = unwrap(expression);
+      if (!ts.isAwaitExpression(unwrapped)) return null;
+      const awaited = unwrap(unwrapped.expression);
+      if (!ts.isCallExpression(awaited) || !ts.isPropertyAccessExpression(awaited.expression)) return null;
+      if (
+        !ts.isIdentifier(awaited.expression.expression) ||
+        awaited.expression.expression.text !== 'Promise' ||
+        awaited.expression.name.text !== 'all' ||
+        !awaited.arguments[0] ||
+        !ts.isArrayLiteralExpression(awaited.arguments[0])
+      ) return null;
+      return awaited.arguments[0].elements.map((element) => {
+        if (ts.isSpreadElement(element) || ts.isOmittedExpression(element)) return null;
+        const candidate = unwrap(element as Expression);
+        return ts.isAwaitExpression(candidate)
+          ? recordedCall(candidate.expression) ?? null
+          : recordedCall(candidate) ?? null;
+      });
+    };
+
+    const bindingsByScope = new Map<Node, Map<string, StaticToolCall | null>>();
+    const setBinding = (scope: Node, identifier: string, call: StaticToolCall | null): void => {
+      let bindings = bindingsByScope.get(scope);
+      if (!bindings) bindingsByScope.set(scope, bindings = new Map());
+      if (!bindings.has(identifier)) bindings.set(identifier, call);
+      else if (bindings.get(identifier) !== call) bindings.set(identifier, null);
+    };
+    const variableScope = (node: Node, isVar = false): Node => {
+      let current = node.parent;
+      while (current) {
+        if (isVar && ts.isFunctionLike(current)) return current;
+        if (
+          ts.isBlock(current) || ts.isModuleBlock(current) || ts.isSourceFile(current) ||
+          ts.isForStatement(current) || ts.isForInStatement(current) || ts.isForOfStatement(current) ||
+          ts.isCatchClause(current)
+        ) return current;
+        current = current.parent;
+      }
+      return source;
+    };
+    const addResultBinding = (call: StaticToolCall, identifier: string): void => {
+      const bindings = call.resultBindings ??= [];
+      if (!bindings.includes(identifier)) bindings.push(identifier);
+    };
+    const samePath = (left: string[], right: string[]): boolean =>
+      left.length === right.length && left.every((segment, index) => segment === right[index]);
+    const addRead = (
+      call: StaticToolCall,
+      path: string[],
+      position: StaticSourcePosition,
+      safeOptionalPaths: string[][] = [],
+    ): void => {
+      if (path.length === 0) return;
+      const reads = call.resultReads ??= [];
+      const existing = reads.find((read) => read.position.offset === position.offset && samePath(read.path, path));
+      if (existing) {
+        const combined = [...(existing.safeOptionalPaths ?? []), ...safeOptionalPaths];
+        existing.safeOptionalPaths = combined
+          .filter((candidate, index, all) => all.findIndex((other) => samePath(candidate, other)) === index);
+      } else {
+        reads.push({ path, position, ...(safeOptionalPaths.length > 0 ? { safeOptionalPaths } : {}) });
+      }
+    };
+    const bindPattern = (pattern: Node, call: StaticToolCall, scope: Node, path: string[] = []): void => {
+      if (ts.isIdentifier(pattern)) {
+        if (path.length === 0) {
+          setBinding(scope, pattern.text, call);
+          addResultBinding(call, pattern.text);
+        } else {
+          setBinding(scope, pattern.text, null);
+          addRead(call, path, positionFor(pattern));
+        }
+        return;
+      }
+      if (ts.isObjectBindingPattern(pattern)) {
+        for (const element of pattern.elements) {
+          if (element.dotDotDotToken) {
+            if (ts.isIdentifier(element.name)) setBinding(scope, element.name.text, null);
+            continue;
+          }
+          const key = element.propertyName
+            ? ts.isIdentifier(element.propertyName) || ts.isStringLiteralLike(element.propertyName) || ts.isNumericLiteral(element.propertyName)
+              ? element.propertyName.text
+              : null
+            : ts.isIdentifier(element.name)
+              ? element.name.text
+              : null;
+          if (key == null) {
+            if (ts.isIdentifier(element.name)) setBinding(scope, element.name.text, null);
+            continue;
+          }
+          bindPattern(element.name, call, scope, [...path, key]);
+        }
+      } else if (ts.isArrayBindingPattern(pattern)) {
+        pattern.elements.forEach((element, index) => {
+          if (ts.isOmittedExpression(element)) return;
+          if (element.dotDotDotToken) {
+            if (ts.isIdentifier(element.name)) setBinding(scope, element.name.text, null);
+            return;
+          }
+          bindPattern(element.name, call, scope, [...path, String(index)]);
+        });
+      }
+    };
+
+    const shadowPattern = (pattern: Node, scope: Node): void => {
+      if (ts.isIdentifier(pattern)) {
+        setBinding(scope, pattern.text, null);
+      } else if (ts.isObjectBindingPattern(pattern) || ts.isArrayBindingPattern(pattern)) {
+        for (const element of pattern.elements) {
+          if (!ts.isOmittedExpression(element)) shadowPattern(element.name, scope);
+        }
+      }
+    };
+
+    const bindDeclarations = (node: Node): void => {
+      if (ts.isVariableDeclaration(node)) {
+        const initializer = node.initializer;
+        const declarationList = ts.isVariableDeclarationList(node.parent) ? node.parent : null;
+        const isVar = declarationList != null && (declarationList.flags & ts.NodeFlags.BlockScoped) === 0;
+        const scope = variableScope(node, isVar);
+        if (ts.isIdentifier(node.name)) {
+          const direct = initializer ? awaitedCall(initializer) : undefined;
+          setBinding(scope, node.name.text, direct ?? null);
+          if (direct) addResultBinding(direct, node.name.text);
+        } else if (ts.isObjectBindingPattern(node.name)) {
+          const direct = initializer ? awaitedCall(initializer) : undefined;
+          if (direct) bindPattern(node.name, direct, scope);
+          else shadowPattern(node.name, scope);
+        } else if (ts.isArrayBindingPattern(node.name)) {
+          const direct = initializer ? awaitedCall(initializer) : undefined;
+          if (direct) bindPattern(node.name, direct, scope);
+          else if (initializer) {
+            const results = promiseAllCalls(initializer);
+            if (results) {
+              node.name.elements.forEach((element, index) => {
+                if (ts.isOmittedExpression(element)) return;
+                const call = results[index];
+                if (call) bindPattern(element.name, call, scope);
+                else shadowPattern(element.name, scope);
+              });
+            } else shadowPattern(node.name, scope);
+          } else {
+            shadowPattern(node.name, scope);
+          }
+        }
+      } else if (ts.isParameter(node)) {
+        const scope = node.parent && ts.isFunctionLike(node.parent) ? node.parent : variableScope(node);
+        shadowPattern(node.name, scope);
+      } else if (ts.isFunctionDeclaration(node) && node.name) {
+        setBinding(variableScope(node), node.name.text, null);
+      } else if (ts.isClassDeclaration(node) && node.name) {
+        setBinding(variableScope(node), node.name.text, null);
+      }
+      ts.forEachChild(node, bindDeclarations);
+    };
+    bindDeclarations(source);
+
+    const propertyPath = (expression: Expression): { root: string; path: string[] } | null => {
+      if (ts.isIdentifier(expression)) return { root: expression.text, path: [] };
+      if (ts.isPropertyAccessExpression(expression)) {
+        const base = propertyPath(expression.expression);
+        return base ? { root: base.root, path: [...base.path, expression.name.text] } : null;
+      }
+      if (ts.isElementAccessExpression(expression) && expression.argumentExpression) {
+        const base = propertyPath(expression.expression);
+        const key = literalKey(expression.argumentExpression) ?? (
+          ts.isNumericLiteral(expression.argumentExpression) ? expression.argumentExpression.text : null
+        );
+        return base && key != null ? { root: base.root, path: [...base.path, key] } : null;
+      }
+      return null;
+    };
+    const rootIdentifier = (expression: Expression): import('typescript').Identifier | null => {
+      if (ts.isIdentifier(expression)) return expression;
+      if (ts.isPropertyAccessExpression(expression)) return rootIdentifier(expression.expression);
+      if (ts.isElementAccessExpression(expression)) return rootIdentifier(expression.expression);
+      return null;
+    };
+    const boundCall = (identifier: import('typescript').Identifier): StaticToolCall | undefined => {
+      let current: Node | undefined = identifier;
+      while (current) {
+        const bindings = bindingsByScope.get(current);
+        if (bindings?.has(identifier.text)) return bindings.get(identifier.text) ?? undefined;
+        current = current.parent;
+      }
+      return undefined;
+    };
+    const isWithin = (node: Node, ancestor: Node): boolean => {
+      let current: Node | undefined = node;
+      while (current) {
+        if (current === ancestor) return true;
+        current = current.parent;
+      }
+      return false;
+    };
+    const isPathPrefix = (prefix: string[], path: string[]): boolean =>
+      prefix.length <= path.length && prefix.every((segment, index) => segment === path[index]);
+    const boundPath = (expression: Expression): { call: StaticToolCall; path: string[] } | undefined => {
+      const resolved = propertyPath(expression);
+      const identifier = rootIdentifier(expression);
+      const call = identifier ? boundCall(identifier) : undefined;
+      return resolved && call ? { call, path: resolved.path } : undefined;
+    };
+    const optionalPathsGuardedByTypeof = (
+      condition: Expression,
+      call: StaticToolCall,
+      branchIsTrue: boolean,
+    ): string[][] => {
+      if (!ts.isBinaryExpression(condition)) return [];
+      const operator = condition.operatorToken.kind;
+      const equals = operator === ts.SyntaxKind.EqualsEqualsToken
+        || operator === ts.SyntaxKind.EqualsEqualsEqualsToken;
+      const notEquals = operator === ts.SyntaxKind.ExclamationEqualsToken
+        || operator === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+      if (!equals && !notEquals) return [];
+
+      const check = ts.isTypeOfExpression(condition.left) && ts.isStringLiteralLike(condition.right)
+        ? { expression: condition.left.expression, typeName: condition.right.text }
+        : ts.isStringLiteralLike(condition.left) && ts.isTypeOfExpression(condition.right)
+          ? { expression: condition.right.expression, typeName: condition.left.text }
+          : null;
+      if (!check) return [];
+
+      const resolved = boundPath(check.expression);
+      if (resolved?.call !== call || resolved.path.length === 0) return [];
+
+      // A typeof comparison proves an optional path exists only for the branch that
+      // excludes undefined. Keep the accepted result types explicit so an unsupported
+      // comparison cannot turn a stale read into a pass.
+      const nonUndefinedType = [
+        'string',
+        'number',
+        'bigint',
+        'boolean',
+        'symbol',
+        'function',
+        'object',
+      ].includes(check.typeName);
+      const presentWhenTrue = (equals && nonUndefinedType)
+        || (notEquals && check.typeName === 'undefined');
+      const presentWhenFalse = (equals && check.typeName === 'undefined')
+        || (notEquals && nonUndefinedType);
+      if (!(branchIsTrue ? presentWhenTrue : presentWhenFalse)) return [];
+
+      // If a deeper access is proven to exist, its ancestors must exist as well.
+      return resolved.path.map((_, index) => resolved.path.slice(0, index + 1));
+    };
+    const safeOptionalPathsForRead = (
+      node: Node,
+      call: StaticToolCall,
+      resolvedPath: string[],
+    ): string[][] => {
+      const safePaths: string[][] = [];
+      const addSafePath = (path: string[]): void => {
+        if (path.length > 0 && !safePaths.some((other) => samePath(other, path))) safePaths.push(path);
+      };
+
+      let current: Node | undefined = node;
+      while (current) {
+        if (ts.isPropertyAccessExpression(current) && current.questionDotToken) {
+          const base = boundPath(current.expression);
+          if (base?.call === call && isPathPrefix(base.path, resolvedPath)) addSafePath(base.path);
+          if (current === node) addSafePath(resolvedPath);
+        }
+
+        // Annotated: `current` is reassigned from `parent` below, so an inferred type here is
+        // circular (TS7022) and the loop variable widens to `any`.
+        if (ts.isConditionalExpression(current)) {
+          const branchIsTrue = isWithin(node, current.whenTrue)
+            ? true
+            : isWithin(node, current.whenFalse)
+              ? false
+              : null;
+          if (branchIsTrue !== null) {
+            for (const path of optionalPathsGuardedByTypeof(current.condition, call, branchIsTrue)) {
+              addSafePath(path);
+            }
+          }
+        }
+
+        const parent: Node | undefined = current.parent;
+        if (!parent) break;
+        if (ts.isBinaryExpression(parent)) {
+          const operator = parent.operatorToken.kind;
+          if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
+            const left = boundPath(parent.left);
+            if (left?.call === call) {
+              if (isWithin(node, parent.right) && isPathPrefix(left.path, resolvedPath)) {
+                addSafePath(left.path);
+              }
+              if (isWithin(node, parent.left) && samePath(left.path, resolvedPath)) {
+                addSafePath(resolvedPath);
+              }
+            }
+          } else if (
+            operator === ts.SyntaxKind.BarBarToken || operator === ts.SyntaxKind.QuestionQuestionToken
+          ) {
+            // A missing optional leaf evaluates to undefined, so a fallback on the expression
+            // that reads it makes that leaf safe. Any optional ancestor still needs its own guard.
+            if (isWithin(node, parent.left)) addSafePath(resolvedPath);
+          }
+        }
+        current = parent;
+      }
+
+      return safePaths;
+    };
+    const readCandidates: Array<{
+      call: StaticToolCall;
+      path: string[];
+      position: StaticSourcePosition;
+      safeOptionalPaths: string[][];
+    }> = [];
+    const visitResultReads = (node: Node): void => {
+      if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+        const resolved = propertyPath(node);
+        const identifier = rootIdentifier(node);
+        const call = identifier ? boundCall(identifier) : undefined;
+        if (resolved && resolved.path.length > 0 && call) {
+          readCandidates.push({
+            call,
+            path: resolved.path,
+            position: positionFor(node),
+            safeOptionalPaths: safeOptionalPathsForRead(node, call, resolved.path),
+          });
+        }
+      }
+      ts.forEachChild(node, visitResultReads);
+    };
+    visitResultReads(source);
+
+    // A chain such as `result.gate.candidate` also visits its `result.gate` prefix. Keep the
+    // longest path at each source offset; schema traversal will still report the first unsafe
+    // ancestor (for example, optional `gate`).
+    for (const candidate of readCandidates) {
+      const hasLongerChain = readCandidates.some((other) =>
+        other.call === candidate.call &&
+        other.position.offset === candidate.position.offset &&
+        other.path.length > candidate.path.length,
+      );
+      if (!hasLongerChain) {
+        addRead(candidate.call, candidate.path, candidate.position, candidate.safeOptionalPaths);
+      }
+    }
+  }
 
   return {
     ok: unknown.size === 0,

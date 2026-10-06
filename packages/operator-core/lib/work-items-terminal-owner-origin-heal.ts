@@ -91,7 +91,13 @@ export function decideTerminalOwnerOriginHeal(input: {
 export async function selfHealTerminalOwnerOriginIfStranded(
   id: string,
   callerOwnerId: string | null | undefined,
-  row: { origin: string | null | undefined; wasAlreadySettled: boolean; terminalOwner: string | null | undefined },
+  row: {
+    origin: string | null | undefined;
+    wasAlreadySettled: boolean;
+    terminalOwner: string | null | undefined;
+    /** WI-10006010: the pinned physical row; omitted, every same-id twin is eligible. */
+    harnessSlug?: string | null;
+  },
 ): Promise<boolean> {
   if (!id) return false;
   const decision = decideTerminalOwnerOriginHeal({
@@ -109,6 +115,7 @@ export async function selfHealTerminalOwnerOriginIfStranded(
     UPDATE harness_shared.work_items
        SET origin = 'local'
      WHERE feature_id = ${id}
+       ${row.harnessSlug ? sql`AND harness_slug = ${row.harnessSlug}` : sql``}
        AND origin = 'remote'
        AND terminal_owner = ${callerOwnerId}
     RETURNING feature_id`;

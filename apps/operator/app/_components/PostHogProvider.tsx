@@ -29,6 +29,37 @@ interface TelemetryConfig {
 }
 
 let initialized = false;
+let client: typeof import('posthog-js').default | null = null;
+let initializing: Promise<typeof import('posthog-js').default> | null = null;
+
+async function consentedClient(cancelled: () => boolean = () => false) {
+  const res = await fetch('/api/desktop/telemetry-config', { cache: 'no-store' });
+  if (!res.ok) return null;
+  const cfg = (await res.json()) as TelemetryConfig;
+  if (cancelled() || cfg.enabled !== true || !cfg.host || !cfg.project_key) return null;
+  if (client) return client;
+  initializing ??= import('posthog-js').then(mod => {
+    const posthog = mod.default;
+    posthog.init(cfg.project_key!, {
+      api_host: cfg.host, person_profiles: 'identified_only',
+      capture_pageview: true, capture_pageleave: true, autocapture: true,
+      disable_session_recording: true,
+      loaded: ph => { ph.identify(cfg.distinct_id ?? cfg.workspace_id ?? 'default'); },
+    });
+    initialized = true; client = posthog;
+    return posthog;
+  }).finally(() => { initializing = null; });
+  return initializing;
+}
+
+/** Recheck the existing consent boundary for each explicit event. Events are
+ * dropped on opt-out or failure, never queued for a later opt-in. */
+export async function captureBrowserTelemetry(event: string, properties: Record<string, string | number | boolean>): Promise<void> {
+  try {
+    const posthog = await consentedClient();
+    if (posthog) posthog.capture(event, properties);
+  } catch { /* Telemetry must not interrupt the product. */ }
+}
 
 export function PostHogProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
@@ -36,35 +67,12 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/api/desktop/telemetry-config', { cache: 'no-store' });
-        if (!res.ok) return;
-        const cfg = (await res.json()) as TelemetryConfig;
-        if (cancelled || !cfg.enabled || !cfg.host || !cfg.project_key) return;
-        // Only now do we even load posthog-js into the bundle.
-        const mod = await import('posthog-js');
-        const posthog = (mod as { default: typeof mod }).default ?? mod;
-        posthog.init(cfg.project_key, {
-          api_host: cfg.host,
-          person_profiles: 'identified_only',
-          capture_pageview: true,
-          capture_pageleave: true,
-          autocapture: true,
-          disable_session_recording: true, // session-replay is a separate consent we don't have
-          // Per-install UUID = distinct id keeps reports anonymous (no email/user
-          // id) AND stable across workspace creation/deletion. Falls back to
-          // workspace id then 'default' if telemetry-config didn't surface one.
-          loaded: (ph) => {
-            ph.identify(cfg.distinct_id ?? cfg.workspace_id ?? 'default');
-          },
-        });
-        initialized = true;
+        await consentedClient(() => cancelled);
       } catch {
         // Telemetry being unreachable should never break the app.
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
   return <>{children}</>;
 }

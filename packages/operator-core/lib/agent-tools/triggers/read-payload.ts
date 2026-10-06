@@ -4,7 +4,7 @@ import { readTriggerPlanRunPayload } from '../../external-triggers/plan-run-payl
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 
 /**
- * The READ half of the external-trigger pair, mirroring `gmail:create-draft`.
+ * The READ half of the external-trigger pair, mirroring `mail:reply { planRunId }`.
  *
  * Both take only `planRunId` and resolve everything else server-side from the
  * owner-local `trigger_runs` row, so the private ingest never has to travel
@@ -32,8 +32,8 @@ export default defineTool({
     notWhen:
       'A run that did not originate from an external trigger, or to browse other runs — this returns only the event for the planRunId you name, inside your own workspace.',
     chaining:
-      'triggers:read-payload → compose the response → gmail:create-draft / slack:respond-in-thread with the SAME planRunId.',
-    seeAlso: ['triggers:status (binding + run health)', 'gmail:create-draft (the write half)'],
+      'triggers:read-payload → compose the response → mail:reply / slack:respond-in-thread with the SAME planRunId.',
+    seeAlso: ['triggers:status (binding + run health)', 'mail:reply { planRunId } (the write half)'],
   },
   args: z
     .object({

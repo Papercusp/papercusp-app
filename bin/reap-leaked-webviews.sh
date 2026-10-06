@@ -187,8 +187,12 @@ while IFS= read -r wpid; do
     killed_webkit=$(( killed_webkit + 1 ))
 done < <(
     # Find WebKitWebProcess PIDs via /proc/*/comm (15-char comm is "WebKitWebProces").
+    # The `read` builtin, never `$(cat ...)`: this loop visits EVERY process on the
+    # host, and a fork+exec per entry made the scan itself outgrow the unit's 30 s
+    # TimeoutStartSec (WI-10006347, measured 2026-10-06 on 7,836 processes: 50.2 s
+    # wall per scan with $(cat), 0.43 s with read; Result=timeout every 5 minutes).
     for comm_file in /proc/[0-9]*/comm; do
-        comm=$(cat "$comm_file" 2>/dev/null) || continue
+        { IFS= read -r comm < "$comm_file"; } 2>/dev/null || continue
         [[ "$comm" == WebKitWebProces* ]] || continue
         pid="${comm_file%/comm}"; pid="${pid#/proc/}"
         echo "$pid"

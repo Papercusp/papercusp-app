@@ -1,5 +1,6 @@
 import { captureWakeHandleForOwner } from './events/await/handle';
 import {
+  FLEET_BENCH_NOTE_PREFIX,
   cancelAwait,
   listActiveAwaits,
   registerAwait,
@@ -75,6 +76,18 @@ export async function reconcileInterestEventAwaits(
 
   for (const key of eventKeys) {
     const candidates = bound.filter((row) => row.eventKey === key);
+    // A caller's explicit wait owns its deadline, predicate and wake policy.
+    // Reuse it without attaching our lifecycle (which would make cleanup retire
+    // the caller's row). Predicate siblings remain separate explicit interests.
+    const explicit = active.filter(
+      (row) => row.eventKey === key && row.boundTo == null && row.rootId == null &&
+        row.policy === 'wake' && row.once === true && !row.note?.startsWith(FLEET_BENCH_NOTE_PREFIX),
+    );
+    if (explicit.length > 0) {
+      for (const row of candidates) await deps.cancel({ awaitId: row.id, subscriberId: input.ownerId });
+      awaitIds.push(...explicit.map((row) => row.id));
+      continue;
+    }
     const keep = candidates.find(
       (row) => row.policy === 'wake' && row.once === true && (handle == null || row.wakeHandle != null),
     );
@@ -95,6 +108,9 @@ export async function reconcileInterestEventAwaits(
       timeoutSec: null,
       once: true,
       boundTo: input.boundTo,
+      // Recheck in the registration transaction: an explicit wait may have
+      // arrived after listActive's snapshot above.
+      preserveExplicitWait: true,
     });
     awaitIds.push(row.id);
   }

@@ -449,6 +449,12 @@ export function improvementsStatus(_d: ImprovementsHealth): PanelStatus {
  * WARN (visible), ending the culture of dismissing tool-call errors as normal. */
 export const MCP_PROXY_HARD_FAIL_CRIT = 10;
 
+/** A critical continuation write still queued for five minutes is a real durability
+ *  incident. Short queueing is expected (measured work_items:complete dwell reached 61.8s),
+ *  so the alarm floor suppresses routine/low-volume waits while catching the observed
+ *  700s+ loop:checkpoint queue stall. The request remains non-expiring by default. */
+export const MCP_PROXY_CRITICAL_CONTINUATION_WAIT_CRIT_MS = 5 * 60_000;
+
 /**
  * Fresh host-pressure thresholds. CPU/memory PSI are stall percentages; the
  * scheduler counters are normalized by the resource profile's effective cores
@@ -644,7 +650,8 @@ export function evaluateHostPressure(
 
 /** Infra. crit = a per-thread perf WEDGE (operator unreachable / event-loop-lag /
  *  CLOSE_WAIT storm — F1/P-030), a sustained MCP tool-call-transport failure stream
- *  (W8/P-008, ≥ MCP_PROXY_HARD_FAIL_CRIT hard failures/window), a tool HANDLER failing
+ *  (W8/P-008, ≥ MCP_PROXY_HARD_FAIL_CRIT hard failures/window), a critical continuation
+ *  write stalled for five minutes, a tool HANDLER failing
  *  fleet-wide (EI-18798264517111160 — the transport is fine, the tool's own work is
  *  not), or the gateway is enabled
  *  but unreachable (the spine is down). unknown = PG unreadable. warn = a per-thread perf
@@ -656,6 +663,9 @@ export function infraStatus(d: InfraHealth): PanelStatus {
   // A real, agent-facing tool-call failure stream OUTRANKS a greyed PG leg: a crit
   // MCP-proxy SLO breach reds Infra even if PG is momentarily unreadable this tick.
   if ((d.mcpProxy?.hardFailures ?? 0) >= MCP_PROXY_HARD_FAIL_CRIT) return 'crit';
+  // A durability continuation waiting five minutes is independently actionable even if PG
+  // is momentarily unreadable; the critical queue intentionally has no timeout by default.
+  if ((d.mcpProxy?.criticalContinuationQueueStalls ?? 0) > 0) return 'crit';
   // A tool whose HANDLER is failing for the whole fleet (EI-18798264517111160). Same
   // precedence reasoning as the MCP-proxy breach directly above — an agent-facing
   // failure stream outranks a greyed PG leg, so it must sit BEFORE the `pg === null`
@@ -723,6 +733,8 @@ export function infraSummary(d: InfraHealth, gatewayEnabled: boolean): string {
   const toolsCrit = d.toolFailures?.rating === 'broken';
   const mcpHard = d.mcpProxy?.hardFailures ?? 0;
   const mcpCrit = mcpHard >= MCP_PROXY_HARD_FAIL_CRIT;
+  const mcpQueueStalls = d.mcpProxy?.criticalContinuationQueueStalls ?? 0;
+  const mcpQueueCrit = mcpQueueStalls > 0;
   const mcpWarn = mcpHard > 0 && !mcpCrit;
   const perfCrit = d.perf?.status === 'crit';
   const worstDiskVol = d.disk && d.disk.length > 0 ? d.disk.reduce((a, b) => (b.usedPct > a.usedPct ? b : a)) : null;
@@ -740,6 +752,10 @@ export function infraSummary(d: InfraHealth, gatewayEnabled: boolean): string {
     return `TOOL FAILING FLEET-WIDE: ${d.toolFailures!.evidence}`;
   }
   if (mcpCrit) return `MCP PROXY FAILING: ${mcpHard} hard tool-call failure(s)/1h (transient-is-normal regression — pages)`;
+  if (mcpQueueCrit) {
+    const longestSec = Math.round((d.mcpProxy?.criticalContinuationQueueMaxWaitMs ?? 0) / 1000);
+    return `MCP PROXY CRITICAL CONTINUATION QUEUE WAIT: ${mcpQueueStalls} request(s) exceeded ${MCP_PROXY_CRITICAL_CONTINUATION_WAIT_CRIT_MS / 60_000}m in the last hour (longest observed ${longestSec}s) — checkpoint/completion write latency incident`;
+  }
   if (perfCrit) {
     const reason = d.perf!.reasons[0] ?? 'operator degraded';
     // D-022: memory PSI is sampled from the host's /proc/pressure/memory, so it
@@ -810,6 +826,7 @@ export function infraCritAmbientOnly(d: InfraHealth): boolean {
     if (!attribution || attribution.operatorDefect.length > 0) return false;
   }
   if ((d.mcpProxy?.hardFailures ?? 0) >= MCP_PROXY_HARD_FAIL_CRIT) return false;
+  if ((d.mcpProxy?.criticalContinuationQueueStalls ?? 0) > 0) return false;
   if (d.toolFailures?.rating === 'broken') return false;
   if (worstDiskBand(d.disk) === 'crit') return false;
   // Mirrors infraStatus's own gatewayReachable leg, which it only reaches once PG

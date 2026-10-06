@@ -39,6 +39,11 @@ import {
 } from './ptt-capture';
 import { f32ToWav } from './f32-to-wav';
 import { transcribeChunk } from '@papercusp/operator-core/lib/voice-engines/whisper';
+import {
+  isFullAgentEngineUnavailable,
+  isWakeEngineUnavailable,
+  releaseUnavailableMessage,
+} from '@papercusp/operator-core/lib/voice-release-availability';
 import { startEnergyVadCapture } from './energy-vad-capture';
 import { PlayoutLedger, type CaptureWindow } from './capture-window';
 import {
@@ -1076,6 +1081,10 @@ async function startWakeWordGateInner(prefs: any): Promise<boolean> {
     );
     return false;
   }
+  if (isWakeEngineUnavailable(engine)) {
+    void emitVoiceToast('error', releaseUnavailableMessage(engine));
+    return false;
+  }
   try {
     if (engine === 'porcupine') {
       const bootR = await fetch('/api/agent-mcp/operator-picovoice-bootstrap').catch(() => null);
@@ -1190,6 +1199,15 @@ async function maybeStartFullAgentInner(): Promise<boolean> {
     // see a startup "[voice] realtime start failed at stage=prefs" warning
     // on a cold tab; 30s leaves headroom without affecting a real hang.
     const prefs = loadVoicePrefsClient();
+    // Preserve legacy preferences, but never silently route a selected
+    // unsupported full-agent provider through local microphone capture.
+    // Release scope (voice-final-public-release-2026-10-01#D-005) covers every
+    // engine in the shared release list, Gemini included.
+    if (isFullAgentEngineUnavailable(prefs.fullAgentEngine)) {
+      setVoiceMode('off');
+      void emitVoiceToast('error', releaseUnavailableMessage(String(prefs.fullAgentEngine)));
+      return true; // Handled: suppress the caller's local-STT fallback.
+    }
     // Pull idle-timeout pref so both EL and Realtime paths can use it.
     if (typeof prefs.fullAgentIdleTimeoutMin === 'number') {
       idleTimeoutMs = Math.max(0, prefs.fullAgentIdleTimeoutMin) * 60_000;
@@ -1723,6 +1741,12 @@ async function maybeStartWakeWordGate(prefs: any): Promise<boolean> {
   // up Whisper once for the command utterance, then return to gating.
   const engine = prefs.wakeWordEngine ?? 'off';
   if (engine === 'off') return false;
+  if (isWakeEngineUnavailable(engine)) {
+    // Visible refusal; the caller keeps its non-gated path, as it already does
+    // when a Picovoice key is missing.
+    void emitVoiceToast('error', releaseUnavailableMessage(engine));
+    return false;
+  }
 
   if (engine === 'porcupine') {
     // Porcupine needs a Picovoice access key.
@@ -3004,6 +3028,61 @@ export function cancelAllSpeech(): void {
   if (state.status === 'speaking') {
     setState({ status: state.mode === 'off' ? 'off' : 'idle', speakingRole: null });
   }
+}
+
+/** Output-only consumer of the maintained TTS/settings surface. Unlike voice
+ * mode, creating this player never acquires a microphone. Its lifetime belongs
+ * to the caller, so obsolete responses cannot enter the global speech queue. */
+export function createVoiceOutputPlayback(
+  requestSpeech: (text: string, engine: string, voiceId: string | null, signal: AbortSignal) => Promise<Blob>,
+  onStatus: (status: 'idle' | 'loading' | 'playing' | 'unavailable') => void,
+) {
+  let current: AbortController | null = null;
+  let disposeAudio: (() => void) | null = null;
+  const stop = () => {
+    current?.abort(); current = null;
+    disposeAudio?.(); disposeAudio = null;
+    onStatus('idle');
+  };
+  return {
+    stop,
+    async play(text: string) {
+      stop();
+      if (isVoiceOutputMuted() || !text.trim()) return;
+      const controller = new AbortController(); current = controller;
+      const signal = controller.signal;
+      onStatus('loading');
+      try {
+        const engine = loadVoicePrefsClient().ttsEngine ?? 'kokoro';
+        if (engine === 'browser') {
+          if (!window.speechSynthesis) throw new Error('speech_unavailable');
+          const utterance = new SpeechSynthesisUtterance(text);
+          utterance.rate = config.rate;
+          const name = voiceForRole('system:operator');
+          utterance.voice = window.speechSynthesis.getVoices().find(voice => voice.name === name) ?? null;
+          disposeAudio = () => window.speechSynthesis.cancel();
+          utterance.onstart = () => { if (!signal.aborted) onStatus('playing'); };
+          utterance.onend = () => { if (!signal.aborted) onStatus('idle'); };
+          utterance.onerror = () => { if (!signal.aborted) onStatus('unavailable'); };
+          window.speechSynthesis.speak(utterance);
+          return;
+        }
+        const blob = await requestSpeech(text, engine, voiceForEngineRole(engine, 'system:operator'), signal);
+        if (signal.aborted || current !== controller || isVoiceOutputMuted()) return;
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        let disposed = false;
+        const dispose = () => { if (!disposed) { disposed = true; audio.pause(); audio.removeAttribute('src'); URL.revokeObjectURL(url); } };
+        disposeAudio = dispose;
+        audio.onended = () => { dispose(); if (!signal.aborted) onStatus('idle'); };
+        audio.onerror = () => { dispose(); if (!signal.aborted) onStatus('unavailable'); };
+        await audio.play();
+        if (!signal.aborted && !disposed) onStatus('playing');
+      } catch {
+        if (!signal.aborted && current === controller) { disposeAudio?.(); disposeAudio = null; onStatus('unavailable'); }
+      }
+    },
+  };
 }
 
 /**

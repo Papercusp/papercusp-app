@@ -507,6 +507,24 @@ export function outstandingLegIds(
 }
 
 /**
+ * WI-10005727 — the legs `outstandingLegIds` correctly REFUSES to count, but which must not
+ * vanish from the verdict either: measured non-pass at a STALE head (`current === false`)
+ * and never admitted to the cycle. The stale result is not evidence about repairHead in
+ * either direction, and with no lifecycle there is nothing else — so the honest reading is
+ * "unmeasured at this head", never the `none-failing` all-clear the assessment fell
+ * through to (observed 2026-10-02: 11 such legs, verdict `none-failing`).
+ */
+export function staleUnadmittedRedLegIds(
+  perLeg: ReadonlyArray<{ id: string; measuredNow: RepairLegStatus | 'not-measured'; lifecycle: 'failing' | 'fixed' | 'never-admitted' }>,
+  current: boolean | null,
+): string[] {
+  if (current !== false) return [];
+  return perLeg
+    .filter((l) => l.lifecycle === 'never-admitted' && l.measuredNow !== 'pass' && l.measuredNow !== 'not-measured')
+    .map((l) => l.id);
+}
+
+/**
  * P-003 — one row per leg, over the UNION of this tick's measurement and the cycle's
  * lifecycle.
  *
@@ -1170,6 +1188,7 @@ export async function readGateCandidateFailures(
       passedAtRepairHeadCount,
       outstandingLegs: nonTestLegs.outstanding.length,
       fixedLegs: nonTestLegs.perLeg.filter((l) => l.lifecycle === 'fixed' && !nonTestLegs.outstanding.includes(l.id)).length,
+      staleUnadmittedLegs: staleUnadmittedRedLegIds(nonTestLegs.perLeg, nonTestLegs.current).length,
     }),
   };
 }
@@ -1185,12 +1204,17 @@ export function assessCandidateFailures(c: {
   passedAtRepairHeadCount: number;
   outstandingLegs: number;
   fixedLegs: number;
+  /** WI-10005727 — `staleUnadmittedRedLegIds(...).length`. */
+  staleUnadmittedLegs: number;
 }): GateCandidateFailuresCode {
   // A genuinely unrepaired test file is real work, whatever else is true.
   if (c.stillBrokenCount > 0) return 'repairs-outstanding';
   // A red non-test leg with no landed fix is real work too — and it is the one the file
   // counts cannot see, so it must be named before any file-count reading can say "done".
   if (c.outstandingLegs > 0) return 'non-test-leg-failing';
+  // WI-10005727: a leg last measured red at an OLDER head, never admitted, says nothing
+  // about repairHead — so neither all-clear below may be claimed while one exists.
+  if (c.staleUnadmittedLegs > 0) return 'unmeasured';
   // Rows exist but some could not be compared: an unmeasured state wearing a green coat,
   // reported as unmeasured rather than as either verdict.
   // A file the gate already PASSED at repairHead is resolved, not unmeasured.

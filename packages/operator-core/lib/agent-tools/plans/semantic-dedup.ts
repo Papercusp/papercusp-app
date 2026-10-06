@@ -66,6 +66,11 @@
 
 import { withWorkspace } from '@papercusp/db-org';
 import type { EmbedderProfileSpec } from '@papercusp/memory';
+import {
+  calibrateNearDuplicateCut,
+  checkNearDuplicates,
+  type NearDuplicateCalibration,
+} from '@papercusp/search';
 import { resolvePlanScope, type PlanSourceOpts } from './source';
 
 // The prose column width contract — ONE source, not a restated `384` (D-005 §5).
@@ -164,27 +169,22 @@ export function planDupeBaselineQuantile(): number {
   return envNumber(process.env.PAPERCUSP_PLAN_DUPE_QUANTILE) ?? DEFAULT_BASELINE_QUANTILE;
 }
 
-/** Nearest-rank quantile over an ASCENDING array. */
-function quantile(sortedAsc: readonly number[], q: number): number {
-  const i = Math.min(sortedAsc.length - 1, Math.max(0, Math.floor(q * sortedAsc.length)));
-  return sortedAsc[i];
-}
-
 /**
  * How the keep/drop cut for one confirmation was arrived at. Reported on the
  * result so an INERT classifier is visible instead of silently keeping
  * everything: `basis` says which rule produced the cut, and `backgroundSamples`
- * says what it was measured over.
+ * says what it was measured over. The rule itself lives in @papercusp/search
+ * (shared-vector-search-libraries-2026-09-29 P-004).
  */
-export interface ConfirmCalibration {
-  basis: 'corpus-relative' | 'absolute-override';
-  /** The cosine at or above which a candidate is KEPT. */
-  cut: number;
-  /** Background sample size; 0 for an absolute override (none was taken). */
-  backgroundSamples: number;
-  /** The quantile used; absent for an absolute override. */
-  quantile?: number;
-}
+export type ConfirmCalibration = NearDuplicateCalibration;
+
+/** The host's calibration options: this module's constants over the library cut. */
+const calibrationOptions = (opts: { absoluteOverride?: number | null; quantile?: number }) => ({
+  absoluteOverride: opts.absoluteOverride ?? null,
+  quantile: opts.quantile ?? DEFAULT_BASELINE_QUANTILE,
+  minSamples: MIN_BACKGROUND_SAMPLES,
+  maxCut: MAX_CALIBRATED_CUT,
+});
 
 /**
  * Resolve the keep/drop cut. PURE — no DB, no embedder — so the calibration
@@ -197,19 +197,10 @@ export function resolveConfirmCalibration(
   background: readonly number[],
   opts: { absoluteOverride?: number | null; quantile?: number } = {},
 ): ConfirmCalibration | null {
-  const override = opts.absoluteOverride ?? null;
-  if (override !== null) {
-    return { basis: 'absolute-override', cut: override, backgroundSamples: 0 };
-  }
-  const usable = background.filter((n) => typeof n === 'number' && Number.isFinite(n));
-  if (usable.length < MIN_BACKGROUND_SAMPLES) return null;
-  const q = opts.quantile ?? DEFAULT_BASELINE_QUANTILE;
-  const sorted = [...usable].sort((a, b) => a - b);
-  const cut = quantile(sorted, q);
-  // A near-self-identical background cannot separate anything; refusing is the
-  // safe direction (the token refusal stands) — see MAX_CALIBRATED_CUT.
-  if (!(cut > 0) || cut > MAX_CALIBRATED_CUT) return null;
-  return { basis: 'corpus-relative', cut, backgroundSamples: usable.length, quantile: q };
+  // A near-self-identical background cannot separate anything; the library
+  // refuses above MAX_CALIBRATED_CUT, which is the safe direction (the token
+  // refusal stands).
+  return calibrateNearDuplicateCut(background, calibrationOptions(opts));
 }
 
 /** Injectable seams (tests + any future non-553 store). */
@@ -432,42 +423,33 @@ async function confirmSimilarPlansCore<T extends { slug: string }>(
     if (!selection) return noVerdict;
     const vec = await resolved.embed(`${proposed.title}\n${(proposed.body ?? '').slice(0, 2000)}`);
     if (!fitsProseColumns(vec.length)) return noVerdict;
-    const slugs = candidates.map((c) => c.slug);
-    const sims = await d.querySimilarities(vec, resolved.mode, slugs, opts, selection);
-
-    // The cut. An absolute override skips the background read entirely; the
-    // normal path calibrates against the corpus and DECLINES TO CLASSIFY when
-    // the background is too small or degenerate — the token refusal then stands
-    // rather than being partitioned by a number that means nothing.
-    const absoluteOverride = planDupeAbsoluteOverride();
-    const background =
-      absoluteOverride !== null
-        ? []
-        : d.queryBackgroundSimilarities
-          ? await d.queryBackgroundSimilarities(
-              vec,
-              resolved.mode,
-              slugs,
-              BACKGROUND_SAMPLE_LIMIT,
-              opts,
-              selection,
-            )
-          : [];
-    const calibration = resolveConfirmCalibration(background, {
-      absoluteOverride,
-      quantile: planDupeBaselineQuantile(),
+    // The cut (library: checkNearDuplicates). An absolute override skips the
+    // background read entirely; the normal path calibrates against the corpus
+    // and DECLINES TO CLASSIFY when the background is too small or degenerate —
+    // the token refusal then stands rather than being partitioned by a number
+    // that means nothing.
+    const queryBackground = d.queryBackgroundSimilarities;
+    const outcome = await checkNearDuplicates({
+      candidates,
+      keyOf: (c) => c.slug,
+      similarities: (slugs) => d.querySimilarities(vec, resolved.mode, [...slugs], opts, selection),
+      sampleBackground: queryBackground
+        ? (slugs, limit) => queryBackground(vec, resolved.mode, [...slugs], limit, opts, selection)
+        : undefined,
+      backgroundLimit: BACKGROUND_SAMPLE_LIMIT,
+      similarityDecimals: 3,
+      ...calibrationOptions({
+        absoluteOverride: planDupeAbsoluteOverride(),
+        quantile: planDupeBaselineQuantile(),
+      }),
     });
-    if (!calibration) return noVerdict;
-
-    const kept: Array<T & { similarity?: number }> = [];
-    const dropped: Array<T & { similarity: number }> = [];
-    for (const c of candidates) {
-      const sim = sims.get(c.slug);
-      if (sim === undefined) kept.push(c);
-      else if (sim >= calibration.cut) kept.push({ ...c, similarity: Math.round(sim * 1000) / 1000 });
-      else dropped.push({ ...c, similarity: Math.round(sim * 1000) / 1000 });
-    }
-    return { verdict: true, kept, dropped, calibration };
+    if (!outcome.verdict) return noVerdict;
+    return {
+      verdict: true,
+      kept: outcome.kept as Array<T & { similarity?: number }>,
+      dropped: outcome.dropped,
+      calibration: outcome.calibration,
+    };
   } catch {
     return noVerdict;
   }

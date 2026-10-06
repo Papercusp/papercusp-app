@@ -38,3 +38,14 @@ export interface TerminalCounterFields {
 export function formatTerminalCounterFields(
   counters?: TerminalCounterInput,
 ): TerminalCounterFields;
+
+export interface RefusalCounterInput extends TerminalCounterInput {
+  tasks?: number;
+  completedTasks?: number;
+  quarantinedFailed?: number;
+  timedOutTasks?: number;
+  undeterminedTasks?: number;
+}
+
+/** Refusal fields preserve completed initial outcomes and untallied observations. */
+export function formatRefusalCounterFields(counters?: RefusalCounterInput): string;

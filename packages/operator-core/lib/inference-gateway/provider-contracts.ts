@@ -12,6 +12,15 @@ export interface ActiveAccount {
   accountId: string;
   token(): Promise<string>;
   invalidateToken?(): void;
+  /** How `token()` authenticates upstream (anthropic-credits-gateway-2026-09-30 P-005): `oauth` =
+   *  `Authorization: Bearer` + the oauth beta; `api-key` = an Anthropic Console key sent as
+   *  `x-api-key`. Absent ⇒ `oauth` (every pre-existing account). */
+  authMode?: 'oauth' | 'api-key';
+  /** Metered spend policy (anthropic-credits-gateway-2026-09-30 P-008, D-003). `overflow` (absent ⇒
+   *  this): while billed per token — an api-key account, or a subscription in usage-credits overage —
+   *  the account serves only when no included-allowance account can. `never`: unselectable while
+   *  metered (overage is treated as a wall; an api-key account is never auto-selected). */
+  meteredPolicy?: 'overflow' | 'never';
   /** Per-account upstream egress. Singular/legacy; superseded by a non-empty `egressPool`. */
   egress?: AccountEgress;
   /** Rotating egress bindings for one account; callers skip entries on per-IP cooldown. */

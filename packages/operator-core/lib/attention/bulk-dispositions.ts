@@ -16,6 +16,13 @@
  * treated as resolved.
  */
 
+import {
+  bugReproductionMissingText,
+  parseBugReproductionReceipt,
+  readBugReproductionReceipt,
+  type BugReproductionReceipt,
+} from './bug-reproduction';
+
 export const BULK_CONFIDENCE_LEVELS = [
   'high',
   'medium',
@@ -608,4 +615,462 @@ export function isBulkRecommendationKind(value: unknown): value is BulkRecommend
 
 export function isBulkDispositionKind(value: unknown): value is BulkDispositionKind {
   return typeof value === 'string' && (BULK_DISPOSITION_KINDS as readonly string[]).includes(value);
+}
+
+// ---------------------------------------------------------------------------
+// Intake dispositions (observation-candidate-acceptance-promotion-2026-09-30
+// P-004, BARs R-3 / R-18 / R-19).
+//
+// An INTAKE input is an observation or unverified candidate surfaced in the
+// attention feed. Reviewing one in a saved bulk run ends in exactly one of six
+// typed decisions. The decision rides BESIDE the existing disposition /
+// recommendation columns (migration 1296 `intake_decision`): each intake
+// disposition also projects onto the existing recommendation vocabulary, so the
+// run counters, settle and report UI keep reading the columns they already read.
+// Promotion itself (creating/updating canonical work) is P-006; this layer only
+// records an attributable, validated decision with an owned next step.
+// ---------------------------------------------------------------------------
+
+export const BULK_INTAKE_DISPOSITIONS = [
+  'promote',
+  'merge',
+  'investigate',
+  'retain',
+  'reject',
+  'retry',
+] as const;
+
+export type BulkIntakeDisposition = (typeof BULK_INTAKE_DISPOSITIONS)[number];
+
+/** Attention-item kinds that are intake inputs (observations / candidates). */
+export const INTAKE_ATTENTION_KINDS = ['improvement'] as const;
+
+export function isIntakeAttentionKind(kind: unknown): boolean {
+  return typeof kind === 'string' && (INTAKE_ATTENTION_KINDS as readonly string[]).includes(kind);
+}
+
+/**
+ * Bulk-run kinds whose items are NOT attention-feed members, so feed membership
+ * cannot be their liveness check (observation-candidate plan P-008 / D-020). An
+ * intake-triage item is an observation-lane row, and the feed admits improvement
+ * rows only when they are flagged for a human, so a feed-membership gate would
+ * refuse every intake-triage application. Their liveness is the source row's own
+ * state, which `executeIntakeDecision` re-reads under its row lock
+ * (`source-not-found` / `source-terminal` refusals write nothing).
+ */
+export function isSourceLivenessRunKind(kind: unknown): boolean {
+  return kind === 'intake-triage';
+}
+
+/**
+ * P-008 / D-020 §4: an uncertain report cannot become accepted fix work. A promote
+ * whose confidence is `low` or `insufficient` is refused when it is REPORTED, so it
+ * never reaches application; the resolver records investigate or retry instead.
+ * Returns the refusal text, or null when the decision may be recorded.
+ */
+export function intakeConfidenceRefusal(disposition: string, confidenceLevel: string | null | undefined): string | null {
+  if (disposition !== 'promote') return null;
+  if (confidenceLevel !== 'low' && confidenceLevel !== 'insufficient') return null;
+  return (
+    `a ${confidenceLevel}-confidence report cannot become accepted work: promote needs confidenceLevel high or medium. ` +
+    'Record investigate (the open question, evidence to collect and exit check) or retry (with the missing information) instead'
+  );
+}
+
+/** One run row as the intake-drain summary reads it. */
+export interface IntakeDrainRow {
+  outcome: string;
+  actionId: string | null;
+  intakeDecision: BulkIntakeDecision | null;
+  /** The accepted item's delivery state, when the caller has read it. */
+  promoted?: { state: string; completionAuthority?: string | null } | null;
+}
+
+export interface IntakeDrainSummary {
+  /** Intake dispositions: what was DECIDED about each input. */
+  intake: {
+    total: number;
+    decided: number;
+    undecided: number;
+    failed: number;
+    applied: number;
+    byDisposition: Record<BulkIntakeDisposition, number>;
+  };
+  /** Accepted-work delivery: a separate question from the decision. */
+  delivery: { accepted: number; delivered: number; notDelivered: number };
+}
+
+/**
+ * P-008 / D-020 §5 (R-27): summarize an intake drain with dispositions SEPARATE from
+ * implementation delivery. An applied promote/investigate counts as accepted, and
+ * only as delivered once its item is terminal `done` with committed completion
+ * authority, so "accepted" can never read as "shipped". Intake never feeds the run's
+ * resolved counters; this summary is the only place its outcomes are counted.
+ */
+export function summarizeIntakeDrain(rows: readonly IntakeDrainRow[]): IntakeDrainSummary {
+  const byDisposition = Object.fromEntries(BULK_INTAKE_DISPOSITIONS.map((d) => [d, 0])) as Record<
+    BulkIntakeDisposition,
+    number
+  >;
+  const summary: IntakeDrainSummary = {
+    intake: { total: rows.length, decided: 0, undecided: 0, failed: 0, applied: 0, byDisposition },
+    delivery: { accepted: 0, delivered: 0, notDelivered: 0 },
+  };
+  for (const row of rows) {
+    const decision = row.intakeDecision;
+    if (!decision) {
+      if (row.outcome === 'failed') summary.intake.failed += 1;
+      else summary.intake.undecided += 1;
+      continue;
+    }
+    summary.intake.decided += 1;
+    byDisposition[decision.disposition] += 1;
+    const applied = row.outcome === 'auto_resolved' && row.actionId === INTAKE_APPLY_ACTION_ID;
+    if (!applied) continue;
+    summary.intake.applied += 1;
+    if (decision.disposition !== 'promote' && decision.disposition !== 'investigate') continue;
+    summary.delivery.accepted += 1;
+    const delivered = row.promoted?.state === 'done' && row.promoted.completionAuthority === 'committed';
+    if (delivered) summary.delivery.delivered += 1;
+    else summary.delivery.notDelivered += 1;
+  }
+  return summary;
+}
+
+export function isBulkIntakeDisposition(value: unknown): value is BulkIntakeDisposition {
+  return typeof value === 'string' && (BULK_INTAKE_DISPOSITIONS as readonly string[]).includes(value);
+}
+
+/** A persisted, validated intake decision. Every field a reader needs to
+ *  attribute the outcome and find its owner is present (R-18). */
+export interface BulkIntakeDecision {
+  disposition: BulkIntakeDisposition;
+  /** Why — required for every disposition, so a reject always has a reason. */
+  reason: string;
+  /** Who decided (the resolver's coord owner id). */
+  decidedBy: string;
+  /** Who owns the next step. */
+  owner: BulkResponsibility;
+  /** merge: the canonical item/candidate this input merges into. */
+  targetRef: string | null;
+  /** retry: what information is missing before the input can be decided. */
+  missingInformation: string | null;
+  decidedAt: string;
+  /**
+   * P-006 (D-013): promote only — `fix` → a bug, `build` → a change. Null keeps the
+   * candidate's own kind (an observation defaults to a fix). `investigate` always
+   * executes as an investigation task.
+   */
+  workKind: IntakeWorkKind | null;
+  /**
+   * P-006: promote/investigate only — the acceptance proposal the resolver drafted
+   * (problem/evidence/outcome/scope/completionCheck). Fields here win over the
+   * source's own proposal; completeness is checked when the decision is EXECUTED,
+   * where an incomplete contract refuses rather than defaults.
+   */
+  acceptance: IntakeAcceptanceProposalInput | null;
+  /**
+   * P-006: the source revision (`src-v1:<sha256>`) the decision judged, stamped
+   * server-side when it is recorded. Executing against an edited source refuses.
+   */
+  sourceRevision: string | null;
+  /**
+   * P-013 (D-023): promote only — the reproduction receipt that makes a BUG promote
+   * acceptable. Null on every other decision, and on a bug whose source was born
+   * verified by its filer's encounter receipt (D-024).
+   */
+  reproduction: BugReproductionReceipt | null;
+}
+
+export const INTAKE_WORK_KINDS = ['fix', 'build'] as const;
+export type IntakeWorkKind = (typeof INTAKE_WORK_KINDS)[number];
+
+/** The storage kind an executed intake decision creates or keeps. */
+export type IntakeTargetKind = 'bug' | 'change' | 'task';
+
+const INTAKE_WORK_STORAGE_KINDS = new Set(['bug', 'change', 'task']);
+
+/**
+ * promote → bug/change (default: the candidate's own kind; observations default to a
+ * fix); investigate → task. Pure, so the report path and the executor agree on
+ * whether a promote is a BUG promote (the one D-023 gates).
+ */
+export function intakeTargetKindFor(
+  decision: Pick<BulkIntakeDecision, 'disposition' | 'workKind'>,
+  source: { kind: string; observation: boolean },
+): IntakeTargetKind {
+  if (decision.disposition === 'investigate') return 'task';
+  if (decision.workKind === 'fix') return 'bug';
+  if (decision.workKind === 'build') return 'change';
+  if (!source.observation && INTAKE_WORK_STORAGE_KINDS.has(source.kind)) return source.kind as IntakeTargetKind;
+  return 'bug';
+}
+
+/** What the reproduction gate needs to know about a decision's source. */
+export interface IntakeReproductionSource {
+  kind: string;
+  observation: boolean;
+  /** D-024: the receipt the source was born verified with, if any. */
+  bornVerified: BugReproductionReceipt | null;
+}
+
+/**
+ * P-013 (D-023 §1-2, D-024 §1): a promote that yields a BUG needs a reproduction
+ * receipt — on the decision, or the source's born-verified encounter receipt.
+ * Returns the refusal text (steering to investigate / reject / retain), or null
+ * when the decision may stand. change/task/feature acceptance is unchanged (§6).
+ */
+export function intakeReproductionRefusal(
+  decision: Pick<BulkIntakeDecision, 'disposition' | 'workKind' | 'reproduction'>,
+  source: IntakeReproductionSource,
+  subject = 'this input',
+): string | null {
+  if (decision.disposition !== 'promote') return null;
+  if (intakeTargetKindFor(decision, source) !== 'bug') return null;
+  if (decision.reproduction || source.bornVerified) return null;
+  return bugReproductionMissingText(subject);
+}
+
+/** A resolver-drafted acceptance proposal; shape only — completeness is judged at execution. */
+export interface IntakeAcceptanceProposalInput {
+  problem?: string | null;
+  evidence?: string[] | null;
+  outcome?: string | null;
+  scope?: string | null;
+  completionCheck?: string | null;
+}
+
+/**
+ * The terminal action that EXECUTES a recorded intake decision (P-006). It is not a
+ * card button: the bulk resolver applies it to a row that already carries a
+ * validated `intake_decision`, through the shared terminal dispatcher.
+ */
+export const INTAKE_APPLY_ACTION_ID = 'apply-intake' as const;
+
+/** What a resolver submits; validated by `parseIntakeDecision`. */
+export interface BulkIntakeDecisionInput {
+  disposition: string;
+  reason?: string | null;
+  owner?: BulkResponsibility | null;
+  targetRef?: string | null;
+  missingInformation?: string | null;
+  workKind?: string | null;
+  acceptance?: IntakeAcceptanceProposalInput | null;
+  /** promote: the reproduction receipt (required when the promote yields a bug). */
+  reproduction?: unknown;
+}
+
+interface IntakeDispositionSpec {
+  disposition: BulkIntakeDisposition;
+  label: string;
+  /** Fields beyond `reason` this disposition requires. */
+  requires: readonly ('targetRef' | 'missingInformation')[];
+  /** Default owner of the next step. */
+  owner: BulkResponsibility;
+  /** Projection onto the existing recommendation vocabulary (CHECK-constrained). */
+  recommendationKind: BulkRecommendationKind;
+}
+
+const INTAKE_DISPOSITION_SPECS: Record<BulkIntakeDisposition, IntakeDispositionSpec> = {
+  promote: {
+    disposition: 'promote',
+    label: 'Promote to accepted work',
+    requires: [],
+    owner: 'engineering',
+    recommendationKind: 'routed',
+  },
+  merge: {
+    disposition: 'merge',
+    label: 'Merge / link into existing work',
+    requires: ['targetRef'],
+    owner: 'agent',
+    recommendationKind: 'cleanup_candidate',
+  },
+  investigate: {
+    disposition: 'investigate',
+    label: 'Investigate before deciding',
+    requires: [],
+    owner: 'agent',
+    recommendationKind: 'investigate',
+  },
+  retain: {
+    disposition: 'retain',
+    label: 'Retain as evidence',
+    requires: [],
+    owner: 'system',
+    recommendationKind: 'cleanup_candidate',
+  },
+  reject: {
+    disposition: 'reject',
+    label: 'Reject with reason',
+    requires: [],
+    owner: 'system',
+    recommendationKind: 'cleanup_candidate',
+  },
+  retry: {
+    disposition: 'retry',
+    label: 'Retry when information is supplied',
+    requires: ['missingInformation'],
+    owner: 'agent',
+    recommendationKind: 'retry_needed',
+  },
+};
+
+/** The six dispositions offered for every intake input, as the manifest shows them. */
+export const BULK_INTAKE_DISPOSITION_OFFER: readonly {
+  disposition: BulkIntakeDisposition;
+  label: string;
+  requires: readonly string[];
+}[] = BULK_INTAKE_DISPOSITIONS.map((d) => ({
+  disposition: d,
+  label: INTAKE_DISPOSITION_SPECS[d].label,
+  requires: ['reason', ...INTAKE_DISPOSITION_SPECS[d].requires],
+}));
+
+function nonBlank(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+/**
+ * Validate a resolver's intake decision. Refuses (never defaults) a missing
+ * reason, a merge without a target, or a retry that does not say what is
+ * missing. Migration 1296 repeats these rules as a CHECK constraint.
+ */
+export function parseIntakeDecision(
+  input: BulkIntakeDecisionInput,
+  ctx: { decidedBy: string; now?: Date; sourceRevision?: string | null },
+): { ok: true; decision: BulkIntakeDecision } | { ok: false; error: string } {
+  if (!isBulkIntakeDisposition(input?.disposition)) {
+    return {
+      ok: false,
+      error: `intake disposition must be one of ${BULK_INTAKE_DISPOSITIONS.join(', ')} (got ${JSON.stringify(input?.disposition)})`,
+    };
+  }
+  const spec = INTAKE_DISPOSITION_SPECS[input.disposition];
+  const reason = nonBlank(input.reason);
+  if (!reason) return { ok: false, error: `intake disposition "${spec.disposition}" requires a non-blank reason` };
+  const decidedBy = nonBlank(ctx.decidedBy);
+  if (!decidedBy) return { ok: false, error: 'intake decision requires an attributable decider' };
+  const targetRef = nonBlank(input.targetRef);
+  const missingInformation = nonBlank(input.missingInformation);
+  if (spec.requires.includes('targetRef') && !targetRef) {
+    return { ok: false, error: `intake disposition "${spec.disposition}" requires targetRef (the work it merges into)` };
+  }
+  if (spec.requires.includes('missingInformation') && !missingInformation) {
+    return {
+      ok: false,
+      error: `intake disposition "${spec.disposition}" requires missingInformation (what must be supplied before retrying)`,
+    };
+  }
+  const owner =
+    input.owner && (BULK_RESPONSIBILITIES as readonly string[]).includes(input.owner) ? input.owner : spec.owner;
+  const workKindRaw = nonBlank(input.workKind);
+  if (workKindRaw && spec.disposition !== 'promote') {
+    return { ok: false, error: `workKind applies to promote only (got it on "${spec.disposition}")` };
+  }
+  if (workKindRaw && !(INTAKE_WORK_KINDS as readonly string[]).includes(workKindRaw)) {
+    return { ok: false, error: `workKind must be one of ${INTAKE_WORK_KINDS.join(', ')} (got ${JSON.stringify(workKindRaw)})` };
+  }
+  const acceptance = readAcceptanceProposalInput(input.acceptance);
+  if (acceptance && spec.disposition !== 'promote' && spec.disposition !== 'investigate') {
+    return { ok: false, error: `acceptance applies to promote/investigate only (got it on "${spec.disposition}")` };
+  }
+  let reproduction: BugReproductionReceipt | null = null;
+  if (input.reproduction !== undefined && input.reproduction !== null) {
+    if (spec.disposition !== 'promote') {
+      return {
+        ok: false,
+        error: `reproduction applies to promote only (got it on "${spec.disposition}"); an unreproduced bug is investigate, reject or retain`,
+      };
+    }
+    const parsedReceipt = parseBugReproductionReceipt(input.reproduction);
+    if (!parsedReceipt.ok) return { ok: false, error: parsedReceipt.error };
+    reproduction = parsedReceipt.receipt;
+  }
+  return {
+    ok: true,
+    decision: {
+      disposition: spec.disposition,
+      reason,
+      decidedBy,
+      owner,
+      targetRef,
+      missingInformation,
+      decidedAt: (ctx.now ?? new Date()).toISOString(),
+      workKind: (workKindRaw as IntakeWorkKind | null) ?? null,
+      acceptance,
+      sourceRevision: nonBlank(ctx.sourceRevision) ?? null,
+      reproduction,
+    },
+  };
+}
+
+/** Trimmed proposal fields; null when nothing usable was supplied. */
+function readAcceptanceProposalInput(raw: unknown): IntakeAcceptanceProposalInput | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const v = raw as Record<string, unknown>;
+  const out: IntakeAcceptanceProposalInput = {};
+  for (const field of ['problem', 'outcome', 'scope', 'completionCheck'] as const) {
+    const value = nonBlank(v[field]);
+    if (value) out[field] = value;
+  }
+  if (Array.isArray(v.evidence)) {
+    const evidence = v.evidence.map(nonBlank).filter((e): e is string => e !== null);
+    if (evidence.length > 0) out.evidence = evidence;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Project an intake decision onto the existing disposition/recommendation columns. */
+export function intakeRecommendationFor(decision: BulkIntakeDecision): {
+  disposition: BulkDispositionKind;
+  recommendationKind: BulkRecommendationKind;
+  label: string;
+  responsibility: BulkResponsibility;
+  retryCondition: string | null;
+} {
+  const spec = INTAKE_DISPOSITION_SPECS[decision.disposition];
+  return {
+    disposition: spec.recommendationKind,
+    recommendationKind: spec.recommendationKind,
+    label: spec.label,
+    responsibility: decision.owner,
+    retryCondition: decision.disposition === 'retry' ? decision.missingInformation : null,
+  };
+}
+
+/** Tolerant read of a persisted `intake_decision` value (jsonb, parsed or string). */
+export function readIntakeDecision(raw: unknown): BulkIntakeDecision | null {
+  let value: unknown = raw;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!isBulkIntakeDisposition(v.disposition)) return null;
+  const reason = nonBlank(v.reason);
+  const decidedBy = nonBlank(v.decidedBy);
+  if (!reason || !decidedBy) return null;
+  const owner = (BULK_RESPONSIBILITIES as readonly string[]).includes(String(v.owner))
+    ? (v.owner as BulkResponsibility)
+    : INTAKE_DISPOSITION_SPECS[v.disposition].owner;
+  return {
+    disposition: v.disposition,
+    reason,
+    decidedBy,
+    owner,
+    targetRef: nonBlank(v.targetRef),
+    missingInformation: nonBlank(v.missingInformation),
+    decidedAt: nonBlank(v.decidedAt) ?? '',
+    workKind: (INTAKE_WORK_KINDS as readonly string[]).includes(String(v.workKind))
+      ? (v.workKind as IntakeWorkKind)
+      : null,
+    acceptance: readAcceptanceProposalInput(v.acceptance),
+    sourceRevision: nonBlank(v.sourceRevision),
+    reproduction: v.disposition === 'promote' ? readBugReproductionReceipt(v.reproduction) : null,
+  };
 }

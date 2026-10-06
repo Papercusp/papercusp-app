@@ -23,7 +23,7 @@
 --      yet (that write-path + the denormalized frontier-projection are su-a5a32's
 --      coord_links domain). We keep the EXISTING blocked_by column unchanged (NOT
 --      a new 4th fork — the same column, in place); the unification is the
---      explicit D-027 follow-on. Surfaced for owner: this defers D-028's literal
+--      explicit D-027 follow-on. Surfaced for avi: this defers D-028's literal
 --      "drop in P-020" because a blind drop breaks the live frontier.
 --   2. Making the base triggers (fill_needs_design / fill_ws_features) kind-aware
 --      so non-feature rows are handled correctly — needed BEFORE non-feature

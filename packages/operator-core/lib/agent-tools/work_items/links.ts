@@ -66,7 +66,7 @@ export default defineTool({
   skipWorkspaceTx: true,
   agentRoles: [...COORD_ROLES],
   description:
-    'Read typed links for one OR many work-items. `direction:"out"` returns what each item points to; `direction:"in"` returns what points to each item. Pass `id` or `ids`, with a shared per-item `limit` (default 20, max 100). Topic-tag edges are omitted. Returns { ok, results:[{ ok, id, direction, links? | error }], counts } — correlate by id.',
+    'Read typed links for one OR many work-items. `direction:"out"` returns what each item points to; `direction:"in"` returns what points to each item. Pass `id` or `ids`, with a shared per-item `limit` (default 20, max 100). Topic-tag edges are omitted. Successful items with no links are omitted from `results`; `coverage` reports selected, checked, and link-bearing counts, plus whether every selected item was checked. Failures stay in `results`.',
   guidance: {
     when: 'You need the structured relations recorded by work_items:link, including blockers, duplicates, fixes, and descriptive edges. Use direction:"out" for the item’s targets or direction:"in" for references to the item; pass ids:[…] for several items.',
     notWhen: 'For topic tags use work_items:tag or work_items:get { detail:true }; tags are intentionally omitted from this relation read.',
@@ -116,6 +116,26 @@ export default defineTool({
       },
       { keyOf: (id) => ({ id }) },
     );
-    return bulkContent(env);
+    // Empty success rows carry no relation evidence and make a large selected
+    // set consume the result door's fixed array allowance. The compact result
+    // keeps every failure and every item with links, while `coverage` proves
+    // how much of the selected set was checked, independently of how many
+    // non-empty detail rows the result door can retain.
+    const linkedIds = env.results.flatMap((result) =>
+      result.ok && 'links' in result && result.links.length > 0 ? [result.id] : [],
+    );
+    const results = env.results.filter(
+      (result) => !result.ok || ('links' in result && result.links.length > 0),
+    );
+    return bulkContent({
+      ...env,
+      results,
+      coverage: {
+        selectedCount: ids.length,
+        checkedCount: env.results.length,
+        complete: env.results.length === ids.length,
+        linkedCount: linkedIds.length,
+      },
+    });
   },
 });

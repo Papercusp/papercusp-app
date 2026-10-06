@@ -39,7 +39,9 @@ import {
   selfSetCeilingForWindow,
   supersededDerivedCompactionLimits,
   MODEL_WINDOW_1M,
+  MODEL_WINDOW_DEFAULT,
   modelWindowForSpec,
+  isDefault1mModelSpec,
   type ModelTier,
 } from '../agent-config-constants';
 import { listActiveClaimFreshnessForOwner } from '../work-item-claims';
@@ -173,6 +175,9 @@ const carryRespawnLoopEscalated = new Set<string>();
  * floor is already at/above the configured soft limit. A cut cannot reduce a
  * fixed floor, so repeatedly respawning such a session is a livelock. */
 const unsatisfiableLimitEscalated = new Set<string>();
+/** WI-10006236: one owner-facing escalation per owner per process when a session whose
+ * model family Papercusp serves at 1M by default is MEASURED at the 200k window. */
+const default1mServedSmallEscalated = new Set<string>();
 /** First under-limit observation in the current carry-respawn streak. A single
  * under-limit sample can be the fresh successor booting after a landed cut, so
  * it does not clear the breaker; only a sustained recovery re-arms it. */
@@ -283,6 +288,65 @@ async function escalateUnsatisfiableCompactionLimit(input: {
     unsatisfiableLimitEscalated.delete(input.ownerId);
     console.warn(
       `[compaction-watchdog] unsatisfiable-limit escalation failed (will retry): ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
+ * WI-10006236 (owner Avi 2026-10-05, #1309 prevention): the symptom alarm for the
+ * WI-10006049 class. Claude Code auto-updated (2.1.284 → 2.1.289) and its bare /model
+ * menu started saving the 200k pick, so 1M-default sessions were measured at 200k and
+ * this watchdog quietly re-limited them (`re-limited 450000 → 158000`). That log line
+ * was the only trace, and nobody read it until a session reset 8 times in an hour.
+ * After WI-10006049 the gateway serves these families at 1M by default, so a 200k
+ * measurement for one of them means an upstream default changed again: raise it to the
+ * owner instead of logging it. One escalation per owner per process; un-deduped on
+ * failure so the next sweep retries.
+ */
+async function escalateDefault1mServedSmall(input: {
+  ownerId: string;
+  ownerLabel: string;
+  spec: string;
+  from: number;
+  to: number;
+  window: number;
+}): Promise<void> {
+  if (default1mServedSmallEscalated.has(input.ownerId)) return;
+  default1mServedSmallEscalated.add(input.ownerId);
+  try {
+    const { openEscalation } = await import('../agent-tools/coordination/escalations');
+    await openEscalation(
+      {
+        ownerId: 'compaction-watchdog',
+        ownerLabel: 'system · compaction-watchdog',
+        source: 'principal',
+        workspaceId: null,
+        userId: null,
+      },
+      {
+        severity: 'advisory',
+        summary: `1M-default session served at a ${input.window}-token window: ${input.ownerLabel} (${input.ownerId})`,
+        body:
+          `Model '${input.spec}' is a family Papercusp serves with the 1M context window by default, but ` +
+          `this session was measured at ${input.window} tokens, so the watchdog lowered its soft ` +
+          `compaction limit ${input.from} → ${input.to}. That should not happen since WI-10006049. ` +
+          `Likely cause: a Claude Code update changed a default (a model-menu pick, the context beta, ` +
+          `or the gateway route). Check the session's served route (gateway /admin/route?owner=) and ` +
+          `the installed Claude Code version. (WI-10006236)`,
+        meta: {
+          subjectSignature: `compaction-watchdog:default-1m-served-small:${input.ownerId}`,
+          spec: input.spec,
+          from: input.from,
+          to: input.to,
+          window: input.window,
+        },
+      },
+    );
+  } catch (e) {
+    default1mServedSmallEscalated.delete(input.ownerId);
+    console.warn(
+      `[compaction-watchdog] default-1m-served-small escalation failed (will retry): ` +
         `${e instanceof Error ? e.message : String(e)}`,
     );
   }
@@ -475,6 +539,7 @@ export function resetCarryRespawnForTests(): void {
   carryRespawnLoopEscalated.clear();
   carryRespawnUnderLimitSince.clear();
   unsatisfiableLimitEscalated.clear();
+  default1mServedSmallEscalated.clear();
 }
 
 /** Test seam (EI-9982 diagnostic). */
@@ -831,7 +896,7 @@ async function tagWatchdogContinuation(ownerId: string, note: string): Promise<s
   const addressedNote = addressContinuationToOwner(note, ownerId);
   try {
     const { tagTurnForInjection } = await import('../turn-provenance/turn-provenance');
-    return tagTurnForInjection({ sid: ownerId, origin: 'watchdog', text: addressedNote }).taggedText;
+    return (await tagTurnForInjection({ sid: ownerId, origin: 'watchdog', text: addressedNote })).taggedText;
   } catch {
     return addressedNote; // provenance must never strand a context boundary
   }
@@ -2080,6 +2145,9 @@ export interface CompactionComplianceResult {
    *  the current shaped default this pass (a policy change reaching a live session
    *  without a relaunch). */
   relimited: Array<{ owner: string; from: number; to: number }>;
+  /** WI-10006236: subset of `relimited` — sessions whose model family is served at 1M by
+   *  default but were MEASURED at the 200k window and lowered; each is escalated once. */
+  default1mServedSmall: Array<{ owner: string; spec: string; from: number; to: number; window: number }>;
   /** EI-237397: sessions whose observed fixed prompt floor consumes the force
    *  band; repairedTo is present when the watchdog raised a derived limit. */
   unsatisfiableLimits: Array<{
@@ -2152,6 +2220,7 @@ export async function checkCompactionCompliance(
     forceCompacted: [],
     carryRespawned: [],
     relimited: [],
+    default1mServedSmall: [],
     unsatisfiableLimits: [],
     seeded: [],
     contextDeaths: [],
@@ -2503,9 +2572,21 @@ export async function checkCompactionCompliance(
             // the extended-codex derivation to the 400k role cap stranded 13
             // live sessions at the old 158,000 (2026-08-18).
             const superseded = supersededDerivedCompactionLimits(seed.spec, { fleetMember });
+            // WI-10006049: the value THIS branch writes when it lowers a session to a
+            // measured 200k window (`re-limited 450000 → 158000 … 200000-token model
+            // window`) is a number the watchdog chose, not a human. Once the live window
+            // is back above 200k it must heal like any other derived seed. Without this a
+            // session dropped to 200k by Claude Code 2.1.289's bare /model menu stayed at
+            // 158k after it was served at 1M again (su-56e2f83b, 2026-10-06): its spec now
+            // derives 450k, so 158k no longer equalled the seed and read as deliberate.
+            const loweredByMeasuredDefaultWindow =
+              liveWindow > MODEL_WINDOW_DEFAULT &&
+              r.compaction_limit === defaultCompactionLimitForWindow(MODEL_WINDOW_DEFAULT, { fleetMember });
             if (
               !seed.explicit &&
-              (seed.limit === r.compaction_limit || superseded.includes(r.compaction_limit))
+              (seed.limit === r.compaction_limit ||
+                superseded.includes(r.compaction_limit) ||
+                loweredByMeasuredDefaultWindow)
             ) {
               apply = safeLimit;
             }
@@ -2518,6 +2599,17 @@ export async function checkCompactionCompliance(
                 `${r.compaction_limit} → ${apply} tokens from the live effective ` +
                 `${liveWindow}-token model window (Codex D-011).`,
             );
+            // WI-10006236: a LOWERING to the 200k window is the WI-10006049 symptom when
+            // the session's model family is served at 1M by default. Resolve the spec only
+            // on this rare path so a normal sweep pays nothing.
+            if (apply < r.compaction_limit && liveWindow <= MODEL_WINDOW_DEFAULT) {
+              const { spec } = await derivedSeedLimitForOwner(sql, r.owner_id, tierMenu, fleetMember);
+              if (spec != null && isDefault1mModelSpec(spec)) {
+                const hit = { owner: r.owner_id, spec, from: r.compaction_limit, to: apply, window: liveWindow };
+                out.default1mServedSmall.push(hit);
+                await escalateDefault1mServedSmall({ ownerId: r.owner_id, ownerLabel: r.owner_label, ...hit });
+              }
+            }
             r.compaction_limit = apply;
           }
         }

@@ -17,6 +17,7 @@ import { useBulkResolverSettings } from "../bulk-resolver/bulk-resolver-settings
 import {
   canonicalPlanCleanupDisposition,
   derivePlanCleanupCounts,
+  planCleanupCoverageNotice,
   usePlanCleanupOps,
   type PlanCleanupFinding,
   type PlanCleanupRun,
@@ -56,6 +57,9 @@ export default function PlansCleanupStrip({
   const [busy, setBusy] = useState(false);
   const [classifying, setClassifying] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [dismissedFailedRunId, setDismissedFailedRunId] = useState<
+    string | null
+  >(null);
   const counts = derivePlanCleanupCounts(findings);
   const retryableFindings = findings.filter(
     (finding) =>
@@ -80,16 +84,29 @@ export default function PlansCleanupStrip({
         return;
       }
       if (result.runId) onRunStarted(result.runId);
+      // P-005 (WI-10004732): a capped run says so — "first N of M" — instead
+      // of silently scanning only part of what the pane shows.
+      const coverageNote = planCleanupCoverageNotice(result.coverage);
       // No LLM is a SUCCESS when the fixed-point deterministic pass cleared
       // every provable finding and no recommendation work remained.
-      if (result.resolverNeeded === false && !result.launchError) return;
+      if (result.resolverNeeded === false && !result.launchError) {
+        if (coverageNote) setNotice(coverageNote);
+        return;
+      }
       // The request succeeds once the run is durable even when its supervised
       // resolver did not boot. Surface that persisted failure instead of
       // leaving a run that can never move looking live.
       if (!result.launched) {
         setNotice(
-          `resolver could not start${result.launchError ? `: ${result.launchError}` : ""}`,
+          [
+            `resolver could not start${result.launchError ? `: ${result.launchError}` : ""}`,
+            coverageNote,
+          ]
+            .filter(Boolean)
+            .join(" "),
         );
+      } else if (coverageNote) {
+        setNotice(coverageNote);
       }
     } finally {
       setStarting(false);
@@ -422,9 +439,20 @@ export default function PlansCleanupStrip({
     );
   }
 
-  const failureNotice =
-    notice ??
-    (run?.phase === "failed" ? (run.error ?? "clean-up run failed") : null);
+  // A persisted failed run renders as a notice until the owner dismisses THAT
+  // run. Dismissal used to clear only the local `notice`, which a failed run's
+  // `run.error` never came from — so Dismiss was a no-op and the raw settle
+  // reason stayed pinned (WI-10004730). Keying it to the run id means a NEW
+  // failure still surfaces after an old one was dismissed.
+  const failedRunNotice =
+    run?.phase === "failed" && run.runId !== dismissedFailedRunId
+      ? `Clean-up run failed: ${run.error ?? "no reason was recorded"}`
+      : null;
+  const failureNotice = notice ?? failedRunNotice;
+  const dismissFailureNotice = () => {
+    if (notice) setNotice(null);
+    else if (run) setDismissedFailedRunId(run.runId);
+  };
   const count = planSlugs.length;
   return (
     <BulkResolverStrip
@@ -453,7 +481,7 @@ export default function PlansCleanupStrip({
         failureNotice
           ? {
               message: failureNotice,
-              onDismiss: () => setNotice(null),
+              onDismiss: dismissFailureNotice,
               dismissLabel: "Dismiss clean-up notice",
             }
           : null

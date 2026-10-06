@@ -17,7 +17,7 @@
  * The picker's bulk footer must be ONE statement rather than N racing upserts,
  * and a single write is also one audit event instead of a burst.
  */
-import type { Sql } from 'postgres';
+import type { Sql, TransactionSql } from 'postgres';
 import { potScopeEnabled, potScopeLookup, type PotLearningScope } from './core';
 
 type Row = Record<string, unknown>;
@@ -41,9 +41,20 @@ function isMissingRelation(err: unknown): boolean {
  * permission error is a real problem the caller needs to see rather than a
  * silently-enabled pot.
  */
-async function failOpenOnMissingRelation<T>(run: () => Promise<T>, fallback: T, what: string): Promise<T> {
+async function failOpenOnMissingRelation<T>(
+  sql: Sql,
+  run: (sql: Sql) => Promise<T>,
+  fallback: T,
+  what: string,
+): Promise<T> {
   try {
-    return await run();
+    // A caught query error still aborts a PostgreSQL transaction. Roll back
+    // the read's savepoint BEFORE applying the missing-relation fallback, so
+    // the caller can continue its reservation or other transactional work.
+    const transaction = sql as Sql & Partial<Pick<TransactionSql, 'savepoint'>>;
+    return typeof transaction.savepoint === 'function'
+      ? await transaction.savepoint(tx => run(tx as unknown as Sql)) as T
+      : await run(sql);
   } catch (err) {
     if (!isMissingRelation(err)) throw err;
     if (!warnedMissingRelation) {
@@ -64,6 +75,16 @@ function mapRow(r: Row): PotLearningScope {
     enabled: r.enabled === true || r.enabled === 't',
     setBy: r.set_by === null || r.set_by === undefined ? null : String(r.set_by),
     setAt: new Date(r.set_at as string | Date).getTime(),
+    // Migration 1271 columns. A row read from a DB that has not applied 1271 yet
+    // (fail-open window, or an older fixture) simply lacks them: read as "no
+    // recorded provenance" rather than crashing the preflight.
+    pauseReason:
+      r.pause_reason === null || r.pause_reason === undefined ? null : String(r.pause_reason),
+    ownerDirected: r.owner_directed === true || r.owner_directed === 't',
+    reviewBy:
+      r.review_by === null || r.review_by === undefined
+        ? null
+        : new Date(r.review_by as string | Date).getTime(),
   };
 }
 
@@ -77,7 +98,8 @@ export async function getPotLearningScope(
   q: { workspaceId: string; potSlug: string },
 ): Promise<PotLearningScope | null> {
   return failOpenOnMissingRelation(
-    async () => {
+    sql,
+    async sql => {
       const rows = (await sql`
         SELECT * FROM harness_shared.learning_pot_scope
          WHERE workspace_id = ${q.workspaceId} AND pot_slug = ${q.potSlug}`) as Row[];
@@ -105,7 +127,8 @@ export async function listPotLearningScope(
   q: { workspaceId: string },
 ): Promise<PotLearningScope[]> {
   return failOpenOnMissingRelation(
-    async () => {
+    sql,
+    async sql => {
       const rows = (await sql`
         SELECT * FROM harness_shared.learning_pot_scope
          WHERE workspace_id = ${q.workspaceId}
@@ -124,7 +147,8 @@ export async function listPotLearningScope(
  */
 export async function disabledPotSlugs(sql: Sql, q: { workspaceId: string }): Promise<string[]> {
   return failOpenOnMissingRelation(
-    async () => {
+    sql,
+    async sql => {
       const rows = (await sql`
         SELECT pot_slug FROM harness_shared.learning_pot_scope
          WHERE workspace_id = ${q.workspaceId} AND enabled = false
@@ -157,8 +181,43 @@ export interface SetPotLearningScopeInput {
   /** One or many pots. The picker's bulk footer passes the whole selection. */
   potSlugs: readonly string[];
   enabled: boolean;
-  /** ownerId or human identity, stamped as the audit trail. */
+  /** ownerId or human identity, stamped as the audit trail. Bare identity — never a provenance suffix. */
   setBy: string | null;
+  /**
+   * Structured deliberate-pause provenance (migration 1271, WI-10002099). Only
+   * meaningful for `enabled:false`; ignored (and cleared) when enabling, so a
+   * re-enabled pot can never keep a stale "owner directive" stamp.
+   */
+  pauseReason?: string | null;
+  /** The pause is the OWNER's standing decision. Requires `pauseReason` — refused otherwise. */
+  ownerDirected?: boolean;
+  /** When the pause should be re-examined. Date or epoch ms; null/undefined = never. */
+  reviewBy?: Date | number | null;
+}
+
+/** Normalised pause provenance for one write. Throws on a claim the DB would refuse anyway. */
+export function normalizePauseProvenance(q: {
+  enabled: boolean;
+  pauseReason?: string | null;
+  ownerDirected?: boolean;
+  reviewBy?: Date | number | null;
+}): { pauseReason: string | null; ownerDirected: boolean; reviewBy: Date | null } {
+  // Enabling clears the record: it describes a pause, and there is no pause now.
+  if (q.enabled) return { pauseReason: null, ownerDirected: false, reviewBy: null };
+  const reason = typeof q.pauseReason === 'string' ? q.pauseReason.trim() : '';
+  const ownerDirected = q.ownerDirected === true;
+  if (ownerDirected && reason.length === 0) {
+    throw new Error(
+      'ownerDirected:true requires a non-empty pauseReason — cite the owner directive (id/date) or work-item, ' +
+        'so the claim is inspectable instead of a bare assertion of authority.',
+    );
+  }
+  let reviewBy: Date | null = null;
+  if (q.reviewBy !== null && q.reviewBy !== undefined) {
+    reviewBy = q.reviewBy instanceof Date ? q.reviewBy : new Date(q.reviewBy);
+    if (Number.isNaN(reviewBy.getTime())) throw new Error('reviewBy is not a valid date');
+  }
+  return { pauseReason: reason.length > 0 ? reason : null, ownerDirected, reviewBy };
 }
 
 /**
@@ -179,14 +238,20 @@ export async function setPotLearningScope(
 ): Promise<PotLearningScope[]> {
   const slugs = [...new Set(q.potSlugs.filter((s) => typeof s === 'string' && s.length > 0))];
   if (slugs.length === 0) return [];
+  const pause = normalizePauseProvenance(q);
   const rows = (await sql`
-    INSERT INTO harness_shared.learning_pot_scope (workspace_id, pot_slug, enabled, set_by, set_at)
-    SELECT ${q.workspaceId}, s, ${q.enabled}, ${q.setBy ?? null}, now()
+    INSERT INTO harness_shared.learning_pot_scope
+      (workspace_id, pot_slug, enabled, set_by, set_at, pause_reason, owner_directed, review_by)
+    SELECT ${q.workspaceId}, s, ${q.enabled}, ${q.setBy ?? null}, now(),
+           ${pause.pauseReason}, ${pause.ownerDirected}, ${pause.reviewBy}
       FROM unnest(${slugs as string[]}::text[]) AS s
     ON CONFLICT (workspace_id, pot_slug) DO UPDATE
-       SET enabled = EXCLUDED.enabled,
-           set_by  = EXCLUDED.set_by,
-           set_at  = EXCLUDED.set_at
+       SET enabled        = EXCLUDED.enabled,
+           set_by         = EXCLUDED.set_by,
+           set_at         = EXCLUDED.set_at,
+           pause_reason   = EXCLUDED.pause_reason,
+           owner_directed = EXCLUDED.owner_directed,
+           review_by      = EXCLUDED.review_by
     RETURNING *`) as Row[];
   return rows.map(mapRow);
 }

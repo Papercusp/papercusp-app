@@ -11,6 +11,7 @@ import { SuTarget } from './su';
 import { makeOverwatchTarget } from './overwatch';
 import { onboardingTutorTarget } from './onboarding-tutor';
 import { PuiLoopTarget } from './pui-loop';
+import { makeSuCodeTarget, makeWorkerTarget } from './worker';
 
 export type TargetFactory = () => ChatTarget;
 
@@ -56,6 +57,10 @@ const TARGETS: Record<string, TargetFactory> = {
   // same su spine/project guide/modes/orientation/catalog as psu, minus the
   // client-remediation sections whose invariants the loop/doors enforce.
   'pui-loop': () => new PuiLoopTarget(),
+  // su + the code-search tools, and the coding-role (worker) prompt on the same loop
+  // (gitnexus-deterministic-integration-2026-10-05 P-015: S37 / W01).
+  'su-code': () => makeSuCodeTarget(),
+  worker: () => makeWorkerTarget(),
 };
 
 export function registerTarget(id: string, factory: TargetFactory): void {

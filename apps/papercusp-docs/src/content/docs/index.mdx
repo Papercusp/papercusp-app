@@ -1,38 +1,66 @@
 ---
 title: Welcome
 description: Public documentation for the Papercusp platform.
+documents:
+  - packages/operator-core/lib/public-docs.ts
+  - packages/operator-core/lib/auth/hosted/self-signup.ts
 ---
 
-**Papercusp** is an open framework for autonomous-harness apps — systems
-that drive AI agents through a structured loop (plan → work → validate
-→ done) against a project goal. This site is the public manual for
-people *using* Papercusp.
+**Papercusp** brings your apps, workspaces and AI agents together. Use the
+[web portal](https://app.papercusp.com/) to manage work in your browser, or a
+Papercusp desktop installation to work with a connected computer.
 
-If you are looking for the substrate spec or framework-author internals,
-launch the Tauri desktop dev shell (`cd papercusp-desktop && npm run dev`) and
-open the in-shell **Docs** tab — that's the operator's spec docs. The
-standalone webapp on `:3055` is retired (2026-05-14).
+This is the **public user manual**. You can read and search it without an
+account. The portal's **Project docs** destination contains documentation for
+your selected project; internal engineering documentation is a separate,
+authenticated surface. Neither is published here.
 
-## What's here
+## Start here
 
-- **[Using the app](/docs/using-the-app)** — a hands-on walkthrough: install,
-  start your first harness, drive a mission to done, save your work.
-- **[Harness templates](/docs/harness-templates)** — reusable harness
-  configurations. What they are, how to make one, how to publish to the
-  marketplace.
-- **[Harness snapshots](/docs/harness-snapshots)** — frozen harness
-  states. How to capture, restore, and share them.
-- **[Plugins](/docs/plugins)** — extend a harness with new actions,
-  dashboard tabs, integrations. How to author one and publish to the
-  marketplace.
+- **[Your first successful task](/docs/quickstart)** — a complete path from
+  account setup to a connected workspace and a verified result.
+- **[Using the app](/docs/using-the-app)** — sign in, choose a workspace and
+  give an agent a small, verifiable first task.
+- **[Accounts and billing](/docs/accounts-and-billing)** — account creation,
+  organization access, subscriptions and pending-payment recovery.
+- **[Cloud workspaces](/docs/cloud-workspaces)** — choose managed hosting or
+  connect your own Google Cloud project or AWS account.
+- **[Workspaces and agents](/docs/workspaces-and-agents)** — understand
+  where work runs, how plans and sessions relate, and how to review results.
+- **[Plans and work](/docs/plans-and-work)** — review scope, dependencies,
+  decisions, work-item progress and final acceptance.
+- **[Agent modes and fleets](/docs/agent-modes-and-fleets)** — choose execution
+  routes, autonomy, model/account settings and context carry.
+- **[Talking to an agent](/docs/voice)** — voice controls, microphone access
+  and connection recovery.
+- **[Harness templates](/docs/harness-templates)** — start from a maintained
+  app scaffold rather than an invented setup.
+- **[Snapshots and backups](/docs/harness-snapshots)** — choose the right
+  recovery mechanism and understand what a restore changes.
+- **[Plugins](/docs/plugins)** — discover integrations and understand their
+  permissions and publication process.
+- **[Remote access](/docs/remote-access)** — connect outside apps without
+  exposing your whole computer.
+- **[Troubleshooting](/docs/troubleshooting)** — resolve sign-in,
+  workspace, session and documentation problems.
 
-## Quick orientation
+## A few useful words
 
-A **harness** is one running instance — a project, a goal, a `.papercusp/`
-directory holding state. A **template** is a recipe to create new
-harnesses. A **snapshot** is a frozen copy of a harness's state. A
-**plugin** extends what every harness can do.
+A **workspace** is the environment your work runs in. A **harness** is a
+managed project within that environment. A **plan** records a goal, work items
+and acceptance conditions. An **agent session** is a conversation that performs
+work with the permissions it has been given. A **template** is a maintained
+starting point for an app; a **plugin** adds capabilities.
 
-All four ship through the same marketplace, install via the same CLI,
-and follow the same capability-based permission model. The pages above
-walk through each one in turn.
+Papercusp is evolving. Available providers, templates, cloud options and
+integrations depend on your installation and permissions. These guides explain
+the current workflow without promising that every option is enabled for every
+account.
+
+## Source and feedback
+
+The public source repository is
+[Papercusp/papercusp-app](https://github.com/Papercusp/papercusp-app).
+For a problem with your installation, use **Support** in the portal and include
+what you tried and the exact error. Never include passwords, access tokens or
+private project content in a public report.

@@ -176,24 +176,26 @@ emits telemetry (`/internal/docs/endpoint-system/superuser-mode`).
   | a syntax pattern or a mechanical codemod | `code:structural` (ast-grep shape, never type truth) |
   | packaging evidence for a reviewer or a model | `code:pack` — strictly POST-retrieval, never an authority for symbol truth |
 
+  **The graph is a SELECTIVE assist, not a per-read tax** (plan
+  `gitnexus-selective-hardening-and-comparison-2026-09-13`, P-006): only for ONE
+  known exact identifier (`graph:query { op:'symbol' }`) or a substantive edit
+  to an EXPORTED shared-lib symbol with unknown consumers (`op:'callers'`); all
+  else stays `rg`/`lsp:query`. One bounded call, re-checked against current
+  source; a stale, empty or refused answer is NOT absence
+  (`code-intelligence/selective-assist.ts`).
+
   ⚠ **Two raw backends are deliberately NOT the route.** `gitnexus.query`
   is UNAVAILABLE: historical builds returned empty or unranked noise, and
-  current real-symbol probes SIGSEGV the shared GitNexus MCP process (D-065).
-  The bridge now refuses it before child dispatch so it cannot take down the
-  otherwise-working siblings. Use `gitnexus.context` for a known symbol,
+  current real-symbol probes SIGSEGV the shared GitNexus MCP process (D-065),
+  so the bridge refuses it. Use `gitnexus.context` for a known symbol,
   `graph:query` for topology, or `rg` for keywords. Raw `repomix.pack` skips
   the pinned version and the secret-scanning rails `code:pack` enforces
-  (D-040/D-041). ⚠ The gitnexus row reaches you through the plugin bridge, so
-  test it rather than assuming: if a call answers `Unknown namespace(s):
-  gitnexus`, the pinned-resolver fix has not deployed yet (P-006) — fall back to
-  `rg` + `lsp:query` for that question class until it does, and do NOT read the
-  absence as "no call chains exist". 📖 Versions, re-provisioning, and the six
-  high-risk failure modes (confident wrong answers OR a hard-crashed evidence
-  channel, incl. a STALE index):
-  `/internal/docs/agent-insights/code-intelligence-backends-runbook`. (Plugin tools — `design-phase.*`, `fetch_plus.*`,
-  `gitnexus.*` — surface on every su session since the plugin-host boot warm;
-  EI-38's "workspace-scoped only" was the post-restart empty-registry window
-  in disguise — see the `plugin-tools-empty-registry-window` insight.)
+  (D-040/D-041). ⚠ A gitnexus call answering `Unknown namespace(s): gitnexus`
+  means fall back to `rg` + `lsp:query` — never "no call chains exist". 📖
+  Versions, re-provisioning, the six high-risk failure modes (incl. a STALE
+  index): `/internal/docs/agent-insights/code-intelligence-backends-runbook`.
+  (Plugin tools surface on every su session — see the
+  `plugin-tools-empty-registry-window` insight.)
 - **`work_items:list { assignedBy, kind:'task' }` + `coord:presence`** = "my
   background agents"; completions push to your `coord:inbox` — no poll.
 - **`blueprint:catalog` → `extend`/`validate` → `harness:create`** — discovery
@@ -435,23 +437,17 @@ that's why it is retired for su loops. Each wake's prompt has you **create +
 SELF-ASSIGN** this iteration's `work_items` (`work_items:create { …,
 assign_to:'<your ownerId>' }`) then work them + `set_state`; **`loop:end`** stops
 it — end the loop the moment the goal is done or you are blocked (don't burn empty
-wakes spinning). Arm it as the LAST thing before you end your turn. *(Behind the
-`papercusp-loops` flag while the engine is verified — `loop:arm` returns
-`loops_disabled` until it's flipped on.)* This replaces `/loop` for su/interactive
-loops ONLY — it is **NOT** the autonomous Blender loop, which is a separate
+wakes spinning). Arm it as the LAST thing before you end your turn. This replaces `/loop` for
+su/interactive loops ONLY — it is **NOT** the autonomous Blender loop, which is a separate
 system; never `loop:arm` from an
 autonomous-fleet agent. ⚠ Its mug/cup/kettle half is **RETIRED**: `kettle:declare-wake`
 is deleted and `pot:declare-wake` REFUSES (the `pot/wake` module survives; its verb does not).
 
 **Then CLOSE YOURSELF — `session:end` (WI-6638).** Ending your loop does not end your
 session: the CLI returns to its prompt and sits there, holding a real process and an
-open terminal tab **forever**. Measured 2026-08-03: **52 agent trees from fleets that
-finished days ago — the oldest 14 — holding 14.4 GB**, while the box thrashed at PSI
-memory-full 12.5 against a threshold of 5. No reaper can clear them: an agent's open
-tab is indistinguishable from the owner's, so every layer correctly refuses (su
-sessions are `driveMode:'responsive'`, excluded by the owner-authority ruling
-P-001/D-001, and behind that the window guard spares a live terminal). **Only you can
-end you.** So when your work is genuinely finished and nothing will wake you again —
+open terminal tab **forever** (52 such idle trees once held 14.4 GB). No reaper can
+clear them: an agent's open tab is indistinguishable from the owner's, so every layer
+correctly refuses. **Only you can end you.** So when your work is genuinely finished and nothing will wake you again —
 loop ended, claims completed/released, checkpoint flushed, not parked on an
 `events:await` — call **`session:end { reason }`** as your last act; psu exiting closes
 the tab. It is safe to try: the host REFUSES unless your session was agent-launched
@@ -724,9 +720,12 @@ continuation gate picks, not a law.
   THEN decide) — call those directly. Flow: write the script and `code:run` it
   directly — NO `code:tools` pre-call needed; a wrong tool/arg name comes back with
   the exact typed `tools.ns.verb(args)` signatures inline to fix + re-run (`code:tools`
-  is OPTIONAL — browse namespaces up front only if you prefer). For `effect:'write'`
-  mutations, `code:run { dryRun:true }` previews `plannedMutations` → inspect →
-  `code:run` to commit. **Summarize conservatively — over-filtering backfires:** only the
+  is OPTIONAL — browse namespaces up front only if you prefer). `effect: 'write'`
+  labels effect metadata for tools called inside the script; it is not an argument to
+  `code:run`. `code:run` accepts `{ script, title?, description?, dryRun?, timeoutSec? }`.
+  Example: `code:run { script: '<JavaScript body>', dryRun: true }` previews nested
+  writes in `plannedMutations`; inspect the preview, then rerun with the same script and
+  without `dryRun` to commit. **Summarize conservatively — over-filtering backfires:** only the
   RETURNED value re-enters context, so if you drop a field you need you re-pay the
   round-trips you saved. (The shared `CODE_RUN_NUDGE` every harness agent also
   carries.)

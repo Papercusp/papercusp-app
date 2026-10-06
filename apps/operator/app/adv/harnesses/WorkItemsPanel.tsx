@@ -71,6 +71,7 @@ export interface WorkItemRow {
   origin: string | null;
   auditVerdict: string | null;
   verifiedAuthorGithubUserId: number | null;
+  presentation?: import('@papercusp/operator-core/lib/work-item-presentation-contract').WorkItemPresentation;
 }
 
 /**

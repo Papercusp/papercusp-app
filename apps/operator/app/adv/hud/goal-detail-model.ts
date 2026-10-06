@@ -39,7 +39,7 @@ import { formatAge } from './hud-board-model';
    rate is the number where disagreeing would be worst (it drives a date the
    owner acts on), so it has exactly one implementation and both surfaces call
    it. Direction is safe: hud-entity-board imports nothing from this module. */
-import { burnEtaText, burnTitle, goalBurn } from './hud-entity-board';
+import { budgetWindowSuffix, burnEtaText, burnTitle, goalBurn, goalCeilingSpendUsd } from './hud-entity-board';
 
 /* ── The `goals.detail` wire shape, narrowed ──────────────────────────────
    Declared here rather than imported from `sync-resolver/goals.ts` for the
@@ -70,6 +70,9 @@ export interface GoalDetailGoalInput {
   killCriterion?: string | null;
   tripwires?: GoalDetailTripwire[] | null;
   budgetCents?: number | null;
+  /** Enforced snapshot and its window — see HudGoalInput.spentCents. */
+  spentCents?: number | null;
+  budgetWindowSec?: number | null;
   spendUsd?: number | null;
   /** The recent-window spend behind the burn rate (P-003). Absent ⇒ no reading;
    *  see goalBurn, which refuses to render a zero it did not measure. */
@@ -805,13 +808,18 @@ export function ceilingLine(goal: GoalDetailGoalInput | null): {
   pct: number | null;
   over: boolean;
 } {
-  const spend = goal?.spendUsd ?? 0;
+  // The same level the card's chip judges (goalCeilingSpendUsd) — never `?? 0`.
+  const spend = goal ? goalCeilingSpendUsd(goal) : null;
   const ceiling = goal?.budgetCents == null ? null : goal.budgetCents / 100;
   if (ceiling == null || ceiling <= 0) {
-    return { text: `${moneyish(spend)} — no ceiling set`, pct: null, over: false };
+    return { text: `${spend == null ? 'Spend unmeasured' : moneyish(spend)} — no ceiling set`, pct: null, over: false };
+  }
+  const per = budgetWindowSuffix(goal?.budgetWindowSec);
+  if (spend == null) {
+    return { text: `Unmeasured of ${moneyish(ceiling)}${per}`, pct: null, over: false };
   }
   return {
-    text: `${moneyish(spend)} of ${moneyish(ceiling)}`,
+    text: `${moneyish(spend)} of ${moneyish(ceiling)}${per}`,
     pct: Math.max(0, Math.min(100, Math.round((spend / ceiling) * 100))),
     over: spend >= ceiling,
   };

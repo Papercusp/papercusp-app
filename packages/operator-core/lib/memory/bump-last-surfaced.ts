@@ -3,11 +3,17 @@
  *
  * Plan: papercusp-su-memory-2026-05-25 (Phase 5 P-021).
  *
- * Called from `injection.ts` after the fan-out merge so Layer 3
- * (deferred) can later pick "memories actually used recently AND
- * stale-validation" — the partial index in migration 085
- * (`memory_canonical_recently_surfaced_idx`) makes that picker query
- * sub-millisecond.
+ * Called from `injection.ts` after the fan-out merge. The only reader that
+ * filters on the column is `recentlySurfacedIds` below (the re-inject guard),
+ * which looks rows up by id through the primary key.
+ *
+ * ⚠ Keep this bump a HOT update: do NOT index `last_surfaced_at`. Migration
+ * 1312 dropped `memory_canonical_recently_surfaced_idx` (from 085, built for a
+ * "Layer 3 picker" that was never written) because an index on the bumped
+ * column blocks HOT, so each bump rewrote the row's entries in every index on
+ * the table, trigram GIN included: ~29 kB of WAL per row and 5.68 GB in total
+ * (measured 2026-10-01, plan papercusp-log-performance-remediation-2026-09-23
+ * P-015(d)). bump-last-surfaced-hot.integration.test.ts fails if that returns.
  *
  * Best-effort: any failure (column missing, PG down, malformed id) is
  * swallowed. The injection itself never depends on this side-effect.

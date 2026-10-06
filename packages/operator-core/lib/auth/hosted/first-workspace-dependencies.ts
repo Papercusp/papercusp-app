@@ -28,7 +28,11 @@ import {
   type HostedDelegationOrganization,
   type HostedProviderDelegationAdapter,
 } from '../../workspace-host/hosted-provider-delegation';
-import { gcpDelegationOrganization } from '../../workspace-host/hosted-gcp-auth';
+import { hostedDelegationOrganization } from '../../workspace-host/hosted-delegation-organization';
+import {
+  discoverHostedAwsHostInfrastructure,
+  type HostedAwsHostDiscoveryDependencies,
+} from '../../workspace-host/hosted-aws-host-discovery';
 import type { HostedFirstWorkspaceDependencies } from './first-workspace';
 import { createHostedWorkspaceAdmission } from './workspace-admission';
 import { createDefaultHostedWorkspaceAdmissionDependencies } from './workspace-admission-dependencies';
@@ -64,8 +68,13 @@ export interface HostedFirstWorkspaceRuntimeOptions {
    */
   readonly provisioning?: WorkspaceHostProvisioningEnqueuer;
   readonly provisioningAvailable?: () => boolean;
-  /** Default: the organization's own account in the GCP identity project (D-397). */
+  /**
+   * Default: the organization's own GCP account in the identity project (D-397) AND its own
+   * AWS role in the control-plane account (aws-byoc-gcp-parity D-001).
+   */
   readonly delegationOrganization?: (organizationId: string) => HostedDelegationOrganization;
+  /** AWS SDK seams for reading the customer's host stack (D-009); production omits them. */
+  readonly awsHostDiscovery?: HostedAwsHostDiscoveryDependencies;
 }
 
 export function createHostedFirstWorkspaceDependencies(
@@ -77,7 +86,7 @@ export function createHostedFirstWorkspaceDependencies(
     controlPlaneWorkspaceId,
   );
   const delegationOrganization = options.delegationOrganization ?? ((organizationId: string) =>
-    gcpDelegationOrganization(organizationId));
+    hostedDelegationOrganization(organizationId));
   // One manager per organization: it stamps and checks the owner of every record it touches.
   const manager = (organizationId: string) =>
     new HostedProviderDelegationManager(store, options.delegationAdapters, delegationOrganization(organizationId));
@@ -96,6 +105,9 @@ export function createHostedFirstWorkspaceDependencies(
            WHERE workspace_id = ${controlPlaneWorkspaceId}
              AND organization_id = ${organizationId}
              AND state <> 'deleted'
+             -- A relay-linked local install (kind 'linked', EAA D-031) is not the organization's
+             -- Papercusp workspace: it must neither block the first one nor be selected as it.
+             AND kind = 'hosted'
         `;
         return rows.map((row) => row.id);
       });
@@ -103,10 +115,11 @@ export function createHostedFirstWorkspaceDependencies(
 
     readDelegation: (workspaceId, connectionId) => store.read(workspaceId, connectionId),
     onboardDelegation: (input) => manager(input.organizationId).onboard(input),
-    onboardPapercuspHostedDelegation: (organizationId, input, hostId) =>
-      manager(organizationId).onboardPapercuspHosted(input, hostId),
+    onboardPapercuspHostedDelegation: (organizationId, input, hostId, provider) =>
+      manager(organizationId).onboardPapercuspHosted(input, hostId, provider),
     verifyDelegation: (organizationId, workspaceId, connectionId) =>
       manager(organizationId).verify(workspaceId, connectionId),
+    discoverAwsHostInfrastructure: (record) => discoverHostedAwsHostInfrastructure(record, options.awsHostDiscovery),
 
     createAdmission: (resolveDesiredSpec, admissionOptions) =>
       createHostedWorkspaceAdmission({

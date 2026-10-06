@@ -26,6 +26,65 @@ export function resolveCodexModelSelection(model: unknown, { source }?: {
     source: CodexModelSource;
 };
 /**
+ * Claude Code's Opus 5 family rejects `xhigh` and advertises `max` instead.
+ * The bare `opus` alias currently resolves into that family. Keep this
+ * normalization at Claude launch boundaries: OMP and Codex have independent
+ * effort contracts and must preserve their requested `xhigh` values.
+ * @param {string} spec
+ * @returns {string}
+ */
+export function normalizeClaudeModelEffortSpec(spec: string): string;
+/**
+ * The `--effort` a Claude launch must pass when its argv names no effort of its own (WI-10005900).
+ * Without one, Claude Code falls back to the effective settings.json `effortLevel`, a key it writes
+ * itself on an /effort or /model change. A session whose settings were written while Opus 5 offered
+ * `xhigh` therefore resumes with `xhigh` and gets a 400 on its first request. The inference gateway
+ * clamps that on the `auto` and pinned routes, but the `default` route skips the gateway, so the
+ * launch boundary applies the same `normalizeClaudeModelEffortSpec` rule to the inherited value.
+ *
+ * `model` is the argv model (empty when the launch passes none); `settings` carries the effective
+ * `effortLevel` and the fallback `model` the CLI would use. Returns the level to pass as `--effort`,
+ * or null when the inherited effort is absent, already supported, or the argv names its own effort.
+ * @param {{ model?: string | null, settings?: { model?: unknown, effortLevel?: unknown } | null }} [input]
+ * @returns {string | null}
+ */
+export function claudeInheritedEffortOverride({ model, settings }?: {
+    model?: string | null;
+    settings?: {
+        model?: unknown;
+        effortLevel?: unknown;
+    } | null;
+}): string | null;
+/**
+ * The settings a claude child falls back to for its model and effort
+ * (readClaudeLaunchSettings); null when unknown.
+ * @typedef {{ model?: unknown, effortLevel?: unknown } | null} ClaudeLaunchSettings
+ */
+/**
+ * The settings.json a claude launch will actually read: the per-session isolated
+ * CLAUDE_CONFIG_DIR when one is set (EI-155), else the shared user-level dir.
+ * @param {Record<string, string | undefined>} env
+ * @param {string} [home]
+ * @returns {string}
+ */
+export function effectiveClaudeSettingsPath(env: Record<string, string | undefined>, home?: string): string;
+/**
+ * The `{ model, effortLevel }` a claude child falls back to when its argv names
+ * no effort: the effective settings.json (the per-session isolated
+ * CLAUDE_CONFIG_DIR when set, else ~/.claude), with `ANTHROPIC_MODEL` taking
+ * precedence over settings.model as it does in the CLI. Pass the env the CHILD
+ * will run with, not the parent's. Fail-open to null — a missing or unreadable
+ * file must never fail a launch or a wake. `readFile` for tests. Shared by the
+ * psu launcher and the wake executor's resume leg (WI-10005900).
+ * @param {Record<string, string | undefined>} [env]
+ * @param {{ home?: string, readFile?: (p: string) => string }} [options]
+ * @returns {ClaudeLaunchSettings}
+ */
+export function readClaudeLaunchSettings(env?: Record<string, string | undefined>, { home, readFile }?: {
+    home?: string;
+    readFile?: (p: string) => string;
+}): ClaudeLaunchSettings;
+/**
  * Render the root model settings that must survive a model-less resume.  The
  * model id and effort are separated because Codex's TOML schema accepts the
  * effort as `model_reasoning_effort`, not as part of `model`.
@@ -271,8 +330,8 @@ export const MAX_LAUNCH_CONTEXT_BYTES: number;
  * rule.  The installed Codex cache is not a policy source: it may advertise a
  * model that the ChatGPT subscription cannot serve (the Spark incident).
  */
-export const CODEX_SAFE_DEFAULT_MODEL: "gpt-5.6-sol:xhigh";
-export const CODEX_DEFAULT_MODEL: "gpt-5.6-sol:xhigh";
+export const CODEX_SAFE_DEFAULT_MODEL: "gpt-6.1-sol:xhigh";
+export const CODEX_DEFAULT_MODEL: "gpt-6.1-sol:xhigh";
 export const CODEX_DENIED_MODEL_IDS: readonly string[];
 /** @typedef {'explicit' | 'inherited' | 'configured-default'} CodexModelSource */
 export const CODEX_MODEL_SOURCES: readonly string[];
@@ -302,6 +361,7 @@ export function assertCodexModelAllowed(model: any): string;
  * unrecognised extended-window models.
  */
 export const CODEX_EXTENDED_WINDOW_FALLBACK: Readonly<{
+    'gpt-6.1-sol': 1000000;
     'gpt-6-sol': 1000000;
     'gpt-6-luna': 1000000;
     'gpt-5.6-sol': 1000000;
@@ -321,4 +381,12 @@ export const CODEX_MAX_CONFIGURED_WINDOW: 1000000;
  * 258,400 window compacts BEFORE a leader's 400k limit is ever reached.
  */
 export const CODEX_AUTO_COMPACT_FRACTION: 0.9;
+/**
+ * The settings a claude child falls back to for its model and effort
+ * (readClaudeLaunchSettings); null when unknown.
+ */
+export type ClaudeLaunchSettings = {
+    model?: unknown;
+    effortLevel?: unknown;
+} | null;
 export type CodexModelSource = "explicit" | "inherited" | "configured-default";

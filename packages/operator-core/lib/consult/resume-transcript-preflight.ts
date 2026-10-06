@@ -18,6 +18,12 @@ import type { ResumeTarget } from '../agent-launch-core';
 export interface ConsultResumeTranscriptCheck {
   available: boolean;
   detail: string;
+  /**
+   * The Claude transcript file the check resolved (on disk or restored from the
+   * archive). Set only for Claude sources, so the fork dispatcher can read the
+   * transcript's tail before forking it (WI-10004260).
+   */
+  transcriptPath?: string;
 }
 
 export async function checkConsultResumeTranscript(
@@ -32,7 +38,7 @@ export async function checkConsultResumeTranscript(
       const { findSessionTranscript } = await import('../claude-sessions');
       const existing = await findSessionTranscript(target.sessionId, { owner: target.ownerId });
       if (existing) {
-        return { available: true, detail: `native transcript found at ${existing}` };
+        return { available: true, detail: `native transcript found at ${existing}`, transcriptPath: existing };
       }
       const { rematerializeTranscript } = await import('../session-transcript-remat');
       const restored = await rematerializeTranscript({
@@ -41,7 +47,11 @@ export async function checkConsultResumeTranscript(
         ...(target.ownerId ? { owner: target.ownerId } : {}),
       });
       return restored.path
-        ? { available: true, detail: `native transcript restored from archive at ${restored.path}` }
+        ? {
+            available: true,
+            detail: `native transcript restored from archive at ${restored.path}`,
+            transcriptPath: restored.path,
+          }
         : {
             available: false,
             detail: `native transcript unavailable (${restored.reason})`,

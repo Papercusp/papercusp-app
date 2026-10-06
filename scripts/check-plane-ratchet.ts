@@ -65,7 +65,7 @@ async function main() {
       SELECT measured_at::text AS measured_at, metrics
         FROM harness_shared.agent_plane_measurements
        WHERE workspace_id = ${workspaceId}
-       ORDER BY measured_at ASC
+       ORDER BY agent_plane_measurements.measured_at ASC
     `;
     series = rows.map((r) => ({
       measuredAt: r.measured_at,

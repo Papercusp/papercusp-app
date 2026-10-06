@@ -32,7 +32,7 @@ Check them in this order:
    * `posthog-admin.env`, `defguard-mesh.env`, `weatherapi-key`,
      `restart-admin-password.txt`
 2. **`~/.papercusp/deploy-credentials/`** — one file per account
-   (`owner-owner`, `ownerhandle*`, `definitelyahuman`).
+   (`<owner>-<project>`, `<owner-handle>*`, `definitelyahuman`).
 3. **`~/.papercusp/marketplace-keys/`** — `marketplace-ed25519.pem` / `.pub`.
 4. **`~/.papercusp/*.env`** at the top level — `posthog-deploy.env`,
    `release-host.env` (the permanent release-host secret).

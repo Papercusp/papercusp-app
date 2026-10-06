@@ -31,7 +31,10 @@ import { type Page } from '@playwright/test';
  * so it cannot also swallow `rest-query-batch` — if a spec still stubs the dead
  * batch route, that stays visibly unhit rather than being masked by this one.
  */
-const REST_QUERY_ROUTE = /\/api\/zero-harness\/rest-query\?/;
+const REST_QUERY_ROUTES = {
+  local: /\/api\/zero-harness\/rest-query\?/,
+  hosted: /\/api\/hosted\/browser\/rest-query\?/,
+};
 
 /**
  * Rows for one sync query. Return `undefined` for a query this spec does not
@@ -75,11 +78,13 @@ export interface SyncQueryStub {
 export async function stubSyncQueries(
   page: Page,
   resolve: SyncRowsResolver,
+  options: { transport?: "local" | "hosted" } = {},
 ): Promise<SyncQueryStub> {
   const names: string[] = [];
   const observed: string[] = [];
 
-  await page.route(REST_QUERY_ROUTE, async (route) => {
+  const endpoint = options.transport === "hosted" ? "/api/hosted/browser" : "/api/zero-harness";
+  await page.route(REST_QUERY_ROUTES[options.transport ?? "local"], async (route) => {
     const url = new URL(route.request().url());
     const name = url.searchParams.get('name') ?? '';
     let args: Record<string, unknown> = {};
@@ -135,7 +140,7 @@ export async function stubSyncQueries(
     assertServed(...expectedNames: string[]) {
       if (names.length === 0) {
         throw new Error(
-          'sync stub was NEVER HIT: no GET /api/zero-harness/rest-query request was ' +
+          `sync stub was NEVER HIT: no GET ${endpoint}/rest-query request was ` +
             'intercepted. The app is not speaking the contract this stub answers, so every ' +
             'panel rendered from real (unstubbed) traffic. Check the route pattern against ' +
             'libs/generic/sync/src/server/http-routes.ts — note POST /rest-query-batch has ' +

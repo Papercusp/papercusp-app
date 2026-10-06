@@ -30,7 +30,6 @@
 import { createHash, createPublicKey, randomUUID, type KeyObject } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-// @ts-expect-error -- buildless plain-JS mutex module intentionally has no declaration file.
 import { withFsMutex } from '../../../../scripts/lib/fs-mutex.mjs';
 import {
   DEFAULT_WORKSPACE_HOST_WORKSPACE_USER,
@@ -38,6 +37,7 @@ import {
   WORKSPACE_HOST_BOOTSTRAP_STATUS_GUEST_ATTRIBUTE_NAMESPACE,
   WORKSPACE_HOST_CREDENTIAL_DELIVERY_CONDUIT,
   WORKSPACE_HOST_REMOTE_INITIALIZER_CONDUIT,
+  parseEc2ConsoleBootstrapStatus,
   parseWorkspaceHostBootstrapReportedStatus,
   type WorkspaceHostDeliveryCapabilities,
   type WorkspaceHostDesiredSpec,
@@ -51,13 +51,20 @@ import {
 } from './credential-material-source';
 import { GcpIapDeliveringWorkspaceHostInitializationOperations } from './gcp-iap-credential-delivery';
 import { isHostedProviderCredentialRef, resolveHostedGcpAuth } from './hosted-gcp-auth';
+import { resolveOrganizationExternalIdRef } from './hosted-aws-identity';
+import { AWS_WORKSPACE_HOST_TARGET } from './aws-connection';
+import { AWS_WORKSPACE_HOST_TRANSPORT_FEATURES } from './aws-connection-profile';
 import {
   GcpIapWorkspaceHostInitializationOperations,
+  awsSsmHostKeyAlias,
   gcpIapHostKeyAlias,
   gcpIapHostKeyAliasFamily,
+  type AwsSsmTunnelCredentials,
+  type AwsSsmWorkspaceHostInitializationProfile,
   type GcpIapWorkspaceHostBootstrapStatusSource,
   type GcpIapWorkspaceHostInitializationProfile,
-  type GcpIapWorkspaceHostTransportProfile,
+  type WorkspaceHostSshInitializationProfile,
+  type WorkspaceHostSshTransportProfile,
 } from './gcp-iap-initialization-operations';
 import {
   GCP_WORKSPACE_HOST_TARGET,
@@ -66,7 +73,11 @@ import {
   type GcpInstanceGuestAttribute,
   type GcpWorkspaceHostApiClient,
 } from './gcp-provider';
-import { readWorkspaceHostConnection, readWorkspaceHostDesiredSpec } from './observability-store';
+import {
+  readWorkspaceHostConnection,
+  readWorkspaceHostDesiredSpec,
+  readWorkspaceHostDestroyTarget,
+} from './observability-store';
 
 /** Public typed initializer transport; keep implementation-private fields out of the seam. */
 export type WorkspaceHostControllerOperations = WorkspaceHostInitializationHostOperations &
@@ -96,6 +107,8 @@ export interface WorkspaceHostInitializationControllerProfile {
   identityFile?: string;
   sshExecutable?: string;
   gcloudExecutable?: string;
+  /** AWS CLI v2 (with the Session Manager plugin) that carries the `aws-ssm-ssh` ProxyCommand. */
+  awsExecutable?: string;
 }
 
 export class WorkspaceHostInitializationHostKeyError extends Error {
@@ -120,7 +133,9 @@ const HOST_KEY_BY_ATTRIBUTE = new Map<string, (typeof HOST_KEY_ALGORITHMS)[numbe
   ['ssh-rsa', 'ssh-rsa'],
 ]);
 
-const hostKeyEnrollmentQueues = new Map<string, Promise<void>>();
+// A serialization chain only: each entry is awaited for ORDER, never for its value, so an
+// enrollment (void) and a prune (GcpIapHostKeyPruneResult) can share one queue per file.
+const hostKeyEnrollmentQueues = new Map<string, Promise<unknown>>();
 const HOST_KEY_ENROLLMENT_MUTEX_PREFIX = 'workspace-host-known-hosts-';
 
 interface GcpIapHostKeyEnrollmentTestHooks {
@@ -426,19 +441,45 @@ async function readPublishedHostKeys(
   }
 }
 
+/**
+ * One provider-neutral pin write: the controller alias, the alias family whose stale pins may be
+ * pruned, and the keys an authenticated out-of-band source published. GCP fills it from `hostkeys/`
+ * guest attributes, AWS from the EC2 serial console (P-005); the trust rules below are shared.
+ */
+interface PinnedHostKeyEnrollment {
+  alias: string;
+  family: string;
+  /** Algorithm -> canonical base64 key, every entry already validated by `parsePublicKeyBlob`. */
+  received: ReadonlyMap<string, string>;
+  knownHostsFile: string;
+}
+
 async function enrollGcpIapHostKeysUnlocked(
   input: GcpIapHostKeyEnrollmentInput,
   hooks: GcpIapHostKeyEnrollmentTestHooks,
 ): Promise<void> {
-  const alias = gcpIapHostKeyAlias(input.identity);
   // Every incarnation of this instance NAME shares the family prefix. A pin under the family with
   // any other suffix — or none, the pre-WI-10002493 name-only alias — belongs to a machine GCP has
   // already deleted (ids are never reused), so it can never match again and is pruned here, under
   // the same mutex as the rewrite. A pin for THIS incarnation is still checked below and a changed
   // key on it still refuses: that is the guard, and binding to the id is what keeps it meaningful.
-  const family = gcpIapHostKeyAliasFamily(input.identity);
+  await enrollPinnedHostKeysUnlocked(
+    {
+      alias: gcpIapHostKeyAlias(input.identity),
+      family: gcpIapHostKeyAliasFamily(input.identity),
+      received: guestHostKeys(input.attributes),
+      knownHostsFile: input.knownHostsFile,
+    },
+    hooks,
+  );
+}
+
+async function enrollPinnedHostKeysUnlocked(
+  input: PinnedHostKeyEnrollment,
+  hooks: GcpIapHostKeyEnrollmentTestHooks,
+): Promise<void> {
+  const { alias, family, received } = input;
   const inFamily = (host: string) => host === family || host.startsWith(`${family}-`);
-  const received = guestHostKeys(input.attributes);
   const directory = dirname(input.knownHostsFile);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
@@ -546,6 +587,143 @@ export function enrollGcpIapHostKeys(
   return run.finally(() => {
     if (hostKeyEnrollmentQueues.get(knownHostsFile) === run) hostKeyEnrollmentQueues.delete(knownHostsFile);
   });
+}
+
+const EC2_CONSOLE_HOST_KEYS_BEGIN = '-----BEGIN SSH HOST KEY KEYS-----';
+const EC2_CONSOLE_HOST_KEYS_END = '-----END SSH HOST KEY KEYS-----';
+
+/**
+ * Parse the SSH host keys cloud-init writes to the EC2 serial console (P-005).
+ *
+ * The console is written only by the instance's own boot and read only through the EC2 API with
+ * the connection's credentials, so it is the AWS analogue of GCP's `hostkeys/` guest attributes:
+ * an out-of-band source the controller can pin from before it first opens SSH. The LAST complete
+ * block wins (the most recent boot). Returns null when no complete block is present (not yet
+ * printed, or scrolled out of the 64 KiB console window). A block that is present but malformed,
+ * duplicated or empty is a hard refusal, never "absent" — a corrupt key is a defect, not a delay.
+ * Unsupported algorithms (e.g. a legacy ssh-dss line) are skipped, as GCP's guest agent omits them.
+ */
+export function parseEc2ConsoleHostKeys(output: string): Map<string, string> | null {
+  const text = output.replace(/\r/g, '');
+  const begin = text.lastIndexOf(EC2_CONSOLE_HOST_KEYS_BEGIN);
+  if (begin < 0) return null;
+  const end = text.indexOf(EC2_CONSOLE_HOST_KEYS_END, begin);
+  if (end < 0) return null;
+  const keys = new Map<string, string>();
+  const body = text.slice(begin + EC2_CONSOLE_HOST_KEYS_BEGIN.length, end);
+  for (const raw of body.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const algorithm = line.split(/\s+/, 1)[0] ?? '';
+    if (!HOST_KEY_BY_ATTRIBUTE.has(algorithm)) continue;
+    const parsed = parsePublicKeyLine(line);
+    if (keys.has(parsed.algorithm)) {
+      throw new WorkspaceHostInitializationHostKeyError(`console host-key block repeats '${parsed.algorithm}'`);
+    }
+    keys.set(parsed.algorithm, parsed.key);
+  }
+  if (keys.size === 0) {
+    throw new WorkspaceHostInitializationHostKeyError('console host-key block carries no supported host key');
+  }
+  return keys;
+}
+
+/** Does the controller trust store already hold a pin under exactly this alias? */
+async function hasPinnedHostKey(knownHostsFile: string, alias: string): Promise<boolean> {
+  let current: string;
+  try {
+    current = await readFile(knownHostsFile, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  return current.split('\n').some((line) => {
+    const fields = line.trimStart().split(/\s+/);
+    return (fields[fields[0]?.startsWith('@') ? 1 : 0] ?? '') === alias;
+  });
+}
+
+export interface AwsSsmHostKeyEnrollmentInput {
+  identity: { region: string; instanceId: string };
+  knownHostsFile: string;
+  keys: ReadonlyMap<string, string>;
+}
+
+/**
+ * Pin an EC2 instance's console-published host keys under its incarnation alias, through the same
+ * queue, filesystem mutex and trust rules as GCP. EC2 ids are never reused, so the alias IS its own
+ * family: there is no earlier incarnation of the same id to prune.
+ */
+export function enrollAwsSsmHostKeys(
+  input: AwsSsmHostKeyEnrollmentInput,
+  hooks: GcpIapHostKeyEnrollmentTestHooks = {},
+): Promise<void> {
+  if (!isAbsolute(input.knownHostsFile)) {
+    return Promise.reject(new WorkspaceHostInitializationHostKeyError('known_hosts path must be absolute'));
+  }
+  const knownHostsFile = resolve(input.knownHostsFile);
+  const alias = awsSsmHostKeyAlias(input.identity);
+  const prior = hostKeyEnrollmentQueues.get(knownHostsFile) ?? Promise.resolve();
+  const run = prior
+    .catch(() => undefined)
+    .then(async () => {
+      await hooks.beforeMutex?.();
+      return withFsMutex(
+        hostKeyEnrollmentMutexName(knownHostsFile),
+        () => enrollPinnedHostKeysUnlocked({ alias, family: alias, received: input.keys, knownHostsFile }, hooks),
+        { timeoutMs: 30_000, staleMs: 60_000, retryMs: 20 },
+      );
+    });
+  hostKeyEnrollmentQueues.set(knownHostsFile, run);
+  return run.finally(() => {
+    if (hostKeyEnrollmentQueues.get(knownHostsFile) === run) hostKeyEnrollmentQueues.delete(knownHostsFile);
+  });
+}
+
+export type AwsSsmHostKeyClient = {
+  getConsoleOutput(instanceId: string): Promise<string | undefined>;
+};
+
+/**
+ * Establish trust for one EC2 incarnation before the first SSH (P-005).
+ *
+ * The console is a rolling window, so the boot-time key block can scroll out on a long-lived host.
+ * That is only a problem for FIRST enrollment: once a pin exists, OpenSSH itself enforces it
+ * (StrictHostKeyChecking=yes under the incarnation alias). So: a block that is present is always
+ * enrolled (which re-verifies an existing pin and refuses a changed key); an absent block with an
+ * existing pin proceeds on the pin; an absent block with no pin waits for publication, bounded by
+ * the same budget as GCP's `hostkeys/` wait, and then refuses.
+ */
+export async function establishAwsSsmHostKeyTrust(
+  client: AwsSsmHostKeyClient,
+  input: { region: string; instanceId: string; knownHostsFile: string },
+  options: WorkspaceHostHostKeyPublicationOptions & {
+    enroll?: (input: AwsSsmHostKeyEnrollmentInput) => Promise<void>;
+  } = {},
+): Promise<'enrolled' | 'pinned'> {
+  const timeoutMs = options.timeoutMs ?? HOST_KEY_PUBLICATION_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? HOST_KEY_PUBLICATION_POLL_INTERVAL_MS;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const enroll = options.enroll ?? enrollAwsSsmHostKeys;
+  const identity = { region: input.region, instanceId: input.instanceId };
+  const startedAt = now();
+  for (let attempt = 0; ; attempt += 1) {
+    const keys = parseEc2ConsoleHostKeys((await client.getConsoleOutput(input.instanceId)) ?? '');
+    if (keys) {
+      await enroll({ identity, knownHostsFile: input.knownHostsFile, keys });
+      return 'enrolled';
+    }
+    if (attempt === 0 && (await hasPinnedHostKey(input.knownHostsFile, awsSsmHostKeyAlias(identity)))) {
+      return 'pinned';
+    }
+    const elapsedMs = now() - startedAt;
+    if (elapsedMs >= timeoutMs) {
+      throw new WorkspaceHostHostKeyPublicationTimeoutError(input.instanceId, elapsedMs);
+    }
+    await options.onWaiting?.({ elapsedMs, timeoutMs });
+    await sleep(pollIntervalMs);
+  }
 }
 
 async function pruneGcpIapHostKeysForAbsentHostUnlocked(
@@ -667,7 +845,8 @@ export class UnsupportedWorkspaceHostInitializationTargetError extends Error {
   constructor(target: string) {
     super(
       `No workspace-host initialization adapter for target '${target}'. ` +
-        `Only '${GCP_WORKSPACE_HOST_TARGET}' is implemented; AWS and Azure adapters are separate plan items.`,
+        `Only '${GCP_WORKSPACE_HOST_TARGET}' (IAP) and '${AWS_WORKSPACE_HOST_TARGET}' (SSM) are implemented; ` +
+        'the Azure adapter is a separate plan item.',
     );
     this.name = 'UnsupportedWorkspaceHostInitializationTargetError';
     this.target = target;
@@ -702,6 +881,53 @@ export function resolveGcpIapWorkspaceHostInitializationProfile(
     ...(controller.gcloudExecutable ? { gcloudExecutable: controller.gcloudExecutable } : {}),
     remoteEntrypoint: controller.remoteEntrypoint,
   };
+}
+
+/**
+ * The SSM SSH profile that reaches ONE EC2 incarnation (P-005). The AWS twin of the IAP profile:
+ * same controller user, trust store, identity and entrypoint, so the two providers cannot disagree
+ * about anything above the transport. `awsProfile` names the shared-config profile the AWS CLI uses
+ * for the Session Manager tunnel; absent means the CLI's default chain.
+ */
+export function resolveAwsSsmWorkspaceHostInitializationProfile(
+  desired: WorkspaceHostDesiredSpec,
+  controller: WorkspaceHostInitializationControllerProfile,
+  incarnation: AwsSsmIncarnation,
+): AwsSsmWorkspaceHostInitializationProfile {
+  if (desired.target !== AWS_WORKSPACE_HOST_TARGET) {
+    throw new UnsupportedWorkspaceHostInitializationTargetError(String(desired.target));
+  }
+  return {
+    kind: 'aws-ssm-ssh',
+    region: desired.region,
+    instanceId: incarnation.instanceId,
+    sshUser: controller.sshUser,
+    knownHostsFile: controller.knownHostsFile,
+    ...(controller.identityFile ? { identityFile: controller.identityFile } : {}),
+    ...(controller.sshExecutable ? { sshExecutable: controller.sshExecutable } : {}),
+    ...(controller.awsExecutable ? { awsExecutable: controller.awsExecutable } : {}),
+    ...(incarnation.awsProfile ? { awsProfile: incarnation.awsProfile } : {}),
+    ...(incarnation.awsCredentials ? { awsCredentials: incarnation.awsCredentials } : {}),
+    remoteEntrypoint: controller.remoteEntrypoint,
+  };
+}
+
+/** One EC2 incarnation plus the identity its Session Manager tunnel runs as. */
+export interface AwsSsmIncarnation {
+  instanceId: string;
+  awsProfile?: string;
+  awsCredentials?: () => Promise<AwsSsmTunnelCredentials>;
+}
+
+/** The SSH profile for whichever provider the desired spec names. */
+export function resolveWorkspaceHostSshInitializationProfile(
+  desired: WorkspaceHostDesiredSpec,
+  controller: WorkspaceHostInitializationControllerProfile,
+  incarnation: AwsSsmIncarnation,
+): WorkspaceHostSshInitializationProfile {
+  return desired.target === AWS_WORKSPACE_HOST_TARGET
+    ? resolveAwsSsmWorkspaceHostInitializationProfile(desired, controller, incarnation)
+    : resolveGcpIapWorkspaceHostInitializationProfile(desired, controller, incarnation);
 }
 
 /**
@@ -760,6 +986,20 @@ export function gcpBootstrapStatusSource(
 }
 
 /**
+ * Read the bootstrap's own status report from the EC2 serial console — the channel
+ * `bootstrapStatusChannel: 'ec2-console-output'` renders into the script (aws-byoc-gcp-parity
+ * D-013). The LAST marker line wins, and the SSM push writes `running` before it starts the
+ * bootstrap, so a report an earlier run left on the console never reads as this run's. No report
+ * is null (keep waiting); an EC2 error propagates, and the readiness wait treats it as no report.
+ */
+export function ec2ConsoleBootstrapStatusSource(
+  client: AwsSsmHostKeyClient,
+  instanceId: string,
+): GcpIapWorkspaceHostBootstrapStatusSource {
+  return async () => parseEc2ConsoleBootstrapStatus((await client.getConsoleOutput(instanceId)) ?? '');
+}
+
+/**
  * Build the concrete host adapter for a desired spec.
  *
  * Throws `UnsupportedWorkspaceHostInitializationTargetError` for a target with no adapter, and
@@ -771,12 +1011,13 @@ export function resolveWorkspaceHostInitializationOperations(
   desired: WorkspaceHostDesiredSpec,
   controller: WorkspaceHostInitializationControllerProfile,
   /** The live incarnation the trust pin was enrolled for — the SSH alias must name the same one. */
-  incarnation: { instanceId: string },
+  incarnation: { instanceId: string; awsProfile?: string },
   credentialMaterialSource?: WorkspaceHostCredentialMaterialSource,
   /** The bootstrap's out-of-band report, which lets the readiness wait fail fast (WI-10002837). */
   bootstrapStatus?: GcpIapWorkspaceHostBootstrapStatusSource,
 ): WorkspaceHostControllerOperations {
-  const profile = resolveGcpIapWorkspaceHostInitializationProfile(desired, controller, incarnation);
+  // Throws UnsupportedWorkspaceHostInitializationTargetError for any target but GCP and AWS.
+  const profile = resolveWorkspaceHostSshInitializationProfile(desired, controller, incarnation);
   const { remoteEntrypoint: _remoteEntrypoint, ...transport } = profile;
 
   // The delivering wrapper is UNCONDITIONAL, not applied only when a material source is
@@ -804,10 +1045,9 @@ export function resolveWorkspaceHostInitializationOperations(
 export function resolveWorkspaceHostDeliveryCapabilities(
   desired: WorkspaceHostDesiredSpec,
 ): WorkspaceHostDeliveryCapabilities {
-  if (desired.target !== GCP_WORKSPACE_HOST_TARGET) {
-    throw new UnsupportedWorkspaceHostInitializationTargetError(String(desired.target));
-  }
-  return GCP_WORKSPACE_HOST_TRANSPORT_FEATURES;
+  if (desired.target === GCP_WORKSPACE_HOST_TARGET) return GCP_WORKSPACE_HOST_TRANSPORT_FEATURES;
+  if (desired.target === AWS_WORKSPACE_HOST_TARGET) return AWS_WORKSPACE_HOST_TRANSPORT_FEATURES;
+  throw new UnsupportedWorkspaceHostInitializationTargetError(String(desired.target));
 }
 
 /** Raised when the controller's own initialization settings are missing or unusable. */
@@ -829,6 +1069,7 @@ const CONTROLLER_ENV = {
   identityFile: 'PAPERCUSP_WORKSPACE_HOST_IDENTITY_FILE',
   sshExecutable: 'PAPERCUSP_WORKSPACE_HOST_SSH_EXECUTABLE',
   gcloudExecutable: 'PAPERCUSP_WORKSPACE_HOST_GCLOUD_EXECUTABLE',
+  awsExecutable: 'PAPERCUSP_WORKSPACE_HOST_AWS_EXECUTABLE',
 } as const;
 
 const DEFAULT_CONTROLLER_REMOTE_ENTRYPOINT = WORKSPACE_HOST_REMOTE_INITIALIZER_CONDUIT;
@@ -902,6 +1143,7 @@ export function resolveWorkspaceHostInitializationControllerProfile(
   const identityFile = optional('identityFile', true);
   const sshExecutable = optional('sshExecutable', false);
   const gcloudExecutable = optional('gcloudExecutable', false);
+  const awsExecutable = optional('awsExecutable', false);
 
   if (problems.length > 0) throw new WorkspaceHostInitializationControllerProfileError(problems);
 
@@ -913,6 +1155,7 @@ export function resolveWorkspaceHostInitializationControllerProfile(
     ...(identityFile ? { identityFile } : {}),
     ...(sshExecutable ? { sshExecutable } : {}),
     ...(gcloudExecutable ? { gcloudExecutable } : {}),
+    ...(awsExecutable ? { awsExecutable } : {}),
   };
 }
 
@@ -961,6 +1204,17 @@ export interface ResolveOperationsForHostInput {
    * Omitted means the measured defaults; callers pass `onWaiting` to record durable progress.
    */
   awaitHostKeys?: WorkspaceHostHostKeyPublicationOptions;
+  /** AWS test seam; production composes the SDK client from the host's own connection. */
+  awsClient?: AwsSsmHostKeyClient;
+  /** AWS test seam; production reads the host's registered `vm` resource. */
+  readAwsInstanceId?: (workspaceId: string, hostId: string) => Promise<string | null>;
+  /** AWS test seam; production pins through `enrollAwsSsmHostKeys`. */
+  enrollAwsHostKeys?: (input: AwsSsmHostKeyEnrollmentInput) => Promise<void>;
+  /**
+   * AWS test seam for a role-chain connection's tunnel credentials; production hands the tunnel the
+   * composed SDK client's own `sessionCredentials()`.
+   */
+  awsTunnelCredentials?: () => Promise<AwsSsmTunnelCredentials>;
 }
 
 /**
@@ -980,7 +1234,7 @@ export async function resolveWorkspaceHostInitializationOperationsForHost(
   operations: WorkspaceHostControllerOperations;
   deliveryCapabilities: WorkspaceHostDeliveryCapabilities;
   /** The pinned SSH transport the operations use, for programs outside that protocol (D-403). */
-  transport: GcpIapWorkspaceHostTransportProfile;
+  transport: WorkspaceHostSshTransportProfile;
 }> {
   const read = input.readDesiredSpec ?? readWorkspaceHostDesiredSpec;
   const lookup = await read(input.workspaceId, input.hostId);
@@ -988,6 +1242,9 @@ export async function resolveWorkspaceHostInitializationOperationsForHost(
     throw new WorkspaceHostDesiredSpecUnavailableError(input.hostId, lookup.miss ?? 'no-recorded-spec');
   }
   const desired = lookup.desired;
+  if (desired.target === AWS_WORKSPACE_HOST_TARGET) {
+    return resolveAwsSsmOperationsForHost(input, desired, lookup.connectionId ?? null);
+  }
 
   // Keep the provider boundary ahead of the GCP-only trust enrollment. Unsupported targets must
   // refuse without making a cloud call (or attempting to interpret an AWS/Azure spec as GCP).
@@ -1052,6 +1309,101 @@ export async function resolveWorkspaceHostInitializationOperationsForHost(
     deliveryCapabilities,
     transport,
   };
+}
+
+/**
+ * The AWS half of `resolveWorkspaceHostInitializationOperationsForHost` (P-005). The incarnation
+ * is the EC2 instance the provisioner REGISTERED for this host (its persisted `vm` resource), never
+ * a guess; trust is pinned from the serial console before the first SSH; the CLI profile for the
+ * Session Manager tunnel comes from the host's own connection.
+ */
+async function resolveAwsSsmOperationsForHost(
+  input: ResolveOperationsForHostInput,
+  desired: WorkspaceHostDesiredSpec,
+  connectionId: string | null,
+): Promise<{
+  desired: WorkspaceHostDesiredSpec;
+  operations: WorkspaceHostControllerOperations;
+  deliveryCapabilities: WorkspaceHostDeliveryCapabilities;
+  transport: WorkspaceHostSshTransportProfile;
+}> {
+  const deliveryCapabilities = resolveWorkspaceHostDeliveryCapabilities(desired);
+  const instanceId = await (input.readAwsInstanceId ?? readRegisteredAwsInstanceId)(input.workspaceId, input.hostId);
+  if (!instanceId) throw new WorkspaceHostDesiredSpecUnavailableError(input.hostId, 'no-recorded-spec');
+  // The CLI profile and the SDK client both come from the host's own connection; without it there
+  // is no credential to reach the instance with, so refuse instead of guessing ambient credentials.
+  const stored = connectionId
+    ? await (input.readConnection ?? readWorkspaceHostConnection)(input.workspaceId, connectionId)
+    : null;
+  if (!stored) throw new Error('aws_workspace_host_connection_missing');
+  const provider = (stored.connection.provider ?? {}) as Record<string, unknown>;
+  const source = provider.credentialSource as { method?: unknown; profile?: unknown } | undefined;
+  const awsProfile =
+    source?.method === 'shared-profile' && typeof source.profile === 'string' ? source.profile : undefined;
+  // Composed exactly as the provider factory composes it (provider-factories.ts): a hosted
+  // customer role resolves its organization's ExternalId; without the resolver the client refuses.
+  const configured = input.awsClient
+    ? null
+    : (await import('./aws-connection-inspection')).createConfiguredAwsWorkspaceHostClient(stored.connection, {
+        resolveExternalId: resolveOrganizationExternalIdRef,
+      });
+  const client: AwsSsmHostKeyClient = input.awsClient ?? configured!;
+  // The AWS CLI resolves the connection's identity on its own only for the default chain and a
+  // named profile. Every role chain (hosted customer-role/OIDC, local assume-role) must hand the
+  // tunnel the SAME credentials the SDK client signs with, or `aws ssm start-session` runs as the
+  // controller's ambient identity (EI-24854807241461317).
+  const awsCredentials = awsCliResolvesConnectionIdentity(source)
+    ? undefined
+    : (input.awsTunnelCredentials ?? (configured ? () => configured.sessionCredentials() : undefined));
+  if (!awsCliResolvesConnectionIdentity(source) && !awsCredentials) {
+    throw new Error('aws_workspace_host_tunnel_credentials_unavailable');
+  }
+  await establishAwsSsmHostKeyTrust(
+    client,
+    { region: desired.region, instanceId, knownHostsFile: input.controller.knownHostsFile },
+    { ...(input.awaitHostKeys ?? {}), ...(input.enrollAwsHostKeys ? { enroll: input.enrollAwsHostKeys } : {}) },
+  );
+  const incarnation = {
+    instanceId,
+    ...(awsProfile ? { awsProfile } : {}),
+    ...(awsCredentials ? { awsCredentials } : {}),
+  };
+  const { remoteEntrypoint: _remoteEntrypoint, ...transport } = resolveAwsSsmWorkspaceHostInitializationProfile(
+    desired,
+    input.controller,
+    incarnation,
+  );
+  return {
+    desired,
+    operations: resolveWorkspaceHostInitializationOperations(
+      desired,
+      input.controller,
+      incarnation,
+      input.credentialMaterialSource ?? UNCONFIGURED_WORKSPACE_HOST_CREDENTIAL_MATERIAL_SOURCE,
+      ec2ConsoleBootstrapStatusSource(client, instanceId),
+    ),
+    deliveryCapabilities,
+    transport,
+  };
+}
+
+/**
+ * Whether the AWS CLI, given only the connection's (non-secret) profile, signs as the same identity
+ * the SDK client does: true for the default chain and a named shared profile, false for every role
+ * chain. A missing or unrecognized source is treated as a role chain, so it refuses rather than
+ * tunnelling under ambient credentials.
+ */
+export function awsCliResolvesConnectionIdentity(source: { method?: unknown } | undefined): boolean {
+  return source?.method === 'default-chain' || source?.method === 'shared-profile';
+}
+
+/** The EC2 instance id the provisioner registered for a host, or null when none is applied. */
+async function readRegisteredAwsInstanceId(workspaceId: string, hostId: string): Promise<string | null> {
+  const target = await readWorkspaceHostDestroyTarget(workspaceId, hostId);
+  const vm = target?.resources.find(
+    (entry) => entry.resource.target === AWS_WORKSPACE_HOST_TARGET && entry.resource.kind === 'vm',
+  );
+  return vm?.resource.providerId ?? null;
 }
 
 /** Raised when the instance a host's intent names does not exist, or GCP will not identify it. */

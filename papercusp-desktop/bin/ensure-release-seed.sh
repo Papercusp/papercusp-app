@@ -74,6 +74,9 @@ EPOCH_KEYS="$SEED_OUT/epoch-keys.json"
 OPERATOR_DIR="$MONOREPO/apps/operator"
 
 log() { echo "[ensure-seed] $*"; }
+# shellcheck source=lib/seed-reuse-age.sh
+source "$HERE/lib/seed-reuse-age.sh"
+seed_uuid_row_drop_prepare || exit 1
 
 seed_present() { [[ -f "$MANIFEST" ]]; }
 
@@ -177,8 +180,18 @@ if [[ "$want_corestore" == "1" ]]; then
   reuse="${PAPERCUSP_SEED_REUSE_CORESTORE:-auto}"
   committed_corestore=0
   [[ -d "$SEED_OUT/corestore" && -f "$MANIFEST" ]] && committed_corestore=1
+  # WI-10004593: a reuse graft ships the committed corestore as-cut, so refuse a
+  # stale one (shared guard, WI-10004429). A refused reuse never re-grafts: under
+  # PAPERCUSP_SEED_REQUIRED=1 it is a hard failure; otherwise the committed seed
+  # is left untouched with a loud warning (this script never fails a plain build).
+  refuse_stale_reuse() {
+    seed_reuse_age_check "$MANIFEST" && return 0
+    [[ "${PAPERCUSP_SEED_REQUIRED:-0}" == "1" ]] && { log "ERROR: stale committed corestore refused under PAPERCUSP_SEED_REQUIRED=1"; exit 1; }
+    log "WARN: stale committed corestore refused — NOT re-grafting; the committed seed is left as-is and is still stale"
+    exit 0
+  }
   case "$reuse" in
-    1) core_args+=(--reuse-corestore "$SEED_OUT") ;;
+    1) refuse_stale_reuse; core_args+=(--reuse-corestore "$SEED_OUT") ;;
     0)
       # FRESH corestore snapshot — requires the live store dir (owner box) AND a
       # quiesced operator (a live fd-lock aborts the snapshot AFTER wiping the
@@ -197,6 +210,7 @@ if [[ "$want_corestore" == "1" ]]; then
       # wipes it) and only refresh git+epoch-keys; fall back to a fresh snapshot
       # (owner box only) when there is no committed corestore to reuse.
       if [[ "$committed_corestore" == "1" ]]; then
+        refuse_stale_reuse
         core_args+=(--reuse-corestore "$SEED_OUT")
         log "corestore: reusing the committed snapshot (auto) — refreshing git + epoch-keys only"
       elif [[ -d "$STORE_DIR" ]]; then
@@ -252,6 +266,7 @@ run_cut() {
         "${depth_args[@]}" \
         "${core_args[@]}" \
         "${emit_args[@]}" \
+        "${SEED_UUID_ROW_DROP_ARGS[@]}" \
         "$@"
   ) 2>&1 | tee -a "$CUT_LOG"
   local rc=$?
@@ -297,6 +312,10 @@ if [[ "$cut_rc" -ne 0 && ${#sparse_args[@]} -gt 0 ]] \
 fi
 
 if [[ "$cut_rc" -ne 0 ]]; then
+  if [[ "$SEED_UUID_ROW_DROP_ACTIVE" == "1" ]]; then
+    log "ERROR: UUID source-bound cut failed; refusing stale/seedless fallback"
+    exit 1
+  fi
   log "WARN: seed cut FAILED (rc=$cut_rc)"
   if seed_usable; then
     log "a usable committed seed is still present — continuing the build with it"

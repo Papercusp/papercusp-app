@@ -22,7 +22,8 @@
 
 import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
-import { runHybridSearch, type LegReport } from '@papercusp/search';
+import { runHybridSearch } from '@papercusp/search';
+import { describeSearchLegs } from './describe-leg';
 import { SEARCH_SOURCES } from './sources';
 import { scopeResidue } from './scope-residue';
 import { buildQueryEmbedderResolved, interactiveEmbedAcquireBudgetMs } from './embedder';
@@ -36,32 +37,6 @@ import { scopeArg, DEFAULT_SCOPE } from './scope';
 import { resolveAgentIdentity } from '../coordination/identity';
 
 const MODE_CHOICES = ['embeddings', 'hybrid'] as const;
-
-/**
- * Project one engine leg report into the agent-facing envelope (P-020).
- *
- * `candidates` is always stated — it is the number that distinguishes a leg
- * that ran and found nothing from one that never ran — while `floored` and
- * `failures` are emitted only when non-zero, so a healthy search stays as
- * compact as the `coverage` block beside it.
- */
-function describeLeg(leg: LegReport): Record<string, unknown> {
-  return {
-    status: leg.status,
-    candidates: leg.candidates,
-    ...(leg.floored > 0 ? { floored: leg.floored } : {}),
-    ...(leg.blocked ? { blocked: leg.blocked } : {}),
-    ...(leg.failures.length > 0
-      ? {
-          failures: leg.failures.map((f) => ({
-            source: f.source,
-            ranker: f.ranker,
-            error: f.error,
-          })),
-        }
-      : {}),
-  };
-}
 
 // + overwatch (overwatch-role-2026-06-15 B-01): the supervisor searches to ground nudges.
 const ALL_ROLES = [...SU_ROLES, 'papercup', 'papercup-deep', 'kettle'] as const;
@@ -251,12 +226,7 @@ export default defineTool({
           // (EI-19447237774252790) leaves the first two reporting perfect health
           // while the search is silently semantic-only, so this reports the
           // candidate counts rather than an execution flag.
-          legs: {
-            degraded: legs.degraded,
-            warning: legs.warning,
-            lexical: describeLeg(legs.lexical),
-            semantic: describeLeg(legs.semantic),
-          },
+          legs: describeSearchLegs(legs),
           coverage: {
             degraded: coverage.degraded,
             warning: coverageWarning,

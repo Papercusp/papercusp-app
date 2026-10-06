@@ -287,13 +287,13 @@ function isPeerRoleOwnerAttribution(line: string, match: RegExpExecArray): boole
  *   is followed by end-of-clause, never a verb. Passive is the natural register for a
  *   status line, which is precisely what a plan's `## Now` **State:** field is.
  *
- *   A PERSONAL NAME — "Approved by owner". Humans refer to a human by name, so the token
+ *   A PERSONAL NAME — "Approved by Avi". Humans refer to a human by name, so the token
  *   `owner` never appears at all.
  *
  * Measured before writing this (running the linter over seven phrasings): the existing
  * regex caught 1 of 5 attribution forms. The motivating incident —
  * `llm-agent-evaluation-measurement-integrity-2026-08-25` opening its Now block with
- * "Approved by owner for direct AUTO implementation by this session", an agent-authored
+ * "Approved by Avi for direct AUTO implementation by this session", an agent-authored
  * line that no owner turn supports and that a later session quoted back as authority —
  * used a missed form. Wiring a new carry surface to the linter without this would have
  * shipped a guard blind to its own motivating case.
@@ -700,7 +700,7 @@ function classifyMechanismClaim(
  * same write that probes the release plane (the write "attaches a checks probe").
  */
 const DEPLOY_DEPENDENCY_RE =
-  /\b(?:wait(?:ing|s)?\s+(?:on|for)|blocked\s+(?:on|by)|needs?|requires?|depends?\s+on|until|pending|gated\s+on|can'?t\s+\w+\s+(?:until|before|without))\b[^.\n]{0,50}?(?:\bgreen[- ]main\b|\bmain\b|:3070\b|\brelease:deployed\b|\bdeploy(?:ed|ment|s)?\b|\bthe\s+release\b)/i;
+  /\b(?:wait(?:ing|s)?\s+(?:on|for)|blocked\s+(?:on|by)|needs?|requires?|depends?\s+on|until|pending|gated\s+on|can'?t\s+\w+\s+(?:until|before|without))\b[^.\n]{0,50}?(?:\bgreen[- ]main\b|\bmain\b|:3070\b|\brelease:deployed\b|\bdeploy(?:ment|ments|s)?\b|\bthe\s+release\b|\b(?:to\s+be|be|been|being|is|are|was|were|get|got)\s+deployed\b|\bdeployed\b(?=\s*(?:[.,;:!?]|$|\b(?:before|until|to|on|at|now|first)\b)))/i;
 
 /** A probe of the release plane, on the line itself or on a checks row. */
 const RELEASE_PLANE_PROBE_RE =

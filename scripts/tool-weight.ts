@@ -18,11 +18,23 @@ async function main(): Promise<void> {
     '../packages/operator-core/lib/agent-tools/tool-guidance-budget.ts'
   );
   const { runToolWeightCli } = await import('../packages/operator-core/lib/agent-tools/tool-weight-cli.ts');
+  // WI-10004590: the OTHER byte budget a tool edit can break — the tool-delivery
+  // floor budget, asserted only at gate time by psu-launcher.test.ts. Resolved by the
+  // generator's own catalog measurement (no second pricing of a tool), claude kind: the
+  // three kinds share one budget (D-005) and one floor set per kind.
+  const { measureDeliverySummary } = await import('./gen-tool-delivery.ts');
+  const delivery = await measureDeliverySummary('claude');
 
   // The operator barrel installs a few long-lived invalidation listeners as
   // part of normal boot. This is a one-shot measurement command, so do not
   // leave the shell hanging after the report has been written.
-  const exitCode = runToolWeightCli(process.argv.slice(2), namedToolWeights());
+  const exitCode = runToolWeightCli(
+    process.argv.slice(2),
+    namedToolWeights(),
+    undefined,
+    undefined,
+    delivery,
+  );
   process.exit(exitCode);
 }
 

@@ -243,6 +243,22 @@ export const WRITE_CAPABILITIES = new Set([
   'tui:dispatch',
   'operator:converse',
   'activity:report',
+  // WI-10004595: fleet-registry control verbs + coord:mark-terminal + testing:run.
+  'fleet:create',
+  'fleet:join',
+  'fleet:leave',
+  'fleet:take-leadership',
+  'fleet:resume',
+  'fleet:pause',
+  'fleet:wind-down',
+  'fleet:supersede',
+  'fleet:headcount-target',
+  'fleet:request_remote_spawn',
+  'fleet:recolor',
+  'fleet:reconfigure-member',
+  'fleet:respawn-member',
+  'coord:mark-terminal',
+  'testing:run',
 ]);
 
 /** `capability -> 'read' | 'write'`, exactly as `defineTool` resolves it. */

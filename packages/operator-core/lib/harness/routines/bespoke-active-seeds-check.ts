@@ -137,6 +137,9 @@ export const BESPOKE_ACTIVE_SEEDS: BespokeActiveSeed[] = [
     seedScript: 'seed-episode-scoped-operational-reconcile-routine.ts',
   },
   { name: 'inbox-bulk-resolve', seedScript: 'seed-inbox-bulk-resolve-routine.ts' },
+  // observation-candidate-acceptance-promotion-2026-09-30 P-008: added with the action.
+  { name: 'intake-triage-drain', seedScript: 'seed-intake-triage-drain-routine.ts' },
+  { name: 'plan-cleanup-sweep',seedScript: 'seed-plan-cleanup-sweep-routine.ts' },
   {
     name: 'frozen-candidate-drift-sweep',
     seedScript: 'seed-frozen-candidate-drift-sweep-routine.ts',
@@ -156,6 +159,10 @@ export const BESPOKE_ACTIVE_SEEDS: BespokeActiveSeed[] = [
   // workspace-host recovery state machine was dead code), which makes "landed a seed script the
   // guard cannot see" the one omission it must not reproduce one level up.
   { name: 'hosted-lifecycle-reconcile', seedScript: 'seed-hosted-lifecycle-reconcile-routine.ts' },
+  // WI-10004437. Added with the action, its import, its spend entry and its seed script, for the
+  // reason the hosted-lifecycle-reconcile entry above records: a tripwire nothing arms is the same
+  // silent nothing as the ingress gaps it exists to catch.
+  { name: 'hosted-public-ingress-probe', seedScript: 'seed-hosted-public-ingress-probe-routine.ts' },
   { name: 'idle-backend-reaper', seedScript: 'seed-idle-backend-reaper-routine.ts' },
   { name: 'improvement-human-digest', seedScript: 'seed-human-digest-routine.ts' },
   { name: 'plan-drain-sweep', seedScript: 'seed-plan-drain-sweep-routine.ts' },
@@ -225,6 +232,12 @@ export const BESPOKE_ACTIVE_SEEDS: BespokeActiveSeed[] = [
   {
     name: 'work-item-durable-park-audit',
     seedScript: 'seed-work-item-durable-park-audit-routine.ts',
+  },
+  // WI-10004722: the bulk dedup only ran on demand and went unrun for weeks; this
+  // driver is the recurring half, so its row going missing must be loud.
+  {
+    name: 'work-item-admission-bulk-dedup-driver',
+    seedScript: 'seed-work-item-admission-bulk-dedup-driver-routine.ts',
   },
   // WI-2141683: found while fixing EI-22136759189899545 below. Both p2p-perf-tier1 and
   // p2p-perf-tier2 default active per their own doc comment (owner-ratified cadence) but

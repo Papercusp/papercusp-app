@@ -25,7 +25,7 @@ import { costUsdOf, proposeCandidate, throwWithCostUsd, type WorstTrace } from '
 import { insertCycle } from './store';
 import { runWithRatePause } from './rate-pause';
 import { ratePauseEventHooks } from './rate-pause-events';
-import { GYM_JUDGE_RUBRIC_V1, type GymJudgeRubric } from './judge-scoring';
+import { GYM_JUDGE_RUBRIC_V1, rubricHash, type GymJudgeRubric } from './judge-scoring';
 import type { GymRunnerPorts } from './gym-runner';
 import type { LoopDeps, EvaluateResult, LoopProposalRecord } from './loop';
 import type { ArchiveCandidateRecord } from './qd/niche';
@@ -82,6 +82,8 @@ export interface BuildLoopDepsConfig {
   harnessCommit: string;
   workspaceId: string;
   scratchRoot: string;
+  /** Retained trace storage, outside every directory the host tears down. */
+  traceRoot?: string;
   timeoutMs: number;
   pollIntervalMs: number;
   maxDistillChars: number;
@@ -166,6 +168,7 @@ export function buildLoopDeps(cfg: BuildLoopDepsConfig): LoopDeps {
       timeoutMs: cfg.timeoutMs,
       pollIntervalMs: cfg.pollIntervalMs,
       scratchRoot: cfg.scratchRoot,
+      traceRoot: cfg.traceRoot,
     });
 
   // Cycle metadata for gym_runs (the baseline is evaluated first → cycle 0).
@@ -177,6 +180,7 @@ export function buildLoopDeps(cfg: BuildLoopDepsConfig): LoopDeps {
       const cycle = evalSeq++;
       const variant = { variantId, label: variantId, overlay };
       await ab.store.upsertVariant(variant);
+      const runIds: string[] = [];
 
       const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 
@@ -223,7 +227,10 @@ export function buildLoopDeps(cfg: BuildLoopDepsConfig): LoopDeps {
         let worst: { composite: number; rationale: string; distilled: string } | null = null;
 
         for (let repeat = 0; repeat < repeats; repeat++) {
-          const runId = `${variantId}::${task.taskId}::c${cycle}::r${repeat}`;
+          // The baseline variant is reused across independent loop runs. Its
+          // durable run key must carry the existing loop token, just as candidate
+          // and cycle keys do, so a later run cannot replace earlier evidence.
+          const evaluationRunId = `${runId}::${variantId}::${task.taskId}::c${cycle}::r${repeat}`;
           const handle = await ab.runPipeline({
             variant,
             task: { ...task, pool: task.pool },
@@ -233,24 +240,39 @@ export function buildLoopDeps(cfg: BuildLoopDepsConfig): LoopDeps {
             workspaceId: cfg.workspaceId,
             scratchRoot: cfg.scratchRoot,
           });
-          // Reserve/charge known pipeline spend before any later stage can throw.
+          // Retain the known subtotal before any later stage can throw. This is
+          // local accounting, not a governor reservation or settlement.
           const pipelineCostUsd = costUsdOf(handle.pipelineUsd);
           incurredCostUsd += pipelineCostUsd;
+          if (handle.pipelineSpend?.complete === false) {
+            throw Object.assign(new Error('Gym pipeline usage evidence is incomplete'), {
+              costUsdMeasurementMissing: true, pipelineSpend: handle.pipelineSpend,
+            });
+          }
           await ab.store.startRun({
-            runId,
+            runId: evaluationRunId,
             variantId,
             taskId: task.taskId,
             cycle,
             repeat,
             harnessSlug: handle.harnessSlug,
             workflowId: handle.workflowID,
+            params: {
+              harnessCommit: cfg.harnessCommit,
+              substrateCommit: task.repoCommit,
+              judgeModel: rubric.model,
+              judgeTemp: rubric.temperature,
+              weights: rubric.weights,
+              rubricHash: rubricHash(rubric),
+            },
           });
+          runIds.push(evaluationRunId);
           const { distilledTrace, traceRef, rawSignals } = await ab.collectAndDistill({
             handle,
             task: { ...task, pool: task.pool },
             maxChars: cfg.maxDistillChars,
           });
-          await ab.store.finishRun(runId, { terminalState: handle.outcome, deterministicSignals: rawSignals, traceRef });
+          await ab.store.finishRun(evaluationRunId, { terminalState: handle.outcome, deterministicSignals: rawSignals, traceRef });
           const score = await runWithRatePause(
             () =>
               judgeGymRun(
@@ -264,7 +286,16 @@ export function buildLoopDeps(cfg: BuildLoopDepsConfig): LoopDeps {
           // The judge response is billed even if recording the score fails.
           const judgeCostUsd = costUsdOf(score.costUsd);
           incurredCostUsd += judgeCostUsd;
-          await ab.store.recordScore(runId, score);
+          if (score.costUsdMeasurementMissing || score.unreportedFrames) {
+            // The successful score still carries only a usage subtotal. Stop
+            // before another task spends and let the attempt remain OPEN.
+            // Its subtotal is already in incurredCostUsd; do not charge twice.
+            throw Object.assign(new Error('Gym judge usage evidence is incomplete'), {
+              costUsd: 0, costUsdMeasurementMissing: true,
+              ...(score.unreportedFrames ? { unreportedFrames: score.unreportedFrames } : {}),
+            });
+          }
+          await ab.store.recordScore(evaluationRunId, score);
           const sig = (rawSignals ?? {}) as Record<string, unknown>;
           composites.push(score.composite);
           cost += pipelineCostUsd + judgeCostUsd;
@@ -363,7 +394,7 @@ export function buildLoopDeps(cfg: BuildLoopDepsConfig): LoopDeps {
       .slice(0, worstK)
       .map((r) => ({ taskId: r.taskId, composite: r.composite, rationale: r.rationale, distilledTrace: r.distilled }));
 
-      return { evalResult, worstTraces, costUsd: totalCost };
+      return { evalResult, worstTraces, costUsd: totalCost, runIds };
     } catch (error) {
       // Keep all pipeline/judge charges from completed work visible when a later
       // task or persistence step aborts the evaluation.

@@ -8,7 +8,8 @@
  */
 import type { ReleaseTaskLedger } from '../../../../scripts/lib/release-task-journal.mjs';
 import { workspaceHostBillingClosureStage, type WorkspaceHostBillingSubject } from './billing-closure-release-receipt';
-import { GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS, type GcpWorkspaceHostResourceCensus } from './gcp-safety';
+import { workspaceHostCensusProfile } from './census-profiles';
+import type { WorkspaceHostResourceCensus } from './gcp-safety';
 import {
   openWorkspaceHostReleaseRecorder,
   type WorkspaceHostReleaseRecorder,
@@ -23,10 +24,16 @@ export const WORKSPACE_HOST_RESOURCE_CENSUS_STAGE = 'teardown.resource-census';
  */
 export type WorkspaceHostTeardownReleaseRecorder = WorkspaceHostReleaseRecorder<'resource-census' | 'billing-closure'>;
 
-export function workspaceHostResourceCensusStage(): WorkspaceHostReleaseStage {
+/**
+ * The census stage is bound to the provider whose population it judges: its identity names the
+ * provider and that provider's full kind set, so a release journal opened for a GCP host can never be
+ * closed by an AWS census (or the reverse).
+ */
+export function workspaceHostResourceCensusStage(provider: string): WorkspaceHostReleaseStage {
+  const profile = workspaceHostCensusProfile(provider);
   return {
     stage: WORKSPACE_HOST_RESOURCE_CENSUS_STAGE,
-    identity: { provider: 'gcp', kinds: [...GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS].sort() },
+    identity: { provider: profile.target, kinds: [...profile.kinds].sort() },
   };
 }
 
@@ -34,11 +41,13 @@ export function workspaceHostResourceCensusStage(): WorkspaceHostReleaseStage {
 export function workspaceHostResourceCensusOutcome(input: {
   subject: { workspaceId: string; hostId: string };
   disposition: string;
-  census: GcpWorkspaceHostResourceCensus;
+  /** The provider whose kind set the census must cover ('gcp', 'aws'). */
+  provider: string;
+  census: WorkspaceHostResourceCensus;
 }): { outcome: 'committed' | 'refused'; evidenceRefs: string[] } {
   const { census } = input;
   const covered = new Set(census.inventoryEvidence.map((evidence) => evidence.kind));
-  const uncovered = GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS.filter((kind) => !covered.has(kind));
+  const uncovered = workspaceHostCensusProfile(input.provider).kinds.filter((kind) => !covered.has(kind));
   const evidenceRefs = [
     `census-host:${input.subject.workspaceId}/${input.subject.hostId}`,
     `census-disposition:${input.disposition}`,
@@ -62,16 +71,18 @@ export function openWorkspaceHostTeardownRelease(input: {
   workspaceId: string;
   hostId: string;
   operationId: string;
+  /** The provider whose resource population the census stage judges ('gcp', 'aws'). */
+  provider: string;
   /** The canary run whose spend the reconciler will settle; a release-bound destroy always has one. */
   billing: WorkspaceHostBillingSubject;
   ledger?: ReleaseTaskLedger;
   readHostRuntimeRelease?: (workspaceId: string, hostId: string) => Promise<unknown>;
 }): Promise<WorkspaceHostTeardownReleaseRecorder> {
-  const { operationId, billing, ...rest } = input;
+  const { operationId, billing, provider, ...rest } = input;
   return openWorkspaceHostReleaseRecorder({
     ...rest,
     stages: {
-      'resource-census': workspaceHostResourceCensusStage(),
+      'resource-census': workspaceHostResourceCensusStage(provider),
       'billing-closure': workspaceHostBillingClosureStage(billing),
     },
     runRef: `destroy-operation:${operationId}`,

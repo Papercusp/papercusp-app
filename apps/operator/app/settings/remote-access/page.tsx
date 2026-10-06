@@ -24,7 +24,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { parseAsBoolean, parseAsString, parseAsStringEnum, useQueryState } from 'nuqs';
 import { toast } from 'sonner';
 import { useSyncQuery } from '@papercusp/sync';
+import { Checkbox } from '@/app/harness/Checkbox';
 import { ConfirmModal } from '@/app/harness/ConfirmModal';
+import { RadioGroup } from '@/app/harness/RadioGroup';
 import { Select } from '@/app/harness/Select';
 import { StepOwnTunnel, type OwnTunnelStatusView } from '@/app/_components/SetupWizard/StepOwnTunnel';
 
@@ -54,7 +56,31 @@ export interface RemoteAccessOverviewRow {
   entries: RemoteAccessEntryView[];
   ownTunnel: OwnTunnelStatusView | null;
   ownTunnelError: string | null;
+  portalRelay?: PortalRelayStatusView | null;
+  portalRelayError?: string | null;
 }
+
+/** The subset of relay-opt-in.ts PortalRelayStatus the screen shows (external-app-access P-008). */
+export interface PortalRelayStatusView {
+  state: 'off' | 'linking' | 'linked';
+  available: boolean;
+  unavailableReason: 'hosted_machine' | null;
+  portalOrigin: string;
+  notice: { version: number; text: string };
+  consent: { agreed: boolean; version: number | null; at: string | null };
+  pending: { userCode: string; verificationUri: string; expiresAt: string | null } | null;
+  linked: { appBaseUrl: string | null; mcpUrl: string | null; linkedAt: string | null } | null;
+  health: 'off' | 'linking' | 'starting' | 'up' | 'down';
+  lastError: string | null;
+}
+
+const RELAY_HEALTH_LABEL: Record<PortalRelayStatusView['health'], string> = {
+  off: 'Off',
+  linking: 'Waiting for approval',
+  starting: 'Connecting…',
+  up: 'Connected',
+  down: 'Not connected',
+};
 
 interface WorkspaceOption {
   id: string;
@@ -339,6 +365,8 @@ export default function RemoteAccessSettingsPage() {
             <StepOwnTunnel />
           </div>
         )}
+        {row?.portalRelayError && <p className="pc-settings-note">Relay status unavailable: {row.portalRelayError}</p>}
+        {row?.portalRelay && <PortalRelayCard relay={row.portalRelay} busy={busy !== null} run={run} />}
       </section>
 
       <section className="pc-settings-section" data-testid="remote-access-list">
@@ -456,6 +484,132 @@ const entryStyle = {
   borderRadius: 6,
   padding: '12px 16px',
 } as const;
+
+/**
+ * The opt-in Papercusp relay (P-008, D-001 / D-009): the alternative to the user's own tunnel.
+ * The notice is shown and must be agreed to before Connect is offered (R-20); connecting shows the
+ * code and the address to approve it on the portal, and the reconciler finishes the link.
+ */
+export function PortalRelayCard(props: {
+  relay: PortalRelayStatusView;
+  busy: boolean;
+  run: (what: string, fn: () => Promise<void>) => Promise<void>;
+}) {
+  const { relay, busy, run } = props;
+  // A mid-edit choice, not user-meaningful state: it resets when the notice is accepted.
+  const [understood, setUnderstood] = useState(false);
+  if (!relay.available) {
+    return (
+      <div data-testid="portal-relay" data-state="unavailable" style={{ marginTop: 16 }}>
+        <h3 style={{ margin: 0 }}>Papercusp relay</h3>
+        <p className="pc-settings-hint">This workspace runs on Papercusp and is already reachable through it; the relay is not used here.</p>
+      </div>
+    );
+  }
+  return (
+    <div data-testid="portal-relay" data-state={relay.state} style={{ marginTop: 16 }}>
+      <h3 style={{ margin: 0 }}>Papercusp relay</h3>
+      <p className="pc-settings-hint">
+        Instead of your own tunnel, this computer can keep a connection to Papercusp so outside apps reach it with no router changes.
+      </p>
+      {relay.state === 'off' && !relay.consent.agreed && (
+        <div data-testid="portal-relay-notice">
+          <p className="pc-settings-note">{relay.notice.text}</p>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Checkbox dataTestId="portal-relay-understand" checked={understood} onChange={setUnderstood} />
+            I understand
+          </label>
+          <button
+            type="button"
+            data-testid="portal-relay-accept"
+            disabled={busy || !understood}
+            onClick={() =>
+              void run('Saving your agreement', async () => {
+                await postJson('/api/remote-access/portal-relay/consent', { noticeVersion: relay.notice.version });
+              })
+            }
+          >
+            Agree
+          </button>
+        </div>
+      )}
+      {relay.state === 'off' && relay.consent.agreed && (
+        <button
+          type="button"
+          data-testid="portal-relay-connect"
+          disabled={busy}
+          onClick={() =>
+            void run('Connecting to the Papercusp relay', async () => {
+              await postJson('/api/remote-access/portal-relay/connect', {});
+            })
+          }
+        >
+          Connect this computer
+        </button>
+      )}
+      {relay.state === 'linking' && relay.pending && (
+        <div data-testid="portal-relay-pending">
+          <p>
+            Open{' '}
+            <a href={relay.pending.verificationUri} target="_blank" rel="noreferrer" data-testid="portal-relay-link">
+              {relay.pending.verificationUri}
+            </a>{' '}
+            and approve the code <code data-testid="portal-relay-code">{relay.pending.userCode}</code>.
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() =>
+              void run('Cancelling', async () => {
+                await postJson('/api/remote-access/portal-relay/cancel', {});
+              })
+            }
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      {relay.state === 'linked' && relay.linked && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 16px', marginTop: 8 }}>
+          <span className="pc-settings-hint">Status</span>
+          <span data-testid="portal-relay-health">{RELAY_HEALTH_LABEL[relay.health]}</span>
+          {relay.linked.appBaseUrl && (
+            <>
+              <span className="pc-settings-hint">App address</span>
+              <code data-testid="portal-relay-address">{relay.linked.appBaseUrl}</code>
+            </>
+          )}
+          {relay.linked.mcpUrl && (
+            <>
+              <span className="pc-settings-hint">MCP URL</span>
+              <code data-testid="portal-relay-mcp">{relay.linked.mcpUrl}</code>
+            </>
+          )}
+        </div>
+      )}
+      {relay.state === 'linked' && (
+        <button
+          type="button"
+          data-testid="portal-relay-disconnect"
+          disabled={busy}
+          style={{ marginTop: 8, color: 'var(--bad, #f87171)' }}
+          onClick={() =>
+            void run('Disconnecting', async () => {
+              await postJson('/api/remote-access/portal-relay/disconnect', {});
+            })
+          }
+        >
+          Disconnect
+        </button>
+      )}
+      {relay.lastError && (
+        <p className="pc-settings-note" data-testid="portal-relay-error">
+          {relay.lastError}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function confirmBody(c: { action: string; entry: RemoteAccessEntryView } | null): ReactNode {
   if (!c) return null;
@@ -733,6 +887,11 @@ function SignInApprovals({ workspaceId, onBack, onClose }: { workspaceId: string
   );
 }
 
+const KEY_KINDS: ReadonlyArray<{ value: 'app' | 'service'; text: string }> = [
+  { value: 'app', text: 'App key — acts for you' },
+  { value: 'service', text: 'Service key — belongs to the workspace, needs a spending cap' },
+];
+
 function CreateKeyForm(props: { workspaceId: string; onBack: () => void; onClose: () => void; onIssued: (k: IssuedKey) => void }) {
   const { workspaceId, onBack, onClose, onIssued } = props;
   const [label, setLabel] = useState('');
@@ -769,15 +928,13 @@ function CreateKeyForm(props: { workspaceId: string; onBack: () => void; onClose
           <span className="pc-settings-hint">Name</span>
           <input data-field="label" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. nightly report" style={{ width: '100%' }} />
         </label>
-        <div className="pc-settings-radio-group" role="radiogroup" aria-label="Key type">
-          <label>
-            <input type="radio" checked={kind === 'app'} onChange={() => setKind('app')} /> App key — acts for you
-          </label>
-          <label>
-            <input type="radio" checked={kind === 'service'} onChange={() => setKind('service')} /> Service key — belongs to the
-            workspace, needs a spending cap
-          </label>
-        </div>
+        <RadioGroup label="Key type" className="pc-settings-radio-group" value={kind} options={KEY_KINDS} onChange={setKind}>
+          {(option, selected) => (
+            <>
+              <span aria-hidden="true">{selected ? '◉' : '○'}</span> {option.text}
+            </>
+          )}
+        </RadioGroup>
         <label>
           <span className="pc-settings-hint">Tools it may call — one per line (`group:verb` or `group:*`).</span>
           <textarea data-field="tools" value={tools} onChange={(e) => setTools(e.target.value)} rows={3} style={{ width: '100%', fontFamily: 'ui-monospace, monospace' }} />

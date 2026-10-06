@@ -10,9 +10,9 @@
  *     preflight.
  *   - `registerReplayLoop` — the arming act (P-001): registers
  *     `frontier:replay-harness` with an owner-set budget.
- *   - `runGovernedReplay` — preflight → clamp the battery's spend cap to the
- *     governor's remaining budget → run → ledger the spend
- *     (signal_origin='replay', accumulate) → return result + verdict.
+ *   - `runGovernedReplay` — preflight → reserve an evaluation attempt → clamp
+ *     the battery to its grant → run → settle the actual charge once
+ *     (signal_origin='replay', accumulate) → return result + spend provenance.
  *
  * Deps are injectable and the PG pool is resolved LAZILY after the flag check
  * (the default-on-flag-glue-vs-hermetic-unit-tests insight): a flag-off call
@@ -23,14 +23,17 @@ import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import type { GovernorVerdict, LearningLoopRegistration } from '../learning-governor/core';
 import { learningGovernorPreflight, type GovernorGlueDeps } from '../learning-governor/registrants';
-import { recordLearningSpend, registerLearningLoop } from '../learning-governor/store';
+import {
+  registerLearningLoop, reserveLearningSpend, settleLearningSpend,
+  type LearningSpendReservation, type ReserveLearningSpendResult,
+} from '../learning-governor/store';
 import { runReplayBattery, type ReplayBatteryConfig, type ReplayBatteryDeps, type ReplayBatteryResult } from './battery';
 import { PgReplayStore } from './store';
 import { REPLAY_LOOP_ID, REPLAY_ORIGIN } from './types';
 
 export interface ReplayPreflightVerdict {
   allow: boolean;
-  reason?: GovernorVerdict['reason'] | 'replay-dark';
+  reason?: GovernorVerdict['reason'] | 'replay-dark' | 'reservation-refused' | 'reservation-error' | 'reservation-unmeasured';
   remainingUsd: number | null;
 }
 
@@ -44,7 +47,8 @@ export interface ReplayGlueDeps {
     q: { workspaceId: string; loopId: string },
     deps?: GovernorGlueDeps,
   ) => Promise<GovernorVerdict>;
-  recordSpend?: typeof recordLearningSpend;
+  reserve?: typeof reserveLearningSpend;
+  settle?: typeof settleLearningSpend;
   log?: (msg: string) => void;
 }
 
@@ -55,7 +59,8 @@ const defaultDeps: Required<ReplayGlueDeps> = {
     return getOrgPg().sql;
   },
   preflight: learningGovernorPreflight,
-  recordSpend: recordLearningSpend,
+  reserve: reserveLearningSpend,
+  settle: settleLearningSpend,
   log: (m) => console.log(`[replay-harness] ${m}`),
 };
 
@@ -102,16 +107,19 @@ export interface GovernedReplayResult {
   verdict: ReplayPreflightVerdict;
   /** Null when the preflight refused. */
   result: ReplayBatteryResult | null;
+  /** Actual governor row; an OPEN row is never evidence of settled spend. */
+  reservation?: LearningSpendReservation;
+  reservationRefusal?: Extract<ReserveLearningSpendResult, { ok: false }>['reason'];
 }
 
 /**
- * The unattended entrypoint FB-07/08/09's loops call: preflight → run the
- * battery (spend cap clamped to the governor's remaining budget) → ledger the
- * spend with origin='replay'. Attended/supervised callers may use
+ * The unattended entrypoint FB-07/08/09's loops call: preflight → reserve →
+ * run the battery within its grant → settle, including zero-cost attempts.
+ * Attended/supervised callers may use
  * runReplayBattery directly — this wrapper is what makes a loop refusable.
  */
 export async function runGovernedReplay(
-  q: { workspaceId: string; config: ReplayBatteryConfig },
+  q: { workspaceId: string; config: ReplayBatteryConfig; potSlug?: string | null },
   deps: Omit<ReplayBatteryDeps, 'store'> & { store?: ReplayBatteryDeps['store'] },
   glue?: ReplayGlueDeps,
 ): Promise<GovernedReplayResult> {
@@ -120,34 +128,66 @@ export async function runGovernedReplay(
   if (!verdict.allow) return { verdict, result: null };
 
   const sql = await d.getSql();
-  const store = deps.store ?? new PgReplayStore(sql, q.workspaceId);
-
-  // The battery's high-water cap never exceeds the governor's remaining budget.
   const caps = [q.config.maxSpendUsd, verdict.remainingUsd ?? undefined].filter(
     (c): c is number => c !== undefined,
   );
+  const requestedUsd = caps.length ? Math.min(...caps) : NaN;
+  if (!Number.isFinite(requestedUsd) || requestedUsd < 0) {
+    return { verdict: { ...verdict, allow: false, reason: 'reservation-unmeasured' }, result: null };
+  }
+  let reserved: Awaited<ReturnType<typeof reserveLearningSpend>>;
+  try {
+    reserved = await d.reserve(sql, {
+      workspaceId: q.workspaceId, loopId: REPLAY_LOOP_ID,
+      ...(q.potSlug === undefined ? {} : { potSlug: q.potSlug }),
+      attemptKind: 'evaluation', requestedUsd, signalOrigin: REPLAY_ORIGIN,
+      runRef: q.config.batteryId, note: 'replay battery',
+    });
+  } catch (e) {
+    d.log(`reservation failed — refusing replay: ${e instanceof Error ? e.message : e}`);
+    return { verdict: { ...verdict, allow: false, reason: 'reservation-error' }, result: null };
+  }
+  if (!reserved.ok) {
+    return { verdict: { ...verdict, allow: false, reason: 'reservation-refused' },
+      result: null, reservationRefusal: reserved.reason };
+  }
+  const reservation = reserved.reservation;
+  // The transactional grant includes other in-flight batteries; preflight's
+  // earlier remainingUsd alone cannot bound concurrent spending.
   const config: ReplayBatteryConfig = {
     ...q.config,
-    ...(caps.length > 0 ? { maxSpendUsd: Math.min(...caps) } : {}),
+    maxSpendUsd: reservation.reservedUsd,
   };
-
-  const result = await runReplayBattery(config, { ...deps, store });
-
-  if (result.totalCostUsd > 0) {
-    try {
-      await d.recordSpend(sql, {
-        workspaceId: q.workspaceId,
-        loopId: REPLAY_LOOP_ID,
-        costUsd: result.totalCostUsd,
-        signalOrigin: REPLAY_ORIGIN,
-        runRef: result.batteryId,
-        note: 'replay battery',
-        accumulate: true,
-      });
-    } catch (e) {
-      // Spend ledgering must never lose a finished battery's result.
-      d.log(`spend ledgering failed for ${result.batteryId}: ${e instanceof Error ? e.message : e}`);
+  const settle = async (disposition: 'used' | 'failed', usedUsd: unknown): Promise<LearningSpendReservation> => {
+    if (typeof usedUsd !== 'number' || !Number.isFinite(usedUsd) || usedUsd < 0) {
+      d.log(`charge unknown for reservation ${reservation.id}; it stays OPEN and visible as unsettled spend`);
+      return reservation;
     }
+    try {
+      const settled = await d.settle(sql, {
+        workspaceId: q.workspaceId, reservationId: reservation.id,
+        disposition, usedUsd, accumulate: true,
+      });
+      if (settled.ok) return settled.reservation;
+      d.log(`settlement refused for reservation ${reservation.id}: ${settled.reason}`);
+      return settled.reservation ?? reservation;
+    } catch (e) {
+      // The reservation remains durable and blocks headroom even if settlement
+      // fails. Preserve the result, without relabelling the OPEN row as paid.
+      d.log(`settlement failed for reservation ${reservation.id}; it stays OPEN: ${e instanceof Error ? e.message : e}`);
+      return reservation;
+    }
+  };
+  let result: ReplayBatteryResult;
+  try {
+    const store = deps.store ?? new PgReplayStore(sql, q.workspaceId);
+    result = await runReplayBattery(config, { ...deps, store });
+  } catch (e) {
+    await settle('failed', (e as { costUsd?: unknown } | null)?.costUsd);
+    throw e;
   }
-  return { verdict, result };
+  // An errored provider call may have charged an unknown amount. Keep the
+  // durable reservation open rather than certifying the known lower bound.
+  return { verdict, result, reservation: result.costMeasured === false
+    ? reservation : await settle('used', result.totalCostUsd) };
 }

@@ -18,6 +18,8 @@ import {
   type PhaseIEffect,
   type PhaseIEffectAttempt,
   type PhaseIHost,
+  type PhaseIRealTargetSnapshot,
+  type PhaseITarget,
   type PhaseITargetSnapshot,
   type PhaseIVariant,
   type PhysicalPhaseIAttempt,
@@ -65,15 +67,29 @@ export function buildPhysicalPhaseIInput(options: {
   towerDeviceKey: string;
   vmDeviceKey: string;
   startMs: number;
+  /**
+   * canary-owner target (WI-10004748): the owner signs through the canary's
+   * real hive key (never minted), attempts are scoped by its real repo_key,
+   * and the real refs are snapshotted G1-frozen / G3-advanced.
+   */
+  canary?: { workspaceId: string; potHomeSlug: string; repoKey: string };
 }): PhysicalPhaseIInput {
-  const { runId, towerDeviceKey, vmDeviceKey, startMs } = options;
+  const { runId, towerDeviceKey, vmDeviceKey, startMs, canary } = options;
   let clock = startMs;
   const tick = () => new Date((clock += 1_000)).toISOString();
   let seq = 0;
   const oid = (label: string) => createHash('sha1').update(`phase-i-fixture:${runId}:${label}`).digest('hex');
   const nextOid = () => oid(`candidate-${(seq += 1)}`);
   const hive = generateEd25519KeypairDer();
-  const repoKey = phaseIRepoKey(runId);
+  const repoKey = canary ? canary.repoKey : phaseIRepoKey(runId);
+  const realSnap = (staging: string): PhaseIRealTargetSnapshot => ({
+    observedAt: tick(),
+    stagingRef: oid(staging),
+    releaseRef: oid('canary-release'),
+    githubMain: oid('canary-github-main'),
+    forkRefs: [{ ref: 'refs/heads/canary-fork', sha: oid('canary-fork') }],
+    pullRequests: [{ number: 7, headRef: 'canary-fork' }],
+  });
   const state: Record<PhaseIHost, Snap> = { vm: freshSnapshot(oid), tower: freshSnapshot(oid) };
   const deviceKey: Record<PhaseIHost, string> = { vm: vmDeviceKey, tower: towerDeviceKey };
 
@@ -141,8 +157,10 @@ export function buildPhysicalPhaseIInput(options: {
   const windowStartedAt = tick();
   const first = {
     schemaVersion: PHASE_I_OWNER_SCHEMA, hostId: 'vm' as const, runId, hiveId: hive.pubkeyBase64,
-    pid: PHASE_I_FIXTURE_OWNER_PIDS.first, startedAt: tick(), mintedKey: true,
+    pid: PHASE_I_FIXTURE_OWNER_PIDS.first, startedAt: tick(), mintedKey: !canary,
+    keySource: canary ? ('host-keychain' as const) : ('drill-minted' as const),
   };
+  const beforeOutage = canary ? realSnap('canary-staging-0') : null;
 
   const proofBytes = Buffer.from(`phase-i-fixture:${runId}:owner-proof`);
   const liveVm = step('vm', 'live', {
@@ -194,15 +212,21 @@ export function buildPhysicalPhaseIInput(options: {
   const outageVm = step('vm', 'outage', { deviceHead });
   const outageTower = step('tower', 'outage', { deviceHeadAcceptance: { ok: true, reason: null } });
 
+  const duringOutage = canary ? realSnap('canary-staging-0') : null;
   const restored = { ...first, pid: PHASE_I_FIXTURE_OWNER_PIDS.restored, startedAt: tick(), mintedKey: false };
   const restoredVm = step('vm', 'restored');
   const restoredTower = step('tower', 'restored');
+  const afterRecovery = canary ? realSnap('canary-staging-1') : null;
+  const target: PhaseITarget | undefined = canary && beforeOutage && duringOutage && afterRecovery
+    ? { kind: 'canary-owner', ...canary, hiveId: hive.pubkeyBase64, realTargets: { beforeOutage, duringOutage, afterRecovery } }
+    : undefined;
 
   return {
     schemaVersion: PHASE_I_INPUT_SCHEMA,
     runId,
     window: { startedAt: windowStartedAt, finishedAt: tick() },
     identities: { towerDeviceKey, vmDeviceKey },
+    ...(target ? { target } : {}),
     owner: { first, restored, goneAfterLost: true },
     steps: {
       live: { vm: liveVm, tower: liveTower },

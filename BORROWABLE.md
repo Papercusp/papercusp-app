@@ -125,3 +125,49 @@ tie-in (DB/schema/path assumptions). Borrowable with adaptation, not as-is.
 | `@papercusp/docs-engine` | Source-agnostic docs retrieval engine. Outline + get + search + MDX-to-markdown pipeline, operating on a pluggable DocSource adapter. | in-repo · `packages/docs-engine` |
 | `@papercusp/host-platform` | Host-boundary interface — fs / paths / database URL resolution behind one swappable adapter. Desktop impl + server stub. | in-repo · `libs/host-platform` |
 
+## Export index
+
+What each library below exports from its root, grouped by the module that
+defines it, so you can find a piece or grep for a function name. Generated
+from each library's entry module; only libraries listed in `EXPORT_INDEX` in
+the generator are indexed.
+
+### `@papercusp/search`
+
+Entry: `libs/generic/search/src/index.ts`.
+
+- `./types` — types: `PgHandle`, `Embedder`, `SearchHit`, `Listing`, `SearchSource`, `SearchSourceParams`, `SearchFilters`
+- `./hybrid` — `runFullTextSearch`, `runHybridSearch` · types: `SearchContext`, `SearchResult`, `HybridResult`
+- `./recency` — `applyRecencyRerank`, `toMillis` · types: `RecencyRank`
+- `./group` — `pickTopGroups`, `countGroups` · types: `GroupKeyOf`
+- `./provenance` — `hitProvenance`, `isVectorOnly`, `isLexicalRanker`, `isSemanticRanker` · types: `MatchProvenance`, `HitProvenance`
+- `./min-score` — `applyMinScore`, `resolveMinScore` · types: `MinScoreFloors`, `MinScoreOutcome`
+- `./legs` — `summariseLegs`, `finaliseLeg`, `newLegAccumulator`, `legOfRanker`, `emptyLegs` · types: `LegStatus`, `LegFailure`, `LegReport`, `SearchLegs`, `LegAccumulator`
+- `./leg-health` — `observeLegs`, `readLegHealth`, `legHealthObservedCount`, `resetLegHealth`, `summariseLegSamples`, `sampleOfLegs`, `LEG_HEALTH_CAPACITY` · types: `LegHealthWindow`, `LegSample`
+- `./embed-latency` — `observeEmbedLatency`, `readEmbedLatency`, `embedLatencyObservedCount`, `resetEmbedLatency`, `summariseEmbedSamples`, `EMBED_LATENCY_CAPACITY`, `UNATTRIBUTED_CALLER` · types: `EmbedLatencyWindow`, `EmbedCallerLatency`, `EmbedLatencySample`, `EmbedLatencyOutcome`
+- `./defaults` — `configureSearchDefaults`, `resetSearchDefaults`, `searchDefaultsHost`, `resolveDefault`, `resolveSearchDefaults` · types: `SearchDefaultsHost`, `SearchDefaultsContext`, `AppliedDefaults`
+- `./chunk` — `splitWindows`, `splitMarkdown`, `splitOnLineBoundaries`, `chunkAnchor`, `sectionAnchorBase`, `isContinuationAnchor`, `CHUNK_ANCHOR_SEP` · types: `WindowSplitOptions`, `MarkdownSplitOptions`, `MarkdownSection`
+- `./chunks/index` — `DEFAULT_CHUNK_MIN_CHARS`, `CHUNK_KEY_SEP`, `splitterVersionOf`, `resolveChunkSurface`, `parentShaOf`, `embeddedChunkText`, `chunkParentKeyId`, `planChunks`, `syncChunkSurface`, `syncChunkSurfaces`, `sharedChunkStore`, `parentShaSql`, `SHARED_CHUNK_EMBEDDED_TEXT_SQL`, `chunkEmbedTargets`, `validateChunkEmbedTarget`, `selectPendingChunks`, `embedPendingChunks`, `chunkAwareVectorLeg`, `chunkAwareVectorLegSql`, `chunkAwareVectorLegSpaceColumns`, `chunkVectorTableOf` · types: `ChunkPlan`, `SharedChunkStoreOptions`, `ChunkEmbedder`, `PendingChunk`, `EmbedPendingChunksOptions`, `EmbedPendingChunksResult`, `ChunkAwareVectorLegOptions`, `ChunkAwareLegRow`, `ChunkLegMode`, `ChunkLegScan`, `ParentVectorColumns`, `SpaceFilterColumns`, `ChunkSurface`, `ChunkSplitter`, `WindowChunkSplitter`, `MarkdownChunkSplitter`, `ChunkKeyColumn`, `ResolvedChunkSurface`, `ChunkStore`, `ChunkVectorTable`, `ChunkEmbedTarget`, `StaleParent`, `ExistingChunk`, `PlannedChunk`, `ChunkRowToWrite`, `ChunkWriteMeta`, `ChunkHash`, `ChunkSyncLogger`, `ChunkSurfaceSyncStats`, `ChunkSyncResult`, `ChunkSyncOptions`
+- `./hnsw-iterative-scan` — `withIterativeScan`, `resetIterativeScanProbe` · types: `IterativeScanOptions`
+- `./embedding-space` — `createEmbeddingSpace`, `PGVECTOR_INDEX_OPERATOR_CLASS` · types: `ColumnWidthSkew`, `EmbeddingDistanceMetric`, `EmbeddingProfileSpec`, `EmbeddingSpace`, `EmbeddingSpaceConfig`, `EmbeddingSpaceSelection`, `EmbeddingStorageContract`
+- `./embedding-space-self-check` — `DEFAULT_DESYNC_DISTANCE_THRESHOLD`, `DEFAULT_SELF_CHECK_MAX_AGE_MS`, `cosineDistance`, `createSelfCheckMemo`, `isEmbeddingDesync`, `parseVectorText`, `runStoredRowSelfCheck` · types: `SelfCheckCanary`, `SelfCheckMemo`, `SelfCheckReading`, `StoredRowSelfCheckDeps`, `StoredRowSelfCheckResult`
+- `./coverage-gate` — `DEFAULT_COVERAGE_THRESHOLDS`, `assessSurfaceCoverage`, `buildCoverageCountQuery`, `buildCoverageSnapshot`, `createCoverageGate`, `measureSurfaceCoverage`, `summarizeCoverage`, `toSurfaceReading` · types: `CoverageCountQuery`, `CoverageGate`, `CoverageGateConfig`, `CoverageSample`, `CoverageSnapshot`, `CoverageSqlHandle`, `CoverageSurfaceSpec`, `CoverageThresholds`, `CoverageVerdict`, `SearchCoverageReport`, `SourceCoverageAssessment`, `SurfaceReading`
+- `./near-duplicate` — `DEFAULT_BACKGROUND_SAMPLE_LIMIT`, `DEFAULT_MAX_CALIBRATED_CUT`, `DEFAULT_MIN_BACKGROUND_SAMPLES`, `DEFAULT_NEAR_DUPLICATE_QUANTILE`, `DEFAULT_SIMILARITY_DECIMALS`, `calibrateNearDuplicateCut`, `checkNearDuplicates`, `nearestRankQuantile` · types: `CalibrateCutOptions`, `DroppedNearDuplicateCandidate`, `NearDuplicateCalibration`, `NearDuplicateCandidate`, `NearDuplicateCheck`, `NearDuplicateOutcome`
+- `./backfill/index` — `BASELINE_RECIPE_VERSION`, `activeRecipeVersion`, `eligiblePredicateSql`, `modeColOf`, `profileColOf`, `recentPredicateSql`, `recipeColOf`, `settledPredicateSql`, `stalePredicateSql`, `truncateToChars`, `withDeadline`, `DEFAULT_BATCH_CHUNK_SIZE`, `DEFAULT_ROW_TIMEOUT_MS`, `backfillTable`, `inspectBackfillTarget`, `DEFAULT_LATCH_STALE_MS`, `DEFAULT_RESOLVE_TIMEOUT_MS`, `DEFAULT_SWEEP_BUDGET_MS`, `createBackfillSweepState`, `createBackfillSweeper` · types: `BackfillEmbedFn`, `BackfillEmbedManyFn`, `BackfillLogger`, `BackfillProfile`, `BackfillProfileSelection`, `BackfillSql`, `BackfillStats`, `BackfillTarget`, `BackfillWidthSkew`, `BackfillTableOptions`, `BackfillTargetInspection`, `BackfillWidthSkewFn`, `BackfillSweepOptions`, `BackfillSweepResult`, `BackfillSweepState`, `BackfillSweeper`, `BackfillSweeperConfig`, `ResolvedBackfillEmbedder`
+- `@papercusp/rrf` (re-exported) — `rrfCombine`, `RRF_K_DEFAULT` · types: `RankedItem`, `FusedItem`
+
+### `@papercusp/search-core`
+
+Entry: `libs/generic/search-core/src/index.ts`.
+
+- `./instruction` — `DEFAULT_RERANK_INSTRUCTION`
+- `./doc` — `buildRerankDoc` · types: `RerankDocMode`, `RerankDocFields`
+- `./rewrite` — `rewriteQuery`, `clearRewriteCache`, `defaultRewritePrompt` · types: `RewriteQueryOptions`
+- `./llm-rerank` — `llmRerank`, `defaultLlmRerankPrompt` · types: `LlmRerankOptions`
+- `./escalation` — `shouldEscalate` · types: `EscalationOptions`
+- `./metrics` — `dcg`, `ndcg`, `ndcgAtK`, `precisionAtK`, `accessoryAtK`
+- `./relevance-eval` — `evaluateRelevance`, `assertRelevance`, `recallAtK` · types: `RelevanceEvalCoverage`, `RelevanceGroundTruth`, `RelevanceEvalInput`, `RelevanceEvalResult`, `RelevanceFloor`, `RelevanceAssertion`
+- `./rank` — `rankWithReranker` · types: `RankDoc`, `RankWithRerankerOptions`
+- `./retrieval-bench` — `runChunkingBench`, `decideChunking`, `drawTailProbe`, `drawShortProbe`, `isDistinctiveProbe`, `rankKeys`, `summarizeRankings`, `pooledScore`, `cosine` · types: `BenchEmbed`, `BenchEmbedKind`, `BenchRow`, `BenchSplitter`, `BenchProbe`, `BenchFold`, `ProbeClass`, `TailProbeOptions`, `ChunkingBenchInput`, `ChunkingBenchResult`, `ArmResult`, `ArmClassResult`, `RankSummary`, `SplitterStats`, `ChunkingDecisionRule`, `ChunkingDecision`
+- `./width-sweep` — `runWidthSweep` · types: `WidthSweepDoc`, `WidthSweepChunkArm`, `WidthSweepInput`, `WidthSweepArm`, `WidthSweepResult`
+

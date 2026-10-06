@@ -23,6 +23,7 @@ import { getOrgPg, withWorkspace } from '@papercusp/db-org';
 import { AppKeyScopeError, insertAppKey, resolveAppKeyScopes, type AppKeyScopes, type CreatedAppKey } from './store';
 import type { AppKeyScopeProblem } from './scope-policy';
 import { parseAccessToken } from './key';
+import { pgDate, pgDateOrNull, type PgTimestamp } from './pg-dates';
 
 // ── the relayed client-credentials token request (P-016, D-022) ─────────────────────────────
 // The portal token endpoint relays a `grant_type=client_credentials` request to the workspace's
@@ -300,7 +301,7 @@ interface ClientRow {
   redirect_uris: string[];
   token_endpoint_auth_method: OAuthTokenEndpointAuthMethod;
   client_secret_hash: string | null;
-  created_at: Date;
+  created_at: PgTimestamp;
 }
 
 const clientOf = (row: ClientRow): OAuthClient => ({
@@ -309,7 +310,7 @@ const clientOf = (row: ClientRow): OAuthClient => ({
   redirectUris: row.redirect_uris,
   tokenEndpointAuthMethod: row.token_endpoint_auth_method,
   clientSecretHash: row.client_secret_hash,
-  createdAt: row.created_at,
+  createdAt: pgDate(row.created_at, 'connected_app_oauth_clients.created_at'),
 });
 
 interface RequestRow {
@@ -320,13 +321,13 @@ interface RequestRow {
   state: 'pending' | 'approved' | 'denied' | 'consumed';
   workspace_id: string | null;
   approved_by: string | null;
-  expires_at: Date;
+  expires_at: PgTimestamp;
   oauth_client_id: string | null;
   oauth_redirect_uri: string | null;
   oauth_code_challenge: string | null;
   oauth_state: string | null;
   auth_code_hash: string | null;
-  auth_code_expires_at: Date | null;
+  auth_code_expires_at: PgTimestamp | null;
 }
 
 /** Thrown inside the redeem transaction when another redemption consumed the code first. */
@@ -385,7 +386,9 @@ export class PostgresOAuthStore implements OAuthStore {
        LIMIT 1`;
     const row = rows[0];
     if (!row || row.state === 'consumed') return { status: 'invalid' };
-    if (row.expires_at.getTime() <= input.now.getTime()) return { status: 'expired' };
+    if (pgDate(row.expires_at, 'connected_app_device_grants.expires_at').getTime() <= input.now.getTime()) {
+      return { status: 'expired' };
+    }
     if (row.state === 'denied') return { status: 'denied', redirectUri: row.oauth_redirect_uri!, state: row.oauth_state };
     if (row.state === 'pending') return { status: 'pending', userCode: row.user_code };
     // approved: mint the code once. A second visit (a replayed continue URL) gets nothing.
@@ -415,7 +418,8 @@ export class PostgresOAuthStore implements OAuthStore {
        LIMIT 1`;
     const row = rows[0];
     if (!row || row.state !== 'approved') return { status: 'invalid_grant', reason: 'code is unknown or already used' };
-    if (!row.auth_code_expires_at || row.auth_code_expires_at.getTime() <= input.now.getTime()) {
+    const codeExpiresAt = pgDateOrNull(row.auth_code_expires_at, 'connected_app_device_grants.auth_code_expires_at');
+    if (!codeExpiresAt || codeExpiresAt.getTime() <= input.now.getTime()) {
       return { status: 'invalid_grant', reason: 'code has expired' };
     }
     if (row.oauth_client_id !== input.client.clientId) return { status: 'invalid_grant', reason: 'code was issued to another client' };

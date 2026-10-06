@@ -16,6 +16,7 @@ import { Checkbox } from './Checkbox';
 import { Select } from './Select';
 import SavedPromptsSection from './SavedPromptsSection';
 import HarnessPluginsSection from './HarnessPluginsSection';
+import IntegrationModeSection from './IntegrationModeSection';
 
 /**
  * BlueprintSettingsPanel — the SCHEMA-DRIVEN per-harness settings panel
@@ -197,6 +198,13 @@ export default function BlueprintSettingsPanel({ slug, phase }: { slug: string; 
           )}
         </div>
       )}
+
+      {/* WI-10006501 (pot-review-integration-mode-2026-10-05 P-016/P-017): the pot's
+          "Where should the agents' work go?" switch. This is the panel the Settings tab
+          mounts by default (BLUEPRINT_AWARE_SETTINGS on), so the switch must live here as
+          well as in the legacy HarnessSettingsPanel. Saves on its own; hidden for
+          projects that are not pots. */}
+      <IntegrationModeSection slug={slug} />
 
       <SavedPromptsSection scope={{ kind: 'harness', slug }} />
       <HarnessPluginsSection slug={slug} />

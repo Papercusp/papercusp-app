@@ -207,10 +207,20 @@ export async function startSuStdioPeer(options: SuStdioPeerOptions): Promise<SuS
     closing = (async () => {
       if (await waitForExit(5_000)) return;
       const result = await killTask(taskId, { signal: 'SIGKILL', includeSubtree: true, reapTerminalResidue: true });
-      if (!result.ok && result.error !== 'already_gone') {
+      // `incomplete` after an explicit SIGKILL means the signal WAS delivered
+      // but a process of the scope (typically one blocked in uninterruptible
+      // I/O) outlived the task manager's verification window; the kernel
+      // applies the kill when its syscall returns and the task stays tracked
+      // for reconciliation. The engine is torn down once its own process
+      // exits, so wait for that instead of failing (WI-10004247: a loaded
+      // release host left one D-state process and failed exact resume).
+      const pending = !result.ok && result.error === 'incomplete';
+      if (!result.ok && result.error !== 'already_gone' && !pending) {
         throw nativeFailure(`Structured engine teardown failed: ${result.error}${result.detail ? `: ${result.detail}` : ''}`);
       }
-      if (!(await waitForExit(5_000))) throw new Error('Structured engine did not exit after tracked teardown');
+      if (!(await waitForExit(pending ? 30_000 : 5_000))) {
+        throw nativeFailure(`Structured engine did not exit after tracked teardown${pending && result.detail ? `: ${result.detail}` : ''}`);
+      }
     })();
     return closing;
   }

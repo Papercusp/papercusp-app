@@ -41,6 +41,7 @@ import {
   formatRedundancyMessage,
   judgeRedundantReservation,
 } from '../../../../../scripts/lib/migration-slug-dedup.mjs';
+import { armCommandFor } from '../../../../../scripts/next-migration.mjs';
 
 // Re-export the canonical binding so the integration test can hold the same
 // lock to reproduce the fsMax TOCTOU window (EI-6852).
@@ -221,20 +222,21 @@ export default defineTool({
 
     const armPath = path.posix.join('libs/papercusp/libs/db/sql', allocated.filename);
     const draftPath = `${armPath}.DRAFT`;
+    const armCommand = armCommandFor(draftPath);
     return json({
       ok: true,
       number: allocated.next,
       suggested_filename: allocated.filename,
       path: draftPath,
       arm_path: armPath,
-      arm_command: `mv ${draftPath} ${armPath}`,
+      arm_command: armCommand,
       reserved_by: reservedBy,
       ...(() => {
         const warning = formatRedundancyMessage(allocated.judgement, { slug, forceFlag: 'force: true' });
         return warning ? { redundancy_warning: warning } : {};
       })(),
       ...(args.harness ? { requested_from_harness: args.harness } : {}),
-      note: `Reserved. Write + iterate the migration at ${draftPath} (a ".DRAFT" suffix). The runner only ever applies files matching *.sql, so this draft is INVISIBLE to boot auto-apply / db:migrate / the green-checkpoint preflight while you edit it — including any deliberate temporary both-ways guard-test mutation. Once it's ready and tested, ARM it for auto-apply with: ${`mv ${draftPath} ${armPath}`}`,
+      note: 'Reserved. Write + iterate the migration at ' + draftPath + ' (a ".DRAFT" suffix). The runner only ever applies files matching *.sql, so this draft is INVISIBLE to boot auto-apply / db:migrate / the green-checkpoint preflight while you edit it — including any deliberate temporary both-ways guard-test mutation. Once it is ready and tested, arm it for auto-apply with: ' + armCommand,
     });
   },
 });

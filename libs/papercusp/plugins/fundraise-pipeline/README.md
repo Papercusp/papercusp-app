@@ -28,10 +28,12 @@ meeting workflow as a single chain rather than two unrelated triggers.
 
 ## Three properties worth knowing
 
-**It cannot send mail.** The manifest requests `gmail.readonly` and `gmail.compose` and deliberately
-no `gmail.send`. Every outbound path in every plan ends at `gmail:create-draft`. The no-auto-send
-guarantee is therefore structural — a property of the granted scopes — rather than a matter of the
-agent following instructions. That is the difference between a safeguard and a request.
+**It cannot send mail.** Every outbound path in every plan ends at a draft: `mail:reply` in its
+default draft mode for replies, `mail:draft` for the first touch. The no-auto-send guarantee is
+enforced by the host, not by the agent following instructions: `mail:reply { planRunId }` refuses
+`mode:"send"` from a triggered run while the owner-authority flag `papercusp-gmail-auto-send` is
+OFF. The scopes are not the guard — Google's `gmail.compose` scope itself permits sending — which
+is why the guard sits in the host. That is the difference between a safeguard and a request.
 
 **A broad binding is made safe by correlation, not by its filter.** "Is this an investor reply"
 cannot be written as a static payload matcher, so `investor-reply-to-pipeline` matches all inbound

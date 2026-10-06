@@ -97,7 +97,8 @@ papercusp_pinned_deps_trees() {
   )
 }
 
-# Usage: papercusp_pinned_deps_snapshot <donor_root> <snapshot_root>
+# Usage: papercusp_pinned_deps_snapshot <donor_root> <snapshot_root> [hardlink|copy]
+# `copy` keeps independent inodes for readers which must also survive in-place donor writes.
 # Hardlink-snapshots every dependency tree under <donor_root> into <snapshot_root>, preserving
 # the donor's relative layout. Prints progress to stdout; returns non-zero on any failure.
 #
@@ -118,7 +119,12 @@ papercusp_pinned_deps_trees() {
 papercusp_pinned_deps_snapshot() {
   local _donor="${1:-}"
   local _snap="${2:-}"
+  local _copy_mode="${3:-hardlink}"
   local _rel _src _dst _tmp _old _n=0 _fail=0
+  case "$_copy_mode" in
+    hardlink|copy) ;;
+    *) echo "ERROR: snapshot mode must be hardlink or copy." >&2; return 2 ;;
+  esac
 
   if [ -z "$_donor" ] || [ -z "$_snap" ]; then
     echo "ERROR: papercusp_pinned_deps_snapshot needs <donor_root> <snapshot_root>." >&2
@@ -144,7 +150,7 @@ papercusp_pinned_deps_snapshot() {
     echo "ERROR: could not determine the filesystem of the donor ($_donor) or snapshot root ($_snap)." >&2
     return 1
   fi
-  if [ "$_donor_dev" != "$_snap_dev" ]; then
+  if [ "$_copy_mode" = hardlink ] && [ "$_donor_dev" != "$_snap_dev" ]; then
     echo "ERROR: a hardlink dependency snapshot needs one filesystem." >&2
     echo "       donor=$_donor ($_donor_dev)  snapshot=$_snap ($_snap_dev)" >&2
     echo "       Place the snapshot root on the donor's filesystem; a cross-device copy would" >&2
@@ -179,7 +185,14 @@ papercusp_pinned_deps_snapshot() {
     # Build beside the destination and swap with renames, never in place. A snapshot root is
     # cheap to rebuild but it may be the lowerdir of a mounted overlay while we run, and a
     # half-populated lower layer is precisely the torn read this file exists to prevent.
-    if ! cp -al "$_src" "$_tmp" 2>/dev/null; then
+    local _copy_rc=0
+    echo "snapshotting $_rel (mode=$_copy_mode)"
+    if [ "$_copy_mode" = copy ]; then
+      cp -a "$_src" "$_tmp" 2>/dev/null || _copy_rc=$?
+    else
+      cp -al "$_src" "$_tmp" 2>/dev/null || _copy_rc=$?
+    fi
+    if [ "$_copy_rc" -ne 0 ]; then
       echo "  FAILED to snapshot $_rel" >&2
       rm -rf "$_tmp" 2>/dev/null
       _fail=1
@@ -217,6 +230,7 @@ EOF
   # describing a tree that was never finished.
   {
     echo "donor=$_donor"
+    echo "mode=$_copy_mode"
     echo "trees=$_n"
     echo "takenAtUtc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } > "$_snap/.papercusp-pinned-deps" || return 1
@@ -240,6 +254,7 @@ EOF
 papercusp_pinned_deps_snapshot_locked() {
   local _donor="${1:-}"
   local _snap="${2:-}"
+  local _copy_mode="${3:-hardlink}"
   local _self="${BASH_SOURCE[0]}"
   local _wrapper
 
@@ -257,7 +272,7 @@ papercusp_pinned_deps_snapshot_locked() {
   fi
 
   node "$_wrapper" --repo-root "$_donor" --exec-under-lock -- \
-    bash "$_self" snapshot "$_donor" "$_snap"
+    bash "$_self" snapshot "$_donor" "$_snap" "$_copy_mode"
 }
 
 # Usage: papercusp_assert_pinned_deps_decoupled <repo_root> [<allowed_root>] [<mountinfo>]

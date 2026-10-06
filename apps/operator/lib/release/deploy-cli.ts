@@ -32,6 +32,8 @@ import { isCliEntry } from '@papercusp/operator-core/lib/util/cli-entry';
 // pulls in none of the git-sync runtime — the real census is lazy-imported below, the
 // same pattern as recordRefusedDeploy.
 import type { StrandedSubmodule } from '@papercusp/operator-core/lib/harness/git-sync/run-git-sync';
+// WI-10005763: TYPE-ONLY for the same reason — the census reads PG and is lazy-imported below.
+import type { RestrictedHoldRefusal } from '@papercusp/operator-core/lib/agent-tools/testing/restricted-hold-fence';
 import { operatorHomeHarnessSlug } from '@papercusp/operator-core/lib/harness/operator-home-harness';
 import { releaseConfig, type ReleaseConfig } from './release-config';
 import {
@@ -118,6 +120,10 @@ export interface DeployCliDeps {
      *  carries no host-local pid, so liveness is genuinely unknown. */
     | { acquired: false; holder: string | null; holderAlive?: boolean | null }
   >;
+  /** WI-10005763 (D-012): the restricted-write fence for an `--execute` run (default the real
+   *  `restrictedTreeHoldRefusal` census over `roots`). Tests inject a stub so no test reads the
+   *  live census; `null` = nothing held, proceed. */
+  restrictedHoldFence?: (roots: readonly string[]) => Promise<RestrictedHoldRefusal | null>;
 }
 
 /**
@@ -125,7 +131,8 @@ export interface DeployCliDeps {
  *   0 — plan-only, noop, or a successful deploy
  *   1 — a deploy ran but failed
  *   2 — REFUSED: an un-green target without --force/--deploy-commit, OR stranded
- *       submodule work without --allow-stranded-submodules (the gate)
+ *       submodule work without --allow-stranded-submodules (the gate), OR an
+ *       `--execute` run while a restricted session's writes are held in the tree (D-012)
  *
  * Pure over its injected deps — `process.exit` is the caller's job (the
  * top-level guard below), so a test can assert the returned code directly.
@@ -142,6 +149,7 @@ export async function main(injected: DeployCliDeps = {}): Promise<number> {
   const recordParity = injected.recordParity ?? recordDeployParityAfterDeploy;
   const runUnderDeployLock = injected.runUnderDeployLock ?? realRunUnderDeployLock;
   const censusStranded = injected.censusStranded ?? realCensusStrandedSubmodules;
+  const restrictedHoldFence = injected.restrictedHoldFence ?? realRestrictedHoldFence;
 
   const arg = (flag: string): string | undefined => {
     const i = argv.indexOf(flag);
@@ -307,6 +315,27 @@ export async function main(injected: DeployCliDeps = {}): Promise<number> {
 
   if (!execute) return runDeployFlow();
 
+  // WI-10005763 (D-012): an --execute run executes live-tree code with network — this CLI's own
+  // import closure, the release setup scripts, and node_modules hardlinked from the integration
+  // tree. launchDetachedDeploy already refuses before spawning this unit; this is the fence for a
+  // DIRECT `npx tsx deploy-cli.ts --execute`, checked before the lock, the plan, or any effect.
+  // --force / --deploy-commit do not bypass it, and a fence that throws refuses (fail-closed, like
+  // every other restricted-hold door). Plan-only stays unfenced: it is git reads plus a localhost
+  // health probe, and the release-trigger that runs it is fenced at its dispatcher.
+  const restrictedHold = await restrictedHoldFence(await deployCliTreeRoots(cfg)).catch(
+    (error: unknown): RestrictedHoldRefusal => ({
+      error: 'restricted_hold_state_unknown',
+      hint: `the restricted-write fence failed (${error instanceof Error ? error.message : String(error)}); no deploy step ran`,
+    }),
+  );
+  if (restrictedHold) {
+    err(`\n[deploy] REFUSING: ${restrictedHold.error} — ${restrictedHold.hint}`);
+    err('         No deploy step ran (no lock, no plan, no checkout). --force and --deploy-commit do not bypass this fence (D-012).');
+    err('         Retry once the disclosure is released.');
+    out(`${DEPLOY_PLAN_MARKER} ${JSON.stringify({ mode: 'execute', refused: restrictedHold.error, restrictedHold })}`);
+    return 2;
+  }
+
   // EI-13729: single-flight the whole gather+execute flow around the ONE
   // chokepoint every deploy trigger (auto-serve, manual --execute,
   // release:deploy op:trigger) funnels through. TRY-ONLY — a concurrent
@@ -373,6 +402,30 @@ async function realCensusStrandedSubmodules(integrationRoot: string): Promise<St
   // submodule, on a tree with ~40 of them. Generous, and bounded so a hung git cannot
   // stall the deploy chokepoint indefinitely.
   return censusStrandedSubmodules((args, cwd) => runGitBounded(args, cwd, 30_000), integrationRoot);
+}
+
+/** WI-10005763: the real restricted-write fence. Lazy-imports operator-core (same reason as
+ *  realCensusStrandedSubmodules) — the census reads PG, which a plan-only run never needs. */
+async function realRestrictedHoldFence(roots: readonly string[]): Promise<RestrictedHoldRefusal | null> {
+  const { restrictedTreeHoldRefusal } = await import('@papercusp/operator-core/lib/agent-tools/testing/restricted-hold-fence');
+  return restrictedTreeHoldRefusal(roots);
+}
+
+/**
+ * WI-10005763: the trees an --execute run executes code from — the integration tree it deploys
+ * from, plus the checkout this CLI was loaded from (a direct `npx tsx` run may differ). Explicit on
+ * purpose: `integrationTreeRoots()` falls back to `<cwd>/../..`, which from a repo-root CLI run is
+ * the home directory — not a checkout, so the census would fail and refuse every deploy.
+ */
+async function deployCliTreeRoots(cfg: ReleaseConfig): Promise<string[]> {
+  const roots = [cfg.integrationRoot];
+  try {
+    const { moduleRepoRoot } = await import('@papercusp/operator-core/lib/module-repo-root');
+    roots.push(moduleRepoRoot(import.meta.url));
+  } catch {
+    // No enclosing checkout (a packaged copy): the integration root is the only candidate.
+  }
+  return roots;
 }
 
 /** P-008: append a `refused` deploy event to the /admin/git pipeline history when the

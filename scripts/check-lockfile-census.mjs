@@ -129,6 +129,10 @@ export const COVERED_LOCKFILES = new Map([
  */
 export const NOT_SHIPPED_LOCKFILES = new Map([
   [
+    'scripts/heap-retainers-native/Cargo.lock',
+    'local heap-snapshot diagnostic adapter: built explicitly with the cargo build --locked command documented in scripts/analyze-heap-snapshots.mjs and invoked only when a caller supplies nativeExecutable; neither the operator host bundle nor the desktop sidecar script/resource copy includes this Cargo project or its target binary',
+  ],
+  [
     'apps/tui/Cargo.lock',
     'apps/tui is a developer terminal UI built from source on a dev box; it is not bundled into any desktop installer target',
   ],

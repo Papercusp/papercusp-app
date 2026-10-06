@@ -16,8 +16,10 @@
  *   • **Client** — `getVoiceRelayKeys()` resolves the relay public keys the
  *     voice swarm should be able to fall back through:
  *     `PAPERCUSP_VOICE_RELAY_KEYS` (comma-separated hex, fleet provisioning)
- *     ∪ the PG operator-state row `voice_relay.relayKeys`. The manager passes
- *     them as the dedicated voice swarm's `relayThrough`.
+ *     ∪ the PG operator-state row `voice_relay.relayKeys`
+ *     ∪ {@link DEFAULT_RELAY_KEYS} when the swarm is on the PUBLIC DHT. The
+ *     manager passes them as the dedicated voice swarm's `relayThrough`; the
+ *     sync swarm reuses the same set (sync-relay.ts).
  *
  *   • **Server** — `startVoiceRelayServer()` makes THIS operator the
  *     designated reachable peer (D-009's natural candidate: the WG-hub box —
@@ -33,6 +35,46 @@
  */
 import { randomBytes } from 'node:crypto';
 import { readOperatorState, writeOperatorState } from '../operator-state-pg';
+import { createBlindRelayServer, type BlindRelayServer } from './blind-relay-core';
+
+/**
+ * Relays Papercusp runs on the public DHT (plan public-blind-relay-2026-10-01,
+ * D-001/D-002). `voice_relay` is per-peer local state and is not replicated, so
+ * a relay only helps a peer that already knows its key: shipping the key here
+ * is how a fresh install gets a working fallback before it has ever connected
+ * to anyone. Served by `papercusp-blind-relay.service` on the VM that
+ * `scripts/relay/provision-relay-vm.sh` manages; the seed lives off-tree at
+ * `~/.papercusp/relay/seed.hex`. Rotating the key means a new release.
+ */
+export const DEFAULT_RELAY_KEYS: readonly string[] = Object.freeze([
+  'b1015b569f617f58d68a41542a3f42ba0765909ffee43379a96d4c7c9cf49f4c',
+]);
+
+export interface RelayKeyScope {
+  /**
+   * The DHT bootstrap list the swarm is constructed with. `undefined` or empty
+   * means the public DHT (hyperdht's own default). A custom list (an isolated
+   * rig or a testnet) cannot reach a public-DHT relay, so the defaults stay out
+   * there: they could only ever produce a not-found warning.
+   */
+  dhtBootstrap: readonly unknown[] | undefined;
+  /**
+   * The operator declared a private DHT (`PAPERCUSP_DHT_BOOTSTRAP` or its file is set), but it
+   * resolved to no usable node, so the swarm silently falls back to the PUBLIC DHT (swarm.ts
+   * `resolveDhtUniverseState` → `'misconfigured'`). The defaults stay out here as well, failing
+   * closed: an operator who asked for a private universe is never routed through Papercusp's
+   * public relay because of a config typo (plan public-blind-relay-2026-10-01 D-002, R-4).
+   * Required, so every caller has to answer it.
+   */
+  bootstrapMisconfigured: boolean;
+}
+
+/** Whether a swarm built with `scope` should fall back through {@link DEFAULT_RELAY_KEYS}. */
+export function defaultRelayKeysApply(scope: RelayKeyScope, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.PAPERCUSP_RELAY_DEFAULTS?.trim() === '0') return false;
+  if (scope.bootstrapMisconfigured) return false;
+  return !scope.dhtBootstrap || scope.dhtBootstrap.length === 0;
+}
 
 export interface VoiceRelayState {
   /** Hex public keys of blind-relay servers to fall back through. */
@@ -63,24 +105,23 @@ export async function readVoiceRelayState(): Promise<VoiceRelayState> {
 }
 
 /**
- * The relay public keys for the voice swarm's `relayThrough`, as Buffers.
- * Env wins ∪ PG; [] (→ pass `undefined` to hyperswarm) when none configured.
+ * The relay public keys for a swarm's `relayThrough`, as Buffers: env ∪ PG ∪
+ * the shipped defaults (public DHT only, see {@link defaultRelayKeysApply}),
+ * deduped, configured keys first. [] (→ pass `undefined` to hyperswarm) when
+ * none apply. `scope` is required so every caller states which DHT its swarm
+ * is on; a caller that guessed would hand an isolated swarm a key it can
+ * never reach.
  */
-export async function getVoiceRelayKeys(): Promise<Buffer[]> {
+export async function getVoiceRelayKeys(scope: RelayKeyScope): Promise<Buffer[]> {
   const fromEnv = parseHexKeys(process.env.PAPERCUSP_VOICE_RELAY_KEYS);
   const state = await readVoiceRelayState();
   const fromState = (state.relayKeys ?? []).map((s) => s.trim().toLowerCase()).filter((s) => /^[0-9a-f]{64}$/.test(s));
-  const all = [...new Set([...fromEnv, ...fromState])];
+  const defaults = defaultRelayKeysApply(scope) ? DEFAULT_RELAY_KEYS : [];
+  const all = [...new Set([...fromEnv, ...fromState, ...defaults])];
   return all.map((hex) => Buffer.from(hex, 'hex'));
 }
 
-export interface VoiceRelayServer {
-  /** The relay's public key (hex) — what peers put in their relayKeys. */
-  publicKey: string;
-  /** Cumulative blind-relay stats (sessions / pairings / streams). */
-  stats(): unknown;
-  close(): Promise<void>;
-}
+export type VoiceRelayServer = Pick<BlindRelayServer, 'publicKey' | 'stats' | 'close'>;
 
 export interface StartVoiceRelayOpts {
   /** Test seam: bootstrap nodes for an isolated DHT (testnet). */
@@ -89,36 +130,13 @@ export interface StartVoiceRelayOpts {
   seed?: Buffer;
 }
 
-interface DhtLike {
-  createServer(onconnection: (socket: RelaySocket) => void): {
-    listen(keyPair: unknown): Promise<void>;
-    close(): Promise<void>;
-  };
-  createRawStream(opts: Record<string, unknown>): unknown;
-  destroy(): Promise<void>;
-}
-interface RelaySocket {
-  remotePublicKey: Buffer;
-  on(ev: 'error', cb: (e: unknown) => void): unknown;
-}
-
 /**
  * Run a blind-relay server over a dedicated hyperdht node. The keypair
- * persists (PG seed) so the published public key survives restarts.
+ * persists (PG seed) so the published public key survives restarts. The
+ * wiring itself lives in blind-relay-core.ts, shared with the standalone
+ * relay daemon.
  */
 export async function startVoiceRelayServer(opts: StartVoiceRelayOpts = {}): Promise<VoiceRelayServer> {
-  const dhtMod = (await import('hyperdht')) as unknown as {
-    default: (new (o?: unknown) => DhtLike) & { keyPair(seed?: Buffer): { publicKey: Buffer } };
-  };
-  const DHT = dhtMod.default;
-  const relayMod = (await import('blind-relay')) as unknown as {
-    Server: new (o: { createStream: (so: Record<string, unknown>) => unknown }) => {
-      accept(socket: RelaySocket, o: { id: Buffer }): unknown;
-      close(): Promise<void>;
-      stats: unknown;
-    };
-  };
-
   let seed = opts.seed ?? null;
   if (!seed) {
     const state = await readVoiceRelayState();
@@ -133,41 +151,9 @@ export async function startVoiceRelayServer(opts: StartVoiceRelayOpts = {}): Pro
       }
     }
   }
-  const keyPair = (DHT as unknown as { keyPair(s: Buffer): unknown }).keyPair(seed);
-
-  const dht = new DHT(opts.bootstrap ? { bootstrap: opts.bootstrap } : undefined);
-  const relayServer = new relayMod.Server({
-    // The canonical wiring (mirrors hyperdht's own relayed-stream shape):
-    // each relayed leg is a framed UDX raw stream on this node.
-    createStream: (so) => dht.createRawStream({ ...so, framed: true }),
-  });
-  const server = dht.createServer((socket) => {
-    socket.on('error', () => {
-      /* sessions tear down on their own */
-    });
-    relayServer.accept(socket, { id: socket.remotePublicKey });
-  });
-  await server.listen(keyPair);
-  const publicKey = (keyPair as { publicKey: Buffer }).publicKey.toString('hex');
-  console.log(`[voice-relay] blind relay listening — publicKey ${publicKey}`);
-
-  return {
-    publicKey,
-    stats: () => relayServer.stats,
-    async close() {
-      try {
-        await relayServer.close();
-      } catch {
-        /* sessions already gone */
-      }
-      try {
-        await server.close();
-      } catch {
-        /* server already closed */
-      }
-      await dht.destroy();
-    },
-  };
+  const relay = await createBlindRelayServer({ seed, ...(opts.bootstrap ? { bootstrap: opts.bootstrap } : {}) });
+  console.log(`[voice-relay] blind relay listening — publicKey ${relay.publicKey}`);
+  return { publicKey: relay.publicKey, stats: relay.stats, close: relay.close };
 }
 
 /** Boot hook: start the relay server when PG state opts this operator in. */

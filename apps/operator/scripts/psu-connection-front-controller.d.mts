@@ -11,9 +11,12 @@ export function parsePsuConnectionArgs(argv: any): {
         selection: null;
         list: boolean;
         addName: null;
+        addAwsName: null;
         removeName: null;
         projectId: null;
         zone: null;
+        region: null;
+        awsProfile: null;
         instanceName: null;
         sshUser: null;
         login: boolean;
@@ -47,6 +50,34 @@ export function normalizeGcpIapProfile(input: any): {
     constraints: string[];
     reconnect: string;
     audited: boolean;
+};
+/**
+ * Your own EC2 instance, reached by OpenSSH over an AWS Systems Manager
+ * Session Manager tunnel — the AWS twin of the GCP IAP profile
+ * (aws-byoc-gcp-parity-2026-10-01 P-009). Like IAP it needs no public IP and
+ * no inbound port: the SSH stream rides an SSM session to port 22.
+ */
+export function normalizeAwsSsmProfile(input: any): {
+    endpoint: string;
+    target: string;
+    remoteOperatorPort: number;
+    supportedClientPlatforms: string[];
+    features: {
+        command: boolean;
+        pty: boolean;
+        tcpForward: boolean;
+        fileTransfer: boolean;
+    };
+    prerequisites: string[];
+    constraints: string[];
+    reconnect: string;
+    audited: boolean;
+    awsProfile?: string | undefined;
+    name: string;
+    kind: string;
+    region: string;
+    instanceId: string;
+    sshUser: string;
 };
 /**
  * A Papercusp cloud portal origin. https only, except a loopback test server;
@@ -101,6 +132,46 @@ export function savePsuConnectionStore(store: any, path?: string): void;
 export function describePsuConnectionProfile(profile: any): string;
 export function describeHostedWorkspace(profile: any, workspace: any, now?: number): string;
 /**
+ * Bridge this terminal to a hosted workspace PTY over the connector relay —
+ * the same `papercusp-hosted-workspace.v1` socket the portal's Terminal tab
+ * uses (apps/operator/app/cloud-workspaces/hosted-workspace-session-protocol.ts).
+ * Resolves when the socket closes; `exit` is set only if the remote shell ended,
+ * and `bound` only once the relay bound this socket to a shell on the machine —
+ * without it there is no shell to resume.
+ *
+ * `expectKind: 'psu'` (D-002) asks the machine to start psu itself. Then `bound`
+ * waits for `pty.ready`, since before it nothing runs on the machine, and
+ * `kindUnavailable` says why the machine did not start psu, so the caller can
+ * fall back to the interim shell line: `degraded` (the relay bound a different
+ * kind), `unknown` (the host answered `channel_kind_unknown`) or `unanswered`
+ * (no `pty.ready` in `readyTimeoutMs` — a host older than that answer says nothing).
+ */
+export function defaultOpenHostedTerminal({ socketUrl, initialInput, notice, expectKind, readyTimeoutMs, stdin, stdout, }: {
+    socketUrl: any;
+    initialInput: any;
+    notice: any;
+    expectKind?: null | undefined;
+    readyTimeoutMs?: number | undefined;
+    stdin?: (NodeJS.ReadStream & {
+        fd: 0;
+    }) | undefined;
+    stdout?: (NodeJS.WriteStream & {
+        fd: 1;
+    }) | undefined;
+}): Promise<any>;
+/**
+ * The line psu types into the shell on a hosted workspace. Papercusp-hosted
+ * machines do not install psu for the workspace account yet (WI-10003949), and
+ * a bare `exec` of a missing program exits 127 and closes the connection. So
+ * the program is started only when the shell finds it; otherwise the shell says
+ * so and stays open. The terminal echoes this line up to three times before it
+ * runs, so it clears the screen first. The trailing CR is the Enter key: the
+ * remote terminal turns it into a newline.
+ */
+export function hostedForwardInput(program: any, forwardedArgv: any): string;
+/** Why a cloud workspace will not start psu with these arguments, in the customer's terms. */
+export function hostedPsuArgvRefusal(reason: any): string;
+/**
  * @returns {Promise<{ handled: boolean, argv: string[], exitCode?: number }>}
  */
 export function runPsuConnectionFrontController(argv: any, overrides?: {}): Promise<{
@@ -114,6 +185,12 @@ export const DEFAULT_REMOTE_OPERATOR_PORT: 3070;
 export const DEFAULT_HOSTED_PORTAL_ORIGIN: "https://app.papercusp.com";
 /** Picker value for "sign in to Papercusp cloud". Not a legal profile name, so it cannot collide. */
 export const HOSTED_LOGIN_CHOICE: ":login";
+/**
+ * How long to wait for the machine to start psu (D-002) before treating its host as older than
+ * the psu kind. A host that knows the kind answers at once, with `pty.ready` or
+ * `channel_kind_unknown`; only a host older than both says nothing at all.
+ */
+export const HOSTED_PSU_READY_TIMEOUT_MS: 15000;
 /**
  * How long psu waits for a running workspace's machine to re-establish its
  * link to Papercusp cloud before giving up. The machine's connector reconnects

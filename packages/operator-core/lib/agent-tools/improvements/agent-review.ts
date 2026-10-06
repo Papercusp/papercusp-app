@@ -12,9 +12,20 @@ import {
   claimNextAgentReview,
   resubmitAgentReview,
 } from '../../harness/improvements/agent-review';
+import { readAgentReviewState } from '../../harness/improvements/agent-review-policy';
+import type { WorkItem } from '../../work-items';
 import { resolveAgentIdentity } from '../coordination/identity';
 import { COORD_ROLES } from '../coordination/roles';
 import { harnessRequiredResult, resolveConcreteHarnessSlug } from '../_harness-scope';
+
+function gradeHandoff(workItem: WorkItem | null) {
+  const review = workItem ? readAgentReviewState(workItem.payload) : null;
+  if (review?.status !== 'pending') return {};
+  return {
+    ledgerIdeaId: review.ledgerIdeaId,
+    gradeWith: { ideaId: review.ledgerIdeaId },
+  };
+}
 
 export default defineTool({
   name: 'improvements:agent-review',
@@ -26,7 +37,7 @@ export default defineTool({
     notWhen:
       'Do not use this to grade or approve — blender:grade-idea is the sole grade authority. Do not use ordinary scheduler:get_next for pending review work; that lane excludes it until approval.',
     chaining:
-      "improvements:agent-review { mode:'claim', id, harness? } (directed) OR { mode:'claim-next', harness? } (queue order) → inspect the work item → blender:grade-idea { routedRef:'wi:<id>', grade, feedback? }; revision author fixes → improvements:agent-review { mode:'resubmit', id }.",
+      "improvements:agent-review { mode:'claim', id, harness? } (directed) OR { mode:'claim-next', harness? } (queue order) → use returned gradeWith.ideaId or ledgerIdeaId with blender:grade-idea { ideaId, grade, feedback? }; revision author fixes → improvements:agent-review { mode:'resubmit', id }.",
     seeAlso: [
       'blender:grade-idea (record the peer grade and drive approval/revision)',
       'work_items:get (read the claimed work and its checkpoint)',
@@ -89,7 +100,12 @@ export default defineTool({
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify({ ok: true, mode: 'claim', ...result }),
+              text: JSON.stringify({
+                ok: true,
+                mode: 'claim',
+                ...result,
+                ...gradeHandoff(result.claimed ? result.workItem : null),
+              }),
             },
           ],
         };
@@ -104,6 +120,7 @@ export default defineTool({
               mode: 'claim-next',
               claimed: workItem !== null,
               workItem,
+              ...gradeHandoff(workItem),
             }),
           },
         ],

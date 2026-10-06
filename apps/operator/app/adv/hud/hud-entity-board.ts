@@ -437,11 +437,14 @@ export interface HudGoalInput {
    * counting it would report a confident wrong number.
    */
   pots?: HudGoalPot[] | null;
-  /** FLEET spend: what the goal's child agents cost. Not the goal's own turns. */
+  /**
+   * Goal-attributed spend over the goal's lifetime (WI-1074208): usage stamped
+   * with this goal when it was recorded. Null ⇒ unmeasured, never $0.
+   */
   spendUsd?: number | null;
   /**
-   * The same fleet spend, restricted to the recent window (P-003) — the RATE
-   * input where `spendUsd` is the LEVEL.
+   * The same attributed spend, restricted to the recent window (P-003) — the
+   * RATE input.
    *
    * Optional, and its ABSENCE is meaningful: a payload that carries no reading
    * must render no rate at all, never `$0/day`. See goalBurn.
@@ -450,6 +453,14 @@ export interface HudGoalInput {
   /** How wide that window is. Read from the payload, never assumed to be 7. */
   spendRecentWindowDays?: number | null;
   budgetCents?: number | null;
+  /**
+   * The spend the ceiling is ENFORCED on, in cents: the rollup's snapshot of
+   * the attributed stream over `budgetWindowSec` — the number the launch gate
+   * and the breach pause read. Null ⇒ unmeasured. See goalCeilingSpendUsd.
+   */
+  spentCents?: number | null;
+  /** The rolling window `budgetCents` applies to, in seconds; null = lifetime. */
+  budgetWindowSec?: number | null;
   createdAt?: string | null;
   /**
    * When the goal's DEFINITION last changed — NOT when it last progressed.
@@ -1154,11 +1165,36 @@ export function goalColumn(goal: HudGoalInput): HudEntityColumnId {
   return 'ready';
 }
 
-/** `$310 / $500` — or bare spend when no ceiling was set. Pure. */
+/**
+ * The spend a goal's ceiling is judged against, in dollars — or null when
+ * nothing measured it (WI-1074208).
+ *
+ * With a ceiling set, that is the rollup's enforced snapshot (`spentCents`):
+ * the attributed stream over the budget window, the figure the launch gate and
+ * the breach pause read, so this chip cannot say "under" while the gate says
+ * "over". Without a ceiling it is the lifetime attributed spend. Never `?? 0`:
+ * a goal nothing measured is not a goal that spent nothing. Pure.
+ */
+export function goalCeilingSpendUsd(goal: HudGoalInput): number | null {
+  if (goal.budgetCents == null) return goal.spendUsd ?? null;
+  return goal.spentCents == null ? null : goal.spentCents / 100;
+}
+
+/** ` per 7d` for a rolling ceiling window; empty for a lifetime ceiling. Pure. */
+export function budgetWindowSuffix(sec: number | null | undefined): string {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return '';
+  if (sec % 86_400 === 0) return ` per ${sec / 86_400}d`;
+  if (sec % 3_600 === 0) return ` per ${sec / 3_600}h`;
+  return ` per ${sec}s`;
+}
+
+/** `$310 / $500 per 7d` — or bare spend when no ceiling was set, and
+ *  `unmeasured` in place of the figure when nothing measured it. Pure. */
 export function goalSpendLabel(goal: HudGoalInput): string {
-  const spend = Math.round(goal.spendUsd ?? 0);
-  if (goal.budgetCents == null) return `$${spend}`;
-  return `$${spend} / $${Math.round(goal.budgetCents / 100)}`;
+  const spend = goalCeilingSpendUsd(goal);
+  if (goal.budgetCents == null) return spend == null ? 'spend unmeasured' : `$${Math.round(spend)}`;
+  const level = spend == null ? 'unmeasured' : `$${Math.round(spend)}`;
+  return `${level} / $${Math.round(goal.budgetCents / 100)}${budgetWindowSuffix(goal.budgetWindowSec)}`;
 }
 
 /**
@@ -1264,6 +1300,7 @@ export function goalPotsChip(goal: HudGoalInput): HudBadge | null {
 export type GoalBurnEtaAbsence =
   | 'no-ceiling'
   | 'no-recent-spend'
+  | 'spend-unmeasured'
   | 'already-over'
   | 'beyond-horizon';
 
@@ -1330,7 +1367,12 @@ export function goalBurn(goal: HudGoalInput, nowMs: number): GoalBurn | null {
   if (ceilingUsd == null || ceilingUsd <= 0) {
     return { ...base, ceilingEtaMs: null, etaAbsent: 'no-ceiling' };
   }
-  const spend = goal.spendUsd ?? 0;
+  // The level the ceiling is ENFORCED on, not the lifetime figure: a rolling
+  // ceiling judged against lifetime spend would read "already over" forever.
+  const spend = goalCeilingSpendUsd(goal);
+  if (spend == null) {
+    return { ...base, ceilingEtaMs: null, etaAbsent: 'spend-unmeasured' };
+  }
   if (spend >= ceilingUsd) {
     return { ...base, ceilingEtaMs: null, etaAbsent: 'already-over' };
   }
@@ -1394,6 +1436,8 @@ export function burnTitle(burn: GoalBurn, goal: HudGoalInput): string {
       return `${rate}. The ceiling has already been reached.`;
     case 'no-recent-spend':
       return `${rate} — nothing has been spent in that window, so no ceiling date can be projected.`;
+    case 'spend-unmeasured':
+      return `${rate}. The spend the ceiling is enforced on is unmeasured, so no ceiling date can be projected.`;
     case 'beyond-horizon':
       return `${rate}. At that rate the ceiling is over a year out.`;
     default:
@@ -1510,14 +1554,17 @@ export function toGoalCard(
   // The spend chip goes `bad` only at/over the ceiling — the second of the two
   // things that can actually stop a goal, so it earns an alarm tone.
   const ceilingUsd = goal.budgetCents == null ? null : goal.budgetCents / 100;
-  const overCeiling = ceilingUsd != null && (goal.spendUsd ?? 0) >= ceilingUsd;
+  const ceilingSpend = goalCeilingSpendUsd(goal);
+  const overCeiling = ceilingUsd != null && ceilingSpend != null && ceilingSpend >= ceilingUsd;
   badges.push({
     id: `${goal.id}:spend`,
     label: goalSpendLabel(goal),
     tone: overCeiling ? 'bad' : 'neutral',
     title: overCeiling
-      ? 'Fleet spend has reached this goal’s ceiling'
-      : 'Fleet spend — what this goal’s CHILD agents cost. The goal agent’s own turns are subscription-billed.',
+      ? 'Goal-attributed spend has reached this goal’s ceiling'
+      : ceilingSpend == null
+        ? 'Unmeasured — no priced usage is attributed to this goal in the window. That is not $0.'
+        : 'Goal-attributed spend — usage stamped with this goal when it was recorded; the figure the ceiling is enforced on.',
   });
   // The RATE beside the level (P-003). Absent entirely when nothing measured
   // the window — goalBurn returns null rather than a reassuring $0/day.

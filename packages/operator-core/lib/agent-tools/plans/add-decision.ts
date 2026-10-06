@@ -43,7 +43,12 @@ import {
 } from './decision-provenance';
 import { neutralizeToolCallTags } from '../../text-safety';
 import { planDecisionRef } from '../../agent-goal-ref';
-import { allocateNextDecisionId, appendDecisionToBody, normalizeAffects } from './decision-body';
+import {
+  allocateNextDecisionId,
+  appendDecisionToBody,
+  decisionIdsMissingFromLiveBody,
+  normalizeAffects,
+} from './decision-body';
 import { reevaluateBarReadinessOnScopeWrite, type BarReadinessResult } from './plan-scope-cascade';
 import { defaultBarReadinessDeps } from './plan-scope-cascade-deps';
 import { resolveAgentIdentity } from '../coordination/identity';
@@ -51,6 +56,7 @@ import {
   evaluateFrozenLineageCarryText,
   frozenLineageCarryViolationPayload,
 } from '../../release/frozen-lineage-execution-policy';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
 
 const REFS = z
   .array(z.string().regex(/^P-\d{3,}$/))
@@ -267,7 +273,9 @@ export function findRetryDuplicateOfLastDecision(
  *  argument, not inferred from a union-returning mutator. */
 type AddDecisionValue =
   | { ok: true; decisionId: string; slug: string; deduped?: boolean }
-  | { ok: false; code: 'not_found' | 'legacy_plan'; reason?: LegacyReason };
+  | { ok: false; code: 'not_found' | 'legacy_plan'; reason?: LegacyReason }
+  // WI-10004529: the live body is missing decisions its own latest revision recorded.
+  | { ok: false; code: 'stale_base_decisions_lost'; reason: string };
 
 type WritableSlugScope = ReturnType<typeof requireUnambiguousSlugScope>;
 type WritableSlugScopeFailure = Exclude<WritableSlugScope, { status: 'resolved' }>;
@@ -356,6 +364,7 @@ async function addDecisionOne(rawIt: NewDecision, ctx: UnifiedToolContext): Prom
   const frozenCarryVerdict = evaluateFrozenLineageCarryText({
     surface: 'plan-decision',
     text: `${it.title}\n${it.body}`,
+    target: resolveHomeGateVerdictTarget(),
   });
   if (!frozenCarryVerdict.allowed) {
     const refusal = frozenLineageCarryViolationPayload(frozenCarryVerdict);
@@ -398,8 +407,10 @@ async function addDecisionOne(rawIt: NewDecision, ctx: UnifiedToolContext): Prom
       intent: `plans:add-decision: ${it.title.slice(0, 60)}`,
       ...(harnessSlug ? { harnessSlug } : {}),
       afterWrite: rev.afterWrite,
+      // WI-10004529: read the revision-spine head under the lock so a stale base is refused.
+      loadLatestRevision: true,
     },
-    async (current): Promise<{ newBody: string | null; value: AddDecisionValue }> => {
+    async (current, meta): Promise<{ newBody: string | null; value: AddDecisionValue }> => {
       if (current === null) {
         return { newBody: null, value: { ok: false, code: 'not_found' } };
       }
@@ -409,6 +420,28 @@ async function addDecisionOne(rawIt: NewDecision, ctx: UnifiedToolContext): Prom
           newBody: null,
           value: { ok: false, code: 'legacy_plan', reason: parsed.legacyReason ?? undefined },
         };
+      }
+      // WI-10004529: an append-only write must not build on a base missing governing decisions.
+      // A live row that silently reverted below its own revision head (stale replay, EI-117/
+      // EI-207 — records no revision) would otherwise get a DUPLICATE id and overwrite the real
+      // decisions with ok:true. Refuse loudly, naming what was lost and where to restore it from.
+      if (meta?.latestRevision) {
+        const missing = decisionIdsMissingFromLiveBody(meta.latestRevision.body, current);
+        if (missing.length > 0) {
+          return {
+            newBody: null,
+            value: {
+              ok: false,
+              code: 'stale_base_decisions_lost',
+              reason:
+                `the live plan body is missing decision(s) ${missing.join(', ')} that its latest ` +
+                `revision (seq ${meta.latestRevision.seq}) recorded — the row diverged below its own ` +
+                `revision head (stale-replay class, EI-117/EI-207). Refusing to append on a stale base: ` +
+                `it would reuse an id and overwrite them. Restore the body from revision seq ` +
+                `${meta.latestRevision.seq} (plans:revision-diff shows the loss), then retry.`,
+            },
+          };
+        }
       }
       // EI-19383795443003151: a blind retry of a timed-out-but-actually-landed
       // write must not duplicate. No-op (no write, no revision, no plan-event)

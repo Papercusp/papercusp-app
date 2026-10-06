@@ -37,6 +37,7 @@ import type { PendingMembershipContent } from '../pending-membership-content';
 import { composeEngineerIssueKey, parseEngineerIssueKey } from '../feature-issue-op-keys';
 import { ANY_FAMILY_TERMINAL_STATES } from '../../../work-item-dispatch-states';
 import {
+  INTAKE_PROMOTION_IDENTITY_INDEX,
   KEYLESS_TITLE_IDENTITY_INDEX,
   RESOURCE_GOVERNOR_IDENTITY_INDEX,
   WATCHDOG_IDENTITY_INDEX,
@@ -477,6 +478,28 @@ async function resolveIdentityConflict(
   incomingIssueId: string,
   payload: unknown,
 ): Promise<string | null> {
+  if (isNamedIdentityConflict(error, INTAKE_PROMOTION_IDENTITY_INDEX)) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    const receipt = (payload as Record<string, unknown>).intakePromotion;
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return null;
+    const key = (receipt as Record<string, unknown>).key;
+    if (typeof key !== 'string' || !key.startsWith('intake-exec:') || key.trim() !== key) return null;
+    // Migration 1298 has no terminal or harness predicate: settled winners still
+    // fence duplicates. Stay inside the projection's workspace and exclude its
+    // exact physical row; never acknowledge an unmeasured/foreign winner.
+    const rows = await sql<{ feature_id: string }[]>`
+      SELECT feature_id FROM harness_shared.work_items
+       WHERE workspace_id = ${workspaceId}
+         AND NOT (feature_id = ${incomingIssueId} AND harness_slug = ${harnessSlug})
+         AND payload ? 'intakePromotion'
+         AND payload -> 'intakePromotion' ->> 'key' = ${key}
+       ORDER BY feature_id LIMIT 2`.catch(() => null);
+    if (!rows || rows.length !== 1) return null;
+    return (
+      `[engineer-issues projection] coalesced duplicate intake promotion issue_id=${incomingIssueId} ` +
+      `onto existing winner=${rows[0]!.feature_id} (key=${key}); remote PUT treated as no-op`
+    );
+  }
   if (isNamedIdentityConflict(error, WATCHDOG_IDENTITY_INDEX)) {
     const identity = watchdogIdentityFromPayload(payload);
     if (!identity) return null;
@@ -526,6 +549,7 @@ async function resolveIdentityConflict(
 
 /** Index names resolveIdentityConflict can coalesce; the replay-policy guard compares this set. */
 export const COALESCED_REPLAY_IDENTITY_INDEXES: readonly string[] = [
+  INTAKE_PROMOTION_IDENTITY_INDEX,
   WATCHDOG_IDENTITY_INDEX,
   KEYLESS_TITLE_IDENTITY_INDEX,
   RESOURCE_GOVERNOR_IDENTITY_INDEX,

@@ -24,6 +24,7 @@ import {
   type CreatedAppKey,
 } from './store';
 import type { AppKeyScopeProblem } from './scope-policy';
+import { pgDate, type PgTimestamp } from './pg-dates';
 
 export type DeviceGrantDecision = 'approved' | 'denied';
 
@@ -79,16 +80,16 @@ interface GrantRow {
   state: 'pending' | 'approved' | 'denied' | 'consumed';
   workspace_id: string | null;
   approved_by: string | null;
-  created_at: Date;
-  expires_at: Date;
+  created_at: PgTimestamp;
+  expires_at: PgTimestamp;
 }
 
 const pending = (row: GrantRow): PendingDeviceGrant => ({
   userCode: row.user_code,
   clientLabel: row.client_label,
   requestedScopes: row.requested_scopes ?? {},
-  createdAt: row.created_at,
-  expiresAt: row.expires_at,
+  createdAt: pgDate(row.created_at, 'connected_app_device_grants.created_at'),
+  expiresAt: pgDate(row.expires_at, 'connected_app_device_grants.expires_at'),
 });
 
 /** Thrown inside the exchange transaction when another poll consumed the grant first. */
@@ -159,7 +160,9 @@ export class PostgresDeviceGrantStore implements DeviceGrantStore {
     // An OAuth authorization request (P-006) is redeemed only at the OAuth token endpoint, with
     // its PKCE verifier — never by polling here with its handle.
     if (!row || row.state === 'consumed' || row.oauth_client_id) return { status: 'invalid' };
-    if (row.expires_at.getTime() <= input.now.getTime()) return { status: 'expired' };
+    if (pgDate(row.expires_at, 'connected_app_device_grants.expires_at').getTime() <= input.now.getTime()) {
+      return { status: 'expired' };
+    }
     if (row.state === 'denied') return { status: 'denied' };
     if (row.state === 'pending') {
       const since = new Date(input.now.getTime() - input.minPollIntervalMs);

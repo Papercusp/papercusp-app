@@ -362,5 +362,9 @@ registerSystemAction(
   },
   // The action returns after enqueueing a managed child; a short routine step is the
   // correct timeout even though the child itself receives the three-hour budget above.
-  { routineTimeoutMs: 30_000 },
+  // WI-10005745: the child runs `$sourceRoot/papercusp-desktop/bin/release-local.sh` and
+  // `$sourceRoot/apps/operator/bin/release/setup-release-checkout.sh` from the LIVE integration
+  // tree before it changes into the pinned release checkout, so a held restricted write in either
+  // script would run with the network. Only the cut's INPUT is a committed sha; its scripts are not.
+  { routineTimeoutMs: 30_000, executesIntegrationTreeCode: true },
 );

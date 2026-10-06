@@ -19,6 +19,7 @@ import { resolveAgentIdentity, resolveSelfLiteral } from '../coordination/identi
 import { deactivateLoop, getLoopStatus } from '../../harness/routines/loop';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { refreshControlAnchorAfterMutation } from '../coordination/control-anchor';
+import { attestLoopControlConsumerView } from '../coordination/control-anchor-consumer-view';
 import {
   GOAL_DISPOSITIONS,
   activeGoalForOwner,
@@ -490,6 +491,15 @@ export default defineTool({
           source: 'loop:end',
         })
       : null;
+    // WI-10005199 (EI-23770243810745552): the `routines` loop row is the WRITE target, but the
+    // wake-source verdict reads the projected `control_state->loop`, and that refresh is
+    // fail-soft (null on timeout while the stop stays committed). A STALE `active:true` there
+    // is the worst direction — the consumer still believes a wake source exists. Attest the
+    // read the consumer will actually do against `{ active:false }`. Exception-only; only
+    // when this call actually ended a loop (a no-op end has no write to attest).
+    const controlConsumerView = ended
+      ? attestLoopControlConsumerView({ active: false, intervalSec: null }, control)
+      : null;
     // EI-21349668185386229: enumerate the wake sources that SURVIVE this stop
     // (see survivingAwaitsNote's header). Fail-soft — a read error must never
     // block the stop; the note then degrades to the scoped-claim wording.
@@ -528,6 +538,7 @@ export default defineTool({
             ownerId,
             ended,
             controlGeneration: control?.generation ?? null,
+            ...(controlConsumerView?.divergedFromWrite ? { controlConsumerView } : {}),
             ...(activeGoal && args.disposition
               ? {
                   goalId: activeGoal.goalId,

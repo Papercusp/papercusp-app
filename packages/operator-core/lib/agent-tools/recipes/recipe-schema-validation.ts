@@ -2,8 +2,10 @@ import {
   checkScript,
   ensureParseCheckReady,
   extractPayloadTier,
+  prepareToolArgsForSchema,
   type ProjectedTool,
 } from '@papercusp/tooldef';
+import type { StaticSourcePosition } from '@papercusp/tooldef/parse-check';
 import { prepareNestedProjection } from '../../result-projection';
 
 /**
@@ -21,7 +23,7 @@ import { prepareNestedProjection } from '../../result-projection';
  *
  * EI-19449316000499177.
  */
-export type RecipeSchemaIssueKind = 'unknown-key' | 'required' | 'enum' | 'type' | 'shape';
+export type RecipeSchemaIssueKind = 'unknown-key' | 'required' | 'enum' | 'type' | 'shape' | 'output-field';
 
 export interface RecipeSchemaIssue {
   tool: string;
@@ -29,6 +31,10 @@ export interface RecipeSchemaIssue {
   message: string;
   /** Optional: absent on issues produced before the classification existed. */
   kind?: RecipeSchemaIssueKind;
+  /** 1-based location of the invalid input call or unsafe result-field read. */
+  position?: StaticSourcePosition;
+  /** Tool-call location for an unsafe result-field read. */
+  callPosition?: StaticSourcePosition;
 }
 
 interface SchemaIssueDetail {
@@ -52,7 +58,56 @@ type JsonSchema = {
   items?: JsonSchema;
   anyOf?: JsonSchema[];
   oneOf?: JsonSchema[];
+  allOf?: JsonSchema[];
+  minItems?: number;
 };
+
+// `checkScript` records property access chains from tool results. When the
+// result is an array, that chain can end in a built-in Array property/method
+// (for example `result.rows.map`), which is valid JavaScript but is not a JSON
+// schema field. Keep this set explicit so an unknown member such as `rows.mapp`
+// still fails closed.
+const ARRAY_MEMBERS = new Set([
+  'length',
+  'at',
+  'concat',
+  'copyWithin',
+  'entries',
+  'every',
+  'fill',
+  'filter',
+  'find',
+  'findIndex',
+  'findLast',
+  'findLastIndex',
+  'flat',
+  'flatMap',
+  'forEach',
+  'includes',
+  'indexOf',
+  'join',
+  'keys',
+  'lastIndexOf',
+  'map',
+  'pop',
+  'push',
+  'reduce',
+  'reduceRight',
+  'reverse',
+  'shift',
+  'slice',
+  'some',
+  'sort',
+  'splice',
+  'toLocaleString',
+  'toReversed',
+  'toSorted',
+  'toSpliced',
+  'toString',
+  'unshift',
+  'values',
+  'with',
+]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -119,6 +174,75 @@ function validateValue(value: unknown, schema: JsonSchema, path: string): Schema
   return [];
 }
 
+interface OutputPathFailure {
+  reason: 'missing' | 'optional';
+  path: string[];
+}
+
+/** Return the first result-path segment the current output schema cannot guarantee. */
+function outputPathFailure(
+  schema: JsonSchema,
+  path: string[],
+  safeOptionalPaths: string[][] = [],
+  offset = 0,
+): OutputPathFailure | null {
+  const alternatives = schema.anyOf ?? schema.oneOf;
+  if (alternatives?.length) {
+    for (const alternative of alternatives) {
+      const failure = outputPathFailure(alternative, path, safeOptionalPaths, offset);
+      if (failure) return failure;
+    }
+    return null;
+  }
+
+  if (schema.allOf?.length) {
+    const properties = Object.assign({}, ...schema.allOf.map((part) => part.properties ?? {}), schema.properties ?? {});
+    const required = [...new Set([
+      ...schema.allOf.flatMap((part) => part.required ?? []),
+      ...(schema.required ?? []),
+    ])];
+    return outputPathFailure({ ...schema, allOf: undefined, properties, required }, path, safeOptionalPaths, offset);
+  }
+
+  const segment = path[offset];
+  if (segment === undefined) return null;
+
+  let child: JsonSchema | undefined;
+  if (schema.type === 'array') {
+    // Validate the array path itself, but do not mistake an intrinsic Array
+    // member for a field the tool must declare in its JSON output schema.
+    if (offset === path.length - 1 && ARRAY_MEMBERS.has(segment)) return null;
+    const index = Number(segment);
+    if (!Number.isInteger(index) || index < 0 || !schema.items) {
+      return { reason: 'missing', path: path.slice(0, offset + 1) };
+    }
+    if ((schema.minItems ?? 0) <= index) {
+      const optionalPath = path.slice(0, offset + 1);
+      if (!safeOptionalPaths.some((safePath) => safePath.length === optionalPath.length && safePath.every((segment, i) => segment === optionalPath[i]))) {
+        return { reason: 'optional', path: optionalPath };
+      }
+    }
+    child = schema.items;
+  } else {
+    const properties = schema.properties ?? {};
+    if (!Object.prototype.hasOwnProperty.call(properties, segment)) {
+      return { reason: 'missing', path: path.slice(0, offset + 1) };
+    }
+    if (!(schema.required ?? []).includes(segment)) {
+      const optionalPath = path.slice(0, offset + 1);
+      if (!safeOptionalPaths.some((safePath) => safePath.length === optionalPath.length && safePath.every((part, i) => part === optionalPath[i]))) {
+        return { reason: 'optional', path: optionalPath };
+      }
+    }
+    child = properties[segment];
+  }
+
+  if (offset === path.length - 1) return null;
+  return child
+    ? outputPathFailure(child, path, safeOptionalPaths, offset + 1)
+    : { reason: 'missing', path: path.slice(0, offset + 1) };
+}
+
 const mcpName = (tool: ProjectedTool): string | undefined => tool.expose.mcp?.name;
 
 /** Validate statically-known calls against the live projected tool catalog. */
@@ -151,20 +275,46 @@ export async function validateRecipeScriptAgainstCatalog(
   const issues: RecipeSchemaIssue[] = [];
 
   for (const call of analysis.calls) {
-    if (call.dynamicArgs || call.args == null) continue;
     const name = call.tool.includes(':') ? call.tool : [...byName.keys()].find((candidate) => candidate?.replace(':', '.') === call.tool);
     const tool = name ? byName.get(name) : undefined;
     if (!name || !tool) continue;
-    // `payloadTier` is a framework-reserved control. The real projected-tool
-    // dispatcher extracts it before validating the tool's published schema, so
-    // recipe preflight must validate the same schema-visible argument shape.
-    const { input: tierlessArgs } = extractPayloadTier(call.args);
-    // `projection` is a host-owned dispatch control, just like payloadTier. The
-    // direct transport peels it before the target schema; recipe preflight must
-    // validate the same schema-visible argument shape or it rejects valid calls.
-    const { args: schemaArgs } = prepareNestedProjection(tierlessArgs);
-    for (const detail of validateValue(schemaArgs, tool.inputSchema as JsonSchema, 'args')) {
-      issues.push({ tool: name, path: 'args', message: detail.message, kind: detail.kind });
+    if (!call.dynamicArgs && call.args != null) {
+      // `payloadTier` is a framework-reserved control. The real projected-tool
+      // dispatcher extracts it before validating the tool's published schema, so
+      // recipe preflight must validate the same schema-visible argument shape.
+      const { input: tierlessArgs } = extractPayloadTier(call.args);
+      // `projection` is a host-owned dispatch control, just like payloadTier. The
+      // direct transport peels it before the target schema; recipe preflight must
+      // validate the same schema-visible argument shape or it rejects valid calls.
+      const { args: nestedArgs } = prepareNestedProjection(tierlessArgs);
+      const schemaArgs = prepareToolArgsForSchema(
+        name,
+        tool.inputSchema as Record<string, unknown>,
+        nestedArgs,
+      );
+      for (const detail of validateValue(schemaArgs, tool.inputSchema as JsonSchema, 'args')) {
+        issues.push({ tool: name, path: 'args', message: detail.message, kind: detail.kind, position: call.position });
+      }
+    }
+
+    const outputSchema = tool.outputJsonSchema as JsonSchema | undefined;
+    if (!outputSchema || !call.resultReads?.length) continue;
+    for (const read of call.resultReads) {
+      const failure = outputPathFailure(outputSchema, read.path, read.safeOptionalPaths ?? []);
+      if (!failure) continue;
+      const readPath = `result.${read.path.join('.')}`;
+      const unsafePrefix = `result.${failure.path.join('.')}`;
+      const reason = failure.reason === 'optional'
+        ? `${unsafePrefix} is optional in the current output schema and may be absent at runtime`
+        : `${unsafePrefix} is not declared in the current output schema`;
+      issues.push({
+        tool: name,
+        path: readPath,
+        message: `${readPath} is unsafe: ${reason}; update or guard the saved recipe before execution`,
+        kind: 'output-field',
+        position: read.position,
+        callPosition: call.position,
+      });
     }
   }
   return {

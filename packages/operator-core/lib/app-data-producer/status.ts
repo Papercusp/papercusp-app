@@ -32,11 +32,7 @@ import { fetchAppCursor, parseReconcileCursor } from './reconcile';
 import { appBaseUrlEnvVar, type AppDeliveryOptions } from './live-sink';
 import { listAppOwnerMappings, PRODUCER_APPS, type ProducerApp } from './owner-mapping';
 
-/** The platform `source` each app consumes, as stored on personal_documents. */
-const SOURCE_FOR_APP: Record<ProducerApp, string> = {
-  email: 'gmail',
-  calendar: 'calendar',
-};
+import { DATATYPE_FOR_APP } from './app-rows';
 
 export type AppProducerHealth =
   /** Configured, reachable, and the app holds everything the platform has. */
@@ -174,25 +170,25 @@ export async function countPendingRows(
   sql: Sql,
   workspaceId: string,
   userId: string,
-  source: string,
+  datatypeId: string,
   cursor: string | null,
 ): Promise<number> {
   const parsed = parseReconcileCursor(cursor);
   const rows = parsed
     ? await sql<{ n: string }[]>`
         SELECT count(*) AS n
-          FROM harness_shared.personal_documents
+          FROM harness_shared.documents
          WHERE workspace_id = ${workspaceId}
            AND user_id = ${userId}
-           AND source = ${source}
+           AND datatype_id = ${datatypeId}
            AND (COALESCE(occurred_at, imported_at), id) > (${parsed.at}::timestamptz, ${parsed.id}::uuid)
       `
     : await sql<{ n: string }[]>`
         SELECT count(*) AS n
-          FROM harness_shared.personal_documents
+          FROM harness_shared.documents
          WHERE workspace_id = ${workspaceId}
            AND user_id = ${userId}
-           AND source = ${source}
+           AND datatype_id = ${datatypeId}
       `;
   return Number(rows[0]?.n ?? 0);
 }
@@ -331,7 +327,7 @@ async function statusForMapping(
 
   try {
     base.pendingRows = await (ctx.deps.countPending ?? countPendingRows)(
-      sql, workspaceId, userId, SOURCE_FOR_APP[app], probe.cursor,
+      sql, workspaceId, userId, DATATYPE_FOR_APP[app], probe.cursor,
     );
   } catch {
     base.pendingRows = null;

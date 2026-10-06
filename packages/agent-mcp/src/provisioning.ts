@@ -166,7 +166,11 @@ export async function provisionSystemPrincipal(
 export interface StartPiSessionArgs {
   workspaceId: string;
   sessionId: string;
-  capabilities: string[];
+  capabilities?: string[];
+  /** Exact canonical MCP tool names. A PI session never infers this from URL `?tools=`. */
+  allowedTools: string[];
+  /** Absolute durable expiry. Defaults to one day for non-interactive PI sessions. */
+  expiresAt?: Date;
 }
 
 export interface PiSessionResult {
@@ -174,7 +178,7 @@ export interface PiSessionResult {
   sessionId: string;
 }
 
-const DEFAULT_PI_CAPABILITIES = [
+export const DEFAULT_PI_CAPABILITIES = [
   'tasks:read',
   'goals:read',
   'harness:read',
@@ -182,18 +186,28 @@ const DEFAULT_PI_CAPABILITIES = [
   'search:read',
 ];
 
+export const DEFAULT_PI_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
 export async function startPiSession(
   args: StartPiSessionArgs,
 ): Promise<PiSessionResult> {
   const { workspaceId, sessionId } = args;
-  const caps = args.capabilities.length ? args.capabilities : DEFAULT_PI_CAPABILITIES;
+  const caps = args.capabilities === undefined ? DEFAULT_PI_CAPABILITIES : args.capabilities;
+  const allowedTools = [...new Set(args.allowedTools.map((name) => name.trim()).filter(Boolean))];
+  const expiresAt = args.expiresAt ?? new Date(Date.now() + DEFAULT_PI_SESSION_TTL_MS);
+  if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
+    throw new TypeError('pi_session_expiry_must_be_in_the_future');
+  }
   return withWorkspace(workspaceId, async (tx) => {
     const bearer = genBearer();
     const bearerHash = hash(bearer);
     await tx`
       INSERT INTO harness_shared.pi_sessions
-        (workspace_id, session_id, bearer_hash, capabilities)
-      VALUES (${workspaceId}, ${sessionId}, ${bearerHash}, ${JSON.stringify(caps)}::jsonb)
+        (workspace_id, session_id, bearer_hash, capabilities, allowed_tools, expires_at)
+      VALUES (
+        ${workspaceId}, ${sessionId}, ${bearerHash}, ${JSON.stringify(caps)}::jsonb,
+        ${JSON.stringify(allowedTools)}::jsonb, ${expiresAt}
+      )
     `;
     await tx`
       INSERT INTO harness_shared.token_index (token, kind, harness_slug, workspace_id)

@@ -33,8 +33,8 @@
  *     own executor can score those, and a plausible-looking number that nobody
  *     measured is worse than a blank.
  *  2. NEVER PROMOTE A FLOOR TO A MEASUREMENT. `computeGoalSpendRollup` reports
- *     `measured: false` when any sample is unpriced — the total is then a lower
- *     bound. Advancing a ceiling-governing tripwire from a floor would read as
+ *     `spentCents: null` when any attributed sample is unpriced — the priced
+ *     total is then a lower bound. Advancing a ceiling-governing tripwire from a floor would read as
  *     "you are safely under" when the true figure is unknown, so an unmeasured
  *     rollup advances nothing. Measured live: the-gui-chat-surface-…8fa0ed had 8
  *     of 17 samples unpriced, and correctly stays blank.
@@ -128,6 +128,14 @@ export interface TripwireMeasurement {
    * (`measured: false`) or absent. Null advances no spend tripwire.
    */
   measuredSpentCents: number | null;
+  /**
+   * The window, in seconds, that `measuredSpentCents` was summed over (the
+   * rollup's `windowSec` — the goal's budget window), or null/absent for a
+   * lifetime or unknown window. A window-suffixed spend metric (`spend_usd_7d`)
+   * resolves ONLY when this equals its suffix; any other window leaves it
+   * unmeasured rather than relabelling a different population (WI-10004419).
+   */
+  measuredWindowSec?: number | null;
   /** Age of the goal at measurement time, in ms. Negative values are treated as 0. */
   goalAgeMs: number;
   /**
@@ -201,11 +209,52 @@ const MS_PER_DAY = 86_400_000;
  * has been observed to disagree with it. `spend_usd` therefore yields dollars
  * whatever `unit` says.
  */
-const RESOLVERS: Record<string, (m: TripwireMeasurement) => number | null> = {
+type Resolver = (m: TripwireMeasurement) => number | null;
+
+/**
+ * Window suffixes a spend metric may carry, mapped to the rollup window (seconds)
+ * each one names (WI-10004419).
+ *
+ * A goal that declares `spend_usd_7d` ("trailing-7d spend vs a weekly ceiling")
+ * used to fall through to the no-resolver path and keep whatever number it was
+ * authored with — a kill criterion that silently never moved while the rollup
+ * measured the real spend. The suffix is a CLAIM about the window, so it is
+ * honoured only when the measurement was actually taken over that window: a 7d
+ * metric fed a 24h or lifetime rollup stays unmeasured (rule 2), never a
+ * mislabelled number.
+ */
+const SPEND_WINDOW_SUFFIXES: Readonly<Record<string, number>> = {
+  '24h': 86_400,
+  '7d': 604_800,
+  '30d': 2_592_000,
+};
+
+/** Measured cents over exactly `windowSec`, or null when the window differs or is unknown. */
+function windowedSpendCents(m: TripwireMeasurement, windowSec: number): number | null {
+  if (m.measuredSpentCents === null || m.measuredWindowSec !== windowSec) return null;
+  return Math.round(m.measuredSpentCents);
+}
+
+const WINDOWED_SPEND_RESOLVERS: Record<string, Resolver> = Object.fromEntries(
+  Object.entries(SPEND_WINDOW_SUFFIXES).flatMap(([suffix, windowSec]): Array<[string, Resolver]> => [
+    [
+      `spend_usd_${suffix}`,
+      (m) => {
+        const cents = windowedSpendCents(m, windowSec);
+        return cents === null ? null : cents / 100;
+      },
+    ],
+    [`spend_cents_${suffix}`, (m) => windowedSpendCents(m, windowSec)],
+  ]),
+);
+
+const RESOLVERS: Record<string, Resolver> = {
   /** Dollars, 2dp — the ceiling most goals declare. */
   spend_usd: (m) => (m.measuredSpentCents === null ? null : Math.round(m.measuredSpentCents) / 100),
   /** Cents, as stored. */
   spend_cents: (m) => (m.measuredSpentCents === null ? null : Math.round(m.measuredSpentCents)),
+  /** `spend_{usd,cents}_{24h,7d,30d}` — only when the rollup window matches the suffix. */
+  ...WINDOWED_SPEND_RESOLVERS,
   /** Whole days since the goal was created. */
   days_elapsed: (m) => Math.floor(Math.max(0, m.goalAgeMs) / MS_PER_DAY),
   /** Whole hours since the goal was created. */
@@ -222,9 +271,10 @@ export const GENERICALLY_MEASURABLE_METRICS: readonly string[] = Object.keys(RES
  * A breach reason reading `spend_usd 62 reached threshold 100` invites the
  * reader to hear "this goal has spent $62" — a fact about the goal. It is not:
  * the spend resolvers are fed `measuredSpentCents`, which the rollup sets from
- * the POT leg alone, so it is a fact about the goal's pot subset and excludes
- * the diagnostic session leg entirely. At a breach that misreading is expensive,
- * because the readout is attached to a kill.
+ * the goal-attributed (lineage) stream over the goal's budget window (D-011),
+ * so it is a fact about that window, not the goal's lifetime, and excludes the
+ * diagnostic pot and session legs entirely. At a breach that misreading is
+ * expensive, because the readout is attached to a pause.
  *
  * Kept HERE, next to RESOLVERS, rather than at the readout site: this is a
  * description of what each resolver reads, and it goes stale the moment the two
@@ -232,8 +282,12 @@ export const GENERICALLY_MEASURABLE_METRICS: readonly string[] = Object.keys(RES
  * added without a population, so the pair cannot silently separate.
  */
 export const METRIC_POPULATION: Record<string, string> = {
-  spend_usd: 'inside-goal-pots:authoritative',
-  spend_cents: 'inside-goal-pots:authoritative',
+  spend_usd: 'attributed-by-lineage:authoritative',
+  spend_cents: 'attributed-by-lineage:authoritative',
+  // Same lineage stream; the suffix only restricts WHEN it resolves.
+  ...Object.fromEntries(
+    Object.keys(WINDOWED_SPEND_RESOLVERS).map((metric) => [metric, 'attributed-by-lineage:authoritative']),
+  ),
   days_elapsed: 'goal-lifetime',
   hours_elapsed: 'goal-lifetime',
 };
@@ -245,6 +299,135 @@ export const METRIC_POPULATION: Record<string, string> = {
  */
 export function populationForMetric(metric: string): string | null {
   return METRIC_POPULATION[metric] ?? null;
+}
+
+/**
+ * A tripwire that READS as platform-measured but that nothing will ever measure
+ * (WI-10004424).
+ *
+ * The no-resolver path is correct by rule 1 — but it is silent, and a metric
+ * named like a platform metric (`spend_usd_week`, `spend_total`, `days_left`)
+ * takes it while looking exactly like one the rollup advances. Its `current`
+ * then keeps whatever was authored forever, so the kill criterion reads as
+ * measured while being decorative. Observed on goal 60d3a8: a spend bar
+ * showing $34.91 against $102.78 actually measured (WI-10004419).
+ *
+ * Advisory, never a refusal: a metric the platform cannot resolve is still a
+ * legitimate executor-scored metric. The goal write tools surface these so the
+ * author learns at write time, not from a bar that never moves.
+ */
+export interface TripwireMeasurabilityAdvisory {
+  metric: string;
+  code: 'platform-shaped-metric-unresolved' | 'spend-window-never-measured';
+  /** The resolvable metric to use instead, or null when none fits. */
+  suggestedMetric: string | null;
+  message: string;
+}
+
+const WINDOW_ALIASES: Readonly<Record<string, string>> = {
+  '24h': '24h', '1d': '24h', day: '24h', daily: '24h',
+  '7d': '7d', '1w': '7d', week: '7d', weekly: '7d',
+  '30d': '30d', month: '30d', monthly: '30d',
+};
+
+/*
+ * "Platform-shaped" is decided by VOCABULARY, not by prefix alone. A prefix
+ * rule flags `hours_since_verdict_advance` (a live executor-scored metric, see
+ * the tests) and would tell its author to swap it for goal age, which is a
+ * different quantity. A name qualifies only when every word after the family
+ * is one the platform's own metrics use, so `spend_usd_week` and `days_left`
+ * qualify while `spend_ads_usd` and `hours_since_verdict_advance` do not.
+ */
+const SPEND_WORDS = new Set([
+  'usd', 'cents', 'cent', 'dollars', 'total', 'all', 'lifetime', 'cumulative', 'measured',
+  'attributed', 'so', 'far', 'to', 'date', 'fleet', 'agent', 'agents', 'compute', 'llm',
+  'inference', 'goal', ...Object.keys(WINDOW_ALIASES),
+]);
+const GOAL_AGE_WORDS = new Set([
+  'elapsed', 'left', 'remaining', 'total', 'used', 'running', 'active', 'open', 'age', 'since',
+  'start', 'started', 'creation', 'created', 'launch', 'launched', 'kickoff', 'in', 'so', 'far', 'goal',
+]);
+
+/** The platform family a metric name claims, or null when it reads as a domain metric. */
+function platformShapedFamily(metric: string): 'spend' | 'days' | 'hours' | null {
+  const [family, ...rest] = metric.toLowerCase().split('_');
+  const vocab = family === 'spend' ? SPEND_WORDS : family === 'days' || family === 'hours' ? GOAL_AGE_WORDS : null;
+  if (!vocab) return null;
+  return rest.filter(Boolean).every((w) => vocab.has(w)) ? (family as 'spend' | 'days' | 'hours') : null;
+}
+
+/** The resolvable metric nearest to a platform-shaped name, or null. */
+function nearestResolvableMetric(metric: string): string | null {
+  const lower = metric.toLowerCase();
+  if (RESOLVERS[lower]) return lower;
+  const family = platformShapedFamily(lower);
+  if (family === 'days') return 'days_elapsed';
+  if (family === 'hours') return 'hours_elapsed';
+  if (family !== 'spend') return null;
+  const unit = lower.includes('cent') ? 'cents' : 'usd';
+  const window = lower
+    .split('_')
+    .map((part) => WINDOW_ALIASES[part])
+    .find((w) => w !== undefined);
+  const suggestion = window ? `spend_${unit}_${window}` : `spend_${unit}`;
+  return RESOLVERS[suggestion] ? suggestion : null;
+}
+
+/**
+ * Tripwires whose metric will never be measured although it looks as if it
+ * will, with the nearest metric that would be.
+ *
+ * Two cases:
+ *  - a platform-shaped name with no resolver and no declared evidence binding;
+ *  - a window-suffixed spend metric whose suffix differs from the goal's budget
+ *    window, which the resolver deliberately never answers (WI-10004419).
+ *    Checked only when `budgetWindowSec` is supplied: `null` means a lifetime
+ *    window, `undefined` means the caller does not know it.
+ */
+export function unmeasuredTripwireAdvisories(
+  tripwires: ReadonlyArray<{ metric: string; evidence?: unknown }> | null | undefined,
+  opts: { budgetWindowSec?: number | null } = {},
+): TripwireMeasurabilityAdvisory[] {
+  const out: TripwireMeasurabilityAdvisory[] = [];
+  for (const t of tripwires ?? []) {
+    if (typeof t?.metric !== 'string') continue;
+    const metric = t.metric;
+    if (RESOLVERS[metric]) {
+      if (opts.budgetWindowSec === undefined) continue;
+      const suffix = Object.keys(SPEND_WINDOW_SUFFIXES).find((s) => metric.endsWith(`_${s}`));
+      if (!suffix || !metric.startsWith('spend_')) continue;
+      const windowSec = SPEND_WINDOW_SUFFIXES[suffix];
+      if (opts.budgetWindowSec === windowSec) continue;
+      const unbounded = metric.slice(0, -(suffix.length + 1));
+      out.push({
+        metric,
+        code: 'spend-window-never-measured',
+        suggestedMetric: opts.budgetWindowSec === null ? unbounded : null,
+        message:
+          `tripwire "${metric}" is resolved only when the goal's budget window is ${windowSec}s, ` +
+          `but it is ${opts.budgetWindowSec === null ? 'unset (lifetime)' : `${opts.budgetWindowSec}s`}, so it will never be measured. ` +
+          `Set budgetWindowSec to ${windowSec}${opts.budgetWindowSec === null ? `, or use "${unbounded}"` : ''}.`,
+      });
+      continue;
+    }
+    const family = platformShapedFamily(metric);
+    if (!family) continue;
+    const evidence = t.evidence as { kind?: unknown } | null | undefined;
+    if (evidence && typeof evidence.kind === 'string' && evidence.kind) continue;
+    const suggestedMetric = nearestResolvableMetric(metric);
+    const countsUp = family === 'spend' ? '' : ' (it counts up from goal creation, so its threshold is the total)';
+    out.push({
+      metric,
+      code: 'platform-shaped-metric-unresolved',
+      suggestedMetric,
+      message:
+        `tripwire "${metric}" looks platform-measured, but no resolver measures it, so its current stays as written and it never fires on a measurement. ` +
+        (suggestedMetric
+          ? `Use "${suggestedMetric}"${countsUp} for a measured bar, or keep it and report current yourself.`
+          : `Measured metrics: ${GENERICALLY_MEASURABLE_METRICS.join(', ')}.`),
+    });
+  }
+  return out;
 }
 
 /** Normalise a stored `current` (absent | null | non-finite) to null. */

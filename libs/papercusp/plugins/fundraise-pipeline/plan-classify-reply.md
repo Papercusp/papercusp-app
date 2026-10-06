@@ -15,7 +15,7 @@ personalScopes: personal:gmail, personal:contacts
 
 ## Background
 
-An inbound Gmail message arrives under `payload.plan_run.inputs.trigger.payload` as a canonical
+An inbound Gmail message arrives under the event `payload` returned by `triggers:read-payload { planRunId: payload.plan_run.runId }` as a canonical
 `email-message`. This plan decides whether the message belongs to the fundraise pipeline at all,
 records what the reply means, and leaves a draft a human reviews.
 
@@ -24,12 +24,13 @@ investor" as a static payload filter, because that judgement needs the pipeline,
 The correlation step below is therefore the real filter, and P-001's stop condition is the most
 important line in this template: an unmatched message must leave no trace.
 
-This plan never sends. The pack holds no `gmail.send` scope, so drafting is the only outbound
-capability that exists here.
+This plan never sends. Every reply goes through `mail:reply` in its default draft mode, and the
+host refuses a send from a triggered run unless the owner has turned on automatic sending (flag
+`papercusp-gmail-auto-send`, default OFF).
 
 ## Phase 1 — Correlate
 
-- **P-001** `todo` Read `payload.plan_run.inputs.trigger.payload` and find the `pipeline-deal` work-item whose `threadRefs` contains the message `threadId`, or whose `contacts` include the sender address, scoped to `payload.plan_run.inputs.pipelineTag`. If no deal matches, COMPLETE THIS PLAN IMMEDIATELY with `matched:false` and take no further action — no draft, no notification, no pipeline write. A non-investor email must be untouched, and "when in doubt, stop" is the correct bias: a missed reply costs one manual read, a wrong draft costs the relationship.
+- **P-001** `todo` Read the triggering email with `triggers:read-payload { planRunId: payload.plan_run.runId }` and find the `pipeline-deal` work-item whose `threadRefs` contains the message `threadId`, or whose `contacts` include the sender address, scoped to `payload.plan_run.inputs.pipelineTag`. If no deal matches, COMPLETE THIS PLAN IMMEDIATELY with `matched:false` and take no further action — no draft, no notification, no pipeline write. A non-investor email must be untouched, and "when in doubt, stop" is the correct bias: a missed reply costs one manual read, a wrong draft costs the relationship.
 - **P-002** `todo` Confirm the message is genuinely inbound from the counterparty and not our own message reflected back into the thread, nor an autoreply/bounce/out-of-office. Treat an autoreply as no reply at all: leave the stage untouched so the follow-up ladder still runs. blocked-by: P-001
 
 ## Phase 2 — Classify and record
@@ -40,8 +41,8 @@ capability that exists here.
 
 ## Phase 3 — Draft
 
-- **P-006** `todo` For `pass`, draft a short, gracious, genuinely no-ask acknowledgement — no rebuttal, no "just to clarify", no attempt to reopen. A clean pass preserves the relationship for the next raise and is worth more than a salvage attempt. blocked-by: P-005
-- **P-007** `todo` For `interested` or `later`, draft the reply with `gmail:create-draft` using `planRunId=payload.plan_run.runId`: answer what they actually asked, propose a concrete next step, and honour `payload.plan_run.inputs.toneGuidance`. Never invent traction numbers, committed investors, round size, or timeline pressure — if a fact is not in the deal record or the thread, omit it rather than estimate it. Complete only after the tool reports `created:true` or `alreadyCreated:true`. blocked-by: P-005
+- **P-006** `todo` For `pass`, draft with `mail:reply` (`planRunId=payload.plan_run.runId`, the acknowledgement as `text`) a short, gracious, genuinely no-ask acknowledgement — no rebuttal, no "just to clarify", no attempt to reopen. A clean pass preserves the relationship for the next raise and is worth more than a salvage attempt. blocked-by: P-005
+- **P-007** `todo` For `interested` or `later`, draft the reply with `mail:reply` using `planRunId=payload.plan_run.runId` and the reply as `text` (never `mode:"send"`): answer what they actually asked, propose a concrete next step, and honour `payload.plan_run.inputs.toneGuidance`. Never invent traction numbers, committed investors, round size, or timeline pressure — if a fact is not in the deal record or the thread, omit it rather than estimate it. Complete only after the tool reports `created:true` or `alreadyCreated:true`. blocked-by: P-005
 - **P-008** `todo` Notify the owner with `notifications:send_owner` using a `dedupeKey` derived from `trigger.dedupeKey` plus this plan-run ref: name the counterparty, the classification with its quoted evidence, and that a draft is waiting for review. The draft is never sent by this plan or any downstream plan. blocked-by: P-006
 
 ## Decisions
@@ -60,5 +61,7 @@ optimistically produces a forecast the owner cannot use.
 
 ### D-003 — This pack drafts and stops
 Date: 2026-08-23
-No plan in this pack sends mail, and the manifest requests no `gmail.send` scope, so the
-no-auto-send property is structural rather than a matter of instruction-following.
+No plan in this pack sends mail. The no-auto-send property is enforced by the host rather than
+by instruction-following: `mail:reply { planRunId }` refuses a send-mode reply from a triggered run
+while the owner-authority flag `papercusp-gmail-auto-send` is OFF. (The scopes are not the guard:
+Google's `gmail.compose` scope itself permits sending.)

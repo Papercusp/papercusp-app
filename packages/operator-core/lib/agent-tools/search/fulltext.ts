@@ -20,6 +20,12 @@ import { rerankCandidateCount, rerankPageHead } from './rerank';
 import { searchFilterArgs, resolveSearchFilters } from './filters';
 import { scopeArg, DEFAULT_SCOPE } from './scope';
 import { resolveAgentIdentity } from '../coordination/identity';
+import {
+  createStageAttempt,
+  traceStageAwait,
+  withStageAttempt,
+  type StageAttemptContext,
+} from '../../sync/hyperbee/stage-stall-log';
 
 // + overwatch (overwatch-role-2026-06-15 B-01): the supervisor searches to ground nudges.
 // + judge (acceptance-rubric grading): the dedicated evaluator needs read-only
@@ -60,6 +66,36 @@ export default defineTool({
     ...searchFilterArgs,
   }),
   async handler(args, ctx) {
+    const startedAt = performance.now();
+    const stages: Array<{ name: string; elapsedMs: number; status: 'ok' | 'error' }> = [];
+    const metadata = (ctx as { metadata?: (value: Record<string, unknown>) => void }).metadata;
+    let queryAttempt: StageAttemptContext | undefined;
+    // Reuse invocation metadata so a slow search distinguishes SQL retrieval
+    // from the optional reranker; record a failed stage before propagating it.
+    const measure = async <T>(name: string, action: () => Promise<T>): Promise<T> => {
+      const start = performance.now();
+      let status: 'ok' | 'error' = 'error';
+      try {
+        const value = await action();
+        status = 'ok';
+        return value;
+      } finally {
+        stages.push({ name, elapsedMs: Math.max(0, performance.now() - start), status });
+        metadata?.({ searchFulltextRead: {
+          schemaVersion: 'fulltext-read-v1',
+          unit: 'ms',
+          timing: 'wall-time-sequential-stages',
+          elapsedMs: Math.max(0, performance.now() - startedAt),
+          stages: [...stages],
+          ...(queryAttempt ? { queryDiagnostics: {
+            ...queryAttempt,
+            stage: 'scope-query',
+            coverage: 'queries-created-during-retrieval',
+            timing: 'query-build-to-terminal-not-acquisition',
+          } } : {}),
+        } });
+      }
+    };
     const limit = args.limit ?? 5;
     // EI-6984: 'work_item' (and now the session/coord corpora) are opt-in only,
     // kept OUT of the historic no-scope default (unscoped callers keep the same
@@ -79,23 +115,39 @@ export default defineTool({
     // ownerId (an unattributable caller asking for 'self' SHOULD error loudly);
     // every other path must keep working for surfaces with no agent identity.
     const needsSelf = args.owner === 'self' || args.session === 'self';
-    const { filters } = await resolveSearchFilters(
+    const { filters } = await measure('filters', () => resolveSearchFilters(
       ctx.tx,
       args,
       needsSelf ? (resolveAgentIdentity(ctx).ownerId ?? '') : '',
       { workspaceId: ctx.workspaceId ?? '' },
-    );
+    ));
 
-    const { results, totalHits } = await runFullTextSearch(sources, {
-      sql: ctx.tx,
-      query: args.query,
-      workspaceId: ctx.workspaceId ?? '',
-      scopeFilter: args.harness_slug ?? null,
-      // Stage B over-fetch — see the note in semantic.ts. `rerankPageHead`
-      // slices back to `limit`, including on the passthrough path.
-      limit: rerankCandidateCount(limit),
-      filters,
-      log: ctx.log,
+    const { results, totalHits } = await measure('retrieval', async () => {
+      // The existing query diagnostic ring captures context when a query is
+      // created. Persist this local attempt identity in invocation metadata so
+      // those records can be joined without guessing from timestamps/session ids.
+      // The ledger invocation id does not exist yet; rowId stays explicitly unknown.
+      const attempt = metadata ? createStageAttempt({ rowId: '', onEvent: () => {} }) : undefined;
+      queryAttempt = attempt?.context;
+      let outcome: 'fulfilled' | 'rejected' = 'rejected';
+      try {
+        const result = await withStageAttempt(attempt, () => traceStageAwait('scope-query', () =>
+          runFullTextSearch(sources, {
+            sql: ctx.tx,
+            query: args.query,
+            workspaceId: ctx.workspaceId ?? '',
+            scopeFilter: args.harness_slug ?? null,
+            // Stage B over-fetch — `rerankPageHead` slices back to limit.
+            limit: rerankCandidateCount(limit),
+            filters,
+            log: ctx.log,
+          }),
+        ));
+        outcome = 'fulfilled';
+        return result;
+      } finally {
+        attempt?.finish(outcome);
+      }
     });
 
     // Stage B: cross-encoder rerank. Fail-safe — no ZeroEntropy key → the
@@ -108,7 +160,7 @@ export default defineTool({
     // blow PROSE_RERANK_TIMEOUT_MS into a full degrade. rerankPageHead honours
     // the cap as a CANDIDATE budget: the head is reranked, the tail rides
     // through in BM25 order, and worst-case cost is flat in page size.
-    const reranked = await rerankPageHead(args.query, results, limit);
+    const reranked = await measure('rerank', () => rerankPageHead(args.query, results, limit));
 
     // search:fulltext's output rows use `rank` (no score/rankers).
     const top = reranked.map((r) => ({

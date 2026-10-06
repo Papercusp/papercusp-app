@@ -1009,7 +1009,7 @@ pub(crate) static HOME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::n
 #[cfg(test)]
 mod tests {
     use super::{
-        provision_env_operators_for_profile, sidecar_runtime_generation, sidecar_wslenv,
+        provision_env_operators_for, sidecar_runtime_generation, sidecar_wslenv,
         windows_path_to_wsl, wsl_runtime_sidecar_path,
     };
     use std::path::PathBuf;
@@ -1084,9 +1084,29 @@ mod tests {
 
     #[test]
     fn vm_release_forces_environment_operator_provisioning_off() {
-        assert_eq!(provision_env_operators_for_profile("vm-release"), "0");
-        assert_eq!(provision_env_operators_for_profile("dogfood"), "1");
-        assert_eq!(provision_env_operators_for_profile(""), "1");
+        assert_eq!(provision_env_operators_for("vm-release", false, None), "0");
+        assert_eq!(provision_env_operators_for("dogfood", false, None), "1");
+        assert_eq!(provision_env_operators_for("", false, None), "1");
+    }
+
+    /// WI-10006420: the headless Server never provisions the desktop
+    /// env-switcher operators, whatever profile it was built with.
+    #[test]
+    fn headless_service_forces_environment_operator_provisioning_off() {
+        for profile in ["dogfood", "vm-release", ""] {
+            assert_eq!(provision_env_operators_for(profile, true, Some("1")), "0", "{profile}");
+        }
+    }
+
+    #[test]
+    fn environment_operator_provisioning_respects_explicit_opt_out() {
+        for profile in ["dogfood", "public", ""] {
+            assert_eq!(provision_env_operators_for(profile, false, Some("0")), "0", "{profile}");
+            for requested in [None, Some("1"), Some(""), Some("false")] {
+                assert_eq!(provision_env_operators_for(profile, false, requested), "1", "{profile}");
+            }
+        }
+        assert_eq!(provision_env_operators_for("vm-release", false, Some("1")), "0");
     }
 
     #[test]
@@ -2084,6 +2104,34 @@ mod discovery_tests {
         assert_gui_boot_reresolves_wsl_route(&body[..end]);
     }
 
+    fn assert_gui_ipc_registered_before_page_exposure(body: &str) {
+        let registration = body
+            .find("register_packaged_endpoint_ipc(")
+            .expect("the GUI must register endpoint-IPC before exposing the app");
+        for exposure in ["restore_window_visibility(", "window.navigate(", "std::thread::spawn("] {
+            let position = body.find(exposure).expect("GUI boot exposure must exist");
+            assert!(registration < position, "endpoint-IPC registration must precede {exposure}");
+        }
+    }
+
+    #[test]
+    fn gui_boot_registers_ipc_before_page_exposure() {
+        let src = include_str!("main.rs");
+        let needle = format!("fn {}(app: &tauri::App)", "gui_setup");
+        let body = &src[src.find(&needle).expect("GUI setup must exist")..];
+        let end = body.find("\n}\n").expect("GUI setup must be brace-terminated");
+        assert_gui_ipc_registered_before_page_exposure(&body[..end]);
+    }
+
+    #[test]
+    fn gui_ipc_registration_guard_rejects_missing_and_late_registration() {
+        let exposure = "restore_window_visibility(); window.navigate(); std::thread::spawn();";
+        for body in [exposure.to_string(), format!("{exposure} register_packaged_endpoint_ipc();")] {
+            assert!(std::panic::catch_unwind(|| assert_gui_ipc_registered_before_page_exposure(&body)).is_err());
+        }
+        assert_gui_ipc_registered_before_page_exposure(&format!("register_packaged_endpoint_ipc(); {exposure}"));
+    }
+
     /// D-001/P-001 recurrence guard: every packaged GUI, including Linux, is
     /// an attach-only shell. The GUI startup helper may launch the sibling
     /// Server product, but no GUI-only Linux function may spawn serve.mjs.
@@ -2762,6 +2810,7 @@ mod discovery_tests {
             &missing_dir,
             &missing_dir,
             &install_defect,
+            false,
         )
         .expect_err("a sidecar dir with no serve.mjs must not spawn");
 
@@ -5767,39 +5816,21 @@ fn spawn_boot_recovery_watcher(
     });
 }
 
-/// Everything that used to run synchronously in setup() after spawning serve
-/// (P-053): wait for discovery, record the port, wire endpoint-IPC, and feed
-/// the bootstrap page its base — or a visible failure state. Runs on a worker
-/// thread so the main thread reaches the event loop immediately and the
-/// window paints the bootstrap page while serve boots.
-fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf, via_wsl: bool) {
-    // WI-37771: register the endpoint-IPC handle FIRST, before the boot-outcome
-    // branch below — NOT after a successful discovery.
-    //
-    // Every early return in that branch (the Windows WSL-onboarding deferral,
-    // the reachable-fallback-env hop, and the FATAL boot-error inject) used to
-    // leave `tauri::State<Arc<IpcClientHandle>>` UNMANAGED for the life of the
-    // process. Nothing re-registers it later, so once any of them fired, every
-    // `endpoint_invoke` failed with Tauri's generic "state not managed" — and
-    // with `requireIpc` on, the webview is forbidden from falling back to HTTP,
-    // so the app sat permanently dead ("Operator connection lost", "Failed to
-    // load Pots") even after the operator came up healthy seconds later.
-    //
-    // Runtime-reproduced on a clean Windows 11 install: the first launch must
-    // create the WSL distro and init embedded PG, which exceeds the cold-boot
-    // budget, so the operator is legitimately not up yet — exactly the case
-    // those returns hand off to. Registering here costs nothing when the
-    // operator IS up (the same handle, a few ms earlier) and is what makes the
-    // hand-off actually work when it is not: the socket source re-reads the
-    // discovery file on EVERY (re)connect and `keep_warm` retries for the life
-    // of the process, so the handle connects by itself whenever the operator
-    // appears — after the onboarding gate's finalize restart included.
-    //
-    // This mirrors the dev branch in setup(), which has always registered
-    // before any operator exists. See endpoint_ipc.rs `IpcClientHandle::disabled`
-    // for why "leave it unmanaged" is never the right shape: the webview must
-    // be able to tell "not ready YET" (wait) from "switched off" (fall back),
-    // and an unmanaged state is indistinguishable from the startup window.
+/// Register before exposing the GUI, without waiting for the Server. WI-37771
+/// protected finish_boot's early returns; P-007 also observed unmanaged state
+/// while gui_setup's worker had not reached finish_boot yet. Reuse this handle
+/// when finish_boot runs so it cannot replace state or start a second supervisor.
+fn register_packaged_endpoint_ipc(
+    app_handle: tauri::AppHandle,
+    workspace_home: std::path::PathBuf,
+    via_wsl: bool,
+) {
+    if app_handle
+        .try_state::<std::sync::Arc<endpoint_ipc::IpcClientHandle>>()
+        .is_some()
+    {
+        return;
+    }
     let ipc_enabled = std::env::var("PAPERCUSP_DESKTOP_IPC").ok().as_deref() != Some("0");
     if ipc_enabled {
         // WI-3395: on Windows the sidecar runs in WSL2 and writes
@@ -5810,9 +5841,15 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
         // /api on the capped HTTP fallback.
         let disc_home = workspace_home.clone();
         let handle = endpoint_ipc::IpcClientHandle::new(move || {
+            // GUI registration precedes cold-install WSL onboarding. The boot
+            // worker publishes the upgraded route; reconnects must read it.
+            #[cfg(target_os = "windows")]
+            let via_wsl = via_wsl || wsl_setup::detect_ready_cached();
             find_endpoint_ipc_socket_resolved(&disc_home, via_wsl)
         });
-        app_handle.manage(handle.clone());
+        if !app_handle.manage(handle.clone()) {
+            return;
+        }
         let ipc_app_handle = app_handle.clone();
         let warm_home = workspace_home.clone();
         // Record the socket in SidecarState on the FIRST successful connect,
@@ -5823,6 +5860,8 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             loop {
                 if handle.warm().await.is_ok() {
                     println!("[papercusp-desktop] endpoint-ipc client connected (discovery file)");
+                    #[cfg(target_os = "windows")]
+                    let via_wsl = via_wsl || wsl_setup::detect_ready_cached();
                     if let Some(path) = find_endpoint_ipc_socket(&warm_home, via_wsl) {
                         let state: tauri::State<SidecarState> = ipc_app_handle.state();
                         *state.endpoint_ipc_socket.lock().unwrap() = Some(path);
@@ -5850,7 +5889,13 @@ fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf,
             "[papercusp-desktop] endpoint-ipc DISABLED (PAPERCUSP_DESKTOP_IPC=0) — /api on HTTP"
         );
     }
+}
 
+/// Wait for discovery and attach or report the boot failure off the main thread
+/// (P-053). GUI setup has already installed IPC; the windowless Server also uses
+/// this path, so ensure registration before any boot-outcome early return.
+fn finish_boot(app_handle: tauri::AppHandle, workspace_home: std::path::PathBuf, via_wsl: bool) {
+    register_packaged_endpoint_ipc(app_handle.clone(), workspace_home.clone(), via_wsl);
     let discovery = match wait_for_operator(
         &app_handle,
         &workspace_home,
@@ -6147,6 +6192,9 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // lives inside WSL, so mirror the same routing to find the right path.
     let via_wsl = should_route_via_wsl(&app.handle());
     wsl_setup::set_route_active(via_wsl);
+    let app_handle = app.handle().clone();
+    let workspace_home = workspaces::shared_sidecar_home();
+    register_packaged_endpoint_ipc(app_handle.clone(), workspace_home.clone(), via_wsl);
 
     // WI-2648: the docs-search palette shortcut is owned by the always-on
     // SERVER process (registered next to install_server_tray), NOT the GUI —
@@ -6172,8 +6220,6 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let app_handle = app.handle().clone();
-    let workspace_home = workspaces::shared_sidecar_home();
     std::thread::spawn(move || {
         ensure_server_running(&app_handle, &workspace_home, via_wsl);
         // WI-37798: the `via_wsl` above is a STARTUP snapshot, and on a cold
@@ -6184,8 +6230,8 @@ fn gui_setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let via_wsl = await_wsl_route_ready(&app_handle, via_wsl);
         let after = app_handle.clone();
         // finish_boot polls operator.json (120s, or the 600s WSL budget once
-        // the route above resolves — covers a cold Server boot), wires
-        // endpoint-IPC, and navigates the window to the operator.
+        // the route above resolves — covers a cold Server boot), and navigates
+        // the window to the operator using the already registered IPC handle.
         finish_boot(app_handle, workspace_home, via_wsl);
         // WI-4827 cross-process COLD start (macOS/Windows two-bundle): if the
         // Quick Panel palette launched us to open a route and the GUI wasn't
@@ -6541,24 +6587,21 @@ fn install_server_tray(app: &tauri::App) -> tauri::Result<()> {
                     }
                 });
             } else if let Some(payload) = id.strip_prefix(DOCS_SHORTCUT_MENU_PREFIX) {
-                // Set the docs-search global shortcut live, then rebuild the tray
-                // menu so the checkmark tracks the new selection. The "Off" item
+                // Rebuild after success OR refusal: native check items toggle
+                // before this callback, so a refused key otherwise stays checked
+                // alongside the persisted working selection. The "Off" item
                 // carries the SHORTCUT_OFF payload → None → disable entirely.
                 let choice = (payload != docs_search::SHORTCUT_OFF).then_some(payload);
-                match docs_search::set_shortcut(app, choice) {
-                    Ok(()) => match build_server_tray_menu(app) {
-                        Ok(menu) => {
-                            if let Some(tray) = app.tray_by_id("papercusp-server") {
-                                let _ = tray.set_menu(Some(menu));
-                            }
+                if let Err(e) = docs_search::set_shortcut(app, choice) {
+                    eprintln!("[papercusp-server] docs-search set to {payload} failed: {e}");
+                }
+                match build_server_tray_menu(app) {
+                    Ok(menu) => {
+                        if let Some(tray) = app.tray_by_id("papercusp-server") {
+                            let _ = tray.set_menu(Some(menu));
                         }
-                        Err(e) => {
-                            eprintln!("[papercusp-server] tray menu rebuild failed: {e}")
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("[papercusp-server] docs-search set to {payload} failed: {e}")
                     }
+                    Err(e) => eprintln!("[papercusp-server] tray menu rebuild failed: {e}"),
                 }
             }
         });
@@ -6835,6 +6878,7 @@ fn bring_up_sidecar(
         &shared_state_dir,
         &workspace_home,
         &INSTALL_DEFECT,
+        false,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -6976,14 +7020,31 @@ fn baked_distribution_profile() -> &'static str {
     option_env!("PAPERCUSP_DISTRIBUTION_PROFILE").unwrap_or("dogfood")
 }
 
-fn provision_env_operators_for_profile(profile: &str) -> &'static str {
-    if profile == "vm-release" {
+/// Whether the operator should provision the local env-switcher operators
+/// (dev :3270 / prod :3070 / staging :3170 / local :3055). They exist only to
+/// light up the desktop's EnvSwitcherBar, so they are OFF for:
+/// - `vm-release` (the immutable customer VM build), and
+/// - an explicit `PAPERCUSP_PROVISION_ENV_OPERATORS=0` opt-out (the same
+///   opt-out honored by host-bootstrap, including isolated desktop verification),
+/// - the `--headless-service` Server whatever its profile (WI-10006420). It has
+///   no window, the operators bind loopback so nothing remote can use them, and
+///   measured 2026-10-06 on a dogfood-profile Server they cost 2.3-2.9 GB RSS
+///   (tsx dev operator + Vite dev server) plus the first-boot source extract. On
+///   a shared host a second tenant also found the first tenant's listeners
+///   "already reachable" and adopted them as its own.
+fn provision_env_operators_for(
+    profile: &str,
+    headless_service: bool,
+    requested: Option<&str>,
+) -> &'static str {
+    if headless_service || profile == "vm-release" || requested == Some("0") {
         "0"
     } else {
         "1"
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_serve(
     via_wsl: bool,
     port_hint: u16,
@@ -6993,6 +7054,7 @@ fn spawn_serve(
     shared_state_dir: &std::path::Path,
     workspace_home: &std::path::Path,
     install_defect: &InstallDefectLatch,
+    headless_service: bool,
 ) -> std::io::Result<Child> {
     // WI-5390: fail CLOSED on a structurally broken install instead of spawning a
     // command that cannot possibly work. Without this the spawn "succeeds" (the
@@ -7234,7 +7296,7 @@ fn spawn_serve(
         // AUTO-UPDATE: where the shipped app looks for releases (WI-4389,
         // plan desktop-release-hosting-r2-2026-07-12 D-001..D-003).
         //
-        // Releases are LOCAL-only [owner:owner 2026-07-08] — never published to
+        // Releases are LOCAL-only [owner:Avi 2026-07-08] — never published to
         // GitHub — so the operator's /api/updates/manifest has nothing to
         // discover unless it is pointed at the static release host. Without
         // this, an installed app polls, gets a 204, and the Tauri updater reads
@@ -7300,7 +7362,11 @@ fn spawn_serve(
         // single-writer), so arming it on every desktop sidecar spawn is safe.
         .env(
             "PAPERCUSP_PROVISION_ENV_OPERATORS",
-            provision_env_operators_for_profile(baked_distribution_profile()),
+            provision_env_operators_for(
+                baked_distribution_profile(),
+                headless_service,
+                std::env::var("PAPERCUSP_PROVISION_ENV_OPERATORS").ok().as_deref(),
+            ),
         )
         // Phase E (P-051): shared-operator model — per-spawn HOME comes from
         // each job's workspace, set operator-side.
@@ -7735,6 +7801,7 @@ fn spawn_serve_supervisor(
                         &sup_shared,
                         &sup_home,
                         &INSTALL_DEFECT,
+                        false,
                     ) {
                         Ok(c) => {
                             *state.child.lock().unwrap() = Some(c);
@@ -9031,8 +9098,15 @@ fn start_native_terminal(app: &AppHandle) {
 /// do NOT launch it (D-004: the dock is FLAGS.TESTING-gated; the webview's
 /// `native_terminal_set_enabled` relay is the only spawn path). Runs in both
 /// dev and prod so the state + layout persistence are ready if the gate opens.
-fn init_native_terminal(app: &tauri::App) {
-    let strategy = native_terminal::resolve_strategy_from_env();
+fn init_native_terminal(app: &tauri::App, window_owner: bool) {
+    // The packaged Server owns the Quick Panel webview even though it has no
+    // main window. That webview invokes native-terminal commands during mount,
+    // so the state must exist in every role. A Server must never spawn a dock.
+    let strategy = if window_owner {
+        native_terminal::resolve_strategy_from_env()
+    } else {
+        native_terminal::TerminalStrategy::Disabled
+    };
     println!(
         "[papercusp-desktop] native-terminal strategy: {}",
         strategy.label()
@@ -9062,26 +9136,66 @@ fn init_native_terminal(app: &tauri::App) {
     // launched, so there's no per-window-event hook to register here.)
 }
 
-/// A hardware GL render node (`/dev/dri/renderD*`) — its ABSENCE means software
-/// rendering (llvmpipe) or a GPU with no render capability (QXL / virtio in a VM,
-/// or headless), where WebKitGTK's DMA-BUF renderer wedges Xorg. A missing
-/// `/dev/dri` directory ⇒ no render node.
+/// Whether any DRM render node can provide hardware GL. A 2D virtio GPU also
+/// exposes renderD*, but cannot accelerate WebKit's compositor (WI-4480).
+/// Keep physical GPUs and virgl-capable guests accelerated; use the existing
+/// software fallback only when every node is absent or confirmed 2D virtio.
 #[cfg(target_os = "linux")]
 fn linux_has_dri_render_node() -> bool {
-    std::fs::read_dir("/dev/dri")
+    linux_has_dri_render_node_at(
+        std::path::Path::new("/dev/dri"),
+        std::path::Path::new("/sys/class/drm"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_has_dri_render_node_at(dri: &std::path::Path, drm: &std::path::Path) -> bool {
+    std::fs::read_dir(dri)
         .map(|rd| {
             rd.flatten().any(|e| {
-                e.file_name()
-                    .to_str()
-                    .is_some_and(|n| n.starts_with("renderD"))
+                e.file_name().to_str().is_some_and(|n| {
+                    n.starts_with("renderD")
+                        && !linux_virtio_gpu_is_2d(&drm.join(n).join("device"))
+                })
             })
         })
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
+fn linux_virtio_gpu_is_2d(device: &std::path::Path) -> bool {
+    let driver = std::fs::read_link(device.join("driver")).ok();
+    if driver.as_ref().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("virtio_gpu")) {
+        // Linux drivers/virtio/virtio.c features_show writes bit 0 FIRST, not a
+        // conventional binary integer. VIRTIO_GPU_F_VIRGL (virtio_gpu.h) is bit
+        // 0. Unknown/unreadable features preserve the existing accelerated path.
+        return std::fs::read_to_string(device.join("features"))
+            .ok()
+            .is_some_and(|s| {
+                let bits = s.trim();
+                bits.starts_with('0') && bits.bytes().all(|b| b == b'0' || b == b'1')
+            });
+    }
+    // DRM's device link on PCI virtio points to the transport, with the actual
+    // virtio_gpu device one level below (e.g. .../0000:00:01.0/virtio0).
+    if driver.as_ref().and_then(|p| p.file_name()) == Some(std::ffi::OsStr::new("virtio-pci")) {
+        return std::fs::read_dir(device)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.starts_with("virtio"))
+                        && linux_virtio_gpu_is_2d(&e.path())
+                })
+            })
+            .unwrap_or(false);
+    }
+    false
+}
+
 /// Whether to force `WEBKIT_DISABLE_DMABUF_RENDERER=1`. The DMA-BUF renderer
 /// misbehaves in two Linux GPU situations: the NVIDIA proprietary driver
-/// (stale-tile artifacts) and software rendering with no hardware render node
+/// (stale-tile artifacts) and software rendering with no usable GL render node
 /// (X-server wedge / black screen on a VM — WI-3282). Pure so it's unit-tested.
 fn should_disable_dmabuf(nvidia_present: bool, software_render: bool) -> bool {
     nvidia_present || software_render
@@ -9101,6 +9215,110 @@ mod dmabuf_render_tests {
         assert!(should_disable_dmabuf(true, true));
         // A real hardware GL render node and no NVIDIA → keep the fast DMA-BUF path.
         assert!(!should_disable_dmabuf(false, false));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod render_capability_tests {
+    use super::linux_has_dri_render_node_at;
+    use std::path::PathBuf;
+
+    struct DrmFixture(PathBuf);
+
+    impl DrmFixture {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "papercusp-drm-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(root.join("dev/dri")).unwrap();
+            std::fs::create_dir_all(root.join("sys/class/drm")).unwrap();
+            Self(root)
+        }
+
+        fn node(&self, name: &str, driver: &str, features: Option<&str>, pci: bool) {
+            use std::os::unix::fs::symlink;
+            std::fs::write(self.0.join("dev/dri").join(name), "").unwrap();
+            let device = self.0.join("devices").join(name);
+            std::fs::create_dir_all(&device).unwrap();
+            let class = self.0.join("sys/class/drm").join(name);
+            std::fs::create_dir_all(&class).unwrap();
+            symlink(&device, class.join("device")).unwrap();
+            let gpu = if pci {
+                symlink("/sys/bus/pci/drivers/virtio-pci", device.join("driver")).unwrap();
+                device.join("virtio0")
+            } else {
+                device
+            };
+            std::fs::create_dir_all(&gpu).unwrap();
+            symlink(format!("/sys/bus/virtio/drivers/{driver}"), gpu.join("driver")).unwrap();
+            if let Some(features) = features {
+                std::fs::write(gpu.join("features"), features).unwrap();
+            }
+        }
+
+        fn has_acceleration(&self) -> bool {
+            linux_has_dri_render_node_at(&self.0.join("dev/dri"), &self.0.join("sys/class/drm"))
+        }
+    }
+
+    impl Drop for DrmFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn render_capability_2d_virtio_node_does_not_imply_acceleration() {
+        let fixture = DrmFixture::new();
+        // Exact sysfs shape and negotiated features from the clean Linux VM.
+        fixture.node(
+            "renderD128",
+            "virtio_gpu",
+            Some("0100000000000000000000000000110010000000100000000000000000000000\n"),
+            true,
+        );
+        assert!(!fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_direct_2d_virtio_is_software() {
+        let fixture = DrmFixture::new();
+        fixture.node("renderD128", "virtio_gpu", Some("01000000\n"), false);
+        assert!(!fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_virgl_retains_acceleration() {
+        let fixture = DrmFixture::new();
+        fixture.node("renderD128", "virtio_gpu", Some("11000000\n"), true);
+        assert!(fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_physical_and_hybrid_gpus_retain_acceleration() {
+        let fixture = DrmFixture::new();
+        fixture.node("renderD128", "virtio_gpu", Some("01000000\n"), true);
+        fixture.node("renderD129", "amdgpu", None, false);
+        assert!(fixture.has_acceleration());
+    }
+
+    #[test]
+    fn render_capability_unknown_features_do_not_disable_real_hardware() {
+        for features in [None, Some(""), Some("malformed\n")] {
+            let fixture = DrmFixture::new();
+            fixture.node("renderD128", "virtio_gpu", features, true);
+            assert!(fixture.has_acceleration());
+        }
+    }
+
+    #[test]
+    fn render_capability_no_render_nodes_uses_software() {
+        let fixture = DrmFixture::new();
+        assert!(!fixture.has_acceleration());
+        assert!(!linux_has_dri_render_node_at(&fixture.0.join("missing"), &fixture.0));
     }
 }
 
@@ -9188,6 +9406,7 @@ fn run_headless_service() -> ! {
         &shared_state_dir,
         &workspace_home,
         &INSTALL_DEFECT,
+        true,
     ) {
         Ok(child) => child,
         Err(error) => {
@@ -9262,18 +9481,18 @@ pub fn run() {
     //   (a) the NVIDIA proprietary driver — stale-tile artifacts (ghost fragments
     //       of other surfaces composited into the webview; webkit#262607,
     //       tauri#9394/#14924; dev box, webkit2gtk 2.52 + driver 580); and
-    //   (b) SOFTWARE rendering with no hardware GL render node (llvmpipe, or a QXL
-    //       / virtio GPU in a VM, or headless) — there the DMA-BUF path drove Xorg
+    //   (b) SOFTWARE rendering with no usable hardware GL render node (llvmpipe,
+    //       QXL / 2D virtio in a VM, or headless) — there the DMA-BUF path drove Xorg
     //       to 93% and WEDGED the X server (black, frozen, uninteractable) even
     //       after killing every app process (WI-3282, owner's clean Linux VM). The
-    //       absence of /dev/dri/renderD* is the software-render signal.
+    //       A render node alone is insufficient: 2D virtio exposes one too.
     #[cfg(target_os = "linux")]
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         let nvidia = std::path::Path::new("/proc/driver/nvidia/version").exists();
         let software_render = !linux_has_dri_render_node();
         if should_disable_dmabuf(nvidia, software_render) {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-            // On a genuinely GPU-less box also drop accelerated compositing — there
+            // With software GL also drop accelerated compositing — there
             // is no hardware accel to lose and it forecloses the rest of the
             // GL-compositing X-wedge class. NOT done on the NVIDIA path (a real GPU
             // is present — disabling compositing there would be a perf regression),
@@ -9658,13 +9877,10 @@ export type Value = "Null" | ({ Bool: boolean }) & { Array?: never; Number?: nev
                 }
             }
 
-            // Native sibling terminal — resolve strategy + launch the glued
-            // (X11) / native terminal and register the glue hook. It's glued to
-            // a window, so only the GUI (and dev) has one; the windowless Server
-            // skips it. Visual-only; coordinates via the substrate.
-            if is_dev || role.is_gui() {
-                init_native_terminal(app);
-            }
+            // Every role may host a webview: the Server owns the Quick Panel.
+            // Manage terminal state for its commands in every role, with a
+            // disabled strategy on the windowless Server.
+            init_native_terminal(app, is_dev || role.is_gui());
 
             if is_dev {
                 // In dev mode we trust the developer (or beforeDevCommand's

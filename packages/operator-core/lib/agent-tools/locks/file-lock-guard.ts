@@ -65,6 +65,16 @@ export type FileLockCtx = IdentityCtx & {
   log?: (msg: string) => void;
 };
 
+export interface FileLockRunContext {
+  coordinated: boolean;
+  /** The normalized keys passed to the lock store. */
+  paths: string[];
+  /** Keys acquired by this invocation; empty when a same-owner lock already existed. */
+  newlyHeld: string[];
+  coordinationDomain?: string;
+  ownerId?: string;
+}
+
 type ToolResultLike = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
 export interface FileLockSpec {
@@ -161,7 +171,7 @@ export async function guardFileLock<T>(
   ctx: FileLockCtx,
   rawPaths: string[],
   spec: FileLockSpec,
-  run: () => Promise<T>,
+  run: (lock: FileLockRunContext) => Promise<T>,
 ): Promise<
   | { acquired: true; result: T; coordinated: boolean }
   | { acquired: false; busy: AcquireBusy[]; reader?: CellReader }
@@ -204,7 +214,11 @@ export async function guardFileLock<T>(
     // It IS reported (`coordinated: false`) rather than assumed, so a caller
     // that cares — anything claiming "this write was arbitrated" — can tell the
     // two apart instead of inferring safety from a bare success.
-    return { acquired: true, result: await run(), coordinated: false };
+    return {
+      acquired: true,
+      result: await run({ coordinated: false, paths: [], newlyHeld: [] }),
+      coordinated: false,
+    };
   }
 
   const { ownerId, ownerLabel, coordinationDomain } = readFileLockIdentity(ctx);
@@ -244,7 +258,11 @@ export async function guardFileLock<T>(
     // (parity with the hook). Reaching here on contention means the load window
     // outlasted the retries. Log + run the body.
     ctx.log?.(`[file-lock] acquire ${contended ? 'contended after retries' : 'faulted'}, allowing edit (fail-open): ${detail}`);
-    return { acquired: true, result: await run(), coordinated: false };
+    return {
+      acquired: true,
+      result: await run({ coordinated: false, paths, newlyHeld: [], coordinationDomain, ownerId }),
+      coordinated: false,
+    };
   }
 
   if (!acquired.ok) {
@@ -271,12 +289,13 @@ export async function guardFileLock<T>(
   // Older in-process callers/tests omit the additive field, so retain the
   // historical all-path fallback for those callers.
   const releasePaths = acquired.newly_held ?? paths;
+  const newlyHeld = acquired.newly_held ?? paths;
   // P-025: push the ACQUIRE to the plan lock banner. Emitted after the txn has
   // committed, never inside it — a notify fired mid-transaction can be observed
   // before the row it announces is visible. No-ops for non-plan paths.
   notifyPlanLockChange(paths);
   try {
-    const result = await run();
+    const result = await run({ coordinated: true, paths, newlyHeld, coordinationDomain, ownerId });
     return { acquired: true, result, coordinated: true };
   } finally {
     if (releasePaths.length > 0) {

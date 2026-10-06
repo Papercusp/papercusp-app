@@ -72,7 +72,7 @@
  * Loopback is never foreign and is not expressed that way — see LOCAL_HOSTNAMES
  * in egress-monitor.ts.
  */
-import { test as base, expect } from '@playwright/test';
+import { test as base, expect, type Page } from '@playwright/test';
 import {
   classifyEgress,
   EGRESS_CONTROL_PARAM,
@@ -225,6 +225,10 @@ export const test = base.extend<EgressFixtureOptions & EgressFixtures>({
       const t0 = Date.now();
       const observed: ResourceTimingLike[] = [];
       const blindTo: string[] = [];
+      const browserDiagnostics = {
+        pageErrors: [] as string[],
+        failedScripts: [] as Array<{ path: string; error: string }>,
+      };
 
       const record = (url: string, via: ResourceTimingLike['via']): void => {
         if (isIgnored(url)) return;
@@ -235,15 +239,31 @@ export const test = base.extend<EgressFixtureOptions & EgressFixtures>({
       // spec opens later, which a page-level listener would miss entirely.
       const onRequest = (req: { url(): string }): void => record(req.url(), 'resource-timing');
       context.on('request', onRequest);
+      const onRequestFailed = (req: {
+        url(): string;
+        resourceType(): string;
+        failure(): { errorText: string } | null;
+      }): void => {
+        if (req.resourceType() !== 'script') return;
+        // Diagnostic URLs retain the module path, never query credentials.
+        browserDiagnostics.failedScripts.push({
+          path: new URL(req.url()).pathname,
+          error: req.failure()?.errorText ?? 'unknown',
+        });
+      };
+      context.on('requestfailed', onRequestFailed);
 
       // WebSockets are a SEPARATE event in Playwright — they do not arrive as
       // 'request'. Desktop sync is SSE-primary but the browser fallback is WS, so
       // without this the fixture would be blind to the app's own live transport.
       const onWebSocket = (ws: { url(): string }): void => record(ws.url(), 'websocket');
-      const attachWs = (p: { on(e: 'websocket', h: (ws: { url(): string }) => void): void }): void =>
+      const onPageError = (error: Error): void => { browserDiagnostics.pageErrors.push(error.message); };
+      const attachPage = (p: Page): void => {
         p.on('websocket', onWebSocket);
-      for (const p of context.pages()) attachWs(p);
-      context.on('page', attachWs);
+        p.on('pageerror', onPageError);
+      };
+      for (const p of context.pages()) attachPage(p);
+      context.on('page', attachPage);
 
       const state: EgressSensorState = {
         controlObserved: false,
@@ -257,6 +277,16 @@ export const test = base.extend<EgressFixtureOptions & EgressFixtures>({
         report: () => classifyEgress(observed, options, state),
         observed: () => observed.map((o) => o.name),
       });
+
+      // A mount/sync assertion can fail before the spec reaches its own error
+      // checks. Preserve those errors before touching a potentially closed page
+      // for the sensor control, without replacing the original failure.
+      if (testInfo.status !== undefined && testInfo.status !== testInfo.expectedStatus) {
+        await testInfo.attach('browser-diagnostics', {
+          body: JSON.stringify(browserDiagnostics, null, 2),
+          contentType: 'application/json',
+        });
+      }
 
       // ---- teardown: prove the sensor was alive, then judge ------------------
       // The control must be issued from the PAGE: context.request.* is a
@@ -280,7 +310,12 @@ export const test = base.extend<EgressFixtureOptions & EgressFixtures>({
       state.controlObserved = observed.some((o) => o.name.includes(EGRESS_CONTROL_PARAM));
 
       context.off('request', onRequest);
-      context.off('page', attachWs);
+      context.off('requestfailed', onRequestFailed);
+      context.off('page', attachPage);
+      for (const p of context.pages()) {
+        p.off('websocket', onWebSocket);
+        p.off('pageerror', onPageError);
+      }
 
       // A test that already failed gets no extra noise piled on: the spec's own
       // failure is the one to act on, and an egress breach behind it will surface

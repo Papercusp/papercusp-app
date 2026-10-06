@@ -53,6 +53,8 @@ ROOT="$(cd "$HERE/.." && pwd)"
 source "$HERE/lib/gen-latest-manifest.sh"
 # shellcheck source=lib/release-artifacts.sh
 source "$HERE/lib/release-artifacts.sh"
+# shellcheck source=lib/cargo-target-root.sh
+source "$HERE/lib/cargo-target-root.sh"
 # WI-20118266632432430: use the same Server DiskSpan normalization as the full
 # release cut and direct Windows cross-builder.
 # shellcheck source=lib/inno-spanned-server.sh
@@ -99,9 +101,7 @@ fi
 
 # ── [1] glob this platform's already-built artifacts (version-scoped, same
 # globs bin/release-local.sh's collection step uses) ─────────────────────────
-CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
-[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
+CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$ROOT/src-tauri")" || exit $?
 
 NEW_ARTIFACTS=()
 RETENTION_PATHS=()
@@ -188,7 +188,7 @@ fi
 # the hashes and invalidates the old receipt. Hardware-unavailable publication
 # remains possible only through the shared, reason-required logged override.
 if release_artifacts_run_smoke_receipts "$TAG" "$VERSION" "${NEW_ARTIFACTS[@]}"; then
-  echo "==> platform smoke gate: $PLATFORM verifier passed and its receipt is content-bound"
+  release_artifacts_smoke_outcome_message "$PLATFORM" "$RELEASE_ARTIFACTS_SMOKE_OUTCOME"
 else
   echo "ERROR: $PLATFORM is built but its automatic installed-artifact smoke did not produce a valid receipt for these exact bytes — refusing to merge it into $TAG." >&2
   echo "       Configure PAPERCUSP_PLATFORM_SMOKE_CMD for a role-specific remote rig, or use" >&2

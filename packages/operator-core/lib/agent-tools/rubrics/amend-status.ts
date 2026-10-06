@@ -53,9 +53,7 @@ export default defineTool({
     })
     .passthrough(),
   async handler(args) {
-    const reply = (payload: Record<string, unknown>) => ({
-      content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, ...payload }) }],
-    });
+    const reply = (payload: Record<string, unknown>) => ({ data: { ok: true, ...payload } });
     const receipt = await getAmendReceipt(args.rubricRef, args.idempotencyKey);
     // A worker can die after the amendment commits but before it updates the
     // receipt. In that case the atomic Decision outranks a stranded "running".

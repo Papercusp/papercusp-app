@@ -338,8 +338,9 @@ pub struct GoalSummary {
     pub open_work_items: i64,
     #[serde(default)]
     pub needs_human: i64,
+    /// Goal-attributed spend; `None` = unmeasured (the server sends null), never $0.
     #[serde(default)]
-    pub spend_usd: f64,
+    pub spend_usd: Option<f64>,
     #[serde(default)]
     pub budget_cents: Option<i64>,
     #[serde(default)]
@@ -2835,6 +2836,56 @@ pub struct ChatMessage {
     pub provenance: Option<ChatProvenance>,
     pub tools: Vec<ChatToolCall>,
     pub streaming: bool,
+    /// How long the turn this reply ended ran, measured by this PUI from the
+    /// moment the turn started running to the moment it settled
+    /// (pui-chat-first-ux P-019: "Worked for 4s"). `None` for replies loaded
+    /// from history, whose running time this PUI never saw.
+    pub worked_for: Option<std::time::Duration>,
+}
+
+/// One readable line for a failed turn. Engines pass the provider's error body
+/// through verbatim, often as JSON (Codex:
+/// `{"type":"error","status":400,"error":{"message":"The 'x' model is not
+/// supported …"}}`), sometimes behind a prefix (`unexpected status 400: {…}`).
+/// Show the provider's sentence with its status, as stock CLIs do; anything
+/// that is not such JSON is shown as sent, whitespace-collapsed.
+pub fn turn_error_text(raw: &str) -> String {
+    let raw = raw.trim();
+    let raw = raw.strip_prefix("SU-session:").map(str::trim).unwrap_or(raw);
+    // The operator wraps a refused turn in a diagnostic for its own logs
+    // (`Claude ended this turn without a usable reply (success, stop reason
+    // stop_sequence): You've hit your weekly limit …`). The reader wants the
+    // provider's sentence, as stock CLIs show it; the wrapper stays in the log.
+    let raw = raw
+        .find(" without a usable reply (")
+        .and_then(|at| raw[at..].find("): ").map(|end| at + end + 3))
+        .map(|start| raw[start..].trim())
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or(raw);
+    let parsed = raw
+        .find('{')
+        .and_then(|start| serde_json::from_str::<serde_json::Value>(&raw[start..]).ok());
+    let from_json = parsed.as_ref().and_then(|v| {
+        let message = v
+            .pointer("/error/message")
+            .or_else(|| v.get("message"))
+            .and_then(serde_json::Value::as_str)?;
+        let status = v
+            .get("status")
+            .or_else(|| v.pointer("/error/status"))
+            .and_then(serde_json::Value::as_u64);
+        Some(match status {
+            Some(status) => format!("API Error {status}: {message}"),
+            None => format!("API Error: {message}"),
+        })
+    });
+    let text = from_json.unwrap_or_else(|| raw.to_string());
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        "The turn failed without a reply.".to_string()
+    } else {
+        text
+    }
 }
 
 impl ChatMessage {
@@ -2846,6 +2897,7 @@ impl ChatMessage {
             provenance: None,
             tools: Vec::new(),
             streaming: false,
+            worked_for: None,
         }
     }
     pub fn assistant(text: &str) -> Self {
@@ -2856,6 +2908,7 @@ impl ChatMessage {
             provenance: None,
             tools: Vec::new(),
             streaming: false,
+            worked_for: None,
         }
     }
     /// A line the owner composed that was NEVER delivered, preserved in the
@@ -2879,7 +2932,45 @@ impl ChatMessage {
             provenance: None,
             tools: Vec::new(),
             streaming: false,
+            worked_for: None,
         }
+    }
+    /// P-025: an accepted turn that the engine failed (an API refusal, a model
+    /// the account cannot use). Stock Claude Code and Codex print the failure
+    /// under the prompt (`⎿ API Error: 400 …`); before this row pui ended the
+    /// turn with nothing in the transcript, so the owner saw a silent no-reply.
+    /// The role keeps it out of the history sent to the model.
+    pub fn turn_error(raw: &str) -> Self {
+        Self {
+            role: "error".into(),
+            content: turn_error_text(raw),
+            reasoning: String::new(),
+            provenance: None,
+            tools: Vec::new(),
+            streaming: false,
+            worked_for: None,
+        }
+    }
+    /// P-025: record a failed turn under its prompt, once. Claude delivers an
+    /// API refusal twice: as a synthetic assistant message whose text is the
+    /// refusal ("You've hit your weekly limit …") and as the turn's error. Stock
+    /// Claude Code shows it once, as the `⎿` failure line, so an assistant
+    /// bubble that only repeats the error is replaced by it.
+    pub fn push_turn_error(messages: &mut Vec<ChatMessage>, raw: &str) {
+        let error = ChatMessage::turn_error(raw);
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let sentence = norm(&error.content);
+        if let Some(last) = messages.last() {
+            let said = norm(&last.content);
+            let echoes = last.role == "assistant"
+                && last.tools.is_empty()
+                && !said.is_empty()
+                && sentence.ends_with(&said);
+            if echoes {
+                messages.pop();
+            }
+        }
+        messages.push(error);
     }
     /// The in-flight assistant bubble — empty, `streaming`, accumulates deltas.
     pub fn streaming_assistant() -> Self {
@@ -2890,6 +2981,7 @@ impl ChatMessage {
             provenance: None,
             tools: Vec::new(),
             streaming: true,
+            worked_for: None,
         }
     }
 }
@@ -3550,6 +3642,88 @@ mod fleet_rate_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P-025, seen live on a weekly-limit refusal: pui drew the refusal three
+    /// times (the synthetic assistant text and two failure lines, one in the
+    /// operator's diagnostic wording). It is one `⎿` line with the provider's
+    /// sentence now; a real reply before an error is kept.
+    #[test]
+    fn a_refused_turn_is_one_plain_failure_line() {
+        let wrapped = "Claude ended this turn without a usable reply (success, stop reason \
+                       stop_sequence): You've hit your weekly limit · resets 1pm (America/New_York)";
+        assert_eq!(
+            turn_error_text(wrapped),
+            "You've hit your weekly limit · resets 1pm (America/New_York)"
+        );
+        // No detail after the wrapper: the wrapper is all there is to show.
+        assert_eq!(
+            turn_error_text("Claude ended this turn without a usable reply (error_during_execution)"),
+            "Claude ended this turn without a usable reply (error_during_execution)"
+        );
+
+        let mut messages = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("You've hit your weekly limit · resets 1pm (America/New_York)"),
+        ];
+        ChatMessage::push_turn_error(&mut messages, wrapped);
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "error"]);
+        assert_eq!(
+            messages[1].content,
+            "You've hit your weekly limit · resets 1pm (America/New_York)"
+        );
+
+        let mut messages = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("Partial answer"),
+        ];
+        ChatMessage::push_turn_error(&mut messages, wrapped);
+        let roles: Vec<&str> = messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, ["user", "assistant", "error"]);
+    }
+
+    #[test]
+    fn turn_error_text_reads_the_provider_sentence_out_of_a_json_body() {
+        // The exact body Codex 0.157.1 wrote into task_complete.error on
+        // 2026-10-06 (P-025 Codex leg, rollout 01a10f95).
+        let codex = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}"#;
+        assert_eq!(
+            turn_error_text(codex),
+            "API Error 400: The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+        );
+        assert_eq!(
+            turn_error_text(&format!("unexpected status 400 Bad Request: {codex}")),
+            turn_error_text(codex),
+        );
+        assert_eq!(
+            turn_error_text(r#"{"message":"overloaded"}"#),
+            "API Error: overloaded"
+        );
+        // Not JSON: shown as sent, on one line.
+        assert_eq!(
+            turn_error_text("SU-session: stream\n  closed"),
+            "stream closed"
+        );
+        assert_eq!(turn_error_text("  "), "The turn failed without a reply.");
+        let row = ChatMessage::turn_error(codex);
+        assert_eq!(row.role, "error");
+        assert!(row.content.starts_with("API Error 400: "));
+    }
+
+    #[test]
+    fn goal_spend_null_is_unmeasured_not_a_parse_failure() {
+        // /api/tui/goals sends spendUsd:null for an unmeasured goal (WI-1074208).
+        // An f64 field would reject the WHOLE goals page on that one null.
+        let j = r#"{"goals":[
+            {"id":"g-1","title":"measured","status":"active","spendUsd":1.4},
+            {"id":"g-2","title":"unmeasured","status":"active","spendUsd":null},
+            {"id":"g-3","title":"older server","status":"active"}
+        ]}"#;
+        let r: GoalsResponse = serde_json::from_str(j).unwrap();
+        assert_eq!(r.goals[0].spend_usd, Some(1.4));
+        assert_eq!(r.goals[1].spend_usd, None);
+        assert_eq!(r.goals[2].spend_usd, None);
+    }
 
     #[test]
     fn parses_coord_inbox_shape() {

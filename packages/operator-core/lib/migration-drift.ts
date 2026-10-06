@@ -19,8 +19,12 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { getOrgPg } from '@papercusp/db-org';
 import { normalizeMigrationSql } from './migration-sql-normalize';
+import { resolveReleaseRoot } from './release/release-root';
+import { selectNewContentDrift } from './migration-content-drift-acknowledged';
 import {
   recoverAppliedMigrationText,
+  recoverAppliedMigrationTexts,
+  type AppliedMigrationTextRequest,
   type AppliedMigrationTextResult,
 } from './migration-applied-text';
 
@@ -30,6 +34,59 @@ function isRunnerMigration(f: string): boolean {
   if (f.includes('per-harness-template')) return false;
   if (f === '040-plugin-configs-backfill.sql') return false; // psql -v only
   return true;
+}
+
+export interface AppliedMigrationLedgerRow {
+  filename: string;
+  sha256: string | null;
+}
+
+export type AppliedMigrationLedgerIdentity =
+  | { state: 'known'; rows: AppliedMigrationLedgerRow[]; digest: string }
+  | { state: 'unknown'; reason: 'query-failed' | 'malformed-ledger' };
+
+/** Stable identity for the applied frontier. applied_at is intentionally excluded. */
+export function digestAppliedMigrationRows(rows: readonly AppliedMigrationLedgerRow[]): string {
+  const canonical = rows
+    .map(({ filename, sha256 }) => ({ filename, sha256 }))
+    .sort((a, b) => a.filename.localeCompare(b.filename) || (a.sha256 ?? '').localeCompare(b.sha256 ?? ''));
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+/**
+ * Read the exact applied migration frontier used by serving-generation. A
+ * failed query is explicit unknown, never an empty applied set.
+ */
+export async function readAppliedMigrationLedgerIdentity(
+  readRows: () => Promise<AppliedMigrationLedgerRow[]> = async () => {
+    const { sql } = getOrgPg();
+    return sql<AppliedMigrationLedgerRow[]>`
+      SELECT filename, sha256 FROM harness_shared.schema_migrations ORDER BY filename
+    `;
+  },
+): Promise<AppliedMigrationLedgerIdentity> {
+  try {
+    const rows: unknown = await readRows();
+    if (
+      !Array.isArray(rows) ||
+      !rows.every(
+        (row) =>
+          row !== null &&
+          typeof row === 'object' &&
+          typeof (row as AppliedMigrationLedgerRow).filename === 'string' &&
+          ((row as AppliedMigrationLedgerRow).sha256 === null ||
+            typeof (row as AppliedMigrationLedgerRow).sha256 === 'string'),
+      )
+    ) {
+      return { state: 'unknown', reason: 'malformed-ledger' };
+    }
+    const canonical = (rows as AppliedMigrationLedgerRow[])
+      .map(({ filename, sha256 }) => ({ filename, sha256 }))
+      .sort((a, b) => a.filename.localeCompare(b.filename) || (a.sha256 ?? '').localeCompare(b.sha256 ?? ''));
+    return { state: 'known', rows: canonical, digest: digestAppliedMigrationRows(canonical) };
+  } catch {
+    return { state: 'unknown', reason: 'query-failed' };
+  }
 }
 
 /**
@@ -110,8 +167,9 @@ function treeRootFromSqlDir(sqlDir: string): string {
 export function resolveDeployedSqlDir(currentSqlDir: string | null): string | null {
   if (!currentSqlDir) return null;
   const treeRoot = treeRootFromSqlDir(currentSqlDir);
-  const parent = path.dirname(treeRoot);
-  const releaseRoot = process.env.PAPERCUSP_RELEASE_ROOT ?? path.join(parent, 'papercup-release');
+  // WI-10005161: shared resolver — on :3170 the serving tree is the physical staging
+  // generation, whose sibling is not the release checkout.
+  const releaseRoot = resolveReleaseRoot({ integrationRoot: treeRoot });
   const releaseSqlDir = path.join(releaseRoot, ...SQL_DIR_REL_SEGMENTS);
   return fs.existsSync(releaseSqlDir) ? releaseSqlDir : null;
 }
@@ -263,6 +321,13 @@ export interface MigrationDrift {
    *  half-landed migration as benign silences exactly the signal the detector
    *  exists to carry. `null` exactly when `contentDrift` is (not measured). */
   contentDriftExecutable: ClassifiedMigrationContentDrift[] | null;
+  /** WI-10004651: `contentDriftExecutable` minus the ACKNOWLEDGED set
+   *  (migration-content-drift-acknowledged.ts) — drift nobody has resolved or
+   *  proven benign yet. `contentDriftExecutable` is never empty on a long-lived
+   *  database, so it cannot alert by itself; THIS is the field an alert keys on
+   *  (the improvements watchdog's `migration-content-drift` source does).
+   *  `null` exactly when `contentDrift` is (not measured). */
+  contentDriftNew: ClassifiedMigrationContentDrift[] | null;
   /** The tree whose bytes `contentDrift` compared against — the canonical
    *  staging tree when resolvable (agents edit THERE, so drift shows up there
    *  first), else whichever tree served this call. Null when neither resolves,
@@ -329,7 +394,14 @@ export interface ClassifyContentDriftOptions {
   budgetMs?: number;
   /** Injectable clock, for testing the budget without sleeping. */
   now?: () => number;
+  /** Batch history lookups so each Git-history depth costs one host fork per bounded group. */
+  readAppliedTexts?: (
+    entries: ReadonlyArray<MigrationContentDrift>,
+    remainingBudgetMs: number,
+  ) => ReadonlyArray<AppliedMigrationTextResult> | Promise<ReadonlyArray<AppliedMigrationTextResult>>;
 }
+
+const CLASSIFY_APPLIED_TEXT_BATCH_SIZE = 32;
 
 /**
  * Pure classifier for byte-level content drift — exported for tests, with both
@@ -346,75 +418,149 @@ export interface ClassifyContentDriftOptions {
  * attention, while reporting a half-landed migration as benign silences the
  * signal the detector exists to carry.
  */
-export function classifyContentDrift(
+export async function classifyContentDrift(
   raw: ReadonlyArray<MigrationContentDrift>,
-  readAppliedText: (d: MigrationContentDrift) => AppliedMigrationTextResult,
+  readAppliedText: (d: MigrationContentDrift) =>
+    | AppliedMigrationTextResult
+    | Promise<AppliedMigrationTextResult>,
   readDiskText: (filename: string) => string | null,
   opts: ClassifyContentDriftOptions = {},
-): ClassifiedMigrationContentDrift[] {
+): Promise<ClassifiedMigrationContentDrift[]> {
   const budgetMs = opts.budgetMs ?? DEFAULT_CLASSIFY_BUDGET_MS;
   const startedAt = opts.now?.() ?? Date.now();
   const now = () => opts.now?.() ?? Date.now();
+  const classified: ClassifiedMigrationContentDrift[] = [];
 
-  return raw.map((d): ClassifiedMigrationContentDrift => {
-    const unclassified = (why: string): ClassifiedMigrationContentDrift => ({
-      ...d,
-      classification: 'unclassified',
-      classificationDetail: why,
-    });
+  // Batch a bounded group across files. Each Git-history depth now costs one
+  // host fork for the group, while the classifier still checks its original
+  // wall-clock budget and reports anything unfinished as hazardous.
+  for (let offset = 0; offset < raw.length;) {
+    const batchEnd = opts.readAppliedTexts
+      ? Math.min(raw.length, offset + CLASSIFY_APPLIED_TEXT_BATCH_SIZE)
+      : offset + 1;
+    const batch = raw.slice(offset, batchEnd);
 
-    // The corpus only grows: 68 drifted files cost ~13s today, so an unbounded
-    // walk becomes a real stall at 200. Past the budget, stop spending and mark
-    // the rest unclassified — which counts as HAZARDOUS, so running out of time
-    // can never make drift look benign.
     if (now() - startedAt > budgetMs) {
-      return unclassified(
-        `not classified — the ${budgetMs}ms classification budget was exhausted before reaching ` +
-          `this file (${raw.length} drifted files); re-run with a larger budgetMs to classify it`,
-      );
+      for (let i = offset; i < raw.length; i += 1) {
+        const d = raw[i]!;
+        classified.push({
+          ...d,
+          classification: 'unclassified',
+          classificationDetail:
+            `not classified — the ${budgetMs}ms classification budget was exhausted before reaching ` +
+            `this file (${raw.length} drifted files); re-run with a larger budgetMs to classify it`,
+        });
+      }
+      break;
     }
 
-    let applied: AppliedMigrationTextResult;
-    try {
-      applied = readAppliedText(d);
-    } catch (err) {
-      return unclassified(
-        `applied text unrecoverable: ${(err as Error)?.message ?? 'unknown error'}`,
-      );
+    let batchAppliedTexts: ReadonlyArray<AppliedMigrationTextResult> | null = null;
+    let batchReadError: string | null = null;
+    if (opts.readAppliedTexts) {
+      const remainingBudgetMs = Math.max(1, budgetMs - (now() - startedAt));
+      try {
+        batchAppliedTexts = await opts.readAppliedTexts(batch, remainingBudgetMs);
+      } catch (err) {
+        batchReadError = (err as Error)?.message ?? 'unknown error';
+      }
     }
-    if (!applied.ok) return unclassified(`applied text unrecoverable: ${applied.reason}`);
 
-    let disk: string | null;
-    try {
-      disk = readDiskText(d.filename);
-    } catch (err) {
-      return unclassified(`on-disk text unreadable: ${(err as Error)?.message ?? 'unknown error'}`);
-    }
-    if (disk === null) return unclassified('on-disk text unreadable');
-
-    const appliedNorm = normalizeMigrationSql(applied.text);
-    if (!appliedNorm.ok) return unclassified(`applied SQL unparseable: ${appliedNorm.reason}`);
-    const diskNorm = normalizeMigrationSql(disk);
-    if (!diskNorm.ok) return unclassified(`on-disk SQL unparseable: ${diskNorm.reason}`);
-
-    const at = applied.commit.slice(0, 12);
-    if (appliedNorm.normalized === diskNorm.normalized) {
-      return {
+    for (let batchIndex = 0; batchIndex < batch.length; batchIndex += 1) {
+      const d = batch[batchIndex]!;
+      const unclassified = (why: string): ClassifiedMigrationContentDrift => ({
         ...d,
-        classification: 'comments-only',
-        classificationDetail:
-          `executable SQL is identical to the applied blob (${at}); only comments/whitespace ` +
-          `differ, so the live schema still matches this file`,
-      };
+        classification: 'unclassified',
+        classificationDetail: why,
+      });
+
+      // A batch can finish after the remaining allowance. Fail closed for that
+      // result and the untouched suffix instead of trusting a late verdict.
+      if (opts.readAppliedTexts && now() - startedAt > budgetMs) {
+        for (let i = offset + batchIndex; i < raw.length; i += 1) {
+          const remainder = raw[i]!;
+          classified.push({
+            ...remainder,
+            classification: 'unclassified',
+            classificationDetail:
+              `not classified — the ${budgetMs}ms classification budget was exhausted before reaching ` +
+              `this file (${raw.length} drifted files); re-run with a larger budgetMs to classify it`,
+          });
+        }
+        return classified;
+      }
+
+      let applied: AppliedMigrationTextResult;
+      if (opts.readAppliedTexts) {
+        applied = batchReadError
+          ? { ok: false, reason: `batched applied text read failed: ${batchReadError}` }
+          : batchAppliedTexts?.[batchIndex] ?? {
+              ok: false,
+              reason: 'batched applied text read did not return a result for this file',
+            };
+      } else {
+        try {
+          applied = await readAppliedText(d);
+        } catch (err) {
+          classified.push(
+            unclassified(`applied text unrecoverable: ${(err as Error)?.message ?? 'unknown error'}`),
+          );
+          continue;
+        }
+      }
+      if (!applied.ok) {
+        classified.push(unclassified(`applied text unrecoverable: ${applied.reason}`));
+        continue;
+      }
+
+      let disk: string | null;
+      try {
+        disk = readDiskText(d.filename);
+      } catch (err) {
+        classified.push(
+          unclassified(`on-disk text unreadable: ${(err as Error)?.message ?? 'unknown error'}`),
+        );
+        continue;
+      }
+      if (disk === null) {
+        classified.push(unclassified('on-disk text unreadable'));
+        continue;
+      }
+
+      const appliedNorm = normalizeMigrationSql(applied.text);
+      if (!appliedNorm.ok) {
+        classified.push(unclassified(`applied SQL unparseable: ${appliedNorm.reason}`));
+        continue;
+      }
+      const diskNorm = normalizeMigrationSql(disk);
+      if (!diskNorm.ok) {
+        classified.push(unclassified(`on-disk SQL unparseable: ${diskNorm.reason}`));
+        continue;
+      }
+
+      const at = applied.commit.slice(0, 12);
+      classified.push(
+        appliedNorm.normalized === diskNorm.normalized
+          ? {
+              ...d,
+              classification: 'comments-only',
+              classificationDetail:
+                `executable SQL is identical to the applied blob (${at}); only comments/whitespace ` +
+                `differ, so the live schema still matches this file`,
+            }
+          : {
+              ...d,
+              classification: 'executable',
+              classificationDetail:
+                `executable SQL DIFFERS from the applied blob (${at}) — the edit never ran and never ` +
+                `will; repair with a NEW migration re-applying the intended state`,
+            },
+      );
     }
-    return {
-      ...d,
-      classification: 'executable',
-      classificationDetail:
-        `executable SQL DIFFERS from the applied blob (${at}) — the edit never ran and never ` +
-        `will; repair with a NEW migration re-applying the intended state`,
-    };
-  });
+
+    offset = batchEnd;
+  }
+
+  return classified;
 }
 
 /** EI-19415309774723126: `000-baseline.sql` is FROZEN/GENERATED — regenerated
@@ -548,19 +694,10 @@ export async function checkMigrationDrift(
     ? fs.readdirSync(sqlDir).filter(isRunnerMigration).sort()
     : [];
 
-  let applied: string[] = [];
-  let appliedRows: Array<{ filename: string; sha256: string | null }> = [];
-  try {
-    const { sql } = getOrgPg();
-    // `sha256` rides along for the content-drift check — it is recorded on every
-    // apply but was never read back until EI-19365742982915607.
-    appliedRows = await sql<Array<{ filename: string; sha256: string | null }>>`
-      SELECT filename, sha256 FROM harness_shared.schema_migrations ORDER BY filename
-    `;
-    applied = appliedRows.map((r) => r.filename);
-  } catch {
-    // tracker absent / unreachable → report all on-disk as missing (loud, not silent).
-  }
+  const appliedLedger = await readAppliedMigrationLedgerIdentity();
+  // tracker absent / unreachable → report all on-disk as missing (loud, not silent).
+  const appliedRows = appliedLedger.state === 'known' ? appliedLedger.rows : [];
+  const applied = appliedRows.map((r) => r.filename);
 
   const appliedSet = new Set(applied);
   const onDiskSet = new Set(onDisk);
@@ -629,7 +766,7 @@ export async function checkMigrationDrift(
   const contentDrift = rawContentDrift === null
     ? null
     : opts.classifyContent
-    ? classifyContentDrift(
+    ? await classifyContentDrift(
         rawContentDrift,
         (d) =>
           contentDriftSqlDir
@@ -643,6 +780,23 @@ export async function checkMigrationDrift(
             return null;
           }
         },
+        {
+          readAppliedTexts: (entries, remainingBudgetMs) => {
+            if (!contentDriftSqlDir) {
+              return entries.map(() => ({
+                ok: false as const,
+                reason: 'no sql dir resolved to search history in',
+              }));
+            }
+            const requests: AppliedMigrationTextRequest[] = entries.map((entry) => ({
+              filename: entry.filename,
+              recordedSha256: entry.recordedSha256,
+            }));
+            return recoverAppliedMigrationTexts(contentDriftSqlDir, requests, {
+              budgetMs: remainingBudgetMs,
+            });
+          },
+        },
       )
     : rawContentDrift.map((d) => ({
         ...d,
@@ -653,6 +807,7 @@ export async function checkMigrationDrift(
       }));
   const contentDriftExecutable =
     contentDrift === null ? null : contentDrift.filter((d) => d.classification !== 'comments-only');
+  const contentDriftNew = contentDrift === null ? null : selectNewContentDrift(contentDrift);
 
   return {
     sqlDir,
@@ -678,6 +833,7 @@ export async function checkMigrationDrift(
     missingCanonical,
     contentDrift,
     contentDriftExecutable,
+    contentDriftNew,
     contentDriftSqlDir,
   };
 }

@@ -24,6 +24,7 @@
 export const WATCHDOG_IDENTITY_INDEX = 'work_items_watchdog_identity_uq';
 export const KEYLESS_TITLE_IDENTITY_INDEX = 'work_items_keyless_title_identity_uq';
 export const RESOURCE_GOVERNOR_IDENTITY_INDEX = 'work_items_resource_governor_identity_uq';
+export const INTAKE_PROMOTION_IDENTITY_INDEX = 'work_items_intake_promotion_key_uniq';
 
 export type WorkItemsReplayIndexPolicy =
   | { readonly kind: 'coalesced'; readonly migration: string }
@@ -34,6 +35,7 @@ export const WORK_ITEMS_UNIQUE_INDEX_REPLAY_POLICY: Readonly<Record<string, Work
   [WATCHDOG_IDENTITY_INDEX]: { kind: 'coalesced', migration: '865' },
   [KEYLESS_TITLE_IDENTITY_INDEX]: { kind: 'coalesced', migration: '1157' },
   [RESOURCE_GOVERNOR_IDENTITY_INDEX]: { kind: 'coalesced', migration: '986' },
+  [INTAKE_PROMOTION_IDENTITY_INDEX]: { kind: 'coalesced', migration: '1298' },
   work_items_pkey: {
     kind: 'physical-row',
     reason: 'the (harness_slug, feature_id) physical key is the projection ON CONFLICT arbiter',

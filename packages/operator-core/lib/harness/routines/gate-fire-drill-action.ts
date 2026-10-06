@@ -42,5 +42,6 @@ registerSystemAction(
     const outcome = await runGateFireDrill(deps);
     console.log(`[gate-fire-drill] ${outcome.status} (${outcome.reason}): ${outcome.detail}`);
   },
-  { routineTimeoutMs: GATE_FIRE_DRILL_ROUTINE_TIMEOUT_MS },
+  // WI-10005745: a drill launches a real green-checkpoint run (tsx from the integration tree).
+  { routineTimeoutMs: GATE_FIRE_DRILL_ROUTINE_TIMEOUT_MS, executesIntegrationTreeCode: true },
 );

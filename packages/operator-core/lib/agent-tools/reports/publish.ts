@@ -30,6 +30,7 @@ import {
   zReportWire,
   zReportSubject,
   zReportVisibility,
+  zGoalOwnerReportSnapshot,
 } from './_shared';
 
 export default defineTool({
@@ -83,6 +84,7 @@ export default defineTool({
     title: z.string().min(1).max(500).describe('one line; this is what the library list shows'),
     summary: z.string().max(4000).optional().describe('a short abstract shown under the title'),
     body_md: z.string().optional().describe('the report itself, markdown; mermaid fences allowed; ≤512KB'),
+    goal_owner_report: zGoalOwnerReportSnapshot.optional().describe('Pinned GOAL snapshot. Workspace must match this session; derives the exact five-section body and GOAL subject.'),
     kind: zReportKind.optional().describe('what kind of report this is (default `audit`)'),
     subject: zReportSubject.optional().describe('what it is ABOUT — use `external` for subjects outside this workspace'),
     visibility: zReportVisibility
@@ -108,6 +110,7 @@ export default defineTool({
           title: args.title,
           summary: args.summary,
           bodyMd: args.body_md,
+          goalOwnerReport: args.goal_owner_report,
           kind: args.kind,
           subject: args.subject,
           visibility: args.visibility,

@@ -24,6 +24,7 @@ import { recordBehaviorChange } from '../change-ledger/change-ledger';
 import type { CandidateVersionVerdict, LoopProposalRecord } from './loop';
 import { recordChampionAcceptance } from './post-acceptance-outcomes';
 import { realAnchorHeld } from './promotion-gate';
+import { recordProducerObservation, withProducerLifecycleWrite } from '../experiment/producer-lifecycle-store';
 import type { GymJudgedCorpus } from './task-corpus';
 import { trackDetached } from '../detached-imports';
 
@@ -252,6 +253,7 @@ export async function recordProposal(sql: Sql, input: RecordProposalInput): Prom
   const id = input.id ?? (input.variantId ? `${input.variantId}__${input.role}` : randomUUID());
   const now = input.now ?? Date.now();
   const columns = await proposalColumns(sql);
+  await withProducerLifecycleWrite(sql, async (sql) => {
   if (columns.has('task_corpus') && columns.has('candidate_verdict')) {
     await sql`
       INSERT INTO harness_shared.gym_proposals
@@ -297,6 +299,8 @@ export async function recordProposal(sql: Sql, input: RecordProposalInput): Prom
          probe_status = EXCLUDED.probe_status, cycle = EXCLUDED.cycle
        WHERE gym_proposals.status = 'pending'`;
   }
+  await recordProducerObservation(sql, { producer: 'gym', workspaceId: input.workspaceId, sourceId: id });
+  });
   // Push-on-write for the Learning tab's Gym view (owner report 2026-07-26 —
   // learning.gym had no producer; pg_notify fans out cross-process).
   void trackDetached(import('../sync-sse'))
@@ -682,6 +686,7 @@ export async function decideProposal(
           SET prompt_md = EXCLUDED.prompt_md, updated_at = EXCLUDED.updated_at`;
     }
     await tx`UPDATE harness_shared.gym_proposals SET status = ${q.decision}, decided_at = ${now} WHERE id = ${q.id}`;
+    await recordProducerObservation(tx, { producer: 'gym', workspaceId: q.workspaceId, sourceId: q.id });
     // P-030 (consume-edges B-09): acceptance opens the post-acceptance outcome
     // window — the baseline is captured ATOMICALLY with the accept, so an
     // accepted champion without a tracking row cannot exist. The gym tick

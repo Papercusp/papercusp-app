@@ -22,7 +22,7 @@ export interface TaskTerminalEventInput {
   exitReason: string | null;
 }
 
-export type TaskTerminalEventEmitter = (event: TaskTerminalEventInput) => void;
+export type TaskTerminalEventEmitter = (event: TaskTerminalEventInput) => void | Promise<void>;
 
 export interface TaskTerminalEventDeps {
   emit?: (opts: import('../events/await/engine').EmitAwaitedEventOpts) => Promise<unknown>;
@@ -33,7 +33,10 @@ export function taskTerminalEventKey(taskId: string): string {
   return `${TASK_TERMINAL_EVENT_PREFIX}${taskId}`;
 }
 
-export function emitTaskTerminalEvent(event: TaskTerminalEventInput, deps: TaskTerminalEventDeps = {}): void {
+export async function emitTaskTerminalEvent(
+  event: TaskTerminalEventInput,
+  deps: TaskTerminalEventDeps = {},
+): Promise<void> {
   const payload = {
     taskId: event.taskId,
     state: event.state,
@@ -43,22 +46,20 @@ export function emitTaskTerminalEvent(event: TaskTerminalEventInput, deps: TaskT
     harness: event.harnessSlug,
     launchedBy: event.launchedBy,
   };
-  void Promise.resolve()
-    .then(async () => {
-      const emit = deps.emit ?? (await import('../events/await/engine')).emitAwaitedEvent;
-      await emit({
-        key: taskTerminalEventKey(event.taskId),
-        summary: `Managed ${event.taskClass} task ${event.taskId} entered terminal state ${event.state}.`,
-        payload,
-        source: 'task-manager',
-        workspaceId: event.workspaceId,
-      });
-    })
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/relation .*event_awaits.* does not exist/.test(message)) return;
-      (deps.warn ?? ((value: string) => console.warn(value)))(
-        `[task-manager] terminal event failed for ${event.taskId}: ${message}`,
-      );
+  try {
+    const emit = deps.emit ?? (await import('../events/await/engine')).emitAwaitedEvent;
+    await emit({
+      key: taskTerminalEventKey(event.taskId),
+      summary: `Managed ${event.taskClass} task ${event.taskId} entered terminal state ${event.state}.`,
+      payload,
+      source: 'task-manager',
+      workspaceId: event.workspaceId,
     });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/relation .*event_awaits.* does not exist/.test(message)) return;
+    (deps.warn ?? ((value: string) => console.warn(value)))(
+      `[task-manager] terminal event failed for ${event.taskId}: ${message}`,
+    );
+  }
 }

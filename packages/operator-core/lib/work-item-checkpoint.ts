@@ -22,7 +22,9 @@
  * federated.
  */
 import { getOrgPg } from '@papercusp/db-org';
+import { boundedOrgTxn } from './pg-bounded-txn';
 import { resolveConcreteWorkspaceId } from './workspace-registry';
+import { sealSharedTextInTxOrRefuse } from './personal-vault/shared-store-seal';
 import {
   setCarryNote,
   setCarryNoteWithPrior,
@@ -103,27 +105,32 @@ export function workItemCheckpointScope(harness: string | null | undefined, work
  *  look like a fresh re-claim and destroyed the meaning of `takenAt`. */
 async function bumpCheckpointProgressAnchor(ref: WorkItemCheckpointRef, ws: string): Promise<void> {
   try {
-    const { sql } = getOrgPg();
     // Issue ids are workspace-unique, while feature ids are harness-scoped. One
     // base-table write therefore handles both families without touching the
     // `engineer_issues` view (whose assigned_at aliases the claim-time taken_at).
     // Credit only a currently-held row, matching markFeatureProgress/
     // markIssueProgress and keeping holderless historical checkpoints out of the
     // live progress signal.
-    await sql`
-      UPDATE harness_shared.work_items
-         SET last_progress_at = now()
-       WHERE workspace_id = ${ws}
-         AND feature_id = ${ref.workItemId}
-         AND taken_by IS NOT NULL
-         AND taken_by <> ''
-         AND (
-           item_kind IN ('bug', 'change', 'task')
-           OR (
-             ${ref.harness !== null && ref.harness !== undefined && ref.harness !== CHECKPOINT_WILDCARD_HARNESS}
-             AND harness_slug = ${ref.harness}
-           )
-         )`;
+    // The carry-note transaction has already committed. Keep this best-effort
+    // follow-up bounded too: an unbounded pool/row-lock wait here kept the MCP
+    // request open after the checkpoint was durable, so the caller saw a timeout
+    // and a concurrent loop checkpoint could remain queued behind it.
+    await boundedOrgTxn(async (tx) => {
+      await tx`
+        UPDATE harness_shared.work_items
+           SET last_progress_at = now()
+         WHERE workspace_id = ${ws}
+           AND feature_id = ${ref.workItemId}
+           AND taken_by IS NOT NULL
+           AND taken_by <> ''
+           AND (
+             item_kind IN ('bug', 'change', 'task')
+             OR (
+               ${ref.harness !== null && ref.harness !== undefined && ref.harness !== CHECKPOINT_WILDCARD_HARNESS}
+               AND harness_slug = ${ref.harness}
+             )
+           )`;
+    });
   } catch {
     /* best-effort */
   }
@@ -192,6 +199,13 @@ export async function setWorkItemCheckpointWithPrior(
      * {@link setCarryNoteWithPrior}; see its `transform` doc for the contract.
      */
     transform?: (priorNote: string | null, note: string | null | undefined) => string | null | undefined;
+    /**
+     * personal-data-reader-set-labels P-012 / D-006: the agent that authored this
+     * checkpoint. While it holds a restricted Personal Vault disclosure the stored
+     * note (and its journal entry) is a sealed stub; the text is opened with
+     * personal:open-sealed. Omit for system writers, which hold no disclosures.
+     */
+    writerOwnerId?: string | null;
   },
 ): Promise<WorkItemCheckpointWithPriorResult> {
   // EI-9013: canonicalize the workspace AT THE SUBSTRATE — a caller that passes
@@ -293,6 +307,20 @@ export async function setWorkItemCheckpointWithPrior(
       ...(opts?.transform ? { transform: opts.transform } : {}),
       ...(depsSpecified ? { deps: depsPayload } : {}),
       ...(opts?.workItem ? { workItem: opts.workItem } : {}),
+      ...(opts?.writerOwnerId?.trim()
+        ? {
+            seal: async (tx, note) =>
+              (
+                await sealSharedTextInTxOrRefuse(tx, {
+                  workspaceId: ws,
+                  writerOwnerId: opts.writerOwnerId,
+                  store: 'work-item-checkpoint',
+                  text: note,
+                  context: { workItemId: ref.workItemId, harness: ref.harness ?? null },
+                })
+              ).text,
+          }
+        : {}),
       bounded: true,
     },
   );

@@ -27,8 +27,9 @@
  * cut by design. Putting them here puts them on the path that actually ships.
  *   1. payload integrity  — does the manifest describe the bytes? (judgeSeedPayloadIntegrity)
  *   2. degradation        — is a sparse label honest?            (assertSeedNotDegraded)
- *   3. build-box identity — do the bytes carry the builder's username / home / hostname /
- *                           git email?                            (judgeSeedIdentity)
+ *   3. release identity — do the bytes carry the machine identity or any owner name,
+ *                         email, organization, or cross-box alias resolved by the
+ *                         canonical release audit?                (judgeSeedIdentity)
  * Measured on the real ~475MB seed: ~1.1s + ~1.8s. Cheap enough that all three run
  * unconditionally — a correctness check nobody enables is not a check.
  *
@@ -54,11 +55,14 @@ import { judgeSeedPayloadIntegrity, type SeedStoreVerifier } from './seed-payloa
 import { assertSeedNotDegraded } from './seed-degradation-guard.js';
 import {
   judgeSeedIdentity,
+  mergeSeedIdentityLiterals,
+  releaseSeedRedactionValues,
   resolveIdentityLiterals,
   SEED_REAL_HOSTNAME_ENV,
   type ResolveIdentityInput,
 } from './seed-identity-guard.js';
 import { DEFAULT_NEUTRAL_BUILD_HOSTNAME } from './seed-hostname-neutralization.js';
+import { OWNER_NAME_ENV } from './release-content-scrub.js';
 
 export const EXIT_OK = 0;
 export const EXIT_MISMATCH = 1;
@@ -80,6 +84,8 @@ export interface VerifySeedPayloadDeps {
   readonly env?: Record<string, string | undefined>;
   /** Machine-identity probes. Never passed from the release path — see seed-identity-guard.ts. */
   readonly probe?: ResolveIdentityInput['probe'];
+  /** Test seam; production resolves the canonical audit's full runtime literal set. */
+  readonly releaseLiterals?: () => readonly string[];
 }
 
 /** Parse argv. Throws on a malformed invocation so a typo cannot silently verify nothing. */
@@ -183,8 +189,8 @@ export async function runVerifySeedPayload(
     // The THIRD and last member of the same class (MEASURED: `assertStagedSeedCarriesNoIdentity`'s
     // only production caller is cut-seed-cli.ts:1350, so like the two legs above it runs ONLY WHEN
     // A CUT RUNS — and the default build path skips the cut). A committed seed carrying the build
-    // box's username, home path, hostname or git email therefore ships inside every installer with
-    // no guard ever firing. Costs 1,835ms on the real ~475MB seed (54 files, 5 literals), the same
+    // box's username, home path or hostname therefore ships inside every installer with no guard
+    // ever firing. Costs 1,835ms on the real ~475MB seed, the same
     // order as the payload leg's ~1.1s, so like it this runs unconditionally rather than behind a
     // flag nobody sets. Runs LAST because it is the expensive leg: a seed already failing above
     // gets its verdict without paying for the scan.
@@ -198,20 +204,22 @@ export async function runVerifySeedPayload(
     // sandboxed build. So we take the same judgement as DATA, via the judge form, and map each
     // reason to its own exit code.
     const neutralHostname = env.PAPERCUSP_SEED_BUILD_HOSTNAME || DEFAULT_NEUTRAL_BUILD_HOSTNAME;
-    const { literals, unknownHostname } = resolveIdentityLiterals({
+    const { literals: machine, unknownHostname } = resolveIdentityLiterals({
       env,
       neutralHostname,
       ...(deps.probe ? { probe: deps.probe } : {}),
     });
     let identity;
     try {
+      const extra = (deps.releaseLiterals ?? (() => releaseSeedRedactionValues(undefined, env)))();
+      const literals = mergeSeedIdentityLiterals(machine, extra, neutralHostname);
       identity = await judgeSeedIdentity({ dir: args.seedDir, literals });
     } catch (err) {
       // The SCAN could not run (unreadable file, vanished dir). Unlike the degradation guard
       // above — where a throw IS the refusal signal and so means "broken" — throwing is never
       // how this judge reports a finding; it reports one as `ok:false`. So a throw here really
       // is "could not check", and must not be dressed up as either verdict.
-      log(`[seed-verify] could not scan the committed seed for build-box identity — ${(err as Error).message}`);
+      log(`[seed-verify] could not scan the committed seed for release identity — ${(err as Error).message}`);
       return EXIT_UNDETERMINED;
     }
     log(identity.message);
@@ -219,7 +227,7 @@ export async function runVerifySeedPayload(
     // this leg deliberately departs from `assertStagedSeedCarriesNoIdentity`'s order. That form
     // refuses on the unknown hostname first, which costs nothing there because both outcomes are
     // the same exception. Here they are different exit codes, and the literals we CAN resolve
-    // inside the namespace (username, home path, git email) are conclusive on their own: finding
+    // inside the namespace (username and home path) are conclusive on their own: finding
     // one is a definite breakage whether or not the hostname question is answerable. Reporting
     // that as "undetermined" would understate evidence we actually have.
     if (!identity.ok) return EXIT_MISMATCH;

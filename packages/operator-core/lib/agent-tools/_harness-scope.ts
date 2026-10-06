@@ -22,7 +22,11 @@
  */
 
 import { z } from 'zod';
-import { HarnessRequiredError } from '@papercusp/agent-mcp';
+// From its defining leaf, not the `@papercusp/agent-mcp` barrel that re-exports it:
+// that barrel reaches back into operator-core (goals → coordination → … →
+// testing/run.ts), and `run.ts` reads `harnessArg` at module scope, so any importer
+// that loads THIS module first saw `harnessArg` undefined mid-cycle.
+import { HarnessRequiredError } from '@papercusp/tooldef';
 import type { Sql } from 'postgres';
 
 /** Canonical "all harnesses / operator scope" sentinel. `'*'` can't collide

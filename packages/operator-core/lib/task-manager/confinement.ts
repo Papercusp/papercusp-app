@@ -50,15 +50,23 @@
  * given a ledger ROW, where does it live?
  */
 import { type CgroupFs, nodeCgroupFs, readProcessCgroupPath } from './cgroup-read';
-import { deriveUserManagerRoot, scopeCgroupRelPath, type TaskClass } from './types';
+import {
+  deriveUserManagerRoot,
+  scopeCgroupRelPath,
+  taskIdFromScopeUnit,
+  type TaskClass,
+  type TaskState,
+} from './types';
 
 /** The ledger fields this resolver reads. Deliberately NOT the stored `cgroupPath` for a
  *  confined row — see the module header. */
 export interface ConfinementInput {
+  taskId?: string;
+  state?: TaskState;
   confined: boolean;
   scopeUnit?: string | null;
   class: string;
-  /** Only consulted for UNCONFINED tasks, where the spawn-time /proc read is correct. */
+  /** Spawn-time path for unconfined tasks; reconcile-observed path for an unaccounted residue. */
   cgroupPath?: string | null;
   unconfinedReason?: string | null;
 }
@@ -71,6 +79,14 @@ export type TaskConfinement =
       /** Derived from `scope_unit` + class, so it is correct for pre-WI-2141828 rows too. */
       source: 'derived-from-scope-unit';
       /** True ⇒ an operator restart takes this task down with it. */
+      insideOperatorCgroup: boolean;
+    }
+  | {
+      confined: true;
+      cgroupPath: string;
+      scopeUnit: string;
+      /** Kernel census path for an unaccounted residue with an exact task scope. */
+      source: 'observed-at-reconcile';
       insideOperatorCgroup: boolean;
     }
   | {
@@ -98,6 +114,28 @@ export type TaskConfinement =
  */
 export function resolveTaskConfinement(row: ConfinementInput, fs: CgroupFs = nodeCgroupFs): TaskConfinement {
   const ownCgroupPath = readProcessCgroupPath(process.pid, fs);
+
+  // Residue rows do not have the original task class needed to derive the
+  // systemd slice path. Their cgroup_path is instead captured from the kernel
+  // census. Trust it only when the exact pc-unit encodes this row's task id and
+  // the observed path ends at that unit beneath our owned slice.
+  if (
+    row.state === 'unaccounted' &&
+    row.taskId &&
+    row.scopeUnit &&
+    row.cgroupPath &&
+    taskIdFromScopeUnit(row.scopeUnit) === row.taskId &&
+    row.cgroupPath.includes('/papercusp.slice/') &&
+    row.cgroupPath.endsWith(`/${row.scopeUnit}`)
+  ) {
+    return {
+      confined: true,
+      cgroupPath: row.cgroupPath,
+      scopeUnit: row.scopeUnit,
+      source: 'observed-at-reconcile',
+      insideOperatorCgroup: isInside(row.cgroupPath, ownCgroupPath),
+    };
+  }
 
   if (!row.confined) {
     return {

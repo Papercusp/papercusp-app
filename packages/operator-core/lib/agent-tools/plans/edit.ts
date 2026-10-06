@@ -201,6 +201,10 @@ export default defineTool({
             `only the ${v.errors.length} error(s) above were INTRODUCED by this edit — the plan already carried ` +
             `${v.preexistingErrors} unrelated lint error(s), which do not block your write. Fix the introduced ones.`;
         }
+      } else if (v.code === 'terminal_parent_child_mutation') {
+        payload.parentStatus = v.parentStatus;
+        payload.changes = v.changes;
+        payload.message = v.message;
       } else if (v.code === 'string_not_unique') {
         payload.count = v.count;
         payload.hint = 'add surrounding context to old_string to make it unique, or pass replace_all: true';
@@ -234,6 +238,7 @@ export default defineTool({
             ok: true,
             slug: v.slug,
             contentHash: v.contentHash,
+            ...(v.planDrainTransitionChanged ? { planDrainTransitionChanged: true } : {}),
             ...(v.nowStamped ? { nowStamped: true } : {}),
             version: result.version,
             filePath: result.filePath,

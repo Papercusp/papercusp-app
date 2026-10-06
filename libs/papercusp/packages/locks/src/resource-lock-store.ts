@@ -112,6 +112,12 @@ export type ResourceAcquireResult =
       queue_position?: number;
     };
 
+/** jsonb returned by resource_acquire_shared (sql/030). jsonb carries
+ *  timestamptz as an ISO string, so callers convert expires_ts to a Date. */
+export type SharedAcquireRpcResult =
+  | { ok: true; lock_id: string; expires_ts: string }
+  | { ok: false; reason: 'unknown_resource' | 'exclusive_pending' | 'at_capacity' | 'held_exclusive' };
+
 async function readLiveExclusiveQueue(
   sql: Sql,
   coordinationDomain: string,
@@ -279,8 +285,11 @@ export async function sweepResourceWaitersExpired(
 // A refused acquirer (blocked by another owner's exclusive) is recorded here so
 // the back-up broadcast on release can target just the waiters, not ['*'].
 
-/** How long a refused acquirer stays a "waiter" before it's GC'd as abandoned. */
-const WAITER_TTL_SEC = 30 * 60;
+/** How long a refused acquirer stays a "waiter" before it's GC'd as abandoned.
+ *  Exported because resource_acquire_shared (sql/030) records waiters too and
+ *  takes this TTL as an argument rather than restating it in SQL. */
+export const RESOURCE_WAITER_TTL_SEC = 30 * 60;
+const WAITER_TTL_SEC = RESOURCE_WAITER_TTL_SEC;
 
 /** Record `owner` as waiting on `resource` (refused while an exclusive was held). */
 export async function recordResourceWaiter(
@@ -377,7 +386,6 @@ export async function tryAcquireResource(
   if (reg.length === 0) {
     return { ok: false, reason: 'unknown_resource', holders: [] };
   }
-  const maxHolders = reg[0].max_holders;
 
   // Clean expired holders first so conflict + drain checks see live state.
   await sweepResourceExpired(tx, cd);
@@ -391,63 +399,30 @@ export async function tryAcquireResource(
   const ttlText = `${ttlSec} seconds`;
 
   if (mode === 'shared') {
-    // Writer-priority: a pending/held exclusive by ANOTHER owner refuses
-    // new shared acquisitions (the "don't start new things" rule). An
-    // incumbent shared holder is different: it must be able to renew while
-    // the exclusive drains, otherwise the lease refresh itself removes the
-    // holder from the drain protocol and a long-running operation can be
-    // interrupted by the restart it was waiting to finish (EI-23229103052811419).
-    const excl = holders.find((h) => h.mode === 'exclusive');
-    const callerHoldsShared = holders.some((h) => h.owner === owner && h.mode === 'shared');
-    const effectiveExclusiveBlocks = excl !== undefined && excl.owner !== owner && !callerHoldsShared;
-    const queuedExclusiveBlocks =
-      queue.length > 0 && !callerHoldsShared && !(excl && excl.owner === owner);
-    if (effectiveExclusiveBlocks || queuedExclusiveBlocks) {
-      // Refused by another owner's exclusive — record as a waiter so the
-      // back-up broadcast on release reaches us (not the whole fleet).
-      await recordResourceWaiter(tx, { coordinationDomain: cd, resource, owner, ownerLabel });
-      return { ok: false, reason: 'exclusive_pending', holders };
-    }
-    // D-008 counting semaphore: gate a NEW shared acquire on capacity. A caller
-    // already holding a shared lease (refresh) doesn't consume a fresh slot.
-    if (maxHolders != null) {
-      const callerHolds = holders.some((h) => h.owner === owner && h.mode === 'shared');
-      const otherSharedCount = holders.filter((h) => h.mode === 'shared' && h.owner !== owner).length;
-      if (!callerHolds && otherSharedCount >= maxHolders) {
-        await recordResourceWaiter(tx, { coordinationDomain: cd, resource, owner, ownerLabel });
-        return { ok: false, reason: 'at_capacity', holders };
-      }
-    }
-    const rows = await tx<Array<{ lock_id: string; expires_ts: Date }>>`
-      INSERT INTO agent_resource_locks
-        (coordination_domain, resource, owner, owner_label, mode, status, reason, expires_ts)
-      VALUES
-        (${cd}, ${resource}, ${owner}, ${ownerLabel}, 'shared', 'held', ${reason},
-         clock_timestamp() + ${ttlText}::interval)
-      ON CONFLICT (coordination_domain, resource, owner) DO UPDATE
-        SET owner_label = EXCLUDED.owner_label,
-            reason      = EXCLUDED.reason,
-            mode        = 'shared',
-            status      = 'held',
-            acquired_ts = clock_timestamp(),
-            expires_ts  = EXCLUDED.expires_ts
-        WHERE agent_resource_locks.mode = 'shared'
-      RETURNING lock_id::text AS lock_id, expires_ts
+    // The shared-admission rules live in ONE place: resource_acquire_shared
+    // (sql/030). It applies writer priority with incumbent renewal
+    // (EI-23229103052811419: a holder must be able to renew while an exclusive
+    // drains, or the refresh itself drops it from the drain protocol), the D-008
+    // capacity gate (a refresh never consumes a fresh slot), waiter recording,
+    // and refuses to downgrade a held exclusive. The one-round-trip
+    // acquireSharedResourceAtomic (resource-atomic.ts) calls the same function.
+    // Here the caller's inWorkspaceTxn already holds the exclusive domain key,
+    // so the function takes no locks of its own (feature key unused => NULL).
+    // `holders` was read above, so the result shape is unchanged.
+    const [row] = await tx<Array<{ result: SharedAcquireRpcResult }>>`
+      SELECT resource_acquire_shared(
+        NULL::integer, ${cd}, ${resource}, ${owner}, ${ownerLabel}, ${reason},
+        ${ttlSec}::integer, ${WAITER_TTL_SEC}::integer, false, NULL::integer
+      ) AS result
     `;
-    if (rows.length === 0) {
-      // The only way ON CONFLICT updates nothing: the caller already holds
-      // an EXCLUSIVE row here, so the WHERE mode='shared' guard refused to
-      // downgrade it. Resolve by releasing the exclusive first.
-      return { ok: false, reason: 'held_exclusive', holders };
-    }
-    // Granted — we're no longer waiting on this resource.
-    await clearResourceWaiter(tx, cd, resource, owner);
+    const result = row.result;
+    if (!result.ok) return { ok: false, reason: result.reason, holders };
     return {
       ok: true,
       mode: 'shared',
       status: 'held',
-      lock_id: rows[0].lock_id,
-      expires_ts: rows[0].expires_ts,
+      lock_id: result.lock_id,
+      expires_ts: new Date(result.expires_ts),
       shared_holders: holders.filter((h) => h.mode === 'shared'),
       fence_seq: 0, // fencing is exclusive-only (correctness-class); shared is efficiency-class.
     };
@@ -756,6 +731,39 @@ export async function tryHeartbeatResource(
   `;
   if (rows.length === 0) return { expires_ts: null, extended: false };
   return { expires_ts: rows[0].expires_ts, extended: true };
+}
+
+/**
+ * WI-10004326: the coordination domain a named-resource lease ACTUALLY lives in,
+ * located by its globally unique `lock_id` + owner.
+ *
+ * A lock_id-only heartbeat or release cannot know the resource name, so it used
+ * to try only the domains the SERVING operator can infer. For a caller-tree
+ * resource that inference is the serving operator's own checkout, which differs
+ * per install: a lease acquired through the staging operator lives in the
+ * staging checkout's domain, and the same lock_id heartbeated through the green
+ * operator (release checkout) found nothing (measured 2026-09-30: not_found via
+ * one port, extended:true via the other, same lock_id). Reading the row's own
+ * domain removes the inference instead of adding another guess to it.
+ *
+ * Owner-scoped, so it only ever locates the caller's OWN lease and widens no
+ * authority. Expired rows are included on purpose: release reports expiry
+ * evidence from the lease's domain. `null` = this owner holds no row with that id.
+ * Served by idx_reslocks_owner (an owner holds a handful of leases).
+ */
+export async function readOwnedResourceLockDomain(
+  sql: Sql,
+  lockId: string,
+  owner: string,
+): Promise<string | null> {
+  const rows = await sql<Array<{ coordination_domain: string }>>`
+    SELECT coordination_domain
+      FROM agent_resource_locks
+     WHERE owner = ${owner}
+       AND lock_id = ${lockId}::uuid
+     LIMIT 1
+  `;
+  return rows[0]?.coordination_domain ?? null;
 }
 
 export interface ResourceLockStatusResult {

@@ -4,9 +4,10 @@
  * `goals:create`'s column list.
  *
  * WHY THIS IS A SEPARATE MODULE (and a package export subpath). The second
- * writer is `goals:start` (operator-core), which creates the goal AND spawns
- * the GOAL-mode agent that owns it, atomically. That tool cannot live in this
- * package: the spawn needs operator-core's console-launcher, and agent-mcp
+ * writer is `goals:start` (operator-core), which persists the goal and its
+ * GOAL-mode owner stamp before spawning the agent, then compensates handled
+ * launch failures. That tool cannot live in this package: the spawn needs
+ * operator-core's console-launcher, and agent-mcp
  * deliberately does not depend on operator-core. The dependency runs the other
  * way (operator-core imports `@papercusp/agent-mcp`), so the half they share
  * lives HERE and is imported from there — exactly the arrangement `./_bulk`

@@ -59,6 +59,12 @@
  */
 
 import { updateIssue, commentIssue } from '../../issues-engineer';
+import { coordScopeWorkspace } from '../../agent-tools/coordination/log';
+import {
+  readRecurringInstanceEvidence,
+  type RecurringInstanceEvidenceArgs,
+  type RecurringInstanceEvidenceRow,
+} from '../../issue-occurrence-ledger';
 import type { ImprovementCandidate, ImprovementSeverity } from './policy';
 import {
   readImprovementItems,
@@ -79,6 +85,33 @@ export const RECURRENCE_ESCALATION_THRESHOLD = 3;
 
 /** Actions produced per run when the caller does not say. */
 export const DEFAULT_MAX_ACTIONS = 10;
+
+// ── Instance-evidence severity PROPOSALS (EI-23768242440859949) ─────────────────────
+//
+// The signature path above learns from "N separate filings of one friction". It is blind
+// to the other recurrence channel: ONE canonical item that keeps being re-reported (dedup /
+// coalesce rows in `work_item_occurrences`). Its severity stays at the filer's n=1
+// impression however many independent reporters hit it.
+//
+// This channel PROPOSES, it does not apply. Measured 2026-10-01 over the 232–233 open
+// minor/nit items: the lifetime gate (≥3 rows ∧ ≥2 reporters) passed ~182 (~80%) and even
+// a 7-day window passed ~105, because most of the corpus is watchdog-fed and "still firing"
+// is the common case. A silent bulk apply would flip ~100 items to `major` at once — the
+// severity-inflation failure the idea itself warns about. So: a ranked slate, capped per
+// tick, one audited comment per item carrying the evidence, idempotent by marker comment.
+// A human (or a later reviewed policy) makes the actual re-grade.
+//
+// NOT YET FALSIFIED: the idea's backfill ("does prior recurrence predict later manual
+// re-grades / slow assignment?") could not be run — no severity-change history exists, and
+// among 71 recent assigned items only 7 had ≥2 prior ledger rows. The proposal comments are
+// the ledger that makes that test runnable; do not promote this to auto-apply without it.
+export const INSTANCE_EVIDENCE_WINDOW_DAYS = 7;
+export const INSTANCE_EVIDENCE_MIN_ROWS = 3;
+export const INSTANCE_EVIDENCE_MIN_REPORTERS = 2;
+/** Proposals posted per run — a bound on tick fan-out, not a statement about the population. */
+export const INSTANCE_EVIDENCE_MAX_PROPOSALS = 5;
+/** Body prefix of the audited proposal comment; the reader excludes items already carrying one. */
+export const INSTANCE_EVIDENCE_MARKER = 'recurrence-evidence:';
 
 /**
  * Hydration budget for phase 2, in member rows. Groups are taken whole-or-not-at-all
@@ -308,10 +341,78 @@ export function planRecurrenceEscalation(
   return actions.slice(0, maxActions);
 }
 
+export interface PlanInstanceEvidenceOpts {
+  windowDays?: number;
+  minRows?: number;
+  minReporters?: number;
+  maxProposals?: number;
+}
+
+/** A severity PROPOSAL — carries the evidence, mutates nothing. */
+export interface SeverityProposal {
+  kind: 'propose-severity';
+  id: string;
+  from: 'minor' | 'nit';
+  to: 'major';
+  rows: number;
+  reporters: number;
+  windowDays: number;
+  firstAt: string;
+  lastAt: string;
+}
+
+/**
+ * Pure: rank the reader's slate and cap it. The gate is re-applied here even though the
+ * reader already filters on it — the reader is an injectable seam, and a proposal that
+ * claims "≥N reports from ≥M reporters" must be provably true of the row it describes.
+ * Ranking is reporters DESC (independent corroboration beats volume — one chatty watchdog
+ * can inflate `rows` alone), then rows DESC, then id for a stable order.
+ */
+export function planInstanceEvidenceProposals(
+  slate: readonly RecurringInstanceEvidenceRow[],
+  opts: PlanInstanceEvidenceOpts = {},
+): SeverityProposal[] {
+  const windowDays = opts.windowDays ?? INSTANCE_EVIDENCE_WINDOW_DAYS;
+  const minRows = opts.minRows ?? INSTANCE_EVIDENCE_MIN_ROWS;
+  const minReporters = opts.minReporters ?? INSTANCE_EVIDENCE_MIN_REPORTERS;
+  const maxProposals = opts.maxProposals ?? INSTANCE_EVIDENCE_MAX_PROPOSALS;
+  if (maxProposals <= 0) return [];
+  const seen = new Set<string>();
+  return slate
+    .filter((r) => (r.severity === 'minor' || r.severity === 'nit') && r.rows >= minRows && r.reporters >= minReporters)
+    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+    .sort((a, b) => b.reporters - a.reporters || b.rows - a.rows || a.id.localeCompare(b.id))
+    .slice(0, maxProposals)
+    .map((r) => ({
+      kind: 'propose-severity' as const,
+      id: r.id,
+      from: r.severity,
+      to: 'major' as const,
+      rows: r.rows,
+      reporters: r.reporters,
+      windowDays,
+      firstAt: r.firstAt,
+      lastAt: r.lastAt,
+    }));
+}
+
+/** The audited comment body. Starts with {@link INSTANCE_EVIDENCE_MARKER} — that prefix IS the idempotence key. */
+export function renderSeverityProposalComment(p: SeverityProposal): string {
+  return (
+    `${INSTANCE_EVIDENCE_MARKER} proposed severity ${p.from}→${p.to} (NOT applied). ` +
+    `${p.rows} reports from ${p.reporters} distinct reporters between ${p.firstAt} and ${p.lastAt} ` +
+    `(last ${p.windowDays}d window). Severity is written once from the filer's n=1 impression; ` +
+    `this is the cross-instance view. Re-grade with work_items:update { severity } if the ` +
+    `recurrence is real impact, or ignore it if this is a known-benign flap — the proposal does not re-post.`
+  );
+}
+
 export interface EscalationResult {
   escalated: number;
   gymRouted: number;
   promotionsSuggested: number;
+  /** Instance-evidence severity proposals posted this run (comment only — severity untouched). */
+  severityProposed: number;
   /** Knowledge-pack candidates staged for owner review (P-032 — fleet→pack edge). */
   candidatesStaged: number;
 }
@@ -337,6 +438,10 @@ export interface EscalationDeps {
   applyTriage: (input: ApplyTriageInput) => Promise<ApplyTriageResult>;
   capture: (input: CaptureImprovementInput) => Promise<CaptureImprovementResult>;
   stageCandidate: (input: StageCandidateInput) => Promise<StageCandidateResult>;
+  /** Occurrence-ledger slate for the instance-evidence proposals (EI-23768242440859949). */
+  readInstanceEvidence: (
+    q: Omit<RecurringInstanceEvidenceArgs, 'workspaceId'>,
+  ) => Promise<RecurringInstanceEvidenceRow[]>;
 }
 
 const defaultDeps: EscalationDeps = {
@@ -347,6 +452,7 @@ const defaultDeps: EscalationDeps = {
   applyTriage: applyTriageDecision,
   capture: captureImprovement,
   stageCandidate: stageKnowledgePackCandidate,
+  readInstanceEvidence: (q) => readRecurringInstanceEvidence({ workspaceId: coordScopeWorkspace(), ...q }),
 };
 
 export async function runRecurrenceEscalation(
@@ -389,7 +495,13 @@ export async function runRecurrenceEscalation(
     ? await deps.readItems({ issueIds: memberIds, limit: memberIds.length })
     : [];
   const actions = planRecurrenceEscalation(all, { ...opts, maxActions });
-  const result: EscalationResult = { escalated: 0, gymRouted: 0, promotionsSuggested: 0, candidatesStaged: 0 };
+  const result: EscalationResult = {
+    escalated: 0,
+    gymRouted: 0,
+    promotionsSuggested: 0,
+    severityProposed: 0,
+    candidatesStaged: 0,
+  };
 
   for (const a of actions) {
     if (a.kind === 'escalate-severity') {
@@ -457,6 +569,38 @@ export async function runRecurrenceEscalation(
         );
       }
     }
+  }
+
+  // PHASE 3 (EI-23768242440859949) — instance-evidence severity PROPOSALS. Best-effort and
+  // isolated: a ledger-read or comment failure must never abort the escalation pass above,
+  // and a failed comment is simply re-proposed next tick (the reader's NOT EXISTS marker
+  // check is what makes a landed one never repeat). Severity is NEVER written here.
+  try {
+    const slate = await deps.readInstanceEvidence({
+      windowDays: INSTANCE_EVIDENCE_WINDOW_DAYS,
+      minRows: INSTANCE_EVIDENCE_MIN_ROWS,
+      minReporters: INSTANCE_EVIDENCE_MIN_REPORTERS,
+      // Over-fetch the SQL slate relative to the post cap so the planner's own re-check of
+      // the gate cannot starve the run by discarding rows from a slate that was exactly N.
+      limit: INSTANCE_EVIDENCE_MAX_PROPOSALS * 4,
+      proposedMarker: INSTANCE_EVIDENCE_MARKER,
+    });
+    for (const p of planInstanceEvidenceProposals(slate)) {
+      try {
+        const posted = await deps.commentIssue(p.id, renderSeverityProposalComment(p), 'recurrence-escalation');
+        if (posted) result.severityProposed += 1;
+      } catch (e) {
+        console.warn(
+          `[recurrence-escalation] severity proposal for ${p.id} failed:`,
+          e instanceof Error ? e.message : e,
+        );
+      }
+    }
+  } catch (e) {
+    console.warn(
+      '[recurrence-escalation] instance-evidence read failed:',
+      e instanceof Error ? e.message : e,
+    );
   }
   return result;
 }

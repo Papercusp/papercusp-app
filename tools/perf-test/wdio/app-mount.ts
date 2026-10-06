@@ -33,6 +33,265 @@ import {
   type MountVerdict,
 } from "../../../libs/generic/gui-readiness/src/document-mount";
 
+export interface PlanPopupAttempt {
+  clicked: boolean;
+  triggerAtMs: number;
+  startTimeMs: number | null;
+}
+
+/** Runs inside the webview. Clear previous phases even if this click never
+ * begins timing, then capture the synchronous handler's start in the page clock. */
+export function triggerPlanPopupAttemptInPage(name: string): PlanPopupAttempt {
+  performance.clearMeasures(name);
+  performance.clearMarks(`${name}:start`);
+  for (const entry of performance.getEntriesByType('measure')) {
+    if (entry.name.startsWith(`${name}:phase:`)) performance.clearMeasures(entry.name);
+  }
+  const trigger = document.querySelector<HTMLElement>('[data-testid="plan-dash-open-full"]');
+  const triggerAtMs = performance.now();
+  if (!trigger) return { clicked: false, triggerAtMs, startTimeMs: null };
+  trigger.click();
+  const start = performance.getEntriesByName(`${name}:start`, 'mark').at(-1);
+  performance.mark(`${name}:trigger-return`);
+  return { clicked: true, triggerAtMs,
+    startTimeMs: start && start.startTime >= triggerAtMs ? start.startTime : null };
+}
+
+/** Runs inside the webview. The total, start and phases share ONE observation;
+ * a late completion is visible even after endInteraction consumes its start.
+ * PerformanceMeasure.startTime retains the begin's timestamp after consumption. */
+export function readPlanPopupAttemptInPage(name: string, attempt: PlanPopupAttempt) {
+  const observedAtMs = performance.now();
+  // Inline callbacks remain self-contained when the TS loader serializes this
+  // function for browser.execute (a named local arrow can inject __name).
+  const start = performance.getEntriesByName(`${name}:start`, 'mark')
+    .filter((entry) => entry.startTime >= attempt.triggerAtMs &&
+      (attempt.startTimeMs === null || entry.startTime === attempt.startTimeMs)).at(-1);
+  const measures = performance.getEntriesByName(name, 'measure')
+    .filter((entry) => entry.startTime >= attempt.triggerAtMs &&
+      (attempt.startTimeMs === null || entry.startTime === attempt.startTimeMs))
+    .map((entry) => ({ startTimeMs: entry.startTime, durationMs: entry.duration }));
+  const phases = performance.getEntriesByType('measure')
+    .filter((entry) => entry.name.startsWith(`${name}:phase:`) && entry.startTime >= attempt.triggerAtMs &&
+      (attempt.startTimeMs === null || entry.startTime === attempt.startTimeMs))
+    .map((entry) => ({ name: entry.name, ms: Math.round(entry.duration),
+      startTimeMs: entry.startTime, endTimeMs: entry.startTime + entry.duration }));
+  const metrics = (window as unknown as {
+    __sync_metrics__?: { snapshot(): { scheduler?: unknown } };
+  }).__sync_metrics__;
+  return {
+    observedAtMs, triggerAtMs: attempt.triggerAtMs, capturedStartTimeMs: attempt.startTimeMs,
+    measureCount: measures.length, measures, phases,
+    startMarkTimeMs: start?.startTime ?? null,
+    startMarkAgeMs: start ? observedAtMs - start.startTime : null,
+    scheduler: metrics?.snapshot().scheduler ?? null,
+    placeholder: document.querySelector('[data-testid="plan-popup-body"] .pc-plans__placeholder')?.textContent?.trim() ?? null,
+  };
+}
+
+/** Runs inside the webview; keep readiness and candidate selection identical.
+ * Unfiltered cached rows can mount before a pinned search resolves. */
+export function readPlanPopupCandidates({ maxRows, requestedSlug }: {
+  maxRows: number;
+  requestedSlug: string | null;
+}): Array<{ slug: string; harness: string | null }> {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>('[data-testid^="plans-pane-row-"]'),
+  )
+    .filter((el) => !requestedSlug || el.getAttribute('data-testid') === `plans-pane-row-${requestedSlug}`)
+    .slice(0, maxRows)
+    .map((el) => ({
+      slug: (el.getAttribute('data-testid') ?? '').replace('plans-pane-row-', ''),
+      harness: el.querySelector('.plans-pane__row-harness')?.textContent?.trim() ?? null,
+    }));
+}
+
+/** Runs inside the webview; the generated `t` export is not a stable module
+ * identity. In component chunks it can be a component requiring props. */
+export function installPopupReactProbe(url: string, done: (value: {
+  installed: boolean; hooks?: string[]; error?: string;
+}) => void) {
+  if (!/(?:^|\/)react-[\w-]+\.js(?:\?.*)?$/.test(url)) {
+    done({ installed: false, error: `React probe requires the packaged react-*.js asset, received ${url}` });
+    return;
+  }
+  const restore: Array<() => void> = [];
+  Promise.resolve().then(async () => {
+    const load = new Function('url', 'return import(url)') as (url: string) => Promise<Record<string, unknown>>;
+    const module = await load(url);
+    const hooks = ['useEffect', 'useLayoutEffect', 'useInsertionEffect'];
+    const hasHooks = (value: unknown): value is Record<string, Function> =>
+      value !== null && typeof value === 'object' &&
+      hooks.every((hook) => typeof (value as Record<string, unknown>)[hook] === 'function');
+    // Named/default exports also work if the bundle stops wrapping CommonJS.
+    const react = hasHooks(module) ? module : hasHooks(module.default) ? module.default :
+      typeof module.t === 'function' ? module.t() : null;
+    if (!hasHooks(react)) throw new Error(`React probe asset does not expose all three effect hooks: ${url}`);
+    const previous = (window as unknown as { __perfReactProbe?: { restore(): void } }).__perfReactProbe;
+    previous?.restore();
+    const records: Array<{ hook: string; ms: number; at: number; stack?: string }> = [];
+    for (const hook of hooks) {
+      const original = react[hook];
+      react[hook] = function (effect: () => unknown, deps: unknown) {
+        const stack = new Error().stack?.slice(0, 1800);
+        return original.call(react, () => {
+          const at = performance.now();
+          try { return effect(); }
+          finally {
+            const ms = performance.now() - at;
+            if (ms >= 5) records.push({ hook, ms, at, stack });
+          }
+        }, deps);
+      };
+      restore.push(() => { react[hook] = original; });
+    }
+    (window as unknown as { __perfReactProbe: { records: typeof records; restore(): void } }).__perfReactProbe = {
+      records, restore: () => restore.splice(0).forEach((fn) => fn()),
+    };
+    done({ installed: true, hooks });
+  }).catch((error) => {
+    restore.splice(0).forEach((fn) => fn());
+    done({ installed: false, error: String(error) });
+  });
+}
+
+/** Runs inside the webview. Computed styles are live: a later property read
+ * can force style calculation even when getComputedStyle itself was fast. */
+export function installPopupLayoutProbe() {
+  const records: Array<{
+    api: string;
+    ms: number;
+    at: number;
+    target?: string;
+    stack?: string;
+    waitMs?: number;
+    firedAt?: number;
+  }> = [];
+  const restores: Array<() => void> = [];
+  const observed: string[] = [];
+  const styleTargets = new WeakMap<object, string>();
+  const targetName = (element: Element) => {
+    const testId = element.getAttribute('data-testid');
+    const id = element.id ? `#${element.id}` : '';
+    const classes = Array.from(element.classList).slice(0, 4);
+    const attributes = ['data-anim', 'data-state', 'role']
+      .map((name) => [name, element.getAttribute(name)] as const)
+      .filter(([, value]) => value)
+      .map(([name, value]) => `[${name}="${value}"]`).join('');
+    return `${element.tagName.toLowerCase()}${id}${testId ? `[data-testid="${testId}"]` : ''}${classes.length ? `.${classes.join('.')}` : ''}${attributes}`.slice(0, 240);
+  };
+  const observe = (proto: object, key: string, accessor: 'get' | 'set' = 'get') => {
+    const descriptor = Object.getOwnPropertyDescriptor(proto, key);
+    if (!descriptor?.configurable) return;
+    const fn = descriptor[accessor] ?? descriptor.value;
+    if (typeof fn !== 'function') return;
+    const api = accessor === 'set' ? `${key}:set` : key;
+    const wrapped = function (this: object, ...args: unknown[]) {
+      const at = performance.now();
+      try { return fn.apply(this, args); }
+      finally {
+        const ms = performance.now() - at;
+        if (ms >= 10) records.push({ api, ms, at, target: this instanceof Element ? targetName(this) : styleTargets.get(this), stack: new Error().stack?.slice(0, 1600) });
+      }
+    };
+    Object.defineProperty(proto, key, descriptor[accessor] ? { ...descriptor, [accessor]: wrapped } : { ...descriptor, value: wrapped });
+    restores.push(() => Object.defineProperty(proto, key, descriptor));
+    observed.push(api);
+  };
+  for (const key of ['getBoundingClientRect', 'getClientRects', 'scrollIntoView', 'clientWidth', 'clientHeight', 'scrollHeight']) observe(Element.prototype, key);
+  for (const key of ['offsetWidth', 'offsetHeight', 'focus', 'innerText']) observe(HTMLElement.prototype, key);
+  // Vditor compiles markdown and assigns innerHTML outside React effects.
+  // Measure both without replacing its renderer or moving the completion mark.
+  observe(Element.prototype, 'innerHTML', 'set');
+  const lute = (window as unknown as { Lute?: { New(...args: unknown[]): Record<string, unknown> } }).Lute;
+  if (typeof lute?.New === 'function') {
+    const originalNew = lute.New;
+    lute.New = function (...args: unknown[]) {
+      const at = performance.now();
+      let instance: Record<string, unknown>;
+      try { instance = originalNew.apply(this, args); }
+      finally {
+        records.push({ api: 'Lute.New', ms: performance.now() - at, at });
+      }
+      const originalCompile = instance.Md2HTML;
+      if (typeof originalCompile === 'function') {
+        instance.Md2HTML = function (...compileArgs: unknown[]) {
+          const at = performance.now();
+          try { return originalCompile.apply(this, compileArgs); }
+          finally { records.push({ api: 'Lute.Md2HTML', ms: performance.now() - at, at }); }
+        };
+        restores.push(() => { instance.Md2HTML = originalCompile; });
+      }
+      return instance;
+    };
+    restores.push(() => { lute.New = originalNew; });
+    observed.push('Lute.New', 'Lute.Md2HTML');
+  }
+  observe(CSSStyleDeclaration.prototype, 'animationName');
+  const proxyAnimationName = !observed.includes('animationName');
+  if (proxyAnimationName) observed.push('animationName-proxy');
+  const originalGetComputedStyle = window.getComputedStyle;
+  window.getComputedStyle = ((element: Element, pseudoElt?: string | null) => {
+    const at = performance.now();
+    try {
+      const styles = originalGetComputedStyle.call(window, element, pseudoElt);
+      styleTargets.set(styles, targetName(element));
+      // WebKit can expose CSS properties through its native style object
+      // without a configurable JavaScript prototype getter. Read with the
+      // original receiver so its brand checks and native methods still work.
+      if (!proxyAnimationName) return styles;
+      const methods = new Map<PropertyKey, Function>();
+      return new Proxy(styles, {
+        get(target, key) {
+          if (key === 'animationName') {
+            const at = performance.now();
+            try { return Reflect.get(target, key, target); }
+            finally {
+              const ms = performance.now() - at;
+              if (ms >= 10) records.push({ api: 'animationName', ms, at, target: styleTargets.get(target), stack: new Error().stack?.slice(0, 1600) });
+            }
+          }
+          const value = Reflect.get(target, key, target);
+          if (typeof value !== 'function') return value;
+          if (!methods.has(key)) methods.set(key, value.bind(target));
+          return methods.get(key);
+        },
+      });
+    } finally {
+      const ms = performance.now() - at;
+      if (ms >= 10) records.push({ api: 'getComputedStyle', ms, at, target: targetName(element), stack: new Error().stack?.slice(0, 1600) });
+    }
+  }) as typeof window.getComputedStyle;
+  observed.push('getComputedStyle');
+  restores.push(() => { window.getComputedStyle = originalGetComputedStyle; });
+
+  // Timer elapsed time is scheduling evidence, not synchronous layout cost.
+  // Preserve the requested delay and actual fire to distinguish React's
+  // Suspense retry throttle from work that occupied the main thread.
+  // This function executes in WebKit. WDIO also includes Node's ambient timer
+  // overload, whose Timeout return type does not describe this browser API.
+  const originalSetTimeout = window.setTimeout;
+  const browserSetTimeout: (handler: TimerHandler, delay?: number, ...args: unknown[]) => number = originalSetTimeout;
+  window.setTimeout = ((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+    if (typeof handler !== 'function' || (delay ?? 0) < 50) {
+      return browserSetTimeout.call(window, handler, delay, ...args);
+    }
+    const record = { api: 'setTimeout', ms: 0, at: performance.now(), waitMs: delay, firedAt: undefined as number | undefined, stack: new Error().stack?.slice(0, 1600) };
+    records.push(record);
+    return browserSetTimeout.call(window, function (this: unknown, ...callbackArgs: unknown[]) {
+      record.firedAt = performance.now();
+      record.ms = record.firedAt - record.at;
+      return handler.apply(this, callbackArgs);
+    }, delay, ...args);
+  }) as typeof window.setTimeout;
+  restores.push(() => { window.setTimeout = originalSetTimeout; });
+  observed.push('setTimeout');
+  (window as unknown as { __perfLayoutProbe: { records: typeof records; restore(): void } }).__perfLayoutProbe = {
+    records, restore: () => restores.splice(0).reverse().forEach((restore) => restore()),
+  };
+  return { installed: true, observed };
+}
+
 /**
  * WebdriverIO's `waitUntil` retries rejected predicates until its timeout.
  * That's useful for transient DOM/protocol errors, but an invalid session or a

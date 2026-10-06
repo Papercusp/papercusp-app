@@ -36,6 +36,99 @@ export function isDatatypeTier(t: string): t is DatatypeTier {
 }
 
 /**
+ * The NATURE of a datatype (enterprise-data-sources-2026-10-01 D-001 / P-008): the one
+ * boundary between WORK and DATA. `work` = something to do (claimable by its audience);
+ * `record` = structured state of an entity; `document` = content read and searched as
+ * prose; `event` = something that happened at a point in time. Tier says HOW a datatype is
+ * stored; nature says WHAT it is. datatype_registry is the source of truth for nature
+ * (D-008); P-010 stamps it onto work_items rows at mint.
+ */
+export const DATATYPE_NATURES = ['work', 'record', 'document', 'event'] as const;
+export type DatatypeNature = (typeof DATATYPE_NATURES)[number];
+export function isDatatypeNature(n: unknown): n is DatatypeNature {
+  return typeof n === 'string' && (DATATYPE_NATURES as readonly string[]).includes(n);
+}
+
+/** Who may claim WORK (D-001): `human` work (email-draft-proposal) is never agent-claimable. */
+export const WORK_AUDIENCES = ['agent', 'human'] as const;
+export type WorkAudience = (typeof WORK_AUDIENCES)[number];
+export function isWorkAudience(a: unknown): a is WorkAudience {
+  return typeof a === 'string' && (WORK_AUDIENCES as readonly string[]).includes(a);
+}
+
+/**
+ * The built-in work_item kinds and their nature (D-013 §1). Migration 1318 seeds the same
+ * rows into datatype_registry (tier first-class, work_item_kind = the kind); this constant is
+ * the fallback for a workspace without those rows. A unit test pins the constant to the
+ * migration seed and to WORK_ITEM_KINDS, so the three cannot drift.
+ */
+export const BUILTIN_WORK_ITEM_KIND_NATURES = {
+  feature: { nature: 'work', audience: 'agent' },
+  chunk: { nature: 'work', audience: 'agent' },
+  bug: { nature: 'work', audience: 'agent' },
+  change: { nature: 'work', audience: 'agent' },
+  task: { nature: 'work', audience: 'agent' },
+} as const satisfies Record<string, { nature: DatatypeNature; audience: WorkAudience | null }>;
+export type BuiltinWorkItemKind = keyof typeof BUILTIN_WORK_ITEM_KIND_NATURES;
+export function isBuiltinWorkItemKind(id: string): id is BuiltinWorkItemKind {
+  return Object.prototype.hasOwnProperty.call(BUILTIN_WORK_ITEM_KIND_NATURES, id);
+}
+
+/** A nature plus its audience (non-null exactly when nature = work). */
+export interface DatatypeNatureSpec {
+  nature: DatatypeNature;
+  audience: WorkAudience | null;
+}
+
+/**
+ * D-013 §5 LEGACY rule — for data that predates natures (an imported package or bundle with
+ * no `nature`), NEVER a default for a new declaration: generic-kind keeps today's claim
+ * behaviour (work/agent), first-class and projection become records. Mirrors migration
+ * 1318's backfill and its expand-phase fill trigger.
+ */
+export function legacyNatureForTier(tier: DatatypeTier): DatatypeNatureSpec {
+  return tier === 'generic-kind' ? { nature: 'work', audience: 'agent' } : { nature: 'record', audience: null };
+}
+
+export type NatureSpecCheck =
+  | { ok: true; value: DatatypeNatureSpec }
+  | { ok: false; reason: 'invalid_nature' | 'audience_required' | 'audience_not_allowed'; message: string };
+
+/**
+ * Validate a nature + audience pair against the table CHECK (audience set exactly when
+ * nature = work). Work with no audience is REFUSED rather than defaulted to `agent`: the
+ * audience is what keeps human-decision work out of the agent queue, so it is declared, not
+ * assumed.
+ */
+export function checkNatureSpec(nature: unknown, audience: unknown): NatureSpecCheck {
+  if (!isDatatypeNature(nature)) {
+    return {
+      ok: false,
+      reason: 'invalid_nature',
+      message: `nature must be one of ${DATATYPE_NATURES.join(' | ')} (got ${JSON.stringify(nature)})`,
+    };
+  }
+  if (nature === 'work') {
+    if (!isWorkAudience(audience)) {
+      return {
+        ok: false,
+        reason: 'audience_required',
+        message: `nature "work" needs an audience: ${WORK_AUDIENCES.join(' | ')} (human work is never agent-claimable)`,
+      };
+    }
+    return { ok: true, value: { nature, audience } };
+  }
+  if (audience != null) {
+    return {
+      ok: false,
+      reason: 'audience_not_allowed',
+      message: `audience applies only to nature "work"; a ${nature} has no claimant — omit audience`,
+    };
+  }
+  return { ok: true, value: { nature, audience: null } };
+}
+
+/**
  * Derive a stable kebab slug (the datatype id / PK) from a free-text name. Lowercase,
  * non-alphanumerics → single dashes, trimmed. Pure → exhaustively unit-testable.
  * `'Bet Thesis'` → `'bet-thesis'`; `'  P&L  '` → `'p-l'`.
@@ -136,6 +229,10 @@ export interface DatatypeRow {
   tier: DatatypeTier;
   /** The registered work_item kind (generic-kind tier; accepted by work_items:create — P-001). */
   workItemKind: string | null;
+  /** D-001: work | record | document | event — the WORK/DATA boundary (source of truth, D-008). */
+  nature: DatatypeNature;
+  /** Who may claim it; non-null exactly when nature = work. */
+  audience: WorkAudience | null;
   /** JSON-Schema shape the kind's payload is validated against. */
   payloadSchema: Record<string, unknown> | null;
   /** Declarative editor + compact-rendering contract (P-024); never executable code. */
@@ -166,6 +263,10 @@ export interface UpsertDatatypeInput {
   description: string;
   tier: DatatypeTier;
   workItemKind?: string | null;
+  /** REQUIRED (P-008): every write states what the datatype IS. Checked by {@link checkNatureSpec}. */
+  nature: DatatypeNature;
+  /** Required when nature = work, refused otherwise. */
+  audience?: WorkAudience | null;
   payloadSchema?: Record<string, unknown> | null;
   display?: DatatypeDisplaySpec | null;
   authoritativeWriter?: string | null;
@@ -187,6 +288,8 @@ type DbRow = {
   description: string;
   tier: string;
   work_item_kind: string | null;
+  nature: string;
+  audience: string | null;
   payload_schema: Record<string, unknown> | null;
   display: Record<string, unknown> | null;
   authoritative_writer: string;
@@ -229,6 +332,11 @@ function mapRow(r: DbRow): DatatypeRow {
     description: r.description,
     tier: (isDatatypeTier(r.tier) ? r.tier : 'generic-kind'),
     workItemKind: r.work_item_kind,
+    // The column is NOT NULL + CHECKed (migration 1318); the fallback only guards a row read
+    // through a stale schema, and maps it by the same legacy rule the migration applied.
+    ...(isDatatypeNature(r.nature)
+      ? { nature: r.nature, audience: isWorkAudience(r.audience) ? r.audience : null }
+      : legacyNatureForTier(isDatatypeTier(r.tier) ? r.tier : 'generic-kind')),
     payloadSchema: parseJsonbMaybe(r.payload_schema),
     display: parsedDisplay?.ok ? parsedDisplay.value : null,
     authoritativeWriter: r.authoritative_writer,
@@ -246,7 +354,7 @@ function mapRow(r: DbRow): DatatypeRow {
 
 /** SELECT-list shared by every read (the raw VECTOR is never serialized back — only its presence). */
 const SELECT_COLS = (sql: postgres.Sql | postgres.TransactionSql) => sql`
-  id, workspace_id, pot_slug, title, description, tier, work_item_kind,
+  id, workspace_id, pot_slug, title, description, tier, work_item_kind, nature, audience,
   payload_schema, display, authoritative_writer, self_improvement, status, published, review_status, tags,
   (embedding IS NOT NULL) AS has_embedding, created_by, created_at, updated_at
 `;
@@ -266,14 +374,17 @@ export async function upsertDatatype(
   if (embeddingLiteral && (!input.embeddingMode || !input.embeddingProfile)) {
     throw new Error('upsertDatatype: a stored embedding requires exact mode and profile provenance');
   }
+  const natureCheck = checkNatureSpec(input.nature, input.audience ?? null);
+  if (!natureCheck.ok) throw new Error(`upsertDatatype: ${natureCheck.reason}: ${natureCheck.message}`);
+  const { nature, audience } = natureCheck.value;
   const rows = await sql<DbRow[]>`
     INSERT INTO harness_shared.datatype_registry
-      (id, workspace_id, pot_slug, title, description, tier, work_item_kind,
+      (id, workspace_id, pot_slug, title, description, tier, work_item_kind, nature, audience,
        payload_schema, display, authoritative_writer, self_improvement, published, tags,
        embedding, embedding_mode, embedding_profile, created_by, updated_at)
     VALUES (
       ${input.id}, ${input.workspaceId}, ${input.potSlug ?? null}, ${input.title},
-      ${input.description}, ${input.tier}, ${input.workItemKind ?? null},
+      ${input.description}, ${input.tier}, ${input.workItemKind ?? null}, ${nature}, ${audience},
       ${input.payloadSchema ? JSON.stringify(input.payloadSchema) : null}::text::jsonb,
       ${input.display ? JSON.stringify(input.display) : null}::text::jsonb,
       ${input.authoritativeWriter ?? 'papercusp'},
@@ -288,6 +399,8 @@ export async function upsertDatatype(
       description          = EXCLUDED.description,
       tier                 = EXCLUDED.tier,
       work_item_kind       = EXCLUDED.work_item_kind,
+      nature               = EXCLUDED.nature,
+      audience             = EXCLUDED.audience,
       payload_schema       = EXCLUDED.payload_schema,
       display              = EXCLUDED.display,
       authoritative_writer = EXCLUDED.authoritative_writer,
@@ -690,6 +803,8 @@ export async function installPublishedDatatype(
     description: s.description,
     tier: s.tier,
     workItemKind: s.workItemKind,
+    nature: s.nature,
+    audience: s.audience,
     payloadSchema: s.payloadSchema,
     display: s.display,
     authoritativeWriter: s.authoritativeWriter,

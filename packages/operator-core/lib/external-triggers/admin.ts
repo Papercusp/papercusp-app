@@ -69,6 +69,15 @@ export interface CreateExternalTriggerBindingInput {
   operationInput?: Record<string, unknown>;
   /** Internal compatibility marker: the legacy plan binding this replacement preserves. */
   operationMigrationFromBindingId?: string | null;
+  /**
+   * Literal input overlaid on the redacted routing envelope when a PLAN target
+   * launches (P-012, D-013 §5) — the same overlay the operation path applies.
+   */
+  planInput?: Record<string, unknown>;
+  /** Portable binding (P-012): queue only canonical events of this datatype. */
+  datatypeId?: string | null;
+  /** The trigger-pack installation that owns this binding (P-012). */
+  packInstallationId?: string | null;
   eventPattern: string;
   eventFilter?: Record<string, unknown>;
   stormPolicy?: Record<string, unknown>;
@@ -189,6 +198,12 @@ export interface ExternalTriggerBindingAdminRow {
     completedAt: string | null;
     error: string | null;
   } | null;
+  /**
+   * The trigger pack that owns this binding (P-013, D-016 §7). Arming an
+   * unreviewed pack binding goes through the pack review, not the toggle.
+   * Absent/null for hand-bound bindings; the admin snapshot always sets it.
+   */
+  pack?: { installationId: string; pluginName: string; reviewed: boolean } | null;
 }
 
 export type ExternalTriggerRunDisposition =
@@ -392,6 +407,9 @@ interface BindingDbRow {
   lastRunTriggeredAt: Date | string | null;
   lastRunCompletedAt: Date | string | null;
   lastRunError: string | null;
+  packInstallationId: string | null;
+  packPluginName: string | null;
+  packReviewed: boolean | null;
 }
 
 interface RunVisibilityDbRow {
@@ -835,7 +853,7 @@ export async function loadExternalTriggerRunVisibilities(
       FROM harness_shared.trigger_runs tr
       JOIN harness_shared.trigger_bindings b
         ON b.workspace_id = tr.workspace_id AND b.id = tr.binding_id
-      JOIN harness_shared.trigger_sources s
+      JOIN harness_shared.data_sources s
         ON s.workspace_id = b.workspace_id AND s.id = b.source_id
       LEFT JOIN harness_shared.trigger_deliveries d
         ON d.workspace_id = tr.workspace_id AND d.id = tr.delivery_id
@@ -883,6 +901,7 @@ function normalizedStormPolicy(raw: Record<string, unknown> = {}): Record<string
   return {
     windowSeconds: parsed.windowSeconds,
     maxRuns: parsed.maxRuns,
+    maxAgeSeconds: parsed.maxAgeSeconds,
   };
 }
 
@@ -905,7 +924,7 @@ export async function createExternalTriggerSource(
       }
     >
   >`
-    INSERT INTO harness_shared.trigger_sources
+    INSERT INTO harness_shared.data_sources
       (workspace_id, kind, config, credential_ref, status, created_by)
     VALUES (
       ${required(workspaceId, 'workspace_id')}, ${kind}, ${config}::text::jsonb,
@@ -958,7 +977,7 @@ export async function createExternalTriggerBinding(
   const planSlug = goalId || directGiven || operationGiven ? null : required(input.planSlug, 'plan_slug');
   const eventPattern = required(input.eventPattern, 'event_pattern');
   const sources = await sql<Array<{ kind: string }>>`
-    SELECT kind FROM harness_shared.trigger_sources
+    SELECT kind FROM harness_shared.data_sources
      WHERE workspace_id = ${ws} AND id = ${sourceId}::uuid
      LIMIT 1`;
   if (!sources[0]) throw new Error(`external_trigger_unknown_source:${sourceId}`);
@@ -1003,6 +1022,21 @@ export async function createExternalTriggerBinding(
   const eventFilter = JSON.stringify(input.eventFilter ?? {});
   const execution = parseAgenticPlanExecutionTarget(input.execution);
   if ((goalId || directGiven || operationGiven) && execution) throw new Error('external_trigger_non_plan_binding_execution_unsupported');
+  if (input.planInput !== undefined && (goalId || directGiven || operationGiven)) {
+    throw new Error('external_trigger_plan_input_requires_plan_target');
+  }
+  if (
+    input.planInput !== undefined &&
+    (input.planInput === null || typeof input.planInput !== 'object' || Array.isArray(input.planInput))
+  ) {
+    throw new Error('external_trigger_plan_input_invalid');
+  }
+  const datatypeId = input.datatypeId?.trim() || null;
+  if (datatypeId) {
+    const datatype = await getDatatype(sql, ws, datatypeId);
+    if (!datatype) throw new Error(`external_trigger_unknown_datatype:${datatypeId}`);
+  }
+  const packInstallationId = input.packInstallationId?.trim() || null;
   const action = JSON.stringify({
     type: operationGiven
       ? 'blueprint-operation'
@@ -1021,6 +1055,7 @@ export async function createExternalTriggerBinding(
             : {}),
         }
       : {}),
+    ...(planGiven && input.planInput && Object.keys(input.planInput).length > 0 ? { input: input.planInput } : {}),
     ...(execution ? { execution } : {}),
   });
   // A binding with no explicit storm policy is UNBOUNDED under the landed
@@ -1030,8 +1065,24 @@ export async function createExternalTriggerBinding(
   // comments. So a social source falls back to its per-platform coalesce-with-cap
   // default (P-023) instead of to unbounded. An explicit caller-supplied policy
   // still wins, and non-social sources are untouched.
-  const socialDefault = input.stormPolicy ? null : defaultSocialStormPolicyForSourceKind(sources[0].kind);
-  const stormPolicy = socialDefault ?? normalizedStormPolicy(input.stormPolicy);
+  //
+  // A policy that states ONLY the dispatch validity window (maxAgeSeconds,
+  // WI-10004920) says nothing about rate, so it must not displace that rate
+  // default either: the window is overlaid on the social default instead.
+  const stated = input.stormPolicy;
+  const statedMaxAge = stated?.maxAgeSeconds ?? stated?.max_age_seconds;
+  const statesRate =
+    stated !== undefined &&
+    Object.keys(stated).some((key) => key !== 'maxAgeSeconds' && key !== 'max_age_seconds');
+  const socialDefault = statesRate ? null : defaultSocialStormPolicyForSourceKind(sources[0].kind);
+  const stormPolicy = socialDefault
+    ? {
+        ...socialDefault,
+        ...(statedMaxAge === undefined || statedMaxAge === null
+          ? {}
+          : { maxAgeSeconds: parseStormPolicy({ maxAgeSeconds: statedMaxAge }).maxAgeSeconds }),
+      }
+    : normalizedStormPolicy(stated);
   const stormPolicyJson = JSON.stringify(stormPolicy);
   const rows = await sql<
     Array<
@@ -1044,12 +1095,13 @@ export async function createExternalTriggerBinding(
     INSERT INTO harness_shared.trigger_bindings
       (workspace_id, source_id, plan_harness_slug, plan_slug, goal_id,
        work_item_harness_slug, work_item_kind, event_pattern, event_filter,
-       action, armed, storm_policy, created_by)
+       action, armed, storm_policy, created_by, datatype_id, pack_installation_id)
     VALUES (
       ${ws}, ${sourceId}::uuid, ${planHarnessSlug}, ${planSlug}, ${goalId},
       ${workItemHarnessSlug}, ${workItemKind}, ${eventPattern},
       ${eventFilter}::text::jsonb, ${action}::text::jsonb, FALSE,
-      ${stormPolicyJson}::text::jsonb, ${input.createdBy?.trim() || null}
+      ${stormPolicyJson}::text::jsonb, ${input.createdBy?.trim() || null},
+      ${datatypeId}, ${packInstallationId}::uuid
     )
     RETURNING id::text,
               source_id::text AS "sourceId",
@@ -1138,7 +1190,7 @@ async function migrationBindingRow(
            b.created_at AS "createdAt",
            b.updated_at AS "updatedAt"
       FROM harness_shared.trigger_bindings b
-      JOIN harness_shared.trigger_sources s
+      JOIN harness_shared.data_sources s
         ON s.workspace_id = b.workspace_id AND s.id = b.source_id
      WHERE b.workspace_id = ${workspaceId}
        AND b.detached_at IS NULL
@@ -1219,7 +1271,13 @@ export async function migrateExternalTriggerPlanBindingToOperation(
       replacement.sourceId !== legacy.sourceId ||
       replacement.eventPattern !== legacy.eventPattern ||
       !isDeepStrictEqual(replacement.eventFilter, legacy.eventFilter) ||
-      !isDeepStrictEqual(replacement.stormPolicy, legacy.stormPolicy)
+      // Parity is about the EFFECTIVE policy, not the stored bytes: a new binding is
+      // written fully normalized (every bounded default stated, incl. maxAgeSeconds —
+      // WI-10004920), while a legacy row may still carry the older, shorter shape.
+      !isDeepStrictEqual(
+        normalizedStormPolicy(replacement.stormPolicy),
+        normalizedStormPolicy(legacy.stormPolicy),
+      )
     ) {
       throw new Error('external_trigger_binding_migration_parity_failed');
     }
@@ -1299,7 +1357,7 @@ export async function ensureExternalTriggerBinding(
              b.created_at AS "createdAt",
              b.updated_at AS "updatedAt"
         FROM harness_shared.trigger_bindings b
-        JOIN harness_shared.trigger_sources s
+        JOIN harness_shared.data_sources s
           ON s.workspace_id = b.workspace_id AND s.id = b.source_id
        WHERE b.workspace_id = ${ws}
          AND b.source_id = ${sourceId}::uuid
@@ -1325,7 +1383,7 @@ export async function ensureExternalTriggerBinding(
            AND b.action IS DISTINCT FROM ${action}::text::jsonb
         RETURNING b.id::text,
                   b.source_id::text AS "sourceId",
-                  (SELECT kind FROM harness_shared.trigger_sources s
+                  (SELECT kind FROM harness_shared.data_sources s
                     WHERE s.workspace_id = ${ws} AND s.id = b.source_id) AS "sourceKind",
                   b.plan_harness_slug AS "planHarnessSlug",
                   b.plan_slug AS "planSlug",
@@ -1435,7 +1493,7 @@ export async function loadExternalTriggerAdminSnapshot(
                WHERE d.outcome = 'failed'
                  AND d.received_at >= now() - interval '24 hours'
              )::int AS "failedDeliveries24h"
-        FROM harness_shared.trigger_sources s
+        FROM harness_shared.data_sources s
         LEFT JOIN harness_shared.trigger_bindings b
           ON b.workspace_id = s.workspace_id
          AND b.source_id = s.id
@@ -1466,10 +1524,15 @@ export async function loadExternalTriggerAdminSnapshot(
              lr.status AS "lastRunStatus",
              lr.triggered_at AS "lastRunTriggeredAt",
              lr.completed_at AS "lastRunCompletedAt",
-             lr.error AS "lastRunError"
+             lr.error AS "lastRunError",
+             pi.id::text AS "packInstallationId",
+             pi.plugin_name AS "packPluginName",
+             (pi.reviewed_fingerprint IS NOT NULL) AS "packReviewed"
         FROM harness_shared.trigger_bindings b
-        JOIN harness_shared.trigger_sources s
+        JOIN harness_shared.data_sources s
           ON s.workspace_id = b.workspace_id AND s.id = b.source_id
+        LEFT JOIN harness_shared.trigger_pack_installations pi
+          ON pi.workspace_id = b.workspace_id AND pi.id = b.pack_installation_id
         LEFT JOIN LATERAL (
           SELECT tr.id, tr.status, tr.triggered_at, tr.completed_at, tr.error
             FROM harness_shared.trigger_runs tr
@@ -1531,6 +1594,10 @@ export async function loadExternalTriggerAdminSnapshot(
               completedAt: iso(row.lastRunCompletedAt),
               error: row.lastRunError,
             }
+          : null,
+      pack:
+        row.packInstallationId && row.packPluginName
+          ? { installationId: row.packInstallationId, pluginName: row.packPluginName, reviewed: row.packReviewed === true }
           : null,
     }),
   );
@@ -1748,7 +1815,7 @@ export async function queueExternalTriggerLastEventTestRun(
                d.source_id::text AS "sourceId",
                s.kind AS "sourceKind"
           FROM harness_shared.trigger_deliveries d
-          JOIN harness_shared.trigger_sources s
+          JOIN harness_shared.data_sources s
             ON s.workspace_id = d.workspace_id AND s.id = d.source_id
          WHERE d.workspace_id = ${ws}
            AND d.source_id = ${binding.sourceId}::uuid
@@ -1848,6 +1915,33 @@ export async function queueExternalTriggerLastEventTestRun(
   });
 }
 
+/**
+ * Arming a binding a trigger pack owns needs the pack's review (P-013, D-016 §3).
+ * `code` is stable for callers to map: the agent tool returns it, the admin route
+ * answers 409 with the installation so the Workflows tab can open the pack review.
+ */
+export class TriggerPackReviewRequiredError extends Error {
+  readonly code = 'trigger_pack_review_required';
+  constructor(
+    readonly bindingId: string,
+    readonly installationId: string,
+    readonly pluginName: string,
+  ) {
+    super(
+      `binding ${bindingId} belongs to trigger pack ${pluginName}, which has no current review; ` +
+        'review the pack and arm it with trigger-packs:arm',
+    );
+    this.name = 'TriggerPackReviewRequiredError';
+  }
+}
+
+/**
+ * The single arm chokepoint (triggers:arm, triggers:disarm, the Workflows toggle).
+ * Disarming is always allowed. Arming a pack-owned binding requires its
+ * installation to carry a review; the check sits inside the UPDATE itself, so a
+ * concurrent return-to-review (which clears the review before disarming) cannot
+ * be raced past.
+ */
 export async function setExternalTriggerBindingArmed(
   sql: postgres.Sql,
   workspaceId: string,
@@ -1855,12 +1949,35 @@ export async function setExternalTriggerBindingArmed(
   armed: boolean,
 ): Promise<{ id: string; armed: boolean; updatedAt: string } | null> {
   const rows = await sql<Array<{ id: string; armed: boolean; updatedAt: Date | string }>>`
-    UPDATE harness_shared.trigger_bindings
+    UPDATE harness_shared.trigger_bindings b
        SET armed = ${armed}, updated_at = now()
-     WHERE workspace_id = ${workspaceId} AND id = ${id}::uuid
-       AND detached_at IS NULL
-     RETURNING id::text, armed, updated_at AS "updatedAt"`;
-  if (!rows[0]) return null;
+     WHERE b.workspace_id = ${workspaceId} AND b.id = ${id}::uuid
+       AND b.detached_at IS NULL
+       AND (
+         ${armed}::boolean = FALSE
+         OR b.pack_installation_id IS NULL
+         OR EXISTS (
+           SELECT 1 FROM harness_shared.trigger_pack_installations i
+            WHERE i.workspace_id = b.workspace_id
+              AND i.id = b.pack_installation_id
+              AND i.reviewed_fingerprint IS NOT NULL
+         )
+       )
+     RETURNING b.id::text, b.armed, b.updated_at AS "updatedAt"`;
+  if (!rows[0]) {
+    if (armed) {
+      const [pack] = await sql<Array<{ installationId: string; pluginName: string }>>`
+        SELECT i.id::text AS "installationId", i.plugin_name AS "pluginName"
+          FROM harness_shared.trigger_bindings b
+          JOIN harness_shared.trigger_pack_installations i
+            ON i.workspace_id = b.workspace_id AND i.id = b.pack_installation_id
+         WHERE b.workspace_id = ${workspaceId} AND b.id = ${id}::uuid
+           AND b.detached_at IS NULL
+           AND i.reviewed_fingerprint IS NULL`;
+      if (pack) throw new TriggerPackReviewRequiredError(id, pack.installationId, pack.pluginName);
+    }
+    return null;
+  }
   return { ...rows[0], updatedAt: iso(rows[0].updatedAt) as string };
 }
 
@@ -1912,12 +2029,20 @@ export async function updateExternalTriggerBindingStormPolicy(
   // `maxRuns: null` stays ACCEPTED at the boundary (the admin route's schema
   // still nulls it) but no longer MEANS unbounded — parseStormPolicy resolves
   // it to the bounded default, and the row is written with that cap.
-  input: { maxRuns: number | null; windowSeconds: number },
+  input: { maxRuns: number | null; windowSeconds: number; maxAgeSeconds?: number },
 ): Promise<{ id: string; stormPolicy: Record<string, unknown>; updatedAt: string } | null> {
-  const stormPolicy: Record<string, unknown> = normalizedStormPolicy({
+  const normalized = normalizedStormPolicy({
     maxRuns: input.maxRuns,
     windowSeconds: input.windowSeconds,
+    ...(input.maxAgeSeconds === undefined ? {} : { maxAgeSeconds: input.maxAgeSeconds }),
   });
+  // An update that does not mention maxAgeSeconds must not reset a stored custom
+  // window to the default (WI-10004920): omit it here and let the jsonb merge below
+  // keep whatever the row already carries.
+  const stormPolicy: Record<string, unknown> =
+    input.maxAgeSeconds === undefined
+      ? { windowSeconds: normalized.windowSeconds, maxRuns: normalized.maxRuns }
+      : normalized;
   const rows = await sql<
     Array<{
       id: string;
@@ -1926,7 +2051,7 @@ export async function updateExternalTriggerBindingStormPolicy(
     }>
   >`
     UPDATE harness_shared.trigger_bindings
-       SET storm_policy = ${JSON.stringify(stormPolicy)}::text::jsonb,
+       SET storm_policy = COALESCE(storm_policy, '{}'::jsonb) || ${JSON.stringify(stormPolicy)}::text::jsonb,
            updated_at = now()
      WHERE workspace_id = ${workspaceId} AND id = ${id}::uuid
        AND detached_at IS NULL

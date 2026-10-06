@@ -84,6 +84,82 @@ export interface PipelineEventRow {
   createdAtMs: number;
 }
 
+export interface PipelineEventWindowRead {
+  status: 'complete' | 'capped' | 'unavailable' | 'invalid';
+  windowStartMs: number;
+  windowEndMs: number;
+  total: number | null;
+  rows: PipelineEventRow[];
+  reason: string | null;
+}
+
+/**
+ * Exact historical gate window, including boundary-crossing fires. Unlike the display
+ * timeline, a failed read or bounded result cannot masquerade as an empty population.
+ * The rows and their count come from ONE statement snapshot. The gate ledger supplies
+ * its single-homed nonterminal vocabulary; this storage layer does not classify outcomes.
+ */
+export async function readGatePipelineWindow(
+  target: { workspaceId: string; installSlug: string },
+  input: { windowStartMs: number; windowEndMs: number; nonTerminalStatuses: readonly string[]; maxRows?: number },
+  sql?: Sql,
+): Promise<PipelineEventWindowRead> {
+  const { windowStartMs, windowEndMs } = input;
+  const maxRows = input.maxRows ?? 10_000;
+  const base = { windowStartMs, windowEndMs, total: null, rows: [] };
+  if (!target.workspaceId.trim() || !target.installSlug.trim() ||
+      !Number.isSafeInteger(windowStartMs) || windowStartMs < 0 ||
+      !Number.isSafeInteger(windowEndMs) || windowStartMs >= windowEndMs ||
+      !Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > 50_000) {
+    return { ...base, status: 'invalid', reason: 'An exact scope, window and valid row budget are required.' };
+  }
+  try {
+    const rows = await db(sql)<{
+      id: string; kind: PipelineEventKind; status: string; detail: unknown;
+      created_at: Date; population_count: string | number;
+    }[]>`
+      WITH scoped AS MATERIALIZED (
+        SELECT id, kind, status, detail, created_at
+          FROM harness_shared.pipeline_events
+         WHERE workspace_id = ${target.workspaceId} AND install_slug = ${target.installSlug}
+           AND kind IN ('green_checkpoint_fire', 'green_checkpoint')
+      ), relevant_fires AS (
+        SELECT detail->>'gateFireId' AS fire_id FROM scoped
+         WHERE created_at >= ${new Date(windowStartMs)} AND created_at <= ${new Date(windowEndMs)}
+        UNION
+        SELECT a.detail->>'gateFireId' FROM scoped a
+         WHERE a.kind = 'green_checkpoint_fire' AND a.created_at <= ${new Date(windowEndMs)}
+           AND NOT EXISTS (
+             SELECT 1 FROM scoped o WHERE o.kind = 'green_checkpoint'
+               AND o.detail->>'gateFireId' = a.detail->>'gateFireId'
+               AND NOT (o.status = ANY(${[...input.nonTerminalStatuses]}::text[]))
+               AND o.created_at < ${new Date(windowStartMs)}
+           )
+      )
+      SELECT id::text, kind, status, detail, created_at, count(*) OVER () AS population_count
+        FROM scoped
+       WHERE (created_at >= ${new Date(windowStartMs)} AND created_at <= ${new Date(windowEndMs)})
+          OR detail->>'gateFireId' IN (SELECT fire_id FROM relevant_fires)
+       ORDER BY created_at, id LIMIT ${maxRows + 1}
+    `;
+    const total = rows.length ? Number(rows[0]!.population_count) : 0;
+    if (!Number.isSafeInteger(total) || total < rows.length ||
+        (total <= maxRows && total !== rows.length) ||
+        rows.some((r) => Number(r.population_count) !== total)) {
+      return { ...base, status: 'unavailable', reason: 'The ledger population count is invalid.' };
+    }
+    return {
+      windowStartMs, windowEndMs, total,
+      status: total > maxRows ? 'capped' : 'complete',
+      reason: total > maxRows ? 'The complete historical population exceeds the row budget.' : null,
+      rows: rows.slice(0, maxRows).map((r) => ({ id: r.id, kind: r.kind, status: r.status,
+        detail: normalizeDetail(r.detail), createdAtMs: new Date(r.created_at).getTime() })),
+    };
+  } catch (error) {
+    return { ...base, status: 'unavailable', reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /**
  * fleet-reliability-verification-2026-07-10 P-009: read `getBuildInfo()` (the
  * SAME cached sha/version resolver `/api/health` and the runtime-vintage

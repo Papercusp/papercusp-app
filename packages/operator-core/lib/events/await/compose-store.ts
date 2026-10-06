@@ -20,6 +20,7 @@ import { getOrgPg } from '@papercusp/db-org';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
 import type { WakeHandle, TimeoutBehavior } from './types';
 import { composedWakeSummary } from './compose-spec';
+import { AWAIT_CANCEL_REASONS } from './cancel-reasons';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -363,7 +364,7 @@ export async function voidTreeDescendants(rootId: number): Promise<{ leaves: num
   const ws = eventsWs();
   const leafRows = await sql`
     UPDATE harness_shared.event_awaits
-       SET cancelled_at = now()
+       SET cancelled_at = now(), cancel_reason = ${AWAIT_CANCEL_REASONS.composedTreeVoided}
      WHERE workspace_id = ${ws} AND root_id = ${rootId}
        AND node_id IS NOT NULL
        AND fired_at IS NULL AND cancelled_at IS NULL
@@ -408,7 +409,8 @@ export async function cancelComposedTree(input: {
   `;
   await sql`
     UPDATE harness_shared.event_awaits
-       SET cancelled_at = now(), cancel_reason = ${input.source === 'operator' ? 'operator' : null}
+       SET cancelled_at = now(),
+           cancel_reason = ${input.source === 'operator' ? 'operator' : AWAIT_CANCEL_REASONS.composedTreeCancelled}
      WHERE workspace_id = ${ws} AND root_id = ${input.rootId}
        AND fired_at IS NULL AND cancelled_at IS NULL
   `;
@@ -576,7 +578,8 @@ export async function reconcileComposedRoot(rootId: number, expireIfDue = false)
       }
     }
     await tx`
-      UPDATE harness_shared.event_awaits SET cancelled_at = now()
+      UPDATE harness_shared.event_awaits
+         SET cancelled_at = now(), cancel_reason = ${AWAIT_CANCEL_REASONS.composedRootSettled}
        WHERE workspace_id = ${ws} AND root_id = ${rootId} AND node_id IS NOT NULL
          AND fired_at IS NULL AND cancelled_at IS NULL
     `;

@@ -36,5 +36,6 @@ export default defineVitestConfig({
   setupFiles: [
     resolve(__dirname, 'lib/coverage-census/attribution/setup-vitest.ts'),
     resolve(__dirname, 'lib/detached-imports/setup-vitest.ts'),
+    resolve(__dirname, 'lib/release/dependency-copy-isolation.setup-vitest.ts'),
   ],
 });

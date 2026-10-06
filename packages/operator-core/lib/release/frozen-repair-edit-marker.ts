@@ -21,12 +21,14 @@
  * writer would give up.
  */
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   normalizeRepoPath,
   type FrozenCandidateRepairQueue,
 } from './frozen-candidate-repair-queue';
+import type { GateVerdictTarget } from './gate-verdict-target';
 
 export type FrozenRepairMarkerLegStatus = 'red' | 'admitted' | 'green';
 
@@ -39,6 +41,8 @@ export interface FrozenRepairMarkerLeg {
 }
 
 export interface FrozenRepairEditMarker {
+  /** The workspace/install whose repair queue produced this marker. */
+  scope?: GateVerdictTarget;
   candidate: string;
   repairHead: string;
   phase: string;
@@ -57,9 +61,26 @@ export interface FrozenRepairEditMarker {
   legs: FrozenRepairMarkerLeg[];
 }
 
-export function frozenRepairMarkerPath(): string {
+function concreteTarget(target: GateVerdictTarget | null | undefined): target is GateVerdictTarget {
+  return Boolean(
+    target &&
+      typeof target.workspaceId === 'string' &&
+      target.workspaceId.trim() &&
+      target.workspaceId.trim() !== '*' &&
+      typeof target.installSlug === 'string' &&
+      target.installSlug.trim() &&
+      target.installSlug.trim() !== '*',
+  );
+}
+
+/** Each workspace/install pair gets a separate file under the shared state directory. */
+export function frozenRepairMarkerPath(target: GateVerdictTarget | null | undefined): string | null {
+  if (!concreteTarget(target)) return null;
   const base = process.env.PAPERCUSP_STATE_DIR ?? join(homedir(), '.papercusp', 'state');
-  return join(base, 'frozen-repair-edit-marker.json');
+  const scopeKey = createHash('sha256')
+    .update(`${target.workspaceId.trim()}\0${target.installSlug.trim()}`)
+    .digest('hex');
+  return join(base, 'frozen-repair-edit-markers', `${scopeKey}.json`);
 }
 
 /**
@@ -69,9 +90,20 @@ export function frozenRepairMarkerPath(): string {
  */
 export function projectFrozenRepairMarker(
   queue: FrozenCandidateRepairQueue | null,
-  path: string = frozenRepairMarkerPath(),
+  targetOrPath?: GateVerdictTarget | string | null,
 ): void {
   try {
+    // A string is an explicit file override used by focused tests/tools. Production
+    // callers pass GateVerdictTarget; missing or wildcard scope must never write to
+    // a process-global marker that another install can observe.
+    const target = typeof targetOrPath === 'object' ? targetOrPath : null;
+    const path =
+      typeof targetOrPath === 'string'
+        ? targetOrPath
+        : target
+          ? frozenRepairMarkerPath(target)
+          : null;
+    if (!path) return;
     if (!queue || queue.phase === 'ready-to-test') {
       // `ready-to-test` is excluded for the same reason the collision detector excludes it:
       // no repair exists yet, so an edit races nothing.
@@ -79,6 +111,7 @@ export function projectFrozenRepairMarker(
       return;
     }
     const marker: FrozenRepairEditMarker = {
+      ...(concreteTarget(target) ? { scope: { workspaceId: target.workspaceId.trim(), installSlug: target.installSlug.trim() } } : {}),
       candidate: queue.candidate,
       repairHead: queue.repairHead,
       phase: queue.phase,
@@ -109,14 +142,31 @@ export function projectFrozenRepairMarker(
 }
 
 export function readFrozenRepairMarker(
-  path: string = frozenRepairMarkerPath(),
+  targetOrPath?: GateVerdictTarget | string | null,
 ): FrozenRepairEditMarker | null {
   try {
+    const target = typeof targetOrPath === 'object' ? targetOrPath : null;
+    const path =
+      typeof targetOrPath === 'string'
+        ? targetOrPath
+        : target
+          ? frozenRepairMarkerPath(target)
+          : null;
+    if (!path || (target && !concreteTarget(target))) return null;
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
     if (!parsed || typeof parsed !== 'object') return null;
     const m = parsed as Record<string, unknown>;
     if (typeof m.candidate !== 'string' || typeof m.repairHead !== 'string') return null;
     if (!Array.isArray(m.failingPaths)) return null;
+    if (target) {
+      const scope = m.scope;
+      if (!scope || typeof scope !== 'object') return null;
+      const storedScope = scope as Record<string, unknown>;
+      if (
+        storedScope.workspaceId !== target.workspaceId.trim() ||
+        storedScope.installSlug !== target.installSlug.trim()
+      ) return null;
+    }
     // P-022 fields are tolerated when absent (a marker written before P-022): the guard then
     // sees an empty ledger, which is the honest reading of a row that recorded no admissions.
     const strings = (v: unknown): string[] =>
@@ -132,6 +182,7 @@ export function readFrozenRepairMarker(
         })
       : [];
     return {
+      ...(m.scope && typeof m.scope === 'object' ? { scope: m.scope as GateVerdictTarget } : {}),
       candidate: m.candidate,
       repairHead: m.repairHead,
       phase: typeof m.phase === 'string' ? m.phase : 'unknown',

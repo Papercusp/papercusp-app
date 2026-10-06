@@ -15,7 +15,7 @@
  *     so the gap is fixed when the rubric is written, not discovered at grading.
  */
 import { resolveBarEvidenceRuntime, type BarEvidenceRuntime } from './acceptance-bar-evidence-runtime';
-import { servingRuntimesMentioned, type ServingRuntimeId } from './serving-runtimes';
+import { evidenceRuntimesMentioned, type EvidenceRuntimeId } from './serving-runtimes';
 
 /** Ratings that assert the change is not (yet) observable on some runtime. */
 export function ratingNeedsRuntimeCitation(rating: string | null | undefined): boolean {
@@ -34,7 +34,7 @@ const SHA_RE = /\b(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b/i;
 
 export interface RuntimeCitationGap {
   missing: Array<'runtime' | 'sha'>;
-  runtimesCited: ServingRuntimeId[];
+  runtimesCited: EvidenceRuntimeId[];
 }
 
 export function validateRuntimeCitation(input: {
@@ -45,7 +45,7 @@ export function validateRuntimeCitation(input: {
   if (input.evidencePlane !== 'live' && input.evidencePlane !== 'deployed') return null;
   if (!ratingNeedsRuntimeCitation(input.rating)) return null;
   const evidence = input.evidence ?? '';
-  const runtimesCited = servingRuntimesMentioned(evidence);
+  const runtimesCited = evidenceRuntimesMentioned(evidence);
   const missing: Array<'runtime' | 'sha'> = [];
   if (runtimesCited.length === 0) missing.push('runtime');
   if (!SHA_RE.test(evidence)) missing.push('sha');
@@ -56,7 +56,7 @@ type CitationCriterion = {
   key: string;
   barKey?: string;
   evidencePlane?: 'tree' | 'deployed' | 'live';
-  evidenceRuntime?: ServingRuntimeId;
+  evidenceRuntime?: EvidenceRuntimeId;
   model?: string;
   method?: string;
   driftMarkers?: string;
@@ -92,9 +92,10 @@ export function runtimeCitationRefusal(
     error:
       `acceptance_runtime_citation_missing: an unknown/mismatch/not-deployed rating on a live or deployed BAR is a claim about ONE ` +
       `runtime, so its evidence must name that runtime (release-operator/:3070, staging-operator/:3170, bg-host, gateway, ` +
-      `embed-sidecar, psu-pty-host, desktop-shell) AND the build sha you measured there. ${gaps.join('; ')}. ` +
+      `embed-sidecar, psu-pty-host, desktop-shell, or runtime-vintage:<workspace>/<unit>@<host>) AND the build sha you measured there. ${gaps.join('; ')}. ` +
       `Read dev:pipeline_position { path } → servingRuntimes for each runtime's build and containsChange — the change may ` +
-      `already be live on the runtime the BAR is about, in which case grade it there instead of waiting on main.`,
+      `already be live on the runtime the BAR is about, in which case grade it there instead of waiting on main. ` +
+      `For a vintage reference, read deploys:vintage and match the exact workspace/unit/host row; a missing or unmeasured build stays unknown.`,
   };
 }
 

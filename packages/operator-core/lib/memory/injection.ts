@@ -33,6 +33,9 @@ import { getMemoryBackend, type MemoryEntry, type SearchLegStats } from './backe
 // Type-only: erased at build, so `recall-stats` stays a dynamic import on the
 // telemetry path (see the writer below) rather than being pulled in eagerly.
 import type { CorpusAdmissionDropReason, CorpusAdmissionStats, RecallAdmissionStats } from './recall-stats';
+import { pushSearchFloors } from './push-search-floors';
+export { MEMORY_INJECTION_COSINE_FLOOR, MEMORY_INJECTION_LEX_FLOOR, pushSearchFloors } from './push-search-floors';
+export type { PushSearchFloors } from './push-search-floors';
 import { admittedByLeg, collapseNearDuplicates } from './recall-admission';
 // P-003. Pure — no I/O, no PG, and its two imports are type-only, so this stays
 // a static import while the SNAPSHOT read (which does pull the search graph)
@@ -44,7 +47,7 @@ import { alreadySurfacedIds, currentSessionEpoch, stampSurfaced } from './sessio
 import { hiveScopeKey, potSlugFromScope, resolvePotSlugsForHarnesses } from './hive-scope';
 import { lexicalQueryText, retrievalQueryText, toRecallQuery, type RecallQueryInput } from './recall-query';
 import { memoryTierOf } from './two-tier';
-import { runJevMemoryGate } from './jev-memory-gate';
+import { jevFunnelEntry, jevMemoryBudgetMs, runJevMemoryGate } from './jev-memory-gate';
 import { annotateSupersededMemory } from './temporal-render';
 import { systemDistinctId } from '../flag-distinct-id';
 import {
@@ -53,6 +56,8 @@ import {
   isMemoryDegraded,
   noteMemoryFailure,
   withMemoryTimeout,
+  createMemoryWorkDeadline,
+  type MemoryWorkDeadline,
 } from './op-deadline';
 
 // P-016: Mirrors EPHEMERAL_BENCHMARK_SLUG_RE in harness/improvements/watchdog.ts.
@@ -80,6 +85,21 @@ const EPHEMERAL_SLUG_RE =
  */
 
 export interface MemoryInjectionInput {
+  /** Shared with prompt preparation and both recall legs; phases cannot reset it. */
+  deadline?: MemoryWorkDeadline;
+  /**
+   * Epoch ms after which the caller's client stops waiting for the response (a
+   * hook's wall, measured from when the request arrived). Jev waits only for what
+   * is left of it (jev-memory-gate: jevMemoryWaitMs). Absent: no client wall.
+   */
+  respondByMs?: number;
+  /**
+   * Whether the caller still waits on this build (injection-block-cache
+   * MemoryBlockBuildContext). Read when Jev's time is set: once it is false the
+   * build answers nobody, so `respondByMs` no longer bounds Jev and only the
+   * build's own deadline does. Absent: treated as waiting.
+   */
+  callerWaiting?: () => boolean;
   /**
    * Per-user memory scope. Omit (or pass null) on workspace-bearer
    * routes that don't have a session user — the helper will then
@@ -181,6 +201,17 @@ export interface MemoryInjectionInput {
    * never affects recall/dedup.
    */
   telemetrySurface?: string;
+  /**
+   * Latency opt-in for a port whose build runs under a hard deadline: overlap
+   * the hybrid backend's `cosine-gated` lexical leg with its cosine leg instead
+   * of running them in series (`SearchOptionsCommon.overlapGatedLexical`).
+   * The recalled set is unchanged; the cost is one discarded lexical query on a
+   * call whose cosine set is empty. Turn-start sets it (WI-10004485: the gate
+   * closed on 0.4% of its recalls while the serial leg cost p50 386 ms of the
+   * 2 s build deadline); ports with a materially higher empty-cosine rate keep
+   * the strict sequence.
+   */
+  overlapGatedLexical?: boolean;
 }
 
 /**
@@ -274,152 +305,6 @@ function reinjectWindowMs(): number {
   return Number.isFinite(raw) && raw >= 0 ? raw : 120_000;
 }
 
-/**
- * Auto-inject relevance floor (memory-backend-improve-and-hybrid P-001 / P-031 /
- * D-003; RE-CALIBRATED by context-injection-audit-2026-07-28 P-050 / D-058).
- * The PUSH path applies an absolute cosine floor so an off-topic turn is NOT
- * injected with nearest-neighbour noise — the hard-negative FP fix, where there
- * is no LLM in the loop to filter the inject. The push path FAVORS PRECISION: an
- * irrelevant inject pollutes the turn, a missed one is recoverable via the pull
- * path.
- *
- * ⚠ THE PREVIOUS VALUE (0.45) WAS MEASURED WHOLLY INERT — not weak, INERT. In the
- * 2026-08-02 re-sweep (150 gold queries, real corpus.v1, production `cosine-gated`
- * contract) floor 0.45 was IDENTICAL TO NO FLOOR AT ALL in every column: hard-neg
- * FP@5 100%, R@10 98%, MRR 0.92, exact-id MRR 1.00, 0 positives emptied — the same
- * row as floor 0.00. D-006 calibrated 0.45 when the classes were separable
- * (hard-negatives ~0.385 vs real hits ~0.51-0.58); the embedder flip to harrier@1024
- * (P-014/P-015) moved the whole distribution up and nobody re-swept, so the floor
- * sat BELOW the weakest off-topic query's top score (0.4658) and could not reject
- * a single one. The stale doc-comment that used to live here quoted the old space's
- * numbers (FP@5 100%→17%, R@10 ~82%) and read as if it still held.
- *
- * 0.58 is BOTH the F1-max (0.947) and the knee of the marginal-cost curve:
- *   0.52 → 0.58 buys 56 points of FP for 6 points of recall;
- *   0.58 → 0.62 buys 24 more points of FP for 17 points of recall.
- *
- * ⚠ THE ACCEPTED FP RATE IS 27% (8 of 30 hard negatives still admit something),
- * and it is accepted DELIBERATELY, not overlooked. Zero FP is reachable only at
- * 0.65, which empties 45 of 150 queries and halves R@10 (98% → 52%) — the classes
- * genuinely OVERLAP in embedding space (hard-neg tops span 0.4658-0.6250 vs
- * on-topic min 0.5500), so no threshold both admits every real hit and rejects
- * every hard negative. n=30 on that class, so read 27% as ~±16pp at 95%, not as a
- * precise constant.
- *
- * MEASURED COST of 0.45 → 0.58: R@10 98% → 92%, exact-id MRR 1.00 → 0.91, and 4 of
- * 120 positive queries return nothing. The exact-id loss is the one to watch: under
- * `cosine-gated` a lexical-only hit is inadmissible, so a high cosine floor also
- * suppresses exact-identifier lookups the lexical leg would otherwise have caught.
- * If that becomes the binding cost, the fix is an admissible exact-identifier
- * lexical path — NOT lowering this floor back into inertness.
- *
- * ⚠ VALID ONLY UNDER `cosine-gated`. Under `floored-union` the lexical leg admits
- * independently of this value and backfills whatever the floor rejects (D-008), so
- * this number does not transfer to the pull path.
- *
- * Env-tunable via PAPERCUSP_MEMORY_MIN_SCORE; `<= 0` disables.
- *
- * Exported so the bench instruments measure at the EXACT production floor — a
- * single source of truth, not a copied magic number. (`recall-stats.ts`'s
- * COSINE_ADMISSION_FLOOR is a deliberate NON-copy: see the note there.) The
- * `injectMin*` readers below default to these (env-overridable).
- */
-export const MEMORY_INJECTION_COSINE_FLOOR = 0.58;
-export const MEMORY_INJECTION_LEX_FLOOR = 0.4;
-
-function injectMinScore(): number | undefined {
-  const raw = Number(process.env.PAPERCUSP_MEMORY_MIN_SCORE);
-  if (Number.isFinite(raw)) return raw > 0 ? raw : undefined;
-  return MEMORY_INJECTION_COSINE_FLOOR;
-}
-
-/**
- * Hybrid-only PUSH lexical-admission bar (P-031 / D-006). The hybrid backend's
- * default lexical bar (0.30) is recall-favoring for the pull path; the no-LLM
- * push path TIGHTENS it to 0.40 so generic lexical token-overlap on an off-topic
- * turn isn't admitted (cuts push FP at a small exact-id cost). Ignored by
- * non-hybrid backends. Env-tunable.
- */
-function injectMinLexScore(): number | undefined {
-  const raw = Number(process.env.PAPERCUSP_MEMORY_MIN_LEX_SCORE);
-  if (Number.isFinite(raw)) return raw >= 0 ? raw : undefined;
-  return MEMORY_INJECTION_LEX_FLOOR;
-}
-
-/**
- * PUSH-path fusion mode (context-injection-audit-2026-07-28 P-032 / F-B, D-010).
- * THE fix that makes the injected block sized by relevance instead of by K.
- *
- * The hybrid default is `floored-union`, where the lexical leg admits hits on
- * `minLexScore` ALONE — independently of the cosine leg's FP floor — and the
- * fusion then returns `slice(0, limit)`. So the cosine leg could return ZERO and
- * the block still came back FULL, refilled by lexical token-overlap: measured at
- * 97% of turn-start recalls returning exactly the pool-limit sums (D-005), with a
- * 0.0% zero-hit rate. The limit was acting as a TARGET, not a ceiling.
- *
- * Note what was NOT the problem, because it is the natural thing to reach for and
- * it does not work (D-008): the 0.45 cosine floor was firing correctly the whole
- * time. Raising it removes cosine hits and the lexical leg simply back-fills the
- * freed slots — less relevance, same K. The size is decided by ADMISSION, so
- * admission is what has to change.
- *
- * Under `cosine-gated` the candidate set is seeded ONLY from cosine hits
- * (hybrid-fusion.ts) — lexical-only admission is skipped — so membership is
- * governed by the cosine floor and the result is naturally 0..K. A real ceiling.
- * The lexical leg still contributes its RANK to the fused score, so exact-id
- * matches keep re-ranking cosine hits to the top; what is given up is a
- * lexical-only hit the cosine leg missed entirely.
- *
- * PUSH ONLY — deliberately not set on the HybridBackend construction
- * (configure.ts), so the PULL path keeps `floored-union`. A human running
- * memory:search wants recall and can discard a bad hit; auto-injection has no
- * LLM filter downstream, so it wants precision. Same asymmetry that already
- * justifies the push path's tighter minLexScore above. Env-tunable for a
- * one-flip revert if the zero-hit rate overshoots.
- */
-function injectFusionMode(): 'floored-union' | 'cosine-gated' {
-  return process.env.PAPERCUSP_MEMORY_FUSION_MODE === 'floored-union' ? 'floored-union' : 'cosine-gated';
-}
-
-/**
- * THE PUSH-PATH ADMISSION CONTRACT, read in ONE place (P-002).
- *
- * These three values decide TOGETHER which entries an auto-injection may admit:
- * the cosine floor, the lexical bar, and the fusion mode that says whether a
- * lexical-only hit is admissible at all. The third is not a detail — under
- * `floored-union` the lexical leg admits independently of the cosine floor, so
- * the floor's effect on the ADMITTED SET is a function of all three, never of
- * `minScore` alone (D-010, and the reason D-008's "just raise the floor" fails).
- *
- * Exported so the P-002 recurrence guard measures THE CONSTRUCTION THIS PATH
- * RUNS instead of a copy of it — which is the difference between a guard and a
- * decoration. The failure mode is already in the tree: `bench/precision-monitor.ts`
- * documents itself as measuring "the EXACT production push floor" and hardcodes
- * `fusionMode: 'floored-union'` — the value this path STOPPED using when D-010
- * flipped the push default to `cosine-gated`. A copied constant cannot notice it
- * has gone stale, so that monitor has been reporting a shape production no longer
- * runs. A guard frozen the same way would pass forever against the shape it
- * captured on the day it was written.
- *
- * Reading the live values (env overrides included) makes the guard track a
- * retune automatically and FAIL if the floor is removed outright.
- */
-export interface PushSearchFloors {
-  /** Absolute cosine floor for the cosine leg; `undefined` = disabled. */
-  minScore: number | undefined;
-  /** Normalized lexical admission bar; `undefined` = the backend default. */
-  minLexScore: number | undefined;
-  /** Whether a lexical-only hit may be admitted at all. */
-  fusionMode: 'floored-union' | 'cosine-gated';
-}
-
-export function pushSearchFloors(): PushSearchFloors {
-  return {
-    minScore: injectMinScore(),
-    minLexScore: injectMinLexScore(),
-    fusionMode: injectFusionMode(),
-  };
-}
 
 /**
  * PUSH-path diversity re-rank λ (context-injection-audit-2026-07-28 P-034 / F-D,
@@ -523,6 +408,9 @@ const MAX_ENTRY_CHARS = 450;
 const SLOW_INJECTION_LOG_MS = 750;
 
 export async function buildMemoryContextBlock(input: MemoryInjectionInput): Promise<string | null> {
+  const ownsDeadline = !input.deadline;
+  const deadline = input.deadline ?? createMemoryWorkDeadline(MEMORY_INJECT_TIMEOUT_MS);
+  input = { ...input, deadline };
   const marks: Array<[string, number]> = [];
   const t0 = Date.now();
   let corpus: CorpusLegResult | null = null;
@@ -539,16 +427,37 @@ export async function buildMemoryContextBlock(input: MemoryInjectionInput): Prom
     // join the one comparable ranking F-C/D-011 built — merging them could
     // only be done by a fixed priority, which D-011 names "a quota under
     // another name". See ./corpus-recall.
-    const corpusP = startCorpusLeg(input);
-    const memoryBlock = await buildBlockInner(input, (label, ms) => marks.push([label, ms]), corpusP);
+    const corpusP = deadline.run(() => startCorpusLeg(input), 'corpus leg').catch((error) => {
+      if (!(error instanceof MemoryTimeoutError)) return null;
+      return emptyCorpusLeg('Related context (matched excerpts)', false, 0, null, {
+        outcome: 'timed-out', selected: 0, dropped: emptyCorpusDrops(),
+        sessionDedup: 0, legs: null, retrievalDepth: 0, rerank: 'nothing-to-reorder',
+      });
+    });
+    let memoryTimedOut = false;
+    let renderedMemory: string | null | undefined;
+    const memoryBlock = await deadline.run(
+      () => buildBlockInner(input, (label, ms) => marks.push([label, ms]), corpusP, (block) => { renderedMemory = block; }), 'memory leg',
+    ).catch((error) => {
+      if (!(error instanceof MemoryTimeoutError)) throw error;
+      // Scheduling the joint telemetry row may still be awaiting the slower
+      // corpus. It must not erase memory that was already safely rendered.
+      memoryTimedOut = renderedMemory === undefined;
+      if (memoryTimedOut) noteMemoryFailure(error);
+      return renderedMemory ?? null;
+    });
     // Settled HERE rather than inside the composer (P-001): the leg's own
     // health is a fact about this injection, not about how the block was
     // assembled, and the `finally` below has to be able to report it. The await
     // point is unchanged, so the two legs still overlap exactly as before.
     corpus = await corpusP.catch(() => null);
     noteCorpusLegHealth(corpus);
-    return composeWithCorpus(memoryBlock, corpus);
+    const block = composeWithCorpus(memoryBlock, corpus);
+    if (!memoryTimedOut) return block;
+    const notice = '⚠ Memory retrieval was DEGRADED this turn (memory leg: timed-out) — recover missing recall with memory:search.';
+    return block ? `${block}\n\n${notice}` : notice;
   } finally {
+    if (ownsDeadline) deadline.close();
     const totalMs = Date.now() - t0;
     if (totalMs > SLOW_INJECTION_LOG_MS) {
       const stamped = marks.reduce((s, [, v]) => s + v, 0);
@@ -567,7 +476,7 @@ interface CorpusLegResult {
   lines: string[];
   refs: string[];
   /**
-   * P-001 — FALSE means the corpus search ran BM25-ONLY: no query vector, so
+   * P-001 — FALSE on a completed (`outcome: 'ok'`) search means BM25-ONLY: no query vector, so
    * every line below it is a lexical match and nothing semantic was reachable.
    * `recallCorpusContext` has always computed this; the injection path dropped
    * it on the floor, which left injection unable to tell "semantic ran and
@@ -691,7 +600,9 @@ const warnSuppressedByTestRunner = (): boolean =>
 let _corpusWarnOptedInByTest = false;
 
 function noteCorpusLegHealth(corpus: CorpusLegResult | null): void {
-  if (!corpus || corpus.embedderAvailable) return;
+  // Disabled, empty-query and failed legs never reached fusion. Their absent
+  // query vector cannot establish that lexical retrieval ran.
+  if (!corpus || corpus.outcome !== 'ok' || corpus.embedderAvailable) return;
   if (warnSuppressedByTestRunner()) return;
   _corpusDegradedSinceWarn += 1;
   const now = Date.now();
@@ -779,6 +690,7 @@ async function assessCorpusGate(
  * section", exactly like every other best-effort leg on this path.
  */
 function startCorpusLeg(input: MemoryInjectionInput): Promise<CorpusLegResult | null> {
+  const deadline = input.deadline!;
   return (async (): Promise<CorpusLegResult | null> => {
     try {
       const query = toRecallQuery(input.queryContext);
@@ -798,7 +710,7 @@ function startCorpusLeg(input: MemoryInjectionInput): Promise<CorpusLegResult | 
       const sessionId = input.session?.sessionId?.trim() || null;
       let ambientExcludedRefs: ReadonlySet<string> | undefined;
       if (sessionId) {
-        const fence = await getSessionBriefAmbientExcludedRefs(sessionId);
+        const fence = await deadline.run(() => getSessionBriefAmbientExcludedRefs(sessionId), 'ambient fence');
         // A missing/legacy row is an available empty fence. A read or parse
         // failure is different: fail closed so a blind session never receives
         // an unreviewed corpus pointer while its exclusion policy is unknown.
@@ -819,13 +731,14 @@ function startCorpusLeg(input: MemoryInjectionInput): Promise<CorpusLegResult | 
       if (sessionId) {
         try {
           const { sql } = getOrgPg();
-          epoch = input.session?.epoch ?? (await currentSessionEpoch(sql, sessionId));
+          epoch = input.session?.epoch ?? (await deadline.run(() => currentSessionEpoch(sql, sessionId), 'corpus epoch'));
         } catch {
           /* no epoch ⇒ no dedup, never a blocked leg */
         }
       }
 
-      const res = await recallCorpusContext({
+      const res = await deadline.run(() => recallCorpusContext({
+        signal: deadline.signal,
         queryText,
         workspaceId: input.workspaceId,
         harnessSlugs: input.harnessSlugs ?? [],
@@ -839,15 +752,18 @@ function startCorpusLeg(input: MemoryInjectionInput): Promise<CorpusLegResult | 
         // production (EI-19460887729945170). The corpus leg now resolves the owner's
         // whole session chain, which is the unit this always meant.
         excludeOwnerId: sessionId,
-      });
+      }), 'corpus retrieval');
       // P-003: what is this retrieval ENTITLED to claim? Evaluated from the
       // coverage samples the alarm already persists — one indexed read,
       // TTL-memoised, fail-open to `unknown` (never to healthy).
       //
-      // Evaluated even when nothing was admitted: an empty section under a
+      // Evaluated even when an enabled search admitted nothing: an empty section under a
       // degraded index and an empty section under a healthy one are different
       // facts, and the observability path must be able to tell them apart.
-      const gate = await assessCorpusGate(input.workspaceId, res);
+      // Disabled retrieval made no claim about this index. Loading coverage
+      // for it can consume the shared prompt budget after memory is rendered.
+      const gate = res.outcome === 'disabled' ? null
+        : await deadline.run(() => assessCorpusGate(input.workspaceId, res), 'corpus coverage');
       const baseTelemetry = {
         outcome: res.outcome ?? 'ok',
         selected: res.lines.length,
@@ -892,18 +808,18 @@ function startCorpusLeg(input: MemoryInjectionInput): Promise<CorpusLegResult | 
         try {
           const { sql } = getOrgPg();
           const { alreadySurfacedRefs, stampSurfacedRefs } = await import('./corpus-surfaced-ledger');
-          const seen = await alreadySurfacedRefs(
+          const seen = await deadline.run(() => alreadySurfacedRefs(
             sql,
             sessionId,
             epoch,
             lines.map((l) => l.handle.ref),
-          );
+          ), 'corpus dedup');
           if (seen.size > 0) {
             const before = lines.length;
             lines = lines.filter((l) => !seen.has(l.handle.ref));
             sessionDedup = before - lines.length;
           }
-          if (lines.length > 0) {
+          if (lines.length > 0 && !deadline.signal.aborted) {
             void stampSurfacedRefs(
               sql,
               sessionId,
@@ -994,7 +910,10 @@ async function buildBlockInner(
   input: MemoryInjectionInput,
   mark: (label: string, ms: number) => void,
   corpusP: Promise<CorpusLegResult | null> = Promise.resolve(null),
+  onRendered: (block: string | null) => void = () => {},
 ): Promise<string | null> {
+  const deadline = input.deadline!;
+  const rendered = (block: string | null) => { onRendered(block); return block; };
   // P-042 (F-J): normalize the accepted forms ONCE, here, so the three readers
   // below share one query object. P-044 (F-L) then splits what is ISSUED into
   // two texts, one per fusion leg: `queryText` (the user text) is embedded by
@@ -1012,7 +931,7 @@ async function buildBlockInner(
   const query = toRecallQuery(input.queryContext);
   const queryText = retrievalQueryText(query);
   const lexText = lexicalQueryText(query);
-  if (!queryText.trim()) return null;
+  if (!queryText.trim()) return rendered(null);
 
   const backend = getMemoryBackend();
   const earlyTotalLimit = input.limit ?? INJECTION_TOTAL_LIMIT;
@@ -1095,7 +1014,7 @@ async function buildBlockInner(
   }
   const tAvail = Date.now();
   try {
-    const avail = await withMemoryTimeout(backend.available(), 'available()', MEMORY_INJECT_TIMEOUT_MS);
+    const avail = await deadline.run(() => backend.available(), 'available()', MEMORY_INJECT_TIMEOUT_MS);
     if (!avail.ok) {
       await writeEarlyZeroRecallStats();
       return null;
@@ -1131,8 +1050,8 @@ async function buildBlockInner(
   } else if (harnessSlugs.length > 0) {
     const tHive = Date.now();
     try {
-      potSlugs = await withMemoryTimeout(
-        resolvePotSlugsForHarnesses(input.workspaceId, harnessSlugs),
+      potSlugs = await deadline.run(
+        () => resolvePotSlugsForHarnesses(input.workspaceId, harnessSlugs),
         'hive-resolve',
         MEMORY_INJECT_TIMEOUT_MS,
       );
@@ -1299,19 +1218,18 @@ async function buildBlockInner(
     let pinnedPackResources: ReadonlySet<string> = new Set();
     if (wearer && scopes.length > 0) {
       try {
-        pinnedPackResources = await withMemoryTimeout(
-          wearerPackageResourcesOrEmpty(getOrgPg().sql, { workspaceId: input.workspaceId, ownerId: wearer }),
+        pinnedPackResources = await deadline.run(
+          () => wearerPackageResourcesOrEmpty(getOrgPg().sql, { workspaceId: input.workspaceId, ownerId: wearer }),
           'package eligibility', MEMORY_INJECT_TIMEOUT_MS);
       } catch {
         pinnedPackResources = new Set();
       }
     }
-    const searchLifetime = new AbortController();
     const doSearch = async (): Promise<MemoryEntry[]> =>
       scopes.length === 0
         ? []
         : backend.search(queryText, {
-            signal: searchLifetime.signal,
+            signal: deadline.signal,
             scope: scopes,
             limit: totalLimit,
             ...(input.includeSuperseded ? { includeSuperseded: true } : {}),
@@ -1319,6 +1237,7 @@ async function buildBlockInner(
             minScore,
             minLexScore,
             fusionMode,
+            ...(input.overlapGatedLexical ? { overlapGatedLexical: true } : {}),
             // P-002 / migration 758: capture what each LEG did. Assigning to the
             // outer `legStats` is safe against the fan-out concern the option's
             // doc raises — this is ONE search call, not a per-scope loop, so
@@ -1333,7 +1252,7 @@ async function buildBlockInner(
             ...(diversityLambda !== undefined ? { diversify: { lambda: diversityLambda } } : {}),
           });
 
-    ranked = await withMemoryTimeout(doSearch(), 'search', MEMORY_INJECT_TIMEOUT_MS, searchLifetime).finally(() => {
+    ranked = await deadline.run(doSearch, 'search', MEMORY_INJECT_TIMEOUT_MS).finally(() => {
       const searchMs = Date.now() - tSearch;
       mark('searchMs', searchMs);
       if (searchMs > SLOW_INJECTION_LOG_MS) {
@@ -1345,7 +1264,7 @@ async function buildBlockInner(
     ranked = shapeIdentityPackageHits(ranked, pinnedPackResources);
     const tStaleness = Date.now();
     try {
-      ranked = await applyStoredMemoryStaleness(ranked, input.workspaceId);
+      ranked = await deadline.run(() => applyStoredMemoryStaleness(ranked, input.workspaceId), 'staleness');
     } finally {
       mark('stalenessMs', Date.now() - tStaleness);
     }
@@ -1459,7 +1378,7 @@ async function buildBlockInner(
   };
 
   try {
-    if (userResults.length + harnessHits.length + hiveHits.length === 0) return null;
+    if (userResults.length + harnessHits.length + hiveHits.length === 0) return rendered(null);
 
     // knowledge-packs P-009: a DISABLED pack's rows stay stored but stop being
     // recalled. One settings read per hive in scope (usually 1); best-effort —
@@ -1473,9 +1392,9 @@ async function buildBlockInner(
             const { disabledPacksFor } = await import('../knowledge-packs/manage');
             const slugs = [...new Set(hiveHits.map(({ slug }) => slug))];
             const disabledBySlug = new Map(
-              await Promise.all(
-                slugs.map(async (slug) => [slug, new Set(await disabledPacksFor(input.workspaceId, slug))] as const),
-              ),
+              await deadline.run(() => Promise.all(
+                slugs.map(async (slug) => [slug, new Set(await deadline.run(() => disabledPacksFor(input.workspaceId, slug), 'pack lookup'))] as const),
+              ), 'packs'),
             );
             hiveHits = hiveHits.filter(({ hit, slug }) => {
               const m = hit.metadata ?? {};
@@ -1491,7 +1410,7 @@ async function buildBlockInner(
         mark('packMs', Date.now() - tPack);
       }
     }
-    if (userResults.length + harnessHits.length + hiveHits.length === 0) return null;
+    if (userResults.length + harnessHits.length + hiveHits.length === 0) return rendered(null);
 
     // memory_feedback consumer (EI-366 / consume-edges P-031): the push path
     // DROPS anything the user deleted — tombstoned ids (the lexical projection
@@ -1505,7 +1424,7 @@ async function buildBlockInner(
       try {
         const { sql } = getOrgPg();
         const { loadFeedbackSignals, isFeedbackSuppressed } = await import('./feedback-rerank');
-        const signals = await loadFeedbackSignals(sql);
+        const signals = await deadline.run(() => loadFeedbackSignals(sql), 'feedback');
         if (signals.deletedIds.size > 0 || signals.deletedTexts.size > 0) {
           userResults = userResults.filter((h) => !isFeedbackSuppressed(h, signals));
           harnessHits = harnessHits.filter(({ hit }) => !isFeedbackSuppressed(hit, signals));
@@ -1526,7 +1445,7 @@ async function buildBlockInner(
     {
       const tWorkspace = Date.now();
       try {
-        if (userResults.length > 0 && (await isMemoryWorkspaceScopedRecallOn())) {
+        if (userResults.length > 0 && (await deadline.run(() => isMemoryWorkspaceScopedRecallOn(), 'workspace policy'))) {
           const before = surviving();
           userResults = userResults.filter((h) => keepUserPoolHitForWorkspace(h, input.workspaceId));
           funnel.dropped.workspace = before - surviving();
@@ -1535,7 +1454,7 @@ async function buildBlockInner(
         mark('workspaceMs', Date.now() - tWorkspace);
       }
     }
-    if (userResults.length + harnessHits.length + hiveHits.length === 0) return null;
+    if (userResults.length + harnessHits.length + hiveHits.length === 0) return rendered(null);
 
     // D-006 — the pre-turn dedup: drop any memory surfaced within the recent
     // watermark window so a stable fact is delivered ONCE, not re-injected
@@ -1559,10 +1478,11 @@ async function buildBlockInner(
             const { sql } = getOrgPg();
             let suppressed: Set<string>;
             if (input.session?.sessionId) {
-              sessionEpoch = input.session.epoch ?? (await currentSessionEpoch(sql, input.session.sessionId));
-              suppressed = await alreadySurfacedIds(sql, input.session.sessionId, sessionEpoch, candidateIds);
+              const session = input.session;
+              sessionEpoch = session.epoch ?? (await deadline.run(() => currentSessionEpoch(sql, session.sessionId), 'memory epoch'));
+              suppressed = await deadline.run(() => alreadySurfacedIds(sql, session.sessionId, sessionEpoch!, candidateIds), 'memory dedup');
             } else {
-              suppressed = await recentlySurfacedIds(sql, candidateIds, reinjectWindowMs());
+              suppressed = await deadline.run(() => recentlySurfacedIds(sql, candidateIds, reinjectWindowMs()), 'memory dedup');
             }
             if (suppressed.size > 0) {
               const before = surviving();
@@ -1579,7 +1499,7 @@ async function buildBlockInner(
         mark('dedupMs', Date.now() - tDedup);
       }
     }
-    if (userResults.length + harnessHits.length + hiveHits.length === 0) return null;
+    if (userResults.length + harnessHits.length + hiveHits.length === 0) return rendered(null);
 
     // Jev, the owner's opt-in filter (plan jev-decision-model-integration-2026-09-29;
     // the switch is jev-settings.ts, D-008; the operating point is D-013). Effective
@@ -1597,11 +1517,38 @@ async function buildBlockInner(
           ...harnessHits.map(({ hit }) => hit),
           ...hiveHits.map(({ hit }) => hit),
         ];
-        const verdict = await runJevMemoryGate({
+        // What Jev may use: the smaller of what is left of the client's wall and of
+        // this build's own deadline, which ends first on turn-start. A wait sized
+        // from the wall alone was cut off by the deadline (jevMemoryBudgetMs).
+        // The wall counts only while someone still waits on this build. A
+        // stale-while-revalidate rebuild answers nobody, yet sized from the wall it
+        // skipped Jev with budgets down to -2,175 ms while its own deadline still
+        // had time (WI-10004485 step D, staging, 2026-10-01).
+        const jevNow = Date.now();
+        const deadlineLeftMs = deadline.remainingMs();
+        const callerWaiting = input.callerWaiting?.();
+        const wallApplies = input.respondByMs !== undefined && callerWaiting !== false;
+        const budgetMs = jevMemoryBudgetMs(jevNow, {
+          ...(wallApplies ? { respondByMs: input.respondByMs } : {}),
+          deadlineRemainingMs: deadlineLeftMs,
+        });
+        const verdict = await deadline.run(() => runJevMemoryGate({
           workspaceId: input.workspaceId,
           message: queryText,
           candidates: pooled.map((hit) => ({ id: hit.id, text: hit.text })),
+          // On waits only where the port's wall can afford it (JEV_MEMORY_NO_WAIT_PORTS),
+          // and only for what is left (jevMemoryWaitMs).
+          ...(input.session?.port ? { port: input.session.port } : {}),
+          ...(budgetMs !== undefined ? { budgetMs } : {}),
+          // The same label memory_recall_stats.surface records for this recall.
+          surface: input.telemetrySurface ?? input.session?.port ?? 'injection',
+        }), 'admission');
+        const jevEntry = jevFunnelEntry(verdict, budgetMs, {
+          ...(callerWaiting !== undefined ? { callerWaiting } : {}),
+          ...(input.respondByMs !== undefined ? { wallLeftMs: input.respondByMs - jevNow } : {}),
+          deadlineLeftMs,
         });
+        if (jevEntry) funnel.jev = jevEntry;
         if (verdict.effective === 'on' && verdict.outcome === 'answered') {
           const drop = new Set(pooled.filter((_, i) => verdict.keep[i] === false));
           if (drop.size > 0) {
@@ -1618,7 +1565,7 @@ async function buildBlockInner(
         mark('jevMs', Date.now() - tJev);
       }
     }
-    if (userResults.length + harnessHits.length + hiveHits.length === 0) return null;
+    if (userResults.length + harnessHits.length + hiveHits.length === 0) return rendered(null);
 
     // Two-tier marker (self-learning-frontier P-022 / FB-08, D-006): with the
     // transfer harness armed, probationary entries are visibly marked — STILL
@@ -1630,7 +1577,7 @@ async function buildBlockInner(
     try {
       const { FLAGS } = await import('@papercusp/flags');
       const { getFlag } = await import('@papercusp/flags/server');
-      tierMarkers = await getFlag(FLAGS.TRANSFER_HARNESS, 'memory-injection');
+      tierMarkers = await deadline.run(() => getFlag(FLAGS.TRANSFER_HARNESS, 'memory-injection'), 'tier policy');
     } catch {
       /* never load-bearing */
     } finally {
@@ -1747,13 +1694,14 @@ async function buildBlockInner(
         mainRows.push(row());
       }
     }
-    const rendered = [...mainRows, ...packRows];
+    deadline.signal.throwIfAborted();
+    const renderedRows = [...mainRows, ...packRows];
     // P-008 (WI-4538): collapse near-duplicate memories (the SAME fact stored under multiple ids
     // — the id-based dedups above can't see it) BEFORE the budget, so a dupe never consumes a
     // slot a distinct fact needed. Order is preserved, so post-F-C the highest-RELEVANCE copy of
     // each cluster survives (it was the highest-priority-POOL copy before D-011).
-    const { kept: dedupedRendered } = collapseNearDuplicates(rendered, (r) => r.text);
-    funnel.dropped.nearDuplicate = rendered.length - dedupedRendered.length;
+    const { kept: dedupedRendered } = collapseNearDuplicates(renderedRows, (r) => r.text);
+    funnel.dropped.nearDuplicate = renderedRows.length - dedupedRendered.length;
     let truncated = false;
     for (const { line, id, entry } of dedupedRendered) {
       // WI-6870: skip-and-continue instead of a hard break. A `break` here discarded every
@@ -1789,7 +1737,7 @@ async function buildBlockInner(
     // writer, whose failures are swallowed (see `admittedByLeg`'s note).
     funnel.byLeg = admittedByLeg(admittedEntries);
     mark('renderMs', Date.now() - tRender);
-    if (lines.length === 0) return null;
+    if (lines.length === 0) return rendered(null);
     if (truncated) {
       lines.push(
         '- (more learnings withheld this turn — the memory budget is full; memory:search pulls the rest on demand)',
@@ -1828,7 +1776,7 @@ async function buildBlockInner(
     }
 
     const heading = input.heading ?? 'Operator memory (relevant entries)';
-    return `## ${heading}\n\n${lines.join('\n')}`;
+    return rendered(`## ${heading}\n\n${lines.join('\n')}`);
   } finally {
     // ONE row per recall, on EVERY exit path — the several `return null`s above,
     // the delivered-block return, and any throw. A `finally` rather than a call

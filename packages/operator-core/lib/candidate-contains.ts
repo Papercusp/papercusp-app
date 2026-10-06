@@ -43,6 +43,7 @@
  */
 
 import { cellUnknown, type CellUnknown } from './cell-contract';
+import { gitRefContains } from './git-ref-contains';
 
 /**
  * A git read scoped to one repo: trimmed stdout on success, `''` for a successful
@@ -425,17 +426,13 @@ async function newestCommitTouching(
 }
 
 /**
- * Is `sha` an ancestor-or-equal of `ref`? Tri-state, and deliberately NOT
- * `merge-base --is-ancestor` — its 0/1 exit is swallowed by every stdout-only runner in
- * this tree (see git-pipeline-position.ts's `refContains`, the identical fix for the
- * identical reason). `${ref}..${sha}` lists commits reachable from `sha` but not `ref`;
- * `rev-list --count` prints a number on success either way, so a genuine "not an
- * ancestor" (a nonzero count) survives through a runner that only reads stdout.
+ * Is `sha` an ancestor-or-equal of `ref`? Tri-state, through a stdout-only runner — see
+ * git-ref-contains.ts for why this is `merge-base` and not `rev-list --count ${ref}..${sha}`
+ * (that read miscounts when the frozen candidate heads a run of 2000-01-01 admission commits,
+ * which is precisely the ref this module judges).
  */
 async function isAncestorOrEqual(git: GitRead, sha: string, ref: string): Promise<boolean | null> {
-  const out = await git(['rev-list', '--count', `${ref}..${sha}`]);
-  if (out === null) return null;
-  return out === '0';
+  return gitRefContains(git, ref, sha);
 }
 
 /**

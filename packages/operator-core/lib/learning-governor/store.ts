@@ -461,7 +461,7 @@ export interface ReserveLearningSpendInput {
 }
 
 type ExactReservationRefusal = 'invalid-exact-request' | 'transaction-required' | 'binding-required' |
-  'stale-binding' | 'disabled' | 'unsupported-budget-kind' | 'insufficient-headroom' | 'already-reserved' |
+  'stale-binding' | 'disabled' | 'pot-disabled' | 'unsupported-budget-kind' | 'insufficient-headroom' | 'already-reserved' |
   'resource-binding-required' | 'resource-accounting-incomplete' | 'resource-cap-exceeded';
 
 export type ReserveLearningSpendResult =
@@ -469,8 +469,8 @@ export type ReserveLearningSpendResult =
   | { ok: false; reason: ReservationRefusal | ExactReservationRefusal; requestedUsd: number; headroomUsd: number | null };
 
 /**
- * Open one attempt. Refuses (fail-closed) on an unbudgeted registration, an
- * invalid amount, or no headroom; grants a CLAMPED reservation when the loop
+ * Open one attempt. Refuses (fail-closed) on a disabled or unbudgeted registration,
+ * an invalid amount, or no headroom; grants a CLAMPED reservation when the loop
  * can afford some but not all of the request — a partial grant is an allow,
  * and the caller bounds itself at `reservation.reservedUsd`.
  *
@@ -515,12 +515,19 @@ export async function reserveLearningSpend(
        WHERE workspace_id = ${q.workspaceId} AND loop_id = ${q.loopId}
        FOR UPDATE`) as Row[];
     const reg = regRows[0] ? mapLoop(regRows[0]) : null;
+    // Preflight may have allowed the loop before an async pool/dispatch wait.
+    // Re-read authority under the registration lock for every reservation,
+    // including native per-cycle mirrors and zero-cost attempts.
+    // Attribution on the request cannot choose a different pot's authority.
+    if (reg?.potSlug && !(await potLearningEnabled(tx as Sql, {
+      workspaceId: q.workspaceId, potSlug: reg.potSlug,
+    }))) return refuse('pot-disabled');
+    if (reg && !reg.enabled) return refuse('disabled');
     if ((reg?.meta?.reservationBinding != null || reg?.meta?.reservationResourceBudget != null) && !exact) {
       return refuse('binding-required');
     }
     if (exact) {
       if (!reg || reg.budgetUsd === null) return refuse('unbudgeted');
-      if (!reg.enabled) return refuse('disabled');
       if (reg.budgetKind !== 'lifetime') return refuse('unsupported-budget-kind');
       if (reg.meta?.reservationBinding !== exact.binding || reg.budgetUsd !== exact.expectedBudgetUsd) {
         return refuse('stale-binding');

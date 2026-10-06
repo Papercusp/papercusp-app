@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
-import { setExternalTriggerBindingArmed } from '../../external-triggers/admin';
+import { setExternalTriggerBindingArmed, TriggerPackReviewRequiredError } from '../../external-triggers/admin';
 import { data, invalidateTriggers, triggerToolContext } from './_shared';
 
 export default defineTool({
@@ -20,7 +20,20 @@ export default defineTool({
   args: z.object({ bindingId: z.string().uuid(), confirm: z.literal(true) }),
   async handler(args, ctx) {
     const { sql, workspaceId } = triggerToolContext(ctx);
-    const binding = await setExternalTriggerBindingArmed(sql, workspaceId, args.bindingId, true);
+    let binding: Awaited<ReturnType<typeof setExternalTriggerBindingArmed>>;
+    try {
+      binding = await setExternalTriggerBindingArmed(sql, workspaceId, args.bindingId, true);
+    } catch (error) {
+      if (!(error instanceof TriggerPackReviewRequiredError)) throw error;
+      return data({
+        ok: false,
+        error: error.code,
+        bindingId: args.bindingId,
+        installationId: error.installationId,
+        pluginName: error.pluginName,
+        next: 'trigger-packs:review { installationId } → trigger-packs:arm { installationId, fingerprint, confirm:true }',
+      });
+    }
     if (!binding) return data({ ok: false, error: 'not_found', bindingId: args.bindingId });
     await invalidateTriggers(workspaceId);
     return data({ ok: true, binding });

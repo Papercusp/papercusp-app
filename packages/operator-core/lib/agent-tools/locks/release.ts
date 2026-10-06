@@ -26,6 +26,7 @@ import {
 import { recordLockEvent } from '../../authority/lock-event-stream';
 import { noteShaTokenRelease } from '../../authority/sha-token-registry';
 import { recordEditAttribution } from '../../edit-attribution';
+import { recordRestrictedEditBeforeRelease } from '../../personal-vault/git-sync-hold';
 import { bulkContent, mergeIds, runBulk } from '../_bulk';
 import { resolveExplicitFileLockDomain } from './coordination-domain';
 import { domainsHoldingLocks, ownedLocksForPaths, type OwnedLockPaths } from './owner-lock-domains';
@@ -232,6 +233,9 @@ export default defineTool({
        * a future release path cannot pick up half of them: every `return` from
        * releaseFileLocks goes through here.
        */
+      // P-014: set when the restricted-owner path below already wrote this edit's
+      // ledger row before the release, so the post-release write does not repeat it.
+      let restrictedEditPreRecorded = false;
       const onFileLocksReleased = (released: string[] | undefined): void => {
         // G-0 (P-033): remember the published sha for the next grant. On the
         // remote-authority path the authority records it too (from the routed
@@ -244,7 +248,7 @@ export default defineTool({
         // mutation. Attribute only after a successful recognized native edit
         // proof whose paths exactly equal the rows actually released.
         const proof = args.native_edit_proof as NativeEditProof | undefined;
-        if (released && isNativeEditProofForPaths(proof, released)) {
+        if (!restrictedEditPreRecorded && released && isNativeEditProofForPaths(proof, released)) {
           const identity = resolveAgentIdentity(ctx);
           void recordEditAttribution({
             repoRoot: domain,
@@ -262,6 +266,24 @@ export default defineTool({
         // (acquire and release share one bus key — D-042).
         notifyPlanLockChange(released ?? []);
       };
+      // P-014 (WI-10005571, D-006): when the owner holds an active personal disclosure,
+      // write this edit's ledger row BEFORE the lock goes away, so git-sync's census
+      // holds the path with no instant where it sees neither the lock nor the hold.
+      // Throws disclosure_ledger_unavailable (the lock is kept) when the row cannot be
+      // written. An unrestricted owner pays one indexed existence check and nothing else.
+      const preReleaseProof = args.native_edit_proof as NativeEditProof | undefined;
+      const preReleasePaths = Array.isArray(preReleaseProof?.paths) ? preReleaseProof.paths : [];
+      if (preReleasePaths.length > 0 && isNativeEditProofForPaths(preReleaseProof, preReleasePaths)) {
+        const identity = resolveAgentIdentity(ctx);
+        restrictedEditPreRecorded = await recordRestrictedEditBeforeRelease({
+          repoRoot: domain,
+          files: preReleasePaths,
+          ownerId,
+          intent: `PostToolUse:${preReleaseProof.source}:${preReleaseProof.tool ?? preReleaseProof.tools?.join(',') ?? 'native-edit'}`,
+          workspaceId: identity.workspaceId ?? undefined,
+          contributor: identity.userId ?? undefined,
+        });
+      }
       try {
         const routed = await acquireWithContentionRetry(() =>
           routeFileLockOp<ReleaseOutcome>(

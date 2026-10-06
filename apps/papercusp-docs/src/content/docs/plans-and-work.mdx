@@ -1,0 +1,86 @@
+---
+title: Plans and work
+description: Turn a request into a durable plan, follow dependencies and decisions, and verify completion.
+documents:
+  - packages/operator-core/lib/agent-tools/plans/new.ts
+  - packages/operator-core/lib/agent-tools/plans/start.ts
+  - packages/operator-core/lib/agent-tools/plans/audit.ts
+  - packages/operator-core/lib/plan-acceptance-gate.ts
+---
+
+Use a **plan** when work has dependent steps, spans several parts of a project,
+or must survive a session restart. A **work item** is an assigned unit of work
+with its own status and verification. A chat message explains intent, but it
+is not a substitute for these durable records.
+
+## Ask for a plan you can review
+
+Tell the agent the outcome, constraints and observable acceptance conditions:
+
+> Plan an export feature. Keep existing permissions unchanged, specify the
+> exported format and failure cases, record dependencies, and include tests.
+> Do not begin implementation until I approve the scope and execution route.
+
+A useful plan says what is in scope, what is excluded, why the approach was
+chosen, who runs each part, and what proves success. Ask the agent to include
+documentation changes when the work changes a user workflow.
+
+## Understand the lifecycle
+
+The maintained plan lifecycle distinguishes:
+
+| State | Meaning for you |
+| --- | --- |
+| Draft | A proposed approach, not an execution commitment |
+| Ready / active | The plan has entered the approved execution path |
+| Awaiting acceptance | Implementation is ready for its final review |
+| Shipped | The plan's required acceptance and delivery checks have passed |
+| Superseded | Another approach replaces it; do not restart its old next steps |
+
+A plan can have completed items before final acceptance is complete.
+Do not treat an old “next” paragraph on a shipped or superseded plan as a
+current instruction. Check the current lifecycle and item status.
+
+## Follow the right surfaces
+
+Open **Plans** for the goal, requirements, decisions and dependencies.
+Use **Work** for individual assignments and blockers, and **Inbox** for
+questions or decisions needing attention. Return to the relevant session when
+the agent needs an answer.
+
+Status can be more useful than a stream of messages:
+
+- A pending item may be waiting on an earlier item.
+- A running item should have an owner and a concrete next action.
+- A blocked item should name the dependency or missing input.
+- A completed item should include verification, not only “done.”
+
+Do not assign another agent to an already-owned task just to speed up a known
+dependency. Parallelize independent work with separate ownership instead.
+
+## Make corrections durable
+
+If you change the scope, say what replaces the old requirement and ask the
+agent to update the plan before continuing. Decisions such as a different
+provider, rejected design or public/private boundary belong in the plan so
+other workers and successor sessions see them.
+
+For example:
+
+> Keep export local-only. Remove public sharing from this plan and record why.
+> Update acceptance tests and documentation to match.
+
+## Review evidence and delivery separately
+
+Ask what ran, what failed, what was not checked and which build was exercised.
+A typecheck is not a behavior test. A request to deploy is not evidence that
+the live app now serves the change.
+
+For release work, require the actual destination and serving revision.
+For a research or documentation task, require the delivered content and its
+checked sources. Keep unresolved follow-ups assigned rather than letting them
+disappear from the completion report.
+
+See [Your first successful task](/docs/quickstart),
+[Agent modes and fleets](/docs/agent-modes-and-fleets) and
+[Troubleshooting](/docs/troubleshooting).

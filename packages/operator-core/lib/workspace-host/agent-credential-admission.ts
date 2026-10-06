@@ -27,11 +27,14 @@ import {
   workspaceHostAgentHomeDirectories,
   workspaceHostAgentHomeOmpModelsPath,
   workspaceHostAgentHomePaths,
+  workspaceHostAgentSpecSatisfiesReadiness,
   workspaceHostCredentialReferenceDigest,
   type ProbeWorkspaceHostAgentsInput,
   type WorkspaceHostAgentHomeBundle,
   type WorkspaceHostAgentProbeRunner,
   type WorkspaceHostAgentVerificationEvidence,
+  type WorkspaceHostAgentVerificationKind,
+  type WorkspaceHostAgentVerificationProbeSpec,
   type WorkspaceHostCanaryAgent,
   type WorkspaceHostCredentialDelivery,
   type WorkspaceHostCredentialFamily,
@@ -139,6 +142,42 @@ function isAgentCredentialFamily(value: unknown): value is WorkspaceHostCredenti
  */
 const WORKSPACE_HOST_UNFUNDED_PROBE_FAILURE = 'provider-usage-limit';
 
+type AdmissionProbeTable = ProbeWorkspaceHostAgentsInput['probes'];
+
+/**
+ * The probes admission RUNS for one agent, and therefore the only verification kinds a receipt may
+ * carry (WI-10005806). Derived from the probe table, never restated, for the reason WI-10002402
+ * derived `workspaceHostAgentAllowedVerificationKinds`: a hand-copied kind rule here had drifted to
+ * accept claude `authenticated-account` (removed from claude's probes by WI-10001689 because
+ * `claude auth status` is forgeable) and to let a `satisfiesReadiness: false` spec decide.
+ *
+ * Two filters, each with its own reason:
+ * - readiness-bearing only. A `satisfiesReadiness: false` spec (codex's `codex login status`,
+ *   WI-10001694) contributes identity elsewhere and can never decide readiness; admission used to
+ *   run it first and `break` on a pass, so a forgeable status line could admit the credential.
+ * - OMP: `authenticated-account` only. A present OMP credential must authenticate its stored
+ *   bytes; local inference proves the controller's Ollama runtime and says nothing about them.
+ *   A credential-free OMP slot never reaches a probe at all (`credentialFreeAgents`).
+ */
+export function workspaceHostAgentAdmissionProbeSpecs(
+  agent: WorkspaceHostCanaryAgent,
+  probes?: AdmissionProbeTable,
+): readonly WorkspaceHostAgentVerificationProbeSpec[] {
+  const configured = probes?.[agent] ?? DEFAULT_WORKSPACE_HOST_AGENT_VERIFICATION_PROBES[agent];
+  return configured.filter(
+    (spec) =>
+      workspaceHostAgentSpecSatisfiesReadiness(spec) &&
+      (agent !== 'omp' || spec.verificationKind === 'authenticated-account'),
+  );
+}
+
+function admissionVerificationKinds(
+  agent: WorkspaceHostCanaryAgent,
+  probes?: AdmissionProbeTable,
+): ReadonlySet<WorkspaceHostAgentVerificationKind> {
+  return new Set(workspaceHostAgentAdmissionProbeSpecs(agent, probes).map((spec) => spec.verificationKind));
+}
+
 /**
  * A refusal that PROVES authentication: same evidence contract as a ready probe, but a non-zero
  * exit carrying the quota reason and no proof digest. Validated as strictly as the ready case so a
@@ -148,12 +187,11 @@ function isUnfundedAgentVerificationEvidence(
   expectedAgent: WorkspaceHostCanaryAgent,
   value: unknown,
   reportObservedAt: number,
+  allowedKinds: ReadonlySet<WorkspaceHostAgentVerificationKind>,
 ): value is WorkspaceHostAgentVerificationEvidence {
   if (!isRecord(value)) return false;
   const observedAt = isTimestamp(value.observedAt) ? Date.parse(value.observedAt) : Number.NaN;
-  const verificationKindIsValid =
-    value.verificationKind === 'authenticated-account' ||
-    (expectedAgent !== 'omp' && value.verificationKind === 'live-inference');
+  const verificationKindIsValid = allowedKinds.has(value.verificationKind as WorkspaceHostAgentVerificationKind);
   return (
     value.contractVersion === WORKSPACE_HOST_AGENT_VERIFICATION_CONTRACT_VERSION &&
     value.agent === expectedAgent &&
@@ -176,12 +214,11 @@ function isReadyAgentVerificationEvidence(
   expectedAgent: WorkspaceHostCanaryAgent,
   value: unknown,
   reportObservedAt: number,
+  allowedKinds: ReadonlySet<WorkspaceHostAgentVerificationKind>,
 ): value is WorkspaceHostAgentVerificationEvidence {
   if (!isRecord(value)) return false;
   const observedAt = isTimestamp(value.observedAt) ? Date.parse(value.observedAt) : Number.NaN;
-  const verificationKindIsValid =
-    value.verificationKind === 'authenticated-account' ||
-    (expectedAgent !== 'omp' && value.verificationKind === 'live-inference');
+  const verificationKindIsValid = allowedKinds.has(value.verificationKind as WorkspaceHostAgentVerificationKind);
   const subjectDisclosureIsValid = value.subjectDisclosure === 'redacted' || value.subjectDisclosure === 'digest';
   const subjectIsValid =
     value.subjectDisclosure === 'redacted'
@@ -207,10 +244,16 @@ function isReadyAgentVerificationEvidence(
   );
 }
 
-/** Validate a receipt before a caller persists or reuses it as an admission decision. */
+/**
+ * Validate a receipt before a caller persists or reuses it as an admission decision.
+ *
+ * `probes` names the probe table the receipt is checked against; omitted, it is the shipped
+ * default, which is what every persisted receipt must match. Only `verify…` passes its own.
+ */
 export function assertWorkspaceHostAgentCredentialAdmissionEvidence(
   evidence: unknown,
   expected?: Pick<WorkspaceHostAgentCredentialAdmissionInput, 'credentialRef' | 'delivery' | 'requestedAgents'>,
+  probes?: AdmissionProbeTable,
 ): asserts evidence is WorkspaceHostAgentCredentialAdmissionEvidence {
   if (!isRecord(evidence) || !isRecord(evidence.binding) || !isRecord(evidence.verification)) {
     throw new Error('workspace-host agent credential admission evidence is incomplete or not ready');
@@ -276,9 +319,10 @@ export function assertWorkspaceHostAgentCredentialAdmissionEvidence(
     }
     // Admission accepts exactly two shapes: a ready probe, or a quota refusal that proves the
     // credential authenticated. Every identity refusal still lands in the `else` and throws.
+    const allowedKinds = admissionVerificationKinds(agent, probes);
     const admissibleEvidence = unfundedSet.has(agent)
-      ? isUnfundedAgentVerificationEvidence(agent, agentEvidence, reportObservedAt)
-      : isReadyAgentVerificationEvidence(agent, agentEvidence, reportObservedAt);
+      ? isUnfundedAgentVerificationEvidence(agent, agentEvidence, reportObservedAt, allowedKinds)
+      : isReadyAgentVerificationEvidence(agent, agentEvidence, reportObservedAt, allowedKinds);
     if (!admissibleEvidence) {
       throw new Error(`workspace-host agent credential admission evidence has invalid '${agent}' verification`);
     }
@@ -391,13 +435,9 @@ export async function verifyWorkspaceHostAgentCredentialAdmission(
         credentialFreeAgents.push(agent);
         continue;
       }
-      // A present OMP credential must pass its authenticated-account probe. Falling back to
-      // local inference would prove the controller's Ollama runtime while saying nothing about
-      // the stored OMP bytes this guard exists to validate.
-      const configured =
-        dependencies.probes?.[agent] ?? DEFAULT_WORKSPACE_HOST_AGENT_VERIFICATION_PROBES[agent];
-      const specs =
-        agent === 'omp' ? configured.filter((spec) => spec.verificationKind === 'authenticated-account') : configured;
+      // Readiness-bearing specs only, and authenticated-account only for a present OMP credential:
+      // see workspaceHostAgentAdmissionProbeSpecs for why each filter exists.
+      const specs = workspaceHostAgentAdmissionProbeSpecs(agent, dependencies.probes);
       if (specs.length === 0) {
         throw new Error(`agent credential admission has no credential-authentication probe for '${agent}'`);
       }
@@ -460,7 +500,7 @@ export async function verifyWorkspaceHostAgentCredentialAdmission(
     // "the canary layer requires allReady"; that reading sends the next editor looking for a
     // consumer that does not exist.
     if (!verification.admissible) throw new WorkspaceHostAgentCredentialAdmissionError(evidence);
-    assertWorkspaceHostAgentCredentialAdmissionEvidence(evidence, input);
+    assertWorkspaceHostAgentCredentialAdmissionEvidence(evidence, input, dependencies.probes);
     return evidence;
   } finally {
     // This tree contains the only plaintext copy outside the encrypted store. Cleanup failure is

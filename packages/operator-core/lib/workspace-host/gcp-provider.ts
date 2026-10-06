@@ -31,7 +31,6 @@ import {
   assertWorkspaceHostSecretIsolation,
   resolveWorkspaceHostHealthStatus,
   unmeasuredHealthCheck,
-  WORKSPACE_HOST_DATA_ROOT,
 } from '@papercusp/deployment-driver';
 import {
   GCP_CLOUD_PLATFORM_SCOPE,
@@ -40,6 +39,10 @@ import {
 } from '../cloud-workspaces/gcp-preflight';
 import { createGcpWorkspaceHostApiClient, type GcpWorkspaceHostApiClientOptions } from './gcp-api-client';
 import { assertGcpImmutableImageId } from './gcp-image-family';
+import {
+  renderDurableFilesystemScript,
+  WORKSPACE_HOST_DURABLE_DATA_MOUNT_POINT,
+} from './durable-filesystem-script';
 import {
   GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS,
   gcpWorkspaceHostLabelValue,
@@ -56,7 +59,9 @@ export const GCP_WORKSPACE_HOST_TARGET = 'gcp';
 export const GCP_WORKSPACE_HOST_PROVIDER_VERSION = 'gcp-workspace-host-provider-v1';
 export const GCP_IAP_TCP_FORWARDING_RANGE = '35.235.240.0/20';
 export const GCP_DATA_DISK_RESIZE_POLICY = 'grow-only';
-export const GCP_DATA_MOUNT_POINT = '/var/lib/papercusp';
+export const GCP_DATA_MOUNT_POINT = WORKSPACE_HOST_DURABLE_DATA_MOUNT_POINT;
+/** How long the GCP startup script waits for the data disk; it is attached at instance creation. */
+const GCP_DATA_DEVICE_WAIT_SEC = 60;
 
 export type GcpComputeInstanceStatus =
   | 'PROVISIONING'
@@ -82,7 +87,37 @@ export interface GcpOperationRef {
 export interface GcpOperationObservation extends GcpOperationRef {
   status: 'PENDING' | 'RUNNING' | 'DONE';
   observedAt: string;
-  error?: { code?: string; message: string };
+  error?: {
+    code?: string;
+    message: string;
+    /**
+     * The HTTP status Google would have answered had the call been synchronous (the operation's
+     * `httpErrorStatusCode`). An operation that finished WITH an error is a settled outcome, not a
+     * lost response, and this is what lets the retry classifier tell a refusal (4xx) from a
+     * transient fault (5xx). Without it every failed operation read as `ambiguous` (WI-10005323).
+     */
+    status?: number;
+    /** A code that a backoff clears (rate limit, parent not ready). Outranks `status`. */
+    throttled?: boolean;
+  };
+}
+
+/**
+ * A GCE operation that finished with an error. Carries the same `status`/`throttled` signals as a
+ * synchronous API error, so `workspaceHostProviderRetryClass` classifies both the same way.
+ */
+export class GcpOperationFailedError extends Error {
+  readonly status?: number;
+  readonly throttled?: boolean;
+  readonly code?: string;
+
+  constructor(operationName: string, error: NonNullable<GcpOperationObservation['error']>) {
+    super(`GCP operation '${operationName}' failed: ${error.message}`);
+    this.name = 'GcpOperationFailedError';
+    if (error.status !== undefined) this.status = error.status;
+    if (error.throttled) this.throttled = true;
+    if (error.code !== undefined) this.code = error.code;
+  }
 }
 
 export interface GcpResourceObservation {
@@ -111,6 +146,12 @@ export interface GcpInstanceObservation extends GcpResourceObservation {
   defguardIp?: string;
   agentOnline?: boolean;
   recreateInput?: GcpInstanceInsertInput;
+  /**
+   * The instance's scheduling.provisioningModel as GCP reports it. 'SPOT' means GCP may stop the
+   * VM at any time; a spot host the controller did not stop is RECLAIMED and must be restarted
+   * (standing-health.ts, WI-10005210). Absent when GCP omitted the field.
+   */
+  provisioningModel?: 'SPOT' | 'STANDARD';
 }
 
 export interface GcpDiskObservation extends GcpResourceObservation {
@@ -250,7 +291,32 @@ export interface GcpInstanceInsertInput {
   /** Absent = the instance holds no cloud identity at all (Papercusp-hosted hosts, D-399). */
   serviceAccounts?: readonly [{ email: string; scopes: readonly string[] }];
   metadata: { items: readonly { key: string; value: string }[] };
+  /** Absent = GCP's default, an on-demand (STANDARD) instance. */
+  scheduling?: GcpInstanceSpotScheduling;
 }
+
+/**
+ * A spot instance's scheduling block. GCP may reclaim a spot VM at any time; STOP (not DELETE)
+ * keeps the boot and data disks, so the host restarts with its state and agents resume
+ * (measured: plan agent-capacity-and-cost-gcp-2026-09-30 D-026). Spot VMs cannot live-migrate or
+ * restart automatically, so those two fields are pinned to the only values GCP accepts for spot.
+ */
+export interface GcpInstanceSpotScheduling {
+  provisioningModel: 'SPOT';
+  instanceTerminationAction: 'STOP' | 'DELETE';
+  automaticRestart: false;
+  onHostMaintenance: 'TERMINATE';
+}
+
+export const GCP_SPOT_SCHEDULING: GcpInstanceSpotScheduling = Object.freeze({
+  provisioningModel: 'SPOT',
+  instanceTerminationAction: 'STOP',
+  automaticRestart: false,
+  onHostMaintenance: 'TERMINATE',
+});
+
+export const GCP_WORKSPACE_HOST_PROVISIONING_MODELS = ['standard', 'spot'] as const;
+export type GcpWorkspaceHostProvisioningModel = (typeof GCP_WORKSPACE_HOST_PROVISIONING_MODELS)[number];
 
 /**
  * The permissions GCP checks on `instances.insert` for THIS request: one per field it sets
@@ -264,6 +330,7 @@ export function gcpInstanceInsertPermissions(request: GcpInstanceInsertInput): s
   if (Object.keys(request.labels).length > 0) permissions.add('compute.instances.setLabels');
   if (request.tags.items.length > 0) permissions.add('compute.instances.setTags');
   if (request.metadata.items.length > 0) permissions.add('compute.instances.setMetadata');
+  if (request.scheduling) permissions.add('compute.instances.setScheduling');
   if (request.serviceAccounts?.length) {
     permissions.add('compute.instances.setServiceAccount');
     permissions.add('iam.serviceAccounts.actAs');
@@ -282,6 +349,91 @@ export function gcpInstanceInsertPermissions(request: GcpInstanceInsertInput): s
   }
   return [...permissions].sort();
 }
+
+type GcpCallPermissionTable = {
+  readonly [K in keyof GcpWorkspaceHostApiClient]: (
+    ...args: Parameters<GcpWorkspaceHostApiClient[K]>
+  ) => readonly string[];
+};
+
+const OPERATION_GET_PERMISSION: Readonly<Record<GcpOperationScope, string>> = {
+  zone: 'compute.zoneOperations.get',
+  region: 'compute.regionOperations.get',
+  global: 'compute.globalOperations.get',
+};
+
+/**
+ * The IAM permissions GCP checks for EACH call this provider's client makes, as a function of the
+ * call's own arguments: the method-level permission plus every field-level check for a field the
+ * call sets. Source: the "IAM Permissions" section and the per-field "Authorization requires"
+ * notes of docs.cloud.google.com/compute/docs/reference/rest/v1/<collection>/<method>, read
+ * 2026-10-02. The two notes that are easy to miss: `network` on subnetworks/firewalls/routers
+ * insert, and on routers update (the NAT add/remove is a router PATCH), needs
+ * `compute.networks.updatePolicy`; `disks.createSnapshot` also needs `compute.snapshots.create`.
+ *
+ * Typed over every client method, so a new call cannot compile until it declares what it needs.
+ * A test runs every lifecycle through a recording client and pins each role that drives this
+ * provider to the union. That test exists because the customer (BYOC) role was a hand-kept list
+ * that lacked `compute.networks.updatePolicy`, and the first live hosted BYOC provision failed at
+ * create-subnetwork with 403 (WI-10005297).
+ */
+export const GCP_WORKSPACE_HOST_CALL_PERMISSIONS: GcpCallPermissionTable = {
+  validateConnection: () => ['compute.projects.get'],
+  listScopes: () => [],
+  listRegions: () => ['compute.regions.list', 'compute.zones.list'],
+  listSizes: () => ['compute.machineTypes.list'],
+  listImages: () => ['compute.images.get'],
+  getImageDiskSizeGb: () => ['compute.images.get'],
+  estimatePrice: () => [],
+  inventoryManagedResources: () => [
+    'compute.instances.list',
+    'compute.disks.list',
+    'compute.snapshots.list',
+    'compute.networks.get',
+    'compute.subnetworks.get',
+    'compute.firewalls.get',
+    'compute.routers.get',
+  ],
+  getNetwork: () => ['compute.networks.get'],
+  getSubnetwork: () => ['compute.subnetworks.get'],
+  getFirewall: () => ['compute.firewalls.get'],
+  getRouter: () => ['compute.routers.get'],
+  getNat: () => ['compute.routers.get'],
+  getDisk: () => ['compute.disks.get'],
+  // The client also reads the boot disk to learn the image it was created from.
+  getInstance: () => ['compute.instances.get', 'compute.disks.get'],
+  getInstanceGuestAttributes: () => ['compute.instances.getGuestAttributes'],
+  getSnapshot: () => ['compute.snapshots.get'],
+  insertNetwork: () => ['compute.networks.create'],
+  insertSubnetwork: () => ['compute.subnetworks.create', 'compute.networks.updatePolicy'],
+  insertFirewall: () => ['compute.firewalls.create', 'compute.networks.updatePolicy'],
+  insertRouter: () => ['compute.routers.create', 'compute.networks.updatePolicy'],
+  // Reads the router, then PATCHes it with the NAT appended.
+  insertNat: () => ['compute.routers.get', 'compute.routers.update', 'compute.networks.updatePolicy'],
+  insertDisk: (_projectId, _zone, input) => [
+    'compute.disks.create',
+    ...(Object.keys(input.labels).length > 0 ? ['compute.disks.setLabels'] : []),
+    ...(input.sourceSnapshot ? ['compute.snapshots.useReadOnly'] : []),
+  ],
+  insertInstance: (_projectId, _zone, input) => gcpInstanceInsertPermissions(input),
+  createSnapshot: (_projectId, _zone, input) => [
+    'compute.disks.createSnapshot',
+    'compute.snapshots.create',
+    ...(Object.keys(input.labels).length > 0 ? ['compute.snapshots.setLabels'] : []),
+  ],
+  startInstance: () => ['compute.instances.start'],
+  stopInstance: () => ['compute.instances.stop'],
+  resetInstance: () => ['compute.instances.reset'],
+  setInstanceMetadata: () => ['compute.instances.setMetadata'],
+  deleteInstance: () => ['compute.instances.delete'],
+  deleteDisk: () => ['compute.disks.delete'],
+  deleteFirewall: () => ['compute.firewalls.delete', 'compute.networks.updatePolicy'],
+  deleteNat: () => ['compute.routers.get', 'compute.routers.update', 'compute.networks.updatePolicy'],
+  deleteRouter: () => ['compute.routers.delete'],
+  deleteSubnetwork: () => ['compute.subnetworks.delete'],
+  deleteNetwork: () => ['compute.networks.delete'],
+  waitForOperation: (operation) => [OPERATION_GET_PERMISSION[operation.scope]],
+};
 
 export interface GcpInstanceMetadataInput {
   fingerprint: string;
@@ -529,6 +681,8 @@ export interface GcpWorkspaceHostDesiredProviderSettings {
   dataDiskResizePolicy: typeof GCP_DATA_DISK_RESIZE_POLICY;
   kmsKeyName?: string;
   metadata: Readonly<Record<string, string>>;
+  /** 'spot' = reclaimable, about half the price (D-020/D-024); the default stays on-demand. */
+  provisioningModel: GcpWorkspaceHostProvisioningModel;
 }
 
 type GcpStepInput =
@@ -1204,6 +1358,23 @@ export function gcpWorkspaceHostRequestUuid(idempotencyKey: string): string {
   return `${hex.slice(0, 8).join('')}-${hex.slice(8, 12).join('')}-${hex.slice(12, 16).join('')}-${hex.slice(16, 20).join('')}-${hex.slice(20).join('')}`;
 }
 
+/**
+ * The identity the VM itself runs as. A host reached through a hosted delegation holds NONE,
+ * whoever's project it runs in: the only GCP identity on that path is the CONTROLLER Papercusp
+ * acts as, and attaching it would hand every agent on the VM the controller's power over the
+ * project through the metadata server (no delegation grants actAs on it, so GCP also refuses the
+ * create with SERVICE_ACCOUNT_ACCESS_DENIED — measured 2026-10-02, WI-10005297).
+ *
+ * Dropped rather than refused: connection config is spread over every desired spec, and until
+ * 2026-10-02 every hosted connection stored the controller email there, as do the desired specs
+ * persisted from them. Refusing would strand plan, reconcile and destroy for those hosts; the
+ * invariant is that the hosted path never attaches an identity, wherever the field came from.
+ */
+function vmServiceAccountEmail(provider: Record<string, unknown>): string | undefined {
+  const email = optionalString(provider.serviceAccountEmail, 'gcp.desired.provider.serviceAccountEmail');
+  return provider.hostedDelegation === undefined ? email : undefined;
+}
+
 function readSettings(desired: WorkspaceHostDesiredSpec): GcpWorkspaceHostDesiredProviderSettings {
   if (desired.target !== GCP_WORKSPACE_HOST_TARGET)
     throw new Error(`GCP provider cannot plan target '${desired.target}'`);
@@ -1277,7 +1448,7 @@ function readSettings(desired: WorkspaceHostDesiredSpec): GcpWorkspaceHostDesire
     imageId,
     network,
     access,
-    serviceAccountEmail: optionalString(provider.serviceAccountEmail, 'gcp.desired.provider.serviceAccountEmail'),
+    serviceAccountEmail: vmServiceAccountEmail(provider),
     serviceAccountScopes: stringArray(provider.serviceAccountScopes, 'gcp.desired.provider.serviceAccountScopes', [
       GCP_CLOUD_PLATFORM_SCOPE,
     ]),
@@ -1293,6 +1464,36 @@ function readSettings(desired: WorkspaceHostDesiredSpec): GcpWorkspaceHostDesire
     dataDiskResizePolicy: GCP_DATA_DISK_RESIZE_POLICY,
     kmsKeyName: optionalString(provider.kmsKeyName, 'gcp.desired.provider.kmsKeyName'),
     metadata: stringRecord(provider.metadata, 'gcp.desired.provider.metadata'),
+    provisioningModel: provisioningModel(provider.provisioningModel),
+  };
+}
+
+function provisioningModel(value: unknown): GcpWorkspaceHostProvisioningModel {
+  if (value === undefined) return 'standard';
+  if ((GCP_WORKSPACE_HOST_PROVISIONING_MODELS as readonly unknown[]).includes(value)) {
+    return value as GcpWorkspaceHostProvisioningModel;
+  }
+  throw new Error(
+    `gcp.desired.provider.provisioningModel must be one of ${GCP_WORKSPACE_HOST_PROVISIONING_MODELS.join(', ')}`,
+  );
+}
+
+/**
+ * Recover the deterministic names of a GCP-managed network from durable desired state.
+ * Legacy host rows can predate resource registration, so destroy census cannot rely on the
+ * resource ledger as its only source for these identities.
+ */
+export function resolveGcpWorkspaceHostManagedNetworkInventoryNames(
+  desired: WorkspaceHostDesiredSpec,
+): GcpWorkspaceHostInventoryRequest['deterministicNames'] | undefined {
+  const { network } = readSettings(desired);
+  if (network.mode !== 'managed') return undefined;
+  return {
+    networks: [network.networkName],
+    subnetworks: [network.subnetworkName],
+    firewalls: [network.firewallName],
+    routers: [network.routerName],
+    nats: [{ routerName: network.routerName, name: network.natName }],
   };
 }
 
@@ -1357,77 +1558,18 @@ function metadata(
  * have the mount hide it. `hostBootstrapScript` reaches this function only from the provider
  * CONTEXT — `readSettings` refuses a caller-supplied `provider.startupScript`, so there is no
  * second producer for this argument.
+ *
+ * The script itself is the provider-neutral {@link renderDurableFilesystemScript}; GCP names the
+ * data disk by its device name, which the guest exposes as `/dev/disk/by-id/google-<name>`. GCP
+ * re-runs the startup script on every boot, and `planUpgrade` recreates the boot disk while
+ * retaining only the data disk (`{ ...dataDisk, autoDelete: false }`).
  */
 function durableFilesystemStartupScript(dataDeviceName: string, hostBootstrapScript?: string): string {
-  const device = `/dev/disk/by-id/google-${dataDeviceName}`;
-  const userScript = hostBootstrapScript?.trim().replace(/^#![^\n]*(?:\n|$)/, '');
-  return [
-    '#!/usr/bin/env bash',
-    'set -euo pipefail',
-    `data_device='${device}'`,
-    `data_mount='${GCP_DATA_MOUNT_POINT}'`,
-    'for attempt in $(seq 1 60); do test -b "$data_device" && break; sleep 1; done',
-    'test -b "$data_device"',
-    'if ! blkid "$data_device" >/dev/null 2>&1; then mkfs.ext4 -F "$data_device"; fi',
-    'data_uuid=$(blkid -s UUID -o value "$data_device")',
-    'install -d -m 0750 "$data_mount"',
-    'grep -q "^UUID=${data_uuid} " /etc/fstab || printf "UUID=%s %s ext4 defaults,nofail,discard 0 2\\n" "$data_uuid" "$data_mount" >> /etc/fstab',
-    'mountpoint -q "$data_mount" || mount "$data_mount"',
-    'resize2fs "$data_device"',
-    'install -d -m 0750 "$data_mount"/{postgres,repositories,transcripts,workspaces}',
-    // ⛔ WORKSPACE + AGENT HOMES MUST LAND ON THE DURABLE DISK (WI-10003296).
-    //
-    // GCP upgrades delete and recreate the boot disk while retaining only `data_device`.
-    // Both identities whose state must survive that operation live below /home: the customer's
-    // SSH identity owns its dotfiles and option-A agent credentials, and the isolated agent
-    // identity owns its native agent homes. Keeping either on the image loses authentication on
-    // every routine upgrade even though the workspace data itself survives.
-    //
-    // First adoption must use repair (which retains the boot disk) before a destructive upgrade.
-    // Publish the first copy by same-filesystem rename: a failed/interrupted copy must never be
-    // mistaken for a complete home on retry. Existing durable content, even empty, wins forever.
-    // This state must be on disk: it is mounted before the bootstrap or database can start.
-    '[[ -d /home && ! -L /home ]] || { echo "workspace home mount target is not a real directory" >&2; exit 1; }',
-    'if [[ ! -e "$data_mount/home" && ! -L "$data_mount/home" ]]; then',
-    '  home_seed="$(mktemp -d "$data_mount/.home-seed.XXXXXX")"',
-    '  cp -a /home/. "$home_seed"/',
-    '  mv -T -- "$home_seed" "$data_mount/home"',
-    'fi',
-    '[[ -d "$data_mount/home" && ! -L "$data_mount/home" ]] || { echo "durable home is not a real directory" >&2; exit 1; }',
-    "install -d -m 0755 '/home'",
-    'grep -q " /home none bind" /etc/fstab || printf "%s /home none bind 0 0\\n" "$data_mount/home" >> /etc/fstab',
-    "mountpoint -q '/home' || mount --bind \"$data_mount/home\" '/home'",
-    '[[ "$(stat -c %d:%i /home)" == "$(stat -c %d:%i "$data_mount/home")" ]] || { echo "workspace home is not backed by the durable directory" >&2; exit 1; }',
-    // ⛔ CUSTOMER WORKSPACES MUST LAND ON THE DURABLE DISK (WI-2143796, proven on canary-14).
-    //
-    // WORKSPACE_HOST_DATA_ROOT is `/srv/papercusp/workspaces` — a path on the BOOT disk, which
-    // `upgrade` DELETES and recreates from the new image (planUpgrade below retains only the data
-    // disk, `{ ...dataDisk, autoDelete: false }`). Measured 2026-09-03: a file written to that root
-    // as the customer SSH user was GONE after a ledger-verified `succeeded|100` upgrade, while the
-    // data disk persisted untouched — i.e. every customer workspace was destroyed by a routine
-    // image upgrade. The `workspaces` directory created just above, on the durable mount, was never
-    // referenced by anything: the storage was already provisioned and simply not used.
-    //
-    // Bind, rather than relocating WORKSPACE_HOST_DATA_ROOT itself, because the bootstrap builds a
-    // deliberate permission boundary at that path — 0711 on /srv/papercusp so the workspace user can
-    // traverse but not list, 0770 + named-user ACLs on the root itself — while $data_mount is
-    // 0750 root:$SERVICE_GROUP with the workspace account deliberately NOT in that group (D-043:
-    // keep runtime files root-owned and non-readable to the workspace user). Moving the root under
-    // $data_mount would put customer workspaces behind a directory the customer is denied, or force
-    // that boundary open. A bind mount keeps the entire published path, permission and ACL model
-    // byte-identical and changes only which disk the bytes live on. The ACLs are stored in the ext4
-    // filesystem on the data disk, so they now survive the upgrade too.
-    //
-    // This runs BEFORE the user bootstrap (see the ordering contract in this function's header), so
-    // the bootstrap's own `install -d`/`setfacl` on the workspace root write straight through to the
-    // durable disk. fstab carries the bind so it survives reboot as well as instance recreation.
-    `install -d -m 0711 '${WORKSPACE_HOST_DATA_ROOT.replace(/\/[^/]+$/, '')}'`,
-    `install -d '${WORKSPACE_HOST_DATA_ROOT}'`,
-    `grep -q " ${WORKSPACE_HOST_DATA_ROOT} none bind" /etc/fstab || printf "%s ${WORKSPACE_HOST_DATA_ROOT} none bind 0 0\\n" "$data_mount/workspaces" >> /etc/fstab`,
-    `mountpoint -q '${WORKSPACE_HOST_DATA_ROOT}' || mount --bind "$data_mount/workspaces" '${WORKSPACE_HOST_DATA_ROOT}'`,
-    ...(userScript ? ['', '# User-supplied bootstrap follows the durable mount.', userScript] : []),
-    '',
-  ].join('\n');
+  return renderDurableFilesystemScript({
+    devicePath: `/dev/disk/by-id/google-${dataDeviceName}`,
+    deviceWaitSec: GCP_DATA_DEVICE_WAIT_SEC,
+    hostBootstrapScript,
+  });
 }
 
 function refreshedInstanceMetadata(
@@ -2205,6 +2347,7 @@ export class GcpWorkspaceHostProvider implements WorkspaceHostProvider {
             ? { serviceAccounts: [{ email: settings.serviceAccountEmail, scopes: settings.serviceAccountScopes }] as const }
             : {}),
           metadata: { items: metadata(settings, desired.hostId, ctx.hostBootstrapScript) },
+          ...(settings.provisioningModel === 'spot' ? { scheduling: GCP_SPOT_SCHEDULING } : {}),
         },
       } satisfies GcpStepInput,
     });
@@ -2670,7 +2813,7 @@ export class GcpWorkspaceHostProvider implements WorkspaceHostProvider {
 
   private async settled(operation: GcpOperationRef, signal?: AbortSignal): Promise<boolean> {
     const observed = await this.client.waitForOperation(operation, signal);
-    if (observed.error) throw new Error(`GCP operation '${operation.name}' failed: ${observed.error.message}`);
+    if (observed.error) throw new GcpOperationFailedError(operation.name, observed.error);
     return observed.status === 'DONE';
   }
 

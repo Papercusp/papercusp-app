@@ -2,8 +2,10 @@ import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { getSessionUserOrDefault } from '../../auth';
 import { authorizePersonalAccess } from '../../personal-vault/authorization';
+import { discloseDocuments } from '../../personal-vault/disclosure-ledger';
 import { buildPersonalQueryEmbedder, PERSONAL_EMBEDDER_MODE } from '../../personal-vault/embedding';
 import { searchPersonalDocuments } from '../../personal-vault/store';
+import { disclosureSubject } from '../_disclosure-subject';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 
 const ALL_ROLES = [...SU_ROLES, 'papercup', 'papercup-deep', 'kettle'] as const;
@@ -52,10 +54,19 @@ export default defineTool({
     } catch {
       // Lexical search remains useful and grant enforcement is unchanged.
     }
-    const results = await searchPersonalDocuments(ctx.tx!, workspaceId, user.id, {
+    const found = await searchPersonalDocuments(ctx.tx!, workspaceId, user.id, {
       ...args,
       scopes: auth.scopes,
       queryEmbedding,
+    });
+    // Same transaction as the read: a restricted result reaches the agent only
+    // with its disclosure row, and then constrains every send it makes.
+    const disclosed = await discloseDocuments(ctx.tx!, {
+      workspaceId,
+      userId: user.id,
+      agentOwnerId: disclosureSubject(ctx),
+      documents: found,
+      via: 'personal:search',
     });
     return {
       data: {
@@ -63,7 +74,11 @@ export default defineTool({
         principal: auth.principal,
         grantedScopes: auth.scopes,
         vectorLeg,
-        results,
+        results: disclosed.documents,
+        ...(disclosed.disclosed
+          ? { restrictedResults: disclosed.disclosed, restrictionNote: 'Results carrying `privacy` are restricted: until the owner releases them, you may send only to their privacy.readerSet (intersected across everything restricted you have read) or to the owner.' }
+          : {}),
+        ...(disclosed.withheld ? { withheldRestricted: disclosed.withheld, withheldReason: 'disclosure_identity_unresolved' } : {}),
       },
     };
   },

@@ -30,7 +30,10 @@ import { StringDecoder } from 'node:string_decoder';
 import { spawn, type StdioOptions } from 'node:child_process';
 import { processGroupLifetime } from './process-group-lifetime';
 
-import type { AdmissionContext } from '../resource-governor/admission';
+import { isReadOnlyGitBatchExec } from '../git-batch';
+import { gitSubcommandOf, qualifiesForLazyReceipt as qualifiesForLazyGitExec } from './sidecar-read-only-git';
+
+import type { AdmissionContext, ResourceDemand } from '../resource-governor/admission';
 import {
   admissionContextFromEnvironment,
   beginGovernedExecution,
@@ -39,11 +42,21 @@ import {
 } from '../resource-governor/execution';
 import { activeWorkspaceId } from '../workspace-registry';
 
+export const PROCESS_EXEC_CALLER_LABELS = {
+  command: 'git-via-sidecar.runCommandViaSpawnerSidecar',
+  stdin: 'git-via-sidecar.runGitStdinViaSpawnerSidecar',
+} as const;
+
+export type ProcessExecCallerLabel =
+  (typeof PROCESS_EXEC_CALLER_LABELS)[keyof typeof PROCESS_EXEC_CALLER_LABELS];
+
 export interface ExecParams {
   command: string;
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  /** Safe, static callsite identity for transport-fault diagnostics. */
+  callerLabel?: ProcessExecCallerLabel;
   /** Optional no-output deadline. Unlike `timeoutMs` (the absolute hard
    * ceiling), this timer refreshes on observed stdout/stderr progress. File
    * output is sampled at idle deadlines, without copying its bytes into JS. */
@@ -91,6 +104,129 @@ export interface ExecProcessDeps {
   onOutputActivity?: () => void;
   /** Injectable grace for real-process cancellation tests. */
   killGraceMs?: number;
+  /**
+   * How long a read-only git exec (see `qualifiesForLazyReceipt`) may run before
+   * it mints its durable admission receipt. `0` restores eager admit-before-spawn
+   * for EVERY command. Default `SIDECAR_LAZY_RECEIPT_DELAY_MS`. Commands that do
+   * not qualify are always admitted eagerly, whatever this says.
+   */
+  lazyReceiptMs?: number;
+}
+
+/**
+ * WI-10004674 / WI-10003465 — a read-only git exec lives ~4 ms, but its durable
+ * receipt costs four awaited PG statements (admit INSERT, lease UPDATE,
+ * markRunning UPDATE, release UPDATE). Fleet-wide that is ~10 execs/s = ~40
+ * statements/s through the sidecar's 2-connection pool on a WAL-saturated disk:
+ * measured enqueue->complete p50 0.5-3.5 s per read against 5 ms for bare git,
+ * and ~59% of native-PG WAL. The receipt is observe-only evidence here
+ * (decision reason `observe-only-targeted-lease`), so a read that is already
+ * finished by the time anyone could look at the ledger does not need one.
+ *
+ * A qualifying exec therefore spawns FIRST and mints its receipt only if it is
+ * still running after this delay. Slow reads (a network `ls-remote`, a huge
+ * `log`) keep full ledger visibility, merely `delay` late.
+ */
+export const SIDECAR_LAZY_RECEIPT_DELAY_MS = 750;
+
+/**
+ * The read-only git classification (which subcommands may defer their receipt)
+ * lives in `sidecar-read-only-git.ts` so the CLIENT-side latency sampler shares
+ * one definition without importing this module's resource-governor/PG chain.
+ * Re-exported here so every existing importer keeps working.
+ */
+export { gitSubcommandOf, qualifiesForLazyReceipt } from './sidecar-read-only-git';
+
+/** Lazy admission covers ordinary read-only Git and the strictly verified dev-deploy batch. */
+export function qualifiesForLazyReceiptProcess(
+  params: Pick<ExecParams, 'command' | 'args'>,
+): boolean {
+  return qualifiesForLazyGitExec(params) || isReadOnlyGitBatchExec(params);
+}
+
+/** What `execProcess` needs from the durable receipt, whether minted eagerly or late. */
+interface ReceiptHandle {
+  /** Env override handed to the child (its nested-lineage context). */
+  readonly childEnv: Record<string, string>;
+  /** Call right after spawn: starts the lazy mint timer (no-op when eager). */
+  armAfterSpawn(): void;
+  finish(demand: ResourceDemand): Promise<void>;
+  cancel(reason: string): Promise<void>;
+}
+
+function eagerReceipt(execution: GovernedExecution): ReceiptHandle {
+  return {
+    childEnv: { PAPERCUSP_ADMISSION_CONTEXT: JSON.stringify(execution.context) },
+    armAfterSpawn: () => {},
+    // Eager settlement failures propagate: the caller reports them in stderr.
+    finish: async (demand) => { await execution.finish(demand); },
+    cancel: async (reason) => { await execution.cancel(reason); },
+  };
+}
+
+function lazyReceipt(
+  begin: (params: ExecParams) => Promise<GovernedExecution>,
+  params: ExecParams,
+  delayMs: number,
+): ReceiptHandle {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let minting: Promise<void> | null = null;
+  let execution: GovernedExecution | null = null;
+  const settle = async (op: (e: GovernedExecution) => Promise<unknown>): Promise<void> => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (minting) await minting;
+    if (!execution) return; // finished before the delay: no receipt was ever minted
+    // Evidence only: a late receipt is bookkeeping for a read that already
+    // succeeded, so its settlement failure must not turn that result into an error.
+    await op(execution).catch(() => undefined);
+  };
+  return {
+    // The child inherits the caller-supplied parent lineage; there is no receipt of its own yet.
+    childEnv: params.admissionContext
+      ? { PAPERCUSP_ADMISSION_CONTEXT: JSON.stringify(params.admissionContext) }
+      : {},
+    armAfterSpawn: () => {
+      timer = setTimeout(() => {
+        timer = null;
+        minting = begin(params).then(
+          (e) => { execution = e; },
+          () => undefined, // best-effort: never disturbs a running read
+        );
+      }, delayMs);
+      timer.unref?.();
+    },
+    finish: (demand) => settle((e) => e.finish(demand)),
+    cancel: (reason) => settle((e) => e.cancel(reason)),
+  };
+}
+
+/**
+ * Receipt metadata. A git receipt also names its SUBCOMMAND and whether it was
+ * eligible for the lazy path: the ledger carries no argv, so without these a
+ * "which git execs still mint receipts after the lazy-receipt fix" question is
+ * unanswerable — a read-only subcommand here is a read that outlived the delay,
+ * a non-read-only one was always going to be eager (WI-10004674 done-when (b)).
+ * Derived deterministically from `params`, so a retry under the same
+ * idempotency key keeps the same request digest.
+ */
+export function sidecarReceiptMetadata(
+  params: Pick<ExecParams, 'command' | 'args'>,
+): Record<string, string | boolean> {
+  const base = { processKind: 'sidecar-exec', command: params.command };
+  if (params.command === 'git') {
+    return {
+      ...base,
+      gitSubcommand: gitSubcommandOf(params.args ?? []) ?? 'unknown',
+      readOnlyGit: qualifiesForLazyGitExec(params),
+    };
+  }
+  if (isReadOnlyGitBatchExec(params)) {
+    return { ...base, gitSubcommand: 'batch', readOnlyGit: true };
+  }
+  return base;
 }
 
 async function beginSidecarProcessExecution(params: ExecParams): Promise<GovernedExecution> {
@@ -111,7 +247,7 @@ async function beginSidecarProcessExecution(params: ExecParams): Promise<Governe
       demand: { cpuWeight: 1 },
       payloadRef: `process:${params.command}`,
       parent,
-      metadata: { processKind: 'sidecar-exec', command: params.command },
+      metadata: sidecarReceiptMetadata(params),
     },
     { owner: params.ownerId?.trim() || params.env?.PAPERCUSP_SID?.trim() || `spawner-sidecar:${process.pid}` },
     governedExecutionRuntime(workspaceId, 'agent-process'),
@@ -135,9 +271,12 @@ export async function execProcess(params: ExecParams, deps: ExecProcessDeps = {}
     return { code: -1, stdout: '', stderr: `spawner sidecar could not open a handoff file: ${String(e)}` };
   }
 
-  let execution: GovernedExecution;
+  const begin = deps.beginExecution ?? beginSidecarProcessExecution;
+  const lazyDelayMs = qualifiesForLazyReceiptProcess(params) ? (deps.lazyReceiptMs ?? SIDECAR_LAZY_RECEIPT_DELAY_MS) : 0;
+  let execution: ReceiptHandle;
   try {
-    execution = await (deps.beginExecution ?? beginSidecarProcessExecution)(params);
+    // Lazy: nothing to admit yet — the receipt is minted only if the read outlives the delay.
+    execution = lazyDelayMs > 0 ? lazyReceipt(begin, params, lazyDelayMs) : eagerReceipt(await begin(params));
   } catch (e) {
     await stdinHandle?.close().catch(() => {});
     await stdoutHandle?.close().catch(() => {});
@@ -171,13 +310,15 @@ export async function execProcess(params: ExecParams, deps: ExecProcessDeps = {}
         env: {
           ...process.env,
           ...(params.env ?? {}),
-          PAPERCUSP_ADMISSION_CONTEXT: JSON.stringify(execution.context),
+          ...execution.childEnv,
         },
         stdio,
         // Own the command's helper processes too. Keep the child referenced;
         // detached here creates a POSIX process group, not a fire-and-forget job.
         detached: process.platform !== 'win32',
       });
+      // A lazy receipt's delay measures the child's runtime, not the setup before it.
+      execution.armAfterSpawn();
       // Decode across chunk boundaries: a multi-byte UTF-8 character split between
       // two `data` events decodes to replacement chars under a plain
       // `String(chunk)`, silently corrupting output (e.g. a non-ASCII author or
@@ -339,7 +480,8 @@ export async function execProcess(params: ExecParams, deps: ExecProcessDeps = {}
           finish(-1);
         }
       });
-      child.on('close', async (code) => {
+      child.on('close', async (code, signal) => {
+        if (signal) stderr += `${stderr ? '\n' : ''}${params.command} terminated by signal ${signal}`;
         try {
           await waitForCommandExit();
           // Admission settlement can itself wait on IO. Remove kill timers

@@ -1,0 +1,81 @@
+# Cloud first-agent lesson and troubleshooting runbook
+URL: /internal/docs/cloud/first-agent-lesson-runbook
+
+Prerequisites, costs, Help/replay, scoped resume, advisory voice/AI privacy and recovery for the hosted six-step first-agent lesson.
+
+The Cloud lesson is **Get your first agent running**, version 1 (`first-cloud-agent`). Open the hosted app's Cloud view. **Help → Get your first agent running** starts or replays it. The guide stays beside the real controls; **Show me** navigates to and focuses the current control. You explicitly connect, provision, launch and send the sample task.
+
+## Before starting
+
+Sign in and select a workspace you may access. For the Google Cloud path, have a project, permission to manage it and enable the required APIs, an injected credential reference, and the runtime service account requested by the connection form. Keep credentials in that form. Never paste API keys, service-account JSON or tokens into lesson Help.
+
+Review cloud billing before creating resources. The configuration estimate uses 730 compute hours and the selected disk; it is guidance, and provider billing is authoritative. Retained disks can still incur charges. Agent model usage can also cost money: review the selected model and account before **+ New session**. You can use an existing healthy workspace.
+
+## The six steps
+
+| Guide heading                 | Your action                                                                                                         | What confirms the step                                                                                                                 |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Connect Google Cloud          | Complete the connection form and choose **Connect and validate**.                                                   | The selected Google Cloud connection reports successful validation.                                                                    |
+| Review configuration and cost | Choose the configuration, review the estimate, and choose **I've reviewed the configuration and cost**.             | The current configuration is valid and its current cost/configuration has been explicitly reviewed. Changing it requires review again. |
+| Wait for a healthy workspace  | Choose **Provision workspace**, or select an existing workspace. Review readiness and connect its browser session.  | The selected workspace is running and healthy and the browser connection is bound to that workspace.                                   |
+| Launch your first agent       | Choose **+ New session** with the intended model/account.                                                           | The explicitly launched session is available on this workspace.                                                                        |
+| Submit a small read-only task | Choose **Send sample task**. The prompt asks the agent to list its tools without running them or changing anything. | The same session reports that the correlated sample request succeeded. An unrelated conversation is insufficient.                      |
+| Inspect the result            | Read the tools checklist, then choose **I've inspected this answer**.                                               | Your inspection receipt matches that successful session, task and answer.                                                              |
+
+The guide's confirmed-step count follows product observations, not instruction clicks or AI claims. **Next explanation**, when replaying, changes the explanation being shown; it does not complete product work.
+
+## Pause, reload and replay
+
+**Pause** removes highlighting and speech; **Resume guide** returns to the current explanation. **Skip lesson** keeps the Cloud controls available. **Close guide** removes the guide and its overlays. **Help → Get your first agent running** and **Restart lesson** replay the explanations. These controls do not destroy a workspace, cancel a launched session or retry a cloud operation.
+
+Saved progress is scoped to your signed-in organization, user, selected workspace and lesson version. It stores the guide disposition and an inspection receipt. It does not store a claim that a connection, workspace or task succeeded. After reload the app checks current product state again; a session/task is confirmed only when the current session controls report it. Another workspace or a changed lesson version does not inherit this workspace's completion. If another tab changes the guide, its latest saved progress is restored.
+
+## Help and speech
+
+Ask the lesson guide about the current step. Its answer is advisory; use the product controls to act. Help uses the lesson's public instructions and advisory step/status, rather than a workspace transcript or product credential record. Your question is sent to the configured AI service, so keep secrets out of it.
+
+The guide speaks step instructions and permitted help answers using the existing voice selection. **Mute guide**, **Stop speech** and **Replay speech** control playback. Speech stops when the step/workspace changes, the guide pauses or exits, or the component is removed. Browser autoplay refusal, a slow response or a TTS outage leaves the visible instructions usable. Use **Replay speech** after a browser interaction to retry. No microphone is required for this output-only guidance.
+
+When existing analytics consent/configuration enables capture, explicit `cloud_tutorial` events contain the lesson ID/version, action, and optional fixed step/status. They do not include identifiers from the lesson scope, free-form help text, credentials or task output. Events are dropped when consent is disabled or the telemetry configuration is unavailable. The tutorial reuses the existing analytics provider and does not enable session recording. This describes tutorial events; other application analytics follow their existing settings.
+
+## Troubleshooting a blocked step
+
+| What you see                                      | What to inspect and do                                                                                                                                             |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Sign-in or workspace-access notice                | Sign in/select an authorized workspace, then **Check lesson again**. Cloud controls remain available. Do not copy progress from another user or workspace.         |
+| Connection validation failure                     | Read the connection's validation details. Fix the named project permission/API/credential setting and explicitly validate again.                                   |
+| Missing highlighted control                       | Choose **Show me** to open the indicated Cloud view. If it is still unavailable, check the selected connection/workspace, then **Check again**.                    |
+| Provisioning waiting, delayed or failed           | Read the selected workspace's operation/readiness details before using its product repair/retry control. **Check again** reads state; it does not provision again. |
+| Session absent or ended                           | Check the launch receipt, account and workspace connection. Use **Check session again**, or explicitly launch a new session if the previous one ended.             |
+| Sample task delivery uncertain, pending or failed | Inspect that session's transcript and account status before **Send sample task again**. An accepted request may still finish; avoid guessing from the guide alone. |
+| AI help or speech unavailable                     | Continue with the visible lesson and product controls. Retry the advisory help or speech when available; neither is needed for completion.                         |
+| Progress could not be saved                       | Keep using the Cloud controls. **Check again** retries saving; sign-in/scope changes require an authorized reload.                                                 |
+
+Support should record the visible step/status and the relevant product validation, operation or launch receipt, excluding secrets. Diagnose those product records and authorization first. Never edit saved progress or manually mark steps complete to unblock a lesson.
+
+## Source-to-UI review
+
+Reviewed against `cloud-tutorial-lesson.ts`, the Cloud page/configuration controls, `CloudTutorialCompanion`, `CloudTutorialGuide`, `CloudTutorialSession`, the hosted progress client and `CloudTutorialAssistance`. The existing tutorial pack's Brief/Details format is reused for a hosted-specific entry; the desktop installation tutorial retains its own flow. This documentation describes the current source/UI contract. Hosted artifact and pilot acceptance are separate release checks in plan P-012.
+
+## Prepared-workspace beginner lesson (version 2)
+
+Choose the beginner entry in Cloud, select an authorized healthy prepared workspace and review its existing cost. This path does not require provider credentials or machine configuration. When no prepared workspace is available, ask the workspace administrator to prepare one or deliberately choose the advanced bring-your-own-cloud path. The beginner entry never provisions or repairs a workspace for you.
+
+The beginner lesson uses version 2 of the existing first-cloud-agent lesson; the six-step advanced lesson above retains version 1. Saved guide disposition and inspection receipts remain scoped to organization, user, workspace and lesson version. Neither version inherits the other version's completion. After reload, current session and task receipts must be observed again.
+
+1. Review the selected prepared workspace's configuration/cost and wait for its authorized connection to be ready.
+2. Launch a session using the existing recommended interactive defaults; review the selected model and account first.
+3. Explicitly send the supplied meeting notes and ask for an action plan. The agent uses supplied text; the exercise does not authorize tools, files or external actions.
+4. Compare the answer with the notes: verify owners and deadlines and check that missing information is marked unknown. Confirm review only for this session, request and result.
+5. Explicitly request the proposed correction, compare the revision with the original notes and confirm review of that revision.
+6. Write a different goal, provide its context and specify the desired output yourself. The independent-task fields start empty. Submit a read-only task from supplied text, review the correlated answer and describe how you verified it. A canned prompt, unrelated answer or pending/failed request does not complete the exercise.
+
+Teach the work cycle as goal, context, proposal, review, explicit approval when needed, correction and verification. A suggested action is not approval. Pausing, skipping or closing the guide only changes its instructions; use the session stop control to stop an agent, and the workspace Stop control to stop compute, then verify the resulting status. Retained disks may still incur charges, and model usage is billed separately.
+
+Help uses only the public lesson instructions and a bounded recovery category: access required, workspace not ready, request delayed, request failed, control unavailable or unknown. Check the product status/transcript before an explicit retry. Common credential-shaped questions are rejected before the configured AI or speech provider. Keep secrets and private context out of Help and these exercises. Text and real controls remain usable when speech or advisory help fails.
+
+## Version 2 verification and rollback
+
+Use the existing canonical lesson/progress/help/session/Cloud tests and Chromium journey. Required compatibility checks include v1 isolation, tenant/workspace switching, reload/resume, failed and delayed requests, keyboard/focus, axe, reduced motion and speech fallback. Automated fixture results establish behavior; they do not establish novice understanding. Independent acceptance must retain a consenting first-time nontechnical participant's help/coaching record, useful independent-task outcome and explanations of approval, stop controls and cost. Final shipment additionally requires the exact authenticated artifact serving app.papercusp.com; source, staging and browser fixtures alone are insufficient.
+
+The beginner lesson is available by default through its entry. Roll back through the normal green release pipeline to a verified preceding artifact; preserve the version1 progress namespace and advanced lesson. Never repair acceptance by editing stored guide progress or marking tasks successful. Follow-up acceptance is tracked in cloud-portal-novice-independence-2026-10-03; the original tutorial plan remains unchanged.

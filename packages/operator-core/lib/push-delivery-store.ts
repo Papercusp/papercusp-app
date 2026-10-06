@@ -110,7 +110,7 @@ export async function pendingPushes(
            pulled_at::text AS pulled_at, acted_at::text AS acted_at
     FROM harness_shared.push_delivery
     WHERE target_owner_id = ${targetOwnerId} AND status = 'queued'
-    ORDER BY enqueued_at ASC
+    ORDER BY push_delivery.enqueued_at ASC
     LIMIT ${cap}
   `;
   return rows.map(normalizeRow);
@@ -304,7 +304,7 @@ export async function recentDeliveries(filter: {
       ${filter.targetOwnerId ? sql`AND target_owner_id = ${filter.targetOwnerId}` : sql``}
       ${filter.status ? sql`AND status = ${filter.status}` : sql``}
       ${sinceIso ? sql`AND enqueued_at > ${sinceIso}::timestamptz` : sql``}
-    ORDER BY enqueued_at DESC
+    ORDER BY push_delivery.enqueued_at DESC
     LIMIT ${cap}
   `;
   return rows.map(normalizeRow);

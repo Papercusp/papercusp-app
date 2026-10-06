@@ -24,6 +24,15 @@ export interface WorkspaceHostBootcCloudArtifact {
   sizeBytes: number;
 }
 
+/**
+ * The release tree the baked IMAGE carries at /opt/papercusp/releases/<version> (WI-10005761).
+ * bake-cloud-images.sh derives it from the image itself (`/opt/papercusp/current`), never from
+ * its own flags, so a `--source-image` reuse is described as accurately as a fresh build.
+ */
+export interface WorkspaceHostBootcBakeRelease {
+  version: string;
+}
+
 export interface WorkspaceHostBootcBakeManifest {
   contractVersion: typeof WORKSPACE_HOST_BOOTC_BAKE_CONTRACT_VERSION;
   /** OCI repository without a tag or digest. */
@@ -34,6 +43,11 @@ export interface WorkspaceHostBootcBakeManifest {
   registryNamespace: string;
   /** Dry-run plans deliberately carry zero-byte placeholders and are never releasable. */
   dryRun?: false;
+  /**
+   * The release baked into the image, or null for an OS-only image. Absent on manifests written
+   * before WI-10005761; consumers must treat absent exactly like null (no release is proven).
+   */
+  release?: WorkspaceHostBootcBakeRelease | null;
   /** One artifact per selected provider. All were rendered from pinnedRef. */
   clouds: readonly WorkspaceHostBootcCloudArtifact[];
 }
@@ -57,6 +71,8 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const IMAGE_REPOSITORY =
   /^[a-z0-9][a-z0-9._-]*(?::\d{1,5})?(?:\/[a-z0-9][a-z0-9._-]*)+$/;
 const TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** The --release-version / PAPERCUSP_RELEASE_VERSION charset the bake and Containerfile enforce. */
+const RELEASE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -97,6 +113,14 @@ export function validateWorkspaceHostBootcBakeManifest(value: unknown): readonly
   }
   if (candidate.dryRun !== undefined && candidate.dryRun !== false) {
     errors.push('dry-run bake manifests cannot be consumed by a release');
+  }
+  if (candidate.release !== undefined && candidate.release !== null) {
+    const release = object(candidate.release);
+    if (!release) {
+      errors.push('release must be an object or null');
+    } else if (typeof release.version !== 'string' || !RELEASE_VERSION.test(release.version)) {
+      errors.push('release.version must be a safe release version');
+    }
   }
 
   if (!Array.isArray(candidate.clouds)) {
@@ -145,6 +169,32 @@ export function parseWorkspaceHostBootcBakeManifest(value: unknown): WorkspaceHo
     ...candidate,
     clouds: candidate.clouds.map((cloud) => ({ ...cloud })),
   };
+}
+
+/**
+ * WI-10005761 — on the bootc model a release is IMAGE CONTENT, not a label: the bootstrap never
+ * installs one, it requires /opt/papercusp/releases/<version> to already be in the booted image.
+ * So a release request may only name the version the bake actually carries. Returns the refusal
+ * when it does not (an OS-only bake, a pre-WI-10005761 manifest, or a different release), else
+ * undefined. Measured cost of the missing check: two billable clean rooms that booted, passed
+ * harden-os, and died at install-runtime.
+ */
+export function workspaceHostBootcBakeReleaseMismatch(
+  manifest: Pick<WorkspaceHostBootcBakeManifest, 'release' | 'tag'>,
+  releaseVersion: string,
+): string | undefined {
+  const baked = manifest.release?.version;
+  if (baked === releaseVersion) return undefined;
+  const carries =
+    baked === undefined
+      ? manifest.release === null
+        ? 'is OS-only (it carries no release)'
+        : 'records no baked release (it predates WI-10005761 or is OS-only)'
+      : `carries release ${baked}`;
+  return (
+    `bake ${manifest.tag} ${carries}, but the release names ${releaseVersion}; ` +
+    `re-bake with bake-cloud-images.sh --release-root <extracted ${releaseVersion}> --release-version ${releaseVersion}`
+  );
 }
 
 export function workspaceHostBootcCloudArtifact(

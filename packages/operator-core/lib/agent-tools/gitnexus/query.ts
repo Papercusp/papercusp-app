@@ -78,6 +78,16 @@ export default defineTool({
       .describe(
         "GitNexus symbol kind ('Function', 'Class', ...). Optional; narrows an ambiguous name.",
       ),
+    file_path: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('symbol/callers/callees: defining file; picks one of several same-name symbols.'),
+    uid: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('symbol/callers/callees: exact uid from an ambiguity error candidate.'),
     direction: z
       .enum(['upstream', 'downstream', 'both'])
       .optional()
@@ -133,6 +143,8 @@ export default defineTool({
       {
         name: args.name,
         kind: args.kind,
+        file_path: args.file_path,
+        uid: args.uid,
         direction: args.direction,
         repo: args.repo,
         limit: args.limit,

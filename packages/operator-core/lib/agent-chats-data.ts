@@ -9,6 +9,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { harnessQuery } from '@papercusp/db-org';
+import {
+  projectChatFailureTranscript,
+  type ChatModelFailureCode,
+} from './chat-model-failure';
 import { getKnownRoles } from './known-roles';
 import { activeWorkspaceId } from './workspace-registry';
 
@@ -52,11 +56,18 @@ export interface TranscriptTurn {
   tools?: TranscriptToolCall[];
   /**
    * Marks an assistant turn that FAILED (rate-limit, backend error, dispatch
-   * error) instead of producing a reply. `content` holds the failure message.
+   * error) instead of producing a reply. New rows keep a safe sentence in
+   * `content`; actionable failure details use stable fields below.
    * Persisted so a reload / second viewer sees the failure instead of a silent
    * gap (the live sender also gets the inline error banner). jsonb — no migration.
    */
   error?: boolean;
+  /** Stable viewer-safe failure classification; never raw backend prose. */
+  code?: ChatModelFailureCode;
+  /** Provider-named account reset instant, when known. */
+  resetAt?: number;
+  /** Backend retry delay, when known. */
+  retryAfterMs?: number;
   /** Number of terminal usage frames whose cost/token fields were absent. */
   unreportedFrames?: number;
   /** Stable idempotency key for a server-to-server external turn (P-010). */
@@ -185,10 +196,11 @@ function msToIsoNullable(v: unknown): string | null {
 }
 
 export function rowToChat(r: Record<string, unknown>): ChatRow {
-  const transcript: TranscriptTurn[] =
+  const storedTranscript: TranscriptTurn[] =
     typeof r.transcript === 'string'
       ? JSON.parse(r.transcript)
       : ((r.transcript as TranscriptTurn[] | undefined) ?? []);
+  const transcript = projectChatFailureTranscript(storedTranscript) as TranscriptTurn[];
   const usageComplete =
     typeof r.usage_complete === 'boolean'
       ? r.usage_complete
@@ -616,5 +628,64 @@ export async function appendExternalChatTurn(
     return { ok: true, data: { appended: false } };
   } catch (e) {
     return { ok: false, status: 500, error: `failed to append external turn: ${(e as Error).message}` };
+  }
+}
+
+export interface DeleteExternalChatTurnsInput {
+  slug: string;
+  chatId: string;
+  source: 'phone-livekit';
+  /** The Phone room whose `(room, seq)` source ids were appended. */
+  roomName: string;
+}
+
+/**
+ * Remove every turn one Phone room mirrored into an agent chat (WI-10006406).
+ *
+ * Phone retention (D-022) deletes a call's transcript after 30 days, and an
+ * owner can delete it sooner; both must also remove the copy that
+ * `appendExternalChatTurn` placed here. Only turns carrying this exact
+ * source AND a `<room>:` source-id prefix are removed, so typed turns, other
+ * rooms and other sources keep their order. Idempotent: a second call
+ * removes 0. A chat that no longer exists returns 404, which the Phone side
+ * treats as already deleted.
+ */
+export async function deleteExternalChatTurns(
+  input: DeleteExternalChatTurnsInput,
+): Promise<Result<{ removed: number }>> {
+  const roomName = input.roomName.trim();
+  // A colon would let `a:` match room `a:b`'s ids, so it is refused outright.
+  if (!roomName || roomName.length > 200 || roomName.includes(':')) {
+    return { ok: false, status: 400, error: 'roomName is invalid' };
+  }
+  try {
+    const rows = await harnessQuery(input.slug, async (sql) => (await sql.unsafe(
+      `WITH target AS (
+         SELECT id, COALESCE(transcript, '[]'::jsonb) AS transcript
+           FROM agent_chats WHERE workspace_id = $1 AND id = $2 FOR UPDATE
+       ), filtered AS (
+         SELECT target.id,
+                COALESCE(jsonb_agg(t.turn ORDER BY t.ord) FILTER (WHERE NOT (
+                  t.turn->>'source' = $3 AND starts_with(COALESCE(t.turn->>'source_id', ''), $4)
+                )), '[]'::jsonb) AS kept,
+                count(t.turn) FILTER (WHERE
+                  t.turn->>'source' = $3 AND starts_with(COALESCE(t.turn->>'source_id', ''), $4)
+                ) AS removed
+           FROM target
+           LEFT JOIN LATERAL jsonb_array_elements(target.transcript) WITH ORDINALITY AS t(turn, ord) ON true
+          GROUP BY target.id
+       ), updated AS (
+         UPDATE agent_chats c SET transcript = filtered.kept, updated_at = $5
+           FROM filtered
+          WHERE c.workspace_id = $1 AND c.id = filtered.id AND filtered.removed > 0
+          RETURNING c.id
+       )
+       SELECT removed::int AS removed FROM filtered`,
+      [activeWorkspaceId(), input.chatId, input.source, `${roomName}:`, Date.now()],
+    )) as Array<{ removed?: number | string }>);
+    if (!rows[0]) return { ok: false, status: 404, error: 'chat not found' };
+    return { ok: true, data: { removed: Number(rows[0].removed ?? 0) } };
+  } catch (e) {
+    return { ok: false, status: 500, error: `failed to delete external turns: ${(e as Error).message}` };
   }
 }

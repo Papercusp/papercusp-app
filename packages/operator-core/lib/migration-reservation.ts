@@ -35,6 +35,19 @@ export interface MigrationReservationConflict {
   reservedFilename: string | null;
 }
 
+/** A migration has a known reservation conflict, distinct from a DB/read failure. */
+export class MigrationReservationConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MigrationReservationConflictError';
+  }
+}
+
+export interface DirtyMigrationReservationIssue {
+  path: string;
+  reason: string;
+}
+
 /** Pure filename-equality check used by boot reconciliation diagnostics. */
 export function reservationFilenameConflicts(
   migrationFiles: readonly string[],
@@ -101,9 +114,30 @@ export async function assertMigrationReservation(client: postgres.Sql, filename:
   const reservedFilename = rows[0]?.filename ?? null;
   if (reservedFilename === filename) return;
   if (reservedFilename === null) {
-    throw new Error(`[migration-reservation-guard] ${filename} has no reservation row`);
+    throw new MigrationReservationConflictError(`[migration-reservation-guard] ${filename} has no reservation row`);
   }
-  throw new Error(`[migration-reservation-guard] ${filename} cannot use ${num}; reserved for ${reservedFilename}`);
+  throw new MigrationReservationConflictError(
+    `[migration-reservation-guard] ${filename} cannot use ${num}; reserved for ${reservedFilename}`,
+  );
+}
+
+/** Return only known reservation conflicts; database/query failures still throw. */
+export async function checkDirtyMigrationReservations(
+  client: postgres.Sql,
+  dirtyPaths: readonly string[],
+): Promise<DirtyMigrationReservationIssue[]> {
+  const issues: DirtyMigrationReservationIssue[] = [];
+  for (const path of new Set(dirtyPaths)) {
+    const filename = armedMigrationFilename(path);
+    if (!filename) continue;
+    try {
+      await assertMigrationReservation(client, filename);
+    } catch (error) {
+      if (!(error instanceof MigrationReservationConflictError)) throw error;
+      issues.push({ path, reason: error.message });
+    }
+  }
+  return issues;
 }
 
 /** Check only enforced migrations in a dirty-path census against the shared ledger. */

@@ -16,10 +16,17 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { parseAsStringEnum, useQueryState } from 'nuqs';
+import { RadioGroup } from '@/app/harness/RadioGroup';
 
 const BASE = '/api/remote-access/own-tunnel';
 export const TUNNEL_METHODS = ['cloudflare', 'token', 'manual'] as const;
 export type TunnelMethod = (typeof TUNNEL_METHODS)[number];
+
+const METHOD_OPTIONS: ReadonlyArray<{ value: TunnelMethod; text: string }> = [
+  { value: 'cloudflare', text: 'Cloudflare (recommended)' },
+  { value: 'token', text: 'Cloudflare with an API token' },
+  { value: 'manual', text: 'Another tunnel' },
+];
 
 export interface OwnTunnelStatusView {
   configured: boolean;
@@ -206,20 +213,20 @@ export function StepOwnTunnel() {
         Let apps like Claude.ai or ChatGPT reach this computer without changing your router. The tunnel runs in your
         own account; you can switch it off at any time. This step is optional.
       </p>
-      <div role="radiogroup" aria-label="Tunnel type" className="flex gap-3">
-        {(
-          [
-            ['cloudflare', 'Cloudflare (recommended)'],
-            ['token', 'Cloudflare with an API token'],
-            ['manual', 'Another tunnel'],
-          ] as const
-        ).map(([id, text]) => (
-          <label key={id} className="flex items-center gap-1">
-            <input type="radio" name="tunnel-method" checked={method === id} onChange={() => void setMethod(id)} data-testid={`own-tunnel-method-${id}`} />
-            {text}
-          </label>
-        ))}
-      </div>
+      <RadioGroup
+        label="Tunnel type"
+        className="flex gap-3"
+        optionClassName="flex items-center gap-1"
+        value={method}
+        options={METHOD_OPTIONS}
+        onChange={(id) => void setMethod(id)}
+      >
+        {(option, selected) => (
+          <span data-testid={`own-tunnel-method-${option.value}`}>
+            <span aria-hidden="true">{selected ? '◉' : '○'}</span> {option.text}
+          </span>
+        )}
+      </RadioGroup>
 
       {method !== 'manual' && !status.cloudflaredInstalled ? (
         <div className="space-y-1">

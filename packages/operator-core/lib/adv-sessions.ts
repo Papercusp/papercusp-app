@@ -18,6 +18,7 @@ import { activeWorkspaceId } from './workspace-registry';
 import type { SuAgent } from './su-agents';
 import { caveat, type FieldCaveat } from './field-reliability';
 import { trackDetached } from './detached-imports';
+import { recordSessionIdentityReanchor } from './session-identity-attribution';
 
 /**
  * Log a best-effort read/write failure UNLESS it's PG's undefined_table
@@ -225,6 +226,7 @@ export function fallbackCodexLaunchSpecFromAdvSession(
     autoMode: false,
     drainMode: false,
     loopArmed: false,
+    headless: row.launchArgv?.includes('--headless') === true,
     fleet: null,
   };
 }
@@ -1010,6 +1012,8 @@ export function hasAdvSessionTerminalEvidence(
 export interface AdvSessionExpectedBinding {
   coordOwnerId: string;
   sessionId: string | null;
+  /** Exact OMP source handle, alongside the unchanged session_id binding. */
+  ompThreadId?: string | null;
   /** PostgreSQL's full-precision started_at::text, never a JS Date round-trip. */
   startedAt: string;
 }
@@ -1635,6 +1639,27 @@ export async function reactivateAdvSessionByOwner(coordOwnerId: string): Promise
 }
 
 /**
+ * WI-10004917: once an owner's row names `sessionId`, give that native incarnation an
+ * applied identity span. Without one, every owner-by-native-session oracle reads its
+ * turns as foreign. Runs on a no-op re-anchor too: the spawn path can stamp the id
+ * before the report lands (WI-41555), and a retried report must heal a span its first
+ * attempt failed to write. The recorder replays when the owner's latest span already
+ * names the id. Best-effort: span hygiene must never fail a re-anchor.
+ */
+async function recordReanchorSpan(
+  workspaceId: string | null,
+  owner: string | null,
+  sessionId: string,
+): Promise<void> {
+  if (!workspaceId || !owner) return;
+  try {
+    await recordSessionIdentityReanchor({ workspaceId, ownerId: owner, nativeSessionId: sessionId });
+  } catch (e) {
+    warnUnlessMissingTable(e, 'recordSessionIdentityReanchor');
+  }
+}
+
+/**
  * WI-5075 (P-018 carry-respawn kill loop): re-anchor a tracked session row's
  * NATIVE session id after a managed-host respawn (carry-respawn / cold RECYCLE).
  *
@@ -1665,19 +1690,22 @@ export async function reanchorAdvSessionNativeId(
     // EI-21417550055038906: clear the COMPLETE terminal tuple (ended_by/
     // ended_signal too, matching claimAdvSessionResume) — leaving them behind
     // creates a half-live row whose residue later reads as terminal evidence.
-    const rows = await sql<{ id: number; owner: string | null }[]>`
+    const rows = await sql<{ id: number; owner: string | null; workspace_id: string }[]>`
       UPDATE harness_shared.adv_sessions
          SET session_id = ${sessionId}, ended_at = NULL, exit_code = NULL, ended_by = NULL,
              ended_signal = NULL, started_at = now(), shutdown_accepted_at = NULL,
              resume_claim_key = NULL, resume_claimed_at = NULL
        WHERE id = ${id} AND session_id IS DISTINCT FROM ${sessionId}
-      RETURNING id, coord_owner_id AS owner
+      RETURNING id, coord_owner_id AS owner, workspace_id
     `;
     // The owner rides back so the respawn route can clear the frozen context
     // gauge (the successor keeps the coord ownerId, so the in-process usage
     // cache would otherwise serve the DEAD predecessor's near-limit estimate
     // for up to a watchdog cadence — the "89% on a fresh successor" bug).
-    if (rows.length > 0) return { reanchored: true, owner: rows[0]?.owner ?? null };
+    if (rows.length > 0) {
+      await recordReanchorSpan(rows[0]?.workspace_id ?? null, rows[0]?.owner ?? null, sessionId);
+      return { reanchored: true, owner: rows[0]?.owner ?? null };
+    }
     // WI-41555: a NO-OP re-anchor is NOT "no owner". The UPDATE above is guarded
     // by `session_id IS DISTINCT FROM`, so a row that ALREADY names this native
     // id matches ZERO rows — exactly what happens when the spawn path stamped the
@@ -1690,9 +1718,10 @@ export async function reanchorAdvSessionNativeId(
     // still the live transcript for this owner.
     // `reanchored` answers "did I change the row"; `owner` answers "whose row is
     // it". They are independent facts, and respawn hygiene keys off the second.
-    const existing = await sql<{ owner: string | null }[]>`
-      SELECT coord_owner_id AS owner FROM harness_shared.adv_sessions WHERE id = ${id}
+    const existing = await sql<{ owner: string | null; workspace_id: string }[]>`
+      SELECT coord_owner_id AS owner, workspace_id FROM harness_shared.adv_sessions WHERE id = ${id}
     `;
+    await recordReanchorSpan(existing[0]?.workspace_id ?? null, existing[0]?.owner ?? null, sessionId);
     return { reanchored: false, owner: existing[0]?.owner ?? null };
   } catch (e) {
     warnUnlessMissingTable(e, 'reanchorAdvSessionNativeId');
@@ -1727,9 +1756,10 @@ export async function reanchorAdvSessionNativeIdByOwner(
     // active row; if there is no active row, accept only a single total row.
     // Two active rows (or two terminal rows) are ambiguous and must not let one
     // session's native id overwrite another session's home key.
-    const target = await sql<{ id: number }[]>`
+    const target = await sql<{ id: number; workspace_id: string }[]>`
       WITH owner_rows AS (
         SELECT id,
+               workspace_id,
                ended_at,
                ended_by,
                count(*) FILTER (WHERE ended_at IS NULL AND ended_by IS NULL) OVER () AS active_count,
@@ -1737,15 +1767,16 @@ export async function reanchorAdvSessionNativeIdByOwner(
           FROM harness_shared.adv_sessions
          WHERE coord_owner_id = ${coordOwnerId}
       ), target AS (
-        SELECT id
+        SELECT id, workspace_id
           FROM owner_rows
          WHERE (active_count = 1 AND ended_at IS NULL AND ended_by IS NULL)
             OR (active_count = 0 AND total_count = 1)
       )
-      SELECT id FROM target LIMIT 1
+      SELECT id, workspace_id FROM target LIMIT 1
     `;
     const targetId = target[0]?.id;
     if (targetId == null) return { reanchored: false, owner: null };
+    const targetWorkspaceId = target[0]?.workspace_id ?? null;
     const rows = await sql<{ id: number }[]>`
       UPDATE harness_shared.adv_sessions
          SET session_id = ${sessionId}, ended_at = NULL, exit_code = NULL,
@@ -1755,13 +1786,13 @@ export async function reanchorAdvSessionNativeIdByOwner(
        WHERE id = ${targetId} AND session_id IS DISTINCT FROM ${sessionId}
       RETURNING id
     `;
-    if (rows.length > 0) return { reanchored: true, owner: coordOwnerId };
     // WI-41555 (see the sibling above for the full reasoning): a row that ALREADY
     // names this native id updates zero rows, and the caller's respawn hygiene —
     // the context-usage + anchor cache clears — must still run for that owner.
     // Confirm the owner really does have a row, then report it with
     // reanchored:false so "did I change it" stays honest.
-    return { reanchored: false, owner: coordOwnerId };
+    await recordReanchorSpan(targetWorkspaceId, coordOwnerId, sessionId);
+    return { reanchored: rows.length > 0, owner: coordOwnerId };
   } catch (e) {
     warnUnlessMissingTable(e, 'reanchorAdvSessionNativeIdByOwner');
     return { reanchored: false, owner: null };
@@ -1783,7 +1814,8 @@ export interface OwnerNativeSessionRow {
  *   - `bound`   — some candidate is already bound to `sessionId`.
  *   - `unbound` — no candidate carries a native id yet (first binding; the
  *                 SessionStart reanchor is how it gets one).
- *   - `foreign` — the owner's incarnation is bound to a DIFFERENT native session.
+ *   - `foreign` — the owner's incarnation is bound to a DIFFERENT native session,
+ *                 or an explicitly requested incarnation cannot be verified.
  *
  * WI-10003957: `foreign` is what a nested CLI looks like. `PAPERCUSP_SID` is
  * inherited by every descendant of an su (native Bash, capability:bash jobs,
@@ -1808,8 +1840,11 @@ export function classifyOwnerNativeSessionRows(
 /**
  * Is `sessionId` the native session the owner's adv_sessions row is bound to?
  * With `advSessionId` (the launcher-exported PAPERCUSP_ADV_SESSION_ID) only that
- * row is consulted, when it belongs to the owner. Throws on a PG error, so the
- * caller decides the fail direction.
+ * owner/id pair is consulted. A missing, foreign-owned or invalid explicit row
+ * is `foreign`, with no candidate id; it must not become a first binding or
+ * borrow another incarnation's binding. Throws on a PG error, so the caller
+ * decides the fail direction. This checks row consistency, not physical actor
+ * identity: the input is still caller-presented.
  */
 export async function classifyOwnerNativeSession(opts: {
   ownerId: string;
@@ -1819,13 +1854,18 @@ export async function classifyOwnerNativeSession(opts: {
   const { sql } = getOrgPg();
   let rows: OwnerNativeSessionRow[] = [];
   if (opts.advSessionId != null) {
+    if (!Number.isSafeInteger(opts.advSessionId) || opts.advSessionId <= 0) {
+      return { binding: 'foreign', boundSessionId: null, advSessionId: null };
+    }
     rows = await sql<OwnerNativeSessionRow[]>`
       SELECT id, session_id, (ended_at IS NULL AND ended_by IS NULL) AS active
         FROM harness_shared.adv_sessions
        WHERE id = ${opts.advSessionId} AND coord_owner_id = ${opts.ownerId}
     `;
-  }
-  if (rows.length === 0) {
+    if (rows.length === 0) {
+      return { binding: 'foreign', boundSessionId: null, advSessionId: null };
+    }
+  } else {
     rows = await sql<OwnerNativeSessionRow[]>`
       SELECT id, session_id, (ended_at IS NULL AND ended_by IS NULL) AS active
         FROM harness_shared.adv_sessions

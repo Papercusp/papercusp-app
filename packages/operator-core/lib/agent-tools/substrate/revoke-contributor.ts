@@ -69,9 +69,19 @@ export default defineTool({
         .describe(
           'The NUMERIC GitHub user id of the contributor to revoke (e.g. 12345). This is the stable id, not the login string. Their device pubkeys are added to the revocation set.',
         ),
+      devicePubkey: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Hive scope only: revoke just this one attested device (base64) of githubUserId, e.g. a departed test VM that used the owner's own login. Refused if it is this Swarm's own device.",
+        ),
     })
     .refine((a) => !!a.harnessSlug !== !!a.potSlug, {
       message: 'Provide exactly one of harnessSlug (harness scope) or potSlug (Pot scope).',
+    })
+    .refine((a) => !(a.devicePubkey && a.harnessSlug), {
+      message: 'devicePubkey is Hive-scoped: pass it with potSlug (for your own harness device use substrate:revoke_self_device).',
     }),
   async handler(args) {
     const result = args.potSlug
@@ -85,6 +95,7 @@ export default defineTool({
           // on an owner and fails open to the local handle.
           potHomeSlug: await resolveFederatedPotScope(args.workspaceId, args.potSlug),
           githubUserId: args.githubUserId,
+          devicePubkey: args.devicePubkey,
         })
       : await revokeContributorViaGithub({
           workspaceId: args.workspaceId,

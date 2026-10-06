@@ -16,6 +16,12 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { isGateEnrolled } from "../check-vitest-config-enrollment.mjs";
+import {
+  packageLockInstallView,
+  rootPackageJsonChangeIsInert,
+  scriptInvocationJudge,
+  workspacePackageJsonChangeIsInert,
+} from "./test-pass-reuse.mjs";
 
 /** Set to `0`/`false`/`off` to leave the static selection un-pruned (default: pruning ON). */
 export const EXECUTED_MAP_ENV = "AFFECTED_EXECUTED_MAP";
@@ -313,6 +319,155 @@ function defaultExec(file, args, opts) {
 }
 
 /**
+ * Every package.json in the tree at `sha` (gate-test-reuse-yield-2026-10-01 D-009), superproject
+ * and submodules: gitlinks are followed at the commit the tree pins, recursively, and node_modules
+ * paths are skipped. Returns each manifest's text by repo-relative path, and every script command
+ * in them. Throws on any failure (a sha or pinned submodule commit this clone lacks, a manifest
+ * that is not a JSON object, a non-object `scripts`), because a manifest it cannot read could
+ * invoke any script; the caller treats a throw as "cannot tell".
+ *
+ * @param {{ exec: (file: string, args: string[], opts: object) => string | Buffer, repoRoot: string, sha: string }} o
+ * @returns {{ texts: Map<string, string>, commands: Array<{ rel: string, name: string, command: string }> }}
+ */
+export function treeScriptCommands({ exec, repoRoot, sha }) {
+  /** @type {Map<string, string>} */
+  const texts = new Map();
+  /** @type {Array<{ rel: string, name: string, command: string }>} */
+  const commands = [];
+  const isObject = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+  const visit = (repoDir, treeSha, prefix) => {
+    const opts = { cwd: repoDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 256 * 1024 * 1024 };
+    const raw = String(exec("git", ["ls-tree", "-r", "-z", "--full-tree", treeSha], opts));
+    /** @type {Array<{ oid: string, rel: string }>} */
+    const manifests = [];
+    for (const entry of raw.split("\0")) {
+      if (!entry) continue;
+      const m = /^(\d{6}) \w+ ([0-9a-f]+)\t([\s\S]+)$/.exec(entry);
+      if (!m) throw new Error(`unparseable ls-tree entry in ${repoDir}: ${entry.slice(0, 80)}`);
+      const [, mode, oid, p] = m;
+      if (mode === "160000") {
+        visit(path.join(repoDir, p), oid, `${prefix}${p}/`);
+      } else if (path.posix.basename(p) === "package.json" && !/(?:^|\/)node_modules\//.test(p)) {
+        manifests.push({ oid, rel: `${prefix}${p}` });
+      }
+    }
+    if (manifests.length === 0) return;
+    // One cat-file per repository: its --batch output is "<oid> blob <size>\n<content>\n" per input.
+    // No `encoding`: the output must stay a Buffer, because <size> counts bytes, not characters.
+    const out = Buffer.from(
+      exec("git", ["cat-file", "--batch"], {
+        cwd: repoDir,
+        stdio: ["pipe", "pipe", "ignore"],
+        maxBuffer: 256 * 1024 * 1024,
+        input: Buffer.from(manifests.map((x) => x.oid).join("\n") + "\n"),
+      }),
+    );
+    let at = 0;
+    for (const { oid, rel } of manifests) {
+      const nl = out.indexOf(10, at);
+      const header = nl < 0 ? "" : out.subarray(at, nl).toString("utf8");
+      const hm = /^([0-9a-f]+) blob (\d+)$/.exec(header);
+      if (!hm || hm[1] !== oid) throw new Error(`cat-file did not return blob ${oid} for ${rel}: ${header}`);
+      const size = Number(hm[2]);
+      const text = out.subarray(nl + 1, nl + 1 + size).toString("utf8");
+      at = nl + 1 + size + 1;
+      const json = JSON.parse(text);
+      if (!isObject(json)) throw new Error(`${rel} is not a JSON object`);
+      const scripts = json.scripts ?? {};
+      if (!isObject(scripts)) throw new Error(`${rel} has non-object scripts`);
+      texts.set(rel, text);
+      for (const [name, command] of Object.entries(scripts)) commands.push({ rel, name, command: String(command) });
+    }
+  };
+  visit(repoRoot, sha, "");
+  return { texts, commands };
+}
+
+/**
+ * Build selectReusablePasses' `inertGlobalChange` seam over a real git checkout
+ * (gate-test-reuse-yield-2026-10-01 P-002, P-005, D-009). Two root files can be inert, each read
+ * at both shas with `git show`: package.json, judged by rootPackageJsonChangeIsInert, and
+ * package-lock.json, judged by comparing packageLockInstallView (the lockfile's view is computed
+ * once per sha, because many proofs share the judged sha and the file is over 1 MB). D-009: so can
+ * any non-root package.json, judged by workspacePackageJsonChangeIsInert against the script
+ * commands of the whole tree at BOTH shas (treeScriptCommands, once per sha; it also supplies the
+ * manifest texts, so a manifest inside a submodule is read at its pinned commit). Every other
+ * path, and any read that fails (a sha missing from this clone, a file absent on one side),
+ * answers false, so the change stays global. Results are cached per (path, from, to).
+ *
+ * @param {{ repoRoot: string, exec?: (file: string, args: string[], opts: object) => string | Buffer }} o
+ * @returns {(rel: string, fromSha: string, toSha: string) => boolean}
+ */
+export function gitInertGlobalChange({ repoRoot, exec = defaultExec }) {
+  /** @type {Map<string, boolean>} */
+  const cache = new Map();
+  /** @type {Map<string, string | null>} */
+  const lockViews = new Map();
+  /** @type {Map<string, { texts: Map<string, string>, invokable: (name: string, definedIn: string) => boolean } | null>} */
+  const trees = new Map();
+  const opts = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 64 * 1024 * 1024 };
+  const read = (sha, rel) => String(exec("git", ["show", `${sha}:${rel}`], opts));
+  const treeAt = (sha) => {
+    if (!trees.has(sha)) {
+      let tree = null;
+      try {
+        const { texts, commands } = treeScriptCommands({ exec, repoRoot, sha });
+        tree = { texts, invokable: scriptInvocationJudge(commands) };
+      } catch {
+        tree = null;
+      }
+      trees.set(sha, tree);
+    }
+    return trees.get(sha) ?? null;
+  };
+  const workspaceInert = (rel, fromSha, toSha) => {
+    const before = treeAt(fromSha);
+    const after = treeAt(toSha);
+    const beforeText = before?.texts.get(rel);
+    const afterText = after?.texts.get(rel);
+    if (!before || !after || beforeText === undefined || afterText === undefined) return false;
+    return workspacePackageJsonChangeIsInert(
+      beforeText,
+      afterText,
+      (name) => before.invokable(name, rel) || after.invokable(name, rel),
+    );
+  };
+  const lockView = (sha) => {
+    if (!lockViews.has(sha)) {
+      let view = null;
+      try {
+        view = packageLockInstallView(read(sha, "package-lock.json"));
+      } catch {
+        view = null;
+      }
+      lockViews.set(sha, view);
+    }
+    return lockViews.get(sha) ?? null;
+  };
+  return (rel, fromSha, toSha) => {
+    const workspaceManifest = rel !== "package.json" && path.posix.basename(rel) === "package.json";
+    if (rel !== "package.json" && rel !== "package-lock.json" && !workspaceManifest) return false;
+    const key = `${rel}\0${fromSha}\0${toSha}`;
+    if (cache.has(key)) return /** @type {boolean} */ (cache.get(key));
+    let inert = false;
+    try {
+      if (workspaceManifest) {
+        inert = workspaceInert(rel, fromSha, toSha);
+      } else if (rel === "package.json") {
+        inert = rootPackageJsonChangeIsInert(read(fromSha, rel), read(toSha, rel));
+      } else {
+        const before = lockView(fromSha);
+        inert = before !== null && before === lockView(toSha);
+      }
+    } catch {
+      inert = false;
+    }
+    cache.set(key, inert);
+    return inert;
+  };
+}
+
+/**
  * One greppable line per workspace selection, so a run that did not narrow is never silent
  * about why.
  *
@@ -490,12 +645,36 @@ export function resolveTaskReportExpectation({
 }
 
 /**
- * @typedef {{ outcome: string, rows: number, retired: number, skipped: number, dirty: boolean, sha: string | null, error: string | null }} ExecutedMapResult
+ * @typedef {{ version: 1, runnerIdentity: string, runContext: string, runGroupId: string | null, files: Array<{ testFile: string, verdict: 'pass' | 'fail' | 'unknown' }> }} ExecutedMapFileResults
+ * @typedef {{ outcome: string, rows: number, retired: number, skipped: number, dirty: boolean, sha: string | null, error: string | null, workspaceName?: string | null, fileResults?: ExecutedMapFileResults | null }} ExecutedMapResult
  * @typedef {{ status: 'reported' | 'no-report', results: ExecutedMapResult[], malformed: number, expectsReport?: boolean | null }} ExecutedMapResultRead
  *   `expectsReport` is stamped by the runner from `resolveTaskReportExpectation` (absent/null = unknown).
  */
 
 const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+
+/** A malformed or historical payload cannot prove a named first-attempt pass. */
+function parseFileResults(value) {
+  if (!value || value.version !== 1 || typeof value.runnerIdentity !== "string" ||
+      !value.runnerIdentity.trim() || typeof value.runContext !== "string" || !value.runContext.trim() ||
+      !(value.runGroupId === null || (typeof value.runGroupId === "string" && value.runGroupId.trim())) ||
+      !Array.isArray(value.files)) return null;
+  const seen = new Set();
+  for (const file of value.files) {
+    if (!file || typeof file.testFile !== "string" || !file.testFile.trim() ||
+        path.posix.isAbsolute(file.testFile) || file.testFile.includes("\\") ||
+        file.testFile.split("/").some((part) => !part || part === "." || part === "..") ||
+        !["pass", "fail", "unknown"].includes(file.verdict) || seen.has(file.testFile)) return null;
+    seen.add(file.testFile);
+  }
+  return {
+    version: 1,
+    runnerIdentity: value.runnerIdentity,
+    runContext: value.runContext,
+    runGroupId: value.runGroupId,
+    files: value.files.map(({ testFile, verdict }) => ({ testFile, verdict })),
+  };
+}
 
 /**
  * Read one task's result file. A missing or empty file is `no-report` (the reporter never flushed:
@@ -540,9 +719,44 @@ export function readExecutedMapResults(filePath, { readFile = (p) => readFileSyn
       dirty: o.dirty === true,
       sha: typeof o.sha === "string" && o.sha ? o.sha : null,
       error: typeof o.error === "string" && o.error ? o.error : null,
+      workspaceName: typeof o.workspaceName === "string" && o.workspaceName.trim() ? o.workspaceName : null,
+      fileResults: typeof o.dirty === "boolean" ? parseFileResults(o.fileResults) : null,
     });
   }
   return { status: results.length > 0 ? "reported" : "no-report", results, malformed };
+}
+
+/**
+ * Name every actual audit draw using the initial task's reporter snapshot. Console pass rows
+ * and separate retries are never a substitute. Missing/ambiguous reporter evidence stays unknown.
+ * @param {string} taskLabel
+ * @param {ExecutedMapResultRead | null | undefined} read
+ * @param {{ watch: Map<string, string> } | null | undefined} reuseWatch
+ * @returns {string[]}
+ */
+export function formatTestReuseAuditResultLines(taskLabel, read, reuseWatch) {
+  const lines = [];
+  for (const [file, reason] of reuseWatch?.watch ?? []) {
+    if (reason !== "audit") continue;
+    const matches = (read?.results ?? []).flatMap((result) =>
+      (result.fileResults?.files ?? []).filter((entry) => entry.testFile === file)
+        .map((entry) => ({ result, entry })),
+    );
+    const match = read?.malformed === 0 && matches.length === 1 ? matches[0] : null;
+    const source = match?.result;
+    const qualified = source && source.workspaceName === taskLabel.split("::")[0] &&
+      !source.dirty && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(source.sha ?? "");
+    lines.push("TEST_PASS_REUSE_AUDIT_RESULT " + JSON.stringify({
+      version: 1, ws: taskLabel, file,
+      verdict: qualified ? match.entry.verdict : "unknown",
+      judgedSha: source?.sha ?? null,
+      runnerIdentity: source?.fileResults?.runnerIdentity ?? null,
+      runContext: source?.fileResults?.runContext ?? null,
+      runGroupId: source?.fileResults?.runGroupId ?? null,
+      dirty: source?.dirty ?? null,
+    }));
+  }
+  return lines;
 }
 
 /** One-line, whitespace-collapsed error text, so an alarm line stays one line. */

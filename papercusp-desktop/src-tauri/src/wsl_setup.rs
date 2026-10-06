@@ -363,30 +363,13 @@ mod imp {
         /// the cost of the other direction is a silently broken distro.
         #[serde(default)]
         rootfs_recipe: Option<String>,
-        /// Cross-process guard for the post-onboarding finalize RESTART, keyed
-        /// PER BUNDLE ROLE. The per-process `FINALIZED` atomic in
-        /// `wsl_finalize_ready` only guards a single process, but that restart
-        /// breakaway-SPAWNS a fresh instance which can re-enter the same
-        /// defer→finalize path (its detect() may still read not-Ready during WSL
-        /// warm-up), chaining restart→restart→… into the window-cascade loop
-        /// users hit (WI-2749). Persisting a "restart already done" flag makes
-        /// the finalize happen AT MOST ONCE per onboarding across every spawned
-        /// instance. Reset by `run_bootstrap` so a fresh onboarding gets its one
-        /// restart.
-        ///
-        /// It MUST be per-role: the GUI and Server BOTH call `wsl_finalize_ready`
-        /// (the GUI from the gate's observed Ready transition, the Server from its
-        /// deferred-boot watcher) but need DIFFERENT outcomes — the GUI restart
-        /// re-points the webview at the now-up operator, the SERVER restart is the
-        /// only thing that spawns the sidecar (its main-thread `install_server_tray`
-        /// can't move off the setup thread, so it can't spawn in a watcher thread).
-        /// A single shared flag let whichever fired FIRST (usually the GUI gate)
-        /// suppress the OTHER — so the Server never restarted, never spawned the
-        /// sidecar, and the GUI then hit its 120s FATAL: stranded cold onboarding
-        /// (WI-2749 cold-variant, found live 2026-07-05). Per-role flags let each
-        /// role take its own single restart; the cascade stays bounded because a
-        /// restarted instance boots Ready (CREATE_NO_WINDOW makes detect() reliable
-        /// console-less) and so never re-enters the defer→finalize path.
+        /// Legacy cross-process guard for post-onboarding finalize restarts,
+        /// keyed per bundle role. The GUI no longer restarts: `gui_setup` waits
+        /// for WSL Ready and then attaches its existing window to the Server.
+        /// Keep the persisted GUI field readable for existing state files; its
+        /// restart path is disabled because the GUI still owns its single-instance
+        /// lock while the gate is running. The Server flag remains for the legacy
+        /// Server restart fallback.
         #[serde(default)]
         gui_finalize_restart_done: bool,
         #[serde(default)]
@@ -1049,21 +1032,12 @@ pub fn wsl_bootstrap(_app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
-/// Restart the desktop app after WSL onboarding completes. The
-/// sidecar spawn in setup() short-circuits while WSL state isn't
-/// Ready, so a clean restart picks up the now-Ready state and routes
-/// the sidecar through `wsl.exe`. Frontend calls this immediately
-/// after `wsl_bootstrap` succeeds and a follow-up `wsl_status` returns
-/// Ready.
-///
-/// Windows: do NOT use `app.restart()` directly — when the app was
-/// launched inside a job object (the NSIS installer's "run app" checkbox,
-/// Task Scheduler, some corporate launchers), the job kills the relaunched
-/// child the moment this process exits, leaving the user on a dead app
-/// (found live 2026-06-11, runs 11/13: onboarding completed but the
-/// restarted instance vanished). Spawn the new instance with
-/// CREATE_BREAKAWAY_FROM_JOB first; fall back to a plain spawn, then to
-/// app.restart().
+/// Finalize the GUI's WSL onboarding transition. `gui_setup` already waits
+/// for WSL Ready and attaches the existing window to the Server in-process.
+/// The GUI must not relaunch here: its parent still owns the single-instance
+/// lock, so a child launched before `app.exit` is rejected as a duplicate
+/// (WI-10003674). Keep the legacy restart path for an explicit Server caller;
+/// the normal Server deferred-boot watcher now spawns the sidecar in-process.
 #[tauri::command]
 #[specta::specta]
 pub fn wsl_finalize_ready(app: tauri::AppHandle) -> Result<(), String> {
@@ -1078,6 +1052,15 @@ pub fn wsl_finalize_ready(app: tauri::AppHandle) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
+        use tauri::Manager;
+
+        if !should_restart_after_wsl_finalize(crate::app_role::detect(&app.config().identifier)) {
+            println!(
+                "[papercusp-gui] wsl_finalize_ready: keeping the existing GUI process; gui_setup already waits for WSL Ready and attaches to the Server"
+            );
+            return Ok(());
+        }
+
         // Cross-process idempotency (WI-2749): the per-process FINALIZED atomic
         // above only guards THIS process, but this fn breakaway-SPAWNS a fresh
         // instance that can itself re-enter here (its detect() may still read
@@ -1112,6 +1095,11 @@ pub fn wsl_finalize_ready(app: tauri::AppHandle) -> Result<(), String> {
         }
     }
     app.restart();
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn should_restart_after_wsl_finalize(role: crate::app_role::Role) -> bool {
+    !role.is_gui()
 }
 
 #[tauri::command]
@@ -1479,6 +1467,16 @@ pub fn ensure_wsl_networking_config() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_finalize_keeps_the_single_instance_owner_running() {
+        assert!(!should_restart_after_wsl_finalize(crate::app_role::Role::Gui));
+    }
+
+    #[test]
+    fn server_finalize_keeps_its_legacy_restart_fallback() {
+        assert!(should_restart_after_wsl_finalize(crate::app_role::Role::Server));
+    }
 
     fn to_json<T: Serialize>(v: &T) -> serde_json::Value {
         serde_json::to_value(v).expect("serialize")

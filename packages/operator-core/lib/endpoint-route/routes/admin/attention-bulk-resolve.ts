@@ -41,6 +41,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
+import type { RefusalContract } from '../../../capability-envelope/refusal-contract-types';
 import { defineTool, type RouteContext } from '@papercusp/agent-mcp';
 import { FLAGS } from '@papercusp/flags';
 import { requireAllowedOriginOr403 } from '../../cors';
@@ -66,6 +67,7 @@ import {
 } from '../../../attention/bulk-run-store';
 import { notifyBulkRunChanged } from '../../../attention/bulk-run-sync';
 import {
+  bulkAutomationEligibility,
   bulkAutomationSnapshot,
   normalizeBulkAutomationPolicy,
   type BulkAutomationPolicy,
@@ -105,6 +107,39 @@ export function buildResolverBrief(
   itemCount: number,
   policy: BulkAutomationPolicy = { mode: 'safe-high', minConfidence: 'high' },
 ): string {
+  const reviewOnly = bulkAutomationEligibility(policy, 'high').reason === 'review-all';
+  const itemAutomationGuidance = reviewOnly
+    ? [
+        '   - This run is review-only under L0/review-all. Never call inbox:bulk-run-act and never',
+        '     report auto_resolved, even for an obvious or high-confidence item. Report a typed',
+        '     recommendation for every item instead.',
+      ]
+    : [
+        '   - AUTO-RESOLVE only when the evidence settles the item and its confidence meets the run',
+        '     floor. You do not have blanket terminal authority: only attempt an action offered as',
+        '     terminal by the manifest, through inbox:bulk-run-act, and only if current policy and',
+        '     dispatcher eligibility allow it. If the action is refused, do not route around the',
+        '     refusal; report a recommendation for that item.',
+      ];
+  const consultAuthorityGuidance = reviewOnly
+    ? '     A reply is evidence, not authority: report a recommendation and take no terminal action.'
+    : '     A reply is evidence, not authority: report auto_resolved only after an allowed action call succeeds.';
+  const actionReportingGuidance = reviewOnly
+    ? [
+        '3. This run is review-only: do not call inbox:bulk-run-act or report auto_resolved. Report',
+        '   every item through inbox:bulk-run-report { items:[...] } with its typed',
+        '   disposition/recommendation fields. Batch them; do not call report once per item.',
+      ]
+    : [
+        `3. Attempt a terminal action only through inbox:bulk-run-act { runId: "${runId}", itemId, actionId,`,
+        "   rationale, ... }. It rechecks current standing policy and dispatcher eligibility; the",
+        '   launch snapshot alone does not grant authority. Mark auto_resolved only after this call',
+        '   reports success. It handles one action per call under the run authority lock. On refusal,',
+        '   do not use another path; report a recommendation instead.',
+        '   Report all other outcomes through inbox:bulk-run-report { items:[...] } with the typed',
+        '   disposition/recommendation fields. Batch them; do not call report once per item.',
+      ];
+
   return [
     `You are the BULK RESOLVE resolver for run ${runId}. The owner is clearing their Inbox and has`,
     `asked you to settle ${itemCount} attention item(s) they filtered down to.`,
@@ -114,21 +149,20 @@ export function buildResolverBrief(
     '   LIVE options it actually offers. An option with terminal:false only opens a sub-surface and',
     '   resolves nothing; never treat one as a resolution.',
     `2. For EVERY item, produce one typed disposition and a next-step recommendation. The run policy is ${policy.mode} (minimum confidence ${policy.minConfidence}).`,
+    '   This is the launch snapshot; the action boundary rechecks current standing policy and',
+    '   dispatcher eligibility.',
     '   A recommendation may carry an actionId only when the manifest offers that real terminal',
     '   action; owner_action, cleanup_candidate, retry_needed, routed, and investigate may omit it.',
     '   Never leave an item as an unexplained skip.',
     '   For each item, decide:',
-    '   - AUTO-RESOLVE when you can settle it from evidence: the ask is moot (its blocker already',
-    '     cleared, the work already landed), it duplicates another item, it is a stale FYI, or it is a',
-    '     plain acknowledgement. You have full authority to take the terminal action, INCLUDING',
-    '     delivering a derivable answer to the asking agent (which wakes them). Record WHY — that',
-    "     rationale is the audit note for something done on the owner's behalf.",
+    ...itemAutomationGuidance,
     '   - CONSULT when you cannot settle it alone AND the item names an asking agent that is live or',
     '     parked (check coord:presence). Send them a directed coord:send asking them to either resolve',
     '     or withdraw their own ask right now, or reply with their recommended option id and a one-line',
-    '     why. Give them a bounded window (~10 min). A reply that arrives lets you report the item',
-    '     auto_resolved or recommended with confidence:"high"; a lapse means you recommend anyway with',
+    '     why. Give them a bounded window (~10 min). A reply can support a recommendation with',
+    '     confidence:"high"; a lapse means you recommend anyway with',
     '     confidence:"low" so the owner sees it is an inference, not evidence.',
+    consultAuthorityGuidance,
     '   - RECOMMEND otherwise: choose recommendationKind from owner_action, cleanup_candidate,',
     '     retry_needed, routed, or investigate; provide a concise label, evidenceBasis, responsibility,',
     '     confidence (high|medium|low|insufficient), and rationale. Include a proposed actionId only',
@@ -136,11 +170,7 @@ export function buildResolverBrief(
     '   - RETRY-NEEDED when the item detail/actions are unavailable; this is a typed recommendation,',
     '     not the legacy skipped outcome. Use skipped only for backward-compatible reporting when a',
     '     caller cannot yet provide the typed fields, and always include its specific error.',
-    `3. AUTO-RESOLVE only through inbox:bulk-run-act { runId: "${runId}", itemId, actionId,`,
-    "   rationale, ... }. It is intentionally one action per call: the tool holds the run's revocable",
-    '   authority lock across the real terminal dispatch, required audit row, outcome and counters.',
-    '   Report all non-action outcomes through inbox:bulk-run-report { items:[...] } with the typed',
-    '   disposition/recommendation fields. Batch them; do not call report once per item.',
+    ...actionReportingGuidance,
     `4. inbox:bulk-run-settle { runId: "${runId}" } when every item is reported.`,
     '',
     'RULES:',
@@ -626,8 +656,14 @@ async function handleOwnerOp(op: string, body: Record<string, unknown>): Promise
         itemId,
       });
       if (!outcome.reverted) {
+        const refusal: RefusalContract = {
+          observed: { runId, itemId },
+          liftsWhen:
+            'the run item is revertable: it has not already been reverted or expired, and its source mutation has a registered compensation that can still apply (see message for the specific reversal refusal)',
+          whoCanMakeItTrue: ['owner', 'host'],
+        };
         return Response.json(
-          { error: { code: 'undo_refused', message: outcome.note, runId, itemId } },
+          { error: { code: 'undo_refused', message: outcome.note, runId, itemId, refusal } },
           { status: 409 },
         );
       }

@@ -473,9 +473,23 @@ async function fileFindings(summary: RunSummary, tierLabel: string): Promise<voi
 }
 
 /** Exported for the watchdogKey-stability unit test (EI-3909). */
-export const _testing = { fileFindings, formatCoverage };
+export const _testing = { fileFindings, formatCoverage, runTier, releasePerfLock };
 
-async function runTier(ctx: SystemActionCtx, tier: '--tier1' | '--tier2', timeoutMs: number): Promise<void> {
+type RunTierDependencies = {
+  runRunner?: typeof runRunner;
+  removeSummary?: typeof rmSync;
+  releasePerfLock?: typeof releasePerfLock;
+};
+
+async function runTier(
+  ctx: SystemActionCtx,
+  tier: '--tier1' | '--tier2',
+  timeoutMs: number,
+  dependencies: RunTierDependencies = {},
+): Promise<void> {
+  const run = dependencies.runRunner ?? runRunner;
+  const removeSummary = dependencies.removeSummary ?? rmSync;
+  const releaseLock = dependencies.releasePerfLock ?? releasePerfLock;
   const root = integrationRoot();
   const label = tier === '--tier1' ? 'nightly Tier-1' : 'weekly Tier-2';
 
@@ -492,9 +506,10 @@ async function runTier(ctx: SystemActionCtx, tier: '--tier1' | '--tier2', timeou
     return;
   }
 
+  let summaryPath: string | null = null;
   try {
-    const summaryPath = path.join(os.tmpdir(), `p2p-perf-${tier.slice(2)}-${Date.now()}.json`);
-    const r = await runRunner(root, [tier, '--profile', 'ci', '--summary-json', summaryPath], timeoutMs);
+    summaryPath = path.join(os.tmpdir(), `p2p-perf-${tier.slice(2)}-${Date.now()}.json`);
+    const r = await run(root, [tier, '--profile', 'ci', '--summary-json', summaryPath], timeoutMs);
 
     let summary: RunSummary | null = null;
     try {
@@ -568,12 +583,22 @@ async function runTier(ctx: SystemActionCtx, tier: '--tier1' | '--tier2', timeou
     await fileFindings(summary, label);
     void ctx;
   } finally {
-    releasePerfLock(tier);
+    if (summaryPath) {
+      try {
+        removeSummary(summaryPath, { force: true });
+      } catch (error) {
+        console.warn(
+          `[p2p-perf] ${label}: failed to remove run summary ${summaryPath}: ${(error as Error)?.message ?? String(error)}`,
+        );
+      }
+    }
+    releaseLock(tier);
   }
 }
 
 // Nightly Tier-1 — 30 min bound (ci profile measures ~10-15 min on the dev box).
-registerSystemAction('p2p-perf-tier1', (ctx) => runTier(ctx, '--tier1', 30 * 60_000));
+// WI-10005745: both tiers run tsx <root>/packages/operator-core/lib/sync/hyperbee/perf/runner.ts.
+registerSystemAction('p2p-perf-tier1', (ctx) => runTier(ctx, '--tier1', 30 * 60_000), { executesIntegrationTreeCode: true });
 
 // Weekly Tier-2 — netem cells are deliberately slow under impairment; 60 min bound.
-registerSystemAction('p2p-perf-tier2', (ctx) => runTier(ctx, '--tier2', 60 * 60_000));
+registerSystemAction('p2p-perf-tier2', (ctx) => runTier(ctx, '--tier2', 60 * 60_000), { executesIntegrationTreeCode: true });

@@ -30,8 +30,7 @@
  * architecture reflect-rules.ts already established.
  */
 import { getOrgPg } from '@papercusp/db-org';
-import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
-import { PLAN_ITEM_KIND, planItemRef } from '../issue-blocks-merge';
+import { PLAN_ITEM_KIND, planItemRef, implementsLinkScopes } from '../issue-blocks-merge';
 import { IMPLEMENTS_REL } from './convert';
 import {
   getWorkItem,
@@ -214,10 +213,15 @@ export async function findAllLinkedWorkItems(planSlug: string, itemId: string): 
   // can, in principle, have accumulated more than one if a duplicate mint ever
   // slipped through; reconciling all of them is strictly safer than only the
   // newest).
+  //
+  // WI-10004553: read BOTH tenants of the split link plane. This lookup was pinned to
+  // DEFAULT_COORD_WORKSPACE, but every edge written since 2026-08-27 lives under
+  // coordScopeWorkspace(), so each post-cutover promoted ISSUE read as stamp-only and
+  // was left open forever by the unproven-link guard below (~190 rows measured).
   const linkRows = await sql<{ src_kind: string; src_ref: string }[]>`
     SELECT DISTINCT src_kind, src_ref
       FROM harness_shared.coord_links
-     WHERE workspace_id = ${DEFAULT_COORD_WORKSPACE}
+     WHERE workspace_id = ANY(${implementsLinkScopes()})
        AND rel = ${IMPLEMENTS_REL}
        AND dst_kind = ${PLAN_ITEM_KIND}
        AND dst_ref = ${planItemRef(planSlug, itemId)}`;
@@ -880,7 +884,18 @@ export function decideLaneGate(
   };
 }
 
-type LaneGateAction = 'gated' | 'ungated' | 'skipped-in-flight' | 'skipped-terminal' | 'noop';
+type LaneGateAction =
+  | 'gated'
+  | 'ungated'
+  | 'skipped-in-flight'
+  | 'skipped-terminal'
+  | 'noop'
+  | { failure: string };
+
+function laneSyncFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.slice(0, 1000) || 'unknown_error';
+}
 
 /** Direct-execution contract stamped by canonical plan-run promotion, if this
  * unassigned row belongs to one. Kept on the shared payload reader so settle
@@ -1075,10 +1090,17 @@ async function applyLaneGateToWorkItem(
       await dispatchUngatedAgenticWorkItem(wi, execution, laneItem);
     }
     return 'ungated';
-  } catch {
-    // Best-effort — a per-item lifecycle hiccup must never break the sweep.
-    return 'noop';
+  } catch (error) {
+    // Keep the sweep fail-soft, but let its caller distinguish a failed write from
+    // an intentional no-op decision. The caller records and warns on this result.
+    return { failure: laneSyncFailureMessage(error) };
   }
+}
+
+export interface PlanLaneSyncFailure {
+  stage: 'linked-work-item-read' | 'apply-gate';
+  workItemId?: string;
+  message: string;
 }
 
 export interface PlanLaneSyncResult {
@@ -1099,6 +1121,8 @@ export interface PlanLaneSyncResult {
   skippedDuplicates: string[];
   /** Gated lanes whose linked canonical row was named as their own prerequisite. */
   circularPrerequisites: CircularPrerequisiteFinding[];
+  /** Fail-soft sync errors that used to disappear as empty arrays or `noop`. */
+  failures?: PlanLaneSyncFailure[];
 }
 
 /**
@@ -1122,6 +1146,17 @@ export async function syncLinkedWorkItemsToPlanLane(
     skippedDuplicates: [],
     circularPrerequisites: [],
   };
+  const recordFailure = (failure: PlanLaneSyncFailure) => {
+    (out.failures ??= []).push(failure);
+    console.warn(
+      `[plan-lane-sync] ${JSON.stringify({
+        event: 'plan_lane_sync_failure',
+        planSlug: item.planSlug,
+        itemId: item.itemId,
+        ...failure,
+      })}`,
+    );
+  };
   try {
     const laneRef = planLaneBlockerRef(item.planSlug, item.itemId);
     const linked = await findAllLinkedWorkItems(item.planSlug, item.itemId);
@@ -1144,17 +1179,29 @@ export async function syncLinkedWorkItemsToPlanLane(
           continue;
         }
       }
-      const action = await applyLaneGateToWorkItem(wi, laneStatus, laneRef, {
-        planSlug: item.planSlug,
-        itemId: item.itemId,
-      });
+      let action: LaneGateAction;
+      try {
+        action = await applyLaneGateToWorkItem(wi, laneStatus, laneRef, {
+          planSlug: item.planSlug,
+          itemId: item.itemId,
+        });
+      } catch (error) {
+        // An unexpected throw still remains isolated to this linked row.
+        recordFailure({ stage: 'apply-gate', workItemId: wi.id, message: laneSyncFailureMessage(error) });
+        continue;
+      }
+      if (typeof action !== 'string') {
+        recordFailure({ stage: 'apply-gate', workItemId: wi.id, message: action.failure });
+        continue;
+      }
       if (action === 'gated') out.gated.push(wi.id);
       else if (action === 'ungated') out.ungated.push(wi.id);
       else if (action === 'skipped-in-flight') out.skippedInFlight.push(wi.id);
       else if (action === 'skipped-terminal') out.skippedAlreadyTerminal.push(wi.id);
     }
-  } catch {
-    // A DB hiccup — this is a best-effort sweep, never a hard dependency.
+  } catch (error) {
+    // A lookup-level DB hiccup remains best-effort, but is no longer invisible.
+    recordFailure({ stage: 'linked-work-item-read', message: laneSyncFailureMessage(error) });
   }
   return out;
 }
@@ -1289,8 +1336,8 @@ export interface PlanDependencyReconcileResult {
  * Reconcile ONE plan item's promoted dependency edges onto its canonical linked
  * work-item, per D-050. Fresh-reads the plan (never trusts a caller snapshot), resolves
  * each still-open `blockedBy` plan item to ITS canonical linked feature-family row, and
- * writes the replace-set through `syncFeatureBlockEdges` — the authoritative coord_links
- * writer with the work_item_deps mirror — even when the set is EMPTY, so removed plan
+ * writes only the prior owned subset through `syncFeatureBlockEdges` and canonical
+ * work_item_deps admission — even when the set is EMPTY, so removed plan
  * edges actually clear. The `_planAuthoredBlockers` marker is written ONLY after the
  * edge sync succeeds (a failed sync must not advance provenance). Null = nothing to do
  * (no plan/item, no canonical feature-family row) or the edge sync was refused (cycle) —
@@ -1309,9 +1356,8 @@ export async function reconcilePlanAuthoredDependenciesNow(
     if (!item) return null;
 
     // The canonical promoted row for THIS lane. Only feature-family rows participate:
-    // getFeatureBlockers/syncFeatureBlockEdges are the feature→feature seam, which is
-    // also what automatically preserves issue-family blockers (they live on edges this
-    // writer never touches).
+    // The reader is feature-only, but the canonical writer knows every endpoint family.
+    // Pass the prior owned subset below rather than replacing all of the target's edges.
     const { canonical } = selectCanonicalLinkedWorkItem(await findAllLinkedWorkItems(planSlug, itemId));
     if (!canonical || canonical.family !== 'feature' || !canonical.harness) return null;
     const harness = canonical.harness;
@@ -1345,7 +1391,7 @@ export async function reconcilePlanAuthoredDependenciesNow(
     // Write even an EMPTY set — that is exactly how a removed plan edge clears. A cycle
     // refusal (syncFeatureBlockEdges throws) aborts BEFORE the marker write below, so a
     // refused sync never advances provenance.
-    await syncFeatureBlockEdges(harness, canonical.id, desired);
+    await syncFeatureBlockEdges(harness, canonical.id, desired, { priorBlockerIds: prior });
     await mergeWorkItemPayload(
       canonical.id,
       { [PLAN_AUTHORED_BLOCKERS_KEY]: { planSlug, itemId, blockerWorkItemIds: resolved } },
@@ -1399,6 +1445,10 @@ export interface OrphanReconcileSweepResult {
   /** Distinct (plan_slug, item_id) pairs enumerated from non-terminal, stamped
    *  work-items — the candidate frontier before the terminal-status check. */
   candidatePlanItems: number;
+  /** WI-10004586: true when the candidate query hit its `candidateCap`, so
+   *  `candidatePlanItems` (and every count derived from the window) is a FLOOR
+   *  over a bounded fetch, not the population total. */
+  candidateWindowSaturated: boolean;
   /** Of those candidates, how many were CONFIRMED terminal (done/dropped) and
    *  therefore actually swept. */
   terminalPlanItems: number;
@@ -1481,6 +1531,7 @@ export async function reconcileOrphanedPlanItemWorkItems(
   const cap = opts.candidateCap && opts.candidateCap > 0 ? opts.candidateCap : DEFAULT_ORPHAN_SWEEP_CAP;
   const out: OrphanReconcileSweepResult = {
     candidatePlanItems: 0,
+    candidateWindowSaturated: false,
     terminalPlanItems: 0,
     reconciled: [],
     gated: [],
@@ -1537,22 +1588,44 @@ export async function reconcileOrphanedPlanItemWorkItems(
   const cands = new Map<string, OrphanCandidate>();
   const key = (planSlug: string, itemId: string) => `${planSlug}\0${itemId}`;
 
+  //    WI-10004586: the window is ORDERED, not an arbitrary planner slice. Without
+  //    an ORDER BY the same ~cap rows came back every tick, and rows that are
+  //    skipped on every pass (gated, unproven-link, a non-terminal lane sync)
+  //    held the window while terminal orphans past it were never visited —
+  //    measured 2026-10-01: 536 candidates, 68 with a terminal plan item, only
+  //    52 of those inside the LIMIT 500 window. Candidates whose plan item the
+  //    derived `plan_items` index already shows TERMINAL go first (they are the
+  //    ones this sweep exists to heal); the rest rotate via random() so every
+  //    lane-sync candidate is eventually visited. The index only PRIORITISES —
+  //    each candidate is still confirmed against a fresh getPlanRow below, so a
+  //    stale index row can reorder the window but never terminalize anything.
   const rows = await sql<{ plan_slug: string; item_id: string; harness_slug: string | null }[]>`
-    SELECT DISTINCT linkage.plan_slug, linkage.item_id, w.harness_slug
-      FROM harness_shared.work_items w
-      CROSS JOIN LATERAL (
-        SELECT w.payload->'plan_item'->>'plan_slug' AS plan_slug,
-               w.payload->'plan_item'->>'item_id'  AS item_id
-         WHERE w.payload->'plan_item' IS NOT NULL
-        UNION
-        SELECT w.source_plan_slug AS plan_slug, source_item_id AS item_id
-          FROM unnest(COALESCE(w.source_plan_item_ids, ARRAY[]::text[])) AS source_item_id
-         WHERE w.source_plan_slug IS NOT NULL
-      ) AS linkage
-     WHERE NOT (w.status = ANY(${SETTLED_WORK_ITEM_STATES}::text[]))
-       AND linkage.plan_slug IS NOT NULL
-       AND linkage.item_id IS NOT NULL
+    SELECT c.plan_slug, c.item_id, c.harness_slug
+      FROM (
+        SELECT DISTINCT linkage.plan_slug, linkage.item_id, w.harness_slug
+          FROM harness_shared.work_items w
+          CROSS JOIN LATERAL (
+            SELECT w.payload->'plan_item'->>'plan_slug' AS plan_slug,
+                   w.payload->'plan_item'->>'item_id'  AS item_id
+             WHERE w.payload->'plan_item' IS NOT NULL
+            UNION
+            SELECT w.source_plan_slug AS plan_slug, source_item_id AS item_id
+              FROM unnest(COALESCE(w.source_plan_item_ids, ARRAY[]::text[])) AS source_item_id
+             WHERE w.source_plan_slug IS NOT NULL
+          ) AS linkage
+         WHERE NOT (w.status = ANY(${SETTLED_WORK_ITEM_STATES}::text[]))
+           AND linkage.plan_slug IS NOT NULL
+           AND linkage.item_id IS NOT NULL
+      ) AS c
+     ORDER BY EXISTS (
+                SELECT 1 FROM harness_shared.plan_items pi
+                 WHERE pi.plan_slug = c.plan_slug
+                   AND pi.item_id = c.item_id
+                   AND pi.status = ANY(${Object.keys(TERMINAL_PLAN_ITEM_TARGET)}::text[])
+              ) DESC,
+              random()
      LIMIT ${cap}`;
+  out.candidateWindowSaturated = rows.length >= cap;
   for (const r of rows) {
     const k = key(r.plan_slug, r.item_id);
     if (!cands.has(k)) cands.set(k, { planSlug: r.plan_slug, itemId: r.item_id, harnessSlug: r.harness_slug ?? null });

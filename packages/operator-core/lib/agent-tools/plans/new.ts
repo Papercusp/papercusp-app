@@ -574,6 +574,11 @@ export default defineTool({
           dedupTokens(slug, args.title),
           rows,
         );
+        // WI-10004345: an exact-slug row in this harness is not a "similar" plan, it is
+        // this slug already taken. Let the lock-enforced create answer `slug_exists`,
+        // the code create-or-reuse callers match, instead of a `similar_exists` that
+        // lists the plan itself.
+        if (harnessSlug && rows.some((row) => row.planSlug === slug)) similar = [];
         // P-010 (shared-embedding-sidecar-and-enrichment-2026-07-10): cosine
         // CONFIRMATION of the token verdict. The token matcher sees slug+title
         // tokens only, so topically-adjacent but distinct efforts false-flag

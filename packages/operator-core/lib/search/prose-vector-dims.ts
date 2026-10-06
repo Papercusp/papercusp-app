@@ -45,6 +45,7 @@ import {
   type PgvectorIndexOperatorClass,
 } from '@papercusp/memory';
 import type { Sql } from 'postgres';
+import { createEmbeddingSpace, type EmbeddingSpace, type EmbeddingSpaceSelection } from '@papercusp/search';
 import { chunkStoreVectorColumns } from './chunks/registry';
 
 /**
@@ -103,6 +104,35 @@ export const PROSE_VECTOR_STORAGE_PROFILE: ProseVectorStorageProfile = Object.fr
   indexOperatorClass: 'vector_cosine_ops',
 });
 
+/**
+ * Papercusp's configuration of the `@papercusp/search` embedding-space filter
+ * (shared-vector-search-libraries-2026-09-29 P-001). The library owns the
+ * logic; papercusp supplies its storage contract and the legacy mode labels,
+ * each mapped to the profile that mode CURRENTLY means. Every prose function
+ * below delegates here, so the stored-space rules exist in one place.
+ * Parity with the pre-move code: embedding-space-parity.test.ts.
+ */
+export const PROSE_EMBEDDING_SPACE: EmbeddingSpace = createEmbeddingSpace({
+  storageLabel: 'shared prose storage',
+  storage: PROSE_VECTOR_STORAGE_PROFILE,
+  legacyModes: Object.fromEntries(
+    PROSE_ELIGIBLE_MODES.map((mode) => [
+      mode,
+      {
+        profileId: EMBEDDER_DIM_SPECS[mode].profileId,
+        dimensions: EMBEDDER_DIM_SPECS[mode].targetDims,
+        distanceMetric: EMBEDDER_DIM_SPECS[mode].distanceMetric,
+      },
+    ]),
+  ),
+});
+
+type ProseProfileInput = Pick<EmbedderProfileSpec, 'profileId' | 'targetDims' | 'distanceMetric'>;
+
+function asSpaceProfile(profile: ProseProfileInput) {
+  return { profileId: profile.profileId, dimensions: profile.targetDims, distanceMetric: profile.distanceMetric };
+}
+
 /** The exact row identity a prose query is allowed to select. `legacyMode` is
  * present only when a mode-only row can be interpreted without guessing: the
  * requested id must be that mode's declared CURRENT profile. */
@@ -113,54 +143,23 @@ export interface ProseProfileSelection {
 
 /** Validate desired embedder output against the independently declared shared
  * prose storage. Returning every problem keeps migration skew actionable. */
-export function validateProseStorageCompatibility(
-  profile: Pick<EmbedderProfileSpec, 'profileId' | 'targetDims' | 'distanceMetric'>,
-): string[] {
-  const problems: string[] = [];
-  if (!PROSE_VECTOR_STORAGE_PROFILE.acceptedProfileIds.includes(profile.profileId)) {
-    problems.push(
-      `shared prose storage does not accept profile ${profile.profileId}; ` +
-        `accepted=${PROSE_VECTOR_STORAGE_PROFILE.acceptedProfileIds.join(',') || '(none)'}`,
-    );
-  }
-  if (profile.targetDims !== PROSE_VECTOR_STORAGE_PROFILE.dimensions) {
-    problems.push(
-      `shared prose storage has ${PROSE_VECTOR_STORAGE_PROFILE.dimensions} dimensions; ` +
-        `profile ${profile.profileId} emits ${profile.targetDims}`,
-    );
-  }
-  if (profile.distanceMetric !== PROSE_VECTOR_STORAGE_PROFILE.distanceMetric) {
-    problems.push(
-      `shared prose storage uses ${PROSE_VECTOR_STORAGE_PROFILE.distanceMetric}; ` +
-        `profile ${profile.profileId} requires ${profile.distanceMetric}`,
-    );
-  }
-  const metric = pgvectorMetricSpec(PROSE_VECTOR_STORAGE_PROFILE.distanceMetric);
-  if (!metric) {
-    problems.push(
-      `shared prose storage has unsupported metric ${PROSE_VECTOR_STORAGE_PROFILE.distanceMetric}`,
-    );
-  } else if (metric.indexOperatorClass !== PROSE_VECTOR_STORAGE_PROFILE.indexOperatorClass) {
-    problems.push(
-      `shared prose storage index uses ${PROSE_VECTOR_STORAGE_PROFILE.indexOperatorClass}; ` +
-        `${PROSE_VECTOR_STORAGE_PROFILE.distanceMetric} requires ${metric.indexOperatorClass}`,
-    );
-  }
-  return problems;
+export function validateProseStorageCompatibility(profile: ProseProfileInput): string[] {
+  return PROSE_EMBEDDING_SPACE.validateCompatibility(asSpaceProfile(profile));
 }
 
 /** Resolve an enabled embedder to an exact prose-row selection, or fail closed
  * when its complete profile is not accepted by the physical store. */
 export function resolveProseProfileSelection(
   mode: string,
-  profile: Pick<EmbedderProfileSpec, 'profileId' | 'targetDims' | 'distanceMetric'>,
+  profile: ProseProfileInput,
 ): ProseProfileSelection | null {
-  if (validateProseStorageCompatibility(profile).length > 0) return null;
-  const legacyMode = (PROSE_ELIGIBLE_MODES as readonly string[]).includes(mode)
-    && EMBEDDER_DIM_SPECS[mode as ProseEligibleMode].profileId === profile.profileId
-      ? (mode as ProseEligibleMode)
-      : null;
-  return { profileId: profile.profileId, legacyMode };
+  return asProseSelection(PROSE_EMBEDDING_SPACE.resolveSelection(mode, asSpaceProfile(profile)));
+}
+
+/** The library returns only accepted ids and configured legacy modes, which
+ * are exactly the members of papercusp's narrower selection types. */
+function asProseSelection(selection: EmbeddingSpaceSelection | null): ProseProfileSelection | null {
+  return selection as ProseProfileSelection | null;
 }
 
 /** Resolve the declared CURRENT profile for a prose-eligible mode. This is for
@@ -168,9 +167,7 @@ export function resolveProseProfileSelection(
  * unknown mode fails closed, and alternate/historical profiles must be passed
  * explicitly through {@link resolveProseProfileSelection}. */
 export function resolveCurrentProseProfileSelection(mode: string): ProseProfileSelection | null {
-  if (!(PROSE_ELIGIBLE_MODES as readonly string[]).includes(mode)) return null;
-  const profile = EMBEDDER_DIM_SPECS[mode as ProseEligibleMode];
-  return resolveProseProfileSelection(mode, profile);
+  return asProseSelection(PROSE_EMBEDDING_SPACE.resolveCurrentSelection(mode));
 }
 
 /** Resolve provenance carried by a query embedder when the full profile object
@@ -180,28 +177,13 @@ export function resolveProseProfileIdSelection(
   profileId: string,
   legacyMode: string | null | undefined,
 ): ProseProfileSelection | null {
-  if (!(PROSE_VECTOR_STORAGE_PROFILE.acceptedProfileIds as readonly string[]).includes(profileId)) {
-    return null;
-  }
-  const mode = (PROSE_ELIGIBLE_MODES as readonly string[]).includes(legacyMode ?? '')
-    ? (legacyMode as ProseEligibleMode)
-    : null;
-  return {
-    profileId: profileId as EmbeddingProfileId,
-    legacyMode:
-      mode !== null && EMBEDDER_DIM_SPECS[mode].profileId === profileId
-        ? mode
-        : null,
-  };
+  return asProseSelection(PROSE_EMBEDDING_SPACE.resolveProfileIdSelection(profileId, legacyMode));
 }
 
 /** Resolve an accepted profile id and grant its legacy-mode fallback only when
  * that id is the declared current profile for exactly one eligible mode. */
 export function resolveAcceptedProseProfileSelection(profileId: string): ProseProfileSelection | null {
-  const legacyMode = PROSE_ELIGIBLE_MODES.find(
-    (mode) => EMBEDDER_DIM_SPECS[mode].profileId === profileId,
-  ) ?? null;
-  return resolveProseProfileIdSelection(profileId, legacyMode);
+  return asProseSelection(PROSE_EMBEDDING_SPACE.resolveAcceptedSelection(profileId));
 }
 
 /** Compile the one canonical SQL predicate for a stored prose vector's exact
@@ -214,12 +196,7 @@ export function proseProfilePredicateSql(
   profileColumn: string,
   modeColumn: string,
 ) {
-  if (!selection) return sql`FALSE`;
-  const profile = sql.unsafe(profileColumn);
-  const mode = sql.unsafe(modeColumn);
-  return selection.legacyMode !== null
-    ? sql`(${profile} = ${selection.profileId} OR (${profile} IS NULL AND ${mode} = ${selection.legacyMode}))`
-    : sql`${profile} = ${selection.profileId}`;
+  return PROSE_EMBEDDING_SPACE.predicateSql(sql, selection, profileColumn, modeColumn);
 }
 
 /** Compile a row's effective exact profile id for row↔row comparisons. Exact
@@ -231,18 +208,7 @@ export function effectiveStoredProseProfileIdSql(
   profileColumn: string,
   modeColumn: string,
 ) {
-  const profile = sql.unsafe(profileColumn);
-  const mode = sql.unsafe(modeColumn);
-  const accepted = [...PROSE_VECTOR_STORAGE_PROFILE.acceptedProfileIds];
-  return sql`CASE
-    WHEN ${profile} = ANY(${accepted}::text[]) THEN ${profile}
-    WHEN ${profile} IS NULL THEN CASE
-      WHEN ${mode} = 'gemma' THEN ${EMBEDDER_DIM_SPECS.gemma.profileId}
-      WHEN ${mode} = 'openai' THEN ${EMBEDDER_DIM_SPECS.openai.profileId}
-      ELSE NULL
-    END
-    ELSE NULL
-  END`;
+  return PROSE_EMBEDDING_SPACE.effectiveStoredProfileIdSql(sql, profileColumn, modeColumn);
 }
 
 /** Pure row-level identity judgement used by tests and non-SQL consumers.
@@ -253,10 +219,7 @@ export function storedProseIdentityMatches(
   stored: { profileId?: string | null; mode?: string | null },
   selection: ProseProfileSelection,
 ): boolean {
-  if (stored.profileId !== null && stored.profileId !== undefined) {
-    return stored.profileId === selection.profileId;
-  }
-  return selection.legacyMode !== null && stored.mode === selection.legacyMode;
+  return PROSE_EMBEDDING_SPACE.storedIdentityMatches(stored, selection);
 }
 
 /**
@@ -313,7 +276,7 @@ export const PROSE_VECTOR_COLUMNS: ReadonlyArray<{ table: string; column: string
   // migration must include it, but its refill is deliberately kept off the
   // general TARGETS sweep: personal-vault/embedding.ts hard-pins the local-only
   // embedder and runs this target as a separate governed leg.
-  { table: 'harness_shared.personal_documents', column: 'embedding' },
+  { table: 'harness_shared.documents', column: 'embedding' },
   // WI-39840. Both are QUERY vectors compared against `session_turns.text_embedding`,
   // so they are governed by the shared prose width — but both were created AFTER
   // migration 727 moved that width to 768 and each declared `vector(384)` anyway
@@ -428,7 +391,7 @@ export const PROSE_VECTOR_DEPENDENT_VIEWS: ReadonlyArray<{ view: string; column:
  * one is authoritative and catches a skewed SCHEMA. Neither subsumes the other.
  */
 export function fitsProseColumns(dims: number): boolean {
-  return dims === PROSE_VECTOR_DIMS;
+  return PROSE_EMBEDDING_SPACE.fitsStorage(dims);
 }
 
 /**
@@ -466,21 +429,7 @@ export interface ProseColumnWidthSkew {
 export function computeProseColumnWidthSkew(
   measured: ReadonlyArray<{ table: string; column: string; dims: number }>,
 ): ProseColumnWidthSkew[] {
-  const skewed: ProseColumnWidthSkew[] = [];
-  for (const m of measured) {
-    if (!Number.isFinite(m.dims) || m.dims <= 0) continue; // unjudgeable, not skewed
-    if (m.dims !== PROSE_VECTOR_DIMS) {
-      skewed.push({
-        table: m.table,
-        column: m.column,
-        liveDims: m.dims,
-        declaredDims: PROSE_VECTOR_DIMS,
-      });
-    }
-  }
-  return skewed.sort(
-    (a, b) => a.table.localeCompare(b.table) || a.column.localeCompare(b.column),
-  );
+  return PROSE_EMBEDDING_SPACE.computeColumnWidthSkew(measured);
 }
 
 /** The declared target width for a mode — the emitting side of the contract. */

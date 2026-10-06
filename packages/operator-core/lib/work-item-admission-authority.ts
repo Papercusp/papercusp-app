@@ -18,6 +18,7 @@ const admissionContextSchema = z.object({
   parentSpawnId: z.string().nullable(), chunkId: z.string().nullable(),
   featureId: z.string().nullable(), planRunSessionId: z.string().nullable(),
   transport: z.literal('mcp'),
+  advSessionId: z.number().int().positive().safe().optional(),
   codeMode: z.boolean().optional(),
 }).strict();
 export const admissionAuthoritySchema = z.discriminatedUnion('kind', [
@@ -67,7 +68,9 @@ export function bindAdmissionAuthority(
       profile: ctx.profile ?? 'engineer', runId: ctx.runId, spawnId: ctx.spawnId,
       parentSpawnId: ctx.parentSpawnId ?? null, chunkId: ctx.chunkId ?? null,
       featureId: ctx.featureId ?? null, planRunSessionId: ctx.planRunSessionId ?? null,
-      transport: ctx.transport, ...(ctx.codeMode !== undefined ? { codeMode: ctx.codeMode } : {}),
+      transport: ctx.transport,
+      ...(ctx.advSessionId !== undefined ? { advSessionId: ctx.advSessionId } : {}),
+      ...(ctx.codeMode !== undefined ? { codeMode: ctx.codeMode } : {}),
     },
   });
   if (!bound.success) throw new AdmissionAuthorityRefused('original authenticated dispatch context is incomplete');

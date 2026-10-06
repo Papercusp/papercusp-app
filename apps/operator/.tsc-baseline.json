@@ -1,6 +1,6 @@
 {
   "createdAt": "2026-08-02T00:00:00.000Z",
-  "updatedAt": "2026-08-10T03:03:27.298Z",
+  "updatedAt": "2026-10-03T08:19:03.418Z",
   "description": "PER-FILE type-error baseline for apps/operator (mirrors packages/operator-core/.tsc-baseline.json, apps/operator-vite/.tsc-baseline.json and libs/papercusp/packages/orchestrator/.tsc-baseline.json, P-010/WI-4535/EI-847). A file whose current error count exceeds its baseline here is a NEW, ATTRIBUTED regression and gates lint:tsc:operator (the gate NAMES the file).",
   "note": "SEEDED 2026-08-02 (EI-19312097806511163 / EI-19346987162238063): apps/operator had NO tsconfig-scoped typecheck gate of any kind before this — test:affected is type-blind (esbuild/Vitest), lint:tsc covers packages/operator-core only, and the operator-vite SPA build transpiles without full type-checking. `npx tsc -p apps/operator/tsconfig.json --noEmit --incremental false` reported several hundred pre-existing errors at seed time, none triaged or fixed as part of establishing this gate (unlike the orchestrator's WI-6826/WI-6838 pass, which fixed its 2 production-source errors before seeding). This baseline is therefore a RATCHET START, not a clean-room zero: it exists so no NEW error can enter silently, while the standing debt is paid down over time via `npm run lint:tsc:operator -- --update` as files are fixed. NOT YET a green-checkpoint gate leg (see EI-19375134577577530 / EI-19372643177590910 — wiring a new project into the release gate is a separate, higher-blast-radius change deliberately deferred). 2026-08-10 (EI-19384804106131566): RAISED 9 entries 126 -> 406. Enrolling psu-launcher.mjs and psu-pty-host.mjs in tsconfig.declarations.json replaced their implicit-any exports with real inferred types, so these files typecheck against the REAL launcher API for the first time. These errors are PRE-EXISTING AND NEWLY VISIBLE, not new breakage: runtime is unchanged (psu-launcher.test.ts 560/560 green) and the gated leg lint:tsc (operator-core) is exit=0 clean at 175/129, identical to its pre-change baseline. Raised deliberately per this gate’s own rule that raising a file is a hand-edit with justification, so the per-file ratchet keeps a correct floor and stays usable for anyone editing apps/operator. It ratchets DOWN from here, and paying these down is the next rung toward gating apps/operator (EI-19391297380137349).",
   "files": {
@@ -68,7 +68,7 @@
     "apps/operator/lib/operator-turn-tools-revision.test.ts": 2,
     "apps/operator/lib/psu-launcher-fork.integration.test.ts": 4,
     "apps/operator/lib/psu-launcher.test.ts": 276,
-    "apps/operator/lib/psu-pty-host-turn.integration.test.ts": 1,
+    "apps/operator/lib/psu-pty-host-turn.integration.test.ts": 0,
     "apps/operator/lib/psu-pty-host.integration.test.ts": 14,
     "apps/operator/lib/psu-pty-host.test.ts": 95,
     "apps/operator/lib/ptool.test.ts": 5,
@@ -85,10 +85,13 @@
     "apps/operator/lib/release/release-profile.test.ts": 9,
     "apps/operator/lib/release/release-registry.ts": 1,
     "apps/operator/lib/release/rollback.test.ts": 1,
+    "apps/operator/lib/seed-mandate-coverage.test.ts": 1,
     "apps/operator/lib/tty-title-target.test.ts": 10,
     "apps/operator/lib/visual-effects.test.ts": 4,
     "apps/operator/playwright.config.ts": 1,
     "apps/operator/scripts/__tests__/bghost-watchdog.test.ts": 1,
+    "apps/operator/scripts/__tests__/cc-coord-hook-enrollment.test.ts": 1,
+    "apps/operator/scripts/__tests__/cc-turn-start-memory-hook-enrollment.test.ts": 1,
     "apps/operator/scripts/__tests__/onboard-launcher.test.ts": 2,
     "apps/operator/scripts/__tests__/psu-supervisor-beat.test.ts": 4,
     "apps/operator/scripts/__tests__/tutorial-runner.test.ts": 25,
@@ -175,10 +178,7 @@
     "packages/operator-core/lib/voice-prefs.ts": 2,
     "packages/plugin-loader/src/daemon/supervisor.ts": 9,
     "packages/plugin-loader/src/wasm/host-impls.ts": 1,
-    "packages/plugin-loader/src/wasm/jco-transpiler.ts": 1,
-    "apps/operator/lib/seed-mandate-coverage.test.ts": 1,
-    "apps/operator/scripts/__tests__/cc-coord-hook-enrollment.test.ts": 1,
-    "apps/operator/scripts/__tests__/cc-turn-start-memory-hook-enrollment.test.ts": 1
+    "packages/plugin-loader/src/wasm/jco-transpiler.ts": 1
   },
-  "errorCount": 864
+  "errorCount": 863
 }

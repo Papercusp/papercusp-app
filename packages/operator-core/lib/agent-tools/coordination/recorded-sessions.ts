@@ -32,6 +32,11 @@ import type { UnifiedPresenceRecord } from './federated-presence';
  *  presence-snapshot.ts. */
 export const RECORDED_SESSION_SOURCE = 'session-log';
 
+/** A session-log row with positive ended_at evidence. Keep this distinct from
+ *  RECORDED_SESSION_SOURCE: the shared liveness oracle treats that marker as
+ *  positive live evidence. */
+export const RECORDED_ENDED_SESSION_SOURCE = 'session-log-ended';
+
 /** A best, human-meaningful label for a recorded session: its launch label,
  *  else its pipeline role, else its CLI, else a generic fallback. */
 function recordedLabel(r: AdvSessionRow): string {
@@ -171,7 +176,7 @@ export function synthesizeEndedRosterRows(
       ownerId,
       ownerLabel: recordedLabel(r),
       workspaceId: r.workspaceId,
-      source: RECORDED_SESSION_SOURCE,
+      source: RECORDED_ENDED_SESSION_SOURCE,
       intent: '',
       currentPlanSlug: r.planSlug,
       currentFiles: [],
@@ -180,8 +185,9 @@ export function synthesizeEndedRosterRows(
       tty: null,
       startedAt: r.startedAt,
       // The death ts is the last truthful liveness reading. stale:true keeps the
-      // row out of every dispatchable surface; deriveVerdict's recordedEnded
-      // branch turns it into an explicit `ended` row on the targeted read.
+      // row out of every dispatchable surface; the distinct ended-source marker
+      // lets deriveVerdict emit `ended` without triggering the live-session
+      // shortcut for RECORDED_SESSION_SOURCE.
       heartbeatAt: r.endedAt ?? r.startedAt,
       lastActiveAt: null,
       intentDeclaredAt: null,

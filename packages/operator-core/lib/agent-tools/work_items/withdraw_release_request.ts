@@ -90,7 +90,7 @@ export default defineTool({
       args.id,
       `↩️ ${ident.ownerId} WITHDREW the release request against ${resolved.holder}${reasonLine} — item stays with the holder, no consequence fires.`,
       ident.ownerId,
-      { harness },
+      { harness, writerOwnerId: ident.ownerId },
     ).catch(() => {});
 
     await sendMessage(ident, {

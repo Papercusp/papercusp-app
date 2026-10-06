@@ -1,0 +1,55 @@
+{
+  "kind": "plugin",
+  "name": "gmail",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Gmail as a first-party mail provider: messages become email-message records (history first, then a budgeted backfill), and drafts, replies, sends, labels, threads and attachments run through the provider contract. Pub/Sub push only wakes a sync. Synced by the host's connector driver; the plugin only maps Gmail's and Pub/Sub's REST APIs.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "main": "./index.cjs",
+  "capabilities": [],
+  "tools": [],
+  "provider": {
+    "id": "gmail",
+    "contractVersion": 1,
+    "displayName": "Gmail",
+    "datatypes": ["email-message"],
+    "capabilities": [
+      "mail.read",
+      "mail.draft",
+      "mail.send",
+      "mail.labels",
+      "mail.threads",
+      "mail.attachments",
+      "sync.wake",
+      "sync.adopt"
+    ],
+    "oauth": {
+      "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+      "tokenUrl": "https://oauth2.googleapis.com/token",
+      "scopes": [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.compose"
+      ],
+      "pkce": true,
+      "clientRegistrationRef": "google",
+      "credentialGroup": "google",
+      "identity": {
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        "idField": "emailAddress",
+        "displayNameField": "emailAddress"
+      }
+    },
+    "egressHosts": ["gmail.googleapis.com", "pubsub.googleapis.com", "accounts.google.com", "oauth2.googleapis.com"],
+    "serviceCredentials": [
+      { "ref": "google-pubsub", "hosts": ["pubsub.googleapis.com"] }
+    ],
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "capabilityEnabled": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

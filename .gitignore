@@ -44,6 +44,17 @@ node_modules.old*/
 # not sweep it into commits or guarded-build source fingerprints.
 .papercusp-tmp/
 **/.papercusp-tmp/
+
+# These repository-root names are reserved for agent/test scratch. Keep the
+# rules root-anchored so legitimate nested source directories with similar
+# names remain visible. Existing tracked files still need index-only removal.
+/.agent-tmp
+/.tmp
+/.tmp-*
+/.tsx-tmp
+/scratch
+/scratchpad
+/scratch-*
 # Stray nested lockfiles (workspace members must ride the root lock) stay
 # ignored, but the ROOT lockfile is the npm-ci source of truth for CI +
 # fresh clones (regenerated + validated 2026-06-11, audit P-024/EI-84) —
@@ -117,6 +128,10 @@ apps/operator-docs/src/content/docs/preview/
 apps/papercusp-docs/dist/
 apps/papercusp-docs/.astro/
 
+# Repo-root Astro prerender cache. Its generated modules contain checkout-specific
+# absolute source IDs and are runtime build output, not repository content.
+/.astro/
+
 # src-as-entry packages — `build` (tsc) emits dist/, but package.json "exports"
 # routes every subpath to ./src/*, so nothing ever consumes the emitted dist/.
 #
@@ -180,6 +195,8 @@ apps/operator/docs/plans/**/*.md
 # slash-anchored patterns miss the .papercusp dirs that appear inside packages/apps.
 .papercusp/dependency-generations/
 **/.papercusp/dependency-generations/
+# The env-named generation store recorded for env-less callers (WI-10005159).
+**/.papercusp/dependency-generation-root
 
 # git-sync-embedded-repo-strand fix (2026-06-30, joint w/ 2b1a8 / WI-1354): transient test-scratch
 # dirs that get a nested .git (an embedded repo). When ANY has NO commit checked out, `git add -A`
@@ -209,7 +226,9 @@ apps/operator/docs/plans/**/*.md
 **/.papercusp/scratch/
 **/.papercusp/vitest-tmp/
 **/.papercusp/tmp/
-**/.papercusp/tmp-*/
+**/.papercusp/tmp-*
+**/.papercusp/node-compile-cache
+**/.papercusp/tsx-*
 **/.papercusp/logs/
 **/.papercusp/bench-reports/
 **/.papercusp/pi-sessions/

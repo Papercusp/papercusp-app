@@ -510,13 +510,16 @@ function normalizeCoverageActivity(
 export async function getAllPlanItemCoverage(opts: {
   /** Restrict the coverage scan when a caller has already filtered its items. */
   planItemRefs?: readonly string[];
+  /** Read every covered item in one plan without hydrating other plans' stamps. */
+  planSlug?: string;
 } = {}): Promise<Map<string, PlanItemCoverage>> {
   const { sql } = getOrgPg();
   const ws = activeWorkspaceId();
   const requestedRefs = opts.planItemRefs;
+  const requestedPlan = opts.planSlug;
   // Do not let an intentionally empty filtered set widen back into the
   // fleet-wide read used by health/coordination callers.
-  if (requestedRefs !== undefined && requestedRefs.length === 0) return new Map();
+  if ((requestedRefs !== undefined && requestedRefs.length === 0) || requestedPlan === '') return new Map();
 
   // 1. work→plan_item edges + the linked work-item's terminal state. NOTE: unlike the
   //    issue-BLOCK edge (issues:link → coord DEFAULT workspace), work_items:link writes
@@ -549,6 +552,7 @@ export async function getAllPlanItemCoverage(opts: {
      WHERE l.rel IN ('fixes', 'relates', 'duplicates')
        AND l.dst_kind = ${PLAN_ITEM_KIND}
        ${requestedRefs !== undefined ? sql`AND l.dst_ref = ANY(${requestedRefs}::text[])` : sql``}
+       ${requestedPlan !== undefined ? sql`AND split_part(l.dst_ref, '#', 1) = ${requestedPlan}` : sql``}
      ORDER BY l.dst_ref, l.src_ref`;
 
   const stampRows = requestedRefs !== undefined
@@ -567,7 +571,8 @@ export async function getAllPlanItemCoverage(opts: {
           JOIN requested r
             ON w.payload->'plan_item'->>'plan_slug' = r.plan_slug
            AND w.payload->'plan_item'->>'item_id' = r.item_id
-         WHERE w.payload->'plan_item' IS NOT NULL`
+         WHERE w.payload->'plan_item' IS NOT NULL
+           ${requestedPlan !== undefined ? sql`AND w.payload->'plan_item'->>'plan_slug' = ${requestedPlan}` : sql``}`
     : await sql<StampCoverageRow[]>`
         SELECT feature_id AS work_item_id, item_kind, status, updated_ts,
                payload ->> '_claimHold' AS claim_hold,
@@ -576,7 +581,14 @@ export async function getAllPlanItemCoverage(opts: {
           FROM harness_shared.work_items
          WHERE payload->'plan_item' IS NOT NULL
            AND payload->'plan_item'->>'plan_slug' IS NOT NULL
-           AND payload->'plan_item'->>'item_id'  IS NOT NULL`;
+           AND payload->'plan_item'->>'item_id'  IS NOT NULL
+           ${requestedPlan !== undefined ? sql`AND payload->'plan_item'->>'plan_slug' = ${requestedPlan}` : sql``}
+         ORDER BY payload->'plan_item'->>'plan_slug', payload->'plan_item'->>'item_id'`;
+
+  // Match the existing partial stamp index's key order. Without this useful
+  // deterministic order, the global reader chose a full-table scan and paid
+  // JSONB extraction for unrelated work-items (WI-10004889). Keep the literal
+  // partial predicate above; do not replace it with an index-defeating unwrap.
 
   // 3. live claims (work-item AND plan-item) from the canonical view — one read.
   const linkedWorkItemIds = [
@@ -592,8 +604,11 @@ export async function getAllPlanItemCoverage(opts: {
   const fleet = await listFleetAssignments({
     workspaceId: null,
     activeOnly: true,
-    ...(requestedRefs !== undefined
-      ? { planItemRefs: requestedRefs, workItemIds: linkedWorkItemIds }
+    ...(requestedRefs !== undefined || requestedPlan !== undefined
+      ? {
+          ...(requestedRefs !== undefined ? { planItemRefs: requestedRefs } : { planItemPlan: requestedPlan }),
+          workItemIds: linkedWorkItemIds,
+        }
       : {}),
   });
   const sessionStates = await coverageSessionStates(fleet);
@@ -723,6 +738,8 @@ export async function getAllPlanItemCoverage(opts: {
   const out = new Map<string, PlanItemCoverage>();
   const refs = new Set<string>([...byRef.keys(), ...directClaim.keys()]);
   for (const ref of refs) {
+    if (requestedPlan !== undefined && ref.slice(0, ref.indexOf('#')) !== requestedPlan) continue;
+    if (requestedRefs !== undefined && !requestedRefs.includes(ref)) continue;
     const links = byRef.get(ref) ?? [];
     const direct = directClaim.get(ref) ?? null;
     const directlyClaimed = Boolean(direct && isLiveActivity(direct.activity));

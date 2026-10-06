@@ -48,7 +48,7 @@ digest must report rather than hide.
 
 ## Phase 1 — Collect
 
-- **P-001** `todo` Read the launching event from `payload.plan_run.inputs.trigger.payload` and its platform from `payload.plan_run.inputs.trigger.source`. Take the window's end from the launching event's `occurredAt` (falling back to now when absent) and its start from that minus the source's storm-policy `windowSeconds`.
+- **P-001** `todo` Read the launching event from the event `payload` returned by `triggers:read-payload { planRunId: payload.plan_run.runId }` and its platform from `payload.plan_run.inputs.trigger.source`. Take the window's end from the launching event's `occurredAt` (falling back to now when absent) and its start from that minus the source's storm-policy `windowSeconds`.
 - **P-002** `todo` Call `social:search` ONCE PER PLATFORM in scope, passing that `{ from, to }` window, the single platform in `platforms`, and `limit` = `payload.plan_run.inputs.maxCommentsPerPlatform`. Take each hit's `postId` VERBATIM — never assemble one from a platform and an id. Read `scopesSearched` and `skipped` from every response: a platform that was skipped is absent from the digest, and saying so is the difference between an empty section and an unsearched one.
 - **P-003** `todo` A search returning exactly `limit` hits for a platform means the window OVERFLOWED and older comments in it are unreported. Record that per platform explicitly; a truncated digest that reads as complete is the failure this step exists to prevent.
 

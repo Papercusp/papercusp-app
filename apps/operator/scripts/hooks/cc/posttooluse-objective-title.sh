@@ -43,6 +43,15 @@ if [ -z "${PAPERCUSP_OBJECTIVE_FIXTURE:-}" ]; then
   fi
 fi
 
+# WI-10004953: a codex/claude NESTED inside another agent inherited that su's
+# PAPERCUSP_SID, and its native session id is in no owner index, so the owner resolves
+# to the su. Rendering for it would advance the SU's tip-notice cursor (the su never
+# sees that tip) and write a title to whatever tty it inherited. Cached per CLI process
+# (pc_nested_cli.sh); any failure leaves the condition false and the hook runs as before.
+if [ -n "${PAPERCUSP_SID:-}" ] && . "$(dirname "$0")/pc_nested_cli.sh" 2>/dev/null && pc_nested_cli_cached; then
+  exit 0
+fi
+
 # Drain stdin (the PostToolUse event JSON) so the pipe closes cleanly; we key off
 # the env + coord:glance, not the tool payload.
 INPUT="$(cat 2>/dev/null || true)"

@@ -130,6 +130,19 @@ export interface OriginSchedulerClassMetrics {
   bytes: number;
 }
 
+/** Bounded lifecycle evidence for caller-labelled finite tasks. All instants use the scheduler clock. */
+export interface OriginSchedulerTaskSample {
+  id: string;
+  label: string;
+  requestClass: OriginSchedulerClass;
+  enqueuedAtMs: number;
+  startedAtMs: number | null;
+  settledAtMs: number | null;
+  limitAtEnqueue: number;
+  limitAtStart: number | null;
+  state: 'queued' | 'running' | OriginSchedulerOutcome;
+}
+
 export interface OriginSchedulerSnapshot {
   /** The normalized origin key used by the process-wide registry. */
   origin: string;
@@ -152,6 +165,8 @@ export interface OriginSchedulerSnapshot {
   maxBackground: number;
   maxBulk: number;
   byClass: Record<OriginSchedulerClass, OriginSchedulerClassMetrics>;
+  /** Last 128 labelled tasks, including unfinished tasks; copies, never live mutable entries. */
+  tasks?: OriginSchedulerTaskSample[];
 }
 
 export interface OriginSchedulerOptions {
@@ -189,6 +204,8 @@ export interface OriginSchedulerTaskContext {
 }
 
 export interface OriginSchedulerRunOptions {
+  /** Diagnostic identity only; callers must omit credentials, query strings and request bodies. */
+  label?: string;
   class?: OriginSchedulerClass | string;
   requestClass?: OriginSchedulerClass | string;
   priority?: OriginSchedulerClass | string;
@@ -249,6 +266,7 @@ interface QueueEntry<T> {
   cancellationRequested: boolean;
   timeoutRequested: boolean;
   startedAt: number | null;
+  diagnostic?: OriginSchedulerTaskSample;
 }
 
 interface MutableClassMetrics extends OriginSchedulerClassMetrics {
@@ -351,6 +369,7 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
   let protocol = options.protocol ?? null;
   let closed = false;
   let active = 0;
+  const taskSamples: OriginSchedulerTaskSample[] = [];
   // The class-aware picker below decides which waiter wins. The established
   // gate still owns the actual permit counter and release pump, keeping this
   // richer scheduler an extension of the generic gate rather than a second
@@ -422,6 +441,10 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
     entry.state = 'settled';
     entry.settled = true;
     clearEntryTimers(entry);
+    if (entry.diagnostic) {
+      entry.diagnostic.state = outcome;
+      entry.diagnostic.settledAtMs = now();
+    }
     const metrics = classMetrics[entry.requestClass];
     if (outcome === 'shed') metrics.shed++;
     else if (outcome === 'timeout') metrics.timeouts++;
@@ -570,6 +593,11 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
     metrics.inFlight = activeByClass[entry.requestClass];
     startedAt = now();
     entry.startedAt = startedAt;
+    if (entry.diagnostic) {
+      entry.diagnostic.state = 'running';
+      entry.diagnostic.startedAtMs = startedAt;
+      entry.diagnostic.limitAtStart = effectiveLimit();
+    }
     const waitMs = Math.max(0, startedAt - entry.enqueuedAt);
     metrics.waitMsTotal += waitMs;
     metrics.waitMsMax = Math.max(metrics.waitMsMax, waitMs);
@@ -612,6 +640,7 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
         entry.settled = true;
         clearEntryTimers(entry);
         metrics.completed++;
+        if (entry.diagnostic) entry.diagnostic.state = 'ok';
         metrics.bytes += entry.bytes > 0 ? entry.bytes : 0;
         entry.resolve(value);
       }
@@ -622,15 +651,19 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
         clearEntryTimers(entry);
         if (entry.timeoutRequested || (error instanceof OriginSchedulerError && error.code === 'timeout')) {
           metrics.timeouts++;
+          if (entry.diagnostic) entry.diagnostic.state = 'timeout';
         } else if (entry.cancellationRequested || (isAbortSignal(entry.signal) && entry.signal.aborted)) {
           metrics.aborted++;
+          if (entry.diagnostic) entry.diagnostic.state = 'aborted';
         } else {
           metrics.failures++;
+          if (entry.diagnostic) entry.diagnostic.state = 'error';
         }
         metrics.bytes += entry.bytes > 0 ? entry.bytes : 0;
         entry.reject(error);
       }
     } finally {
+      if (entry.diagnostic) entry.diagnostic.settledAtMs = now();
       if (timer !== undefined) clearTimeout(timer);
       entry.cancelReject = undefined;
       entry.timeoutReject = undefined;
@@ -728,6 +761,21 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
     void promise.catch(() => {});
 
     const typedEntry = entry as QueueEntry<unknown>;
+    if (rawOptions.label) {
+      typedEntry.diagnostic = {
+        id: typedEntry.id,
+        label: rawOptions.label.slice(0, 200),
+        requestClass,
+        enqueuedAtMs: enqueuedAt,
+        startedAtMs: null,
+        settledAtMs: null,
+        limitAtEnqueue: effectiveLimit(),
+        limitAtStart: null,
+        state: 'queued',
+      };
+      taskSamples.push(typedEntry.diagnostic);
+      if (taskSamples.length > 128) taskSamples.shift();
+    }
     const onAbort = (): void => {
       if (typedEntry.settled) return;
       typedEntry.cancellationRequested = true;
@@ -833,6 +881,7 @@ export function createOriginScheduler(options: OriginSchedulerOptions = {}): Ori
       maxBackground,
       maxBulk,
       byClass,
+      tasks: taskSamples.map((sample) => ({ ...sample })),
     };
   };
 

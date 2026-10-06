@@ -20,10 +20,14 @@ import { resolveAgentIdentity, type ResolveIdentityCtx } from './coordination/id
 import {
   CONTEXT_GAUGE_LOUD_PCT,
   contextUsagePct,
-  renderBandedContextGauge,
 } from './coordination/tools/inbox-context-usage';
 import {
+  buildTranscriptEstimateGaugeEvidence,
+  renderBandedContextGaugeWithEvidence,
+} from './context-gauge-evidence';
+import {
   getContextUsage,
+  getContextUsageRecordedAt,
   isContextGaugeEnabled,
 } from '../system-health/context-usage-cache';
 import { currentContextTokensSyncForOwner } from '../compaction-usage';
@@ -62,18 +66,28 @@ export const contextGaugeAnnotator: ResultAnnotator = (result, ctx) => {
   const pct = contextUsagePct(tokens, usage.limit);
   const selfCompactionAvailable =
     pct != null && pct >= CONTEXT_GAUGE_LOUD_PCT ? selfCompactionAvailability(ownerId).available : null;
-  const line = renderBandedContextGauge(
+  // EI-23761864550626068: the numerator above is `anchorTokens` = transcript bytes/4, a
+  // heuristic — never provider-measured usage — so this gauge carries an explicit
+  // count-evidence contract (`_meta._contextGaugeEvidence`) and, on the loud/critical bands
+  // that demand an irreversible respawn, an inline estimate qualifier.
+  const evidence = buildTranscriptEstimateGaugeEvidence({
+    limit: usage.limit,
+    limitRecordedAt: getContextUsageRecordedAt(ownerId),
+    observedPromptFloor: usage.observedPromptFloor ?? null,
+  });
+  const line = renderBandedContextGaugeWithEvidence(
     tokens,
     usage.limit,
     selfCompactionAvailable,
     null,
     usage.observedPromptFloor ?? null,
+    evidence,
   );
   if (!line) return result; // below the quiet band — silent
   if (resultCarriesContextLine(result)) return result; // don't double-render (coord:inbox)
   return {
     ...result,
-    _meta: { ...(result._meta ?? {}), _contextGauge: line },
+    _meta: { ...(result._meta ?? {}), _contextGauge: line, _contextGaugeEvidence: evidence },
     content: [...result.content, { type: 'text' as const, text: line }],
   };
 };

@@ -7,7 +7,7 @@
     "papercusp": "./bin/papercusp"
   },
   "scripts": {
-    "test": "node --test src/**/*.node-test.ts"
+    "test": "node --test --test-global-setup=monorepo-host-preflight.mjs src/**/*.node-test.ts"
   },
   "dependencies": {
     "@papercusp/blueprint-distribution": "*",

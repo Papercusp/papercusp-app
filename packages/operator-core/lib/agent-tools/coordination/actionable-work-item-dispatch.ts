@@ -29,6 +29,7 @@ import { wakeRecipients, type WakeRecipientsResult } from './inbox-wake';
 import { assemblePresenceSnapshot, matchesOwner, resolvePresenceScope } from './presence-snapshot';
 import { listSessionsForAgentName, type AdoptionRow } from '../../plan-items/agent-names';
 import type { LegacyFleetScopeDowngradeAdmission } from '../../work-item-fleet-scope-recovery';
+import type { RefusalContract } from '../../capability-envelope/identity-refusal-contract';
 
 const UNASSIGNED_FRONTIER_STATES = new Set(['open', 'failing', 'todo']);
 const RETAINED_EXECUTION_STATES = new Set([...UNASSIGNED_FRONTIER_STATES, 'wip', 'in_progress', 'validating']);
@@ -59,6 +60,12 @@ export interface WorkItemDispatchSkip {
    * release { claimHold:true } park. Keep both because either can coexist.
    */
   claimHold?: ClaimHoldDispatchDetails;
+  /**
+   * WI-10005197: what would LIFT this skip. Present on the blocked/denied skips whose
+   * cause is a condition another agent or the owner can clear (dependency_blocked,
+   * plan_lane_blocked, authority_denied); read/shape skips carry none.
+   */
+  refusal?: RefusalContract;
 }
 
 type ClaimHoldProvenance = ReturnType<typeof readWorkItemClaimHoldProvenance>;
@@ -154,7 +161,7 @@ export interface ActionableWorkItemDispatchDeps {
   claim: (
     id: string,
     assignee: string,
-    opts: { harness?: string; legacyFleetScopeDowngradeAdmission?: LegacyFleetScopeDowngradeAdmission },
+    opts: { harness?: string; assignedBy?: string; legacyFleetScopeDowngradeAdmission?: LegacyFleetScopeDowngradeAdmission },
   ) => Promise<WorkItem | null>;
   /** The same named-id claim-floor oracle used by work_items:claim. */
   explainClaimFloors: typeof explainIssueClaimFloors;
@@ -367,6 +374,14 @@ async function classifyOne(
         code: 'dependency_blocked',
         reason: `unresolved work-item blocker${unresolved.length === 1 ? '' : 's'}${ids.length ? `: ${ids.join(', ')}` : ''}`,
         ...(ids.length ? { blockers: ids } : {}),
+        refusal: {
+          observed: { workItemId, unresolvedBlockers: ids.length ? ids.join(',') : String(unresolved.length) },
+          liftsWhen:
+            'every listed blocker work-item reaches a terminal state (done, dropped or resolved), or the ' +
+            'blocked-by link is removed. Re-dispatching before then re-skips: finish or drop the blocker, or ' +
+            'unlink it with work_items:link',
+          whoCanMakeItTrue: ['another-agent', 'owner'],
+        },
       },
     };
   }
@@ -393,7 +408,24 @@ async function classifyOne(
   if (planBlocked) {
     return {
       kind: 'skip',
-      skipped: { workItemId, code: 'plan_lane_blocked', reason: planBlocked.reason },
+      skipped: {
+        workItemId,
+        code: 'plan_lane_blocked',
+        reason: planBlocked.reason,
+        refusal: {
+          observed: {
+            workItemId,
+            planSlug: planBlocked.planSlug,
+            planItemId: planBlocked.itemId,
+            effectiveStatus: planBlocked.effectiveStatus,
+          },
+          liftsWhen:
+            'the plan item this work-item implements is no longer blocked: its effective status leaves ' +
+            '`blocked` (blocked-by dependencies resolve, or a sticky `blocked` token is cleared with ' +
+            'plans:set-status). Re-dispatching before then re-skips',
+          whoCanMakeItTrue: ['another-agent', 'owner'],
+        },
+      },
     };
   }
   if (planClaimed && planClaimed.claimedBy !== targetAgent) {
@@ -437,7 +469,20 @@ async function classifyOne(
       ...(workspaceId ? { workspaceId } : {}),
     });
     if (!authority.allowed) return {
-      kind: 'skip', skipped: { workItemId, code: 'authority_denied', reason: authority.reason },
+      kind: 'skip',
+      skipped: {
+        workItemId,
+        code: 'authority_denied',
+        reason: authority.reason,
+        refusal: {
+          observed: { workItemId, targetAgent, actor: actor ?? null },
+          liftsWhen:
+            'the dispatch authority check admits this exact work-item for the target agent: the fleet leader ' +
+            'widens the target\'s claim spec (scheduler:set_claim_spec) or admits the id, or an actor with ' +
+            'authority over the target dispatches it. Retrying the same dispatch cannot lift it',
+          whoCanMakeItTrue: ['another-agent', 'owner'],
+        },
+      },
     };
     legacyFleetScopeDowngradeAdmission = authority.legacyFleetScopeDowngradeAdmission;
   } catch (error) {
@@ -518,6 +563,7 @@ export async function assignActionableWorkItems(
       try {
         const claimed = await deps.claim(workItemId, args.targetAgent, {
           ...(args.harness ? { harness: args.harness } : {}),
+          ...(args.actor ? { assignedBy: args.actor } : {}),
           ...(legacyFleetScopeDowngradeAdmission ? { legacyFleetScopeDowngradeAdmission } : {}),
         });
         return claimed

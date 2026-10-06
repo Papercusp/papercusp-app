@@ -18,7 +18,9 @@ import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadBlueprintFromFile, type ResolvedAgentSpecification } from '@papercusp/orchestrator/blueprint';
 import type { PotCapabilityProviderBindingRow } from '../capability-class-registry-store';
+import { grantProviderToolReach } from '../agent-identities/grant-provider-kinds';
 import { matchesAny, PROTECTED_CAPABILITY_GLOBS, ROLE_ENVELOPES, type RoleEnvelope } from './policy';
+import { identityRefusalContract, type RefusalContract } from './identity-refusal-contract';
 
 interface CacheEntry {
   mtimeMs: number;
@@ -68,12 +70,25 @@ export function blueprintRoleEnvelopes(
   return envelopes;
 }
 
+/**
+ * Every cause the identity gate can refuse with. A const list (not just a union) so
+ * the refusal-contract table and its test derive from the one truth instead of
+ * paraphrasing it (EI-23766133296678780).
+ */
+export const IDENTITY_GRANT_FAILURE_CAUSES = [
+  'stale-artifact', 'no-launch-record', 'policy-unavailable', 'provider-unbound',
+  'provider-changed', 'tool-unavailable', 'outside-ceiling',
+] as const;
+export type IdentityGrantFailureCause = (typeof IDENTITY_GRANT_FAILURE_CAUSES)[number];
+
 export interface IdentityGrantFailure {
   code: 'capability_unsatisfied';
   classRef: string | null;
-  cause: 'stale-artifact' | 'no-launch-record' | 'policy-unavailable' | 'provider-unbound' | 'provider-changed' | 'tool-unavailable' | 'outside-ceiling';
+  cause: IdentityGrantFailureCause;
   toolName?: string;
   routes: readonly ['operator-notify', 'suggest-provider', 'needs_human'];
+  /** What would lift this refusal, who can make it true, and what was compared (set on runtime denials). */
+  refusal?: RefusalContract;
 }
 
 /** One ceiling predicate shared by install validation and runtime grants. */
@@ -137,8 +152,10 @@ export function resolveIdentityGrantEnvelope(input: {
   const failures: IdentityGrantFailure[] = [];
   const allowedTools = new Set<string>();
   const fail = (cause: IdentityGrantFailure['cause'], classRef: string | null, toolName?: string) => {
+    // WI-10005197: the same lift condition the kernel verdict carries for this cause.
     failures.push({ code: 'capability_unsatisfied', cause, classRef,
-      ...(toolName ? { toolName } : {}), routes: ['operator-notify', 'suggest-provider', 'needs_human'] });
+      ...(toolName ? { toolName } : {}), routes: ['operator-notify', 'suggest-provider', 'needs_human'],
+      refusal: identityRefusalContract(cause) });
   };
   const result = (): IdentityGrantEnvelope => ({
     applied: true,
@@ -179,7 +196,13 @@ export function resolveIdentityGrantEnvelope(input: {
       if (required.has(classRef)) fail('provider-changed', classRef);
       continue;
     }
-    const classTools = [...new Set(Object.values(pin.verbBindings))];
+    // P-012 / D-040(e): a recipe provider's verbs name recipes; the grant is the
+    // tool reach its inspection recorded, the same reach install admitted.
+    const classTools = grantProviderToolReach(binding);
+    if (!classTools) {
+      if (required.has(classRef)) fail('provider-unbound', classRef);
+      continue;
+    }
     const permitted: string[] = [];
     for (const toolName of classTools) {
       const cause = identityGrantToolFailure({ ...input, toolName });

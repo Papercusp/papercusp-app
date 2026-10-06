@@ -101,8 +101,12 @@ export async function prepareStructuredSuResume(record: DurableSuSessionRecord) 
     const reason = safeReasons.has(holder?.reason ?? '') ? holder!.reason : 'unknown';
     const rawPid = holder?.pid;
     const pid = typeof rawPid === 'number' && Number.isInteger(rawPid) && rawPid > 0 ? rawPid : 'none';
+    // The errno behind a failed /proc listing (EI-24661719545676832); errno
+    // tokens only, never a message that could carry a path or command line.
+    const rawError = (holder as { error?: unknown } | null)?.error;
+    const errno = typeof rawError === 'string' && /^E[A-Z0-9]+$/.test(rawError) ? `, error=${rawError}` : '';
     throw new Error(`Could not establish exclusive ownership of the saved native session `
-      + `(backend=${native.backend}, probe=${reason}, held=${holder?.held === true}, pid=${pid}, `
+      + `(backend=${native.backend}, probe=${reason}${errno}, held=${holder?.held === true}, pid=${pid}, `
       + `force=${process.env.PSU_FORCE_RESUME === '1'})`);
   }
   const floor = await checkInteractiveSafetyFloor();
@@ -160,8 +164,11 @@ export async function prepareStructuredSuResume(record: DurableSuSessionRecord) 
       env.CLAUDE_CONFIG_DIR = native.configDir;
     } else if (native.backend === 'codex') {
       if (!native.codexHome) throw new Error('The saved Codex home is unavailable');
-      await ensureCodexHomeViaOperator(record.ownerId, native.codexHome, row.id,
-        { operatorUrl, requireGatewayProvider: accountRoute.mode !== 'default' });
+      await ensureCodexHomeViaOperator(record.ownerId, native.codexHome, row.id, {
+        operatorUrl,
+        requireGatewayProvider: accountRoute.mode !== 'default',
+        headless: spec.headless ?? row.launchArgv?.includes('--headless') === true,
+      });
       if (!isCodexHomeLaunchReady(native.codexHome, record.ownerId)) throw new Error('The saved Codex SU configuration is not ready');
       if (accountRoute.mode === 'default') rehealResumeCodexAuth(native.codexHome);
       applyCodexGatewayRoute(native.codexHome, { ...accountRoute, ownerId: record.ownerId,

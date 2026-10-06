@@ -20,6 +20,10 @@ export default defineTool({
   description:
     "Speak a short line ALOUD to the local app user via the desktop's TTS (the Sentinel's voice-out). LOCAL app user only — not the P2P voice channels.",
   capability: 'operator:read',
+  // WI-10004577: speaks ALOUD (writes the shared sentinel_says FIFO) while sharing the `operator:read`
+  // capability with genuine readers, so it declares its own write effect — it must not infer 'read'
+  // (that would run it during a code:run dryRun preview AND exempt it from the late-completion abort).
+  effect: 'write',
   guidance: {
     when: `You are the voice-first Papercup and want the user to HEAR something — call voice:say with the spoken words (short: one or two sentences). The user hears ONLY what you pass here.`,
     notWhen: `Don't speak internal tool steps, long detail, or code aloud. For multi-peer P2P voice use voice:join, not this.`,

@@ -117,5 +117,9 @@ for required in loader.js editor/editor.main.css; do
   fi
 done
 
+# The stamp sits OUTSIDE the rm'd $DEST, so a `>` redirect would truncate the
+# existing inode in place and rewrite every tree that hard-links it (WI-10004321).
+# Unlink first so the new stamp is this tree's own file.
+rm -f "$STAMP"
 echo "$VERSION" > "$STAMP"
 echo "monaco-runtime: mirrored monaco-editor v$VERSION into $DEST/ ($(du -sh "$DEST" | cut -f1))"

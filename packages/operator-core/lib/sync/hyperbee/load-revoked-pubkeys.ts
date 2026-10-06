@@ -12,6 +12,8 @@
 
 import { getOrgPg } from '@papercusp/db-org';
 
+import { readRevokedSetCached, revokedSetCacheKey } from './revoked-set-cache';
+
 export interface LoadRevokedOpts {
   workspaceId: string;
   harnessSlug: string;
@@ -41,4 +43,18 @@ export async function loadRevokedPubkeys(opts: LoadRevokedOpts): Promise<Set<str
     }
   }
   return set;
+}
+
+/**
+ * `loadRevokedPubkeys` through the NOTIFY-invalidated process cache (WI-10005183).
+ * For the per-pass hot path (boot.ts `applyRevocationRefresh`); one-off readers
+ * keep calling `loadRevokedPubkeys` directly. Exact by construction: see
+ * revoked-set-cache.ts for why a cached answer is never staler than the last
+ * committed write this process has heard about.
+ */
+export function loadRevokedPubkeysCached(opts: LoadRevokedOpts): Promise<Set<string>> {
+  return readRevokedSetCached(
+    revokedSetCacheKey('contributors', opts.workspaceId, opts.harnessSlug),
+    () => loadRevokedPubkeys(opts),
+  );
 }

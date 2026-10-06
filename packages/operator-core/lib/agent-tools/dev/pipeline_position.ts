@@ -479,6 +479,7 @@ function minimalPipelineResult(
     'targetShortSha',
     'dirtyUncommitted',
     'positions',
+    'positionsMarker',
     'assessments',
     'deployedSha',
     'verdictUnknown',
@@ -649,7 +650,7 @@ export default defineTool({
   name: 'dev:pipeline_position',
   profile: 'engineer',
   description:
-    '"Is my edit live YET — and what actually makes it live?" Read-only. Pass a repo-relative `path` (preferred) or a `sha`: returns committed/on-staging/in-main/deployed + the green-gate stall context + a one-line summary — AND, from the path, WHICH PROCESS RUNS THAT CODE. That second half matters: the gateway (:8788), bg-host (routines/DBOS) and embed-sidecar all run tsx STRAIGHT FROM THE STAGING TREE, so a deploy NEVER carries their code — the edit is already on their disk and a `dev:restart { target }` is what loads it. For those paths this returns an `activation` block (the exact restart call) and deliberately does NOT tell you to wait on the deploy. A few paths have 2 consumers on different routes — those return `activations` (plural) instead.',
+    '"Is my edit live YET — and what actually makes it live?" Read-only. Pass a repo-relative `path` (preferred) or a `sha`: returns committed/on-staging/in-main/deployed + the green-gate stall context + a one-line summary — AND, from the path, WHICH PROCESS RUNS THAT CODE. That second half matters: the gateway (:8788), bg-host (routines/DBOS) and embed-sidecar all run tsx STRAIGHT FROM THE STAGING TREE. A deploy NEVER carries their code. The edit is already on their disk and a `dev:restart { target }` is what loads it. For those paths this returns an `activation` block (the exact restart call) and deliberately does NOT tell you to wait on the deploy. A few paths have 2 consumers on different routes — those return `activations` (plural) instead.',
   // @cell-lens git.pipelinePosition
   // This tool is the RESOLVER behind all five registered cells (git.pipelinePosition,
   // gate.greenCheckpoint.verdict/.candidate, deploy.3070.sha, git.mainBehindStaging) —
@@ -670,6 +671,16 @@ export default defineTool({
   // See ProjectedTool.skipWorkspaceTx; same declaration as dev:restart and capability:git.
   skipWorkspaceTx: true,
   capability: 'intel:read',
+  // WI-10004551 (parent WI-10004530): 23 of the 25 calls that ran >=55s ended status=timeout
+  // ("handler returned but signal had aborted", avg 84.6s, 20 owners, 72h) — the handler FINISHED,
+  // and the dispatch threw its valid result away. Cause: the ok-on-abort exemption that surfaces a
+  // completed-late read (agent-insights/tool-error-cluster-is-the-ok-on-abort-race) keys on every
+  // declared capability being tier 'low', and `intel:read` is deliberately tier 'high' (it also
+  // gates the prompt/activity-exposing intel panels), so this pure read never qualified. Re-tagging
+  // the capability would change every role's grant, so opt in through the tool-level flag instead:
+  // this handler only READS (git/systemd/release probes, no writes), so re-running it can never
+  // double-effect — the exact contract `idempotent` documents in dispatch-stack.ts.
+  idempotent: true,
   guidance: {
     when: 'After leaving an edit, pass `path` to measure which runtime loaded it. For a functional test, add `testClass` (e.g. operator-api, background-federation, desktop-native, multi-machine-p2p-git) to get the maintained current-build route, isolation boundary and prerequisites before waiting on main. A route marked gap is NOT ready.',
     notWhen: 'To PAUSE sync (use locks:acquire_resource on git-sync:<slug>). For the whole-pipeline dashboard use the /admin Git tab; this is the targeted per-path/sha probe.',

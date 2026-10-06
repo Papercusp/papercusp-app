@@ -17,7 +17,7 @@
  */
 
 import { getOrgPg } from '@papercusp/db-org';
-import { boundedOrgTxn } from '../../pg-bounded-txn';
+import { boundedOrgTxn, type BoundedOrgTxnOptions } from '../../pg-bounded-txn';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
 import { normalizeEventKey } from './announce-key';
 import { isPattern, keyMatchesPattern, payloadMatchesFilter, patternLiteralPrefix } from './pattern';
@@ -26,6 +26,8 @@ import { withEffectiveDeadlines } from './effective-deadline';
 import { observeCheckpointProducer } from './checkpoint-verified-wait';
 import { reconcileEventExternalBlockers } from '../../work-items';
 import { reconcileEventDurableParks } from '../../work-items-durable-park-audit';
+import { AWAIT_CANCEL_REASONS, type AwaitSystemCancelReason } from './cancel-reasons';
+export { AWAIT_CANCEL_REASONS, type AwaitSystemCancelReason } from './cancel-reasons';
 import type {
   AwaitPolicy,
   AwaitRow,
@@ -223,6 +225,9 @@ export async function registerAwait(input: {
   expectedGeneration?: number | null;
   /** Lifecycle owner for auto/suggested-armed rows. Manual awaits omit it. */
   boundTo?: LifecycleBinding | null;
+  /** Lifecycle auto-arm reuses a pending explicit one-shot wake for this key,
+   *  preserving its identity and complete control state under the key lock. */
+  preserveExplicitWait?: boolean;
   /** Retire this owner's pending rows atomically with the replacement insert. */
   supersedePending?: {
     /** Retire matching rows across every event key for this subscriber. Callers
@@ -331,13 +336,42 @@ export async function registerAwait(input: {
     !isPattern(input.eventKey) &&
     input.payloadFilter == null &&
     !input.note?.startsWith(FLEET_BENCH_NOTE_PREFIX);
-  const retireExactPending = async (tx: any): Promise<number> => {
-    if (!exactOneShot) return 0;
+  if (input.preserveExplicitWait &&
+      (!input.boundTo || !exactOneShot || supersedePending || (input.policy ?? 'wake') !== 'wake')) {
+    throw new Error('preserveExplicitWait requires an exact one-shot lifecycle wake without explicit supersession');
+  }
+  const reconcileExactPending = async (tx: any): Promise<AwaitRow | null> => {
+    if (!exactOneShot) return null;
     const lockKey = `event-await:${ws}:${input.subscriberId}:${input.eventKey}`;
     await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
-    const retired = await tx`
+    if (input.preserveExplicitWait) {
+      // The snapshot in interest-auto-arm is advisory. Ordinary explicit
+      // registrations share this lock, so a late bounded wait cannot be retired
+      // and replaced by an unlimited automatic registration. Return the stored
+      // row verbatim: recomputing timeoutSec would extend the original deadline.
+      // Filtered explicit siblings must not gain an unconditional automatic wake.
+      const explicit = await tx`
+        SELECT * FROM harness_shared.event_awaits
+         WHERE workspace_id = ${ws}
+           AND subscriber_id = ${input.subscriberId}
+           AND event_key = ${input.eventKey}
+           AND policy = 'wake'
+           AND once = true
+           AND root_id IS NULL
+           AND bound_to IS NULL
+           AND (note IS NULL OR note NOT LIKE ${FLEET_BENCH_NOTE_PREFIX + '%'})
+           AND fired_at IS NULL
+           AND cancelled_at IS NULL
+           AND superseded_at IS NULL
+         ORDER BY expires_ts ASC NULLS LAST, id DESC
+         LIMIT 1
+         FOR UPDATE
+      `;
+      if (explicit[0]) return mapAwait(explicit[0]);
+    }
+    await tx`
       UPDATE harness_shared.event_awaits
-         SET cancelled_at = now()
+         SET cancelled_at = now(), cancel_reason = ${AWAIT_SUPERSEDED_BY_REGISTRATION}
        WHERE workspace_id = ${ws}
          AND subscriber_id = ${input.subscriberId}
          AND event_key = ${input.eventKey}
@@ -351,7 +385,7 @@ export async function registerAwait(input: {
          AND superseded_at IS NULL
       RETURNING id
     `;
-    return retired.length;
+    return null;
   };
   if (supersedePending) {
     return boundedOrgTxn(async (tx) => {
@@ -377,7 +411,7 @@ export async function registerAwait(input: {
             : tx``;
       const superseded = await tx`
         UPDATE harness_shared.event_awaits
-           SET cancelled_at = now()
+           SET cancelled_at = now(), cancel_reason = ${AWAIT_SUPERSEDED_BY_REGISTRATION}
          WHERE workspace_id = ${ws}
            AND subscriber_id = ${input.subscriberId}
            ${eventFilter}
@@ -398,14 +432,14 @@ export async function registerAwait(input: {
   if (input.expectedGeneration != null) {
     return boundedOrgTxn(async (tx) => {
       await assertGenerationPin(tx);
-      await retireExactPending(tx);
-      return insertAwait(tx);
+      const explicit = await reconcileExactPending(tx);
+      return explicit ?? insertAwait(tx);
     }, AWAIT_PRE_REGISTRATION_TXN_OPTIONS);
   }
   if (exactOneShot) {
     return boundedOrgTxn(async (tx) => {
-      await retireExactPending(tx);
-      return insertAwait(tx);
+      const explicit = await reconcileExactPending(tx);
+      return explicit ?? insertAwait(tx);
     }, AWAIT_PRE_REGISTRATION_TXN_OPTIONS);
   }
   // Keep the legacy insert byte-for-byte free of `bound_to` when no binding was
@@ -485,7 +519,7 @@ export async function retireLifecycleBoundWatches(
     const rows = await tx<{ awaits: number; predicate_watches: number }[]>`
       WITH retired_awaits AS (
         UPDATE harness_shared.event_awaits
-           SET cancelled_at = now()
+           SET cancelled_at = now(), cancel_reason = ${AWAIT_CANCEL_REASONS.lifecycleBindingRetired}
          WHERE bound_to = ANY(${bindingJsons}::text[]::jsonb[])
            AND (NOT ${ownerFilter}::boolean OR subscriber_id = ANY(${owners}::text[]))
            -- Announcements are declaration/latch rows, not lifecycle
@@ -544,7 +578,7 @@ export async function retireWatchesForReapedOwners(
   return boundedOrgTxn(async (tx) => {
     const awaits = await tx`
       UPDATE harness_shared.event_awaits
-         SET cancelled_at = now()
+         SET cancelled_at = now(), cancel_reason = ${AWAIT_CANCEL_REASONS.ownerReaped}
        WHERE subscriber_id = ANY(${owners}::text[])
          -- A declared gate is durable coordination state, not an
          -- owner-scoped await.  Do not cancel it when the announcer is
@@ -635,7 +669,7 @@ export async function cancelInboxWakeAwaits(subscriberId: string): Promise<numbe
   const ws = eventsWs();
   const rows = await sql`
     UPDATE harness_shared.event_awaits
-       SET cancelled_at = now()
+       SET cancelled_at = now(), cancel_reason = ${AWAIT_CANCEL_REASONS.inboxWakeSessionEnded}
      WHERE workspace_id = ${ws} AND subscriber_id = ${subscriberId}
        AND policy = 'wake' AND once = false AND fired_at IS NULL AND cancelled_at IS NULL
        AND event_key LIKE 'coord:inbox-wake:%'
@@ -648,23 +682,30 @@ export async function cancelInboxWakeAwaits(subscriberId: string): Promise<numbe
   return rows.length;
 }
 
-/** Cancel a subscriber's standing `work-item:claimable` await(s) — called when the
- *  agent SUCCESSFULLY claims work (scheduler:get_next / work_items:claim_next). Holding a
- *  claim and waiting for claimable work are mutually exclusive: the documented idle model is
- *  serial (park ONE `work-item:claimable` await when a self-pull misses → wake → claim → work
- *  → re-park on the next miss), so a claimable await that outlives its claim is always stale.
- *  EI-10541: a pre-claim idle-park await that isn't cancelled when the agent later claims via a
- *  leader-fed spec bump keeps firing spurious ~30-min timeout wakes while the agent is busy,
- *  each costing a full re-orient turn. Subscriber-scoped (you can only cancel your own, like
- *  cancelInboxWakeAwaits); best-effort at the call site. Returns how many rows were cancelled. */
-export async function cancelClaimableAwaits(subscriberId: string): Promise<number> {
+/** Cancel a subscriber's pending one-shot `work-item:claimable` wake await(s) after a
+ *  successful claim. A one-shot idle wait is stale once the agent is working, but a standing
+ *  `once:false` watch is a reusable subscription and must survive claims. Notification-policy
+ *  rows are also independent of the agent's idle/working state and are preserved.
+ *
+ *  Paused-fleet paths pass `includeStanding:true` to retire every wake-policy claimable wait,
+ *  since the member must not be re-invoked for work it is forbidden to claim.
+ *  Subscriber-scoped (you can only cancel your own, like cancelInboxWakeAwaits); best-effort
+ *  at the call site. Returns how many rows were cancelled. */
+export async function cancelClaimableAwaits(
+  subscriberId: string,
+  options: { includeStanding?: boolean } = {},
+): Promise<number> {
   const { sql } = getOrgPg();
   const ws = eventsWs();
+  const includeStanding = options.includeStanding === true;
   const rows = await sql`
     UPDATE harness_shared.event_awaits
-       SET cancelled_at = now()
+       SET cancelled_at = now(),
+           cancel_reason = ${includeStanding ? AWAIT_CANCEL_REASONS.claimableFleetPaused : AWAIT_CANCEL_REASONS.claimableWorkClaimed}
      WHERE workspace_id = ${ws} AND subscriber_id = ${subscriberId}
        AND event_key = 'work-item:claimable'
+       AND policy = 'wake'
+       AND (once = true OR ${includeStanding})
        AND fired_at IS NULL AND cancelled_at IS NULL
     RETURNING id
   `;
@@ -706,6 +747,15 @@ export async function cancelAwaitsForSubscribersOnKeys(
     includeNotePrefix?: string;
     /** Restrict cancellation to one-shot rows; standing watches remain armed. */
     onceOnly?: boolean;
+    /** Stamped into cancel_reason; defaults to the generic sibling/supersession reason. */
+    reason?: AwaitCancelReason;
+    /**
+     * Run the cancel + delivery settle on this client instead of the org pool — for a
+     * caller that already owns its connection (a sweep handed `sql`, or a fixture DB)
+     * so the retirement it performs and this cancel land on the same database
+     * (WI-10005573). Still bounded by the same txn timeouts.
+     */
+    client?: BoundedOrgTxnOptions['client'];
   } = {},
 ): Promise<number> {
   if (subscriberIds.length === 0 || eventKeys.length === 0) return 0;
@@ -721,7 +771,8 @@ export async function cancelAwaitsForSubscribersOnKeys(
       const onceFilter = options.onceOnly ? tx`AND once = true` : tx``;
       const cancelled = await tx`
         UPDATE harness_shared.event_awaits
-           SET cancelled_at = now()
+           SET cancelled_at = now(),
+               cancel_reason = ${options.reason ?? AWAIT_CANCEL_REASONS.siblingOrSupersededKey}
          WHERE workspace_id = ${ws}
            AND subscriber_id = ANY(${tx.array([...subscriberIds])}::text[])
            AND event_key = ANY(${tx.array([...eventKeys])}::text[])
@@ -746,7 +797,7 @@ export async function cancelAwaitsForSubscribersOnKeys(
       );
       return cancelled;
     },
-    AWAIT_PRE_REGISTRATION_TXN_OPTIONS,
+    options.client ? { ...AWAIT_PRE_REGISTRATION_TXN_OPTIONS, client: options.client } : AWAIT_PRE_REGISTRATION_TXN_OPTIONS,
   );
   return rows.length;
 }
@@ -762,13 +813,16 @@ export async function cancelAwaitsForSubscribersOnKeys(
  * a payload-filter match, never a guess. Best-effort shape: returns the count actually
  * cancelled (already-fired/cancelled rows are silently skipped, not an error).
  */
-export async function cancelAwaitsByIds(ids: readonly number[]): Promise<number> {
+export async function cancelAwaitsByIds(
+  ids: readonly number[],
+  reason: AwaitCancelReason = AWAIT_CANCEL_REASONS.exactIdCleanup,
+): Promise<number> {
   if (ids.length === 0) return 0;
   const { sql } = getOrgPg();
   const ws = eventsWs();
   const rows = await sql`
     UPDATE harness_shared.event_awaits
-       SET cancelled_at = now()
+       SET cancelled_at = now(), cancel_reason = ${reason}
      WHERE workspace_id = ${ws} AND id = ANY(${[...ids]})
        AND policy <> 'announce'
        AND fired_at IS NULL AND cancelled_at IS NULL
@@ -782,6 +836,29 @@ export async function cancelAwaitsByIds(ids: readonly number[]): Promise<number>
 }
 
 export type AwaitCancellationSource = 'operator';
+
+/**
+ * Why a SYSTEM (non-operator) cancellation happened, stamped into cancel_reason so
+ * a reminder plane's delivery is measurable (P-010, goal-holder-plans-ideation-
+ * truthful-reports-2026-10-03). Never 'operator': that value is the user-cancel
+ * marker that suppresses a later auto-arm and is set only via `source`.
+ */
+export type AwaitCancelReason =
+  | 'obligation-discharged'
+  | 'obligation-superseded'
+  | 'obligation-delivered'
+  | 'obligation-unevaluated-expired'
+  | typeof AWAIT_SUPERSEDED_BY_REGISTRATION
+  | AwaitSystemCancelReason;
+
+/**
+ * Stamped by registerAwait itself when a new registration retires a pending
+ * row (exact one-shot dedup or supersedePending). Without it the retired row
+ * reads as an unexplained cancel and a caller's later, more specific
+ * cancelAwait reason is lost because the row is already cancelled
+ * (WI-10005938: 22 agent-obligation watches in one goal-holder window).
+ */
+export const AWAIT_SUPERSEDED_BY_REGISTRATION = 'superseded-by-registration' as const;
 
 /** A user cancellation marker that suppresses a later auto-arm re-registration. */
 export interface OperatorCancelledAwait {
@@ -799,7 +876,7 @@ export interface CancelAwaitResult {
   expiresTs?: string | null;
   droppedDeliveries: number;
   inFlightDeliveries: number;
-  error?: 'standing_watch_requires_confirmation';
+  error?: 'standing_watch_requires_confirmation' | 'active_loop_inbox_wake_requires_loop_end';
 }
 
 /**
@@ -809,7 +886,9 @@ export interface CancelAwaitResult {
  * `source:'operator'` is reserved for the explicit events:cancel surface;
  * internal cleanup callers intentionally omit it and do not create a suppression.
  * Public cancellation also requires `confirmStanding:true` for a standing
- * (`once:false`) watch. A one-word `await_id` slip must not silently disable a
+ * (`once:false`) watch. The active loop's own inbox-wake is additionally
+ * protected until loop:end deactivates that loop; a loopless session may still
+ * explicitly opt out. A one-word `await_id` slip must not silently disable a
  * recurring wake source.
  */
 export async function cancelAwaitDetailed(input: {
@@ -817,6 +896,8 @@ export async function cancelAwaitDetailed(input: {
   subscriberId: string;
   source?: AwaitCancellationSource;
   confirmStanding?: boolean;
+  /** Stamped into cancel_reason for a system cancel; ignored when source is 'operator'. */
+  reason?: AwaitCancelReason;
 }): Promise<CancelAwaitResult> {
   const { sql } = getOrgPg();
   const ws = eventsWs();
@@ -861,9 +942,33 @@ export async function cancelAwaitDetailed(input: {
       };
     }
 
+    if (
+      input.source === 'operator' &&
+      !once &&
+      base.eventKey === 'coord:inbox-wake:' + input.subscriberId
+    ) {
+      const activeLoops = await tx`
+        SELECT 1
+          FROM harness_shared.routines
+         WHERE workspace_id = ${ws}
+           AND target_owner_id = ${input.subscriberId}
+           AND active = TRUE
+           AND reschedule_interval_sec IS NOT NULL
+         LIMIT 1
+      `;
+      if (activeLoops.length > 0) {
+        return {
+          ...base,
+          cancelled: false,
+          error: 'active_loop_inbox_wake_requires_loop_end',
+        };
+      }
+    }
+
     const rows = await tx`
       UPDATE harness_shared.event_awaits
-         SET cancelled_at = now(), cancel_reason = ${input.source === 'operator' ? 'operator' : null}
+         SET cancelled_at = now(),
+             cancel_reason = ${input.source === 'operator' ? 'operator' : (input.reason ?? AWAIT_CANCEL_REASONS.internalCleanup)}
        WHERE workspace_id = ${ws} AND id = ${input.awaitId}
          AND subscriber_id = ${input.subscriberId}
          AND policy <> 'announce'
@@ -908,6 +1013,7 @@ export async function cancelAwait(input: {
   subscriberId: string;
   source?: AwaitCancellationSource;
   confirmStanding?: boolean;
+  reason?: AwaitCancelReason;
 }): Promise<boolean> {
   return (await cancelAwaitDetailed(input)).cancelled;
 }
@@ -1627,6 +1733,75 @@ export async function hasLiveExactAwaitForSubscriberKey(
      LIMIT 1
   `);
   return rows.length > 0;
+}
+
+/**
+ * Standing-watch registration identity for `watch:create`'s dedupe gate (WI-10005697).
+ *
+ * A STANDING watch is the one registration nothing ever consumes — a standing fire
+ * matches without setting `fired_at` — so re-running the drained-lane member contract's
+ * own `watch:create { pattern:'work-item:claimable', wake:true, once:false }` step added
+ * a PERMANENT duplicate row on every wake. One owner was measured holding SEVEN identical
+ * never-expiring rows (EI-23788231724653530). Only PREDICATE watches had a dedupe
+ * (`findMatchingActivePredicateWatch`); this is the pattern-watch counterpart, and it is
+ * deliberately shaped the same way: an IDENTICAL live registration is JOINED rather than
+ * duplicated.
+ *
+ * Identity is every field that changes how the watch BEHAVES — key, payload filter, wake
+ * floor, urgency — so two registrations that would wake the subscriber identically
+ * collapse, while any behavioural difference still earns its own row. `note` is annotation
+ * and is deliberately excluded. `payload_filter` is compared as jsonb, which Postgres
+ * normalizes on parse, so key ORDER and duplicate keys cannot split an otherwise identical
+ * filter.
+ *
+ * ⚠ Key comparison is EXACT, not `normalizeEventKey`. That helper is a fuzzy NEAR-MISS
+ * normalizer (`trim().toLowerCase().replace(/[-_:.]/g,'')`) while `registerAwait` stores
+ * the key verbatim, so normalizing here would compare a separator-stripped probe against a
+ * raw column and never match the very keys this exists for (`work-item:claimable` has both
+ * a `-` and a `:`).
+ *
+ * Scope is narrow on purpose — standing, deadline-free, plain (non-composed, no producer
+ * certificate) wake rows, i.e. exactly the shape that accumulates forever because nothing
+ * retires it. A one-shot await is consumed by its fire; a deadline-bearing, composed, or
+ * certificate-bearing row carries per-registration state. Those still insert.
+ *
+ * NOT atomic against a concurrent identical registration: this is a read, and
+ * `registerAwait` opens its own transaction. Two registrations racing inside that window
+ * still produce two rows — the same residual race `findMatchingActivePredicateWatch` has.
+ * The defect being fixed is sequential re-registration across wakes, which this closes
+ * completely.
+ */
+export async function findMatchingActiveStandingWatch(input: {
+  subscriberId: string;
+  eventKey: string;
+  payloadFilter?: unknown | null;
+  minSleepSec?: number | null;
+  urgency?: boolean;
+}): Promise<AwaitRow | null> {
+  const ws = eventsWs();
+  const payloadFilter = input.payloadFilter == null ? null : JSON.stringify(input.payloadFilter);
+  const rows = await boundedOrgTxn(
+    (tx) => tx`
+    SELECT * FROM harness_shared.event_awaits
+     WHERE workspace_id = ${ws}
+       AND subscriber_id = ${input.subscriberId}
+       AND event_key = ${input.eventKey}
+       AND policy = 'wake'
+       AND once = false
+       AND root_id IS NULL
+       AND expires_ts IS NULL
+       AND producer_health IS NULL
+       AND fired_at IS NULL
+       AND cancelled_at IS NULL
+       AND superseded_at IS NULL
+       AND payload_filter IS NOT DISTINCT FROM ${payloadFilter}::text::jsonb
+       AND min_sleep_sec IS NOT DISTINCT FROM ${input.minSleepSec ?? null}
+       AND coalesce(urgency, false) = ${input.urgency ?? false}
+     ORDER BY created_at ASC
+     LIMIT 1
+  `,
+  );
+  return rows.length > 0 ? mapAwait(rows[0]) : null;
 }
 
 /** Active awaits matching an event key — peek without firing (sources may use

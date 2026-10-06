@@ -169,8 +169,10 @@ async function isAncestor(repoPath: string, ancestor: string, descendant: string
  *  on a content conflict. Uses merge-tree --write-tree (git ≥2.38; `-X` needs
  *  ≥2.40): exit 0 = clean, exit 1 = conflicts, else error. `-z --name-only
  *  --no-messages` makes stdout `<tree>\0<path>\0…` so the conflicted paths are
- *  parseable whatever characters they contain. */
-async function mergeTree(
+ *  parseable whatever characters they contain. Also run against a member
+ *  WORKTREE by catchUpWorktreeToWatermark (D-055) to name the paths that keep
+ *  a diverged member parked; it writes objects, never the index or files. */
+export async function mergeTree(
   repoPath: string,
   a: string,
   b: string,

@@ -20,6 +20,9 @@ export * from './judge';
 export * from './scoring';
 export * from './rate-pause';
 export { tryParseJson } from './parse-json';
+// Producer diagnostics share the evaluator's original-load receipt. This is
+// per-module evidence; it never supplies a complete runtime code pin.
+export { captureSourceHash } from './source-identity';
 
 // The compare/select comparison core (test-gym P-002) — re-exported so battery
 // callers rank/select arms with the same semantics the scenario substrate uses

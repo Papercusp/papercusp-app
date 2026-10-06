@@ -21,7 +21,7 @@ import { makeFeatureCommitLookup } from './feature-commits';
 import { sweepHarnessDocs, recomputeDocStatus, type SweepResult } from './freshness-sweep';
 import { deleteDocRecord, listDocRecords, setDocStatus, markRegenEnqueued, markReverifyFlagged } from './doc-record';
 import { resolveHarnessDocPaths } from './harness-repo';
-import { readDocBody } from './doc-fs';
+import { readDocBody, docIdForRepoPath, docFilePath } from './doc-fs';
 import { anchorManualDoc } from './manual-anchor';
 import { dispatchDocStewardForDrift, type DriftedDoc } from './doc-steward-dispatch';
 import {
@@ -278,24 +278,17 @@ export async function runDocFreshnessSweepAfterSync(input: SweepAfterSyncInput):
     try {
       const paths = await resolveHarnessDocPaths(harnessSlug);
       if (paths) {
-        const docsRel = relative(paths.repoRoot, paths.docsRoot);
-        const prefix = docsRel && docsRel !== '.' ? docsRel.replace(/\/?$/, '/') : '';
-        const docIdForRepoPath = (repoPath: string): string | null => {
-          if (!/\.(md|mdx)$/i.test(repoPath)) return null;
-          if (prefix && !repoPath.startsWith(prefix)) return null;
-          const docId = prefix ? repoPath.slice(prefix.length) : repoPath;
-          return docId || null;
-        };
+        const resolveDocId = (repoPath: string) => docIdForRepoPath(paths.repoRoot, paths, repoPath);
 
         // A rename is different from a delete + unrelated add: Git gives us both paths,
         // so retire only the old tracking row for a move. Otherwise the self-bootstrap
         // below correctly creates the new archive/ doc but leaves the old doc_id forever.
         for (const change of changedPathPairs ?? []) {
           if (!change.previousPath) continue;
-          const oldDocId = docIdForRepoPath(change.previousPath);
-          const newDocId = docIdForRepoPath(change.path);
+          const oldDocId = resolveDocId(change.previousPath);
+          const newDocId = resolveDocId(change.path);
           if (!oldDocId || !newDocId || oldDocId === newDocId || !records.has(oldDocId)) continue;
-          if (await readDocBody(paths.docsRoot, newDocId) === null) continue;
+          if (await readDocBody(paths, newDocId) === null) continue;
           await deleteDocRecord(harnessSlug, oldDocId, workspaceId);
           records.delete(oldDocId);
         }
@@ -307,9 +300,7 @@ export async function runDocFreshnessSweepAfterSync(input: SweepAfterSyncInput):
           submodulePaths,
         };
         for (const p of changedPaths) {
-          if (!/\.(md|mdx)$/i.test(p)) continue;
-          if (prefix && !p.startsWith(prefix)) continue;
-          const docId = prefix ? p.slice(prefix.length) : p;
+          const docId = resolveDocId(p);
           if (!docId) continue;
           if (!records.has(docId)) {
             // NEW doc → register + set the verify baseline (page-by-page tracking growth).
@@ -416,6 +407,14 @@ export async function runDocFreshnessSweepAfterSync(input: SweepAfterSyncInput):
   // healable) ahead of retry re-offers. `newlyDrifted` shares object refs with `staleDocs`,
   // so a Set dedups the concatenation.
   const ordered = [...new Set([...newlyDrifted, ...staleDocs])];
+  const sourcePaths = await resolveHarnessDocPaths(harnessSlug);
+  if (sourcePaths) {
+    for (const doc of ordered) {
+      if (!sourcePaths.sources?.[doc.docId.split('/')[0]]) continue;
+      const file = docFilePath(sourcePaths, doc.docId);
+      if (file) doc.sourceFile = relative(repoRoot, file).split('\\').join('/');
+    }
+  }
   const dispatched = await dispatchDocStewardForDrift(harnessSlug, workspaceId, ordered);
 
   // WI-1661: spend each dispatched doc's retry attempt HERE — only once a doc-steward is

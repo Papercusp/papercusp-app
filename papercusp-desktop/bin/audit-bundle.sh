@@ -9,8 +9,9 @@
 #   • a finished installer/archive (.deb .dmg .msi .exe .AppImage .zip .tar.gz …)
 #     → `--scan-artifact` (expands it and fails closed if it cannot be read)
 #   • a directory (an unpacked .app, a staged sidecar)            → `--scan-dir`
-# Exit: 0 clean · 1 a finding · 2 could not check (e.g. no owner-name literal —
-# export PAPERCUSP_RELEASE_OWNER_NAME — or an unreadable container).
+# Exit: 0 clean · 1 a finding · 2 could not check (for example an unreadable
+# container). D-112 makes owner name/email legitimate release content, so neither
+# is required to run the machine-identity audit.
 #
 # WHY THIS IS A WRAPPER (WI-10003577, 2026-09-28). This script used to be a SEPARATE
 # PostHog-key scanner with its OWN allowlist: a single PUBLIC_PROJECT_KEY. The

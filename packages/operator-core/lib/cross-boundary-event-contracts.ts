@@ -59,6 +59,8 @@ export function parseUiIntentMessage(
 
 export type AgentTimelineEntry = {
   kind: 'text' | 'tool_use' | 'tool_result' | 'status' | 'result' | 'prompt';
+  /** Only a native terminal record can attest this; ordinary text is not completion. */
+  outcome?: 'succeeded' | 'failed';
   text?: string;
   toolName?: string;
   toolInput?: unknown;
@@ -83,6 +85,9 @@ export function parseAgentTimelineEntry(
   if (!record(value)) return invalid('agent-timeline-entry', 'payload is not an object', report);
   if (typeof value.kind !== 'string' || !TIMELINE_KINDS.has(value.kind as AgentTimelineEntry['kind'])) {
     return invalid('agent-timeline-entry', 'kind is unknown', report);
+  }
+  if (value.outcome !== undefined && (value.kind !== 'result' || !['succeeded', 'failed'].includes(String(value.outcome)))) {
+    return invalid('agent-timeline-entry', 'invalid terminal outcome', report);
   }
   for (const key of OPTIONAL_STRINGS) {
     if (value[key] !== undefined && typeof value[key] !== 'string') {

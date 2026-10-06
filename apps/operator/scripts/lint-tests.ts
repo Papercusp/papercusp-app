@@ -38,6 +38,7 @@
  *   tsx apps/operator/scripts/lint-tests.ts
  */
 
+import { spawnSync } from 'node:child_process';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
@@ -213,9 +214,50 @@ function globMatches(g: CompiledGlob, relPath: string): boolean {
 // per-scratch-dir whack-a-mole class.
 const COVERAGE_IGNORE_RE = /^\.|\.(?:tmp|old)\.\d+$/;
 
+export interface GitIgnoredPaths {
+  /** Ignored directories, without the trailing '/'. */
+  dirs: ReadonlySet<string>;
+  files: ReadonlySet<string>;
+}
+
+/** Untracked paths git ignores under `root`, as POSIX paths relative to it. A clean checkout,
+ * which is what the green-checkpoint gate runs in, never contains them. Walking them made the
+ * shared-tree verdict differ from the gate's. In WI-10005450 an untracked test under the
+ * gitignored /scratchpad satisfied a registry glob here, while the gate failed STALE_GLOB.
+ * Returns empty sets when git is unavailable, which falls back to walking everything. */
+export function listGitIgnoredPaths(root: string): GitIgnoredPaths {
+  const dirs = new Set<string>();
+  const files = new Set<string>();
+  const r = spawnSync(
+    'git',
+    ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'],
+    { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (r.status !== 0 || typeof r.stdout !== 'string') return { dirs, files };
+  for (const p of r.stdout.split('\0')) {
+    if (!p) continue;
+    if (p.endsWith('/')) dirs.add(p.slice(0, -1));
+    else files.add(p);
+  }
+  return { dirs, files };
+}
+
+let repoIgnored: GitIgnoredPaths | null = null;
+function repoGitIgnored(): GitIgnoredPaths {
+  repoIgnored ??= listGitIgnoredPaths(REPO_ROOT);
+  return repoIgnored;
+}
+
 /** Recursively list every file under `dir` whose basename matches `match`,
- * POSIX-relative, skipping ignore dirs. Defaults to canonical TS/JS tests. */
-async function walkAll(dir: string, match: RegExp = CANONICAL_TEST_RE, base = ''): Promise<string[]> {
+ * POSIX-relative, skipping ignore dirs. Defaults to canonical TS/JS tests.
+ * `ignored` holds paths relative to `dir` that git ignores. The default applies
+ * the repository's ignore set only when the walk starts at REPO_ROOT. */
+export async function walkAll(
+  dir: string,
+  match: RegExp = CANONICAL_TEST_RE,
+  base = '',
+  ignored: GitIgnoredPaths | null = base === '' && dir === REPO_ROOT ? repoGitIgnored() : null,
+): Promise<string[]> {
   let entries: Dirent<string>[];
   try { entries = await readdir(dir, { withFileTypes: true }); } catch { return []; }
   const out: string[] = [];
@@ -223,8 +265,9 @@ async function walkAll(dir: string, match: RegExp = CANONICAL_TEST_RE, base = ''
     const rel = base ? posix.join(base, e.name) : e.name;
     if (e.isDirectory()) {
       if (COVERAGE_IGNORE_DIRS.has(e.name) || COVERAGE_IGNORE_RE.test(e.name) || COVERAGE_IGNORE_REL.has(rel)) continue;
-      out.push(...await walkAll(join(dir, e.name), match, rel));
-    } else if (e.isFile() && match.test(e.name)) {
+      if (ignored?.dirs.has(rel)) continue;
+      out.push(...await walkAll(join(dir, e.name), match, rel, ignored));
+    } else if (e.isFile() && match.test(e.name) && !ignored?.files.has(rel)) {
       out.push(rel);
     }
   }

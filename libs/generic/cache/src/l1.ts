@@ -5,6 +5,7 @@
  */
 export class LruCache<V> {
   private readonly map = new Map<string, V>();
+  private pruneCursor: IterableIterator<[string, V]> | undefined;
 
   constructor(private readonly maxEntries: number) {
     if (maxEntries <= 0) throw new Error('LruCache: maxEntries must be > 0');
@@ -33,8 +34,33 @@ export class LruCache<V> {
     this.map.delete(key);
   }
 
+  /** Remove matching values without touching recency or copying the key set.
+   * Continue the scan on the next call so cold entries are eventually visited.
+   * The iterator is live: deleted/replaced entries cannot supply stale values.
+   */
+  prune(predicate: (value: V) => boolean, maxChecks: number): { checked: number; removed: number } {
+    if (!Number.isInteger(maxChecks) || maxChecks <= 0) throw new Error('LruCache: maxChecks must be a positive integer');
+    this.pruneCursor ??= this.map.entries();
+    let checked = 0, removed = 0;
+    while (checked < maxChecks) {
+      const next = this.pruneCursor.next();
+      if (next.done) {
+        this.pruneCursor = undefined;
+        break;
+      }
+      const [key, value] = next.value;
+      checked++;
+      if (predicate(value)) {
+        this.map.delete(key);
+        removed++;
+      }
+    }
+    return { checked, removed };
+  }
+
   clear(): void {
     this.map.clear();
+    this.pruneCursor = undefined;
   }
 
   get size(): number {

@@ -37,6 +37,7 @@ import {
 } from './gcp-image-family';
 import { evaluateImageScanPolicy, GCP_IMAGE_SCAN_POLICY } from './image-scan-policy';
 import { workspaceHostReleaseSubjectSha256 } from './bootc-bake-manifest';
+import { measureGcpBaseImage } from './gcp-base-image-identity';
 import {
   IAP_TCP_FORWARDING_SOURCE_RANGE,
   iapSshRuleAdmits,
@@ -52,6 +53,13 @@ export interface GcpImageFamilyCommand {
   stdin?: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /**
+   * Stop the process (SIGTERM, then SIGKILL after 10 s) once its stderr matches: the run is already
+   * lost and the rest of it is wasted time. WI-10006192: coldsnap kept uploading for 28 min after a
+   * block had used its last retry, then exited 1. The result keeps the captured output, notes the
+   * early stop, and always carries a non-zero exit code.
+   */
+  abortOnStderr?: RegExp;
 }
 
 export interface GcpImageFamilyCommandResult {
@@ -824,6 +832,12 @@ export class NodeGcpImageFamilyCommandRunner implements GcpImageFamilyCommandRun
       let bytes = 0;
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // Non-global copy: a /g pattern's lastIndex would make repeated .test() calls skip matches.
+      const abortPattern = actualOptions.abortOnStderr
+        ? new RegExp(actualOptions.abortOnStderr.source, actualOptions.abortOnStderr.flags.replace(/[gy]/g, ''))
+        : undefined;
+      let aborted = false;
+      let stderrTail = '';
       const finish = (result: GcpImageFamilyCommandResult): void => {
         if (settled) return;
         settled = true;
@@ -847,6 +861,13 @@ export class NodeGcpImageFamilyCommandRunner implements GcpImageFamilyCommandRun
         bytes += chunk.byteLength;
         if (bytes > maxOutputBytes) return overLimit('stderr');
         stderr.push(chunk);
+        if (!abortPattern || aborted) return;
+        // Match against a short tail, so a line split across two chunks is still seen.
+        stderrTail = (stderrTail + chunk.toString('utf8')).slice(-4096);
+        if (!abortPattern.test(stderrTail)) return;
+        aborted = true;
+        child.kill('SIGTERM');
+        setTimeout(() => child.kill('SIGKILL'), 10_000).unref?.();
       });
       child.once('error', (error) =>
         finish({
@@ -855,13 +876,15 @@ export class NodeGcpImageFamilyCommandRunner implements GcpImageFamilyCommandRun
           stderr: error instanceof Error ? error.message : 'failed to start command',
         }),
       );
-      child.once('close', (code) =>
+      child.once('close', (code) => {
+        const exitCode = typeof code === 'number' ? code : 1;
+        const capturedStderr = Buffer.concat(stderr).toString('utf8');
         finish({
-          exitCode: typeof code === 'number' ? code : 1,
+          exitCode: aborted && exitCode === 0 ? 1 : exitCode,
           stdout: Buffer.concat(stdout).toString('utf8'),
-          stderr: Buffer.concat(stderr).toString('utf8'),
-        }),
-      );
+          stderr: aborted ? `${capturedStderr}\nstopped early: stderr matched ${abortPattern}` : capturedStderr,
+        });
+      });
       timer = setTimeout(() => {
         child.kill('SIGKILL');
         finish({
@@ -1451,6 +1474,22 @@ export class GoogleComputeGcpImageFamilyReleaseAdapter implements GcpImageFamily
       fail(`bootcArtifact is invalid for builder.kind '${input.builderKind}'`);
     }
     const builderNetworkTags = parseBuilderNetworkTags(bytes.toString('utf8'));
+    const sourceImage = assertGcpImmutableImageId(
+      text(this.options.sourceImage ?? context.artifact.buildManifest.baseImage.reference, 'baseImage.reference'),
+      'baseImage.reference',
+    );
+    const attestedBaseSha256 = digest(context.artifact.buildManifest.baseImage.sha256, 'baseImage.sha256');
+    // ⚠ RE-MEASURE the image Packer will actually boot, not the one the manifest names: the
+    // `sourceImage` override can point elsewhere, and the provenance below records
+    // `base_image_sha256` as fact (WI-10005746). This is a read, so it runs before anything billable.
+    const measuredBase = await measureGcpBaseImage(this.compute, sourceImage);
+    if (measuredBase.sha256 !== attestedBaseSha256) {
+      fail(
+        `base image ${sourceImage} measures ${measuredBase.sha256} (id ${measuredBase.identity.id}, ` +
+          `created ${measuredBase.identity.creationTimestamp}), but the build manifest attests ` +
+          `baseImage.sha256 ${attestedBaseSha256}; refusing to build from an image the release did not measure`,
+      );
+    }
     const vars: Readonly<Record<string, string | number | boolean>> = {
       project_id: project(input.projectId, 'projectId'),
       zone: text(context.request.cleanRoom.zone, 'cleanRoom.zone'),
@@ -1458,11 +1497,8 @@ export class GoogleComputeGcpImageFamilyReleaseAdapter implements GcpImageFamily
       service_account_email: text(context.request.cleanRoom.serviceAccountEmail, 'cleanRoom.serviceAccountEmail'),
       candidate_image_name: candidateName,
       build_manifest_identity: manifest(input.buildManifestIdentity, 'buildManifestIdentity'),
-      source_image: assertGcpImmutableImageId(
-        text(this.options.sourceImage ?? context.artifact.buildManifest.baseImage.reference, 'baseImage.reference'),
-        'baseImage.reference',
-      ),
-      base_image_sha256: digest(context.artifact.buildManifest.baseImage.sha256, 'baseImage.sha256'),
+      source_image: sourceImage,
+      base_image_sha256: measuredBase.sha256,
       architecture: text(input.architecture, 'architecture'),
       release_version: ensureVersion(input.releaseVersion, 'releaseVersion'),
       release_bundle_url: text(context.artifact.release.bundleUrl, 'release.bundleUrl'),

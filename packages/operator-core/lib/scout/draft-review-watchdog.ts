@@ -140,17 +140,16 @@ const NEEDS_HUMAN_ITEM_RE =
 const CONDITIONAL_TRIGGER_WORDS_RE = /\b(?:retry|re-try|once|after|until|when)\b/i;
 const CONDITIONAL_SETTLE_WORDS_RE =
   /\b(?:backfill(?:s|ed)?|repair(?:s|ed)?|resolve[sd]?|land[sd]?|fix(?:es|ed)?|close[sd]?|complete[sd]?|merge[sd]?|ship(?:s|ped)?|deploy(?:s|ed)?)\b/i;
-const CONDITIONAL_DISPOSITION_RE = new RegExp(
-  `(?=[\\s\\S]*${CONDITIONAL_TRIGGER_WORDS_RE.source})(?=[\\s\\S]*${CONDITIONAL_SETTLE_WORDS_RE.source})`,
-  'i',
-);
+function hasConditionalDisposition(text: string): boolean {
+  return CONDITIONAL_TRIGGER_WORDS_RE.test(text) && CONDITIONAL_SETTLE_WORDS_RE.test(text);
+}
 
 /**
  * PURE: does this one recorded decision still suppress the staleness alarm
  * right now? (WI-2142684 — see `ScoutDraftReviewEvidence.hasDecision`.)
  *
  * Suppression lifts only when BOTH: (a) the decision's own text reads as a
- * deferred/conditional hold (`CONDITIONAL_DISPOSITION_RE`), not an
+ * deferred/conditional hold (`hasConditionalDisposition`), not an
  * unconditional ruling, AND (b) it cites at least one WI-/EI- ref, ALL of
  * which have since settled — terminal, or ABSENT (no matching row; itself a
  * "nothing left to wait on" signal, per `getWorkItemRefStates`'s contract). An
@@ -177,7 +176,7 @@ export function decisionStillSuppresses(
   const title = String((decision as { title?: unknown }).title ?? '');
   const body = String((decision as { body?: unknown }).body ?? '');
   const text = `${title}\n${body}`;
-  if (!CONDITIONAL_DISPOSITION_RE.test(text)) return true; // unconditional ruling: unchanged
+  if (!hasConditionalDisposition(text)) return true; // unconditional ruling: unchanged
   const refs = extractWorkItemRefs(text);
   if (refs.length === 0) return true; // conditional language, nothing to check against
   return refs.some((ref) => {
@@ -328,7 +327,7 @@ export async function readScoutDraftCandidates(
       const title = String((decision as { title?: unknown }).title ?? '');
       const body = String((decision as { body?: unknown }).body ?? '');
       const text = `${title}\n${body}`;
-      if (!CONDITIONAL_DISPOSITION_RE.test(text)) continue;
+      if (!hasConditionalDisposition(text)) continue;
       for (const ref of extractWorkItemRefs(text)) candidateRefs.add(ref);
     }
   }

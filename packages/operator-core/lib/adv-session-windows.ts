@@ -30,9 +30,25 @@ interface FocusCommandResult {
   stdout: string;
 }
 
+/** A sync result is accepted for injected test seams; the real runner is async. */
+type X11CommandRunner = (command: string, args: string[]) => FocusCommandResult | Promise<FocusCommandResult>;
+
 interface FocusWindowIdDeps {
-  runCommand?: (command: string, args: string[]) => FocusCommandResult;
+  runCommand?: X11CommandRunner;
   settle?: (ms: number) => Promise<void>;
+}
+
+/**
+ * WI-10005394: every X11 command here runs through async `execFile` with a bound. These used to
+ * be `spawnSync` on the operator main thread, three of them with NO timeout: a wedged X server
+ * then blocked the event loop until the sentinel wedge-killed the host and every MCP session on
+ * it (#1155). Even against a healthy X server each synchronous fork of the ~1.7 GB operator costs
+ * ~160 ms of main-thread time (EI-24852529885337741), and one focus click issues up to ~14.
+ */
+async function runX11Command(command: string, args: string[]): Promise<FocusCommandResult> {
+  const { execFileResult } = await import('./sync-exec-replay');
+  const r = await execFileResult(command, args, { timeout: X11_FOCUS_TIMEOUT_MS });
+  return { status: r.status, stdout: r.stdout };
 }
 
 function parseX11WindowId(value: string): bigint | null {
@@ -52,23 +68,20 @@ export function sameX11WindowId(left: string, right: string): boolean {
   return a !== null && b !== null && a === b;
 }
 
-function activeX11WindowMatches(
-  targetWindowId: string,
-  runCommand: (command: string, args: string[]) => FocusCommandResult,
-): boolean {
-  const active = runCommand('xdotool', ['getactivewindow']);
+async function activeX11WindowMatches(targetWindowId: string, runCommand: X11CommandRunner): Promise<boolean> {
+  const active = await runCommand('xdotool', ['getactivewindow']);
   return active.status === 0 && sameX11WindowId(active.stdout, targetWindowId);
 }
 
 async function waitForActiveX11Window(
   targetWindowId: string,
-  runCommand: (command: string, args: string[]) => FocusCommandResult,
+  runCommand: X11CommandRunner,
   settle: (ms: number) => Promise<void>,
 ): Promise<boolean> {
-  if (activeX11WindowMatches(targetWindowId, runCommand)) return true;
+  if (await activeX11WindowMatches(targetWindowId, runCommand)) return true;
   for (let attempt = 0; attempt < X11_FOCUS_SETTLE_ATTEMPTS; attempt += 1) {
     await settle(X11_FOCUS_SETTLE_INTERVAL_MS);
-    if (activeX11WindowMatches(targetWindowId, runCommand)) return true;
+    if (await activeX11WindowMatches(targetWindowId, runCommand)) return true;
   }
   return false;
 }
@@ -80,9 +93,8 @@ async function waitForActiveX11Window(
  * message rather than crashing.
  */
 export async function resolveWindowIdForPid(pid: number): Promise<string | null> {
-  const { spawnSync } = await import('node:child_process');
   try {
-    const r = spawnSync('wmctrl', ['-lp'], { encoding: 'utf8' });
+    const r = await runX11Command('wmctrl', ['-lp']);
     if (r.status !== 0) return null;
     // wmctrl -lp output: <wid> <desktop> <pid> <host> <title>
     for (const line of r.stdout.split('\n')) {
@@ -143,9 +155,8 @@ export async function resolveWindowIdForTitleFragment(fragment: string): Promise
       return null;
     }
   }
-  const { spawnSync } = await import('node:child_process');
   try {
-    const r = spawnSync('wmctrl', ['-lp'], { encoding: 'utf8' });
+    const r = await runX11Command('wmctrl', ['-lp']);
     if (r.status !== 0) return null;
     // A psu/fleet terminal titles itself "▶ · ☕2 · 3p · su-78d15 · 🔭 …" — the
     // matched fragment (e.g. a coord-owner short id) can sit DEEP in the title,
@@ -178,34 +189,21 @@ export async function focusWindowId(
     }
   }
   try {
-    let runCommand = deps.runCommand;
+    const runCommand: X11CommandRunner = deps.runCommand ?? runX11Command;
     const settle = deps.settle ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    if (!runCommand) {
-      const { spawnSync } = await import('node:child_process');
-      runCommand = (command, args) => {
-        const result = spawnSync(command, args, {
-          encoding: 'utf8',
-          timeout: X11_FOCUS_TIMEOUT_MS,
-        });
-        return {
-          status: result.status,
-          stdout: typeof result.stdout === 'string' ? result.stdout : '',
-        };
-      };
-    }
 
     // GNOME can accept wmctrl's _NET_ACTIVE_WINDOW request (exit 0) while
     // refusing to activate the window. Observe the active window before
     // reporting success; an exit code alone is not evidence of activation.
-    const wmctrl = runCommand('wmctrl', ['-ia', windowId]);
-    if (wmctrl.status === 0 && activeX11WindowMatches(windowId, runCommand)) {
+    const wmctrl = await runCommand('wmctrl', ['-ia', windowId]);
+    if (wmctrl.status === 0 && (await activeX11WindowMatches(windowId, runCommand))) {
       return true;
     }
 
     // xdotool's synchronous activation path succeeds on GNOME installations
     // where wmctrl is a false positive. It is bounded by the runner timeout,
     // and still must pass the same observed-active-window check.
-    const xdotool = runCommand('xdotool', ['windowactivate', '--sync', windowId]);
+    const xdotool = await runCommand('xdotool', ['windowactivate', '--sync', windowId]);
     if (xdotool.status === 0 && (await waitForActiveX11Window(windowId, runCommand, settle))) {
       return true;
     }
@@ -216,9 +214,9 @@ export async function focusWindowId(
     // final direct X input-focus attempt after raising the exact resolved
     // window. Never trust either exit status: require _NET_ACTIVE_WINDOW to
     // converge on the target before reporting success.
-    const raised = runCommand('xdotool', ['windowraise', windowId]);
+    const raised = await runCommand('xdotool', ['windowraise', windowId]);
     if (raised.status !== 0) return false;
-    const directlyFocused = runCommand('xdotool', ['windowfocus', '--sync', windowId]);
+    const directlyFocused = await runCommand('xdotool', ['windowfocus', '--sync', windowId]);
     if (directlyFocused.status !== 0) return false;
     return await waitForActiveX11Window(windowId, runCommand, settle);
   } catch {
@@ -245,9 +243,8 @@ export async function closeWindowId(windowId: string): Promise<boolean> {
     // wrong window is worse than a no-op. Report un-actionable.
     return false;
   }
-  const { spawnSync } = await import('node:child_process');
   try {
-    const r = spawnSync('wmctrl', ['-ic', windowId], { encoding: 'utf8' });
+    const r = await runX11Command('wmctrl', ['-ic', windowId]);
     return r.status === 0;
   } catch {
     return false;

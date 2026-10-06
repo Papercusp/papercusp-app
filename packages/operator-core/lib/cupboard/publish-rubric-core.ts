@@ -26,6 +26,7 @@
  * server-side by the worker, not here; this core just surfaces it in the result.
  */
 import { publishListingToCupboard } from './publish-listing';
+import { buildSelfDescribingPublishExtras, type SelfDescribingPublishExtras } from './self-describing-release';
 import { resolveLocalRubric } from './rubric-store';
 import { parseGithubRemote, fetchGithubRepoMeta } from './resolve-repo-coords';
 import { getRubric } from '../rubrics';
@@ -111,10 +112,28 @@ export async function publishRubricToCupboard(input: PublishRubricInput): Promis
     (local?.characteristic ? `Grades: ${local.characteristic}` : '') ||
     '';
 
+  const listingRef =
+    typeof input.listing_ref === 'string' && input.listing_ref.trim() ? input.listing_ref.trim() : ref;
+
+  // Same split as templates: a locally-resolved rubric dir has bytes to pin + ship to the R2 origin; a
+  // ref only present in the rubric store (no on-disk dir) publishes GitHub-only as before.
+  let releaseExtras: Partial<SelfDescribingPublishExtras> = {};
+  if (local?.dir) {
+    const releaseBuild = await buildSelfDescribingPublishExtras({
+      listingKind: 'rubric',
+      listingRef,
+      dir: local.dir,
+    });
+    if (!releaseBuild.ok) {
+      return { ok: false, status: releaseBuild.status, error: releaseBuild.error, detail: releaseBuild.detail };
+    }
+    releaseExtras = releaseBuild.extras;
+  }
+
   const result = await publishListingToCupboard({
+    ...releaseExtras,
     listing_kind: 'rubric',
-    listing_ref:
-      typeof input.listing_ref === 'string' && input.listing_ref.trim() ? input.listing_ref.trim() : ref,
+    listing_ref: listingRef,
     project_ref: typeof input.project_ref === 'string' ? input.project_ref : undefined,
     github_repository_id: meta.id,
     github_owner: parsed.owner,

@@ -10,6 +10,7 @@ same names under the ``user.`` namespace.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import os
 import sys
@@ -41,6 +42,46 @@ MISSING_XATTR_ERRNOS = frozenset(
     if value is not None
 )
 
+# CPython on macOS 3.9 does not expose os.listxattr/os.removexattr. Use the
+# system calls directly there: launching xattr(1) for every bundled file would
+# make the pre-signing walk prohibitively slow on a multi-GB sidecar.
+if sys.platform == "darwin":
+    _libc = ctypes.CDLL(None, use_errno=True)
+    _listxattr = _libc.listxattr
+    _listxattr.argtypes = (ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+    _listxattr.restype = ctypes.c_ssize_t
+    _removexattr = _libc.removexattr
+    _removexattr.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
+    _removexattr.restype = ctypes.c_int
+    _XATTR_NOFOLLOW = 0x0001
+
+
+def _darwin_error(path: str) -> OSError:
+    code = ctypes.get_errno()
+    return OSError(code, os.strerror(code), path)
+
+
+def _darwin_listxattr(path: str) -> list[str]:
+    encoded = os.fsencode(path)
+    for _ in range(2):
+        size = _listxattr(encoded, None, 0, _XATTR_NOFOLLOW)
+        if size < 0:
+            raise _darwin_error(path)
+        if size == 0:
+            return []
+        names = ctypes.create_string_buffer(size)
+        actual = _listxattr(encoded, names, size, _XATTR_NOFOLLOW)
+        if actual >= 0:
+            return [os.fsdecode(name) for name in names.raw[:actual].split(b"\0") if name]
+        if ctypes.get_errno() != errno.ERANGE:
+            raise _darwin_error(path)
+    raise _darwin_error(path)
+
+
+def _darwin_removexattr(path: str, name: str) -> None:
+    if _removexattr(os.fsencode(path), os.fsencode(name), _XATTR_NOFOLLOW) != 0:
+        raise _darwin_error(path)
+
 
 def paths_under(root: str) -> Iterator[str]:
     yield root
@@ -55,6 +96,8 @@ def paths_under(root: str) -> Iterator[str]:
 
 def list_xattrs(path: str) -> list[str]:
     try:
+        if sys.platform == "darwin":
+            return _darwin_listxattr(path)
         return os.listxattr(path, follow_symlinks=False)
     except OSError as exc:
         if exc.errno in NO_XATTR_ERRNOS:
@@ -91,7 +134,10 @@ def main() -> int:
             if args.check:
                 continue
             try:
-                os.removexattr(path, name, follow_symlinks=False)
+                if sys.platform == "darwin":
+                    _darwin_removexattr(path, name)
+                else:
+                    os.removexattr(path, name, follow_symlinks=False)
             except OSError as exc:
                 if exc.errno not in MISSING_XATTR_ERRNOS:
                     failures.append(f"{path}: cannot remove {name}: {exc}")

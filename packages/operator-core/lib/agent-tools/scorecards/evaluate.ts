@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { COORD_ROLES } from '../coordination/roles';
 import { resolveAgentIdentity } from '../coordination/identity';
-import { getRubric, readRubricPlanRevision } from '../../rubrics';
+import { getRubricWithoutSeeding, readRubricPlanRevision } from '../../rubrics';
 import {
   normalizeScorecardRatings,
   validateObservationRatings,
@@ -19,7 +19,7 @@ import {
   resolveScorecardReleaseGateBinding,
   scorecardRatingsClaimPass,
   scorecardEvidenceFingerprint,
-  validateWorkOnEverythingEvidenceEnvelope,
+  validateRubricRatingContracts,
   computeWorkOnEverythingRollup,
   resolveScorecardInstrumentSnapshots,
   type ScorecardInstrumentSnapshot,
@@ -223,9 +223,9 @@ export async function evaluateScorecard(
   args: z.infer<typeof scorecardEvaluateArgs>,
   caller?: ScorecardEvaluateCaller,
 ) {
-  const rubric = await getRubric(args.rubricRef);
+  const rubric = await getRubricWithoutSeeding(args.rubricRef);
   if (!rubric) {
-    // `getRubric` is intentionally fail-soft for read callers. Pair its null
+    // The seed-free lookup is intentionally fail-soft for read callers. Pair its null
     // with the revision-spine read so a transient DB/data-plane failure cannot
     // become a false authoritative "not found" during grading preflight.
     const revisionRead = await readRubricPlanRevision(args.rubricRef);
@@ -246,8 +246,11 @@ export async function evaluateScorecard(
   // skeleton in that state makes a grader spend the full pass only to have the
   // terminal emit refuse the same payload.
   if (rubric.kind === 'acceptance' && rubric.barContract?.adoptionEpoch != null && rubric.subjectPlan) {
+    // Same harness scope as scorecards:emit: a plan slug is unique per harness, not per
+    // workspace (WI-10005160).
     const lifecycle = await readAndEvaluateAcceptanceBarLifecycle(rubric.subjectPlan, 'pre-grading', {
       expectedApplicable: true,
+      harnessSlug: rubric.subjectHarnessSlug,
     });
     if (!lifecycle.satisfied) {
       return {
@@ -309,7 +312,7 @@ export async function evaluateScorecard(
     // grader BEFORE the terminal emit that a poor rating must route somewhere.
     validateScorecardPoorRatingDisposition(observation, rubric);
     try {
-      validateWorkOnEverythingEvidenceEnvelope(args.rubricRef, ratings);
+      validateRubricRatingContracts(args.rubricRef, ratings);
     } catch (error) {
       return {
         ok: false as const,

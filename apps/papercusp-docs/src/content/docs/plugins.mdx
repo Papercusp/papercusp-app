@@ -1,192 +1,78 @@
 ---
 title: Plugins
-description: Extend any harness with new actions, dashboard tabs, secrets, and integrations.
+description: Discover integrations, review their permissions and share supported plugins through the Cupboard.
+documents:
+  - packages/operator-core/lib/endpoint-route/routes/plugins/list.ts
+  - packages/operator-core/lib/cupboard/plugin-listings.ts
 ---
 
-A **plugin** extends what every harness can do: it adds dashboard tabs,
-toolbar actions, lifecycle hooks, scheduled routines, and database
-schemas. Plugins ship as standalone packages on the marketplace and
-install per-machine, then enable per-harness.
+A plugin adds capabilities to Papercusp. A runtime-less **code-tool pack**
+provides tools without the same plugin runtime. What a unit contributes is
+declared by its manifest, not by a promise that every plugin has every feature.
 
-The reference plugins that ship with Papercusp —
-`@papercupai/cloudflare-pages`, `@papercupai/slack-notifier`,
-`@papercupai/jira-sync`, `@papercupai/notion-export` — are themselves
-just plugins published to the marketplace.
+## Discover and install
 
-## What a plugin can contribute
+Open **Cupboard** or the installation's plugin-management surface to inspect
+available units. Before installing:
 
-Plugins declare contributions in their manifest:
+- Check the publisher and source repository.
+- Read the capability/permission requirements and dependency information.
+- Confirm compatibility with your installation.
+- Identify which workspace or project will use it.
 
-| Surface | What it is | Example |
-|---|---|---|
-| **dashboardTabs** | A tab that appears in the harness dashboard | docs-viewer adds a "Docs" iframe tab |
-| **sidebarItems** | A link in the operator's left sidebar | Linear plugin adds "Linear" |
-| **harness-toolbar actions** | A button next to "save snapshot" / "start" | cloudflare-pages adds "Publish website" |
-| **lifecycle hooks** | Code that runs on `mission.start`, `onFeaturePassed`, etc. | slack-notifier posts a message on `mission.done` |
-| **routines** | Scheduled triggers (cron / webhook / API) | briefings runs daily at 9am |
-| **api routes** | Plugin-owned HTTP endpoints under `/api/plugins/<name>/` | postgres-manager exposes `/migrations/run` |
-| **schemas** | Postgres DDL the plugin owns (run at install time) | jira-sync owns `plugin_jira.issues` |
+An integration that connects an external account may need a separate
+connection or authorization step. Installing code is not the same as
+authorizing that code to access your account.
 
-Each of these is opt-in via a capability declaration. A plugin that
-wants to read secrets must list `secrets:read:<NAME>` (or
-`secrets:read:PREFIX_*`). A plugin that wants to fetch a URL must list
-`http:fetch:<host>` (or `http:fetch:*.subdomain`). The runtime refuses
-to load plugins whose declared capabilities don't cover what the code
-actually does, and refuses to invoke handlers whose capabilities aren't
-satisfied.
+## Verify and maintain the connection
 
-## Anatomy of a plugin
+After installation, perform one small action on the intended account and
+workspace and inspect the result. A loaded manifest is not proof that an
+external service authorized the integration or that its actions succeeded.
 
-```
-my-plugin/
-├── papercusp.json       # manifest: name, capabilities, dashboardTabs, actions, routines, …
-├── index.ts             # default-exports a Plugin (init/onLoad/hooks/routines)
-├── dist/index.cjs       # compiled CJS — the loader prefers this over .ts
-├── tab.tsx              # React component for any dashboardTab (optional)
-├── README.md
-└── (optional) sql/init.sql   # plugin schema migrations
-```
+When updating, review changed permissions and compatibility before accepting
+the new version. If an action fails, preserve the unit version, connection
+status and provider error. Repeated reinstalling will not repair revoked
+provider access. Reauthorize through the supported connection flow when
+appropriate, rather than pasting a token into chat.
 
-The minimum manifest:
+## Permissions and secrets
 
-```json
-{
-  "name": "@you/my-plugin",
-  "version": "0.1.0",
-  "kind": "plugin",
-  "papercusp": "^0.1.0",
-  "description": "What this plugin does.",
-  "capabilities": ["events:listen:mission-done", "http:fetch:hooks.example.com"],
-  "actions": [
-    { "name": "notify",
-      "label": "Notify",
-      "surfaces": ["mission-done", "harness-toolbar"],
-      "capabilities": ["http:fetch:hooks.example.com"] }
-  ]
-}
-```
+Give an integration only the access it needs. Use the supported credential or
+connection setup; never put tokens in public source, plugin manifests,
+screenshots or support reports.
 
-Action capabilities must be a *subset* of the plugin's top-level
-capabilities. The host enforces this at registry-build time — a plugin
-can't grant its actions more power than the user consented to at
-install.
+If you disconnect or remove an integration, check whether its provider-side
+authorization also needs to be revoked. Do not assume deleting local code
+cancels an external account's access grant.
 
-## Lifecycle hooks
+## Authoring a plugin
 
-The host fires named hooks at well-known points. Subscribe in
-`hooks: { ... }` on the exported Plugin object:
+Start from the current plugin conventions and manifest schema in the
+installation you target. Have your agent inspect existing maintained examples,
+declare the contributed tools/events and permissions, and use the project's
+normal test framework.
 
-| Hook | When it fires | Receives |
-|---|---|---|
-| `onLoad(ctx)` / `onUnload(ctx)` | Plugin (un)loaded by the host | ctx |
-| `beforeMissionStart(ctx)` | Once before the harness loop starts | ctx |
-| `afterDone(ctx)` | After the orchestrator decides DONE | ctx |
-| `onPostOrchestrator(ctx, decision)` | After every orchestrator invoke | ctx, decision verb |
-| `onPostWorker(ctx, featureId)` | After every worker invoke | ctx, featureId |
-| `onPostValidator(ctx, featureId, status)` | After every validator | ctx, featureId, 'passed' \| 'failing' |
-| `onFeaturePassed(ctx, featureId)` | When a feature transitions to passed | ctx, featureId |
-| `onProposalAccepted(ctx, proposalPath)` | When a SPEC proposal is applied | ctx, proposalPath |
+Verify both the successful workflow and permission/connection failures. A
+plugin that loads is not yet proof that its actions work or that it respects
+the workspace boundary.
 
-`ctx` carries the install slug, project paths, a logger, the plugin's
-private storage path, the action registry, and a capability-gated
-`spawn` for invoking subprocess binaries.
+## Publishing to the Cupboard
 
-## Authoring workflow
+The maintained `cupboard:publish-plugin` workflow can list a plugin or
+code-tool pack using its manifest and GitHub repository. The code must be
+available at the intended repository before a listing can point to it.
+Installability and publication policy are checked by the platform.
 
-```bash
-# 1. Scaffold from a reference plugin.
-papercusp plugin scaffold @you/my-plugin --from slack-notifier
+Reviewed listings can be **pending** until moderation approves them.
+Publication submitted is not publication publicly visible. Inspect the
+returned listing and review status.
 
-# 2. Edit. Add actions in the manifest, implement them in init().
-#    Build:
-cd my-plugin/
-npx esbuild index.ts --bundle --platform=node --format=cjs --target=node20 \
-  --external:@papercusp/plugin-sdk \
-  --footer:js='module.exports = index_default; module.exports.default = index_default;' \
-  --outfile=index.cjs
+Before sharing, review the repository's license, secrets, private data and
+provided capabilities. Publishing a template, blueprint, knowledge pack or
+whole app uses its own supported workflow; do not substitute plugin publishing
+for those operations or assume one generic CLI command handles them all.
 
-# 3. Iterate locally — symlink the plugin into ~/.papercusp/global-plugins/
-#    and enable it on a test harness.
-ln -s "$PWD" ~/.papercusp/global-plugins/@you/my-plugin
-papercusp plugin enable @you/my-plugin --harness test-harness
-
-# 4. Validate.
-papercusp plugin validate
-
-# 5. Publish.
-papercusp publish
-```
-
-Hot-reload the operator runtime while developing:
-
-```bash
-PAPERCUSP_DEV_PLUGIN_WATCH=1 npm run dev:operator
-```
-
-This watches `~/.papercusp/global-plugins/` and resets the host cache
-on every manifest or entry-file change. The next request rediscovers.
-
-## Capabilities reference
-
-```
-events:listen:<event-name>      # subscribe to a host event
-events:emit:<event-name>        # fire a custom event
-http:fetch:<host>               # exact OR `*.subdomain`
-secrets:read:<NAME>             # exact OR `<PREFIX>_*`
-storage:plugin-private          # ~/.papercusp/plugin-data/<name>/
-db:plugin-schema                # owned Postgres schema (declare in schema field)
-compute:exec:<basename>         # spawn a subprocess (basename only — no /paths)
-ui:dashboard-tab                # contribute a dashboard tab
-ui:sidebar-item                 # contribute a sidebar link
-ui:harness-toolbar              # contribute a toolbar button
-ui:harness-route                # owns the full /harness/<slug> page
-roles:register:<role-name>      # add a custom role to the harness
-routines:read|write             # read/write the routine table
-tasks:read|write                # ditto for features (legacy: tasks)
-goals:read|write
-comments:read|write
-```
-
-Wildcards: `http:fetch:*.foo.com` matches subdomains;
-`secrets:read:YT_*` matches any secret name starting with `YT_`;
-`compute:exec:*` is rejected (degenerate).
-
-> *(Screenshot: the operator's `/settings/plugin-runtime` page showing
-> Loaded / Load errors / Initialized pairs / per-plugin action
-> registries.)*
-
-## Submitting to the marketplace
-
-Same flow as templates and snapshots: GitHub-OAuth on first publish
-under `@your-handle/...`, then `papercusp publish` from the plugin
-directory. After publish:
-
-- Listed under [Plugins](https://papercuspai.com/marketplace?kind=plugin).
-- Operators install via the UI's "Install" button or
-  `papercusp install @you/my-plugin`.
-- Per-harness enablement happens in the marketplace's "Enable in
-  harness…" picker.
-
-## Tips
-
-- **Compile to `index.cjs`**, not `index.js`. If your `package.json`
-  declares `"type": "module"`, a `.js` file is treated as ESM and
-  CommonJS `module.exports` won't bind. The loader looks for `.cjs`
-  first for exactly this reason.
-- **Don't import `@papercusp/plugin-sdk` types into bundles** — mark it
-  `--external` in esbuild. The host provides the types at runtime.
-- **Declare every capability your code uses**. The runtime refuses to
-  fire any handler whose capabilities aren't a subset of the plugin's
-  declared set. A `compute:exec:ffmpeg` call will throw if you forgot
-  to list it.
-- **`ui:widget: "password"` in your `uiSchema`** marks a config field
-  as sensitive. Snapshots redact those fields automatically. Use it
-  for any token, key, or secret your plugin reads.
-
-## See also
-
-- [Using the app](/docs/using-the-app) — the user-facing flow.
-- [Harness templates](/docs/harness-templates) — when a plugin set is
-  the same across many harnesses, bundle it as a template.
-- [Operator's plugin migration story](http://localhost:3055/docs/spec/plugin-migration)
-  — what happens when the runtime version bumps.
+For a supported installation problem, use **Support** with the unit name,
+version and exact error. See [Troubleshooting](/docs/troubleshooting) and
+[Remote access](/docs/remote-access).

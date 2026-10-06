@@ -105,7 +105,8 @@ export const GYM_SIGNAL_REGISTRY: Readonly<Record<string, SignalFn>> = Object.fr
     if (!ctx.preTests || !ctx.postTests) {
       return { name: 'regressionsFromTests', value: false, applicable: false };
     }
-    return { name: 'regressionsFromTests', value: regressionsFromTests(ctx.preTests, ctx.postTests), applicable: true };
+    const value = regressionsFromTests(ctx.preTests, ctx.postTests);
+    return { name: 'regressionsFromTests', value: value ?? false, applicable: value !== undefined };
   },
   plantedBugCaught: (ctx) => {
     if (!ctx.plantedBug || ctx.harnessOutputText == null) {

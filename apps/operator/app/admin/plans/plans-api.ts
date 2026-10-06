@@ -15,6 +15,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1290,7 +1291,11 @@ function useAsyncJson<T>(
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
-  useEffect(() => {
+  // Start the asynchronous body read before passive modal effects flush live
+  // computed styles. Radix Presence's animationName read took 155ms in native
+  // WebKit; waiting behind it serialized request latency with that style work.
+  // This effect only dispatches the request; it never waits for its response.
+  useLayoutEffect(() => {
     // Abort the in-flight request when deps change or the component unmounts.
     // Without this, rapidly switching plans/items leaves superseded fetches
     // holding open connections; under the webview's ~6-per-origin HTTP/1.1 cap

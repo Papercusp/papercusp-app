@@ -34,10 +34,10 @@ import { managedSetInterval } from '@papercusp/scheduled-registry';
 import { hostGlobalLockDomain } from '../agent-tools/locks/coordination-domain';
 import { inWorkspaceTxn } from '../agent-tools/locks/in-workspace-txn';
 import {
+  acquireSharedResourceAtomic,
+  heartbeatSharedResourceAtomic,
   registerResource,
-  tryAcquireResource,
-  tryHeartbeatResource,
-  tryReleaseResource,
+  releaseSharedResourceAtomic,
 } from '../agent-tools/locks/su-lock-store';
 import { runWithTrackedMemoryTimeouts, type TrackedMemoryWork } from './op-deadline';
 
@@ -51,6 +51,11 @@ export const MID_TURN_MEMORY_MAX_HOLDERS = 2;
 // host cap. A crashed worker suppresses optional recall for at most two minutes.
 export const MID_TURN_MEMORY_LOCK_TTL_SEC = 120;
 export const MID_TURN_MEMORY_HEARTBEAT_INTERVAL_MS = 40_000;
+
+// Acquire is optional and must never make a caller wait. With one-round-trip
+// admission the per-resource key is held only for server time (~1ms), so a
+// wait beyond this ceiling means the store is unhealthy: shed, don't queue.
+export const MID_TURN_MEMORY_ACQUIRE_LOCK_TIMEOUT_MS = 250;
 
 const REGISTRATION_RETRY_MS = 60_000;
 const WARNING_INTERVAL_MS = 60_000;
@@ -263,42 +268,45 @@ async function ensureProductionResource(): Promise<boolean> {
   return productionState.registrationPromise;
 }
 
+// P-014(e), WI-10004964: acquire/heartbeat/release are ONE statement each
+// (locks sql/030), holding the shared domain gate + this resource's own key for
+// server time only. They used to run inside inWorkspaceTxn, which held the
+// host-global exclusive domain key across ~10 client round trips. Measured
+// 2026-10-01: 543k waits at a 35ms mean, every sampled waiter and holder being
+// this semaphore contending with itself across operator workers.
 const productionStore: MidTurnAdmissionStore = {
   ensureRegistered: ensureProductionResource,
   async tryAcquire(ownerId) {
-    const domain = hostGlobalLockDomain();
-    const result = await inWorkspaceTxn(domain, ownerId, (tx) =>
-      tryAcquireResource(tx, {
-        coordinationDomain: domain,
-        resource: MID_TURN_MEMORY_RESOURCE,
-        mode: 'shared',
-        owner: ownerId,
-        ownerLabel: `operator-worker:${process.pid}`,
-        reason: 'optional initialize or mid-turn MCP memory recall',
-        ttlSec: MID_TURN_MEMORY_LOCK_TTL_SEC,
-      }),
-    );
+    const result = await acquireSharedResourceAtomic({
+      coordinationDomain: hostGlobalLockDomain(),
+      resource: MID_TURN_MEMORY_RESOURCE,
+      owner: ownerId,
+      ownerLabel: `operator-worker:${process.pid}`,
+      reason: 'optional initialize or mid-turn MCP memory recall',
+      ttlSec: MID_TURN_MEMORY_LOCK_TTL_SEC,
+      lockTimeoutMs: MID_TURN_MEMORY_ACQUIRE_LOCK_TIMEOUT_MS,
+    });
     return result.ok ? { ok: true as const, lockId: result.lock_id } : { ok: false as const, reason: result.reason };
   },
   async heartbeat(ownerId, lockId) {
-    const domain = hostGlobalLockDomain();
-    const result = await inWorkspaceTxn(domain, ownerId, (tx) =>
-      tryHeartbeatResource(tx, domain, ownerId, lockId, MID_TURN_MEMORY_LOCK_TTL_SEC),
-    );
+    const result = await heartbeatSharedResourceAtomic({
+      coordinationDomain: hostGlobalLockDomain(),
+      resource: MID_TURN_MEMORY_RESOURCE,
+      owner: ownerId,
+      lockId,
+      ttlSec: MID_TURN_MEMORY_LOCK_TTL_SEC,
+    });
     if (!result.extended) throw new Error('admission lease expired before heartbeat');
   },
   async release(ownerId, lockId) {
-    const domain = hostGlobalLockDomain();
-    const result = await inWorkspaceTxn(domain, ownerId, (tx) =>
-      tryReleaseResource(tx, {
-        coordinationDomain: domain,
-        owner: ownerId,
-        lockId,
-      }),
-    );
+    const result = await releaseSharedResourceAtomic({
+      coordinationDomain: hostGlobalLockDomain(),
+      resource: MID_TURN_MEMORY_RESOURCE,
+      owner: ownerId,
+      lockId,
+    });
     if (result.released === 0) {
-      const expired = result.expired?.some((entry) => entry.lockId === lockId) ?? false;
-      throw new Error(expired ? 'admission lease expired before release' : 'admission lock was not released');
+      throw new Error(result.expired ? 'admission lease expired before release' : 'admission lock was not released');
     }
   },
 };

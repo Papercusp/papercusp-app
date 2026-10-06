@@ -69,6 +69,24 @@ import {
 } from './auto-close-sources';
 export { AUTO_CLOSE_DEFAULT_MIN_TICKS, AUTO_CLOSE_ELIGIBLE_SOURCES };
 
+/**
+ * WI-10005102: sources with a SOURCE-LEVEL closing route, which is what the census read
+ * (`listOpen`) selects on. That is the absence-close allowlist PLUS 'red-test'. 'red-test' is
+ * deliberately absent from AUTO_CLOSE_ELIGIBLE_SOURCES (a quiet tick must never close it), but
+ * the positive green-run resolution below still needs to see it. Positive tool-failure
+ * repair is the row-level route selected by `ListIssuesFilter.watchdogCloseRoutes`.
+ * Watchdog-key duplicate closing is intentionally absent: work_items_watchdog_identity_uq
+ * already forbids duplicate open rows with an exact harness/key/origin/lane identity.
+ */
+export const AUTO_CLOSE_CENSUS_SOURCES: readonly string[] = [...AUTO_CLOSE_ELIGIBLE_SOURCES, 'red-test'];
+
+/**
+ * Row cap on the census read. The SQL route filter is what keeps the census small; this cap
+ * only bounds the transfer, and `listOpen` reports loudly when it is reached. It is the
+ * listIssues ceiling (ISSUES_MAX_LIMIT), the largest legal value.
+ */
+export const AUTO_CLOSE_CENSUS_LIMIT = 2000;
+
 /** The minimal shape the pure decision needs (an EngineerIssue maps onto it). */
 export interface AutoCloseCandidate {
   issueId: string;
@@ -189,13 +207,6 @@ export interface AutoCloseOutcome {
   reason: string;
 }
 
-interface CanonicalWatchdogIssue {
-  id: string;
-  watchdogKey: string;
-  updatedAtMs: number;
-  createdAtMs: number;
-}
-
 type Sql = ReturnType<typeof getOrgPg>['sql'];
 
 export interface AutoCloseDeps {
@@ -244,16 +255,6 @@ const watchdogKeyOfIssue = (i: EngineerIssue): string => {
   return typeof p.watchdogKey === 'string' ? p.watchdogKey : '';
 };
 
-const issueUpdatedAtMs = (i: EngineerIssue): number => {
-  const ms = Date.parse(i.updatedAt ?? '');
-  return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
-};
-
-const issueCreatedAtMs = (i: EngineerIssue): number => {
-  const ms = Date.parse(i.createdAt ?? '');
-  return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
-};
-
 function toolFailureRepairFieldsOf(issue: EngineerIssue): {
   classKey?: string;
   contractFingerprint?: string;
@@ -272,44 +273,6 @@ function toolFailureRepairFieldsOf(issue: EngineerIssue): {
   };
 }
 
-function selectCanonicalOpenIssues(open: EngineerIssue[]): {
-  canonicalByKey: Map<string, CanonicalWatchdogIssue>;
-  duplicates: Array<{ issueId: string; watchdogKey: string; keepId: string }>;
-} {
-  const canonicalByKey = new Map<string, CanonicalWatchdogIssue>();
-  const duplicates: Array<{ issueId: string; watchdogKey: string; keepId: string }> = [];
-
-  for (const issue of open) {
-    const watchdogKey = watchdogKeyOfIssue(issue);
-    if (!watchdogKey) continue;
-    const candidate: CanonicalWatchdogIssue = {
-      id: issue.id,
-      watchdogKey,
-      updatedAtMs: issueUpdatedAtMs(issue),
-      createdAtMs: issueCreatedAtMs(issue),
-    };
-    const existing = canonicalByKey.get(watchdogKey);
-    if (!existing) {
-      canonicalByKey.set(watchdogKey, candidate);
-      continue;
-    }
-    const replace =
-      candidate.updatedAtMs > existing.updatedAtMs
-      || (candidate.updatedAtMs === existing.updatedAtMs && candidate.createdAtMs > existing.createdAtMs)
-      || (candidate.updatedAtMs === existing.updatedAtMs
-        && candidate.createdAtMs === existing.createdAtMs
-        && candidate.id > existing.id);
-    if (replace) {
-      duplicates.push({ issueId: existing.id, watchdogKey, keepId: candidate.id });
-      canonicalByKey.set(watchdogKey, candidate);
-    } else {
-      duplicates.push({ issueId: candidate.id, watchdogKey, keepId: existing.id });
-    }
-  }
-
-  return { canonicalByKey, duplicates };
-}
-
 /** Default deps: the real PG-backed reads + close. */
 export function defaultAutoCloseDeps(workspaceId: string): AutoCloseDeps {
   const { sql }: { sql: Sql } = getOrgPg();
@@ -324,7 +287,29 @@ export function defaultAutoCloseDeps(workspaceId: string): AutoCloseDeps {
     // its named test). With the filter the read returns the ~59 watchdog-keyed rows and the
     // limit stops binding. Do NOT "fix" a recurrence by raising the limit: ISSUES_MAX_LIMIT
     // is 2000 < 17,154, so the cap cannot cover the backlog and the horizon returns.
-    listOpen: () => listIssues({ state: 'open', watchdogKeyed: true, limit: 500 }),
+    //
+    // WI-10005102: the same horizon came back one level down. By 2026-10-01 there were
+    // 11,598 open watchdog-keyed rows (9,615 repeated-tool-error), so this read again saw
+    // only the newest ~12 h. `watchdogCloseRoutes` narrows it, in SQL, to rows some route
+    // below can close (521 of 11,598 that day). `body` is dropped because nothing in this
+    // sweep reads it. If the read ever fills its limit the census is a window again, so
+    // that is reported instead of being silently treated as the full set.
+    listOpen: async () => {
+      const rows = await listIssues({
+        state: 'open',
+        watchdogKeyed: true,
+        watchdogCloseRoutes: { closableSources: AUTO_CLOSE_CENSUS_SOURCES },
+        includeBody: false,
+        limit: AUTO_CLOSE_CENSUS_LIMIT,
+      });
+      if (rows.length >= AUTO_CLOSE_CENSUS_LIMIT) {
+        console.warn(
+          `[watchdog-auto-close] census read SATURATED at ${AUTO_CLOSE_CENSUS_LIMIT} rows: ` +
+            'older closable watchdog items are invisible to this tick (WI-10005102 horizon class)',
+        );
+      }
+      return rows;
+    },
     recentRanTickKeys: async (n: number) => {
       // WI-40769: `collectors` comes back alongside the keys so a BLIND tick is
       // distinguishable from a QUIET one. It is the existing jsonb column — no
@@ -468,39 +453,27 @@ export async function processAutoClose(
   if (keyed.length === 0) return [];
   const out: AutoCloseOutcome[] = [];
 
-  const { canonicalByKey, duplicates } = selectCanonicalOpenIssues(keyed);
-  for (const dup of duplicates) {
-    try {
-      const reason = `duplicate of ${dup.keepId} — canonical open watchdog item retained for \`${dup.watchdogKey}\``;
-      await d.close(dup.issueId, dup.watchdogKey, reason);
-      out.push({ issueId: dup.issueId, watchdogKey: dup.watchdogKey, reason });
-    } catch (e) {
-      console.warn(`[watchdog-auto-close] duplicate close failed for ${dup.issueId}:`, e instanceof Error ? e.message : e);
-    }
-  }
-
-  const canonical = keyed.filter((i) => canonicalByKey.get(watchdogKeyOfIssue(i))?.id === i.id);
-  const inFlight = await d.inFlightDispatchIds(canonical.map((i) => i.id));
+  const inFlight = await d.inFlightDispatchIds(keyed.map((i) => i.id));
 
   // ── P-007: POSITIVE green-run resolution ────────────────────────────────────────────
   // Runs BEFORE (and independent of) the absence path, and does NOT need ran-tick history:
   // it resolves a red-test EI whose named test verifiably passes NOW (N consecutive greens
   // in test_runs), attaching that as real completion evidence. A green-resolved item is
   // then skipped by the absence loop below.
-  const greenResolved = await resolveProvenGreenRedTests(canonical, inFlight, d, opts, out);
+  const greenResolved = await resolveProvenGreenRedTests(keyed, inFlight, d, opts, out);
 
   // ── Positive repeated-tool-error repair resolution ──────────────────────────────────
   // Unlike the absence path, this path needs no quiet-tick history: an exact class/key
   // contract change or passing probe is affirmative evidence that the rejected call was
   // repaired. The source remains absent from AUTO_CLOSE_ELIGIBLE_SOURCES, so this is the
   // only route by which repeated-tool-error can close.
-  const toolFailureResolved = await resolveProvenToolFailureRepairs(canonical, inFlight, d, out);
+  const toolFailureResolved = await resolveProvenToolFailureRepairs(keyed, inFlight, d, out);
 
-  // ── Absence-based dedup close (needs enough ran-tick history) ───────────────────────
+  // ── Absence-based close (needs enough ran-tick history) ────────────────────────────
   const { seenKeys, ranTickCount, unobservedTicksBySource } = await d.recentRanTickKeys(minTicks);
   if (ranTickCount >= minTicks) {
     const nowMs = d.nowMs();
-    for (const i of canonical) {
+    for (const i of keyed) {
       if (greenResolved.has(i.id) || toolFailureResolved.has(i.id)) continue; // already resolved positively
       const watchdogKey = watchdogKeyOfIssue(i);
       const candidate: AutoCloseCandidate = {

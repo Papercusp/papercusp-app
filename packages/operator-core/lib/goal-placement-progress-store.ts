@@ -58,7 +58,7 @@ export function verifiedGoalPlacementEffects(input: {
     const lane = p.activeLane;
     const fleet = p.fleet;
     if (p.state !== 'working' || !p.reconciliation.consistent || !lane?.workItemId || !fleet ||
-      !lane.holderLive || !fleet.leaderLive || !fleet.planScoped || fleet.controlState !== 'active' ||
+      !lane.holderLive || !fleet.leaderLive || !fleet.planAdmitted || fleet.controlState !== 'active' ||
       lane.ownerFleet !== fleet.slug || lane.ownerId === fleet.leaderOwnerId ||
       lane.ownerId === input.ownerId || fleet.leaderOwnerId === input.ownerId ||
       !lane.expiresAt || !Number.isFinite(Date.parse(lane.expiresAt)) ||

@@ -28,7 +28,7 @@ import { getOrgPg } from '@papercusp/db-org';
 import type { AsyncRuleDeclaration } from '../cupboard/rule-store';
 import { parseCapabilityClassRef } from '../capability-class-registry-store';
 import type { IdentityReactionCeiling } from '../capability-envelope/identity-grants-port';
-import { getEventKey } from '../event-key-registry-store';
+import { getEventKey, normalizeEventKey } from '../event-key-registry-store';
 import { validateClassFireTarget, type ClassFireTarget } from '../events/class-fire-target';
 import { IDENTITY_WEARER_ROLE, identityCeilingRefusal } from './wearer-authority';
 import {
@@ -232,18 +232,25 @@ export type AsyncRuleInstallCheck =
  * watch primitive is exact-match) and its `fire` is a class verb that declares
  * the capability the reaction will be sandboxed to. Both are checked again at
  * fire time; this is what makes a bad rule fail before a wearer attaches it.
+ *
+ * `claimingKeys` are keys the SAME install claims before it activates (an
+ * identity's bundled event packages, D-042): that install refuses unless the
+ * claim lands, so the key is catalogued by the time any wearer attaches.
  */
 export async function checkAsyncRuleInstall(
   sql: postgres.Sql | postgres.TransactionSql,
   workspaceId: string,
   rule: Pick<AsyncRuleDeclaration, 'on' | 'fire'>,
+  options: { claimingKeys?: ReadonlySet<string> } = {},
 ): Promise<AsyncRuleInstallCheck> {
-  const key = await getEventKey(sql, workspaceId, rule.on);
-  if (!key) {
-    return { ok: false, error: `event key "${rule.on}" is not catalogued in this workspace (event_key_registry); an async rule listens on one exact catalogued key` };
-  }
-  if (key.status !== 'active') {
-    return { ok: false, error: `event key "${rule.on}" is ${key.status}; an async rule cannot listen on it` };
+  if (!options.claimingKeys?.has(normalizeEventKey(rule.on))) {
+    const key = await getEventKey(sql, workspaceId, rule.on);
+    if (!key) {
+      return { ok: false, error: `event key "${rule.on}" is not catalogued in this workspace (event_key_registry); an async rule listens on one exact catalogued key` };
+    }
+    if (key.status !== 'active') {
+      return { ok: false, error: `event key "${rule.on}" is ${key.status}; an async rule cannot listen on it` };
+    }
   }
   const fire = await validateClassFireTarget(sql, workspaceId, rule.fire);
   if (!fire.ok) return { ok: false, error: fire.error };

@@ -10,24 +10,30 @@
  * hand-track ~4300→4500c. This module writes the snapshot PLATFORM-SIDE, on a
  * recurring tick, for every ACTIVE goal — no agent in the loop.
  *
- * ── The two attribution legs (and their authority boundary) ───────────────────
- *  1. POT leg — `goalSpend()` (@papercusp/db-org): agent_usage_samples summed by
- *     harness_slug over the goal's live goal_pots, bounded to the goal's lifetime.
- *     Covers every fleet/agent working in the goal's pots. NOT additive across
- *     goals (a shared pot bills in full to each — D-021). This is the ONLY
- *     authoritative source for metadata.spentCents, spend tripwires, and budget
- *     enforcement: it is exactly the value exposed by goals:pots and accepted by
- *     goals:update's exact-match verification.
- *  2. SESSION leg — diagnostic-only context about the goal SUBJECT's interactive
- *     session and inherited descendants whose samples carry a harness OUTSIDE
- *     the goal's pots (or none at all). Session-to-goal attribution is not a
- *     reliable billing boundary: it can be incomplete, inherited, or unpriced.
- *     It MUST NOT change spentCents, advance a spend tripwire, or kill a goal.
+ * ── The authority boundary (work-on-everything-stewardship-remediation P-003, D-011) ─
+ *  LINEAGE leg — `lineageSpendForGoal`: samples whose `goal_id` was STAMPED AT
+ *     INSERT, over the goal's budget window (its lifetime when none is
+ *     declared). This is the ONLY authoritative source for metadata.spentCents,
+ *     spend tripwires, the launch gate and breach enforcement — one figure for
+ *     all four, so the number shown, the number gated on and the number that
+ *     pauses the goal cannot disagree. Null, never 0, when it is not a complete
+ *     measurement (no attributed samples, or any unpriced one).
  *
- * The diagnostic total still partitions the ledger without double-counting:
- * samples whose harness_slug IS one of the goal's pot harnesses are excluded
- * from the session leg. It rides in spentCentsBreakdown so operators can inspect
- * it without promoting an estimate into authoritative spend.
+ * Before D-011 the POT leg held that authority. It was wrong twice over: an
+ * INNER JOIN on goal_pots made a pot-less goal whose fleets really spend
+ * unmeasurable forever (so its launches were refused), and the snapshot was a
+ * LIFETIME figure judged against a weekly budget. It stays below as a diagnostic.
+ *
+ * Diagnostic legs (never control anything):
+ *  1. POT leg — `goalSpend()` (@papercusp/db-org): agent_usage_samples summed by
+ *     harness_slug over the goal's live goal_pots. NOT additive across goals (a
+ *     shared pot bills in full to each — D-021).
+ *  2. SESSION leg — the goal SUBJECT's interactive session and inherited
+ *     descendants whose samples carry a harness OUTSIDE the goal's pots.
+ *
+ * Pot + session partition the ledger without double-counting (samples whose
+ * harness_slug IS a pot harness are excluded from the session leg); the lineage
+ * leg cross-cuts both. All three ride in spentCentsBreakdown, labelled.
  *
  * Mechanism precedent: the goal watchdog family (goal-liveness-watchdog.ts,
  * goal-drain-fleet-watchdog.ts) — a process-level managedSetInterval sweep
@@ -36,13 +42,21 @@
  * default ON). Missing a tick costs nothing: the next tick recomputes from the
  * ledger — the write is idempotent state, not an event.
  */
-import type { Sql } from 'postgres';
+import type { JSONValue, Sql } from 'postgres';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
 import { goalSpend, GOAL_SPEND_SNAPSHOT_SOURCE, type GoalSpend } from '@papercusp/db-org';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { GOAL_MODE } from '../modes/goal-session';
 import { getGoalTransitionExecutor } from '@papercusp/agent-mcp';
+import type { GoalSqlTag } from '@papercusp/agent-mcp/goals';
+import {
+  isInteractiveUsageUnmeasuredReason,
+  readInteractiveUsageFreshness,
+  type InteractiveUsageFreshness,
+  type InteractiveUsageUnmeasuredReason,
+} from '../interactive-usage/freshness';
+import { appendGoalWriteAudit } from './write-audit';
 import {
   breachedTripwires,
   populationForMetric,
@@ -74,7 +88,7 @@ export const GOAL_SPEND_ROLLUP_INTERVAL_MS = 5 * 60_000;
  * label is only true while the session query keeps its goal_pots exclusion, and
  * `spend-rollup-scope-labels.test.ts` fails if that clause is removed.
  */
-export const GOAL_SPEND_POT_SCOPE = 'inside-goal-pots:authoritative' as const;
+export const GOAL_SPEND_POT_SCOPE = 'inside-goal-pots:diagnostic-only' as const;
 export const GOAL_SPEND_SESSION_SCOPE = 'outside-goal-pots:diagnostic-only' as const;
 
 /**
@@ -107,9 +121,11 @@ export const GOAL_SPEND_SESSION_SCOPE = 'outside-goal-pots:diagnostic-only' as c
  * because the shipped code measures the overlap rather than hardcoding zero —
  * exactly the drift the derived-truth ladder exists to prevent (WI-2145059).
  *
- * So: diagnostic-only, like the session leg, and never added into any total.
+ * So it is never added into any total. Since D-011 it is also the AUTHORITATIVE
+ * leg: the one stamped at write time is the one that cannot be wrong about its
+ * own provenance, and it sees every fleet a goal runs, pot or no pot.
  */
-export const GOAL_SPEND_LINEAGE_SCOPE = 'attributed-by-lineage:diagnostic-only' as const;
+export const GOAL_SPEND_LINEAGE_SCOPE = 'attributed-by-lineage:authoritative' as const;
 
 /**
  * How the three scopes relate, as DATA rather than prose, so a consumer can
@@ -117,10 +133,17 @@ export const GOAL_SPEND_LINEAGE_SCOPE = 'attributed-by-lineage:diagnostic-only' 
  * `spentCentsBreakdown`.
  */
 export const GOAL_SPEND_SCOPE_RELATIONS = {
+  authoritative: GOAL_SPEND_LINEAGE_SCOPE,
   additive: [GOAL_SPEND_POT_SCOPE, GOAL_SPEND_SESSION_SCOPE],
   overlapping: [GOAL_SPEND_LINEAGE_SCOPE],
-  note: 'pot+session partition the ledger and sum to diagnosticTotalCents; lineage cross-cuts them and must never be added to either.',
+  note: 'lineage is the authoritative spentCents; pot+session partition the ledger and sum to diagnosticTotalCents; lineage cross-cuts them and must never be added to either.',
 } as const;
+
+/** Why `spentCents` is null. Only `unpriced-lineage-samples` means spend exists. */
+export type GoalSpendUnmeasuredReason =
+  | 'no-lineage-samples'
+  | 'unpriced-lineage-samples'
+  | InteractiveUsageUnmeasuredReason;
 
 /** The SESSION leg's contribution — samples the pot leg cannot see. */
 export interface GoalSessionSpend {
@@ -155,9 +178,21 @@ export interface GoalLineageSpend {
 
 export interface GoalSpendRollup {
   goalId: string;
+  /**
+   * AUTHORITATIVE (D-011): lineage cents over `windowSec`, written to
+   * metadata.spentCents and judged by the launch gate, tripwires and breach
+   * check. Null when it is not a complete measurement — see `unmeasuredReason`.
+   */
+  spentCents: number | null;
+  /** Why `spentCents` is null; null when it is measured. */
+  unmeasuredReason: GoalSpendUnmeasuredReason | null;
+  /** Goal-scoped ingestion freshness for the usage rows behind this read. */
+  interactiveUsageFreshness: InteractiveUsageFreshness;
+  /** The budget window every leg was judged over; null ⇒ the goal's lifetime. */
+  windowSec: number | null;
   /** POT leg + diagnostic SESSION leg, in integer cents. Never authoritative. */
   totalCents: number;
-  /** Authoritative goals:pots value written to metadata.spentCents. */
+  /** Diagnostic goals:pots value. */
   potCents: number;
   /** Diagnostic-only interactive-session estimate. */
   sessionCents: number;
@@ -170,9 +205,10 @@ export interface GoalSpendRollup {
   pot: GoalSpend;
   session: GoalSessionSpend;
   /**
-   * Diagnostic write-time-attributed spend. Deliberately NOT part of
-   * `totalCents`, `samples`, `unpricedSamples` or `measured`: it overlaps the
-   * legs those aggregate, so including it would double-count.
+   * Priced write-time-attributed spend — `spentCents` when complete, otherwise a
+   * FLOOR. Deliberately NOT part of `totalCents`, `samples`, `unpricedSamples`
+   * or `measured`: it overlaps the legs those aggregate, so including it would
+   * double-count.
    */
   lineageCents: number;
   /** Measured lineage ∩ pot, in cents — measured every tick, never assumed zero; see GOAL_SPEND_LINEAGE_SCOPE. */
@@ -181,16 +217,20 @@ export interface GoalSpendRollup {
 }
 
 /**
- * The SESSION leg: samples attributed (via adv_sessions) to owners under the
- * goal, excluding samples already covered by the pot leg's harness match.
+ * The SESSION leg: samples attributed to owners under the goal plus selected
+ * consult answer sessions they opened, excluding samples already covered by
+ * the pot leg's harness match.
  *
  * For legacy NULL rows, owner→goal membership deliberately reads the SAME two
  * tables as resolveGoalContext (modes/goal-context.ts) rather than any
- * agent-supplied list. adv_sessions is NOT workspace-filtered on purpose: coord
- * owner ids are globally unique and a respawn chain can carry rows under more
- * than one workspace label, while the SAMPLE-side workspace_id filter still
- * holds the tenancy line. The goal-lifetime lower bound mirrors goalSpend(): a
- * subject's spend from before the goal existed never bills to it.
+ * agent-supplied list. Consult answer sessions are linked through the persisted
+ * routing snapshot for consults requested by those owners, with the same
+ * answer-session start bound as conversations:get. adv_sessions for goal owners
+ * is NOT workspace-filtered on purpose: coord owner ids are globally unique
+ * and a respawn chain can carry rows under more than one workspace label, while
+ * the SAMPLE-side workspace_id filter still holds the tenancy line. The
+ * goal-lifetime lower bound mirrors goalSpend(): a subject's spend from before
+ * the goal existed never bills to it.
  */
 export async function sessionSpendForGoal(
   sql: Sql,
@@ -206,6 +246,45 @@ export async function sessionSpendForGoal(
       sessions: string;
     }>
   >`
+    WITH goal_owners AS (
+      SELECT m.owner_id FROM harness_shared.agent_modes m
+       WHERE m.workspace_id = ${opts.workspaceId}
+         AND m.mode = ${GOAL_MODE}
+         AND m.subject = ${opts.goalId}
+      UNION
+      SELECT b.owner_id FROM harness_shared.session_briefs b
+       WHERE b.workspace_id = ${opts.workspaceId}
+         AND b.goal_id = ${opts.goalId}
+    ),
+    -- P-014(a): the selected consult answer sessions, computed ONCE. This used
+    -- to be a correlated EXISTS evaluated per usage sample, rescanning
+    -- consult_state + jsonb_array_elements for each of ~126k samples
+    -- (~24.7 s and ~48M buffers per call, every 5 min per active goal). The
+    -- per-sample conditions (session match, s.ts >= answer start) moved to the
+    -- probe below; MIN(started_ms) preserves "any qualifying answer session".
+    -- Live equivalence across all 5 active goals 2026-10-01: identical cost,
+    -- samples, priced/unpriced and session counts; 20–37 s → 0.4–0.8 s.
+    consult_answer_sessions AS MATERIALIZED (
+      SELECT answer_session.session_id,
+             MIN((EXTRACT(EPOCH FROM answer_session.started_at) * 1000)::bigint) AS started_ms
+        FROM harness_shared.consult_state cs
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE
+            WHEN jsonb_typeof(cs.routing #> '{selection,selected}') = 'array'
+              THEN cs.routing #> '{selection,selected}'
+            ELSE '[]'::jsonb
+          END
+        ) selected
+        JOIN harness_shared.adv_sessions answer_session
+          ON answer_session.workspace_id = cs.workspace_id
+         AND answer_session.coord_owner_id = NULLIF(selected->>'answeringOwnerId', '')
+         AND answer_session.session_id IS NOT NULL
+         AND answer_session.started_at >= cs.created_at
+       WHERE cs.workspace_id = ${opts.workspaceId}
+         AND cs.requester_id IN (SELECT owner_id FROM goal_owners)
+         AND NULLIF(selected->>'answeringOwnerId', '') IS NOT NULL
+       GROUP BY answer_session.session_id
+    )
     SELECT COALESCE(SUM(s.cost_usd), 0) AS cost,
            COUNT(*)                     AS samples,
            COUNT(*) FILTER (WHERE s.cost_usd IS NOT NULL) AS priced_samples,
@@ -220,20 +299,19 @@ export async function sessionSpendForGoal(
          s.goal_id = ${opts.goalId}
          OR (
            s.goal_id IS NULL
-           AND s.session_id IN (
-             SELECT a.session_id
-               FROM harness_shared.adv_sessions a
-              WHERE a.session_id IS NOT NULL
-                AND a.coord_owner_id IN (
-                  SELECT m.owner_id FROM harness_shared.agent_modes m
-                   WHERE m.workspace_id = ${opts.workspaceId}
-                     AND m.mode = ${GOAL_MODE}
-                     AND m.subject = ${opts.goalId}
-                  UNION
-                  SELECT b.owner_id FROM harness_shared.session_briefs b
-                   WHERE b.workspace_id = ${opts.workspaceId}
-                     AND b.goal_id = ${opts.goalId}
-                )
+           AND (
+             s.session_id IN (
+               SELECT a.session_id
+                 FROM harness_shared.adv_sessions a
+                WHERE a.session_id IS NOT NULL
+                  AND a.coord_owner_id IN (SELECT owner_id FROM goal_owners)
+             )
+             OR EXISTS (
+               SELECT 1
+                 FROM consult_answer_sessions cas
+                WHERE cas.session_id = s.session_id
+                  AND s.ts >= cas.started_ms
+             )
            )
          )
        )
@@ -320,25 +398,56 @@ export async function lineageSpendForGoal(
 }
 
 /**
- * Both legs, combined for diagnostics. The persisted/controlling number is
- * always `potCents`; `totalCents` is intentionally non-authoritative.
+ * Every leg over one window. The controlling number is `spentCents` (the
+ * lineage leg); `totalCents` is intentionally non-authoritative.
  *
- * `sinceMs` threads to BOTH legs unchanged (each already clamps it up to the
- * goal's creation, so it can narrow the window but never reach back before the
- * goal existed). Omitted ⇒ goal lifetime, which is what the snapshot wants;
- * the rolling-window ceiling (P-004) passes one.
+ * `windowSec` is the goal's budget window (goals.budget_window_sec). It becomes
+ * a `sinceMs` lower bound on EVERY leg, and each leg clamps it up to the goal's
+ * creation, so it can narrow the span but never reach back before the goal
+ * existed. Null/omitted ⇒ the goal's lifetime. One window for the snapshot, the
+ * gate and the breach check is the point of D-011: a lifetime snapshot judged
+ * against a weekly budget is how a standing goal gets refused for spend it
+ * made months ago.
  */
 export async function computeGoalSpendRollup(
   sql: Sql,
-  opts: { workspaceId: string; goalId: string; sinceMs?: number },
+  opts: {
+    workspaceId: string;
+    goalId: string;
+    windowSec?: number | null;
+    nowMs?: number;
+    /** A goal-scoped read can be shared by this goal's snapshot and controls. */
+    interactiveUsageFreshness?: InteractiveUsageFreshness;
+  },
 ): Promise<GoalSpendRollup> {
-  const [pot, session, lineage] = await Promise.all([
-    goalSpend(sql, opts),
-    sessionSpendForGoal(sql, opts),
-    lineageSpendForGoal(sql, opts),
+  const windowSec = opts.windowSec ?? null;
+  const legOpts = {
+    workspaceId: opts.workspaceId,
+    goalId: opts.goalId,
+    ...(windowSec === null ? {} : { sinceMs: (opts.nowMs ?? Date.now()) - windowSec * 1000 }),
+  };
+  const [pot, session, lineage, interactiveUsageFreshness] = await Promise.all([
+    goalSpend(sql, legOpts),
+    sessionSpendForGoal(sql, legOpts),
+    lineageSpendForGoal(sql, legOpts),
+    opts.interactiveUsageFreshness
+      ? Promise.resolve(opts.interactiveUsageFreshness)
+      : readInteractiveUsageFreshness(sql, { workspaceId: opts.workspaceId, goalId: opts.goalId, nowMs: opts.nowMs }),
   ]);
   const potCents = Math.round(pot.costUsd * 100);
   const sessionCents = Math.round(session.costUsd * 100);
+  const lineageCents = Math.round(lineage.costUsd * 100);
+  // D-011 clause 3: unmeasured stays unmeasured. No attributed samples is not
+  // a measured zero, and a window with an unpriced sample has only a floor.
+  const freshnessReason: GoalSpendUnmeasuredReason | null =
+    interactiveUsageFreshness.status === 'stale'
+      ? 'interactive-usage-stale'
+      : interactiveUsageFreshness.status === 'unavailable'
+        ? 'interactive-usage-unavailable'
+        : null;
+  const unmeasuredReason: GoalSpendUnmeasuredReason | null = lineage.samples === 0
+    ? 'no-lineage-samples'
+    : freshnessReason ?? (lineage.unpricedSamples > 0 ? 'unpriced-lineage-samples' : null);
   // The pot/session partition is what aggregates. The lineage leg is EXCLUDED
   // from every aggregate below on purpose: it overlaps both (see
   // GOAL_SPEND_LINEAGE_SCOPE), so folding it in would double-count rather than
@@ -348,6 +457,10 @@ export async function computeGoalSpendRollup(
   const unpricedSamples = pot.unpricedSamples + session.unpricedSamples;
   return {
     goalId: opts.goalId,
+    spentCents: unmeasuredReason === null ? lineageCents : null,
+    unmeasuredReason,
+    interactiveUsageFreshness,
+    windowSec,
     totalCents: potCents + sessionCents,
     potCents,
     sessionCents,
@@ -356,7 +469,7 @@ export async function computeGoalSpendRollup(
     measured: samples > 0 && unpricedSamples === 0,
     pot,
     session,
-    lineageCents: Math.round(lineage.costUsd * 100),
+    lineageCents,
     lineageInsidePotCents: Math.round(lineage.insidePotCostUsd * 100),
     lineage,
   };
@@ -374,51 +487,21 @@ export async function writeGoalSpendSnapshot(
   nowIso: string = new Date().toISOString(),
 ): Promise<number> {
   const patch = {
-    // Hard authority boundary: this must remain byte-for-byte equivalent to
-    // goals:pots, even when the diagnostic session leg is larger or unpriced.
-    //
-    // ...but it must never assert a number the pot leg did not MEASURE. goalSpend()
-    // is an INNER JOIN on goal_pots, so a goal with ZERO attached pots yields
-    // samples === 0 and potCents === 0: "unmeasurable" and "measured zero" are
-    // indistinguishable in the value alone. That distinction is load-bearing here,
-    // because the budget launch gate reads THIS field: its `spentCents == null`
-    // branch (goal-launch-settings.ts) records a degraded reason naming the goal and
-    // fails OPEN, whereas a bare 0 is accepted as an authoritative measurement and
-    // silently admits every launch under budget. Writing null therefore turns a
-    // SILENT fail-open into a LOUD one — it cannot freeze launches — and restores
-    // the symmetry with refreshGoalTripwires below, which already guards this way.
-    //
-    // The discriminator is `samples`, NOT `measured`. `measured` is
-    // `samples > 0 && unpricedSamples === 0` (goal-pots.ts), so keying on it would
-    // ALSO null out a partially-priced pot — and judgeGoalSpend deliberately uses
-    // that pot's potCents as a spend FLOOR (the spend-floor-goal-breach branch
-    // below). Copying the tripwire sibling verbatim would regress a live budget
-    // control, not merely a diagnostic.
-    spentCents: rollup.pot.samples > 0 ? rollup.potCents : null,
+    // The ONE authoritative goal spend (D-011): lineage cents over the budget
+    // window, or null with a named reason. Never 0 for "nothing measured": the
+    // launch gate reads THIS field, and a bare 0 would admit every launch under
+    // budget on a number nothing measured. The reason is what lets the gate tell
+    // "nothing spent in the window" (admit, degraded) from "spent, but unpriced"
+    // (refuse as unmeasurable).
+    spentCents: rollup.spentCents,
     spentCentsSource: GOAL_SPEND_SNAPSHOT_SOURCE,
     spentCentsAt: nowIso,
+    spentCentsWindowSec: rollup.windowSec,
+    spentCentsUnmeasuredReason: rollup.unmeasuredReason,
+    spentCentsFreshness: rollup.interactiveUsageFreshness,
     spentCentsBreakdown: {
-      potCents: rollup.potCents,
-      potSamples: rollup.pot.samples,
-      potUnpricedSamples: rollup.pot.unpricedSamples,
-      measured: rollup.pot.measured,
-      // The scope labels are what stop potCents and sessionCents being read as
-      // rival totals of one quantity: they are disjoint partitions of the
-      // ledger, and only the pot leg may control anything.
-      potScope: GOAL_SPEND_POT_SCOPE,
-      sessionScope: GOAL_SPEND_SESSION_SCOPE,
+      measured: rollup.spentCents !== null,
       lineageScope: GOAL_SPEND_LINEAGE_SCOPE,
-      // How the three relate, as data. A consumer can reject an unsafe sum
-      // without reading this module — which is the whole point of P-004.
-      scopeRelations: GOAL_SPEND_SCOPE_RELATIONS,
-      // Everything below is diagnostic-only and must never be read as the
-      // authoritative spend snapshot or a terminal-control input.
-      sessionCents: rollup.sessionCents,
-      sessionSamples: rollup.session.samples,
-      sessionUnpricedSamples: rollup.session.unpricedSamples,
-      sessionMeasured: rollup.session.samples > 0 && rollup.session.unpricedSamples === 0,
-      sessionCount: rollup.session.sessions,
-      // LINEAGE leg — cross-cutting, never added to the totals below.
       lineageCents: rollup.lineageCents,
       lineageSamples: rollup.lineage.samples,
       lineageUnpricedSamples: rollup.lineage.unpricedSamples,
@@ -427,6 +510,23 @@ export async function writeGoalSpendSnapshot(
       // zero a reader can SEE is what makes the non-additivity checkable
       // rather than a claim they have to trust.
       lineageInsidePotCents: rollup.lineageInsidePotCents,
+      // How the three relate, as data. A consumer can reject an unsafe sum
+      // without reading this module — which is the whole point of P-004.
+      scopeRelations: GOAL_SPEND_SCOPE_RELATIONS,
+      // Everything below is diagnostic-only and must never be read as the
+      // authoritative spend snapshot or a terminal-control input. Pot and
+      // session are disjoint partitions of the ledger, not rival meters.
+      potCents: rollup.potCents,
+      potSamples: rollup.pot.samples,
+      potUnpricedSamples: rollup.pot.unpricedSamples,
+      potMeasured: rollup.pot.measured,
+      potScope: GOAL_SPEND_POT_SCOPE,
+      sessionScope: GOAL_SPEND_SESSION_SCOPE,
+      sessionCents: rollup.sessionCents,
+      sessionSamples: rollup.session.samples,
+      sessionUnpricedSamples: rollup.session.unpricedSamples,
+      sessionMeasured: rollup.session.samples > 0 && rollup.session.unpricedSamples === 0,
+      sessionCount: rollup.session.sessions,
       diagnosticTotalCents: rollup.totalCents,
       diagnosticSamples: rollup.samples,
       diagnosticUnpricedSamples: rollup.unpricedSamples,
@@ -439,7 +539,7 @@ export async function writeGoalSpendSnapshot(
   // live: metadata became [{}, "{…}"] while the UPDATE reported count=1).
   const res = await sql`
     UPDATE harness_shared.goals
-       SET metadata = COALESCE(metadata, '{}'::jsonb) || ${sql.json(patch)}
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || ${sql.json(patch as unknown as JSONValue)}
      WHERE id = ${opts.goalId}
        AND workspace_id = ${opts.workspaceId}
   `;
@@ -450,10 +550,10 @@ export async function writeGoalSpendSnapshot(
  * Advance this goal's generically-measurable tripwires from the rollup just
  * computed (plan blender-goal-amendment-rail-2026-08-19 P-004, D-014).
  *
- * ⚠ THE POT-LEG `measured` GATE IS THE POINT, not a detail. The session leg is
- * diagnostic-only and may neither inflate the current nor make an otherwise
- * measured goals:pots value look unmeasured. Only a fully-priced POT rollup
- * advances a spend tripwire; everything else leaves the value unchanged.
+ * ⚠ THE `spentCents` NULL GATE IS THE POINT, not a detail. Only a complete
+ * lineage measurement (D-011) advances a spend tripwire — the same windowed
+ * figure the snapshot and the ceiling use; a floor or an absent measurement
+ * leaves the value unchanged. The pot and session legs never reach it.
  *
  * Like {@link writeGoalSpendSnapshot} this deliberately does NOT bump
  * `updated_at`: scoring a tripwire reports a measurement, it does not edit the
@@ -466,8 +566,14 @@ export async function refreshGoalTripwires(
   rollup: GoalSpendRollup,
   nowMs: number = Date.now(),
 ): Promise<{ advanced: number; written: boolean; breached: ReturnType<typeof breachedTripwires> }> {
+  if (isInteractiveUsageUnmeasuredReason(rollup.unmeasuredReason)) {
+    return { advanced: 0, written: false, breached: [] };
+  }
   const res = refreshTripwireCurrents(goal.tripwires, {
-    measuredSpentCents: rollup.pot.measured ? rollup.potCents : null,
+    measuredSpentCents: rollup.spentCents,
+    // The window the cents were summed over, so a window-suffixed metric
+    // (`spend_usd_7d`) resolves only when it names this window (WI-10004419).
+    measuredWindowSec: rollup.windowSec,
     goalAgeMs: nowMs - goal.createdAtMs,
     // The stamp's clock comes from the caller for the same reason the rest of the
     // measurement does: the refresh stays pure and testable without a fake timer.
@@ -491,7 +597,7 @@ export async function refreshGoalTripwires(
   // sql.json for the same double-encoding reason documented on the snapshot write.
   const upd = await sql`
     UPDATE harness_shared.goals
-       SET tripwires = ${sql.json(res.next)}
+       SET tripwires = ${sql.json(res.next as unknown as JSONValue)}
      WHERE id = ${opts.goalId}
        AND workspace_id = ${opts.workspaceId}
   `;
@@ -500,130 +606,199 @@ export async function refreshGoalTripwires(
   return { advanced: res.advanced, written: true, breached };
 }
 
+/** The identity every rollup-driven goal write is attributed to. */
+export const GOAL_SPEND_ROLLUP_ACTOR = 'goal-spend-rollup' as const;
+
+/** Decide whether the authoritative windowed spend requires a lifecycle pause. */
+export function goalSpendBreachDecision(
+  rollup: GoalSpendRollup,
+  breached: ReturnType<typeof breachedTripwires>,
+  budgetCents: number | null,
+): { judgedCents: number; budgetBreached: boolean; reasons: string[] } | null {
+  if (isInteractiveUsageUnmeasuredReason(rollup.unmeasuredReason)) return null;
+  // A partially priced lineage still has an enforceable priced floor.
+  const judgedCents = rollup.spentCents ?? rollup.lineageCents;
+  const budgetBreached = budgetCents !== null && judgedCents >= budgetCents;
+  if (!budgetBreached && breached.length === 0) return null;
+
+  const per = rollup.windowSec === null ? '' : ` per ${rollup.windowSec}s window`;
+  const reasons = [
+    ...(budgetBreached
+      ? [
+          rollup.spentCents !== null
+            ? `measured goal-attributed spend ${judgedCents}c reached budget ${budgetCents}c${per}`
+            : `goal-attributed spend floor ${judgedCents}c reached budget ${budgetCents}c${per} with ${rollup.lineage.unpricedSamples} unpriced sample(s)`,
+        ]
+      : []),
+    ...breached.map((b) => {
+      const pop = populationForMetric(b.metric);
+      return `${b.metric} ${b.current} reached threshold ${b.threshold}${pop ? ` [measured over ${pop}]` : ''}`;
+    }),
+  ];
+  return { judgedCents, budgetBreached, reasons };
+}
+
 /**
- * A spend ceiling breach is a terminal control, not merely telemetry. The
- * launch gate prevents new work, but an active goal otherwise keeps its
- * existing pots and attributed loops alive indefinitely. Transition through
- * the shared goal-stop seam after the row is marked killed so placement and
- * loops receive the same fan-out as an explicit goals:update call.
+ * A spend ceiling breach is a control, not merely telemetry. The launch gate
+ * prevents new work, but an active goal otherwise keeps its existing pots and
+ * attributed loops alive indefinitely, so a breach stops it through the shared
+ * goal-stop seam — the same fan-out as an explicit goals:update call.
+ *
+ * It PAUSES rather than kills (D-011 clause 5). A kill is terminal and has hit
+ * a goal carrying ~89 live agents; a budget running out is an owner decision
+ * (raise it, wait for the window, or wind down), not a verdict on the goal.
+ * The pause carries `holderRespawn.needsHuman` with no `escalatedAtMs`, so the
+ * holder respawner stays off it while paused and the liveness reconciler
+ * clears the latch once the owner resumes it.
+ *
+ * `rollup` must already be windowed to `budgetWindowSec` — the sweep computes
+ * it that way — so the figure judged here is the one the snapshot shows and the
+ * launch gate reads. A lifetime figure judged against a per-window ceiling is a
+ * guaranteed-termination bug for a standing goal (work-on-everything-goal P-004).
  */
 async function enforceGoalBreaches(
   sql: Sql,
   scope: { workspaceId: string; goalId: string },
   rollup: GoalSpendRollup,
   breached: ReturnType<typeof breachedTripwires>,
+  budgetCents: number | null,
+  nowMs: number = Date.now(),
 ): Promise<void> {
-  const budgetRows = await sql<Array<{ budget_cents: string | null; budget_window_sec: number | null }>>`
-    SELECT budget_cents, budget_window_sec
-      FROM harness_shared.goals
-     WHERE id = ${scope.goalId}
-       AND workspace_id = ${scope.workspaceId}
-       AND status = 'active'
-     LIMIT 1
-  `;
-  const budgetCents = budgetRows[0]?.budget_cents == null ? null : Number(budgetRows[0].budget_cents);
-  const windowSec =
-    budgetRows[0]?.budget_window_sec == null ? null : Number(budgetRows[0].budget_window_sec);
-
-  /*
-   * THE DENOMINATOR (work-on-everything-goal-2026-08-23 P-004).
-   *
-   * With no window the ceiling is per goal LIFETIME and `rollup` — computed
-   * over exactly that — is the figure to judge. That is correct for an outcome
-   * goal: the ceiling bounds a bet.
-   *
-   * With a window the ceiling is spend-per-window and lifetime spend is the
-   * WRONG number, not merely a stricter one. A standing goal (P-001) pursues an
-   * ongoing duty, so its lifetime spend crosses any finite ceiling by
-   * construction — judging it against lifetime does not budget the goal, it
-   * schedules its auto-kill for whenever the total happens to arrive. Since
-   * this function KILLS on breach, getting the denominator wrong here is a
-   * silent guaranteed-termination bug, which is why the window is re-measured
-   * rather than approximated from the lifetime figure.
-   *
-   * The extra query is paid ONLY by goals that declare a window; every other
-   * goal keeps the single pre-existing read.
-   */
-  const judged =
-    budgetCents !== null && windowSec !== null
-      ? await computeGoalSpendRollup(sql, { ...scope, sinceMs: Date.now() - windowSec * 1000 })
-      : rollup;
-
-  // Only goals:pots can govern the goal. A POT floor still necessarily reaches
-  // the ceiling when its known priced portion does; the diagnostic session leg
-  // is never part of this comparison.
-  const budgetBreached = budgetCents !== null && judged.potCents >= budgetCents;
-  if (!budgetBreached && breached.length === 0) return;
-
-  const per = windowSec === null ? '' : ` per ${windowSec}s window`;
-  const reasons = [
-    ...(budgetBreached
-      ? [
-          judged.pot.measured
-            ? `measured goals:pots spend ${judged.potCents}c reached budget ${budgetCents}c${per}`
-            : `goals:pots spend floor ${judged.potCents}c reached budget ${budgetCents}c${per} with ${judged.pot.unpricedSamples} unpriced sample(s)`,
-        ]
-      : []),
-    ...breached.map((b) => {
-      // NAME THE POPULATION (P-004). `spend_usd 62 reached threshold 100` reads
-      // as a fact about the goal; it is a fact about the goal's pot subset.
-      const pop = populationForMetric(b.metric);
-      return `${b.metric} ${b.current} reached threshold ${b.threshold}${pop ? ` [measured over ${pop}]` : ''}`;
-    }),
-  ];
+  const decision = goalSpendBreachDecision(rollup, breached, budgetCents);
+  if (!decision) return;
+  const { judgedCents, budgetBreached, reasons } = decision;
   const evidence = {
-    reason: budgetBreached && !judged.pot.measured ? 'spend-floor-goal-breach' : 'measured-goal-breach',
-    at: new Date().toISOString(),
+    reason: budgetBreached && rollup.spentCents === null ? 'spend-floor-goal-breach' : 'measured-goal-breach',
+    at: new Date(nowMs).toISOString(),
     reasons,
-    spentCents: judged.potCents,
-    measured: judged.pot.measured,
+    spentCents: judgedCents,
+    measured: rollup.spentCents !== null,
     /*
-     * THE KILL'S OWN PROVENANCE (P-004).
+     * THE PAUSE'S OWN PROVENANCE (P-004).
      *
-     * `spentCents` above is the POT leg — the only leg allowed to govern. Read
-     * cold on a killed goal it looks like "what this goal cost", and when the
-     * diagnostic session leg is larger (routinely ~2x) that reads as the kill
-     * having fired at the wrong number. It did not; the two measure disjoint
-     * populations. This plan is itself the case study for what happens when a
-     * number is read without its population, so the terminal readout carries
-     * its own scope rather than relying on a reader to know the rule.
+     * Read cold on a paused goal, `spentCents` looks like "what this goal
+     * cost". It is the goal-attributed stream over `judgedWindowSec`; the pot
+     * and session legs measure other populations and routinely disagree with
+     * it. The readout carries its own scope rather than relying on a reader to
+     * know the rule.
      */
-    spentCentsScope: GOAL_SPEND_POT_SCOPE,
+    spentCentsScope: GOAL_SPEND_LINEAGE_SCOPE,
     /** Lifetime, or the rolling window the ceiling was actually judged over. */
-    judgedWindowSec: windowSec,
+    judgedWindowSec: rollup.windowSec,
     /** Diagnostic-only context, labelled, so it cannot be mistaken for the cause. */
     notJudged: {
-      sessionCents: judged.sessionCents,
+      potCents: rollup.potCents,
+      potScope: GOAL_SPEND_POT_SCOPE,
+      sessionCents: rollup.sessionCents,
       sessionScope: GOAL_SPEND_SESSION_SCOPE,
-      lineageCents: judged.lineageCents,
-      lineageScope: GOAL_SPEND_LINEAGE_SCOPE,
-      note: 'Present for context only. Neither figure advanced a tripwire or contributed to this kill.',
+      note: 'Present for context only. Neither figure advanced a tripwire or contributed to this pause.',
     },
   };
-  const changed = await sql`
+  const pause = {
+    reason: `Spend ceiling reached: ${reasons.join('; ')}. Raise the budget, wait for the window to roll, or wind the goal down.`,
+    pausedBy: GOAL_SPEND_ROLLUP_ACTOR,
+    pausedAtMs: nowMs,
+  };
+  // Every bare parameter inside jsonb_build_object carries a cast: the function
+  // is VARIADIC "any", so an uncast one fails at PARSE time on every call (see
+  // pauseGoalForHolderRespawnRateCap and sql-variadic-any-uncast-param.test.ts).
+  const [changed] = await sql<Array<{ id: string }>>`
     UPDATE harness_shared.goals
-       SET status = 'killed',
-           -- A terminal status transition is a definition-state change, just
-           -- like goals:update { status: 'killed' }. Measurement-only writes
-           -- above deliberately leave updated_at alone, but omitting this stamp
-           -- makes the lifecycle transition invisible to recency-ordered reads.
-           updated_at = now(),
-           metadata = COALESCE(metadata, '{}'::jsonb) || ${sql.json({ autoKilled: evidence })}
+       SET status = 'paused',
+           -- A status transition is a definition-state change, just like
+           -- goals:update { status: 'paused' }. Measurement-only writes above
+           -- deliberately leave updated_at alone, but omitting this stamp makes
+           -- the lifecycle transition invisible to recency-ordered reads.
+           updated_at = to_timestamp(${nowMs}::double precision / 1000.0),
+           metadata = jsonb_set(
+             (CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) ||
+               ${sql.json({ autoPaused: evidence, pause })},
+             '{holderRespawn}',
+             (CASE WHEN jsonb_typeof(metadata -> 'holderRespawn') = 'object'
+                   THEN metadata -> 'holderRespawn' ELSE '{}'::jsonb END) ||
+               jsonb_build_object(
+                 'needsHuman', true,
+                 'needsHumanAtMs', ${nowMs}::bigint
+               ),
+             true
+           )
      WHERE id = ${scope.goalId}
        AND workspace_id = ${scope.workspaceId}
        AND status = 'active'
+    RETURNING id
   `;
-  if (changed.count !== 1) return;
+  if (!changed) return;
+
+  await appendGoalWriteAudit(sql as unknown as GoalSqlTag, {
+    workspaceId: scope.workspaceId,
+    goalId: scope.goalId,
+    author: GOAL_SPEND_ROLLUP_ACTOR,
+    writeKind: 'spend-breach-pause',
+    actorClass: GOAL_SPEND_ROLLUP_ACTOR,
+    detail: reasons.join('; '),
+    atMs: nowMs,
+  }).catch((error) => {
+    console.warn(
+      `[goal-spend-rollup] goal:write pause audit failed for ${scope.goalId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
 
   const executor = getGoalTransitionExecutor();
   if (executor) {
     await executor({
       goalId: scope.goalId,
       workspaceId: scope.workspaceId,
-      status: 'killed',
-      actor: 'goal-spend-rollup',
+      status: 'paused',
+      actor: GOAL_SPEND_ROLLUP_ACTOR,
     });
   }
+  escalateBreachPause({ ...scope, budgetCents, spentCents: judgedCents, reasons });
+}
+
+/**
+ * Tell the owner the goal was paused and why. Fire-and-forget, deduped per goal
+ * so a re-pause after a premature resume bumps the one card instead of
+ * stacking another — the escalateBudgetRefusal pattern in goal-launch-settings.
+ */
+function escalateBreachPause(args: {
+  workspaceId: string;
+  goalId: string;
+  budgetCents: number | null;
+  spentCents: number;
+  reasons: string[];
+}): void {
+  void (async () => {
+    const { openEscalation } = await import('../agent-tools/coordination/escalations');
+    await openEscalation(
+      {
+        ownerId: `${GOAL_SPEND_ROLLUP_ACTOR}:${args.goalId}`,
+        ownerLabel: 'goal spend rollup',
+        source: 'principal',
+        workspaceId: args.workspaceId,
+        userId: null,
+      },
+      {
+        // 'blocker': the goal is stopped until the owner acts on its budget.
+        severity: 'blocker',
+        summary: `goal ${args.goalId}: PAUSED — spend ceiling reached`,
+        body:
+          `${args.reasons.join('\n')}\n\n` +
+          'The goal is paused, not killed. Raise its budget, wait for the budget window to roll, ' +
+          'or wind it down; resuming it while it is still over budget pauses it again on the next rollup tick.',
+        meta: {
+          dedupKind: 'goal-spend-breach-paused',
+          subjectSignature: `${args.workspaceId}:${args.goalId}`,
+          goalId: args.goalId,
+          budgetCents: args.budgetCents,
+          spentCents: args.spentCents,
+        },
+      },
+    );
+  })().catch((error) => {
+    console.warn(
+      `[goal-spend-rollup] breach escalation failed for ${args.goalId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
 }
 
 export interface GoalSpendRollupSweepResult {
@@ -640,8 +815,14 @@ export interface GoalSpendRollupSweepResult {
 /**
  * One sweep: snapshot every ACTIVE goal. Per-goal error isolation — one goal's
  * failure never starves the rest (same contract as the watchdog siblings).
+ *
+ * Each goal's rollup is computed ONCE, over its budget window, and that single
+ * figure feeds the snapshot, the tripwires and the breach check (D-011).
  */
-export async function runGoalSpendRollupOnce(sql: Sql): Promise<GoalSpendRollupSweepResult> {
+export async function runGoalSpendRollupOnce(
+  sql: Sql,
+  opts: { nowMs?: number } = {},
+): Promise<GoalSpendRollupSweepResult> {
   const enabled = await getFlag(FLAGS.GOAL_SPEND_ROLLUP_TICK, 'system').catch(() => false);
   if (!enabled) return { ok: true, ran: false, checked: 0, written: 0, tripwiresAdvanced: 0, errors: [] };
   const goals = await sql<
@@ -650,18 +831,31 @@ export async function runGoalSpendRollupOnce(sql: Sql): Promise<GoalSpendRollupS
       workspace_id: string;
       tripwires: GoalTripwireLike[] | null;
       created_at: Date;
+      budget_cents: string | null;
+      budget_window_sec: number | null;
     }>
   >`
-    SELECT id, workspace_id, tripwires, created_at
+    SELECT id, workspace_id, tripwires, created_at, budget_cents, budget_window_sec
       FROM harness_shared.goals WHERE status = 'active'
   `;
   const errors: Array<{ goalId: string; error: string }> = [];
   let written = 0;
   let tripwiresAdvanced = 0;
+  const nowMs = opts.nowMs ?? Date.now();
+  const freshnessEntries = await Promise.all(goals.map(async (goal) => [
+    goal.id,
+    await readInteractiveUsageFreshness(sql, { workspaceId: goal.workspace_id, goalId: goal.id, nowMs }),
+  ] as const));
+  const freshnessByGoal = new Map(freshnessEntries);
   for (const g of goals) {
     try {
       const scope = { workspaceId: g.workspace_id, goalId: g.id };
-      const rollup = await computeGoalSpendRollup(sql, scope);
+      const rollup = await computeGoalSpendRollup(sql, {
+        ...scope,
+        windowSec: g.budget_window_sec == null ? null : Number(g.budget_window_sec),
+        nowMs,
+        interactiveUsageFreshness: freshnessByGoal.get(g.id),
+      });
       const count = await writeGoalSpendSnapshot(sql, scope, rollup);
       // A zero-row write means the snapshot silently went nowhere (the goal row
       // vanished mid-sweep, or a scope mismatch) — an error, never a success.
@@ -680,9 +874,17 @@ export async function runGoalSpendRollupOnce(sql: Sql): Promise<GoalSpendRollupS
           createdAtMs: new Date(g.created_at).getTime(),
         },
         rollup,
+        nowMs,
       );
       tripwiresAdvanced += refreshed.advanced;
-      await enforceGoalBreaches(sql, scope, rollup, refreshed.breached);
+      await enforceGoalBreaches(
+        sql,
+        scope,
+        rollup,
+        refreshed.breached,
+        g.budget_cents == null ? null : Number(g.budget_cents),
+        nowMs,
+      );
     } catch (e) {
       errors.push({ goalId: g.id, error: e instanceof Error ? e.message : String(e) });
     }

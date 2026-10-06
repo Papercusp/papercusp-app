@@ -19,6 +19,7 @@ import { getConnInfo } from '@hono/node-server/conninfo';
 import type { ZodTypeAny } from 'zod';
 import type { Principal } from '@papercusp/agent-mcp';
 import { PrincipalCheckError, requirePrincipal } from '../auth/require-principal';
+import { AgentIdentityRequiredError } from '../auth/identity-required-error';
 import { principalFromCookie } from '../auth/principal/from-cookie';
 import type { RouteDefinition } from './define-route';
 import { defaultCorsOrigin } from './cors';
@@ -544,6 +545,12 @@ const invokeStep: RouteStep = {
       if (exec.abort.signal.aborted) {
         exec.status = 'timeout';
         return errorResponse(408, 'timeout', `route exceeded ${timeoutSec}s`);
+      }
+      // EI-24708210960582152: an unattributable caller is a REQUEST fault — answer a typed
+      // 401 identity_required, never the 500 handler_error that reads as a server crash.
+      if (err instanceof AgentIdentityRequiredError) {
+        exec.status = 'unauthorized';
+        return errorResponse(err.status, err.code, err.message);
       }
       exec.status = 'error';
       return errorResponse(

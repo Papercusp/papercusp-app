@@ -30,12 +30,26 @@ import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-reg
 import Protomux from 'protomux';
 import c from 'compact-encoding';
 import { getSwarmGuard, type SwarmGuard } from './swarm-guard';
+import {
+  parseDhtBootstrap,
+  resolveDhtUniverseState,
+  resolveEffectiveDhtBootstrap,
+  type DhtBootstrapNode,
+  type DhtUniverseState,
+} from './dht-universe';
 import { getResourceProfile } from '../../resource-profile';
 import type { SignedAnnounce } from './announce';
 import type { AdmissionResult } from './read-admission';
 import { wireHiveGitServe, type PotGitServeConfig } from '../pot-git/serve-wiring';
 import { wireHiveGitDial, resolveVerifiedDevicePubkeyForSocket } from '../pot-git/peer-dial-registry';
 import { loadOrGenerateSwarmSeed } from '../../identity/swarm-keypair';
+import {
+  describeSyncRelayFallback,
+  resolveSyncRelayKeys,
+  scheduleRelayLivenessCheck,
+  syncRelayKeyReader,
+  syncRelayThroughOption,
+} from './sync-relay';
 import {
   readWireStats,
   dataPathProven,
@@ -64,6 +78,19 @@ export interface SwarmHandle {
    * and "connected-but-dead replication" (the zombie-connection class).
    */
   liveConnectionCount: number;
+  /**
+   * WI-10005287: live sockets that may be carrying THIS topic — the input to
+   * boot.ts's pre-admission stall leg (`computeHasStalledLogs` leg (b)).
+   *
+   * `liveConnectionCount` is the SHARED swarm's whole socket set, so it is
+   * topic-blind: one peer connected for some other harness made every local
+   * topic with no admitted remote read "stalled" forever (bg-host 2026-10-02:
+   * 48 of 89 joins, admitted = own log only, one socket whose announce channel
+   * was open on 2 other topics and never opened on these). A socket counts here
+   * only if {@link isTopicStallCandidateSocket} says so — see its doc for the
+   * rule and why it keeps the original dead-data-path case.
+   */
+  topicStallCandidateCount: number;
   /**
    * EI-13317 rung (b): force a fresh topic leave()+join() NOW (a new discovery
    * session/DHT announce), bypassing the severed-link timer. Extracted from
@@ -365,8 +392,17 @@ export interface JoinHarnessSwarmOpts {
    * (cheap — a Map scan, no I/O); a throw is treated as false (never blocks
    * the keepalive). Omitted ⇒ byte-identical pre-WI-1534 behavior (fast window
    * only, then flat 60s slow cadence).
+   *
+   * WI-10005270: a stall gets its OWN fast window — `fastWindowMs` from when
+   * this first reads true — then stalled-triggered refreshes back off
+   * exponentially (doubling from `refreshMs`) up to `stalledMaxRefreshMs`.
    */
   hasStalledLogs?: () => boolean;
+  /**
+   * WI-10005270: cap on the stalled-refresh backoff (see `hasStalledLogs`).
+   * Default `DEFAULT_SUBSTRATE_STALLED_MAX_REFRESH_MS`.
+   */
+  stalledMaxRefreshMs?: number;
   /**
    * EI-13317 escalation ladder: once this topic HAD a live peer and then sits
    * at ZERO live peers for this long — DESPITE the refresh() self-heal loop
@@ -1007,14 +1043,44 @@ function announceTopicStatesFor(mux: object): Map<string, TopicAnnounceState> {
  * `userData`; the WeakMap check keeps this safe for minimal test streams whose
  * `userData` may hold something unrelated.
  */
-function announceStateForSocket(socket: unknown, topicHex: string): TopicAnnounceState | null {
+function announceStatesForSocket(socket: unknown): Map<string, TopicAnnounceState> | null {
   const muxStream = ((socket as { noiseStream?: unknown } | null)?.noiseStream ?? socket) as {
     userData?: unknown;
   } | null;
   if (!muxStream || typeof muxStream !== 'object') return null;
   const mux = muxStream.userData;
   if (!mux || typeof mux !== 'object') return null;
-  return announceTopicStateByMuxer.get(mux)?.get(topicHex) ?? null;
+  return announceTopicStateByMuxer.get(mux) ?? null;
+}
+
+function announceStateForSocket(socket: unknown, topicHex: string): TopicAnnounceState | null {
+  return announceStatesForSocket(socket)?.get(topicHex) ?? null;
+}
+
+/**
+ * WI-10005287: could this live socket be carrying `topicHex`? Feeds
+ * {@link SwarmHandle.topicStallCandidateCount}.
+ *
+ * One Hyperswarm socket per peer is shared by every topic in the process, so
+ * "a socket exists" says nothing about which topic it serves. The announce
+ * channels opened on its muxer do:
+ *   - this topic's channel has opened (both sides opened it) → yes, the peer
+ *     participates in this topic;
+ *   - some OTHER topic's channel has opened but not this one → no. The data
+ *     path demonstrably works and the peer has not opened this topic, so it
+ *     is not a participant (the measured bg-host case);
+ *   - no channel has opened on it at all → yes. We cannot tell which topic it
+ *     is for, and this is exactly EI-18665254552552477's pre-admission stall
+ *     (established sockets, zero inbound frames), so it must still count.
+ * A socket with no readable muxer state (minimal test fakes) has opened no
+ * channel, so it counts — the pre-WI-10005287 behaviour.
+ */
+export function isTopicStallCandidateSocket(socket: unknown, topicHex: string): boolean {
+  const states = announceStatesForSocket(socket);
+  if (!states) return true;
+  if (states.get(topicHex)?.opened) return true;
+  for (const state of states.values()) if (state.opened) return false;
+  return true;
 }
 
 /** Create + open the announce channel on a muxer (returns silently when the
@@ -1867,6 +1933,15 @@ export const DEFAULT_SUBSTRATE_REFRESH_MS = 2500;
 // still bounded (no forever-hammering). Re-armed on last-peer-loss for snappy reheal.
 export const DEFAULT_SUBSTRATE_FAST_WINDOW_MS = 120_000;
 export const DEFAULT_SUBSTRATE_SLOW_REFRESH_MS = 60_000;
+/**
+ * WI-10005270: the ceiling of the stalled-log refresh backoff. Before it, a
+ * stall re-armed the 2.5 s cadence FOREVER: an admitted remote log whose machine
+ * is offline never regains a peer, so bg-host re-announced ~47 topics every 2.5 s
+ * (5.35 DHT announce queries/s, ~12% of its main thread, measured 2026-10-02).
+ * Half the slow keepalive keeps a long stall retried 2x as often as WI-1534's
+ * 80-min case, without the permanent fast loop.
+ */
+export const DEFAULT_SUBSTRATE_STALLED_MAX_REFRESH_MS = 30_000;
 /**
  * EI-13317: how long a topic that previously had a live peer must sit at
  * ZERO live peers — despite the refresh() self-heal loop actively ticking —
@@ -3055,6 +3130,14 @@ export async function joinHarnessSwarm(
     const refreshMs = opts.refreshMs ?? DEFAULT_SUBSTRATE_REFRESH_MS;
     const fastWindowMs = opts.fastWindowMs ?? DEFAULT_SUBSTRATE_FAST_WINDOW_MS;
     const slowRefreshMs = opts.slowRefreshMs ?? DEFAULT_SUBSTRATE_SLOW_REFRESH_MS;
+    const stalledMaxRefreshMs = Math.max(
+      refreshMs,
+      opts.stalledMaxRefreshMs ?? DEFAULT_SUBSTRATE_STALLED_MAX_REFRESH_MS,
+    );
+    /** WI-10005270: when the current stall was first seen (null = no stall). */
+    let stallSinceMs: number | null = null;
+    /** WI-10005270: the current stalled-refresh interval (doubles to the cap). */
+    let stalledIntervalMs = refreshMs;
     if (refreshMs > 0) {
       // P-007: this join's tick body. It is registered on the swarm's ONE shared
       // refresh loop (see registerSwarmRefresh above) instead of arming a timer
@@ -3297,8 +3380,20 @@ export async function joinHarnessSwarm(
             stalled = false;
           }
         }
+        // WI-10005270: a stall gets its own fast window, then backs off. The
+        // ladder restarts whenever the stall clears or the join's fast window
+        // is live (new join / peer loss — connectivity changed).
+        if (!stalled) stallSinceMs = null;
+        else if (stallSinceMs === null) stallSinceMs = now;
+        if (!stalled || inFastWindow) stalledIntervalMs = refreshMs;
+        const stallBackingOff = stallSinceMs !== null && now - stallSinceMs >= fastWindowMs;
+        const stalledDue =
+          stalled && now - lastRefreshMs >= (stallBackingOff ? stalledIntervalMs : refreshMs);
         const slowDue = now - lastRefreshMs >= slowRefreshMs;
-        if (!inFastWindow && !stalled && !slowDue) return;
+        if (!inFastWindow && !stalledDue && !slowDue) return;
+        if (stalledDue && stallBackingOff && !inFastWindow) {
+          stalledIntervalMs = Math.min(stalledIntervalMs * 2, stalledMaxRefreshMs);
+        }
         lastRefreshMs = now;
         try {
           // Re-announce (server) + re-lookup (client) — the same call the
@@ -3364,6 +3459,15 @@ export async function joinHarnessSwarm(
         return n;
       }
       return liveConnectionCount;
+    },
+    get topicStallCandidateCount() {
+      // Same socket source as liveConnectionCount (the shared swarm's set, or
+      // this join's own sockets on minimal fakes), filtered to the sockets that
+      // may be carrying this topic (WI-10005287).
+      const sockets: Iterable<unknown> = opts.swarm.connections ?? mySockets;
+      let n = 0;
+      for (const socket of sockets) if (isTopicStallCandidateSocket(socket, topicHex)) n++;
+      return n;
     },
     async forceRejoin() {
       await forceRejoinNow();
@@ -3529,11 +3633,16 @@ export function resolveDefaultMaxPeers(): number {
   }
 }
 
-/** One DHT bootstrap node (host + UDP port). */
-export interface DhtBootstrapNode {
-  host: string;
-  port: number;
-}
+// The pure bootstrap parser + universe classifier live in ./dht-universe so host
+// probes (dev:service_health's isolated-DHT alarm, WI-10005995) can classify another
+// process without loading this module's import graph. Re-exported unchanged.
+export {
+  parseDhtBootstrap,
+  resolveDhtUniverseState,
+  resolveEffectiveDhtBootstrap,
+  type DhtBootstrapNode,
+  type DhtUniverseState,
+} from './dht-universe';
 
 /** Parse `PAPERCUSP_DHT_HOST` — an optional local bind/advertise host for
  * hyperdht. Hyperswarm does not forward `host` to HyperDHT, so callers that
@@ -3545,56 +3654,11 @@ export function parseDhtHost(raw: string | undefined): string | undefined {
   return host || undefined;
 }
 
-/**
- * Parse `PAPERCUSP_DHT_BOOTSTRAP` — a comma-separated `host:port` list — into
- * hyperdht bootstrap nodes. Returns undefined when unset/empty/all-malformed
- * (→ the swarm uses the real public DHT, the default). When set, every peer
- * that shares the value joins the SAME isolated DHT — which is how two
- * instances on ONE box deterministically discover each other without relying on
- * public-DHT NAT hairpinning (the same trick the in-process p079 live test uses
- * via `hyperdht/testnet`). Exported for unit testing.
- */
-export function parseDhtBootstrap(raw: string | undefined): DhtBootstrapNode[] | undefined {
-  if (!raw) return undefined;
-  const nodes = raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s): DhtBootstrapNode | null => {
-      const i = s.lastIndexOf(':'); // lastIndexOf tolerates IPv6-ish hosts minimally
-      if (i <= 0) return null;
-      const host = s.slice(0, i);
-      const port = Number.parseInt(s.slice(i + 1), 10);
-      return host && Number.isFinite(port) && port > 0 ? { host, port } : null;
-    })
-    .filter((n): n is DhtBootstrapNode => n !== null);
-  return nodes.length ? nodes : undefined;
-}
-
-/**
- * WI-3604 (split-DHT-universe recurrence guard). The DHT universe this
- * process's shared swarm actually resolved to, at construction time:
- * `'isolated'` (a custom bootstrap list, e.g. the fed-a/fed-b rig DHT),
- * `'public'` (no `PAPERCUSP_DHT_BOOTSTRAP` set — the real public DHT), or
- * `'misconfigured'` (the env var WAS set but resolved to zero usable
- * bootstrap nodes — {@link parseDhtBootstrap}'s all-malformed case — which
- * silently falls back to the PUBLIC DHT, the exact "isolated federation
- * quietly breaks" failure this guards against).
- */
-export type DhtUniverseState =
-  | { mode: 'isolated'; bootstrap: DhtBootstrapNode[] }
-  | { mode: 'public' }
-  | { mode: 'misconfigured'; envValue: string };
-
-/** Pure classifier: given the raw `PAPERCUSP_DHT_BOOTSTRAP` value, resolve
- * which DHT universe a swarm constructed with it would join. Exported for
- * unit testing (no I/O). */
-export function resolveDhtUniverseState(envBootstrapRaw: string | undefined): DhtUniverseState {
-  const trimmed = envBootstrapRaw?.trim();
-  if (!trimmed) return { mode: 'public' };
-  const bootstrap = parseDhtBootstrap(trimmed);
-  if (bootstrap?.length) return { mode: 'isolated', bootstrap };
-  return { mode: 'misconfigured', envValue: trimmed };
+/** Whether this process's effective DHT bootstrap (env, then file) was declared but resolved to
+ * no usable node — the `'misconfigured'` universe. Relay-key callers outside the shared swarm
+ * (the voice node) pass this as `RelayKeyScope.bootstrapMisconfigured`. */
+export function dhtBootstrapMisconfigured(): boolean {
+  return resolveDhtUniverseState(readEffectiveDhtBootstrapRaw()).mode === 'misconfigured';
 }
 
 /** Result of comparing this process's resolved {@link DhtUniverseState}
@@ -3735,11 +3799,13 @@ export function readEffectiveDhtBootstrapRaw(): string | undefined {
     const os = require('node:os') as typeof import('node:os');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const path = require('node:path') as typeof import('node:path');
-    const filePath =
-      process.env.PAPERCUSP_DHT_BOOTSTRAP_FILE?.trim() ||
-      path.join(os.homedir(), '.papercusp', 'dht-bootstrap');
-    const contents = fs.readFileSync(filePath, 'utf8').trim();
-    return contents || undefined;
+    // The precedence itself lives in ./dht-universe so an outside probe of ANOTHER
+    // process (dev:service_health, WI-10005995) applies exactly the same rule.
+    return resolveEffectiveDhtBootstrap({
+      env: process.env,
+      defaultFilePath: path.join(os.homedir(), '.papercusp', 'dht-bootstrap'),
+      readFile: (p) => fs.readFileSync(p, 'utf8'),
+    }).raw;
   } catch {
     return undefined;
   }
@@ -4030,6 +4096,8 @@ async function buildSharedSwarm(): Promise<HyperswarmLike> {
         dht?: unknown;
         firewall?: (remotePublicKey: Buffer) => boolean;
         seed?: Buffer;
+        /** WI-10004827: blind-relay keys, used only after a direct holepunch fails. */
+        relayThrough?: Buffer[];
       }) => HyperswarmLike;
     }
   ).default;
@@ -4097,6 +4165,15 @@ async function buildSharedSwarm(): Promise<HyperswarmLike> {
     dht = new DHT({ bootstrap: opts.bootstrap, host: opts.dhtHost });
     console.info(`[swarm] DHT host = ${opts.dhtHost}`);
   }
+  // WI-10004827: peers that cannot holepunch each other (same NAT without
+  // hairpin, CGNAT, one Cloud NAT) need a relay or they never replicate. Reuse
+  // the voice blind-relay set; hyperswarm uses it only after a direct connect
+  // fails (sync-relay.ts). Read once per process: a relay added later takes
+  // effect on the next restart.
+  const relayKeys = await resolveSyncRelayKeys(
+    syncRelayKeyReader(opts.bootstrap, dhtUniverse.mode === 'misconfigured'),
+  );
+  console.info(describeSyncRelayFallback(relayKeys));
   // P-003: the firewall runs BEFORE the Noise handshake completes — it cheaply
   // rejects banned keys without spending handshake CPU. Hyperswarm only hands
   // the firewall the remote public key, so IP-level bans are enforced in the
@@ -4106,6 +4183,7 @@ async function buildSharedSwarm(): Promise<HyperswarmLike> {
     maxClientConnections: opts.maxClientConnections,
     ...(dht ? { dht } : opts.bootstrap ? { bootstrap: opts.bootstrap } : {}),
     ...(swarmSeed ? { seed: swarmSeed } : {}),
+    ...syncRelayThroughOption(relayKeys),
     firewall: (remotePublicKey: Buffer) => guard.firewall(remotePublicKey),
   });
   // WI-6063: make the budget split VISIBLE at construction. The reserve only
@@ -4136,6 +4214,10 @@ async function buildSharedSwarm(): Promise<HyperswarmLike> {
   // actually happened on the wire — the distinction that cost ~7h of packet
   // archaeology when a correctly-configured DHT could not reach its bootstrap.
   scheduleDhtReachabilityCheck(_sharedSwarm);
+  // WI-10004904: the same configured-vs-actual gap for the relay fallback. The
+  // relay line above counts configured keys; this says whether any of them is
+  // actually served on the DHT (a key dead since June read as "1 key" all along).
+  scheduleRelayLivenessCheck(_sharedSwarm, relayKeys, DHT_BOOTSTRAP_GRACE_MS);
   return _sharedSwarm;
 }
 

@@ -40,7 +40,7 @@
  *   - structural — a real bug/misconfig (the tool, a missing table, a wiring
  *     gap). Fires on FEW occurrences OR a high error-rate → auto-implement.
  *   - transient  — timeout / load / shared-infra exhaustion. Volume-gated.
- *   - caller     — the caller sent bad input or lacks a role (DX/schema). kind=change.
+ *   - caller     — the caller sent bad input, lacks a role, or was rejected at the MCP auth gate (DX/auth). kind=change.
  *   - rate-limit — an EXTERNAL provider rate-limit / quota (OpenAI embed TPM
  *     429). Capacity, not a code bug → infra/owner, never the auto-implement lane.
  */
@@ -72,25 +72,42 @@ export interface ToolErrorRule {
 // ── The shared message patterns (dual-engine; see the module header) ──────────
 
 /** A timeout, including one that surfaced as `handler_error`
- *  ("exceeded timeout … handler returned but signal had aborted"). */
-export const TIMEOUT_MESSAGE_PATTERN = 'exceeded timeout|timed? *out';
+ *  ("exceeded timeout … handler returned but signal had aborted"). Word boundaries
+ *  keep argument names such as `timeoutSec` from looking like a timeout outcome. */
+export const TIMEOUT_MESSAGE_PATTERN =
+  'exceeded timeout([^a-zA-Z]|$)|(^|[^a-zA-Z])timed? *out([^a-zA-Z]|$)';
 
-/** Caller-side arg/scope error in the MESSAGE: an `invalid_args:` prefix
+/** Caller-side auth/arg/scope error in the MESSAGE: a retained
+ *  `missing_capability:` prefix from a nested `tools:invoke` refusal, or an `invalid_args:` prefix
  *  (regardless of the row's error_code — this is the bit the old TS fn missed),
+ *  including the `invalid_input: invalid_args:` wrapper from a nested
+ *  `tools:invoke` refusal,
+ *  the checkpoint replacement safety refusal that requires explicit retirement
+ *  of carried safety rows,
+ *  an explicit compaction flush-gate refusal that requires a checkpoint,
+ *  an explicit reviewer-model allowlist refusal,
  *  a missing / unregistered harness, a registered standalone harness passed
- *  to the Hive-scoped plan store, or a desktop-only capability called before
- *  its sandbox lease was provisioned. A missing WORKSPACE-scope
+ *  to the Hive-scoped plan store, a desktop-only capability called before its
+ *  sandbox lease was provisioned, or a pre-vetting refusal caused by the
+ *  caller-authored acceptance BAR contract. A missing WORKSPACE-scope
  *  ("requires a workspace-scoped call") is deliberately NOT here — a
  *  workspace-scoping gap is treated as `structural` (a wiring gap worth catching
  *  at the low bar), and the fingerprint separates it from anything it used to mask. */
 export const CALLER_MESSAGE_PATTERN =
-  '^invalid_args:|No harness specified|not registered in (any workspace|harness_shared)|resolvePlanScope:.*is not a Hive home|no sandbox desktop is leased';
+  '^missing_capability:|^invalid_input: *invalid_args:|^invalid_args:|^reviewer_model_not_allowed:|checkpoint_replace_would_drop_rows|"error":"flush-required"|No harness specified|not registered in (any workspace|harness_shared)|resolvePlanScope:.*is not a Hive home|no sandbox desktop is leased|acceptance BAR contract is not ready for vetting|predicate_shape_mismatch:';
 
 /** An EXTERNAL provider rate-limit / quota (OpenAI embedding TPM 429,
  *  "Rate limit reached", surfaced as `openai_embed_failed_429`). CAPACITY, not a
  *  code bug — must not fall through to `structural` (P-002). */
 export const RATE_LIMIT_MESSAGE_PATTERN =
   'openai_embed_failed_429|rate[ _-]?limit[ _-]?(reached|exceeded)|tokens per min|requests per min|too many requests';
+
+/** The operator's own MCP admission bulkhead returns a retryable shed response
+ *  when the event loop is critical or its in-flight capacity is full. That is
+ *  backpressure from the shared admission gate, not a per-tool implementation
+ *  defect. */
+export const OPERATOR_ADMISSION_TRANSIENT_MESSAGE_PATTERN =
+  'operator MCP admission is saturated|reason=(loop_pressure_critical|operator_admission_capacity)';
 
 /** Shared-infra exhaustion (PG `max_connections` / DB-unavailable), an operator
  *  shutdown-window response, and a stale-pooled-connection reset against
@@ -126,15 +143,41 @@ export const TOOL_ERROR_RULES: readonly ToolErrorRule[] = [
   },
   {
     class: 'caller',
-    errorCodes: ['invalid_args', 'invalid_input', 'role_not_allowed', 'missing_capability', 'quota_exceeded', 'harness_required'],
+    errorCodes: [
+      'invalid_args', 'invalid_input', 'role_not_allowed', 'missing_capability',
+      'quota_exceeded', 'harness_required', 'checkpoint_replace_would_drop_rows',
+      'flush-required', 'rubric-not-found', 'reviewer_model_not_allowed',
+      'dynamic_import_unsupported', 'mcp_auth_failed',
+    ],
     statuses: ['role-not-allowed'],
     messagePattern: CALLER_MESSAGE_PATTERN,
-    why: 'the caller sent bad input / lacks a role / named no (or an unregistered) harness — DX, not a tool bug',
+    why: 'the caller sent bad input, chose a reviewer outside the expert allowlist, attempted an import in the import-free code:run sandbox, lacked a role, was rejected at the MCP auth gate, named no (or an unregistered) harness, or hit an explicit flush precondition — not a tool bug',
+  },
+  {
+    class: 'caller',
+    messagePattern:
+      'patch verification could not find the expected|patch was rejected before writing because .*abbreviated text|patch was rejected because one expected source line did not match exactly',
+    why: 'the patch tool deliberately refused a hunk whose expected source context did not match; refresh the exact file context instead of filing a Papercusp structural defect',
+  },
+  {
+    class: 'caller',
+    messagePattern: 'Identity capability \\(unresolved\\): outside-ceiling',
+    why: 'the kernel refused a call outside the caller identity’s authored capability ceiling; this expected authorization refusal is not a tool implementation defect',
+  },
+  {
+    class: 'caller',
+    messagePattern: 'coord:ask is owner-UI-only',
+    why: 'coord:ask deliberately denies direct agent calls; this owner-UI-only permission refusal is caller-side, while generic unauthorized workspace-scope failures remain structural',
   },
   {
     class: 'rate-limit',
     messagePattern: RATE_LIMIT_MESSAGE_PATTERN,
     why: 'an EXTERNAL provider rate-limit / quota (OpenAI embed TPM 429) — capacity, not a code bug',
+  },
+  {
+    class: 'transient',
+    messagePattern: OPERATOR_ADMISSION_TRANSIENT_MESSAGE_PATTERN,
+    why: 'the operator MCP admission gate returned retryable backpressure under critical loop pressure or full capacity — not a per-tool defect',
   },
   {
     class: 'transient',
@@ -509,6 +552,32 @@ export function toolFailureSignatureKey(
   const errorCode = correlationSegment(input.errorCode, 'error-code-unknown');
   const fieldPath = correlationSegment(input.fieldPath, 'field-unknown');
   return `tool-failure-signature:${tool}:${failureFamily}:${errorCode}:${fieldPath}`;
+}
+
+const TOOL_FAILURE_SIGNATURE_PREFIX = 'tool-failure-signature:';
+const TOOL_ERROR_CLASS_VALUES: readonly ToolErrorClass[] = ['structural', 'transient', 'caller', 'rate-limit'];
+
+/**
+ * Inverse of {@link toolFailureSignatureKey}. Tool names and field paths may themselves
+ * contain `:` (`coord:glance`), so the key is split on its ONE enumerated segment, the
+ * failure family, never by position. Returns null for anything the builder cannot emit.
+ */
+export function parseToolFailureSignatureKey(
+  key: string | null | undefined,
+): { toolName: string; failureFamily: ToolErrorClass; errorCode: string; fieldPath: string } | null {
+  if (!key || !key.startsWith(TOOL_FAILURE_SIGNATURE_PREFIX)) return null;
+  const rest = key.slice(TOOL_FAILURE_SIGNATURE_PREFIX.length);
+  let best: { at: number; family: ToolErrorClass } | null = null;
+  for (const family of TOOL_ERROR_CLASS_VALUES) {
+    const at = rest.indexOf(`:${family}:`);
+    if (at > 0 && (best === null || at < best.at)) best = { at, family };
+  }
+  if (!best) return null;
+  const toolName = rest.slice(0, best.at);
+  const tail = rest.slice(best.at + best.family.length + 2);
+  const sep = tail.indexOf(':');
+  if (sep <= 0 || sep === tail.length - 1) return null;
+  return { toolName, failureFamily: best.family, errorCode: tail.slice(0, sep), fieldPath: tail.slice(sep + 1) };
 }
 
 /** Convenience key builder used by callers that already know the failure family. */

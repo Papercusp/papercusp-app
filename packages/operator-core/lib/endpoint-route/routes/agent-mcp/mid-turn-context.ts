@@ -61,8 +61,12 @@ import { CORPUS_BLOCK_HEADING } from '../../../memory/corpus-recall';
 import { recordInjectionCoverage } from '../../../memory/injection-delivery-coverage';
 import { takePendingFailureLoopHint, type FailureLoopHint } from '../../../failure-loop-circuit-breaker';
 
-/** Query clamp — embed the head of a long command, not a pasted heredoc. */
-const QUERY_CLAMP = 1_000;
+/**
+ * Query clamp — embed the head of a long command, not a pasted heredoc.
+ * Exported so offline replays (memory/bench/jev-live-drop-quality.ts) rebuild
+ * the exact query this handler sends, instead of keeping a second copy.
+ */
+export const QUERY_CLAMP = 1_000;
 
 /**
  * The mid-turn budget (chars). DELIBERATELY an order of magnitude under

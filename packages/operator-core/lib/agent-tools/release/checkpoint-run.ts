@@ -1877,6 +1877,27 @@ export default defineTool({
         };
       }
     }
+    // WI-10005763 (D-012): a restricted session's writes are held in the tree the launcher would
+    // execute from. Nothing was started or stopped, and neither force nor replaceStale bypasses it.
+    if (!result.launched && result.restrictedHold) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: serializeResponse({
+              ok: false,
+              launched: false,
+              reason: result.restrictedHold.error,
+              restricted_hold: result.restrictedHold,
+              logical_attempt_id: logicalAttemptId,
+              note:
+                `NOT launched: ${result.restrictedHold.hint}. No run was started or stopped; force and replaceStale do not bypass this fence. ` +
+                'Call release:checkpoint-run again once the restricted session has released its disclosure.',
+            }),
+          },
+        ],
+      };
+    }
     // WI-6962: the host could not be asked whether a run is in flight, so we refused rather
     // than gambled. This is a DIFFERENT answer from already_running and needs a different
     // response: retry in a moment (the probe is a fork, and it fails under host pressure),

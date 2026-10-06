@@ -53,6 +53,98 @@ function isMigrationLockTimeout(error) {
   return /** @type {{ code?: unknown }} */ (error).code === '55P03';
 }
 
+const LOCK_HOLDER_LIMIT = 5;
+const LOCK_HOLDER_RELATION_LIMIT = 50;
+const LOCK_HOLDER_QUERY_CHARS = 120;
+// `(?<!…)` rather than `\b`: there is no word boundary before a leading `"`.
+const QUALIFIED_RELATION = /(?<![A-Za-z0-9_$"])("?)([A-Za-z_][A-Za-z0-9_$]*)\1\s*\.\s*("?)([A-Za-z_][A-Za-z0-9_$]*)\3/g;
+
+/**
+ * Postgres folds an unquoted identifier to lower case; a quoted one keeps its case.
+ * @param {string} quote `"` when the identifier was quoted, else empty
+ * @param {string} name
+ */
+function foldIdentifier(quote, name) {
+  return quote ? name : name.toLowerCase();
+}
+
+/**
+ * Schema-qualified `schema.relation` names a migration chunk mentions, in first-seen order.
+ * Non-relations (`alias.column`, `schema.function`) are harmless: they match no
+ * pg_class row in {@link describeMigrationLockHolders}.
+ * @param {string} ddl
+ * @returns {string[]}
+ */
+export function migrationRelationNames(ddl) {
+  const names = new Set();
+  for (const match of ddl.matchAll(QUALIFIED_RELATION)) {
+    names.add(`${foldIdentifier(match[1], match[2])}.${foldIdentifier(match[3], match[4])}`);
+    if (names.size >= LOCK_HOLDER_RELATION_LIMIT) break;
+  }
+  return [...names];
+}
+
+/** @param {number} seconds */
+function formatAge(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
+}
+
+/**
+ * WI-10004820: a SQLSTATE 55P03 means ANOTHER session holds a lock this
+ * migration's DDL conflicts with. When the retry and failure lines named no
+ * holder, a staging boot crash loop on migration 1295 (a 40-minute ad-hoc
+ * `psql` read holding ACCESS SHARE on the altered table) was attributed to
+ * backup contention. Name the granted relation-lock holders on the relations
+ * the failing chunk mentions, oldest transaction first, so the log answers "who".
+ * Read-only catalog query, run after the failed transaction was rolled back.
+ * Never throws: a failed diagnosis is reported inline instead of masking the 55P03.
+ * @param {{ unsafe: (sql: string) => Promise<unknown> }} client
+ * @param {string} ddl the chunk that hit the lock timeout
+ * @returns {Promise<string>}
+ */
+export async function describeMigrationLockHolders(client, ddl) {
+  const relations = migrationRelationNames(ddl);
+  if (relations.length === 0) {
+    return 'lock holders: not diagnosed (the failing chunk names no schema-qualified relation)';
+  }
+  const literals = relations.map((name) => `'${name.replace(/'/g, "''")}'`).join(', ');
+  try {
+    const rows = /** @type {Array<Record<string, unknown>>} */ (
+      (await client.unsafe(
+        `SELECT l.pid, coalesce(a.application_name, '') AS application_name, coalesce(a.state, '') AS state,
+                l.mode, n.nspname || '.' || c.relname AS relation,
+                extract(epoch FROM now() - coalesce(a.xact_start, a.query_start, a.backend_start))::int AS age_sec,
+                left(regexp_replace(coalesce(a.query, ''), '\\s+', ' ', 'g'), ${LOCK_HOLDER_QUERY_CHARS}) AS query
+           FROM pg_locks l
+           JOIN pg_class c ON c.oid = l.relation
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+          WHERE l.locktype = 'relation' AND l.granted AND l.pid <> pg_backend_pid()
+            AND n.nspname || '.' || c.relname IN (${literals})
+          ORDER BY age_sec DESC NULLS LAST, l.pid
+          LIMIT ${LOCK_HOLDER_LIMIT}`,
+      )) ?? []
+    );
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return `lock holders: none granted on ${relations.join(', ')} at diagnosis time (the holder may already have released)`;
+    }
+    const holders = rows.map((row) => {
+      const app = String(row.application_name || 'unnamed');
+      const state = row.state ? `, ${String(row.state)}` : '';
+      const age = Number.isFinite(Number(row.age_sec)) ? `, txn ${formatAge(Number(row.age_sec))}` : '';
+      const query = row.query ? `: ${String(row.query)}` : '';
+      return `pid ${String(row.pid)} (${app}${state}${age}) holds ${String(row.mode)} on ${String(row.relation)}${query}`;
+    });
+    return `lock holders (oldest first): ${holders.join(' | ')}`;
+  } catch (error) {
+    const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error);
+    return `lock holders: diagnosis failed (${message})`;
+  }
+}
+
 /** @param {number} ms */
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -257,6 +349,7 @@ function migrationPosition(value, ddl, queryPrefix = MIGRATION_TRANSACTION_PREFI
  * @param {boolean | undefined} args.dataDirWasReused
  * @param {boolean} args.haltBoot
  * @param {string} [args.queryPrefix]
+ * @param {string | null} [args.lockHolders] {@link describeMigrationLockHolders} output for a 55P03
  * @returns {Error}
  */
 function wrapMigrationFailure({
@@ -267,8 +360,9 @@ function wrapMigrationFailure({
   dataDirWasReused,
   haltBoot,
   queryPrefix = MIGRATION_TRANSACTION_PREFIX,
+  lockHolders = null,
 }) {
-  const details = /** @type {{ message?: unknown, code?: unknown, position?: unknown }} */ (
+  const details = /** @type {{ message?: unknown, code?: unknown, position?: unknown, where?: unknown }} */ (
     cause && typeof cause === 'object' ? cause : {}
   );
   const causeMessage = String(details.message ?? cause ?? 'unknown migration error');
@@ -284,6 +378,17 @@ function wrapMigrationFailure({
     lines.push(`Offending statement near migration character ${position.character}: ${excerpt}`);
   } else {
     lines.push('The underlying error did not report a usable query position; inspect the migration file directly.');
+  }
+  // PL/pgSQL failures often have no outer position; PostgreSQL's context names
+  // the inner statement and block line (including dynamic ALTER ROLE failures).
+  if (typeof details.where === 'string' && details.where.trim()) {
+    lines.push(`PostgreSQL context: ${details.where.slice(0, MAX_STATEMENT_EXCERPT_CHARS)}`);
+  }
+  if (lockHolders) {
+    lines.push(
+      `Another session holds a lock this migration's DDL conflicts with — ${lockHolders}. ` +
+        'The migration SQL is not at fault: let that transaction finish, or cancel it (pg_cancel_backend(pid)) if it is an abandoned ad-hoc query, then restart.',
+    );
   }
   if (dataDirWasReused === true) {
     lines.push('This boot reused an existing Postgres data directory; its schema may predate assumptions in this migration.');
@@ -466,6 +571,8 @@ export async function applyPendingMigrations({ client, sqlDir, log = () => {}, s
     const queryPrefix = migrationTransactionPrefix(effectiveMigrationStatementTimeoutMs, bulkApply);
     let activeChunk = ddl;
     let rollbackCompleted = false;
+    /** @type {string | null} */
+    let lockHolders = null;
     try {
       await beforeApply?.(f, ddlRaw);
       const chunks = migrationTransactionChunks(ddl);
@@ -487,11 +594,13 @@ export async function applyPendingMigrations({ client, sqlDir, log = () => {}, s
             // eligible for another fail-fast attempt.
             await client.unsafe('ROLLBACK').catch(() => {});
             rollbackCompleted = true;
-            if (!isMigrationLockTimeout(err) || attempt >= MIGRATION_LOCK_RETRY_MAX_ATTEMPTS) throw err;
+            if (!isMigrationLockTimeout(err)) throw err;
+            lockHolders = await describeMigrationLockHolders(client, activeChunk);
+            if (attempt >= MIGRATION_LOCK_RETRY_MAX_ATTEMPTS) throw err;
             const delayMs = migrationLockRetryBackoffMs(attempt);
             log(
               `retry ${f} after SQLSTATE 55P03 lock timeout in ${delayMs}ms ` +
-                `(attempt ${attempt + 1}/${MIGRATION_LOCK_RETRY_MAX_ATTEMPTS})`,
+                `(attempt ${attempt + 1}/${MIGRATION_LOCK_RETRY_MAX_ATTEMPTS}); ${lockHolders}`,
             );
             await sleep(delayMs);
             // The next attempt starts a fresh transaction. If it fails too,
@@ -524,6 +633,7 @@ export async function applyPendingMigrations({ client, sqlDir, log = () => {}, s
         dataDirWasReused,
         haltBoot: !continueOnError,
         queryPrefix,
+        lockHolders: isMigrationLockTimeout(err) ? lockHolders : null,
       });
       if (continueOnError) {
         log(`FAILED ${failure.message}`);

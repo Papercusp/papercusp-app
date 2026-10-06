@@ -112,7 +112,7 @@ export async function classifyAddressee(
       bool_or(d.source <> 'contacts' AND ${address} = ANY (d.participants))      AS "asParticipant",
       bool_or(position(${address} in lower(coalesce(d.text, '') || ' '
                                            || coalesce(d.title, ''))) > 0)       AS "inBody"
-      FROM harness_shared.personal_documents d
+      FROM harness_shared.documents d
      WHERE d.workspace_id = ${params.workspaceId}
        AND d.user_id = ${params.userId}::uuid`;
   const row = rows[0];
@@ -129,7 +129,7 @@ async function verifyContact(
 ): Promise<boolean> {
   const rows = await sql<Array<{ hit: boolean }>>`
     SELECT true AS hit
-      FROM harness_shared.personal_documents d
+      FROM harness_shared.documents d
      WHERE d.workspace_id = ${params.workspaceId}
        AND d.user_id = ${params.userId}::uuid
        AND d.source = 'contacts'
@@ -145,7 +145,7 @@ async function verifyThreadParticipant(
 ): Promise<boolean> {
   const rows = await sql<Array<{ hit: boolean }>>`
     SELECT true AS hit
-      FROM harness_shared.personal_documents d
+      FROM harness_shared.documents d
      WHERE d.workspace_id = ${params.workspaceId}
        AND d.user_id = ${params.userId}::uuid
        AND d.source = ${params.source}

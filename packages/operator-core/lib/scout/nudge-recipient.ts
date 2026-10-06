@@ -84,9 +84,23 @@ const SU_OWNER_PREFIX = 'su-';
  */
 export type NudgeRecipient =
   | { kind: 'mug'; ownerId: string; why: string }
-  | { kind: 'su'; ownerId: string; ownerLabel: string; why: string }
+  | {
+      kind: 'su';
+      ownerId: string;
+      ownerLabel: string;
+      why: string;
+      /** The P-007 steward tier the chosen su was ranked in (see `stewardTier`). Carried
+       *  on the verdict so a caller can decide whether this recipient is one whose JOB is
+       *  the nudge (tier 0/1) or merely the most recently active peer (tier 2) — the
+       *  distinction `deliverScoutNudge`'s `wakeSu: 'grading-posture'` policy keys on. */
+      tier: StewardTier;
+    }
   | { kind: 'escalate'; why: string }
   | { kind: 'unresolved'; why: string };
+
+/** P-007 rung-2 preference tiers: 0 = the Blender steward, 1 = any GRADE-mode su,
+ *  2 = the most-recently-active fallback. */
+export type StewardTier = 0 | 1 | 2;
 
 export interface ResolveNudgeRecipientOpts {
   workspaceId: string;
@@ -212,7 +226,7 @@ async function readBlenderGoalIds(workspaceId: string): Promise<Set<string>> {
 function stewardTier(
   modes: ModeLike[] | undefined,
   blenderGoalIds: ReadonlySet<string>,
-): 0 | 1 | 2 {
+): StewardTier {
   if (!modes || modes.length === 0) return 2;
   if (!modes.some((m) => m.mode === GRADE_MODE)) return 2;
   const goalId = goalIdFromModes(modes);
@@ -391,6 +405,7 @@ export async function resolveNudgeRecipient(
       kind: 'su',
       ownerId: chosen.ownerId,
       ownerLabel: chosen.ownerLabel,
+      tier,
       why:
         `the Mug tier is RETIRED, so you are the reviewer — routed to ${tierWhy} ${chosen.ownerLabel} ` +
         `(${verdicts.get(chosen.ownerId)?.sessionState ?? 'unknown'}, ${liveSu.length} su candidate(s))`,
@@ -415,9 +430,35 @@ export interface DeliverScoutNudgeOpts {
   payload?: unknown;
   body?: string;
   harnessSlug?: string | null;
-  /** A true pager must re-invoke the selected su after the durable inbox write.
-   *  Quiet review/grade nudges leave this false and remain inject-only. */
-  wakeSu?: boolean;
+  /** Whether to re-invoke the selected su after the durable inbox write.
+   *   - `true` — a true PAGER: wake whoever the ladder chose (error-streak alarm).
+   *   - `'grading-posture'` — wake ONLY a recipient whose declared posture is the
+   *     nudge's own job (steward tier 0/1: the Blender steward or a GRADE-mode su).
+   *     A tier-2 recency-fallback su still receives the message, as an un-woken FYI.
+   *     WI-10004412: the grading backstop delivered inject-only to a DIFFERENT
+   *     recency-fallback su on every fire (13 fires/30d, the same 10 rows each time),
+   *     so the one rail whose purpose is to MAKE grading happen never started a turn.
+   *     Waking an arbitrary busy peer would trade that for interrupting the wrong agent;
+   *     waking a session that registered GRADE mode is waking the agent whose job it is.
+   *   - `false`/absent — inject-only for every recipient. */
+  wakeSu?: boolean | 'grading-posture';
+  /** DI seams forwarded to `resolveNudgeRecipient` (unit tests only). */
+  recipientSeams?: Pick<ResolveNudgeRecipientOpts, 'readAgentModesFn' | 'readBlenderGoalIdsFn'>;
+}
+
+/**
+ * PURE: does this delivery re-invoke its su recipient? Split out so the policy is
+ * assertable without the coord stack. Only an `su` verdict can be woken — a mug is
+ * woken by its own leg, and escalate/unresolved have no session to wake.
+ */
+export function shouldWakeSuRecipient(
+  recipient: NudgeRecipient,
+  wakeSu: DeliverScoutNudgeOpts['wakeSu'],
+): boolean {
+  if (recipient.kind !== 'su') return false;
+  if (wakeSu === true) return true;
+  if (wakeSu === 'grading-posture') return recipient.tier <= 1;
+  return false;
 }
 
 /**
@@ -431,6 +472,7 @@ export async function deliverScoutNudge(
   const recipient = await resolveNudgeRecipient({
     workspaceId: opts.workspaceId,
     mugOwner: opts.mugOwner,
+    ...opts.recipientSeams,
   });
 
   // ALWAYS run the legacy Mug delivery first — this addition is PURELY ADDITIVE, the
@@ -482,6 +524,15 @@ export async function deliverScoutNudge(
     `send its scout owner feedback, or deprecate it with learnings. Do not wait for a Mug or a Queen: ` +
     `that tier is RETIRED (retire-mug-kettle-su-only-2026-08-09), so nothing else will drain this. ` +
     `Before this ladder existed the nudge would have parked in the legacy '@role:mug' slot, where nobody drains it.`;
+  const wake = shouldWakeSuRecipient(recipient, opts.wakeSu);
+  // Say so when a grading-posture nudge reached a recency-fallback su un-woken: the
+  // recipient should know it is an FYI it was chosen for by recency alone, not a page.
+  const fyiNote =
+    recipient.kind === 'su' && opts.wakeSu === 'grading-posture' && !wake
+      ? `\n\nThis is an un-woken FYI: no session with a grading posture (GRADE mode) was live, so the ` +
+        `ladder fell back to recency and did not interrupt you. Register GRADE mode (mode:set { mode:'grade' }) ` +
+        `if you take on this grading, and later nudges will wake you.`
+      : '';
 
   try {
     await runWithWorkspace(opts.workspaceId, () =>
@@ -496,10 +547,17 @@ export async function deliverScoutNudge(
         {
           to,
           summary: opts.summary,
-          body: `${opts.body ?? opts.summary}${routingNote}`,
+          body: `${opts.body ?? opts.summary}${routingNote}${fyiNote}`,
           expectsReply: recipient.kind === 'escalate',
           harnessSlug: opts.harnessSlug,
-          extra: { scoutNudge: { route: recipient.kind, why: recipient.why, source: opts.source } },
+          extra: {
+            scoutNudge: {
+              route: recipient.kind,
+              why: recipient.why,
+              source: opts.source,
+              ...(recipient.kind === 'su' ? { tier: recipient.tier, woken: wake } : {}),
+            },
+          },
         },
       ),
     );
@@ -509,7 +567,7 @@ export async function deliverScoutNudge(
     // opt-in the alarm can select a live su, persist a message, and still never start
     // a turn for that recipient. Wake only after the durable write succeeds so a
     // failed send cannot produce an empty wake.
-    if (recipient.kind === 'su' && opts.wakeSu) {
+    if (recipient.kind === 'su' && wake) {
       const { wakeRecipients } = await import('../agent-tools/coordination/inbox-wake');
       await wakeRecipients([recipient.ownerId], {
         summary: opts.summary,

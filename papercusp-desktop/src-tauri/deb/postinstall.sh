@@ -166,6 +166,70 @@ DESK
   fi
 fi
 
+# ── Codex system skills root — inert, removes an idle CPU drain ─────────────
+# Codex's skills watcher watches /etc/codex/skills; when that dir is missing it
+# watches /etc itself with IN_OPEN, so every process start on the host (each
+# opens /etc/ld.so.cache) wakes every Codex agent session the Server runs
+# (EI-21417256075155406, measured 2026-10-01: ~5-30% of a core per idle session
+# under agent load, 0.1% once the dir existed). An empty dir is inert: Codex
+# loads no skills from it.
+mkdir -p "${DPKG_ROOT:-}/etc/codex/skills" >/dev/null 2>&1 || true
+
+# ── Codex sandbox on AppArmor-restricted hosts (WI-10004618) ────────────────
+# Ubuntu 23.10+ ships kernel.apparmor_restrict_unprivileged_userns=1. Codex's
+# Linux sandbox runs /usr/bin/bwrap, which then cannot create a user namespace
+# unless an AppArmor profile grants it `userns`. Without one, EVERY command a
+# Codex agent runs fails inside the sandbox while the run still reports
+# success (measured 2026-10-01 on stock Ubuntu 24.04: 0 of 4 recorded commands
+# executed). Grant exactly /usr/bin/bwrap that permission — the scoped fix the
+# Codex community uses (github.com/makash/codex-ubuntu24-bubblewrap-fix); the
+# global restriction stays on for every other binary. Ubuntu's own
+# bwrap-userns-restrict is NOT a substitute: it strips capabilities from
+# bwrap's children, which breaks bwrap's loopback setup (openai/codex#12572).
+# Never overwrite a profile another package or the administrator owns, and
+# remove ours again if the parser rejects it (an AppArmor without `userns`
+# rules), so an unloadable profile can never fail apparmor.service at boot.
+# Arguments exist so the behaviour is testable against a temp dir.
+papercusp_install_bwrap_userns_profile() {
+  aa_dir="$1"; restrict_sysctl="$2"; bwrap_bin="$3"
+  marker='# Managed by the papercusp-server package (WI-10004618).'
+  profile="$aa_dir/bwrap"
+  # Only kernels that HAVE the restriction need (or can parse) the grant.
+  [ -e "$restrict_sysctl" ] || return 0
+  [ -x "$bwrap_bin" ] || return 0
+  [ -d "$aa_dir" ] || return 0
+  command -v apparmor_parser >/dev/null 2>&1 || return 0
+  if [ -e "$profile" ] && ! grep -qF "$marker" "$profile" 2>/dev/null; then
+    return 0  # someone else's /etc/apparmor.d/bwrap — leave it alone
+  fi
+  for other in "$aa_dir"/*; do
+    [ -f "$other" ] && [ "$other" != "$profile" ] || continue
+    if grep -qE "^[[:space:]]*(profile[[:space:]]+[^[:space:]]+[[:space:]]+)?$bwrap_bin[[:space:]]+(flags=|\{)" "$other" 2>/dev/null; then
+      return 0  # another profile already attaches to bwrap
+    fi
+  done
+  cat > "$profile" <<PROFILE || { rm -f "$profile"; return 0; }
+$marker Removed with the package.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap $bwrap_bin flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+PROFILE
+  if ! apparmor_parser -r "$profile" >/dev/null 2>&1; then
+    rm -f "$profile"
+    echo "WARN: AppArmor rejected the bwrap userns profile; Codex sandboxed commands may fail on this host" >&2
+  fi
+  return 0
+}
+if [ -z "${DPKG_ROOT:-}" ]; then
+  papercusp_install_bwrap_userns_profile /etc/apparmor.d \
+    /proc/sys/kernel/apparmor_restrict_unprivileged_userns /usr/bin/bwrap || true
+fi
+
 # ── (2) ghostty — deferred, best-effort ─────────────────────────────────────
 # A postinst CANNOT call apt directly (dpkg holds the apt lock for THIS
 # transaction → deadlock), so defer the PPA-add + install to a detached worker

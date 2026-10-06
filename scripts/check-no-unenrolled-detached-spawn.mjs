@@ -113,6 +113,17 @@ export const ALLOWLIST = new Map([
   // these two should come off the list.
   ['packages/operator-core/lib/agent-tools/testing/run.ts', 'detached ONLY to lead a process group so a timeout group-kills vitest; the child is awaited and dies with the call'],
   ['packages/operator-core/lib/agent-tools/build/typecheck.ts', 'detached ONLY to lead a process group so a timeout group-kills tsc; the child is awaited and dies with the call'],
+  // Same category-(2) lifecycle: the closure worker is bounded by its request
+  // deadline, terminated in `finally`, and awaited through exit before the
+  // preflight settles. `detached` supplies only the POSIX group that cleanup kills.
+  ['packages/operator-core/lib/agent-tools/testing/mutation-probe-fence.ts', 'detached ONLY to let the request deadline kill the esbuild worker process group; testImportClosures terminates it in finally and awaits worker exit before the preflight settles'],
+  ['packages/operator-core/lib/release/admission-fix-precheck.ts', 'detached ONLY to lead a process group so a timeout (or a stdout-holding grandchild after exit) group-kills the pre-check subtree; the child is awaited and dies with the call (WI-10004928 part 5)'],
+  // Same category-(2) shape, verified first-hand (WI-10004340): each spawn site is inside
+  // `await new Promise((resolve) => …)` that resolves on the child's `close`, and `detached`
+  // exists only so the timeout can `process.kill(-child.pid, 'SIGTERM')` the whole replay /
+  // record CLI group. Nothing outlives the awaiting call.
+  ['scripts/agent-capacity/load-driver.ts', 'detached ONLY to lead a process group so the replay timeout group-kills the CLI; the child is awaited (Promise resolves on close) and dies with the call'],
+  ['scripts/agent-capacity/record-session.ts', 'detached ONLY to lead a process group so the record timeout group-kills the CLI; the child is awaited (Promise resolves on close) and dies with the call'],
   ['libs/generic/deployment-driver/src/workspace-host-agent-authentication.ts', 'detached ONLY to lead the awaited agent probe process group; timeout and output-limit paths kill runuser plus its descendants, closing inherited pipes before the host initializer exits (EI-22527750869820737)'],
   // Surfaced for the FIRST time by the AST trigger: `detached: detach` at :9289, where
   // `const detach = opts.killProcessGroupOnTimeout === true`. The literal-text predicate

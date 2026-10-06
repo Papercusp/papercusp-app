@@ -30,27 +30,38 @@ papercusp_cargo_metadata_target_dir() {
     echo "ERROR: papercusp_cargo_metadata_target_dir needs a Cargo project directory" >&2
     return 2
   fi
-  node - "$project" <<'JS'
-const { execFileSync } = require('node:child_process');
-const path = require('node:path');
-const env = { ...process.env };
-// The caller already honored a non-empty explicit override. An exported empty
-// value must not hide Cargo's configuration during this read-only resolution.
-delete env.CARGO_TARGET_DIR;
-try {
-  const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--no-deps', '--format-version', '1'], {
-    cwd: process.argv[2], env, encoding: 'utf8', timeout: 10000,
-    maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-  }));
-  if (typeof metadata.target_directory !== 'string' || !path.isAbsolute(metadata.target_directory)) {
-    throw new Error('Cargo metadata did not return an absolute target_directory');
-  }
-  process.stdout.write(metadata.target_directory);
-} catch (error) {
-  console.error(`ERROR: cannot resolve Cargo target directory for ${process.argv[2]} — refusing to guess a different filesystem: ${String(error.stderr || error.message).slice(0, 1200)}`);
-  process.exit(1);
-}
-JS
+  # python3, not node (WI-10005239): build managers run these scripts with a
+  # minimal PATH (/usr/bin:/bin). Callers add CARGO_HOME/bin for cargo itself,
+  # but node lives outside /usr/bin on the build hosts, so a node helper died
+  # with exit 127 before Cargo was ever asked. /usr/bin/python3 is present on
+  # every Linux build host that sources this file.
+  local py
+  py="$(command -v python3 || true)"
+  if [[ -z "$py" ]]; then
+    echo "ERROR: cannot resolve Cargo target directory for $project — python3 not found on PATH ($PATH); refusing to guess a different filesystem" >&2
+    return 1
+  fi
+  "$py" - "$project" <<'PY'
+import json, os, subprocess, sys
+project = sys.argv[1]
+env = dict(os.environ)
+# The caller already honored a non-empty explicit override. An exported empty
+# value must not hide Cargo's configuration during this read-only resolution.
+env.pop('CARGO_TARGET_DIR', None)
+try:
+    proc = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
+                          cwd=project, env=env, stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=10)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr or f'cargo metadata exited {proc.returncode}')
+    target = json.loads(proc.stdout).get('target_directory')
+    if not isinstance(target, str) or not os.path.isabs(target):
+        raise RuntimeError('Cargo metadata did not return an absolute target_directory')
+    sys.stdout.write(target)
+except Exception as error:  # noqa: BLE001 — every failure is a refusal, never a guess
+    sys.stderr.write(f'ERROR: cannot resolve Cargo target directory for {project} — refusing to guess a different filesystem: {str(error)[:1200]}\n')
+    sys.exit(1)
+PY
 }
 
 papercusp_cargo_target_root() {

@@ -30,6 +30,7 @@ import {
   type SocialPlatformRow,
   type SocialWriteVerb,
 } from '../external-triggers/social/platform-registry';
+import { assertDisclosurePermits } from '../personal-vault/disclosure-ledger';
 import { assertTrustedAddressee, type AddresseeDecision, type AddresseeProvenance } from './addressing';
 import {
   resolveCanonicalDocument,
@@ -938,6 +939,11 @@ export async function replyToCanonicalSocialPost(
     ref: string | SocialPostRef;
     text: string;
     visibility?: SocialVisibility | null;
+    /**
+     * Reader-set labels: see `sendNewMail` in ./mail. A post's audience cannot be
+     * enumerated as mailboxes, so any active disclosure refuses it.
+     */
+    agentOwnerId: string | null;
   },
 ): Promise<SocialReplyResult> {
   const text = params.text.trim();
@@ -948,6 +954,13 @@ export async function replyToCanonicalSocialPost(
     workspaceId: params.workspaceId,
     userId: params.userId,
     ref: params.ref,
+  });
+  await assertDisclosurePermits(sql, {
+    workspaceId: params.workspaceId,
+    userId: params.userId,
+    agentOwnerId: params.agentOwnerId,
+    recipients: null,
+    sink: `${ref.platform}:reply`,
   });
   const coordinates = resolveSocialReplyCoordinates(doc);
   const visibility = resolveReplyVisibility(coordinates.parentVisibility, params.visibility);
@@ -1086,6 +1099,8 @@ export async function postToCanonicalSocialDestination(
     text: string;
     visibility?: SocialVisibility | null;
     provenance: AddresseeProvenance;
+    /** See `replyToCanonicalSocialPost`. */
+    agentOwnerId: string | null;
   },
 ): Promise<SocialPostResult> {
   const text = params.text.trim();
@@ -1114,6 +1129,16 @@ export async function postToCanonicalSocialDestination(
     userId: params.userId,
     destination: ref.destination,
     provenance: params.provenance,
+  });
+  // Beside rail 2 and for the same reason: before any credential is resolved,
+  // and regardless of the publish flag, so the echo never promises a post the
+  // labels would refuse.
+  await assertDisclosurePermits(sql, {
+    workspaceId: params.workspaceId,
+    userId: params.userId,
+    agentOwnerId: params.agentOwnerId,
+    recipients: null,
+    sink: `${ref.platform}:${ref.destination}`,
   });
 
   const { context } = await resolveSocialOutboundContext(sql, {

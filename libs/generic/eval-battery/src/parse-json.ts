@@ -5,6 +5,10 @@
  * `llm-client` drags in). Factored out of the gym (`gym/parse-json.ts`) into the
  * shared eval-battery engine (reconciliation D-001) unchanged.
  */
+import { captureSourceHash } from './source-identity';
+
+export const PARSE_JSON_SOURCE_HASH = captureSourceHash(import.meta.url);
+
 export function tryParseJson(text: string): unknown {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);

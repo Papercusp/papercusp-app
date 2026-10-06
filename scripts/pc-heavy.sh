@@ -46,10 +46,35 @@
 #                         scarce. Applies to a FIXED PC_HEAVY_SLOTS too, never
 #                         clamps below 1, and fails open on any unreadable
 #                         input. off/false/no also disable.
-#   PC_HEAVY_MEM_PER_SLOT_GIB  GiB budgeted per admitted heavy run (default 14 —
-#                         measured `tsc -p packages/operator-core` peak RSS
-#                         12.74 GiB on 2026-09-27; plan
-#                         host-memory-reduction-2026-09-27 P-003).
+#   PC_HEAVY_MEM_PER_SLOT_GIB  GiB budgeted per admitted heavy run, for EVERY
+#                         job, with the count clamp (MemAvailable / this). When
+#                         unset the reserve is per job CLASS (WI-10005334):
+#                         `typecheck` (any argv word tsc / tsgo / lint:tsc /
+#                         lint-tsc*.mjs / vue-tsc / --noEmit) or `other`, each
+#                         DERIVED from this host's job-peaks ledger rows of that
+#                         class (see PC_HEAVY_PEAK_LEDGER and
+#                         _mem_per_slot_resolve; WI-10005184), falling back to
+#                         14 GiB for a typecheck — the measured
+#                         `tsc -p packages/operator-core` peak RSS 12.74 GiB on
+#                         2026-09-27 plus margin (plan
+#                         host-memory-reduction-2026-09-27 P-003) — and 4 GiB for
+#                         anything else (largest measured install 3.6 GiB).
+#   PC_HEAVY_MEM_ADMISSION "headroom"(default)/"count". headroom (only without
+#                         PC_HEAVY_MEM_PER_SLOT_GIB): admit a job iff no other
+#                         holder runs, or MemAvailable minus every running
+#                         holder's UNUSED reserve (reserve - its live anon) is
+#                         at least this job's class reserve. Holders publish
+#                         <PC_HEAVY_DIR>/reserves/rec.<id> (kernel-flocked for
+#                         their lifetime) and the monitor writes their live anon
+#                         to anon.<id>. count: the pre-WI-10005334 rule, one
+#                         reserve (the larger class) charged to every slot.
+#   PC_HEAVY_JOB_CLASS    typecheck|other — overrides the argv classification.
+#   PC_HEAVY_MEM_RESERVE_TYPECHECK_DEFAULT_GIB / _OTHER_DEFAULT_GIB
+#                         the per-class cold-start constants (14 / 4).
+#   PC_HEAVY_MEM_PER_SLOT_QUANTILE / _WINDOW / _MIN_JOBS / _MIN_SPAN_SEC
+#                         derivation knobs, applied per class (defaults 100 =
+#                         max / last 100 jobs / at least 10 / spanning at least
+#                         86400 s).
 #   PC_HEAVY_MEM_PSI_BACKOFF  memory PSI full avg10 at or above which the
 #                         budget is HALVED (default 5, the threshold
 #                         infra-liveness already alerts on). A box in reclaim
@@ -90,6 +115,26 @@
 #                         plausibly explain the observed pressure. Set to 0 to
 #                         restore the unconditional pre-fix election.
 #   PC_HEAVY_MEM_PSI_SAMPLE_SEC  post-admission sample cadence (default 2s).
+#   PC_HEAVY_PEAK_LEDGER  per-job peak-memory ledger (WI-10005184). Default
+#                         <PC_HEAVY_DIR>/job-peaks.tsv; empty, 0 or off disables.
+#                         An admitted job runs in its CALLER's cgroup, so the
+#                         cgroup cannot say what one job used. Instead the
+#                         preemptible monitor sums RssAnon and VmRSS over every
+#                         process in the job's own session (the setsid group
+#                         it already owns for preemption) and, when the leader
+#                         exits, appends one line:
+#                           at=<epoch> anon_mib=<peak> rss_mib=<peak>
+#                           samples=<n> secs=<wall> exit=<rc> [class=<c>]
+#                           label=<cmd words>
+#                         anon_mib is the budgeting number: VmRSS double-counts
+#                         file pages shared between worker processes. A peak is
+#                         a sampled maximum, so a spike shorter than the cadence
+#                         can be missed, and an OOM-killed job (exit=137)
+#                         records only the peak reached before the kill.
+#   PC_HEAVY_PEAK_SAMPLE_SEC  peak sampling cadence in whole seconds (default 2;
+#                         independent of PC_HEAVY_PSI_ADMISSION).
+#   PC_HEAVY_PEAK_LEDGER_MAX  lines kept in the ledger (default 500). It is
+#                         trimmed back to this many when it reaches twice it.
 #   PC_HEAVY_MEM_PSI_OVERRIDE_FILE  dynamic test/operator override: its first
 #                         line is the numeric full-avg10 sample and takes
 #                         precedence over /proc and the scalar override.
@@ -432,7 +477,10 @@ set -uo pipefail
 
 # ── Flock holder diagnostics (EI-21322804786723906) ─────────────────────────
 # Diagnostic-only helpers shared by the exclusive barrier and the retry path.
-# `/proc/locks` is the lock authority and is cheap to read directly. A row whose
+# `/proc/locks` is the lock authority, but read it ONCE: a bash `while read`
+# loop issues one read(2) per line, and the kernel regenerates the seq_file up
+# to that offset each time, so a line-wise scan is quadratic (measured 1.9s for
+# ~1,460 rows at load ~200, vs 22ms for one bulk read). A row whose
 # second token is `->` is a BLOCKED WAITER, not a holder, so it is ignored. The
 # kernel records the PID of the short-lived `flock <fd>` helper that originally
 # acquired an inherited open-file description; after that helper exits, the
@@ -475,7 +523,7 @@ _pc_heavy_publish_lock_owner() {
 _exclusive_describe_holders() {
   local _file="${1:-}" _target='' _dev='' _inode='' _major='' _minor=''
   local _lock_target='' _lock_id='' _kind='' _advisory='' _mode='' _pid=''
-  local _row_target='' _rest='' _candidate='' _out=''
+  local _row_target='' _rest='' _candidate='' _out='' _locks=''
   [ -n "$_file" ] || return 0
   [ -e "$_file" ] || return 0
   _target="$(stat -Lc '%d:%i' "$_file" 2>/dev/null || true)"
@@ -483,7 +531,9 @@ _exclusive_describe_holders() {
 
   # Fast path for pc-heavy-owned locks. A waiter never publishes, so it cannot
   # overwrite the real owner's candidate while merely holding the path open.
-  IFS= read -r _candidate < "${_file}.owner" 2>/dev/null || _candidate=''
+  # The group matters: in `read < f 2>/dev/null` the input redirect fails
+  # before stderr is redirected, so a missing .owner printed noise.
+  { IFS= read -r _candidate < "${_file}.owner"; } 2>/dev/null || _candidate=''
   _out="$(_pc_heavy_verified_holder_desc "$_file" "$_target" "$_candidate" 2>/dev/null || true)"
   if [ -n "$_out" ]; then
     printf '%s' "$_out"
@@ -500,6 +550,8 @@ _exclusive_describe_holders() {
   _major=$(( ((_dev >> 8) & 0xfff) | ((_dev >> 32) & ~0xfff) ))
   _minor=$(( (_dev & 0xff) | ((_dev >> 12) & ~0xff) ))
   printf -v _lock_target '%02x:%02x:%s' "$_major" "$_minor" "$_inode"
+  { _locks="$(< /proc/locks)"; } 2>/dev/null || return 0
+  [ -n "$_locks" ] || return 0
   while read -r _lock_id _kind _advisory _mode _pid _row_target _rest; do
     # Blocked rows are `<id>: -> FLOCK ...`, so `_kind` is `->` and cannot
     # satisfy this holder shape.
@@ -509,7 +561,7 @@ _exclusive_describe_holders() {
     [ -n "$_out" ] || continue
     printf '%s' "$_out"
     return 0
-  done < /proc/locks 2>/dev/null
+  done <<< "$_locks"
 }
 
 # Probe an advisory flock without perturbing the lock owner. This is separate
@@ -708,7 +760,10 @@ _pc_heavy_internal_preempt_run() {
   local _psi_lock_file="$_psi_admission_dir/coordinator.lock"
   local _psi_retry_handle='' _psi_admitted_at='' _psi_child_start_ticks=''
   local _psi_cgroup_path='' _psi_memory_current_mib='' _psi_state='active'
-  local _psi_frozen_since=0
+  # _psi_frozen_since (s) drives the max-freeze expiry; _psi_frozen_since_ms drives the
+  # frozen_total_ms accounting below. A 1 s clock recorded a sub-second scarcity freeze/thaw
+  # as 0 ms (gate run 014f2801, pc-heavy-psi-scarcity-gate.test.ts).
+  local _psi_frozen_since=0 _psi_frozen_since_ms=0
   # EI-21903376339103215: cumulative wall-clock ms this admission has spent SIGSTOPped, and how
   # many freeze episodes contributed to it. Persisted via _psi_write_record so a child that
   # inherits PC_HEAVY_ADMISSION_DIR/PC_HEAVY_ADMISSION_ID can read, after it thaws, how much of
@@ -720,6 +775,19 @@ _pc_heavy_internal_preempt_run() {
   local _psi_next_sample=0 _psi_last_undetermined=''
   local _psi_finalization_seen_at='' _psi_finalization_expired=0
   local _psi_selected_id='' _psi_total_mib=0 _psi_record_count=0 _psi_unreadable_count=0
+  # Per-job peak memory (WI-10005184); see PC_HEAVY_PEAK_LEDGER in the header.
+  # `-` not `:-` so an explicitly EMPTY value disables the ledger.
+  local _peak_ledger="${PC_HEAVY_PEAK_LEDGER-$_preempt_pid_dir/job-peaks.tsv}"
+  local _peak_sample_sec="${PC_HEAVY_PEAK_SAMPLE_SEC:-2}"
+  local _peak_ledger_max="${PC_HEAVY_PEAK_LEDGER_MAX:-500}"
+  local _peak_label="${PC_HEAVY_PEAK_LABEL:-}"
+  local _peak_anon_kib=0 _peak_rss_kib=0 _peak_samples=0 _peak_next_sample=0 _peak_started_at=0
+  # WI-10005334: the admitting wrapper's job class (recorded on the ledger row)
+  # and the file where this job's live anonymous MiB is published, so a waiter
+  # charges this holder only the part of its reserve it has not used yet.
+  local _peak_class="${PC_HEAVY_PEAK_CLASS:-}"
+  local _reserve_anon_file="${PC_HEAVY_RESERVE_ANON_FILE:-}"
+  case "$_peak_class" in typecheck|other) ;; *) _peak_class='' ;; esac
 
   # The outer wrapper uses this private sentinel to distinguish a supervisor
   # that never started from a real child exit. Touch it before any setup that
@@ -755,6 +823,11 @@ _pc_heavy_internal_preempt_run() {
   case "$_preempt_term_grace" in ''|*[!0-9]*) _preempt_term_grace=30 ;; esac
   case "$_preempt_poll" in ''|*[!0-9.]*) _preempt_poll=0.1 ;; esac
   case "$_preempt_ready_max" in ''|*[!0-9]*) _preempt_ready_max=600 ;; esac
+  case "$_peak_ledger" in 0|off|OFF|false|FALSE|no|NO) _peak_ledger='' ;; esac
+  case "$_peak_sample_sec" in ''|0|*[!0-9]*) _peak_sample_sec=2 ;; esac
+  case "$_peak_ledger_max" in ''|0|*[!0-9]*) _peak_ledger_max=500 ;; esac
+  # One ledger line per job: no field separator or line break may survive.
+  _peak_label="${_peak_label//[$'\t\n\r']/ }"
   case "$_preempt_caller_pid" in ''|*[!0-9]*) _preempt_caller_pid=''; _preempt_caller_start_ticks='' ;; esac
   case "$_preempt_caller_start_ticks" in
     ''|*[!0-9]*) _preempt_caller_pid=''; _preempt_caller_start_ticks='' ;;
@@ -877,6 +950,92 @@ _pc_heavy_internal_preempt_run() {
         rm -f "$_result_tmp" 2>/dev/null || true
       fi
     fi
+  }
+
+  # Per-job peak memory (WI-10005184). An admitted job shares its caller's
+  # cgroup, so memory.current answers for the caller, not the job. The job's
+  # own process tree is exact: walk it from the leader through
+  # /proc/<pid>/task/*/children (CONFIG_PROC_CHILDREN, on by default in stock
+  # Debian/Ubuntu kernels) and sum RssAnon/VmRSS from each /proc/<pid>/status.
+  # Deliberately NOT `ps -s <sid>`: that scans every process on the host and
+  # measured ~0.64 s of CPU per call on a ~10k-process box (2026-10-02), far
+  # too costly at a 2 s cadence times every running heavy job. This walk reads
+  # only the job's own entries — measured the same day at ~16 ms for a
+  # 15-process tree and ~94 ms for 86 processes, with every status file summed
+  # in ONE cat|awk pass (a bash read loop per status file cost 2-3x that).
+  # A descendant that re-parents away (double-fork daemon) leaves the tree and
+  # is not counted; heavy jobs do not do that.
+  _peak_sample() {
+    local -a _queue=() _kids=() _files=()
+    local _pid='' _f='' _sums='' _seen=0 _anon=0 _rss=0 _i=0
+    [ -n "${_peak_ledger:-}" ] || [ -n "${_reserve_anon_file:-}" ] || return 0
+    case "${_preempt_child_pid:-}" in ''|*[!0-9]*) return 0 ;; esac
+    _queue=("$_preempt_child_pid")
+    # Index walk (no array shifting). The bound only guards a pathological
+    # tree; a real job is far below it.
+    while [ "$_i" -lt "${#_queue[@]}" ] && [ "$_i" -lt 4096 ]; do
+      _pid="${_queue[$_i]}"
+      _i=$(( _i + 1 ))
+      case "$_pid" in ''|*[!0-9]*) continue ;; esac
+      _files+=("/proc/$_pid/status")
+      for _f in /proc/"$_pid"/task/*/children; do
+        _kids=()
+        # No trailing newline, so read returns 1 after filling; a process that
+        # exited mid-walk makes the redirection fail, silently.
+        read -r -a _kids 2>/dev/null < "$_f" || true
+        [ "${#_kids[@]}" -gt 0 ] && _queue+=("${_kids[@]}")
+      done
+    done
+    # cat skips a status file whose process has exited and keeps going (mawk
+    # would abort on it), so one vanished worker cannot void the sample. Its
+    # non-zero status is swallowed INSIDE the pipe: under `set -o pipefail` it
+    # would otherwise fail the whole substitution and discard a good reading.
+    _sums="$({ cat "${_files[@]}" 2>/dev/null || true; } | awk '
+      $1 == "Name:" { n++ } $1 == "RssAnon:" { a += $2 } $1 == "VmRSS:" { r += $2 }
+      END { printf "%d %d %d\n", n, a, r }')"
+    read -r _seen _anon _rss <<<"${_sums:-0 0 0}" || true
+    case "${_seen:-}:${_anon:-}:${_rss:-}" in *[!0-9:]*|:*|*::*|*:) return 0 ;; esac
+    [ "$_seen" -gt 0 ] || return 0
+    # Live, not peak: a waiter subtracts this from the holder's reserve because
+    # MemAvailable already excludes it. A torn read there parses as 0, which
+    # charges the full reserve — the safe direction.
+    if [ -n "${_reserve_anon_file:-}" ]; then
+      printf '%s\n' "$(( _anon / 1024 ))" > "$_reserve_anon_file" 2>/dev/null || true
+    fi
+    _peak_samples=$(( _peak_samples + 1 ))
+    if [ "$_anon" -gt "$_peak_anon_kib" ]; then _peak_anon_kib="$_anon"; fi
+    if [ "$_rss" -gt "$_peak_rss_kib" ]; then _peak_rss_kib="$_rss"; fi
+    return 0
+  }
+
+  # Append this job's peak once the leader has exited. Best effort: a busy
+  # lock or an unwritable directory loses one line and never fails the job.
+  _peak_record() {
+    local _rc="$1" _now=0
+    [ -n "${_peak_ledger:-}" ] || return 0
+    [ "${_peak_samples:-0}" -gt 0 ] || return 0
+    printf -v _now '%(%s)T' -1
+    mkdir -p "$(dirname "$_peak_ledger")" 2>/dev/null || true
+    (
+      flock -w 2 9 || exit 0
+      # class= sits before label= so the field parsers, which stop at label=,
+      # can read it; a row from a directly-driven monitor carries none.
+      printf 'at=%s anon_mib=%s rss_mib=%s samples=%s secs=%s exit=%s%s label=%s\n' \
+        "$_now" "$(( _peak_anon_kib / 1024 ))" "$(( _peak_rss_kib / 1024 ))" \
+        "$_peak_samples" "$(( _now - _peak_started_at ))" "$_rc" \
+        "${_peak_class:+ class=$_peak_class}" "$_peak_label" \
+        >> "$_peak_ledger" || exit 0
+      _lines="$(wc -l < "$_peak_ledger" 2>/dev/null)" || exit 0
+      if [ "${_lines:-0}" -ge $(( _peak_ledger_max * 2 )) ]; then
+        _trim="$_peak_ledger.$$.trim"
+        if tail -n "$_peak_ledger_max" "$_peak_ledger" > "$_trim" 2>/dev/null; then
+          mv -f "$_trim" "$_peak_ledger" 2>/dev/null || rm -f "$_trim" 2>/dev/null
+        else
+          rm -f "$_trim" 2>/dev/null
+        fi
+      fi
+    ) 9>>"$_peak_ledger.lock" 2>/dev/null || true
+    return 0
   }
 
   _psi_field() {
@@ -1025,7 +1184,7 @@ _pc_heavy_internal_preempt_run() {
 
   _psi_tick() {
     [ "${_psi_enabled:-0}" = 1 ] || return 0
-    local _sample='' _lock_fd='' _now='' _low_since='' _expire_frozen=0
+    local _sample='' _lock_fd='' _now='' _now_ms=0 _low_since='' _expire_frozen=0
     _sample="$(_pc_heavy_mem_psi_full_avg10 2>/dev/null)" || {
       if [ "$_psi_last_undetermined" != psi-unreadable ]; then
         _psi_emit undetermined psi-unreadable unavailable 0
@@ -1047,6 +1206,11 @@ _pc_heavy_internal_preempt_run() {
       return 0
     fi
     _now=$(date +%s)
+    # Fork-free millisecond clock for the frozen-time accounting only. EPOCHREALTIME is
+    # "<sec><locale decimal sep><6 digits>", so stripping non-digits yields microseconds.
+    _now_ms="${EPOCHREALTIME:-}"
+    _now_ms="${_now_ms//[!0-9]/}"
+    if [ -n "$_now_ms" ]; then _now_ms=$(( _now_ms / 1000 )); else _now_ms=$(( _now * 1000 )); fi
     if [ "$_sample" -ge "$_psi_high" ]; then
       rm -f "$_psi_recovery_file" 2>/dev/null || true
       # One pressure episode yields ONE root. Re-scanning active records after
@@ -1068,7 +1232,7 @@ _pc_heavy_internal_preempt_run() {
         # suspended until its much later outer watchdog fires.
         # EI-21903376339103215: account the frozen wall-clock time for this episode before the
         # state flips off `frozen` — _psi_frozen_since is only meaningful while state=frozen.
-        _psi_frozen_total_ms=$(( _psi_frozen_total_ms + (_now - _psi_frozen_since) * 1000 ))
+        _psi_frozen_total_ms=$(( _psi_frozen_total_ms + (_now_ms > _psi_frozen_since_ms ? _now_ms - _psi_frozen_since_ms : 1) ))
         _psi_frozen_episodes=$(( _psi_frozen_episodes + 1 ))
         _psi_write_record expired || true
         _psi_emit expired memory-psi-high-timeout "$_sample" "$_psi_total_mib"
@@ -1089,7 +1253,7 @@ _pc_heavy_internal_preempt_run() {
           # Same accounting as the expire and recovery paths: capture this
           # episode's frozen duration BEFORE _psi_write_record flips the state,
           # since _psi_frozen_since is only meaningful while state=frozen.
-          _psi_frozen_total_ms=$(( _psi_frozen_total_ms + (_now - _psi_frozen_since) * 1000 ))
+          _psi_frozen_total_ms=$(( _psi_frozen_total_ms + (_now_ms > _psi_frozen_since_ms ? _now_ms - _psi_frozen_since_ms : 1) ))
           _psi_frozen_episodes=$(( _psi_frozen_episodes + 1 ))
           _psi_write_record active || true
           rm -f "$_psi_recovery_file" 2>/dev/null || true
@@ -1147,6 +1311,7 @@ _pc_heavy_internal_preempt_run() {
           fi
           if kill -STOP -- "-${_preempt_child_pid:-}" 2>/dev/null; then
             _psi_frozen_since="$_now"
+            _psi_frozen_since_ms="$_now_ms"
             _psi_write_record frozen || true
             _psi_state=frozen
             _psi_emit frozen memory-psi-high "$_sample" "$_psi_total_mib"
@@ -1174,7 +1339,7 @@ _pc_heavy_internal_preempt_run() {
           if kill -CONT -- "-${_preempt_child_pid:-}" 2>/dev/null; then
             # EI-21903376339103215: same accounting as the expire path above — record this
             # episode's frozen duration before _psi_write_record flips state away from `frozen`.
-            _psi_frozen_total_ms=$(( _psi_frozen_total_ms + (_now - _psi_frozen_since) * 1000 ))
+            _psi_frozen_total_ms=$(( _psi_frozen_total_ms + (_now_ms > _psi_frozen_since_ms ? _now_ms - _psi_frozen_since_ms : 1) ))
             _psi_frozen_episodes=$(( _psi_frozen_episodes + 1 ))
             _psi_write_record active || true
             rm -f "$_psi_recovery_file" 2>/dev/null || true
@@ -1338,6 +1503,9 @@ _pc_heavy_internal_preempt_run() {
   # "child ... did not exit normally" after the monitor intentionally terminates
   # this group, which is an expected preemption outcome rather than a workload
   # diagnostic. The monitor itself remains the cleanup owner through its traps.
+  # An asynchronous command in non-interactive Bash otherwise receives
+  # /dev/null on fd 0. Preserve caller stdin explicitly: EOF can make a
+  # script-on-stdin workload exit zero without executing any of its program.
   setsid --wait bash -c '
     trap - PIPE
     _notify_fd="${PC_HEAVY_PREEMPT_NOTIFY_FD:-}"
@@ -1347,12 +1515,12 @@ _pc_heavy_internal_preempt_run() {
     esac
     unset PC_HEAVY_PREEMPT_NOTIFY_FD
     unset PC_HEAVY_CALLER_PID PC_HEAVY_CALLER_START_TICKS PC_HEAVY_DURABLE_CALLER
-    unset PC_HEAVY_PREEMPT_START_FILE
+    unset PC_HEAVY_PREEMPT_START_FILE PC_HEAVY_PEAK_LABEL PC_HEAVY_PEAK_CLASS PC_HEAVY_RESERVE_ANON_FILE
     _pid_file="$1"
     shift
     printf "%s\n" "$$" > "$_pid_file"
     exec "$@"
-  ' _ "$_preempt_pid_file" "$@" &
+  ' _ "$_preempt_pid_file" "$@" <&0 &
   _preempt_wait_pid=$!
   _preempt_start_deadline=$(( ${EPOCHSECONDS:-$(date +%s)} + 5 ))
   while [ ! -s "$_preempt_pid_file" ]; do
@@ -1384,6 +1552,7 @@ _pc_heavy_internal_preempt_run() {
       ;;
   esac
   _psi_init
+  printf -v _peak_started_at '%(%s)T' -1
 
   # The waitable leader defines COMMAND completion. A command may deliberately
   # daemonize a stdio-detached descendant; waiting for the whole process group
@@ -1414,6 +1583,10 @@ _pc_heavy_internal_preempt_run() {
         return "$_psi_tick_rc"
       fi
       _psi_next_sample=$(( _preempt_now + _psi_sample_sec ))
+    fi
+    if { [ -n "$_peak_ledger" ] || [ -n "$_reserve_anon_file" ]; } && [ "$_preempt_now" -ge "$_peak_next_sample" ]; then
+      _peak_sample
+      _peak_next_sample=$(( _preempt_now + _peak_sample_sec ))
     fi
     if _preempt_writer_is_held; then
       # Once the child has completed its irreversible derivation and published
@@ -1476,6 +1649,7 @@ _pc_heavy_internal_preempt_run() {
 
   wait "$_preempt_wait_pid"
   local _rc=$?
+  _peak_record "$_rc"
   rm -f "$_preempt_pid_file" 2>/dev/null || true
   _psi_remove_record
   _preempt_cleanup_ready_marker
@@ -1489,6 +1663,11 @@ if [ "${1:-}" = "--pc-heavy-internal-preempt-run" ]; then
   _pc_heavy_internal_preempt_run "$@"
   exit $?
 fi
+
+# WI-10005334: an inherited anon-file path belongs to an ENCLOSING holder. A
+# nested run's monitor would otherwise overwrite that holder's live reading
+# with its own; this wrapper exports its own path only once it publishes.
+unset PC_HEAVY_RESERVE_ANON_FILE
 
 # `--exclusive-all-slots` is the reciprocal release-materialization admission
 # path (WI-40774): drain every currently-held ordinary heavy slot, hold the whole
@@ -1602,6 +1781,12 @@ _caller_cgroup_headroom_mib() {
 }
 
 _guard_typecheck_cgroup_headroom() {
+  # WI-10005296 (plan agent-capacity-and-cost-gcp-2026-09-30 D-031): this guard is for THIS repo's
+  # dev tower. Its floor is the monorepo's own tsc heap, and its two outcomes (re-run outside the
+  # caller's cgroup, or refuse pointing at Papercusp agent tools) are wrong for a hosted customer
+  # agent, whose cgroup IS its memory limit and whose `tsc` is the customer's. The hosted profile
+  # sets PC_HEAVY_TYPECHECK_GUARD=0, so the typecheck simply waits for a slot like any heavy job.
+  case "${PC_HEAVY_TYPECHECK_GUARD:-1}" in 0|off|OFF|false|FALSE|no|NO) return 0 ;; esac
   _is_full_typecheck_command "$@" || return 0
 
   local _headroom _heap _overhead _needed _runner _reexec_rc _sentinel _child_rc
@@ -2064,6 +2249,300 @@ _gate_recheck_refusal() {
 # heavy run is what a busy box does, not a deadlock. This is a safety reserve
 # like the gate clamp, so (unlike load adaptation) it applies to an explicit
 # PC_HEAVY_SLOTS too. Escape hatch: PC_HEAVY_MEM_CLAMP=0.
+#
+# The per-slot GiB is resolved ONCE per invocation by _mem_per_slot_resolve
+# (WI-10005184), in this order:
+#   1. env     — PC_HEAVY_MEM_PER_SLOT_GIB when set (a garbage value -> 14).
+#   2. derived — from this host's per-job peak ledger (PC_HEAVY_PEAK_LEDGER,
+#      written by the preemptible monitor): the PC_HEAVY_MEM_PER_SLOT_QUANTILE
+#      (default 100 = max) of the anonymous-memory peaks of the last
+#      PC_HEAVY_MEM_PER_SLOT_WINDOW (default 100) jobs that ran >= 3 samples,
+#      plus 10% headroom, rounded UP to whole GiB, clamped to [1, 64]. Needs at
+#      least PC_HEAVY_MEM_PER_SLOT_MIN_JOBS (default 10) such jobs, spanning at
+#      least PC_HEAVY_MEM_PER_SLOT_MIN_SPAN_SEC (default 86400 = one day of
+#      this host's workload) from oldest to newest.
+#   3. default — 14, the measured constant above.
+# Jobs under 3 samples are excluded because their only sample is taken just
+# after start, which understates a compile's peak. The default statistic is the
+# MAX, mirroring how the 14 was set (largest measured peak plus ~10%): the
+# ledger mixes job types (installs, compiles, test sweeps), and any lower
+# quantile of a mixture can undersize the reserve for its largest type.
+#
+# Per-class reserves and headroom admission (WI-10005334, plan
+# agent-capacity-and-cost-gcp-2026-09-30 D-033). One reserve from the whole
+# ledger is set by its largest job type: measured on a spot e2-standard-16,
+# 61 compiles peaked at p50 8.5 / max 9.1 GiB while all 421 test runs stayed
+# under 1 GiB, so the derived 10 GiB charged every vitest job a compile's
+# reserve and held 24 agents where a flat 4 GiB held 32. Each class now
+# derives its own reserve with the same rails (class= on newer ledger rows;
+# older rows classify from their label words).
+#
+# The count clamp also counted memory twice: slots = live MemAvailable /
+# reserve, while running holders both kept their slot AND had their usage
+# already removed from MemAvailable. Headroom admission charges a running
+# holder only the part of its reserve it has not used yet (reserve - live
+# anon), and admits iff what remains covers this job's class reserve.
+_mem_per_slot_gib=14
+_mem_per_slot_source=default
+_mem_reserve_typecheck_gib=14
+_mem_reserve_typecheck_source=default
+_mem_reserve_other_gib=4
+_mem_reserve_other_source=default
+_mem_admission=headroom
+_mem_self_reserve_mib=14336
+_mem_unknown_reserve_mib=14336
+_mem_headroom_note=''
+_mem_refused=0
+_mem_rec_fd=''
+_mem_reserve_dir=''
+
+# Job class from argv. A script handed to `sh -c` is split into words (with
+# globbing off) so a wrapped compile still classifies. A false `typecheck` only
+# costs capacity; PC_HEAVY_JOB_CLASS overrides when argv cannot tell.
+_pc_heavy_job_class() {
+  case "${PC_HEAVY_JOB_CLASS:-}" in
+    typecheck|other) printf '%s\n' "$PC_HEAVY_JOB_CLASS"; return 0 ;;
+  esac
+  local -
+  local _arg='' _word='' IFS=$' \t\n'
+  local -a _words=()
+  set -f
+  for _arg in "$@"; do
+    _words=($_arg)
+    for _word in ${_words[@]+"${_words[@]}"}; do
+      case "${_word##*/}" in
+        lint-tsc*.mjs|lint:tsc|lint:tsc:*|tsc|tsc.cmd|tsgo|tsgo.cmd|vue-tsc|--noEmit)
+          printf 'typecheck\n'; return 0 ;;
+      esac
+    done
+  done
+  printf 'other\n'
+}
+
+# Print the chosen quantile (MiB) of one class's recent ledger peaks, or fail
+# when that class lacks the minimum job count / span (its cold start).
+_mem_class_peak_mib() {
+  local _class="$1" _ledger="$2" _q="$3" _window="$4" _min="$5" _span="$6"
+  # Field parse stops at label=, so command words can never pose as numbers.
+  # The span guard (oldest-to-newest `at` of the windowed rows) is the
+  # cold-start rail: a fresh ledger holds whatever ran first, and measured
+  # 2026-10-02 on the dev tower its first 39 rows were all npm installs
+  # (max 3.6 GiB) with no test sweep, which would have loosened the clamp
+  # 3.5x on jobs it had never seen.
+  awk -v want="$_class" '
+      {
+        a = ""; s = ""; t = ""; c = ""; lab = 0
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^label=/) { lab = i; break }
+          if ($i ~ /^anon_mib=[0-9]+$/) a = substr($i, 10)
+          else if ($i ~ /^samples=[0-9]+$/) s = substr($i, 9)
+          else if ($i ~ /^at=[0-9]+$/) t = substr($i, 4)
+          else if ($i ~ /^class=(typecheck|other)$/) c = substr($i, 7)
+        }
+        if (c == "") {
+          c = "other"
+          if (lab) for (j = lab; j <= NF; j++) {
+            w = $j; if (j == lab) w = substr(w, 7)
+            if (w ~ /^(lint-tsc.*[.]mjs|lint:tsc|lint:tsc:.*|tsc|tsc[.]cmd|tsgo|tsgo[.]cmd|vue-tsc|--noEmit)$/) { c = "typecheck"; break }
+          }
+        }
+        if (c == want && a != "" && s != "" && t != "" && s + 0 >= 3) print t, a
+      }' "$_ledger" 2>/dev/null | tail -n "$_window" | sort -k2,2n | awk -v q="$_q" -v min="$_min" -v span="$_span" '
+      {
+        v[NR] = $2
+        if (NR == 1 || $1 < lo) lo = $1
+        if (NR == 1 || $1 > hi) hi = $1
+      }
+      END {
+        if (NR == 0) exit 1
+        # Too little history to LOOSEN on, but the largest peak seen is still
+        # a floor (rows are sorted ascending, so v[NR] is the max).
+        if (NR < min || hi - lo < span) { print "cold", v[NR]; exit 0 }
+        i = int((q * NR + 99) / 100); if (i < 1) i = 1; if (i > NR) i = NR
+        print "derived", v[i]
+      }'
+}
+
+_mem_per_slot_resolve() {
+  local _env="${PC_HEAVY_MEM_PER_SLOT_GIB:-}" _ledger='' _q='' _window='' _min='' _span='' _mib=''
+  local _class='' _gib=0 _peak='' _kind='' _src='' _tc_def="${PC_HEAVY_MEM_RESERVE_TYPECHECK_DEFAULT_GIB:-14}"
+  local _ot_def="${PC_HEAVY_MEM_RESERVE_OTHER_DEFAULT_GIB:-4}"
+  case "$_tc_def" in ''|0|*[!0-9]*) _tc_def=14 ;; esac
+  case "$_ot_def" in ''|0|*[!0-9]*) _ot_def=4 ;; esac
+  _mem_reserve_typecheck_gib="$_tc_def"; _mem_reserve_typecheck_source=default
+  _mem_reserve_other_gib="$_ot_def"; _mem_reserve_other_source=default
+  case "${PC_HEAVY_MEM_ADMISSION:-headroom}" in
+    count|COUNT) _mem_admission=count ;;
+    *) _mem_admission=headroom ;;
+  esac
+  if [ -n "$_env" ]; then
+    # An explicit size keeps the pre-WI-10005334 rule exactly: that one size
+    # for every job, under the count clamp (hosted hosts pin this).
+    _mem_admission=count
+    case "$_env" in
+      *[!0-9]*) _mem_per_slot_gib=14; _mem_per_slot_source=default ;;
+      *) _mem_per_slot_gib="$_env"; _mem_per_slot_source=env ;;
+    esac
+    _mem_reserve_typecheck_gib="$_mem_per_slot_gib"; _mem_reserve_typecheck_source="$_mem_per_slot_source"
+    _mem_reserve_other_gib="$_mem_per_slot_gib"; _mem_reserve_other_source="$_mem_per_slot_source"
+  else
+    _ledger="${PC_HEAVY_PEAK_LEDGER-${_dir:-${XDG_RUNTIME_DIR:-/tmp}/pc-heavy-slots}/job-peaks.tsv}"
+    case "$_ledger" in 0|off|OFF|false|FALSE|no|NO) _ledger='' ;; esac
+    if [ -n "$_ledger" ] && [ -r "$_ledger" ]; then
+      _q="${PC_HEAVY_MEM_PER_SLOT_QUANTILE:-100}"
+      _window="${PC_HEAVY_MEM_PER_SLOT_WINDOW:-100}"
+      _min="${PC_HEAVY_MEM_PER_SLOT_MIN_JOBS:-10}"
+      _span="${PC_HEAVY_MEM_PER_SLOT_MIN_SPAN_SEC:-86400}"
+      case "$_q" in ''|0|*[!0-9]*) _q=100 ;; esac
+      [ "$_q" -gt 100 ] && _q=100
+      case "$_window" in ''|0|*[!0-9]*) _window=100 ;; esac
+      case "$_min" in ''|0|*[!0-9]*) _min=10 ;; esac
+      case "$_span" in ''|*[!0-9]*) _span=86400 ;; esac
+      for _class in typecheck other; do
+        _peak="$(_mem_class_peak_mib "$_class" "$_ledger" "$_q" "$_window" "$_min" "$_span")" || continue
+        _kind="${_peak%% *}"
+        _mib="${_peak#* }"
+        case "$_kind:$_mib" in derived:*|cold:*) ;; *) continue ;; esac
+        case "$_mib" in ''|*[!0-9]*) continue ;; esac
+        # +10% headroom, ceil to GiB: ceil(mib * 1.1 / 1024) == ceil(mib * 11 / 10240).
+        _gib=$(( (_mib * 11 + 10239) / 10240 ))
+        [ "$_gib" -lt 1 ] && _gib=1
+        [ "$_gib" -gt 64 ] && _gib=64
+        _src="derived:q${_q}-of-${_mib}MiB"
+        if [ "$_kind" = cold ]; then
+          # Cold start keeps the class constant — unless this class has already
+          # been seen to use more. The constants are per class now, and the
+          # `other` one (4 GiB) sits under jobs a wrapper script can hide a
+          # compile in (measured on the dev tower 2026-10-02: a `bash` wrapper
+          # around tsc peaked at 15 GiB as `other`).
+          _src="cold-start-max:${_mib}MiB"
+          if [ "$_class" = typecheck ]; then
+            [ "$_gib" -gt "$_mem_reserve_typecheck_gib" ] || continue
+          else
+            [ "$_gib" -gt "$_mem_reserve_other_gib" ] || continue
+          fi
+        fi
+        if [ "$_class" = typecheck ]; then
+          _mem_reserve_typecheck_gib="$_gib"; _mem_reserve_typecheck_source="$_src"
+        else
+          _mem_reserve_other_gib="$_gib"; _mem_reserve_other_source="$_src"
+        fi
+      done
+    fi
+    if [ "$_mem_admission" = count ]; then
+      # One reserve for every slot, as before: the larger class.
+      if [ "$_mem_reserve_typecheck_gib" -ge "$_mem_reserve_other_gib" ]; then
+        _mem_per_slot_gib="$_mem_reserve_typecheck_gib"; _mem_per_slot_source="$_mem_reserve_typecheck_source"
+      else
+        _mem_per_slot_gib="$_mem_reserve_other_gib"; _mem_per_slot_source="$_mem_reserve_other_source"
+      fi
+    elif [ "${_job_class:-other}" = typecheck ]; then
+      _mem_per_slot_gib="$_mem_reserve_typecheck_gib"; _mem_per_slot_source="$_mem_reserve_typecheck_source"
+    else
+      _mem_per_slot_gib="$_mem_reserve_other_gib"; _mem_per_slot_source="$_mem_reserve_other_source"
+    fi
+  fi
+  case "${PC_HEAVY_MEM_CLAMP:-1}" in 0|off|OFF|false|FALSE|no|NO) _mem_admission=off ;; esac
+  _mem_self_reserve_mib=$(( _mem_per_slot_gib * 1024 ))
+  if [ "$_mem_reserve_typecheck_gib" -ge "$_mem_reserve_other_gib" ]; then
+    _mem_unknown_reserve_mib=$(( _mem_reserve_typecheck_gib * 1024 ))
+  else
+    _mem_unknown_reserve_mib=$(( _mem_reserve_other_gib * 1024 ))
+  fi
+  return 0
+}
+
+# MemAvailable in MiB for the headroom test; the GiB overrides scale up.
+_pc_heavy_mem_avail_mib() {
+  local _raw=''
+  if [ -n "${PC_HEAVY_MEMAVAIL_GIB_OVERRIDE_FILE:-}" ] || [ -n "${PC_HEAVY_MEMAVAIL_GIB_OVERRIDE:-}" ]; then
+    _raw="$(_pc_heavy_mem_avail_gib)" || return 1
+    printf '%s\n' "$(( _raw * 1024 ))"
+    return 0
+  fi
+  _raw="$(awk '/^MemAvailable:/ { print int($2 / 1024); exit }' /proc/meminfo 2>/dev/null)"
+  case "$_raw" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$_raw"
+}
+
+# Publish this holder's reserve record, once. The record is created under a
+# temporary name, exclusively flocked, filled, then renamed into place, so a
+# reader never sees an unlocked live record. The kernel lock IS the liveness
+# proof: it dies with this process, and unlike a pid it means the same thing
+# from every PID namespace (capability:bash jobs run in their own).
+_mem_reserve_publish() {
+  [ "${_focused_lane:-0}" = 1 ] && return 0
+  [ -z "${_mem_rec_fd:-}" ] || return 0
+  [ -n "${_mem_reserve_dir:-}" ] || return 0
+  local _id='' _tmp='' _rfd=''
+  mkdir -p "$_mem_reserve_dir" 2>/dev/null || return 0
+  _id="$$.${EPOCHSECONDS:-$(date +%s)}.$RANDOM"
+  _tmp="$_mem_reserve_dir/tmp.$_id"
+  { exec {_rfd}>"$_tmp"; } 2>/dev/null || return 0
+  if ! flock -n "$_rfd" 2>/dev/null; then
+    eval "exec ${_rfd}>&-" 2>/dev/null || true
+    rm -f "$_tmp" 2>/dev/null || true
+    return 0
+  fi
+  printf 'class=%s reserve_mib=%s pid=%s\n' "${_job_class:-other}" "$_mem_self_reserve_mib" "$$" >&"$_rfd" 2>/dev/null || true
+  if mv -f "$_tmp" "$_mem_reserve_dir/rec.$_id" 2>/dev/null; then
+    _mem_rec_fd="$_rfd"
+    export PC_HEAVY_RESERVE_ANON_FILE="$_mem_reserve_dir/anon.$_id"
+  else
+    eval "exec ${_rfd}>&-" 2>/dev/null || true
+    rm -f "$_tmp" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# Does this job's class reserve fit beside the running holders' unused
+# reserves? 0 = admit. Fails OPEN on an unreadable MemAvailable, and always
+# admits when no holder runs (forward progress, like the count clamp's floor of
+# 1). Under memory PSI backoff MemAvailable is halved, the headroom form of the
+# count clamp's halved budget. Sets _mem_headroom_note for the queue message.
+_mem_headroom_admits() {
+  [ "${_mem_admission:-}" = headroom ] || return 0
+  [ "${_focused_lane:-0}" = 1 ] && return 0
+  [ -n "${_mem_reserve_dir:-}" ] || return 0
+  local _avail='' _psi='' _backoff="${PC_HEAVY_MEM_PSI_BACKOFF:-5}" _out=0 _live=0 _free=0
+  local _rec='' _id='' _line='' _res='' _anon='' _rfd=''
+  _avail="$(_pc_heavy_mem_avail_mib)" || return 0
+  case "$_backoff" in ''|*[!0-9]*) _backoff=5 ;; esac
+  _psi="$(_pc_heavy_mem_psi_full_avg10 2>/dev/null)" || _psi=''
+  case "$_psi" in
+    ''|*[!0-9]*) : ;;
+    *) [ "$_psi" -ge "$_backoff" ] && _avail=$(( _avail / 2 )) ;;
+  esac
+  for _rec in "$_mem_reserve_dir"/rec.*; do
+    [ -f "$_rec" ] || continue
+    _id="${_rec##*/rec.}"
+    _rfd=''
+    { exec {_rfd}<"$_rec"; } 2>/dev/null || continue
+    if flock -s -n "$_rfd" 2>/dev/null; then
+      # Nobody holds it: that holder has exited and the kernel released it.
+      eval "exec ${_rfd}<&-" 2>/dev/null || true
+      rm -f "$_rec" "$_mem_reserve_dir/anon.$_id" 2>/dev/null || true
+      continue
+    fi
+    _line=''
+    IFS= read -r _line <&"$_rfd" 2>/dev/null || true
+    eval "exec ${_rfd}<&-" 2>/dev/null || true
+    _res=''
+    if [[ " $_line" =~ \ reserve_mib=([0-9]+) ]]; then _res="${BASH_REMATCH[1]}"; fi
+    # A live holder whose record cannot be read is charged the largest reserve.
+    [ -n "$_res" ] || _res="$_mem_unknown_reserve_mib"
+    _anon=''
+    { IFS= read -r _anon < "$_mem_reserve_dir/anon.$_id"; } 2>/dev/null || _anon=''
+    case "$_anon" in ''|*[!0-9]*) _anon=0 ;; esac
+    _live=$(( _live + 1 ))
+    [ "$_res" -gt "$_anon" ] && _out=$(( _out + _res - _anon ))
+  done
+  _free=$(( _avail - _out ))
+  _mem_headroom_note="${_free} MiB free after ${_live} running reserve(s), ${_mem_self_reserve_mib} MiB needed"
+  [ "$_live" -eq 0 ] && return 0
+  [ "$_free" -ge "$_mem_self_reserve_mib" ]
+}
+
 _mem_clamp_slots() {
   local _n="$1"
   case "${PC_HEAVY_MEM_CLAMP:-1}" in
@@ -2079,7 +2558,7 @@ _mem_clamp_slots() {
   # Unreadable/garbage MemAvailable ⇒ fail open, exactly as if no clamp existed.
   case "$_avail_gib" in ''|*[!0-9]*) echo "$_n"; return ;; esac
 
-  local _per="${PC_HEAVY_MEM_PER_SLOT_GIB:-14}"
+  local _per="${_mem_per_slot_gib:-14}"
   case "$_per" in ''|*[!0-9]*) _per=14 ;; esac
   [ "$_per" -lt 1 ] && _per=1
 
@@ -2121,8 +2600,12 @@ _effective_slots() {
   fi
   # Memory clamp LAST: it is a physical ceiling, so it must be able to cut a
   # count the gate clamp already lowered — and must apply to a fixed
-  # PC_HEAVY_SLOTS, which the load-adaptive path never sees.
-  _n="$(_mem_clamp_slots "$_n")"
+  # PC_HEAVY_SLOTS, which the load-adaptive path never sees. Under headroom
+  # admission (WI-10005334) memory is tested per job at acquisition instead,
+  # so the count stays the CPU/gate ceiling.
+  if [ "${_mem_admission:-count}" = count ]; then
+    _n="$(_mem_clamp_slots "$_n")"
+  fi
   case "$_n" in ''|*[!0-9]*) _n=1 ;; esac
   echo "$_n"
 }
@@ -2134,6 +2617,8 @@ if [ -z "$_slots_base" ]; then
 fi
 _gate_active=0
 _gate_reserve_active && _gate_active=1
+_job_class="$(_pc_heavy_job_class "$@")"
+_mem_per_slot_resolve
 _slots="$(_effective_slots)"
 _gate_phase=""
 _gate_proto=""
@@ -2221,12 +2706,13 @@ if [ "$_is_focused_command" = 1 ]; then
   fi
 fi
 if [ "${PC_HEAVY_DEBUG:-}" = "1" ]; then
-  echo "[pc-heavy] slots=$_slots fixed=$_slots_fixed cores=$_cores floor=$_floor ceil=$_ceil gate=$_gate_active phase=${_gate_phase:-none} div=$_gate_div focused=$_focused_lane" >&2
+  echo "[pc-heavy] slots=$_slots fixed=$_slots_fixed cores=$_cores floor=$_floor ceil=$_ceil gate=$_gate_active phase=${_gate_phase:-none} div=$_gate_div focused=$_focused_lane mem_per_slot=${_mem_per_slot_gib}GiB source=$_mem_per_slot_source mem_admission=$_mem_admission class=$_job_class reserve_typecheck=${_mem_reserve_typecheck_gib}GiB:$_mem_reserve_typecheck_source reserve_other=${_mem_reserve_other_gib}GiB:$_mem_reserve_other_source" >&2
 fi
 _slot_dir="$_dir"
 if [ "$_focused_lane" = 1 ]; then
   _slot_dir="$_dir/focused"
 fi
+_mem_reserve_dir="$_dir/reserves"
 _timeout="${PC_HEAVY_TIMEOUT_SEC:-900}"
 if [ -z "${PC_HEAVY_TIMEOUT_SEC:-}" ]; then
   for _arg in "$@"; do
@@ -3045,8 +3531,8 @@ if [ "$_coalesce_enabled" = 1 ]; then
       # caller's own command, and the trap aborts partway through its cleanup
       # list rather than running all of it (WI-38277, observed live).
       trap '
-        if [ -n "${_c_out_tee_pid:-}" ]; then kill "${_c_out_tee_pid}" 2>/dev/null || true; fi
-        if [ -n "${_c_err_tee_pid:-}" ]; then kill "${_c_err_tee_pid}" 2>/dev/null || true; fi
+        if [ -n "${_c_out_tee_pid:-}" ]; then kill "${_c_out_tee_pid:-}" 2>/dev/null || true; fi
+        if [ -n "${_c_err_tee_pid:-}" ]; then kill "${_c_err_tee_pid:-}" 2>/dev/null || true; fi
         rm -rf "$_c_lockdir" 2>/dev/null
         rm -f "${_c_out_tmp:-}" "${_c_err_tmp:-}" "${_c_out_fifo:-}" "${_c_err_fifo:-}" 2>/dev/null
       ' EXIT
@@ -3088,12 +3574,47 @@ fi
 # tsc/vitest/build runs were being dropped on the floor.
 _held=""
 _held_path=""
-for _i in $(seq 0 $(( _slots - 1 ))); do
-  if { exec {_fd}>"$_slot_dir/slot.$_i"; } 2>/dev/null; then
-    if flock -n "$_fd"; then _held=1; _held_path="$_slot_dir/slot.$_i"; break; fi
-    eval "exec ${_fd}>&-" 2>/dev/null || true   # not ours — close it
+# One acquisition attempt across slot.0..slot.(_slots-1). Under headroom
+# admission (WI-10005334) the memory test, the slot flock and the reserve
+# publication happen under one short admission lock, so two waiters cannot both
+# spend the same headroom. A lock that cannot be taken in 2 s counts as "not
+# yet" and the next sweep retries. `_fd` stays global: it is the held slot.
+_try_acquire_slot() {
+  local _i='' _lfd=''
+  _mem_refused=0
+  if [ "${_mem_admission:-}" = headroom ] && [ "${_focused_lane:-0}" != 1 ]; then
+    if { exec {_lfd}>>"$_slot_dir/mem-admission.lock"; } 2>/dev/null; then
+      if ! flock -w 2 "$_lfd" 2>/dev/null; then
+        eval "exec ${_lfd}>&-" 2>/dev/null || true
+        _mem_refused=1
+        _mem_headroom_note='memory admission lock busy'
+        return 1
+      fi
+    else
+      _lfd=''
+    fi
+    if ! _mem_headroom_admits; then
+      if [ -n "$_lfd" ]; then eval "exec ${_lfd}>&-" 2>/dev/null || true; fi
+      _mem_refused=1
+      return 1
+    fi
   fi
-done
+  for _i in $(seq 0 $(( _slots - 1 ))); do
+    if { exec {_fd}>"$_slot_dir/slot.$_i"; } 2>/dev/null; then
+      if flock -n "$_fd"; then
+        _held=1
+        _held_path="$_slot_dir/slot.$_i"
+        _mem_reserve_publish
+        if [ -n "$_lfd" ]; then eval "exec ${_lfd}>&-" 2>/dev/null || true; fi
+        return 0
+      fi
+      eval "exec ${_fd}>&-" 2>/dev/null || true   # not ours — close it
+    fi
+  done
+  if [ -n "$_lfd" ]; then eval "exec ${_lfd}>&-" 2>/dev/null || true; fi
+  return 1
+}
+_try_acquire_slot || true
 
 # All slots busy → poll round-robin across ALL slots (non-blocking) until one
 # frees or the timeout elapses; run anyway once it elapses so a stuck holder
@@ -3133,9 +3654,14 @@ if [ -z "$_held" ]; then
   if [ "$_focused_lane" = 1 ]; then
     echo "[pc-heavy] queued for a focused test lane slot (all $_slots slot(s) busy) —" \
          "pid $$, waiting up to ${_timeout}s" >&2
+  elif [ "$_mem_refused" = 1 ]; then
+    echo "[pc-heavy] queued for a heavy slot (memory headroom: $_mem_headroom_note) —" \
+         "pid $$, waiting up to ${_timeout}s; $_job_class reserve ${_mem_per_slot_gib} GiB" \
+         "($_mem_per_slot_source)" >&2
   else
     echo "[pc-heavy] queued for a heavy slot (all $_slots slot(s) busy) —" \
-         "pid $$, waiting up to ${_timeout}s" >&2
+         "pid $$, waiting up to ${_timeout}s;" \
+         "memory reserve ${_mem_per_slot_gib} GiB/slot ($_mem_per_slot_source)" >&2
   fi
   _wait_start="${EPOCHSECONDS:-$(date +%s)}"  # EI-21894520557549786: fork-free clock read
   _fallback_deadline=$(( _wait_start + _timeout ))
@@ -3157,20 +3683,17 @@ if [ -z "$_held" ]; then
     else
       _slots="$(_effective_slots)"
     fi
-    for _i in $(seq 0 $(( _slots - 1 ))); do
-      if { exec {_fd}>"$_slot_dir/slot.$_i"; } 2>/dev/null; then
-        if flock -n "$_fd"; then _held=1; _held_path="$_slot_dir/slot.$_i"; break 2; fi
-        eval "exec ${_fd}>&-" 2>/dev/null || true   # not ours — close it
-      fi
-    done
+    if _try_acquire_slot; then break; fi
     _now="${EPOCHSECONDS:-$(date +%s)}"  # EI-21894520557549786: fork-free clock read
     # Periodic "still alive, still queued" heartbeat so a long wait (the
     # normal case under a hard gate clamp) never goes silent for minutes at a
     # stretch — same rationale as the enqueue line above, just amortized
     # across the wait instead of a single point-in-time print.
     if [ $(( _now - _last_heartbeat )) -ge "$_heartbeat_every" ]; then
+      _hb_mem=''
+      if [ "$_mem_refused" = 1 ]; then _hb_mem="; memory headroom: $_mem_headroom_note"; fi
       echo "[pc-heavy] still queued ($(( _now - _wait_start ))s elapsed, pid $$," \
-           "slots=$_slots)" >&2
+           "slots=$_slots$_hb_mem)" >&2
       _last_heartbeat="$_now"
     fi
     [ "$_now" -ge "$_fallback_deadline" ] && break
@@ -3199,12 +3722,33 @@ fi
 _gate_recheck_refusal "$@"
 if [ -n "$_held_path" ]; then
   _pc_heavy_publish_lock_owner "$_held_path"
+else
+  # Ran past the queue without a slot: its memory still has to be visible to
+  # the next waiter's headroom test (WI-10005334).
+  _mem_reserve_publish
 fi
 echo "[pc-heavy] slot acquired — starting real work" >&2
 
 # The child self-limits via the slot it now (or effectively) holds — tell the
 # admission gate not to also deny it.
 export PC_HEAVY_BYPASS=1
+
+# Label for the per-job peak ledger (WI-10005184): the first three non-option
+# words of the command, basenames only, so `npx tsc -p packages/operator-core`
+# records as `npx tsc operator-core`. Diagnostic only — budgeting reads the
+# numbers, never the label. A caller may set its own PC_HEAVY_PEAK_LABEL.
+if [ -z "${PC_HEAVY_PEAK_LABEL:-}" ]; then
+  _peak_words=()
+  for _peak_word in "$@"; do
+    case "$_peak_word" in -*) continue ;; esac
+    _peak_words+=("${_peak_word##*/}")
+    [ "${#_peak_words[@]}" -ge 3 ] && break
+  done
+  _peak_label="${_peak_words[*]:-}"
+  export PC_HEAVY_PEAK_LABEL="${_peak_label:0:80}"
+fi
+# The ledger row records the class this job was admitted as (WI-10005334).
+export PC_HEAVY_PEAK_CLASS="$_job_class"
 
 # Lower CPU (and IO, when available) priority so a held run yields to
 # interactive work and the CPUWeight-protected critical services.

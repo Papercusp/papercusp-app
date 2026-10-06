@@ -29,7 +29,7 @@ import { dataConditionSchema } from '@papercusp/rules';
 import { defineTool, lookupByMcpName, SU_ROLES } from '@papercusp/agent-mcp';
 import { resolveAgentIdentity } from '../coordination/identity';
 import { captureWakeHandleForOwner } from '../../events/await/handle';
-import { registerAwait, cancelAwait } from '../../events/await/store';
+import { registerAwait, cancelAwait, findMatchingActiveStandingWatch } from '../../events/await/store';
 import { startAwaitSweeper, deliverToSpecificAwaits } from '../../events/await/engine';
 import {
   PREDICATE_OPS,
@@ -682,6 +682,53 @@ export default defineTool({
           : once
             ? DEFAULT_TIMEOUT_SEC
             : null);
+
+    // WI-10005697: a STANDING pattern watch is the one registration nothing ever
+    // consumes — a standing fire matches without setting fired_at — so the drained-lane
+    // member contract's own "register work-item:claimable and end your turn" step added a
+    // PERMANENT duplicate row every time it ran. One owner was measured holding SEVEN
+    // identical never-expiring rows (EI-23788231724653530). Join the live row instead,
+    // exactly as the predicate branch above joins an identical poller, so the contract is
+    // idempotent and re-running it is free. A differing payload_filter / floor / urgency
+    // is a DIFFERENT watch and still gets its own row; one-shot, deadline-bearing and
+    // certificate-bearing registrations are out of scope (see the finder's docstring).
+    if (!once && effectiveTimeoutSec == null && producerHealthCertificate == null) {
+      const existingStanding = await findMatchingActiveStandingWatch({
+        subscriberId: identity.ownerId,
+        eventKey: args.pattern,
+        payloadFilter: args.payload_filter ?? null,
+        minSleepSec,
+        urgency: args.urgency,
+      });
+      if (existingStanding) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                ok: true,
+                watch: {
+                  id: existingStanding.id,
+                  pattern: existingStanding.eventKey,
+                  wake: true,
+                  once: existingStanding.once,
+                  min_sleep_sec: existingStanding.minSleepSec,
+                  urgency: existingStanding.urgency,
+                  expires_ts: existingStanding.expiresTs,
+                  on_timeout: existingStanding.timeoutBehavior,
+                  ...(args.payload_filter !== undefined ? { payload_filter: args.payload_filter } : {}),
+                },
+                deduped: { joined_watch_id: existingStanding.id },
+                wake_handle: handleNote,
+                advice:
+                  'You ALREADY HOLD this exact standing watch — no second row was created, and the one you hold is live. End your turn; you will be re-woken on matches, at most once per min_sleep_sec. Re-running this registration is idempotent, so you never need an "do I already have one?" check first.',
+              }),
+            },
+          ],
+        };
+      }
+    }
+
     const row = await registerAwait({
       subscriberId: identity.ownerId,
       eventKey: args.pattern,

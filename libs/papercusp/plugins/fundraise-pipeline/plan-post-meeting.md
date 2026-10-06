@@ -27,7 +27,7 @@ work until the meeting has actually ended.
 
 ## Phase 1 — Wait for the meeting to end
 
-- **P-001** `todo` Read the meeting end time from `payload.plan_run.inputs.trigger.payload.end` (fall back to `start` plus one hour when `end` is absent). If that instant is still in the future, arm a single-shot cadence with `plans:set-schedule` + `plans:arm-schedule` for shortly after it and COMPLETE this run — the next run resumes at Phase 2. Do not busy-wait, and do not draft a thank-you for a meeting that has not happened yet.
+- **P-001** `todo` Read the meeting end time from `payload.end` from `triggers:read-payload { planRunId: payload.plan_run.runId }` (fall back to `start` plus one hour when `end` is absent). If that instant is still in the future, arm a single-shot cadence with `plans:set-schedule` + `plans:arm-schedule` for shortly after it and COMPLETE this run — the next run resumes at Phase 2. Do not busy-wait, and do not draft a thank-you for a meeting that has not happened yet.
 - **P-002** `todo` On the resumed run, re-read the calendar event and the matched `pipeline-deal`. If the event was cancelled or declined, set `stageDetail: meeting-cancelled`, leave `stage` unchanged, disarm the cadence, and COMPLETE without drafting. blocked-by: P-001
 
 ## Phase 2 — Capture what was promised
@@ -37,7 +37,7 @@ work until the meeting has actually ended.
 
 ## Phase 3 — Draft and hand off
 
-- **P-005** `todo` Draft the thank-you with `gmail:create-draft` using `planRunId=payload.plan_run.runId`, in the existing thread: one line of genuine specificity from the conversation, the owed items with dates, and the proposed next step. Honour `payload.plan_run.inputs.toneGuidance`. No recap of the whole meeting — they were there. blocked-by: P-004
+- **P-005** `todo` Draft the thank-you in the existing thread: find the latest message in the deal's `threadRefs` thread with `personal:search { scopes:["personal:gmail"] }`, then call `mail:reply` with its `externalId` as `messageId`, its `sourceId`, and the thank-you as `text` (draft mode, never `mode:"send"`). The draft carries one line of genuine specificity from the conversation, the owed items with dates, and the proposed next step. Honour `payload.plan_run.inputs.toneGuidance`. No recap of the whole meeting — they were there. blocked-by: P-004
 - **P-006** `todo` List every owed artifact as a checklist on the deal's `notes` with an owner and a date, so an unshipped promise is visible in the pipeline board rather than only in a draft nobody re-reads. blocked-by: P-004
 - **P-007** `todo` Notify the owner with `notifications:send_owner` on a stable `dedupeKey`: counterparty, what was promised, the new stage, and that a thank-you draft is waiting. blocked-by: P-005
 

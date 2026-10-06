@@ -53,6 +53,7 @@ import {
   loadRevokedHivePubkeys,
   type HiveMemberRecord,
 } from './hive-membership-store';
+import { readRevokedSetCached, revokedSetCacheKey } from './sync/hyperbee/revoked-set-cache';
 
 declare const federatedPotScopeBrand: unique symbol;
 
@@ -192,4 +193,22 @@ export async function loadRevokedHivePubkeysForLocalPot(
   return sql === undefined
     ? loadRevokedHivePubkeys(workspaceId, scope)
     : loadRevokedHivePubkeys(workspaceId, scope, sql);
+}
+
+/**
+ * `loadRevokedHivePubkeysForLocalPot` for the per-pass hot path (boot.ts
+ * `applyRevocationRefresh`, WI-10005183): the `pot_members` read goes through the
+ * NOTIFY-invalidated process cache (sync/hyperbee/revoked-set-cache.ts). The scope is
+ * still resolved on EVERY call and is part of the cache key, so a joiner whose
+ * federated scope changes reads the new scope's set at once — the cache can never
+ * reintroduce the local-handle defect this module exists to prevent.
+ */
+export async function loadRevokedHivePubkeysForLocalPotCached(
+  workspaceId: string,
+  localPotHomeSlug: string,
+): Promise<Set<string>> {
+  const scope = await resolveFederatedPotScope(workspaceId, localPotHomeSlug);
+  return readRevokedSetCached(revokedSetCacheKey('pot_members', workspaceId, scope), () =>
+    loadRevokedHivePubkeys(workspaceId, scope),
+  );
 }

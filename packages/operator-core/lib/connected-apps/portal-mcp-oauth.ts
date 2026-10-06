@@ -19,6 +19,7 @@
  */
 import { randomBytes as nodeRandomBytes } from 'node:crypto';
 import type { Sql } from 'postgres';
+import { consentPageCsp } from './consent-csp';
 import { parseAppKey } from './key';
 import {
   OAUTH_CLIENT_ID_PREFIX,
@@ -54,9 +55,11 @@ import {
   TOKEN_GRANT_TYPES_SUPPORTED,
   publicOriginOf,
 } from './mcp-oauth-discovery';
+import { pgDate, pgDateOrNull, type PgTimestamp } from './pg-dates';
 import type { AppKeyScopes } from './store';
 import type { HostedPrincipal } from '../auth/hosted-principal';
 import { isHostedConnectorLive } from '../endpoint-route/hosted-workspace-connector';
+import { isSameOriginFormPost } from '../endpoint-route/same-origin-form-post';
 import type {
   AppRelayConnector,
   AppRelayPort,
@@ -67,13 +70,57 @@ import type {
 // ── URLs ─────────────────────────────────────────────────────────────────────────────────────
 
 const WS = '([A-Za-z0-9][A-Za-z0-9_-]{0,127})';
-const RESOURCE_METADATA_PATH = new RegExp(`^/\\.well-known/oauth-protected-resource/api/workspaces/${WS}/mcp$`);
-/** RFC 8414 §3.1 inserts the issuer path after the well-known segment; some clients append it instead. */
-const SERVER_METADATA_PATHS = [
-  new RegExp(`^/\\.well-known/oauth-authorization-server/api/workspaces/${WS}$`),
-  new RegExp(`^/api/workspaces/${WS}/\\.well-known/oauth-authorization-server$`),
+const WORKSPACE_PARAM = ':workspaceId';
+
+export type PortalMcpOAuthVerb = 'register' | 'authorize' | 'consent' | 'token';
+
+/**
+ * One path this module serves. `template` names `:workspaceId` exactly once. `sampleMethod` is a
+ * method the handler accepts there; the hosted ingress probe sends it (the tunnel routes by path).
+ */
+export type PortalMcpOAuthRoute =
+  | { readonly kind: 'resource-metadata' | 'server-metadata'; readonly template: string; readonly sampleMethod: 'GET' }
+  | { readonly kind: 'verb'; readonly verb: PortalMcpOAuthVerb; readonly template: string; readonly sampleMethod: 'GET' | 'POST' };
+
+/**
+ * Every route this module serves, in match order. The router matches only these, and the hosted
+ * ingress probe samples each one (WI-10005092), so a route added here is also probed through the tunnel.
+ */
+export const PORTAL_MCP_OAUTH_ROUTES: ReadonlyArray<PortalMcpOAuthRoute> = [
+  { kind: 'resource-metadata', template: '/.well-known/oauth-protected-resource/api/workspaces/:workspaceId/mcp', sampleMethod: 'GET' },
+  // RFC 8414 §3.1 inserts the issuer path after the well-known segment; some clients append it instead.
+  { kind: 'server-metadata', template: '/.well-known/oauth-authorization-server/api/workspaces/:workspaceId', sampleMethod: 'GET' },
+  { kind: 'server-metadata', template: '/api/workspaces/:workspaceId/.well-known/oauth-authorization-server', sampleMethod: 'GET' },
+  { kind: 'verb', verb: 'register', template: '/api/workspaces/:workspaceId/oauth/register', sampleMethod: 'POST' },
+  { kind: 'verb', verb: 'authorize', template: '/api/workspaces/:workspaceId/oauth/authorize', sampleMethod: 'GET' },
+  { kind: 'verb', verb: 'consent', template: '/api/workspaces/:workspaceId/oauth/consent', sampleMethod: 'GET' },
+  { kind: 'verb', verb: 'token', template: '/api/workspaces/:workspaceId/oauth/token', sampleMethod: 'POST' },
 ];
-const OAUTH_VERB_PATH = new RegExp(`^/api/workspaces/${WS}/oauth/(register|authorize|consent|token)$`);
+
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function compileRouteTemplate(template: string): RegExp {
+  const parts = template.split(WORKSPACE_PARAM);
+  if (parts.length !== 2) throw new Error(`portal MCP OAuth route ${template} must name ${WORKSPACE_PARAM} exactly once`);
+  return new RegExp(`^${escapeRegExp(parts[0]!)}${WS}${escapeRegExp(parts[1]!)}$`);
+}
+
+const COMPILED_ROUTES = PORTAL_MCP_OAUTH_ROUTES.map((route) => ({ route, pattern: compileRouteTemplate(route.template) }));
+
+/** The route this path is, and the workspace id it names; null when the path is not one of ours. */
+export function matchPortalMcpOAuthRoute(pathname: string): { route: PortalMcpOAuthRoute; workspaceId: string } | null {
+  for (const { route, pattern } of COMPILED_ROUTES) {
+    const match = pattern.exec(pathname);
+    if (match) return { route, workspaceId: match[1]! };
+  }
+  return null;
+}
+
+/** The concrete path of a route for one workspace. */
+export const portalMcpOAuthRoutePath = (route: PortalMcpOAuthRoute, workspaceId: string): string =>
+  route.template.replace(WORKSPACE_PARAM, workspaceId);
+
+const RESOURCE_METADATA_ROUTE = PORTAL_MCP_OAUTH_ROUTES.find((route) => route.kind === 'resource-metadata')!;
 
 /** Where a signed-out approver signs in (the plane's hosted auth routes). */
 export const PORTAL_SIGN_IN_PATH = '/api/hosted/auth/sign-in';
@@ -81,7 +128,7 @@ export const PORTAL_SIGN_IN_PATH = '/api/hosted/auth/sign-in';
 export const portalIssuer = (origin: string, id: string): string => `${origin}/api/workspaces/${id}`;
 export const portalMcpResource = (origin: string, id: string): string => `${origin}/api/workspaces/${id}/mcp`;
 export const portalResourceMetadataUrl = (origin: string, id: string): string =>
-  `${origin}/.well-known/oauth-protected-resource/api/workspaces/${id}/mcp`;
+  `${origin}${portalMcpOAuthRoutePath(RESOURCE_METADATA_ROUTE, id)}`;
 
 /** RFC 9728 metadata for a workspace's portal MCP endpoint. */
 export function portalProtectedResourceMetadata(origin: string, id: string) {
@@ -252,8 +299,17 @@ interface ClientRow {
   redirect_uris: string[];
   token_endpoint_auth_method: OAuthTokenEndpointAuthMethod;
   client_secret_hash: string | null;
-  created_at: Date;
+  created_at: PgTimestamp;
 }
+
+const clientOf = (row: ClientRow): OAuthClient => ({
+  clientId: row.client_id,
+  clientName: row.client_name,
+  redirectUris: row.redirect_uris,
+  tokenEndpointAuthMethod: row.token_endpoint_auth_method,
+  clientSecretHash: row.client_secret_hash,
+  createdAt: pgDate(row.created_at, 'hosted_mcp_oauth_clients.created_at'),
+});
 
 interface RequestRow {
   handle_hash: string;
@@ -269,8 +325,8 @@ interface RequestRow {
   granted_scopes: AppKeyScopes | null;
   state: PortalRequestStatus;
   approved_by: string | null;
-  code_expires_at: Date | null;
-  expires_at: Date;
+  code_expires_at: PgTimestamp | null;
+  expires_at: PgTimestamp;
 }
 
 const REQUEST_COLUMNS = `handle_hash, client_id, control_workspace_id, organization_id, customer_workspace_id, redirect_uri,
@@ -292,8 +348,8 @@ const requestOf = (row: RequestRow): PortalOAuthRequest => ({
   grantedScopes: row.granted_scopes,
   status: row.state,
   approvedBy: row.approved_by,
-  codeExpiresAt: row.code_expires_at,
-  expiresAt: row.expires_at,
+  codeExpiresAt: pgDateOrNull(row.code_expires_at, 'hosted_mcp_oauth_requests.code_expires_at'),
+  expiresAt: pgDate(row.expires_at, 'hosted_mcp_oauth_requests.expires_at'),
 });
 
 /**
@@ -318,18 +374,7 @@ export class PostgresPortalOAuthStore implements PortalOAuthStore {
               ${input.clientName}, ARRAY(SELECT jsonb_array_elements_text(${JSON.stringify([...input.redirectUris])}::text::jsonb)),
               ${input.tokenEndpointAuthMethod}, ${clientSecret ? sha256Hex(clientSecret) : null}, ${now})
       RETURNING client_id, client_name, redirect_uris, token_endpoint_auth_method, client_secret_hash, created_at`);
-    const row = rows[0]!;
-    return {
-      client: {
-        clientId: row.client_id,
-        clientName: row.client_name,
-        redirectUris: row.redirect_uris,
-        tokenEndpointAuthMethod: row.token_endpoint_auth_method,
-        clientSecretHash: row.client_secret_hash,
-        createdAt: row.created_at,
-      },
-      clientSecret,
-    };
+    return { client: clientOf(rows[0]!), clientSecret };
   }
 
   async getClient(customerWorkspaceId: string, clientId: string): Promise<OAuthClient | null> {
@@ -339,17 +384,7 @@ export class PostgresPortalOAuthStore implements PortalOAuthStore {
         FROM papercusp_auth.hosted_mcp_oauth_clients
        WHERE client_id = ${clientId} AND customer_workspace_id = ${customerWorkspaceId}
        LIMIT 1`);
-    const row = rows[0];
-    return row
-      ? {
-          clientId: row.client_id,
-          clientName: row.client_name,
-          redirectUris: row.redirect_uris,
-          tokenEndpointAuthMethod: row.token_endpoint_auth_method,
-          clientSecretHash: row.client_secret_hash,
-          createdAt: row.created_at,
-        }
-      : null;
+    return rows[0] ? clientOf(rows[0]) : null;
   }
 
   async createRequest(input: NewPortalOAuthRequest): Promise<void> {
@@ -613,9 +648,14 @@ export function narrowedGrant(
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
-function page(title: string, body: string, status = 200): Response {
+/**
+ * `redirectTargets`: where a form on this page can end up. The consent form's answer redirects to
+ * the client's registered redirect_uri, and the browser enforces form-action on that hop too
+ * (WI-10004470), so the page must admit exactly that target.
+ */
+function page(title: string, body: string, status = 200, redirectTargets: readonly string[] = []): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="referrer" content="no-referrer"><title>${escapeHtml(title)}</title>
+<title>${escapeHtml(title)}</title>
 <style>body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem}input{width:100%;font:inherit}
 .row{display:flex;gap:.75rem;margin-top:1rem}button{font:inherit;padding:.4rem 1.2rem}</style></head>
 <body><h1>${escapeHtml(title)}</h1>${body}</body></html>`;
@@ -623,8 +663,12 @@ function page(title: string, body: string, status = 200): Response {
     status,
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+      'content-security-policy': consentPageCsp(redirectTargets),
       'x-frame-options': 'DENY',
+      // NOT 'no-referrer' (WI-10004462): under it a browser posts the consent form with
+      // `Origin: null` (see ../endpoint-route/same-origin-form-post.ts). 'same-origin' still keeps
+      // the request handle in this page's URL from the connector's callback origin.
+      'referrer-policy': 'same-origin',
       ...OAUTH_NO_STORE,
     },
   });
@@ -662,6 +706,8 @@ export interface PortalMcpOAuthDependencies {
   readonly store: PortalOAuthStore;
   /** The connector broker: liveness and the mint channel. */
   readonly port: AppRelayPort;
+  /** Server-side hosting lookup for a workspace whose connector is offline. */
+  readonly resolveCustomerWorkspaceHosting?: (customerWorkspaceId: string) => Promise<'byoc' | 'papercusp' | null>;
   /** The plane's own cookie-session resolver. */
   readonly resolvePrincipal: (headers: Headers) => Promise<PortalPrincipalResolution>;
   readonly now?: () => Date;
@@ -671,7 +717,7 @@ export interface PortalMcpOAuthDependencies {
 
 /** True for a path this module serves (the host mounts it before `/api/*` and the SPA). */
 export function isPortalMcpOAuthPath(pathname: string): boolean {
-  return RESOURCE_METADATA_PATH.test(pathname) || SERVER_METADATA_PATHS.some((re) => re.test(pathname)) || OAUTH_VERB_PATH.test(pathname);
+  return matchPortalMcpOAuthRoute(pathname) !== null;
 }
 
 const offline = () =>
@@ -685,22 +731,26 @@ export async function handleHostedMcpOAuth(request: Request, deps: PortalMcpOAut
   const now = () => deps.now?.() ?? new Date();
   const random = deps.randomBytes ?? ((size: number) => nodeRandomBytes(size));
 
-  const resourceMatch = RESOURCE_METADATA_PATH.exec(url.pathname);
-  if (resourceMatch) {
+  const matched = matchPortalMcpOAuthRoute(url.pathname);
+  if (!matched) return null;
+  const { route, workspaceId: id } = matched;
+  if (route.kind !== 'verb') {
     if (method !== 'GET') return oauthErrorResponse('invalid_request', 'use GET', 405);
-    return Response.json(portalProtectedResourceMetadata(origin, resourceMatch[1]!), { headers: { 'cache-control': 'max-age=300' } });
+    const metadata = route.kind === 'resource-metadata' ? portalProtectedResourceMetadata(origin, id) : portalAuthorizationServerMetadata(origin, id);
+    return Response.json(metadata, { headers: { 'cache-control': 'max-age=300' } });
   }
-  for (const re of SERVER_METADATA_PATHS) {
-    const m = re.exec(url.pathname);
-    if (m) {
-      if (method !== 'GET') return oauthErrorResponse('invalid_request', 'use GET', 405);
-      return Response.json(portalAuthorizationServerMetadata(origin, m[1]!), { headers: { 'cache-control': 'max-age=300' } });
-    }
+  // Metadata is public control data. Every OAuth verb can carry customer content or
+  // mint a secret, so refuse BYOC before reading a request body or touching the store.
+  const hostingConnector = deps.port.appConnector(id);
+  const hosting = hostingConnector?.binding.hosting ?? await deps.resolveCustomerWorkspaceHosting?.(id).catch(() => null);
+  if (hosting === 'byoc') {
+    return Response.json({
+      error: 'byoc_plaintext_relay_refused',
+      error_description: 'Use customer-controlled ingress or the sealed channel.',
+      alternatives: ['customer_controlled_ingress', 'sealed_channel'],
+    }, { status: 403, headers: OAUTH_NO_STORE });
   }
-  const verbMatch = OAUTH_VERB_PATH.exec(url.pathname);
-  if (!verbMatch) return null;
-  const id = verbMatch[1]!;
-  const verb = verbMatch[2]!;
+  const verb = route.verb;
   const issuer = portalIssuer(origin, id);
   const liveConnector = (): AppRelayConnector | null => {
     const connector = deps.port.appConnector(id);
@@ -786,7 +836,7 @@ export async function handleHostedMcpOAuth(request: Request, deps: PortalMcpOAut
   if (verb === 'consent') {
     const fields: Record<string, unknown> =
       method === 'POST' ? (await readFormOrJson(request)) ?? {} : Object.fromEntries(url.searchParams);
-    if (method === 'POST' && request.headers.get('origin') !== origin) {
+    if (method === 'POST' && !isSameOriginFormPost(request.headers, origin)) {
       return page('Not allowed', '<p>Consent must be given on this page.</p>', 403);
     }
     if (method !== 'GET' && method !== 'POST') return page('Not allowed', '<p>Open this link in a browser.</p>', 405);
@@ -813,7 +863,7 @@ export async function handleHostedMcpOAuth(request: Request, deps: PortalMcpOAut
     if (!mayConsent(who.principal, pending.workspace)) {
       return page('Not your workspace', '<p>The account you are signed in with cannot use this workspace, so it cannot approve this app.</p>', 403);
     }
-    if (method === 'GET') return page(`Allow ${client.clientName}?`, consentForm(id, handle, client, pending));
+    if (method === 'GET') return page(`Allow ${client.clientName}?`, consentForm(id, handle, client, pending), 200, [pending.redirectUri]);
 
     const approvedBy = `portal:${who.principal.userId}`;
     if (fields.decision !== 'approve') {
@@ -825,7 +875,9 @@ export async function handleHostedMcpOAuth(request: Request, deps: PortalMcpOAut
       return redirectWithParams(denied.redirectUri, { error: 'access_denied', error_description: 'the owner denied access', state: denied.state, iss: issuer });
     }
     const grant = narrowedGrant(pending.requestedScopes, fields);
-    if (!grant.ok) return page('Check the scope', `<p>${escapeHtml(grant.problem)}.</p>${consentForm(id, handle, client, pending)}`, 400);
+    if (!grant.ok) {
+      return page('Check the scope', `<p>${escapeHtml(grant.problem)}.</p>${consentForm(id, handle, client, pending)}`, 400, [pending.redirectUri]);
+    }
     const code = newAuthorizationCode(random);
     const decidedAt = now();
     const approved = await deps.store.decide({

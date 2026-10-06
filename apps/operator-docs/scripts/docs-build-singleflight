@@ -30,14 +30,34 @@
 # holder can never block a build forever.
 #
 # Test seams (apps/operator/scripts/__tests__/docs-build-singleflight.test.ts):
-#   DOCS_BUILD_CMD        stand in for the real build pipeline
+#   DOCS_BUILD_CMD        stand in for the real inner build pipeline
+#   DOCS_BUILD_PRE_CMD    stand in for PG materialization (`--from-pg` only)
 #   DOCS_BUILD_LOCK       put the lock in a tmp dir
 #   DOCS_BUILD_WAIT_SECS  shrink the timeout
+#   DOCS_BUILD_SOURCE_ROOT  use fixture pages for the source-byte census
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LOCK="${DOCS_BUILD_LOCK:-/tmp/papercup-operator-docs-build.lock}"
-CMD="${DOCS_BUILD_CMD:-npm run build:inner}"
+MODE="${1:-build}"
+PRE_CMD=""
+if [ "$#" -gt 1 ]; then
+  echo "docs-build-singleflight: expected no argument or --from-pg" >&2
+  exit 2
+fi
+case "$MODE" in
+  build)
+    CMD="${DOCS_BUILD_CMD:-npm run build:inner}"
+    ;;
+  --from-pg)
+    PRE_CMD="${DOCS_BUILD_PRE_CMD:-npm --prefix ../.. run gen:authored-docs:materialize}"
+    CMD="${DOCS_BUILD_CMD:-npm run build:inner}"
+    ;;
+  *)
+    echo "docs-build-singleflight: unknown mode '$MODE'; expected --from-pg" >&2
+    exit 2
+    ;;
+esac
 WAIT_SECS="${DOCS_BUILD_WAIT_SECS:-900}"
 
 # Append-open: never truncate a live holder's pid record while waiting.
@@ -76,10 +96,34 @@ fi
 # this is so a timed-out waiter can name who it was waiting on).
 echo "$$" > "$LOCK"
 
-set +e
-bash -c "$CMD"
-status=$?
-set -e
+# Materialize once, under the same lock, BEFORE measuring the build inputs.
+if [ -n "$PRE_CMD" ]; then
+  bash -c "$PRE_CMD"
+fi
+
+# EI-24818597129873918: the build lock serializes builders, not authors. A
+# page added during Astro compilation made the final current-source guard red
+# even though that page was never an input. An existing page edited mid-build
+# can be worse: both twins exist, so the completeness guard alone misses it.
+# Compare byte censuses and rebuild once under this SAME lock. A stable red
+# is never retried or hidden; continuing source churn stays loudly nonzero.
+SOURCE_ROOT="${DOCS_BUILD_SOURCE_ROOT:-src/content/docs}"
+status=1
+for attempt in 1 2; do
+  before="$(node ../../scripts/check-docs-mirror.mjs --source-fingerprint --source-root="$SOURCE_ROOT")"
+  set +e
+  bash -c "$CMD"
+  status=$?
+  set -e
+  after="$(node ../../scripts/check-docs-mirror.mjs --source-fingerprint --source-root="$SOURCE_ROOT")"
+  if [ "$before" = "$after" ]; then break; fi
+  if [ "$attempt" -eq 1 ]; then
+    echo "[docs-build-singleflight] Source pages changed during compilation; rebuilding once under the held lock." >&2
+  else
+    echo "[docs-build-singleflight] Source pages changed during both attempts; mirror is not verified current. Run docs:rebuild after authors settle." >&2
+    if [ "$status" -eq 0 ]; then status=1; fi
+  fi
+done
 
 # Cosmetic: blank the pid record. flock releases on fd close at exit.
 : > "$LOCK" 2>/dev/null || true

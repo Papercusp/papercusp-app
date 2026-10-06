@@ -76,6 +76,11 @@ export async function reconcileWorkItemCompletionEventIntents(
          AND closed_ts IS NOT NULL
          AND closed_ts <= ${cutoff}
          AND harness_shared.work_item_status_is_terminal(status)
+         -- WI-10005136: the close's publisher owns its work-item:done event. A row whose
+         -- current version came from a peer (origin='remote') is the peer's to emit and
+         -- acknowledge; clearing its key here is a plain UPDATE that the federation stamp
+         -- re-mints as a newer local write, which then overwrites the publisher's row.
+         AND COALESCE(origin, 'local') = 'local'
        ORDER BY closed_ts ASC, feature_id ASC
        LIMIT ${BATCH_SIZE}
     `;
@@ -100,6 +105,7 @@ export async function reconcileWorkItemCompletionEventIntents(
              AND feature_id = ${row.feature_id}
              AND payload->>${WORK_ITEM_COMPLETION_EVENT_INTENT_KEY} = ${row.intent_id}
              AND harness_shared.work_item_status_is_terminal(status)
+             AND COALESCE(origin, 'local') = 'local'
           RETURNING feature_id
         `;
         result.acknowledged += acknowledged.length;

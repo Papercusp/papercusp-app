@@ -16,7 +16,7 @@
 import { z } from 'zod';
 import { defineTool, AGENT_ROLES } from '@papercusp/agent-mcp';
 import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
-import { resolveBoundDisplay, type ComputerCtx } from './computer';
+import { desktopArg, resolveBoundDisplay, type ComputerCtx } from './computer';
 import { resolveLocalDesktopByDisplay } from '../../desktop/desktop-session-registry';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { commentWorkItem } from '../../work-items';
@@ -51,6 +51,7 @@ const recordArgs = z
       .optional()
       .describe('Work-item this recording belongs to (e.g. "WI-1234"). Bound at `start`; `export` parks its pointer comment there.'),
     note: z.string().max(500).optional().describe('Short human note stored in the manifest ("reproducing the save-dialog hang").'),
+    desktop: desktopArg,
     format: z.enum(['webm', 'gif']).optional().describe('export format (default webm; gif for pasting into a thread).'),
     recording: z
       .string()
@@ -90,7 +91,8 @@ function resolveExportDir(display: string, id?: string): string {
 export type RecordTrajectoryCtx = ComputerCtx & ResolveIdentityCtx;
 
 export async function runRecordTrajectory(args: RecordArgs, ctx: RecordTrajectoryCtx = {}) {
-  const target = await resolveBoundDisplay(ctx); // throws loudly if no lease / refuses :0
+  // throws loudly if no lease / refuses :0 / desktop_not_owned; recordings are per display, so per desktop
+  const target = await resolveBoundDisplay(ctx, { desktop: args.desktop });
 
   if (args.op === 'status') {
     const open = recordingStatus(target.display);

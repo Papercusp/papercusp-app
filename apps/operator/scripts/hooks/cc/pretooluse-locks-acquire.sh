@@ -164,6 +164,13 @@ cwd = payload.get('cwd') or os.getcwd()
 # the machine-wide su-agent-id (two shells sharing only that collapse to
 # one owner — the bug PAPERCUSP_SID fixes). Pre + Post share the env, so
 # release still matches acquire.
+#
+# A CLI NESTED inside another agent (a `claude -p` from an su's Bash tool, or under a
+# capability:bash job) inherits that su's PAPERCUSP_SID and so locks AS the su. That is
+# deliberate (WI-10004945), unlike the activity/ask/nudge hooks, which skip a nested CLI
+# (pc_nested_cli.sh). The nested CLI edits the shared tree on the su's behalf, so the
+# su answers for those edits, and skipping here would drop the lock rail from them
+# entirely, leaving them free to clobber a peer's held file.
 env_sid = os.environ.get('PAPERCUSP_SID')
 lock_sid = os.environ.get('PAPERCUSP_LOCK_SID')
 session_id = payload.get('session_id')
@@ -355,6 +362,10 @@ def _read_batch_descriptor(path, current_tool_id):
         }
     return None
 
+
+# THIS call's own paths, kept before any batch union below replaces raw_paths:
+# a cross-repository batch falls back to locking just these (WI-10006390).
+call_raw_paths = list(raw_paths)
 
 if transcript_path and tool_name in EDIT_TOOL_NAMES and tool_use_id:
     batch_info = _read_batch_descriptor(transcript_path, tool_use_id)
@@ -753,6 +764,13 @@ def _is_isolation_worktree(repo_root, canonical_tree):
 # ── Resolve to repo-relative POSIX, refuse symlinked paths ─────────────
 repo_relative = []
 repo_domains = set()
+# WI-10006390 bookkeeping, parallel to repo_relative: which raw path produced
+# each entry, and the repository domain of each repo-relative entry (an
+# @external key has none). The loop below appends from several branches, so
+# entries are attributed lazily at the top of each iteration and once after it.
+_entry_raw = []
+_entry_domain = {}
+_entry_raw_cursor = None
 
 
 def _external_lock_key(abs_path):
@@ -797,6 +815,8 @@ def _external_lock_key(abs_path):
 
 
 for p in raw_paths:
+    _entry_raw.extend([_entry_raw_cursor] * (len(repo_relative) - len(_entry_raw)))
+    _entry_raw_cursor = p
     abs_p = p if os.path.isabs(p) else os.path.join(cwd, p)
     abs_p = os.path.abspath(abs_p)
 
@@ -1019,7 +1039,53 @@ for p in raw_paths:
     except Exception:
         pass  # realpath failure (broken link, EACCES) → leave to server.
 
+    _entry_domain[len(repo_relative)] = _real_root
     repo_relative.append(rel)
+_entry_raw.extend([_entry_raw_cursor] * (len(repo_relative) - len(_entry_raw)))
+
+# ── Cross-repository edit sets (WI-10006390) ──────────────────────────
+# A file lock keys on (coordination_domain, path relative to THAT domain), and
+# each entry above is relative to its OWN repository. One locks:acquire names
+# one domain, so a set spanning repositories has no correct single request.
+# Omitting the domain (the old behaviour) filed every path under the server
+# default, the superproject: libs/papercusp/libs/db/sql/X was locked as
+# (superproject, 'libs/db/sql/X'), a key that exists nowhere and never
+# conflicts with a peer's real (libs/papercusp, 'libs/db/sql/X') lock. That
+# was silent lock evasion for every cross-repository Codex patch.
+#
+# The domain set counts only domains that carry an entry: a path skipped after
+# its domain was noted (escapes the repo, nested foreign scope) locks nothing.
+repo_domains = set(_entry_domain.values())
+if len(repo_domains) > 1 and batch_info:
+    # A Claude native batch unions several single-file tool calls; each call
+    # alone is single-repository. Lock just THIS call's entries and forgo batch
+    # atomicity for this cross-repository batch. Every sibling hook process
+    # computes the same union and takes the same per-call fallback.
+    _own = set(call_raw_paths)
+    _keep = [i for i, raw in enumerate(_entry_raw) if raw in _own]
+    repo_relative = [repo_relative[i] for i in _keep]
+    _entry_domain = {
+        j: _entry_domain[i] for j, i in enumerate(_keep) if i in _entry_domain
+    }
+    repo_domains = set(_entry_domain.values())
+    batch_info = None
+if len(repo_domains) > 1:
+    _by_domain = {}
+    for _i, _dom in sorted(_entry_domain.items()):
+        _by_domain.setdefault(_dom, []).append(repo_relative[_i])
+    _listing = '; '.join(
+        f"{_dom} -> {', '.join(sorted(set(_rels))[:6])}"
+        + (' …' if len(set(_rels)) > 6 else '')
+        for _dom, _rels in sorted(_by_domain.items())
+    )
+    deny(
+        f"locks: refused — this {tool_name} edits files in "
+        f"{len(_by_domain)} repositories ({_listing}). A file lock is scoped to "
+        f"ONE repository (submodules are their own), so one cross-repository "
+        f"edit cannot be locked correctly and would leave its files "
+        f"unprotected. Split it into one {tool_name} per repository, keeping "
+        f"the paths exactly as you wrote them, and retry."
+    )
 
 if not repo_relative:
     allow()
@@ -1712,7 +1778,7 @@ def _is_transient(res):
     condition as ok:false with NO reason and an EMPTY busy list — treat that
     shape as transient too, never as a foreign hold."""
     return res.get('reason') == 'workspace_contended' or (
-        not res.get('reason') and not (res.get('busy') or []))
+        res.get('ok') is False and not res.get('reason') and not (res.get('busy') or []))
 
 
 # EI-19324697909459657: "transient" and "one-off" are NOT the same claim, and

@@ -34,6 +34,14 @@ export {
   type TreeDigestEntry,
 } from "./content-address.js";
 
+// Content-defined chunking — split bytes so shared runs dedupe under a chunk-hash store
+export {
+  contentDefinedChunkBoundaries,
+  contentDefinedChunks,
+  DEFAULT_CDC_AVG_SIZE,
+  type ContentDefinedChunkOptions,
+} from "./content-defined-chunks.js";
+
 // Content-addressed blob store (Layer A — the storage backend)
 export {
   putContentAddressed,

@@ -1834,6 +1834,96 @@ export function buildJsonbTypeofNegationAdvisory(rawSql: string): string | null 
 }
 
 /**
+ * Flag a jsonb-returning accessor (`->` / `#>`) compared with `IS [NOT] NULL`.
+ *
+ * `->` yields JSONB, so a key that is PRESENT with a JSON null value comes back
+ * as jsonb `null`, which is not SQL NULL: `(col->'k') IS NULL` is FALSE for
+ * every such row, and `IS NOT NULL` counts those rows as populated. The
+ * predicate is not merely imprecise, it is INVERTED on exactly the rows the
+ * caller is asking about — it read as "the field is populated on all 349 rows"
+ * in a real CTRL investigation (EI-23761509275982493), a perfectly plausible
+ * report that was the opposite of the truth.
+ *
+ * Two deliberate boundaries, both load-bearing:
+ *
+ *  1. The text-returning siblings `->>` / `#>>` ARE correct with `IS NULL`
+ *     (they return SQL NULL for a JSON null), so a chain whose LAST accessor is
+ *     a text arrow must not fire. Without that, the advisory would fire on the
+ *     very form it recommends and get discounted as noise — the failure mode
+ *     that retires an advisory faster than being wrong does.
+ *  2. The `IS NULL` must follow the accessor chain directly (closing parens
+ *     aside). An intervening cast — `(col->'k')::text IS NULL` — carries the
+ *     same trap but is left UNFLAGGED on purpose: a narrow trigger that is
+ *     always right beats a broad one agents learn to skip. Widen it only with
+ *     evidence that the cast form actually bites.
+ */
+export function buildJsonNullArrowAdvisory(rawSql: string): string | null {
+  const masked = rawSql.split('');
+  for (const [from, to] of sqlLiteralAndCommentRanges(rawSql)) {
+    for (let i = from; i < to; i++) {
+      if (masked[i] !== '\n') masked[i] = ' ';
+    }
+  }
+  const code = masked.join('');
+  const skipWhitespace = (from: number): number => {
+    let i = from;
+    while (i < code.length && /\s/.test(code[i] ?? '')) i++;
+    return i;
+  };
+  /** Offset just past a jsonb-returning arrow at `at`, or null. */
+  const jsonbArrowAt = (at: number): number | null => {
+    if (code.startsWith('->>', at) || code.startsWith('#>>', at)) return null;
+    if (code.startsWith('->', at) || code.startsWith('#>', at)) return at + 2;
+    return null;
+  };
+
+  for (let i = 0; i < code.length; i++) {
+    const afterArrow = jsonbArrowAt(i);
+    if (afterArrow === null) continue;
+
+    let cursor = skipWhitespace(afterArrow);
+    let endsWithTextArrow = false;
+    for (;;) {
+      // The key operand: an identifier, a number, or a quoted literal that the
+      // mask above already blanked to whitespace.
+      // Quote chars are consumed as part of the operand because the mask above
+      // blanks a literal's CONTENT; whether it also blanks the delimiters is not
+      // something this scan should depend on.
+      // Do NOT consume the predicate as if it were a key operand: the literal
+      // mask above can blank the key entirely, leaving IS NULL as the very next
+      // token. Consuming first ate the IS keyword, so every real trap returned
+      // null while the silent-form cases kept passing vacuously.
+      if (!/^IS\s+(?:NOT\s+)?NULL\b/i.test(code.slice(cursor))) {
+        while (cursor < code.length && /[A-Za-z0-9_$."']/.test(code[cursor] ?? '')) cursor++;
+      }
+      cursor = skipWhitespace(cursor);
+      if (code.startsWith('->>', cursor) || code.startsWith('#>>', cursor)) {
+        endsWithTextArrow = true;
+        break;
+      }
+      const chained = jsonbArrowAt(cursor);
+      if (chained === null) break;
+      cursor = skipWhitespace(chained);
+    }
+    if (endsWithTextArrow) continue;
+
+    while (code[cursor] === ')') cursor = skipWhitespace(cursor + 1);
+    if (!/^IS\s+(?:NOT\s+)?NULL\b/i.test(code.slice(cursor))) continue;
+
+    return (
+      '⚠ json null is not SQL NULL: `->` / `#>` return JSONB, so a key present with a ' +
+      'JSON null value is jsonb `null` — `(col->\'k\') IS NULL` is FALSE for those rows ' +
+      'and `IS NOT NULL` counts them as populated, inverting the predicate on exactly ' +
+      'the rows in question. Use `col->>\'k\' IS NULL`, ' +
+      '`jsonb_typeof(col->\'k\') = \'null\'`, or `col->\'k\' = \'null\'::jsonb`. ' +
+      '(EI-23761509275982493.)'
+    );
+  }
+
+  return null;
+}
+
+/**
  * Flag a read that treats `status = 'open'` (or the candidate VIEW) as the
  * answer to "what can be claimed".
  *
@@ -3245,10 +3335,35 @@ export const PG_READ_QUERY_CALL_OVERHEAD_MS = 3000;
  * the timer wins, so a late resolution/rejection is a no-op (resolve/reject
  * only takes effect once) rather than an unhandled rejection.
  */
-export function withCallDeadline<T>(work: Promise<T>, deadlineMs: number, timeoutMessage: string): Promise<T> {
+export function withCallDeadline<T>(
+  work: Promise<T> | ((assertActive: () => void) => Promise<T>),
+  deadlineMs: number,
+  timeoutMessage: string,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new PgReadQueryTimeoutError(timeoutMessage)), deadlineMs);
-    work.then(
+    const timeoutError = new PgReadQueryTimeoutError(timeoutMessage);
+    const expiresAt = performance.now() + deadlineMs;
+    let expired = false;
+    const timer = setTimeout(() => {
+      expired = true;
+      reject(timeoutError);
+    }, deadlineMs);
+    // A deadline settles the caller but cannot cancel postgres-js acquisition.
+    // Factory callers check this before each new statement so a late connection
+    // or completed prerequisite cannot start abandoned diagnostic work. The
+    // monotonic check also covers a delayed timer under event-loop stalls.
+    const assertActive = () => {
+      if (expired || performance.now() >= expiresAt) throw timeoutError;
+    };
+    let pending: Promise<T>;
+    try {
+      pending = typeof work === 'function' ? work(assertActive) : work;
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      return;
+    }
+    pending.then(
       (v) => {
         clearTimeout(timer);
         resolve(v);
@@ -3647,8 +3762,15 @@ export function assertSingleReadStatement(raw: string): string {
  * CONSENT (or these tables revoked outright from whatever role agent SQL uses),
  * not merely workspace. Until one exists, THIS is the control — not a
  * belt-and-braces addition to a working one.
+ *
+ * `documents` is the vault table's name since migration 1327 (WI-10005071).
+ * `personal_documents` stays fenced because 1327 leaves a compat VIEW under that
+ * name for the release build that still reads it; that view reads the same
+ * rows. Drop the old name from this list only in the contract migration that
+ * drops the view, never before: an unfenced alias is a way into the mailbox.
  */
 const PERSONAL_VAULT_RELATIONS = [
+  'documents',
   'personal_documents',
   'personal_identities',
   'personal_identity_aliases',
@@ -3658,7 +3780,30 @@ const PERSONAL_VAULT_RELATIONS = [
 ] as const;
 
 /**
- * The refusal message when `rawSql` touches a Personal Vault relation, else null.
+ * Organization-corpus access-control relations (migration 1316, plan
+ * enterprise-data-sources-2026-10-01 P-014). Organization documents themselves
+ * live in `documents` (scope='organization'), which the list above
+ * already fences. These three decide WHO may read them: the source-derived
+ * permission lists, their members, and the owner-configured mapping from a
+ * provider identity (a Slack/Asana user) to a local user. Ad-hoc SQL against
+ * them reads company membership and account linkage without the grant check,
+ * ACL evaluation or disclosure ledger that searchOrganizationDocuments applies,
+ * and a write here forges access outright. Same reasoning as the vault list:
+ * RLS on these tables is inert for agent connections.
+ */
+const ORGANIZATION_CORPUS_RELATIONS = [
+  'document_permission_lists',
+  'document_permission_members',
+  'provider_identity_mappings',
+] as const;
+
+function findFencedRelation(stripped: string, relations: readonly string[]): string | undefined {
+  return relations.find((rel) => new RegExp(`\\b${rel}\\b`, 'i').test(stripped));
+}
+
+/**
+ * The refusal message when `rawSql` touches a Personal Vault or organization-corpus
+ * access-control relation, else null.
  *
  * Deliberately NOT built on {@link extractReferencedTables}: that one is capped at
  * GUARD_MAX_TABLES and only sees FROM/JOIN/UPDATE/INTO, so a fifth-table join or a
@@ -3667,9 +3812,14 @@ const PERSONAL_VAULT_RELATIONS = [
  *
  * Stripping literals and comments FIRST is what keeps the guard usable rather
  * than merely strict: auditing the vault's own schema — `WHERE relname =
- * 'personal_documents'`, or this file's own doc comments — stays allowed, because
- * there the name is a string, not a table reference. `personal_documents_id` does
- * not match either: `_` is a word character, so the trailing `\b` fails.
+ * 'documents'`, or this file's own doc comments — stays allowed, because
+ * there the name is a string, not a table reference. `documents_id` and
+ * `personal_documents` do not match `documents` either: `_` is a word character,
+ * so the `\b` on that side fails. That is also why each name is listed on its own.
+ *
+ * The match is on the bare identifier, so `documents` is fenced in any schema,
+ * not only harness_shared. That is deliberate (a fence errs closed); a table in
+ * another schema that happens to be named `documents` is read by quoting it.
  *
  * Absolute rather than grant-aware on purpose. This is a pure SQL helper with no
  * principal in scope; a consent check it cannot actually perform would be worse
@@ -3678,7 +3828,19 @@ const PERSONAL_VAULT_RELATIONS = [
  */
 export function personalVaultRefusal(rawSql: string): string | null {
   const stripped = stripSqlLiteralsAndComments(rawSql);
-  const hit = PERSONAL_VAULT_RELATIONS.find((rel) => new RegExp(`\\b${rel}\\b`, 'i').test(stripped));
+  const orgHit = findFencedRelation(stripped, ORGANIZATION_CORPUS_RELATIONS);
+  const hit = findFencedRelation(stripped, PERSONAL_VAULT_RELATIONS);
+  if (!hit && orgHit) {
+    return (
+      `refused: harness_shared.${orgHit} controls access to the organization documents corpus — ` +
+      'which provider identities may read which company documents, and which local user each ' +
+      'provider identity is mapped to. Ad-hoc SQL is not an authorized path to it: no grant is ' +
+      'checked, no ACL is evaluated and no disclosure is recorded here, and a write would forge ' +
+      'access. Organization documents are read through searchOrganizationDocuments (organization:search), ' +
+      'which requires a live organization grant for your principal. Reading SCHEMA is still fine — ' +
+      `quote the name ('${orgHit}') so it is a literal rather than a table reference.`
+    );
+  }
   if (!hit) return null;
   return (
     `refused: harness_shared.${hit} holds Personal Vault data — the owner's synced mail, ` +
@@ -3686,7 +3848,7 @@ export function personalVaultRefusal(rawSql: string): string | null {
     'here and no vault access is audited, so this door reads the mailbox that personal:search ' +
     'refuses without consent (WI-10001796). Use personal:search, which resolves your principal ' +
     "and requires a live owner grant. Reading vault SCHEMA is still fine — quote the name " +
-    "('personal_documents') so it is a literal rather than a table reference."
+    `('${hit}') so it is a literal rather than a table reference.`
   );
 }
 
@@ -3762,22 +3924,29 @@ export async function pgReadQuery(
   let rows: Record<string, unknown>[] = [];
   let positiveControlRows: Record<string, unknown>[] | null = null;
   const callDeadlineMs = timeoutMs + PG_READ_QUERY_CALL_OVERHEAD_MS;
-  const work = sql.begin(async (tx) => {
+  const work = (assertActive: () => void) => sql.begin(async (tx) => {
+    assertActive();
     // READ ONLY must be set before the first data statement in the txn.
     await tx.unsafe('SET TRANSACTION READ ONLY');
+    assertActive();
     await tx.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+    assertActive();
     await tx.unsafe(SET_LOCAL_UTC);
+    assertActive();
     if (usePerTransactionOrgSearchPath) {
       await tx.unsafe(SET_LOCAL_ORG_SEARCH_PATH);
     }
+    assertActive();
     if (positiveControlQuery) {
       positiveControlRows = (await tx.unsafe(
         `SELECT * FROM (${positiveControlQuery}) AS _pgq_positive_control LIMIT 2`,
       )) as unknown as Record<string, unknown>[];
     }
+    assertActive();
     const resultRows = (await tx.unsafe(
       isExplain ? query : `SELECT * FROM (${query}) AS _pgq LIMIT ${maxRows + 1}`,
     )) as unknown as Record<string, unknown>[];
+    assertActive();
     // EXPLAIN returns its plan as rows and cannot itself be wrapped in the
     // SELECT * / LIMIT shape above. Keep the same response cap at this seam;
     // the transaction timeout still bounds plan generation.
@@ -3835,12 +4004,17 @@ export async function explainReadQuery(
   const sql = opts.client ?? getOrgPg().sql;
   const callDeadlineMs = timeoutMs + PG_READ_QUERY_CALL_OVERHEAD_MS;
   try {
-    const work = sql.begin(async (tx) => {
+    const work = (assertActive: () => void) => sql.begin(async (tx) => {
+      assertActive();
       await tx.unsafe('SET TRANSACTION READ ONLY');
+      assertActive();
       await tx.unsafe(`SET LOCAL statement_timeout = ${timeoutMs}`);
+      assertActive();
       // Same TZ pin as pgReadQuery so a query VALIDATES under the session it will RUN under.
       await tx.unsafe(SET_LOCAL_UTC);
+      assertActive();
       await tx.unsafe(`EXPLAIN (COSTS OFF) ${query}`);
+      assertActive();
     });
     // Bound the WHOLE call the same way pgReadQuery does — see withCallDeadline's doc.
     await withCallDeadline(work, callDeadlineMs, callTimeoutMessage(timeoutMs, callDeadlineMs));
@@ -4080,14 +4254,19 @@ function extractFilterPredicates(rawSql: string, masked: string): string[] {
   return out;
 }
 
-/** Top-level conjuncts of the FIRST WHERE clause, sliced from the raw SQL.
+/** Location of the shallowest WHERE clause, sliced from the raw SQL.
  *
  * The WHERE is located at whatever depth it actually sits at rather than only
  * at depth 0, because `SELECT EXISTS (SELECT 1 FROM t WHERE …)` — one of the two
  * shapes this advisory exists for — carries its predicates one paren deep. The
  * clause ends at the first sibling clause keyword or as soon as depth drops
  * BELOW the WHERE's own, which is the subquery's closing paren. */
-function extractWhereConjuncts(rawSql: string, masked: string): string[] {
+function locateWhereClause(masked: string): {
+  depth: Int32Array;
+  base: number;
+  start: number;
+  end: number;
+} | null {
   const depth = sqlDepthPrefix(masked);
   // Prefer the SHALLOWEST `where`, not the lexically first one. In a census the
   // first `where` token belongs to a `FILTER (WHERE …)` bucket one paren deep,
@@ -4102,7 +4281,7 @@ function extractWhereConjuncts(rawSql: string, masked: string): string[] {
       whereAt = { index: m.index, length: m[0].length };
     }
   }
-  if (!whereAt) return [];
+  if (!whereAt) return null;
   const base = depth[whereAt.index]!;
   const start = whereAt.index + whereAt.length;
 
@@ -4124,6 +4303,21 @@ function extractWhereConjuncts(rawSql: string, masked: string): string[] {
       break;
     }
   }
+
+  return { depth, base, start, end };
+}
+
+/** The complete shared WHERE expression, preserved for the FILTER partition. */
+function extractWhereClause(rawSql: string, masked: string): string {
+  const where = locateWhereClause(masked);
+  return where ? rawSql.slice(where.start, where.end).replace(/;\s*$/, '').trim() : '';
+}
+
+/** Top-level AND/OR-separated predicates of the shallowest WHERE clause. */
+function extractWhereConjuncts(rawSql: string, masked: string): string[] {
+  const where = locateWhereClause(masked);
+  if (!where) return [];
+  const { depth, base, start, end } = where;
 
   const out: string[] = [];
   let last = start;
@@ -4177,7 +4371,7 @@ export interface PredicatePartitionPlan {
   dimensions: string[];
   /** Discriminators beyond the cap, named so the preview cannot imply completeness. */
   droppedDimensions: string[];
-  /** Tenant predicates, kept as WHERE so the partition holds the caller's scope. */
+  /** Caller population predicates kept as WHERE in generated partition SQL. */
   scope: string[];
   touchesJsonb: boolean;
 }
@@ -4225,6 +4419,7 @@ export function planPredicatePartition(rawSql: string): PredicatePartitionPlan |
 
   const masked = maskSqlNoise(rawSql);
   const filters = extractFilterPredicates(rawSql, masked);
+  const whereClause = extractWhereClause(rawSql, masked);
   const whereConjuncts = extractWhereConjuncts(rawSql, masked);
   // FILTER buckets ARE the caller's dimensions when present; the surrounding
   // WHERE is then a shared scope rather than a discriminator.
@@ -4242,13 +4437,11 @@ export function planPredicatePartition(rawSql: string): PredicatePartitionPlan |
     if (NON_SUMMING_SCOPE_RE.test(text)) addScope(text);
     else if (!dimensions.includes(text)) dimensions.push(text);
   }
-  // When FILTER buckets supplied the dimensions the WHERE was never consulted,
-  // so its scope predicates would be dropped from the suggested partition.
-  if (filters.length) {
-    for (const predicate of whereConjuncts) {
-      const text = predicate.replace(/\s+/g, ' ').trim();
-      if (NON_SUMMING_SCOPE_RE.test(text)) addScope(text);
-    }
+  // FILTER buckets are measured within the caller's complete WHERE population.
+  // Keeping only tenant-like terms silently drops time bounds and other shared
+  // restrictions, so preserve the original expression intact (including ORs).
+  if (filters.length && whereClause) {
+    addScope(whereClause.replace(/\s+/g, ' ').trim());
   }
   if (!dimensions.length) return null;
 

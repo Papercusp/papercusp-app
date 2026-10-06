@@ -1,0 +1,1940 @@
+{
+  "measuredAt": "2026-09-14T13:47:41.650Z",
+  "disposition": "interim/inconclusive",
+  "attempts": 19,
+  "accountedUsd": 1.6147294,
+  "accountingBasis": "Production ledgers plus conservative reservations for unknown calls and historical zero-priced provider usage; not invoice cost.",
+  "grouped": [
+    {
+      "pin": "23b3288077d2751dc57a1eeebe8f373809154e86e2a882302546a8100ed0b408",
+      "arm": "structured-pair",
+      "attempts": 2,
+      "cost": 0.055139400000000005,
+      "scientific": {
+        "unverified/rerank-unavailable": 1,
+        "no-review/Scout dream did not receive an upstream response before the cycle deadline (never admitted by the local governor — no capacity within the remaining budget; not generation)": 1
+      },
+      "sourceUnitIds": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope"
+      ],
+      "qualifiedFamilyAssessment": "0/3 reviewed representative families qualify as novel bounded local experiments; review is calibration-wide, not arm-specific",
+      "sourceSnapshots": [
+        "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346"
+      ]
+    },
+    {
+      "pin": "23b3288077d2751dc57a1eeebe8f373809154e86e2a882302546a8100ed0b408",
+      "arm": "structured-triple",
+      "attempts": 1,
+      "cost": 0,
+      "scientific": {
+        "no-review/no-pair": 1
+      },
+      "sourceUnitIds": [],
+      "qualifiedFamilyAssessment": "0/3 reviewed representative families qualify as novel bounded local experiments; review is calibration-wide, not arm-specific",
+      "sourceSnapshots": [
+        "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346"
+      ]
+    },
+    {
+      "pin": "23b3288077d2751dc57a1eeebe8f373809154e86e2a882302546a8100ed0b408",
+      "arm": "uniform-pair",
+      "attempts": 1,
+      "cost": 0.014978400000000001,
+      "scientific": {
+        "no-review/malformed": 1
+      },
+      "sourceUnitIds": [
+        "capability:code.secret-scanned-pack",
+        "mechanism:memory.hive-scope"
+      ],
+      "qualifiedFamilyAssessment": "0/3 reviewed representative families qualify as novel bounded local experiments; review is calibration-wide, not arm-specific",
+      "sourceSnapshots": [
+        "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346"
+      ]
+    },
+    {
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-pair",
+      "attempts": 5,
+      "cost": 0.174601,
+      "scientific": {
+        "unverified/rerank-unavailable": 2,
+        "unverified/counterfactual-unknown": 3
+      },
+      "sourceUnitIds": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions",
+        "mechanism:dream.cost-admission",
+        "mechanism:memory.hive-scope"
+      ],
+      "qualifiedFamilyAssessment": "0/3 reviewed representative families qualify as novel bounded local experiments; review is calibration-wide, not arm-specific",
+      "sourceSnapshots": [
+        "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346"
+      ]
+    },
+    {
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-triple",
+      "attempts": 5,
+      "cost": 0.3513708,
+      "scientific": {
+        "unverified/counterfactual-unknown": 4,
+        "unverified/review-unavailable": 1
+      },
+      "sourceUnitIds": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions",
+        "mechanism:dream.cost-admission",
+        "mechanism:memory.hive-scope"
+      ],
+      "qualifiedFamilyAssessment": "0/3 reviewed representative families qualify as novel bounded local experiments; review is calibration-wide, not arm-specific",
+      "sourceSnapshots": [
+        "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346"
+      ]
+    },
+    {
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "uniform-pair",
+      "attempts": 3,
+      "cost": 0.9622952,
+      "scientific": {
+        "unverified/rerank-unavailable": 1,
+        "unverified/review-unavailable": 2
+      },
+      "sourceUnitIds": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope"
+      ],
+      "qualifiedFamilyAssessment": "0/3 reviewed representative families qualify as novel bounded local experiments; review is calibration-wide, not arm-specific",
+      "sourceSnapshots": [
+        "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346"
+      ]
+    },
+    {
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "blender",
+      "attempts": 2,
+      "cost": 0.056344599999999995,
+      "scientific": {},
+      "sourceUnitIds": [],
+      "qualifiedFamilyAssessment": "0/3 reviewed representative families qualify as novel bounded local experiments; review is calibration-wide, not arm-specific",
+      "sourceSnapshots": []
+    }
+  ],
+  "dreams": [
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:969eb602-f44a-4e70-a4c4-966d5ac3fba0:dream:1",
+      "pin": "23b3288077d2751dc57a1eeebe8f373809154e86e2a882302546a8100ed0b408",
+      "arm": "uniform-pair",
+      "matchedPairIndex": null,
+      "startedAt": "2026-09-09 00:09:40.664243-04",
+      "status": "malformed",
+      "verdict": null,
+      "reason": "malformed",
+      "note": null,
+      "candidateHash": null,
+      "behavior": null,
+      "beneficiary": null,
+      "units": [
+        "mechanism:memory.hive-scope",
+        "capability:code.secret-scanned-pack"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "claude-haiku-4-5",
+          "settledUsd": 0.014978400000000001,
+          "reservedUsd": 0.041859,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.014978400000000001,
+      "settledProviderUsd": 0.014978400000000001
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:edd8d09c-5088-4ed8-b567-7bb6a3b917bf:dream:1",
+      "pin": "23b3288077d2751dc57a1eeebe8f373809154e86e2a882302546a8100ed0b408",
+      "arm": "structured-pair",
+      "matchedPairIndex": null,
+      "startedAt": "2026-09-09 00:11:46.454159-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "rerank-unavailable",
+      "note": "The candidate reranker did not score the complete bounded source set.",
+      "candidateHash": "72a00fae61c896db12eb3ae87856d062ac1147e4f4c6a2212043e5f4a2b44018",
+      "behavior": "When a pack operation (pack or diff) completes or refuses, its full behavioral contract—including include set, engine identity, scan status, and outcome—is appended as an immutable revision in the spec clauses store. Concurrent pack attempts against the same scoped identity use compare-and-swap to ensure exactly one revision advances; stale callers receive structured conflict with the current revision.",
+      "beneficiary": "Code packing operations that must enforce immutable audit history: operators can verify that a pack command's parameters, refusal reasons, and engine provenance remain tamper-proof and queryable across revisions.",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "claude-haiku-4-5",
+          "settledUsd": 0.015966400000000002,
+          "reservedUsd": 0.043791,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.015966400000000002,
+      "settledProviderUsd": 0.015966400000000002
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:9bdb53a3-889c-4896-b563-5d00cc747b4b:dream:1",
+      "pin": "23b3288077d2751dc57a1eeebe8f373809154e86e2a882302546a8100ed0b408",
+      "arm": "structured-triple",
+      "matchedPairIndex": null,
+      "startedAt": "2026-09-09 00:12:57.571682-04",
+      "status": "no-pair",
+      "verdict": null,
+      "reason": "no-pair",
+      "note": null,
+      "candidateHash": null,
+      "behavior": null,
+      "beneficiary": null,
+      "units": [],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0,
+      "settledProviderUsd": 0
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:36930ec0-0135-4c3d-8261-b9b8f8028545:dream:1",
+      "pin": "23b3288077d2751dc57a1eeebe8f373809154e86e2a882302546a8100ed0b408",
+      "arm": "structured-pair",
+      "matchedPairIndex": null,
+      "startedAt": "2026-09-09 00:20:41.995442-04",
+      "status": "error",
+      "verdict": null,
+      "reason": "Scout dream did not receive an upstream response before the cycle deadline (never admitted by the local governor — no capacity within the remaining budget; not generation)",
+      "note": null,
+      "candidateHash": null,
+      "behavior": null,
+      "beneficiary": null,
+      "units": [
+        "mechanism:memory.hive-scope",
+        "capability:plans.spec-revisions"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "unknown",
+          "model": "claude-haiku-4-5",
+          "settledUsd": null,
+          "reservedUsd": 0.039173,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.039173,
+      "settledProviderUsd": 0
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:cc713651-7d82-4a4e-a69d-c66336363cc6:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "uniform-pair",
+      "matchedPairIndex": null,
+      "startedAt": "2026-09-09 00:58:47.572321-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "rerank-unavailable",
+      "note": "The candidate reranker did not score the complete bounded source set.",
+      "candidateHash": "8d6ce3a7fcf28509446ee4a070cc4705c0762d27f7b6a5a2060876126a6605a1",
+      "behavior": "When a session is confined to a hive, spec-history recall first retains only the harness slugs admitted by hive scoping, then reads each retained harness's clauses using immutable revision and exact-history semantics. Unknown candidates and sibling-hive histories are not included.",
+      "beneficiary": "Operators and agents reviewing behavioral specifications within a session hive, especially when multiple sibling harnesses contain similarly named or revised clauses.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0,
+          "reservedUsd": 0.0086538,
+          "zeroPricedUsage": true
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.0086538,
+      "settledProviderUsd": 0
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:36eedc13-9395-4629-895f-ef4102434286:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-pair",
+      "matchedPairIndex": 0,
+      "startedAt": "2026-09-09 01:18:40.617936-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "rerank-unavailable",
+      "note": "The candidate reranker did not score the complete bounded source set.",
+      "candidateHash": "7f4be45fec2ce7198fe2ec2ba440cc1068937ddf21d25d9a222e7ee96af632bd",
+      "behavior": "Before a Dream cycle may append or revise a behavioral spec clause, run Dream admission for the workspace and pot. If admission refuses, do not write the revision; if it allows, append using the caller's expected revision and surface either the new revision or the existing structured conflict/no-op result.",
+      "beneficiary": "Workspace operators and reviewers of Dream-generated plan specifications, who gain bounded-cost updates with auditable, conflict-safe contract history.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "mechanism:dream.cost-admission"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.002669,
+          "reservedUsd": 0.0089032,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.002669,
+      "settledProviderUsd": 0.002669
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:26897403-5406-4112-b75b-45518fe42798:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-triple",
+      "matchedPairIndex": 0,
+      "startedAt": "2026-09-09 01:22:00.401846-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "counterfactual-unknown",
+      "note": "At least one held-out primary comparison remains unknown.",
+      "candidateHash": "10b98ace2564fd1b455db6093d24baecb717aa5698a8cd43fa69be64dda9c172",
+      "behavior": "Require each Dream admission request to name the expected revision of its scoped budget contract. Before applying the existing cycle and rolling-spend gates, refuse a stale revision with the contract identity, expected revision, and actual revision; successful verdicts report the revision used.",
+      "beneficiary": "Operators and reviewers who need Dream cycles to use an explicitly approved budget contract while retaining an auditable explanation for stale or superseded decisions.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "mechanism:dream.cost-admission",
+        "capability:code.secret-scanned-pack"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": false,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0044862,
+          "reservedUsd": 0.011308,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.028284,
+          "reservedUsd": 0.05224,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.02114,
+          "reservedUsd": 0.046008,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.0539102,
+      "settledProviderUsd": 0.0539102
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:81e76cc4-4480-4d3e-80b3-6b1ff58aa6ad:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-pair",
+      "matchedPairIndex": 1,
+      "startedAt": "2026-09-09 01:53:52.866134-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "rerank-unavailable",
+      "note": "The candidate reranker did not score the complete bounded source set.",
+      "candidateHash": "c5142cbe14a5f6165a16d3d7bac48169b26738b7c7a27b00279047fdf9bbd4a5",
+      "behavior": "When a session hive is specified, resolve recalled harnesses to repository paths, discard sibling and unknown candidates, and pass the resulting nonempty explicit include set to the existing source packer. Refuse if resolution produces no paths; preserve pinned-engine verification, attached arguments, and mandatory secret scanning.",
+      "beneficiary": "Operators generating source evidence from memory or harness recall, who need packs limited to the active session hive rather than accidentally including sibling or unknown harness content.",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "mechanism:memory.hive-scope"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0030168,
+          "reservedUsd": 0.0093212,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.0030168,
+      "settledProviderUsd": 0.0030168
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:33dfdb19-ec6f-46bc-a33e-354ebb70d0d2:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-triple",
+      "matchedPairIndex": 1,
+      "startedAt": "2026-09-09 01:56:07.677906-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "review-unavailable",
+      "note": "[\n  {\n    \"origin\": \"string\",\n    \"code\": \"too_big\",\n    \"maximum\": 600,\n    \"inclusive\": true,\n    \"path\": [\n      \"note\"\n    ],\n    \"message\": \"Too big: expected string to have <=600 characters\"\n  }\n]",
+      "candidateHash": "29ca6a627b91431c0782c5db4c2ae43db5d7b577dd7c9943fcba10898bf4801d",
+      "behavior": "When a session-scoped pack is requested, the system filters candidate harnesses to the session hive, resolves the survivors to explicit repository include paths, and invokes the existing packer. Unknown or sibling candidates are excluded; an empty result is refused; pinned engine identity, attached arguments, and mandatory secret scanning remain enforced. The selected scope and packing policy may be recorded under an expected revision.",
+      "beneficiary": "Operators and reviewers generating evidence from a multi-harness workspace who need packs that are both security-constrained and limited to the active session hive.",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "mechanism:memory.hive-scope",
+        "capability:plans.spec-revisions"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": false,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0037946,
+          "reservedUsd": 0.0111788,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.037696,
+          "reservedUsd": 0.059352,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.020936,
+          "reservedUsd": 0.043732,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.0624266,
+      "settledProviderUsd": 0.0624266
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:5e8c8ef8-3271-44c5-95a0-866b5fb0a177:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-pair",
+      "matchedPairIndex": 2,
+      "startedAt": "2026-09-09 03:14:32.511928-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "counterfactual-unknown",
+      "note": "At least one held-out primary comparison remains unknown.",
+      "candidateHash": "b1b265815ca6af4ef9eb0814831299fbd87818dc40c0dd8a12bb09c347196b13",
+      "behavior": "For a hive-confined session, filter candidate harness slugs using the session hive before retrieving behavioral clauses, while retaining immutable revision history, exact revision reads, no-op detection, and stale-writer conflicts for the selected scope. Unscoped sessions preserve current pass-through behavior.",
+      "beneficiary": "Agents and operators retrieving behavioral specifications within a session hive, especially when multiple harnesses or concurrent spec editors are active.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": false,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0028,
+          "reservedUsd": 0.0087822,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.019824,
+          "reservedUsd": 0.054884,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.021432,
+          "reservedUsd": 0.0458,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.044056,
+      "settledProviderUsd": 0.044056
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:56c04e4f-a34d-466c-a0e5-25337ae3384f:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-triple",
+      "matchedPairIndex": 2,
+      "startedAt": "2026-09-09 03:17:11.018233-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "counterfactual-unknown",
+      "note": "At least one held-out primary comparison remains unknown.",
+      "candidateHash": "7e6a31ed97b9f40024a479a7c78fd49cc153261d344487d906fd83b5dba14add",
+      "behavior": "Before a plan-spec revision is accepted or audited, constrain candidate harnesses to the session hive, apply the expected-revision check, and produce a scoped evidence artifact for the accepted or inspected revision. Reject stale revisions and exclude sibling or unknown harnesses.",
+      "beneficiary": "Operators and reviewers changing behavioral plans within multi-harness sessions benefit from hive-bounded, conflict-safe contract updates with auditable source evidence.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope",
+        "capability:code.secret-scanned-pack"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": false,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0041776,
+          "reservedUsd": 0.0114146,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.018732,
+          "reservedUsd": 0.045676,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.039164,
+          "reservedUsd": 0.05476,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.06207359999999999,
+      "settledProviderUsd": 0.06207359999999999
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:d536051b-66d6-436e-8d02-e2831492713f:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "uniform-pair",
+      "matchedPairIndex": null,
+      "startedAt": "2026-09-09 03:35:11.286413-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "review-unavailable",
+      "note": "Scout review did not receive an upstream response before the cycle deadline (never admitted by the local governor — no capacity within the remaining budget; not generation)",
+      "candidateHash": "2f7edd47c9a8faa01847125a68fcc74d2acb06aa54205be83fd56a46e6afce49",
+      "behavior": "For a recall request tied to a session hive, filter candidate harness slugs to that hive before deriving source includes, then request a pack using only the surviving explicit nonempty include set. Unknown or sibling candidates are excluded; an empty or unverified pack request is refused.",
+      "beneficiary": "Operators and reviewers using hive-scoped memory recall who need source evidence that is both narrowly scoped and security-preserving.",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "mechanism:memory.hive-scope"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": false,
+      "bOnly": false,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0031278,
+          "reservedUsd": 0.0094308,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.025148,
+          "reservedUsd": 0.061328,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.021128,
+          "reservedUsd": 0.045708,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "review",
+          "status": "unknown",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": null,
+          "reservedUsd": 0.495232,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.5446358,
+      "settledProviderUsd": 0.0494038
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:5104b567-55e0-4f11-93d0-f2b869393718:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-pair",
+      "matchedPairIndex": 3,
+      "startedAt": "2026-09-09 05:04:38.5416-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "counterfactual-unknown",
+      "note": "At least one held-out primary comparison remains unknown.",
+      "candidateHash": "48f98fdd8275f7ccd63c30debae0637a8f948dc01f0824ed55d96273ae32de4d",
+      "behavior": "Before accepting a new or revised behavioral clause, require a successful scoped source pack, then associate its artifact and engine provenance with the immutable revision. Preserve current no-op and stale-revision conflict behavior; refuse the revision when packing is unscoped, unverifiable, or security controls are not satisfied.",
+      "beneficiary": "Teams reviewing or reproducing behavioral-plan changes benefit from revisions that are backed by explicitly scoped, security-scanned source evidence and can be traced to the exact accepted contract revision.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "capability:code.secret-scanned-pack"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": false,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0031724,
+          "reservedUsd": 0.0098172,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.01984,
+          "reservedUsd": 0.054968,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.037788,
+          "reservedUsd": 0.061504,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.060800400000000004,
+      "settledProviderUsd": 0.060800400000000004
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:fd1b331e-7a1c-4c34-a4db-f61b06d34957:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-triple",
+      "matchedPairIndex": 3,
+      "startedAt": "2026-09-09 05:12:07.615631-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "counterfactual-unknown",
+      "note": "At least one held-out primary comparison remains unknown.",
+      "candidateHash": "120235e1ea34971336933ab9a8fea56ca61ebee4ff26994f9b05ef9e2c07c5aa",
+      "behavior": "Given a hive-scoped spec identity and expected revision, produce a source pack only after the revision is confirmed current; attach the exact revision and pack provenance, and refuse on stale revision, invalid scope, empty selection, or unverified packer identity.",
+      "beneficiary": "Operators and reviewers who need reproducible, security-scanned source evidence tied to the exact behavioral contract revision being evaluated.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "capability:code.secret-scanned-pack",
+        "mechanism:memory.hive-scope"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": null,
+      "bOnly": false,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.003728,
+          "reservedUsd": 0.011287799999999999,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.020224,
+          "reservedUsd": 0.054692,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.067892,
+          "reservedUsd": 0.061228,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.091844,
+      "settledProviderUsd": 0.091844
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:88bb6009-f0dd-4bb9-af5c-cb92e0db1774:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "uniform-pair",
+      "matchedPairIndex": null,
+      "startedAt": "2026-09-09 05:32:35.262036-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "review-unavailable",
+      "note": "Skeptical review cites missing or unsupported evidence.",
+      "candidateHash": "89f916f16c2e46bedfa8dfaa7447bd78b4ee5952036e36f47f9f4bbd56f6032b",
+      "behavior": "When producing a scoped source-evidence pack for a behavioral clause, associate the artifact and its provenance with the clause's expected revision. Refuse or mark the result stale if the clause revision changed before association, while preserving prior associations and allowing exact historical lookup.",
+      "beneficiary": "Teams reviewing or approving behavioral specifications benefit from evidence packs that are explicitly tied to the exact immutable specification revision under review.",
+      "units": [
+        "capability:plans.spec-revisions",
+        "capability:code.secret-scanned-pack"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": false,
+      "bOnly": false,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0030296000000000003,
+          "reservedUsd": 0.0098172,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.036676,
+          "reservedUsd": 0.061392,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.023648,
+          "reservedUsd": 0.054856,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "review",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.345652,
+          "reservedUsd": 0.510764,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.4090056,
+      "settledProviderUsd": 0.4090056
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:bd41054b-4207-48dc-87af-5385a8e81c04:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-pair",
+      "matchedPairIndex": 4,
+      "startedAt": "2026-09-09 06:22:08.621858-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "counterfactual-unknown",
+      "note": "At least one held-out primary comparison remains unknown.",
+      "candidateHash": "c1fb73aeea1d109e4478b6c021a7362035dfb45fd9ea18c5da3e4e7023128ee7",
+      "behavior": "When a behavioral clause revision is accepted, associate it with an immutable reference to the explicitly selected source pack, including pack artifact identity, engine provenance, and scan/admissibility status. Refuse the revision if packing is refused or the expected revision is stale; preserve the pack reference across later history reads.",
+      "beneficiary": "Plan authors, reviewers, and downstream agents who need to verify that an accepted behavioral contract revision was based on a deliberately scoped, security-scanned source snapshot.",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": false,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0032828,
+          "reservedUsd": 0.0098172,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.036432,
+          "reservedUsd": 0.061548,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.024344,
+          "reservedUsd": 0.055012,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.0640588,
+      "settledProviderUsd": 0.0640588
+    },
+    {
+      "runId": "dream-cycle:papercusp-workspace:papercusp:45baf69a-7d88-417f-b5cf-0d0333f36abb:dream:1",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "arm": "structured-triple",
+      "matchedPairIndex": 4,
+      "startedAt": "2026-09-09 06:25:40.570174-04",
+      "status": "rejected",
+      "verdict": "unverified",
+      "reason": "counterfactual-unknown",
+      "note": "At least one held-out primary comparison remains unknown.",
+      "candidateHash": "d256a64041e01d6af9333c38a67b0da35c923437898142eb950b689dcbcb68c6",
+      "behavior": "Given a hive-scoped candidate set and an expected spec revision, produce a source pack whose manifest records the accepted revision and pack provenance; refuse before packing when the revision is stale, the selection is empty, or the packer identity/security conditions fail.",
+      "beneficiary": "Operators and reviewers who need to audit whether a source pack corresponds to the exact behavioral contract revision being evaluated, without admitting unscoped or cross-hive evidence.",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope"
+      ],
+      "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+      "aOnly": false,
+      "bOnly": null,
+      "assessments": [],
+      "calls": [
+        {
+          "phase": "packet",
+          "status": "settled",
+          "model": "local:packet",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "generation",
+          "status": "settled",
+          "model": "gpt-5.6-luna:medium",
+          "settledUsd": 0.0038204000000000003,
+          "reservedUsd": 0.011287799999999999,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "retrieval",
+          "status": "settled",
+          "model": "local:retrieval",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "rerank",
+          "status": "settled",
+          "model": "local:rerank",
+          "settledUsd": 0,
+          "reservedUsd": 0,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-b",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.019324,
+          "reservedUsd": 0.054736,
+          "zeroPricedUsage": false
+        },
+        {
+          "phase": "control-a",
+          "status": "settled",
+          "model": "gpt-5.6-sol:xhigh",
+          "settledUsd": 0.057972,
+          "reservedUsd": 0.061272,
+          "zeroPricedUsage": false
+        }
+      ],
+      "accountedUsd": 0.0811164,
+      "settledProviderUsd": 0.0811164
+    }
+  ],
+  "blender": [
+    {
+      "cycleId": "scout-1788932984807",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "configHash": "0b00cd04e2a7cb06b76bc58571605c818d59a973241332f0fc6bebc086f13e11",
+      "status": "ran",
+      "settled": true,
+      "ideasGenerated": 3,
+      "routed": 0,
+      "costUsd": 0.0329984,
+      "calls": [
+        {
+          "id": 0,
+          "model": "gpt-5.6-luna:medium",
+          "status": "settled",
+          "costUsd": 0.005710400000000001,
+          "inputTokens": 18808,
+          "reservedUsd": 0.0349212,
+          "outputTokens": 1624
+        },
+        {
+          "id": 1,
+          "model": "gpt-5.6-sol:xhigh",
+          "status": "settled",
+          "costUsd": 0.009448,
+          "inputTokens": 722,
+          "reservedUsd": 0.215356,
+          "outputTokens": 328
+        },
+        {
+          "id": 2,
+          "model": "gpt-5.6-sol:xhigh",
+          "status": "settled",
+          "costUsd": 0.00758,
+          "inputTokens": 720,
+          "reservedUsd": 0.215044,
+          "outputTokens": 235
+        },
+        {
+          "id": 3,
+          "model": "gpt-5.6-sol:xhigh",
+          "status": "settled",
+          "costUsd": 0.01026,
+          "inputTokens": 720,
+          "reservedUsd": 0.214744,
+          "outputTokens": 369
+        }
+      ],
+      "tickAt": "2026-09-09 01:51:36.321387-04"
+    },
+    {
+      "cycleId": "scout-1788948515884",
+      "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+      "configHash": "f69aa6c34b7e9f578b7cd67fa9785b8fe429ded3cef0dc17017edcc52efb1b3b",
+      "status": "ran",
+      "settled": true,
+      "ideasGenerated": 2,
+      "routed": 0,
+      "costUsd": 0.0233462,
+      "calls": [
+        {
+          "id": 0,
+          "model": "gpt-5.6-luna:medium",
+          "status": "settled",
+          "costUsd": 0.0050182,
+          "inputTokens": 18299,
+          "reservedUsd": 0.0344476,
+          "outputTokens": 1132
+        },
+        {
+          "id": 1,
+          "model": "gpt-5.6-sol:xhigh",
+          "status": "settled",
+          "costUsd": 0.00876,
+          "inputTokens": 755,
+          "reservedUsd": 0.215784,
+          "outputTokens": 287
+        },
+        {
+          "id": 2,
+          "model": "gpt-5.6-sol:xhigh",
+          "status": "settled",
+          "costUsd": 0.009568,
+          "inputTokens": 752,
+          "reservedUsd": 0.215644,
+          "outputTokens": 328
+        }
+      ],
+      "tickAt": "2026-09-09 06:10:07.4689-04"
+    }
+  ],
+  "matchedPairs": [
+    {
+      "key": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf:0",
+      "complete": true,
+      "primaryMatch": true,
+      "pair": "dream-cycle:papercusp-workspace:papercusp:36eedc13-9395-4629-895f-ef4102434286:dream:1",
+      "triple": "dream-cycle:papercusp-workspace:papercusp:26897403-5406-4112-b75b-45518fe42798:dream:1",
+      "units": [
+        "capability:plans.spec-revisions",
+        "mechanism:dream.cost-admission",
+        "capability:code.secret-scanned-pack"
+      ],
+      "pairVerdict": "unverified",
+      "tripleVerdict": "unverified",
+      "pairReason": "rerank-unavailable",
+      "tripleReason": "counterfactual-unknown",
+      "pairAccountedUsd": 0.002669,
+      "tripleAccountedUsd": 0.0539102
+    },
+    {
+      "key": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf:1",
+      "complete": true,
+      "primaryMatch": true,
+      "pair": "dream-cycle:papercusp-workspace:papercusp:81e76cc4-4480-4d3e-80b3-6b1ff58aa6ad:dream:1",
+      "triple": "dream-cycle:papercusp-workspace:papercusp:33dfdb19-ec6f-46bc-a33e-354ebb70d0d2:dream:1",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "mechanism:memory.hive-scope",
+        "capability:plans.spec-revisions"
+      ],
+      "pairVerdict": "unverified",
+      "tripleVerdict": "unverified",
+      "pairReason": "rerank-unavailable",
+      "tripleReason": "review-unavailable",
+      "pairAccountedUsd": 0.0030168,
+      "tripleAccountedUsd": 0.0624266
+    },
+    {
+      "key": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf:2",
+      "complete": true,
+      "primaryMatch": true,
+      "pair": "dream-cycle:papercusp-workspace:papercusp:5e8c8ef8-3271-44c5-95a0-866b5fb0a177:dream:1",
+      "triple": "dream-cycle:papercusp-workspace:papercusp:56c04e4f-a34d-466c-a0e5-25337ae3384f:dream:1",
+      "units": [
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope",
+        "capability:code.secret-scanned-pack"
+      ],
+      "pairVerdict": "unverified",
+      "tripleVerdict": "unverified",
+      "pairReason": "counterfactual-unknown",
+      "tripleReason": "counterfactual-unknown",
+      "pairAccountedUsd": 0.044056,
+      "tripleAccountedUsd": 0.06207359999999999
+    },
+    {
+      "key": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf:3",
+      "complete": true,
+      "primaryMatch": true,
+      "pair": "dream-cycle:papercusp-workspace:papercusp:5104b567-55e0-4f11-93d0-f2b869393718:dream:1",
+      "triple": "dream-cycle:papercusp-workspace:papercusp:fd1b331e-7a1c-4c34-a4db-f61b06d34957:dream:1",
+      "units": [
+        "capability:plans.spec-revisions",
+        "capability:code.secret-scanned-pack",
+        "mechanism:memory.hive-scope"
+      ],
+      "pairVerdict": "unverified",
+      "tripleVerdict": "unverified",
+      "pairReason": "counterfactual-unknown",
+      "tripleReason": "counterfactual-unknown",
+      "pairAccountedUsd": 0.060800400000000004,
+      "tripleAccountedUsd": 0.091844
+    },
+    {
+      "key": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf:4",
+      "complete": true,
+      "primaryMatch": true,
+      "pair": "dream-cycle:papercusp-workspace:papercusp:bd41054b-4207-48dc-87af-5385a8e81c04:dream:1",
+      "triple": "dream-cycle:papercusp-workspace:papercusp:45baf69a-7d88-417f-b5cf-0d0333f36abb:dream:1",
+      "units": [
+        "capability:code.secret-scanned-pack",
+        "capability:plans.spec-revisions",
+        "mechanism:memory.hive-scope"
+      ],
+      "pairVerdict": "unverified",
+      "tripleVerdict": "unverified",
+      "pairReason": "counterfactual-unknown",
+      "tripleReason": "counterfactual-unknown",
+      "pairAccountedUsd": 0.0640588,
+      "tripleAccountedUsd": 0.0811164
+    }
+  ],
+  "independentCalibration": {
+    "source": "calibration-review-2026-09-14.json",
+    "reviewer": "su-4a57e338-b9eb-4fc6-84fb-d7804168bb72",
+    "reviewerKind": "AI/domain",
+    "reviewerMinutesApproximate": 17,
+    "blindHash": "54bcca71a57be273669f56f9a54c6f5bc4210015c7466033d827027a3d782427",
+    "frozenPostIds": [
+      204381,
+      204382,
+      204384,
+      204386,
+      204387,
+      204388,
+      204389
+    ],
+    "clarificationPostIds": [
+      204393
+    ],
+    "caseJudgments": {
+      "reject": 4,
+      "unverified": 2,
+      "accept": 0
+    },
+    "familyInterpretation": {
+      "families": 5,
+      "intrinsicallyRejected": 2,
+      "unverified": 3,
+      "accepted": 0,
+      "representativeRule": "Within the duplicated source-packing family select the lexicographically smallest frozen case ID (1176a396ed37847cf61c), before reading arm/outcome mapping. Selection is for further review, not acceptance."
+    },
+    "qualifiedFamilies": null,
+    "admissibility": "Exploratory AI source-contribution/feasibility evidence with disclosed incidental aggregate exposure; not pristine blindness, human validation, held-out confirmation or executed outcomes."
+  },
+  "unblindedNoveltyReview": {
+    "source": "calibration-unblinded-review-2026-09-14.json",
+    "sourceWorkItem": "WI-40148",
+    "reviewer": {
+      "id": "su-4a57e338-b9eb-4fc6-84fb-d7804168bb72",
+      "kind": "independent-ai-domain-reviewer"
+    },
+    "postIds": [
+      204403,
+      204404,
+      204405,
+      204406
+    ],
+    "representatives": [
+      {
+        "caseId": "1176a396ed37847cf61c",
+        "family": "hive-filtered secure source packing",
+        "classification": "exact-family-duplicate",
+        "novelBoundedLocalExperiment": false,
+        "engineeringFeasibleInPrinciple": true,
+        "qualification": "Consolidate under the earlier family only if an observed product leak or registered requirement establishes a real beneficiary and authoritative harness-to-path semantics."
+      },
+      {
+        "caseId": "36908b44cc10514ba38e",
+        "family": "hive-confined revision-aware clause retrieval",
+        "classification": "exact-family-duplicate",
+        "novelBoundedLocalExperiment": false,
+        "engineeringFeasibleInPrinciple": true,
+        "qualification": "Revisit under the earlier family only from an observed multi-harness spec-history journey or registered capability requirement."
+      },
+      {
+        "caseId": "5908803065283e72f93d",
+        "family": "hive-bounded CAS spec revision with scoped evidence pack",
+        "classification": "prior-family-refinement",
+        "novelBoundedLocalExperiment": false,
+        "engineeringFeasibleInPrinciple": true,
+        "qualification": "A future engineering prototype would require stable revision-to-artifact identity, transaction or compensation semantics, failure injection, an actual caller, and no atomicity claim before durable joint identity is proven."
+      }
+    ],
+    "closure": {
+      "reviewedRepresentatives": 3,
+      "qualifiedNovelExperiments": 0,
+      "engineeringFeasibleInPrinciple": 3,
+      "downstreamEligibleCandidates": 0,
+      "downstreamTrialsExecuted": 0,
+      "downstreamDisposition": "not-applicable-no-qualified-candidates"
+    },
+    "limitations": [
+      "This is independent AI/domain review, not human validation or held-out confirmation.",
+      "Conclusions are scoped to intact prior-match prefixes and current-source inspection; some historical priorMatches text ends at 12000 characters without a full-text reference (EI-23213592026804608).",
+      "Not novel does not mean technically impossible or valueless; it means the proposed behavior cannot count as a new Dream discovery without a distinct observed product gap."
+    ]
+  },
+  "flatFacetedAblation": {
+    "source": "calibration-flat-faceted-ablation-result-2026-09-14.json",
+    "protocol": "calibration-flat-faceted-ablation-protocol.json",
+    "sourceWorkItem": "WI-10001412",
+    "sourcePostId": 204651,
+    "sourcePostBodySha256": "3d59be4b70d683c22df4a9936cf6af9abfa182fcede315638a389d3204940b80",
+    "reviewer": "su-f106637d-b145-4cd4-a05e-fff90c116e5a",
+    "reviewerKind": "AI/domain",
+    "reviewerMinutesApproximate": 13,
+    "exposure": {
+      "attestation": "Before assignment, the reviewer had not read WI-40148 posts 204381–204406, Dream calibration review/key artifacts, or prior faceted judgments/results.",
+      "duringReview": "The reviewer read only calibration-flat-blind-v2.json; no sibling Dream artifact, key, status, review thread, outcome, candidate command, provider call, agent launch, setting change, or study mutation.",
+      "limitation": "The reviewer reported the file SHA from the assigned pin rather than recomputing it because commands were prohibited; the embedded sourceBlindHash was directly observed. The study owner independently verified the file SHA before assignment."
+    },
+    "caseComparisons": [
+      {
+        "caseId": "1176a396ed37847cf61c",
+        "facetedDisposition": "reject",
+        "flatDisposition": "accept",
+        "agreement": false,
+        "direction": "reject-to-accept",
+        "facetedFamily": "hive-filtered secure source packing",
+        "flatFamily": "hive-confined secure source-evidence packing"
+      },
+      {
+        "caseId": "32f8b3a1af51c14a4739",
+        "facetedDisposition": "reject",
+        "flatDisposition": "reject",
+        "agreement": true,
+        "direction": "reject-to-reject",
+        "facetedFamily": "CAS-versioned pack-operation audit",
+        "flatFamily": "operational pack-call audit logging through the behavioral-spec revision store"
+      },
+      {
+        "caseId": "36908b44cc10514ba38e",
+        "facetedDisposition": "unverified",
+        "flatDisposition": "accept",
+        "agreement": false,
+        "direction": "unverified-to-accept",
+        "facetedFamily": "hive-confined revision-aware clause retrieval",
+        "flatFamily": "hive-confined, revision-aware behavioral-clause retrieval"
+      },
+      {
+        "caseId": "5908803065283e72f93d",
+        "facetedDisposition": "unverified",
+        "flatDisposition": "reject",
+        "agreement": false,
+        "direction": "unverified-to-reject",
+        "facetedFamily": "hive-bounded CAS spec revision with scoped evidence pack",
+        "flatFamily": "three-way hive-confined spec revision plus secure evidence packing"
+      },
+      {
+        "caseId": "82152aef5690ace62e79",
+        "facetedDisposition": "reject",
+        "flatDisposition": "reject",
+        "agreement": true,
+        "direction": "reject-to-reject",
+        "facetedFamily": "hive-filtered secure source packing",
+        "flatFamily": "hive-confined secure source-evidence packing"
+      },
+      {
+        "caseId": "838da71efc0a5d2f4a2d",
+        "facetedDisposition": "reject",
+        "flatDisposition": "unverified",
+        "agreement": false,
+        "direction": "reject-to-unverified",
+        "facetedFamily": "Dream-admission-gated spec revision",
+        "flatFamily": "Dream-budget-gated behavioral-spec persistence"
+      }
+    ],
+    "primaryEndpoint": {
+      "name": "exact per-case disposition agreement",
+      "population": 6,
+      "agreements": 2,
+      "mismatches": 4,
+      "agreementFraction": 0.3333333333333333,
+      "mismatchCaseIds": [
+        "1176a396ed37847cf61c",
+        "36908b44cc10514ba38e",
+        "5908803065283e72f93d",
+        "838da71efc0a5d2f4a2d"
+      ],
+      "facetedHistogram": {
+        "accept": 0,
+        "reject": 4,
+        "unverified": 2
+      },
+      "flatHistogram": {
+        "accept": 2,
+        "reject": 3,
+        "unverified": 1
+      }
+    },
+    "secondaryEndpoints": {
+      "duplicateFamilyRecognition": {
+        "caseIds": [
+          "1176a396ed37847cf61c",
+          "82152aef5690ace62e79"
+        ],
+        "facetedRecognized": true,
+        "flatRecognized": true,
+        "agreement": true
+      },
+      "requiredDomainCoverage": {
+        "population": 6,
+        "complete": 6,
+        "domains": [
+          "scoped novelty",
+          "necessity of both primary contributions",
+          "concrete usefulness",
+          "falsifier feasibility",
+          "maintenance/coupling risk",
+          "could-not-determine gaps"
+        ]
+      },
+      "citationCompleteness": {
+        "population": 6,
+        "complete": 6,
+        "rule": "Each flat judgment includes decisive source references and literal supporting quotes."
+      }
+    },
+    "interpretation": {
+      "result": "The flat and faceted AI reviews agree on only 2 of 6 exact dispositions. Four directional mismatches are a large descriptive sensitivity signal in this calibration sample.",
+      "causalLimit": "Different reviewers judged the two representations, and the faceted reviewer disclosed incidental aggregate exposure after forming judgments. The design cannot isolate representation effects from reviewer effects.",
+      "powerLimit": "Six calibration cases are not a powered effectiveness sample and do not establish population-level equivalence or a winning Dream arm.",
+      "qualificationLimit": "Flat ACCEPT means qualified as a bounded experiment on the flat source-stage evidence, not global novelty, implementation success, or beneficial outcome. The separate unblinded novelty review remains 0 of 3 qualified representatives and controls current downstream eligibility.",
+      "acceptanceLimit": "This result is AI/offline calibration, not independent human validation, held-out confirmation, downstream experiment evidence, product acceptance, or shipment approval."
+    }
+  },
+  "scientific": {
+    "dreamAttempts": 17,
+    "acceptedDreamRows": 0,
+    "unverifiedDreamReviews": 14,
+    "noDreamReview": 3,
+    "blenderIdeas": 5,
+    "blenderRouted": 0,
+    "qualifiedNovelFamilies": 0,
+    "downstreamEligibleCandidates": 0,
+    "downstreamTrialsExecuted": 0
+  },
+  "historicalDiagnosticWarnings": [
+    "Historical timeout notes claiming never-admitted/local-governor starvation were retracted in EI-22769219749818913: the Codex adapter did not emit onAdmitted. These raw persisted strings do not establish the cause or prove no generation occurred.",
+    "For the original Haiku cycle 36930ec0-0135-4c3d-8261-b9b8f8028545, the recovered driver log records four HTTP 429 rate_limit_error retries before the deadline. This contradicts its persisted never-admitted explanation. The responding hop, pool account, later retry progress and billed usage remain unestablished; retain the USD 0.039173 unknown-call reservation. Evidence is preserved in EI-22756328656642291 comment 203056; source /tmp/dream-study-pair-after-readiness-20260909.log, SHA-256 ea874cd3a74f97ec879eb9d490a8d1e257684a52f54dc487ccf716e080fe5e3c. This historical evidence does not prove current Haiku recovery."
+  ],
+  "infrastructureCorrections": [
+    "EI-22762141222831537 is closed: the Scout production path now threads the explicit workspaceId through productionScoutRunner, buildScoutCycleDeps, and the default goal-dispatch path. Twelve focused adapter/runner tests passed. This prevents future runs from relying on ambient sentinel scope; it does not reclassify historical study outcomes.",
+    "EI-22769219749818913 is closed: the deadline diagnostics now separate admission and generation budgets, with 49 focused tests passing at the recorded base and the relevant source unchanged at closure. The historical d536051b delay remains un-attributable, and no paid identity was retried."
+  ],
+  "outstanding": [
+    "Independent human validation; the two AI source-stage reviews disagree on four of six exact dispositions",
+    "Independent final acceptance and owner keep/simplify/expand/stop or explicitly inconclusive disposition"
+  ],
+  "limitations": [
+    "Four source units and one source snapshot; no domain-general inference",
+    "Model blocks and pre/post infrastructure or prompt-contract windows must remain distinct",
+    "Ordinary Blender uses its production corpus and one ideator, not the Dream source population",
+    "Unequal spend so far; no matched-spend superiority claim",
+    "All phase cost figures exclude unmeasured engineer/reviewer time and local compute dollar valuation",
+    "No substantive rejection should be inferred from an unverified verdict or a missing judgment",
+    "The flat/faceted comparison used different reviewers and cannot isolate representation effects from reviewer effects"
+  ]
+}

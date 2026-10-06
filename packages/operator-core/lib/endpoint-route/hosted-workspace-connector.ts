@@ -15,6 +15,8 @@ export interface HostedConnectorBinding {
   generation: number;
   transport: HostedConnectorTransport;
   state: 'pending' | 'active' | 'revoked';
+  /** Server-derived at socket admission; never accepted from a connector or browser. */
+  hosting?: 'byoc' | 'papercusp';
 }
 
 export interface HostedConnectorTicketBinding extends HostedConnectorBinding {
@@ -34,7 +36,7 @@ export interface HostedConnectorTicketBinding extends HostedConnectorBinding {
  * pong, so a live link is never more than ~30s stale. 90s tolerates two lost
  * pongs before the cloud stops calling the machine reachable. Before this, the
  * row state alone decided reachability, so a half-open link read as "connected"
- * for hours (measured on owner-test, 2026-09-29).
+ * for hours (measured on avi-test, 2026-09-29).
  */
 export const HOSTED_CONNECTOR_LIVENESS_FRESH_MS = 90_000;
 

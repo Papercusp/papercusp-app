@@ -3,6 +3,8 @@
 // alias `ViteUserConfig`. Import that under our existing local name so nothing else here changes.
 import { configDefaults, defineConfig, type ViteUserConfig as UserConfig } from 'vitest/config';
 import tsconfigPaths from 'vite-tsconfig-paths';
+import type { Plugin } from 'vite';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -17,6 +19,14 @@ import { resolveLaneInclude, type TestLane } from './lane-split.ts';
 import { ensurePapercuspTmpdir } from './tmpdir-guard.ts';
 // gate-file-level-test-reuse-2026-09-27 P-008: per-file pass reuse (PC_TEST_REUSE_SKIP_LIST).
 import { resolveReuseSkipExclude } from './test-pass-reuse-skip.ts';
+import {
+  EXECUTED_INPUTS_CAPTURE_SETUP,
+  FAIL_ON_CONSOLE_SETUP,
+  HANDLE_LEAK_SETUP,
+  HERMETIC_ENV_SETUP,
+  NO_REAL_PG_SETUP,
+  TESTING_LIBRARY_TIMEOUT_SETUP,
+} from './worker-setup-files.ts';
 
 // 'e2e' (EI-24442044145393058): a live, end-to-end run against a real running system (a
 // serving operator, the real database, real git). Its only runtime difference from 'unit' is
@@ -68,23 +78,8 @@ export interface DefineVitestConfigOptions {
 const baseExclude = ['**/node_modules/**', '**/dist/**', '**/.next/**', '**/.papercusp/**', '**/_retired/**'];
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const FAIL_ON_CONSOLE_SETUP = resolve(__dirname, 'setup-fail-on-console.ts');
-const HERMETIC_ENV_SETUP = resolve(__dirname, 'setup-hermetic-env.ts');
-// EI-19311807188719573: unit-layer-only rail forbidding a real Postgres connection.
-// See the file's own doc comment for why it guards the consequence (a live pool) rather
-// than the cause (an un-memoized dynamic import under concurrency).
-const NO_REAL_PG_SETUP = resolve(__dirname, 'setup-no-real-pg.ts');
-// EI-9990: bumps @testing-library/dom's waitFor/findBy* internal poll timeout
-// for shared-box tolerance — a no-op for any package without
-// @testing-library/dom on its graph. See the file's own doc comment.
-const TESTING_LIBRARY_TIMEOUT_SETUP = resolve(__dirname, 'setup-testing-library-timeout.ts');
-// WI-38215 / plan gate-suite-speedup-2026-08-12 D-014+D-016: attributes a leaked
-// timer/listener/registry entry to the file that LEFT it, instead of to the file
-// that happened to be running when it fired (which is what vitest reports, and it
-// sends you to edit an innocent file). Observe-and-report only — it never fails a
-// test; see the file's own doc comment for why, and for why it must be registered
-// FIRST (outermost bracket, so sibling setups' create/release pairs cancel out).
-const HANDLE_LEAK_SETUP = resolve(__dirname, 'setup-handle-leak-detector.ts');
+// The worker setup files (and why each exists) live in worker-setup-files.ts, so the reuse rule's
+// main-process closure (main-process-closure.ts) can tell them apart from reporters/globalSetup.
 // The monorepo root (libs/test-config/src → up 3 = repo root). Whitelisted in
 // Vite's server.fs.allow below so a `vitest run --root <pkg>` invocation can
 // still serve this hoisted setup file + other workspace deps. Without it, a
@@ -119,6 +114,8 @@ ensurePapercuspTmpdir();
 // + fail-soft (D-007): a missing DB / cold checkout never changes a test outcome. Opt-out via
 // PAPERCUSP_DISABLE_TEST_RUNS_REPORTER=1 (the reporter's own test sets it).
 const ADMIN_TEST_RUNS_REPORTER = resolve(__dirname, 'admin-test-runs-reporter.ts');
+/** The host repository's "may this run start?" veto — see host-preflight-global-setup.ts. */
+export const HOST_PREFLIGHT_GLOBAL_SETUP = resolve(__dirname, 'host-preflight-global-setup.ts');
 
 // ── EXECUTED-SOURCE MAP (gate-latency-selection-and-retry-policy-2026-09-06, P-002) ──────
 // A second reporter that records, per test FILE, the modules vitest actually executed, into
@@ -152,6 +149,21 @@ export const PC_EXECUTED_SOURCE_MAP_RESULT_ENV = 'PC_EXECUTED_SOURCE_MAP_RESULT'
 export const PC_EXECUTED_SOURCE_MAP_NO_PERSIST_ENV = 'PC_EXECUTED_SOURCE_MAP_NO_PERSIST';
 export const EXECUTED_SOURCE_MAP_IMPORT_LIMIT = 1_000_000;
 const EXECUTED_SOURCE_MAP_REPORTER = resolve(__dirname, 'executed-source-map-reporter.ts');
+/** Vite's existing module metadata carries the original transform input, including erased TS. */
+export const PC_EXECUTED_SOURCE_ORIGINAL_META = 'papercuspExecutedOriginalSource';
+
+export function executedSourceOriginalsPlugin(): Plugin {
+  return {
+    name: 'papercusp-executed-source-originals',
+    enforce: 'pre',
+    transform(code, id) {
+      // Metadata only: no code/map replacement and no source text retained in memory.
+      return { meta: { [PC_EXECUTED_SOURCE_ORIGINAL_META]: {
+        version: 1, id, sha256: createHash('sha256').update(code).digest('hex'),
+      } } };
+    },
+  };
+}
 
 /** The arming decision, PURE over an env — `null` when the runner did not ask for a map. */
 export function executedSourceMapArmed(
@@ -173,12 +185,15 @@ export function executedSourceMapConfig(env: NodeJS.ProcessEnv = process.env): {
   reporters: string[];
   experimental: { importDurations: { limit: number; print: false } } | undefined;
   setupFiles: string[];
+  plugins?: Plugin[];
 } {
-  if (!executedSourceMapArmed(env)) return { reporters: [], experimental: undefined, setupFiles: [] };
+  const armed = executedSourceMapArmed(env);
+  if (!armed) return { reporters: [], experimental: undefined, setupFiles: [] };
   return {
     reporters: [EXECUTED_SOURCE_MAP_REPORTER],
     experimental: { importDurations: { limit: EXECUTED_SOURCE_MAP_IMPORT_LIMIT, print: false } },
     setupFiles: armExecutedInputsCapture(env) ? [EXECUTED_INPUTS_CAPTURE_SETUP] : [],
+    ...(armed.outPath ? { plugins: [executedSourceOriginalsPlugin()] } : {}),
   };
 }
 
@@ -188,7 +203,6 @@ export function executedSourceMapConfig(env: NodeJS.ProcessEnv = process.env): {
 // evaluation (before any worker exists) and inherited by every worker through the env. When it
 // cannot be created, nothing is captured and every recorded row stays non-reusable.
 export const PC_EXECUTED_INPUTS_DIR_ENV = 'PC_EXECUTED_INPUTS_DIR';
-const EXECUTED_INPUTS_CAPTURE_SETUP = resolve(__dirname, 'executed-inputs-capture-setup.ts');
 
 /** Ensure the hand-off directory exists and is named in `env`; false when unavailable. */
 export function armExecutedInputsCapture(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -216,10 +230,16 @@ export function armExecutedInputsCapture(env: NodeJS.ProcessEnv = process.env): 
 // of 73 tasks). defineVitestConfig and gateParticipationConfig now both read THIS function, so a
 // new gate-owned piece reaches every enrolled config at once instead of drifting.
 interface GateOwnedParts {
+  plugins: Plugin[];
   /** Gate-owned reporters only — never 'default' / 'junit', which each config chooses. */
   reporters: string[];
   /** Setup files that must precede every other setup file. */
   leadingSetupFiles: string[];
+  /**
+   * globalSetup files that must precede every other globalSetup: the host preflight's refusal has
+   * to land before anything else (a testcontainer, a schema clone) starts on the run's behalf.
+   */
+  leadingGlobalSetup: string[];
   /** Exclude globs for files whose pass proof is still valid at the judged sha. */
   reuseSkipExclude: string[];
   experimental: { importDurations: { limit: number; print: false } } | undefined;
@@ -228,12 +248,15 @@ interface GateOwnedParts {
 function gateOwnedParts(layer: TestLayer, env: NodeJS.ProcessEnv): GateOwnedParts {
   const executedSourceMap = executedSourceMapConfig(env);
   return {
+    plugins: executedSourceMap.plugins ?? [],
     reporters: [
       ...(env.PAPERCUSP_DISABLE_TEST_RUNS_REPORTER === '1' ? [] : [ADMIN_TEST_RUNS_REPORTER]),
       ...executedSourceMap.reporters,
     ],
     // The capture patches node:fs, so never in a real browser.
     leadingSetupFiles: layer === 'browser' ? [] : executedSourceMap.setupFiles,
+    // Every layer: globalSetup runs in vitest's node main process even for a browser run.
+    leadingGlobalSetup: [HOST_PREFLIGHT_GLOBAL_SETUP],
     // affected-tests arms the skip channel for unit vitest tasks alone, and the reader re-checks
     // run context + runner identity (a declined list means every file runs).
     reuseSkipExclude: layer === 'unit' ? resolveReuseSkipExclude(env) : [],
@@ -244,6 +267,8 @@ function gateOwnedParts(layer: TestLayer, env: NodeJS.ProcessEnv): GateOwnedPart
 export interface GateParticipationOptions {
   /** The workspace's own setup files. The gate's capture setup is placed before them. */
   setupFiles?: string[];
+  /** The workspace's own globalSetup files. The host preflight is placed before them. */
+  globalSetup?: string[];
   /** The workspace's own exclude globs, merged with vitest's defaults and the reuse skip list. */
   exclude?: string[];
 }
@@ -251,6 +276,8 @@ export interface GateParticipationOptions {
 export interface GateParticipationFragment {
   reporters: string[];
   setupFiles: string[];
+  /** The host preflight. Pass the workspace's own globalSetup through `opts.globalSetup`. */
+  globalSetup: string[];
   exclude: string[];
   experimental?: { importDurations: { limit: number; print: false } };
 }
@@ -273,6 +300,7 @@ export function gateParticipationConfig(
   return {
     reporters: ['default', ...gate.reporters],
     setupFiles: [...gate.leadingSetupFiles, ...(opts.setupFiles ?? [])],
+    globalSetup: [...gate.leadingGlobalSetup, ...(opts.globalSetup ?? [])],
     exclude: [...configDefaults.exclude, ...(opts.exclude ?? []), ...gate.reuseSkipExclude],
     ...(gate.experimental ? { experimental: gate.experimental } : {}),
   };
@@ -673,7 +701,7 @@ export function defineVitestConfig(opts: DefineVitestConfigOptions): UserConfig 
   }
 
   return defineConfig({
-    plugins: [tsconfigPaths({ ignoreConfigErrors: true })],
+    plugins: [tsconfigPaths({ ignoreConfigErrors: true }), ...gate.plugins],
     // Use a project-local Vite cache dir instead of os.tmpdir() (which is
     // TMPDIR=/tmp/claude on this dev box — a read-only path that doesn't
     // exist, causing every vitest run to ENOENT on the ssr/ sub-directory
@@ -819,7 +847,7 @@ export function defineVitestConfig(opts: DefineVitestConfigOptions): UserConfig 
           ? Number(process.env.VITEST_INTEGRATION_HOOK_TIMEOUT_MS) || 90_000
           : 60_000,
       setupFiles: finalSetup,
-      globalSetup,
+      globalSetup: [...gate.leadingGlobalSetup, ...globalSetup],
       reporters: process.env.CI
         ? [['default', { summary: false }], ['junit', { outputFile: './junit.xml' }], ...gate.reporters]
         : ['default', ...gate.reporters],

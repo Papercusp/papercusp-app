@@ -10,13 +10,28 @@ distilled from the backlog-clearance fleet run.)
 
 **Turning it ON / OFF.** Any of these turn it on: **"drain mode"**, "clear the backlog",
 "drain the queue". Parameters — each has a default; owner words override: **SCOPE** (default:
-the current harness's actionable set — non-terminal, unclaimed, not in-progress), **FLEET
+the current harness's agent-work backlog, as defined just below), **FLEET
 size** (default 10), **AGENT + MODEL** (no default — announce the account routing + model and
 the alternatives at every spawn, always), **TERMINAL criteria** (default: every scoped item
 done/resolved/deprecated/needs_human). OFF when: the wind-down report is sent, or the owner
 stops it. REGISTER it like AUTO: `mode:set { mode:'drain', reason, ownerDirected }` on entry
 (drain implies + stacks with auto), `enabled:false` at wind-down — an unregistered mode dies
 at the next compaction.
+
+**The backlog is the work predicate, and nothing else.** A drain's backlog is exactly the rows
+the work predicate admits: `harness_shared.work_item_is_agent_work(nature, audience, lane,
+needs_owner_action)`, i.e. `nature = 'work'` AND `audience = 'agent'`, not in the observation
+lane, not awaiting owner action. That predicate is the drain's only backlog source. Read and take
+the backlog only through the surfaces that apply it: `work_items:claimable` (what is claimable
+now), `scheduler:get_next` / `work_items:claim_next` (take the next item). Never size or feed a
+drain from a raw `harness_shared.work_items` query, a hand-written `item_kind` list, or a
+`work_items:list { natures }` slice. Rows of the other three natures are data, not backlog, and
+never count toward burn-down: a **record** (a CRM deal, an Asana ticket nobody handed to
+Papercusp), a **document** (a Slack thread rollup), an **event** (a status change). A row of
+nature work with **audience human** (an email draft awaiting the owner's approval) is the
+owner's work: an agent never drains, claims or closes it. Turning data into work is an explicit,
+attributable promotion, never a drain decision. Definitions and examples: the agent-insights doc
+`work-natures-and-the-work-predicate`.
 
 **Defect-filing exception — DRAIN overrides the general file-every-suspected-bug rule.** While
 DRAIN is active, do **not** mint an `improvements:capture`, issue, work-item, or observation for

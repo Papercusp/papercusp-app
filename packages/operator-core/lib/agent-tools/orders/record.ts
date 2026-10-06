@@ -5,9 +5,10 @@
  * Since owner-directive-delivery-redesign-2026-09-22 D-001 the UserPromptSubmit
  * hook captures EVERY owner turn automatically (orders:capture) and tells the
  * session "YOUR owner directive #N". This verb is now the fallback for an order
- * that arrived without that notice; a re-record of an already-captured turn
- * returns the captured row (directive-ownership-clarity-2026-09-23 P-004) instead
- * of minting a twin. What the agent files here is not demoted to checkpoint
+ * that arrived without that notice. When a sourceTurnRef is supplied, the store's
+ * exact per-turn key makes recovery idempotent; only calls without that key use the
+ * recent same-session text-twin fallback (directive-ownership-clarity-2026-09-23 P-004).
+ * What the agent files here is not demoted to checkpoint
  * prose: an open row
  * renders ABOVE the loop agenda in every wake, every orient, and every
  * post-compaction anchor until orders:disposition closes it — the re-injection
@@ -36,7 +37,7 @@ export default defineTool({
   name: 'orders:record',
   profile: 'engineer',
   description:
-    "Record an explicit OWNER DIRECTIVE verbatim into the durable owner-directives store. The open row renders ABOVE your loop agenda in every wake, orient, and post-compaction anchor — across session death — until orders:disposition closes it. The verbatim text is verified against your transcript's human turns (a miss records loudly as unverified).",
+    "Record an explicit OWNER DIRECTIVE verbatim into the durable owner-directives store. The open row renders ABOVE your loop agenda in every wake, orient, and post-compaction anchor — across session death — until orders:disposition closes it. A supplied sourceTurnRef is the exact idempotency key; without one, the tool can match a recent same-session capture by text. The verbatim text is verified against your transcript's human turns (a miss records loudly as unverified).",
   guidance: {
     when:
       "An owner order reached you WITHOUT a 'YOUR owner directive #N' notice (capture failed, or it came by another channel) — record it verbatim before starting the work.",
@@ -88,25 +89,31 @@ export default defineTool({
       /* stamp stays unverified */
     }
 
-    // P-004: the hook has usually captured this very turn already. Hand it back
-    // instead of minting a twin under a second owner label and turn ref.
-    const twin = await findCapturedTwin({ workspaceId, recordedBy: identity.ownerId, verbatimText: args.verbatim })
-      .catch(() => null);
-    if (twin) {
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: JSON.stringify({
-              ok: true,
-              id: twin.id,
-              deduplicated: true,
-              state: twin.dispositionStatus ?? 'open',
-              note: `Already captured automatically as your directive #${twin.id}; no second row was created. Refer to it as #${twin.id}.`,
-            }),
-          },
-        ],
-      };
+    const sourceTurnRef = args.sourceTurnRef ?? verifiedTurnRef;
+
+    // P-004: preserve the legacy same-session text recovery unless the caller
+    // explicitly supplied an exact turn key. A provenance-derived key alone must
+    // not bypass that recovery, while an explicit key must not collapse a later,
+    // identical owner turn through a text match.
+    if (args.sourceTurnRef === undefined) {
+      const twin = await findCapturedTwin({ workspaceId, recordedBy: identity.ownerId, verbatimText: args.verbatim })
+        .catch(() => null);
+      if (twin) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                ok: true,
+                id: twin.id,
+                deduplicated: true,
+                state: twin.dispositionStatus ?? 'open',
+                note: `Already captured automatically as your directive #${twin.id}; no second row was created. Refer to it as #${twin.id}.`,
+              }),
+            },
+          ],
+        };
+      }
     }
 
     const row = await recordOwnerDirective({
@@ -114,10 +121,42 @@ export default defineTool({
       // D-004: one owner label for every row, whichever path wrote it.
       ownerId: OWNER_DIRECTIVE_DEFAULT_OWNER,
       sessionRef,
-      sourceTurnRef: args.sourceTurnRef ?? verifiedTurnRef,
+      sourceTurnRef,
       verbatimText: args.verbatim,
       recordedBy: identity.ownerId,
     });
+
+    if (sourceTurnRef && row.sourceTurnRef === sourceTurnRef && row.verbatimText !== args.verbatim) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: false,
+              error: 'source_turn_ref_conflict',
+              hint: 'This sourceTurnRef already belongs to a different verbatim owner turn; no duplicate was created.',
+            }),
+          },
+        ],
+      };
+    }
+
+    if (sourceTurnRef && row.capturedByHook && row.sourceTurnRef === sourceTurnRef) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: true,
+              id: row.id,
+              deduplicated: true,
+              state: row.dispositionStatus ?? 'open',
+              note: `Already captured automatically as your directive #${row.id}; no second row was created. Refer to it as #${row.id}.`,
+            }),
+          },
+        ],
+      };
+    }
     const openCount = await countOpenOwnerDirectives(workspaceId).catch(() => null);
     return {
       content: [

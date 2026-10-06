@@ -34,15 +34,12 @@ DESK="${PAPERCUSP_DESKTOP_TARGET_ROOT:-$(cd "$ORCHESTRATOR_HERE/.." && pwd)}"
 DESK="$(cd "$DESK" && pwd)"
 cd "$DESK"
 
-# ── OWNER-NAME PREFLIGHT (EI-21227487662710416). The final AppImage identity
-# audit cannot certify the bundle without an explicitly asserted human owner
-# name. Refuse before Cargo metadata, cleanup, or any packaging work so a direct
-# invocation fails at the boundary that requires the input rather than after
-# minutes of runtime-closure work. Keep the policy in the shared audit helper;
-# the value is runtime-only and is never written into the tree.
+# ── IDENTITY-POLICY COMPATIBILITY PREFLIGHT. D-112 no longer requires owner
+# name/email. Keep the shared audit entrypoint before expensive work so older
+# cutters remain compatible and future early machine-policy checks have one home.
 AUDIT_PY="$ORCHESTRATOR_HERE/audit-release-bundle.py"
 python3 "$AUDIT_PY" --owner-preflight \
-  || { echo "ERROR: owner-name preflight failed — refusing to start AppImage build" >&2; exit 2; }
+  || { echo "ERROR: identity-policy preflight failed — refusing to start AppImage build" >&2; exit 2; }
 
 # Claim a target-dir slot before Cargo metadata or any release-tree cleanup. This
 # direct entrypoint is also invoked outside release-local.sh, so it must establish
@@ -53,9 +50,7 @@ python3 "$AUDIT_PY" --owner-preflight \
   exit 1
 }
 
-CT="$(cd src-tauri && cargo metadata --no-deps --format-version 1 2>/dev/null \
-        | python3 -c 'import sys,json; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)"
-[ -n "$CT" ] || CT="$HOME/.cargo-target"
+CT="$(papercusp_cargo_target_root "$DESK/src-tauri")" || exit $?
 # shellcheck source=lib/release-artifacts.sh
 . "$ORCHESTRATOR_HERE/lib/release-artifacts.sh" || {
   echo "FATAL: cannot source bin/lib/release-artifacts.sh — refusing to build without release-retention guards" >&2

@@ -17,6 +17,8 @@ import { getOrgPg } from '@papercusp/db-org';
 import { defineTool, SU_ROLES, isOperatorConfigWriteRole } from '@papercusp/agent-mcp';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { classifyForRehome, isHarnessInScope, primeWorkScopePolicy, recordWorkScopeDecision } from '../../work-scope-policy';
+import { loadOwnAuthorPubkeys } from '../../work-items-admission';
+import { ANY_FAMILY_TERMINAL_STATES } from '../../work-item-dispatch-states';
 
 /**
  * Every `harness_shared` relation carrying (workspace_id, harness_slug, feature_id)
@@ -48,14 +50,65 @@ export interface RehomeMoved {
   to: string;
   /** rows moved per relation (work_items included) */
   moved: Record<string, number>;
+  /** true ⇒ the move ran in full and was ROLLED BACK; nothing changed. */
+  dryRun?: boolean;
 }
 export interface RehomeRefused {
   ok: false;
-  error: 'not_found' | 'ambiguous' | 'already_home' | 'exists_in_target';
+  error: 'not_found' | 'ambiguous' | 'already_home' | 'exists_in_target' | 'conflicts_in_target' | 'peer_owned';
   message: string;
+  /** conflicts_in_target: the target-harness constraint the move would violate. */
+  constraint?: string;
+  /** conflicts_in_target: the open row in the target harness that holds the same identity, when identifiable. */
+  twinId?: string | null;
 }
 
-/** The transactional move. Exported for the backfill script + tests. */
+/** Thrown to roll a dry-run transaction back after the move ran in full. */
+class RehomeDryRunRollback extends Error {
+  constructor(readonly outcome: RehomeMoved) {
+    super('work_items:rehome dry run — rolled back');
+  }
+}
+
+/**
+ * The title-identity guard (migration 1157). A keyless bug/change/task may not share its
+ * `payload.admissionIdentity.titleKey` with another OPEN row in the same harness, so a move
+ * into a harness that already holds the newer twin is refused by the index, not by us.
+ */
+const TITLE_IDENTITY_CONSTRAINT = 'work_items_keyless_title_identity_uq';
+
+/** The open row in `to` that shares the moving row's title identity (the index's own key). */
+async function findTitleIdentityTwin(workspaceId: string, id: string, from: string, to: string): Promise<string | null> {
+  const sql = getOrgPg().sql;
+  const rows = await sql<Array<{ feature_id: string }>>`
+    SELECT t.feature_id
+      FROM harness_shared.work_items s
+      JOIN harness_shared.work_items t
+        ON t.workspace_id = s.workspace_id
+       AND t.harness_slug = ${to}
+       AND t.feature_id <> s.feature_id
+       AND t.payload #>> '{admissionIdentity,titleKey}' = s.payload #>> '{admissionIdentity,titleKey}'
+     WHERE s.workspace_id = ${workspaceId} AND s.harness_slug = ${from} AND s.feature_id = ${id}
+       AND (t.status IS NULL OR t.status <> ALL (${ANY_FAMILY_TERMINAL_STATES as string[]}::text[]))
+     ORDER BY t.created_ts DESC NULLS LAST
+     LIMIT 1`;
+  return rows[0]?.feature_id ?? null;
+}
+
+function pgErrorField(err: unknown, field: 'code' | 'constraint_name'): string | null {
+  const v = (err as Record<string, unknown> | null)?.[field];
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+/**
+ * The transactional move. Exported for the backfill script + tests.
+ *
+ * `dryRun` executes EVERY statement of the real move and then rolls the transaction back,
+ * so a preview reports exactly what the move would do — including a refusal from a
+ * target-harness constraint. A preview that only re-read the source row once answered
+ * ok:true for three rows whose real move then died on a raw unique-violation
+ * (WI-10004844, 2026-10-01).
+ */
 export async function rehomeWorkItem(input: {
   id: string;
   to: string;
@@ -63,12 +116,23 @@ export async function rehomeWorkItem(input: {
   actor: string;
   from?: string | null;
   workspaceId?: string;
+  dryRun?: boolean;
 }): Promise<RehomeMoved | RehomeRefused> {
   const sql = getOrgPg().sql;
   const workspaceId = input.workspaceId ?? activeWorkspaceId();
-  const outcome = await sql.begin(async (tx): Promise<RehomeMoved | RehomeRefused> => {
-    const rows = await tx<Array<{ harness_slug: string }>>`
-      SELECT harness_slug FROM harness_shared.work_items
+  // A remote row authored by one of THIS workspace's own substrate keys is ours (the same
+  // own-node rule the claim gate applies); any other remote row belongs to a peer, and a
+  // local move would fork it — the content write re-stamps origin='local' (migration 824's
+  // stamp_local_federated_write), silently taking the row away from its author.
+  const ownKeys = await loadOwnAuthorPubkeys(workspaceId);
+  // A holder object, not a `let`: it is written inside the transaction callback, and TS
+  // would otherwise keep the `null` narrowing into the catch below.
+  const source: { harness: string | null } = { harness: null };
+  let outcome: RehomeMoved | RehomeRefused;
+  try {
+    outcome = await sql.begin(async (tx): Promise<RehomeMoved | RehomeRefused> => {
+    const rows = await tx<Array<{ harness_slug: string; origin: string | null; author_pubkey: string | null }>>`
+      SELECT harness_slug, origin, author_pubkey FROM harness_shared.work_items
        WHERE workspace_id = ${workspaceId} AND feature_id = ${input.id}
          ${input.from ? tx`AND harness_slug = ${input.from}` : tx``}
        FOR UPDATE`;
@@ -87,7 +151,18 @@ export async function rehomeWorkItem(input: {
       };
     }
     const from = rows[0]!.harness_slug;
+    source.harness = from;
     if (from === input.to) return { ok: false, error: 'already_home', message: `${input.id} is already homed in ${input.to}` };
+    const { origin, author_pubkey: author } = rows[0]!;
+    if (origin === 'remote' && !(author && ownKeys.has(author))) {
+      return {
+        ok: false,
+        error: 'peer_owned',
+        message:
+          `${input.id} is remote-authored by a key this workspace has never written locally (${author ? author.slice(0, 16) : 'no author key'}) — ` +
+          `a local move would take it from its authoring peer; ask that peer to re-home it`,
+      };
+    }
     const clash = await tx`
       SELECT 1 FROM harness_shared.work_items
        WHERE workspace_id = ${workspaceId} AND harness_slug = ${input.to} AND feature_id = ${input.id}
@@ -111,9 +186,37 @@ export async function rehomeWorkItem(input: {
              updated_ts = ${Date.now()}
        WHERE workspace_id = ${workspaceId} AND harness_slug = ${from} AND feature_id = ${input.id}`;
     moved.work_items = base.count;
-    return { ok: true, id: input.id, from, to: input.to, moved };
-  });
-  if (outcome.ok) {
+    const result: RehomeMoved = { ok: true, id: input.id, from, to: input.to, moved };
+    if (input.dryRun) throw new RehomeDryRunRollback({ ...result, dryRun: true });
+    return result;
+    });
+  } catch (err) {
+    if (err instanceof RehomeDryRunRollback) return err.outcome;
+    // A target-harness constraint refused the move (or would have, under dryRun). Name it and,
+    // for the title-identity guard, the twin that already holds the identity — instead of
+    // surfacing a raw `duplicate key value violates unique constraint` handler_error.
+    const from = source.harness;
+    if (pgErrorField(err, 'code') === '23505' && from) {
+      const constraint = pgErrorField(err, 'constraint_name') ?? 'unique constraint';
+      const twinId =
+        constraint === TITLE_IDENTITY_CONSTRAINT ? await findTitleIdentityTwin(workspaceId, input.id, from, input.to) : null;
+      return {
+        ok: false,
+        error: 'conflicts_in_target',
+        constraint,
+        twinId,
+        message:
+          `${input.id} cannot move to ${input.to}: it would violate ${constraint}` +
+          (twinId
+            ? ` — ${twinId} already holds the same title identity there. Close ${input.id} as superseded by ${twinId} instead of moving it.`
+            : constraint === TITLE_IDENTITY_CONSTRAINT
+              ? ' — an open row there already holds the same title identity. Close this one as superseded instead of moving it.'
+              : ''),
+      };
+    }
+    throw err;
+  }
+  if (outcome.ok && !outcome.dryRun) {
     // Ledger + loudness OUTSIDE the transaction (best-effort, never rolls a move back).
     await recordWorkScopeDecision({
       site: 'work_items:rehome',
@@ -212,10 +315,15 @@ export default defineTool({
     if (args.op === 'classify') {
       return json({ ok: true, id: args.id, harness: row.harness_slug, inScope: isHarnessInScope(row.harness_slug), verdict });
     }
-    if (args.dryRun) {
-      return json({ ok: true, dryRun: true, id: args.id, from: row.harness_slug, to: args.harness, verdict, tables: [...REHOME_DEPENDENT_TABLES, 'work_items'] });
-    }
-    const res = await rehomeWorkItem({ id: args.id, to: args.harness, reason: args.reason, actor, from: row.harness_slug, workspaceId });
+    const res = await rehomeWorkItem({
+      id: args.id,
+      to: args.harness,
+      reason: args.reason,
+      actor,
+      from: row.harness_slug,
+      workspaceId,
+      dryRun: args.dryRun === true,
+    });
     return json({ ...res, verdict });
   },
 });

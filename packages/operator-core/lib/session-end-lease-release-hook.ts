@@ -112,7 +112,7 @@ export interface SessionEndLeaseReleaseResult {
  * signal and the ones it must not.
  *
  * Pulled out as a pure function on purpose. The exemption is an OWNER RULING
- * (plan terminal-psu-session-enrolment-2026-08-24 D-001, owner 2026-08-24:
+ * (plan terminal-psu-session-enrolment-2026-08-24 D-001, avi 2026-08-24:
  * "Visible only — never auto-reap"), and a ruling that lives as an inline
  * `.filter()` inside an async cleanup pass can only be tested through the whole
  * hook, which makes it easy to delete and hard to notice. Here it is one named,
@@ -233,13 +233,13 @@ export function partitionSuccessorTasks(
 async function loadProtectedOwners(endingOwnerId: string): Promise<ReadonlySet<string>> {
   // Dynamic imports avoid turning adv-sessions -> this hook -> idle-session-reaper
   // -> adv-sessions into an eager module cycle. This path runs only after an end.
-  const [{ gatherProtectedSessionOwners, liveHostOwnerSet }, { listLiveHosts }] = await Promise.all([
+  const [{ gatherProtectedSessionOwners, liveHostOwnerSet }, { listLiveHostsAsync }] = await Promise.all([
     import('./idle-session-reaper'),
     import('./events/await/psu-pty-discovery'),
   ]);
   let liveHostOwners = new Set<string>();
   try {
-    liveHostOwners = liveHostOwnerSet(listLiveHosts());
+    liveHostOwners = liveHostOwnerSet(await listLiveHostsAsync());
   } catch {
     // A missing host signal protects nobody, but the heartbeat/wake/PID legs
     // below still fail closed for any owner they can establish as live.
@@ -317,7 +317,7 @@ export async function runSessionEndLeaseRelease(
       classes: ['agent-session'],
       limit: 2_000,
     });
-    // ⛔ OWNER RULING (terminal-psu-session-enrolment-2026-08-24 D-001, owner
+    // ⛔ OWNER RULING (terminal-psu-session-enrolment-2026-08-24 D-001, avi
     // 2026-08-24): a TERMINAL-launched session enrolled by
     // `adopt-terminal-session` is VISIBLE ONLY and must never be auto-reaped.
     //

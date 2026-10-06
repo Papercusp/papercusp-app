@@ -1,0 +1,97 @@
+{
+  "version": "dream-study-flat-faceted-ablation-v1",
+  "registeredAt": "2026-09-14T13:31:00.000Z",
+  "workItem": "WI-40148",
+  "flatReviewWorkItem": "WI-10001412",
+  "scope": "descriptive offline representation ablation on the same six calibration cases",
+  "source": {
+    "faceted": {
+      "artifact": "calibration-blind-v2.json",
+      "compactHash": "54bcca71a57be273669f56f9a54c6f5bc4210015c7466033d827027a3d782427",
+      "reviewArtifact": "calibration-review-2026-09-14.json",
+      "reviewer": "su-4a57e338-b9eb-4fc6-84fb-d7804168bb72",
+      "limitation": "AI/domain review with disclosed incidental aggregate exposure after judgments were formed; not pristine blindness or human validation"
+    },
+    "flat": {
+      "artifact": "calibration-flat-blind-v2.json",
+      "fileSha256": "0d38cc66c7b0ad168b573c00d80c5839ae84c70725618e8a4f8086ce45adfe00",
+      "compactHash": "f9094e8c1da7727c076b3efa00c2296d9935d17028184531d5313b9299a6262f",
+      "sourceBlindHash": "54bcca71a57be273669f56f9a54c6f5bc4210015c7466033d827027a3d782427",
+      "reviewer": "su-f106637d-b145-4cd4-a05e-fff90c116e5a",
+      "eligibilityAttestation": "coord-send-eb086204d0bc21f14e8da76bd35de59b2c02b001b791f01bf72f6d35d2431d27",
+      "result": null
+    }
+  },
+  "frozenFacetedOutcomes": [
+    {
+      "caseId": "1176a396ed37847cf61c",
+      "family": "hive-filtered secure source packing",
+      "disposition": "reject"
+    },
+    {
+      "caseId": "32f8b3a1af51c14a4739",
+      "family": "CAS-versioned pack-operation audit",
+      "disposition": "reject"
+    },
+    {
+      "caseId": "36908b44cc10514ba38e",
+      "family": "hive-confined revision-aware clause retrieval",
+      "disposition": "unverified"
+    },
+    {
+      "caseId": "5908803065283e72f93d",
+      "family": "hive-bounded CAS spec revision with scoped evidence pack",
+      "disposition": "unverified"
+    },
+    {
+      "caseId": "82152aef5690ace62e79",
+      "family": "hive-filtered secure source packing",
+      "disposition": "reject"
+    },
+    {
+      "caseId": "838da71efc0a5d2f4a2d",
+      "family": "Dream-admission-gated spec revision",
+      "disposition": "reject"
+    }
+  ],
+  "analysis": {
+    "primaryEndpoint": {
+      "name": "exact per-case disposition agreement",
+      "population": 6,
+      "values": ["accept", "reject", "unverified"],
+      "report": [
+        "agreement count and fraction",
+        "case IDs for every mismatch",
+        "direction of every mismatch",
+        "flat and faceted disposition histograms"
+      ]
+    },
+    "secondaryEndpoints": [
+      {
+        "name": "duplicate-family recognition",
+        "rule": "Report whether both reviewers place 1176a396ed37847cf61c and 82152aef5690ace62e79 in the same behavioral family; do not require identical wording."
+      },
+      {
+        "name": "required-domain coverage",
+        "rule": "For each flat judgment, record whether it addresses scoped novelty, necessity of both primary contributions, concrete usefulness, falsifier feasibility, maintenance/coupling risk, and could-not-determine gaps. This measures review completeness, not agreement or truth."
+      },
+      {
+        "name": "citation completeness",
+        "rule": "For each flat judgment, record whether decisive source refs and literal supporting quotes are present."
+      }
+    ],
+    "interpretation": {
+      "fullAgreement": "Six of six exact dispositions plus duplicate-family recognition is descriptive evidence that removing facet headings did not change these sampled review outcomes.",
+      "anyMismatch": "Any disposition mismatch is evidence of representation and/or reviewer sensitivity at that case. Report it without choosing a winning representation.",
+      "causalLimit": "Different reviewers judged the two representations, and the faceted reviewer disclosed aggregate exposure after forming judgments. The ablation is descriptive and cannot isolate representation from reviewer effects.",
+      "powerLimit": "Six calibration cases are not a powered effectiveness sample and cannot establish a winning Dream arm or population-level equivalence.",
+      "acceptanceLimit": "Neither agreement nor disagreement supplies independent human validation, held-out confirmation, downstream experiment evidence, product acceptance, or shipment approval."
+    }
+  },
+  "safeguards": [
+    "Do not read or compare the flat result until all six flat judgments are frozen durably on WI-10001412.",
+    "Do not alter either frozen input, historical judgment, study row, provider/model/account setting, or original accounting.",
+    "Do not upgrade unverified to accepted from representation agreement alone.",
+    "Preserve case-level results and uncertainty; do not collapse the sample to a histogram only."
+  ]
+}

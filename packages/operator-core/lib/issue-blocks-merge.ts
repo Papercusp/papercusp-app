@@ -36,9 +36,28 @@
  */
 import { getOrgPg } from '@papercusp/db-org';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
+import { coordScopeWorkspace } from './agent-tools/coordination/log';
 
 export const PLAN_ITEM_KIND = 'plan_item';
 export const FEATURE_KIND = 'feature';
+
+/**
+ * The workspace scopes the plan-item `implements`/`relates` link plane is split across.
+ * EVERY reader or deleter of a `dst_kind='plan_item'` coord_links edge must match
+ * `workspace_id = ANY(implementsLinkScopes())`, never a single pinned tenant.
+ *
+ * Measured 2026-10-01 (WI-10004553): until 2026-08-27 both families wrote under
+ * DEFAULT_COORD_WORKSPACE; since then BOTH write under coordScopeWorkspace() (4,535 issue
+ * + 1,399 feature edges), while 2,437 feature + 156 issue edges remain under the default.
+ * A reader pinned to either tenant is blind to half the plane. The reconciler pinned to
+ * the default read every post-2026-08-27 promoted issue as an unproven link and left
+ * ~190 of them open on terminal plan items. `workspaceIds` pins the set in tests only.
+ */
+export function implementsLinkScopes(workspaceIds?: readonly string[]): string[] {
+  return workspaceIds?.length
+    ? [...new Set(workspaceIds)]
+    : [...new Set([DEFAULT_COORD_WORKSPACE, coordScopeWorkspace()])];
+}
 
 /** The coord_links dst_ref for a plan item: '<plan_slug>#<item_id>'. */
 export function planItemRef(planSlug: string, itemId: string): string {

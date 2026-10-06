@@ -52,10 +52,10 @@ if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
   fi
 fi
 
-# The scrub and the later gate both need the owner's name; refuse up front
-# rather than after the copy (EI-20976222603137006).
+# Stable compatibility entrypoint for the audit-owned identity policy. D-112 makes
+# owner name/email legitimate release content; machine and credential checks remain.
 python3 "$HERE/audit-release-bundle.py" --owner-preflight \
-  || { echo "ERROR: owner-name preflight failed — export PAPERCUSP_RELEASE_OWNER_NAME" >&2; exit 2; }
+  || { echo "ERROR: identity-policy preflight failed" >&2; exit 2; }
 
 # shellcheck source=lib/source-tree-selection.sh
 . "$HERE/lib/source-tree-selection.sh"

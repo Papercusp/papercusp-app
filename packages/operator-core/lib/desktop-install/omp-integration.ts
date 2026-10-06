@@ -200,13 +200,44 @@ export async function removeOmpGatewayProvider(modelsYmlPath: string): Promise<b
   return true;
 }
 
+/**
+ * A hosted operator PATH can expose `omp` as a wrapper around the Papercusp
+ * launcher (`psu.mjs --agent=omp`). Running `config get/set` through that
+ * wrapper starts a psu session instead of invoking the OMP CLI. Reject direct
+ * launcher targets and small executable wrappers that forward to that argv.
+ */
+async function isPsuOmpLauncherShim(binaryPath: string): Promise<boolean> {
+  let resolvedPath = binaryPath;
+  try {
+    resolvedPath = await fs.realpath(binaryPath);
+  } catch {
+    /* retain the PATH result and inspect it below */
+  }
+
+  if (/(?:^|[\\/])scripts[\\/](?:psu|psu-launcher)\.mjs$/i.test(resolvedPath)) return true;
+
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(resolvedPath, 'r');
+    const prefix = Buffer.alloc(8192);
+    const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0);
+    const source = prefix.subarray(0, bytesRead).toString('utf8');
+    return source.startsWith('#!') && /psu(?:-launcher)?\.mjs[^\r\n]*--agent(?:=|\s+)omp/i.test(source);
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function detectOmpBinary(): Promise<string | null> {
   // `command -v` is POSIX; works on bash/zsh/dash. Skipped on Windows
   // anyway via the supported check before this is called.
   try {
     const { stdout } = await exec('sh', ['-c', 'command -v omp'], { timeout: 3000 });
     const found = stdout.trim();
-    return found || null;
+    if (!found || await isPsuOmpLauncherShim(found)) return null;
+    return found;
   } catch {
     return null;
   }

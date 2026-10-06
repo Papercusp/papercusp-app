@@ -17,6 +17,7 @@ import {
   parseCapabilityClassRef,
   type CapabilityProviderDependentRow,
 } from '../capability-class-registry-store';
+import type { RefusalContract } from '../capability-envelope/identity-refusal-contract';
 import { listIdentitySources } from '../agent-identities/source';
 import { parseBlueprintSource } from '../agent-tools/blueprint/_resolve';
 import { operatorResolveExtends } from '../blueprint/installed-blueprints';
@@ -45,6 +46,8 @@ export interface CapabilityUnsatisfiedAfterProviderRemoval {
   optionalFor: string[];
   routes: ['operator-notify', 'suggest-provider', 'needs_human'];
   detail: string;
+  /** WI-10005197: what would lift the unsatisfied state — the same contract the identity gate carries. */
+  refusal: RefusalContract;
 }
 
 export interface CapabilityProviderUninstallReview {
@@ -192,6 +195,20 @@ export async function reviewCapabilityProviderUninstall(
       detail:
         `Capability class ${binding.classRef} becomes unbound in ${binding.potSlug} when ` +
         `${providerPackage}@${installed.version} is removed.`,
+      refusal: {
+        observed: {
+          potSlug: binding.potSlug,
+          classRef: binding.classRef,
+          provider: `${providerPackage}@${installed.version}`,
+          requiredBy: String(requiredBy.length),
+          optionalFor: String(optionalFor.length),
+        },
+        liftsWhen:
+          `an active, conformance-passed provider is bound for ${binding.classRef} in ${binding.potSlug} ` +
+          `again — keep ${providerPackage}@${installed.version} installed, or bind a replacement provider ` +
+          'before removing it. Retrying the removal cannot lift this: it needs a binding decision',
+        whoCanMakeItTrue: ['owner'],
+      },
     };
   });
   const base = {

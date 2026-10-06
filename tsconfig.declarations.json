@@ -69,6 +69,10 @@
   // An explicit list is also the honest surface: a glob would silently start
   // emitting declarations for every future script in the repo.
   "files": [
+    // EI-24834079439388393: ptool's SDK-install race regression imports the
+    // maintained mutex and install boundary directly; keep their types generated.
+    "scripts/lib/fs-mutex.mjs",
+    "scripts/npm-install-safe.mjs",
     "scripts/lib/not-checked.mjs",
     "scripts/lib/git-index-fault.mjs",
     "scripts/lib/task-exit-class.mjs",
@@ -102,6 +106,24 @@
     // (D-004). Registered for the same reason as executed-source-map.mjs above: imported
     // directly by test-pass-reuse.test.ts.
     "scripts/lib/test-pass-reuse.mjs",
+    // gitnexus-selective-hardening-and-comparison-2026-09-13 P-008 — the pure snapshot-bound,
+    // source-corroborated graph-suggestion module behind the affected-test selector. Imported
+    // directly by affected-tests-graph-suggestions.test.ts.
+    "scripts/lib/graph-dependency-suggestions.mjs",
+    // P-008 — the out-of-band producer for that snapshot (the only code that reads the graph
+    // backend; fails closed). Imported directly by gen-graph-dependency-snapshot.test.ts.
+    "scripts/gen-graph-dependency-snapshot.mjs",
+    // gate-test-reuse-yield-2026-10-01 P-007 (D-010) — per-table generated-schema drift. Imported
+    // by test-pass-reuse.mjs and directly by schema-symbol-drift.test.ts.
+    "scripts/lib/schema-symbol-drift.mjs",
+    // EI-24538088938561684 — pass reuse + proof recording for the gate's targeted task re-runs.
+    // Imported by apps/operator/lib/release/green-checkpoint.ts (runGateAtRef) and directly by
+    // targeted-task-reuse.test.ts.
+    "scripts/lib/targeted-task-reuse.mjs",
+    // gate-test-reuse-yield-2026-10-01 P-006 (D-005 §1) — post-verdict pure-lane proof capture.
+    // Imported by apps/operator/lib/release/green-checkpoint.ts (runPostVerdictPureProofCapture)
+    // and directly by pure-lane-proof-capture.test.ts.
+    "scripts/lib/pure-lane-proof-capture.mjs",
     // EI-20812741760514969 — the "where did this run's blast radius come from" reporter.
     // Registered for the FIRST reason this list exists: it is imported directly by
     // affected-tests-changed-path-provenance.test.ts, which is what makes the disclosure
@@ -272,6 +294,8 @@
     // BYOC P-014 — imported directly by the TypeScript-focused controller test and
     // by psu-launcher.mjs; keep its inferred surface generated and drift-checked.
     "apps/operator/scripts/psu-connection-front-controller.mjs",
+    // WI-10006057 — imported by psu-launcher.mjs and its TypeScript test.
+    "apps/operator/scripts/psu-operator-down-diagnosis.mjs",
     "apps/operator/scripts/psu-pty-host.mjs",
     // EI-20228184337467634 — ptool.mjs is imported by TypeScript tests; register
     // its runtime dependency too so the complete CLI import surface is typed.
@@ -372,6 +396,20 @@
     // the generated sibling declaration tracks the JSDoc surface instead of a TS7016.
     "scripts/verify-identities-r4.mjs",
     // P-015 R-7 live-switch verifier, imported by its contract test (same reason).
-    "scripts/verify-identities-r7.mjs"
+    "scripts/verify-identities-r7.mjs",
+    // EI-18750303030034478: imported by its TypeScript contract test (same reason).
+    "scripts/lib/mutation-probe-window.mjs",
+    // shared-vector-search-libraries-2026-09-29 P-007 (WI-10004276): the BORROWABLE.md
+    // generator's export index is imported by borrowable-export-index.test.ts.
+    "scripts/gen-borrowable-catalog.mjs",
+    // Shared inspector client is imported by memory and transport contract tests.
+    "scripts/cdp-inspector.mjs",
+    "scripts/analyze-heap-snapshots.mjs",
+    // WI-10005802: committed-source-loader.test.ts pins that the workspace test launcher
+    // routes explicit files through the router under the committed-source loader.
+    "scripts/workspace-test.mjs",
+    // WI-10005888: apps/operator/lib/public-docs-readiness.test.ts imports the public
+    // manual's source contract.
+    "apps/papercusp-docs/scripts/source-contract.mjs"
   ]
 }

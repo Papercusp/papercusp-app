@@ -34,7 +34,7 @@ import {
   resolveInstalledDatatype,
   type InstalledDatatype,
 } from './datatype-store';
-import type { UpsertDatatypeInput } from '../datatype-registry-store';
+import { legacyNatureForTier, type UpsertDatatypeInput } from '../datatype-registry-store';
 import { parseDatatypeDisplay, type DatatypeDisplaySpec } from '../datatype-display';
 
 export interface InstallDatatypeInput {
@@ -96,12 +96,19 @@ export function registryInputFromPackage(
     }
     display = parsed.value;
   }
+  // P-008 / D-013 §5: a package that declares its nature keeps it; one that predates natures
+  // gets the legacy tier rule (the same rule migration 1318 backfills existing rows with).
+  const natureSpec = datatype.nature
+    ? { nature: datatype.nature, audience: datatype.audience }
+    : legacyNatureForTier(datatype.tier);
   return {
     id: datatype.id,
     workspaceId,
     title: datatype.title,
     description: datatype.description,
     tier: datatype.tier,
+    nature: natureSpec.nature,
+    audience: natureSpec.audience,
     ...(datatype.workItemKind ? { workItemKind: datatype.workItemKind } : {}),
     ...(datatype.payloadSchema ? { payloadSchema: datatype.payloadSchema } : {}),
     ...(display ? { display } : {}),

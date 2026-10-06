@@ -22,6 +22,38 @@ import { defineTool } from '@papercusp/agent-mcp';
 
 const ID_RE = /^[A-Za-z0-9._-]+$/;
 
+const gatewayBase = () => 'http://127.0.0.1:' + (Number(process.env.PAPERCUSP_GATEWAY_PORT) || 8788);
+
+type GatewayReload = { appliedLive: boolean; changed?: boolean; version?: number; warning?: string };
+
+async function applyGatewayPoolLive(): Promise<GatewayReload> {
+  let response: Response;
+  try {
+    response = await fetch(gatewayBase() + '/admin/reload', {
+      method: 'POST',
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return {
+      appliedLive: false,
+      warning: 'saved durably but live gateway apply failed; it will retry on the next ~60s pool poll',
+    };
+  }
+
+  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok || body.ok === false) {
+    return {
+      appliedLive: false,
+      warning: 'saved durably but live gateway apply failed; it will retry on the next ~60s pool poll',
+    };
+  }
+  return {
+    appliedLive: true,
+    ...(typeof body.changed === 'boolean' ? { changed: body.changed } : {}),
+    ...(typeof body.version === 'number' ? { version: body.version } : {}),
+  };
+}
+
 export default defineTool({
   method: 'POST',
   path: '/admin/deploy-accounts/register',
@@ -105,7 +137,8 @@ export default defineTool({
       const account = (await accountStatus()).find((a) => a.id === accountId) ?? null;
       // Live UI reflection — the Accounts tab reads the accounts.pool sync query.
       void notifySyncInvalidate('accounts.pool', {}).catch(() => {});
-      return Response.json({ ok: true, account });
+      const gatewayReload = await applyGatewayPoolLive();
+      return Response.json({ ok: true, account, gatewayReload });
     } catch (err) {
       return Response.json({ ok: false, error: (err as Error).message }, { status: 500 });
     }

@@ -1,6 +1,6 @@
 [package]
 name = "papercusp-desktop"
-version = "0.0.25"
+version = "0.0.26"
 description = "Papercusp desktop shell — Tauri webview + Node sidecar"
 authors = ["Papercusp Team"]
 license = "Elastic-2.0"
@@ -18,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 # `tray-icon` powers the "Papercusp Server" menubar/tray app (Server role, no
 # main window); cross-platform (macOS status item, Windows notification-area,
 # Linux appindicator). See app_role.rs + the Server branch in setup().
-tauri = { version = "2", features = ["specta", "tray-icon", "devtools"] }
+tauri = { version = "2", features = ["specta", "tray-icon", "devtools", "webview-data-url"] }
 tauri-plugin-shell = "2"
 # Cross-platform login auto-start for the Server role: macOS LaunchAgent,
 # Windows HKCU Run key, Linux XDG ~/.config/autostart. Registered only when
@@ -135,6 +135,10 @@ gtk = "0.18"
 glib = "0.18"
 libloading = "0.8"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Exercise the OS grab owned by the same crate the Tauri shortcut plugin uses.
+global-hotkey = "0.8"
+
 # libloading on macOS — the D-009 SwiftTerm embed dlopens the
 # macos-term-shim dylib at runtime (same no-link-time-dependency pattern as
 # the Linux VTE embed; absent shim → NewWindow downgrade).
@@ -186,6 +190,10 @@ strip = "symbols"
 # still carries the unwrap as of 2026-06-09 — drop this patch when a released
 # tauri-runtime-wry walks the ancestry safely.
 [patch.crates-io]
+# global-hotkey 0.8.0 queues X11 ungrabs without flushing: Off keeps swallowing
+# the key until another registration. Backport upstream PR #197; remove when a
+# released version includes it. Real X11 coverage: tests/global_shortcut_x11.rs.
+global-hotkey = { path = "vendor/global-hotkey" }
 # tao 0.35.3's Linux raw-device helper calls XDefaultRootWindow(NULL) when
 # XOpenDisplay fails, crashing the whole app. Keep this exact release vendored
 # with the null-display guard in vendor/tao/src/platform_impl/linux/device.rs.

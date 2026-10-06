@@ -241,9 +241,27 @@ function hunksFromCodexApplyPatch(toolInput: unknown): FrozenRepairEditExtract[]
   return output;
 }
 
+/**
+ * A trimmed psu tool surface reaches capability:edit/write only through `tools:invoke`, so the
+ * edit arrives as `{ name: 'capability:edit', args: {…} }` under the invoke tool's own name.
+ * Returns the inner call in direct-call form, or null when the envelope is not a file write.
+ */
+export function unwrapToolsInvoke(toolName: string, toolInput: unknown): { toolName: string; toolInput: unknown } | null {
+  if (!/(^|_)tools_invoke$/.test(String(toolName ?? '').toLowerCase())) return null;
+  if (!toolInput || typeof toolInput !== 'object') return null;
+  const envelope = toolInput as Record<string, unknown>;
+  const inner = asString(envelope.name);
+  if (!inner || !/^capability:(edit|write|multi_?edit)$/i.test(inner)) return null;
+  return { toolName: inner.replace(':', '_'), toolInput: envelope.args };
+}
+
 export function hunksFromToolCall(toolName: string, toolInput: unknown): FrozenRepairEditExtract[] {
   const name = String(toolName ?? '').toLowerCase();
   if (name === 'apply_patch') return hunksFromCodexApplyPatch(toolInput);
+  if (/(^|_)tools_invoke$/.test(name)) {
+    const inner = unwrapToolsInvoke(toolName, toolInput);
+    return inner ? hunksFromToolCall(inner.toolName, inner.toolInput) : [];
+  }
   if (!toolInput || typeof toolInput !== 'object') return [];
   const input = toolInput as Record<string, unknown>;
   const isMulti = /multi_?edit/.test(name);

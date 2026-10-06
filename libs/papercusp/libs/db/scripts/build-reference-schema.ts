@@ -77,11 +77,11 @@
  *     e.g. PAPERCUSP_PG_BOOTSTRAP_URL=postgres://postgres_app:postgres@localhost:5432/postgres.
  *
  * Flags:
- *   --schemas=a,b   pg_dump --schema-only scope (default: harness_shared,papercup_shared —
- *                   matches what's currently baked into the committed 000-baseline.sql;
+ *   --schemas=a,b   pg_dump --schema-only scope (default: harness_shared,papercusp_shared —
+ *                   includes the canonical messaging schema after migrations;
  *                   migrations 109+ add papercusp_auth/audit ON TOP, deliberately excluded
  *                   here — see fresh-migrate.integration.test.ts's note on that original
- *                   blind spot; pass --schemas=harness_shared,papercup_shared,papercusp_auth,audit
+ *                   blind spot; pass --schemas=harness_shared,papercusp_shared,papercusp_auth,audit
  *                   for a from-scratch re-squash that folds them in too).
  *   --keep-db       don't drop the scratch database on exit (debugging).
  */
@@ -102,7 +102,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SQL_DIR = resolve(__dirname, '..', 'sql');
 
 const DEFAULT_ADMIN_URL = 'postgres://harness_admin:harness_admin_pwd@localhost:5432/papercusp';
-const DEFAULT_SCHEMAS = ['harness_shared', 'papercup_shared'];
+const DEFAULT_SCHEMAS = ['harness_shared', 'papercusp_shared'];
 
 // Same boot pre-migration step embedded-postgres-server/src/index.js runs
 // (framework roles + the 3 extensions the migrations reference) — mirrored

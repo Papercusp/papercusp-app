@@ -88,6 +88,8 @@ export function OperateStage({
   onLifecycle,
   onDestroy,
   onGoToConfigure,
+  onWorkspaceBound,
+  onReviewConfiguration,
   now,
 }: {
   workspaces: readonly WorkspaceHostControlRow[];
@@ -105,6 +107,8 @@ export function OperateStage({
   ) => void;
   onDestroy: (workspaceId: string) => void;
   onGoToConfigure: () => void;
+  onWorkspaceBound?: (hostId: string, workspaceId: string | null) => void;
+  onReviewConfiguration?: (hostId: string) => void;
   now?: number;
 }) {
   const drifting = driftingWorkspaces(workspaces);
@@ -112,6 +116,8 @@ export function OperateStage({
   if (workspaces.length === 0) {
     return (
       <section
+        data-tutorial-target="cloud-workspace"
+        tabIndex={-1}
         className={styles.stage}
         aria-labelledby="operate-stage-heading"
         data-stage="operate"
@@ -144,6 +150,8 @@ export function OperateStage({
 
   return (
     <section
+      data-tutorial-target="cloud-workspace"
+      tabIndex={-1}
       className={styles.stage}
       aria-labelledby="operate-stage-heading"
       data-stage="operate"
@@ -198,6 +206,8 @@ export function OperateStage({
             onSelectTab={onSelectTab}
             onLifecycle={onLifecycle}
             onDestroy={onDestroy}
+            onWorkspaceBound={onWorkspaceBound}
+            onReviewConfiguration={onReviewConfiguration}
           />
         ))}
       </ul>
@@ -214,6 +224,8 @@ function HostRow({
   onSelectTab,
   onLifecycle,
   onDestroy,
+  onWorkspaceBound,
+  onReviewConfiguration,
 }: {
   workspace: WorkspaceHostControlRow;
   busyKeys: ReadonlySet<string>;
@@ -226,6 +238,8 @@ function HostRow({
     action: Exclude<LifecycleAction, "destroy">,
   ) => void;
   onDestroy: (workspaceId: string) => void;
+  onWorkspaceBound?: (hostId: string, workspaceId: string | null) => void;
+  onReviewConfiguration?: (hostId: string) => void;
 }) {
   const [overflowOpen, setOverflowOpen] = useState(false);
   const overflowRef = useRef<HTMLDivElement | null>(null);
@@ -534,10 +548,11 @@ function HostRow({
               <ResourcesTab workspace={workspace} />
             ) : null}
             {activeTab === "logs" ? <LogsTab workspace={workspace} /> : null}
-            {activeTab === "cost" ? <CostTab workspace={workspace} /> : null}
+            {activeTab === "cost" ? <CostTab workspace={workspace} onReviewConfiguration={onReviewConfiguration} /> : null}
             <HostedDesktopConnection
               workspace={workspace}
               showDesktop={activeTab === "desktops"}
+              onWorkspaceBound={onWorkspaceBound}
             />
           </div>
 
@@ -758,9 +773,9 @@ function LogsTab({ workspace }: { workspace: WorkspaceHostControlRow }) {
   );
 }
 
-function CostTab({ workspace }: { workspace: WorkspaceHostControlRow }) {
+function CostTab({ workspace, onReviewConfiguration }: { workspace: WorkspaceHostControlRow; onReviewConfiguration?: (hostId: string) => void }) {
   return (
-    <div className={styles.tabStack}>
+    <div className={styles.tabStack} data-tutorial-target="cloud-configuration" tabIndex={-1}>
       <dl className={styles.hostFacts}>
         <div>
           <dt>Estimated monthly</dt>
@@ -775,6 +790,8 @@ function CostTab({ workspace }: { workspace: WorkspaceHostControlRow }) {
           <dd>{workspace.diskGiB} GiB</dd>
         </div>
       </dl>
+      <p>Google Cloud bills for provisioned resources and retained disks. This estimate excludes taxes and egress; provider billing is authoritative.</p>
+      {onReviewConfiguration && <Button onClick={() => onReviewConfiguration(workspace.id)}>I've reviewed the configuration and cost</Button>}
       <section
         className={styles.telemetryPanel}
         aria-label={`Cost and quota signals for ${workspace.name}`}

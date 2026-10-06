@@ -7,6 +7,7 @@
  * secret exclusion, and the small amount of derived support-access state.
  */
 import { getOrgPg } from '@papercusp/db-org';
+import type { Sql } from 'postgres';
 
 export type GovernanceJson =
   | null
@@ -287,12 +288,13 @@ export interface HostedUserPreferencesInput {
 
 export async function saveHostedUserPreferences(
   input: HostedUserPreferencesInput,
+  transaction?: Sql,
 ): Promise<void> {
   const profile = input.profile ?? {};
   const notifications = input.notifications ?? {};
   assertGovernancePayloadSafe(profile, 'profile');
   assertGovernancePayloadSafe(notifications, 'notifications');
-  const { sql } = getOrgPg();
+  const sql = transaction ?? getOrgPg().sql;
   await sql`
     INSERT INTO papercusp_auth.hosted_user_preferences (
       organization_id, user_id, locale, time_zone, profile,
@@ -306,7 +308,7 @@ export async function saveHostedUserPreferences(
     ON CONFLICT (organization_id, user_id) DO UPDATE
       SET locale = EXCLUDED.locale,
           time_zone = EXCLUDED.time_zone,
-          profile = EXCLUDED.profile,
+          profile = papercusp_auth.hosted_user_preferences.profile || EXCLUDED.profile,
           notification_preferences = EXCLUDED.notification_preferences,
           updated_at = now()`;
 }

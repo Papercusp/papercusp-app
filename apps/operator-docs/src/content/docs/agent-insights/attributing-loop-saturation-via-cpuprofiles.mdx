@@ -6,19 +6,19 @@
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
 title: "Attributing event-loop saturation to a hot frame — read the cpuprofiles, and subtract the profiler"
 description: "Once you know :3070 is event-loop-saturated (routes slow, /health fast), the next question is WHICH code. Aggregate self-time across the ~/.papercusp/loop-profiles/*.cpuprofile captures — but first subtract the profiler's own observer-effect (it can be ~44% of samples), and don't trust the obvious culprit: in round-4 the cost was uncached git subprocess spawning, not the JSON-serialize everyone assumed."
+type: Insight
 discovered: 2026-06-19
-tags: [operator, performance, event-loop, cpuprofile, attribution, diagnostics, child_process, caching]
+tags: ["operator", "performance", "event-loop", "cpuprofile", "attribution", "diagnostics", "child_process", "caching"]
 status: active
 documents:
-  - packages/operator-core/lib/event-loop-lag-monitor.ts
-  - packages/operator-core/lib/dev-deploy-state.ts
-  - packages/operator-core/lib/system-health/compute.ts
-  - packages/operator-core/lib/sync-resolver/index.ts
+  - "packages/operator-core/lib/event-loop-lag-monitor.ts"
+  - "packages/operator-core/lib/dev-deploy-state.ts"
+  - "packages/operator-core/lib/system-health/compute.ts"
+  - "packages/operator-core/lib/sync-resolver/index.ts"
 plans:
-  - infra-perf-reliability-audit-2026-06-19
-  - infra-perf-reliability-audit-round3-2026-06-19
-  - infra-perf-robustness-audit-2026-06-18
-type: Insight
+  - "infra-perf-reliability-audit-2026-06-19"
+  - "infra-perf-reliability-audit-round3-2026-06-19"
+  - "infra-perf-robustness-audit-2026-06-18"
 generated:
   by: agent
   at: 2026-06-20
@@ -41,15 +41,17 @@ lag crosses the threshold. Those are your evidence. Aggregate them.
 
 ## The method
 
-A `.cpuprofile` is `{ nodes[], samples[], timeDeltas[] }`. **Self-time** for a node
-= sum of `timeDeltas[i]` (µs) where `samples[i]` points at it. Aggregate self-time
+A `.cpuprofile` is `{ nodes[], samples[], timeDeltas[], startTime, endTime }`. `timeDeltas[i]` is the time from the PREVIOUS sample (or from `startTime`, for i = 0) to sample i, and a sample shows the stack at one instant. So sample i owns the interval that FOLLOWS it: **self-time** for a node = sum of `timeDeltas[i+1]` (µs) over the samples that point at it. Chrome DevTools attributes it the same way.
+
+⚠ **Never credit `timeDeltas[i]` to sample i, and never credit an unsampled stretch to any frame.** The lead-in `timeDeltas[0]` (startTime to the first sample) and any interval far above the median were NOT sampled. Sentinel stall profiles open with a 1.6-2.3 s lead-in, so crediting the preceding delta hands the whole stall to whichever frame was sampled first. That produced a false "2,325 ms self in `_onread`" finding (WI-10005379, retracted). In the opposite case it hides a stall as `(program)` idle. Use `sampleDurations()` from `scripts/lib/cpu-profile.mjs`. It returns per-sample durations plus `leadInUs` / `unsampledGapUs`, and both `scripts/analyze-loop-profiles.mjs` and `scripts/cpu-sample.mjs` use it (WI-10005421). Aggregate self-time
 per `callFrame` (functionName + url:line) across *all* the captures — the recurring
 hot frame is the culprit, not whatever one capture happened to catch.
 
 ```python
 node_self_us = defaultdict(float)
 for i, sid in enumerate(prof['samples']):
-    node_self_us[sid] += max(0, prof['timeDeltas'][i])   # µs, this node's own time
+    nxt = prof['timeDeltas'][i + 1] if i + 1 < len(prof['samples']) else 0
+    node_self_us[sid] += max(0, nxt)   # µs: the interval FOLLOWING this sample (cap over-median gaps; see above)
 # then sum node_self_us by callFrame across every *.cpuprofile, rank descending
 ```
 

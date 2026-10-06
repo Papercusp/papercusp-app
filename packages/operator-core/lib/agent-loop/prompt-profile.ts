@@ -14,6 +14,7 @@ import {
   assembleRolePrompt,
   projectGuideAtBudget,
 } from '../prompt-assembly';
+import { readServingGeneration } from '../serving-generation';
 
 export {
   PUI_LOOP_PROJECT_GUIDE_MAX_CHARS,
@@ -60,6 +61,7 @@ export async function renderPuiLoopPrompt(
     input.projectDir,
     input.projectGuideSource,
   );
+  const servingGeneration = await readServingGeneration();
   const assembled = assembleRolePrompt({
     role: 'operator',
     profile: 'pui-loop',
@@ -69,6 +71,7 @@ export async function renderPuiLoopPrompt(
     projectGuideSource,
     projectGuideMaxChars: input.projectGuideMaxChars,
     toolCatalogText: input.toolCatalogText,
+    servingGeneration,
   });
   return {
     text: assembled.text,

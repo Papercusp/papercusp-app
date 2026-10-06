@@ -44,9 +44,14 @@ export interface ChecksSeamSection {
   validOutput: Record<string, unknown>;
   /** A payload.out fixture the gate must REJECT (throw). */
   invalidOutput: Record<string, unknown>;
-  /** Stable app-agent blueprint.yaml — cross-checked against work kind and operation declaration. */
+  /** Stable app-agent blueprint.yaml — cross-checked against work kind; must declare NO operations. */
   agentBlueprint: string;
-  /** The standard reusable task declaration that targets the app-owned plan template. */
+  /**
+   * The app's ROOT blueprint, where `blueprint:submit` resolves operations
+   * (app-agent-tasks-durable-execution-2026-10-06#D-003). Default `.papercusp/blueprint.yaml`.
+   */
+  rootBlueprint?: string;
+  /** The standard reusable task declaration (declared in the ROOT blueprint) that targets the app-owned plan template. */
   operation: {
     id: string;
     version: string;
@@ -450,6 +455,8 @@ export function validateChecksConfig(value: unknown): string[] {
         if (!isRecord(value.seam[f]))
           errors.push(`seam.${f}: required object fixture`);
       }
+      if (value.seam.rootBlueprint !== undefined && !isNonEmptyString(value.seam.rootBlueprint))
+        errors.push("seam.rootBlueprint: must be a non-empty string when present");
       if (!isRecord(value.seam.operation))
         errors.push("seam.operation: required object");
       else {

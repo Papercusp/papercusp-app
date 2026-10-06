@@ -868,6 +868,10 @@ export const CC_HOOK_FILES = [
   // The incoming-content guard cannot see corruption introduced after dispatch;
   // this hook compares the requested UTF-8 bytes with the resulting file.
   'posttooluse-write-byte-integrity-guard.mjs',
+  // WI-10004699: re-seeds promptOverride.su the moment papercup-pot.su.md is edited, so
+  // the fail-closed launch check (verifyPapercuspSuInstanceOverride) never refuses every
+  // fresh papercusp su launch because a human forgot the manual re-seed (WI-10004556).
+  'posttooluse-su-instance-override-reseed.mjs',
   // PostToolUse nudge: an Edit/Write after the last `lint:tsc` run invalidates that
   // run's "clean" verdict, so the hook says so at the edit instead of hours later at
   // the gate (the hook file shipped without this allowlist entry — install parity 3/3).
@@ -948,6 +952,11 @@ export const CC_HOOK_FILES = [
   // installer (dead code whose own header claimed it was "the hard backstop").
   // Moved here and wired below.
   'pretooluse-secrets-guard.mjs',
+  // P-007 / BAR R-11 (plan personal-data-reader-set-labels-2026-10-01): PreToolUse
+  // (matcher "Bash|WebFetch") hard DENY when a session that has read restricted personal
+  // data names a mail/chat/calendar/social provider host, a sidecar, or the sidecars'
+  // secrets in a client-native tool call. capability:bash is gated server-side.
+  'pretooluse-restricted-egress-guard.mjs',
   // EI-18896033546676518: PreToolUse (matcher "Edit|MultiEdit") hard DENY on any file
   // that already contains a raw NUL byte — the Edit tool has a confirmed round-trip
   // corruption bug on such files (silently writes a different byte than requested
@@ -1231,6 +1240,15 @@ export const CC_HOOK_FILES = [
   // the su's PAPERCUSP_SID). Omit it and the guard fails open: a nested `claude -p`
   // ends the su again. Run via the interpreter, never exec'd directly, so it is 0644.
   'pc_nested_cli.py',
+  // WI-10004945: the CACHED form of the same verdict, for hooks that fire on every tool
+  // call (activity reports, ask-gate-mirror, workitem-verify-nudge) and for the Stop
+  // directive check. Sourced by bash hooks and run via `bash <path>` by the .mjs one,
+  // never exec'd, so 0644. Omit it and those hooks fail open: a nested CLI acts as the su.
+  'pc_nested_cli.sh',
+  // WI-10004953: the node entry to that cached verdict, imported by the .mjs hooks
+  // (stop-owner-directive-check, precompact-managed-carry, schedule-wakeup provenance) and
+  // by the inject dispatcher. Imported, never executed, so 0644.
+  'pc_nested_cli.mjs',
 ] as const;
 
 /** Hook files that are LIBRARIES, not executables — installed 0644, never chmod +x. */
@@ -1238,6 +1256,8 @@ const CC_HOOK_LIB_FILES: ReadonlySet<string> = new Set([
   'pc_tty.py',
   'mcp_response.py',
   'pc_nested_cli.py',
+  'pc_nested_cli.sh',
+  'pc_nested_cli.mjs',
 ]);
 
 /** Match the runtime-vintage unit label used by host-bootstrap in install evidence. */
@@ -1622,8 +1642,22 @@ export const PSU_REEXEC_EXIT_CODE = 87;
  *  fresh code, so the fixed point is reached in one hop. The cap exists for the
  *  case that does NOT converge — a file rewritten under a running loop (git-sync
  *  sweeps this tree continuously) — where an uncapped loop would respawn the
- *  owner's session forever. */
+ *  owner's session forever.
+ *
+ *  WI-10005351: the cap counts re-execs inside ONE BURST (see
+ *  PSU_REEXEC_WINDOW_SEC), not over the session's lifetime. Adoptions ride on
+ *  carry-respawns, so a healthy long-lived session on this tree adopts every
+ *  respawn while host code keeps changing: measured 2026-10-02, 6 of the 7
+ *  owners whose event log reached a 17th adoption got no prompt successor
+ *  kickoff on it. The shim refused and exited, and the session stayed dark
+ *  until an unrelated wake resumed a stale native id. */
 export const PSU_REEXEC_MAX = 16;
+
+/** WI-10005351: a re-exec more than this many seconds after the previous one
+ *  starts a new burst (the counter resets). A genuine non-converging loop
+ *  re-execs within seconds; legitimate adoptions are a respawn apart (minutes).
+ *  `PAPERCUSP_PSU_REEXEC_WINDOW_SEC` overrides it (non-negative integer). */
+export const PSU_REEXEC_WINDOW_SEC = 300;
 
 function launcherNameVariants(launcherPath: string): string[] {
   const names = [path.basename(launcherPath)];
@@ -1665,8 +1699,8 @@ export function shimRuntimeOptions(launcherPath: string, explicitLauncherEnv: st
  * installPapercuspFiles last. On a dev box both the green release operator and
  * the staging operator boot, so the shared ~/.papercusp/bin/psu silently
  * changed behavior based on boot order. Runtime resolution makes the active
- * integration/release root win, while the install-time fallback keeps a
- * packaged app usable when no root env is exported.
+ * declared canonical edit tree win before the active integration/release root;
+ * the install-time fallback keeps a packaged app usable when no root env is exported.
  */
 export async function writeShim(
   shimPath: string,
@@ -1699,7 +1733,7 @@ export async function writeShim(
     '    return 0\n' +
     '  fi\n' +
     '  local root rel candidate\n' +
-    '  for root in "${PAPERCUSP_INTEGRATION_ROOT:-}" "${PAPERCUSP_RELEASE_ROOT:-}"; do\n' +
+    '  for root in "${PAPERCUSP_CANONICAL_TREE:-}" "${PAPERCUSP_INTEGRATION_ROOT:-}" "${PAPERCUSP_RELEASE_ROOT:-}"; do\n' +
     '    [ -n "$root" ] || continue\n' +
     '    for rel in \\\n' +
     `      ${relativeLiterals.join(' \\\n      ')}\n` +
@@ -1737,6 +1771,10 @@ export async function writeShim(
         // promise that someone will re-run it, and exit into nobody.
         'export PAPERCUSP_PSU_REEXEC_PPID=$$\n' +
         'psu_reexecs=0\n' +
+        // WI-10005351: the cap below counts one BURST, not the session lifetime.
+        `psu_reexec_window="\${PAPERCUSP_PSU_REEXEC_WINDOW_SEC:-${PSU_REEXEC_WINDOW_SEC}}"\n` +
+        `case "$psu_reexec_window" in ''|*[!0-9]*) psu_reexec_window=${PSU_REEXEC_WINDOW_SEC} ;; esac\n` +
+        'psu_last_reexec_at=$SECONDS\n' +
         'while :; do\n' +
         `  ${shellLiteral(nodeCmd)} "$launcher" "$@"\n` +
         '  psu_code=$?\n' +
@@ -1764,12 +1802,17 @@ export async function writeShim(
         '    esac\n' +
         '  done\n' +
         '  set -- "${psu_next_args[@]}"\n' +
+        // WI-10005351: a re-exec a full window after the previous one is a new
+        // burst. A real loop re-execs within seconds; adoptions are a respawn
+        // apart, so a long-lived session never accumulates toward the cap.
+        '  if [ $((SECONDS - psu_last_reexec_at)) -ge "$psu_reexec_window" ]; then psu_reexecs=0; fi\n' +
+        '  psu_last_reexec_at=$SECONDS\n' +
         '  psu_reexecs=$((psu_reexecs + 1))\n' +
         // -gt, not -ge: `psu_reexecs` counts re-execs ALREADY PERFORMED, so the
         // Nth one must be allowed to happen before the N+1th is refused.
         `  if [ "$psu_reexecs" -gt ${PSU_REEXEC_MAX} ]; then\n` +
         `    printf '%s\\n' ${shellLiteral(
-          `papercusp ${label}: ${PSU_REEXEC_MAX} host re-execs in one session — refusing to loop again`,
+          `papercusp ${label}: ${PSU_REEXEC_MAX} host re-execs in one burst (each within the re-exec window of the last) — refusing to loop again`,
         )} >&2\n` +
         '    exit "$psu_code"\n' +
         '  fi\n' +
@@ -2882,6 +2925,17 @@ export function mergeClaudeHookSettings(
         hooks: cmd('posttooluse-write-byte-integrity-guard.mjs'),
       },
     );
+  // merge_su_instance_override_reseed_hook — PostToolUse (WI-10004699). The script itself
+  // no-ops for every path except the canonical papercup-pot.su.md source.
+  if (has('posttooluse-su-instance-override-reseed.mjs'))
+    hooks.PostToolUse = replaceOurHookEntries(
+      ev('PostToolUse'),
+      ours('posttooluse-su-instance-override-reseed.mjs'),
+      {
+        matcher: fileWriteMatcher,
+        hooks: cmd('posttooluse-su-instance-override-reseed.mjs'),
+      },
+    );
   // merge_activity_pre_hook — PreToolUse, matcher '*' (EI-8997: a renewal signal
   // at dispatch time too, not just completion — see the script's own header).
   if (has('pretooluse-activity-report.sh'))
@@ -3038,7 +3092,10 @@ export function mergeClaudeHookSettings(
   // nudge that misses the writes agents actually make is the failure mode the file exists to stop.
   if (has('posttooluse-frozen-candidate-edit-nudge.mjs'))
     hooks.PostToolUse = replaceOurHookEntries(ev('PostToolUse'), ours('posttooluse-frozen-candidate-edit-nudge.mjs'), {
-      matcher: fileWriteMatcher,
+      // …plus tools:invoke: a trimmed psu surface reaches capability:edit/write ONLY through it, so
+      // without this every su edit is absent from the frozen-repair edit ledger and hunk-exact
+      // admission refuses no-ledgered-hunks. The hook unwraps the envelope; other invokes extract nothing.
+      matcher: `${fileWriteMatcher}|mcp__.*__tools_invoke`,
       hooks: cmd('posttooluse-frozen-candidate-edit-nudge.mjs'),
     });
   // merge_registry_census_drift_nudge_hook — PostToolUse, matcher 'Edit|Write|MultiEdit'
@@ -3228,6 +3285,16 @@ export function mergeClaudeHookSettings(
     hooks.PreToolUse = replaceOurHookEntries(ev('PreToolUse'), ours('pretooluse-secrets-guard.mjs'), {
       matcher: fileWriteMatcher,
       hooks: cmd('pretooluse-secrets-guard.mjs'),
+    });
+  // merge_restricted_egress_guard_hook — PreToolUse (P-007 / BAR R-11). The client-native
+  // tools never pass through capability:bash's server-side egress check. WI-10005589 / D-012
+  // widened the matcher: a restricted session's Bash is rewritten to run with no network,
+  // and WebFetch, non-Papercusp MCP tools and edits of agent runtime files are denied.
+  // Must equal the hook's own RESTRICTED_EGRESS_MATCHER (claude-hooks.test.ts pins both).
+  if (has('pretooluse-restricted-egress-guard.mjs'))
+    hooks.PreToolUse = replaceOurHookEntries(ev('PreToolUse'), ours('pretooluse-restricted-egress-guard.mjs'), {
+      matcher: 'Bash|WebFetch|Edit|Write|MultiEdit|NotebookEdit|mcp__(?!papercusp).*',
+      hooks: cmd('pretooluse-restricted-egress-guard.mjs'),
     });
   // merge_nul_byte_edit_guard_hook — PreToolUse, matcher 'Edit|MultiEdit' (EI-18896033546676518).
   // Write is deliberately NOT in the matcher — see the script header for why.

@@ -224,6 +224,8 @@ export interface PgAdmissionCutoverQueueStoreOptions {
   readonly workspaceId?: string;
   readonly abandonAfterMs?: number;
   readonly resolveSessionStatesFn?: ResolveSessionStates;
+  /** Lease hot-path reuse window for the ended-lease-owner scan, ms (WI-10004631). */
+  readonly endedLeaseOwnerReuseMs?: number;
 }
 
 /** Positive-control census that gates removal of the bounded legacy adapter. */
@@ -269,6 +271,7 @@ export class PgAdmissionCutoverQueueStore implements DurableAdmissionQueueStore 
       workspaceId: this.workspaceId,
       ...(options.abandonAfterMs ? { abandonAfterMs: options.abandonAfterMs } : {}),
       ...(options.resolveSessionStatesFn ? { resolveSessionStatesFn: options.resolveSessionStatesFn } : {}),
+      ...(options.endedLeaseOwnerReuseMs ? { endedLeaseOwnerReuseMs: options.endedLeaseOwnerReuseMs } : {}),
     };
     this.legacy = new PgWorkItemAdmissionQueueStore(shared);
     this.ledger = new PgAdmissionLedgerQueueStore({

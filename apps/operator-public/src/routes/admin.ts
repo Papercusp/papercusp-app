@@ -22,12 +22,22 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { Env } from '../env.ts';
-import { AuthError, isCupboardOperator, resolveGithubBearer } from '../auth.ts';
-import { isSelfDescribingKind } from '../content-pin.ts';
+import { AuthError, extractBearer, isCupboardOperator, resolveGithubBearer } from '../auth.ts';
 import {
+  COMMIT_SHA_RE,
+  diffListingContent,
+  isSelfDescribingKind,
+  pinListingContent,
+  pinRefusalToHttp,
+} from '../content-pin.ts';
+import {
+  approveListingVersion,
   audit,
   banPublisherPubkey,
+  getActiveListingByRefs,
   getHarnessById,
+  getPreviouslyApprovedVersion,
+  listVersionsSupersededByApproval,
   getReportById,
   listBannedPubkeys,
   listPendingReview,
@@ -37,6 +47,25 @@ import {
   setReviewStatus,
   unbanPublisherPubkey,
 } from '../db.ts';
+import {
+  LEDGER_STREAM_IDS,
+  exportLedgerStream,
+  isLedgerStreamId,
+  verifyLedgerStream,
+  witnessLedgerStream,
+} from '../ledger-chain-store.ts';
+
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/** Parse the optional `?headSeq=&headHash=` pin a verifier saved from an earlier export. */
+function parseExpectedHead(url: URL): { seq: number; entryHash: string } | null | 'invalid' {
+  const seqRaw = url.searchParams.get('headSeq');
+  const hash = url.searchParams.get('headHash');
+  if (seqRaw == null && hash == null) return null;
+  const seq = Number(seqRaw);
+  if (seqRaw == null || hash == null || !Number.isSafeInteger(seq) || seq < 0 || !HEX64.test(hash)) return 'invalid';
+  return { seq, entryHash: hash };
+}
 
 interface ResolveBody {
   action: 'unlist' | 'dismiss';
@@ -156,7 +185,7 @@ export function adminRoute(): Hono<{ Bindings: Env }> {
     if (op instanceof Response) return op;
     const id = c.req.param('id');
 
-    let body: { decision?: string; reason?: string } = {};
+    let body: { decision?: string; reason?: string; reviewed_commit_sha?: string } = {};
     try {
       body = (await c.req.json()) as typeof body;
     } catch {
@@ -167,6 +196,15 @@ export function adminRoute(): Hono<{ Bindings: Env }> {
     }
     if (body.reason != null && (typeof body.reason !== 'string' || body.reason.length > 1000)) {
       return c.json({ error: 'invalid_field', field: 'reason' }, 400);
+    }
+    // P-008: the commit the operator actually reviewed. Absent ⇒ the row's own
+    // pin (what the review-diff showed). Present and different ⇒ the row had
+    // DRIFTED and is re-pinned to this SHA before it is approved.
+    if (
+      body.reviewed_commit_sha != null &&
+      (typeof body.reviewed_commit_sha !== 'string' || !COMMIT_SHA_RE.test(body.reviewed_commit_sha))
+    ) {
+      return c.json({ error: 'invalid_field', field: 'reviewed_commit_sha' }, 400);
     }
 
     const row = await getHarnessById(c.env.DB, id);
@@ -192,16 +230,150 @@ export function adminRoute(): Hono<{ Bindings: Env }> {
     }
 
     const now = Date.now();
-    const status = body.decision === 'approve' ? ('approved' as const) : ('rejected' as const);
-    await setReviewStatus(c.env.DB, id, status, body.reason?.trim() || null, now);
-    await audit(c.env.DB, now, 'review_decided', {
+    const reason = body.reason?.trim() || null;
+    if (body.decision === 'reject') {
+      await setReviewStatus(c.env.DB, id, 'rejected', reason, now);
+      await audit(c.env.DB, now, 'review_decided', {
+        id,
+        listing_kind: row.listing_kind,
+        decision: 'rejected',
+        operator_github_user_id: op.id,
+        publisher_github_user_id: row.publisher_github_user_id,
+      });
+      return c.json({ ok: true, id, review_status: 'rejected' });
+    }
+
+    // Approve (P-008): record WHICH commit was reviewed, re-pin a drifted row to
+    // it, and make this the single served version of its identity.
+    let approved: { commitSha: string; treeDigest: string } | null = null;
+    let repinned = false;
+    let repinAuthority: { unresolved: boolean; cause: string | null } | null = null;
+    if (isSelfDescribingKind(row.listing_kind)) {
+      // Non-null: the content_pin_required guard above refused a NULL pin.
+      approved = { commitSha: row.pinned_commit_sha as string, treeDigest: row.pinned_tree_digest as string };
+      const reviewed = body.reviewed_commit_sha;
+      if (reviewed != null && reviewed !== row.pinned_commit_sha) {
+        // The reviewer read a different commit than the row's pin: re-fetch +
+        // re-scan `<ref>/` AT THAT SHA (never the default-branch head — the point
+        // is to serve exactly what was reviewed), then pin it.
+        const clash = await getActiveListingByRefs(
+          c.env.DB,
+          row.github_repository_id,
+          row.listing_kind,
+          row.listing_ref as string,
+          reviewed,
+        );
+        if (clash && clash.id !== id) {
+          return c.json({ error: 'version_exists', existing_id: clash.id, commit_sha: reviewed }, 409);
+        }
+        const repin = await pinListingContent({
+          token: extractBearer(c.req.raw),
+          owner: row.github_owner,
+          name: row.github_name,
+          defaultBranch: '',
+          listingRef: row.listing_ref as string,
+          commitSha: reviewed,
+          kind: row.listing_kind,
+        });
+        if (!repin.ok) {
+          const refusal = pinRefusalToHttp(repin);
+          return c.json(refusal.body, refusal.status);
+        }
+        approved = { commitSha: repin.commitSha, treeDigest: repin.treeDigest };
+        // P-007: a re-pin replaces the pinned bytes, so the Worker's authority verdict must be
+        // the one computed from THOSE bytes, not the superseded commit's.
+        repinAuthority = repin.recipeAuthority ?? null;
+        repinned = true;
+      }
+    }
+    const superseded = approved ? await listVersionsSupersededByApproval(c.env.DB, row) : [];
+    await approveListingVersion(c.env.DB, {
+      id,
+      reason,
+      now,
+      approved,
+      repinned,
+      authority: repinAuthority,
+      retire: approved ? row : null,
+      // WI-10004643: the audit row rides in the approval's own atomic batch (D1 has no
+      // transaction across two calls), so a Worker failure can't leave an approval unaudited.
+      audit: {
+        kind: 'review_decided',
+        detail: {
+          id,
+          listing_kind: row.listing_kind,
+          decision: 'approved',
+          operator_github_user_id: op.id,
+          publisher_github_user_id: row.publisher_github_user_id,
+          approved_commit_sha: approved?.commitSha ?? null,
+          repinned,
+          from_pinned_commit_sha: repinned ? row.pinned_commit_sha : null,
+          retired_ids: superseded.map((v) => v.id),
+        },
+      },
+    });
+    return c.json({
+      ok: true,
+      id,
+      review_status: 'approved',
+      approved_commit_sha: approved?.commitSha ?? null,
+      repinned,
+      retired_ids: superseded.map((v) => v.id),
+    });
+  });
+
+  // GET /admin/listings/:id/review-diff — what an approval would change (P-008).
+  // File-level diff of `<listing_ref>/` between the previously approved commit of
+  // this (repo, kind, ref) and the pending row's pin. Blob shas are content
+  // addresses, so added / removed / modified is exact without moving any bytes.
+  // The first-ever version diffs against nothing (every file `added`).
+  app.get('/admin/listings/:id/review-diff', async (c) => {
+    const op = await requireOperator(c);
+    if (op instanceof Response) return op;
+    const id = c.req.param('id');
+    const row = await getHarnessById(c.env.DB, id);
+    if (!row || row.unlisted_at) return c.json({ error: 'not_found' }, 404);
+    if (row.review_status !== 'pending') {
+      return c.json({ error: 'not_pending', review_status: row.review_status }, 409);
+    }
+    if (!isSelfDescribingKind(row.listing_kind) || row.listing_ref == null) {
+      return c.json({ error: 'not_self_describing', listing_kind: row.listing_kind }, 409);
+    }
+    if (row.pinned_commit_sha == null) {
+      return c.json({ error: 'content_pin_required', reason: 'republish_required_before_review' }, 409);
+    }
+    const previous = await getPreviouslyApprovedVersion(
+      c.env.DB,
+      {
+        github_repository_id: row.github_repository_id,
+        listing_kind: row.listing_kind,
+        listing_ref: row.listing_ref,
+      },
+      id,
+    );
+    const diff = await diffListingContent({
+      token: extractBearer(c.req.raw),
+      owner: row.github_owner,
+      name: row.github_name,
+      listingRef: row.listing_ref,
+      toCommitSha: row.pinned_commit_sha,
+      fromCommitSha: previous?.approved_commit_sha ?? previous?.pinned_commit_sha ?? null,
+    });
+    if (!diff.ok) {
+      const refusal = pinRefusalToHttp(diff);
+      return c.json(refusal.body, refusal.status);
+    }
+    return c.json({
       id,
       listing_kind: row.listing_kind,
-      decision: status,
-      operator_github_user_id: op.id,
-      publisher_github_user_id: row.publisher_github_user_id,
+      listing_ref: row.listing_ref,
+      first_version: diff.fromCommitSha == null,
+      from_commit_sha: diff.fromCommitSha,
+      from_listing_id: previous?.id ?? null,
+      to_commit_sha: diff.toCommitSha,
+      files: diff.files,
+      unchanged_count: diff.unchangedCount,
     });
-    return c.json({ ok: true, id, review_status: status });
   });
 
   // POST /admin/harnesses/:id/unlist — proactive operator takedown.
@@ -293,6 +465,64 @@ export function adminRoute(): Hono<{ Bindings: Env }> {
       operator_github_user_id: op.id,
     });
     return c.json({ ok: true });
+  });
+
+  // ── Hash-chained ledgers (agent-economy-flywheel P-040) ──────────────────
+  // GET  /admin/ledger-chain                       — verify every stream.
+  // GET  /admin/ledger-chain/:stream/verify        — recompute one chain and
+  //      report the first break; `?headSeq=&headHash=` additionally checks the
+  //      chain still ends at a head the caller saved earlier (truncation).
+  // GET  /admin/ledger-chain/:stream/export        — the stable JSONL export
+  //      (@papercusp/hash-chain format), verifiable offline.
+  // POST /admin/ledger-chain/:stream/witness       — chain rows a failed
+  //      after-append witness pass left unchained.
+  app.get('/admin/ledger-chain', async (c) => {
+    const op = await requireOperator(c);
+    if (op instanceof Response) return op;
+    const streams = [];
+    for (const streamId of LEDGER_STREAM_IDS) streams.push(await verifyLedgerStream(c.env.DB, streamId));
+    return c.json({ ok: streams.every((s) => s.ok), streams });
+  });
+
+  app.get('/admin/ledger-chain/:stream/verify', async (c) => {
+    const op = await requireOperator(c);
+    if (op instanceof Response) return op;
+    const streamId = c.req.param('stream');
+    if (!isLedgerStreamId(streamId)) return c.json({ error: 'unknown_stream', streams: LEDGER_STREAM_IDS }, 404);
+    const expectedHead = parseExpectedHead(new URL(c.req.url));
+    if (expectedHead === 'invalid') return c.json({ error: 'invalid_field', field: 'headSeq/headHash' }, 400);
+    const report = await verifyLedgerStream(c.env.DB, streamId, { expectedHead });
+    return c.json(report);
+  });
+
+  app.get('/admin/ledger-chain/:stream/export', async (c) => {
+    const op = await requireOperator(c);
+    if (op instanceof Response) return op;
+    const streamId = c.req.param('stream');
+    if (!isLedgerStreamId(streamId)) return c.json({ error: 'unknown_stream', streams: LEDGER_STREAM_IDS }, 404);
+    const body = await exportLedgerStream(c.env.DB, streamId);
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'content-type': 'application/x-ndjson; charset=utf-8',
+        'content-disposition': `attachment; filename="${streamId}.chain.jsonl"`,
+      },
+    });
+  });
+
+  app.post('/admin/ledger-chain/:stream/witness', async (c) => {
+    const op = await requireOperator(c);
+    if (op instanceof Response) return op;
+    const streamId = c.req.param('stream');
+    if (!isLedgerStreamId(streamId)) return c.json({ error: 'unknown_stream', streams: LEDGER_STREAM_IDS }, 404);
+    const now = Date.now();
+    const result = await witnessLedgerStream(c.env.DB, streamId, now);
+    await audit(c.env.DB, now, 'ledger_chain_witnessed', {
+      stream_id: streamId,
+      appended: result.appended,
+      operator_github_user_id: op.id,
+    });
+    return c.json({ ok: true, ...result });
   });
 
   return app;

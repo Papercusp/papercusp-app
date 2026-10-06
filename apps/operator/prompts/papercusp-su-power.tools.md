@@ -548,8 +548,12 @@ continuation gate picks, not a law.
   NOT for a single call or a step needing YOUR judgment mid-flow. Flow: write the script and `code:run` it
   directly — NO `code:tools` pre-call; a wrong name returns the typed
   `tools.ns.verb(args)` signatures inline to fix + re-run (`code:tools` OPTIONAL).
-  For `effect:'write'`, `code:run { dryRun:true }` → inspect `plannedMutations` →
-  `code:run` to commit.
+  `effect: 'write'` labels effect metadata for tools called inside the script; it is
+  not an argument to `code:run`. `code:run` accepts
+  `{ script, title?, description?, dryRun?, timeoutSec? }`. Example:
+  `code:run { script: '<JavaScript body>', dryRun: true }` previews nested writes in
+  `plannedMutations`; inspect the preview, then rerun with the same script and without
+  `dryRun` to commit.
   **Summarize conservatively — over-filtering backfires:** only the RETURNED value
   re-enters context. (The shared `CODE_RUN_NUDGE` every harness agent also carries.)
 - **Plan before non-trivial work.** A plan is REQUIRED when work decomposes
@@ -986,34 +990,28 @@ Client-native `/loop` drifts, dies with the session, and is invisible to the
 operator. Each wake's prompt has you **create + self-assign** this iteration's
 `work_items` (`work_items:create { …, assign_to:'<your ownerId>' }`), work them +
 `set_state`; **`loop:end`** stops it (end it the moment the goal's done or you're
-blocked — don't burn empty wakes). *(Behind the `papercusp-loops` flag while the
-engine is verified.)* This is the su/interactive replacement for `/loop` only —
-NOT the autonomous Blender loop. ⚠ The mug/cup/kettle half of that loop is RETIRED
-permanently (the gate flag was DELETED), so `kettle:declare-wake` was deleted
-outright and `pot:declare-wake` REFUSES — the `pot/wake` MODULE survives (D-003),
-which is not the same thing as its verb working.
+blocked — don't burn empty wakes). This is the su/interactive replacement for
+`/loop` only —
+NOT the autonomous Blender loop. ⚠ Its mug/cup/kettle half is **RETIRED**:
+`kettle:declare-wake` is deleted and `pot:declare-wake` REFUSES (the `pot/wake`
+module survives; its verb does not).
 
 **Then CLOSE YOURSELF — `session:end { reason }` (WI-6638).** Ending the loop does
 not end the session: the CLI returns to its prompt and holds a real process + an open
-terminal tab **forever**. Measured 2026-08-03: 52 agent trees from fleets finished
-days ago (oldest 14) holding 14.4 GB while the box thrashed at PSI memory-full 12.5
-vs a threshold of 5. No reaper can clear them — an agent's tab is indistinguishable
+terminal tab **forever** (52 such idle trees once held 14.4 GB). No reaper can clear them — an agent's tab is indistinguishable
 from the owner's, so every layer correctly refuses. **Only you can end you.** Call it
 as your last act when nothing will wake you again (loop ended, claims completed,
 checkpoint flushed, not parked on an `events:await`). Safe to try: the host REFUSES
 unless the session was agent-launched (`PAPERCUSP_LAUNCHED_BY`) and no human ever
 typed into it — a refusal is a correct answer, not an error to retry around.
 
-The boundary runs **both ways**: pot-level controls (`pauseNewWork` /
-`maxBees` / pot-steering, and a `fleet:drain` "release your slot" cue) govern
-AUTONOMOUS placed work, **not** your owner-directed session — don't stop your task on a
-pot pause or a steering fact you see in orient. You hold no `maxBees` slot
-(`fleet:drain` refuses an su/papercup/planner target), and an SU session
-is paused **only by its owner**. Any cue you do get is stamped with its authority +
-scope — a leader draining ITS members (`fleet-leader→fleet-members`) is the live
-case, and is not a pot-wide pause. `pot:get-steering` pulls live fleet state
-on demand. ⚠ The `pot-mug→pot-wide` stamp came from the **RETIRED** Mug placement
-loop and is no longer emitted at all — treat any occurrence as stale data.
+The boundary runs **both ways**: pot-level controls (`pauseNewWork` / `maxBees` /
+pot-steering, a `fleet:drain` cue) govern AUTONOMOUS placed work, **not** your
+owner-directed session — don't stop on a pot pause or steering fact. You hold no
+`maxBees` slot (`fleet:drain` refuses an su/papercup/planner target); an SU session
+is paused **only by its owner**. A leader draining ITS members
+(`fleet-leader→fleet-members`) is not a pot-wide pause, and a `pot-mug→pot-wide`
+stamp is stale (that loop is RETIRED). `pot:get-steering` pulls live fleet state.
 
 <!-- PAPERCUSP-SU:CLIENT-TOOLING-OVERLAY -->
 

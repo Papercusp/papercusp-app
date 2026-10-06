@@ -228,6 +228,19 @@ struct HealthResponse {
     /// when there is no main webview or its URL can't be read (nothing to
     /// check); `Some(false)` means the origin refused/timed out/errored.
     operator_reachable: Option<bool>,
+    /// Retain the actual target and transport result. CLI clients may strip
+    /// unknown fields, so the raw /health response is the diagnostic authority.
+    operator_probe: Option<OriginProbe>,
+}
+
+#[derive(Debug, Serialize)]
+struct OriginProbe {
+    url: String,
+    reachable: bool,
+    elapsed_ms: u64,
+    status: Option<u16>,
+    error_kind: Option<&'static str>,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -308,15 +321,50 @@ fn pid_alive(_pid: u32) -> Option<bool> {
 /// currently pointed at — the ground truth `sidecars_alive`'s PID-only check
 /// (and the always-empty-in-production sidecar registry) never captures. ANY
 /// response (even a 4xx/5xx) means the origin is answering, so this reports
-/// `Some(true)`; a connect-refused/timeout/other transport error reports
-/// `Some(false)`; an empty `url` (no webview / unreadable URL upstream)
+/// reachable=true; a connect-refused/timeout/other transport error reports
+/// reachable=false with its measured cause; an empty `url` (no webview /
+/// unreadable URL upstream)
 /// reports `None` — "nothing to check", never a false failure. `client` is
 /// injected so tests never depend on a real Tauri webview.
-fn origin_reachable(client: &reqwest::blocking::Client, url: &str) -> Option<bool> {
+fn origin_reachable(client: &reqwest::blocking::Client, url: &str) -> Option<OriginProbe> {
     if url.is_empty() {
         return None;
     }
-    Some(client.get(url).send().is_ok())
+    let started = Instant::now();
+    let result = client.get(url).send();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let (status, error_kind, error) = match result {
+        Ok(response) => (Some(response.status().as_u16()), None, None),
+        Err(err) => {
+            let kind = if err.is_timeout() {
+                "timeout"
+            } else if err.is_connect() {
+                "connect"
+            } else if err.is_builder() {
+                "builder"
+            } else if err.is_redirect() {
+                "redirect"
+            } else {
+                "request"
+            };
+            let mut detail = err.to_string();
+            let mut source = std::error::Error::source(&err);
+            while let Some(cause) = source {
+                detail.push_str(": ");
+                detail.push_str(&cause.to_string());
+                source = cause.source();
+            }
+            (None, Some(kind), Some(detail))
+        }
+    };
+    Some(OriginProbe {
+        url: url.to_string(),
+        reachable: status.is_some(),
+        elapsed_ms,
+        status,
+        error_kind,
+        error,
+    })
 }
 
 /// Register a sidecar process with the bridge so it shows up in `/process`
@@ -852,9 +900,10 @@ pub fn start_bridge(
                                 parsed.join("/api/health").ok().map(|j| j.to_string())
                             })
                         });
-                        let operator_reachable = health_url
+                        let operator_probe = health_url
                             .as_deref()
                             .and_then(|u| origin_reachable(&health_check_client, u));
+                        let operator_reachable = operator_probe.as_ref().map(|p| p.reachable);
                         let sidecars_alive =
                             pid_sidecars_alive && operator_reachable.unwrap_or(true);
                         let resp = HealthResponse {
@@ -865,6 +914,7 @@ pub fn start_bridge(
                             selected_api_port: crate::SELECTED_API_PORT
                                 .load(std::sync::atomic::Ordering::Relaxed),
                             operator_reachable,
+                            operator_probe,
                         };
                         let json = serde_json::to_string(&resp).unwrap();
                         let header =
@@ -1195,10 +1245,24 @@ mod tests {
             sidecars: Vec::new(),
             selected_api_port: 3170,
             operator_reachable: Some(true),
+            operator_probe: Some(OriginProbe {
+                url: "http://127.0.0.1:3170/api/health".to_string(),
+                reachable: true,
+                elapsed_ms: 4,
+                status: Some(200),
+                error_kind: None,
+                error: None,
+            }),
         };
 
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["selected_api_port"], 3170);
+        assert_eq!(
+            json["operator_probe"]["url"],
+            "http://127.0.0.1:3170/api/health"
+        );
+        assert_eq!(json["operator_probe"]["status"], 200);
+        assert_eq!(json["operator_probe"]["elapsed_ms"], 4);
     }
 
     #[test]
@@ -1239,7 +1303,10 @@ mod tests {
         write_private_token_file(&path, "{\"token\":\"t\"}").unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "bridge token must be readable by its owner only");
+        assert_eq!(
+            mode, 0o600,
+            "bridge token must be readable by its owner only"
+        );
         assert_eq!(fs::read_to_string(&path).unwrap(), "{\"token\":\"t\"}");
         let _ = fs::remove_file(&path);
     }
@@ -1275,18 +1342,19 @@ mod tests {
         let client = reqwest::blocking::Client::new();
         // Nothing to check (no webview / unreadable URL upstream) — never a
         // false failure.
-        assert_eq!(origin_reachable(&client, ""), None);
+        assert!(origin_reachable(&client, "").is_none());
     }
 
     #[test]
     fn origin_reachable_true_when_the_origin_answers() {
         // A real tiny_http responder — ANY response (even this bare 200)
-        // proves the origin is up.
+        // proves the origin is up. Preserve a server error as a response,
+        // not a transport failure.
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let handle = thread::spawn(move || {
             if let Ok(req) = server.recv() {
-                let _ = req.respond(Response::from_string("ok"));
+                let _ = req.respond(Response::from_string("unavailable").with_status_code(503));
             }
         });
         let client = reqwest::blocking::Client::builder()
@@ -1294,7 +1362,12 @@ mod tests {
             .build()
             .unwrap();
         let url = format!("http://127.0.0.1:{port}/api/health");
-        assert_eq!(origin_reachable(&client, &url), Some(true));
+        let probe = origin_reachable(&client, &url).unwrap();
+        assert!(probe.reachable);
+        assert_eq!(probe.url, url);
+        assert_eq!(probe.status, Some(503));
+        assert!(probe.error.is_none());
+        assert!(probe.error_kind.is_none());
         handle.join().unwrap();
     }
 
@@ -1310,7 +1383,48 @@ mod tests {
             .build()
             .unwrap();
         let url = format!("http://127.0.0.1:{port}/api/health");
-        assert_eq!(origin_reachable(&client, &url), Some(false));
+        let probe = origin_reachable(&client, &url).unwrap();
+        assert!(!probe.reachable);
+        assert_eq!(probe.url, url);
+        assert_eq!(probe.status, None);
+        assert_eq!(probe.error_kind, Some("connect"));
+        assert!(probe.error.as_deref().unwrap().contains("refused"));
+    }
+
+    #[test]
+    fn origin_reachable_distinguishes_timeout_from_connection_refusal() {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let handle = thread::spawn(move || {
+            if let Some(req) = server
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+            {
+                thread::sleep(std::time::Duration::from_millis(150));
+                let _ = req.respond(Response::from_string("late"));
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(25))
+            .build()
+            .unwrap();
+        let probe =
+            origin_reachable(&client, &format!("http://127.0.0.1:{port}/api/health")).unwrap();
+        assert!(!probe.reachable);
+        assert_eq!(probe.status, None);
+        assert_eq!(probe.error_kind, Some("timeout"));
+        assert!(probe.error.as_deref().unwrap().contains("timed out"));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn origin_reachable_reports_an_unsupported_scheme_as_a_builder_error() {
+        let client = reqwest::blocking::Client::new();
+        let probe = origin_reachable(&client, "papercusp://localhost/api/health").unwrap();
+        assert!(!probe.reachable);
+        assert_eq!(probe.status, None);
+        assert_eq!(probe.error_kind, Some("builder"));
+        assert!(probe.error.is_some());
     }
 
     // ── LogBuffer ring semantics ────────────────────────────────────────────

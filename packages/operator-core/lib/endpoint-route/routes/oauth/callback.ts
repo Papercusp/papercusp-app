@@ -6,37 +6,34 @@
  * persisted to the plugin's per-harness config. plugin/harness/field
  * come from the verified state, never the URL.
  *
+ * Managed connections (Google Workspace, Facebook, and every descriptor
+ * provider with `oauth`) run the provider-neutral lifecycle in
+ * integrations/connection-lifecycle.ts; this route holds no provider-name
+ * branch (P-003).
+ *
  * Ported from app/api/oauth/callback/route.ts. `auth: 'public'` — the
  * caller is the OAuth provider's redirect.
  */
-import { getProvider, loadAndRegisterProvidersFromDisk } from '../../../oauth/providers';
+import { loadAndRegisterProvidersFromDisk } from '../../../oauth/providers';
 import { verifyAndConsumeState } from '../../../oauth/state';
 import { fsTokenStorage } from '../../../oauth/storage-fs';
 import { getOrgPg } from '@papercusp/db-org';
 import {
-  GOOGLE_WORKSPACE_OAUTH_PLUGIN,
-  assertGoogleWorkspaceOwnerUserId,
-  googleWorkspaceOAuthField,
-  googleWorkspaceSourceAccountId,
-  isGoogleWorkspaceProvisionalProviderAccountId,
-  provisionOwnedGoogleWorkspaceSources,
-  resolveGoogleWorkspaceProviderAccount,
-} from '../../../external-triggers/google-workspace';
-import {
-  listOwnedExternalTriggerSources,
-  renameOwnedExternalTriggerSourceAccount,
-} from '../../../external-triggers/source-store';
-import { ensureGmailRespondDraftBinding } from '../../../external-triggers/gmail-flagship';
-import {
-  FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN,
-  assertFacebookPersonalVaultOwnerUserId,
-  provisionOwnedFacebookPersonalVaultSource,
-  resolveFacebookPersonalVaultProviderAccount,
-} from '../../../external-triggers/facebook';
+  connectionAdapterFor,
+  finishConnection,
+  missingRefreshTokenRefusal,
+  prepareConnection,
+  resolveConnectionOwner,
+  resolveOAuthProvider,
+  type ConnectionOwner,
+  type PreparedConnection,
+} from '../../../integrations/connection-lifecycle';
+import { ensureBuiltinConnectionAdapters } from '../../../integrations/builtin-connection-adapters';
 import { defineTool } from '@papercusp/agent-mcp';
 
 let providersLoaded = false;
 async function ensureProvidersLoaded(): Promise<void> {
+  ensureBuiltinConnectionAdapters();
   if (providersLoaded) return;
   await loadAndRegisterProvidersFromDisk();
   providersLoaded = true;
@@ -121,13 +118,7 @@ function oauthResultResponse(
 }
 
 function callbackReturnPath(plugin: string, providerId: string, harness: string): string {
-  if (
-    (providerId === 'google' && plugin === GOOGLE_WORKSPACE_OAUTH_PLUGIN) ||
-    (providerId === 'facebook' && plugin === FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN)
-  ) {
-    return '/settings/personal-vault';
-  }
-  return '/harness/' + encodeURIComponent(harness) + '?panel=config';
+  return connectionAdapterFor(plugin, providerId)?.returnPath ?? '/harness/' + encodeURIComponent(harness) + '?panel=config';
 }
 
 function requestedScopes(privateContext: Readonly<Record<string, string>> | undefined): string[] {
@@ -147,6 +138,10 @@ function requestedScopes(privateContext: Readonly<Record<string, string>> | unde
   } catch {
     return [];
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export default defineTool({
@@ -180,59 +175,19 @@ export default defineTool({
     }
 
     const { plugin, harness, field, provider: providerId } = verified.claims;
+    const adapter = connectionAdapterFor(plugin, providerId);
     const returnPath = callbackReturnPath(plugin, providerId, harness);
-    const provider = getProvider(providerId);
-    if (!provider) {
-      return oauthResultResponse(
-        req.url,
-        returnPath,
-        'oauth_error',
-        `provider ${providerId} not registered`,
-        verified.privateContext,
-        500,
-      );
-    }
+    const fail = (message: string, legacyJsonStatus?: number) =>
+      oauthResultResponse(req.url, returnPath, 'oauth_error', message, verified.privateContext, legacyJsonStatus);
+    const provider = await resolveOAuthProvider(providerId);
+    if (!provider) return fail(`provider ${providerId} not registered`, 500);
 
-    const connectsGoogleWorkspace = providerId === 'google' && plugin === GOOGLE_WORKSPACE_OAUTH_PLUGIN;
-    const connectsFacebookPersonalVault = providerId === 'facebook' && plugin === FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN;
-    let googleOwner: {
-      ownerUserId: string;
-      workspaceId: string;
-      reconnectProviderAccountId: string | null;
-    } | null = null;
-    let facebookOwner: {
-      ownerUserId: string;
-      workspaceId: string;
-      reconnectProviderAccountId: string | null;
-    } | null = null;
-    if (connectsGoogleWorkspace) {
+    let owner: ConnectionOwner | null = null;
+    if (adapter) {
       try {
-        const ownerUserId = assertGoogleWorkspaceOwnerUserId(verified.privateContext?.ownerUserId);
-        const workspaceId = verified.privateContext?.workspaceId?.trim() ?? '';
-        if (!workspaceId) throw new Error('google_workspace_workspace_id_required');
-        googleOwner = {
-          ownerUserId,
-          workspaceId,
-          reconnectProviderAccountId: verified.privateContext?.reconnectProviderAccountId?.trim() || null,
-        };
+        owner = resolveConnectionOwner(adapter, verified.privateContext);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return oauthResultResponse(req.url, returnPath, 'oauth_error', message, verified.privateContext, 400);
-      }
-    }
-    if (connectsFacebookPersonalVault) {
-      try {
-        const ownerUserId = assertFacebookPersonalVaultOwnerUserId(verified.privateContext?.ownerUserId);
-        const workspaceId = verified.privateContext?.workspaceId?.trim() ?? '';
-        if (!workspaceId) throw new Error('facebook_personal_vault_workspace_id_required');
-        facebookOwner = {
-          ownerUserId,
-          workspaceId,
-          reconnectProviderAccountId: verified.privateContext?.reconnectProviderAccountId?.trim() || null,
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return oauthResultResponse(req.url, returnPath, 'oauth_error', message, verified.privateContext, 400);
+        return fail(errorMessage(error), 400);
       }
     }
 
@@ -240,197 +195,20 @@ export default defineTool({
     try {
       tokens = await provider.exchangeCode(code, verified.privateContext);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return oauthResultResponse(req.url, returnPath, 'oauth_error', msg, verified.privateContext);
+      return fail(errorMessage(e));
     }
 
-    let googleProviderAccountId: string | null = null;
-    let googlePreviousFields: string[] = [];
-    if (googleOwner) {
+    let prepared: PreparedConnection | null = null;
+    if (adapter && owner) {
       try {
-        const resolved = await resolveGoogleWorkspaceProviderAccount(tokens.accessToken);
-        googleProviderAccountId = resolved.providerAccountId;
-        const expected = googleOwner.reconnectProviderAccountId;
-        if (expected && expected !== resolved.providerAccountId) {
-          const provisional =
-            expected.startsWith(`${GOOGLE_WORKSPACE_OAUTH_PLUGIN}:`) || expected.startsWith('legacy-owner:');
-          if (!provisional) {
-            return oauthResultResponse(
-              req.url,
-              returnPath,
-              'oauth_error',
-              'google_workspace_account_mismatch',
-              verified.privateContext,
-            );
-          }
-          await renameOwnedExternalTriggerSourceAccount(getOrgPg().sql, {
-            workspaceId: googleOwner.workspaceId,
-            ownerUserId: googleOwner.ownerUserId,
-            previousProviderAccountId: expected,
-            providerAccountId: resolved.providerAccountId,
-          });
-        }
-        let owned = await listOwnedExternalTriggerSources(
-          getOrgPg().sql,
-          googleOwner.workspaceId,
-          googleOwner.ownerUserId,
-        );
-        let reconciledProvisionalAccount = false;
-        const provisionalAccountIds = [
-          ...new Set(
-            owned
-              .filter((source) => {
-                const providerAccountId = source.providerAccountId?.trim() ?? '';
-                return (
-                  Boolean(providerAccountId) &&
-                  providerAccountId !== resolved.providerAccountId &&
-                  isGoogleWorkspaceProvisionalProviderAccountId(providerAccountId) &&
-                  googleWorkspaceSourceAccountId(source, owned) === resolved.providerAccountId
-                );
-              })
-              .map((source) => source.providerAccountId!.trim()),
-          ),
-        ];
-        const directCanonicalSources = owned.filter(
-          (source) =>
-            source.providerAccountId?.trim() === resolved.providerAccountId && source.credentialRef !== null,
-        );
-        // Older rows may have persisted the Gmail cursor's canonical email while
-        // retaining `google-workspace:<field>` as providerAccountId. Adopt that
-        // identity before provisioning the new OAuth field; otherwise upsert
-        // creates a second canonical row and Personal Vault exposes the old row
-        // as a ghost account. Only reconcile an unambiguous provisional group.
-        if (!expected && directCanonicalSources.length === 0 && provisionalAccountIds.length === 1) {
-          await renameOwnedExternalTriggerSourceAccount(getOrgPg().sql, {
-            workspaceId: googleOwner.workspaceId,
-            ownerUserId: googleOwner.ownerUserId,
-            previousProviderAccountId: provisionalAccountIds[0]!,
-            providerAccountId: resolved.providerAccountId,
-          });
-          reconciledProvisionalAccount = true;
-          owned = await listOwnedExternalTriggerSources(
-            getOrgPg().sql,
-            googleOwner.workspaceId,
-            googleOwner.ownerUserId,
-          );
-        }
-        googlePreviousFields = [
-          ...new Set(
-            owned
-              .filter(
-                (source) =>
-                  googleWorkspaceSourceAccountId(source, owned) === resolved.providerAccountId &&
-                  source.credentialRef !== null,
-              )
-              .map((source) => googleWorkspaceOAuthField(source.credentialRef)),
-          ),
-        ];
-        // The mismatch guard above only covers RECONNECT (it needs an `expected`
-        // account to compare against). An add-account flow carries no `expected`,
-        // so without this a consent screen that came back with the account that is
-        // already connected would be written under the freshly allocated field from
-        // oauth/start — a second credential slot pointing at the same mailbox, with
-        // no error surfaced to the owner. Refuse instead: the owner picked the wrong
-        // account in the chooser, and the honest repair is to run it again.
-        if (!expected && googlePreviousFields.length > 0 && !reconciledProvisionalAccount) {
-          return oauthResultResponse(
-            req.url,
-            returnPath,
-            'oauth_error',
-            'google_workspace_account_already_connected',
-            verified.privateContext,
-          );
-        }
+        const result = await prepareConnection(getOrgPg().sql, adapter, owner, tokens.accessToken);
+        if ('refusal' in result) return fail(result.refusal);
+        prepared = result;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return oauthResultResponse(req.url, returnPath, 'oauth_error', message, verified.privateContext);
+        return fail(errorMessage(error));
       }
-    }
-
-    let facebookProviderAccount: { providerAccountId: string; displayName: string } | null = null;
-    let facebookPreviousFields: string[] = [];
-    if (facebookOwner) {
-      try {
-        facebookProviderAccount = await resolveFacebookPersonalVaultProviderAccount(tokens.accessToken);
-        const expected = facebookOwner.reconnectProviderAccountId;
-        if (expected && expected !== facebookProviderAccount.providerAccountId) {
-          const provisional =
-            expected.startsWith(`${FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN}:`) || expected.startsWith('legacy-owner:');
-          if (!provisional) {
-            return oauthResultResponse(
-              req.url,
-              returnPath,
-              'oauth_error',
-              'facebook_personal_vault_account_mismatch',
-              verified.privateContext,
-            );
-          }
-          await renameOwnedExternalTriggerSourceAccount(getOrgPg().sql, {
-            workspaceId: facebookOwner.workspaceId,
-            ownerUserId: facebookOwner.ownerUserId,
-            previousProviderAccountId: expected,
-            providerAccountId: facebookProviderAccount.providerAccountId,
-          });
-        }
-        const owned = await listOwnedExternalTriggerSources(
-          getOrgPg().sql,
-          facebookOwner.workspaceId,
-          facebookOwner.ownerUserId,
-        );
-        facebookPreviousFields = [
-          ...new Set(
-            owned
-              .filter(
-                (source) =>
-                  source.kind === 'facebook' &&
-                  source.providerAccountId === facebookProviderAccount!.providerAccountId &&
-                  source.credentialRef !== null,
-              )
-              .map((source) => source.credentialRef!.slice(`${FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN}:`.length)),
-          ),
-        ];
-        // Symmetric to the Google guard above (WI-129473/WI-133209). oauth/start
-        // allocates a fresh field for BOTH plugins, and this branch's mismatch
-        // guard likewise needs an `expected` account, so it covers RECONNECT only.
-        // Facebook makes this easier to hit than Google: its authorize URL carries
-        // no account-chooser hint at all, so an active session simply continues as
-        // the logged-in user. Refuse rather than write a second slot for an account
-        // that is already connected.
-        if (!expected && facebookPreviousFields.length > 0) {
-          return oauthResultResponse(
-            req.url,
-            returnPath,
-            'oauth_error',
-            'facebook_personal_vault_account_already_connected',
-            verified.privateContext,
-          );
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return oauthResultResponse(req.url, returnPath, 'oauth_error', message, verified.privateContext);
-      }
-    }
-
-    // A brand-new Google account slot that arrives without a refresh token is
-    // already broken: the access token expires within the hour and there is
-    // nothing to renew it with. That is precisely what an authorize URL which
-    // lets Google skip re-consent produces, so fail loudly here instead of
-    // persisting a credential that dies quietly a while after the owner was
-    // told the connection succeeded. Reconnects are exempt — they legitimately
-    // keep the refresh token already stored for that account.
-    if (
-      googleOwner &&
-      !googleOwner.reconnectProviderAccountId &&
-      googlePreviousFields.length === 0 &&
-      !tokens.refreshToken
-    ) {
-      return oauthResultResponse(
-        req.url,
-        returnPath,
-        'oauth_error',
-        'google_workspace_refresh_token_missing',
-        verified.privateContext,
-      );
+      const refusal = missingRefreshTokenRefusal(adapter, owner, prepared.previousFields, tokens);
+      if (refusal) return fail(refusal);
     }
 
     const patch: Record<string, unknown> = { [field]: tokens.accessToken };
@@ -442,70 +220,22 @@ export default defineTool({
     if (grantedScopes.length) patch[`${field}_scopes`] = grantedScopes;
     patch[`${field}_expired`] = false;
     await fsTokenStorage.update(plugin, harness, patch);
-    if (googleOwner) {
+
+    if (adapter && owner && prepared) {
       try {
-        const sources = await provisionOwnedGoogleWorkspaceSources(getOrgPg().sql, {
-          workspaceId: googleOwner.workspaceId,
-          ownerUserId: googleOwner.ownerUserId,
-          providerAccountId: googleProviderAccountId!,
+        await finishConnection(getOrgPg().sql, adapter, {
+          owner,
+          account: prepared.account,
           field,
-          createdBy: `owner:${googleOwner.ownerUserId}`,
+          harness,
+          previousFields: prepared.previousFields,
+          createdBy: `owner:${owner.ownerUserId}`,
         });
-        const gmail = sources.find((source) => source.kind === 'gmail');
-        if (!gmail) throw new Error('google_workspace_gmail_source_missing');
-        await ensureGmailRespondDraftBinding(
-          getOrgPg().sql,
-          googleOwner.workspaceId,
-          gmail,
-          `owner:${googleOwner.ownerUserId}`,
-        );
-        for (const previousField of googlePreviousFields) {
-          if (previousField === field) continue;
-          await fsTokenStorage.update(GOOGLE_WORKSPACE_OAUTH_PLUGIN, harness, {
-            [previousField]: null,
-            [previousField + '_refresh']: null,
-            [previousField + '_expires_at']: null,
-            [previousField + '_scopes']: null,
-            [previousField + '_expired']: true,
-          });
-        }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return oauthResultResponse(req.url, returnPath, 'oauth_error', message, verified.privateContext);
-      }
-    }
-    if (facebookOwner) {
-      try {
-        await provisionOwnedFacebookPersonalVaultSource(getOrgPg().sql, {
-          workspaceId: facebookOwner.workspaceId,
-          ownerUserId: facebookOwner.ownerUserId,
-          providerAccountId: facebookProviderAccount!.providerAccountId,
-          displayName: facebookProviderAccount!.displayName,
-          field,
-          createdBy: `owner:${facebookOwner.ownerUserId}`,
-        });
-        for (const previousField of facebookPreviousFields) {
-          if (previousField === field) continue;
-          await fsTokenStorage.update(FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN, harness, {
-            [previousField]: null,
-            [previousField + '_refresh']: null,
-            [previousField + '_expires_at']: null,
-            [previousField + '_scopes']: null,
-            [previousField + '_expired']: true,
-          });
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return oauthResultResponse(req.url, returnPath, 'oauth_error', message, verified.privateContext);
+        return fail(errorMessage(error));
       }
     }
 
-    return oauthResultResponse(
-      req.url,
-      returnPath,
-      'oauth_connected',
-      plugin,
-      verified.privateContext,
-    );
+    return oauthResultResponse(req.url, returnPath, 'oauth_connected', plugin, verified.privateContext);
   },
 });

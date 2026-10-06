@@ -5,7 +5,7 @@
  * WHY. A `repo-files` binding's freshness is a content hash of the source and test files
  * it measured. Editing any one of them stales the proof, but nothing said so at the
  * edit: the editor (often a PEER of the proof's holder) learned it only at the next gate
- * probe. Measured 2026-09-23 (owner #302): su-9306f9c3 staled R-1, R-3 and R-4 by trimming
+ * probe. Measured 2026-09-23 (Avi #302): su-9306f9c3 staled R-1, R-3 and R-4 by trimming
  * tool guidance and found out at the gate; on this plan peer edits staled P-001 once,
  * P-002 twice and P-004 four times (D-006; EI-24053039097767980).
  *

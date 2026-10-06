@@ -25,7 +25,7 @@ import { FLAGS } from '@papercusp/flags';
 import { advSessionsByCoordOwner, isFailedTerminalLaunch, type AdvSessionRow } from './adv-sessions';
 // WI-37841: the cause of a failed launch, from the boot log psu-launcher.mjs and
 // launch-su.ts both write. One shared path derivation — see psu-launch-log.mjs.
-import { readPsuHeadlessLaunchBlockHint, readPsuLaunchLogTail } from './psu-launch-log.mjs';
+import { readPsuHeadlessLaunchBlockHintAsync, readPsuLaunchLogTailAsync } from './psu-launch-log.mjs';
 import { heartbeatAgeTone, LIVE_MS, type Liveness } from './liveness';
 import { resolveSessionStates } from './agent-tools/coordination/liveness-oracle';
 import { modeRegistrationLive } from './modes/liveness';
@@ -59,8 +59,8 @@ import {
 } from './native-session-handles';
 import { resolveSpawnBackendModel } from './harness-invoke-once';
 import {
-  getAllWakeModeOverrides,
   getDefaultWakeMode,
+  getWakeModeOverridesFor,
   resolveWakeModeFrom,
   type WakeMode,
 } from './agent-tools/coordination/wake-mode';
@@ -1080,9 +1080,52 @@ export function pendingLaunchesToRosterEntries(
  *     'workbench') can never pane one of these even if it read this tier. The
  *     primary guard is that the pui reads only `pending`; this is the backstop.
  */
+/** The two log-derived diagnostics a starting-tier card may carry. */
+export interface StartingLaunchLogHints {
+  /** Why a still-live headless launch is parked (provider limit dialog). */
+  blockedHint: string | null;
+  /** The boot-log tail of a launch already known to have FAILED. */
+  failureHint: string | null;
+}
+
+/**
+ * Read the per-launch log diagnostics for the starting tier, OFF the event loop.
+ *
+ * EI-24748208098755918: these reads used to happen synchronously inside
+ * {@link startingLaunchesToRosterEntries}, once per starting row on every roster
+ * poll. A saturation profile (2026-10-01 22:41Z) charged 790 ms of one 3 s
+ * window to that `readSync`, which stalled every request on the worker. The
+ * mapper is now pure; callers await this first and pass the result in.
+ *
+ * Best-effort by contract: never rejects, and an unreadable log simply yields
+ * no hint (the card keeps its generic copy). Keyed by `AdvSessionRow.id`.
+ */
+export async function readStartingLaunchLogHints(
+  rows: readonly AdvSessionRow[],
+): Promise<Map<number, StartingLaunchLogHints>> {
+  const entries = await Promise.all(
+    rows.map(async (r): Promise<[number, StartingLaunchLogHints]> => {
+      const failed = isFailedTerminalLaunch(r);
+      try {
+        // A failed launch reads its boot log; a live one checks for a blocking
+        // provider dialog. Never both, as before the split.
+        const [blockedHint, failureHint] = failed
+          ? [null, await readPsuLaunchLogTailAsync(r.coordOwnerId)]
+          : [await readPsuHeadlessLaunchBlockHintAsync(r.terminalBin), null];
+        return [r.id, { blockedHint, failureHint }];
+      } catch {
+        return [r.id, { blockedHint: null, failureHint: null }];
+      }
+    }),
+  );
+  return new Map(entries);
+}
+
 export function startingLaunchesToRosterEntries(
   rows: AdvSessionRow[],
   localHost: string,
+  /** From {@link readStartingLaunchLogHints}. Absent ⇒ no log-derived hints. */
+  logHints: ReadonlyMap<number, StartingLaunchLogHints> = new Map(),
 ): RosterEntry[] {
   return rows.map((r) => {
     // `ownerId` is passed for the same reason the ACTIVE path passes it
@@ -1106,9 +1149,11 @@ export function startingLaunchesToRosterEntries(
     const failed = isFailedTerminalLaunch(r);
     // A headless host can stay alive forever while the native client is stopped
     // at a provider usage-limit dialog. `terminalBin` already persists the exact
-    // log receipt; inspect only that bounded, generated path. Keep this distinct
-    // from death: the useful action is another account/backend or the reset.
-    const blockedHint = failed ? null : readPsuHeadlessLaunchBlockHint(r.terminalBin);
+    // log receipt; readStartingLaunchLogHints inspected only that bounded,
+    // generated path. Keep this distinct from death: the useful action is
+    // another account/backend or the reset. This mapper does NO file I/O.
+    const hints = logHints.get(r.id);
+    const blockedHint = failed ? null : (hints?.blockedHint ?? null);
     const blocked = blockedHint != null;
     return {
       // Fall back to a synthetic id only for a pre-WI-6363 row that carries no
@@ -1120,12 +1165,10 @@ export function startingLaunchesToRosterEntries(
       // death. Saying "starting up" about a corpse is the lie WI-6821 filed.
       intent: failed ? 'launch failed' : blocked ? 'launch blocked' : 'starting up',
       launchFailed: failed,
-      // WI-37841: read the cause ONLY for a launch already known to have failed.
-      // Gating on `failed` keeps this off the hot path entirely — a healthy boot
-      // window does no file I/O — and a failed launch is both rare and bounded
-      // by STARTING_LAUNCH_WINDOW_SEC. Never throws (see readPsuLaunchLogTail):
-      // a missing or unreadable log degrades to today's generic copy.
-      launchFailureHint: failed ? readPsuLaunchLogTail(r.coordOwnerId) : null,
+      // WI-37841: the cause, read (asynchronously, by readStartingLaunchLogHints)
+      // ONLY for a launch already known to have failed. A missing or unreadable
+      // log degrades to the generic copy.
+      launchFailureHint: failed ? (hints?.failureHint ?? null) : null,
       launchBlocked: blocked,
       launchBlockedHint: blockedHint,
       currentFiles: [],
@@ -1441,14 +1484,20 @@ async function spawnedAgentRunInfoByOwner(): Promise<Map<string, { runId: string
  * a FALLBACK (spawned-run harness still wins when both exist) so the
  * thinking-stream's own runId-paired semantics are undisturbed.
  */
-async function sessionBriefHarnessByOwner(): Promise<Map<string, string>> {
+export async function sessionBriefHarnessByOwner(ownerIds: readonly string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
+  // Owner-scoped (WI-10005228): session_briefs keeps one row per owner EVER seen
+  // (14,160 on 2026-10-02 against ~100 live), and this join is only ever looked
+  // up by the roster's own presence owners — so read exactly those (a PK probe).
+  const ids = [...new Set(ownerIds.filter((id) => id))];
+  if (ids.length === 0) return out;
   try {
     const { sql } = getOrgPg();
     const rows = (await sql`
       SELECT owner_id, harness_slug
         FROM harness_shared.session_briefs
-       WHERE harness_slug IS NOT NULL
+       WHERE owner_id = ANY(${ids}::text[])
+         AND harness_slug IS NOT NULL
     `) as unknown as Array<{ owner_id: string | null; harness_slug: string | null }>;
     for (const r of rows) {
       if (r.owner_id && r.harness_slug) out.set(r.owner_id, r.harness_slug);
@@ -1626,19 +1675,16 @@ export async function mergeRosterWithAssignments(
     advByOwner,
     assignmentRows,
     sessionsByOwner,
-    wakeModesByOwner,
     defaultWakeMode,
     pendingWakesByOwner,
     runInfoByOwner,
     loopArmedOwners,
     nurseryByOwner,
-    sessionBriefHarness,
   ] = await Promise.all([
     listPresence(),
     advSessionsByCoordOwner(),
     listFleetAssignments({ workspaceId }).catch(() => []),
     spawnedAgentNativeSessionsByOwner(),
-    getAllWakeModeOverrides().catch(() => new Map<string, WakeMode>()),
     getDefaultWakeMode().catch(() => 'auto' as WakeMode),
     countAllPendingWakes().catch(() => new Map<string, number>()),
     spawnedAgentRunInfoByOwner(),
@@ -1649,10 +1695,6 @@ export async function mergeRosterWithAssignments(
     // adds to the roster-merge baseline the search-transcripts endpoint pays
     // on every query).
     runningSpawnLivenessByOwner(os.hostname()),
-    // P-007 finding (see sessionBriefHarnessByOwner docblock): harnessSlug
-    // fallback for interactive psu/su sessions, which spawnedAgentRunInfoByOwner
-    // alone never covers.
-    sessionBriefHarnessByOwner(),
   ]);
   const localPresence = scopePresenceToWorkspace(presenceAll, workspaceId);
   // Shared-hive federation: when presence-gossip is on, fold in cross-machine agents
@@ -1675,10 +1717,13 @@ export async function mergeRosterWithAssignments(
   }
   // #3: per-owner fleet label + the fleet's accent color, for the pui roster grouping —
   // and the official standing-modes read (EI-7626), both batched, in parallel.
+  const presenceOwnerIds = presence.map((p) => p.ownerId);
   const [
     fleetInfoByOwner,
     modesByOwner,
     awaitByOwner,
+    wakeModesByOwner,
+    sessionBriefHarness,
     verdictByOwner,
     accountPinByOwner,
     displayNameByOwner,
@@ -1690,7 +1735,17 @@ export async function mergeRosterWithAssignments(
     // rather than awaited after — a serial hop would add to the roster-merge
     // baseline every caller pays (see the perf docs' serial-loop anti-pattern).
     // Scoped by the roster's OWNER IDS, not workspace — see openAwaitsByOwner.
-    openAwaitsByOwner(presence.map((p) => p.ownerId)),
+    openAwaitsByOwner(presenceOwnerIds),
+    // WI-10005228: both joins are only ever looked up by a presence owner
+    // (mergeRosterEntries keys them by p.ownerId), so they read exactly those
+    // owners here, after presence is known, instead of every row ever written
+    // (10,342 wake overrides / 14,160 briefs against ~100 live agents) in the
+    // first batch. Same batch as the other owner-scoped joins: no serial hop added.
+    getWakeModeOverridesFor(presenceOwnerIds).catch(() => new Map<string, WakeMode>()),
+    // P-007 finding (see sessionBriefHarnessByOwner docblock): harnessSlug
+    // fallback for interactive psu/su sessions, which spawnedAgentRunInfoByOwner
+    // alone never covers.
+    sessionBriefHarnessByOwner(presenceOwnerIds),
     // WI-6636: the SHARED liveness oracle. This roster used to derive liveness
     // from heartbeat freshness alone and so disagreed with every other surface —
     // it read 110 parked agents as "Stalled" on the default HUD board while

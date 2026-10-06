@@ -94,6 +94,15 @@ export default defineTool({
       .record(z.string(), z.unknown())
       .optional()
       .describe('announce only: a @papercusp/rules DataCondition expected to match the eventual emit payload. Mutually exclusive with expected_sha.'),
+  }).superRefine((args, ctx) => {
+    if (args.announce === true && (args.to?.length ?? 0) > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['to'],
+        message:
+          "events:emit — `announce` declares a gate; it wakes/notifies no one, so `to` is not allowed. Fire the returned key later to deliver.",
+      });
+    }
   }),
   async handler(args, ctx) {
     const identity = resolveAgentIdentity(ctx);

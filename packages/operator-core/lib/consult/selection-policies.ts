@@ -87,8 +87,10 @@ export function ensureSelectionPolicies(): void {
 /**
  * The global consult default, derived rather than restated.
  * consult-min-max-and-rubric-vetting-2026-08-17 D-003 [owner]: every consult
- * selects at least the best-available live candidate even below the relevance
- * floor (labelled via:'minimum'), so the minimum is 1 system-wide.
+ * has a default minimum of 1 and may fill it with the best-available selectable
+ * transcript candidate below the relevance floor (labelled via:'minimum').
+ * consult-expert-routing-2026-09-22 D-002 [owner] makes delivery a separate
+ * fork/convert session, so the source agent's liveness does not gate selection.
  */
 export const DEFAULT_MIN_RESPONDERS = SELECTION_POLICIES[CONSULT_DEFAULT_POLICY]!.min;
 /** The global consult cap — unchanged at 3 per D-004; see CONSULT_DEFAULT_POLICY. */

@@ -1,5 +1,5 @@
 /**
- * pg-bounded-txn — a bounded, atomic WRITE transaction on the operator admin pool.
+ * pg-bounded-txn — a bounded transaction on the operator admin pool.
  *
  * WHY (reliability): getOrgPg() (the `harness_admin` pool) carries a role-default
  * `lock_timeout` (15s) + `idle_in_transaction_session_timeout` (60s) but DELIBERATELY
@@ -16,7 +16,7 @@
  * unblocks a wedged query is a DB-side statement_timeout. (Root cause of the
  * reported "work_items:comment hung, then timed out on a bounded retry.")
  *
- * boundedOrgTxn wraps a unit of admin-pool writes in ONE transaction with a
+ * boundedOrgTxn wraps admin-pool work in ONE transaction with a
  * SET LOCAL statement_timeout + lock_timeout, so the work is:
  *   - ATOMIC  — partial writes can't half-land and a post-stall retry can't
  *               duplicate (every statement commits together or not at all); and
@@ -25,7 +25,7 @@
  *               turns into a clean { ok:false, error } result (runBulk does this
  *               for the bulk tools), instead of an indefinite hang.
  *
- * It is the interactive-WRITE counterpart to pg-read-query's bounded READ ONLY txn,
+ * It is the interactive transaction counterpart to pg-read-query's bounded READ ONLY txn,
  * and a deliberately lighter sibling of locks/inWorkspaceTxn: NO per-workspace
  * advisory lock (a coordination append must not serialize the entire workspace).
  * Migrations + long tooling keep calling getOrgPg() directly and stay unbounded.
@@ -193,13 +193,20 @@ export class OrgTxnTimeoutError extends Error {
    * knows it is synthesizing passes `'caller-budget'`.
    */
   readonly timeoutSource: 'pg' | 'caller-budget';
-  constructor(pgCode: string, cause: unknown, blockerHint?: string, timeoutSource: 'pg' | 'caller-budget' = 'pg') {
+  constructor(
+    pgCode: string,
+    cause: unknown,
+    blockerHint?: string,
+    timeoutSource: 'pg' | 'caller-budget' = 'pg',
+    operation: 'read' | 'write' = 'write',
+  ) {
+    const subject = operation === 'read' ? 'operator read query' : 'operator write';
     const base =
       timeoutSource === 'caller-budget'
-        ? `operator write was abandoned after exceeding the CALLER's own time budget (reported as pg ${pgCode} so it is never mistaken for "nothing matched"; PostgreSQL itself did not time out) — retry shortly`
+        ? `${subject} was abandoned after exceeding the CALLER's own time budget (reported as pg ${pgCode} so it is never mistaken for "nothing matched"; PostgreSQL itself did not time out) — retry shortly`
         : pgCode === '55P03'
-          ? 'operator write timed out waiting for a row/advisory lock (pg 55P03 lock_timeout) — retry shortly'
-          : 'operator write exceeded its time budget (pg 57014 statement_timeout) — the database stalled; retry shortly';
+          ? `${subject} timed out waiting for a row/advisory lock (pg 55P03 lock_timeout) — retry shortly`
+          : `${subject} exceeded its time budget (pg 57014 statement_timeout) — the database stalled; retry shortly`;
     super(blockerHint ? `${base} — ${blockerHint}` : base);
     this.name = 'OrgTxnTimeoutError';
     this.pgCode = pgCode;
@@ -313,6 +320,8 @@ export interface BoundedOrgTxnOptions {
   statementTimeoutMs?: number;
   /** Per-lock-wait cap (PG lock_timeout), ms. Default ORG_TXN_DEFAULT_LOCK_TIMEOUT_MS. */
   lockTimeoutMs?: number;
+  /** Start the transaction READ ONLY before applying its local timeouts. */
+  readOnly?: boolean;
   /** Inject the sql client (tests / a non-default backend). Default getOrgPg().sql. */
   client?: OrgSql;
   /** Cancel in-flight postgres-js queries when the caller abandons this transaction. */
@@ -354,6 +363,10 @@ export async function boundedOrgTxn<T>(fn: (tx: OrgSql) => Promise<T>, opts: Bou
             const cancellation = cancellableTransaction(rawTx as unknown as OrgSql, opts.signal);
             try {
               cancellation.assertNotAborted();
+              // SET TRANSACTION must precede the first query in this transaction.
+              // Bounded search reads use this option to preserve the read-only
+              // contract while still receiving the same per-statement bounds.
+              if (opts.readOnly) await cancellation.tx`SET TRANSACTION READ ONLY`;
               // set_config(name, value, is_local=true) == SET LOCAL, but binds the value
               // as a parameter (a bare `SET` cannot). Mirrors locks/inWorkspaceTxn.
               // WI-10003631: one round trip for both transaction-local settings.
@@ -387,7 +400,7 @@ export async function boundedOrgTxn<T>(fn: (tx: OrgSql) => Promise<T>, opts: Bou
       // connection already aborted, so this runs on a fresh one and must never be
       // allowed to throw or hang in place of the real error.
       const blockerHint = await describeContentionAtFailure(sql, acquirePool).catch(() => undefined);
-      throw new OrgTxnTimeoutError(code, err, blockerHint);
+      throw new OrgTxnTimeoutError(code, err, blockerHint, 'pg', opts.readOnly ? 'read' : 'write');
     }
     throw err;
   }

@@ -10,12 +10,15 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronRight, Sparkles, Square } from 'lucide-react';
+import { parseGoalOwnerReportSnapshot, serializeGoalOwnerReportSnapshot } from '@papercusp/chat-protocol';
 import type {
   CardResponse,
   OpenCardSnapshot,
   ReportBlock,
   ReportItem,
   ReportPlan,
+  GoalOwnerReportRefV1,
+  GoalOwnerReportSnapshotV1,
 } from '@papercusp/chat-protocol';
 
 export interface AskChoiceOption {
@@ -323,18 +326,103 @@ export interface ReportBlockRenderContext {
   plan: ReportPlan;
 }
 
+/** The host resolves the exact immutable ID through its existing report library. */
+export interface ResolvedGoalOwnerReport {
+  reportId: string;
+  workspaceId: string;
+  goalId: string;
+  bodySha256: string;
+  bodyMd: string;
+  snapshot: GoalOwnerReportSnapshotV1;
+}
+
 export interface ReportBlockCardProps {
   report: ReportBlock;
   renderItemText?: (context: ReportBlockRenderContext) => ReactNode;
   onDrillIn?: (ref: string) => void;
   canDrillIn?: (ref: string) => boolean;
+  resolveGoalReport?: (reference: GoalOwnerReportRefV1) => Promise<ResolvedGoalOwnerReport>;
+  /** Hosts may keep expansion in their URL/router; portable hosts use local state. */
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
+  renderGoalReportControl?: (control: { label: string; expanded: boolean; onClick: () => void }) => ReactNode;
 }
 
-export function ReportBlockCard({ report, renderItemText, onDrillIn, canDrillIn }: ReportBlockCardProps): ReactNode {
-  if (!report.plans.length) return null;
+function GoalReportDetail({ reference, resolve, expanded, onToggle, renderControl }: {
+  reference: GoalOwnerReportRefV1;
+  resolve: ReportBlockCardProps['resolveGoalReport'];
+  expanded: boolean;
+  onToggle: () => void;
+  renderControl: ReportBlockCardProps['renderGoalReportControl'];
+}): ReactNode {
+  const key = `${reference.goalId}:${reference.reportId}:${reference.bodySha256}`;
+  const [retry, setRetry] = useState(0);
+  const [state, setState] = useState<{ key: string; result?: ResolvedGoalOwnerReport; error?: string }>({ key });
+  useEffect(() => {
+    if (!expanded || !resolve || (state.key === key && state.result)) return;
+    let cancelled = false;
+    setState({ key });
+    void (async () => {
+      try {
+        const result = await resolve(reference);
+        const snapshot = parseGoalOwnerReportSnapshot(result.snapshot);
+        if (!snapshot || result.reportId !== reference.reportId || result.goalId !== reference.goalId ||
+          result.bodySha256 !== reference.bodySha256 || snapshot.goalId !== reference.goalId ||
+          snapshot.workspaceId !== result.workspaceId || result.bodyMd !== serializeGoalOwnerReportSnapshot(snapshot)) {
+          throw new Error('The resolved report does not match this pinned snapshot.');
+        }
+        const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(result.bodyMd));
+        const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+        if (hash !== reference.bodySha256) throw new Error('The report body does not match this pinned snapshot.');
+        if (!cancelled) setState({ key, result });
+      } catch (error) {
+        if (!cancelled) setState({ key, error: error instanceof Error ? error.message : 'Report resolution failed.' });
+      }
+    })();
+    return () => { cancelled = true; };
+    // The scalar key is the reference identity. Result state deliberately does not
+    // trigger another fetch; collapse/reopen keeps this immutable result cached.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, resolve, key, retry]);
+  if (!resolve) return <p className="report-block-plan-summary">Full snapshot is unavailable in this view.</p>;
+  const label = expanded ? 'Collapse full report' : 'Expand full report';
+  const result = state.key === key ? state.result : undefined;
+  const error = state.key === key ? state.error : undefined;
+  return (
+    <div className="report-block-goal-detail">
+      {renderControl ? renderControl({ label, expanded, onClick: onToggle }) : (
+        <button type="button" className="report-block-item-drill" aria-expanded={expanded} onClick={onToggle}>{label}</button>
+      )}
+      {expanded ? (
+        <div className="report-block-goal-content">
+          {result ? (
+            <>
+              <p className="report-block-goal-as-of">Historical snapshot · observed at {result.snapshot.observedAt}</p>
+              <pre className="report-block-goal-body" data-report-id={result.reportId}>{result.bodyMd}</pre>
+            </>
+          ) : error ? (
+            <>
+              <p role="alert">This snapshot could not be loaded. {error}</p>
+              <button type="button" className="report-block-item-drill" onClick={() => setRetry((value) => value + 1)}>Retry loading report</button>
+            </>
+          ) : <p role="status">Loading this snapshot…</p>}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function ReportBlockCard({ report, renderItemText, onDrillIn, canDrillIn,
+  resolveGoalReport, expanded, onExpandedChange, renderGoalReportControl }: ReportBlockCardProps): ReactNode {
+  const [localExpanded, setLocalExpanded] = useState(false);
+  const isExpanded = expanded ?? localExpanded;
+  if (!report.plans.length && !report.goalReport) return null;
   return (
     <div className="report-block-card" data-component="report-block" role="group" aria-label={report.title ?? 'Report'}>
       {report.title ? <div className="report-block-title">{report.title}</div> : null}
+      {report.goalReport ? <GoalReportDetail reference={report.goalReport} resolve={resolveGoalReport}
+        expanded={isExpanded} onToggle={() => { setLocalExpanded(!isExpanded); onExpandedChange?.(!isExpanded); }}
+        renderControl={renderGoalReportControl} /> : null}
       <div className="report-block-plans">
         {report.plans.map((plan, planIndex) => {
           const planStatus = statusGlyph(plan.status);

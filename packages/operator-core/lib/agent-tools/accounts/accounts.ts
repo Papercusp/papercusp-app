@@ -15,8 +15,56 @@ import { activeWorkspaceId } from '../../workspace-registry';
 import { mergeIds, runBulk, bulkContent } from '@papercusp/agent-mcp/_bulk';
 import { trackDetached } from '../../detached-imports';
 import { accountsForProvider } from '../../deployment/account-pool';
+import type { GatewayAccountBilling } from '../../inference-gateway/gateway';
 
-const ok = (payload: Record<string, unknown>) => ({
+/**
+ * WI-10004486 (anthropic-credits-gateway P-009 remainder). A Claude account's LIVE billing state
+ * (included | usage-credits | walled | api-credits) and its metered token totals exist only in the
+ * gateway process's memory — `GET :8788/stats` → `billing.byAccount[id]` — never in the pool store
+ * `accountStatus` reads. So `accounts:status` joins them per claude row, and says so when it can't:
+ *   • `'unavailable'`  — the gateway did not answer. UNKNOWN, never "not metered".
+ *   • `'not-observed'` — the gateway answered but holds no billing entry for this account (it has not
+ *                        served it since the gateway started, or the gateway predates P-009).
+ * Codex rows carry no `billing` key: the Anthropic billing model does not apply to them.
+ */
+export type AccountBillingView = GatewayAccountBilling | 'unavailable' | 'not-observed';
+
+export interface AccountsBillingSummary {
+  source: 'gateway:/stats';
+  /** false ⇒ every claude row reads `billing:'unavailable'`. */
+  reachable: boolean;
+  /** false ⇒ the gateway answered without a `billing` block (a pre-P-009 build). */
+  supported: boolean;
+  /** Pool-wide metered tally (`billing.metered`), when the gateway reported one. */
+  metered?: unknown;
+}
+
+export function joinGatewayBilling<R extends { id: string; provider?: string }>(
+  rows: readonly R[],
+  stats: unknown,
+): { accounts: Array<R & { billing?: AccountBillingView }>; billing: AccountsBillingSummary } {
+  const reachable = stats !== null && typeof stats === 'object';
+  const block = reachable ? (stats as { billing?: unknown }).billing : undefined;
+  const supported = block !== null && typeof block === 'object';
+  const byAccountRaw = supported ? (block as { byAccount?: unknown }).byAccount : undefined;
+  const byAccount =
+    byAccountRaw !== null && typeof byAccountRaw === 'object'
+      ? (byAccountRaw as Record<string, GatewayAccountBilling | undefined>)
+      : {};
+  const accounts = rows.map((row) => {
+    if ((row.provider ?? 'claude') !== 'claude') return { ...row };
+    const entry = Object.prototype.hasOwnProperty.call(byAccount, row.id) ? byAccount[row.id] : undefined;
+    const view: AccountBillingView = !reachable ? 'unavailable' : (entry ?? 'not-observed');
+    return { ...row, billing: view };
+  });
+  const metered = supported ? (block as { metered?: unknown }).metered : undefined;
+  return {
+    accounts,
+    billing: { source: 'gateway:/stats', reachable, supported, ...(metered !== undefined ? { metered } : {}) },
+  };
+}
+
+const ok =(payload: Record<string, unknown>) => ({
   content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, ...payload }) }],
 });
 const fail = (payload: Record<string, unknown>) => ({
@@ -28,7 +76,7 @@ const wsArg = z.string().min(1).optional().describe('Workspace id (defaults to t
 export default defineTool({
   name: 'accounts:register',
   description:
-    "Register (or update) a provider account in the pool. `provider:'claude'` (default) uses a Claude Max OAuth credential: `token:<path>` (`claude setup-token`) | `file:<path>` / absolute / `~` (`.credentials.json`). `provider:'codex'` uses a bearer credential for the Codex/OpenAI-compatible gateway: `token:<path>` or `env:NAME`. Credential refs are references, never the secret. Optional `egress` pins the account to its own outbound IP. Re-registering an existing id updates credentialRef/provider/label/egress, preserving bindings + rate state. Returns {ok, account}.",
+    "Register (or update) a provider account in the pool. `provider:'claude'` (default) uses a Claude subscription OAuth credential: `token:<path>` (`claude setup-token`) | `file:<path>` / absolute / `~` (`.credentials.json`) — or an Anthropic Console API key that spends API credits: `apikey:env:NAME` | `apikey:file:<path>` | `apikey:credentials` (the key saved with setup:save_key). `provider:'codex'` uses a bearer credential for the Codex/OpenAI-compatible gateway: `token:<path>` or `env:NAME`. Credential refs are references, never the secret. Optional `egress` pins the account to its own outbound IP. Re-registering an existing id updates credentialRef/provider/label/egress, preserving bindings + rate state. Returns {ok, account}.",
   guidance: {
     when: 'Adding a Claude Max subscription the inference gateway can pool (each subscription has its own 5h/7d rolling budget — more accounts = more aggregate budget). Register ≥2 before flipping papercusp-inference-gateway-multi-account.',
     notWhen: 'Setting the operator API key (operator:credentials). A one-off local run (no deploy).',
@@ -45,7 +93,7 @@ export default defineTool({
   args: z.object({
     id: z.string().min(1).describe('Stable account id (A-Za-z0-9 . _ - only; becomes part of the rate-bucket key)'),
     provider: z.enum(['claude', 'codex']).optional().describe("Provider for this account. Defaults to 'claude'."),
-    credentialRef: z.string().min(1).describe('Credential reference. Claude: token:<path> | file:<path> | absolute/~ .credentials.json. Codex: token:<path> or env:NAME bearer credential.'),
+    credentialRef: z.string().min(1).describe('Credential reference. Claude: token:<path> | file:<path> | absolute/~ .credentials.json | apikey:env:NAME | apikey:file:<path> | apikey:credentials (Console API key). Codex: token:<path> or env:NAME bearer credential.'),
     label: z.string().min(1).optional().describe('Optional human label'),
     egress: z
       .object({
@@ -54,6 +102,12 @@ export default defineTool({
       })
       .optional()
       .describe('Per-account egress for per-account IP routing (optional; default = shared egress). Owner-provisioned. Superseded by egressPool when set.'),
+    meteredPolicy: z
+      .enum(['overflow', 'never'])
+      .optional()
+      .describe(
+        'Metered spend policy. overflow (default): an api-key account, or a subscription in usage-credits overage, serves only when no included-allowance account can. never: unselectable while metered.',
+      ),
     egressPool: z
       .array(
         z.object({
@@ -76,7 +130,7 @@ export default defineTool({
       // writer registered in between, which is exactly how owner-registered accounts
       // silently vanished from the Deploy Accounts page.
       const next = await updateAccountPool(
-        (pool) => registerAccount(pool, { id: args.id, provider: args.provider, credentialRef: args.credentialRef, label: args.label, egress: args.egress, egressPool: args.egressPool }, Date.now()),
+        (pool) => registerAccount(pool, { id: args.id, provider: args.provider, credentialRef: args.credentialRef, label: args.label, egress: args.egress, egressPool: args.egressPool, meteredPolicy: args.meteredPolicy }, Date.now()),
         ws,
       );
       return ok({ account: getAccount(next, args.id) });
@@ -179,7 +233,7 @@ export const accountsStatusTool = defineTool({
       'accounts:scale_policy (tune when to scale out under sustained limiting)',
     ],
     returns:
-      "{ ok, accounts:[...], poolVerdict:[...] }. ⚠ `accounts` INTERLEAVES every provider in one list, so counting walled rows yourself makes a claude wall read as evidence about codex. Read `poolVerdict` instead — one row PER PROVIDER, derived from those same rows: { provider, total, serviceable, walledFresh, paused, pacing, unknown, atCapacity, binding, reason }. `atCapacity` is true ONLY when every row is measured unable to serve (no serviceable AND no unknown rows) — a pool of stale readings is unmeasured, never at capacity. `binding` is the shared capacity vocabulary: usage-wall | admission-concurrency | pacing-policy | host | none. The counts OVERLAP (a row can be both walledFresh and paused); `pacing` counts accounts under a burn PACING PROJECTION, which still SERVE — never add them to the walls. Per row, `burn.disposition` ('measured-wall' | 'pacing-projection' | 'no-verdict') says whether that verdict is a measurement or this system pacing itself; a 'pacing-projection' throttle/shed is NOT a provider wall and must not be remedied by throttling the fleet.",
+      "{ ok, accounts:[...], poolVerdict:[...], billing }. Each claude row's `billing` is the gateway's live billing view (state, meteredNow, metered tokens); 'unavailable' = the gateway did not answer, so UNKNOWN. ⚠ `accounts` INTERLEAVES every provider in one list, so counting walled rows yourself makes a claude wall read as evidence about codex. Read `poolVerdict` instead — one row PER PROVIDER, derived from those same rows: { provider, total, serviceable, walledFresh, paused, pacing, unknown, atCapacity, binding, reason }. `atCapacity` is true ONLY when every row is measured unable to serve (no serviceable AND no unknown rows) — a pool of stale readings is unmeasured, never at capacity. `binding` is the shared capacity vocabulary: usage-wall | admission-concurrency | pacing-policy | host | none. The counts OVERLAP (a row can be both walledFresh and paused); `pacing` counts accounts under a burn PACING PROJECTION, which still SERVE — never add them to the walls. Per row, `burn.disposition` ('measured-wall' | 'pacing-projection' | 'no-verdict') says whether that verdict is a measurement or this system pacing itself; a 'pacing-projection' throttle/shed is NOT a provider wall and must not be remedied by throttling the fleet.",
   },
   capability: 'harness:read',
   requirePrincipal: false,
@@ -190,17 +244,25 @@ export const accountsStatusTool = defineTool({
       ok: z.boolean().optional(),
       accounts: z.unknown().optional(),
       poolVerdict: z.unknown().optional(),
+      billing: z.unknown().optional(),
     })
     .passthrough(),
   async handler(args) {
     const { accountStatus, poolVerdictByProvider } = await import('../../deployment/account-pool-store');
+    const { fetchGatewayStatsRaw } = await import('../../inference-gateway/observability');
     const ws = args.workspace ?? activeWorkspaceId();
     const now = Date.now();
-    const accounts = await accountStatus(ws, now);
+    // WI-10004486: the live billing view is gateway-process memory. accountStatus already reads
+    // /stats for edge-throttle state, so fetch ONE snapshot here (same 500ms bound; resolves null —
+    // never throws — when :8788 is down) and inject it: one round-trip, and the edge-throttle and
+    // billing fields describe the same instant. Unreachable ⇒ `billing:'unavailable'` per row.
+    const stats = await fetchGatewayStatsRaw({ timeoutMs: 500 });
+    const rows = await accountStatus(ws, now, { gatewayStats: stats });
+    const { accounts, billing } = joinGatewayBilling(rows, stats);
     // P-002: the rows are INTERLEAVED across providers, so a reader diagnosing one provider
     // otherwise counts another's walls as evidence about theirs. Roll up per provider, from
     // these same rows, so that inference cannot be made.
-    return ok({ accounts, poolVerdict: poolVerdictByProvider(accounts, now) });
+    return ok({ accounts, poolVerdict: poolVerdictByProvider(rows, now), billing });
   },
 });
 

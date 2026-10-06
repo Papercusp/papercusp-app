@@ -106,22 +106,68 @@ export class SpendCapError extends Error {
 
 export interface Spend {
   readonly usd: number;
-  /** Add `amount` (negatives ignored); throw SpendCapError BEFORE recording if it would exceed the cap. */
+  readonly costMeasured: boolean;
+  /** Check the next estimated charge BEFORE invoking the provider. */
+  assertCanSpend(estimateUsd: number): void;
+  markUnmeasured(): void;
+  /** Record a charge already incurred, then throw if the total exceeds the cap. */
   charge(amount: number, label: string): void;
 }
 
 /** A hard total-spend ceiling. `charge` throws the instant a charge would cross `capUsd`. */
 export function makeSpend(capUsd: number): Spend {
   let usd = 0;
+  let costMeasured = true;
   return {
     get usd() {
       return usd;
     },
-    charge(amount: number) {
-      const next = usd + Math.max(0, amount);
-      if (next > capUsd) throw new SpendCapError(capUsd, next);
-      usd = next;
+    get costMeasured() { return costMeasured; },
+    markUnmeasured() { costMeasured = false; },
+    assertCanSpend(estimateUsd) {
+      if (!costMeasured) throw new Error('judge spend is unmeasured — further paid calls refused');
+      if (usd + estimateUsd > capUsd) throw new SpendCapError(capUsd, usd + estimateUsd);
     },
+    charge(amount: number) {
+      if (!Number.isFinite(amount)) {
+        costMeasured = false;
+        throw new Error('judge charge is unmeasured');
+      }
+      const next = usd + Math.max(0, amount);
+      usd = next;
+      if (next > capUsd) throw new SpendCapError(capUsd, next);
+    },
+  };
+}
+
+/** Existing gen-0 spend rail around the judge, including charged failures and timeouts. */
+export function makeCappedJudge(llmCall: JudgeLlmCall, spend: Spend, timeoutMs = 240_000): JudgeLlmCall {
+  return async (opts) => {
+    try { spend.assertCanSpend(JUDGE_COST_ESTIMATE_USD); }
+    catch (error) { throw Object.assign(error as Error, { costUsd: 0 }); } // provider was never invoked
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let reply;
+    try {
+      reply = await Promise.race([
+        llmCall(opts),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`judge llmCall timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+        }),
+      ]);
+    } catch (error) {
+      const cost = (error as { costUsd?: unknown } | null)?.costUsd;
+      if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) {
+        try { spend.charge(cost, 'judge'); } catch { /* paid receipt recorded; preserve the provider error and its charge */ }
+      } else spend.markUnmeasured();
+      throw error;
+    } finally { if (timer) clearTimeout(timer); }
+    if (!Number.isFinite(reply.costUsd) || reply.costUsd < 0) {
+      spend.markUnmeasured();
+      throw new Error('judge charge is unmeasured');
+    }
+    try { spend.charge(reply.costUsd, 'judge'); }
+    catch (error) { throw Object.assign(error as Error, { costUsd: reply.costUsd }); }
+    return reply;
   };
 }
 
@@ -361,36 +407,15 @@ export async function runGen0Battery(args: Gen0Args): Promise<void> {
     // Bound each judge llmCall so a stuck/slow judge (e.g. an unreachable backend's internal retry
     // loop) errors only THIS case (battery → status 'errored', continues) instead of wedging the
     // whole sequential run. Preserve the existing four-minute compatibility ceiling.
-    const JUDGE_TIMEOUT_MS = 240_000;
     const judge: JudgeLlmCall = args.dryRun
       ? dryRunJudge
-      : async (opts) => {
-          if (spend.usd + JUDGE_COST_ESTIMATE_USD > args.capUsd) {
-            throw new SpendCapError(args.capUsd, spend.usd + JUDGE_COST_ESTIMATE_USD);
-          }
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const r = await Promise.race([
-            realJudge(opts),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(
-                () => reject(new Error(`judge llmCall timed out after ${JUDGE_TIMEOUT_MS / 1000}s`)),
-                JUDGE_TIMEOUT_MS,
-              );
-            }),
-          ]).finally(() => {
-            if (timer) clearTimeout(timer);
-          });
-          spend.charge(r.costUsd, 'judge');
-          return r;
-        };
+      : makeCappedJudge(realJudge, spend);
 
     const metricsCollector = await createMetricsCollector(sql);
     const deps: BeekeeperDeps = {
       store: new BeekeeperStorePg(sql),
       runInstance: async (input) => {
-        if (spend.usd + SOLVER_COST_ESTIMATE_USD > args.capUsd) {
-          throw new SpendCapError(args.capUsd, spend.usd + SOLVER_COST_ESTIMATE_USD);
-        }
+        spend.assertCanSpend(SOLVER_COST_ESTIMATE_USD);
         const handle = await baseRunInstance(input);
         spend.charge(handle.costUsd, 'solver');
         return handle;
@@ -410,7 +435,7 @@ export async function runGen0Battery(args: Gen0Args): Promise<void> {
     const rateLimited = result.outcomes.filter((o) => o.status === 'rate_limited').length;
     console.log('\n=== results ===');
     console.log(`scored=${scored} errored=${errored} rate_limited=${rateLimited} of ${result.totalCases}`);
-    console.log(`meanComposite=${result.meanComposite.toFixed(3)} rubricHash=${result.rubricHash} spend≈$${spend.usd.toFixed(4)}`);
+    console.log(`meanComposite=${result.meanComposite.toFixed(3)} rubricHash=${result.rubricHash} spend≈$${spend.usd.toFixed(4)} costMeasured=${spend.costMeasured && result.costMeasured !== false}`);
     for (const o of result.outcomes) {
       console.log(`  ${o.caseVariant} ${o.runId}: ${o.status}${o.error ? ` — ${o.error}` : ` composite=${o.composite.toFixed(2)}`}`);
     }

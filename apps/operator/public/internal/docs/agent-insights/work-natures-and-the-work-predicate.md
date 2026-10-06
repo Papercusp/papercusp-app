@@ -1,0 +1,57 @@
+# Work natures and the work predicate: what an agent may drain
+URL: /internal/docs/agent-insights/work-natures-and-the-work-predicate
+
+Every datatype declares one of four natures (work, record, document, event). Only rows the work predicate admits (nature work, audience agent, not observation-lane, not awaiting owner action) are backlog an agent may claim, place or drain. Examples: an Asana ticket, a Slack thread, a CRM deal, an email draft awaiting approval.
+
+## The rule
+
+A drain's backlog is exactly the rows the **work predicate** admits, and nothing else:
+
+```sql
+harness_shared.work_item_is_agent_work(nature, audience, lane, needs_owner_action)
+  = nature = 'work'
+    AND audience = 'agent'
+    AND lane IS DISTINCT FROM 'observation'
+    AND needs_owner_action IS NOT TRUE
+```
+
+The function is defined in migration `1325-work-item-is-agent-work.sql`. Its TypeScript mirror, `agentWorkWhereSql` in `packages/operator-core/lib/work-nature/agent-work-predicate.ts`, is the only place claim and placement paths spell it (plan `enterprise-data-sources-2026-10-01`, D-022). The work predicate is the drain's only backlog source: size and feed a drain through the surfaces that apply it, never around them.
+
+| you want                                    | use                                            | not                                                                      |
+| ------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ |
+| how much drainable work there is, and which | `work_items:claimable`                         | a raw `harness_shared.work_items` query, a hand-written `item_kind` list |
+| take the next item                          | `scheduler:get_next` / `work_items:claim_next` | picking rows out of `work_items:list`                                    |
+| read data rows (records, documents, events) | `work_items:list { natures: ['record'] }`      | treating that slice as backlog                                           |
+
+`work_items:claimable` and `scheduler:get_next` are pinned to the predicate by the recurrence guard `packages/operator-core/lib/work-nature/agent-work-recurrence-guard.integration.test.ts`. The by-id claim checks the category half (nature and audience) too (D-024), so a non-work row cannot be claimed by id either.
+
+## The four natures
+
+Every datatype in `harness_shared.datatype_registry` declares a nature. A trigger stamps it onto each `work_items` row of that kind at mint, and restamps rows when a datatype is reclassified (D-018). A caller cannot set it: the trigger overwrites any value a writer passes.
+
+* **work**: a unit someone is expected to drive to a terminal state (claim, wip, done or dropped), with an assignee and completion evidence. Only work is claimable, drainable, placeable or counted as backlog. Work also carries an **audience**: `agent` or `human`.
+* **record**: an entity whose state is tracked or mirrored. It is read, updated and referenced. It is never claimed.
+* **document**: retrievable text for search and context injection.
+* **event**: a signal that something happened, consumed by triggers.
+
+One external object can produce several natures. An Asana ticket is a record, its comments are documents, and its status changes are events.
+
+## Examples
+
+| thing                                                                 | nature   | audience | may an agent drain it?                                                                  |
+| --------------------------------------------------------------------- | -------- | -------- | --------------------------------------------------------------------------------------- |
+| An Asana ticket that nobody has handed to Papercusp                   | record   | (none)   | No. It becomes work only through an explicit, attributable admission rule or promotion. |
+| A Slack thread                                                        | document | (none)   | No. It is indexed as a thread rollup for search and injection.                          |
+| A CRM deal (for example a fundraise pipeline deal)                    | record   | (none)   | No. Read it with `work_items:list { natures: ['record'] }`.                             |
+| An email draft awaiting the owner's approval (`email-draft-proposal`) | work     | human    | No. It is the owner's work: an agent never claims, drains or closes it.                 |
+| A bug, change, task or feature                                        | work     | agent    | Yes, when the observation-lane and owner-action floors also pass.                       |
+
+## Why the boundary is a column, not a table
+
+Non-work rows stay in `harness_shared.work_items`, tagged by `nature` (D-011). Search embeddings, full-text search, federation and work-item events all key on work-item ids, so moving rows to a separate records table would have broken them. The one benefit of a separate table, that drains never see records, is delivered by the work predicate instead. That is why every work-selecting path must go through the predicate: the rows are physically next to the work.
+
+`work_items:list`, `work_items:search` and the work-item counts default to `nature = 'work'` (D-021). Pass `natures` to read other natures; naming a `kind` explicitly also lifts the nature filter.
+
+## What this means for DRAIN mode
+
+The DRAIN definition (`su.mode-drain`, `prompts/objective.md`) states the same rule: the backlog is the work predicate. Records, documents and events never count toward burn-down, and work with audience `human` is residue for the owner, not an item to close. Turning data into work is an explicit promotion, never a drain decision.

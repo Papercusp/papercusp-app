@@ -37,6 +37,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { floorHeadroom } from '@papercusp/operator-core/lib/agent-tools/tool-delivery-policy';
 import { isCliEntry } from '@papercusp/operator-core/lib/util/cli-entry';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,7 +47,7 @@ const OUT_PATH = 'apps/operator/scripts/tool-delivery.generated.mjs';
 /**
  * The trimmed-mode wire budget, in bytes, per agent kind.
  *
- * Owner directive [owner 2026-09-21]: "lets make omp claude and codex use the same
+ * Owner directive [Avi 2026-09-21]: "lets make omp claude and codex use the same
  * tool list in trimmed mode" (D-005). The three entries are therefore EQUAL, and
  * they are spelled out per kind rather than collapsed to one constant so that a
  * future divergence is a visible data edit with a reason, not a code change.
@@ -367,29 +368,16 @@ export function renderBaselineDiff(
   return out.join('');
 }
 
-async function build(): Promise<{
-  text: string;
-  agents: Record<string, GeneratedAgent>;
-  catalogSize: number;
-  baseline: SeedBaseline;
-  catalogByName: Map<string, { name: string; fullBytes: number; compactBytes: number }>;
-  demandByName: Map<string, { name: string; callers: number; calls: number }>;
-  guidanceByName: Map<string, GuidanceHalf>;
-  sweepLines: string[];
-}> {
+/**
+ * The registered catalog, measured at both tiers — the ONE place both the generator and
+ * the edit-time headroom signal (`tool-weight`, WI-10004590) read it, so the two cannot
+ * price a tool differently.
+ */
+async function measureCatalog() {
   // Side-effect import FIRST: it registers the catalog that listAllProjectedTools reads.
   await import('../packages/operator-core/lib/agent-tools/index.ts');
-  const {
-    listAllProjectedTools,
-    compactWireBytes,
-    partialGuidanceLoss,
-    summaryGuidanceDescription,
-    compactInputSchema,
-  } = await import('@papercusp/tooldef');
-  const { explainToolDelivery } = await import(
-    '../packages/operator-core/lib/agent-tools/tool-delivery-policy.ts'
-  );
-  const { deliveryFloorNames } = await import('../apps/operator/lib/tool-delivery-floors.ts');
+  const tooldef = await import('@papercusp/tooldef');
+  const { listAllProjectedTools, compactWireBytes } = tooldef;
 
   const projected = listAllProjectedTools();
   if (projected.length < MIN_PLAUSIBLE_CATALOG) {
@@ -408,6 +396,74 @@ async function build(): Promise<{
       return { name, fullBytes: bytes.full, compactBytes: bytes.compact };
     })
     .filter((t): t is { name: string; fullBytes: number; compactBytes: number } => t !== null);
+  return { tooldef, projected, catalog };
+}
+
+function readDemandSnapshot() {
+  return JSON.parse(readFileSync(resolve(REPO_ROOT, SNAPSHOT_PATH), 'utf8')) as {
+    capturedAt: string;
+    tools: Array<{ name: string; callers: number; calls: number }>;
+  };
+}
+
+/**
+ * The edit-time signal for the tool-delivery FLOOR budget (WI-10004590): the live
+ * catalog resolved for `kind`, reduced to the floors' remaining headroom plus every
+ * tool's own delivery detail. `npm run tool-weight` prints it; `--report` prints the
+ * same headroom from the committed artifact. No sweep, no artifact write — the
+ * resolution alone is cheap once the barrel is loaded.
+ */
+export async function measureDeliverySummary(kind: keyof typeof TRIMMED_BUDGET_BYTES = 'claude') {
+  const { catalog } = await measureCatalog();
+  const { summarizeDelivery } = await import(
+    '../packages/operator-core/lib/agent-tools/tool-delivery-policy.ts'
+  );
+  const { deliveryFloorNames } = await import('../apps/operator/lib/tool-delivery-floors.ts');
+  return summarizeDelivery({
+    agentKind: kind as 'claude' | 'codex' | 'omp',
+    catalog,
+    demand: readDemandSnapshot().tools,
+    floors: deliveryFloorNames(),
+    budgetBytes: TRIMMED_BUDGET_BYTES[kind],
+  });
+}
+
+/**
+ * The `--report` line carrying the floor headroom, derived from the SAME rows the
+ * committed artifact carries (`floors` ∩ `rows`), so the report, the artifact and the
+ * live `tool-weight` line are one measurement read three ways. Pure.
+ */
+export function renderFloorHeadroomLine(
+  kind: string,
+  agent: Pick<GeneratedAgent, 'budgetBytes' | 'floors' | 'rows'>,
+): string {
+  const floorSet = new Set(agent.floors);
+  const h = floorHeadroom(
+    agent.budgetBytes,
+    agent.rows.filter((r) => floorSet.has(r.name)).map((r) => r.compactBytes),
+  );
+  return (
+    `FLOOR_HEADROOM kind=${kind} floors=${h.floorCount} floorBytes=${h.floorBytes} budget=${h.budgetBytes} ` +
+    `headroom=${h.headroomBytes} margin=${h.marginBytes} status=${h.status}\n`
+  );
+}
+
+async function build(): Promise<{
+  text: string;
+  agents: Record<string, GeneratedAgent>;
+  catalogSize: number;
+  baseline: SeedBaseline;
+  catalogByName: Map<string, { name: string; fullBytes: number; compactBytes: number }>;
+  demandByName: Map<string, { name: string; callers: number; calls: number }>;
+  guidanceByName: Map<string, GuidanceHalf>;
+  sweepLines: string[];
+}> {
+  const { tooldef, projected, catalog } = await measureCatalog();
+  const { partialGuidanceLoss, summaryGuidanceDescription, compactInputSchema, compactWireBytes } = tooldef;
+  const { explainToolDelivery } = await import(
+    '../packages/operator-core/lib/agent-tools/tool-delivery-policy.ts'
+  );
+  const { deliveryFloorNames } = await import('../apps/operator/lib/tool-delivery-floors.ts');
 
   // P-010/D-006: the PROSE half, measured independently of the schema half so
   // the two can be traded against each other rather than moving as one lump.
@@ -430,10 +486,7 @@ async function build(): Promise<{
     });
   }
 
-  const snapshot = JSON.parse(readFileSync(resolve(REPO_ROOT, SNAPSHOT_PATH), 'utf8')) as {
-    capturedAt: string;
-    tools: Array<{ name: string; callers: number; calls: number }>;
-  };
+  const snapshot = readDemandSnapshot();
   const floors = deliveryFloorNames();
   const byName = new Map(catalog.map((t) => [t.name, t]));
   const demandByName = new Map(snapshot.tools.map((r) => [r.name, r]));
@@ -563,6 +616,12 @@ async function main(): Promise<number> {
       process.stdout.write(
         `TOOL_DELIVERY_REPORT kind=${kind} full=${a.counts.full} compact=${a.counts.compact} deferred=${a.counts.deferred} spent=${a.spentBytes} budget=${a.budgetBytes} overrun=${a.budgetOverrun}\n`,
       );
+    }
+    // WI-10004590: the floors' remaining headroom, one line per kind, beside the totals
+    // it is derived from — so a report reader sees 8 B (or an overrun) without doing the
+    // sum, and `status=low|overrun` is greppable.
+    for (const [kind, a] of Object.entries(built.agents)) {
+      process.stdout.write(renderFloorHeadroomLine(kind, a));
     }
     process.stdout.write(`TOOL_DELIVERY_CATALOG tools=${built.catalogSize}\n`);
     process.stdout.write(

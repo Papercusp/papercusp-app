@@ -16,6 +16,16 @@ export function repoLocation(filePath: any, cwd?: string, git?: typeof execFileS
     root: string;
     rel: string;
 } | null;
+/**
+ * The harness the lookup is scoped to: the session's `PAPERCUSP_HARNESS_SLUG`, the same env
+ * var the plans-read, activity-report and work-item-verify hooks read. `plans:evidence-
+ * measuring-paths` REQUIRES a `harness` on an operator-scope (superuser, no session harness)
+ * call and refuses `harness_required` without one — measured 2026-10-01 (WI-10004549):
+ * 608 such refusals / 72h from ~39 owners, every one a hook-origin tool-call-failure row.
+ * Null when unset or malformed: the caller then skips WITHOUT calling the operator, so a
+ * session with no harness costs no failed call and trips no circuit breaker.
+ */
+export function harnessFromEnv(env?: NodeJS.ProcessEnv): string | null;
 /** Editor identity, in the same precedence the lock and frozen-candidate hooks use. */
 export function editorIdentity(payload: any, env?: NodeJS.ProcessEnv): any;
 /** Parse an MCP `tools/call` HTTP body (plain JSON or SSE-framed) into the tool's JSON data. */
@@ -58,10 +68,11 @@ export function callTool({ baseUrl, token, owner, name, args, fetchImpl, timeout
     detail: string;
 }>;
 /** Primary operator first; the staging operator carries a newly shipped tool sooner. */
-export function lookupMeasuringClauses({ urls, token, owner, path, fetchImpl }: {
+export function lookupMeasuringClauses({ urls, token, owner, harness, path, fetchImpl }: {
     urls: any;
     token: any;
     owner: any;
+    harness: any;
     path: any;
     fetchImpl?: typeof fetch | undefined;
 }): Promise<{

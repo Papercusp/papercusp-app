@@ -30,7 +30,8 @@
  * write mode creates the standard one on the spot, so adding a lib to
  * BORROWABLE and running `npm run gen:borrowable` can never forget it.
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -165,6 +166,186 @@ const SEAMED = [
 
 const CATEGORY_ORDER = ['Pure utilities & infra', 'Search & retrieval', 'IPC, transport & sync', 'Audio & media', 'UI components', 'Build & release', 'Testing & QA'];
 
+/**
+ * Libraries whose public exports are listed in the catalog's "Export index",
+ * so a reader can find a piece (and grep for a function) without opening the
+ * library. Opt-in, and limited to libraries that bundle several independent
+ * pieces under one package: indexing every library would add about 57K
+ * characters (1,374 values + 1,194 types across 57 libraries, measured
+ * 2026-10-01) and would make `gen:borrowable:check` go stale on every export
+ * change anywhere. The list itself is derived from each entry module, never
+ * hand-written. Added for shared-vector-search-libraries-2026-09-29 R-15.
+ */
+export const EXPORT_INDEX = new Set(['libs/generic/search', 'libs/generic/search-core']);
+
+/** The TypeScript parser, loaded only when an export index is built. */
+function typescript() {
+  return createRequire(import.meta.url)('typescript');
+}
+
+function isFile(p) {
+  try { return statSync(p).isFile(); } catch { return false; }
+}
+
+/** The TypeScript source a library's root import resolves to. */
+export function entryModule(libDir) {
+  const pkg = JSON.parse(readFileSync(join(libDir, 'package.json'), 'utf8'));
+  const dot = pkg.exports?.['.'];
+  const fromExports = typeof dot === 'string' ? dot : dot?.types ?? dot?.import ?? dot?.default;
+  for (const rel of [fromExports, pkg.types, pkg.main, 'src/index.ts', 'index.ts']) {
+    if (typeof rel !== 'string') continue;
+    const p = join(libDir, rel);
+    if (/\.(m?ts|tsx)$/.test(p) && isFile(p)) return p;
+    const ts = p.replace(/\.m?js$/, '.ts');
+    if (isFile(ts)) return ts;
+  }
+  return null;
+}
+
+function resolveRelative(fromFile, spec) {
+  const base = join(dirname(fromFile), spec);
+  const bare = base.replace(/\.m?js$/, '');
+  for (const c of [base, `${bare}.ts`, `${bare}.tsx`, `${bare}.mts`, join(base, 'index.ts')]) {
+    if (/\.(m?ts|tsx)$/.test(c) && isFile(c)) return c;
+  }
+  return null;
+}
+
+function parse(file) {
+  const ts = typescript();
+  return ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, false);
+}
+
+function exportsKeyword(node) {
+  const ts = typescript();
+  return ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+/** Names declared at a module's top level, each marked 'type' or 'value'. */
+function declaredKinds(sf) {
+  const ts = typescript();
+  const kinds = new Map();
+  for (const st of sf.statements) {
+    if (ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st)) kinds.set(st.name.text, 'type');
+    else if ((ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st) || ts.isEnumDeclaration(st)) && st.name) kinds.set(st.name.text, 'value');
+    else if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) kinds.set(d.name.text, 'value');
+    } else if (ts.isImportDeclaration(st) && st.importClause) {
+      const bindings = st.importClause.namedBindings;
+      const typeOnly = st.importClause.isTypeOnly;
+      if (st.importClause.name) kinds.set(st.importClause.name.text, typeOnly ? 'type' : 'value');
+      if (bindings && ts.isNamedImports(bindings)) for (const el of bindings.elements) kinds.set(el.name.text, typeOnly || el.isTypeOnly ? 'type' : 'value');
+    }
+  }
+  return kinds;
+}
+
+/**
+ * Every name a module exports, mapped to 'type' or 'value', following
+ * relative re-exports. `external` collects packages re-exported wholesale
+ * (`export * from 'pkg'`), whose names cannot be listed from this tree.
+ */
+export function moduleExports(file, seen = new Set()) {
+  const ts = typescript();
+  const names = new Map();
+  const external = new Set();
+  if (seen.has(file)) return { names, external };
+  seen.add(file);
+  const sf = parse(file);
+  const local = declaredKinds(sf);
+  for (const st of sf.statements) {
+    if (ts.isExportDeclaration(st)) {
+      const spec = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? st.moduleSpecifier.text : null;
+      const target = spec?.startsWith('.') ? resolveRelative(file, spec) : null;
+      if (spec?.startsWith('.') && !target) throw new Error(`${file}: cannot resolve re-export '${spec}'`);
+      const inner = target ? moduleExports(target, seen) : null;
+      if (!st.exportClause) {
+        if (inner) {
+          for (const [n, k] of inner.names) if (n !== 'default') names.set(n, k);
+          inner.external.forEach((e) => external.add(e));
+        } else if (spec) external.add(spec);
+      } else if (ts.isNamespaceExport(st.exportClause)) {
+        names.set(st.exportClause.name.text, 'value');
+      } else {
+        for (const el of st.exportClause.elements) {
+          const source = (el.propertyName ?? el.name).text;
+          const known = inner ? inner.names.get(source) : spec ? undefined : local.get(source);
+          names.set(el.name.text, st.isTypeOnly || el.isTypeOnly ? 'type' : known ?? 'value');
+        }
+      }
+    } else if (ts.isExportAssignment(st)) {
+      names.set('default', 'value');
+    } else if (exportsKeyword(st)) {
+      for (const [n, k] of declaredKinds({ statements: [st] })) names.set(n, k);
+    }
+  }
+  return { names, external };
+}
+
+/**
+ * A library's public exports grouped by the entry statement that exposes
+ * them: one group per re-exported module (in entry order), one for names the
+ * entry declares itself, one per package re-exported wholesale.
+ */
+export function exportIndex(libDir) {
+  const ts = typescript();
+  const entry = entryModule(libDir);
+  if (!entry) throw new Error(`${libDir}: no TypeScript entry module (package.json exports/types/main)`);
+  const groups = [];
+  const group = (label, external = false) => {
+    let g = groups.find((x) => x.label === label);
+    if (!g) groups.push((g = { label, external, values: [], types: [], wholesale: false }));
+    return g;
+  };
+  const sf = parse(entry);
+  const local = declaredKinds(sf);
+  for (const st of sf.statements) {
+    if (ts.isExportDeclaration(st)) {
+      const spec = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? st.moduleSpecifier.text : null;
+      const relative = spec?.startsWith('.');
+      const g = group(spec ?? 'entry', Boolean(spec && !relative));
+      const target = relative ? resolveRelative(entry, spec) : null;
+      if (relative && !target) throw new Error(`${entry}: cannot resolve re-export '${spec}'`);
+      const inner = target ? moduleExports(target) : null;
+      if (!st.exportClause) {
+        if (!inner) { g.wholesale = true; continue; }
+        for (const [n, k] of inner.names) if (n !== 'default') (k === 'type' ? g.types : g.values).push(n);
+        for (const e of inner.external) group(e, true).wholesale = true;
+      } else if (ts.isNamespaceExport(st.exportClause)) {
+        g.values.push(st.exportClause.name.text);
+      } else {
+        for (const el of st.exportClause.elements) {
+          const source = (el.propertyName ?? el.name).text;
+          const known = inner ? inner.names.get(source) : spec ? undefined : local.get(source);
+          ((st.isTypeOnly || el.isTypeOnly ? 'type' : known ?? 'value') === 'type' ? g.types : g.values).push(el.name.text);
+        }
+      }
+    } else if (ts.isExportAssignment(st)) {
+      group('entry').values.push('default');
+    } else if (exportsKeyword(st)) {
+      for (const [n, k] of declaredKinds({ statements: [st] })) (k === 'type' ? group('entry').types : group('entry').values).push(n);
+    }
+  }
+  return { entry, groups };
+}
+
+function exportIndexSection(libDir) {
+  const pkg = readPkg(libDir);
+  const { entry, groups } = exportIndex(join(ROOT, libDir));
+  const tick = (names) => names.map((n) => `\`${n}\``).join(', ');
+  const lines = [`### \`${pkg.name}\``, '', `Entry: \`${entry.slice(ROOT.length + 1)}\`.`, ''];
+  for (const g of groups) {
+    const label = g.label === 'entry' ? 'declared in the entry' : g.external ? `\`${g.label}\` (re-exported)` : `\`${g.label}\``;
+    const parts = [];
+    if (g.wholesale) parts.push('everything it exports');
+    if (g.values.length) parts.push(tick(g.values));
+    if (g.types.length) parts.push(`types: ${tick(g.types)}`);
+    lines.push(`- ${label} — ${parts.join(' · ')}`);
+  }
+  lines.push('');
+  return lines;
+}
+
 export function parseGitmodules() {
   const map = {};
   let text = '';
@@ -255,6 +436,17 @@ function build(submodules) {
   lines.push('|---|---|---|');
   for (const [p, fb] of SEAMED) lines.push(row(p, fb, submodules));
   lines.push('');
+  const indexed = BORROWABLE.filter(([p]) => EXPORT_INDEX.has(p)).map(([p]) => p);
+  if (indexed.length) {
+    lines.push('## Export index');
+    lines.push('');
+    lines.push('What each library below exports from its root, grouped by the module that');
+    lines.push('defines it, so you can find a piece or grep for a function name. Generated');
+    lines.push("from each library's entry module; only libraries listed in `EXPORT_INDEX` in");
+    lines.push('the generator are indexed.');
+    lines.push('');
+    for (const p of indexed) lines.push(...exportIndexSection(p));
+  }
   return lines.join('\n') + '\n';
 }
 

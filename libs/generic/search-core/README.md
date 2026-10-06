@@ -54,6 +54,38 @@ const decision = decideChunking(result, {
 - Papercusp's CLI over its own collections:
   `packages/operator-core/lib/memory/bench/chunking-bench-cli.ts`.
 
+## The width sweep: how much of each document should one vector embed?
+
+`runWidthSweep` measures how far into a document a single embedded prefix still
+finds it. Each usable document gives one probe (`probeLength` characters cut at
+`probeStart`); the probe is then ranked against every document embedded at each
+width, and the sweep reports the rank-based MRR and recall@1 of the probe's true
+parent. The embedder is the only seam: pass your own, in your production space.
+
+```ts
+import { runWidthSweep } from '@papercusp/search-core';
+
+const sweep = await runWidthSweep({
+  docs,                                  // { key, text }[], most preferred first
+  widths: [500, 1000, 2000, 4000],       // embedded prefix lengths; the first is the baseline
+  probeStart: 3000,                      // probes come from beyond the narrow widths
+  sample: 200,                           // at most this many documents take part
+  embed: (kind, texts) => myEmbedder(kind, texts),  // 'document' | 'query'
+  chunkArm: { label: 'chunk1800', split: (text) => mySplitter(text) },  // optional
+});
+for (const arm of sweep.arms) console.log(arm.label, arm.mrr, arm.recallAt1);
+```
+
+- A document is used only if it is long enough to hold the probe and its probe
+  is distinctive (`isDistinctiveProbe`); the sweep refuses to report on fewer
+  than `minDocs` (default 10) usable documents.
+- `identicalToFirst` counts documents whose vector at that width is identical
+  (cosine above 0.9999) to the first width's, which shows where longer prefixes
+  stop changing anything.
+- The optional chunk arm embeds every chunk and scores a document by its best
+  chunk, so one run compares wider single vectors with chunking.
+- Papercusp's CLI: `packages/operator-core/lib/memory/bench/turn-truncation-width-cli.ts`.
+
 ## Design
 
 **No project dependencies.** Typesense, Postgres, the catalog schema, and the

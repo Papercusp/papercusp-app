@@ -356,6 +356,8 @@ export class SnapshotFoldWorker implements SnapshotFoldWorkerLike {
     schema_version: number;
     maxChunkBytes?: number;
     excludeTables: readonly string[];
+    /** See `SnapshotPayload.ownPrefix`. */
+    ownPrefix?: boolean;
   }): Promise<{
     blocks: Uint8Array[];
     rowCount: number;

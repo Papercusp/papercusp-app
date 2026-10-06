@@ -17,6 +17,7 @@
  * Add a key here when you add a sync query over the memory corpus.
  */
 import { notifySyncInvalidate } from '../sync-sse';
+import { activeWorkspaceId } from '../workspace-registry';
 
 /** Every sync query whose result changes when a user's memories change.
  *  learning.retainFeed / learning.retainDetail (WI-39535): the Retained ledger
@@ -37,20 +38,37 @@ export const USER_MEMORY_SYNC_KEYS = [
  * did. Mirrors the `.catch(() => {})` every call site already applied.
  */
 export async function invalidateUserMemoryViews(): Promise<void> {
-  await Promise.all(
-    // `await` inside the try — NOT `notifySyncInvalidate(key).catch(…)`. That form only
-    // handles a REJECTED promise, so it leaked the two failures this helper exists to
-    // absorb: a SYNCHRONOUS throw (the `.catch` is never reached, and the throw escapes
-    // `.map`) and a non-promise return (`.catch` of undefined -> TypeError). Both landed as
-    // UNHANDLED REJECTIONS rather than assertion failures, so every `expect` still passed
-    // while the whole stateful lane went red — the "a failure that fails no assertion"
-    // class. `await` normalises all three shapes (sync throw / rejection / plain value).
-    USER_MEMORY_SYNC_KEYS.map(async (key) => {
+  await Promise.all([
+    (async () => {
+      try {
+        // Turn-start memory blocks share this canonical corpus. Publish one
+        // workspace-wide table-change event into the existing sync-sse bridge;
+        // each operator listener runs the generic cache-ECA and bumps the
+        // `memory_canonical` tag locally. Keep this on the write-refresh path
+        // instead of attaching a per-row trigger to the table.
+        await notifySyncInvalidate(
+          'harness_shared.memory_canonical.changed',
+          { workspace_id: activeWorkspaceId() },
+          undefined,
+          { dedupeWindowMs: 0 },
+        );
+      } catch {
+        /* best-effort — cache freshness must never fail the memory write */
+      }
+    })(),
+    ...USER_MEMORY_SYNC_KEYS.map(async (key) => {
+      // `await` inside the try — NOT `notifySyncInvalidate(key).catch(…)`. That form only
+      // handles a REJECTED promise, so it leaked the two failures this helper exists to
+      // absorb: a SYNCHRONOUS throw (the `.catch` is never reached, and the throw escapes
+      // `.map`) and a non-promise return (`.catch` of undefined -> TypeError). Both landed as
+      // UNHANDLED REJECTIONS rather than assertion failures, so every `expect` still passed
+      // while the whole stateful lane went red — the "a failure that fails no assertion"
+      // class. `await` normalises all three shapes (sync throw / rejection / plain value).
       try {
         await notifySyncInvalidate(key);
       } catch {
         /* best-effort — see the contract above: a fan-out must never fail the write */
       }
     }),
-  );
+  ]);
 }

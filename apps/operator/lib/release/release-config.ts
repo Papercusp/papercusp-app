@@ -10,6 +10,7 @@
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
+import { resolveReleaseRoot } from '@papercusp/operator-core/lib/release/release-root';
 
 /**
  * Capacity contract for the green-checkpoint's Vitest workers.
@@ -283,8 +284,10 @@ export function releaseConfig(overrides: Partial<ReleaseConfig> = {}): ReleaseCo
   const integrationRoot =
     overrides.integrationRoot ?? process.env.PAPERCUSP_INTEGRATION_ROOT ?? scriptRepoRoot();
   const parent = path.dirname(integrationRoot);
-  const releaseRoot =
-    overrides.releaseRoot ?? process.env.PAPERCUSP_RELEASE_ROOT ?? path.join(parent, 'papercup-release');
+  // WI-10005161: the one shared release-checkout resolver (override → PAPERCUSP_RELEASE_ROOT
+  // → sibling of PAPERCUSP_CANONICAL_TREE → sibling of integrationRoot). On :3170 the
+  // integration root is the physical staging generation, whose sibling does not exist.
+  const releaseRoot = resolveReleaseRoot({ integrationRoot, override: overrides.releaseRoot });
   // Per-root checkpoint checkout — `<basename(integrationRoot)>-checkpoint` in the parent
   // dir, mirroring checkpointRunLockDir's per-root run lock (green-checkpoint.ts). The old
   // FIXED `papercup-checkpoint` name made every lineage sharing a parent dir share ONE

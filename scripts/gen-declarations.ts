@@ -29,6 +29,12 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { exportParityProblems, formatProblems } from './lib/declaration-export-parity.js';
 import { orphanedJsdocProblems, formatOrphanedJsdoc } from './lib/orphaned-jsdoc.ts';
+import {
+  formatStaleSuppressions,
+  importerSources,
+  staleDeclarationSuppressions,
+  type StaleSuppression,
+} from './lib/stale-declaration-suppressions.ts';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CONFIG = 'tsconfig.declarations.json';
@@ -221,9 +227,26 @@ export function generate(
     console.log(
       `✓ gen:declarations: emitted ${selectedInputs.length} of ${declaredInputs.length} declaration file(s) — compiler: ${COMPILER_LABEL}`,
     );
+    // Publishing a declaration is exactly the moment an importer's `@ts-expect-error` goes stale
+    // (WI-10005290). Report it HERE, naming each line, rather than leaving it to surface as TS2578
+    // whenever someone next typechecks that importer. Reported, not auto-removed: this runs from
+    // an edit hook, and rewriting arbitrary importers from a script would bypass the file locks.
+    const stale = staleSuppressionsIn(repoRoot, declaredInputs);
+    if (stale?.length) {
+      console.error(
+        `✗ gen:declarations: ${stale.length} @ts-expect-error suppression(s) are now unused (TS2578) because ` +
+          `the module they guarded has a declaration. Delete each line:\n   ${formatStaleSuppressions(stale).join('\n   ')}`,
+      );
+    }
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
+}
+
+/** `null` = importers could not be listed (not a git checkout): NOT measured, never "none". */
+export function staleSuppressionsIn(repoRoot: string, modules: readonly string[]): StaleSuppression[] | null {
+  const sources = importerSources(repoRoot, modules);
+  return sources === null ? null : staleDeclarationSuppressions(modules, sources);
 }
 
 export function check(repoRoot = REPO_ROOT, config = CONFIG): void {
@@ -291,9 +314,23 @@ export function check(repoRoot = REPO_ROOT, config = CONFIG): void {
       process.exit(1);
     }
 
+    const unusedSuppressions = staleSuppressionsIn(repoRoot, declaredInputs);
+    if (unusedSuppressions === null) {
+      console.error(`✗ could not list importers (git grep failed in ${repoRoot}); stale suppressions NOT checked`);
+      process.exit(1);
+    }
+    if (unusedSuppressions.length) {
+      console.error(
+        `✗ @ts-expect-error suppression(s) guarding a module that now has a declaration — each is\n` +
+          `  TS2578 "Unused '@ts-expect-error' directive":\n   ${formatStaleSuppressions(unusedSuppressions).join('\n   ')}`,
+      );
+      console.error(`\nDelete each listed line (WI-10005290).`);
+      process.exit(1);
+    }
+
     console.log(
       `✓ gen:declarations:check: ${declaredInputs.length} declaration file(s) up to date; ` +
-        `hand-written declarations match their sources`,
+        `hand-written declarations match their sources; no importer suppresses a declared module`,
     );
   } finally {
     rmSync(out, { recursive: true, force: true });

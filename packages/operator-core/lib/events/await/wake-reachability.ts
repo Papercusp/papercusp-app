@@ -142,16 +142,22 @@ export function deriveWakeReachability(i: WakeReachabilityInput): WakeReachabili
       wouldBeChannel: repairable ? asIfArmed.channel : null,
       summary: repairable
         ? `no standing coord:inbox-wake await — a wake emit matches nothing (woken:0 → no-session-now), ` +
-          `but the session is otherwise live and would be reachable via ${asIfArmed.channel} once re-armed`
+          (asIfArmed.channel === 'resume'
+            ? 'but a resumable handle is available; re-arming enables a fresh-process resume after the previous process exits'
+            : `but the session is otherwise live and would be reachable via ${asIfArmed.channel} once re-armed`)
         : 'no standing coord:inbox-wake await — a wake emit matches nothing (woken:0 → no-session-now)',
       // Both variants keep the original WI-655 phrasing ("no inbox-wake watch is armed" +
       // "no-session-now") — that is the diagnosis, and it is true in both cases. Repairability
       // ADDS the remedy; it does not replace the finding.
       warning: repairable
         ? `NOT wake-reachable: no inbox-wake watch is armed for this session, so loop fires black-hole ` +
-          `as no-session-now — but this is REPAIRABLE, not a dead session: the process is alive and ` +
-          `injectable and would take the ${asIfArmed.channel} channel the moment the watch is re-armed ` +
-          `(armInboxWake / loop:arm). Do NOT read it as gone (WI-36685).`
+          (asIfArmed.channel === 'resume'
+            ? 'as no-session-now — this is REPAIRABLE through its resumable handle. Re-arm the watch ' +
+              '(armInboxWake / loop:arm); the resume channel starts a fresh process once the previous ' +
+              'process has exited. This does not prove that the previous process is alive or injectable.'
+            : `as no-session-now — but this is REPAIRABLE, not a dead session: the process is alive and ` +
+              `injectable and would take the ${asIfArmed.channel} channel the moment the watch is re-armed ` +
+              `(armInboxWake / loop:arm). Do NOT read it as gone (WI-36685).`)
         : 'NOT wake-reachable: no inbox-wake watch is armed for this session, so loop fires black-hole as no-session-now. (loop:arm now arms it directly; if you see this from loop:status, re-arm the loop.)',
     };
   }

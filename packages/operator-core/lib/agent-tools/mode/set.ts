@@ -31,6 +31,7 @@ import { goalHolderPolicyProblem, readGoalLaunchSettings } from '../../goal-laun
 import { assertFact, retractFact, FACT_BODY_MAX_CHARS } from '../../agent-facts/store';
 import { resolveConcreteWorkspaceId } from '../../workspace-registry';
 import { refreshControlAnchorAfterMutation } from '../coordination/control-anchor';
+import { attestModeControlConsumerView } from '../coordination/control-anchor-consumer-view';
 import { deactivateLoopForGoal, getLoopStatus } from '../../harness/routines/loop';
 import { notifyGoalHolderHandoff } from '../../goals/holder-handoff';
 
@@ -217,8 +218,8 @@ export default defineTool({
     // argument actually accepts (goal-mode-hardening-2026-08-10 P-008).
     `Enter/exit an official session mode (${MODE_IDS.join(' | ')}) for yourself or a peer. ` +
     '{ mode, reason, enabled?, instructions?, agent?, ownerDirected? }. Same-axis modes AUTO-SWITCH (result carries switchedFrom); ' +
-    'cross-axis modes stack. Peer-set: reason is delivered to the target with the mode contract; an owner-directed ' +
-    'incumbent REFUSES a peer override (stickyConflict:true — downgraded to a request message). Self-set returns the ' +
+    'cross-axis modes stack. Peer-set: reason is delivered to the target with the mode contract. An owner-directed ' +
+    'incumbent REFUSES peer overrides. Such an override is downgraded to a request message (stickyConflict:true). Self-set returns the ' +
     'full binding contract — read it. Audited in agent_mode_changes.',
   guidance: {
     when:
@@ -550,6 +551,14 @@ export default defineTool({
           ownerDirected: Boolean(args.ownerDirected && ownerAuthorized),
         })
       : null;
+    // WI-10005199 (EI-23770243810745552): `agent_modes` is the WRITE target, but the
+    // turn-start hook and dispatch seat read the projected `control_state->modes`, and
+    // that projection is fail-soft (a timed-out refresh returns null while the mode
+    // write stays committed). Attest the read the consumer will actually do.
+    // Exception-only: an agreeing read adds nothing to the result.
+    const controlConsumerView = res.ok && !res.noop
+      ? attestModeControlConsumerView({ modeId: def.id, enabled }, control)
+      : null;
 
     // WI-6949: an applied autonomy mode with no armed loop leaves the TARGET with no
     // wake source. Read the target's loop (not the caller's) so a peer-set warns about
@@ -836,6 +845,7 @@ export default defineTool({
       ...(wakeOutcome ? { wake: wakeOutcome } : {}),
       ...(wakeWarning ? { wakeSource: 'owner-only', wakeSourceWarning: wakeWarning } : {}),
       ...(control ? { controlGeneration: control.generation } : {}),
+      ...(controlConsumerView?.divergedFromWrite ? { controlConsumerView } : {}),
       ...(res.error ? { error: res.error } : {}),
     };
     return { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] };

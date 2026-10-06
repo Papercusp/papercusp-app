@@ -55,6 +55,9 @@ TESTS=(
   mac-vm-fresh-state.selftest.sh
   streak-escalation.selftest.sh
   remote-object-state.selftest.sh
+  offline-installer-evidence-redaction.selftest.sh
+  vm-port-alloc.selftest.sh
+  vm-boot-extra-drives.selftest.sh
 )
 
 # COMPLETENESS GATE (WI-6181) — fixed; this array is no longer silently partial.

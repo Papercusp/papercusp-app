@@ -793,6 +793,7 @@ mod tests {
                 provenance: None,
                 tools: Vec::new(),
                 streaming: false,
+                worked_for: None,
             },
             ChatMessage::assistant("gamma\n  delta"),
         ]);

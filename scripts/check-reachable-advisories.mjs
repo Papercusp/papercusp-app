@@ -532,8 +532,9 @@ export function measureJson(label, attempt, opts = {}) {
     try {
       out = attempt();
     } catch (err) {
-      // npm exits non-zero when advisories/extraneous deps exist; that is expected, so we
-      // read stdout regardless and judge only on whether the payload parses.
+      // npm exits non-zero for advisory findings and dependency-tree problems. Keep valid
+      // JSON stdout so the caller can inspect it; npm ls validates its problems before any
+      // audit or advisory analysis runs.
       out = err && err.stdout;
     }
     if (!out || !String(out).trim()) {
@@ -557,6 +558,36 @@ export function measureJson(label, attempt, opts = {}) {
 function runJson(args, label) {
   return measureJson(label, () =>
     execFileSync('npm', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }),
+  );
+}
+
+function assertNpmTreeIntegrity(lsTree) {
+  if (!lsTree || typeof lsTree !== 'object' || Array.isArray(lsTree)) {
+    throw new Error(
+      'ADVISORY_GATE_UNDETERMINED: npm ls did not return a dependency-tree object. ' +
+        'This is a measurement failure; no STALE or disposition-drift conclusion is trustworthy.',
+    );
+  }
+
+  const problems = lsTree.problems;
+  if (problems === undefined) return;
+  if (!Array.isArray(problems)) {
+    throw new Error(
+      'ADVISORY_GATE_UNDETERMINED: npm ls returned malformed dependency-tree problems metadata. ' +
+        'This is a measurement failure; no STALE or disposition-drift conclusion is trustworthy.',
+    );
+  }
+  if (problems.length === 0) return;
+
+  const shown = problems.slice(0, 5).map((problem) => String(problem)).join('; ');
+  const omitted = problems.length > 5 ? '; and ' + (problems.length - 5) + ' more' : '';
+  throw new Error(
+    'ADVISORY_GATE_UNDETERMINED: npm ls reported ' +
+      problems.length +
+      ' dependency-tree problem(s): ' +
+      shown +
+      omitted +
+      '. The graph may be incomplete; reconcile manifests, lockfile, and install state before trusting STALE or disposition-drift results.',
   );
 }
 
@@ -666,12 +697,17 @@ function main() {
   const auditPath = valueOf('--audit-json');
   const lsPath = valueOf('--ls-json');
   const fullAuditPath = valueOf('--full-audit-json');
-  const audit = auditPath
-    ? JSON.parse(readFileSync(auditPath, 'utf8'))
-    : runJson(['audit', '--omit=dev', '--json'], 'npm audit');
   const ls = lsPath
     ? JSON.parse(readFileSync(lsPath, 'utf8'))
     : runJson(['ls', '--omit=dev', '--all', '--json'], 'npm ls');
+  // A parseable npm ls response can still be incomplete: npm emits JSON with exit status 1
+  // and a problems[] list for invalid/missing/extraneous dependency edges. Refuse that graph
+  // before running either audit lens or allowing it to produce STALE/drift conclusions.
+  assertNpmTreeIntegrity(ls);
+
+  const audit = auditPath
+    ? JSON.parse(readFileSync(auditPath, 'utf8'))
+    : runJson(['audit', '--omit=dev', '--json'], 'npm audit');
   // Second lens: the tree as actually installed. Fix feasibility is judged here (see
   // analyze()). Never fatal — if it cannot be read we fall back to the single-lens
   // reading, which is optimistic about fixes but still gates on the same population.

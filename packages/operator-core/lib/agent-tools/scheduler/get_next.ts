@@ -28,7 +28,11 @@ import {
 } from '../../scheduler/claim-spec-store';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
 import { CURRENT_SPEC_VERSION } from '../../scheduler/claim-spec';
-import { CLAIM_STATES_ALLOWLIST, familyOf, releaseWorkItem } from '../../work-items';
+// The allowlist comes from its leaf: the args schema below reads it at module-eval time,
+// which the `../../work-items` re-export cannot serve inside that module's import cycle.
+import { CLAIM_STATES_ALLOWLIST } from '../../scheduler/claim-states';
+import { familyOf, releaseWorkItem } from '../../work-items';
+import { ISSUE_FAMILY_ROUTE_KINDS } from '../../work-nature/agent-work-predicate';
 import { workItemClaimLeaseEnabled, leaseClaimedWorkItem } from '../../work-item-claim-lease-wiring';
 import { getBuildInfo } from '../../build-info';
 import {
@@ -56,16 +60,18 @@ import { liveLockedPaths } from '../locks/live-lock-paths';
 /** The claimable-state subset diagnoseClaimNextMiss accepts (mirrors CLAIM_STATES_ALLOWLIST). */
 type ClaimNextStates = ('open' | 'failing')[] | undefined;
 import { matchRoutingGateHint } from '../../routing-gate-hints';
+import { reviewableMiss } from '../../scheduler/reviewable-miss';
 import {
   fleetScopedMiss,
   reconcileFleetScopeClaims,
   readFleetPauseState,
   diagnoseFleetScopeCooldownMiss,
   diagnoseFleetScopeIssueFloorMiss,
-  diagnoseFleetScopeFeatureFamilyMatch,
+  diagnoseFleetScopeFeatureFamilyExclusions,
   diagnoseFleetScopeTerminalExhaustion,
   diagnoseFleetScopePlanTerminality,
   diagnoseFleetScopeLeaderLiveness,
+  reconcileFleetScopeLeaderSuccession,
   fleetLeaderUnavailableRefusal,
 } from '../../scheduler/fleet-scope-admission';
 import { getClaimTimeRetractionAdvisory } from '../work_items/retraction-advisory';
@@ -224,6 +230,7 @@ export const MISS_BREAKDOWN_BUDGET_MS = 1_500;
 export function getNextTimeoutResult(
   budgetMs = GET_NEXT_BUDGET_MS,
   reconciliation: ClaimTimeoutReconciliation = { status: 'unknown', heldIds: [] },
+  lastClaimStep?: string,
 ): {
   ok: false;
   error: 'timeout';
@@ -232,6 +239,7 @@ export function getNextTimeoutResult(
   possiblyClaimed: true;
   heldIds: string[];
   claimReconciliation: ClaimTimeoutReconciliationStatus;
+  lastClaimStep?: string;
   message: string;
 } {
   const reconciliationNote =
@@ -249,13 +257,15 @@ export function getNextTimeoutResult(
     possiblyClaimed: true,
     heldIds: reconciliation.heldIds,
     claimReconciliation: reconciliation.status,
+    ...(lastClaimStep ? { lastClaimStep } : {}),
     message:
-      `scheduler:get_next exceeded its ${budgetMs}ms internal budget (likely transient PG pool ` +
-      `contention) and returned a fast error instead of hanging until the MCP client's 300s ` +
+      `scheduler:get_next exceeded its ${budgetMs}ms internal budget` +
+      (lastClaimStep ? ` at claim step "${lastClaimStep}"` : '') +
+      ` and returned a fast error instead of hanging until the MCP client's 300s ` +
       `idle-timeout abort (EI-18167154191955470). The claim promise may still commit after this ` +
       `response, so possiblyClaimed is true. ${reconciliationNote} Reconcile the held ids before ` +
-      `retrying; if the timeout persists, the account/PG pool may be saturated (see ` +
-      `accounts:status / dev:rate_governor_status).`,
+      `retrying. The last entered step identifies the unresolved phase, not its cause; ` +
+      `measure that phase before attributing the timeout to database or pool contention.`,
   };
 }
 
@@ -356,7 +366,9 @@ export function specNamedIds(spec: unknown): string[] {
  *  all imported below) — mirrors buildFleetKindClaimSpec's ISSUE_FAMILY_CLAIM_KINDS
  *  in fleet_registry/launch-on-plan.ts (not re-exported from there to avoid a
  *  fleet_registry → agent-tools/scheduler import edge for one literal set). */
-const ISSUE_FAMILY_KINDS = new Set(['bug', 'change', 'task']);
+// The shared family route list (P-009, D-022): never a local copy. The R-3 work-predicate
+// lint (work-nature/work-predicate-lint.test.ts) fails a hardcoded kind list here.
+const ISSUE_FAMILY_KINDS: ReadonlySet<string> = new Set<string>(ISSUE_FAMILY_ROUTE_KINDS);
 
 /**
  * EI-18741395910746959: pull the `kind in [...]` leaf's value out of a claim spec's
@@ -448,11 +460,14 @@ export function shadowedFleetSpecNote(args: {
  * which is why the false verdict reads as rigorously confirmed. Hence the check below runs BEFORE
  * the re-check, not merely before the verdict.
  */
-function concurrencyBlockedRefusal(concurrency: {
-  activeClaims: number;
-  maxConcurrentClaims: number;
-  heldIds: string[];
-}): { error: string; diagnosis: Record<string, unknown> } {
+function concurrencyBlockedRefusal(
+  concurrency: {
+    activeClaims: number;
+    maxConcurrentClaims: number;
+    heldIds: string[];
+  },
+  ownerId: string,
+): { error: string; diagnosis: Record<string, unknown> } {
   return {
     // EI-19931420102632438: lead with the CAP, never with a lane-contents claim. A caller refused
     // on its own cap had the lane never consulted at all.
@@ -460,7 +475,13 @@ function concurrencyBlockedRefusal(concurrency: {
       `claim cap reached: you already hold ${concurrency.activeClaims}/${concurrency.maxConcurrentClaims} ` +
       `concurrent claim(s) — release or complete one before claiming another; ` +
       `held: ${concurrency.heldIds.join(', ')}. (The claim lane itself was NOT evaluated — this is ` +
-      `not a statement about lane contents.)`,
+      `not a statement about lane contents.) A parked or externally-blocked claim STILL counts ` +
+      `(EI-11796: declaring a blocker does not buy a slot). To hold more than one lane at once the ` +
+      `LEADER raises your cap by reading scheduler:get_claim_spec { cupId: '${ownerId}' } and ` +
+      `replacing it with scheduler:set_claim_spec { cupId: '${ownerId}', spec: { ...current.spec, ` +
+      `limits: { ...current.spec.limits, maxConcurrentClaims: N } } }. The write requires exactly one ` +
+      `target selector (cupId or fleet) and a full replacement spec — ` +
+      `do not work around it, and do not release a parked item you still own just to pull other work.`,
     diagnosis: {
       concurrencyBlocked: true,
       activeClaims: concurrency.activeClaims,
@@ -710,7 +731,7 @@ async function buildMissDiagnosis(args: {
     if (concurrency?.blocked) {
       // WI-6409: the message + diagnosis now live in `concurrencyBlockedRefusal` so the
       // fleet-scoped branch returns the IDENTICAL verdict instead of a false divergence.
-      return concurrencyBlockedRefusal(concurrency);
+      return concurrencyBlockedRefusal(concurrency, args.ownerId);
     }
 
     // D-002 (drain-claim-spec-hardening-2026-07-13, fixes EI-11300): mirror getNextWorkItem's
@@ -807,12 +828,18 @@ async function buildMissDiagnosis(args: {
       }
     }
 
-    const aggregate = diag.drained
-      ? 'the backlog is genuinely DRAINED (0 unclaimed items in the pool) — idling is correct'
-      : `the backlog is NOT drained: ${diag.pendingUnclaimed} unclaimed item(s) in the pool, but ${diag.readyUnclaimed} pass the floors` +
-        (diag.readyUnclaimed === 0
-          ? ' — every one of them is GATED (blocked / held / needs-human / not-work), so idling is correct but the backlog is not empty'
-          : '');
+    // WI-10004358: `reviewing` = spec rows are pending PEER REVIEW, a gate that never self-clears
+    // and that this caller can clear — so "idling is correct" must not be said for that lane.
+    const aggregateText = (reviewing: boolean) =>
+      diag.drained
+        ? 'the backlog is genuinely DRAINED (0 unclaimed items in the pool) — idling is correct'
+        : `the backlog is NOT drained: ${diag.pendingUnclaimed} unclaimed item(s) in the pool, but ${diag.readyUnclaimed} pass the floors` +
+          (diag.readyUnclaimed === 0
+            ? reviewing
+              ? ' — every one of them is GATED, and some are gated by pending peer review you can perform (see below), so idling is NOT correct'
+              : ' — every one of them is GATED (blocked / held / needs-human / not-work), so idling is correct but the backlog is not empty'
+            : '');
+    let reviewable: ReturnType<typeof reviewableMiss> = null;
     // EI-14108: a flag-READ failure (fail-closed) reads identically to "the issue-claimable
     // flag is off" otherwise — say so explicitly so this never presents as a drained/out-of-
     // scope pool when it's actually an unreadable flag store.
@@ -850,6 +877,7 @@ async function buildMissDiagnosis(args: {
       );
       if (agg.value) {
         excludedBreakdown = agg.value;
+        reviewable = reviewableMiss(agg.value.queueControl, { harness: args.harness });
         const top = Object.entries(agg.value.excluded)
           .filter(([, n]) => (n as number) > 0)
           .sort((a, b) => (b[1] as number) - (a[1] as number));
@@ -873,6 +901,10 @@ async function buildMissDiagnosis(args: {
     // kinds only (no kind filter at all, or one that includes feature/chunk/research-task/…),
     // this whole diagnosis may be silently irrelevant to why THEIR claim actually missed. Say
     // so plainly instead of letting "matches 0 issue-family row(s)" read as the whole picture.
+    // WI-10004358: the review route rides inside breakdownSummary (it IS a breakdown finding), and
+    // `aggregate` is derived only now, once the breakdown has said whether review is pending.
+    if (reviewable) breakdownSummary += ` ${reviewable.message} ${reviewable.advice}`;
+    const aggregate = aggregateText(reviewable != null);
     const issueFamilyOnly = specIsIssueFamilyOnly(rec?.spec);
     const familyScopeNote = issueFamilyOnly
       ? ''
@@ -884,6 +916,7 @@ async function buildMissDiagnosis(args: {
 
     return {
       error: `${STATIC}. Diagnosis: ${aggregate}.${shadowedFleetNote}${namedSummary}${breakdownSummary}${flagReadErrorNote}${familyScopeNote}`,
+      ...(reviewable ? { reviewable: reviewable.route } : {}),
       diagnosis: {
         drained: diag.drained,
         pendingUnclaimed: diag.pendingUnclaimed,
@@ -1457,13 +1490,11 @@ export default defineTool({
           // terminal acceptance and wind-down have no live driver. A null reading is
           // deliberately fail-open; only a successful negative blocks new work.
           currentPreflightStep = 'fleet-leader-liveness';
-          const leaderLiveness = await diagnoseFleetScopeLeaderLiveness({
+          const leaderSuccession = await reconcileFleetScopeLeaderSuccession({
             scope: reconciliation.scope,
-            ...(reconciliation.fleetAssignmentRows
-              ? { fleetAssignmentRows: reconciliation.fleetAssignmentRows }
-              : {}),
+            identity: ident,
           });
-          if (leaderLiveness === false) return { kind: 'leader-unavailable', reconciliation };
+          if (leaderSuccession === 'unavailable') return { kind: 'leader-unavailable', reconciliation };
         }
         // SCHEDULER_SPEC_CLAIM kill-switch (default ON; fail-open): OFF ⇒ ignore the bee's stored
         // spec and claim by the DEFAULT ordering (a no-breakage degrade to claim_next behavior).
@@ -1596,7 +1627,7 @@ export default defineTool({
       // claimable await(s) right here so no future release re-wakes them for a
       // pull they're forbidden to make anyway. Self/subscriber-scoped + best-effort,
       // same posture as the successful-claim cancel below.
-      const claimableAwaitsCancelled = await cancelClaimableAwaits(ident.ownerId).catch(() => 0);
+      const claimableAwaitsCancelled = await cancelClaimableAwaits(ident.ownerId, { includeStanding: true }).catch(() => 0);
       return {
         content: [
           {
@@ -1716,11 +1747,16 @@ export default defineTool({
       });
     };
     const claimBudgetMs = remainingBudgetMs();
+    let lastClaimStep = 'claim-start';
+    const onClaimStep = (step: string): void => {
+      lastClaimStep = step;
+    };
     const claim = await withBoundedTimeout(
       (signal) =>
         getNextForBee({
           cupId: ident.ownerId,
           onPlanLaneBlocked,
+          onClaimStep,
           // EI-21830839826880925: ordinary MCP reads can occupy every slot on the
           // process-wide org pool. Keep pickup on its own tiny transactional pool so a
           // fleet member does not spend the whole 30s claim budget waiting behind them.
@@ -1753,14 +1789,27 @@ export default defineTool({
     // not become a generic `handler_error` that strands the fleet pull loop (EI-20224136729541724).
     if (claim.degraded && claim.reason === 'error') {
       if (claim.error instanceof OrgTxnTimeoutError) {
+        ctx.metadata?.({ schedulerTimeout: { phase: 'claim', lastClaimStep } });
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify(getNextContentionResult(claim.error)) }],
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                ...getNextContentionResult(claim.error),
+                lastClaimStep,
+              }),
+            },
+          ],
         };
       }
       throw new Error(claim.errorMessage ?? 'scheduler:get_next claim failed');
     }
     // Budget exceeded: return the fast, retryable timeout miss instead of hanging to the abort.
     if (claim.degraded) {
+      // Snapshot before reconciliation: its reads are a separate phase and an abandoned
+      // resolver may make late progress while they run. Preserve the timeout's own evidence.
+      const timedOutClaimStep = lastClaimStep;
+      ctx.metadata?.({ schedulerTimeout: { phase: 'claim', lastClaimStep: timedOutClaimStep } });
       // EI-22737570207805341: withBoundedTimeout is a Promise.race and does not cancel the
       // abandoned claim. The resolver can therefore commit after this watchdog fires. Read the
       // caller's held rows before responding, but preserve UNKNOWN when that read fails or also
@@ -1788,7 +1837,7 @@ export default defineTool({
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify(getNextTimeoutResult(claimBudgetMs, timeoutReconciliation)),
+            text: JSON.stringify(getNextTimeoutResult(claimBudgetMs, timeoutReconciliation, timedOutClaimStep)),
           },
         ],
       };
@@ -1831,7 +1880,7 @@ export default defineTool({
           content: [
             {
               type: 'text' as const,
-              text: JSON.stringify({ ok: false, ...concurrencyBlockedRefusal(capped) }),
+              text: JSON.stringify({ ok: false, ...concurrencyBlockedRefusal(capped, ident.ownerId) }),
             },
           ],
         };
@@ -1926,11 +1975,11 @@ export default defineTool({
     // === 0, the overwhelmingly common shape) never enters this block and pays nothing.
     let issueBreakdown: import('../../scheduler/get-next').IssueClaimExclusionBreakdown | null = null;
     let divergenceRecheck: 'resolved-by-retry' | 'confirmed-twice' | undefined;
-    // WI-7151 (EI-19318364531323846): the tier-1 (feature-family) match count, computed ONLY
+    // WI-7151 (EI-19318364531323846): the tier-1 (feature-family) breakdown, computed ONLY
     // when the issue-family breakdown would otherwise certify a false `spec_matches_nothing` —
-    // see diagnoseFleetScopeFeatureFamilyMatch's doc comment. Left null for every other miss
+    // Keep pre-floor matches as well as survivors; held features do not make the spec empty.
     // shape (zero extra cost on the common paths).
-    let featureFamilyMatched: number | null = null;
+    let featureBreakdown: import('../../scheduler/fleet-scope-admission').FeatureFamilyClaimExclusionBreakdown | null = null;
     let terminalExhaustion: import('../../scheduler/fleet-scope-admission').FleetScopeTerminalExhaustion | null = null;
     let planTerminality: import('../../scheduler/fleet-scope-admission').FleetScopePlanTerminality | null = null;
     let leaderLiveness: boolean | null = null;
@@ -2000,8 +2049,8 @@ export default defineTool({
         // STRUCTURALLY blind to the feature family (bug/change/task only). Check tier-1
         // before letting this certify a false `spec_matches_nothing` (e.g. a plan-scoped
         // spec whose promoted items are feature-family, per D-009).
-        [featureFamilyMatched, terminalExhaustion, planTerminality, leaderLiveness] = await Promise.all([
-          diagnoseFleetScopeFeatureFamilyMatch({
+        [featureBreakdown, terminalExhaustion, planTerminality, leaderLiveness] = await Promise.all([
+          diagnoseFleetScopeFeatureFamilyExclusions({
             scope: reconciliation.scope,
             harness: args.harness,
             workspaceId: ident.workspaceId,
@@ -2016,12 +2065,10 @@ export default defineTool({
           diagnoseFleetScopePlanTerminality({ scope: reconciliation.scope }),
           diagnoseFleetScopeLeaderLiveness({
             scope: reconciliation.scope,
-            ...(reconciliation.fleetAssignmentRows
-              ? { fleetAssignmentRows: reconciliation.fleetAssignmentRows }
-              : {}),
+            ...(reconciliation.fleetAssignmentRows ? { fleetAssignmentRows: reconciliation.fleetAssignmentRows } : {}),
           }),
         ]);
-        if (featureFamilyMatched && featureFamilyMatched > 0) {
+        if (featureBreakdown && featureBreakdown.claimable > 0) {
           // A genuine tier-1 candidate exists even though the claim (which just queried
           // this exact table) missed moments ago — retry once, same shape as the
           // claimable>0 divergence recheck above.
@@ -2053,7 +2100,7 @@ export default defineTool({
           );
           if (!retry.degraded && retry.value) {
             res = await arbitrateSchedulerClaim(retry.value);
-            featureFamilyMatched = null; // claimed on retry — nothing left to explain
+            featureBreakdown = null; // claimed on retry — nothing left to explain
           }
         }
       } else if (!issueBreakdown) {
@@ -2495,12 +2542,10 @@ export default defineTool({
             : Promise.resolve(null),
         ]);
       }
-      // EI-10541: a successful self-pull means this agent is transitioning idle -> working, so
-      // cancel its standing `work-item:claimable` idle-park await(s) — holding a claim and waiting
-      // for claimable work are mutually exclusive, and a pre-claim await left armed (e.g. this claim
-      // came from a leader-fed spec bump, not the await firing) otherwise keeps firing spurious ~30-min
-      // timeout wakes while the agent is busy. Best-effort + subscriber-scoped: a cancel failure must
-      // never break the claim path (fails soft, like the recall port above).
+      // EI-10541: a successful self-pull moves this agent from idle to working. Retire only a
+      // pending one-shot claimable wake (e.g. left by a leader-fed spec bump); reusable standing
+      // watches remain armed for the next claimable transition. Best-effort + subscriber-scoped:
+      // a cancel failure must never break the already-committed claim path.
       await cancelClaimableAwaits(ident.ownerId).catch(() => 0);
       // EI-20099413453852234: the same idle -> working transition also makes the caller's
       // DECLARED INTENT stale, which peers read as "this holder isn't really working it".
@@ -2612,8 +2657,8 @@ export default defineTool({
     const issueBreakdownForMiss = !res && reconciliation.scope && !invalidHarnessKnownSlugs ? issueBreakdown : null;
     // WI-7151: same suppression as issueBreakdownForMiss — irrelevant once res is set (claimed
     // on a retry) or when the miss isn't fleet-scoped/is an invalid-harness miss.
-    const featureFamilyMatchedForMiss =
-      !res && reconciliation.scope && !invalidHarnessKnownSlugs ? featureFamilyMatched : null;
+    const featureBreakdownForMiss =
+      !res && reconciliation.scope && !invalidHarnessKnownSlugs ? featureBreakdown : null;
     // EI-20186990913643457: same suppression as the other miss annotations — terminal
     // exhaustion only describes an actual fleet-scoped miss under a valid harness.
     const terminalExhaustionForMiss =
@@ -2685,7 +2730,7 @@ export default defineTool({
           ? fleetScopedMiss(reconciliation.scope, reconciliation.quarantinedIds, {
               cooldownDiag,
               issueBreakdown: issueBreakdownForMiss,
-              featureFamilyMatched: featureFamilyMatchedForMiss,
+              featureBreakdown: featureBreakdownForMiss,
               terminalExhaustion: terminalExhaustionForMiss,
               planTerminality: planTerminalityForMiss,
               leaderLiveness: leaderLivenessForMiss,
@@ -2716,7 +2761,19 @@ export default defineTool({
               // moment happens, instead of leaving the caller to a 60s re-poll.
               advice: IDLE_PULL_MISS_ADVICE,
             };
-    const payload = retiredSoloPlanSpec ? { ...basePayload, retiredSoloPlanSpec } : basePayload;
+    // P-007 Phase B (D-027): a verifier-lane pull names the work it served and the next call.
+    const verification = res?.verificationKind
+      ? {
+          lane: 'verification' as const,
+          kind: res.verificationKind,
+          next:
+            res.verificationKind === 'agent-review'
+              ? "Review it, then grade it with blender:grade-idea { ideaId: payload.agentReview.ledgerIdeaId, grade, feedback? }."
+              : "Run the task's payload.verification.check against payload.verification.subject, then complete the task with the result.",
+        }
+      : null;
+    const lanePayload = verification ? { ...basePayload, verification } : basePayload;
+    const payload = retiredSoloPlanSpec ? { ...lanePayload, retiredSoloPlanSpec } : lanePayload;
     // P-003: `tool_invocations` has no inline result JSON. Stamp the one fact a
     // later launch verifier needs — claimed vs diagnosed no-claim — onto the
     // invocation's existing metadata writer. This is intentionally the only

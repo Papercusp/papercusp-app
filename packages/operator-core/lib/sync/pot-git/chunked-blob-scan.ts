@@ -18,6 +18,7 @@
  * whole admissible range.
  */
 import { pinModuleState } from '@papercusp/module-singleton';
+import { createTimeSlice } from '../../event-loop-lag-monitor';
 import { defaultRunGitStdin } from './storage';
 import { type SecretFinding, scanForSecrets } from './secrets-guard';
 
@@ -258,6 +259,10 @@ export async function scanTextBlobsChunked(
     }
   }
 
+  // A chunk is up to `chunkBytes` (32 MB) of text. Scanning it in one turn held
+  // bg-host's main thread for seconds (WI-10005476), so yield between files once
+  // a slice is spent. Verdicts are per file, so this changes no result or order.
+  const slice = createTimeSlice();
   for (const group of partitionBlobsForScan(pending, chunkBytes)) {
     const { files, binaryOids, error } = await readTextBlobs(group, repoPath);
     if (error) return { findings: [], error };
@@ -271,6 +276,7 @@ export async function scanTextBlobsChunked(
       }
     }
     for (const f of files) {
+      await slice.maybeYield();
       blobScanState.stats.scannedBytes += f.content.length;
       // Per file, so each verdict is attributable to exactly one (oid, path).
       // Still `scanForSecrets` (never the raw per-line scanner): it applies the

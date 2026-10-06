@@ -103,14 +103,14 @@ interface DirectiveActuationEnvelopeEntry extends DirectiveEffectEnvelopeEntry {
 
 async function fetchDirectiveActuationEntries(
   recipientIds: string[],
-  opts: { fromId?: string; nowMs?: number; lookbackMs?: number } = {},
+  opts: { fromId?: string; nowMs?: number; lookbackMs?: number; workspaceId?: string } = {},
 ): Promise<DirectiveActuationEnvelopeEntry[]> {
   if (recipientIds.length === 0 || !coordHasPgFastPath()) return [];
   try {
     const nowMs = opts.nowMs ?? Date.now();
     const sinceMs = nowMs - (opts.lookbackMs ?? DIRECTIVE_EFFECT_LOOKBACK_MS);
     const sql = coordSql();
-    const ws = coordWorkspaceId();
+    const ws = opts.workspaceId ?? coordWorkspaceId();
     const from = opts.fromId ?? null;
     const rows = await sql<DirectiveEffectEnvelopeRow[]>`
       SELECT r AS recipient,
@@ -124,6 +124,11 @@ async function fetchDirectiveActuationEntries(
          AND e.surface = 'messages'
          AND e.body ? 'expectEffect'
          AND jsonb_typeof(e.body->'to') = 'array'
+         -- P-014(c): an index-usable restatement of the recipient predicate
+         -- below (coord_event_log_msgs_to_gin). Without it every call walked
+         -- all ~573k messages to find the ~1.5k carrying expectEffect
+         -- (~895k buffers/call; 127 for one recipient with it, same rows).
+         AND e.body->'to' ?| ${recipientIds}::text[]
          AND r = ANY(${recipientIds}::text[])
          AND e.body->>'from' IS DISTINCT FROM r
          AND (${from}::text IS NULL OR e.body->>'from' = ${from})
@@ -149,7 +154,7 @@ async function fetchDirectiveActuationEntries(
 /** Message ids whose explicitly declared effect is proven to have happened. */
 export async function fetchSatisfiedDirectiveMessageIds(
   recipientIds: string[],
-  opts: { nowMs?: number; lookbackMs?: number } = {},
+  opts: { nowMs?: number; lookbackMs?: number; workspaceId?: string } = {},
 ): Promise<Set<string>> {
   const entries = await fetchDirectiveActuationEntries(recipientIds, opts);
   return new Set(

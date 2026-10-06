@@ -35,12 +35,41 @@ function required(values, key) {
   return value;
 }
 
-function git(repoRoot, args) {
-  return execFileSync("git", ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 30_000,
-  }).trim();
+// The default bound is a hang guard for cheap plumbing calls (rev-parse).
+// `status --ignore-submodules=none` is different: on a freshly created staging
+// candidate the index is cold, so git must re-stat (and re-hash racily clean
+// entries of) the whole tree. Measured 2026-10-02 at load average ~120: the
+// stamp step took ~20s on a fresh candidate against 0.7s on a warm tree, and an
+// 11:38Z run crossed the old flat 30s cap. bundle-host.sh then skipped the
+// freshness proof, and staging-sync refused the finished generation
+// (EI-24867768475421999). The status bound stays finite so a hung git still fails.
+const GIT_TIMEOUT_MS = 30_000;
+const GIT_STATUS_TIMEOUT_MS = 300_000;
+
+function git(repoRoot, args, timeoutMs = GIT_TIMEOUT_MS) {
+  const started = Date.now();
+  try {
+    return execFileSync("git", ["-C", repoRoot, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+    }).trim();
+  } catch (error) {
+    // Name the command, the elapsed time and the bound: a bare
+    // "spawnSync git ETIMEDOUT" cannot say which call failed or how close it came.
+    const cause =
+      error?.code ??
+      (error?.signal ? `signal ${error.signal}` : `exit ${error?.status}`);
+    const stderr = String(error?.stderr ?? "")
+      .trim()
+      .split("\n")
+      .slice(-2)
+      .join(" | ");
+    throw new Error(
+      `git ${args.join(" ")} failed after ${Date.now() - started}ms ` +
+        `(timeout ${timeoutMs}ms): ${cause}${stderr ? ` — ${stderr}` : ""}`,
+    );
+  }
 }
 
 function sourceIdentity(repoRoot) {
@@ -52,12 +81,16 @@ function sourceIdentity(repoRoot) {
     throw new Error(
       `repo root mismatch: requested ${resolvedRoot}, git reports ${gitRoot}`,
     );
-  const dirty = git(resolvedRoot, [
-    "status",
-    "--porcelain=v1",
-    "--untracked-files=no",
-    "--ignore-submodules=none",
-  ]);
+  const dirty = git(
+    resolvedRoot,
+    [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=no",
+      "--ignore-submodules=none",
+    ],
+    GIT_STATUS_TIMEOUT_MS,
+  );
   if (dirty)
     throw new Error(
       "tracked source tree is dirty; a commit SHA cannot prove bundle freshness",

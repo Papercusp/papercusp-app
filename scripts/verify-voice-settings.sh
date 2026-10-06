@@ -4,6 +4,8 @@
 #
 # Run it as:
 #   VERIFY_TAURI_ISOLATED_DB=1 scripts/verify-tauri-headless.sh -- scripts/verify-voice-settings.sh
+# For the unsupported saved-engine regression without audio-service checks:
+#   VERIFY_TAURI_ISOLATED_DB=1 scripts/verify-tauri-headless.sh -- scripts/verify-voice-settings.sh --gemini-unavailable
 #
 # ⚠ VERIFY_TAURI_ISOLATED_DB=1 IS NOT OPTIONAL HERE, AND THE SCRIPT ENFORCES IT.
 # Step 6 switches an engine, which POSTs /api/agent-mcp/operator-voice-prefs —
@@ -47,6 +49,22 @@ PORT="${VERIFY_TAURI_PORT:?verify-tauri-headless.sh must export VERIFY_TAURI_POR
 
 say() { printf '\n=== %s ===\n' "$1"; }
 
+MODE=full
+if [ "$#" -gt 0 ]; then
+  [ "$#" -eq 1 ] && [ "$1" = --gemini-unavailable ] || {
+    echo "FATAL: expected no arguments or --gemini-unavailable" >&2
+    exit 2
+  }
+  MODE=gemini
+fi
+
+# Keep these expressions executable in the conventional desktop node:test suite.
+# A different alert elsewhere on the page must not mask the settings alert.
+GEMINI_ALERT='(() => { const page = document.querySelector(".pc-settings-page--voice"); return !!page && Array.from(page.querySelectorAll("[role=alert]")).some(a => (a.textContent || "").includes("Gemini Live is not supported")); })()'
+GEMINI_DISABLED='Array.from(document.querySelectorAll("[role=option]")).some(o => (o.textContent || "").includes("Gemini Live") && o.hasAttribute("data-disabled") && o.getAttribute("aria-disabled") === "true")'
+GEMINI_OPEN_PICKER='(() => { const trigger = document.querySelector("button.h-select-trigger[aria-label=\"Full-agent engine\"]"); if (!trigger) return false; trigger.focus(); trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true })); return true; })()'
+GEMINI_DIAGNOSTIC='({ href: location.href, readyState: document.readyState, settingsPresent: !!document.querySelector(".pc-settings-page--voice"), alerts: Array.from(document.querySelectorAll("[role=alert]")).map(a => (a.textContent || "").slice(0, 500)), fullAgentLabel: document.querySelector("button.h-select-trigger[aria-label=\"Full-agent engine\"]")?.textContent || null, geminiOptions: Array.from(document.querySelectorAll("[role=option]")).filter(o => (o.textContent || "").includes("Gemini Live")).map(o => ({ text: o.textContent, disabled: o.hasAttribute("data-disabled"), ariaDisabled: o.getAttribute("aria-disabled") })) })'
+
 # ── STEP 0: PROVE WE ARE DRIVING OUR OWN APP ────────────────────────────────
 # NOT ceremony. On 2026-09-02, inside a CORRECTLY-booted rig, a bare
 # tauri-agent-tools call auto-discovered and attached to the OWNER'S LIVE
@@ -72,6 +90,36 @@ if [ "${VERIFY_TAURI_ISOLATED_DB:-0}" != "1" ]; then
 fi
 echo "isolated throwaway DB ✓ — engine writes cannot touch the owner's real prefs"
 
+if [ "$MODE" = gemini ]; then
+  # Install the diagnostic only AFTER PID/isolation controls. Never inspect an
+  # unverified desktop, and never lose the original failing exit status.
+  trap 'status=$?; if [ "${status:-0}" -ne 0 ]; then "$TAT" eval --pid "$PID" "$GEMINI_DIAGNOSTIC" 2>&1 || true; fi' EXIT
+  # Read the raw bridge response: the installed CLI schema strips newer fields.
+  # This follows the proved PID/isolation controls, and never prints its token.
+  node <<'NATIVE_HEALTH'
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+(async () => {
+  const pid = Number(process.env.VERIFY_TAURI_PID);
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("invalid verifier PID");
+  const bridge = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), `tauri-dev-bridge-${pid}.token`), "utf8"));
+  if (bridge.pid !== pid) throw new Error("bridge token PID mismatch");
+  const response = await fetch(`http://127.0.0.1:${bridge.port}/health`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: bridge.token }), signal: AbortSignal.timeout(5000),
+  });
+  const health = await response.json();
+  console.log("NATIVE_HEALTH_DIAGNOSTIC", JSON.stringify(health));
+  if (!response.ok || !health.operator_probe) throw new Error("current native health diagnostics are unavailable");
+})().catch(error => { console.error(error.message); process.exitCode = 1; });
+NATIVE_HEALTH
+  "$TAT" health --pid "$PID" --json
+  say "Gemini regression: seed and assert the stored legacy preference"
+  "$TAT" eval --pid "$PID" 'fetch("/api/agent-mcp/operator-voice-prefs", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ fullAgentEngine: "gemini-live" }) }).then(async r => { const prefs = await r.json(); window.__voiceGeminiSeed = { status: r.status, engine: prefs.fullAgentEngine }; return window.__voiceGeminiSeed; })'
+  "$POLL" --require body --eval '!!window.__voiceGeminiSeed && window.__voiceGeminiSeed.status === 200 && window.__voiceGeminiSeed.engine === "gemini-live"'
+fi
+
 "$TAT" eval --pid "$PID" "window.location.href = '/settings/voice'" >/dev/null 2>&1 || true
 "$TAT" wait --pid "$PID" --selector '.pc-settings-page--voice' --timeout 60000 >/dev/null 2>&1 \
   || echo "DIAG: voice settings page never appeared"
@@ -81,6 +129,20 @@ echo "isolated throwaway DB ✓ — engine writes cannot touch the owner's real 
 "$POLL" --require '.pc-settings-page--voice' --eval "
   location.href.includes(':${PORT}') && location.pathname.startsWith('/settings/voice')"
 echo "page URL on our port ${PORT} ✓"
+
+if [ "$MODE" = gemini ]; then
+  say "Gemini regression: the saved engine has an explicit unsupported alert"
+  "$POLL" --require '.pc-settings-page--voice' --eval "$GEMINI_ALERT"
+  say "Gemini regression: the actual portalled option is disabled"
+  # Radix opens on keydown; a bare DOM click can leave the picker closed.
+  "$TAT" eval --pid "$PID" "$GEMINI_OPEN_PICKER"
+  "$POLL" --require '[role=option]' --eval "$GEMINI_DISABLED"
+  say "Gemini regression: the unsupported saved preference remains intact"
+  "$TAT" eval --pid "$PID" 'fetch("/api/agent-mcp/operator-voice-prefs").then(async r => { const prefs = await r.json(); window.__voiceGeminiReadback = { status: r.status, engine: prefs.fullAgentEngine }; return window.__voiceGeminiReadback; })'
+  "$POLL" --require '.pc-settings-page--voice' --eval '!!window.__voiceGeminiReadback && window.__voiceGeminiReadback.status === 200 && window.__voiceGeminiReadback.engine === "gemini-live"'
+  echo "PASS: Gemini unavailable regression (native settings UI; no microphone acceptance)"
+  exit 0
+fi
 
 # ── STEP 1: THE SURFACE IS REALLY THERE ─────────────────────────────────────
 # The anti-vacuous-green guard for everything below. Each later step asserts

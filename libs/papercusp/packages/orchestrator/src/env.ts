@@ -13,9 +13,30 @@ import type { AgentBackend, OrchestratorEnv } from './types';
 // psu launcher. Keeping the Codex policy in one place prevents the orchestrator
 // from reintroducing a model-less or Spark-bearing command before it reaches
 // the operator-side writers.
-import { resolveCodexModel } from '../../../../../packages/operator-core/lib/model-context-budget.mjs';
+import {
+  normalizeClaudeModelEffortSpec,
+  resolveCodexModel,
+} from '../../../../../packages/operator-core/lib/model-context-budget.mjs';
 
 export { resolveCodexModel };
+
+const CLAUDE_EFFORT_SPEC_RE = /^(.+):(low|medium|high|xhigh|max)$/i;
+
+/**
+ * The claude-code argv for a psu-style `<model>[:<effort>]` spec (WI-10006244).
+ * Claude takes reasoning effort as its OWN `--effort` flag: a verbatim
+ * `--model opus:xhigh` sets the model and silently drops the effort (the EI-7138
+ * class operator-core's applyRoleModel already handles). Opus 5 also retired
+ * `xhigh` in favor of `max`, so the spec goes through the same
+ * `normalizeClaudeModelEffortSpec` rule every other Claude launch boundary uses.
+ * A spec with no recognized effort suffix keeps the single `--model <spec>`.
+ * Input is the backend-normalized model (provider prefix already stripped).
+ */
+export function claudeModelFlagArgs(model: string): string[] {
+  const normalized = normalizeClaudeModelEffortSpec(model);
+  const m = CLAUDE_EFFORT_SPEC_RE.exec(normalized);
+  return m ? ['--model', m[1], '--effort', m[2].toLowerCase()] : ['--model', normalized];
+}
 
 /**
  * Resolve which agent backend to drive. Reads `AGENT_BACKEND` directly,

@@ -27,6 +27,7 @@
 import type { Sql } from 'postgres';
 import { getOrgPg, withWorkspace } from '@papercusp/db-org';
 import { networkOf, type AppKeyUseOutcome } from './network';
+import { pgDate, pgDateOrNull, type PgTimestamp } from './pg-dates';
 import { listAllProjectedTools } from '@papercusp/agent-mcp';
 import { appKeyHashMatches, mintAppKey, parseAccessToken, parseAppKey } from './key';
 import {
@@ -202,6 +203,62 @@ const APP_COLUMNS = `id, user_email, workspace_id, kind, label, scopes, limits,
   spend_cap_cents::float8 AS spend_cap_cents, spend_cap_window_sec,
   rotated_at, previous_token_valid_until, client_auth`;
 
+/** The timestamp columns of APP_COLUMNS. */
+type AppKeyTimestampColumn =
+  | 'paired_at'
+  | 'expires_at'
+  | 'paused_at'
+  | 'revoked_at'
+  | 'last_seen'
+  | 'rotated_at'
+  | 'previous_token_valid_until';
+
+/** A row's APP_COLUMNS timestamps as a raw query returns them: text or Date (./pg-dates.ts). */
+interface RawAppKeyTimestamps {
+  paired_at: PgTimestamp;
+  expires_at: PgTimestamp | null;
+  paused_at: PgTimestamp | null;
+  revoked_at: PgTimestamp | null;
+  last_seen: PgTimestamp | null;
+  rotated_at: PgTimestamp | null;
+  previous_token_valid_until: PgTimestamp | null;
+}
+
+/**
+ * A key row (or a row that includes one) as a raw query returns it. Every query that selects
+ * APP_COLUMNS is typed with this and its rows go through `appKeyOf`, so no caller sees a timestamp
+ * that is text (WI-10004453: `previousKeyStillValid` checks `instanceof Date`, and expiry checks
+ * call `getTime()`).
+ */
+type RawAppKey<T extends AppKeyRow> = Omit<T, AppKeyTimestampColumn> & RawAppKeyTimestamps;
+
+/** The row with its timestamps as valid `Date`s; throws naming the column when one is not. */
+export function appKeyOf<T extends AppKeyRow>(raw: RawAppKey<T>): T {
+  return {
+    ...raw,
+    paired_at: pgDate(raw.paired_at, 'connected_apps.paired_at'),
+    expires_at: pgDateOrNull(raw.expires_at, 'connected_apps.expires_at'),
+    paused_at: pgDateOrNull(raw.paused_at, 'connected_apps.paused_at'),
+    revoked_at: pgDateOrNull(raw.revoked_at, 'connected_apps.revoked_at'),
+    last_seen: pgDateOrNull(raw.last_seen, 'connected_apps.last_seen'),
+    rotated_at: pgDateOrNull(raw.rotated_at, 'connected_apps.rotated_at'),
+    previous_token_valid_until: pgDateOrNull(raw.previous_token_valid_until, 'connected_apps.previous_token_valid_until'),
+  } as unknown as T;
+}
+
+/** The scope row a raw query returns: its timestamps may be text too. */
+type RawAppScopeRow = Omit<AppScopeRow, 'revoked_at' | 'paused_at' | 'expires_at'> &
+  Pick<RawAppKeyTimestamps, 'revoked_at' | 'paused_at' | 'expires_at'>;
+
+function appScopeRowOf(raw: RawAppScopeRow): AppScopeRow {
+  return {
+    ...raw,
+    revoked_at: pgDateOrNull(raw.revoked_at, 'connected_apps.revoked_at'),
+    paused_at: pgDateOrNull(raw.paused_at, 'connected_apps.paused_at'),
+    expires_at: pgDateOrNull(raw.expires_at, 'connected_apps.expires_at'),
+  };
+}
+
 /**
  * The Remote access switch of the key's workspace (migration 1263, D-025), as a column of a query
  * over `harness_shared.connected_apps` (unaliased). No settings row = on.
@@ -254,7 +311,7 @@ export interface InsertAppKeyInput {
 export async function insertAppKey(tx: Sql, input: InsertAppKeyInput): Promise<CreatedAppKey> {
   const minted = mintAppKey();
   const kind: AppKeyKind = input.kind ?? 'app';
-  const rows = await tx<AppKeyRow[]>`
+  const rows = await tx<RawAppKey<AppKeyRow>[]>`
     INSERT INTO harness_shared.connected_apps
       (id, user_email, workspace_id, kind, label, scopes, limits, token_hash, expires_at, paired_at,
        spend_cap_cents, spend_cap_window_sec)
@@ -264,9 +321,9 @@ export async function insertAppKey(tx: Sql, input: InsertAppKeyInput): Promise<C
             ${input.spendCapCents ?? null}, ${input.spendCapWindowSec ?? null})
     RETURNING ${tx.unsafe(APP_COLUMNS)}
   `;
-  const app = rows[0];
-  if (!app) throw new Error('insertAppKey: insert returned no row');
-  return { app, key: minted.key };
+  const row = rows[0];
+  if (!row) throw new Error('insertAppKey: insert returned no row');
+  return { app: appKeyOf(row), key: minted.key };
 }
 
 /**
@@ -301,12 +358,13 @@ export async function createServiceKey(
 
 /** Every app and service key in a workspace, newest first — revoked ones included, flagged by revoked_at. */
 export async function listAppKeys(workspaceId: string): Promise<AppKeyRow[]> {
-  return withWorkspace(workspaceId, async (tx) => tx<AppKeyRow[]>`
+  const rows = await withWorkspace(workspaceId, async (tx) => tx<RawAppKey<AppKeyRow>[]>`
     SELECT ${tx.unsafe(APP_COLUMNS)}
       FROM harness_shared.connected_apps
      WHERE ${tx.unsafe(KEY_KINDS_SQL)}
      ORDER BY paired_at DESC
   `);
+  return rows.map((row) => appKeyOf(row));
 }
 
 /** Pause (true) or resume (false) a key. Returns false when no live key has that id. */
@@ -341,13 +399,13 @@ export async function revokeAppKey(workspaceId: string, id: string): Promise<boo
  * tokens are evaluated against their parent's scopes too. Returns null when no live key has that id.
  */
 export async function setAppKeyScopes(workspaceId: string, id: string, scopes: AppKeyScopes): Promise<AppKeyRow | null> {
-  const rows = await withWorkspace(workspaceId, async (tx) => tx<AppKeyRow[]>`
+  const rows = await withWorkspace(workspaceId, async (tx) => tx<RawAppKey<AppKeyRow>[]>`
     UPDATE harness_shared.connected_apps
        SET scopes = ${JSON.stringify(scopes)}::jsonb
      WHERE id = ${id} AND ${tx.unsafe(KEY_KINDS_SQL)} AND revoked_at IS NULL
     RETURNING ${tx.unsafe(APP_COLUMNS)}
   `);
-  return rows[0] ?? null;
+  return rows[0] ? appKeyOf(rows[0]) : null;
 }
 
 export interface RotatedAppKey extends CreatedAppKey {
@@ -373,7 +431,7 @@ export async function rotateAppKey(
   const now = opts.now ?? new Date();
   const validUntil = new Date(now.getTime() + overlap * 1000);
   const minted = mintAppKey(id);
-  const rows = await withWorkspace(workspaceId, async (tx) => tx<AppKeyRow[]>`
+  const rows = await withWorkspace(workspaceId, async (tx) => tx<RawAppKey<AppKeyRow>[]>`
     UPDATE harness_shared.connected_apps
        SET previous_token_hash        = token_hash,
            previous_token_valid_until = ${validUntil},
@@ -382,9 +440,9 @@ export async function rotateAppKey(
      WHERE id = ${id} AND ${tx.unsafe(KEY_KINDS_SQL)} AND revoked_at IS NULL
     RETURNING ${tx.unsafe(APP_COLUMNS)}
   `);
-  const app = rows[0];
-  if (!app) return null;
-  return { app, key: minted.key, previousKeyValidUntil: validUntil };
+  const row = rows[0];
+  if (!row) return null;
+  return { app: appKeyOf(row), key: minted.key, previousKeyValidUntil: validUntil };
 }
 
 /** A stored key row as verification reads it: the public row, both digests and the workspace switch. */
@@ -506,30 +564,46 @@ export async function verifyAppKey(key: string, now: Date = new Date()): Promise
   const { sql } = getOrgPg();
   const token = parseAccessToken(key);
   if (token) {
-    const tokens = await sql<StoredAccessTokenRow[]>`
+    const tokens = await sql<(Omit<StoredAccessTokenRow, 'expires_at'> & { expires_at: PgTimestamp })[]>`
       SELECT id, token_hash, app_id, scopes, expires_at
         FROM harness_shared.connected_app_access_tokens
        WHERE id = ${token.id}
        LIMIT 1
     `;
-    const row = tokens[0];
+    const row = tokens[0]
+      ? { ...tokens[0], expires_at: pgDate(tokens[0].expires_at, 'connected_app_access_tokens.expires_at') }
+      : undefined;
     const parents = row
-      ? await sql<(AppKeyRow & RemoteAccessState)[]>`
+      ? await sql<RawAppKey<AppKeyRow & RemoteAccessState>[]>`
           SELECT ${sql.unsafe(APP_COLUMNS)}, ${sql.unsafe(REMOTE_ACCESS_COLUMN)}
             FROM harness_shared.connected_apps
            WHERE id = ${row.app_id} AND ${sql.unsafe(KEY_KINDS_SQL)} LIMIT 1`
       : [];
-    return accessTokenVerdictOf(row, parents[0], key, now);
+    const parent = parents[0] ? appKeyOf<AppKeyRow & RemoteAccessState>(parents[0]) : undefined;
+    return countedAuthFailure(accessTokenVerdictOf(row, parent, key, now), row?.app_id);
   }
   const parsed = parseAppKey(key);
   if (!parsed) return { ok: false, reason: 'malformed' };
-  const rows = await sql<StoredAppKeyRow[]>`
+  const rows = await sql<RawAppKey<StoredAppKeyRow>[]>`
     SELECT ${sql.unsafe(APP_COLUMNS)}, token_hash, previous_token_hash, ${sql.unsafe(REMOTE_ACCESS_COLUMN)}
       FROM harness_shared.connected_apps
      WHERE id = ${parsed.id} AND ${sql.unsafe(KEY_KINDS_SQL)}
      LIMIT 1
   `;
-  return appKeyVerdictOf(rows[0], key, now);
+  const stored = rows[0] ? appKeyOf<StoredAppKeyRow>(rows[0]) : undefined;
+  return countedAuthFailure(appKeyVerdictOf(stored, key, now), stored?.id);
+}
+
+/**
+ * P-328 (D-030 #3): count a refusal of a KNOWN key toward the repeated-auth-failure alert. Fire and
+ * forget, so counting never delays or fails the auth decision; `recordAppKeyAuthFailure` skips the
+ * owner-chosen states (paused, remote access off) and never throws.
+ */
+function countedAuthFailure(verdict: AppKeyVerdict, appId: string | undefined): AppKeyVerdict {
+  if (!verdict.ok && appId) {
+    void import('./alert-sweep').then((m) => m.recordAppKeyAuthFailure(appId, verdict.reason)).catch(() => {});
+  }
+  return verdict;
 }
 
 /**
@@ -541,14 +615,15 @@ export async function loadClientKeyRow(
   id: string,
 ): Promise<(StoredAppKeyRow & { client_jwk: Record<string, unknown> | null }) | null> {
   const { sql } = getOrgPg();
-  const rows = await sql<(StoredAppKeyRow & { client_jwk: Record<string, unknown> | null })[]>`
+  type ClientKeyRow = StoredAppKeyRow & { client_jwk: Record<string, unknown> | null };
+  const rows = await sql<RawAppKey<ClientKeyRow>[]>`
     SELECT ${sql.unsafe(APP_COLUMNS)}, token_hash, previous_token_hash, client_jwk,
            ${sql.unsafe(REMOTE_ACCESS_COLUMN)}
       FROM harness_shared.connected_apps
      WHERE id = ${id} AND ${sql.unsafe(KEY_KINDS_SQL)}
      LIMIT 1
   `;
-  return rows[0] ?? null;
+  return rows[0] ? appKeyOf<ClientKeyRow>(rows[0]) : null;
 }
 
 /**
@@ -559,7 +634,7 @@ export async function loadClientKeyRow(
  */
 export async function loadAccessTokenScopeRow(tokenId: string, appId: string): Promise<AppScopeRow | null> {
   const { sql } = getOrgPg();
-  const rows = await sql<(AppScopeRow & { token_expires_at: Date })[]>`
+  const rows = await sql<(RawAppScopeRow & { token_expires_at: PgTimestamp })[]>`
     SELECT a.id, a.workspace_id, t.scopes, a.revoked_at, a.paused_at, a.expires_at, t.expires_at AS token_expires_at
       FROM harness_shared.connected_app_access_tokens t
       JOIN harness_shared.connected_apps a ON a.id = t.app_id
@@ -569,9 +644,11 @@ export async function loadAccessTokenScopeRow(tokenId: string, appId: string): P
   `;
   const row = rows[0];
   if (!row) return null;
-  const { token_expires_at: tokenExpiresAt, ...scopeRow } = row;
-  const parentExpiry = scopeRow.expires_at ? new Date(scopeRow.expires_at).getTime() : Infinity;
-  return { ...scopeRow, expires_at: new Date(Math.min(parentExpiry, new Date(tokenExpiresAt).getTime())) };
+  const { token_expires_at: tokenExpiresAt, ...rawScopeRow } = row;
+  const scopeRow = appScopeRowOf(rawScopeRow);
+  const parentExpiry = scopeRow.expires_at ? scopeRow.expires_at.getTime() : Infinity;
+  const tokenExpiry = pgDate(tokenExpiresAt, 'connected_app_access_tokens.expires_at').getTime();
+  return { ...scopeRow, expires_at: new Date(Math.min(parentExpiry, tokenExpiry)) };
 }
 
 /** Thrown by `setClientCredentialsMode` for a mode no row may hold. */
@@ -601,14 +678,14 @@ export async function setClientCredentialsMode(
        WHERE id = ${id} AND ${tx.unsafe(KEY_KINDS_SQL)} AND revoked_at IS NULL`;
     if (!current[0]) return null;
     if (mode && current[0].kind !== 'service') throw new ClientCredentialsModeError('not_service_key');
-    const rows = await tx<AppKeyRow[]>`
+    const rows = await tx<RawAppKey<AppKeyRow>[]>`
       UPDATE harness_shared.connected_apps
          SET client_auth = ${mode?.auth ?? null},
              client_jwk  = ${jwk ? JSON.stringify(jwk) : null}::jsonb
        WHERE id = ${id} AND ${tx.unsafe(KEY_KINDS_SQL)} AND revoked_at IS NULL
       RETURNING ${tx.unsafe(APP_COLUMNS)}`;
     await tx`DELETE FROM harness_shared.connected_app_access_tokens WHERE app_id = ${id}`;
-    return rows[0] ?? null;
+    return rows[0] ? appKeyOf(rows[0]) : null;
   });
 }
 
@@ -620,13 +697,13 @@ export async function setClientCredentialsMode(
  */
 export async function loadAppScopeRow(id: string): Promise<AppScopeRow | null> {
   const { sql } = getOrgPg();
-  const rows = await sql<AppScopeRow[]>`
+  const rows = await sql<RawAppScopeRow[]>`
     SELECT id, workspace_id, scopes, revoked_at, paused_at, expires_at
       FROM harness_shared.connected_apps
      WHERE id = ${id} AND ${sql.unsafe(KEY_KINDS_SQL)}
      LIMIT 1
   `;
-  return rows[0] ?? null;
+  return rows[0] ? appScopeRowOf(rows[0]) : null;
 }
 
 /** The fields an alert about a key shows (P-011): its label, kind and workspace. */

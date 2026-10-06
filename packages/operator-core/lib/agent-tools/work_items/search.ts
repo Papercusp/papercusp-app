@@ -4,6 +4,7 @@
  * merges the matches; filter by harness / kind.
  */
 import { z } from 'zod';
+import { DATATYPE_NATURES } from '../../datatype-registry-store';
 import { defineTool } from '@papercusp/agent-mcp';
 import { COORD_ROLES } from '../coordination/roles';
 import { searchWorkItems, type WorkItem, type WorkItemKind } from '../../work-items';
@@ -156,6 +157,12 @@ export default defineTool({
       .describe(
         "EI-10422: by default a payload.lane:'observation' row (a turn-end reflection / rubric scorecard filed via improvements:capture { lane:'observation' }) is EXCLUDED from matches — by design (D-005) it never enters the work queue/triage. Pass true to include raw observations in search results.",
       ),
+    natures: z
+      .array(z.enum(DATATYPE_NATURES))
+      .optional()
+      .describe(
+        "P-010/D-011: natures to return (work|record|document|event). Default: work only, unless kind is named. ['record'] reads record rows such as pipeline deals.",
+      ),
   }),
   async handler(args) {
     const { items, legs, retry } = await searchWorkItems(args.query, {
@@ -164,6 +171,7 @@ export default defineTool({
       limit: args.limit,
       semantic: args.semantic,
       includeObservations: args.includeObservations,
+      natures: args.natures,
     });
     // P-016/P-020: report which ranking legs actually ran and contributed.
     // A dedup search that silently fell back to lexical-only (embedder down,

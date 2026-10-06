@@ -69,7 +69,7 @@ export default defineTool({
       .min(1)
       .optional()
       .describe(
-        'Path to the file the cursor is in (absolute, or relative to the workspace root). Required for symbol/references/implementations/diagnostics/refactor_preview. For workspace_symbols it is not a cursor but an ANCHOR naming which project the symbol index answers for: required for TypeScript (tsserver has no project until a document is opened), optional for rust when rootPath already holds a Cargo.toml. Unanchored and unresolvable, workspace_symbols refuses rather than returning an empty that would read as absence.',
+        'Path to the file the cursor is in (absolute, or relative to the workspace root). Required for symbol/references/implementations/diagnostics/refactor_preview. For workspace_symbols it is not a cursor but an ANCHOR (a file, or a directory inside ONE project) naming which project the symbol index answers for: required for TypeScript (tsserver has no project until a document is opened), optional for rust when rootPath already holds a Cargo.toml. Unanchored and unresolvable, workspace_symbols refuses rather than returning an empty that would read as absence.',
       ),
     line1: z
       .number()
@@ -131,7 +131,7 @@ export default defineTool({
       language: args.language,
       newName: args.newName,
       limit: args.limit,
-    });
+    }, { workspaceId: ctx.workspaceId ?? ctx.principal?.workspaceId, actorId: ctx.principal?.slug });
     return { data: answer };
   },
 });

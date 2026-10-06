@@ -5,6 +5,16 @@
  * The row page and every aggregate compile from one normalized predicate; the
  * deliberately bounded states/perState picker/HUD branch remains a fair sample
  * and never claims corpus completeness.
+ *
+ * Cost shape (papercusp-log-performance-remediation P-013). `payload` is the
+ * TOASTed polymorphic JSONB (~3 GB across ~250k rows), so every `payload->…`
+ * evaluated per in-scope row detoasts and decompresses the whole value. The
+ * per-row `scoped` projection carries only heap columns (severity is the STORED
+ * `severity_projection`, migration 1308), plus the spine join only when a filter
+ * or facet reads it. The page selects its keys first, ordered by
+ * the raw `updated_ts` so `hfc_updated_idx` serves it, and hydrates payload
+ * fields and the spine for those keys only. Measured on the live corpus
+ * (2026-10-01): page statement 277 ms mean → 27.7 ms.
  */
 import type {
   CompanionSummaryAggregateRow,
@@ -15,6 +25,10 @@ import {
   observationLaneExclusionSql,
   type OrgSql,
 } from '../work-items';
+import { deriveWorkItemPresentationStage, readImplementationReadiness } from '../harness/improvements/agent-review-policy';
+import type { WorkItemPresentation } from '../work-item-presentation-contract';
+import { activeWorkItemDependencyRefsSql } from '../dbos/work-item-deps-store';
+import { ALL_SUCCESSFUL_STATUSES, ALL_TERMINAL_STATUSES } from '../work-item-blocking';
 
 export const WORK_ITEMS_CURSOR_PAGE_LIMIT = 500;
 export const WORK_ITEMS_FAIR_STATE_LIMIT = 200;
@@ -86,6 +100,8 @@ export interface WorkItemsCompiledPredicate {
 
 export interface WorkItemsListRow {
   id: string;
+  harness?: string;
+  createdAt?: string;
   kind: string;
   family: 'feature' | 'issue';
   title: string;
@@ -103,6 +119,7 @@ export interface WorkItemsListRow {
   origin: string | null;
   auditVerdict: string | null;
   verifiedAuthorGithubUserId: number | null;
+  presentation?: WorkItemPresentation;
 }
 
 const uniq = (values: readonly string[] | undefined): string[] =>
@@ -259,7 +276,24 @@ function predicateSql(
     AND ${f.rankMax != null ? sql`s.rank <= ${f.rankMax}` : sql`TRUE`}`;
 }
 
-function scopedCtes(
+/** Issue-family kinds carry `_ei` severity / assigned_by in payload. */
+const issueKindSql = (sql: OrgSql) =>
+  sql`wi.item_kind = ANY(ARRAY['bug','change','task']::text[])`;
+
+type SqlFragment = ReturnType<typeof issueKindSql>;
+
+/**
+ * Heap column, no detoast: migration 1308 (P-013, WI-10004929) stores
+ * `CASE WHEN <issue kind> THEN COALESCE(payload->'_ei'->>'severity', 'minor') END`
+ * as the generated `severity_projection`, so every in-scope row can carry it.
+ */
+const severitySql = (sql: OrgSql) => sql`wi.severity_projection`;
+
+/** Detoasts `wi.payload`: evaluate per PAGE row only. */
+const assignedBySql = (sql: OrgSql) =>
+  sql`CASE WHEN ${issueKindSql(sql)} THEN wi.payload->'_ei'->>'assigned_by' ELSE NULL END`;
+
+function latestSpineCte(
   sql: OrgSql,
   workspaceId: string,
   args: NormalizedWorkItemsListArgs,
@@ -277,39 +311,204 @@ function scopedCtes(
          AND sa.feature_id IS NOT NULL
        ORDER BY sa.workspace_id, sa.harness_slug, sa.feature_id,
                 sa.started_at DESC NULLS LAST, sa.spawn_id DESC
-    ),
-    scoped AS (
+    )`;
+}
+
+interface ScopedNeeds {
+  /** Join the latest spine per in-scope row (stage filter or facet). */
+  spine: boolean;
+  /**
+   * The page reads `scoped` twice (non-NULL and NULL `updated_ts` branches) and
+   * must stay inlined so each branch keeps its index-ordered LIMIT; the summary
+   * reads it once per facet and must be computed once.
+   */
+  materialization: 'MATERIALIZED' | 'NOT MATERIALIZED';
+}
+
+/**
+ * One row per in-scope work item carrying ONLY what the predicate, the sort and
+ * the facets read. `spine_role` is a NULL placeholder unless `need.spine`;
+ * `predicateSql` reads it only when the stage filter is set.
+ * Requires `latest_spine` in the same WITH when `need.spine`.
+ */
+function scopedCte(
+  sql: OrgSql,
+  workspaceId: string,
+  args: NormalizedWorkItemsListArgs,
+  need: ScopedNeeds,
+) {
+  return sql`
+    scoped AS ${need.materialization === 'MATERIALIZED' ? sql`MATERIALIZED` : sql`NOT MATERIALIZED`} (
       SELECT wi.feature_id AS id,
+             wi.harness_slug,
              wi.item_kind AS kind,
-             CASE WHEN wi.item_kind = ANY(ARRAY['bug','change','task']::text[])
-                  THEN 'issue' ELSE 'feature' END AS family,
+             CASE WHEN ${issueKindSql(sql)} THEN 'issue' ELSE 'feature' END AS family,
              COALESCE(wi.title, '') AS title,
              COALESCE(wi.status, 'open') AS state,
              NULLIF(wi.taken_by, 'unassigned') AS assignee,
-             CASE WHEN wi.item_kind = ANY(ARRAY['bug','change','task']::text[])
-                  THEN wi.payload->'_ei'->>'assigned_by' ELSE NULL END AS assigned_by,
-             CASE WHEN wi.item_kind = ANY(ARRAY['bug','change','task']::text[])
-                  THEN COALESCE(wi.payload->'_ei'->>'severity', 'minor') ELSE NULL END AS severity,
+             ${severitySql(sql)} AS severity,
              wi.feature_order AS priority,
              wi.assignee_rank AS rank,
              wi.source_plan_slug AS plan_slug,
-             spine.child_role AS spine_role,
-             spine.status AS spine_status,
-             COALESCE(wi.updated_ts, 0)::bigint AS updated_ts,
-             wi.origin,
-             wi.audit_verdict,
-             wi.verified_author_github_user_id
+             ${need.spine ? sql`spine.child_role` : sql`NULL::text`} AS spine_role,
+             wi.updated_ts AS raw_updated_ts,
+             COALESCE(wi.updated_ts, 0)::bigint AS updated_ts
         FROM harness_shared.work_items wi
-        LEFT JOIN latest_spine spine
-          ON spine.workspace_id = wi.workspace_id
-         AND spine.harness_slug = wi.harness_slug
-         AND spine.feature_id = wi.feature_id
+        ${
+          need.spine
+            ? sql`LEFT JOIN latest_spine spine
+                    ON spine.workspace_id = wi.workspace_id
+                   AND spine.harness_slug = wi.harness_slug
+                   AND spine.feature_id = wi.feature_id`
+            : sql``
+        }
        WHERE ${workItemScopeSql(sql, workspaceId, args)}
     )`;
 }
 
+/**
+ * Attach the latest spine to the bounded key set `keys` (≤ page size). Joined
+ * here, against two small inputs, rather than in the final hydration: there
+ * the row estimate after the primary-key join collapses to ~1, and the planner
+ * chose a nested loop that rescanned the whole `latest_spine` CTE per page row
+ * (measured: 501 loops × 492 rows ≈ 85 ms of a 100 ms statement).
+ */
+function pageWithSpineSql(sql: OrgSql, keys: SqlFragment) {
+  return sql`
+    page AS MATERIALIZED (
+      SELECT k.*,
+             spine.child_role AS spine_role,
+             spine.status AS spine_status
+        FROM (${keys}) k
+        LEFT JOIN latest_spine spine
+          ON spine.harness_slug = k.harness_slug
+         AND spine.feature_id = k.id
+    )`;
+}
+
+/**
+ * Hydrate the bounded key set in CTE `page` (cheap scoped columns + spine) with
+ * the payload-derived columns. Only page rows are detoasted.
+ */
+function hydratePageSql(sql: OrgSql, workspaceId: string, includeDetails = false) {
+  return sql`
+    SELECT p.id,
+           p.harness_slug AS "harnessSlug",
+           p.kind,
+           p.family,
+           p.title,
+           ${includeDetails ? sql`COALESCE(wi.summary, '')` : sql`''::text`} AS summary,
+           ${includeDetails ? sql`wi.created_ts` : sql`NULL::bigint`} AS "createdTs",
+           p.state,
+           p.assignee,
+           ${assignedBySql(sql)} AS "assignedBy",
+           ${severitySql(sql)} AS severity,
+           p.priority,
+           p.rank,
+           p.plan_slug AS "planSlug",
+           p.spine_role AS "spineRole",
+           p.spine_status AS "spineStatus",
+           p.updated_ts AS "updatedTs",
+           wi.origin,
+           wi.audit_verdict AS "auditVerdict",
+           wi.verified_author_github_user_id AS "verifiedAuthorGithubUserId"
+      FROM page p
+      JOIN harness_shared.work_items wi
+        ON wi.workspace_id = ${workspaceId}
+       AND wi.harness_slug = p.harness_slug
+       AND wi.feature_id = p.id
+     ORDER BY p.updated_ts DESC, p.id DESC`;
+}
+
+const pageNeeds = (args: NormalizedWorkItemsListArgs): ScopedNeeds => ({
+  spine: args.filters.stages.length > 0,
+  materialization: 'NOT MATERIALIZED',
+});
+
+/**
+ * The newest-first cursor page. Order and keyset are on
+ * `COALESCE(updated_ts, 0)` (a NULL sorts as 0); the key scan is split so the
+ * non-NULL branch orders by the RAW column and `hfc_updated_idx` serves it,
+ * while the NULL branch (normally empty) uses the same index's NULL entries.
+ * Exported so the integration suite can EXPLAIN the production statement.
+ */
+export function workItemsPageSql(
+  sql: OrgSql,
+  workspaceId: string,
+  args: NormalizedWorkItemsListArgs,
+  includeDetails = false,
+) {
+  const take = args.limit + 1;
+  const cursor = args.cursor;
+  const nonNullKeyset = cursor
+    ? sql`s.raw_updated_ts <= ${cursor.updatedTs}::bigint
+          AND (s.raw_updated_ts, s.id) < (${cursor.updatedTs}::bigint, ${cursor.id}::text)`
+    : sql`TRUE`;
+  const nullKeyset = cursor
+    ? sql`(0::bigint, s.id) < (${cursor.updatedTs}::bigint, ${cursor.id}::text)`
+    : sql`TRUE`;
+  const keys = sql`
+    SELECT u.*
+      FROM (
+        (SELECT s.id, s.harness_slug, s.kind, s.family, s.title, s.state, s.assignee,
+                s.priority, s.rank, s.plan_slug, s.updated_ts
+           FROM scoped s
+          WHERE ${predicateSql(sql, args)}
+            AND s.raw_updated_ts IS NOT NULL
+            AND ${nonNullKeyset}
+          ORDER BY s.raw_updated_ts DESC, s.id DESC
+          LIMIT ${take})
+        UNION ALL
+        (SELECT s.id, s.harness_slug, s.kind, s.family, s.title, s.state, s.assignee,
+                s.priority, s.rank, s.plan_slug, s.updated_ts
+           FROM scoped s
+          WHERE ${predicateSql(sql, args)}
+            AND s.raw_updated_ts IS NULL
+            AND ${nullKeyset}
+          ORDER BY s.id DESC
+          LIMIT ${take})
+      ) u
+     ORDER BY u.updated_ts DESC, u.id DESC
+     LIMIT ${take}`;
+  return sql`
+    WITH ${latestSpineCte(sql, workspaceId, args)},
+    ${scopedCte(sql, workspaceId, args, pageNeeds(args))},
+    ${pageWithSpineSql(sql, keys)}
+    ${hydratePageSql(sql, workspaceId, includeDetails)}`;
+}
+
+/** Bounded per-state fair sample for pickers/HUD boards (never corpus-complete). */
+function workItemsFairStatesSql(
+  sql: OrgSql,
+  workspaceId: string,
+  args: NormalizedWorkItemsListArgs,
+) {
+  const keys = sql`
+    SELECT r.id, r.harness_slug, r.kind, r.family, r.title, r.state, r.assignee,
+           r.priority, r.rank, r.plan_slug, r.updated_ts
+      FROM (
+        SELECT s.*,
+               row_number() OVER (
+                 PARTITION BY s.state
+                 ORDER BY s.updated_ts DESC, s.id DESC
+               ) AS state_rank
+          FROM scoped s
+         WHERE ${predicateSql(sql, args)}
+           AND s.state = ANY(${args.fairStates}::text[])
+      ) r
+     WHERE r.state_rank <= ${args.perState}`;
+  return sql`
+    WITH ${latestSpineCte(sql, workspaceId, args)},
+    ${scopedCte(sql, workspaceId, args, pageNeeds(args))},
+    ${pageWithSpineSql(sql, keys)}
+    ${hydratePageSql(sql, workspaceId)}`;
+}
+
 interface WorkItemsDbRow {
   id: string;
+  harnessSlug: string;
+  summary?: string;
+  createdTs?: number | string | null;
   kind: string;
   family: 'feature' | 'issue';
   title: string;
@@ -338,10 +537,12 @@ function mapWorkItemsRow(row: WorkItemsDbRow): WorkItemsListRow & { updatedTs: n
   const updatedTs = numberOrNull(row.updatedTs) ?? 0;
   return {
     id: row.id,
+    harness: row.harnessSlug,
+    ...(row.createdTs != null ? { createdAt: new Date(numberOrNull(row.createdTs) ?? 0).toISOString() } : {}),
     kind: row.kind,
     family: row.family,
     title: row.title,
-    summary: '',
+    summary: row.summary ?? '',
     state: row.state,
     assignee: row.assignee,
     assignedBy: row.assignedBy,
@@ -359,66 +560,78 @@ function mapWorkItemsRow(row: WorkItemsDbRow): WorkItemsListRow & { updatedTs: n
   };
 }
 
-const selectListColumns = (sql: OrgSql) => sql`
-  id,
-  kind,
-  family,
-  title,
-  state,
-  assignee,
-  assigned_by AS "assignedBy",
-  severity,
-  priority,
-  rank,
-  plan_slug AS "planSlug",
-  spine_role AS "spineRole",
-  spine_status AS "spineStatus",
-  updated_ts AS "updatedTs",
-  origin,
-  audit_verdict AS "auditVerdict",
-  verified_author_github_user_id AS "verifiedAuthorGithubUserId"`;
+/** Reuse the acceptance classifier only for the bounded page (or one detail row).
+ * Full payloads and source bodies never enter the list wire or summary census.
+ */
+export async function readWorkItemPresentations(
+  sql: OrgSql,
+  workspaceId: string,
+  selected: readonly { id: string; harnessSlug: string }[],
+): Promise<Map<string, WorkItemPresentation>> {
+  if (selected.length === 0) return new Map();
+  const rows = await sql<{
+    id: string; harnessSlug: string; kind: string; status: string;
+    title: string; summary: string | null; payload: unknown;
+    assignee: string | null; terminalOwner: string | null;
+    terminalCompletionRef: string | null; completionAuthority: string | null; blocked: boolean;
+  }[]>`
+    WITH active_dependencies AS (${activeWorkItemDependencyRefsSql(sql, {
+      itemWorkspaceId: workspaceId,
+      successfulStates: [...ALL_SUCCESSFUL_STATUSES], terminalStates: [...ALL_TERMINAL_STATUSES],
+    })})
+    SELECT wi.feature_id AS id, wi.harness_slug AS "harnessSlug",
+           wi.item_kind AS kind, wi.status, wi.title, wi.summary,
+           -- Preserve absent versus enrolled-null readiness. Only narrow fields
+           -- needed by the shared classifier leave this bounded SQL read.
+           (CASE WHEN wi.payload ? 'implementationReadiness'
+             THEN jsonb_build_object('implementationReadiness', wi.payload->'implementationReadiness')
+             ELSE '{}'::jsonb END) || jsonb_build_object(
+             'lane', wi.payload->'lane', '_claimHold', wi.payload->'_claimHold',
+             'needsOwnerAction', wi.payload->'needsOwnerAction',
+             'humanCapability', wi.payload->'humanCapability',
+             'externalBlockers', wi.payload->'externalBlockers') AS payload,
+           wi.taken_by AS assignee, wi.terminal_owner AS "terminalOwner",
+           wi.terminal_completion_ref AS "terminalCompletionRef", wi.authority AS "completionAuthority",
+           EXISTS (SELECT 1 FROM active_dependencies d
+             WHERE d.blocked_ref IN (wi.feature_id, wi.harness_slug || '#' || wi.feature_id)) AS blocked
+      FROM harness_shared.work_items wi
+      JOIN unnest(${selected.map(r => r.id)}::text[], ${selected.map(r => r.harnessSlug)}::text[])
+        AS requested(id, harness) ON wi.feature_id = requested.id AND wi.harness_slug = requested.harness
+     WHERE wi.workspace_id = ${workspaceId} AND wi.item_kind = ANY(ARRAY['bug','change','task']::text[])`;
+  return new Map(rows.map((row): [string, WorkItemPresentation] => {
+    const decision = deriveWorkItemPresentationStage(row);
+    const readiness = readImplementationReadiness(row.payload);
+    const refs = readiness?.evidence?.acceptance?.evidence;
+    const evidenceRefs = Array.isArray(refs) ? refs : [];
+    return [`${row.harnessSlug}#${row.id}`, {
+      stage: decision.stage,
+      reason: decision.reason + (readiness?.reason ? `: ${readiness.reason.slice(0, 500)}` : ''),
+      evidenceRefs: evidenceRefs.filter((ref): ref is string => typeof ref === 'string').slice(0, 8).map(ref => ref.slice(0, 500)),
+      completionRef: row.terminalCompletionRef?.slice(0, 500) ?? null,
+    }];
+  }));
+}
 
 export async function readWorkItemsPageFromStore(
   sql: OrgSql,
   workspaceId: string,
   predicate: WorkItemsCompiledPredicate,
+  // Mobile retains the existing WorkItem summary/date contract; hydrate these
+  // fields only for bounded page keys, leaving the desktop's lean default intact.
+  options: { includeDetails?: boolean } = {},
 ): Promise<BoundedListPage<WorkItemsListRow>> {
   const args = predicate.args;
   if (args.fairStates.length > 0) {
-    const rows = await sql<WorkItemsDbRow[]>`
-      WITH ${scopedCtes(sql, workspaceId, args)},
-      ranked AS (
-        SELECT s.*,
-               row_number() OVER (
-                 PARTITION BY s.state
-                 ORDER BY s.updated_ts DESC, s.id DESC
-               ) AS state_rank
-          FROM scoped s
-         WHERE ${predicateSql(sql, args)}
-           AND s.state = ANY(${args.fairStates}::text[])
-      )
-      SELECT ${selectListColumns(sql)}
-        FROM ranked
-       WHERE state_rank <= ${args.perState}
-       ORDER BY updated_ts DESC, id DESC`;
-    return { rows: rows.map(mapWorkItemsRow), nextCursor: null, hasMore: false };
+    const rows = await sql<WorkItemsDbRow[]>`${workItemsFairStatesSql(sql, workspaceId, args)}`;
+    const presentations = await readWorkItemPresentations(sql, workspaceId, rows);
+    return { rows: rows.map(row => ({ ...mapWorkItemsRow(row), presentation: presentations.get(`${row.harnessSlug}#${row.id}`) })), nextCursor: null, hasMore: false };
   }
 
-  const rows = await sql<WorkItemsDbRow[]>`
-    WITH ${scopedCtes(sql, workspaceId, args)}
-    SELECT ${selectListColumns(sql)}
-      FROM scoped s
-     WHERE ${predicateSql(sql, args)}
-       AND ${
-         args.cursor
-           ? sql`(s.updated_ts, s.id) < (${args.cursor.updatedTs}::bigint, ${args.cursor.id}::text)`
-           : sql`TRUE`
-       }
-     ORDER BY s.updated_ts DESC, s.id DESC
-     LIMIT ${args.limit + 1}`;
+  const rows = await sql<WorkItemsDbRow[]>`${workItemsPageSql(sql, workspaceId, args, options.includeDetails)}`;
   const hasMore = rows.length > args.limit;
   const pageRows = hasMore ? rows.slice(0, args.limit) : rows;
-  const mapped = pageRows.map(mapWorkItemsRow);
+  const presentations = await readWorkItemPresentations(sql, workspaceId, pageRows);
+  const mapped = pageRows.map(row => ({ ...mapWorkItemsRow(row), presentation: presentations.get(`${row.harnessSlug}#${row.id}`) }));
   const tail = mapped[mapped.length - 1];
   return {
     rows: mapped.map(({ updatedTs: _updatedTs, ...row }) => row),
@@ -444,8 +657,12 @@ export async function readWorkItemsSummaryFromStore(
   predicate: WorkItemsCompiledPredicate,
 ): Promise<readonly CompanionSummaryAggregateRow[]> {
   const args = predicate.args;
+  // Every facet reads `scoped`, so it is computed once; stage is a facet, so the
+  // spine is joined per row. Severity is the stored heap column (migration 1308);
+  // no payload field is read here.
   const rows = await sql<WorkItemsAggregateDbRow[]>`
-    WITH ${scopedCtes(sql, workspaceId, args)},
+    WITH ${latestSpineCte(sql, workspaceId, args)},
+    ${scopedCte(sql, workspaceId, args, { spine: true, materialization: 'MATERIALIZED' })},
     totals AS (
       SELECT count(*)::int AS n FROM scoped
     ),

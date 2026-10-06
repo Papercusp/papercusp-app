@@ -35,6 +35,9 @@ export interface LaunchContextInput {
   planNow?: { state: string; next: string } | null;
   /** Controls which repo-specific shortcuts belong in the launch brief. */
   profile?: 'engineer' | 'power' | 'generic';
+  /** WI-10004449: the session's fleet role. A `leader` gets a lead-the-fleet first
+   *  move instead of the member "claim its next actionable item" line. */
+  fleetRole?: string | null;
 }
 
 /**
@@ -99,8 +102,12 @@ export function composeLaunchContext(input: LaunchContextInput): string {
     // positional-prompt seam, a server kickoff-derive miss, a future launcher), it
     // must START ON ITS OWN rather than park waiting to be told.
     lines.push(
-      `- **First move:** read \`${planSlug}\`, claim its next actionable item, and begin; a ` +
-        'plan-bound launch is already a work assignment.',
+      input.fleetRole === 'leader'
+        ? `- **First move:** you LEAD this plan's fleet — read \`${planSlug}\`, check that the fleet ` +
+            "claim spec selects its items and that members are claiming them; do not claim the plan's " +
+            'items yourself (WI-10004449).'
+        : `- **First move:** read \`${planSlug}\`, claim its next actionable item, and begin; a ` +
+            'plan-bound launch is already a work assignment.',
     );
   }
 

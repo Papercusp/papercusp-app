@@ -34,6 +34,7 @@ import {
   evaluateFrozenLineageShellCommand,
   frozenLineageShellCommandViolationPayload,
 } from '../../release/frozen-lineage-execution-policy';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
 import { repoHeadSha } from '../../harness/docs/git-runner';
 import { realpathSoft, resolveCapabilityIntegrationRoot } from '../capability/base-dir';
 
@@ -141,6 +142,7 @@ export default defineTool({
         : Promise.resolve(null),
       frozenLineageRoot
         ? evaluateFrozenLineageShellCommand(frozenLineageCommand, frozenLineageRoot, {
+            target: resolveHomeGateVerdictTarget(),
             readCheckoutHead: repoHeadSha,
             canonicalizePath: realpathSoft,
             readFrozenRepairQueue: () =>

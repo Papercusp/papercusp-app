@@ -5,7 +5,7 @@
 # the next projection (it cannot tell your edit from corruption), so it blocks the
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
 title: "The agent-policies doc is retired — binding rules live in the injected prompts"
-description: "On 2026-08-21 the owner (owner) directed retirement of /internal/docs/agent-policies. Its rules were superseded by (or folded into) the injected su playbook, the persona base, and the project CLAUDE.md; several sections had rotted into actively-wrong guidance. Where each surviving piece went, and why no agent should look for the page."
+description: "On 2026-08-21 the owner directed retirement of /internal/docs/agent-policies. Its rules were superseded by (or folded into) the injected su playbook, the persona base, and the project CLAUDE.md; several sections had rotted into actively-wrong guidance. Where each surviving piece went, and why no agent should look for the page."
 type: Insight
 discovered: 2026-08-21
 tags: ["retirement", "agent-policies", "prompts", "playbook", "docs"]
@@ -14,7 +14,7 @@ status: active
 
 ## What
 
-`/internal/docs/agent-policies` (doc_id `agent-policies.mdx`) was **removed on 2026-08-21 by owner directive** (owner: consolidate, then "remove it so we don't get confused in the future"; work-item WI-40258, investigation plan `su-agent-policies-injection-audit-2026-08-21`). The PG row was retired (`harness_docs:retire`), the source projection and served mirrors deleted, and every inbound pointer removed or repointed.
+`/internal/docs/agent-policies` (doc_id `agent-policies.mdx`) was **removed on 2026-08-21 by owner directive** (the owner: consolidate, then "remove it so we don't get confused in the future"; work-item WI-40258, investigation plan `su-agent-policies-injection-audit-2026-08-21`). The PG row was retired (`harness_docs:retire`), the source projection and served mirrors deleted, and every inbound pointer removed or repointed.
 
 ## Why it matters
 

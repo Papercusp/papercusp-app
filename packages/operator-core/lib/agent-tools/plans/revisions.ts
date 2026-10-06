@@ -159,45 +159,129 @@ export async function recordPlanRevisionInTransaction(
   tx: PlanRevisionSql,
   args: RecordPlanRevisionArgs & { workspaceId: string; harnessSlug: string },
 ): Promise<RecordedRevision> {
+  return insertRevisionInTransaction(tx, {
+    workspaceId: args.workspaceId,
+    harnessSlug: args.harnessSlug,
+    planSlug: args.planSlug,
+    content: args.content,
+    contentHash: args.contentHash,
+    rationale: args.rationale ?? null,
+    author: () => ({ kind: classifyAuthor(args.identity), id: args.identity.ownerId }),
+    sessionId: args.sessionId ?? null,
+    sessionKind: args.sessionKind ?? null,
+  });
+}
+
+/** System author of the revision a federated per-part recompose records (WI-10006275). */
+export const FEDERATED_RECOMPOSE_REVISION_AUTHOR = 'plan-parts:federated-recompose';
+/** System author of the revision a remote whole-blob BOOTSTRAP insert records (WI-10006275). */
+export const FEDERATED_BOOTSTRAP_REVISION_AUTHOR = 'plan-federation:whole-blob-bootstrap';
+/**
+ * System author of the revision a whole-blob UPDATE records when it changes an existing
+ * plan's bytes (WI-10006313: the flag-OFF `ON CONFLICT DO UPDATE` federation apply).
+ */
+export const FEDERATED_WHOLE_BLOB_REVISION_AUTHOR = 'plan-federation:whole-blob-apply';
+/**
+ * System authors for the scheduled-run instance writers, which write `harness_plans.content`
+ * with raw SQL outside `withPlanLock` (WI-10006321). They are the clone of a template into its
+ * `<template>@run-<token>` instance, and that instance's retirement.
+ */
+export const PLAN_RUN_INSTANCE_CLONE_REVISION_AUTHOR = 'plan-run:instance-clone';
+export const PLAN_RUN_INSTANCE_RETIRE_REVISION_AUTHOR = 'plan-run:instance-retire';
+/** System author for the built-in external-trigger flagship plan seed/refresh (WI-10006321). */
+export const FLAGSHIP_PLAN_SEED_REVISION_AUTHOR = 'external-triggers:flagship-plan-seed';
+/** System author for the lazily materialised ad-hoc spec-scope plan row (WI-10006321). */
+export const ADHOC_SPEC_SCOPE_REVISION_AUTHOR = 'plan-spec:adhoc-scope';
+
+/**
+ * Append one SYSTEM-attributed revision using an already-open transaction, for a
+ * writer that changes a plan's bytes with no agent identity behind it (WI-10006275:
+ * the federated per-part recompose, which rewrites `harness_plans.content` outside
+ * `withPlanLock`). Same contract as `recordPlanRevisionInTransaction`: the caller
+ * already holds the plan lock (order: plan lock, then the revision lock taken here),
+ * and any failure throws so the enclosing write rolls back with it — the bytes and
+ * their revision commit together or not at all.
+ */
+export async function recordSystemPlanRevisionInTransaction(
+  tx: PlanRevisionSql,
+  args: {
+    workspaceId: string;
+    harnessSlug: string;
+    planSlug: string;
+    content: string;
+    contentHash?: string;
+    rationale: string;
+    authorId: string;
+  },
+): Promise<RecordedRevision> {
+  return insertRevisionInTransaction(tx, {
+    workspaceId: args.workspaceId,
+    harnessSlug: args.harnessSlug,
+    planSlug: args.planSlug,
+    content: args.content,
+    contentHash: args.contentHash,
+    rationale: args.rationale,
+    author: () => ({ kind: 'system', id: args.authorId }),
+    sessionId: null,
+    sessionKind: null,
+  });
+}
+
+/** The one in-transaction `plan_revisions` INSERT, shared by the agent and system writers. */
+async function insertRevisionInTransaction(
+  tx: PlanRevisionSql,
+  row: {
+    workspaceId: string;
+    harnessSlug: string;
+    planSlug: string;
+    content: string;
+    contentHash: string | undefined;
+    rationale: string | null;
+    /** Resolved inside the try so a bad identity surfaces as PlanRevisionUnavailableError. */
+    author: () => { kind: PlanRevisionAuthorKind | 'system'; id: string };
+    sessionId: string | null;
+    sessionKind: PlanRevisionSessionKind | null;
+  },
+): Promise<RecordedRevision> {
   try {
-    const contentHash = args.contentHash ?? hashPlanContent(args.content);
-    const authorKind = classifyAuthor(args.identity);
+    const contentHash = row.contentHash ?? hashPlanContent(row.content);
+    const author = row.author();
     const createdAt = Date.now();
     // The enclosing plan lock serializes ordinary plan writers, while this
     // separate lock also coordinates with post-commit best-effort writers for
     // the same revision spine.
-    await acquirePlanRevisionAdvisoryLock(tx, args.workspaceId, args.harnessSlug, args.planSlug);
+    await acquirePlanRevisionAdvisoryLock(tx, row.workspaceId, row.harnessSlug, row.planSlug);
     const rows = await tx<{ seq: number }[]>`
       INSERT INTO harness_shared.plan_revisions (
         workspace_id, harness_slug, plan_slug, seq, content_hash, content_snapshot, rationale,
         author_kind, author_id, session_id, session_kind, created_at
       )
       SELECT
-        ${args.workspaceId},
-        ${args.harnessSlug},
-        ${args.planSlug},
+        ${row.workspaceId},
+        ${row.harnessSlug},
+        ${row.planSlug},
         COALESCE(MAX(seq), 0) + 1,
         ${contentHash},
-        ${args.content},
-        ${args.rationale ?? null},
-        ${authorKind},
-        ${args.identity.ownerId},
-        ${args.sessionId ?? null},
-        ${args.sessionKind ?? null},
+        ${row.content},
+        ${row.rationale},
+        ${author.kind},
+        ${author.id},
+        ${row.sessionId},
+        ${row.sessionKind},
         ${createdAt}
       FROM harness_shared.plan_revisions
-      WHERE workspace_id = ${args.workspaceId}
-        AND harness_slug = ${args.harnessSlug} AND plan_slug = ${args.planSlug}
+      WHERE workspace_id = ${row.workspaceId}
+        AND harness_slug = ${row.harnessSlug} AND plan_slug = ${row.planSlug}
       RETURNING seq
     `;
-    const row = rows[0];
-    if (!row) {
-      throw new Error(`plan_revisions: failed to insert revision for ${args.planSlug}`);
+    const inserted = rows[0];
+    if (!inserted) {
+      throw new Error(`plan_revisions: failed to insert revision for ${row.planSlug}`);
     }
-    return { seq: Number(row.seq), contentHash };
+    return { seq: Number(inserted.seq), contentHash };
   } catch (error) {
     if (error instanceof PlanRevisionUnavailableError) throw error;
-    throw new PlanRevisionUnavailableError(args.planSlug, error);
+    throw new PlanRevisionUnavailableError(row.planSlug, error);
   }
 }
 

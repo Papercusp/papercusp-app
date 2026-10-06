@@ -2,22 +2,45 @@
 import { defineTool } from '@papercusp/agent-mcp';
 import { activeWorkspaceId } from '../../../workspace-registry';
 import { committedRouteResponse } from '../../route-stack';
+import { createSuSessionEventResponse } from '../../../su-session-host';
 import {
-  SuSessionHostError,
-  createSuSessionEventResponse,
-  getRegisteredSuSessionHost,
-  rehydrateRegisteredSuSessionHost,
-} from '../../../su-session-host';
-import { readDurableSuSession } from '../../../su-session-persistence';
-import { detachSuClientLease } from '../../../su-session-client-lease';
+  SU_SESSION_SERVED_BY_HEADER,
+  createForwardedSuSessionEventResponse,
+  localHost,
+  resolveSuSessionRoute,
+  runRoutedSuSessionOp,
+  type SuSessionAddress,
+  type SuSessionHostOp,
+} from '../../../su-session-owner-routing';
 
-async function hostFor(slug: string, chatId: string) {
-  const input = {
-    workspaceId: activeWorkspaceId(),
-    harnessSlug: slug,
-    agentChatId: chatId,
-  };
-  return getRegisteredSuSessionHost(input) ?? (await rehydrateRegisteredSuSessionHost(input));
+// WI-10003879: every handler below routes through su-session-owner-routing, so
+// on a clustered operator the worker that holds the session's engine answers,
+// not whichever worker SO_REUSEPORT happened to pick.
+
+type RouteParams = Record<string, string>;
+
+function addressOf(params: RouteParams): SuSessionAddress {
+  return { workspaceId: activeWorkspaceId(), harnessSlug: params.slug, agentChatId: params.chatId };
+}
+
+const NOT_ATTACHED = {
+  error: 'no SU session is attached to this agent chat',
+  code: 'su_session_not_attached',
+};
+
+async function routed(
+  params: RouteParams,
+  request: Exclude<SuSessionHostOp, { op: 'events' }>,
+): Promise<Response> {
+  const outcome = await runRoutedSuSessionOp(addressOf(params), request);
+  if (outcome instanceof Response) return outcome;
+  const response = Response.json(outcome.result.body, {
+    status: outcome.result.status,
+    headers: { [SU_SESSION_SERVED_BY_HEADER]: outcome.servedBy },
+  });
+  // acceptCommand reserves owner turns before returning an acceptance.
+  // A route watchdog cannot undo that committed turn or its receipt.
+  return outcome.result.committed ? committedRouteResponse(response) : response;
 }
 
 const snapshotRoute = defineTool({
@@ -25,25 +48,7 @@ const snapshotRoute = defineTool({
   path: '/harness/:slug/agent-chats/:chatId/su-session',
   auth: 'public',
   async handler(_request, context) {
-    const host = await hostFor(context.params.slug, context.params.chatId);
-    if (!host) {
-      return Response.json(
-        {
-          error: 'no SU session is attached to this agent chat',
-          code: 'su_session_not_attached',
-        },
-        { status: 404 },
-      );
-    }
-    // pui-chat-first-ux P-010: PUI scopes /resume and its startup reattach to
-    // the directory it was started in, so the snapshot names the directory this
-    // session was launched in. `null` = not recorded (e.g. a psu launch without
-    // a caller directory), which PUI treats as "unknown", never "matches".
-    const record = await readDurableSuSession({
-      agentChatId: context.params.chatId,
-      workspaceId: activeWorkspaceId(),
-    });
-    return Response.json({ ok: true, ...host.snapshot(), launchCwd: record?.cwd ?? null });
+    return routed(context.params, { op: 'snapshot' });
   },
 });
 
@@ -52,17 +57,18 @@ const eventsRoute = defineTool({
   path: '/harness/:slug/agent-chats/:chatId/su-session/events',
   auth: 'public',
   async handler(request, context) {
-    const host = await hostFor(context.params.slug, context.params.chatId);
-    if (!host) {
-      return Response.json(
-        {
-          error: 'no SU session is attached to this agent chat',
-          code: 'su_session_not_attached',
-        },
-        { status: 404 },
-      );
+    const address = addressOf(context.params);
+    const route = await resolveSuSessionRoute(address);
+    if (route.kind === 'remote') {
+      const forwarded = await createForwardedSuSessionEventResponse(request, address, route.owner);
+      if (forwarded) return forwarded;
+      // The owner is gone or no longer holds it: serve the durable row here.
+      const fallback = await localHost(address);
+      if (fallback) return createSuSessionEventResponse(request, fallback);
+      return Response.json(NOT_ATTACHED, { status: 404 });
     }
-    return createSuSessionEventResponse(request, host);
+    if (route.kind === 'absent') return Response.json(NOT_ATTACHED, { status: 404 });
+    return createSuSessionEventResponse(request, route.host);
   },
 });
 
@@ -71,53 +77,13 @@ const commandRoute = defineTool({
   path: '/harness/:slug/agent-chats/:chatId/su-session/commands',
   auth: 'loopback',
   async handler(request, context) {
-    const host = await hostFor(context.params.slug, context.params.chatId);
-    if (!host) {
-      return Response.json(
-        {
-          error: 'no SU session is attached to this agent chat',
-          code: 'su_session_not_attached',
-        },
-        { status: 404 },
-      );
-    }
     let body: unknown;
     try {
       body = await request.json();
     } catch {
       return Response.json({ error: 'invalid JSON command body', code: 'invalid_command' }, { status: 400 });
     }
-    try {
-      const dispatch = await host.acceptCommand(body);
-      if (!dispatch.accepted) {
-        return Response.json(
-          {
-            ok: false,
-            replayed: dispatch.replayed,
-            terminal: await dispatch.terminal,
-          },
-          { status: 409 },
-        );
-      }
-      const response = Response.json(
-        {
-          ok: true,
-          replayed: dispatch.replayed,
-          accepted: dispatch.accepted,
-        },
-        { status: 202 },
-      );
-      // acceptCommand reserves owner turns before returning an acceptance.
-      // A route watchdog cannot undo that committed turn or its receipt.
-      return dispatch.accepted.commandType === 'owner_turn'
-        ? committedRouteResponse(response)
-        : response;
-    } catch (error) {
-      if (error instanceof SuSessionHostError) {
-        return Response.json({ error: error.message, code: error.code }, { status: error.status });
-      }
-      return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
-    }
+    return routed(context.params, { op: 'command', body });
   },
 });
 
@@ -131,23 +97,7 @@ const detachRoute = defineTool({
   path: '/harness/:slug/agent-chats/:chatId/su-session/detach',
   auth: 'loopback',
   async handler(_request, context) {
-    const host = await hostFor(context.params.slug, context.params.chatId);
-    if (!host) {
-      return Response.json(
-        { error: 'no SU session is attached to this agent chat', code: 'su_session_not_attached' },
-        { status: 404 },
-      );
-    }
-    if (host.snapshot().terminal) {
-      return Response.json(
-        { error: 'this session has already ended', code: 'session_terminal' },
-        { status: 409 },
-      );
-    }
-    const detached = await detachSuClientLease(host.descriptor().identity.advSessionId);
-    return detached
-      ? Response.json({ ok: true, detached: true })
-      : Response.json({ error: 'this session has already ended', code: 'session_terminal' }, { status: 409 });
+    return routed(context.params, { op: 'detach' });
   },
 });
 

@@ -108,6 +108,29 @@ export function isLegacyGovernorReceiptSnapshotValue(value: unknown): boolean {
 }
 
 /**
+ * Resolve a pre-829 bare engineer-issue key only when the authenticated row value
+ * proves its physical target. The scope field drives the projection write; the
+ * separate harness_slug field is only the federation routing slug and may name a
+ * different harness. Operator rows do not carry enough physical identity here.
+ */
+function qualifiedKeyForBareEngineerIssue(value: unknown, hbKey: string): string | null {
+  const row = record(value);
+  if (!row || !hbKey || row.issue_id !== hbKey || typeof row.scope !== 'string') return null;
+  if (!row.scope.startsWith('harness:')) return null;
+  const storageHarnessSlug = row.scope.slice('harness:'.length);
+  if (!storageHarnessSlug || storageHarnessSlug.includes('/')) return null;
+  if (
+    row.storage_harness_slug !== undefined &&
+    (typeof row.storage_harness_slug !== 'string' ||
+      !row.storage_harness_slug ||
+      row.storage_harness_slug !== storageHarnessSlug)
+  ) {
+    return null;
+  }
+  return `${storageHarnessSlug}/${hbKey}`;
+}
+
+/**
  * Fail-safe drop decision. Bare legacy keys, malformed values, rows without a
  * measured source index, post-census appends, non-receipts, currently-live
  * receipt keys, and envelopes that cannot be opened are all retained.
@@ -125,22 +148,31 @@ export function shouldDropGovernorReceiptSnapshotRow(
   if (context.table !== ENGINEER_ISSUES_SNAPSHOT_TABLE) return false;
   if (!Number.isSafeInteger(context.sourceIndex) || context.sourceIndex! < 0) return false;
   if (context.sourceIndex! >= filter.maxSourceIndexExclusive) return false;
-  // Pre-829 bare keys cannot identify a physical row safely. Keep them.
-  if (context.hbKey.indexOf('/') <= 0) return false;
-  if (liveQualifiedKeys.has(context.hbKey)) return false;
-  if (isLegacyGovernorReceiptSnapshotValue(value)) return true;
-  // D-024: own-log content rows are hive-epoch envelopes; judge the plaintext.
-  const plaintext = openEnvelope?.(value, context);
-  if (!plaintext) return false;
-  const bytes = Buffer.isBuffer(plaintext)
-    ? plaintext
-    : Buffer.from(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
-  if (bytes.indexOf(RESOURCE_GOVERNOR_KEY_BYTES) < 0) return false;
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(bytes.toString('utf8'));
-  } catch {
-    return false;
+  const qualified = context.hbKey.indexOf('/') > 0;
+  // Current qualified rows need no decrypt. A bare alias must be opened first
+  // because its value carries the only available physical-scope proof.
+  if (qualified && liveQualifiedKeys.has(context.hbKey)) return false;
+
+  let receiptValue = value;
+  if (!isLegacyGovernorReceiptSnapshotValue(receiptValue)) {
+    // D-024: own-log content rows are hive-epoch envelopes; judge authenticated plaintext.
+    const plaintext = openEnvelope?.(value, context);
+    if (!plaintext) return false;
+    const bytes = Buffer.isBuffer(plaintext)
+      ? plaintext
+      : Buffer.from(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
+    if (bytes.indexOf(RESOURCE_GOVERNOR_KEY_BYTES) < 0) return false;
+    try {
+      receiptValue = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      return false;
+    }
+    if (!isLegacyGovernorReceiptSnapshotValue(receiptValue)) return false;
   }
-  return isLegacyGovernorReceiptSnapshotValue(decoded);
+
+  const physicalKey = qualified
+    ? context.hbKey
+    : qualifiedKeyForBareEngineerIssue(receiptValue, context.hbKey);
+  if (!physicalKey || liveQualifiedKeys.has(physicalKey)) return false;
+  return true;
 }

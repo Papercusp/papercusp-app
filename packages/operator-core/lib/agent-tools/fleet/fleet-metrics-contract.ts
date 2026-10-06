@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import type { FleetPopulationLifecycleSnapshot } from './fleet-population';
 import { COUNT_EVIDENCE_COMPARISON_RULE } from '../../count-evidence-contract';
+import { WORK_ITEM_PRESENTATION_STAGES } from '../../work-item-presentation-contract';
 
 export const FLEET_METRICS_SCHEMA_VERSION = 'fleet-metrics-v1' as const;
 
@@ -339,6 +340,107 @@ const issueUnitsSchema = z
     }
   });
 
+/**
+ * P-001 (feature-drain-delivery-readiness-and-outcome-accounting-2026-10-01, R-1/R-11..R-14).
+ *
+ * The flow/authority blocks above count ISSUE-family rows only, so a feature fleet whose
+ * claim spec admits only feature rows read `terminal 0` while it was closing features
+ * (WI-10004580: four committed + two proposed feature closes were invisible). Feature
+ * outcomes are therefore their own population: only feature-family closes count, the
+ * supporting tasks/bugs closed in the same window are listed apart and never added in,
+ * every close is labelled fleet-done / inherited / unknown, and authority stays partitioned
+ * so a proposed close is never a committed outcome.
+ */
+export const FLEET_METRIC_FEATURE_INHERITED_CLAIM_TO_CLOSE_MAX_MS = 2 * 60 * 60 * 1000;
+
+export const FLEET_METRIC_FEATURE_ORIGIN_RULE =
+  'inherited = work history shows a worker outside the fleet ever-member cohort before the closing claim AND closedAt minus that closing claim is at most claimToCloseMaxMs; fleet-done = history present otherwise; unknown = no work history recorded for the row' as const;
+
+export const FLEET_METRIC_PAUSED_TIME_RULE =
+  'workingMs = windowMs - pausedMs, where pausedMs is the union of fleet pause/wind-down intervals clipped to the window' as const;
+
+const unknownMeasureSchema = z.object({
+  status: z.literal('unknown'),
+  reason: nonEmpty,
+  recoverVia: nonEmpty,
+});
+
+const featureOriginSchema = z.object({
+  fleetDone: nonNegativeInt,
+  inherited: nonNegativeInt,
+  unknown: nonNegativeInt,
+  partitionsLifecycleTerminal: z.literal(true),
+  claimToCloseMaxMs: z.literal(FLEET_METRIC_FEATURE_INHERITED_CLAIM_TO_CLOSE_MAX_MS),
+  rule: z.literal(FLEET_METRIC_FEATURE_ORIGIN_RULE),
+  historyWriter: z.literal('harness_shared.work_items.worked_by_history'),
+});
+
+const featureSupportingSchema = z
+  .object({
+    unit: z.literal('distinct canonical issue-family work-item ids'),
+    tasks: nonNegativeInt,
+    bugs: nonNegativeInt,
+    other: nonNegativeInt,
+    total: nonNegativeInt,
+    countedInFeatureOutcomes: z.literal(false),
+  })
+  .superRefine((supporting, ctx) => {
+    if (supporting.tasks + supporting.bugs + supporting.other !== supporting.total) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['total'], message: 'supporting buckets must sum to total' });
+    }
+  });
+
+export const fleetFeatureOutcomesSchema = z.discriminatedUnion('status', [
+  unknownMeasureSchema,
+  z
+    .object({
+      status: z.literal('measured'),
+      unit: z.literal('distinct canonical feature-family work-item ids'),
+      population: z.literal('feature-family-lifecycle-terminal-in-window'),
+      closes: authorityPartitionSchema,
+      origin: featureOriginSchema,
+      shipped: z.discriminatedUnion('status', [
+        z.object({ status: z.literal('measured'), count: nonNegativeInt }),
+        unknownMeasureSchema,
+      ]),
+      supporting: featureSupportingSchema,
+    })
+    .superRefine((outcomes, ctx) => {
+      const { fleetDone, inherited, unknown } = outcomes.origin;
+      if (fleetDone + inherited + unknown !== outcomes.closes.lifecycleTerminal) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['origin'],
+          message: 'origin buckets must partition closes.lifecycleTerminal',
+        });
+      }
+    }),
+]);
+
+export const fleetPausedTimeSchema = z.discriminatedUnion('status', [
+  unknownMeasureSchema,
+  z
+    .object({
+      status: z.literal('measured'),
+      windowMs: nonNegativeInt,
+      pausedMs: nonNegativeInt,
+      workingMs: nonNegativeInt,
+      intervalCount: nonNegativeInt,
+      openAtGeneratedAt: z.boolean(),
+      source: z.literal('harness_shared.tool_invocations fleet:pause|fleet:wind-down -> fleet:resume'),
+      rule: z.literal(FLEET_METRIC_PAUSED_TIME_RULE),
+    })
+    .superRefine((paused, ctx) => {
+      if (paused.pausedMs + paused.workingMs !== paused.windowMs) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['workingMs'],
+          message: 'workingMs must equal windowMs - pausedMs',
+        });
+      }
+    }),
+]);
+
 export const fleetMetricsSnapshotSchema = z
   .object({
     schemaVersion: z.literal(FLEET_METRICS_SCHEMA_VERSION),
@@ -358,9 +460,32 @@ export const fleetMetricsSnapshotSchema = z
     remaining: remainingSchema,
     authority: authorityPartitionSchema,
     issueUnits: issueUnitsSchema,
+    intakeStages: z.object({
+      population: nonNegativeInt,
+      unit: z.literal('work-item rows'),
+      counts: z.record(z.enum(WORK_ITEM_PRESENTATION_STAGES), nonNegativeInt),
+      remainingBugs: nonNegativeInt,
+      verifiedCompletions: nonNegativeInt,
+      mutuallyExclusive: z.literal(true),
+      writer: z.literal('deriveWorkItemPresentationStage'),
+      scope: z.literal('current-spec issue-family rows including observation evidence'),
+      window: z.literal('current stock at generatedAt'),
+    }).superRefine((report, ctx) => {
+      if (WORK_ITEM_PRESENTATION_STAGES.reduce((sum, stage) => sum + (report.counts[stage] ?? 0), 0) !== report.population
+        || WORK_ITEM_PRESENTATION_STAGES.some(stage => report.counts[stage] === undefined)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['counts'], message: 'intake stages must partition the declared population once' });
+      }
+      if (report.verifiedCompletions !== report.counts['verified-completion']) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['verifiedCompletions'], message: 'verified delivery must equal the verified-completion stage' });
+      }
+    }).optional(),
     // Optional for backwards-compatible parsing of pre-P-004 snapshots; the
     // canonical resolver and burn-down writer always emit it for fleet reads.
     populationLifecycle: z.custom<FleetPopulationLifecycleSnapshot>().optional(),
+    // P-001: optional only so pre-P-001 snapshots still parse; buildFleetMetricsResult
+    // always emits both, as `unknown` (never zero) when the population was not measured.
+    featureOutcomes: fleetFeatureOutcomesSchema.optional(),
+    pausedTime: fleetPausedTimeSchema.optional(),
     admissionParity: z.object({
       oracle: z.literal(FLEET_METRIC_ADMISSION_PARITY.oracle),
       filterEvaluator: z.literal(FLEET_METRIC_ADMISSION_PARITY.filterEvaluator),
@@ -451,6 +576,8 @@ export type FleetMetricScope = z.infer<typeof fleetMetricScopeSchema>;
 export type FleetMetricQuality = z.infer<typeof fleetMetricQualitySchema>;
 export type FleetMetricsSnapshot = z.infer<typeof fleetMetricsSnapshotSchema>;
 export type FleetMetricsResult = z.infer<typeof fleetMetricsResultSchema>;
+export type FleetFeatureOutcomes = z.infer<typeof fleetFeatureOutcomesSchema>;
+export type FleetPausedTime = z.infer<typeof fleetPausedTimeSchema>;
 
 export function parseFleetMetricsResult(value: unknown): FleetMetricsResult {
   return fleetMetricsResultSchema.parse(value);

@@ -14,7 +14,7 @@ use crate::models::{
     RosterEntry, SessionTranscriptResolution, SessionTranscriptTurn, TestingDomain, ToolPaletteHit,
     ToolPaletteRecipe, TuiPaneContribution, ViewState, WorkFrontier, WorkItem,
 };
-use crossterm::event::{self, Event as CtEvent, KeyEvent};
+use crossterm::event::{self, Event as CtEvent, KeyEvent, MouseEvent};
 use pui_companion_proto::Topology;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -75,6 +75,14 @@ pub enum Event {
     /// the terminal is below the supported minimum (`ui::too_small`); ratatui
     /// still re-reads the size itself on each draw.
     Resize(u16, u16),
+    /// A mouse wheel notch or a left-button press, drag or release
+    /// (pui-chat-first-ux P-018). Only the chat-first surface turns mouse
+    /// reporting on (main.rs), because without it the terminal turns the wheel
+    /// into Up/Down keys on the alternate screen, which in the message box
+    /// cycle your sent messages instead of scrolling the conversation. Pointer
+    /// motion and the other buttons are dropped by the reader, so moving the
+    /// mouse wakes nothing.
+    Mouse(MouseEvent),
     /// Idle tick (emitted when no input arrives within the poll window).
     Tick,
     /// A signal asked pui to stop: SIGHUP when its terminal closes, SIGTERM,
@@ -462,6 +470,16 @@ pub enum Event {
         owner_turn_ids: Vec<String>,
         approvals: Vec<crate::models::PendingApproval>,
     },
+    /// The conversation LIST alone refreshed (P-027 G-12): updates the /resume
+    /// inventory without touching the open conversation, unlike
+    /// `AgentChatLoaded`.
+    AgentChatListLoaded {
+        harness: String,
+        summaries: Vec<crate::agent_chats::AgentChatSummary>,
+    },
+    /// Listing this pot's conversations failed (P-027 G-12). The /resume
+    /// picker says so in plain words instead of loading forever.
+    AgentChatListFailed { harness: String, message: String },
     /// A parked historical HITL request was decided through the resolve POST.
     AgentChatApprovalResolved { call_id: String, approved: bool },
     /// A PUI SU-session create/attach completed through launch-su.  The
@@ -594,6 +612,22 @@ pub enum VoiceMsg {
     Error(String),
 }
 
+/// The mouse events the app acts on (P-018): the wheel, and the left button's
+/// press, drag and release, which make a text selection. Mouse capture reports
+/// every pointer move as well; forwarding those would wake the update loop on
+/// each one for nothing.
+pub fn mouse_event_wanted(m: &MouseEvent) -> bool {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    matches!(
+        m.kind,
+        MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
+    )
+}
+
 /// Spawn the blocking input reader. Emits `Key` on input and `Tick` otherwise,
 /// so the loop stays responsive without a busy-wait. Returns when the channel
 /// receiver is dropped.
@@ -623,6 +657,7 @@ pub fn spawn_input_listener(tx: UnboundedSender<Event>) {
                     // we believe is held — see Event::FocusLost.
                     Ok(CtEvent::FocusLost) => Some(Event::FocusLost),
                     Ok(CtEvent::Resize(cols, rows)) => Some(Event::Resize(cols, rows)),
+                    Ok(CtEvent::Mouse(m)) if mouse_event_wanted(&m) => Some(Event::Mouse(m)),
                     _ => None,
                 };
                 if let Some(ev) = ev {
@@ -639,4 +674,42 @@ pub fn spawn_input_listener(tx: UnboundedSender<Event>) {
             Err(_) => break,
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mouse_event_wanted;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    fn at(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 4,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// pui-chat-first-ux P-018: the wheel and the left button reach the app;
+    /// pointer motion and the other buttons stay in the reader.
+    #[test]
+    fn only_the_wheel_and_the_left_button_are_forwarded() {
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert!(mouse_event_wanted(&at(kind)), "{kind:?} is dropped");
+        }
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Drag(MouseButton::Middle),
+            MouseEventKind::ScrollLeft,
+        ] {
+            assert!(!mouse_event_wanted(&at(kind)), "{kind:?} is forwarded");
+        }
+    }
 }

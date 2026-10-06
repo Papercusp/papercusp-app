@@ -385,6 +385,7 @@ export function reconcileStampedAuthority(input: {
   const contentIdentityDowngrade =
     input.inProcessContentIdentityMissing ||
     (stampedAuthority === 'proposed' &&
+      input.computed === 'committed' &&
       input.authorityByEvidence === 'committed' &&
       input.declaredFilesCount > 0);
   return {

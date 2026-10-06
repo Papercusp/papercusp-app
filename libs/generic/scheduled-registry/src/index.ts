@@ -63,10 +63,38 @@ export type TimerClassification = 'must-sample' | 'timeout-reaper' | 'violation'
 
 export interface ManagedTimerOptions {
   category: ManagedCategory;
+  /** Keep a one-shot CLI alive until its owner calls stop(); background timers default to unref. */
+  ref?: boolean;
   /** Heavy ticks shed a cycle under load when the injected shouldShed(name) returns true. Light ticks omit it. */
   shed?: boolean;
   /** Also run ONCE immediately on arm (heal-on-startup), not only after the first interval. */
   fireOnArm?: boolean;
+  /**
+   * Which phase the recurrence keeps across host restarts (WI-10005289).
+   *
+   * `'arm'` is bare `setInterval`: the first fire is at `armedAt + intervalMs`. The registry
+   * is in-memory, so EVERY restart pushes the next fire a full interval out. A host that
+   * restarts more often than the interval never fires the timer at all. Measured on the
+   * bg-host 2026-10-02: 20 restarts in 8h (median uptime ~13 min), and every 30–240 min timer
+   * there, including the hourly wedged-identity sweep and the pot git-gc routines, read
+   * `fires=0`.
+   *
+   * `'aligned'` re-phases onto a stable wall-clock slot: epoch-aligned, offset by a hash of
+   * the NAME so different timers do not herd onto the same instant. A restart then loses at
+   * most the slot that falls inside its own downtime. The arm-time `setInterval` is still
+   * armed exactly as in `'arm'` (so the first fire is never LATER than before); the one-shot
+   * re-phase at the slot replaces it. A slot within `ALIGNED_PHASE_WARMUP_MS` of arm, or of
+   * the arm-phase fire, is skipped, so a fire never lands in the startup ramp.
+   *
+   * Default: `'aligned'` for a non-instanced timer whose interval is at least
+   * `ALIGNED_PHASE_MIN_INTERVAL_MS`, otherwise `'arm'`. Instanced per-connection timers are
+   * never aligned, because alignment would herd every socket's keepalive onto one instant.
+   * Inside a Vitest worker the DEFAULT alignment stays off unless the timeout seam is injected
+   * or `allowInTest` is set, so a consumer's fake-timer test keeps the deterministic
+   * `armedAt + n·interval` schedule it was written against. An explicit `'aligned'` is always
+   * honoured.
+   */
+  phase?: 'aligned' | 'arm';
   /**
    * Allow MANY live timers under one `name` (per-connection lifecycle timers — a WS/SSE
    * keepalive armed per socket). Without this, re-arming a name stops the previous timer
@@ -330,10 +358,54 @@ function makeTick(name: string, fn: () => void | Promise<void>, opts: ManagedTim
   };
 }
 
+/** A non-instanced timer at or above this interval defaults to `phase: 'aligned'` (WI-10005289). */
+export const ALIGNED_PHASE_MIN_INTERVAL_MS = 15 * 60_000;
+
+/** An aligned slot closer than this to arm (startup ramp) or to the arm-phase fire is skipped. */
+export const ALIGNED_PHASE_WARMUP_MS = 2 * 60_000;
+
+/** FNV-1a 32-bit, so a timer's slot offset is stable across processes and restarts. */
+function nameHash(name: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i += 1) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+/**
+ * Milliseconds from `nowMs` until `name`'s next wall-clock slot for `intervalMs`, in
+ * `[0, intervalMs)`. Slots are `k·intervalMs + (hash(name) mod intervalMs)` since the epoch,
+ * so every process computes the same slots for the same timer whenever it was armed.
+ */
+export function alignedSlotDelayMs(name: string, intervalMs: number, nowMs: number): number {
+  if (!(intervalMs > 0)) return 0;
+  const offset = nameHash(name) % intervalMs;
+  const phase = (((nowMs - offset) % intervalMs) + intervalMs) % intervalMs;
+  return phase === 0 ? 0 : intervalMs - phase;
+}
+
+/**
+ * The delay at which to re-phase this timer onto its aligned slot, or null to keep arm phase.
+ * See `ManagedTimerOptions.phase` for the default and the Vitest rule.
+ */
+function alignedRephaseDelayMs(name: string, intervalMs: number, opts: ManagedTimerOptions, instanced: boolean): number | null {
+  if (instanced || opts.phase === 'arm') return null;
+  if (opts.phase !== 'aligned') {
+    if (intervalMs < ALIGNED_PHASE_MIN_INTERVAL_MS) return null;
+    if (inVitestWorker() && !opts.allowInTest && state.resolved.setTimeoutImpl === defaultSetTimeoutImpl) return null;
+  }
+  const delay = alignedSlotDelayMs(name, intervalMs, state.resolved.now());
+  // Too close to arm (the startup ramp) or to the arm-phase fire at +intervalMs, which covers it.
+  if (delay < ALIGNED_PHASE_WARMUP_MS || delay > intervalMs - ALIGNED_PHASE_WARMUP_MS) return null;
+  return delay;
+}
+
 /**
  * Arm a NAMED, listable interval. Returns a handle whose stop() clears + deregisters it.
  * Re-arming an existing name stops the previous timer first (no duplicate names, no leak).
- * The timer is unref'd so it never holds the process open.
+ * The timer is unref'd by default; ref:true keeps a CLI alive until its owner stops it.
  */
 export function managedSetInterval(
   name: string,
@@ -391,10 +463,24 @@ export function managedSetInterval(
   const rec: InternalRecord = { entry, key, timer: { unref: undefined }, running: false, stopped: false };
   const tick = makeTick(name, fn, opts, rec);
   rec.timer = state.resolved.setIntervalImpl(tick, intervalMs);
-  rec.timer.unref?.();
+  if (!opts.ref) rec.timer.unref?.();
   if (opts.fireOnArm) {
     const t = state.resolved.setTimeoutImpl(tick, 0);
-    t.unref?.();
+    if (!opts.ref) t.unref?.();
+  }
+  const rephaseDelay = alignedRephaseDelayMs(name, intervalMs, opts, instanced);
+  if (rephaseDelay !== null) {
+    // The slot is earlier than the arm-phase fire (delay < intervalMs), so the arm interval has
+    // not fired yet. Swap it for one anchored at the slot, then fire, so the cadence continues
+    // slot + n·interval. A stop() in between leaves `stopped` set and this is a no-op.
+    const t = state.resolved.setTimeoutImpl(() => {
+      if (rec.stopped) return;
+      state.resolved.clearIntervalImpl(rec.timer);
+      rec.timer = state.resolved.setIntervalImpl(tick, intervalMs);
+      if (!opts.ref) rec.timer.unref?.();
+      tick();
+    }, rephaseDelay);
+    if (!opts.ref) t.unref?.();
   }
   registry.set(key, rec);
   return { stop: () => stopManaged(key) };

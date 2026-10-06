@@ -26,18 +26,22 @@ import {
 } from '@papercusp/agent-mcp';
 import '../../../agent-tools/index';
 import { DEVICE_AUTH, devicePrincipal } from './_shared';
-import { listPlanRows, readPlanBySlug, type PlanRow } from '../../../agent-tools/plans/source';
-import { listHarnessesFor } from '../../../device-harnesses';
-import { operatorHomeHarnessSlug } from '../../../harness/operator-home-harness';
+import {
+  listPlanIndexRows,
+  listPlanIndexRowsForWorkspace,
+  readPlanBySlug,
+  type PlanIndexRow,
+} from '../../../agent-tools/plans/source';
+import { harnessExistsInWorkspace } from '../../../device-harnesses';
 
 /** Compact per-status item tally for a plan card. */
-function itemCounts(row: PlanRow): Record<string, number> {
+function itemCounts(row: PlanIndexRow): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const it of row.items) counts[it.status] = (counts[it.status] ?? 0) + 1;
   return counts;
 }
 
-function planSummary(row: PlanRow) {
+function planSummary(row: PlanIndexRow) {
   return {
     slug: row.planSlug,
     harness: row.harnessSlug,
@@ -54,8 +58,9 @@ function planSummary(row: PlanRow) {
 
 /**
  * GET /device/plans?harness=<slug>&includeArchived= — plan summaries.
- * Omitted harness (or `all`) fans out across every harness (pot) in the
- * workspace for the "All Pots" view; a concrete slug narrows to one pot.
+ * Omitted harness (or `all`) reads the workspace's canonical plan index
+ * once. Member pots share Hive plans, so per-pot full-content reads repeat
+ * the same plans and can exceed the mobile request deadline.
  */
 const plansList = defineTool({
   method: 'GET',
@@ -68,31 +73,24 @@ const plansList = defineTool({
     const harness = url.searchParams.get('harness');
     const includeArchived = url.searchParams.get('includeArchived') === 'true';
 
-    let slugs: string[];
+    // Preserve the existing list's instance plans and Now text, without
+    // loading the full Markdown blobs the summary does not consume.
+    const options = { includeArchived, includeInstances: true, heavyFields: true };
+    let all: PlanIndexRow[];
     if (harness && harness !== 'all' && harness !== '*') {
-      slugs = [harness];
-    } else {
-      // Fan out across the workspace's pots ("All Pots"). Always include the
-      // operator-home primary (papercusp post-migration) — its plans live under
-      // the home workspace (resolvePlanScope), which the device's paired
-      // workspace may not be. Baking 'papercup' here returned nothing once the
-      // papercup→papercusp migration moved the home's plans, so resolve the
-      // home pointer instead of a dead literal.
-      const harnesses = await listHarnessesFor(principal.workspaceId).catch(() => []);
-      slugs = [...new Set([operatorHomeHarnessSlug(), ...harnesses.map((h) => h.slug)])];
-    }
-
-    const all: PlanRow[] = [];
-    for (const slug of slugs) {
-      try {
-        // No workspaceId override — let resolvePlanScope resolve each pot to
-        // the workspace its plans actually live in (the home → its workspace),
-        // the SAME resolution the operator's plans:list uses.
-        const rows = await listPlanRows({ harnessSlug: slug, includeArchived });
-        all.push(...rows);
-      } catch {
-        /* best-effort per pot — a missing/empty harness shouldn't fail the list */
+      if (!(await harnessExistsInWorkspace(principal.workspaceId, harness))) {
+        return Response.json({ error: 'harness_not_in_workspace' }, { status: 404 });
       }
+      all = await listPlanIndexRows({
+        ...options,
+        workspaceId: principal.workspaceId,
+        harnessSlug: harness,
+      });
+    } else {
+      all = await listPlanIndexRowsForWorkspace({
+        ...options,
+        workspaceId: principal.workspaceId,
+      });
     }
     // Most-recently-updated first.
     all.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));

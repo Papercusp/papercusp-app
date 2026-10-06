@@ -36,6 +36,21 @@ run's numeric id. The response tool accepts only that same id; it resolves the s
 channel, thread, and bot credential server-side so a worker cannot redirect the reply
 elsewhere.
 
+## Requirements
+
+**R-1 — Reply in the originating thread.**
+\`\`\`requirement
+{"intent":{"request":"Each Slack mention yields one reply posted to the thread it was made in.","constraints":["Resolve channel, thread and bot credential server-side from the trigger plan run.","Never post to a caller-supplied channel."],"sourceRefs":["P-001","D-001","D-002"]},"acceptance":{"condition":"A run of this template posts exactly one reply to the originating Slack thread through slack:respond-in-thread with the run's planRunId.","falsifier":"A run completes with no reply, posts a second reply for the same run, or posts outside the originating thread.","requiredScope":["tree"],"evidencePlane":"tree"},"verification":{"method":"Fire a slack mention event through the binding engine, then read the run and the reply tool's recorded result.","check":{"kind":"instrument","instrumentKey":"none"},"replication":"Run packages/operator-core/lib/external-triggers/slack-flagship.integration.test.ts."}}
+\`\`\`
+
+## Design
+
+### Bar-to-work map for this plan
+
+| bar | implementing plan items | evidence plane |
+|---|---|---|
+| R-1 | P-001 | tree |
+
 ## Phase 1 — Respond
 
 - **P-001** \`todo\` Call \`triggers:read-payload\` with \`planRunId=payload.plan_run.runId\` to read the triggering mention, draft a concise response, then call \`slack:respond-in-thread\` with that same \`planRunId\` and the response text. Complete only after the tool reports \`posted:true\` or \`alreadyPosted:true\`.
@@ -186,7 +201,7 @@ export async function respondToSlackTriggerPlanRun(
         FROM harness_shared.trigger_runs tr
         JOIN harness_shared.trigger_bindings b
           ON b.workspace_id = tr.workspace_id AND b.id = tr.binding_id
-        JOIN harness_shared.trigger_sources s
+        JOIN harness_shared.data_sources s
           ON s.workspace_id = b.workspace_id AND s.id = b.source_id
        WHERE tr.workspace_id = ${workspaceId}
          AND tr.plan_run_ref = ${String(planRunId)}

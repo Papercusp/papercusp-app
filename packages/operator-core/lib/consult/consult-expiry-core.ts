@@ -455,7 +455,12 @@ export async function sweepExpiredConsults(deps: ExpirySweepDeps): Promise<Expir
                        answered_by: answeredBy,
                      } as never)
                    : null
-               }::jsonb, outcome),
+               }::jsonb
+                 -- EI-23764501791910357: a requester's recorded proceed-reconciliation survives
+                 -- the terminal write (a NULL new outcome keeps the old one via the COALESCE).
+                 || CASE WHEN (outcome -> 'reconciliation') IS NOT NULL
+                         THEN jsonb_build_object('reconciliation', outcome -> 'reconciliation')
+                         ELSE '{}'::jsonb END, outcome),
                closed_at = ${nowIso}::timestamptz,
                updated_at = ${nowIso}::timestamptz
          WHERE workspace_id = ${row.workspace_id}
@@ -669,7 +674,10 @@ async function convertReviewConsult(
                  work_item_id: workItemId,
                  review_kind: kind,
                  silent_responder: row.responder_id,
-               } as never)}::jsonb,
+               } as never)}::jsonb
+                 || CASE WHEN (outcome -> 'reconciliation') IS NOT NULL
+                         THEN jsonb_build_object('reconciliation', outcome -> 'reconciliation')
+                         ELSE '{}'::jsonb END,
                closed_at = ${nowIso}::timestamptz,
                updated_at = ${nowIso}::timestamptz
          WHERE workspace_id = ${row.workspace_id}

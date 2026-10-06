@@ -89,6 +89,109 @@ export function parseProcDirectoryFd(raw: string, wchan: string | null): number 
   return Number.isSafeInteger(fd) && fd >= 0 ? fd : null;
 }
 
+/** `AT_FDCWD` — the dirfd value meaning "relative to the cwd" for `*at` syscalls. */
+export const AT_FDCWD = -100;
+
+/**
+ * x86-64 syscalls whose blocking on the main thread names a FILE, keyed by
+ * number. `fd` = arg0 is an open file descriptor; `path0` = arg0 is a path
+ * pointer; `at` = arg0 is a dirfd and arg1 a path pointer.
+ *
+ * Deliberately x86-64 only: syscall numbers are architecture-specific, and a
+ * wrong table would name a plausible but wrong file in the record written just
+ * before a possible SIGKILL. On any other arch the parser returns `null`.
+ */
+const X64_FILE_SYSCALLS: Readonly<Record<number, readonly [string, 'fd' | 'path0' | 'at']>> = {
+  0: ['read', 'fd'], 1: ['write', 'fd'], 2: ['open', 'path0'], 3: ['close', 'fd'],
+  4: ['stat', 'path0'], 5: ['fstat', 'fd'], 6: ['lstat', 'path0'], 16: ['ioctl', 'fd'],
+  17: ['pread64', 'fd'], 18: ['pwrite64', 'fd'], 19: ['readv', 'fd'], 20: ['writev', 'fd'],
+  21: ['access', 'path0'], 73: ['flock', 'fd'], 74: ['fsync', 'fd'], 75: ['fdatasync', 'fd'],
+  76: ['truncate', 'path0'], 77: ['ftruncate', 'fd'], 78: ['getdents', 'fd'],
+  82: ['rename', 'path0'], 83: ['mkdir', 'path0'], 84: ['rmdir', 'path0'], 85: ['creat', 'path0'],
+  86: ['link', 'path0'], 87: ['unlink', 'path0'], 89: ['readlink', 'path0'], 90: ['chmod', 'path0'],
+  91: ['fchmod', 'fd'], 92: ['chown', 'path0'], 93: ['fchown', 'fd'], 94: ['lchown', 'path0'],
+  137: ['statfs', 'path0'], 138: ['fstatfs', 'fd'], 217: ['getdents64', 'fd'],
+  257: ['openat', 'at'], 258: ['mkdirat', 'at'], 260: ['fchownat', 'at'], 262: ['newfstatat', 'at'],
+  263: ['unlinkat', 'at'], 264: ['renameat', 'at'], 265: ['linkat', 'at'], 267: ['readlinkat', 'at'],
+  268: ['fchmodat', 'at'], 269: ['faccessat', 'at'], 277: ['sync_file_range', 'fd'],
+  280: ['utimensat', 'at'], 285: ['fallocate', 'fd'], 295: ['preadv', 'fd'], 296: ['pwritev', 'fd'],
+  306: ['syncfs', 'fd'], 316: ['renameat2', 'at'], 327: ['preadv2', 'fd'], 328: ['pwritev2', 'fd'],
+  332: ['statx', 'at'], 437: ['openat2', 'at'], 439: ['faccessat2', 'at'], 452: ['fchmodat2', 'at'],
+};
+
+/** What a thread blocked in a file syscall is touching, from `/proc/<tid>/syscall`. */
+export interface ProcSyscallTarget {
+  /** Syscall number as the kernel reported it. */
+  nr: number;
+  /** Syscall name (x86-64 table). */
+  name: string;
+  /** Open fd to resolve through `/proc/<pid>/fd/<fd>` (fd syscalls). */
+  fd?: number;
+  /** User-space address of the NUL-terminated path argument (path syscalls). */
+  pathPtr?: number;
+  /** Base dirfd for a RELATIVE path of an `*at` syscall; {@link AT_FDCWD} = cwd. */
+  dirFd?: number;
+}
+
+/** One `/proc/<tid>/syscall` argument as a signed 32-bit int (fds and dirfds are C `int`). */
+function procArgInt32(field: string | undefined): number | null {
+  if (!field || !/^(0x[0-9a-f]+|[0-9]+)$/i.test(field)) return null;
+  return Number(BigInt.asIntN(32, BigInt(field)));
+}
+
+/** One `/proc/<tid>/syscall` argument as a user-space pointer; null when not a safe integer. */
+function procArgPointer(field: string | undefined): number | null {
+  if (!field || !/^(0x[0-9a-f]+|[0-9]+)$/i.test(field)) return null;
+  const v = BigInt(field);
+  return v > 0n && v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : null;
+}
+
+/**
+ * Parse which FILE a thread is blocked on from its `/proc/<tid>/syscall` line
+ * (`nr arg0 arg1 … sp pc`), for a main thread parked in D-state (WI-10004754).
+ *
+ * The wait channel says WHERE in the kernel the thread waits (`lookup_slow`,
+ * `jbd2_log_do_checkpoint`, …) but not which call or file, so a D-state stall
+ * could not be traced back to code. The syscall line can: an fd argument
+ * resolves through `/proc/<pid>/fd`, and a path argument is a pointer into the
+ * process's own memory, which the in-process sentinel worker can read.
+ *
+ * Returns null for `running`, for "blocked but not in a syscall" (`-1 …`),
+ * for an unknown or non-file syscall, for a malformed argument, and on any arch
+ * other than x64. UNKNOWN is never coerced to fd 0 or a guessed path.
+ */
+export function parseProcSyscallTarget(raw: string, arch: string): ProcSyscallTarget | null {
+  if (arch !== 'x64') return null;
+  const fields = raw.trim().split(/\s+/);
+  if (fields.length < 3 || !/^[0-9]+$/.test(fields[0])) return null;
+  const nr = Number(fields[0]);
+  const entry = X64_FILE_SYSCALLS[nr];
+  if (!entry) return null;
+  const [name, shape] = entry;
+  if (shape === 'fd') {
+    const fd = procArgInt32(fields[1]);
+    return fd != null && fd >= 0 ? { nr, name, fd } : null;
+  }
+  if (shape === 'path0') {
+    const pathPtr = procArgPointer(fields[1]);
+    return pathPtr != null ? { nr, name, pathPtr } : null;
+  }
+  const dirFd = procArgInt32(fields[1]);
+  const pathPtr = procArgPointer(fields[2]);
+  if (dirFd == null || pathPtr == null || (dirFd < 0 && dirFd !== AT_FDCWD)) return null;
+  return { nr, name, pathPtr, dirFd };
+}
+
+/**
+ * Decode a NUL-terminated path read out of process memory. Null when the bytes
+ * hold no NUL (a truncated read) or decode to nothing; never a partial guess.
+ */
+export function decodeProcPath(bytes: Uint8Array, length: number): string | null {
+  const end = bytes.subarray(0, Math.max(0, Math.min(length, bytes.length))).indexOf(0);
+  if (end <= 0) return null;
+  return new TextDecoder().decode(bytes.subarray(0, end));
+}
+
 /**
  * Parse the CPU-pressure `some avg60` percentage from `/proc/pressure/cpu`.
  *
@@ -159,7 +262,7 @@ export interface MainThreadActivity {
  * enough to establish that the main thread is the parked subject rather than
  * a stale or misread `/proc` sample.
  */
-const HOST_IO_WAIT_WCHAN_RE = /^(?:rq_qos_wait|io_schedule(?:_timeout)?|blk_mq_[a-z0-9_]+|wait_on_(?:buffer|page(?:_bit)?|page_writeback)|folio_wait_[a-z0-9_]+|jbd2_[a-z0-9_]+|do_get_write_access|wait_transaction_locked)$/i;
+const HOST_IO_WAIT_WCHAN_RE = /^(?:iterate_dir|rq_qos_wait|io_schedule(?:_timeout)?|blk_mq_[a-z0-9_]+|wait_on_(?:buffer|page(?:_bit)?|page_writeback)|folio_wait_[a-z0-9_]+|(?:__)?jbd2_[a-z0-9_]+|do_get_write_access|wait_transaction_locked)$/i;
 
 /**
  * Decide whether a sentinel kill should be suppressed because the main thread

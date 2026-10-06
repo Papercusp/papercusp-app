@@ -67,7 +67,9 @@ const WALLS_HEADING_RE = /^walls$/i;
  * of owner-walled facts with the wall marker do not match.
  */
 const OWNER_QUESTION_RES: RegExp[] = [
-  /\b(?:ask|asking|need(?:s)? to ask|should ask|must ask)\s+(?:the\s+)?(?:owner|human)\b/i,
+  // `coord:ask owner-UI-only` is a tool-mode label, not prose; a word boundary
+  // alone treats the hyphen before `UI` as the end of the word "owner".
+  /\b(?:ask|asking|need(?:s)? to ask|should ask|must ask)\s+(?:the\s+)?(?:owner|human)\b(?!-UI-only\b)/i,
   /\bquestion\s+for\s+(?:the\s+)?(?:owner|human)\b/i,
   // A non-possessive owner is ambiguous but conventionally means the human
   // owner ("waiting on the owner to decide"). A possessive owner must name

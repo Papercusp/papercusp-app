@@ -70,6 +70,7 @@ import {
   noInputDiagnostic,
   parseFoundSummary,
   parseTscDiagnostics,
+  splitVanishedIncludeFiles,
   summariseByFile,
   syntaxBrokenFiles,
   TSC_DECOY_BANNER,
@@ -610,8 +611,8 @@ export function ambientTypePackages(typeRoot: string): string[] {
  * enumeration is a repair for a known-broken case, never something to force on a project
  * whose intent we could not read.
  */
-export function projectDeclaresTypes(tsconfigAbs: string, depth = 0): boolean {
-  if (depth > 8) return true; // cyclic or absurd extends chain — do not intervene
+function projectDeclaredTypes(tsconfigAbs: string, depth = 0): string[] | undefined | null {
+  if (depth > 8) return null; // unknown: cyclic or absurd extends chain — do not intervene
   let parsed: { compilerOptions?: { types?: unknown }; extends?: unknown };
   try {
     const raw = readFileSync(tsconfigAbs, 'utf8');
@@ -633,18 +634,25 @@ export function projectDeclaresTypes(tsconfigAbs: string, depth = 0): boolean {
       );
     }
   } catch {
-    return true;
+    return null;
   }
-  if (parsed?.compilerOptions && 'types' in parsed.compilerOptions) return true;
+  if (parsed?.compilerOptions && 'types' in parsed.compilerOptions) {
+    const types = parsed.compilerOptions.types;
+    return Array.isArray(types) && types.every(type => typeof type === 'string') ? types : null;
+  }
   const ext = parsed?.extends;
-  if (typeof ext !== 'string' || ext.length === 0) return false;
+  if (typeof ext !== 'string' || ext.length === 0) return undefined;
   // Only a relative/absolute path extends is resolvable here; a bare package specifier
   // (e.g. "@tsconfig/node20/tsconfig.json") is treated as declaring, i.e. hands-off.
-  if (!ext.startsWith('.') && !isAbsolute(ext)) return true;
+  if (!ext.startsWith('.') && !isAbsolute(ext)) return null;
   const next = isAbsolute(ext) ? ext : resolve(dirname(tsconfigAbs), ext);
   const withExt = existsSync(next) ? next : `${next}.json`;
-  if (!existsSync(withExt)) return true;
-  return projectDeclaresTypes(withExt, depth + 1);
+  if (!existsSync(withExt)) return null;
+  return projectDeclaredTypes(withExt, depth + 1);
+}
+
+export function projectDeclaresTypes(tsconfigAbs: string, depth = 0): boolean {
+  return projectDeclaredTypes(tsconfigAbs, depth) !== undefined;
 }
 
 /**
@@ -735,7 +743,8 @@ export function buildScopedTsconfig(
   const typeRoot = join(root, 'node_modules', '@types');
   // Only repair a project that declares NO `types` — see projectDeclaresTypes for the
   // measured reason overriding a declared one is destructive.
-  const ambientTypes = projectDeclaresTypes(projectTsconfigAbs) ? [] : ambientTypePackages(typeRoot);
+  const declaredTypes = projectDeclaredTypes(projectTsconfigAbs);
+  const ambientTypes = declaredTypes !== undefined ? [] : ambientTypePackages(typeRoot);
   const dir = mkdtempSync(join(tmpdir(), 'pc-typecheck-scoped-'));
   const configPath = join(dir, 'tsconfig.json');
   writeFileSync(
@@ -752,7 +761,11 @@ export function buildScopedTsconfig(
           // may include imports from anywhere in the workspace, so anchor the synthetic
           // program at the real workspace root rather than the temp config directory.
           rootDir: root,
-          typeRoots: [typeRoot],
+          // An explicit package subpath such as vitest/globals lives outside
+          // @types. /tmp cannot find the project's node_modules by ancestry.
+          // Add that search root only with a KNOWN explicit list, so implicit
+          // discovery cannot inject every package's globals into the program.
+          typeRoots: Array.isArray(declaredTypes) ? [typeRoot, join(root, 'node_modules')] : [typeRoot],
           // Trap 3 above — enumerated, not hardcoded, so this mirrors what tsc would have
           // auto-included. Omitted entirely when the scan finds nothing, so an unreadable
           // or absent @types dir degrades to today's behaviour rather than pinning `types`
@@ -861,7 +874,7 @@ export async function askTypecheckService(opts: {
 export default defineTool({
   name: 'build:typecheck',
   description:
-    'Run `tsc --noEmit` for ONE project and return structured diagnostics — { ok, errorCount, errors:[{file,line,column,code,message}], byFile, syntaxBroken, semanticCheckIncomplete } — instead of a compiler log you pipe through grep/tail. In scopeToFiles mode, ok/errorCount/exitCode describe the requested files, while otherErrorCount/otherErrors preserve other-file diagnostics separately. Parser/global/partial-scope failures remain incomplete, never green. When syntaxBroken is non-empty, semanticCheckIncomplete is true and the diagnostic counts are LOWER BOUNDS, not complete totals. REFUSES a run that checked nothing (TS5057/TS5058/TS18003) rather than reporting a clean zero: this repo has no root tsconfig.json, so `-p .` silently checks zero files. `files` filters diagnostics server-side. Runs with --incremental false so a warm tsbuildinfo cannot under-report.',
+    'Run `tsc --noEmit` for ONE project and return structured diagnostics — { ok, errorCount, errors:[{file,line,column,code,message}], byFile, syntaxBroken, semanticCheckIncomplete } — instead of a compiler log you pipe through grep/tail. In scopeToFiles mode, ok/errorCount/exitCode describe the requested files, while otherErrorCount/otherErrors preserve other-file diagnostics separately. Parser/global/partial-scope failures remain incomplete, never green. When syntaxBroken is non-empty, semanticCheckIncomplete is true and the diagnostic counts are LOWER BOUNDS, not complete totals. REFUSES a run that checked zero files. Such a run (TS5057/TS5058/TS18003) is refused rather than reported as a clean zero: this repo has no root tsconfig.json, so `-p .` silently checks zero files. `files` filters diagnostics server-side. Runs with --incremental false so a warm tsbuildinfo cannot under-report.',
   guidance: {
     when: 'You edited TypeScript and want to know whether a project typechecks, and exactly which errors are where. Also the way to check a workspace OUTSIDE operator-core, which `npm run lint:tsc` does not cover.',
     notWhen:
@@ -1125,6 +1138,15 @@ export default defineTool({
       };
     }
 
+    // EI-24801454238382823 — a file the include glob listed and that was deleted before
+    // tsc read it is TREE CHURN on a shared checkout, not a no-input run: every other file
+    // WAS checked. Strip it from the verdict and say so. A vanished path that exists AGAIN
+    // now (a rewrite-by-rename) was never checked, so it keeps the verdict incomplete.
+    const { vanished, rest: checkedDiagnostics } = splitVanishedIncludeFiles(diagnostics);
+    const vanishedAbs = vanished.map((p) => (isAbsolute(p) ? p : resolve(typecheckCwd, p)));
+    const vanishedStillPresent = vanishedAbs.filter((p) => existsSync(p));
+    const inputRaceIncomplete = vanishedStillPresent.length > 0;
+
     // tsc's own word on "I checked nothing" — catches TS18003 (a real tsconfig
     // whose include/files match no inputs), which no path check can predict.
     const noInput = noInputDiagnostic(diagnostics);
@@ -1142,7 +1164,7 @@ export default defineTool({
       };
     }
 
-    const errors = errorsOnly(diagnostics);
+    const errors = errorsOnly(checkedDiagnostics);
     const scopedPartition = scoped ? partitionScopedDiagnostics(errors, scoped.resolvedFiles) : null;
     // In scoped mode `files`/`dirs` defined the PROGRAM, so they must not also narrow the
     // OUTPUT: the scoped program deliberately includes the import graph, and an error your
@@ -1169,7 +1191,10 @@ export default defineTool({
     const syntaxBroken = syntaxBrokenFiles(errors);
     const scopedVerdictIncomplete = Boolean(
       scoped &&
-      (scoped.missing.length > 0 || (scopedPartition?.unattributed.length ?? 0) > 0 || syntaxBroken.length > 0),
+      (scoped.missing.length > 0 ||
+        (scopedPartition?.unattributed.length ?? 0) > 0 ||
+        syntaxBroken.length > 0 ||
+        inputRaceIncomplete),
     );
     const scopedOk = Boolean(
       scoped && scopedPartition && scopedPartition.requested.length === 0 && !scopedVerdictIncomplete,
@@ -1183,10 +1208,30 @@ export default defineTool({
 
     return {
       data: {
-        ok: scoped ? scopedOk : errors.length === 0 && outcome.code === 0,
+        // tsc exits non-zero on the stripped TS6053 alone, so a vanished-glob run is judged
+        // on the diagnostics that remain rather than on the compiler's exit code.
+        ok: scoped
+          ? scopedOk
+          : errors.length === 0 && (outcome.code === 0 || vanished.length > 0) && !inputRaceIncomplete,
         project: relative(root, resolved),
         ...engineFields,
         errorCount: shown.length,
+        ...(vanished.length > 0
+          ? {
+              vanishedDuringRun: vanishedAbs.map((p) => relative(root, p)),
+              inputRaceIncomplete,
+              ...(inputRaceIncomplete
+                ? { vanishedStillPresent: vanishedStillPresent.map((p) => relative(root, p)) }
+                : {}),
+              inputRaceNote:
+                'These files matched the project include glob when tsc listed it and were gone when it read them ' +
+                '(tree churn on the shared checkout, e.g. a short-lived scratch directory under the include root). ' +
+                'Every other file was checked. ' +
+                (inputRaceIncomplete
+                  ? 'vanishedStillPresent exist again and were NOT checked, so this verdict is incomplete: re-run.'
+                  : 'None of them exists now, so the verdict describes the current tree.'),
+            }
+          : {}),
         // A scoped PASS is a weaker claim than a project-wide one, so it must never be
         // reported in the same shape. These fields travel with the result so a reader
         // (or a successor reading a checkpoint that quotes it) cannot mistake
@@ -1262,7 +1307,7 @@ export default defineTool({
         // Cross-check against tsc's own tally: a mismatch means the diagnostic
         // grammar drifted (a compiler upgrade), and the caller is told rather
         // than handed a silently wrong number.
-        ...(reported !== null && reported !== errors.length
+        ...(reported !== null && reported !== errors.length + vanished.length
           ? {
               parseWarning: `tsc reported ${reported} errors but ${errors.length} were parsed — the diagnostic format may have changed; treat counts as approximate.`,
             }

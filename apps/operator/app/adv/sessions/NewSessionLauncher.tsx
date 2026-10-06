@@ -306,6 +306,8 @@ function formatLaunchPlanOptionDetail(plan: PlanListRow): string | undefined {
 
 export interface NewSessionLauncherProps {
   className?: string;
+  /** Scoped lessons start idle until the human submits their task. */
+  initialPosture?: 'interactive';
   /** Called after a successful launch — callers whose session list isn't
    *  already sync-driven (e.g. AdvSessionsClient's polled list) can use this
    *  to force a refresh. The HUD board needs no such hook: its roster read
@@ -345,6 +347,7 @@ type LaunchReceipt = {
  */
 export default function NewSessionLauncher({
   className,
+  initialPosture,
   onLaunched,
   onViewSessions,
 }: NewSessionLauncherProps) {
@@ -369,7 +372,7 @@ export default function NewSessionLauncher({
   const [contextSize, setContextSize] = useState(CONTEXT_SELECT_NATIVE);
   // P-042 — the launch posture. Local useState like its siblings: a mid-edit
   // draft of the next launch, not a shareable view.
-  const [mode, setMode] = useState(NEW_SESSION_DEFAULT_MODE);
+  const [mode, setMode] = useState(initialPosture === 'interactive' ? MODE_SELECT_NONE : NEW_SESSION_DEFAULT_MODE);
   // WI-38039: headless launches do not open a terminal, so the short-lived
   // toast cannot be the only acknowledgement. Keep a small receipt shelf in
   // this control; it is deliberately launch history, not a liveness claim —

@@ -151,6 +151,8 @@ export interface ThreadableStore {
   addPost(input: { thread_id: string; author_id?: string; body: string; created_ts: string }): Promise<ThreadPostRow>;
   /** Posts in a thread, oldest-first; `afterId` for incremental reads. */
   listPosts(threadId: string, opts?: { afterId?: number }): Promise<ThreadPostRow[]>;
+  /** Read one post by its workspace-local numeric id, or null when absent. */
+  getPostById(postId: number): Promise<ThreadPostRow | null>;
   /** The thread attached to `parent`, or null. */
   getThreadByParent(parent: ObjectRef): Promise<ThreadRow | null>;
 }

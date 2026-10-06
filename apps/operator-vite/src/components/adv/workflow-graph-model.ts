@@ -95,6 +95,8 @@ export interface WorkflowBindingInput {
   planHarnessSlug: string | null;
   armed: boolean;
   lastRun?: { status: string } | null;
+  /** Set when a trigger pack owns this binding (P-013, D-016): it arms through the pack review. */
+  pack?: { installationId: string; pluginName: string; reviewed: boolean } | null;
 }
 
 export interface BuildWorkflowGraphInput {

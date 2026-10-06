@@ -252,7 +252,57 @@ export function summariseByFile(diagnostics: TscDiagnostic[]): TscFileCount[] {
  * write, and it is the compiler's word rather than our inference.
  */
 export function noInputDiagnostic(diagnostics: TscDiagnostic[]): TscDiagnostic | null {
-  return diagnostics.find((d) => NO_INPUT_CODES.has(d.code)) ?? null;
+  return diagnostics.find((d) => NO_INPUT_CODES.has(d.code) && vanishedIncludeFile(d) === null) ?? null;
+}
+
+/**
+ * tsc's own explanation that a missing file entered the program through an `include`
+ * GLOB. Verified against TypeScript 6.0.3 by listing a file in the glob and deleting it
+ * before the read; tsc prints, and parseTscDiagnostics folds into one message:
+ *
+ *   error TS6053: File '/r/lib/gone.ts' not found.
+ *     The file is in the program because:
+ *       Matched by include pattern 'lib/** /*.ts' in '/r/tsconfig.json'
+ *
+ * A missing CLI operand explains itself as "Root file specified for compilation" and a
+ * missing `files` entry as "Part of 'files' list in tsconfig.json", so neither matches.
+ */
+const INCLUDE_MATCH_EXPLANATION = /\bThe file is in the program because:.*\bMatched by include pattern '/;
+const NOT_FOUND_FILE = /^File '([^']+)' not found\./;
+
+/**
+ * The path of a file the program found through an include glob and could not read, or
+ * null (EI-24801454238382823).
+ *
+ * That TS6053 is NOT "checked nothing": the glob listed the file, then it was deleted
+ * before tsc read it, and every other file in the program WAS checked. On this shared
+ * checkout that is ordinary tree churn (a peer's short-lived probe directory under
+ * `lib/**` refused two consecutive operator-core typechecks as `nothing_typechecked`,
+ * quoting "zero files were typechecked", which was false). A TS6053 without this
+ * explanation keeps its no-input meaning: a missing operand really does check nothing.
+ */
+export function vanishedIncludeFile(d: TscDiagnostic): string | null {
+  if (d.code !== 'TS6053' || d.file !== null) return null;
+  if (!INCLUDE_MATCH_EXPLANATION.test(d.message)) return null;
+  return NOT_FOUND_FILE.exec(d.message)?.[1] ?? null;
+}
+
+/**
+ * Split out the include-glob files that vanished between listing and reading.
+ * `rest` is every other diagnostic, in order; `vanished` is de-duplicated.
+ */
+export function splitVanishedIncludeFiles(diagnostics: TscDiagnostic[]): {
+  vanished: string[];
+  rest: TscDiagnostic[];
+} {
+  const vanished = new Set<string>();
+  const rest: TscDiagnostic[] = [];
+  for (const d of diagnostics) {
+    const path = vanishedIncludeFile(d);
+    if (path === null) rest.push(d);
+    else vanished.add(path);
+  }
+  return { vanished: [...vanished], rest };
 }
 
 /**

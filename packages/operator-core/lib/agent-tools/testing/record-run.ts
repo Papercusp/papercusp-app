@@ -26,6 +26,7 @@ import { resolveAgentWorkspaceRoot } from '../capability/base-dir';
 import { harnessArg, harnessRequiredResult, resolveConcreteHarnessSlug } from '../_harness-scope';
 
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+export const MAX_OPERATIONAL_EVIDENCE_BYTES = 256 * 1024;
 
 const operationalEvidenceArtifactSchema = z
   .object({
@@ -94,7 +95,12 @@ async function gitOutput(root: string, args: string[]): Promise<Buffer> {
 }
 
 export function parseOperationalEvidenceArtifact(bytes: Buffer): OperationalEvidenceArtifact {
-  if (bytes.byteLength > 256 * 1024) throw new Error('evidence_too_large');
+  if (bytes.byteLength > MAX_OPERATIONAL_EVIDENCE_BYTES) {
+    throw new Error(
+      `evidence_too_large: ${bytes.byteLength} bytes exceeds the ${MAX_OPERATIONAL_EVIDENCE_BYTES}-byte limit. ` +
+        'Store bulky payloads as a raw artifact pinned by SHA-256 and keep the docs/evidence JSON small.',
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(bytes.toString('utf8'));
@@ -239,7 +245,7 @@ export async function recordOperationalRun(
 export default defineTool({
   name: 'testing:record-run',
   description:
-    'Record an already-executed non-Vitest operational check in harness_shared.test_runs and return its numeric testRunIds for plans:bind-spec-evidence. The evidence must be a committed docs/evidence/*.json artifact with schemaVersion:1, kind:"operational-test-evidence", command, timestamps, exitCode, summary, and explicit assertions; expectedSha256 pins the exact bytes. The verdict is derived from exitCode + assertions, never accepted as a caller boolean. Idempotent by artifact hash.',
+    `Record an already-executed non-Vitest operational check in harness_shared.test_runs and return its numeric testRunIds for plans:bind-spec-evidence. The evidence must be a committed docs/evidence/*.json artifact with schemaVersion:1, kind:"operational-test-evidence", command, timestamps, exitCode, summary, and explicit assertions; expectedSha256 pins the exact bytes. Evidence JSON is capped at ${MAX_OPERATIONAL_EVIDENCE_BYTES} bytes; keep it compact and store bulky payloads as raw artifacts pinned by SHA-256. The verdict is derived from exitCode + assertions, never accepted as a caller boolean. Idempotent by artifact hash.`,
   guidance: {
     when: 'A real Playwright, Cargo, node, shell, desktop, or other operational acceptance run already completed and needs an honest numeric execution-ledger anchor.',
     notWhen:

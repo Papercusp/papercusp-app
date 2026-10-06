@@ -10,7 +10,6 @@
  */
 import { spawn } from 'node:child_process';
 
-// @ts-expect-error -- buildless plain-JS mutex module intentionally has no declaration file.
 import { PACKAGE_CACHE_MUTEX_NAME, withFsMutex } from '../../../../scripts/lib/fs-mutex.mjs';
 
 export { PACKAGE_CACHE_MUTEX_NAME };

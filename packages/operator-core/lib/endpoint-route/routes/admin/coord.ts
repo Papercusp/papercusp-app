@@ -1,5 +1,5 @@
 /**
- * /api/admin/coord/:verb — admin surface for the coord:* WRITE tools.
+ * /api/admin/coord/:verb — admin surface for coord writes and the narrow wake-mode read.
  *
  * The Planning-tab attention feed lets the human Resolve an escalation or
  * Ack a coord message — actions that until now only agents could do (via
@@ -42,6 +42,7 @@ import { applyOwnerMessageDefaults } from '../../../agent-tools/coordination/own
 // reader drops messages acked BY this owner.
 const ADMIN_UI_CLIENT_ID = ADMIN_COORD_UI_OWNER;
 const WRITE_VERBS = new Set(['resolve', 'ack', 'message-agent', 'send']);
+const READ_ONLY_VERBS = new Set(['wake-mode']);
 
 function unwrap(toolResult: { status: number; body: unknown }): Response {
   if (toolResult.status === 200) {
@@ -82,7 +83,7 @@ async function dispatchWrite(req: Request, ctx: RouteContext): Promise<Response>
   if (csrf) return csrf;
 
   const verb = ctx.params.verb;
-  if (!WRITE_VERBS.has(verb)) {
+  if (!WRITE_VERBS.has(verb) && !READ_ONLY_VERBS.has(verb)) {
     return Response.json(
       { error: { code: 'unknown_verb', message: `coord write verb '${verb}' not found` } },
       { status: 404 },
@@ -94,6 +95,12 @@ async function dispatchWrite(req: Request, ctx: RouteContext): Promise<Response>
     if (txt) body = JSON.parse(txt) as Record<string, unknown>;
   } catch {
     return Response.json({ error: { code: 'invalid_json', message: 'request body must be JSON' } }, { status: 400 });
+  }
+  if (READ_ONLY_VERBS.has(verb) && ('mode' in body || 'reason' in body)) {
+    return Response.json(
+      { error: { code: 'read_only_verb', message: 'coord:wake-mode is read-only through this admin route' } },
+      { status: 405 },
+    );
   }
   // P-033: a GUI sender is not an agent and cannot author the protocol fields
   // coord:send now requires — D-048 made `expects` REQUIRED with no default, and

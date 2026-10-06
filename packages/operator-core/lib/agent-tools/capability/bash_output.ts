@@ -1272,17 +1272,24 @@ export default defineTool({
               )
             : false;
 
+        const scopeActive =
+          ledgerVerdict.kind === 'ledger_inconclusive' && ledgerRow ? await taskScopeIsActive(ledgerRow) : false;
+        const currentTaskIsLive = ledgerVerdict.kind === 'confirmed_alive' || scopeActive;
+
         // EI-20230176152308336: the durable JOB END marker is stronger than a
         // stale/non-terminal task-ledger row. The marker is appended from the
         // child close handler, so once it is present the job has a recoverable
         // terminal verdict even though the in-memory BashJob and/or its ledger
         // update may have been lost. An OBSERVED terminal ledger exit is stronger
-        // still and wins a conflict with a later marker. `stranded` and
-        // `ended_unobserved` prove only that the process is gone: they carry no
-        // observed shell exit, so a durable JOB END must win over their generic
+        // still and wins a conflict with a later marker. Positive liveness for
+        // this task is stronger than any marker in its output: commands can
+        // print or copy a JOB END line from another task while still running.
+        // `stranded` and `ended_unobserved` prove only that the process is gone:
+        // they carry no observed shell exit, so a durable JOB END must win over their generic
         // job_process_gone/re-run advice (EI-23696035248162547).
         if (
           strandedLog.terminal &&
+          !currentTaskIsLive &&
           (ledgerVerdict.kind !== 'confirmed_dead' || isLedgerConfirmedUnobservedDeath(ledgerVerdict.state))
         ) {
           const markerOk = strandedLog.terminal.status === 'completed';
@@ -1313,7 +1320,7 @@ export default defineTool({
         // A previous recovery read may already have appended JOB DIED. It is a
         // durable failed terminal verdict just like JOB END is a durable normal
         // terminal verdict, but never a success signal.
-        if (strandedLog.died) {
+        if (strandedLog.died && !currentTaskIsLive) {
           return {
             content: [
               {
@@ -1338,10 +1345,7 @@ export default defineTool({
           };
         }
 
-        const scopeActive =
-          ledgerVerdict.kind === 'ledger_inconclusive' && ledgerRow ? await taskScopeIsActive(ledgerRow) : false;
-
-        if (ledgerVerdict.kind === 'confirmed_alive' || scopeActive) {
+        if (currentTaskIsLive) {
           // EI-20218784292451325: a durable liveness proof is a successful
           // recovery, not a tool failure. The worker-local JOBS map may be
           // missing after a cross-worker read, but the task is still healthy;

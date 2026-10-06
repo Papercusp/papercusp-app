@@ -52,6 +52,29 @@ CLAUDE.md AGENTS.md BORROWABLE.md
 node_modules apps libs packages
 tools scripts templates patches design design-tokens rubrics goal-packages docs bin"
 
+# Filter already-discovered file candidates through the EXACT GNU-tar exclusion
+# policy assembled by source_tree_selection(). The identity scrubber overlays
+# redacted copies after the main tar pass; without this check that overlay can
+# accidentally re-add a file the selection policy deliberately excluded.
+#
+# Use GNU tar itself rather than reimplementing its exclude/glob semantics in
+# bash or Python. --no-recursion makes this a cheap membership query over the
+# explicit candidate files, and --null preserves spaces in paths.
+source_tree_filter_candidate_files() {
+  local tar_bin="$1" mono="$2" candidate
+  shift 2
+  (( $# > 0 )) || return 0
+
+  "$tar_bin" "${SELECTION_EXCLUDES[@]}" --null --no-recursion \
+    -C "$mono" -cf - -T <(
+      for candidate in "$@"; do
+        printf './%s\0' "${candidate#./}"
+      done
+    ) \
+    | "$tar_bin" -tf - \
+    | sed 's|^\./||'
+}
+
 source_tree_selection() {
   local here="$1" mono="$2" mode="${3:-installer}"
   local pat tdir entry required required_set

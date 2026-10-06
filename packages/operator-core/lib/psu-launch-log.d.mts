@@ -48,14 +48,23 @@ export function readPsuLaunchLogTail(
   opts?: { home?: string; chars?: number },
 ): string | null;
 
+/** {@link readPsuLaunchLogTail} without blocking the event loop (polled roster path). */
+export function readPsuLaunchLogTailAsync(
+  ownerId: string | null | undefined,
+  opts?: { home?: string; chars?: number },
+): Promise<string | null>;
+
 /** Recognize the pre-turn Claude weekly-limit dialog in terminal output. */
 export function detectPsuHeadlessLaunchBlockHint(logText: string | null | undefined): string | null;
 
-/** Read a bounded headless log tail named by terminal_bin and recognize a block. */
-export function readPsuHeadlessLaunchBlockHint(
+/**
+ * Read a bounded headless log tail named by terminal_bin and recognize a block.
+ * Async only: its caller is the polled roster read on the operator main thread.
+ */
+export function readPsuHeadlessLaunchBlockHintAsync(
   terminalBin: string | null | undefined,
   opts?: { scanBytes?: number },
-): string | null;
+): Promise<string | null>;
 
 /** {@link psuLaunchLogPath}, but creates the directory. Null when unusable. */
 export function ensurePsuLaunchLogPath(

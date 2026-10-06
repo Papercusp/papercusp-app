@@ -42,6 +42,7 @@ export const ORIENT_CORE_RESULT_KEYS = [
   'fleetSummariesTruncated',
   'goalPortfolio',
   'obligations',
+  'obligationsWithheldBy',
 ] as const;
 
 /**

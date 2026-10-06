@@ -40,6 +40,18 @@ import type { BlueprintRetirementInfo } from '@papercusp/orchestrator/blueprint'
 /** Below this remaining budget an autoloop is not worth (or safe) firing. */
 export const GYM_AUTOLOOP_BUDGET_FLOOR_USD = 0.5;
 
+/** Budget floor (USD): env override PAPERCUSP_GYM_BUDGET_FLOOR_USD, else the tick default. */
+export function gymBudgetFloorUsd(): number {
+  const raw = process.env.PAPERCUSP_GYM_BUDGET_FLOOR_USD;
+  if (raw == null || raw.trim() === '') return GYM_AUTOLOOP_BUDGET_FLOOR_USD;
+  const n = Number(raw.trim());
+  if (!Number.isFinite(n) || n < 0) {
+    console.warn(`[gym-cycle] PAPERCUSP_GYM_BUDGET_FLOOR_USD="${raw}" is not a non-negative number — using ${GYM_AUTOLOOP_BUDGET_FLOOR_USD}`);
+    return GYM_AUTOLOOP_BUDGET_FLOOR_USD;
+  }
+  return n;
+}
+
 /**
  * A row 'running' longer than this is a crash artifact, not a live cycle.
  *
@@ -133,7 +145,7 @@ export function remainingBudgetUsd(cfg: Pick<GymAutoloopConfig, 'budgetUsd' | 's
  * enabled, which is both R-5's fail-open default and the pre-gate behaviour.
  */
 export function isEligibleAutoloop(
-  cfg: GymAutoloopConfig,
+  cfg: Pick<GymAutoloopConfig, 'enabled' | 'status' | 'budgetUsd' | 'spentUsd'>,
   budgetFloorUsd: number,
   potEnabled: boolean = true,
 ): boolean {

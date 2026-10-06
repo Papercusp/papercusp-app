@@ -156,6 +156,26 @@ export interface CreateInvalidationBusOptions {
     queryName: string,
     sourceEventName: string,
   ) => number | undefined;
+  /**
+   * Optional per-target trailing-coalesce policy for bridged targets. Same
+   * argument order as {@link bridgedDedupeWindowMs}: synthesized query name,
+   * then source event name. Return a window in milliseconds, or `undefined` to
+   * keep {@link bridgeCoalesceWindowMs}.
+   *
+   * Under sustained writes the trailing window, not the dedupe floor, sets the
+   * delivered rate: the bus emits about one trailing event per window per
+   * (source, target, args) key, because the staleness deadline
+   * (`firstSuppressedAt + window`) always lands before the floor. A target that
+   * is expensive to refetch, such as an aggregate over a large table, can opt
+   * into a longer window and trade a little freshness for a much lower refetch
+   * rate. The window stays bounded: values are clamped to
+   * {@link MAX_BRIDGE_COALESCE_WINDOW_MS}, so the final write is never hidden
+   * for longer than that.
+   */
+  bridgedCoalesceWindowMs?: (
+    queryName: string,
+    sourceEventName: string,
+  ) => number | undefined;
   /** Injectable clock (testing). Default Date.now. */
   now?: () => number;
   /** Injectable timer seams (testing). Defaults to setTimeout/clearTimeout. */
@@ -197,12 +217,29 @@ const DEFAULT_HISTORY_WINDOW_MS = 60_000;
 const DEFAULT_DEDUPE_WINDOW_MS = 90_000;
 /** The normal-path freshness bound for a suppressed bridged target. */
 export const DEFAULT_BRIDGE_COALESCE_WINDOW_MS = 2_000;
+/**
+ * Hard ceiling for a per-target {@link CreateInvalidationBusOptions.bridgedCoalesceWindowMs}
+ * override. An opted-in expensive target may wait longer than the default
+ * before its trailing event, but never longer than this.
+ */
+export const MAX_BRIDGE_COALESCE_WINDOW_MS = 15_000;
 const DEFAULT_PAYLOAD_SIZE_LIMIT = 32 * 1024;
 
 /** Keep the normal-path trailing bound an invariant, even if a host supplies a bad value. */
 function normalizeBridgeCoalesceWindow(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_BRIDGE_COALESCE_WINDOW_MS;
   return Math.min(DEFAULT_BRIDGE_COALESCE_WINDOW_MS, Math.max(0, value));
+}
+
+/**
+ * Resolve one bridged target's trailing window. An absent or non-finite override
+ * keeps the bus-wide value; anything else is clamped to [0, MAX]. The ceiling is
+ * what keeps "the final write is never hidden indefinitely" true for opted-in
+ * targets as well.
+ */
+function resolveTargetCoalesceWindow(override: number | undefined, busWide: number): number {
+  if (override === undefined || !Number.isFinite(override)) return busWide;
+  return Math.min(MAX_BRIDGE_COALESCE_WINDOW_MS, Math.max(0, override));
 }
 
 interface BridgeCandidate {
@@ -216,6 +253,8 @@ interface BridgeWindow {
   floor: FloorState<BridgeCandidate>;
   /** Effective source-side floor for this source/target pair. */
   dedupeWindowMs: number;
+  /** Effective trailing staleness bound for this source/target pair. */
+  coalesceWindowMs: number;
   /** A scheduled trailing flush, or null when there is no pending candidate. */
   timer: unknown | null;
 }
@@ -361,7 +400,7 @@ export function createInvalidationBus(
       now: at,
       cfg: {
         minSleepMs: entry.dedupeWindowMs,
-        maxStalenessMs: bridgeCoalesceWindowMs,
+        maxStalenessMs: entry.coalesceWindowMs,
         leadingEdge: true,
       },
     });
@@ -378,17 +417,20 @@ export function createInvalidationBus(
     key: string,
     candidate: BridgeCandidate,
     effectiveDedupeWindowMs: number,
+    effectiveCoalesceWindowMs: number,
   ): void {
     let entry = bridgeWindows.get(key);
     if (!entry) {
       entry = {
         floor: emptyFloorState<BridgeCandidate>(),
         dedupeWindowMs: effectiveDedupeWindowMs,
+        coalesceWindowMs: effectiveCoalesceWindowMs,
         timer: null,
       };
       bridgeWindows.set(key, entry);
     } else {
       entry.dedupeWindowMs = effectiveDedupeWindowMs;
+      entry.coalesceWindowMs = effectiveCoalesceWindowMs;
     }
 
     // Keep the pending fire's anchor time stable while replacing its payload
@@ -406,7 +448,7 @@ export function createInvalidationBus(
       now: candidate.ts,
       cfg: {
         minSleepMs: effectiveDedupeWindowMs,
-        maxStalenessMs: bridgeCoalesceWindowMs,
+        maxStalenessMs: effectiveCoalesceWindowMs,
         leadingEdge: true,
       },
     });
@@ -470,10 +512,15 @@ export function createInvalidationBus(
         targetDedupeWindowMs === undefined || !Number.isFinite(targetDedupeWindowMs)
           ? dedupeWindowMs
           : Math.max(0, targetDedupeWindowMs);
+      const effectiveCoalesceWindowMs = resolveTargetCoalesceWindow(
+        opts.bridgedCoalesceWindowMs?.(name, parsed.name),
+        bridgeCoalesceWindowMs,
+      );
       emitBridgedTarget(
         key,
         { name, ts: ev.ts, ...(targetArgs !== undefined ? { args: targetArgs } : {}) },
         effectiveDedupeWindowMs,
+        effectiveCoalesceWindowMs,
       );
     }
   }

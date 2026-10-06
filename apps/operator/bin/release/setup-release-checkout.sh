@@ -54,10 +54,13 @@
 #                             [--node-modules-generation-id <v1-sha256>]
 #                             [--node-modules-generation-token <stat-token>]
 #                             [--node-modules-workspace-dir <repo-relative-dir>]...
+#                             [--dependency-generation-root <dir>]
 #                             [--integration <dir>] [--release <dir>]
 #                             [--prepare-existing]
 #                             [--source-only]
 #                             [--source-integrity allow-live-tree|object-sourced]
+#                             [--build-spa]
+#   setup-release-checkout.sh -h|--help   print this usage and exit 0 (touches nothing)
 #
 # `--source-integrity object-sourced` (P-008) refuses the one materialization path
 # that reads the integration tree's live working directory instead of git objects
@@ -73,6 +76,17 @@
 #
 # Env overrides: PAPERCUSP_INTEGRATION_ROOT, PAPERCUSP_RELEASE_ROOT.
 set -euo pipefail
+
+# EI-24760202132078287: usage discovery must be non-mutating, so it is handled
+# before anything else runs (no helper sourcing, no trap, no git). The text is
+# the header's own `# Usage:` … `# Env overrides:` block, so it cannot drift.
+for _arg in "$@"; do
+  case "$_arg" in
+    -h|--help)
+      sed -n '/^# Usage:/,/^# Env overrides:/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
+      exit 0 ;;
+  esac
+done
 
 # Default to the checkout this script actually lives in — never one box's path
 # (WI-4419: a hardcoded /home/<user>/… default is wrong on every other machine
@@ -1034,6 +1048,7 @@ sync_one_node_modules() {
   fi
   rm -rf "$tmp" "$old"                 # defensive: clear this run's leftovers (crash-safety)
   mkdir -p "$(dirname "$dest")"
+  dependency_generation_reap_dead_siblings "$dest"   # and dead runs' (WI-10004825)
   case "${NODE_MODULES_COPY_MODE:-hardlink}" in
     hardlink) cp -al "$src" "$tmp" ;;  # fast; source and destination share file data
     copy)
@@ -1167,9 +1182,17 @@ sync_one_node_modules() {
 record_node_modules_copy_metadata() {
   local metadata_root="$RELEASE_ROOT/node_modules"
   mkdir -p "$metadata_root"
-  [ -f "$INTEGRATION_ROOT/package-lock.json" ] \
-    && cp "$INTEGRATION_ROOT/package-lock.json" "$metadata_root/.papercusp-source-package-lock.json"
+  # WI-10004928 part 7: a REUSED immutable generation carries both markers
+  # read-only (0444). A plain `cp` / `>` onto one fails EACCES and the verify
+  # ends verdictless. Unlink first (needs only directory write), so each write
+  # creates a fresh file. Never chmod the inherited file in place: it may be a
+  # hard link into the immutable generation store.
+  if [ -f "$INTEGRATION_ROOT/package-lock.json" ]; then
+    rm -f "$metadata_root/.papercusp-source-package-lock.json"
+    cp "$INTEGRATION_ROOT/package-lock.json" "$metadata_root/.papercusp-source-package-lock.json"
+  fi
   if [ -n "${PINNED_DEPENDENCY_GENERATION_ID:-}" ]; then
+    rm -f "$metadata_root/.papercusp-dependency-generation"
     printf 'identity=%s\nsource=%s\n' \
       "$PINNED_DEPENDENCY_GENERATION_ID" "$DEPENDENCY_GENERATION_SOURCE_FINGERPRINT" \
       > "$metadata_root/.papercusp-dependency-generation"
@@ -1180,7 +1203,7 @@ record_node_modules_copy_metadata() {
 if need_node_modules; then
   NODE_MODULES_SOURCE_ROOT="$INTEGRATION_ROOT"
   if [ "$NODE_MODULES_COPY_MODE" = "copy" ] && [ "$NODE_MODULES_GENERATION_MODE" = "required" ]; then
-    DEPENDENCY_GENERATION_ROOT="${DEPENDENCY_GENERATION_ROOT:-$INTEGRATION_ROOT/.papercusp/dependency-generations}"
+    DEPENDENCY_GENERATION_ROOT="$(dependency_generation_resolve_root "$INTEGRATION_ROOT" "$DEPENDENCY_GENERATION_ROOT")"
     dependency_generation_configure_workspace_dirs \
       "$INTEGRATION_ROOT" "${NODE_MODULES_WORKSPACE_DIRS[@]}"
     if [ -n "$NODE_MODULES_GENERATION_ID" ]; then
@@ -1331,7 +1354,7 @@ reconcile_pinned_lock_deps() {
     --pinned-lock "$pinned_lock" \
     --integration-lock "$INTEGRATION_ROOT/package-lock.json" \
     --release "$RELEASE_ROOT" \
-    --generations "${DEPENDENCY_GENERATION_ROOT:-$INTEGRATION_ROOT/.papercusp/dependency-generations}" \
+    --generations "$(dependency_generation_resolve_root "$INTEGRATION_ROOT" "$DEPENDENCY_GENERATION_ROOT")" \
     --backfill 2>&1)" && rc=0 || rc=$?
   rm -f "$pinned_lock"
   [ -z "$out" ] || while IFS= read -r line; do log "$line"; done <<<"$out"
@@ -1630,8 +1653,8 @@ rebuild_stale_native_addons
 #
 # Same treatment node_modules already gets in step 3, and for the same stated
 # reason ("untracked by design"): provision from the integration tree rather
-# than re-download. Hardlink first — lute.min.js alone is ~3.9MB and the gate
-# host is not reliably networked, so re-running the setup scripts here would
+# than re-download. Copy locally (a real copy, not a hard link: WI-10004321,
+# below) — lute.min.js alone is ~3.9MB and the gate host is not reliably networked, so re-running the setup scripts here would
 # trade a deterministic red for a flaky one.
 #
 # ONLY fills entries MISSING from the release tree, so anything tracked at
@@ -1648,6 +1671,16 @@ rebuild_stale_native_addons
 # copying, and renames into place, so the fallback can never nest. Staging
 # lives in PROVISION_STAGE_DIR (outside public/, same filesystem as DST) so a
 # crash mid-copy cannot leave a half tree that vite would ship.
+#
+# WI-10004321: a REAL copy (`cp -a`), never a hard link (`cp -al`). A hard link
+# shares one inode between the integration tree and this release tree, and the
+# setup-*-runtime.sh postinstall scripts used to rewrite these files IN PLACE
+# (`cp`/`cp -f` open an existing destination with O_TRUNC). So a canonical
+# `npm install` or vite rebuild silently rewrote the published and in-flight
+# release trees' assets (measured 2026-09-30: silero_vad_v5.onnx was one inode
+# with 11 links across canonical, relcut-0024/0025/0026). The writers now unlink
+# first, and this copy removes the sharing at the source, so neither side alone
+# has to be right. The cost is disk (~320 MB of real runtime assets per tree).
 provision_runtime_asset() {
   _pra_src="$1"
   _pra_dst="$2"
@@ -1655,12 +1688,9 @@ provision_runtime_asset() {
   _pra_tmp="$_pra_stage/.provision.$$.$(basename "$_pra_dst")"
   mkdir -p "$(dirname "$_pra_dst")" "$_pra_stage" 2>/dev/null || return 1
   rm -rf -- "$_pra_tmp"
-  if ! cp -al "$_pra_src" "$_pra_tmp" 2>/dev/null; then
+  if ! cp -a "$_pra_src" "$_pra_tmp" 2>/dev/null; then
     rm -rf -- "$_pra_tmp"
-    if ! cp -a "$_pra_src" "$_pra_tmp" 2>/dev/null; then
-      rm -rf -- "$_pra_tmp"
-      return 1
-    fi
+    return 1
   fi
   if ! mv -- "$_pra_tmp" "$_pra_dst"; then
     rm -rf -- "$_pra_tmp"
@@ -1674,6 +1704,13 @@ if [ -d "$INTEGRATION_ROOT/$PUBLIC_ASSET_REL" ]; then
   PROVISION_STAGE_DIR="$RELEASE_ROOT/.provision-stage.$$"
   while IFS= read -r _ignored_entry; do
     [ -n "$_ignored_entry" ] || continue
+    # internal/docs.old.<pid> is the docs publisher's swap-out of the PREVIOUS
+    # mirror (apps/operator-docs/scripts/postbuild-copy.sh), never a runtime
+    # asset. One left behind in the integration tree (350 MB, measured
+    # 2026-09-30) was copied into every release tree and its SPA dist.
+    case "$_ignored_entry" in
+      "$PUBLIC_ASSET_REL"/internal/docs.old.*) continue ;;
+    esac
     _asset_src="$INTEGRATION_ROOT/$_ignored_entry"
     _asset_dst="$RELEASE_ROOT/$_ignored_entry"
     [ -e "$_asset_src" ] || continue
@@ -1690,6 +1727,34 @@ EOF
   rm -rf -- "$PROVISION_STAGE_DIR"
   unset PROVISION_STAGE_DIR
   log "provisioned $_provisioned_assets gitignored runtime asset(s) under $PUBLIC_ASSET_REL"
+fi
+
+# 3b (cont). No file under apps/operator/public may share an inode (WI-10004321).
+# The loop above skips entries that already exist, so a tree provisioned before
+# the fix still holds `cp -al` hard links to the integration tree. Unshare them:
+# copy each multiply-linked file to a sibling temp and rename it over the
+# original. The rename gives THIS tree a fresh inode and never writes through the
+# shared one, so the other trees' bytes are untouched. Then assert none remain.
+# Unlike a missing asset (non-fatal above: the owning test reports it), a shared
+# inode is silent: the tree's assets can change after it was built and tested,
+# and nothing would ever go red. So this one is fatal.
+if [ -d "$RELEASE_ROOT/apps/operator/public" ]; then
+  _unshared_assets=0
+  while IFS= read -r -d '' _linked_asset; do
+    _unshare_tmp="$(dirname "$_linked_asset")/.unshare.$$.$(basename "$_linked_asset")"
+    if cp -a -- "$_linked_asset" "$_unshare_tmp" && mv -f -- "$_unshare_tmp" "$_linked_asset"; then
+      _unshared_assets=$((_unshared_assets + 1))
+    else
+      rm -f -- "$_unshare_tmp"
+    fi
+  done < <(find "$RELEASE_ROOT/apps/operator/public" -type f -links +1 -print0 2>/dev/null)
+  [ "$_unshared_assets" -eq 0 ] || log "unshared $_unshared_assets hard-linked file(s) under apps/operator/public"
+  _still_linked="$(find "$RELEASE_ROOT/apps/operator/public" -type f -links +1 2>/dev/null | head -5)"
+  if [ -n "$_still_linked" ]; then
+    log "FATAL files under apps/operator/public still share an inode with another tree (WI-10004321); a rewrite in either tree would change the other:"
+    log "$_still_linked"
+    exit 1
+  fi
 fi
 
 # 3c. Checksum-pinned desktop rootfs -----------------------------------------

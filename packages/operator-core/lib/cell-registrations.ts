@@ -723,7 +723,7 @@ export const GATE_CANDIDATE_FAILURES_CELL: CellSpec = {
       },
       unmeasured: {
         meaning:
-          'The candidate is frozen but its failing-file set could not be read (test_runs unreachable, or the refs did not resolve).',
+          'The candidate is frozen but its failing-file set could not be read (test_runs unreachable, or the refs did not resolve) — OR a non-test leg was last measured red at an OLDER repairHead and the cycle never admitted it, so nothing is known about that leg at the current head (WI-10005727: before this, that shape read `none-failing`).',
         safeAction:
           'Read `unavailable` for the reason. Do NOT substitute a raw test_runs query — that population mixes the full suite (commit_sha=NULL) and dirty-tree runs, which is the original defect. Retry, or state the answer is unknown.',
       },
@@ -1902,6 +1902,82 @@ export const GOVERNOR_RECOVERY_CELL: CellSpec = {
   shape: '{ state, completed, total, progress, nextProbeAtMs, evidenceRef, confidence }',
 };
 
+export const LSP_ADMISSION_CELL: CellSpec = {
+  cell: 'lsp.admission',
+  registeredOn: '2026-10-03',
+  owner: 'lsp-fleet-scale-all-languages-2026-08-21',
+  headline: 'admission',
+  nullable: true,
+  unknownHoist: 'unknown',
+  callerRelativity: { kind: 'global' },
+  provenance: {
+    obtainedBy: 'daemon-owned LspAdmissionController.snapshot() over the existing Unix-socket RPC transport',
+    liveExercised: true,
+    evidence: 'code-intelligence/lsp-admission.test.ts exercises the real controller under pressure; state/lsp-admission.test.ts reads its actual snapshot and rejects unavailable/stale readback.',
+  },
+  resolver: 'lsp:admission_snapshot → readLspDaemonAdmission → LspAdmissionController.snapshot()',
+  visibility: { kind: 'workspace' },
+  federation: { kind: 'local' },
+  assessment: {
+    path: 'assessment',
+    codes: {
+      idle: { meaning: 'The daemon measured no active or waiting queries.', safeAction: 'Submit work through the daemon; the next request measures its own lane.' },
+      active: { meaning: 'Queries are running with no observed pressure waiters.', safeAction: 'Use the class windows and actual in-flight counts when assessing execution.' },
+      pressure: { meaning: 'Queries wait for class-specific service capacity.', safeAction: 'Inspect class queue age, caller deadlines and feedback; allow unrelated classes to proceed.' },
+      'settlement-failed': { meaning: 'At least one durable receipt failed to settle.', safeAction: 'Inspect the named failed receipts and restore durable settlement before asserting the queue drained.' },
+      unknown: { meaning: 'Daemon queue state could not be measured.', safeAction: 'Inspect the explicit daemon read failure; do not treat it as an empty queue.' },
+    },
+    evidence: ['measurement'],
+  },
+  changeSignal: { kind: 'poll', tool: 'lsp:admission_snapshot', path: 'admission' },
+  shape: '{ queued, inFlight, classes[{ classKey, queued, pendingPersistence, oldestWaitMs, desiredWindow, effectiveWindow, health, feedback }], settlementFailures, measured, sampledAtMs, generation }',
+};
+
+/** Reuse the daemon lens; readiness is not inferred from an empty queue or process health. */
+export const LSP_WARM_SERVERS_CELL: CellSpec = {
+  ...LSP_ADMISSION_CELL,
+  cell: 'lsp.warmServers',
+  registeredOn: '2026-10-05',
+  headline: 'runtime',
+  unknownHoist: 'runtimeUnknown',
+  provenance: {
+    obtainedBy: 'daemon health RPC → lspHealth() → lspClientInventory(), including the owning PID and measurement timestamp',
+    liveExercised: true,
+    evidence: 'lsp-admission.pinned.integration.test.ts measures the real daemon health inventory at nine replay boundaries with migrated PG; state/lsp-admission.test.ts rejects stale/failed readback independently of the queue.',
+  },
+  resolver: 'lsp:admission_snapshot → readLspDaemonHealth → lspClientInventory()',
+  assessment: {
+    path: 'runtimeAssessment',
+    codes: {
+      healthy: { meaning: 'The measured server processes are healthy; this does not certify any query intent.', safeAction: 'Read lsp.readiness before interpreting absence or completeness.' },
+      degraded: { meaning: 'At least one server process is degraded.', safeAction: 'Inspect its task identity and proof ledger.' },
+      unhealthy: { meaning: 'At least one server process is unhealthy.', safeAction: 'Inspect its actual failure before relying on answers.' },
+      unknown: { meaning: 'No enabled warm population could be established.', safeAction: 'Inspect runtimeUnknown and the enabled flag; do not infer zero servers.' },
+    },
+    evidence: ['runtimeMeasurement'],
+  },
+  changeSignal: { kind: 'poll', tool: 'lsp:admission_snapshot', path: 'runtime' },
+  shape: '{ enabled, overall, pid, node, entry, sampledAtMs, servers[{ language, rootPath, taskId, pid, health, certifiedReadiness, unprovenReadiness, pendingProgress, progressGeneration }] }',
+};
+
+export const LSP_READINESS_CELL: CellSpec = {
+  ...LSP_WARM_SERVERS_CELL,
+  cell: 'lsp.readiness',
+  headline: 'readiness',
+  assessment: {
+    path: 'readinessAssessment',
+    codes: {
+      reported: { meaning: 'The daemon reported its exact per-intent proof sets; missing intents are not certified.', safeAction: 'Use only the listed certified intents when interpreting absence.' },
+      unproven: { meaning: 'At least one measured intent is unproven or its server is still indexing.', safeAction: 'Retain honest degraded answers and inspect the per-intent evidence.' },
+      unknown: { meaning: 'An enabled server readiness population could not be established.', safeAction: 'Inspect runtimeUnknown; do not promote missing readiness into a proof.' },
+    },
+    evidence: ['runtimeMeasurement'],
+    measuredBy: { readiness: 'runtimeMeasurement' },
+  },
+  changeSignal: { kind: 'poll', tool: 'lsp:admission_snapshot', path: 'readiness' },
+  shape: '[{ language, rootPath, taskId, certified, unproven, quiescent, pendingProgress, progressGeneration }]; process health never promotes an intent proof',
+};
+
 /* ═══════════════════════════════════════════════════════════════════════════════
  * goal-mode-drift-guards-2026-08-31 P-002 — IS THE STEWARD PLACING ANYTHING?
  *
@@ -2824,6 +2900,9 @@ export const BUILTIN_CELLS: CellSpec[] = [
   GOVERNOR_QUEUE_CELL,
   GOVERNOR_RESOURCES_CELL,
   GOVERNOR_RECOVERY_CELL,
+  LSP_ADMISSION_CELL,
+  LSP_WARM_SERVERS_CELL,
+  LSP_READINESS_CELL,
   CAPACITY_VERDICT_CELL,
   ROLE_LAUNCH_CELL,
   WORK_SCOPE_CELL,

@@ -1,0 +1,72 @@
+# Materialize this file as the app's ROOT blueprint: `.papercusp/blueprint.yaml`.
+#
+# Why here and not under blueprints/: `blueprint:submit` resolves a harness's
+# operations from its projected specification or, on a miss, from
+# `<harnessDir>/.papercusp/blueprint.yaml` (operation-service). Nothing reads
+# `operations:` out of the pots-plane blueprints under `blueprints/*`, so an
+# operation declared there is never submittable (ruling:
+# app-agent-tasks-durable-execution-2026-10-06#D-003). The stable app agent in
+# `blueprints/app-agent/` stays a pots-plane definition and declares no
+# operations.
+#
+# Every agent task the app runs is a typed, versioned operation declared HERE
+# and invoked through the seam client (`submitOperations` / `operationStatus` /
+# `operationResult` in @papercusp/pot-app-seam). Never trigger a direct
+# `work_items:create` (or a `create-work-item` binding) for agent work; the
+# `operation-first-triggers` check fails the app if it does.
+id: "{{APP_HARNESS_SLUG}}"
+extends: coding
+description: >-
+  {{APP_DISPLAY_NAME}} harness. Declares the app's agent tasks as blueprint
+  operations; the deterministic app submits them through the seam client.
+
+# Worker roles. An operation with `execution: { kind: agent, role }` must name a
+# role declared in THIS file: the orchestrator validator refuses a role that
+# only exists on a dependency blueprint. Keep each worker read + propose-only
+# (no send/apply capability on the app's dangerous surface).
+#
+# roles:
+#   - id: "{{WORKER_ROLE}}"
+#     description: >-
+#       Executes one {{OPERATION_ID}} request and returns a schema-valid result.
+#     capabilities: ["{{SAFE_CAPABILITY_CLASS}}"]
+#     tools: [work_items:get, work_items:checkpoint, work_items:complete]
+
+# The deterministic app submits this reusable operation through blueprint:submit.
+# It targets the app-owned plan template rather than copying its DAG; the pinned
+# ref makes a receipt replay resolve the same definition even after later edits.
+# The plan template's schedule.execution names the stable app agent that works
+# the promoted items.
+operations:
+  - id: "{{OPERATION_ID}}"
+    version: "{{OPERATION_VERSION}}"
+    description: >-
+      Run {{PLAN_TEMPLATE_SLUG}} for one typed {{WORK_UNIT_NOUN}} request and
+      return its validated {{CONTRACT_NAME}} output.
+    target:
+      kind: plan
+      template:
+        kind: plan-template
+        ref: "{{PLAN_TEMPLATE_SLUG}}"
+        revision: "{{PLAN_TEMPLATE_REVISION}}"
+        contentHash: "{{PLAN_TEMPLATE_CONTENT_HASH_SHA256}}"
+    inputSchema:
+      type: object
+      properties:
+        "{{OPERATION_INPUT_FIELD}}":
+          type: string
+        provenance:
+          type: object
+        trigger:
+          type: object
+      required:
+        - "{{OPERATION_INPUT_FIELD}}"
+      additionalProperties: false
+    acceptance:
+      resultSchema:
+        type: object
+        properties:
+          "{{OPERATION_RESULT_FIELD}}": {}
+        required:
+          - "{{OPERATION_RESULT_FIELD}}"
+        additionalProperties: false

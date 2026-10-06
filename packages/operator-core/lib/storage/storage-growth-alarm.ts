@@ -164,6 +164,10 @@ export const RETENTION_COVERED_ELSEWHERE: Readonly<Record<string, string>> = {
   operator_turns: 'pruned by operator-turns-gc.ts',
   operator_conversations: 'pruned by operator-turns-gc.ts',
   plan_revisions: 'pruned by agent-tools/plans/revisions-gc.ts',
+  // Payload pruned (SET payload = NULL), rows kept as each sink's dedupe identity —
+  // the row horizon is an open decision, tracked on WI-10004921.
+  trigger_deliveries:
+    'payload pruned by external-triggers/delivery-retention.ts pruneTriggerDeliveryPayloads (30d horizon; non-event-bus copies immediately); rows kept as per-sink dedupe identity',
   coord_thread_posts: 'pruned by agent-tools/coordination/message-log-gc.ts',
   session_archive_files: `permanent canonical archive — archiveSession() writes/updates it in session-archive.ts; ${NOT_AGE_PRUNABLE}`,
   session_turns: 'pruned by search/session-ingest.ts pruneSessionTurnsOnce (RETENTION_DAYS=45)',

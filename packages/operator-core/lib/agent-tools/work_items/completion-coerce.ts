@@ -147,6 +147,40 @@ function isNoFilesChangedSentinel(v: unknown): v is string {
 }
 
 /**
+ * WI-10005684 (EI-23774140426573307): the sentinel set above only matches a WHOLE
+ * string, so a truthful negation written as a SENTENCE — `"None. This is a
+ * not-a-defect close, no source, test, or config file was modified."` — fell through
+ * to the comma-split list rescue below and was recorded as four fabricated "paths".
+ * The close then landed authority:'proposed' with three stacked integrity warnings:
+ * the anti-fabrication machinery accusing a caller who had told the exact truth.
+ *
+ * A string reads as a negation (the empty set) only when BOTH hold:
+ *  - it OPENS with a negation lead (`none`, `nothing`, `n/a`, `no files|changes|source|
+ *    code|tests|config|repo`) followed by a word boundary or sentence punctuation, and
+ *  - NO whitespace-delimited token in it is path-shaped (a `/` or `\` separator, a
+ *    dotted extension such as `a.ts`, or a dotfile).
+ * The second clause is what keeps this from swallowing real evidence: `"None, but I
+ * did edit src/a.ts"` names a path, so it is NOT a negation and still takes the list
+ * rescue. It errs toward NOT normalizing — a string this declines to classify behaves
+ * exactly as before, so the only behavior change is for sentences with no path in them.
+ */
+const NO_FILES_PROSE_LEAD =
+  /^(?:none|nothing|n\/a|no\s+(?:files?|changes?|source|code|tests?|config|repo(?:sitory)?))(?=$|[\s.,:;!—–-])/i;
+
+function isPathShapedProseToken(token: string): boolean {
+  const t = token.replace(/^[("'`[]+/, '').replace(/[)"'`\].,;:!?]+$/, '');
+  if (!t || t.toLowerCase() === 'n/a') return false;
+  return /[\\/]/.test(t) || /^[\w.-]*\w\.[A-Za-z][A-Za-z0-9]{0,7}$/.test(t) || /^\.[A-Za-z][\w.-]*$/.test(t);
+}
+
+function isNoFilesChangedProse(v: unknown): v is string {
+  if (typeof v !== 'string') return false;
+  const t = v.trim();
+  if (t.length === 0 || t.length > 500 || !NO_FILES_PROSE_LEAD.test(t)) return false;
+  return !t.split(/\s+/).some(isPathShapedProseToken);
+}
+
+/**
  * Normalize the path-only `filesChanged` field.
  *
  * Unlike prose arrays such as `whatLanded`, a scalar containing commas,
@@ -157,7 +191,7 @@ function isNoFilesChangedSentinel(v: unknown): v is string {
  * disambiguate it by passing the documented array form.
  */
 function coerceFilesChanged(v: unknown): unknown {
-  if (isNoFilesChangedSentinel(v)) return [];
+  if (isNoFilesChangedSentinel(v) || isNoFilesChangedProse(v)) return [];
 
   let entries: unknown[];
   if (typeof v === 'string') {
@@ -317,6 +351,71 @@ function repairTruncatedJsonObject(s: string): Record<string, unknown> | undefin
 }
 
 /**
+ * WI-10005684 (EI-24822105308825949): the mirror image of the truncation repair above —
+ * a JSON-stringified completion carrying EXTRA trailing closers. Measured on the one
+ * ledger row behind the report (tool_invocations 30937604, 2026-10-01, a 3,442-char
+ * `completion` string): it began `{`, ended `}`, and `JSON.parse` failed with
+ * "Unexpected non-whitespace character after JSON at position 3441" — the caller had
+ * emitted ONE `}` too many. It was therefore not a client that "stringified a good
+ * object" (the report's inference): the string was malformed, so it fell to the
+ * bare-string rejection whose wording ("not a bare string") sent the caller away from
+ * the real defect.
+ *
+ * Extra closers carry no data, so peeling them is LOSSLESS — the recovered object is
+ * exactly the complete prefix the caller wrote, which is why (unlike the truncation
+ * repair) no incompleteness marker is attached. Only trailing `}` / `]` / whitespace
+ * are peeled, at most {@link MAX_PEELED_CLOSERS}, and the result is accepted only if it
+ * parses to a plain object carrying a recognised completion key — so a truncated object
+ * (a closer MISSING, never in excess) cannot be mistaken for this case: peeling cannot
+ * make an unbalanced-short string parse.
+ */
+const MAX_PEELED_CLOSERS = 8;
+
+function repairExtraTrailingClosers(s: string): Record<string, unknown> | undefined {
+  let t = s.trim();
+  if (!t.startsWith('{')) return undefined;
+  for (let peeled = 0; peeled < MAX_PEELED_CLOSERS; peeled += 1) {
+    const last = t[t.length - 1];
+    if (last !== '}' && last !== ']') return undefined;
+    t = t.slice(0, -1).trimEnd();
+    try {
+      const parsed: unknown = JSON.parse(t);
+      if (!isPlainObject(parsed)) return undefined;
+      return Object.keys(parsed).some((k) => COMPLETION_SHAPE_KEYS.has(k)) ? parsed : undefined;
+    } catch {
+      /* keep peeling — the next closer may be the last excess one */
+    }
+  }
+  return undefined;
+}
+
+/**
+ * WI-10005684: when `completion` arrives as a STRING that is shaped like a JSON object
+ * (`{ … }`) but could not be parsed or repaired, say THAT. The generic
+ * {@link COMPLETION_STRING_REJECTION} ("not a bare string") reads as an accusation
+ * about prose and gave the 2026-10-01 caller no hint their JSON was merely malformed
+ * (they concluded the direct door mangled their object). Returns the parser's own
+ * message so the position of the break is named, or `undefined` for genuine prose
+ * (not brace-delimited) where the generic rejection is already accurate.
+ */
+export function describeUnparseableCompletionJsonString(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const t = raw.trim();
+  if (!t.startsWith('{') || !t.endsWith('}')) return undefined;
+  try {
+    JSON.parse(t);
+    return undefined; // parses — not this failure
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return (
+      `completion arrived as a STRING that looks like a JSON object but is NOT valid JSON (${reason.slice(0, 160)}) ` +
+      'and could not be repaired — send completion as a structured object value, not a JSON-encoded string ' +
+      '(if you do send a string it must be one valid JSON object).'
+    );
+  }
+}
+
+/**
  * Normalise ONE `completion` value to the CompletionRecord shape. Handles:
  *  - a JSON-stringified object → parsed + coerced as an object (EI-7311)
  *  - a TRUNCATED JSON-stringified object → closers rebuilt, then coerced as an
@@ -334,6 +433,9 @@ export function coerceCompletionShape(raw: unknown): unknown {
   if (typeof raw === 'string') {
     const parsedObject = tryParseJsonObject(raw);
     if (parsedObject) return coerceCompletionShape(parsedObject);
+    // WI-10005684: one-or-few EXTRA trailing closers — lossless peel, no marker.
+    const peeled = repairExtraTrailingClosers(raw);
+    if (peeled) return coerceCompletionShape(peeled);
     // EI-20724228359175431: a TRUNCATED JSON completion — recover the fields that
     // did arrive rather than rejecting the whole broken blob. Mark it distinctly so
     // the caller-facing warning can say the record may be INCOMPLETE.

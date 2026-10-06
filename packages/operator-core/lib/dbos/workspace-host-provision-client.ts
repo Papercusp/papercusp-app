@@ -22,7 +22,11 @@ import { DBOSClient } from '@dbos-inc/dbos-sdk';
 import { withDbosIdleTxGrace } from './bootstrap';
 import {
   WORKSPACE_HOST_PROVISIONING_WORKFLOW_NAME,
+  workspaceHostDestroyEnqueueRequest,
+  workspaceHostLifecycleEnqueueRequest,
   workspaceHostProvisioningEnqueueRequest,
+  type StartWorkspaceHostDestroyInput,
+  type StartWorkspaceHostLifecycleInput,
   type StartWorkspaceHostProvisioningInput,
 } from './workspace-host-provision-workflow';
 
@@ -45,6 +49,17 @@ export interface WorkspaceHostProvisioningEnqueuer {
   enqueue(input: StartWorkspaceHostProvisioningInput): Promise<{ workflowId: string }>;
 }
 
+/**
+ * Lifecycle actions and destroy for an EXISTING host, enqueued the same way (WI-10005363). Without
+ * it the hosted action route forwards the raw browser body to the controller's loopback route,
+ * which drops every server-derived field (the actor) and answers a false 504 while the controller
+ * waits out its admission window.
+ */
+export interface WorkspaceHostOperationEnqueuer {
+  enqueueLifecycle(input: StartWorkspaceHostLifecycleInput): Promise<{ workflowId: string; operationId: string }>;
+  enqueueDestroy(input: StartWorkspaceHostDestroyInput): Promise<{ workflowId: string; operationId: string }>;
+}
+
 export interface WorkspaceHostProvisioningClientOptions {
   readonly systemDatabaseUrl: string;
   /** The DBOS primary's `applicationVersion` (its `DBOS__APPVERSION`). Required. */
@@ -62,7 +77,7 @@ async function createDbosClient(systemDatabaseUrl: string): Promise<WorkspaceHos
 
 export function createWorkspaceHostProvisioningClient(
   options: WorkspaceHostProvisioningClientOptions,
-): WorkspaceHostProvisioningEnqueuer {
+): WorkspaceHostProvisioningEnqueuer & WorkspaceHostOperationEnqueuer {
   const appVersion = options.appVersion.trim();
   if (!appVersion) throw new Error('workspace_host_provisioning_client_app_version_required');
   if (!options.systemDatabaseUrl.trim()) {
@@ -79,20 +94,32 @@ export function createWorkspaceHostProvisioningClient(
     return client;
   };
 
+  // Every action is the one workspace-host workflow on its one queue; only the request differs.
+  const enqueueRequest = async (request: { workflowId: string; deduplicationId: string; workflowInput: unknown }) => {
+    const handle = await (await connected()).enqueue(
+      {
+        queueName: WORKSPACE_HOST_PROVISIONING_WORKFLOW_NAME,
+        workflowName: WORKSPACE_HOST_PROVISIONING_WORKFLOW_NAME,
+        workflowID: request.workflowId,
+        deduplicationID: request.deduplicationId,
+        appVersion,
+      },
+      request.workflowInput,
+    );
+    return handle.workflowID;
+  };
+
   return {
     async enqueue(input) {
-      const request = workspaceHostProvisioningEnqueueRequest(input);
-      const handle = await (await connected()).enqueue(
-        {
-          queueName: WORKSPACE_HOST_PROVISIONING_WORKFLOW_NAME,
-          workflowName: WORKSPACE_HOST_PROVISIONING_WORKFLOW_NAME,
-          workflowID: request.workflowId,
-          deduplicationID: request.deduplicationId,
-          appVersion,
-        },
-        request.workflowInput,
-      );
-      return { workflowId: handle.workflowID };
+      return { workflowId: await enqueueRequest(workspaceHostProvisioningEnqueueRequest(input)) };
+    },
+    async enqueueLifecycle(input) {
+      const request = workspaceHostLifecycleEnqueueRequest(input);
+      return { workflowId: await enqueueRequest(request), operationId: request.workflowInput.operationId };
+    },
+    async enqueueDestroy(input) {
+      const request = workspaceHostDestroyEnqueueRequest(input);
+      return { workflowId: await enqueueRequest(request), operationId: request.workflowInput.operationId };
     },
   };
 }

@@ -35,7 +35,12 @@ import { promisify } from 'node:util';
 import { resolveProject, resolveWorkspaceForHarnessSlug } from '../../harness-core';
 import type { GitObjectStoreState, TargetProbe, TargetResolution } from './dead-target-routine-reaper';
 
-const execFileAsync = promisify(execFile);
+// Lazy + memoized, NOT promisified at module scope (EI-10161): under a narrow
+// `vi.mock('node:child_process')` `execFile` is undefined, and an eager `promisify` throws at
+// IMPORT time — crashing every test file that reaches this module, even one that never calls it.
+let execFileAsyncMemo: typeof execFile.__promisify__ | null = null;
+const execFileAsync = ((...args: unknown[]) =>
+  Reflect.apply((execFileAsyncMemo ??= promisify(execFile)), undefined, args)) as typeof execFile.__promisify__;
 
 /** Bound on each individual git read. Env-overridable; a sweep runs this per install. */
 export function probeTimeoutMs(): number {

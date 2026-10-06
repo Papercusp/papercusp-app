@@ -47,6 +47,8 @@ function failSoft(scope: string, e: unknown): void {
 /** Injectable seam for tests. */
 export interface SessionCompactedEventsDeps {
   emit?: typeof emitAwaitedEvent;
+  /** Exact successor identity supplied by the native-proof-gated host. */
+  sessionId?: string;
 }
 
 /**
@@ -70,7 +72,11 @@ export async function emitSessionCompactedEventAsync(
   const emit = deps.emit ?? emitAwaitedEvent;
   const key = `session:compacted:${owner}`;
   const summary = `session ${owner} finished /compact${detail ? ` — ${detail}` : ''}`;
-  await emit({ key, summary, payload: { owner, detail: detail ?? null }, source: 'session' });
+  await emit({
+    key, summary,
+    payload: { owner, detail: detail ?? null, ...(deps.sessionId ? { sessionId: deps.sessionId } : {}) },
+    source: 'session',
+  });
 }
 
 /**

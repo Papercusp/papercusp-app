@@ -63,6 +63,15 @@ export interface SenderBodyDeliveryDiagnostics {
   bodyCrowdedPageCap: number;
 }
 
+/** These describe the recipient's inbox view, not missing bytes in a send receipt. */
+export function isCoordSendDeliveryDiagnostic(toolName: string | undefined, key: string): boolean {
+  return toolName === 'coord:send' && (key === 'bodyTruncated' || key === 'bodyMayBeTruncated');
+}
+
+export const COORD_SEND_RECEIPT_RECOVERY =
+  'Do not repeat coord:send to recover its result. Inspect the returned reference and use coord:read ' +
+  'with results[].msg_id or results[].bodyReadRef to read the persisted messages.';
+
 /**
  * Describe what a normal recipient inbox read can see without performing a
  * second read or changing the durable message. The message itself remains

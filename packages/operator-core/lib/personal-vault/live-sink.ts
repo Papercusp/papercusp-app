@@ -7,6 +7,15 @@ import { setPersonalSyncState, upsertPersonalDocuments } from './store';
 export interface NormalizedExternalEvent {
   key: string;
   externalId: string;
+  /**
+   * Canonical datatype registry id (`email-message`, `calendar-event`, …).
+   * This — never the provider-named event key — selects the Vault and app
+   * route (D-010), so any registered provider emitting a known datatype lands
+   * in the same place Google does.
+   */
+  datatypeId: string;
+  /** Server-owned source id, present on every canonical ingestion event. */
+  sourceId?: string | null;
   occurredAt?: string | null;
   payload: Record<string, unknown>;
 }
@@ -20,48 +29,111 @@ export interface PersonalDocumentProvenance {
   providerAccountId?: string | null;
 }
 
+interface VaultRouteShape {
+  kind: string;
+  participants: string[];
+  title: string;
+  text: string;
+  /** Native-id qualifier between source id and native id (facebook entity type). */
+  keyQualifier?: string;
+}
+
+interface VaultRoute {
+  /**
+   * Vault category label. Display/uniqueness-domain only after D-010: renaming
+   * the provider-named `gmail` label belongs to the P-008 cutover.
+   */
+  category: string;
+  shape(payload: Record<string, unknown>): VaultRouteShape;
+}
+
+/**
+ * The ONE datatype-keyed route table for Vault ingestion (D-010). The app-row
+ * producer reads the stamped `datatypeId` back off the document, so adding a
+ * datatype here is the whole change for a new provider's records to flow.
+ */
+const VAULT_ROUTES: Readonly<Record<string, VaultRoute>> = {
+  'email-message': {
+    category: 'gmail',
+    shape: (p) => ({
+      kind: 'message',
+      participants: [...strings(p.from), ...strings(p.to), ...strings(p.cc)],
+      title: String(p.subject ?? '(no subject)'),
+      text: String(p.text ?? p.snippet ?? ''),
+    }),
+  },
+  'calendar-event': {
+    category: 'calendar',
+    shape: (p) => {
+      const attendees = Array.isArray(p.attendees)
+        ? p.attendees.flatMap((a) => typeof a === 'string' ? [a] : strings((a as { email?: unknown }).email))
+        : [];
+      return {
+        kind: 'event',
+        participants: [...strings(p.organizer), ...attendees],
+        title: String(p.summary ?? '(untitled event)'),
+        text: String(p.description ?? ''),
+      };
+    },
+  },
+  'social-post': {
+    category: 'facebook',
+    shape: (p) => {
+      const entityType = p.entityType === 'profile' || p.entityType === 'photo' ? p.entityType : 'post';
+      const author = typeof p.author === 'string' && p.author.trim() ? p.author.trim() : null;
+      const text = String(p.text ?? '');
+      const title = entityType === 'profile'
+        ? author ?? 'Facebook profile'
+        : entityType === 'photo'
+          ? text || 'Facebook photo'
+          : 'Facebook post';
+      return { kind: entityType, participants: author ? [author] : [], title, text, keyQualifier: entityType };
+    },
+  },
+};
+
+/** Datatypes the Vault ingests. Exported for routing tests and adapters. */
+export const VAULT_DATATYPES: readonly string[] = Object.freeze(Object.keys(VAULT_ROUTES));
+
+/**
+ * Stable Vault key: `<category>:<sourceId>:[qualifier:]<nativeId>` whenever a
+ * source id exists, so two sources reusing a native id never collapse (D-010).
+ */
+export function vaultDedupeKey(
+  category: string,
+  nativeId: string,
+  sourceId?: string | null,
+  qualifier?: string,
+): string {
+  const sid = sourceId?.trim();
+  return [category, ...(sid ? [sid] : []), ...(qualifier ? [qualifier] : []), nativeId].join(':');
+}
+
 export function personalDocumentFromExternalEvent(
   event: NormalizedExternalEvent,
   provenance: PersonalDocumentProvenance = {},
 ): PersonalDocumentInput {
+  const route = VAULT_ROUTES[event.datatypeId];
+  if (!route) throw new Error(`unsupported_personal_datatype:${event.datatypeId}`);
   const p = event.payload;
-  if (event.key.startsWith('ext:gmail:')) {
-    return {
-      source: 'gmail', ...provenance, kind: 'message', externalId: event.externalId, occurredAt: event.occurredAt,
-      participants: [...strings(p.from), ...strings(p.to), ...strings(p.cc)],
-      title: String(p.subject ?? '(no subject)'), text: String(p.text ?? p.snippet ?? ''),
-      metadata: p, dedupeKey: `gmail:${event.externalId}`,
-    };
-  }
-  if (event.key.startsWith('ext:gcal:')) {
-    const attendees = Array.isArray(p.attendees)
-      ? p.attendees.flatMap((a) => typeof a === 'string' ? [a] : strings((a as { email?: unknown }).email))
-      : [];
-    return {
-      source: 'calendar', ...provenance, kind: 'event', externalId: event.externalId, occurredAt: event.occurredAt,
-      participants: [...strings(p.organizer), ...attendees],
-      title: String(p.summary ?? '(untitled event)'), text: String(p.description ?? ''),
-      metadata: p, dedupeKey: `calendar:${event.externalId}`,
-    };
-  }
-  if (event.key.startsWith('ext:facebook:')) {
-    const entityType = p.entityType === 'profile' || p.entityType === 'photo'
-      ? p.entityType
-      : 'post';
-    const author = typeof p.author === 'string' && p.author.trim() ? p.author.trim() : null;
-    const text = String(p.text ?? '');
-    const title = entityType === 'profile'
-      ? author ?? 'Facebook profile'
-      : entityType === 'photo'
-        ? text || 'Facebook photo'
-        : 'Facebook post';
-    return {
-      source: 'facebook', ...provenance, kind: entityType, externalId: event.externalId, occurredAt: event.occurredAt,
-      participants: author ? [author] : [], title, text,
-      metadata: p, dedupeKey: `facebook:${entityType}:${event.externalId}`,
-    };
-  }
-  throw new Error(`unsupported_personal_event:${event.key}`);
+  const shaped = route.shape(p);
+  // Server-owned sink provenance wins over the event's own copy: the sink was
+  // built for exactly one resolved source and principal.
+  const sourceId = provenance.sourceId?.trim() || event.sourceId?.trim() || null;
+  return {
+    source: route.category,
+    ...provenance,
+    sourceId,
+    datatypeId: event.datatypeId,
+    kind: shaped.kind,
+    externalId: event.externalId,
+    occurredAt: event.occurredAt,
+    participants: shaped.participants,
+    title: shaped.title,
+    text: shaped.text,
+    metadata: p,
+    dedupeKey: vaultDedupeKey(route.category, event.externalId, sourceId, shaped.keyQualifier),
+  };
 }
 
 /** Second-sink seam consumed by the external-trigger adapters: normalization is
@@ -160,7 +232,7 @@ export async function syncGoogleContacts(
       const resourceName = String(person.resourceName ?? '');
       const primaryEmail = emails?.map((e) => e.value).find(Boolean) ?? null;
       return {
-        source: 'contacts', kind: 'contact', externalId: resourceName || primaryEmail,
+        source: 'contacts', datatypeId: 'contact', kind: 'contact', externalId: resourceName || primaryEmail,
         participants: emails?.map((e) => e.value ?? '').filter(Boolean) ?? [],
         title: names?.map((n) => n.displayName).find(Boolean) ?? primaryEmail ?? '(unnamed contact)',
         text: [...(emails?.map((e) => e.value) ?? []), ...(phones?.map((p) => p.value) ?? [])].filter(Boolean).join('\n'),

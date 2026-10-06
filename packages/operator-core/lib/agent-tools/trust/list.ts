@@ -34,9 +34,7 @@ export default defineTool({
     const ws = principalWs && principalWs !== '*' ? principalWs : activeWorkspaceId();
     const trusted = await listTrustedUsers(ws);
     return {
-      content: [
-        { type: 'text', text: JSON.stringify({ ok: true, workspaceId: ws, count: trusted.length, trusted }, null, 2) },
-      ],
+      data: { ok: true, workspaceId: ws, count: trusted.length, trusted },
     };
   },
 });

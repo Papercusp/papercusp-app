@@ -98,6 +98,35 @@ export interface AcceptanceRubricVettingStatus {
    * machine-readable form of the note appended to that candidate's `detail`.
    */
   gradingAuditDispatchSuppressed?: GradingAuditDispatchSuppression;
+  /**
+   * Set only on an UNVETTED verdict where some candidate is stranded on a pending
+   * grade-the-grader audit that dispatch is NOT known to suppress: the exact call
+   * that launches its auditor now (WI-10005150). The rejection carries its own
+   * repair, so the reader does not have to find the lever in source.
+   */
+  pendingGradingAuditRepair?: PendingGradingAuditRepair;
+}
+
+/**
+ * The manual lever for a pending grade-the-grader audit (WI-10005150).
+ *
+ * Automatic re-dispatch only happens when a later `scorecards:emit` (or a gated
+ * completion) runs the no-target backlog sweep, and that sweep reads only the
+ * newest bounded window of scorecards. A pending card that has aged out of that
+ * window is reachable ONLY by naming it, which is what this call does.
+ */
+export interface PendingGradingAuditRepair {
+  tool: 'scorecards:repair';
+  args: { targetIds: string[] };
+}
+
+/** Text appended to a pending-audit rejection whose dispatch is not suppressed. */
+export function describePendingGradingAuditRepair(issueId: string): string {
+  return (
+    `it settles only when an independent auditor is dispatched; dispatch one now with ` +
+    `scorecards:repair { targetIds: ['${issueId}'] }. The automatic re-dispatch rides on a later ` +
+    `scorecards:emit and sweeps only the most recent scorecards, so an older pending card can wait indefinitely`
+  );
 }
 
 /**
@@ -132,8 +161,9 @@ export interface AcceptanceRubricVettingDeps {
   /**
    * Optional: is grade-the-grader dispatch suppressed right now? Consulted only
    * when a candidate was rejected for a `pending` audit. Omitted ⇒ never
-   * consulted (no behavior change). A throw is treated as "not suppressed" —
-   * this read only ANNOTATES a refusal, it never decides one.
+   * consulted, and every pending candidate is treated as repairable. A throw is
+   * treated as "not suppressed" — this read only ANNOTATES a refusal, it never
+   * decides one.
    */
   readGradingAuditDispatchSuppression?: (targetOwnerId?: string | null) => Promise<GradingAuditDispatchSuppression | null>;
 }
@@ -327,7 +357,15 @@ export async function getAcceptanceRubricVettingStatus(
     };
     candidates.push(candidate);
     if (rejectedBy === 'grading-audit-unsettled' && card.gradingAudit?.state === 'pending') {
-      pendingAuditCandidates.push({ candidate, targetOwnerId: card.createdBy });
+      if (card.subject?.kind === 'rubric' && card.subjectRubricCurrentness?.state !== 'current') {
+        const subjectCurrentness = card.subjectRubricCurrentness;
+        candidate.detail =
+          `${detail}. The subject rubric is ${subjectCurrentness?.state ?? 'unknown'}` +
+          (subjectCurrentness?.reason ? ` (${subjectCurrentness.reason})` : '') +
+          '; scorecards:repair skips non-current rubric subjects, so re-attest against the current revision instead';
+      } else {
+        pendingAuditCandidates.push({ candidate, targetOwnerId: card.createdBy });
+      }
     }
     if (rejectedBy === null || rejectedBy === 'stale-revision') vettedCards.push(card);
     if (rejectedBy === null && !current) current = card;
@@ -335,21 +373,38 @@ export async function getAcceptanceRubricVettingStatus(
   // EI-24121421744054354: a pending audit settles only when an auditor is launched.
   // If dispatch is suppressed, say so ON the card it strands — otherwise the refusal
   // reads as "wait a bit" while nothing can move until an owner pause lifts.
+  // WI-10005150: when dispatch is NOT suppressed, name the call that launches the
+  // auditor now. Waiting is not guaranteed to help: automatic re-dispatch sweeps
+  // only the newest scorecards, so an aged-out pending card never moves unaided.
+  // Both annotations are skipped once a settled attestation carries — re-auditing
+  // a card that no longer gates anything would spend an auditor for nothing.
   let gradingAuditDispatchSuppressed: GradingAuditDispatchSuppression | undefined;
-  if (!current && pendingAuditCandidates.length > 0 && deps.readGradingAuditDispatchSuppression) {
+  const repairableAuditTargets: string[] = [];
+  if (!current && pendingAuditCandidates.length > 0) {
     const suppressionByOwner = new Map<string | null, GradingAuditDispatchSuppression | null>();
+    const readSuppression = deps.readGradingAuditDispatchSuppression;
     for (const { candidate, targetOwnerId } of pendingAuditCandidates) {
-      let suppression: GradingAuditDispatchSuppression | null;
-      if (suppressionByOwner.has(targetOwnerId)) suppression = suppressionByOwner.get(targetOwnerId) ?? null;
-      else {
-        suppression = await deps.readGradingAuditDispatchSuppression(targetOwnerId).catch(() => null);
-        suppressionByOwner.set(targetOwnerId, suppression);
+      let suppression: GradingAuditDispatchSuppression | null = null;
+      if (readSuppression) {
+        if (suppressionByOwner.has(targetOwnerId)) suppression = suppressionByOwner.get(targetOwnerId) ?? null;
+        else {
+          suppression = await readSuppression(targetOwnerId).catch(() => null);
+          suppressionByOwner.set(targetOwnerId, suppression);
+        }
       }
-      if (!suppression) continue;
-      gradingAuditDispatchSuppressed ??= suppression;
-      candidate.detail = `${candidate.detail}. ${describeGradingAuditDispatchSuppression(suppression)}`;
+      if (suppression) {
+        gradingAuditDispatchSuppressed ??= suppression;
+        candidate.detail = `${candidate.detail}. ${describeGradingAuditDispatchSuppression(suppression)}`;
+        continue;
+      }
+      repairableAuditTargets.push(candidate.issueId);
+      candidate.detail = `${candidate.detail}. ${describePendingGradingAuditRepair(candidate.issueId)}`;
     }
   }
+  const pendingGradingAuditRepair: PendingGradingAuditRepair | undefined =
+    repairableAuditTargets.length > 0
+      ? { tool: 'scorecards:repair', args: { targetIds: repairableAuditTargets } }
+      : undefined;
   const attestedRevisions = [
     ...new Set(vettedCards.map((card) => card.vetting?.rubricRevision).filter((v): v is number => v != null)),
   ];
@@ -382,6 +437,7 @@ export async function getAcceptanceRubricVettingStatus(
       candidates,
       diagnosis,
       ...(gradingAuditDispatchSuppressed ? { gradingAuditDispatchSuppressed } : {}),
+      ...(pendingGradingAuditRepair ? { pendingGradingAuditRepair } : {}),
     };
   }
 

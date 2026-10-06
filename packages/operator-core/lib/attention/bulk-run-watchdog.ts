@@ -52,6 +52,33 @@
 
 import type { BulkRunPhase, RunLiveness } from './bulk-run-store';
 
+/**
+ * Mirrors of the store's thresholds. Kept as literals rather than imported
+ * because `bulk-run-store` opens Postgres at module scope and this core must stay
+ * importable from PG-free unit tests; `bulk-run-watchdog.test.ts` pins both
+ * values against the store's exports so the two cannot drift.
+ */
+export const WATCHDOG_STALE_AFTER_MS = 5 * 60_000;
+export const WATCHDOG_RESOLVER_MAX_SILENCE_MS = 30 * 60_000;
+
+/**
+ * What the shared activity clock says about the run's resolver
+ * (WI-10004887). `heartbeat_at` is written only by the run tools, so a
+ * resolver that spends six minutes classifying with other tools, or polls its
+ * inbox for a peer's reply, reads as dead to a heartbeat-only watchdog. Measured
+ * 2026-10-01: two scheduled runs were failed while their resolvers were making
+ * tool calls every few seconds (bulk-8df81e9e, bulk-948a3af3).
+ */
+export interface ResolverEvidence {
+  ownerId: string;
+  /**
+   * Epoch-ms of the resolver's most recent `agent_activity` row or attributed
+   * `tool_invocations` row — the same activity clock coord:presence derives from
+   * (`fetchWakeability().lastActivityMs`). `null` when none was found.
+   */
+  lastActivityMs: number | null;
+}
+
 export interface BulkRunCounters {
   autoResolved: number;
   recommended: number;
@@ -70,6 +97,11 @@ export interface WatchdogRunFacts {
   stored: BulkRunCounters;
   /** The counters DERIVED from the run's own item/finding rows — the truth. */
   derived: BulkRunCounters;
+  /**
+   * The resolver's own activity, when the run names a resolver owner. Absent or
+   * `null` means no evidence beyond the heartbeat — the pre-WI-10004887 rule.
+   */
+  resolver?: ResolverEvidence | null;
 }
 
 export interface CounterDrift {
@@ -94,7 +126,51 @@ export interface WatchdogVerdict {
      *  owner-facing report most needs spelled out. */
     measuredFrom: 'heartbeat' | 'start';
   } | null;
+  /**
+   * The heartbeat is stale but the resolver is demonstrably working, so the run
+   * is left alone this tick. Reported so a sweep can say WHY it did not strand.
+   */
+  deferred: {
+    reason: 'resolver-active';
+    ownerId: string;
+    /** How long ago the resolver last did anything. */
+    activityAgeMs: number;
+    /** How long since the run's own last heartbeat (or start). */
+    heartbeatAgeMs: number;
+  } | null;
   counterDrift: CounterDrift | null;
+}
+
+/**
+ * PURE: does the resolver's own activity keep a heartbeat-stale run alive?
+ *
+ * Two bounds, and each blocks a distinct failure:
+ *  - the activity must be as recent as the heartbeat threshold itself, so a
+ *    resolver that went quiet is noticed on the same clock as before;
+ *  - the run's own heartbeat (or start) must be younger than
+ *    `maxSilenceMs`. Without this ceiling a resolver stuck looping on unrelated
+ *    tools would hold a run open forever; the run tools beat on every manifest
+ *    and report, so 30 minutes without one means the run is not advancing.
+ */
+export function resolverKeepsRunAlive(input: {
+  liveness: RunLiveness;
+  resolver: ResolverEvidence | null | undefined;
+  nowMs: number;
+  staleAfterMs?: number;
+  maxSilenceMs?: number;
+}): { ownerId: string; activityAgeMs: number; heartbeatAgeMs: number } | null {
+  const staleAfterMs = input.staleAfterMs ?? WATCHDOG_STALE_AFTER_MS;
+  const maxSilenceMs = input.maxSilenceMs ?? WATCHDOG_RESOLVER_MAX_SILENCE_MS;
+  if (input.liveness.state !== 'stale') return null;
+  const resolver = input.resolver;
+  if (!resolver || resolver.lastActivityMs == null || !Number.isFinite(resolver.lastActivityMs)) return null;
+  const heartbeatAgeMs = input.liveness.ageMs;
+  if (!Number.isFinite(heartbeatAgeMs) || heartbeatAgeMs > maxSilenceMs) return null;
+  const activityAgeMs = input.nowMs - resolver.lastActivityMs;
+  // A future timestamp is clock skew, not proof of life beyond the threshold;
+  // treat it as "just now" rather than rejecting it, since it is still recent.
+  if (activityAgeMs > staleAfterMs) return null;
+  return { ownerId: resolver.ownerId, activityAgeMs: Math.max(0, activityAgeMs), heartbeatAgeMs };
 }
 
 const COUNTER_FIELDS: (keyof BulkRunCounters)[] = [
@@ -121,7 +197,10 @@ export function diffCounters(
  * phase carrying counters no write could have produced — checking only active
  * runs would miss precisely the population where the drift is permanent.
  */
-export function decideWatchdogVerdict(facts: WatchdogRunFacts): WatchdogVerdict {
+export function decideWatchdogVerdict(
+  facts: WatchdogRunFacts,
+  nowMs: number = Date.now(),
+): WatchdogVerdict {
   const counterDrift = diffCounters(facts.stored, facts.derived);
 
   // Only an EXECUTING run can be stranded. `review` is waiting on the owner by
@@ -129,13 +208,27 @@ export function decideWatchdogVerdict(facts: WatchdogRunFacts): WatchdogVerdict 
   // correct state into a failure. `classifyRunLiveness` already encodes that as
   // `not-executing`, so this reads its verdict rather than re-deriving it.
   if (facts.liveness.state !== 'stale') {
-    return { runId: facts.runId, strand: null, counterDrift };
+    return { runId: facts.runId, strand: null, deferred: null, counterDrift };
   }
   // A stale run with nothing left undecided has no stranded work — settling it is
   // the settle path's job (and `deriveSettleOutcome` has its own never-ran rule).
   // Failing it here would relabel a finished run as a failure.
   if (facts.undecided <= 0) {
-    return { runId: facts.runId, strand: null, counterDrift };
+    return { runId: facts.runId, strand: null, deferred: null, counterDrift };
+  }
+
+  // The heartbeat is one witness, not the only one (WI-10004887). A resolver that
+  // is still calling tools is working on the run even when it is not calling a
+  // run tool, and failing it there is the costly direction of error this module
+  // was written to avoid.
+  const alive = resolverKeepsRunAlive({ liveness: facts.liveness, resolver: facts.resolver, nowMs });
+  if (alive) {
+    return {
+      runId: facts.runId,
+      strand: null,
+      deferred: { reason: 'resolver-active', ...alive },
+      counterDrift,
+    };
   }
 
   return {
@@ -146,6 +239,7 @@ export function decideWatchdogVerdict(facts: WatchdogRunFacts): WatchdogVerdict 
       ageMs: facts.liveness.ageMs,
       measuredFrom: facts.liveness.measuredFrom,
     },
+    deferred: null,
     counterDrift,
   };
 }
@@ -178,11 +272,15 @@ export interface WatchdogDependencies {
   reconcileCounters(input: { runId: string }): Promise<void>;
   /** Structured trace for the routine log; never throws. */
   note?(line: string): void;
+  /** Clock seam for tests; defaults to `Date.now()`. */
+  nowMs?(): number;
 }
 
 export interface WatchdogSweepResult {
   examined: number;
   stranded: string[];
+  /** Heartbeat-stale runs left alone because their resolver is still working. */
+  deferred: string[];
   itemsMarked: number;
   countersReconciled: string[];
   /** Runs whose effect threw. A failure on one run must not abort the sweep. */
@@ -200,15 +298,24 @@ export async function runBulkRunWatchdog(
   const result: WatchdogSweepResult = {
     examined: 0,
     stranded: [],
+    deferred: [],
     itemsMarked: 0,
     countersReconciled: [],
     errors: [],
   };
 
   const runs = await deps.listRuns();
+  const nowMs = deps.nowMs?.() ?? Date.now();
   for (const facts of runs) {
     result.examined += 1;
-    const verdict = decideWatchdogVerdict(facts);
+    const verdict = decideWatchdogVerdict(facts, nowMs);
+    if (verdict.deferred) {
+      result.deferred.push(facts.runId);
+      deps.note?.(
+        `deferred ${facts.runId}: no run heartbeat for ${Math.round(verdict.deferred.heartbeatAgeMs / 1000)}s, ` +
+          `but resolver ${verdict.deferred.ownerId} was active ${Math.round(verdict.deferred.activityAgeMs / 1000)}s ago`,
+      );
+    }
     try {
       if (verdict.strand) {
         const { marked } = await deps.strandRun({

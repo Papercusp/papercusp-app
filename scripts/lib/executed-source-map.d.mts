@@ -157,6 +157,48 @@ export function collectRecursiveDiff({ exec, repoDir, prefix, a, b, out }: {
     out: any;
 }): boolean;
 /**
+ * Every package.json in the tree at `sha` (gate-test-reuse-yield-2026-10-01 D-009), superproject
+ * and submodules: gitlinks are followed at the commit the tree pins, recursively, and node_modules
+ * paths are skipped. Returns each manifest's text by repo-relative path, and every script command
+ * in them. Throws on any failure (a sha or pinned submodule commit this clone lacks, a manifest
+ * that is not a JSON object, a non-object `scripts`), because a manifest it cannot read could
+ * invoke any script; the caller treats a throw as "cannot tell".
+ *
+ * @param {{ exec: (file: string, args: string[], opts: object) => string | Buffer, repoRoot: string, sha: string }} o
+ * @returns {{ texts: Map<string, string>, commands: Array<{ rel: string, name: string, command: string }> }}
+ */
+export function treeScriptCommands({ exec, repoRoot, sha }: {
+    exec: (file: string, args: string[], opts: object) => string | Buffer;
+    repoRoot: string;
+    sha: string;
+}): {
+    texts: Map<string, string>;
+    commands: Array<{
+        rel: string;
+        name: string;
+        command: string;
+    }>;
+};
+/**
+ * Build selectReusablePasses' `inertGlobalChange` seam over a real git checkout
+ * (gate-test-reuse-yield-2026-10-01 P-002, P-005, D-009). Two root files can be inert, each read
+ * at both shas with `git show`: package.json, judged by rootPackageJsonChangeIsInert, and
+ * package-lock.json, judged by comparing packageLockInstallView (the lockfile's view is computed
+ * once per sha, because many proofs share the judged sha and the file is over 1 MB). D-009: so can
+ * any non-root package.json, judged by workspacePackageJsonChangeIsInert against the script
+ * commands of the whole tree at BOTH shas (treeScriptCommands, once per sha; it also supplies the
+ * manifest texts, so a manifest inside a submodule is read at its pinned commit). Every other
+ * path, and any read that fails (a sha missing from this clone, a file absent on one side),
+ * answers false, so the change stays global. Results are cached per (path, from, to).
+ *
+ * @param {{ repoRoot: string, exec?: (file: string, args: string[], opts: object) => string | Buffer }} o
+ * @returns {(rel: string, fromSha: string, toSha: string) => boolean}
+ */
+export function gitInertGlobalChange({ repoRoot, exec }: {
+    repoRoot: string;
+    exec?: (file: string, args: string[], opts: object) => string | Buffer;
+}): (rel: string, fromSha: string, toSha: string) => boolean;
+/**
  * One greppable line per workspace selection, so a run that did not narrow is never silent
  * about why.
  *
@@ -224,6 +266,17 @@ export function resolveTaskReportExpectation({ command, wsDir, readFile, isEnrol
 export function readExecutedMapResults(filePath: string, { readFile }?: {
     readFile?: (p: string) => string;
 }): ExecutedMapResultRead;
+/**
+ * Name every actual audit draw using the initial task's reporter snapshot. Console pass rows
+ * and separate retries are never a substitute. Missing/ambiguous reporter evidence stays unknown.
+ * @param {string} taskLabel
+ * @param {ExecutedMapResultRead | null | undefined} read
+ * @param {{ watch: Map<string, string> } | null | undefined} reuseWatch
+ * @returns {string[]}
+ */
+export function formatTestReuseAuditResultLines(taskLabel: string, read: ExecutedMapResultRead | null | undefined, reuseWatch: {
+    watch: Map<string, string>;
+} | null | undefined): string[];
 /**
  * The per-task RESULT lines (one per flush, or one `outcome=no-report` line).
  *
@@ -293,6 +346,16 @@ export type TaskReportExpectation = {
     reason: "enrolled-config" | "unenrolled-config" | "no-config" | "not-vitest" | "node-test-runner" | "wrapper-unreadable" | "compound-command" | "no-command";
     config: string | null;
 };
+export type ExecutedMapFileResults = {
+    version: 1;
+    runnerIdentity: string;
+    runContext: string;
+    runGroupId: string | null;
+    files: Array<{
+        testFile: string;
+        verdict: "pass" | "fail" | "unknown";
+    }>;
+};
 export type ExecutedMapResult = {
     outcome: string;
     rows: number;
@@ -301,6 +364,8 @@ export type ExecutedMapResult = {
     dirty: boolean;
     sha: string | null;
     error: string | null;
+    workspaceName?: string | null;
+    fileResults?: ExecutedMapFileResults | null;
 };
 /**
  * `expectsReport` is stamped by the runner from `resolveTaskReportExpectation` (absent/null = unknown).

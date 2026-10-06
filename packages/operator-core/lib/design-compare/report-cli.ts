@@ -52,6 +52,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 
 import type { CaptureEnvironment, ReferenceClass } from './contract';
 import { createStorybookCaptureAdapter } from './capture';
@@ -535,7 +536,7 @@ export async function measureCalibration(options: MeasureOptions): Promise<Calib
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(HERE, '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
 
 function argValue(name: string, fallback: string): string {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));

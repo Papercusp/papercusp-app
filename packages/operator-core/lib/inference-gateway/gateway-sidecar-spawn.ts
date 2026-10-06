@@ -30,6 +30,11 @@ import { fileURLToPath } from 'node:url';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
 import { DEFAULT_GATEWAY_PORT } from './launch';
 import {
+  GATEWAY_TENANT_SERVICE,
+  loopbackPortHeldByForeignUid,
+  pinTenantLoopbackPort,
+} from '../process-supervision/tenant-loopback-port';
+import {
   resolveSidecarSpawnPlan,
   respawnBackoffMs,
   pruneRespawnWindow,
@@ -119,20 +124,46 @@ export function buildGatewaySpawnPlan(opts?: {
   });
 }
 
-export type EnsureGatewayOutcome = 'disabled' | 'already-running' | 'adopted-external' | 'spawned';
+export type EnsureGatewayOutcome =
+  | 'disabled'
+  | 'already-running'
+  | 'adopted-external'
+  | 'refused-foreign'
+  | 'spawned';
 
 /**
  * Ensure a gateway is serving on the supervisor port: adopt an already-listening one
  * (systemd on the dev box, or another operator instance), else spawn + supervise a child.
  * Idempotent; safe to call from multiple boot paths.
+ *
+ * WI-10005481: the port is first pinned per tenant (pinTenantLoopbackPort), so a gateway
+ * another Linux user owns on :8788 moves this tenant to its own port instead of being
+ * adopted. A listener that is STILL foreign after pinning (an explicit env pointing at a
+ * neighbour) is refused, never adopted.
  */
-export async function ensureGatewaySidecar(): Promise<EnsureGatewayOutcome> {
+export async function ensureGatewaySidecar(
+  deps: {
+    spawnGatewayChild?: (port: number) => Promise<void>;
+    isListening?: (port: number) => Promise<boolean>;
+    heldByForeignUid?: (port: number) => boolean;
+    pinPort?: () => void;
+  } = {},
+): Promise<EnsureGatewayOutcome> {
   if (process.env.PAPERCUSP_GATEWAY_SUPERVISE === '0') return 'disabled';
   if (gatewayProcess) return 'already-running';
 
+  (deps.pinPort ?? (() => pinTenantLoopbackPort(GATEWAY_TENANT_SERVICE)))();
   const port = gatewaySupervisorPort();
+  const heldByForeign = deps.heldByForeignUid ?? ((p: number) => loopbackPortHeldByForeignUid(p));
+  if (heldByForeign(port)) {
+    console.error(
+      `[gateway-sidecar] :${port} belongs to another user — refusing to adopt it (WI-10005481); ` +
+        'this tenant runs without a gateway until the port is free or re-pinned',
+    );
+    return 'refused-foreign';
+  }
   armReprobeTimer(port);
-  if (await isGatewayListening(port)) {
+  if (await (deps.isListening ?? isGatewayListening)(port)) {
     // systemd (Linux dev box) or a sibling operator already owns the port — adopt, never
     // double-bind. If IT dies later, nothing here notices on its own (it has its own
     // Restart=always) — armReprobeTimer above is what NOW periodically re-checks this
@@ -143,7 +174,7 @@ export async function ensureGatewaySidecar(): Promise<EnsureGatewayOutcome> {
     return 'adopted-external';
   }
 
-  await spawnGatewayChild(port);
+  await (deps.spawnGatewayChild ?? spawnGatewayChild)(port);
   return 'spawned';
 }
 
@@ -209,6 +240,11 @@ export async function gatewayReprobeTick(
       return;
     }
     if (respawnGivenUp) {
+      if (listening && loopbackPortHeldByForeignUid(port)) {
+        // WI-10005481: another user took the port while we were down. Never adopt it.
+        console.error(`[gateway-sidecar] :${port} is now held by another user — not adopting (WI-10005481)`);
+        return;
+      }
       if (listening) {
         // Something else took the port while we'd given up (systemd/another operator) — adopt.
         adoptedExternal = true;

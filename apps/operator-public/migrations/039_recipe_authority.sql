@@ -1,0 +1,25 @@
+-- Worker-computed recipe authority (cupboard-release-pipeline-content-trust-2026-09-16
+-- P-007, D-005, D-010).
+--
+-- A recipe's `authorityUnresolved` used to be a PUBLISHER claim: the publishing
+-- operator ran its analyzer and wrote the verdict into `recipe.json`. The
+-- installer then showed that claim to the person about to run the script. A
+-- hostile publisher simply writes `authorityUnresolved: false` beside a script
+-- that dispatches a computed tool name. The Worker now fetches the pinned bytes
+-- itself (P-001), so it runs the SAME static analysis on the script it fetched
+-- and records the verdict here, where no publisher field can reach it.
+--
+--   authority_unresolved        1 = the Worker could NOT prove the script's
+--       effects statically (opaque tool, computed dispatch target, volatile
+--       coordination args, analyzer unavailable, manifest unreadable ...).
+--       0 = the Worker proved it resolvable. The Worker NEVER writes 0 on a
+--       failure path: "could not analyze" is 1 with a cause, not 0.
+--   authority_unresolved_cause  the discriminator that set it (the analyzer's
+--       cause kind, or the Worker's own `analyzer-unavailable` /
+--       `recipe-manifest-missing` / `recipe-manifest-invalid`); NULL when 0.
+--
+-- Both NULL = "not analyzed": every non-recipe kind, and every recipe row
+-- published before this migration. A consumer must read NULL on a RECIPE row as
+-- UNKNOWN and treat it as unresolved (fail closed), never as resolved.
+ALTER TABLE harnesses ADD COLUMN authority_unresolved INTEGER;
+ALTER TABLE harnesses ADD COLUMN authority_unresolved_cause TEXT;

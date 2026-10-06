@@ -19,12 +19,15 @@
  * hot proxy path off disk between refreshes.
  */
 import { promises as fs } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { getOAuthToken, type TokenStorage } from '../oauth/token';
 import { getProvider, registerProvider, makeClaudeProvider } from '../oauth/providers';
-import { listClaudeKeychainCredentialItems, writeClaudeKeychainOAuthBundle } from '../agent-auth-detect';
+import {
+  listClaudeKeychainCredentialItemsAsync,
+  readKeychainSecretAsync,
+  writeClaudeKeychainOAuthBundleAsync,
+} from '../agent-auth-detect';
 
 /** The OAuth beta flag a subscription (non-API-key) request must carry. */
 export const CLAUDE_OAUTH_BETA = 'oauth-2025-04-20';
@@ -58,20 +61,97 @@ function expandHome(p: string): string {
   return p.startsWith('~') ? p.replace(/^~/, process.env.HOME ?? '~') : p;
 }
 
-/** Parse a credentialRef into its channel + path (mirrors `resolveCredential`). Every account is a
- *  consumer Claude Max OAuth subscription — `token:` (a `claude setup-token`), `file:` (a
- *  refreshable `.credentials.json` bundle), or `keychain:` (the macOS login-Keychain item Claude
- *  Code stores the SAME bundle JSON in — darwin has no `.credentials.json` on disk; P-006,
- *  cross-platform-hardening-and-agent-ergonomics-2026-07-05). There is NO static-API-key channel:
- *  this deployment has no `ANTHROPIC_API_KEY`, and a raw billed key would 400 against the
- *  subscription-only `oauth-2025-04-20` beta the gateway sends. */
-export function parseCredentialRef(ref: string): { kind: 'token' | 'file' | 'env' | 'keychain'; path: string } {
+/** Parse a credentialRef into its channel + path (mirrors `resolveCredential`). A Claude account is
+ *  either a consumer Claude subscription — `token:` (a `claude setup-token`), `file:` (a refreshable
+ *  `.credentials.json` bundle), or `keychain:` (the macOS login-Keychain item Claude Code stores the
+ *  SAME bundle JSON in — darwin has no `.credentials.json` on disk; P-006,
+ *  cross-platform-hardening-and-agent-ergonomics-2026-07-05) — or an Anthropic Console API key,
+ *  `apikey:<source>` (anthropic-credits-gateway-2026-09-30 P-005, D-002). An API-key account spends
+ *  the Console organization's API credits and authenticates with `x-api-key` instead of the
+ *  subscription OAuth Bearer; `path` carries the raw source spec, parsed by `parseApiKeySource`. */
+export function parseCredentialRef(ref: string): { kind: 'token' | 'file' | 'env' | 'keychain' | 'apikey'; path: string } {
   if (ref.startsWith('token:')) return { kind: 'token', path: expandHome(ref.slice(6)) };
   if (ref.startsWith('file:')) return { kind: 'file', path: expandHome(ref.slice(5)) };
   if (ref.startsWith('env:')) return { kind: 'env', path: ref.slice(4).trim() };
   if (ref.startsWith('keychain:')) return { kind: 'keychain', path: ref.slice(9).trim() };
+  if (ref.startsWith('apikey:')) {
+    const spec = ref.slice(7).trim();
+    parseApiKeySource(spec); // validate eagerly so a malformed ref fails at parse, not at first request
+    return { kind: 'apikey', path: spec };
+  }
   if (ref.startsWith('/') || ref.startsWith('~')) return { kind: 'file', path: expandHome(ref) };
-  throw new Error(`inference-gateway: unsupported credentialRef '${ref}' (expected token:/file:/keychain:/path — Claude Max OAuth only)`);
+  throw new Error(
+    `inference-gateway: unsupported credentialRef '${ref}' (expected token:/file:/keychain:/path for a Claude subscription, or apikey:env:NAME | apikey:file:PATH | apikey:credentials for a Console API key)`,
+  );
+}
+
+/** How an upstream Claude request authenticates. `oauth` = `Authorization: Bearer` plus the
+ *  subscription `oauth-2025-04-20` beta (a subscription account; also the shape of a plain bearer
+ *  account). `api-key` = `x-api-key` with NO Authorization header and NO oauth beta (an Anthropic
+ *  Console API key, billed to the organization's API credits). */
+export type ClaudeAuthMode = 'oauth' | 'api-key';
+
+/** Where an `apikey:` account's key lives. `credentials` is the operator credentials store's
+ *  `anthropic_api_key` (written by `setup:save_key`), so a key saved once is usable without copying
+ *  it into a file or the gateway's environment. */
+export type ApiKeySource = { kind: 'env'; name: string } | { kind: 'file'; path: string } | { kind: 'credentials' };
+
+/** Parse the part of an `apikey:` credentialRef after the scheme. Throws on an unknown source. */
+export function parseApiKeySource(spec: string): ApiKeySource {
+  const s = spec.trim();
+  if (s === 'credentials') return { kind: 'credentials' };
+  if (s.startsWith('env:')) {
+    const name = s.slice(4).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`inference-gateway: apikey:env: needs an environment variable name, got '${name}'`);
+    }
+    return { kind: 'env', name };
+  }
+  if (s.startsWith('file:')) {
+    const path = expandHome(s.slice(5).trim());
+    if (!path) throw new Error('inference-gateway: apikey:file: needs a path');
+    return { kind: 'file', path };
+  }
+  throw new Error(
+    `inference-gateway: unsupported apikey source '${spec}' (expected apikey:env:NAME | apikey:file:PATH | apikey:credentials)`,
+  );
+}
+
+/** Reads the operator credentials store's `anthropic_api_key` — injectable for tests (the default
+ *  touches Postgres, lazily, so importing this module never does). */
+export type ApiKeyCredentialsReader = () => Promise<string | undefined>;
+const defaultApiKeyCredentialsReader: ApiKeyCredentialsReader = async () => {
+  const { readCredentials } = await import('../credentials');
+  return (await readCredentials()).anthropic_api_key;
+};
+let apiKeyCredentialsReader: ApiKeyCredentialsReader = defaultApiKeyCredentialsReader;
+export function _setApiKeyCredentialsReaderForTests(fn: ApiKeyCredentialsReader | null): void {
+  apiKeyCredentialsReader = fn ?? defaultApiKeyCredentialsReader;
+}
+
+/** Resolve an API key from its source. Refuses a subscription OAuth token (`sk-ant-oat…`) — sent as
+ *  `x-api-key` it would 401 on every request; that credential belongs under `token:`. */
+async function readApiKey(source: ApiKeySource): Promise<string> {
+  let raw: string | undefined;
+  let where: string;
+  if (source.kind === 'env') {
+    raw = process.env[source.name];
+    where = `environment variable ${source.name}`;
+  } else if (source.kind === 'file') {
+    raw = await fs.readFile(source.path, 'utf8');
+    where = source.path;
+  } else {
+    raw = await apiKeyCredentialsReader();
+    where = 'the operator credentials store (anthropic_api_key — set it with setup:save_key)';
+  }
+  const key = normalizeBearerToken(raw ?? '');
+  if (!key) throw new Error(`inference-gateway: no Anthropic API key in ${where}`);
+  if (key.startsWith('sk-ant-oat')) {
+    throw new Error(
+      `inference-gateway: ${where} holds a subscription OAuth token, not a Console API key — register it as token:<path> instead of apikey:`,
+    );
+  }
+  return key;
 }
 
 /**
@@ -117,8 +197,11 @@ export interface CredentialResolver {
    *  gateway refreshes near expiry), or `keychain` (the macOS local-credential FRESHEST-SCAN —
    *  serves the newest live bundle across the base Keychain item, every per-config-dir sibling
    *  and the disk bundle, self-refreshing only when all of them are hard-expired; see the
-   *  channel comment above). All are subscription OAuth → Bearer + the oauth beta. */
-  readonly kind: 'token' | 'file' | 'keychain';
+   *  channel comment above), or `apikey` (an Anthropic Console API key — never refreshes). */
+  readonly kind: 'token' | 'file' | 'keychain' | 'apikey';
+  /** How the upstream request authenticates with what `current()` returns: `oauth` (Bearer + the
+   *  oauth beta) for every subscription channel, `api-key` (x-api-key) for `apikey:`. */
+  readonly authMode: ClaudeAuthMode;
 }
 
 // ── macOS local-credential channel (`keychain:`) — the FRESHEST-SCAN resolver ──────────────────
@@ -137,30 +220,36 @@ export interface CredentialResolver {
 // write-back, disk fallback). Reading a SECRET (`-w`) may raise a one-time "allow access" GUI
 // prompt on some Macs (click "Always Allow"); enumeration is metadata-only and never prompts.
 
+// Every Keychain call below is NON-BLOCKING (WI-10005306). The gateway serves every fleet
+// member's inference from one event loop, and the freshest-scan shells out to `security` once
+// per enumerated item (dozens on a fleet Mac) plus a `dump-keychain` of up to 15s. Run with
+// spawnSync, each call froze every in-flight request for its duration. The injectable seams
+// accept a sync OR async function, so a plain sync test fake stays assignable (`await` takes
+// plain values); the defaults are agent-auth-detect's execFile-based helpers.
+
 /** Read the Keychain item's secret payload, or null when absent/unreadable. Injectable for tests
  *  (there is no `security` off macOS). */
-export type KeychainSecretReader = (service: string) => string | null;
+export type KeychainSecretReader = (service: string) => Promise<string | null> | string | null;
 
-const defaultKeychainReader: KeychainSecretReader = (service) => {
-  try {
-    const r = spawnSync('security', ['find-generic-password', '-s', service, '-w'], {
-      encoding: 'utf8',
-      timeout: 5_000,
-    });
-    if (r.status === 0 && typeof r.stdout === 'string' && r.stdout.trim()) return r.stdout;
-  } catch {
-    /* security absent / errored → treated as not-found below */
-  }
-  return null;
-};
+const defaultKeychainReader: KeychainSecretReader = (service) => readKeychainSecretAsync(service);
 let keychainReader: KeychainSecretReader = defaultKeychainReader;
 export function _setKeychainReaderForTests(fn: KeychainSecretReader | null): void {
   keychainReader = fn ?? defaultKeychainReader;
 }
 
+/** One reader call that never throws: a throwing/rejecting seam is a miss, like a null. */
+async function readKeychainSecret(service: string): Promise<string | null> {
+  try {
+    const raw = await keychainReader(service);
+    return typeof raw === 'string' && raw ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Read + parse Claude Code's Keychain bundle. Throws with actionable guidance on any miss. */
-export function readClaudeKeychainBundle(service: string): ClaudeCredentialBundle {
-  const raw = keychainReader(service);
+export async function readClaudeKeychainBundle(service: string): Promise<ClaudeCredentialBundle> {
+  const raw = await readKeychainSecret(service);
   if (!raw) {
     throw new Error(
       `inference-gateway: no readable Keychain item for service '${service}' — is Claude Code ` +
@@ -177,8 +266,10 @@ export function readClaudeKeychainBundle(service: string): ClaudeCredentialBundl
 
 /** Enumerate Claude Code Keychain items (service + account, metadata only) — injectable for
  *  tests (there is no Keychain off macOS). Defaults to agent-auth-detect's `dump-keychain` shim. */
-export type KeychainItemLister = () => { service: string; account: string | null }[];
-const defaultKeychainItemLister: KeychainItemLister = () => listClaudeKeychainCredentialItems();
+export type KeychainItemLister = () =>
+  | Promise<{ service: string; account: string | null }[]>
+  | { service: string; account: string | null }[];
+const defaultKeychainItemLister: KeychainItemLister = () => listClaudeKeychainCredentialItemsAsync();
 let keychainLister: KeychainItemLister = defaultKeychainItemLister;
 export function _setKeychainListerForTests(fn: KeychainItemLister | null): void {
   keychainLister = fn ?? defaultKeychainItemLister;
@@ -186,9 +277,13 @@ export function _setKeychainListerForTests(fn: KeychainItemLister | null): void 
 
 /** Write a rotated bundle back into a Keychain item — injectable for tests. Defaults to
  *  agent-auth-detect's `add-generic-password -U` shim (false off macOS / on ACL refusal). */
-export type KeychainBundleWriter = (service: string, account: string, secret: string) => boolean;
+export type KeychainBundleWriter = (
+  service: string,
+  account: string,
+  secret: string,
+) => Promise<boolean> | boolean;
 const defaultKeychainBundleWriter: KeychainBundleWriter = (service, account, secret) =>
-  writeClaudeKeychainOAuthBundle(service, account, secret);
+  writeClaudeKeychainOAuthBundleAsync(service, account, secret);
 let keychainWriter: KeychainBundleWriter = defaultKeychainBundleWriter;
 export function _setKeychainWriterForTests(fn: KeychainBundleWriter | null): void {
   keychainWriter = fn ?? defaultKeychainBundleWriter;
@@ -221,11 +316,18 @@ export function localCredentialsFilePath(): string {
 export async function scanLocalCredentialCandidates(baseService: string): Promise<LocalCredentialCandidate[]> {
   const out: LocalCredentialCandidate[] = [];
   const metas = new Map<string, string | null>([[baseService, null]]);
-  for (const m of keychainLister()) {
+  let listed: { service: string; account: string | null }[] = [];
+  try {
+    const l = await keychainLister();
+    if (Array.isArray(l)) listed = l;
+  } catch {
+    /* enumeration failed → scan the base item + disk bundle only */
+  }
+  for (const m of listed) {
     if (!metas.has(m.service) || m.account) metas.set(m.service, m.account);
   }
   for (const [service, account] of metas) {
-    const raw = keychainReader(service);
+    const raw = await readKeychainSecret(service);
     if (!raw) continue;
     try {
       const bundle = JSON.parse(raw.trim()) as ClaudeCredentialBundle;
@@ -279,7 +381,13 @@ export function selectLocalCredential(
 async function persistLocalCandidate(c: LocalCredentialCandidate): Promise<void> {
   if (c.kind === 'keychain') {
     const account = c.account ?? process.env.USER ?? '';
-    if (account && keychainWriter(c.service!, account, JSON.stringify(c.bundle))) return;
+    let wrote = false;
+    try {
+      wrote = account !== '' && (await keychainWriter(c.service!, account, JSON.stringify(c.bundle))) === true;
+    } catch {
+      /* a throwing writer is a refused write-back → disk fallback below */
+    }
+    if (wrote) return;
   }
   const filePath = c.kind === 'file' ? c.path! : localCredentialsFilePath();
   try {
@@ -421,11 +529,12 @@ export async function credentialRefSupportsOpenAiBearer(credentialRef: string): 
  * accounts never share a refresh.
  */
 export function makeCredentialResolver(credentialRef: string, harnessKey?: string): CredentialResolver {
-  ensureClaudeProvider();
   const { kind, path } = parseCredentialRef(credentialRef);
   if (kind === 'env') {
-    throw new Error(`inference-gateway: unsupported Claude credentialRef '${credentialRef}' (env: is only valid for bearer accounts)`);
+    throw new Error(`inference-gateway: unsupported Claude credentialRef '${credentialRef}' (env: is only valid for bearer accounts; a Console API key in the environment is apikey:env:NAME)`);
   }
+  if (kind === 'apikey') return makeApiKeyResolver(parseApiKeySource(path));
+  ensureClaudeProvider();
   const dedupKey = harnessKey ?? path;
 
   let cachedToken: string | undefined;
@@ -438,6 +547,7 @@ export function makeCredentialResolver(credentialRef: string, harnessKey?: strin
 
   return {
     kind,
+    authMode: 'oauth',
     invalidate() {
       cachedToken = undefined;
       cachedExpiresAt = 0;
@@ -540,16 +650,39 @@ export function makeCredentialResolver(credentialRef: string, harnessKey?: strin
   };
 }
 
+/**
+ * An Anthropic Console API-key account (`apikey:`, anthropic-credits-gateway-2026-09-30 P-005). The
+ * key is read once and cached — keys do not expire, so there is nothing to refresh — and an upstream
+ * 401 `invalidate()`s the cache so a rotated key (a new env value, file, or `setup:save_key`) is
+ * picked up on the next request without a gateway restart.
+ */
+function makeApiKeyResolver(source: ApiKeySource): CredentialResolver {
+  let cachedKey: string | undefined;
+  return {
+    kind: 'apikey',
+    authMode: 'api-key',
+    invalidate() {
+      cachedKey = undefined;
+    },
+    async current() {
+      if (cachedKey) return cachedKey;
+      cachedKey = await readApiKey(source);
+      return cachedKey;
+    },
+  };
+}
+
 export function makeBearerCredentialResolver(credentialRef: string): CredentialResolver {
   const { kind, path } = parseCredentialRef(credentialRef);
-  if (kind === 'keychain') {
+  if (kind === 'keychain' || kind === 'apikey') {
     throw new Error(
-      `inference-gateway: unsupported bearer credentialRef '${credentialRef}' (keychain: is Claude-subscription-only; use token:/file:/env: for bearer accounts)`,
+      `inference-gateway: unsupported bearer credentialRef '${credentialRef}' (${kind === 'keychain' ? 'keychain: is Claude-subscription-only' : 'apikey: is Claude-only'}; use token:/file:/env: for bearer accounts)`,
     );
   }
   let cachedToken: string | undefined;
   return {
     kind: kind === 'env' ? 'token' : kind,
+    authMode: 'oauth',
     invalidate() {
       cachedToken = undefined;
     },
@@ -567,18 +700,82 @@ export function makeBearerCredentialResolver(credentialRef: string): CredentialR
   };
 }
 
-/**
- * Build the `anthropic-beta` header to send upstream on an OAuth (subscription) request: the
- * client's existing beta flags PLUS the required `oauth-2025-04-20`, de-duplicated.
- */
-export function withOAuthBeta(incoming: string | null | undefined, context1m = false): string {
-  const flags = new Set(
+/** Split a comma-separated `anthropic-beta` value into trimmed, de-duplicated flags (order kept). */
+function betaFlags(incoming: string | null | undefined): Set<string> {
+  return new Set(
     (incoming ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
   );
+}
+
+/**
+ * Build the `anthropic-beta` header to send upstream on an OAuth (subscription) request: the
+ * client's existing beta flags PLUS the required `oauth-2025-04-20`, de-duplicated.
+ */
+export function withOAuthBeta(incoming: string | null | undefined, context1m = false): string {
+  const flags = betaFlags(incoming);
   flags.add(CLAUDE_OAUTH_BETA);
   if (context1m) flags.add(CLAUDE_CONTEXT_1M_BETA);
   return [...flags].join(',');
+}
+
+/**
+ * The client's `anthropic-beta` flags plus the 1M-context beta when requested — WITHOUT the
+ * subscription OAuth flag. This is the auth-neutral request-level value; the per-attempt layer
+ * (`claudeAttemptHeaders`) adds or removes the OAuth flag for the account the attempt lands on.
+ * Returns undefined when no flag remains.
+ */
+export function withClientBetas(incoming: string | null | undefined, context1m = false): string | undefined {
+  const flags = betaFlags(incoming);
+  flags.delete(CLAUDE_OAUTH_BETA);
+  if (context1m) flags.add(CLAUDE_CONTEXT_1M_BETA);
+  return flags.size ? [...flags].join(',') : undefined;
+}
+
+/** The auth mode a Claude `credentialRef` selects, decided from the ref alone (no secret read). */
+export function claudeAuthModeForRef(credentialRef: string): ClaudeAuthMode {
+  return parseCredentialRef(credentialRef).kind === 'apikey' ? 'api-key' : 'oauth';
+}
+
+/**
+ * Upstream headers for ONE Claude attempt (anthropic-credits-gateway-2026-09-30 P-006).
+ *
+ * Auth is decided per ATTEMPT, not per request: a request that hits a usage cap on a subscription
+ * account can rotate to a Console API-key account and must present THAT account's credential shape.
+ *  - `oauth` (subscription): `authorization: Bearer <token>` and the `oauth-2025-04-20` beta.
+ *  - `api-key` (Console credits): `x-api-key: <key>`, NO `authorization`, and the OAuth beta
+ *    REMOVED — a Console key carrying the subscription-only beta is rejected — while every other
+ *    client beta (context-1m, …) is kept.
+ * Any `authorization` / `x-api-key` already in `base` is dropped first, so a caller can never
+ * smuggle its own credential upstream (the gateway also strips them at intake; this is the
+ * attempt-level backstop). Header names are matched case-insensitively.
+ */
+export function claudeAttemptHeaders(
+  base: Record<string, string>,
+  authMode: ClaudeAuthMode,
+  token: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  let beta: string | undefined;
+  for (const [k, v] of Object.entries(base)) {
+    const lk = k.toLowerCase();
+    if (lk === 'authorization' || lk === 'x-api-key') continue;
+    if (lk === 'anthropic-beta') {
+      beta = beta ? `${beta},${v}` : v;
+      continue;
+    }
+    out[k] = v;
+  }
+  const flags = betaFlags(beta);
+  if (authMode === 'api-key') {
+    flags.delete(CLAUDE_OAUTH_BETA);
+    out['x-api-key'] = token;
+  } else {
+    flags.add(CLAUDE_OAUTH_BETA);
+    out.authorization = `Bearer ${token}`;
+  }
+  if (flags.size) out['anthropic-beta'] = [...flags].join(',');
+  return out;
 }

@@ -77,6 +77,7 @@ import {
   SU_IDEATE_UNGRADED_EPOCH_MS,
   countActionableUngradedOlderThan,
   countActionableUngradedOutsideScopes,
+  countRoutedByOriginSince,
   epochMsForOrigin,
   groupFilingsByOrigin,
   readActionableUngradedFilings,
@@ -109,6 +110,10 @@ export interface UngradedFilingsConfig {
    *  `epochMs` on a multi-origin rail is not a summary — it is a wrong answer to
    *  "which line was drawn here" for every origin but one. */
   policy: UngradedEpochPolicy;
+  /** The batch FLOOR (UNGRADED_BATCH_CAP). WI-10004412: the cap a fire actually uses is
+   *  sized per origin per tick from its arrival rate (`ungradedBatchCapFor`) and is
+   *  reported on each sweep result as `batchCap` / `arrivalsInWindow`. The name is kept
+   *  because persisted run summaries (watchdog/status.ts) already carry it. */
   batchCap: number;
 }
 
@@ -140,6 +145,39 @@ export { SU_IDEATE_UNGRADED_EPOCH_MS };
  *  even a large producer's backlog arrives in triage as a bounded, workable batch.
  *  P-001: applied PER ORIGIN, so one producer cannot consume another's budget. */
 export const UNGRADED_BATCH_CAP = 10;
+
+/**
+ * WI-10004412 capacity CEILING: the most filings one fire may name. A fixed batch of 10
+ * per debounce window was a rail whose best case (every nudge fully graded) still lost
+ * to its inflow: measured 2026-09-30, agent-review routed 392 filings in 14 days
+ * (~28/day, 78 in the last 2-day window) against 10 per 2 days, about 6x short, so the
+ * backlog could only grow. The ceiling is the D-013 flood guard that survives: a batch
+ * still has to be a workable unit, and the read below is bounded by it.
+ */
+export const UNGRADED_BATCH_MAX = 100;
+
+/**
+ * PURE capacity model (WI-10004412): size one origin's batch to the filings it routed
+ * during the last debounce window, so a recipient that grades each batch keeps the
+ * backlog from growing. Floored at UNGRADED_BATCH_CAP (a quiet producer still gets a
+ * meaningful batch of its oldest rows) and ceilinged at UNGRADED_BATCH_MAX.
+ *
+ * `shortfall` is how many arrivals even a fully graded batch cannot absorb. A positive
+ * shortfall means the rail cannot keep pace at this cadence; it is reported on the nudge
+ * and the sweep result so that state is visible rather than inferred from a growing count.
+ * A non-finite or negative arrival count (a failed measurement) yields the floor with
+ * zero shortfall: never act on a missing number.
+ */
+export function ungradedBatchCapFor(arrivalsInWindow: number): { cap: number; shortfall: number } {
+  if (!Number.isFinite(arrivalsInWindow) || arrivalsInWindow < 0) {
+    return { cap: UNGRADED_BATCH_CAP, shortfall: 0 };
+  }
+  const arrivals = Math.floor(arrivalsInWindow);
+  return {
+    cap: Math.min(UNGRADED_BATCH_MAX, Math.max(UNGRADED_BATCH_CAP, arrivals)),
+    shortfall: Math.max(0, arrivals - UNGRADED_BATCH_MAX),
+  };
+}
 
 /**
  * The single `WatchdogSource` every ungraded-filing nudge fires under, whatever its
@@ -223,7 +261,9 @@ export async function readUngradedFilings(
     workspaceId,
     harnessSlug: installSlug,
     policy: opts.policy ?? DEFAULT_UNGRADED_EPOCH_POLICY,
-    limitPerOrigin: opts.limitPerOrigin ?? 50,
+    // Bounded by the capacity CEILING, not a separate literal: a read narrower than the
+    // largest batch would silently cap every batch at the read size instead.
+    limitPerOrigin: opts.limitPerOrigin ?? UNGRADED_BATCH_MAX,
   });
 }
 
@@ -240,6 +280,12 @@ export interface UngradedSweepResult {
   eligibleBacklogCount: number;
   staleCount: number;
   reason: string;
+  /** WI-10004412: the per-origin batch cap this tick used (ungradedBatchCapFor) and the
+   *  arrival count it was sized from. Present on per-origin results only; '*' rows
+   *  describe sweep infrastructure and have no batch. `arrivalsInWindow` is null when
+   *  the arrival read failed and the cap fell back to the floor. */
+  batchCap?: number;
+  arrivalsInWindow?: number | null;
 }
 
 /**
@@ -261,6 +307,7 @@ export async function fireGradingNudge(
   staleSec: number,
   harnessSlug: string | null = null,
   origin: string = stale[0]?.origin ?? 'unknown',
+  capacity: { arrivalsInWindow: number | null; shortfall: number } = { arrivalsInWindow: null, shortfall: 0 },
 ): Promise<void> {
   const days = Math.max(1, Math.round(staleSec / 86_400));
   const shown = stale.slice(0, 5);
@@ -268,8 +315,17 @@ export async function fireGradingNudge(
     .map((s) => `• ${s.ideaId}${s.title ? ` — ${s.title}` : ''} (${s.routedRef})`)
     .join('\n');
   const more = stale.length > shown.length ? `\n…and ${stale.length - shown.length} more.` : '';
+  const pace =
+    capacity.arrivalsInWindow == null
+      ? ''
+      : ` ${origin} routed ${capacity.arrivalsInWindow} new filing(s) in the last ${days}d; this batch is sized ` +
+        `to keep pace with that inflow.` +
+        (capacity.shortfall > 0
+          ? ` ⚠ CAPACITY SHORTFALL: ${capacity.shortfall} arrival(s) exceed the ${UNGRADED_BATCH_MAX}-filing batch ` +
+            `ceiling, so this rail cannot keep pace even if every batch is graded.`
+          : '');
   const summary =
-    `${origin} grading backstop: ${stale.length} ${origin}-originated filing(s) ungraded > ${days}d. ` +
+    `${origin} grading backstop: ${stale.length} ${origin}-originated filing(s) ungraded > ${days}d.${pace} ` +
     `Grade each via blender:grade-idea { ideaId, grade, feedback } — grades feed the originator's ` +
     `priming + lens win-rates, and a grade of 3 or lower with feedback wakes the originator to ` +
     `revise. Grading them (or their artifacts reaching a terminal state) stops this nudge.\n\n` +
@@ -286,10 +342,17 @@ export async function fireGradingNudge(
       ideaIds: stale.map((s) => s.ideaId),
       refs: stale.map((s) => s.routedRef),
       staleDays: days,
+      arrivalsInWindow: capacity.arrivalsInWindow,
+      capacityShortfall: capacity.shortfall,
     },
     source: UNGRADED_NUDGE_SOURCE,
     body: `${list}${more}`,
     harnessSlug,
+    // WI-10004412: inject-only delivery meant the rail never started a turn for anyone
+    // (13 fires/30d, each to a different recency-fallback su, the same 10 rows every
+    // time). Wake the recipient when grading is its declared posture (the Blender steward
+    // or a GRADE-mode su); a recency-fallback su still gets the message as an FYI.
+    wakeSu: 'grading-posture',
   });
 }
 
@@ -356,12 +419,32 @@ export async function ungradedFilingsSweep(opts: { now?: number } = {}): Promise
     for (const { workspaceId, installSlug } of scopes) {
       try {
         const candidates = await readUngradedFilings(sql, workspaceId, installSlug, { policy });
+        // WI-10004412: the inflow each origin's batch is sized against — filings routed in
+        // the last debounce window (the window IS the stale threshold here). A failed read
+        // degrades every origin to the floor cap; a capacity estimate must never cost the
+        // nudge itself.
+        let arrivalsByOrigin: Map<string, number> | null = null;
+        try {
+          arrivalsByOrigin = await countRoutedByOriginSince(sql, {
+            workspaceId,
+            harnessSlug: installSlug,
+            policy,
+            sinceMs: now - thresholdMs,
+          });
+        } catch (e) {
+          console.warn(
+            `[ungraded-filings] arrival read failed for ${workspaceId}/${installSlug}; using the floor batch cap: ` +
+              `${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
         // P-001: one nudge PER ORIGIN. A single mixed-origin fire would name filings
         // from producers with different graders and different deadlines in one
         // message, and would share one debounce slot — so the loudest producer would
         // silence every other one for the whole window.
         for (const [origin, originCandidates] of groupFilingsByOrigin(candidates)) {
-          const stale = selectUngradedFilings(originCandidates, { now, thresholdMs, policy });
+          const arrivalsInWindow = arrivalsByOrigin ? (arrivalsByOrigin.get(origin) ?? 0) : null;
+          const { cap: batchCap, shortfall } = ungradedBatchCapFor(arrivalsInWindow ?? Number.NaN);
+          const stale = selectUngradedFilings(originCandidates, { now, thresholdMs, policy, cap: batchCap });
           if (stale.length === 0) continue;
           const scopeKey = ungradedFireScopeKey(origin);
           // EI-16038: cheap non-atomic pre-check first (avoid the transaction round-trip
@@ -385,6 +468,8 @@ export async function ungradedFilingsSweep(opts: { now?: number } = {}): Promise
               eligibleBacklogCount: stale.length,
               staleCount: stale.length,
               reason: 'debounced',
+              batchCap,
+              arrivalsInWindow,
             });
             continue;
           }
@@ -416,11 +501,16 @@ export async function ungradedFilingsSweep(opts: { now?: number } = {}): Promise
               eligibleBacklogCount: stale.length,
               staleCount: stale.length,
               reason: 'debounced (raced or backed off)',
+              batchCap,
+              arrivalsInWindow,
             });
             continue;
           }
           const mugOwner = await resolveMugOwner(sql, workspaceId, installSlug);
-          await fireGradingNudge(workspaceId, mugOwner, stale, staleSec, installSlug, origin);
+          await fireGradingNudge(workspaceId, mugOwner, stale, staleSec, installSlug, origin, {
+            arrivalsInWindow,
+            shortfall,
+          });
           results.push({
             workspaceId,
             installSlug,
@@ -431,6 +521,8 @@ export async function ungradedFilingsSweep(opts: { now?: number } = {}): Promise
             eligibleBacklogCount: stale.length,
             staleCount: stale.length,
             reason,
+            batchCap,
+            arrivalsInWindow,
           });
         }
       } catch (e) {

@@ -7,7 +7,8 @@
  * Renders the listing's declared surface (`identity_surface`, worker migration
  * 035): slots, context contributions and where they inject, sync and async
  * hooks, bundled packages, knowledge-pack memories and docs, class contracts,
- * grants and the permission lines install asks consent for. The publisher
+ * grants, burn knobs (what sets spend; agent-economy-flywheel P-015) and the
+ * permission lines install asks consent for. The publisher
  * derived it from the closure it signed and install recomputes it from the
  * verified clone, refusing a listing whose surface differs — so this preview
  * cannot describe less than what installs.
@@ -17,6 +18,7 @@
  */
 import React from 'react';
 import {
+  IDENTITY_LISTING_SURFACE_SCHEMA_VERSION,
   parseIdentityListingSurface,
   type IdentityListingSurface,
 } from '@papercusp/operator-core/lib/cupboard/identity-listing-surface-wire';
@@ -163,17 +165,55 @@ function Access({ surface }: { surface: IdentityListingSurface }) {
   );
 }
 
+const KNOB_VALUE_MAX = 120;
+
+function knobValue(path: string, value: unknown): string {
+  if (path === 'promptBytes' && typeof value === 'number') return `${value} bytes`;
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length > KNOB_VALUE_MAX ? `${text.slice(0, KNOB_VALUE_MAX)}…` : text;
+}
+
+function BurnKnobs({ surface }: { surface: IdentityListingSurface }) {
+  return (
+    <Group title="Burn knobs" testId="identity-surface-burn-knobs" count={surface.burnKnobs.length}>
+      {surface.burnKnobs.map(({ path, value }) => (
+        <li key={path} data-knob={path}>
+          <code style={mono}>{path}</code>{' '}
+          <span style={muted} title={JSON.stringify(value)}>{knobValue(path, value)}</span>
+        </li>
+      ))}
+    </Group>
+  );
+}
+
+function Notice({ state, children }: { state: string; children: React.ReactNode }) {
+  return (
+    <div style={box} data-testid="identity-surface" data-state={state}>
+      <div style={{ fontFamily: FONTS.ui, fontSize: SIZES.sm, fontWeight: 600, color: COLORS.text }}>Identity surface</div>
+      <p style={note}>{children}</p>
+    </div>
+  );
+}
+
 export default function IdentitySurface({ value }: { value: string | null | undefined }) {
   const surface = parseIdentityListingSurface(value);
   if (!surface) {
     return (
-      <div style={box} data-testid="identity-surface" data-state="unreadable">
-        <div style={{ fontFamily: FONTS.ui, fontSize: SIZES.sm, fontWeight: 600, color: COLORS.text }}>Identity surface</div>
-        <p style={note}>
-          This identity listing carries no readable declared surface, so there is nothing to preview. Install refuses an
-          identity whose listed surface does not match what its signed release contains.
-        </p>
-      </div>
+      <Notice state="unreadable">
+        This identity listing carries no readable declared surface, so there is nothing to preview. Install refuses an
+        identity whose listed surface does not match what its signed release contains.
+      </Notice>
+    );
+  }
+  const listedVersion: number = surface.schemaVersion;
+  if (listedVersion !== IDENTITY_LISTING_SURFACE_SCHEMA_VERSION) {
+    // Install reports this as `schema-version` and refuses it; previewing the
+    // older shape would describe less than what installs.
+    return (
+      <Notice state="schema-version">
+        This listing was published with surface format {listedVersion}; this build reads format{' '}
+        {IDENTITY_LISTING_SURFACE_SCHEMA_VERSION}. Install refuses it until the publisher republishes the release.
+      </Notice>
     );
   }
   return (
@@ -197,6 +237,7 @@ export default function IdentitySurface({ value }: { value: string | null | unde
       <Hooks surface={surface} />
       <Packages surface={surface} />
       <Access surface={surface} />
+      <BurnKnobs surface={surface} />
     </div>
   );
 }

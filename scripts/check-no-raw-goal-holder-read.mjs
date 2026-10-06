@@ -46,6 +46,21 @@
  *
  * Comments are stripped first, so prose about goal holders never trips it.
  *
+ * ── THE SECOND TELL: the goal's STARTER read as its holder ──────────────────
+ *
+ * `goals.metadata.agentOwnerId` is written ONCE, by goals/start.ts, and lease
+ * succession never updates it. It answers "who started this goal", never "who
+ * holds it". Measured 2026-10-03 02:50Z (plan
+ * goal-holder-plans-ideation-truthful-reports-2026-10-03 D-003): it named
+ * su-6aab097a while `agent_modes` held su-9e72a11f at lease epoch 18, and a
+ * resolver built on it would have exempted nobody. The same field, read first,
+ * mapped the scorecard evidence record of a former holder to a goal it no longer
+ * held. So a file whose SQL touches `harness_shared.goals` AND reads
+ * `metadata ->> 'agentOwnerId'` (or `->`, `#>>`, or a JSON containment `@>`
+ * on that key) is flagged unless STARTER_READ_ALLOWLIST says why it is asking the
+ * "who started it" question. Writers (`jsonb_set(metadata, '{agentOwnerId}', …)`,
+ * `metadata || …`) do not match.
+ *
  * EXCLUDED (never scanned): vendored / build output / _retired / tests / SQL
  *   migrations / non-source.
  *
@@ -131,6 +146,23 @@ export const ALLOWLIST = new Set([
   // and stamps `subject` on its own row. Both are writes/self-reads about the
   // caller's own session, which is trivially live — it is executing the call.
   'packages/agent-mcp/src/tools/goals/create.ts',
+]);
+
+/**
+ * Files that read `goals.metadata.agentOwnerId` on purpose, each because it asks
+ * "who STARTED this goal" and never treats the answer as the current holder. A new
+ * entry needs that argument written down, like ALLOWLIST above.
+ */
+export const STARTER_READ_ALLOWLIST = new Set([
+  // Projects the field as `started_holder_owner_id`: the starter, compared against
+  // the lease, never used as the holder.
+  'packages/operator-core/lib/system-health/goal-liveness-watchdog.ts',
+
+  // Scorecard evidence record for a PAST window. The starter link is the LAST of
+  // three ordered sources, after the holder's own goal-stamped tool_invocations in
+  // the window and its agent_modes lease row, and the record names it
+  // goalSource 'goals.agentOwnerId' so a grader sees which source answered.
+  'packages/operator-core/lib/agent-tools/scorecards/agent-run-evidence-record.ts',
 ]);
 
 /**
@@ -221,6 +253,24 @@ export function readsRawGoalHolder(text) {
   );
 }
 
+/** The goals table. `\b` keeps `harness_shared.goals_foo` out. */
+const GOALS_TABLE = /harness_shared\.goals\b/;
+/**
+ * A READ of the starter key: `->>` / `->` / `#>>` / `#>` on `agentOwnerId` (with or
+ * without the `{}` path braces), or a JSON containment test `@> … agentOwnerId`.
+ */
+const STARTER_READ =
+  /(?:->>?|#>>?)\s*'\{?agentOwnerId\}?'|@>[^;`]*agentOwnerId/;
+
+/**
+ * Does this source read `goals.metadata.agentOwnerId` (the goal's STARTER) in SQL?
+ * Pure (text → boolean), file-level for the same reason as readsRawGoalHolder.
+ */
+export function readsGoalStarterAsHolder(text) {
+  const t = stripCommentsOnly(text);
+  return GOALS_TABLE.test(t) && STARTER_READ.test(t);
+}
+
 /**
  * Scan the tracked tree for offenders. Enumerates via `listTrackedFiles`, which
  * recurses into submodules — a bare `git ls-files` emits one gitlink entry per
@@ -232,28 +282,43 @@ export function findOffenders() {
   const { files: tracked, unscanned } = listTrackedFiles(ROOT);
 
   const offenders = [];
+  const starterOffenders = [];
   for (const f of tracked) {
     if (isExcluded(f)) continue;
-    if (ALLOWLIST.has(f) || BASELINE.has(f)) continue;
+    const checkHolder = !ALLOWLIST.has(f) && !BASELINE.has(f);
+    const checkStarter = !STARTER_READ_ALLOWLIST.has(f);
+    if (!checkHolder && !checkStarter) continue;
     let text;
     try {
       text = readFileSync(new URL(f, `file://${ROOT}`), 'utf8');
     } catch {
       continue;
     }
-    if (readsRawGoalHolder(text)) offenders.push(f);
+    if (checkHolder && readsRawGoalHolder(text)) offenders.push(f);
+    if (checkStarter && readsGoalStarterAsHolder(text)) starterOffenders.push(f);
   }
-  return { offenders, unscanned };
+  return { offenders, starterOffenders, unscanned };
 }
 
 function main() {
-  const { offenders, unscanned } = findOffenders();
-  if (offenders.length === 0) {
+  const { offenders, starterOffenders, unscanned } = findOffenders();
+  if (offenders.length === 0 && starterOffenders.length === 0) {
     console.log(
-      '✓ no raw goal-holder read bypasses the liveness fold.' + describeUnscanned(unscanned),
+      '✓ no raw goal-holder read bypasses the liveness fold, and no goals.metadata.agentOwnerId read stands in for the holder.' +
+        describeUnscanned(unscanned),
     );
     process.exit(0);
   }
+  if (starterOffenders.length > 0) {
+    console.error('✗ goals.metadata.agentOwnerId read(s): that field names the goal STARTER and');
+    console.error('  lease succession never updates it (plan goal-holder-plans-ideation-truthful-');
+    console.error('  reports-2026-10-03 D-003). Resolve the holder through');
+    console.error('  packages/operator-core/lib/goals/holder.ts, or, if the question really is');
+    console.error('  "who started it", add the file to STARTER_READ_ALLOWLIST with that reason:\n');
+    for (const o of starterOffenders) console.error('    ' + o);
+    console.error('');
+  }
+  if (offenders.length === 0) process.exit(1);
   console.error('✗ raw goal-holder read(s) that skip the liveness fold:');
   console.error('  A goal-mode row OUTLIVES the session that wrote it and nothing clears it on');
   console.error('  death, so counting rows reports a goal dark for days as staffed. Resolve');

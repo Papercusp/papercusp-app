@@ -52,11 +52,16 @@ export interface LazyIdentityLaunchRecord {
   readonly hasAcceptedOperation: boolean;
   readonly acceptedOperation: unknown;
   /**
-   * Read the full record. Called at most once per preflight, and only on an
+   * Read the record. Called at most once per preflight, and only on an
    * identity-resolution cache miss. A throw propagates to the kernel resolver,
    * which fails closed exactly as a failed control-anchor read does.
+   *
+   * `receipts` (WI-10004801): the revision pairs the caller will select a
+   * receipt for. When given, `identityHistory` arrives narrowed to the entries
+   * matching one of them (identity-receipt-narrowing.ts); every top-level field
+   * is unchanged. Omitted ⇒ the whole record.
    */
-  load(): Promise<LoadedIdentityLaunchRecord | null>;
+  load(receipts?: readonly unknown[]): Promise<LoadedIdentityLaunchRecord | null>;
 }
 
 export function lazyIdentityLaunchRecord(

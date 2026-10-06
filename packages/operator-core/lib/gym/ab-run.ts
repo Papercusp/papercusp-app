@@ -26,6 +26,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, readFileSync, 
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -48,7 +49,7 @@ import { spawnGymOperatorWithRetry } from './operator-ready';
 process.env.LLM_TEST_BACKEND = process.env.LLM_TEST_BACKEND ?? 'claude-code';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
 const FAKE_AGENT = join(__dirname, 'fixtures/fake-agent.mjs');
 const PORT = Number(process.env.GYM_AB_PORT ?? 3972);
 const HEX = randomBytes(4).toString('hex');

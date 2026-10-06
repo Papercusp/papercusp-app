@@ -54,7 +54,7 @@ import { convertPlanItem } from '../../../plan-items/convert';
 import { getFlag } from '@papercusp/flags/server';
 import { FLAGS } from '@papercusp/flags';
 import { withBoundedTimeout } from '../../../bounded-timeout';
-import { cellTranscriptionHint } from '../../../cell-transcription-detector';
+import { cellTranscriptionHintResolvingCommits } from '../../../git-commit-resolver';
 import { goalRefSchema } from '../../../agent-goal-ref';
 
 /**
@@ -426,9 +426,10 @@ export default defineTool({
     // stating something that was true when it was copied and rots silently afterwards
     // — and peers read intents to decide what to do. DETECTOR, never a gate: this is a
     // string on the result, the declare always succeeds, and a deliberate historical
-    // quote is legitimate. Pure + total (never throws), so it needs no timeout budget
-    // like the pivot leg below.
-    const cellHint = cellTranscriptionHint(args.intent);
+    // quote is legitimate. Total (never throws); each sha-shaped token is resolved
+    // against the integration tree first, in parallel and bounded by git's own 2s
+    // timeout, so an agent short id is not reported as a sha (EI-24684014950807803).
+    const cellHint = await cellTranscriptionHintResolvingCommits(args.intent);
     // P-015: mechanical pivot detection between consecutive intents (plan D-006
     // — extractive embedding use only; deterministic lexical fallback). A sharp
     // pivot usually means the previous approach dead-ended — the nudge points

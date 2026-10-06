@@ -878,6 +878,10 @@ export function isBackedLiveServiceClaim(
     /\bNRestarts\s*(?:=|:)\s*\d+\b/i,
     /\bActiveState\s*(?:=|:)\s*(?:active|inactive|failed|activating|deactivating)\b/i,
     /\bHTTP(?:\/\d(?:\.\d)?)?(?:\s+status)?\s*(?:=|:)?\s*[1-5]\d{2}\b/i,
+    // curl's documented `-w "%{http_code}"` idiom naturally produces
+    // `http_status=200` / `http_code=200`; the general HTTP alternatives above
+    // allow whitespace before `status`, but cannot consume this suffix separator.
+    /\bHTTP[_-](?:status|code)\s*(?:=|:)\s*[1-5]\d{2}\b/i,
     /\b(?:GET|HEAD|POST|PUT|PATCH|DELETE)\s+\S+[^\n]{0,80}(?:->|→|returned|status)\s*[1-5]\d{2}\b/i,
     /https?:\/\/\S+[^\n]{0,80}(?:->|→|returned|status)\s*[1-5]\d{2}\b/i,
   ].some((pattern) => pattern.test(runtimeEvidence));

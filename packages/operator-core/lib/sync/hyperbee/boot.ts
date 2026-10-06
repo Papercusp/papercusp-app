@@ -128,7 +128,12 @@ import { acceptOpVersion, CURRENT_SCHEMA_VERSION, type SchemaVersionAlert } from
 import { schemaVersionEvents } from './schema-version';
 import { getFlag } from '@papercusp/flags/server';
 import { FLAGS } from '@papercusp/flags';
-import { loadRevokedPubkeys } from './load-revoked-pubkeys';
+import {
+  formatMemoryFederationDegradedWarn,
+  readMemoryFederationFlagOnce,
+  type MemoryFederationFlagRead,
+} from './memory-federation-flag-read';
+import { loadRevokedPubkeysCached } from './load-revoked-pubkeys';
 import {
   registerAllHarnessProjections,
   buildHarnessProjectionApply,
@@ -558,6 +563,8 @@ export interface BootHarnessOpts {
   swarmRefreshMs?: number;
   swarmFastWindowMs?: number;
   swarmSlowRefreshMs?: number;
+  /** WI-10005270: cap on the stalled-log refresh backoff (swarm.ts `stalledMaxRefreshMs`). */
+  swarmStalledMaxRefreshMs?: number;
   /**
    * WI-752 / FED-2 join-retry base interval (ms). When the boot-time swarm join
    * FAILS (→ local-only), retry it on a bounded exponential backoff starting at
@@ -1094,13 +1101,20 @@ export function classifySameHiveMember(input: {
  *
  * So: report stalled for either (a) an admitted remote log with zero
  * replicator peers (the original WI-1534 axis, unchanged), or (b) zero
- * admitted remotes AT ALL while `liveConnectionCount` is nonzero — i.e. we
+ * admitted remotes AT ALL while `topicConnectionCount` is nonzero — i.e. we
  * have live swarm sockets on this topic and nothing has been admitted yet.
  * The live-connection leg is required (not "admitted is empty" alone) so a
  * genuinely solo/offline node still gets the slow cadence — the same
  * false-positive discipline rung (c)'s never-paired escalation already
  * applies (WI-5686: an axis with no live-peer guard fires for a peer that
  * simply isn't there).
+ *
+ * WI-10005287: `topicConnectionCount` MUST be topic-scoped
+ * (`SwarmHandle.topicStallCandidateCount`). The swarm-wide
+ * `liveConnectionCount` this used to receive counts the one shared socket per
+ * peer for every local topic, so a peer serving only OTHER harnesses held leg
+ * (b) true forever on every topic it does not share (measured on bg-host
+ * 2026-10-02: 48 of 89 joins).
  */
 export function computeHasStalledLogs(
   // `unknown` values (not `Partial<{ peersCount... }>>` directly) so a caller
@@ -1109,7 +1123,7 @@ export function computeHasStalledLogs(
   // `peersCount()` read site (e.g. the `maybePeersCount` casts above).
   admitted: ReadonlyMap<string, unknown>,
   ownLogKeyHex: string,
-  liveConnectionCount: number,
+  topicConnectionCount: number,
 ): boolean {
   let sawRemoteAdmitted = false;
   for (const [keyHex, rawLog] of admitted) {
@@ -1124,7 +1138,7 @@ export function computeHasStalledLogs(
     }
   }
   if (sawRemoteAdmitted) return false;
-  return liveConnectionCount > 0;
+  return topicConnectionCount > 0;
 }
 
 export async function bootHarnessSubstrate(opts: BootHarnessOpts): Promise<BootedHarnessHandle> {
@@ -1458,17 +1472,44 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
   // merge cursor was persisted outside that decision. An OFF-gated memory op
   // therefore advanced the cursor and became indistinguishable from an applied
   // op. Keep the projection and apply-binding on one boot-owned snapshot.
-  const readMemoryFederationFlag = async (): Promise<boolean> => {
-    try {
-      if (opts.memoryFederationFlagOn) {
-        return (await opts.memoryFederationFlagOn()) === true;
-      }
-      return (await getFlag(FLAGS.MEM0_FEDERATION_EGRESS, 'system')) === true;
-    } catch {
-      return false;
-    }
+  //
+  // WI-10005919 — a read can DEGRADE (override store unreachable with nothing cached,
+  // or a throw), and a degraded value is not the owner's setting. It is never allowed
+  // to pass silently as OFF: every degraded read is logged with a running count, a
+  // mid-run degraded read holds the last authoritative value, and a degraded boot
+  // value that no pass consumed is not treated as an OFF state (see mergeOnePass).
+  const readMemoryFederationFlag = () => readMemoryFederationFlagOnce(opts.memoryFederationFlagOn);
+  let memoryFederationDegradedReads = 0;
+  const warnMemoryFederationReadDegraded = (
+    read: MemoryFederationFlagRead,
+    when: 'boot' | 'pass',
+    outcome: string,
+  ): void => {
+    memoryFederationDegradedReads += 1;
+    console.warn(
+      formatMemoryFederationDegradedWarn({
+        workspaceId: opts.workspaceId,
+        harnessSlug: opts.harnessSlug,
+        when,
+        read,
+        degradedReadsThisBoot: memoryFederationDegradedReads,
+        outcome,
+      }),
+    );
   };
-  let memoryFederationEnabledForPass = await readMemoryFederationFlag();
+  const bootMemoryFederationRead = await readMemoryFederationFlag();
+  let memoryFederationEnabledForPass = bootMemoryFederationRead.value;
+  // Whether memoryFederationEnabledForPass came from an authoritative read.
+  let memoryFederationFlagAuthoritative = bootMemoryFederationRead.degraded === null;
+  // Whether any merge pass has applied under a snapshot yet.
+  let memoryFederationSnapshotConsumed = false;
+  if (bootMemoryFederationRead.degraded !== null) {
+    warnMemoryFederationReadDegraded(
+      bootMemoryFederationRead,
+      'boot',
+      `provisional ${bootMemoryFederationRead.value ? 'ON' : 'OFF'} until the first pass re-reads`,
+    );
+  }
   const memoryFederationFlagSnapshot = async (): Promise<boolean> => memoryFederationEnabledForPass;
 
   // WI-2142064: one instance for this harness's whole boot lifetime (survives a
@@ -1911,11 +1952,20 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
   // and a live PG, so this is safe.
   //
   // Fail-open: a load failure records a boot event and continues.
+  //
+  // WI-10005183: both reads go through the NOTIFY-invalidated process cache
+  // (revoked-set-cache.ts). This loader runs at the top of EVERY merge pass for
+  // EVERY harness (~once a second each), and the published sets change a few times
+  // a day — measured 162 identical queries/s on bg-host before the cache. The cache
+  // serves nothing until it is attached to the live sync_invalidate LISTEN, and
+  // every contributors / pot_members row write drops it, so a refresh here still
+  // sees every committed revocation this process has heard about. The G7 ordering
+  // and the WI-193 un-revoke reconciliation below are unchanged.
   const loadRevoked =
     opts.loadRevokedOverride ??
     (async () => {
       // Harness-scope revocations (the base set).
-      const base = await loadRevokedPubkeys({
+      const base = await loadRevokedPubkeysCached({
         workspaceId: opts.workspaceId,
         harnessSlug: opts.harnessSlug,
       });
@@ -1933,8 +1983,8 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
           // handle on a joiner seeded an EMPTY revoked set — i.e. THIS seed, whose whole job
           // is refusing an already-revoked peer on first contact, refused nobody. Resolve
           // the federated scope first (a no-op on an owner).
-          const { loadRevokedHivePubkeysForLocalPot } = await loadFederatedPotScopeModule();
-          for (const pk of await loadRevokedHivePubkeysForLocalPot(opts.workspaceId, hiveHome)) {
+          const { loadRevokedHivePubkeysForLocalPotCached } = await loadFederatedPotScopeModule();
+          for (const pk of await loadRevokedHivePubkeysForLocalPotCached(opts.workspaceId, hiveHome)) {
             base.add(pk);
           }
         }
@@ -2360,6 +2410,19 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
     return memoryFederationEnabledForPass
       ? `${projectionBinding ?? '<none>'}::mem0-federation-egress=on`
       : projectionBinding;
+  };
+  // WI-10005575: the same projection scope under the OTHER memory-federation state.
+  // A fresh boot whose flag read degrades (an empty override cache plus a timed-out
+  // store read serves the dark default) resolves the other stamp, finds no rows under
+  // its own, and used to re-fold every log from 0 for hours. Progress stamped ON is a
+  // superset of an OFF fold, so an OFF pass may resume from it outright; progress
+  // stamped OFF skipped memory applies, so an ON pass resumes from it and owes a
+  // memory-only replay (the same remedy as the live OFF→ON edge).
+  const memoryToggledApplyBinding = (): string | null => {
+    const projectionBinding = currentProjectionBinding();
+    return memoryFederationEnabledForPass
+      ? projectionBinding
+      : `${projectionBinding ?? '<none>'}::mem0-federation-egress=on`;
   };
 
   // Keep lifecycle transitions in event order even when a caller deliberately
@@ -3949,13 +4012,41 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
       // binding, seeding, or projection apply for this pass. A live OFF→ON edge
       // starts one memory-only replay; OFF cancels an incomplete replay.
       markMergeStage('memory-federation-flag');
-      const memoryFederationEnabledNow = await readMemoryFederationFlag();
+      const memoryFederationRead = await readMemoryFederationFlag();
+      let memoryFederationEnabledNow = memoryFederationRead.value;
+      if (memoryFederationRead.degraded !== null) {
+        if (memoryFederationFlagAuthoritative) {
+          // WI-10005919: hold the last authoritative value. Adopting the degraded OFF
+          // would cancel an in-flight memory replay and flip the apply binding, and the
+          // next good read would then start a full memory-only replay from 0.
+          memoryFederationEnabledNow = memoryFederationEnabledForPass;
+          warnMemoryFederationReadDegraded(
+            memoryFederationRead,
+            'pass',
+            `holding ${memoryFederationEnabledNow ? 'ON' : 'OFF'} (last authoritative value)`,
+          );
+        } else {
+          warnMemoryFederationReadDegraded(
+            memoryFederationRead,
+            'pass',
+            `no authoritative value yet, running this pass ${memoryFederationEnabledNow ? 'ON' : 'OFF'}`,
+          );
+        }
+      }
       if (!memoryFederationEnabledNow) {
         memoryReplayCursor = null;
-      } else if (!memoryFederationEnabledForPass) {
+      } else if (
+        !memoryFederationEnabledForPass &&
+        (memoryFederationFlagAuthoritative || memoryFederationSnapshotConsumed)
+      ) {
+        // A live OFF→ON edge. WI-10005919: a degraded boot value that no pass ever
+        // applied under is not an OFF state, so it owes no replay; the cursor seed
+        // below decides from persisted progress whether memory was missed.
         memoryReplayCursor = createMergeCursor();
       }
       memoryFederationEnabledForPass = memoryFederationEnabledNow;
+      if (memoryFederationRead.degraded === null) memoryFederationFlagAuthoritative = true;
+      memoryFederationSnapshotConsumed = true;
 
       // WI-3852 (F2 of WI-898): a bucket EVICTED from either content-deferral buffer (epoch-
       // key-not-yet-local / member-not-yet-federated) since the last pass has NO recovery path
@@ -4186,7 +4277,25 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
       if (pgMergeCursorStore && pgCursorSeedCache) {
         markMergeStage('pg-cursor-seed');
         try {
-          await pgCursorSeedCache.seed(mergeCursor, pgMergeCursorStore, currentApplyBinding(), logKeys);
+          const applyBinding = currentApplyBinding();
+          const fallbackBinding = memoryToggledApplyBinding();
+          const seededFromFallback = await pgCursorSeedCache.seed(
+            mergeCursor,
+            pgMergeCursorStore,
+            applyBinding,
+            logKeys,
+            fallbackBinding,
+          );
+          if (seededFromFallback.size > 0) {
+            const owesMemoryReplay = memoryFederationEnabledForPass;
+            if (owesMemoryReplay && !memoryReplayCursor) memoryReplayCursor = createMergeCursor();
+            console.warn(
+              `[read-merge] [${opts.workspaceId}/${opts.harnessSlug}] WI-10005575: seeded ` +
+                `${seededFromFallback.size} log(s) from cursor progress stamped '${fallbackBinding}' ` +
+                `(this pass binds '${applyBinding}'), instead of re-folding them from 0` +
+                (owesMemoryReplay ? '; started a memory-only replay for the memory ops that stamp skipped.' : '.'),
+            );
+          }
         } catch (e) {
           // F4: an unreadable durable cursor may be holding an unapplied entry
           // at zero. Snapshot skipping is unsafe until that state is known.
@@ -6048,8 +6157,10 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
         refreshMs: opts.swarmRefreshMs,
         fastWindowMs: opts.swarmFastWindowMs,
         slowRefreshMs: opts.swarmSlowRefreshMs,
-        // WI-1534 anti-entropy: keep the self-heal loop in its FAST cadence
-        // whenever an admitted remote log has zero live replicator peers —
+        stalledMaxRefreshMs: opts.swarmStalledMaxRefreshMs,
+        // WI-1534 anti-entropy: re-arm the self-heal loop's FAST cadence
+        // (WI-10005270: for one fast window, then an exponential backoff to
+        // stalledMaxRefreshMs) whenever an admitted remote log has zero live replicator peers —
         // on a quiescent hive (no connection churn) this is the ONLY thing
         // that re-arms it; otherwise it settles into the 60s slow keepalive
         // and a genuinely stalled/zombie peer can go unresynced for as long
@@ -6068,7 +6179,9 @@ async function bootHarnessSubstrateInner(opts: BootHarnessOpts): Promise<BootedH
         // `escalateToForcedRejoin`'s `swarmHandle?.forceRejoin()` above.
         hasStalledLogs: () => {
           try {
-            return computeHasStalledLogs(admitted, ownLog.keyHex, swarmHandle?.liveConnectionCount ?? 0);
+            // WI-10005287: the TOPIC-scoped socket count, never the swarm-wide
+            // liveConnectionCount (see topicStallCandidateCount's doc).
+            return computeHasStalledLogs(admitted, ownLog.keyHex, swarmHandle?.topicStallCandidateCount ?? 0);
           } catch {
             return false;
           }

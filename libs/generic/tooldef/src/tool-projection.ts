@@ -26,6 +26,7 @@ import type {
   ToolResult,
 } from './wire';
 import type { AgentRole, Capability, PluginSpawn } from './host-types';
+import type { BundledDefinitionSite } from './bundle-definition-site';
 import type { PayloadShapers } from './payload-tier';
 import type {
   KernelBoundary,
@@ -356,6 +357,17 @@ export interface RequestOriginMetadata {
   query?: Record<string, string>;
   /** Non-secret request headers useful for attribution/debugging. */
   headers?: Record<string, string>;
+  /**
+   * Host-classified native-session presentation. Fingerprints preserve the
+   * carrier without retaining its raw value. A bound pair proves caller/row
+   * consistency, not possession or physical actor identity.
+   */
+  nativeSession?: {
+    carrier: 'header:x-papercusp-native-session' | 'query:native_session';
+    valueFingerprint: string;
+    binding: 'bound' | 'unbound';
+    candidateAdvSessionId: number | null;
+  };
 }
 
 export interface UnifiedToolContext {
@@ -440,6 +452,10 @@ export interface UnifiedToolContext {
    * listing the real keys, but only if the value is an object at all.
    */
   codeMode?: boolean;
+  /** Dispatcher-generated id for this exact handler call; safe as an idempotency key. */
+  dispatchCallId?: string;
+  /** True when this handler was reached through ctx.dispatchTool rather than a top-level call. */
+  indirectDispatch?: boolean;
   /** Aborts on per-tool timeout, parent cancellation, or shutdown. */
   signal: AbortSignal;
 
@@ -550,7 +566,7 @@ export interface UnifiedToolContext {
    */
   principal?:
     | (Pick<Principal, 'slug' | 'workspaceId' | 'capabilities'> &
-        Partial<Pick<Principal, 'kind' | 'authMethod' | 'trust' | 'roles' | 'label'>>)
+        Partial<Pick<Principal, 'kind' | 'authMethod' | 'trust' | 'roles' | 'label' | 'allowedTools'>>)
     | null;
   /**
    * Transaction-bound Sql client with `app.workspace_id` GUC set. Built-in
@@ -731,6 +747,14 @@ export interface UnifiedToolContext {
    * to it. Null/undefined for headless spawns and CLI callers.
    */
   uiClientId?: string | null;
+
+  /**
+   * Database row id of this caller's adv_sessions launch, set only when the
+   * MCP host verified the native CLI session is bound to that row. The operator
+   * kernel uses it to read this caller's launch authority rather than another
+   * active row owned by the same coordination identity.
+   */
+  advSessionId?: number;
 
   /**
    * Private stable session key for process-local failure-loop detector state.
@@ -1001,6 +1025,13 @@ export interface ProjectedTool {
    * "is the schema this process is serving older than the tree?".
    */
   sourceFile?: string;
+  /**
+   * Set INSTEAD of `sourceFile` when the tool was defined inside a bundle that also
+   * inlines this library: every frame reports the same file, so the file cannot name
+   * the defining module, but the frames' LINES can. A host that can read the bundle
+   * resolves it with `definingModuleOfBundledSite` (P-002 / EI-25176539351759672).
+   */
+  bundledDefinitionSite?: BundledDefinitionSite;
   /**
    * OpenAI/MCP-safe JSON Schema for tool input. Validated before invocation
    * and advertised to strict function-calling clients. Built-in `defineTool`
@@ -1848,6 +1879,16 @@ export function projectedToolSourceFile(toolName: string): string | null {
   // accepts all three and returns undefined rather than guessing when a
   // normalized name is ambiguous.
   return resolveMcpName(toolName)?.sourceFile ?? null;
+}
+
+/**
+ * The bundled definition site of `toolName` — the frames' positions in the one file
+ * a bundle put both this library and the tool into — or `null` when the tool is
+ * unknown or was not defined inside a bundle. Same tolerant name resolution as
+ * {@link projectedToolSourceFile}; a host resolves the site to a module path.
+ */
+export function projectedToolBundledDefinitionSite(toolName: string): BundledDefinitionSite | null {
+  return resolveMcpName(toolName)?.bundledDefinitionSite ?? null;
 }
 
 /**

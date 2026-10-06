@@ -58,6 +58,21 @@ export function recordContextUsage(
  *  be nudged into an immediate pointless re-cut. Clearing beats a stale serve:
  *  the gauge renders nothing until the next watchdog pass measures the real
  *  (tiny) successor transcript. */
+/**
+ * EI-23761864550626068: when the watchdog last wrote this owner's (tokens, limit) pair —
+ * the denominator's calibration time. Kept as a SEPARATE accessor (not a new field on
+ * `getContextUsage`'s result) so existing exact-shape assertions on that result are
+ * undisturbed. Honors the same staleness rule: an expired entry reads null.
+ */
+export function getContextUsageRecordedAt(
+  ownerId: string,
+  now: number = Date.now(),
+): number | null {
+  const e = cache.get(ownerId);
+  if (!e || now - e.at > CONTEXT_USAGE_STALE_MS) return null;
+  return e.at;
+}
+
 export function clearContextUsage(ownerId: string): void {
   cache.delete(ownerId);
 }

@@ -47,9 +47,10 @@ import {
   writeFileSync,
   type Dirent,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { resolveInheritedOperatorBaseUrl } from '../../mcp-base-url';
+import { withBoundedTimeout } from '../../bounded-timeout';
 import { CHARS_PER_TOKEN_ESTIMATE, computeTurnDoors } from '../../context-doors';
 import { packWakeText, recordWakePack, renderSectionIndex } from './wake-text-budget';
 import { getDoorConstantsSync } from '../../context-doors-config';
@@ -93,7 +94,9 @@ import {
   type FreshContextDeps,
 } from './wake-executor-fresh-context';
 import { appendCrashResumeAdvisory } from './crash-resume-advisory';
-import { getPresence } from '../../agent-tools/coordination/presence';
+import { getPresence, touchHeartbeat } from '../../agent-tools/coordination/presence';
+import { resolveWakeMode } from '../../agent-tools/coordination/wake-mode';
+import { stagePendingWake } from '../../agent-tools/coordination/pending-wakes';
 import { fetchContextPressure, type ContextPressureBucket } from '../../agent-tools/coordination/context-pressure';
 import { sendMessage } from '../../agent-tools/coordination/messages';
 import { getSessionBriefLifecycle, type SessionBriefLifecycle } from '../../session-brief';
@@ -151,7 +154,23 @@ import {
   renderLoopWallsBlock,
 } from '../../harness/routines/loop-fire';
 import { getLoopStatus, countAgentToolCallsInWindow } from '../../harness/routines/loop';
-import { formatEnvelope, mintNonce, tagTurnForInjection } from '../../turn-provenance/turn-provenance';
+import {
+  formatEnvelope,
+  mintNonce,
+  tagTurnForInjection,
+  type TaggedTurn,
+} from '../../turn-provenance/turn-provenance';
+
+/** The envelope+ledger tagger seam. The real one is async (WI-10005327: its
+ *  ledger write must not block the event loop); hermetic test stubs may stay
+ *  sync, so callers always await the result. */
+export type WakeTurnTagger = (args: Parameters<typeof tagTurnForInjection>[0]) => TaggedTurn | Promise<TaggedTurn>;
+
+// Text accepted by the lower-level injector only after tagWakeText has written
+// its provenance ledger entry and prefixed the envelope. The brand lets the
+// source guard preserve that proof through the nested warm-wake closure.
+declare const ENROLLED_WAKE_TEXT: unique symbol;
+type EnrolledWakeText = string & { readonly [ENROLLED_WAKE_TEXT]: true };
 import { isInboxOwnerReplyPayload } from '../../agent-tools/coordination/inbox-reply';
 import {
   readOwnerChatTurnText,
@@ -163,7 +182,13 @@ import {
   appendClaudeToolReferencesToSeed,
   CLAUDE_TOOL_REFERENCE_POISON_TURNS,
   isMissingClaudeToolReferenceError,
+  neutralizeResumeNativeToolReferences,
 } from '../../claude-resume-tool-references.mjs';
+import {
+  claudeInheritedEffortOverride,
+  readClaudeLaunchSettings,
+  type ClaudeLaunchSettings,
+} from '../../model-context-budget.mjs';
 import { quarantineRepeatedClaudeToolReferenceFailures } from './poisoned-resume-session';
 import type { ToolReferenceDeathRecovery } from '../../system-health/compaction-compliance-watchdog';
 import type { ResumeTurnContext, ResumeTurnExitRaw } from './resume-turn-outcome';
@@ -173,6 +198,7 @@ import type { DeliveryWork, WakeChannel, WakeOutcome } from './types';
  *  API errors (incl. the 429 / usage-limit lines) to STDOUT; the dying turn's error
  *  is at the END of its output, so a tail is enough to classify it. */
 const RESUME_OUTPUT_TAIL_BYTES = Number(process.env.PAPERCUSP_RESUME_OUTPUT_TAIL_BYTES) || 8192;
+const WAKE_MODE_DELIVERY_LOOKUP_TIMEOUT_MS = 15_000;
 
 /** WI-666: bound the attended-loop recovery leg. A resumable loop owner may be
  * alive in a terminal the operator cannot inject, so send SIGINT and wait only
@@ -436,9 +462,25 @@ export function defaultAccountHeadlessResumeTurn(input: HeadlessResumeTurnInput)
     input.pid,
     { workspaceId: input.sessionWorkspaceId ?? input.deliveryWorkspaceId },
   );
+  // WI-10005725: a resume-headless turn has no psu launcher, so no supervisor
+  // beat ever reports its pid. Without this stamp the presence row keeps the
+  // DEAD launcher pid of the session being resumed, the liveness oracle's ESRCH
+  // probe outranks the turn's own fresh activity, and the working turn reads
+  // `ended` (a goal-holder respawner then replaces it). Stamp the child's
+  // pid/host so the probe describes the process actually running; once the
+  // child exits, the same probe correctly reads it gone. Best-effort like the
+  // adv write: the spawn never waits on it, a failure never rejects
+  // `pidRecorded`, and touchHeartbeat is a no-op without a presence row.
+  const presenceStamped = touchHeartbeat(input.coordOwnerId, {
+    pid: input.pid,
+    host: hostname(),
+  }).catch(() => undefined);
   let finished = false;
   return {
-    pidRecorded: setAdvSessionPid(input.advSessionId, input.pid, undefined, input.sessionWorkspaceId),
+    pidRecorded: Promise.all([
+      setAdvSessionPid(input.advSessionId, input.pid, undefined, input.sessionWorkspaceId),
+      presenceStamped,
+    ]).then(() => undefined),
     finish: (exit) => {
       if (finished) return;
       finished = true;
@@ -552,6 +594,8 @@ export interface EnsureCodexHomeForWakeInput {
   advSessionId: number;
   owner: string;
   codexHome: string;
+  /** Channel-2 wake resumes are detached/headless and must retain that config policy. */
+  headless: true;
   sessionRow?: CodexRepairSessionRow | null;
   /** The launcher passes this when the rollout is bound to the gateway provider. */
   requireGatewayProvider?: boolean;
@@ -623,6 +667,7 @@ async function defaultEnsureCodexHomeForWake(
         token: readSuperuserToken(),
         codexGatewayAuto: input.requireGatewayProvider === true,
         codexGatewayPriority: input.requireGatewayProvider === true ? 'su' : null,
+        headless: input.headless,
         trustDir: null,
         projectDir: input.sessionRow?.cwd,
       }),
@@ -960,6 +1005,17 @@ type ClaimableDeliveryFreshness = {
   staleIds: string[];
 };
 
+type BlockedBoundDeliveryComponent = {
+  itemId: string;
+  eventIndex: number | null;
+};
+
+type BlockedBoundDeliveryFreshness = {
+  delivery: DeliveryWork;
+  staleOnly: boolean;
+  staleIds: string[];
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -1003,8 +1059,8 @@ function deliveryEventPayloadIsTimeout(event: CoalescedDeliveryEvent): boolean {
   return isRecord(event.payload) && event.payload.timeout === true;
 }
 
-/** Rebuild the coalesced headline after stale claimable components are removed. */
-function rebuildCoalescedClaimableDelivery(
+/** Rebuild the coalesced headline after stale components are removed. */
+function rebuildCoalescedDelivery(
   d: DeliveryWork,
   events: CoalescedDeliveryEvent[],
 ): DeliveryWork {
@@ -1134,7 +1190,106 @@ async function revalidateClaimableDelivery(
   }
 
   return {
-    delivery: rebuildCoalescedClaimableDelivery(d, remaining),
+    delivery: rebuildCoalescedDelivery(d, remaining),
+    staleOnly: false,
+    staleIds: [...staleIds],
+  };
+}
+
+/** Find the blocked work-item lifecycle target stamped on an auto-armed wake. */
+function blockedBoundWorkItemId(payload: unknown): string | null {
+  if (!isRecord(payload) || !isRecord(payload.bound_to)) return null;
+  const binding = payload.bound_to;
+  if (binding.kind !== 'work-item-blocked' || typeof binding.ref !== 'string') return null;
+  const ref = binding.ref.trim();
+  return ref || null;
+}
+
+/** Preserve per-event binding provenance when the engine coalesced several wakes. */
+function blockedBoundDeliveryComponents(d: DeliveryWork): BlockedBoundDeliveryComponent[] {
+  if (isRecord(d.payload) && d.payload.coalesced === true && Array.isArray(d.payload.events)) {
+    return d.payload.events.flatMap((raw, eventIndex) => {
+      const itemId = isRecord(raw) ? blockedBoundWorkItemId(raw.payload) : null;
+      return itemId ? [{ itemId, eventIndex }] : [];
+    });
+  }
+  const itemId = blockedBoundWorkItemId(d.payload);
+  return itemId ? [{ itemId, eventIndex: null }] : [];
+}
+
+/**
+ * A fired one-shot may already have a queued delivery by the time its bound
+ * work-item settles, so cancelling the await row alone cannot suppress it.
+ * Re-read that lifecycle target at delivery time and remove only components
+ * whose `work-item-blocked` target is confirmed terminal. Unreadable targets
+ * stay fail-open so a transient store problem cannot swallow a live wake.
+ */
+async function revalidateBlockedBoundDelivery(
+  d: DeliveryWork,
+  lookup: typeof getWorkItem,
+  timeoutMs: number,
+): Promise<BlockedBoundDeliveryFreshness> {
+  const components = blockedBoundDeliveryComponents(d);
+  if (components.length === 0) return { delivery: d, staleOnly: false, staleIds: [] };
+
+  const freshnessById = new Map<string, Promise<boolean | null>>();
+  const staleEventIndexes = new Set<number>();
+  const staleIds = new Set<string>();
+  for (const component of components) {
+    let terminal: boolean | null = null;
+    try {
+      let pending = freshnessById.get(component.itemId);
+      if (!pending) {
+        pending = withWakeTimeout(
+          Promise.resolve().then(() => lookup(component.itemId)),
+          `blocked-bound delivery lookup/${component.itemId}`,
+          Math.max(1, timeoutMs),
+        ).then((item) => (item ? isSettledWorkItemState(item.state) : null));
+        freshnessById.set(component.itemId, pending);
+      }
+      terminal = await pending;
+    } catch {
+      // Unknown reads preserve the original wake, matching the other delivery gates.
+      terminal = null;
+    }
+    if (terminal !== true) continue;
+    staleIds.add(component.itemId);
+    if (component.eventIndex != null) staleEventIndexes.add(component.eventIndex);
+  }
+
+  if (staleIds.size === 0) return { delivery: d, staleOnly: false, staleIds: [] };
+
+  const ids = [...staleIds].join(', ');
+  const coalescedPayload =
+    isRecord(d.payload) && d.payload.coalesced === true && Array.isArray(d.payload.events) ? d.payload : null;
+  if (!coalescedPayload) {
+    return {
+      delivery: {
+        ...d,
+        payload: null,
+        summary: `work-item-blocked wake is stale; bound work-item(s) ${ids} are terminal`,
+      },
+      staleOnly: true,
+      staleIds: [...staleIds],
+    };
+  }
+
+  const events = coalescedPayload.events as unknown[];
+  const remaining = events.filter((_event, index) => !staleEventIndexes.has(index)) as CoalescedDeliveryEvent[];
+  if (remaining.length === 0) {
+    return {
+      delivery: {
+        ...d,
+        payload: null,
+        summary: `work-item-blocked wake is stale; bound work-item(s) ${ids} are terminal`,
+      },
+      staleOnly: true,
+      staleIds: [...staleIds],
+    };
+  }
+
+  return {
+    delivery: rebuildCoalescedDelivery(d, remaining),
     staleOnly: false,
     staleIds: [...staleIds],
   };
@@ -1904,7 +2059,7 @@ export function applyInjectionDoor(d: DeliveryWork, text: string): string {
  * ledger write still returns deliverable tagged text (the turn then shows as
  * UNVERIFIED at the hook — visible, never a dropped wake).
  */
-function tagWakeText(d: DeliveryWork, text: string, tag: typeof tagTurnForInjection): string {
+async function tagWakeText(d: DeliveryWork, text: string, tag: WakeTurnTagger): Promise<EnrolledWakeText> {
   const origin = readLoopDeliveryMarker(d.payload)
     ? 'loop-fire'
     : // EI-20130618357432548: an owner CHAT-PANE turn is the same authority as an
@@ -1923,14 +2078,14 @@ function tagWakeText(d: DeliveryWork, text: string, tag: typeof tagTurnForInject
       ? OWNER_CHAT_TURN_ORIGIN
       : 'wake-pump';
   try {
-    return tag({ sid: d.subscriberId, origin, text }).taggedText;
+    return (await tag({ sid: d.subscriberId, origin, text })).taggedText as EnrolledWakeText;
   } catch {
     // The wake itself is fail-soft, but returning it without an envelope turns a
     // machine prompt into affirmative owner speech in every transcript reader.
     // Keep delivery moving with a syntactically valid, unverified envelope; the
     // prompt hook can classify it as unverified (there is no ledger row), while
     // owner-visible readers still fail closed on the non-owner origin.
-    return `${formatEnvelope(origin, mintNonce())}\n${text}`;
+    return `${formatEnvelope(origin, mintNonce())}\n${text}` as EnrolledWakeText;
   }
 }
 
@@ -2024,6 +2179,27 @@ export async function degradeToInboxOrDrop(
       reason: `${reason} — inbox delivery also failed (no resolvable owner): ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
+
+/**
+ * WI-10005900: `claude --resume` names no effort, so the resumed CLI falls back
+ * to the effortLevel in its settings.json — a key Claude Code writes itself. A
+ * session whose settings were written while Opus 5 offered `xhigh` then resumes
+ * with `xhigh` and 400s on its first request. The gateway clamps that on the
+ * `auto`/pinned routes, but the `default` route skips the gateway, so the resume
+ * argv carries the clamped level explicitly (the same rule psu-launcher applies
+ * to its own launches). Returns `args` itself when nothing needs clamping, the
+ * argv already names an effort, or it has no `--resume`.
+ */
+export function withClaudeResumeEffortClamp(args: string[], settings: ClaudeLaunchSettings): string[] {
+  if (args.some((a) => a === '--effort' || a.startsWith('--effort='))) return args;
+  const at = args.indexOf('--resume');
+  if (at < 0) return args;
+  const modelAt = args.indexOf('--model');
+  const model = modelAt >= 0 && modelAt + 1 < args.length ? args[modelAt + 1] : null;
+  const level = claudeInheritedEffortOverride({ model, settings });
+  if (!level) return args;
+  return [...args.slice(0, at), '--effort', level, ...args.slice(at)];
 }
 
 /** Per-client resume invocation (mirrors psu-launcher resumeArgsFor, headless-
@@ -2346,6 +2522,9 @@ export interface ExecuteWakeDeps {
   findPty?: typeof findPtyByPid;
   write?: typeof writePty;
   spawnManagedPty?: typeof spawnPty;
+  /** WI-10005900: reads the settings.json a resumed claude child falls back to
+   *  for its model + effort, given the env that child will run with. */
+  readClaudeLaunchSettings?: (env: Record<string, string | undefined>) => ClaudeLaunchSettings;
   spawnDetached?: (
     bin: string,
     args: string[],
@@ -2378,6 +2557,11 @@ export interface ExecuteWakeDeps {
   presence?: typeof getPresence;
   /** EI-203843: durable release-latch read, before any wake reanimation. */
   getSessionLifecycle?: (ownerId: string) => Promise<SessionBriefLifecycle | null>;
+  /** Re-read the target's effective mode before consuming a queued wake. */
+  resolveWakeModeFn?: typeof resolveWakeMode;
+  /** Stage a queued delivery when manual mode became active after its emit. */
+  stageManualWakeFn?: typeof stagePendingWake;
+  wakeModeDeliveryLookupTimeoutMs?: number;
   /** EI-22449230917085417: delivery-time ownership read for positive
    *  `lock:grant:*` wakes. A confirmed false downgrades a delayed grant to the
    *  coord inbox; null/rejection/timeout preserves the normal wake. */
@@ -2421,7 +2605,7 @@ export interface ExecuteWakeDeps {
    *  wake delivery (never inbox bodies). Injected for tests (a hermetic test stubs
    *  it to avoid real ~/.papercusp/turn-provenance writes, or to a passthrough to
    *  assert un-tagged text); defaults to the real tagTurnForInjection. */
-  tagTurn?: typeof tagTurnForInjection;
+  tagTurn?: WakeTurnTagger;
   resumePlanRun?: (input: { runId: number; wakeText: string }) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** turn-lifecycle-control Phase 3 (P-014): discover + inject into a live
    *  psu-hosted managed-pty session's control socket. The operator can't see it
@@ -2486,6 +2670,8 @@ export interface ExecuteWakeDeps {
     harness: string | null;
     wakeText: string;
     deliveryId: number;
+    /** Explicit cold wakes override carry; transcript recovery preserves the source. */
+    carry?: 'cold';
   }) => Promise<boolean>;
   /** P-013 part A (review-system-rework-reduction-2026-09-23, RSR-P-013-A): decide whether a
    *  dead Claude session's resume must be RE-HOMED because its account is walled. Injected
@@ -2672,6 +2858,24 @@ export function quotaRecoveryPickupConfirmed(
 }
 
 /**
+ * WI-10005134: an ACKED `deferred-*` refusal (busy gate, pending carry-respawn,
+ * owner typing, quota wall) is the live psu host deciding "not now". The host is
+ * alive and owns the session, so the only safe outcome is a durable park. Treating
+ * it as a socket miss (null) let the executor fall through to `resume-headless`,
+ * which put a second `claude --resume` process on the live session.
+ */
+export function parkOnHostDeferral(
+  confirmation: InjectConfirmation | null | undefined,
+  reason: string | null | undefined,
+): WakeOutcome | null {
+  if (confirmation !== 'acked' || typeof reason !== 'string' || !reason.startsWith('deferred-')) return null;
+  return {
+    kind: 'park',
+    reason: `psu-host ${reason}: the live host deferred this wake; parked for a durable retry, never a second process`,
+  };
+}
+
+/**
  * Inject a wake into a live psu-pty host, forking WARM (default) vs COLD
  * (su-cold-auto-mode-2026-07-03 Phase 2). Shared by BOTH executeWake psu-host inject
  * branches (the handle-less always-armed path + the main adv-session path) so the
@@ -2686,13 +2890,14 @@ export function quotaRecoveryPickupConfirmed(
  * flag / carry-note error falls back to warm, and a failed COLD inject retries warm in
  * place — the cold path never drops or corrupts a wake.
  *
- * Returns the delivered WakeOutcome on a clean inject, or null on a socket miss (the
- * caller then falls through to the normal channels, exactly as before).
+ * Returns the delivered WakeOutcome on a clean inject, a park when the live host
+ * acknowledged and deferred it (WI-10005134), or null on a socket miss (the caller
+ * then falls through to the normal channels, exactly as before).
  */
 async function injectPsuHostWake(
   d: DeliveryWork,
   host: PsuInjectHostView,
-  warmText: string,
+  warmText: EnrolledWakeText,
   injectPsuHost: typeof injectIntoHost,
   deps: ExecuteWakeDeps,
   capturedCarryNoteMeta: DeliveryCarryNoteMeta | null = null,
@@ -2745,11 +2950,12 @@ async function injectPsuHostWake(
       : null;
     if (confirming) {
       const result = await confirming(sock, injectMsg);
-      if (!result.ok) return null;
+      if (!result.ok) return parkOnHostDeferral(result.confirmation, result.reason);
       if (result.reason === 'accepted' || result.reason === 'pending-delivery-id') {
         return {
           kind: 'park',
           reason: `psu-host ${result.reason}: delivery accepted before turn-start proof; retry remains durable`,
+          hostCommitPending: true,
         };
       }
       if (result.reason === 'duplicate-delivery-id') {
@@ -3032,7 +3238,7 @@ async function injectPsuHostWake(
       lastTurnAtMs ?? undefined,
       agentToolCallsSinceNote,
     );
-    const coldText = tagWakeText(
+    const coldText = await tagWakeText(
       d,
       mixedSnapshotWarning ? `${mixedSnapshotWarning}\n\n${renderedColdWake}` : renderedColdWake,
       deps.tagTurn ?? tagTurnForInjection,
@@ -3089,6 +3295,7 @@ async function injectPsuHostWake(
         return {
           kind: 'park',
           reason: `psu-host ${confirmationReason}: delivery accepted before turn-start proof; retry remains durable`,
+          hostCommitPending: true,
         };
       }
       // A re-exec the host never confirmed is reported as such instead of as a clean success.
@@ -3103,6 +3310,10 @@ async function injectPsuHostWake(
             : 'psu-socket-reset';
       return { kind: 'delivered', channel };
     }
+    // WI-10005134: a live host that DEFERRED the cold inject is not a miss —
+    // re-injecting warm would only hit the same deferral.
+    const coldDeferral = parkOnHostDeferral(confirmation, confirmationReason);
+    if (coldDeferral) return coldDeferral;
     // Cold inject missed → warm in place rather than drop the wake. Deliberately
     // use the boolean injector here: the confirmation transport just failed, so
     // retrying that same seam would repeat the miss instead of exercising the
@@ -3123,7 +3334,7 @@ async function injectPsuHostWake(
  */
 async function injectPsuHostWakeWithReverify(
   d: DeliveryWork,
-  warmText: string,
+  warmText: EnrolledWakeText,
   findPsuHost: (ownerId: string) => PsuInjectHostView | null,
   injectPsuHost: typeof injectIntoHost,
   deps: ExecuteWakeDeps,
@@ -3358,6 +3569,100 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
       };
     }
 
+    // A wake may wait in the delivery queue after its emit-time admission. Re-read
+    // the authoritative mode before any continuation/injection/resume branch so a
+    // later manual pause moves the wake into the same owner-review queue as a
+    // send that arrived while already paused.
+    const wakeModeRead = await withBoundedTimeout(
+      () => (deps.resolveWakeModeFn ?? resolveWakeMode)(d.subscriberId),
+      {
+        fallback: 'auto' as const,
+        timeoutMs: deps.wakeModeDeliveryLookupTimeoutMs ?? WAKE_MODE_DELIVERY_LOOKUP_TIMEOUT_MS,
+        label: 'wake-executor:delivery-mode',
+      },
+    ).catch(() => ({ value: 'auto' as const }));
+    if (wakeModeRead.value === 'manual') {
+      const [
+        {
+          isLoopWakeSource,
+          isOwnerGuiWakeSource,
+          isDeliveryLadderWakeSource,
+          isEscalationSlaRerouteWakeSource,
+          MANUAL_WAKE_QUEUE_RELEASE_SOURCE_PREFIX,
+          inboxWakeKey,
+        },
+        { isOwnerVerifiedRelay, readRelayProvenance },
+      ] = await Promise.all([
+        import('../../agent-tools/coordination/inbox-wake'),
+        import('../../agent-tools/coordination/relay-provenance'),
+      ]);
+      const source = d.source ?? undefined;
+      const payloadRecord =
+        d.payload !== null && typeof d.payload === 'object' && !Array.isArray(d.payload)
+          ? (d.payload as Record<string, unknown>)
+          : null;
+      const recordOf = (value: unknown): Record<string, unknown> | null =>
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : null;
+      const ownerVerifiedRelayPayload = (payload: unknown): boolean =>
+        isOwnerVerifiedRelay(readRelayProvenance(recordOf(payload)));
+      // Relay authority is carried only on the addressed coord inbox-wake. The
+      // event pump wraps coalesced rows under `events[]`; require every component
+      // to be an owner-verified inbox relay so one approved message cannot
+      // authorize an unrelated sibling in the same coalesced turn. Ambiguous
+      // legacy/latest-only envelopes stay in the owner-review queue.
+      const ownerVerifiedInboxRelay =
+        d.eventKey === inboxWakeKey(d.subscriberId) &&
+        (payloadRecord?.coalesced === true
+          ? Array.isArray(payloadRecord.events) &&
+            payloadRecord.events.length > 0 &&
+            payloadRecord.events.every((value) => {
+              const component = recordOf(value);
+              return component?.event === d.eventKey && ownerVerifiedRelayPayload(component.payload);
+            })
+          : ownerVerifiedRelayPayload(payloadRecord));
+      const bypassManualGate =
+        isLoopWakeSource(source) ||
+        isOwnerGuiWakeSource(source) ||
+        isDeliveryLadderWakeSource(source) ||
+        isEscalationSlaRerouteWakeSource(source) ||
+        (source ?? '').startsWith(MANUAL_WAKE_QUEUE_RELEASE_SOURCE_PREFIX) ||
+        ownerVerifiedInboxRelay;
+      if (!bypassManualGate) {
+        await (deps.stageManualWakeFn ?? stagePendingWake)({
+          ownerId: d.subscriberId,
+          summary: d.summary ?? undefined,
+          payload: d.payload,
+          source: d.source ?? undefined,
+          workspaceId: d.workspaceId,
+        });
+        return {
+          kind: 'drop',
+          reason: 'effective wake mode is manual at delivery time; queued wake staged for owner review',
+        };
+      }
+    }
+
+    // EI-24119981583160918: an auto-armed blocked-item await can fire before
+    // its target settles, leaving a delivery queued after the one-shot itself
+    // is no longer cancellable. Revalidate the stamped lifecycle binding before
+    // any wake side effect so a terminal target does not spend a full turn.
+    const blockedBoundFreshness = await revalidateBlockedBoundDelivery(
+      d,
+      getCurrentWorkItem,
+      claimableLookupTimeoutMs,
+    );
+    d = blockedBoundFreshness.delivery;
+    if (blockedBoundFreshness.staleOnly) {
+      return {
+        kind: 'drop',
+        reason:
+          `blocked-item-holder wake is stale because bound work-item(s) ` +
+          `${blockedBoundFreshness.staleIds.join(', ')} are terminal`,
+      };
+    }
+
     // EI-22449230917085417: the lock-grant bridge fires once and queues a
     // durable delivery, but the owner can finish its edit and release the lock
     // before the pump reaches that row. Only a positive, successful ownership
@@ -3586,7 +3891,7 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
       const rehydratedText = await rehydrateForDelivery(d, wakeTurnText(d));
       const outcome = await injectPsuHostWakeWithReverify(
         d,
-        tagWakeText(d, applyInjectionDoor(d, rehydratedText), tagTurn),
+        await tagWakeText(d, applyInjectionDoor(d, rehydratedText), tagTurn),
         findPsuHost,
         injectPsuHost,
         deliveryDeps,
@@ -3607,7 +3912,7 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
       // wake reason as the prompt. Lazy import keeps the engine free of a
       // static plans-tool dependency.
       const resumePlanRun = deps.resumePlanRun ?? (await import('./plan-run-wake')).resumePlanRunForWake;
-      const planRunText = tagWakeText(
+      const planRunText = await tagWakeText(
         d,
         applyInjectionDoor(d, await rehydrateForDelivery(d, wakeTurnText(d))),
         tagTurn,
@@ -3661,7 +3966,9 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
     }
 
     // A live interactive transcript has no detached-child exit callback. Check
-    // the saved assistant-turn streak before injecting another wake.
+    // the saved assistant-turn streak before injecting another wake. A dead
+    // Claude session also needs the reconciled detector before Channel 2 resumes
+    // it, even when this local transcript scan could not find its file.
     //
     // WI-10003466 (su-7dc2cf9d, 2026-09-27): RECOVER FIRST. A transient MCP
     // disconnect makes the client drop its papercusp-su tools, and every later
@@ -3676,26 +3983,31 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
     // (this row names a dead predecessor's) and the wake proceeds; only
     // `unrecoverable` (no live carry-respawn-capable host) falls through to the
     // quarantine below.
-    let liveTranscriptHealthy = false;
-    if (isAlive && sessionAgent === 'claude' && claudeTranscriptAnalysis?.needsFreshContext && claudeResumeTranscriptPath) {
+    let reconciledTranscriptHealthy = false;
+    if (
+      sessionAgent === 'claude' &&
+      (!isAlive || Boolean(claudeTranscriptAnalysis?.needsFreshContext && claudeResumeTranscriptPath))
+    ) {
       const recovery = await recoverToolReferenceDeath(sessionOwner, {
         workspaceId: fresh?.workspaceId ?? sessionDelivery.workspaceId,
       }).catch((): ToolReferenceDeathRecovery => 'unrecoverable');
       if (recovery === 'queued' || recovery === 'in-grace') {
+        const rejectionStreak = claudeTranscriptAnalysis?.trailingMissingToolReferenceTurns;
+        const rejectionDetail = rejectionStreak != null
+          ? `${rejectionStreak} consecutive rejected turns: ${claudeTranscriptAnalysis?.lastMissingToolReferenceName ?? 'unknown tool'}`
+          : 'confirmed by the reconciled transcript detector';
         return {
           kind: 'park',
           reason:
-            `live Claude session replays an unavailable tool reference ` +
-            `(${claudeTranscriptAnalysis.trailingMissingToolReferenceTurns} consecutive rejected turns: ` +
-            `${claudeTranscriptAnalysis.lastMissingToolReferenceName ?? 'unknown tool'}); ` +
+            `Claude session replays an unavailable tool reference (${rejectionDetail}); ` +
             `carry-respawn onto fresh context ${recovery === 'queued' ? 'queued' : 'already pending'} — ` +
             `this wake re-delivers to the successor`,
         };
       }
-      liveTranscriptHealthy = recovery === 'not-dead';
+      reconciledTranscriptHealthy = recovery === 'not-dead';
     }
     if (
-      !liveTranscriptHealthy &&
+      !reconciledTranscriptHealthy &&
       isAlive && sessionAgent === 'claude' && claudeTranscriptAnalysis?.poisoned && claudeResumeTranscriptPath
     ) {
       const poisonContext: ResumeTurnContext = {
@@ -3724,7 +4036,7 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
       }
     }
 
-    const text = tagWakeText(
+    const text = await tagWakeText(
       sessionDelivery,
       applyInjectionDoor(
         sessionDelivery,
@@ -3838,19 +4150,43 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
       };
     }
 
+    // WI-10005134: every channel below STARTS A NEW PROCESS for this session
+    // (cold successor, hive fresh wake, fresh-context fork, backend re-home,
+    // resume-headless). The recorded pid above can be stale while the session
+    // is still alive: a psu host carry-respawns its CLI child under a new pid.
+    // A live, identity-verified psu host is the authoritative "this session is
+    // running" signal, so if the host ladder above did not take the wake, park.
+    // A parked delivery is retried; a second process on one session is not
+    // recoverable (measured 2026-10-01: three wakes for su-9dfd3ffc went
+    // resume-headless while its host was live and deferring them).
+    if (findPsuHost(d.subscriberId)) {
+      return {
+        kind: 'park',
+        reason:
+          'live psu host owns this session but did not take the wake inject; parked instead of starting a second process (WI-10005134)',
+      };
+    }
+
     // A cold wake cannot safely use Channel 2: `resume-headless` restores the
     // predecessor transcript, defeating the fresh-context contract. The host
     // ladder has already had its bounded attempts above; park until a host is
     // available rather than silently reopening the old context. This is only
     // active for an eligible explicit-cold wake; warm/disabled/unanchored wakes
     // preserve the normal resume fallback below.
-    if (await coldWakeRequiresPsuHost(sessionDelivery, deliveryDeps)) {
+    const coldWakeNeedsHost = await coldWakeRequiresPsuHost(sessionDelivery, deliveryDeps);
+    // EI-24797049094820185: a detached Claude turn has no managed host to
+    // carry-respawn. After its process exits, replaying the rejected transcript
+    // just produces the same API 400. Reuse the identity-preserving successor
+    // path below, even for warm/event wakes, without changing its carry policy.
+    const rejectedTranscriptNeedsSuccessor = sessionAgent === 'claude' &&
+      !reconciledTranscriptHealthy && Boolean(claudeTranscriptAnalysis?.needsFreshContext);
+    if (coldWakeNeedsHost || rejectedTranscriptNeedsSuccessor) {
       // The former P-013 inbox fallback discarded the cold marker. Its second
       // delivery therefore resumed the old Codex UUID and kept the critical
       // context. Use the existing identity-preserving successor launch instead.
       const launchSuccessor = deps.launchColdFreshSuccessor ?? (async (input: {
         subscriberId: string; workspaceId: string; harness: string | null;
-        wakeText: string; deliveryId: number;
+        wakeText: string; deliveryId: number; carry?: 'cold';
       }) => {
         const { default: launchTool } = await import('../../agent-tools/capability/launch-agent');
         const result = await launchTool.handler({
@@ -3858,7 +4194,7 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
           brief: input.wakeText,
           harness: input.harness ?? undefined,
           headless: true,
-          carry: 'cold',
+          carry: input.carry,
           idempotencyKey: `cold-wake:${input.deliveryId}`,
         } as never, {
           workspaceId: input.workspaceId,
@@ -3870,15 +4206,22 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
       });
       const successorStarted = await launchSuccessor({
         subscriberId: d.subscriberId,
-        workspaceId: d.workspaceId,
+        workspaceId: fresh?.workspaceId ?? sessionDelivery.workspaceId,
         harness: fresh?.harnessSlug ?? readLoopDeliveryMarker(d.payload)?.harness ?? null,
         wakeText: text,
         deliveryId: d.id,
+        ...(coldWakeNeedsHost ? { carry: 'cold' as const } : {}),
       }).catch((error) => {
         console.warn(`[wake-executor] cold fresh successor failed for ${d.subscriberId}: ${String(error)}`);
         return false;
       });
       if (successorStarted) return { kind: 'delivered', channel: 'cold-fresh-successor' };
+      if (rejectedTranscriptNeedsSuccessor && !coldWakeNeedsHost) {
+        return {
+          kind: 'park',
+          reason: 'Claude transcript repeatedly references an unavailable tool; fresh successor failed — parked without replaying the rejected transcript',
+        };
+      }
       // No inbox-wake watcher (or the fan failed): nothing else can carry this fire,
       // so the limbo guard below still streaks it toward pause + escalation.
       // EI-21431587306904888: for an ENDED session no injectable host ever
@@ -4073,6 +4416,7 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
           advSessionId: handle.advSessionId,
           owner: fresh?.coordOwnerId ?? d.subscriberId,
           codexHome: home,
+          headless: true,
           sessionRow: fresh,
         }).catch((err) => {
           console.warn(
@@ -4268,6 +4612,22 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
         } catch (e) {
           console.warn(`[wake-executor] claude rematerialize check failed: ${(e as Error)?.message ?? e}`);
         }
+        // EI-24890753013901545: the resumed headless process has its own tool surface, so
+        // a NATIVE deferred tool the earlier process loaded (ExitPlanMode,
+        // WaitForMcpServers…) can be absent and the provider 400s the first replayed
+        // request — the seed below restores only Papercusp MCP names. This process holds
+        // no live session (we are about to spawn the resume), so drop the native
+        // references from the transcript first; they only pre-load a schema.
+        try {
+          const dropped = neutralizeResumeNativeToolReferences(join(cfgDir, 'projects'), sid);
+          if (dropped.rewritten > 0) {
+            console.log(
+              `[wake-executor] dropped ${dropped.rewritten} native deferred tool reference(s) (${dropped.toolNames.join(', ')}) from claude/${sid} before resume`,
+            );
+          }
+        } catch (e) {
+          console.warn(`[wake-executor] native tool-reference neutralize failed: ${(e as Error)?.message ?? e}`);
+        }
         const analysis = await refreshClaudeResumeTranscript(owner, sid);
         const inheritedToolSeed = process.env.PAPERCUSP_TOOLS;
         if (analysis?.toolReferences.length && inheritedToolSeed?.trim()) {
@@ -4290,6 +4650,17 @@ export async function executeWake(d: DeliveryWork, deps: ExecuteWakeDeps = {}): 
     // per-session CODEX_HOME — point the resumed `codex exec resume` at it
     // (turn-lifecycle-control P-009).
     if (codexHome) env.CODEX_HOME = codexHome;
+
+    // WI-10005900: clamp the effort the resumed claude would inherit from the
+    // settings.json it will actually read. Read it with the CHILD's env (the
+    // isolated CLAUDE_CONFIG_DIR set above), never the operator's own.
+    if (resumeAgent === 'claude') {
+      const childEnv = { ...sanitizeInheritedWakeEnv(process.env), ...env };
+      resume.args = withClaudeResumeEffortClamp(
+        resume.args,
+        (deps.readClaudeLaunchSettings ?? readClaudeLaunchSettings)(childEnv),
+      );
+    }
 
     const spawnDetached = deps.spawnDetached ?? defaultSpawnDetached;
 

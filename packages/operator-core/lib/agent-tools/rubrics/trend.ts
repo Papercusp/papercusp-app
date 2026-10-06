@@ -19,7 +19,7 @@ export default defineTool({
   name: 'rubrics:trend',
   profile: 'engineer',
   description:
-    'Qualitative health TREND for a rubric — aggregates the Overwatch scorecard rating time-series per criterion: direction (improving | worsening | stable | unknown), rating distribution, first/latest ("placement-health: degraded, worsening over 5 ratings"). Chronological series returned as compact RLE runs only when includeSeries=true. Also a `staleness` signal (P-011): criteria persistently rated "unknown" (unassessable — the model may have drifted; re-ratify via the rubric↔scout loop). Unknowns with `idle:`-prefixed evidence (the stage did not run) are excluded from staleness. Reads scorecards (P-013) — no new data.',
+    'Rubric health trend: per-criterion direction, distribution and first/latest ratings. includeSeries adds chronological RLE runs. staleness detects persistently unassessable criteria, excluding idle unknowns. observationAge separately judges retained observation ends against observationMaxAgeSec: fresh, stale, mixed or unknown, with timestamp coverage. Omitted horizon or incomplete/invalid/future timestamps means unknown. Filing freshness is separate.',
   guidance: {
     when: 'You want to see how a rubric\'s criteria have trended OVER TIME — is a characteristic improving or worsening? which criteria are degrading across recent wakes? Or whether the rubric ITSELF is STALE (its model drifted — `staleness.stale`). The qualitative health-over-time view, vs a single point-in-time scorecard.',
     notWhen:
@@ -37,7 +37,7 @@ export default defineTool({
   agentRoles: [...COORD_ROLES],
   args: z
     .object({
-      rubricRef: z.string().optional().describe('the rubric to trend, e.g. "pot-coordination-health" (a trend is per-rubric)'),
+      rubricRef: z.string().min(1).describe('the rubric to trend, e.g. "pot-coordination-health" (a trend is per-rubric)'),
       sourceHive: z.string().optional().describe('restrict the trend to one source-hive'),
       since: z
         .string()
@@ -50,6 +50,12 @@ export default defineTool({
         .max(500)
         .optional()
         .describe('max scorecards to aggregate (newest-first read; default 500)'),
+      observationMaxAgeSec: z
+        .number()
+        .finite()
+        .positive()
+        .optional()
+        .describe('explicit observation-age horizon in seconds for the retained cohort; omitted means unknown, independent of filing time and rubric staleness'),
       includeSeries: z
         .boolean()
         .optional()
@@ -62,17 +68,15 @@ export default defineTool({
         .describe(
           'also return the resolved full rubric definition (default false — most trend consumers need only aggregates)',
         ),
-    })
-    .refine((a) => Boolean(a.rubricRef), {
-      message: 'pass `rubricRef` (required)',
     }),
   async handler(args, ctx) {
     resolveAgentIdentity(ctx);
     const trend = await scorecardTrend({
-      rubricRef: args.rubricRef!,
+      rubricRef: args.rubricRef,
       sourceHive: args.sourceHive,
       since: args.since,
       limit: args.limit,
+      observationMaxAgeSec: args.observationMaxAgeSec,
       includeSeries: args.includeSeries,
       includeDefinition: args.includeDefinition,
     });

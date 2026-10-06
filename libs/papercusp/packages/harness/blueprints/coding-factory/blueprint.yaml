@@ -140,7 +140,7 @@ gym:
   signals: [regressionsFromTests, plantedBugCaught]
   rubric:
     version: v1
-    model: gpt-5.6-sol:xhigh
+    model: gpt-6.1-sol:xhigh
     weights: { d1: 0.5, d2: 0.25, d3: 0.25 }
 
 knobs:

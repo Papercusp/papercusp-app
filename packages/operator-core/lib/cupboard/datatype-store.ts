@@ -25,9 +25,12 @@ import { join } from 'node:path';
 import { papercuspPath } from '../papercusp-root';
 import { isCompilableSchema } from '../datatype-payload-validation';
 import {
+  checkNatureSpec,
   isDatatypeTier,
   slugifyDatatype,
+  type DatatypeNature,
   type DatatypeTier,
+  type WorkAudience,
 } from '../datatype-registry-store';
 import {
   enumerateSelfDescribingDirs,
@@ -54,6 +57,10 @@ export interface DatatypePackageManifest {
   description: string;
   version: string;
   tier: DatatypeTier;
+  /** P-008: work | record | document | event. Absent only on packages that predate natures. */
+  nature?: DatatypeNature;
+  /** nature work only: agent | human. */
+  audience?: WorkAudience;
   /** generic-kind: the `work_items:create` kind this datatype registers. */
   workItemKind?: string;
   payloadSchema?: Record<string, unknown>;
@@ -76,6 +83,9 @@ export interface InstalledDatatype {
   description: string;
   version: string;
   tier: DatatypeTier;
+  /** null = the package predates natures; the installer applies the D-013 legacy rule. */
+  nature: DatatypeNature | null;
+  audience: WorkAudience | null;
   workItemKind: string | null;
   payloadSchema: Record<string, unknown> | null;
   display: Record<string, unknown> | null;
@@ -207,6 +217,20 @@ export function readDatatypeDir(
   const tier = stringValue(manifest.tier, 40);
   if (!tier || !isDatatypeTier(tier)) return null;
 
+  // P-008: a declared nature must be a valid nature + audience pair. An absent nature is a
+  // pre-nature package (the installer applies the legacy rule); an audience with no nature
+  // is malformed.
+  let nature: DatatypeNature | null = null;
+  let audience: WorkAudience | null = null;
+  if (manifest.nature !== undefined) {
+    const natureCheck = checkNatureSpec(manifest.nature, manifest.audience ?? null);
+    if (!natureCheck.ok) return null;
+    nature = natureCheck.value.nature;
+    audience = natureCheck.value.audience;
+  } else if (manifest.audience !== undefined) {
+    return null;
+  }
+
   const workItemKind = manifest.workItemKind === undefined ? null : stringValue(manifest.workItemKind, 80);
   if (manifest.workItemKind !== undefined && (!workItemKind || !WORK_ITEM_KIND_RE.test(workItemKind))) return null;
 
@@ -254,6 +278,8 @@ export function readDatatypeDir(
     description,
     version,
     tier,
+    nature,
+    audience,
     workItemKind,
     payloadSchema,
     display,
@@ -304,6 +330,8 @@ export interface DatatypeExportSource {
   title?: string | null;
   description?: string | null;
   tier: string;
+  nature?: string | null;
+  audience?: string | null;
   workItemKind?: string | null;
   payloadSchema?: Record<string, unknown> | null;
   display?: Record<string, unknown> | null;
@@ -353,6 +381,13 @@ export function writeDatatypePackageDir(
       `a ${tier} datatype must carry its self-improvement surface (P-010) to be published`,
     );
   }
+  // P-008: the nature travels with the package so an install never has to guess it.
+  let natureSpec: { nature: DatatypeNature; audience: WorkAudience | null } | null = null;
+  if (input.nature != null) {
+    const natureCheck = checkNatureSpec(input.nature, input.audience ?? null);
+    if (!natureCheck.ok) throw new Error(`invalid datatype nature: ${natureCheck.message}`);
+    natureSpec = natureCheck.value;
+  }
 
   const root = opts.targetDir ?? papercuspPath('datatypes', 'exports');
   const dir = join(root, ref);
@@ -364,6 +399,8 @@ export function writeDatatypePackageDir(
     description,
     version,
     tier,
+    ...(natureSpec ? { nature: natureSpec.nature } : {}),
+    ...(natureSpec?.audience ? { audience: natureSpec.audience } : {}),
     ...(input.workItemKind ? { workItemKind: input.workItemKind } : {}),
     ...(input.payloadSchema ? { payloadSchema: input.payloadSchema } : {}),
     ...(input.display ? { display: input.display } : {}),

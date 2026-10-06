@@ -1259,9 +1259,8 @@ async function probeCodeDrift(
     };
   }
   try {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const run = promisify(execFile);
+    // Every git/find below goes through the spawner sidecar (WI-10005118), never a local fork.
+    const run = defaultCodeDriftExec;
     // Boot time via the SHARED systemd probe (agent-tools/dev/systemd-service-probe)
     // rather than a second inline systemctl+ps: it already handles the unit-type
     // suffix correctly (EI-18700974567040702) and distinguishes "MainPID 0 = not
@@ -1550,7 +1549,30 @@ export async function probeEmbedSidecar(
         note: 'embed sidecar not enabled on this host (PAPERCUSP_EMBED_SIDECAR/…_URL unset) — nothing to probe',
       };
     }
-    url = (explicitUrl ?? spawnMod.embedSidecarLocalUrl()).replace(/\/$/, '');
+    const resolved = explicitUrl ?? spawnMod.embedSidecarLocalUrl();
+    if (!explicitUrl && spawnMod.embedSidecarIdleByDesign()) {
+      return {
+        name,
+        up: true,
+        status: null,
+        latencyMs: Date.now() - start,
+        present: false,
+        note: 'embed sidecar is exiting idle (announced) — the next embed re-launches it; nothing to probe',
+      };
+    }
+    if (!resolved) {
+      // P-530: this Server spawns its sidecar on demand and none is running
+      // now (not started yet, or it exited idle). Not an outage.
+      return {
+        name,
+        up: true,
+        status: null,
+        latencyMs: Date.now() - start,
+        present: false,
+        note: 'embed sidecar is spawned on demand by this Server and is not running now — nothing to probe',
+      };
+    }
+    url = resolved.replace(/\/$/, '');
   } catch {
     return { name, up: true, status: null, latencyMs: Date.now() - start, present: false, note: 'embed-sidecar liveness unknown (spawn-module read failed)' };
   }
@@ -1560,12 +1582,32 @@ export async function probeEmbedSidecar(
     : exercise
       ? EMBED_SIDECAR_EXERCISE_PROBE_TIMEOUT_MS
       : EMBED_SIDECAR_FUNCTIONAL_PROBE_TIMEOUT_MS;
+  // P-532b: a per-tenant sidecar exits after 5 idle minutes. Its idle clock must not count
+  // this probe, and a sidecar that exits idle WHILE this probe runs is "not running", not DOWN.
+  const { EMBED_SIDECAR_PROBE_HEADER } = await import('./memory/embed-sidecar-server');
+  const exitedIdleMeanwhile = async (): Promise<ProbeResult | null> => {
+    if (process.env.PAPERCUSP_EMBED_SIDECAR_URL) return null;
+    try {
+      const spawnMod = await import('./memory/embed-sidecar-spawn');
+      if (!spawnMod.embedSidecarIdleByDesign()) return null;
+    } catch {
+      return null;
+    }
+    return {
+      name,
+      up: true,
+      status: null,
+      latencyMs: Date.now() - start,
+      present: false,
+      note: 'embed sidecar exited idle while this probe ran — the next embed re-launches it; not an outage',
+    };
+  };
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), budgetMs);
   try {
     const response = await fetch(embedUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', [EMBED_SIDECAR_PROBE_HEADER]: '1' },
       body: JSON.stringify({
         model: 'gemma',
         kind: 'query',
@@ -1580,6 +1622,8 @@ export async function probeEmbedSidecar(
       signal: ctl.signal,
     });
     if (!response.ok) {
+      const idle = await exitedIdleMeanwhile();
+      if (idle) return idle;
       return {
         name,
         up: false,
@@ -1685,6 +1729,8 @@ export async function probeEmbedSidecar(
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
+    const idle = await exitedIdleMeanwhile();
+    if (idle) return idle;
     return {
       name,
       up: false,
@@ -1804,11 +1850,49 @@ export async function resolveOwnServiceUnit(): Promise<string | null> {
   }
 }
 
-async function defaultJournalCanaryExec(args: string[], timeoutMs: number): Promise<{ stdout: string }> {
-  const { execFile } = await import('node:child_process');
-  const { promisify } = await import('node:util');
-  const run = promisify(execFile);
-  return run('journalctl', args, { timeout: timeoutMs, maxBuffer: 64 * 1024 });
+/** Per-site kill-switch for the code-drift probes' sidecar route (`0` = force a local spawn). */
+export const CODE_DRIFT_SIDECAR_VAR = 'PAPERCUSP_CODE_DRIFT_SPAWN_SIDECAR';
+
+/**
+ * The production exec for the code-drift probes (`git rev-parse`, `git diff --name-only`,
+ * `find -printf`): forked by the spawner sidecar where this host has one. WI-10005118: a 30 s
+ * main-thread CPU profile of a 3.5 GB bg-host put probeCodeDrift at 47% of the main thread's
+ * spawn self time, because a local fork copies the parent's page tables (cost grows with RSS).
+ * Same contract as promisify(execFile): resolves on exit 0, rejects with `.code`/`.stdout` otherwise.
+ */
+export async function defaultCodeDriftExec(
+  file: string,
+  args: string[],
+  options: { cwd?: string; timeout: number; maxBuffer?: number },
+): Promise<{ stdout: string }> {
+  const { execFileViaSidecar } = await import('./fleet/git-via-sidecar');
+  const { stdout } = await execFileViaSidecar(file, args, {
+    timeoutMs: options.timeout,
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+    ...(options.maxBuffer !== undefined ? { maxBuffer: options.maxBuffer } : {}),
+    subsystem: 'code-drift-probe',
+    sidecarVar: CODE_DRIFT_SIDECAR_VAR,
+  });
+  return { stdout };
+}
+
+/** Per-site kill-switch for the journal canary's sidecar route (`0` = force a local spawn). */
+export const JOURNAL_CANARY_SIDECAR_VAR = 'PAPERCUSP_JOURNAL_CANARY_SPAWN_SIDECAR';
+
+/**
+ * The production canary read: `journalctl` forked by the spawner sidecar where this host
+ * has one (WI-10004975 — this per-tick read was ~10% of a 13 GB bg-host's spawn samples;
+ * a local fork costs time proportional to the parent's RSS). Exported for its routing test.
+ */
+export async function defaultJournalCanaryExec(args: string[], timeoutMs: number): Promise<{ stdout: string }> {
+  const { execFileViaSidecar } = await import('./fleet/git-via-sidecar');
+  const { stdout } = await execFileViaSidecar('journalctl', args, {
+    timeoutMs,
+    maxBuffer: 64 * 1024,
+    subsystem: 'journal-canary',
+    sidecarVar: JOURNAL_CANARY_SIDECAR_VAR,
+  });
+  return { stdout };
 }
 
 /** Render epoch milliseconds in journalctl's unambiguous `@epoch` grammar — never a
@@ -2023,6 +2107,26 @@ export interface SupervisionEntry {
    * `service-health-unit-coverage.test.ts` asserts this.
    */
   exitEncodesRunOnly?: boolean;
+  /**
+   * EI-24811958626062774: hold this report-only entry's DOWN broadcast until the unit has been
+   * continuously down for this many ms, and stay silent about a recovery that lands first.
+   *
+   * Report-only entries otherwise announce the first failed tick. That is right for a unit
+   * that fails rarely and wrong for one that fails in short self-clearing streaks. Measured on
+   * `papercup-staging-sync` over 3 days: 30 failure streaks, 14 of them a single failed run. A
+   * first-tick alarm there emits about 20 down/recovered broadcasts a day, almost all noise,
+   * and a channel that cries wolf is the one nobody reads when the 5-hour streak arrives.
+   *
+   * The clock counts the WHOLE episode, including runs in flight that did not recover it
+   * (`decideReconcile` holds state across them), so it measures how long the subject has
+   * actually been stuck. It is in-memory like the rest of the flap state: a bg-host restart
+   * restarts the clock, which delays one alarm and never invents one.
+   *
+   * INVARIANT: `notifyAfterDownMs ⇒ !autoRestart`. A restart-capable entry already pages on
+   * its own ladder (failed restart, give-up), and delaying that would hide a dead service.
+   * `service-health-unit-coverage.test.ts` asserts this.
+   */
+  notifyAfterDownMs?: number;
 }
 
 /**
@@ -2114,6 +2218,21 @@ export const SUPERVISED_PROCESSES: SupervisionEntry[] = [
   // which is `static` and has no `[Install]` section — does NOT persist and WILL be undone).
   // `enable --now` to resume.
   { name: 'live-federation-gate-timer', layer: 'systemd-user', unit: 'papercup-live-federation-gate.timer', criticality: 'important', autoRestart: true },
+  // EI-24811958626062774: the job that moves :3170 forward. `Type=oneshot`, `RemainAfterExit=no`,
+  // fired ~every 5min by papercup-staging-sync.timer, so it is EPISODIC: idle `inactive` is
+  // healthy and only `failed` is down. When it fails, :3170 keeps serving its last build while
+  // staging moves on, and every agent verifying "current staging" there is reading stale code.
+  // Nothing watched it: on 2026-10-01 it exited FATAL on every tick from 20:16Z for 5+ hours
+  // (WorkingDirectory vs the `.current` alias) and was found only because one live verification
+  // needed :3170.
+  //
+  // `autoRestart: false`: re-running a failed sync just repeats the same FATAL; the failure is in
+  // the tree or the layout, which a restart cannot fix. `notifyAfterDownMs: 30min`: measured
+  // over 3 days, 30 failure streaks; at 30 min the alarm fires on the 31-69 min streaks and the
+  // 5-hour one, and stays quiet on the 14 single-run blips. The timer itself is not a separate
+  // entry: a stopped timer is a different failure (it stops running at all) and has not been
+  // observed here.
+  { name: 'staging-sync', layer: 'systemd-user', unit: 'papercup-staging-sync', criticality: 'important', autoRestart: false, episodic: true, notifyAfterDownMs: 30 * 60_000 },
   // WI-6149 (D-010 item 4): the oddsmith sidecar — persistent, probed on :46229
   // (see HEALTH_ENDPOINTS). `autoRestart: false` follows the `bg-host` precedent
   // directly above: the unit is already `Restart=always` at the systemd level, so
@@ -2312,6 +2431,15 @@ export function diffHealth(
 export const DESKTOP_DOWN_CONFIRM_TICKS = 2;
 
 /**
+ * The operator probe resolves through `operatorApiBase()` to the current
+ * packaged listener. A single refused preflight can coincide with its brief
+ * restart/startup window, so use the same two-tick confirmation as the
+ * explicitly probed staging listener. A sustained outage still confirms on
+ * the next 60s health tick.
+ */
+export const OPERATOR_DOWN_CONFIRM_TICKS = 2;
+
+/**
  * WI-6146: damping is LOAD-BEARING for `staging-api`, not a nicety — without
  * it, adding the :3170 probe would have manufactured ~50 false DOWN
  * broadcasts/day.
@@ -2423,6 +2551,7 @@ export const JOURNAL_CANARY_DOWN_CONFIRM_TICKS = 2;
 
 export const DOWN_CONFIRM_TICKS: Readonly<Record<string, number>> = {
   [PORTLESS_PROBE_NAMES.desktop]: DESKTOP_DOWN_CONFIRM_TICKS,
+  operator: OPERATOR_DOWN_CONFIRM_TICKS,
   'staging-api': STAGING_API_DOWN_CONFIRM_TICKS,
   [PORTLESS_PROBE_NAMES.bgHostTicker]: BG_HOST_TICKER_DOWN_CONFIRM_TICKS,
   'oddsmith-sidecar': ODDSMITH_SIDECAR_DOWN_CONFIRM_TICKS,

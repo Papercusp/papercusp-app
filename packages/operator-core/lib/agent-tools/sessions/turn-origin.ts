@@ -131,6 +131,77 @@ export function classifyHitTurnOrigin(
   speaker: string | null | undefined,
   head: string | null | undefined,
   tail?: string | null,
+  stored?: StoredTurnVerdict | null,
+): HitTurnOrigin {
+  return applyStoredTurnVerdict(classifyFromText(speaker, head, tail), stored);
+}
+
+/** The verdict ingest PERSISTED on the row (`session_turns.turn_origin_verdict` /
+ *  `turn_origin`, migration 794). Both are NULL on a row ingested before 794. */
+export interface StoredTurnVerdict {
+  verdict: string | null | undefined;
+  origin?: string | null;
+}
+
+/** Ingest's honest-uncertainty verdict for a clean user row on a file-backed CLI
+ *  source with no hook-authenticated prompt-origin match. PINNED to
+ *  session-ingest.ts's `UNENROLLED_ORIGIN_VERDICT` by turn-origin.test.ts (imported
+ *  there, not here, so this module stays free of the ingest graph). */
+export const STORED_UNENROLLED_ORIGIN = 'unenrolled-origin';
+
+const UNENROLLED_WHY =
+  'ingest stored this file-backed CLI turn as unenrolled-origin: it carried no origin ' +
+  'envelope and no hook-authenticated prompt-origin stamp matched it, so authorship was ' +
+  'never proven either way. It is an owner CANDIDATE, not owner speech';
+
+/**
+ * WI-10004510: honour the verdict ingest STORED, as a DOWNGRADE ONLY.
+ *
+ * The text classifier's `owner-typed` is a RESIDUAL ("no machine rule matched"), not a
+ * positive identification. Ingest knows more than the text: it correlates the hook's
+ * prompt-origin ledger, and on a file-backed source it refuses to keep an uncorrelated
+ * residual as `owner-typed`, storing `unenrolled-origin` instead (`stampTurnProvenance`).
+ * Re-deriving from text alone discarded that — measured 2026-10-01, 947 user turns cited
+ * by activation audits (221 plans) were stored `unenrolled-origin` yet counted here as
+ * owner speech, i.e. this read manufactured owner authority (the WI-3532 class).
+ *
+ * Same contract as turn-ref.ts `classifyRecordedUserTurn`: the stored verdict can take a
+ * text `owner-typed` to a non-owner verdict and can NEVER grant owner — a non-owner text
+ * verdict (an envelope, a machine surface) always stands, because the catalogue that
+ * produced a stored verdict may be older than the text classifier's. A NULL stored
+ * verdict means "never classified" (pre-794), not `unknown`, so the text verdict stands.
+ */
+export function applyStoredTurnVerdict(
+  fromText: HitTurnOrigin,
+  stored?: StoredTurnVerdict | null,
+): HitTurnOrigin {
+  if (fromText.verdict !== 'owner-typed') return fromText;
+  const verdict = stored?.verdict;
+  if (verdict == null || verdict === '') return fromText;
+  switch (verdict) {
+    case 'owner-typed':
+    case 'owner-turn':
+    case 'owner-dialog':
+      return fromText;
+    case 'agent-injected': {
+      const origin = stored?.origin ?? null;
+      return { verdict: 'agent-injected', origin, note: agentInjectedNote(origin) };
+    }
+    case 'machine-surface':
+    case 'synthetic':
+      return { verdict, origin: null, note: MACHINE_SURFACE_NOTE };
+    case STORED_UNENROLLED_ORIGIN:
+      return unknownTurnOrigin(UNENROLLED_WHY);
+    default:
+      // Any verdict added to ingest later: never the owner (property 2 — and never "agent").
+      return unknownTurnOrigin(`ingest stored the non-owner verdict '${verdict}'`);
+  }
+}
+
+function classifyFromText(
+  speaker: string | null | undefined,
+  head: string | null | undefined,
+  tail?: string | null,
 ): HitTurnOrigin {
   if (typeof head !== 'string' || !head.trim()) {
     return unknownTurnOrigin('the turn text could not be read from the corpus');
@@ -185,11 +256,14 @@ export async function resolveHitTurnOrigins(
       speaker: string | null;
       head: string | null;
       tail: string | null;
+      turn_origin?: string | null;
+      turn_origin_verdict?: string | null;
     }>
   >`
     SELECT source_kind, session_id, turn_idx, speaker,
            left(text, ${TURN_ORIGIN_HEAD_CHARS}) AS head,
-           right(text, ${TURN_ORIGIN_TAIL_CHARS}) AS tail
+           right(text, ${TURN_ORIGIN_TAIL_CHARS}) AS tail,
+           turn_origin, turn_origin_verdict
       FROM harness_shared.session_turns
      WHERE (workspace_id = ${workspaceId} OR workspace_id = 'default')
        AND (source_kind, session_id, turn_idx) IN (
@@ -200,7 +274,7 @@ export async function resolveHitTurnOrigins(
   for (const r of rows) {
     out.set(
       turnOriginKey({ sourceKind: r.source_kind, sessionId: r.session_id, turnIdx: r.turn_idx }),
-      classifyHitTurnOrigin(r.speaker, r.head, r.tail),
+      classifyHitTurnOrigin(r.speaker, r.head, r.tail, { verdict: r.turn_origin_verdict, origin: r.turn_origin }),
     );
   }
   return out;

@@ -29,7 +29,7 @@
  * test can pin both sides of it.
  */
 import { getOrgPg } from '@papercusp/db-org';
-import type { SessionIndependentCloseReason } from './gate-store';
+import type { GateKind, SessionIndependentCloseReason } from './gate-store';
 
 /**
  * What we affirmatively know about the asking session.
@@ -61,6 +61,12 @@ export interface GateReapInput {
   defaultIfUnanswered: unknown;
   askerLiveness: AskerLiveness;
   unknownGoneAfterMs?: number;
+  /**
+   * The gate's kind (WI-10005039). Optional + defaulting to a session-bound ask so every
+   * pre-existing caller keeps its exact behaviour. `suppressed_ask` changes the contract: the
+   * asking session is EXPECTED to be gone, so the asker-gone rules do not apply to it.
+   */
+  kind?: GateKind;
 }
 
 export type GateReapDecision =
@@ -74,7 +80,13 @@ export type GateReapDecision =
  * and is reported by whichever of those actually decided. A skip counter that
  * could never increment would be misleading telemetry.
  */
-export type GateReapSkipReason = 'already-closed' | 'asker-live' | 'asker-unknown-within-grace';
+export type GateReapSkipReason =
+  | 'already-closed'
+  | 'asker-live'
+  | 'asker-unknown-within-grace'
+  /** A `suppressed_ask` before its deadline: the decision is the OWNER's, not the session's, so
+   *  the declaring session ending is not evidence the question was resolved (WI-10005039). */
+  | 'suppressed-awaiting-owner';
 
 /**
  * Decide whether one gate may be closed without the asking session.
@@ -103,6 +115,12 @@ export function decideGateReap(input: GateReapInput): GateReapDecision {
     // for the deadline would leave exactly the rows this work-item exists to
     // retire sitting open. Fall through.
   }
+
+  // A suppressed ask outlives its declaring session BY DESIGN: the agent that registered it
+  // is typically the one that stopped asking, and ended shortly after. Applying the asker-gone
+  // rules here would close it the moment that session ends — recreating the invisibility this
+  // kind exists to remove. Only the owner's answer (hook_cleared) or its own deadline closes it.
+  if (input.kind === 'suppressed_ask') return { close: false, why: 'suppressed-awaiting-owner' };
 
   if (input.askerLiveness === 'live') return { close: false, why: 'asker-live' };
   if (input.askerLiveness === 'ended') return { close: true, reason: 'asker_gone', disposition: null };
@@ -140,6 +158,7 @@ interface OpenGateLivenessRow {
   opened_at: Date;
   decide_by: Date | null;
   default_if_unanswered: unknown;
+  kind: GateKind;
   asker_liveness: AskerLiveness;
 }
 
@@ -169,6 +188,7 @@ export async function sweepSessionIndependentGates(opts?: {
            g.opened_at           AS opened_at,
            g.decide_by           AS decide_by,
            g.default_if_unanswered AS default_if_unanswered,
+           g.kind                AS kind,
            CASE
              WHEN p.owner_id IS NOT NULL
               AND p.last_active_at > now() - (${presenceWindowMs}::bigint * interval '1 millisecond')
@@ -199,6 +219,7 @@ export async function sweepSessionIndependentGates(opts?: {
       'already-closed': 0,
       'asker-live': 0,
       'asker-unknown-within-grace': 0,
+      'suppressed-awaiting-owner': 0,
     },
     truncatedByLimit,
   };
@@ -212,6 +233,7 @@ export async function sweepSessionIndependentGates(opts?: {
       defaultIfUnanswered: row.default_if_unanswered,
       askerLiveness: row.asker_liveness,
       unknownGoneAfterMs: opts?.unknownGoneAfterMs,
+      kind: row.kind,
     });
 
     if (!decision.close) {

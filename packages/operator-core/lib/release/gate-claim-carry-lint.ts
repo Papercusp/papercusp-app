@@ -19,6 +19,7 @@
  */
 import { readFrozenRepairMarker, type FrozenRepairEditMarker } from './frozen-repair-edit-marker';
 import { looksLikeGateRedFixClaim } from './gate-red-completion-claim';
+import type { GateVerdictTarget } from './gate-verdict-target';
 
 export interface GateClaimCarryLint {
   flagged: true;
@@ -46,11 +47,11 @@ export const GATE_CLAIM_CARRY_NOTE =
  */
 export function gateClaimCarryLint(
   text: string | null | undefined,
-  probe: { marker?: FrozenRepairEditMarker | null } = {},
+  probe: { marker?: FrozenRepairEditMarker | null; target?: GateVerdictTarget | null } = {},
 ): GateClaimCarryLint | undefined {
   try {
     if (!text || !text.trim()) return undefined;
-    const marker = 'marker' in probe ? probe.marker : readFrozenRepairMarker();
+    const marker = 'marker' in probe ? probe.marker : readFrozenRepairMarker(probe.target);
     if (!marker) return undefined;
 
     // Line-scoped so the writer is pointed at the sentence, not handed a whole-note verdict.

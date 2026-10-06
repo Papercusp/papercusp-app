@@ -29,7 +29,7 @@ when you want drafting or digesting.
 `trigger` is delivered by the binding that fired:
 
 - `trigger.event` — which event fired: `upload`, `comment`, `reply`.
-- `trigger.payload` — the canonical `social-post` document the YouTube adapter
+- the event payload — not embedded in the plan inputs; fetch it with `triggers:read-payload { planRunId: payload.plan_run.runId }` and read its `payload` field, the canonical `social-post` document the YouTube adapter
   normalized. `id` and `text` are always present; `author`, `url`,
   `replyToId` and `occurredAt` are present when YouTube supplies them.
 - `trigger.dedupeKey` — stable across identical passes, so a redelivery of the
@@ -37,7 +37,7 @@ when you want drafting or digesting.
 
 ## Steps
 
-1. Read `trigger.payload`. Use ONLY fields that are actually present on it —
+1. Call `triggers:read-payload { planRunId: payload.plan_run.runId }` and read its `payload`. Use ONLY fields that are actually present on it —
    an absent field means YouTube did not supply one, not that you should go
    looking for it elsewhere.
 2. Summarize the event in your completion, in one or two lines: the platform,

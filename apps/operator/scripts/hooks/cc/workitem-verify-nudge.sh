@@ -55,6 +55,15 @@ FLAG_KEY="papercusp-workitem-verify-nudge"
 if [ -z "${PAPERCUSP_SID:-}" ] || [ ! -s "$TOKEN_PATH" ]; then
   exit 0
 fi
+
+# WI-10004945: a claude/codex NESTED inside another agent inherited that su's
+# PAPERCUSP_SID. Its edits would mark the SU's session as having edited code, and its
+# Stop would post the nudge as a coord note from the su about an objective that is not
+# its own. Cached per CLI process (pc_nested_cli.sh), since PostToolUse fires on every
+# edit; any failure leaves the condition false and the hook runs as before.
+if . "$(dirname "$0")/pc_nested_cli.sh" 2>/dev/null && pc_nested_cli_cached; then
+  exit 0
+fi
 AGENT="${PAPERCUSP_AGENT:-}"
 # Drain stdin (the hook event JSON) so the pipe closes cleanly.
 INPUT="$(cat 2>/dev/null || true)"
@@ -68,7 +77,7 @@ urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHa
 
 operator_url, token_path, sid, cache_dir, workspace_root, flag_key, agent, hook_dir = sys.argv[1:9]
 sys.path.insert(0, hook_dir)
-from mcp_response import read_hook_payload, read_token_file  # noqa: E402
+from mcp_response import read_hook_payload, read_token_file, with_native_session  # noqa: E402
 raw = read_hook_payload()
 token = read_token_file(token_path)
 HTTP_TIMEOUT = 3
@@ -96,6 +105,10 @@ except Exception:
     sys.exit(0)
 if not isinstance(ev, dict):
     sys.exit(0)
+
+hook_native_session_id = ev.get('session_id') or ev.get('sessionId')
+if not isinstance(hook_native_session_id, str) or not hook_native_session_id.strip():
+    hook_native_session_id = os.environ.get('PAPERCUSP_NATIVE_SESSION_ID') or ''
 
 name = (ev.get('hook_event_name') or ev.get('hookEventName') or '').strip()
 
@@ -178,11 +191,15 @@ if not os.path.exists(edited_marker):
     sys.exit(0)              # no workspace edits this session — nothing to verify.
 
 
-def call_tool(tool, args):
+def call_tool(tool, args, native_session_id=None):
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
                        'params': {'name': tool, 'arguments': args}}).encode()
+    url = operator_url.rstrip('/') + '/api/mcp?superuser=1&origin=hook&client=' + urllib.parse.quote(sid, safe='')
+    context_session_id = native_session_id or args.get('session_id') or hook_native_session_id
+    if context_session_id:
+        url = with_native_session(url, context_session_id)
     req = urllib.request.Request(
-        operator_url.rstrip('/') + '/api/mcp?superuser=1&origin=hook&client=' + urllib.parse.quote(sid, safe=''),
+        url,
         data=body,
         headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json',
                  'Accept': 'application/json, text/event-stream'},
@@ -333,7 +350,7 @@ if not glance_fixture:
         cwd = ev.get('cwd')
         if isinstance(cwd, str) and cwd:
             a['cwd'] = cwd
-        call_tool('activity:report', a)
+        call_tool('activity:report', a, native_session_id=hook_native_session_id)
     except Exception:
         pass
 

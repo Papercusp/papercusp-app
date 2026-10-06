@@ -34,6 +34,66 @@ import { openAcceptanceBarAmendmentReview } from '../../consult/acceptance-bar-a
 const REVIEW_NOT_REQUESTED_NEXT =
   "Post preview.approval once as a work_items:comment, then repeat this dry run with reviewPreviewPost:'thread-post:<that post id>'. The relevance router picks and screens the outside-lineage reviewer; do not pick or message one yourself.";
 
+const NO_LIVE_DISCHARGE_MAPPING_CODE = 'acceptance_bar_amendment_no_live_discharge_mapping';
+const NO_LIVE_DISCHARGE_MAPPING_NEXT =
+  "Add the changed BAR to the subject plan's `## Requirements` section and add a matching row to `## Design` → `### Bar-to-work map for this plan`, mapping it to at least one non-dropped `P-NNN` item. Then retry. The amendment guard exempts a BAR being removed from the discharge-map check.";
+
+const ACCEPTANCE_BAR_APPROVAL_REQUIRED_CODE = 'acceptance_bar_approval_required';
+const ACCEPTANCE_BAR_APPROVAL_REQUIRED_NEXT =
+  "Run rubrics:amend with dryRun:true, post preview.approval as a work_items:comment, repeat the dry run with reviewPreviewPost:'thread-post:<preview-id>', follow review.next, and apply only with approvalRef:'thread-post:<reviewer-answer-id>'.";
+
+const REVIEWER_MODEL_NOT_ALLOWED_CODE = 'reviewer_model_not_allowed';
+const REVIEWER_MODEL_NOT_ALLOWED_NEXT =
+  'Choose an agent/model pair present in the workspace expert model allowlist, or update that allowlist before retrying. rubrics:amend never substitutes an unavailable reviewer.';
+
+function noLiveDischargeMappingRefusal(error: unknown): {
+  ok: false;
+  code: string;
+  error: string;
+  next: string;
+} | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.startsWith(`${NO_LIVE_DISCHARGE_MAPPING_CODE}:`)) return null;
+  return {
+    ok: false,
+    code: NO_LIVE_DISCHARGE_MAPPING_CODE,
+    error: message,
+    next: NO_LIVE_DISCHARGE_MAPPING_NEXT,
+  };
+}
+
+function acceptanceBarApprovalRequiredRefusal(error: unknown): {
+  ok: false;
+  code: string;
+  error: string;
+  next: string;
+} | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.startsWith(`${ACCEPTANCE_BAR_APPROVAL_REQUIRED_CODE}:`)) return null;
+  return {
+    ok: false,
+    code: ACCEPTANCE_BAR_APPROVAL_REQUIRED_CODE,
+    error: message,
+    next: ACCEPTANCE_BAR_APPROVAL_REQUIRED_NEXT,
+  };
+}
+
+function reviewerModelNotAllowedRefusal(error: unknown): {
+  ok: false;
+  code: string;
+  error: string;
+  next: string;
+} | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.startsWith(`${REVIEWER_MODEL_NOT_ALLOWED_CODE}:`)) return null;
+  return {
+    ok: false,
+    code: REVIEWER_MODEL_NOT_ALLOWED_CODE,
+    error: message,
+    next: REVIEWER_MODEL_NOT_ALLOWED_NEXT,
+  };
+}
+
 /** The amendment fields exactly as requested, so a routed reviewer can reproduce the preview. */
 function amendmentPatch(args: z.infer<typeof rubricsAmendArgs>): Record<string, unknown> {
   const fields = ['requirement', 'criteria', 'criterion', 'criterionClass', 'criterionEvidencePlane', 'methodRef', 'classRef', 'composes'] as const;
@@ -56,7 +116,7 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       .boolean()
       .optional()
       .describe(
-        'Preview a BAR meaning amendment without writing; returns exact approval JSON. If approvalRequired, post preview.approval once as a work_items:comment and repeat the dry run with reviewPreviewPost to open the routed review (guidance.chaining).',
+        'Preview without writing. For BAR approval, post preview.approval as a work_items:comment, then repeat with reviewPreviewPost (see chaining).',
       ),
     reviewPreviewPost: z
       .string()
@@ -64,14 +124,14 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       .regex(/^thread-post:[1-9][0-9]*$/)
       .optional()
       .describe(
-        "dryRun only: thread-post:<id> of your post carrying this preview's approval JSON. When approval is required, the relevance router opens a lineage-screened review for it; returns review { state, conversationId, screenedOut, next }.",
+        "dryRun only: thread-post:<id> containing this preview's approval JSON; opens the routed review when required and returns its state/next.",
       ),
     reviewerModel: z.object({
       agent: z.enum(['claude', 'codex', 'omp']),
       model: z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/),
       effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
     }).strict().optional().describe(
-      'dryRun reviewPreviewPost only: require this allowed backend/model and optional reasoning effort for routed and fresh reviewers; an unavailable model refuses instead of changing the requested choice.',
+      'Routed-review backend/model and optional effort; required with reviewPreviewPost. The pair must match a workspace expert-model allowlist entry. Unavailable choices return a structured refusal and are never substituted.',
     ),
     criteria: z
       .array(amendmentCriterionSchema)
@@ -79,7 +139,7 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       .max(200)
       .optional()
       .describe(
-        'acceptance-kind only: replace the COMPLETE criterion set through the atomic BAR amendment transaction. Use this when adding a BAR or binding structured checks across the set; read rubrics:get first and resubmit every stored criterion. Alias contract: prefer structured intent/acceptance/verification sections and omit legacy top-level aliases; when both forms are supplied, corresponding values (`bar`/`model`↔`acceptance.condition`, `driftMarkers`↔`acceptance.falsifier`, and verification fields) must match after canonical normalization or validation fails with `requirement_alias_conflict`',
+        'acceptance-kind only: atomically replace the full set; read rubrics:get and resubmit all stored criteria. Prefer structured acceptance/verification; legacy aliases must match or fail requirement_alias_conflict.',
       ),
     criterionEvidencePlane: z
       .object({ key: z.string().min(1), evidencePlane: z.enum(['tree', 'deployed', 'live']) })
@@ -107,7 +167,7 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       })
       .optional()
       .describe(
-        "set one criterion's grading class (P-008). UPGRADE-ONLY here: tagging 'violatable' tightens grading, so it keeps status + ratifier; downgrading a stored 'violatable' is refused — use rubrics:propose with classDowngradeReason",
+        "Set one grading class (P-008); upgrade-only. Marking 'violatable' tightens grading and preserves status/ratifier; downgrades require rubrics:propose with classDowngradeReason.",
       ),
     methodRef: z
       .string()
@@ -121,7 +181,7 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       .max(120)
       .optional()
       .describe(
-        'acceptance-kind only: bind a missing class to an existing standard rubric while preserving every BAR and criterion; an existing class may be repeated but not replaced',
+        'Bind a missing class to an existing standard rubric while preserving BARs/criteria; an existing class may repeat but cannot change.',
       ),
     composes: z
       .array(z.string().trim().min(1))
@@ -129,7 +189,7 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       .max(16)
       .optional()
       .describe(
-        'replace the unpinned composition refs with existing standard-kind rubric ids; omit to preserve the current list (revision pins are intentionally not supported)',
+        'Replace unpinned refs with existing standard rubric IDs; omit to preserve. Revision pins are unsupported.',
       ),
     allowMethodShrink: z
       .boolean()
@@ -168,7 +228,7 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       .max(240)
       .optional()
       .describe(
-        'thread-post:<id> containing the preview approval JSON, authored by an authenticated outside-lineage reviewer. This authorizes a patch but is not itself a patch; include at least one amendment field.',
+        'thread-post:<id> of an authenticated outside-lineage reviewer with preview approval JSON. It authorizes a patch, not its fields; include an amendment field.',
       ),
     approvedBy: z
       .string()
@@ -176,7 +236,7 @@ export const rubricsAmendArgs = refineEvenWithShapeIssues(
       .max(200)
       .optional()
       .describe(
-        'optional assertion of the reviewer identity; must match the approval post author. On dryRun:true it also returns approverEligibility for that identity, a diagnostic: the routed review screens every candidate itself. approvedBy equal to the caller yields { selfScreen:true, eligible:null }, which is no verdict. relatedVia:"caller" is curable with an unrelated applier (WI-10002357).',
+        'Optional reviewer identity assertion; must match the approval post author. dryRun eligibility is diagnostic; routed review screens candidates. approvedBy=caller yields selfScreen:true/eligible:null (no verdict); relatedVia=caller needs an unrelated applier (WI-10002357).',
       ),
     approvedAt: z
       .string()
@@ -239,15 +299,15 @@ export default defineTool({
   name: 'rubrics:amend',
   profile: 'engineer',
   description:
-    'Patch one rubric criterion/requirement, complete acceptance criteria, evidence plane, or rubric refs. An approvalRef authorizes a patch but never substitutes for one; include at least one amendment field. Use rubrics:propose for standard rubric criteria, key, or rating changes. A started BAR meaning change needs outside-lineage approval first (guidance.chaining has the steps). Subject Decision, BAR/spec revisions, and rebind commit atomically; old proof/grades remain history and the existing shrink guard applies.',
+    'Patch a rubric criterion/requirement, acceptance criteria, evidence plane, or refs; include an amendment field (approvalRef alone is not a patch). Use rubrics:propose for standard criterion/key/rating changes. Started BAR meaning changes require outside-lineage approval (see chaining). The subject Decision, BAR/spec revisions, and rebind commit atomically; prior proof and grades remain history; the shrink guard applies.',
   guidance: {
     returns:
-      "{ ok, rubric, completeness, replicationSqlCheck, methodLint, idempotencyKey }. methodLint is a non-blocking advisory for acceptance methods that prescribe native shell commands (judges cannot run shell; MCP tools such as testing:run stay valid). An amend or dry-run preview still running after ~40s returns { ok:true, pending:true, receipt } instead of timing out: the work continues server-side; poll rubrics:amend-status { rubricRef, idempotencyKey } and do not re-issue while it reads running. A dry run with reviewPreviewPost adds review { state, conversationId, previewPostRef, screenedOut, next }. The resolver loads the immutable preview in the same workspace and checks every changed BAR hash against the current delta; authorship/time come from the reviewer post.",
+      "{ ok, rubric, completeness, replicationSqlCheck, methodLint, idempotencyKey }. methodLint is a non-blocking advisory for acceptance methods that prescribe native shell commands (judges cannot run shell; MCP tools such as testing:run stay valid). Missing live BAR mapping (`acceptance_bar_amendment_no_live_discharge_mapping`), required outside-lineage approval (`acceptance_bar_approval_required`), and unavailable reviewer models (`reviewer_model_not_allowed`) return { ok:false, code, error, next } as domain refusals and make no write. An amend or dry-run preview still running after ~40s returns { ok:true, pending:true, receipt } instead of timing out: the work continues server-side; poll rubrics:amend-status { rubricRef, idempotencyKey } and do not re-issue while it reads running. A dry run with reviewPreviewPost adds review { state, conversationId, previewPostRef, screenedOut, next }. The resolver loads the immutable preview in the same workspace and checks every changed BAR hash against the current delta; authorship/time come from the reviewer post.",
     when: 'A targeted acceptance-BAR change, evidence-plane binding, or rubric-ref update.',
     notWhen:
       'For standard rubric criteria, key, or rating changes use rubrics:propose. Complete `criteria` is acceptance-only and must preserve stored keys unless removal is explicitly allowed.',
     chaining:
-      "rubrics:get → rubrics:amend. Started BAR: amend { dryRun:true } → if approvalRequired, post preview.approval once as a work_items:comment → re-run dryRun with reviewPreviewPost:'thread-post:<that post id>'; the relevance router picks an outside-lineage reviewer → follow review.next → reviewer answers `approve thread-post:<preview-post-id>` → apply with amend { approvalRef:'thread-post:<answer post id>' }. Posts are immutable and resolved by workspace/id, which avoids hash transcription; server checks preview vs applied delta. A payload needs payloadTier (unreadable in some views); a post is visible on every surface. Never pick or message a reviewer yourself. Do not create a counter-sign work-item for approval.",
+      "Started BAR: read the subject plan's `## Requirements`/`## Design`; map each changed BAR to a non-dropped P-NNN item in `### Bar-to-work map for this plan` (removals exempt). Preview with `dryRun:true`; post `preview.approval` as a `work_items:comment`; retry with `reviewPreviewPost:'thread-post:<preview-id>'` and follow `review.next`. After `approve thread-post:<preview-post-id>`, apply with `approvalRef:'thread-post:<answer-id>'`. The relevance router chooses the outside-lineage reviewer; never pick or message a reviewer yourself; do not create a counter-sign work-item. Posts are immutable workspace/id refs (no hash transcription) and visible on every surface; a payload needs payloadTier, unreadable in some views. Full contract: /internal/docs/agent-insights/unified-requirement-contract.",
     seeAlso: [
       'rubrics:propose (whole-document revision)',
       'rubrics:get (read before amending)',
@@ -265,6 +325,9 @@ export default defineTool({
     .object({
       ok: z.boolean(),
       error: z.string().optional(),
+      code: z.string().optional(),
+      next: z.string().optional(),
+      dryRun: z.boolean().optional(),
       rubric: z.record(z.string(), z.unknown()).optional(),
       completeness: z.record(z.string(), z.unknown()).optional(),
       replicationSqlCheck: z.unknown().optional(),
@@ -324,7 +387,14 @@ export default defineTool({
     if (args.dryRun) {
       const receiptKey = 'preview-' + randomUUID();
       const run = trackAmendRun(receiptKey, args.rubricRef, async (): Promise<Record<string, unknown>> => {
-        const preview = await previewAcceptanceBarAmendment(input);
+        let preview: Awaited<ReturnType<typeof previewAcceptanceBarAmendment>>;
+        try {
+          preview = await previewAcceptanceBarAmendment(input);
+        } catch (error) {
+          const refusal = noLiveDischargeMappingRefusal(error);
+          if (refusal) return { ...refusal, dryRun: true };
+          throw error;
+        }
         if (preview === null) {
           return {
             ok: false,
@@ -345,19 +415,26 @@ export default defineTool({
         if (!identity.workspaceId) {
           throw new Error('acceptance_bar_amendment_review_unscoped: a routed review needs a concrete workspace identity');
         }
-        const review = await openAcceptanceBarAmendmentReview({
-          rubricRef: args.rubricRef,
-          previewPostRef: args.reviewPreviewPost,
-          preview,
-          ...(args.reason ? { reason: args.reason } : {}),
-          patch: amendmentPatch(args),
-          identity,
-          workspaceId: identity.workspaceId,
-          // WI-10003299: a fresh-reviewer launch reuses this call's context,
-          // re-attributed to the review's system principal.
-          launchCtx: ctx,
-          ...(args.reviewerModel ? { reviewerModel: args.reviewerModel } : {}),
-        });
+        let review: Awaited<ReturnType<typeof openAcceptanceBarAmendmentReview>>;
+        try {
+          review = await openAcceptanceBarAmendmentReview({
+            rubricRef: args.rubricRef,
+            previewPostRef: args.reviewPreviewPost,
+            preview,
+            ...(args.reason ? { reason: args.reason } : {}),
+            patch: amendmentPatch(args),
+            identity,
+            workspaceId: identity.workspaceId,
+            // WI-10003299: a fresh-reviewer launch reuses this call's context,
+            // re-attributed to the review's system principal.
+            launchCtx: ctx,
+            ...(args.reviewerModel ? { reviewerModel: args.reviewerModel } : {}),
+          });
+        } catch (error) {
+          const refusal = reviewerModelNotAllowedRefusal(error);
+          if (refusal) return { ...refusal, dryRun: true };
+          throw error;
+        }
         return { ok: true, dryRun: true, preview, review };
       });
       const settled = await settleWithin(run, amendForegroundBudgetMs());
@@ -447,7 +524,14 @@ async function settleWithin<T>(run: Promise<T>, budgetMs: number): Promise<Settl
 
 /** The synchronous amend: apply, then build the response payload. */
 async function executeAmend(input: AmendRubricInput, rubricRef: string): Promise<Record<string, unknown>> {
-  const rubric = await amendRubric(input);
+  let rubric: Awaited<ReturnType<typeof amendRubric>>;
+  try {
+    rubric = await amendRubric(input);
+  } catch (error) {
+    const refusal = noLiveDischargeMappingRefusal(error) ?? acceptanceBarApprovalRequiredRefusal(error);
+    if (refusal) return refusal;
+    throw error;
+  }
   if (!rubric) return { ok: false, error: `no rubric '${rubricRef}' — rubrics:list to see refs` };
   const completeness = rubricCompleteness(rubric);
   // EI-10514: schema-validate embedded replication-drill SQL against live PG (non-blocking).

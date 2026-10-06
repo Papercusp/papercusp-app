@@ -51,16 +51,27 @@ export const LOCK_CONTENTION_BACKOFFS_MS = [500, 1500, 4000] as const;
  */
 export async function acquireWithContentionRetry<T>(
   run: () => Promise<T>,
-  opts: { backoffsMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
+  opts: {
+    backoffsMs?: readonly number[];
+    sleep?: (ms: number) => Promise<void>;
+    /**
+     * Narrows which errors are retried (default `isWorkspaceContended`). A caller
+     * that deliberately sets a long statement_timeout must NOT retry 57014: that
+     * would multiply an already-slow statement. WI-10004951 passes a 55P03-only
+     * predicate for exactly that reason.
+     */
+    isRetryable?: (e: unknown) => boolean;
+  } = {},
 ): Promise<T> {
   const backoffs = opts.backoffsMs ?? LOCK_CONTENTION_BACKOFFS_MS;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const isRetryable = opts.isRetryable ?? isWorkspaceContended;
   let lastErr: unknown;
   for (let attempt = 0; ; attempt++) {
     try {
       return await run();
     } catch (e) {
-      if (!isWorkspaceContended(e)) throw e;
+      if (!isRetryable(e)) throw e;
       lastErr = e;
       if (attempt >= backoffs.length) throw lastErr;
       await sleep(backoffs[attempt]);

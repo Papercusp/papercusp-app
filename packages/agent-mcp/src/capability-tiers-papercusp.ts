@@ -15,8 +15,8 @@
  * at install time, not silently land at low.
  */
 
-import { setCapabilityTierResolver } from '@papercusp/tooldef';
-import type { CapabilityTier } from '@papercusp/tooldef';
+import { setCapabilityTierResolver, setLateCompletionReadClassifier } from '@papercusp/tooldef';
+import type { CapabilityTier, LateCompletionToolFacts } from '@papercusp/tooldef';
 
 /**
  * Exact-match table. Wildcards (`secrets:read:*`) are matched by prefix
@@ -197,3 +197,27 @@ export function papercuspTierFor(capability: string): CapabilityTier {
 // Register on import (load-time side effect). Imported at the top of index.ts
 // before bootstrap so the resolver is active before any tool self-registers.
 setCapabilityTierResolver(papercuspTierFor);
+
+/**
+ * Late-completion READ policy (WI-10004577). A handler that finishes AFTER its deadline has its
+ * result discarded and reported as `timeout` — unless the tool is a read that is safe to surface
+ * late. `tierFor` cannot express that for ~160 tools: the table above has no row for `intel:read`,
+ * `operator:read`, `search:read`, `memory:read`, … so they fall to 'medium' (and tier also drives
+ * auth exposure + the watchdog timeout, so re-tiering them is the wrong lever).
+ *
+ * The rule is the intersection of two AUTHORED signals — never `effect` alone, which is a DEFAULT
+ * inference (everything not write-suffixed infers 'read'):
+ *   1. every declared capability is a `*:read` capability (the author put it on the read side), AND
+ *   2. `effect === 'read'` (a mutator that shares a `*:read` capability opts out by declaring
+ *      `effect: 'write'` on its own def — the convention documented at WRITE_CAPABILITIES).
+ * The registry guard `late-completion-read-policy.test.ts` (operator-core) enumerates every tool
+ * this admits and fails on a mutating-verb name that has not been consciously reviewed.
+ */
+export function papercuspLateCompletionRead(tool: LateCompletionToolFacts): boolean {
+  return (
+    tool.effect === 'read' &&
+    tool.capabilities.length > 0 &&
+    tool.capabilities.every((c) => c.endsWith(':read'))
+  );
+}
+setLateCompletionReadClassifier(papercuspLateCompletionRead);

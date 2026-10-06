@@ -45,6 +45,44 @@ export function operatorBase(env = process.env) {
   return (env.PAPERCUSP_OPERATOR_URL || 'http://localhost:3070').replace(/\/+$/, '');
 }
 
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/**
+ * The operators to try, in order: the pin, then — for a LOOPBACK pin only — the
+ * local MCP proxy (PAPERCUSP_MCP_PROXY_PORT, default 9071), which forwards to the
+ * :3070 operator and bridges its restarts.
+ *
+ * WI-10005007: a session launched from a staging console inherits
+ * PAPERCUSP_OPERATOR_URL=http://localhost:3170 and keeps it across every
+ * carry-respawn. Staging restarts many times a day, and while it is down this
+ * hook got nothing back, so the turn carried no CTRL, orientation or memory. Worse,
+ * turn-start ACK-ON-PROOF (delivery-ledger.mjs) can only acknowledge a delivery the
+ * hook actually printed, so a session whose turns keep landing in staging's down
+ * windows sees its in-place identity activation sit at 'prepared' for hours. The
+ * provenance hook already falls back this way (EI-24091823697677465,
+ * userpromptsubmit-provenance.sh `_mcp_candidate_bases`); this is the same rule for
+ * the injection transport, so the two cannot disagree about where a turn goes.
+ *
+ * A non-loopback pin names a different operator: writing to the local one instead
+ * would be wrong, so it gets no fallback.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string[]}
+ */
+export function operatorBases(env = process.env) {
+  const pinned = operatorBase(env);
+  let url;
+  try {
+    url = new URL(pinned);
+  } catch {
+    return [pinned];
+  }
+  if (!LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) return [pinned];
+  const raw = String(env.PAPERCUSP_MCP_PROXY_PORT ?? '').trim();
+  const proxyPort = /^\d+$/.test(raw) && Number(raw) > 0 && Number(raw) <= 65535 ? String(Number(raw)) : '9071';
+  const pinnedPort = url.port || (url.protocol === 'https:' ? '443' : '80');
+  return pinnedPort === proxyPort ? [pinned] : [pinned, `http://127.0.0.1:${proxyPort}`];
+}
+
 /**
  * The session id IS the gate: no PAPERCUSP_SID means this is not a psu session,
  * so there is no session to inject into and nothing to look up (invariant 3).
@@ -154,12 +192,29 @@ export async function postInjection(port, body, opts = {}) {
   const timer = setTimeout(() => controller.abort(), spec.timeoutMs);
   try {
     if (typeof fetchImpl !== 'function') return null;
-    const res = await fetchImpl(operatorBase(env) + spec.endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    // wallMs: this hook's own wall, so the operator spends only what is left of
+    // it (the Jev memory filter's wait, WI-10004485). Derived from the spec, never
+    // a second copy of the number on the server.
+    const payloadBody = JSON.stringify({ ...body, wallMs: spec.timeoutMs });
+    let res = null;
+    // WI-10005007: the next base is tried ONLY when the previous one could not be
+    // reached at all (the fetch rejected before the wall fired — refused, reset,
+    // unreachable). A wall abort means the time is spent, and an HTTP answer means
+    // an operator DID handle the request; re-sending either would just double-run
+    // the turn-start acknowledgement on a second host. One wall bounds the chain.
+    for (const base of operatorBases(env)) {
+      try {
+        res = await fetchImpl(base + spec.endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payloadBody,
+          signal: controller.signal,
+        });
+        break;
+      } catch (err) {
+        if (controller.signal.aborted) throw err;
+      }
+    }
     if (!res || !res.ok) return null;
     const payload = await res.json();
     if (!payload || typeof payload !== 'object') return null;

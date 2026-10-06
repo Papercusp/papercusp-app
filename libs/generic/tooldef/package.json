@@ -26,6 +26,11 @@
       "types": "./src/state-delta.ts",
       "import": "./src/state-delta.ts",
       "default": "./src/state-delta.ts"
+    },
+    "./parse-check": {
+      "types": "./src/code-orchestration/parse-check.ts",
+      "import": "./src/code-orchestration/parse-check.ts",
+      "default": "./src/code-orchestration/parse-check.ts"
     }
   },
   "dependencies": {

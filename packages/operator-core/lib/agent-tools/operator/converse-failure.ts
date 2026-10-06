@@ -16,30 +16,73 @@
  *
  * The leading `operator brain produced no output (agent backend failure` is kept
  * verbatim so anything grepping logs for the old text still matches.
+ *
+ * WI-10004897: the message names EVERY backend the turn tried, in order. A papercup turn
+ * that hit a usage cap and failed over used to report only the failover's error (a 401
+ * from an expired codex copy), so the real cause, the cap, never reached the user. A
+ * failover that was skipped because the alternate's login is known dead is named too,
+ * with the reason.
  */
 export const BRAIN_NO_OUTPUT_PREFIX = 'operator brain produced no output (agent backend failure';
 
 const MAX_BACKEND_ERROR_CHARS = 240;
 
-export function brainNoOutputMessage(input: {
+/** One attempt that produced nothing: the backend and model that ran, and its own error text. */
+export interface BrainAttemptOutcome {
   engine: string | null | undefined;
   model: string | null | undefined;
-  lastBackendError: string | null | undefined;
-}): string {
-  const engine = input.engine?.trim() || 'unknown backend';
-  const model = input.model?.trim();
-  const ran = model ? `${engine}, model ${model}` : engine;
-  const firstLine = (input.lastBackendError ?? '')
+  error: string | null | undefined;
+}
+
+/** A failover the turn did NOT take because the alternate's credential cannot work. */
+export interface SkippedBrainFailover {
+  engine: string;
+  model: string;
+  credential: 'absent' | 'expired-no-refresh' | 'unreadable';
+}
+
+function firstErrorLine(error: string | null | undefined): string | null {
+  const line = (error ?? '')
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (firstLine) {
-    const clipped =
-      firstLine.length > MAX_BACKEND_ERROR_CHARS ? `${firstLine.slice(0, MAX_BACKEND_ERROR_CHARS - 1)}…` : firstLine;
-    return `${BRAIN_NO_OUTPUT_PREFIX}: ${ran}: ${clipped})`;
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) return null;
+  return line.length > MAX_BACKEND_ERROR_CHARS ? `${line.slice(0, MAX_BACKEND_ERROR_CHARS - 1)}…` : line;
+}
+
+function skippedCredentialText(skip: SkippedBrainFailover): string {
+  switch (skip.credential) {
+    case 'absent':
+      return `this host has no ${skip.engine} credential`;
+    case 'expired-no-refresh':
+      return `this host's ${skip.engine} login has expired and has no refresh token, so it cannot renew itself`;
+    case 'unreadable':
+      return `this host's ${skip.engine} credential file could not be parsed`;
   }
-  return (
-    `${BRAIN_NO_OUTPUT_PREFIX}: ${ran} returned an empty turn and reported no error; ` +
-    `check that this host has a working ${engine} credential)`
-  );
+}
+
+export function brainNoOutputMessage(input: {
+  attempts: readonly BrainAttemptOutcome[];
+  skippedFailover?: SkippedBrainFailover | null;
+}): string {
+  // Consecutive attempts on the same backend with the same error read as one entry.
+  const groups: Array<{ engine: string; model: string | undefined; line: string | null; count: number }> = [];
+  for (const attempt of input.attempts.length ? input.attempts : [{ engine: null, model: null, error: null }]) {
+    const engine = attempt.engine?.trim() || 'unknown backend';
+    const model = attempt.model?.trim() || undefined;
+    const line = firstErrorLine(attempt.error);
+    const last = groups[groups.length - 1];
+    if (last && last.engine === engine && last.model === model && last.line === line) last.count += 1;
+    else groups.push({ engine, model, line, count: 1 });
+  }
+  const parts = groups.map((g) => {
+    const ran = `${g.model ? `${g.engine}, model ${g.model}` : g.engine}${g.count > 1 ? ` (${g.count} attempts)` : ''}`;
+    return g.line
+      ? `${ran}: ${g.line}`
+      : `${ran} returned an empty turn and reported no error; check that this host has a working ${g.engine} credential`;
+  });
+  let text = parts.join('; then ');
+  const skip = input.skippedFailover;
+  if (skip) text += `; failover to ${skip.engine} (model ${skip.model}) skipped: ${skippedCredentialText(skip)}`;
+  return `${BRAIN_NO_OUTPUT_PREFIX}: ${text})`;
 }

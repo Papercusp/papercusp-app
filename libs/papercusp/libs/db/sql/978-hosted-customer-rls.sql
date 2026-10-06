@@ -49,6 +49,14 @@ BEGIN
     FROM pg_roles
    WHERE rolname = current_user;
 
+  -- WI-10006171: roles live in a cluster-global catalog even when each replay
+  -- has its own database. Database-local advisory locks cannot protect them.
+  -- Serialize catalog writers before checking/normalizing roles; the relation
+  -- lock also conflicts with ordinary ALTER ROLE in a different database.
+  IF is_super THEN
+    LOCK TABLE pg_catalog.pg_authid IN SHARE ROW EXCLUSIVE MODE;
+  END IF;
+
   FOREACH target_role IN ARRAY
     ARRAY['hosted_owner', 'hosted_app', 'hosted_service']
   LOOP

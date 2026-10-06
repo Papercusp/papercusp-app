@@ -89,6 +89,9 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   // Verified 2026-09-23: https://developers.openai.com/api/docs/models/gpt-6-astra
   // https://developers.openai.com/api/docs/models/gpt-6-sol and /gpt-6-luna.
   // Standard, global list prices. Subscription estimates are not invoices.
+  // Verified 2026-09-30: https://developers.openai.com/api/docs/models/gpt-6.1-sol
+  'gpt-6.1-sol': { in: 2.0, out: 10.0, cacheRead: 0.1, cacheWrite: 2.5,
+    longContext: { above: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 } },
   'gpt-6-astra': { in: 10.0, out: 50.0, cacheRead: 1.0, cacheWrite: 12.5,
     longContext: { above: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 } },
   'gpt-6-sol': { in: 2.0, out: 10.0, cacheRead: 0.2, cacheWrite: 2.5,
@@ -96,10 +99,67 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   'gpt-6-luna': { in: 0.1, out: 0.5, cacheRead: 0.01, cacheWrite: 0.125,
     longContext: { above: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 } },
   'gpt-5.5': { in: 2.5, out: 20.0, cacheRead: 0.25, cacheWrite: 2.5 },
+  // Verified 2026-10-01: https://developers.openai.com/api/docs/models/gpt-5.4
+  // (1.05M context; prompts >272K input tokens bill 2x input / 1.5x output).
+  // Missing entry made every Scout ideator call throw (WI-10004502).
+  'gpt-5.4': { in: 2.5, out: 15.0, cacheRead: 0.25, cacheWrite: 2.5,
+    longContext: { above: 272_000, inputMultiplier: 2, outputMultiplier: 1.5 } },
+  // Verified 2026-10-01: https://developers.openai.com/api/docs/models/gpt-5.4-mini
+  // (400K context, max input 272K, so no long-context tier). In the gateway's
+  // Codex lineup; found unpriced by configured-models-priced.test.ts (WI-10004506).
+  'gpt-5.4-mini': { in: 0.75, out: 4.5, cacheRead: 0.075, cacheWrite: 0.75 },
   // OpenAI-direct models used by LLM-testing hosts (e.g. Restart's Scout SUT).
   'gpt-4o-mini': { in: 0.15, out: 0.6 },
   'gpt-4o': { in: 2.5, out: 10.0 },
 };
+
+/**
+ * Revision of the RULES `costFromTokens` applies to a usage (tier selection, floors, refusals).
+ * Bump it whenever the same usage under the same table would price differently: a stored estimate
+ * is a function of table AND rules, so a rule change must make old stamps stale exactly like a
+ * price change does (agent-economy-flywheel-2026-08-30 D-020).
+ *   1: the original rules.
+ *   2: `unknownTier: 'floor'` — an unknown long-context or cache-write tier prices at its floor.
+ */
+export const PRICING_RULES_REVISION = 2;
+
+/**
+ * Content version of a price table under a rules revision: two 32-bit FNV-1a hashes (different
+ * offset bases) of its canonical JSON (keys sorted at every level) plus the revision, as 16 hex
+ * characters.
+ *
+ * Derived, never hand-maintained: ANY edit to a price changes it, so a stored estimate stamped
+ * with an older version is detectably stale (WI-10004517). Not a security hash; it only has to
+ * change when the table does. No BigInt and no node:crypto, so every consumer target compiles.
+ */
+export function priceTableVersion(
+  table: Readonly<Record<string, ModelPrice>> = MODEL_PRICES,
+  rulesRevision: number = PRICING_RULES_REVISION,
+): string {
+  const text = `${canonicalJson(table)}\u0000rules:${rulesRevision}`;
+  const fnv1a = (offsetBasis: number): string => {
+    let hash = offsetBasis >>> 0;
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, '0');
+  };
+  return fnv1a(0x811c9dc5) + fnv1a(0x050c5d1f);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const entries = Object.keys(value as Record<string, unknown>)
+    .filter((k) => (value as Record<string, unknown>)[k] !== undefined)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`);
+  return `{${entries.join(',')}}`;
+}
+
+/** The version of the live `MODEL_PRICES` table. Writers stamp it beside every estimate. */
+export const PRICE_TABLE_VERSION: string = priceTableVersion(MODEL_PRICES);
 
 /**
  * Normalize a model id for lookup: lowercase, strip a vendor prefix
@@ -155,17 +215,55 @@ export interface CostEstimate {
   usd: number;
   /** False for an unknown model or unreconciled write tier — persist NULL, not 0. */
   priced: boolean;
+  /**
+   * `'lower'` only under `unknownTier: 'floor'`, when a tier the usage cannot establish was
+   * priced at its cheapest rate: the true cost is at least `usd`. Persist the bound with the cost.
+   */
+  bound?: 'lower';
 }
 
+export interface CostOptions {
+  /**
+   * What to do when the usage cannot establish a price TIER: an aggregate with no request size
+   * for a model with a long-context tier, or cache writes with no TTL split.
+   * `'refuse'` (default) returns `priced: false`. `'floor'` prices the tier at its cheapest rate
+   * and returns `bound: 'lower'` — for usage ledgers, where a marked lower bound beats erasing
+   * cost that was measured (D-020). An unknown model, unreported cache writes and an inconsistent
+   * tier breakdown still refuse: none of them has a floor that is not a guess.
+   */
+  unknownTier?: 'refuse' | 'floor';
+}
+
+/**
+ * The options every usage-LEDGER writer prices with (one row per request or per aggregate, kept
+ * and re-derived later). One constant, so the writers and their re-pricer cannot drift apart.
+ */
+export const USAGE_LEDGER_PRICING: Readonly<CostOptions> = Object.freeze({ unknownTier: 'floor' });
+
 /** Estimate cost from token counts at list price. Provider-reported cost always wins over this. */
-export function costFromTokens(model: string, usage: TokenUsage): CostEstimate {
+export function costFromTokens(model: string, usage: TokenUsage, options: CostOptions = {}): CostEstimate {
+  const floor = options.unknownTier === 'floor';
+  let bounded = false;
   const p = priceFor(model);
   if (!p) return { usd: 0, priced: false };
   if (usage.cacheCreationUnreported) return { usd: 0, priced: false };
-  if (p.longContext && (usage.requestInputTokens === undefined || !Number.isFinite(usage.requestInputTokens) || usage.requestInputTokens < 0)) {
-    return { usd: 0, priced: false }; // an aggregate cannot establish the request's tier
+  let long: NonNullable<ModelPrice['longContext']> | null = null;
+  if (p.longContext) {
+    const size = usage.requestInputTokens;
+    if (size === undefined || !Number.isFinite(size) || size < 0) {
+      // An aggregate cannot establish the request's tier. Its floor takes the cheaper of the
+      // two rates per component (multipliers capped at 1), whatever mix of requests it holds.
+      if (!floor) return { usd: 0, priced: false };
+      bounded = true;
+      long = {
+        above: p.longContext.above,
+        inputMultiplier: Math.min(1, p.longContext.inputMultiplier),
+        outputMultiplier: Math.min(1, p.longContext.outputMultiplier),
+      };
+    } else if (size > p.longContext.above) {
+      long = p.longContext;
+    }
   }
-  const long = p.longContext && usage.requestInputTokens! > p.longContext.above ? p.longContext : null;
   const inputMultiplier = long?.inputMultiplier ?? 1;
   const outputMultiplier = long?.outputMultiplier ?? 1;
   const n = (v: number | undefined): number =>
@@ -188,13 +286,16 @@ export function costFromTokens(model: string, usage: TokenUsage): CostEstimate {
     // is a reconciliation check, not a second set of tokens to charge for.
     writeCost = fiveMinute * p.in * 1.25 + oneHour * p.in * 2;
   } else if (usage.cacheCreationTierUnknown && n(usage.cacheCreationTokens) > 0) {
-    return { usd: 0, priced: false };
+    if (!floor) return { usd: 0, priced: false };
+    // Every write at the 5-minute rate (1.25x input, against 2x for 1-hour) is the floor.
+    bounded = true;
+    writeCost = n(usage.cacheCreationTokens) * p.in * 1.25;
   }
   const usd =
     ((n(usage.inputTokens) * p.in + n(usage.cacheReadTokens) * cacheRead + writeCost) * inputMultiplier +
       n(usage.outputTokens) * p.out * outputMultiplier) /
     1_000_000;
-  return { usd, priced: true };
+  return bounded ? { usd, priced: true, bound: 'lower' } : { usd, priced: true };
 }
 
 /**

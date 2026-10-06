@@ -45,6 +45,30 @@ export async function resolveDocsRoot(projectPath: string): Promise<string> {
   return join(projectPath, 'docs');
 }
 
+/**
+ * Additional file-authoritative corpora share tracking, not publication.
+ * Namespaces keep the existing engineering/project root and doc IDs intact.
+ * Reject both lexical and symlink escapes before a corpus can be read/tracked.
+ */
+export async function resolveDocsSources(projectPath: string): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  try {
+    const config = JSON.parse(await fs.readFile(join(projectPath, '.papercusp/docs.json'), 'utf8'));
+    if (!config.sources || typeof config.sources !== 'object' || Array.isArray(config.sources)) return out;
+    const primary = await resolveDocsRoot(projectPath);
+    const realProject = await fs.realpath(projectPath);
+    for (const [namespace, rel] of Object.entries(config.sources)) {
+      if (!/^[a-z][a-z0-9-]*$/.test(namespace) || typeof rel !== 'string') continue;
+      const root = safeJoinUnderRoot(projectPath, rel);
+      if (!root || root === primary || existsSync(join(primary, namespace))) continue;
+      const real = await fs.realpath(root).catch(() => null);
+      if (!real || !real.startsWith(realProject + sep) || !(await fs.stat(real)).isDirectory()) continue;
+      out[namespace] = real;
+    }
+  } catch { /* absent/malformed source declarations do not change the primary corpus */ }
+  return out;
+}
+
 /** Recursively collect every .md/.mdx file under docsRoot, relative + sorted. */
 async function listDocs(docsRoot: string): Promise<string[]> {
   const out: string[] = [];

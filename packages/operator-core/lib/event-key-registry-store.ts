@@ -275,7 +275,7 @@ export type ClaimEventKeyResult =
  * overwrite semantics: re-curating a key is the local pot's authority, not a claim.
  */
 export async function claimEventKey(
-  sql: postgres.Sql,
+  sql: postgres.Sql | postgres.TransactionSql,
   input: RegisterEventKeyInput & { contributor: string },
 ): Promise<ClaimEventKeyResult> {
   if (!input.contributor?.trim()) throw new Error('claimEventKey requires a contributor');
@@ -286,7 +286,7 @@ export async function claimEventKey(
 }
 
 async function upsertEventKey(
-  sql: postgres.Sql,
+  sql: postgres.Sql | postgres.TransactionSql,
   input: RegisterEventKeyInput,
   sameContributorOnly: boolean,
 ): Promise<EventKeyDbRow[]> {

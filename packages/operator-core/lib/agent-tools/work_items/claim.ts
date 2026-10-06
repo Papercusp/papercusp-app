@@ -26,10 +26,13 @@ import {
   commentWorkItem,
   explainIssueClaimFloors,
   getWorkItem,
+  readNonAgentWorkCategory,
   readUnresolvedDepBlockers,
   type ClaimFloorAttribution,
   type UnresolvedDepBlocker,
 } from '../../work-items';
+import { notAgentWorkClaimHint } from '../../work-nature/not-agent-work-hint';
+import { verificationTaskConflict } from '../../harness/improvements/agent-review-policy';
 import { mintForceTakeoverAdmission } from '../../issues-engineer';
 import { lookupWorkItem } from './_lookup';
 import { runBulk, bulkContent, type BulkItemResult } from '../_bulk';
@@ -85,6 +88,7 @@ import {
   type PilotParticipantRole,
 } from '../../pilot-participant-receipts';
 import { canonicalizeAssigneeOwnerId, resolveHolderOwnerId } from '../../work-item-holder-identity';
+import { resolveExplicitAgentOwnerId } from '../coordination/recipient-resolve';
 
 interface ClaimItem {
   id: string;
@@ -235,6 +239,7 @@ export function blockedClaimWarning(blockers: readonly UnresolvedDepBlocker[] | 
 export function concurrencyClaimWarning(
   verdict: ClaimConcurrencyVerdict | null | undefined,
   claimedId: string,
+  targetOwnerId: string,
   dispatchedAssignee?: string | null,
 ): string | null {
   if (!verdict?.blocked) return null;
@@ -258,8 +263,12 @@ export function concurrencyClaimWarning(
     `scheduler:get_next WILL now refuse to serve ${serveSubject} (concurrencyBlocked), so do not read this ` +
     `success as "the queue agrees ${subject} ${isDispatch ? 'has' : 'have'} capacity". Either release/complete a held item ` +
     '(work_items:release / work_items:complete), or — if this lane genuinely needs more than ' +
-    'one item at a time — raise the cap deliberately with scheduler:set_claim_spec ' +
-    '{ limits: { maxConcurrentClaims: N } } rather than accumulating past it one claim at a time. ' +
+    'one item at a time — raise the per-target cap deliberately. First read the existing spec with ' +
+    `scheduler:get_claim_spec { cupId: '${targetOwnerId}' }, then preserve it in ` +
+    `scheduler:set_claim_spec { cupId: '${targetOwnerId}', spec: { ...current.spec, ` +
+    'limits: { ...current.spec.limits, maxConcurrentClaims: N } } }. The write requires exactly one ' +
+    'target selector (cupId or fleet) and a full replacement spec; limits belongs inside spec. ' +
+    'Do not accumulate past the cap one claim at a time. ' +
     `A PARKED item still counts: it retains taken_by; ${subject} must account for it under ${possessive} cap.`
   );
 }
@@ -306,10 +315,16 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
   // here with a typed reason naming the fix. Left to the claimWorkItem backstop it came back
   // null, which this path reported as a phantom claim conflict. A full id, a non-su identity,
   // and any other value pass through byte-identical, with no lookup.
-  if (it.assignee) {
+  if (it.assignee !== undefined) {
     const canonical = await canonicalizeAssigneeOwnerId(it.assignee, { workspaceId: identity.workspaceId ?? null });
     if (!canonical.ok) return { ok: false, id: it.id, error: canonical.code, hint: canonical.message };
-    if (canonical.expandedFrom !== null) it.assignee = canonical.ownerId;
+    const resolved = await resolveExplicitAgentOwnerId(
+      canonical.ownerId,
+      identity.ownerId,
+      identity.workspaceId ?? null,
+    );
+    if (!resolved.ok) return { ok: false, id: it.id, error: resolved.code, hint: resolved.message };
+    it.assignee = resolved.ownerId;
   }
   const claimer = it.assignee ?? claimerDefault;
   if (it.pilotRole && claimer !== claimerDefault) {
@@ -846,7 +861,7 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
     // assignee whose capacity was measured. Pass that identity through so the prose cannot
     // make the leader think its own lane changed (EI-21731818164781453).
     const dispatchedAssignee = claimer !== claimerDefault ? claimer : null;
-    const concurrencyWarning = concurrencyClaimWarning(concurrency, it.id, dispatchedAssignee);
+    const concurrencyWarning = concurrencyClaimWarning(concurrency, it.id, claimer, dispatchedAssignee);
     const suggestedWatches = suggestedWatchesForItemBlockers({
       itemId: it.id,
       blockers: workItem.externalBlockers,
@@ -1040,6 +1055,23 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
             'check its admission/origin/auditVerdict directly (dev:pg_query) rather than retrying the takeover blind.'),
     };
   }
+  // P-007 / D-021: claimWorkItem refuses a verification task to its own reporter or
+  // implementer. That refusal is PERMANENT for this claimant (waiting or retrying cannot
+  // clear it), so name it rather than letting it read as a peer conflict or a gate.
+  const verificationRole = current ? verificationTaskConflict(current.payload, claimer) : null;
+  if (verificationRole) {
+    return {
+      ok: false,
+      id: it.id,
+      error: 'verification_conflict',
+      role: verificationRole,
+      workItem: current,
+      hint:
+        `${it.id} is a verification task and ${claimer} is its ${verificationRole}. ` +
+        'Verification must be done by an independent agent, never the reporter or the implementer, ' +
+        'so this refusal is permanent for you: leave it for a verifier and pick other work.',
+    };
+  }
   const failure = classifyClaimFailure(current, claimer);
   if (failure.reason === 'not_found') {
     return { ok: false, id: it.id, error: `work_item '${it.id}' not found` };
@@ -1091,6 +1123,31 @@ async function claimOne(itRaw: ClaimItem, identity: AgentIdentity, reader: CellR
   // Reuse the per-id oracle rather than re-deriving admission here. This is advisory
   // and fail-soft: a diagnostic read must never change the refusal or turn a read
   // outage into a fabricated floor.
+  // P-009 / D-024: the feature-family claim UPDATE gates on the CATEGORY half of the work
+  // predicate (nature 'work' AND audience 'agent'). A record, document, event or human-audience
+  // row (e.g. an email-draft-proposal) is never claimable, by id or otherwise, so name it:
+  // unlike the admission floors below, waiting or retrying cannot help. Diagnostic only and
+  // fail-soft; a read outage falls through to the generic refusal, never to a grant.
+  const categoryHarness = current?.harness ?? it.harness;
+  if (current && current.family !== 'issue' && categoryHarness) {
+    let category: { nature: string; audience: string | null } | null = null;
+    try {
+      category = await readNonAgentWorkCategory(it.id, categoryHarness);
+    } catch {
+      category = null;
+    }
+    if (category) {
+      return {
+        ok: false,
+        id: it.id,
+        error: 'not_agent_work',
+        workItem: current,
+        nature: category.nature,
+        audience: category.audience,
+        hint: notAgentWorkClaimHint(category.nature, category.audience),
+      };
+    }
+  }
   let claimFloor: ClaimFloorAttribution | null = null;
   if (current?.family === 'issue') {
     const issueHarness = current.harness ?? it.harness;
@@ -1151,7 +1208,7 @@ export default defineTool({
   guidance: {
     when: 'Before editing: claim to prevent duplicate work. Use ids:[…] for a swath. By-id claims override readiness/lifecycle floors, not fleet scope or ordinary born-pending admission/trust; server-derived dispatch/force may bypass pending rows.',
     notWhen:
-      '`claim_conflict` means a live peer holds it: coordinate, do not retry. `force_unauthorized` means takeover refused. `work_item_unreadable` means the pre-claim read failed.',
+      '`claim_conflict` means a live peer holds it: coordinate, do not retry. `force_unauthorized` means takeover refused. `work_item_unreadable` means the pre-claim read failed. Never claim non-work or human-audience rows: data or a person\'s job.',
     chaining:
       'work_items:list → claim → set_state → release/close. No heartbeat; platform calls refresh liveness. During long local-only work, checkpoint (EI-6772).',
     seeAlso: [

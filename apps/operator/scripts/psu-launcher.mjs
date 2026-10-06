@@ -47,6 +47,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { join, dirname, delimiter, basename, relative } from "node:path";
 import { isCliEntry } from "@papercusp/operator-core/lib/util/cli-entry";
+import { consumeKickoffPromptFile, KICKOFF_PROMPT_FILE_ENV } from "@papercusp/operator-core/lib/agent-kickoff/prompt-transport.mjs";
 
 /** Keep the packaged adapter relocatable while preserving source-checkout development. */
 export function resolveNativeMcpAssets(moduleUrl = import.meta.url, available = existsSync) {
@@ -76,8 +77,10 @@ export function nativeOmpExtensionArgs(backend, env = process.env, platform = pr
   return ["-e", fileURLToPath(nativeMcpExtension)];
 }
 import {
+  appendHostEvent,
   fireSessionCompactedEvent,
   hostThroughPty,
+  resolveLinuxCodexStartupPid,
   fleetOscFromEnv,
   findLiveHostFor,
   hostIdleMs,
@@ -109,6 +112,8 @@ import { TOOL_DELIVERY_BY_AGENT_KIND } from "./tool-delivery.generated.mjs";
 import {
   analyzeClaudeResumeTranscript,
   appendClaudeToolReferencesToSeed,
+  neutralizeForkSeedToolReferences,
+  neutralizeResumeNativeToolReferencesInFile,
 } from "../../../packages/operator-core/lib/claude-resume-tool-references.mjs";
 import {
   RECOVERY_CAPABILITY_DIAGNOSTIC,
@@ -126,6 +131,10 @@ import {
 // import the SAME definition.
 import { PSU_REQUEST_TIMEOUT_MS } from "../lib/mcp-proxy/budgets.mjs";
 import {
+  slowOperatorNotice,
+  withOperatorDownDiagnosis,
+} from "./psu-operator-down-diagnosis.mjs";
+import {
   RUNTIME_OVERHEAD_TOKENS,
   buildContextBudget,
   codexContextConfigArgs,
@@ -137,7 +146,19 @@ import {
   CODEX_DENIED_MODEL_IDS,
   resolveCodexModel,
   resolveCodexModelSelection,
+  normalizeClaudeModelEffortSpec,
+  claudeInheritedEffortOverride,
+  effectiveClaudeSettingsPath,
+  readClaudeLaunchSettings,
 } from "../../../packages/operator-core/lib/model-context-budget.mjs";
+// Shared with the wake executor's resume leg (WI-10005900); re-exported for the
+// launcher's existing callers and tests.
+export { readClaudeLaunchSettings };
+// D-002: the argv allowlist the workspace host applies to a psu it starts for a customer.
+import {
+  isHostedPsuCustomer,
+  parseHostedPsuCustomerArgv,
+} from "../../../packages/operator-core/lib/workspace-host/hosted-psu-argv.mjs";
 // WI-126377: the ONE builder for this picker's rows + the effort intersection
 // rule. Plain .mjs for the same reason as every import below it — see that
 // file's header for why a registry's advertised effort list can never be
@@ -156,6 +177,7 @@ import { SU_TIER_ROLES } from "../../../packages/operator-core/lib/su-tier-roles
 // carry two byte-identical copies of its regex pair (cloudModelBackendHint,
 // validateModelSpec); both now call it, so the gate cannot drift from them.
 import { isLocalModelSpec } from "../../../packages/operator-core/lib/local-model-spec.mjs";
+import { isProviderCredentialEnvName } from "../../../packages/operator-core/lib/personal-vault/provider-egress.mjs";
 import { EXTERNAL_SCHEDULES } from "../../../packages/operator-core/lib/schedule-descriptors.mjs";
 import {
   SU_CONTEXT_SIZE,
@@ -272,6 +294,7 @@ Launch context:
 
 Fleet and execution:
   --fleet=<slug>                     Join an existing fleet
+  --fleet-role=leader|member         Role in that fleet (default member)
   --seat=<ref>                       Consume a delegated fleet seat
   --headless                         Launch without a desktop window
   --auto, --no-auto                  Set AUTO mode explicitly
@@ -307,6 +330,10 @@ Remote hosts (run psu on another machine; every other option is forwarded to it)
   --connect-add-gcp-iap=<name>       Save your own GCP VM, reached over IAP SSH, with
                                      --connect-project, --connect-zone,
                                      --connect-instance and --connect-user
+  --connect-add-aws-ssm=<name>       Save your own EC2 instance, reached over SSM
+                                     Session Manager SSH, with --connect-region,
+                                     --connect-instance (i-…), --connect-user and
+                                     optionally --connect-aws-profile
   --connect-remove=<name>            Forget a saved remote host
 
 Values may use either --name=value or (where supported) --name value form.
@@ -511,10 +538,90 @@ export function resolveOperatorTarget({
           `this session bypasses deploy-restart resilience (WI-1457). Unset the override (or point it at :${proxyPort}) to ride the proxy.`,
       );
     }
+    // EI-24402391758483336: the staging host (:3170) restarts on every staging sync
+    // and deploy, so a direct :3170 pin is refused for a whole restart window — psu
+    // fails ("refused connections for 30s") and a session's MCP goes dark. When the
+    // staging proxy (:9171 → :3170, papercup-mcp-proxy-staging.service) is live,
+    // ride it instead: it fronts the SAME operator (single-candidate, fail-closed),
+    // so the pin's build choice is preserved while restarts become invisible.
+    // Launched children inherit the proxied URL (env.PAPERCUSP_OPERATOR_URL below).
+    const stagingProxyPort =
+      Number(env.PAPERCUSP_MCP_STAGING_PROXY_PORT) > 0
+        ? Number(env.PAPERCUSP_MCP_STAGING_PROXY_PORT)
+        : 9171;
+    const pinsStaging = /^https?:\/\/(127\.0\.0\.1|localhost):3170$/.test(pinned);
+    const stagingProxy = `http://127.0.0.1:${stagingProxyPort}`;
+    const source =
+      env[OPERATOR_URL_PROVENANCE_ENV] === LAUNCHER_OPERATOR_URL_PROVENANCE
+        ? "managed-env" : "env";
+    if (
+      pinsStaging &&
+      env.PAPERCUSP_MCP_STAGING_PROXY !== "0" &&
+      !proxyOptedOut &&
+      probe(stagingProxyPort)
+    ) {
+      warn(
+        `psu: PAPERCUSP_OPERATOR_URL pins staging ${pinned}; routing through the staging proxy ${stagingProxy} ` +
+          `(same operator) so its restarts don't drop this launch or its sessions (EI-24402391758483336). ` +
+          `PAPERCUSP_MCP_STAGING_PROXY=0 connects directly.`,
+      );
+      return { url: stagingProxy, source, startedAt: null };
+    }
+    // EI-24899559853673371: the background host has a dedicated :9271 → :3271
+    // proxy. Its operator process carries the proxy base + target port rather
+    // than the proxy listener port, so derive and probe that listener from the
+    // configured base. Route only local :3271 pins through an active local HTTP
+    // proxy explicitly pinned to the same runtime; the live :9071 proxy must
+    // never receive current-build traffic.
+    const backgroundProxyBase = String(env.PAPERCUSP_MCP_PROXY_BASE || "").trim();
+    const backgroundProxyTargetsPinnedRuntime =
+      String(env.PAPERCUSP_MCP_PROXY_TARGET_PORT || "").trim() === "3271";
+    const pinsBackgroundHost =
+      /^https?:\/\/(127\.0\.0\.1|localhost):3271$/.test(pinned);
+    if (
+      pinsBackgroundHost &&
+      !proxyOptedOut &&
+      backgroundProxyTargetsPinnedRuntime &&
+      backgroundProxyBase
+    ) {
+      try {
+        const parsedProxy = new URL(backgroundProxyBase);
+        const proxyPortNumber = Number(parsedProxy.port);
+        const validProxyPort = parsedProxy.port.length > 0 &&
+          Number.isInteger(proxyPortNumber) &&
+          proxyPortNumber > 0 &&
+          proxyPortNumber <= 65535 &&
+          proxyPortNumber !== 3271;
+        const localProxyHost = ["127.0.0.1", "localhost", "[::1]"].includes(
+          parsedProxy.hostname.toLowerCase(),
+        );
+        if (
+          parsedProxy.protocol === "http:" &&
+          localProxyHost &&
+          !parsedProxy.username &&
+          !parsedProxy.password &&
+          parsedProxy.pathname === "/" &&
+          !parsedProxy.search &&
+          !parsedProxy.hash &&
+          validProxyPort &&
+          probe(proxyPortNumber)
+        ) {
+          const backgroundProxy = parsedProxy.origin;
+          warn(
+            `psu: PAPERCUSP_OPERATOR_URL pins background ${pinned}; routing through the ` +
+              `configured same-vintage MCP proxy ${backgroundProxy} (upstream :3271) ` +
+              `so background-host restarts do not drop this launch or its sessions ` +
+              `(EI-24899559853673371). PAPERCUSP_MCP_PROXY=0 connects directly.`,
+          );
+          return { url: backgroundProxy, source, startedAt: null };
+        }
+      } catch {
+        // An invalid proxy base cannot safely replace the explicit operator pin.
+      }
+    }
     return {
       url: pinned,
-      source: env[OPERATOR_URL_PROVENANCE_ENV] === LAUNCHER_OPERATOR_URL_PROVENANCE
-        ? "managed-env" : "env",
+      source,
       startedAt: null,
     };
   }
@@ -691,6 +798,17 @@ const CONNECT_RETRY_BUDGET_MS = Number.isFinite(_connectRetryRaw)
 // operator.json on come-up, so a fresh record = plausibly mid-boot).
 const STALE_DISCOVERY_MS = 10 * 60_000;
 const STALE_FAST_FAIL_BUDGET_MS = 5_000;
+// WI-10006057: while the operator behind the MCP proxy is down, the proxy holds
+// a request for its whole ~90s retry window and psu printed nothing. A request
+// still pending after this long checks the operator's health once per launch,
+// and if it is refusing, says which systemd unit is down and why.
+const SLOW_REQUEST_NOTICE_MS = 5_000;
+let slowRequestNoticeShown = false;
+async function slowRequestNoticeOncePerLaunch({ url }) {
+  if (slowRequestNoticeShown) return null;
+  slowRequestNoticeShown = true;
+  return slowOperatorNotice(url);
+}
 
 // The MCP proxy marks admission shedding with HTTP 429 + Retry-After. Treat that
 // response as a bounded, safe-to-replay front-door condition: the proxy sheds
@@ -816,6 +934,7 @@ export function parseArgs(argv) {
     account: null,
     fleet: null,
     fleetRole: null,
+    fleetRoleRequested: null,
     fleetName: null,
     fleetScheme: null,
     auto: null,
@@ -951,7 +1070,7 @@ export function parseArgs(argv) {
     if (pendingFleet) {
       pendingFleet = false;
       out.fleet = a;
-      out.fleetRole = "member";
+      out.fleetRole = out.fleetRoleRequested ?? "member";
       continue;
     }
     if (a === "--") {
@@ -1217,7 +1336,22 @@ export function parseArgs(argv) {
     else if (a === "--fleet") pendingFleet = true;
     else if (a.startsWith("--fleet=")) {
       out.fleet = a.slice("--fleet=".length);
-      out.fleetRole = "member";
+      out.fleetRole = out.fleetRoleRequested ?? "member";
+    }
+    // WI-10004449: `--fleet-role=leader` boots a scripted launch as the fleet's
+    // LEADER. fleet:launch-on-plan { leader:'spawn' } needs it: the registry names
+    // the spawned leader only after its process opens, so a bare `--fleet=` resolved
+    // it as a member (member kickoff, member mission) against its own leader brief.
+    // Order-independent with --fleet. It is deliberately NOT re-emitted into
+    // launch_argv (psuLaunchArgvRecord): on resume the registry decides who leads.
+    else if (a.startsWith("--fleet-role=")) {
+      const role = a.slice("--fleet-role=".length);
+      if (role === "leader" || role === "member") {
+        out.fleetRoleRequested = role;
+        if (out.fleet) out.fleetRole = role;
+      } else {
+        console.error(`psu: ignoring --fleet-role=${role} (expected leader|member)`);
+      }
     }
     // agent-allocation P-005 (launch-from-seats): the delegated agent_slot template
     // this member consumes ('<model>:<effort>:<account>', emitted by
@@ -1479,18 +1613,90 @@ export function ompResponsesCompatibilityEnv(agent, model, env = process.env) {
   return { [OMP_OPENROUTER_RESPONSES_ENV]: "0" };
 }
 
-export function modelArgsFor(agent, model) {
+function codexModelSpecFromConfigText(configText) {
+  const root = String(configText ?? "").split(/^\s*\[/m, 1)[0];
+  const model = /^model\s*=\s*(["'])([^"'\r\n]+)\1\s*(?:#.*)?$/m.exec(root)?.[2];
+  if (!model) return null;
+  const effort = /^model_reasoning_effort\s*=\s*(["'])(low|medium|high|xhigh|max)\1\s*(?:#.*)?$/m.exec(root)?.[2];
+  return resolveCodexModelSelection(`${model}${effort ? `:${effort}` : ""}`, {
+    source: "inherited",
+  }).model;
+}
+
+/**
+ * A visible fresh launch inherits the user's native model configuration before
+ * bootstrap. That choice is not the operator's compiled configured default:
+ * preserving its provenance lets a newer launcher use an older operator
+ * without rejecting or replacing the user's configured model.
+ * Explicit choices and unattended missing-model checks remain authoritative.
+ * Read the machine's native home, not a parent agent's isolated CODEX_HOME.
+ * @param {string} agent
+ * @param {any} args
+ * @param {{ home?: string, readConfig?: (path: string, encoding: string) => string }} [options]
+ * @returns {any}
+ */
+export function inheritFreshCodexConfiguredModel(
+  agent,
+  args,
+  { home = homedir(), readConfig = readFileSync } = {},
+) {
+  if (
+    agent !== "codex" || args.headless || args.picker === false ||
+    (args.modelSource && args.modelSource !== "configured-default") ||
+    (args.model && args.modelSource !== "configured-default")
+  ) return args;
+  let text;
+  try {
+    text = readConfig(join(home, ".codex", "config.toml"), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return args;
+    throw error;
+  }
+  const configured = codexModelSpecFromConfigText(text);
+  return configured ? { ...args, model: configured, modelSource: "inherited" } : args;
+}
+
+/**
+ * @typedef {import("../../../packages/operator-core/lib/model-context-budget.mjs").ClaudeLaunchSettings} ClaudeLaunchSettings
+ */
+
+/**
+ * `--effort <level>` for a claude argv that names no effort of its own, when the
+ * settings the CLI will fall back to carry an effortLevel the model rejects
+ * (WI-10005900; see claudeInheritedEffortOverride). `[]` without settings, so
+ * every caller that passes none stays byte-identical. Pure — exported for tests.
+ * @param {string | null | undefined} model
+ * @param {ClaudeLaunchSettings | undefined} claudeSettings
+ * @returns {string[]}
+ */
+export function claudeInheritedEffortArgs(model, claudeSettings) {
+  if (!claudeSettings) return [];
+  const level = claudeInheritedEffortOverride({ model, settings: claudeSettings });
+  return level ? ["--effort", level] : [];
+}
+
+// readClaudeLaunchSettings lives in model-context-budget.mjs (imported above).
+
+// No default on claudeSettings: a defaulted destructured property becomes the
+// ONLY member of the inferred options type, so every other key a caller passes
+// turns into an excess-property error in the TS tests (WI-10005900).
+export function modelArgsFor(agent, model, { claudeSettings } = {}) {
   // Low-level argv construction is never itself authorization to choose a
   // model. Fresh visible launchers resolve configured-default explicitly;
   // unattended resume/fleet paths must supply an explicit or inherited model.
   if (agent === "codex") model = resolveCodexModel(model);
-  if (!model) return [];
+  // A model-less claude launch still owes a clamped --effort when the settings
+  // it inherits name a level the settings model rejects (WI-10005900).
+  if (!model)
+    return agent === "claude" ? claudeInheritedEffortArgs(null, claudeSettings) : [];
   const effectiveModel =
     agent === "codex"
       ? normalizeCodexCliModel(model)
       : agent === "omp"
         ? normalizeOmpModelSpec(model)
-        : model;
+        : agent === "claude"
+          ? normalizeClaudeModelEffortSpec(model)
+          : model;
   const m = /^(.+):(low|medium|high|xhigh|max)$/.exec(effectiveModel);
   if (agent === "codex") {
     // Extended-window models are launched with the exact top-level opt-in and
@@ -1513,6 +1719,12 @@ export function modelArgsFor(agent, model) {
     return ["-m", effectiveModel, ...windowArgs];
   }
   if (agent === "claude" && m) return ["--model", m[1], "--effort", m[2]];
+  if (agent === "claude")
+    return [
+      "--model",
+      effectiveModel,
+      ...claudeInheritedEffortArgs(effectiveModel, claudeSettings),
+    ];
   return ["--model", effectiveModel];
 }
 
@@ -1525,9 +1737,15 @@ export function modelArgsFor(agent, model) {
  * `buildEngineerOmpLaunchCommand` (P-032): omp `--model`/`-r`, claude
  * `--model`/`--resume`, codex `-m`/`resume`.
  */
-export function suWrapperExtraArgs(agent, { model, resumeSession } = {}) {
+export function suWrapperExtraArgs(
+  agent,
+  { model, resumeSession, claudeSettings } = {},
+) {
   const args = [];
-  if (model) args.push(...modelArgsFor(agent, model));
+  // claude also gets here model-less: an inherited unsupported effortLevel still
+  // needs its clamped --effort (WI-10005900). `[]` when there is nothing to clamp.
+  if (model || agent === "claude")
+    args.push(...modelArgsFor(agent, model, { claudeSettings }));
   if (agent === "omp") args.push(...ompTitleMitigationArgs(model));
   if (resumeSession) {
     if (agent === "omp" || agent === "claude") args.push("-r", resumeSession);
@@ -1917,6 +2135,7 @@ export function roleLaunchArgs(
     allowSubagents,
     model,
     allowNativeLsp,
+    claudeSettings,
   } = {},
 ) {
   if (backend === "claude") {
@@ -1971,7 +2190,7 @@ export function roleLaunchArgs(
         // (Opus) — the root cause behind the heavy-pane "Agent did not respond" class.
         // Same effort-splitting rules as the su flow (modelArgsFor). NOTE: the omp/codex
         // role branches below still lack model argv (claude-minimal for P-019).
-        ...modelArgsFor("claude", model),
+        ...modelArgsFor("claude", model, { claudeSettings }),
       ],
     };
   }
@@ -2250,10 +2469,17 @@ export function kickoffPositionalArgs(res, args) {
  * buildConsoleOneliner and breaks the shell (the gnome-terminal exit-2 the
  * docs-agent hit), whereas an env value is exported via a correctly-escaped
  * `export K=…` in the oneliner prelude and arrives intact (multiline / embedded
- * quotes included). Pure — exported for tests.
+ * quotes included). Large free-form prompts use a private, single-use file;
+ * consume its environment pointer before launching the backend. Exported for tests.
  */
 export function resolveKickoffText(args, env = process.env) {
-  return args?.kickoffPromptText || env?.PAPERCUSP_KICKOFF_PROMPT || null;
+  const inline = args?.kickoffPromptText || env?.PAPERCUSP_KICKOFF_PROMPT;
+  if (inline) return inline;
+  const path = env?.[KICKOFF_PROMPT_FILE_ENV];
+  if (!path) return null;
+  const text = consumeKickoffPromptFile(path);
+  delete env[KICKOFF_PROMPT_FILE_ENV];
+  return text || null;
 }
 
 /**
@@ -2436,6 +2662,9 @@ export function resumeArgsFor(
     model = null,
     personaFile = null,
     env = process.env,
+    // The inherited settings a claude resume falls back to for its effort
+    // (readClaudeLaunchSettings). Injected, not read here, so this stays pure.
+    claudeSettings = /** @type {ClaudeLaunchSettings} */ (null),
   } = {},
 ) {
   // --fork is native for claude and codex; omp has no branch-the-session flag,
@@ -2517,7 +2746,7 @@ export function resumeArgsFor(
         NO_CHROME_FLAG,
         ...forkFlag,
         ...addDirArgs("claude", addDir),
-        ...modelArgsFor("claude", model),
+        ...modelArgsFor("claude", model, { claudeSettings }),
       ],
     };
   }
@@ -2816,6 +3045,32 @@ export function resolveTrackedResumeSession(
 }
 
 /**
+ * Resolve a direct resume before searching raw native stores. Numeric adv ids
+ * can fall outside the recent list; ask the existing exact-row surface rather
+ * than interpreting the missing id as an OMP thread name. Native ids keep the
+ * existing store/owner recovery path, and a missing exact row stays untracked.
+ * Read errors propagate so an unavailable operator cannot bless a raw source.
+ */
+export async function resolveDirectTrackedResumeSession(
+  sessions,
+  id,
+  { apiImpl = api, home = homedir() } = {},
+) {
+  const cached = resolveTrackedResumeSession(sessions, id, { home });
+  if (cached) return cached;
+  const wanted = String(id ?? "");
+  if (!/^\d+$/.test(wanted)) return null;
+  const exactId = Number(wanted);
+  if (!Number.isSafeInteger(exactId) || exactId <= 0) return null;
+  const exact = await apiImpl(
+    `/api/adv/sessions/resumable?id=${encodeURIComponent(String(exactId))}`,
+  );
+  return resolveTrackedResumeSession(exact?.sessions ?? [], String(exactId), {
+    home,
+  });
+}
+
+/**
  * Find a session the user did NOT launch via psu, by searching each agent's
  * OWN session store for the id — NOT a filesystem crawl: claude keeps every
  * session under `~/.claude/projects/<dir>/<id>.jsonl`, codex under
@@ -2860,7 +3115,19 @@ export function findUntrackedSession(
     // "isn't linked to a tracked psu launch" warning was actively misleading
     // for that (very common) case and is exactly what the owner-reported
     // repro saw.
+    //
+    // WI-10004654: the SAME transcript can sit under several owner dirs. A
+    // managed fork seeds its own config dir with a copy of the source's
+    // `<id>.jsonl` (same native id) before `--fork-session` mints the fork's
+    // id, and that seed stays. Returning the first hit in readdir order then
+    // names the FORK as the transcript's owner, and the exact recovery below
+    // (correctly) refuses the owner mismatch — so one consult fork made its
+    // source unforkable for every later out-of-window fork/convert (measured
+    // 2026-10-01, conv-mup68u8r). The first-write-wins owner index records the
+    // owner the session was born with: when it names one of the hits, that dir
+    // is the real one. Otherwise keep the old first-hit behaviour.
     const isoRoot = sessionClaudeRoot(home);
+    const isoHits = [];
     for (const owner of safeReaddir(isoRoot)) {
       if (!owner.isDirectory()) continue;
       const configDir = join(isoRoot, owner.name);
@@ -2869,16 +3136,27 @@ export function findUntrackedSession(
         if (!d.isDirectory()) continue;
         const f = join(projects, d.name, `${id}.jsonl`);
         if (existsSync(f)) {
-          return {
-            agent: "claude",
-            sessionId: id,
-            cwd: cwdFromSessionFile(f) || cwd,
-            untracked: true,
-            configDir,
-            psuTracked: true,
-          };
+          isoHits.push({ owner: owner.name, configDir, file: f });
+          break;
         }
       }
+    }
+    if (isoHits.length) {
+      const bornOwner =
+        isoHits.length > 1
+          ? recoverSessionIdentity(id, { home })?.ownerId ?? null
+          : null;
+      const hit =
+        (bornOwner && isoHits.find((h) => h.owner === bornOwner)) ||
+        isoHits[0];
+      return {
+        agent: "claude",
+        sessionId: id,
+        cwd: cwdFromSessionFile(hit.file) || cwd,
+        untracked: true,
+        configDir: hit.configDir,
+        psuTracked: true,
+      };
     }
     const codexRollout = findCodexRollout(join(home, ".codex", "sessions"), id);
     if (codexRollout)
@@ -3581,6 +3859,68 @@ export function mintRecycleArgs(
 }
 
 /**
+ * psu-process-free-parking-2026-10-06 P-015: the argv that brings a PARKED
+ * Claude child back as the SAME conversation.
+ *
+ * A park SIGKILLs an idle CLI to free its memory (~215 MB per agent, D-018/D-025
+ * of agent-capacity-and-cost-gcp-2026-09-30) while the psu host, its socket and
+ * its terminal stay up. Unparking must resume the transcript the killed process
+ * was writing, NOT open a fresh one, so this is the inverse of mintRecycleArgs:
+ *
+ *   - the LIVE child's `--session-id X` / `--resume X` becomes `--resume X`
+ *     (one id, the one the killed child was writing — the input is the live
+ *     child's argv, not the launch argv, so it is still right after a recycle
+ *     rotated the id);
+ *   - `--continue` / `--fork-session` are dropped (a fork would mint a new id
+ *     and the next park would then resume the wrong conversation);
+ *   - a trailing kickoff positional is stripped (stripKickoffPositional): the
+ *     resumed child must not re-run the launch prompt as a new turn;
+ *   - EVERYTHING ELSE IS COPIED VERBATIM, the `--system-prompt-file` included.
+ *     Re-rendering the persona here would change the system prompt and miss the
+ *     1h prompt cache that makes a park cost no extra tokens (D-018).
+ *
+ * Claude only (D-025: an idle Codex CLI is ~17 MB, not worth parking). Returns
+ * null — "this child cannot be parked" — for any other agent or when the argv
+ * carries no session id to resume. `nativeId` overrides the argv's id: the host
+ * passes the id of the session's newest transcript when it differs, because an
+ * in-TUI `/clear` starts a new conversation the argv never learns about.
+ * Pure; exported for tests.
+ *
+ * @param {string[]} [liveArgs]
+ * @param {{ agent?: string | null, nativeId?: string | null }} [opts]
+ * @returns {{ args: string[], nativeId: string } | null}
+ */
+export function mintParkResumeArgs(liveArgs = [], { agent = null, nativeId: overrideId = null } = {}) {
+  if (String(agent ?? "").trim().toLowerCase() !== "claude") return null;
+  const src = stripKickoffPositional(liveArgs.map((a) => String(a ?? "")));
+  let nativeId = null;
+  const out = [];
+  for (let i = 0; i < src.length; i++) {
+    const a = src[i];
+    if (a === "--session-id" || a === "--resume") {
+      const id = src[i + 1];
+      if (typeof id === "string" && id && !id.startsWith("-")) {
+        nativeId = nativeId ?? id;
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith("--session-id=") || a.startsWith("--resume=")) {
+      const id = a.slice(a.indexOf("=") + 1);
+      if (id) nativeId = nativeId ?? id;
+      continue;
+    }
+    if (a === "--continue" || a === "--fork-session") continue;
+    out.push(a);
+  }
+  const override = typeof overrideId === "string" && /^[A-Za-z0-9._-]+$/.test(overrideId) ? overrideId : null;
+  const resumeId = override ?? nativeId;
+  if (!resumeId) return null;
+  out.push("--resume", resumeId);
+  return { args: out, nativeId: resumeId };
+}
+
+/**
  * P-018 deterministic carry respawn: rotate the native Claude session id using
  * {@link mintRecycleArgs}, persist the bounded carry document as one owner-scoped
  * 0600 launch-context file, and layer it onto the fresh child. The original argv
@@ -3786,7 +4126,9 @@ export function mintCarryRespawnArgs(
       ? strippedKickoff.slice(0, subcommandAt)
       : strippedKickoff;
     return {
-      args: freshArgs,
+      // Apply the detected model AFTER stripping the old subcommand, so an
+      // added effort flag also stays on the fresh successor's root argv.
+      args: mintRecycleArgs(freshArgs, { agent, model }).args,
       nativeId: null,
       launchContextPath,
       codexAgentsPath: agentsPath,
@@ -3970,36 +4312,49 @@ export function sessionTranscriptFile(session, { home = homedir() } = {}) {
  * call tools:find. Unknown/removed tool names are harmlessly ignored by the
  * server's allowlist filter and remain eligible for the poison detector.
  */
-export function addClaudeResumeToolReferencesToEnv(session, env, { home = homedir() } = {}) {
-  if (session?.agent !== "claude" || typeof env?.PAPERCUSP_TOOLS !== "string" || !env.PAPERCUSP_TOOLS.trim()) {
-    return { transcriptPath: null, restored: 0, toolReferences: [] };
-  }
+export function addClaudeResumeToolReferencesToEnv(
+  session,
+  env,
+  { home = homedir(), neutralizeNative = false } = {},
+) {
+  const nothing = { rewritten: 0, toolNames: [] };
+  if (session?.agent !== "claude") return { transcriptPath: null, restored: 0, toolReferences: [] };
+  const hasSeed = typeof env?.PAPERCUSP_TOOLS === "string" && env.PAPERCUSP_TOOLS.trim().length > 0;
+  if (!hasSeed && !neutralizeNative) return { transcriptPath: null, restored: 0, toolReferences: [] };
   const transcriptPath = sessionTranscriptFile(session, { home });
   if (!transcriptPath) return { transcriptPath: null, restored: 0, toolReferences: [] };
+  // EI-24890753013901545: a NATIVE deferred tool (ExitPlanMode, WaitForMcpServers…)
+  // the earlier process loaded is absent from this resumed process, and the
+  // provider 400s the replay. The seed below can only restore Papercusp MCP names,
+  // so drop the native references from the transcript before it opens. Opt-in: a
+  // FORK's transcriptPath is the SOURCE session's, which must never be rewritten.
+  const nativeNeutralized = neutralizeNative ? neutralizeResumeNativeToolReferencesInFile(transcriptPath) : nothing;
+  if (!hasSeed) return { transcriptPath, restored: 0, toolReferences: [], nativeNeutralized };
   let analysis;
   try {
     analysis = analyzeClaudeResumeTranscript(readFileSync(transcriptPath, "utf8"));
   } catch {
-    return { transcriptPath, restored: 0, toolReferences: [] };
+    return { transcriptPath, restored: 0, toolReferences: [], nativeNeutralized };
   }
   if (analysis.toolReferences.length === 0) {
-    return { transcriptPath, restored: 0, toolReferences: [] };
+    return { transcriptPath, restored: 0, toolReferences: [], nativeNeutralized };
   }
   const before = new Set(env.PAPERCUSP_TOOLS.split(",").map((name) => name.trim().toLowerCase()).filter(Boolean));
   env.PAPERCUSP_TOOLS = appendClaudeToolReferencesToSeed(env.PAPERCUSP_TOOLS, analysis.toolReferences);
   const restored = analysis.toolReferences.filter((name) => !before.has(name.toLowerCase())).length;
-  return { transcriptPath, restored, toolReferences: analysis.toolReferences };
+  return { transcriptPath, restored, toolReferences: analysis.toolReferences, nativeNeutralized };
 }
 
-/** How much of a transcript's tail lastActiveModelFor reads — the model appears
- *  on every assistant event (claude) / turn_context (codex), so a quarter-MB of
- *  tail always covers the latest turn without reading a multi-MB file. */
+/** Read block size, not a search limit: one Codex turn can write megabytes
+ *  after its turn_context. Stop at the latest valid model record, not at an
+ *  arbitrary tail cutoff that silently forgets the owner's /model choice. */
 const LAST_MODEL_TAIL_BYTES = 256 * 1024;
 
 /**
  * The model that was LAST ACTIVE in a session, read from its own transcript
- * (WI-3758: `psu --resume` shows it and offers to keep it). Tail-reads the
- * final ~256KB and scans lines newest-first:
+ * (WI-3758: `psu --resume` shows it and offers to keep it). Scans backward in
+ * blocks to the latest valid model record, retaining split JSONL bytes until
+ * the complete line is available (including split UTF-8 code points):
  *   - claude: `{"type":"assistant","message":{"model":"…"}}` — the model that
  *     actually answered; `<synthetic>` (error/system events) is skipped.
  *   - codex: `{"type":"turn_context","payload":{"model":"…","effort":"…"}}`
@@ -4008,38 +4363,22 @@ const LAST_MODEL_TAIL_BYTES = 256 * 1024;
  *     carry or exact resume cannot silently reset the owner's reasoning level.
  *   - omp / no transcript / unreadable → null (callers degrade to "unknown").
  * Pure-ish (reads FS); `home` injectable for tests; exported for tests.
+ * `notBeforeMs` limits Codex carry observations to this launcher's lifetime:
+ * an older resumed turn must not override its newly selected model.
+ * @param {any} session
+ * @param {{ home?: string, notBeforeMs?: number | null }} [opts]
  */
-export function lastActiveModelFor(session, { home = homedir() } = {}) {
+export function lastActiveModelFor(session, { home = homedir(), notBeforeMs = null } = {}) {
   const file = sessionTranscriptFile(session, { home });
   if (!file) return null;
-  let tail;
-  try {
-    const size = statSync(file).size;
-    const want = Math.min(size, LAST_MODEL_TAIL_BYTES);
-    const fd = openSync(file, "r");
-    try {
-      const buf = Buffer.alloc(want);
-      readSync(fd, buf, 0, want, size - want);
-      tail = buf.toString("utf8");
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
-  const lines = tail.split("\n");
-  // A truncated read starts mid-line — drop the partial first line so a stray
-  // `"model":"…"` fragment can never half-parse into a wrong answer.
-  if (tail.length === LAST_MODEL_TAIL_BYTES) lines.shift();
   const marker =
     session.agent === "codex"
       ? '"turn_context"'
       : session.agent === "omp"
         ? '"model_change"'
         : '"assistant"';
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line.includes(marker) || !line.includes('"model"')) continue; // cheap prefilter
+  const modelFromLine = (line) => {
+    if (!line.includes(marker) || !line.includes('"model"')) return null;
     try {
       const o = JSON.parse(line);
       // WI-2141859: a SUBAGENT turn (`isSidechain`) can answer on a different
@@ -4047,7 +4386,11 @@ export function lastActiveModelFor(session, { home = homedir() } = {}) {
       // this session running" — for the resume picker OR for the respawn model
       // carry below. Claude stamps the flag on every record it writes; codex
       // and omp have no sidechains, so the guard is inert for them.
-      if (o?.isSidechain === true) continue;
+      if (o?.isSidechain === true) return null;
+      if (session.agent === "codex" && Number.isFinite(notBeforeMs)) {
+        const recordedAt = typeof o?.timestamp === "string" ? Date.parse(o.timestamp) : NaN;
+        if (!Number.isFinite(recordedAt) || recordedAt < notBeforeMs) return null;
+      }
       const m =
         session.agent === "codex"
           ? o?.type === "turn_context"
@@ -4069,10 +4412,37 @@ export function lastActiveModelFor(session, { home = homedir() } = {}) {
         return m;
       }
     } catch {
-      /* malformed / partial line — keep scanning */
+      /* malformed line — keep scanning */
     }
+    return null;
+  };
+  try {
+    let position = statSync(file).size;
+    let pending = Buffer.alloc(0);
+    const fd = openSync(file, "r");
+    try {
+      while (position > 0) {
+        const want = Math.min(position, LAST_MODEL_TAIL_BYTES);
+        position -= want;
+        const block = Buffer.alloc(want);
+        if (readSync(fd, block, 0, want, position) !== want) return null;
+        const bytes = pending.length ? Buffer.concat([block, pending]) : block;
+        let end = bytes.length;
+        for (let i = bytes.length - 1; i >= 0; i--) {
+          if (bytes[i] !== 10) continue;
+          const model = modelFromLine(bytes.subarray(i + 1, end).toString("utf8"));
+          if (model) return model;
+          end = i;
+        }
+        pending = bytes.subarray(0, end);
+      }
+      return modelFromLine(pending.toString("utf8"));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /** The effort levels a `<model>:<effort>` spec may carry. Kept local so the
@@ -4200,9 +4570,10 @@ export function modelSpecFromRecycleArgv(args = []) {
  * @param {{ ownerId?: string | null, agent?: string | null, home?: string,
  *          configDir?: string | null, codexHome?: string | null,
  *          advSessionId?: string | number | null, modelSource?: string | null,
+ *          includeInherited?: boolean, notBeforeMs?: number | null,
  *          readLatestCodexRollout?: (root: string) => {id: string} | null,
  *          readLastActiveModel?: (session: { agent: string, sessionId: string, coordOwnerId?: string | null, configDir?: string },
- *                                 opts?: { home?: string }) => string | null }} [opts]
+ *                                 opts?: { home?: string, notBeforeMs?: number | null }) => string | null }} [opts]
  * @returns {string | null}
  */
 export function detectRespawnModelSpec(
@@ -4215,6 +4586,8 @@ export function detectRespawnModelSpec(
     codexHome = null,
     advSessionId = null,
     modelSource = null,
+    includeInherited = false,
+    notBeforeMs = null,
     readLatestCodexRollout = latestCodexRollout,
     readLastActiveModel = lastActiveModelFor,
   } = {},
@@ -4237,7 +4610,7 @@ export function detectRespawnModelSpec(
       try {
         active = readLastActiveModel(
           { agent: "codex", id: advSessionId, sessionId: latest.id },
-          { home },
+          { home, notBeforeMs },
         );
       } catch {
         // A missing or incomplete rollout must not block the carry.
@@ -4253,18 +4626,18 @@ export function detectRespawnModelSpec(
     }
     if (modelSource === "configured-default") {
       try {
-        const text = readFileSync(join(codexHome, "config.toml"), "utf8").split(/^\s*\[/m, 1)[0];
-        const model = /^model\s*=\s*"([^"]+)"\s*$/m.exec(text)?.[1];
-        const effort = /^model_reasoning_effort\s*=\s*"(low|medium|high|xhigh|max)"\s*$/m.exec(text)?.[1];
-        const configured = model ? resolveCodexModelSelection(
-          `${model}${effort ? `:${effort}` : ""}`, { source: "inherited" },
-        ).model : null;
-        return configured && configured !== inherited ? configured : null;
+        const configured = codexModelSpecFromConfigText(
+          readFileSync(join(codexHome, "config.toml"), "utf8"),
+        );
+        if (configured && configured !== inherited) return configured;
       } catch {
-        return null;
+        // Home repair still needs the inherited model if config is unreadable.
       }
     }
-    return null;
+    // A null is the argv rewriter's "unchanged" sentinel. The home repair
+    // endpoint instead reads null as "restore the historical launch model".
+    // Let that caller carry the current selection even when no swap is needed.
+    return includeInherited ? inherited : null;
   }
   if (normalized && normalized !== "claude") return null;
   const sessionId = nativeSessionIdFromLaunchArgs(args);
@@ -4283,6 +4656,95 @@ export function detectRespawnModelSpec(
   } catch {
     return null; // an unreadable transcript only costs the refresh
   }
+}
+
+/** WI-10006049: the session-settings `model` values that get the 1M marker — the bare Claude Code
+ *  aliases its `/model` menu saves for a 1M-capable family (opus, sonnet, fable, opusplan; each has
+ *  an `[1m]` twin in CC 2.1.289) and generation-5+ API ids of those families. NOT haiku (no 1M
+ *  version) and NOT a pinned 4.x id like `claude-opus-4-1`: forcing the marker there makes the CLI
+ *  send a beta that model rejects. */
+const SESSION_SETTINGS_1M_MODEL_RE =
+  /^(?:opus|sonnet|fable|opusplan|claude-(?:opus|sonnet|fable)-(?:[5-9]|[1-9]\d+)(?:[-.][0-9a-z.-]*)?)$/i;
+
+/**
+ * WI-10006049 (owner Avi 2026-10-05 #1369 "if the default is 1m that sounds good", #1371 "make
+ * sure this works for all claude models too not just opus"): keep a model-less Claude session on
+ * the 1M window across its respawns, whatever its `/model` menu saved.
+ *
+ * A session launched WITHOUT `--model` takes its model from the `model` key of its isolated
+ * CLAUDE_CONFIG_DIR/settings.json, and a carry-respawn reuses that dir without re-materializing it
+ * (mintRecycleArgs never ADDS a --model flag — see its WI-2141859 note). So a `/model` menu save
+ * persists for the session's whole life. On Claude Code 2.1.289 the bare menu saves the 200k pick
+ * (`opus`, not `opus[1m]`): su-56e2f83b's dir still read `"model": "opus"` hours after one menu
+ * use, and every respawn came back at 200k with a 158k limit under a ~140k prompt floor.
+ *
+ * This keeps the FAMILY the owner picked and only adds the window marker (`opus` → `opus[1m]`,
+ * `sonnet` → `sonnet[1m]`, `fable` → `fable[1m]`, `opusplan` → `opusplan[1m]`); haiku and pinned 4.x
+ * ids are left exactly as they are. A missing key (the menu's "Default") is restored to what
+ * materialize writes — the global settings model, normalized the same way. Atomic write; every
+ * failure is a no-op. Returns `{ from, to }` when it changed the file, else null.
+ *
+ * @param {string | null | undefined} configDir
+ * @param {{ home?: string }} [opts]
+ * @returns {{ from: string | null, to: string } | null}
+ */
+export function normalizeSessionSettingsModel(configDir, { home = homedir() } = {}) {
+  if (!configDir) return null;
+  const path = join(configDir, "settings.json");
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) return null;
+  const upgrade = (spec) =>
+    typeof spec === "string" && SESSION_SETTINGS_1M_MODEL_RE.test(spec.trim())
+      ? normalizeModelSpec(spec.trim())
+      : null;
+  const current =
+    typeof cfg.model === "string" && cfg.model.trim() ? cfg.model.trim() : null;
+  let next = null;
+  if (current) {
+    next = upgrade(current);
+  } else {
+    try {
+      next = upgrade(
+        JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8"))?.model,
+      );
+    } catch {
+      next = null;
+    }
+  }
+  if (!next || next === current) return null;
+  try {
+    const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({ ...cfg, model: next }, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    renameSync(tmp, path);
+  } catch {
+    return null;
+  }
+  return { from: current, to: next };
+}
+
+/**
+ * The launch-site half of normalizeSessionSettingsModel: only a Claude argv with NO --model reads
+ * its model from settings (an explicit flag wins and is already normalized at the flag).
+ *
+ * @param {string[]} args
+ * @param {{ agent?: string | null, configDir?: string | null, home?: string }} [opts]
+ * @returns {{ from: string | null, to: string } | null}
+ */
+export function normalizeSessionSettingsModelForLaunch(
+  args,
+  { agent = null, configDir = null, home = homedir() } = {},
+) {
+  const normalized = String(agent ?? "").trim().toLowerCase();
+  if (normalized && normalized !== "claude") return null;
+  if (modelSpecFromRecycleArgv(Array.isArray(args) ? args : [])) return null;
+  return normalizeSessionSettingsModel(configDir, { home });
 }
 
 /** Map a plan picker value to the bootstrap-su `plan_slug` (NO_PLAN → null). Pure. */
@@ -4873,7 +5335,10 @@ export function contextTrimmingEnv(agent, env = process.env) {
 export function healContextTrimmingEnv(env, agent = env?.PAPERCUSP_AGENT) {
   const filled = [];
   for (const [k, v] of Object.entries(contextTrimmingEnv(agent))) {
-    if (env[k] === undefined || env[k] === "") {
+    // An empty value counts as absent only when the derived value is not itself
+    // empty: under PAPERCUSP_CLAUDE_FULL_SEED the compact list is legitimately "",
+    // and refilling "" over "" would make the heal report it forever (WI-10005917).
+    if (env[k] === undefined || (env[k] === "" && v !== "")) {
       env[k] = v;
       filled.push(k);
     }
@@ -7584,6 +8049,10 @@ export async function fetchWithResilience(
     resolveFallback = resolveFallbackOperatorTargets,
     onFailover = adoptOperatorTarget,
     healthProbeTimeoutMs = 2_000,
+    // Called once a request has been pending slowNoticeAfterMs; resolves to a
+    // notice to print, or null to stay silent (WI-10006057).
+    slowRequestNotice = slowRequestNoticeOncePerLaunch,
+    slowNoticeAfterMs = SLOW_REQUEST_NOTICE_MS,
   } = {},
 ) {
   // A caller-supplied AbortSignal owns the request lifetime — never retry it.
@@ -7616,11 +8085,29 @@ export async function fetchWithResilience(
   let lastErr;
   for (;;) {
     try {
-      const response = await fetchImpl(url, {
-        ...init,
-        // Without a timeout a wedged operator hangs psu indefinitely. Fail fast.
-        signal: callerSignal ?? AbortSignal.timeout(timeoutMs),
-      });
+      let pending = true;
+      const slowTimer =
+        slowRequestNotice && slowNoticeAfterMs > 0
+          ? setTimeout(() => {
+              Promise.resolve(slowRequestNotice({ url, target }))
+                .then((notice) => {
+                  if (notice && pending) onNotice(notice);
+                })
+                .catch(() => {});
+            }, slowNoticeAfterMs)
+          : null;
+      slowTimer?.unref?.();
+      let response;
+      try {
+        response = await fetchImpl(url, {
+          ...init,
+          // Without a timeout a wedged operator hangs psu indefinitely. Fail fast.
+          signal: callerSignal ?? AbortSignal.timeout(timeoutMs),
+        });
+      } finally {
+        pending = false;
+        if (slowTimer) clearTimeout(slowTimer);
+      }
       if (retryable && isRetryableMcpProxyOverload(response)) {
         const remaining = overloadDeadline - now();
         const retryAfter = response.headers.get("retry-after");
@@ -7757,15 +8244,18 @@ export async function fetchWithResilience(
       `the operator at ${shownUrl} did not respond within ${timeoutMs}ms (${label}). ` +
         (isDesktop
           ? `It may be wedged — restart the Papercusp desktop app, `
-          : `It may be wedged — restart it (systemctl --user restart papercup-dev-api.service), `) +
+          : `It may be wedged — restore that operator through the coordinated dev:restart tool, `) +
         `or raise the cap with PAPERCUSP_PSU_TIMEOUT_MS.`,
     );
   }
   if (target?.source === "env") {
     throw new Error(
-      `the operator URL this shell pins via PAPERCUSP_OPERATOR_URL (${shownUrl}) refused connections for ` +
-        `${Math.ceil(effectiveConnectBudgetMs / 1000)}s. The explicit target was preserved; no other operator was tried. ` +
-        `Restore that operator, or \`unset PAPERCUSP_OPERATOR_URL\` to opt into discovery (~/.papercusp/operator.json).`,
+      withOperatorDownDiagnosis(
+        `the operator URL this shell pins via PAPERCUSP_OPERATOR_URL (${shownUrl}) refused connections for ` +
+          `${Math.ceil(effectiveConnectBudgetMs / 1000)}s. The explicit target was preserved; no other operator was tried. ` +
+          `Restore that operator, or \`unset PAPERCUSP_OPERATOR_URL\` to opt into discovery (~/.papercusp/operator.json).`,
+        { url: shownUrl },
+      ),
     );
   }
   if (isDesktop) {
@@ -7779,8 +8269,11 @@ export async function fetchWithResilience(
     );
   }
   throw new Error(
-    `could not reach the operator at ${shownUrl} after ${Math.ceil(effectiveConnectBudgetMs / 1000)}s (${e?.message || e}). ` +
-      `Is the desktop/operator running? Override with PAPERCUSP_OPERATOR_URL.`,
+    withOperatorDownDiagnosis(
+      `could not reach the operator at ${shownUrl} after ${Math.ceil(effectiveConnectBudgetMs / 1000)}s (${e?.message || e}). ` +
+        `Is the desktop/operator running? Override with PAPERCUSP_OPERATOR_URL.`,
+      { url: shownUrl },
+    ),
   );
 }
 
@@ -7832,7 +8325,13 @@ async function api(path, opts = {}) {
     json = { status: "error", error: text.slice(0, 200) };
   }
   if (!res.ok || json.status === "error") {
-    const failure = new Error(formatApiFailureMessage(json, res.status, path));
+    const message = formatApiFailureMessage(json, res.status, path);
+    // WI-10006057: the proxy's refusal names a port; say which unit is down and why.
+    const failure = new Error(
+      json?.error === "mcp_proxy_upstream_unavailable"
+        ? withOperatorDownDiagnosis(message, { detail: json.detail })
+        : message,
+    );
     failure.status = res.status;
     failure.path = path;
     throw failure;
@@ -8512,7 +9011,14 @@ export function accountPickerChoices(accounts) {
   // against their model's underlying Claude/Codex provider before reaching here.
   const provider = accounts?.provider ?? "claude";
   const showAuto =
+    accounts?.gatewayOn &&
     pool.length > 0 && (provider === "claude" || provider === "codex");
+  // Share the pin admission predicate: a populated provider pool can still
+  // contain ZERO allowed accounts (for example a Codex-only workspace steer
+  // while Claude is selected). Explain that before bootstrap, never switch
+  // providers or silently fall back to the system credential. Usage snapshots
+  // are not this policy check; live gateway preflight owns capacity/credits.
+  const autoAllowed = pool.some((id) => accountPinnable(accounts, id));
   return [
     // ⚠ The value MUST be the LITERAL `system` escape hatch — NEVER null/'' (default-deploy-account
     // -2026-08-08 P-004 D-002). The server's resolveAccountPin reads an UNSPECIFIED account as
@@ -8534,6 +9040,9 @@ export function accountPickerChoices(accounts) {
           {
             name: "· auto — route via the inference gateway (nominated default account first, then failover)",
             value: "auto",
+            disabled: autoAllowed
+              ? false
+              : `(no allowed ${provider} accounts — check workspace account restrictions)`,
           },
         ]
       : []),
@@ -8657,8 +9166,12 @@ async function fetchFleetChoices(workspace) {
  * fleet (D-002). Returns `{ slug, role, name }`: slug+role null for "no fleet";
  * `name` is set only for a freshly-entered new fleet (its title — threaded to the
  * server, which creates the agent_fleets row + re-derives the slug authoritatively).
+ * Exported for tests.
  */
-async function pickFleet(workspace) {
+export async function pickFleet(workspace) {
+  // D-002 rule 2: a hosted customer's psu never joins or creates a fleet.
+  if (isHostedPsuCustomer(process.env))
+    return { slug: null, role: null, name: null, scheme: null };
   const { fleets, nextScheme, schemes } = await fetchFleetChoices(workspace);
   const existing = Array.isArray(fleets) ? fleets : [];
   const NEW = "__new__";
@@ -8943,6 +9456,8 @@ export function identityPickerChoices(page) {
 }
 
 export async function pickIdentity(workspace, harness) {
+  // D-002 rule 2: a hosted customer's psu launches as plain su, the picker's own default.
+  if (isHostedPsuCustomer(process.env)) return { stack: [], selectedIdentityRevision: null };
   const { select } = await import("@inquirer/prompts");
   let after = null;
   for (;;) {
@@ -9240,13 +9755,6 @@ export function claimTtyOwnership(ttyPath, sid, { dir } = {}) {
   } catch {
     /* cosmetic guard — never fail a launch over a claim-file write */
   }
-}
-
-/** The settings.json a claude launch will actually read: the per-session isolated
- *  CLAUDE_CONFIG_DIR when psu pinned one (EI-155), else the shared user-level dir. */
-function effectiveClaudeSettingsPath(env, home = homedir()) {
-  const dir = (env.CLAUDE_CONFIG_DIR ?? "").trim();
-  return join(dir || join(home, ".claude"), "settings.json");
 }
 
 /**
@@ -10503,6 +11011,63 @@ export async function reportSessionRespawned(
   }
 }
 
+// Bumped by every durable respawn report in this process: a retry that sees a
+// newer value stops, so a late retry can never re-anchor the row back to an older id.
+let respawnReportGeneration = 0;
+const RESPAWN_REPORT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 300_000, 600_000];
+const sleepUnref = (ms) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms).unref?.();
+  });
+
+/**
+ * {@link reportSessionRespawned} that keeps retrying in the background until the
+ * operator accepts it (WI-10004917). A single 2s attempt was the only chance the
+ * successor got: one that landed while the operator was restarting left the adv row
+ * naming the predecessor, and no applied identity span ever named the live native id,
+ * so owner-by-native-session oracles read its turns as foreign. Resolves with the
+ * FIRST attempt's verdict without holding up the successor. `onConfirmed` also
+ * notifies a carry announcer when a background retry succeeds; returning the first
+ * failure alone loses that wake. A newer respawn supersedes reports and callbacks.
+ */
+export function reportSessionRespawnedDurably(
+  advSessionId,
+  sessionId,
+  {
+    coordOwnerId = null,
+    reportImpl = reportSessionRespawned,
+    retryDelaysMs = RESPAWN_REPORT_RETRY_DELAYS_MS,
+    sleepImpl = sleepUnref,
+    onConfirmed = (_nativeId) => {},
+  } = {},
+) {
+  if (!sessionId || (!advSessionId && !coordOwnerId)) return Promise.resolve(false);
+  const generation = ++respawnReportGeneration;
+  const attempt = () =>
+    Promise.resolve()
+      .then(() => generation === respawnReportGeneration
+        ? reportImpl(advSessionId, sessionId, { coordOwnerId }) : false)
+      .then((ok) => {
+        if (ok !== true || generation !== respawnReportGeneration) return false;
+        try {
+          void Promise.resolve(onConfirmed(sessionId)).catch(() => {});
+        } catch {
+          /* a notification failure must not invalidate the accepted mapping */
+        }
+        return true;
+      }, () => false);
+  const first = attempt();
+  void first.then(async (ok) => {
+    if (ok || generation !== respawnReportGeneration) return;
+    for (const delayMs of retryDelaysMs) {
+      await sleepImpl(delayMs);
+      if (generation !== respawnReportGeneration) return;
+      if (await attempt()) return;
+    }
+  });
+  return first;
+}
+
 /**
  * Complete a stale-host carry adoption's lifecycle report before announcing
  * `session:compacted`. The detached event wakes members that may immediately
@@ -10510,29 +11075,60 @@ export async function reportSessionRespawned(
  * successor and cleared the predecessor's context estimate. Exported for a
  * deterministic ordering regression test; both operations remain fail-soft.
  */
+/**
+ * EI-23076695727837648: the first turn a host-code-adopting predecessor owed its
+ * successor. The in-process respawn injects it after spawn; an adopting host exits
+ * first, so it travels in the handoff as `firstTurnText`. Returns null when absent,
+ * so a handoff written by an older host keeps the old behaviour (no kickoff).
+ */
+export function handoffFirstTurnText(handoff) {
+  const text = handoff?.firstTurnText;
+  return typeof text === "string" && text.length > 0 ? text : null;
+}
+
+/**
+ * Keep carry adoption explicit even when Codex has not assigned its native id
+ * yet. The successor pty host resolves that late id from exact kickoff proof.
+ */
+export function adoptedCarryRespawnFromHandoff(handoff) {
+  if (handoff?.mode !== "carry-respawn") return null;
+  const nativeId = typeof handoff.nativeId === "string" && handoff.nativeId.trim()
+    ? handoff.nativeId.trim()
+    : null;
+  return { nativeId };
+}
+
 export async function announceAdoptedCarryRespawn(
   ownerId,
   advSessionId,
   nativeId,
   {
-    reportImpl = reportSessionRespawned,
+    reportImpl = reportSessionRespawnedDurably,
     emitImpl = fireSessionCompactedEvent,
   } = {},
 ) {
   if (!ownerId || !nativeId) return false;
+  let announced = false;
+  const announce = () => {
+    if (announced) return;
+    try {
+      emitImpl(ownerId, "carry-respawn", { nativeId });
+      announced = true;
+    } catch {
+      /* a wake announcement must never surface into the successor */
+    }
+  };
   let reported = false;
   try {
-    reported = await reportImpl(advSessionId, nativeId, { coordOwnerId: ownerId });
+    reported = await reportImpl(advSessionId, nativeId, {
+      coordOwnerId: ownerId,
+      onConfirmed: (confirmedId) => { if (confirmedId === nativeId) announce(); },
+    });
   } catch {
     return false;
   }
-  if (!reported) return false;
-  try {
-    emitImpl(ownerId, "carry-respawn", { nativeId });
-  } catch {
-    /* a wake announcement must never surface into the successor */
-  }
-  return true;
+  if (reported) announce();
+  return announced;
 }
 
 /**
@@ -10884,6 +11480,14 @@ export function sanitizeInheritedEnv(env) {
   ]) {
     delete out[key];
   }
+  // P-007 / BAR R-11 (plan personal-data-reader-set-labels-2026-10-01): mail,
+  // chat, calendar and social provider credentials live in the sidecars only.
+  // An agent that inherited one could reach a provider around the gated verbs
+  // that check a restricted document's reader set. The strip is unconditional
+  // because a session becomes restricted mid-run, after its env is fixed.
+  for (const key of Object.keys(out)) {
+    if (isProviderCredentialEnvName(key)) delete out[key];
+  }
   return out;
 }
 
@@ -10898,6 +11502,23 @@ export const CODEX_DIAGNOSTIC_RUST_LOG = "codex_core=info,codex_tui=info";
 
 export function applyCodexDiagnosticEnv(env, agent) {
   if (agent === "codex") env.RUST_LOG = CODEX_DIAGNOSTIC_RUST_LOG;
+  return env;
+}
+
+/**
+ * A headless Codex TUI must never publish an OAuth URL into the owner's desktop
+ * browser. If model or optional plugin auth is unexpectedly unavailable, Codex
+ * can fail visibly in its managed PTY/log, but it cannot open an outward-facing
+ * browser that nobody launched interactively. Applied in runWrapper so fresh,
+ * resume, carry-respawn and host-handoff paths share the same invariant.
+ */
+export function applyHeadlessCodexBrowserPolicy(env) {
+  if (
+    env.PAPERCUSP_AGENT === "codex" &&
+    env.PAPERCUSP_PSU_HEADLESS === "1"
+  ) {
+    env.BROWSER = "false";
+  }
   return env;
 }
 
@@ -11403,6 +12024,7 @@ export function runWrapper(options) {
   // launches keep the guard.
   if (!preserveCwd) cwd = repoCwdOrRedirect(cwd);
   const env = { ...sanitizeInheritedEnv(process.env), ...envelopeEnv };
+  applyHeadlessCodexBrowserPolicy(env);
   const reportPreSpawnFailure = () =>
     onSpawnFailure
       ? onSpawnFailure()
@@ -11536,6 +12158,7 @@ export function runWrapper(options) {
   // self-validating; a null here is the ordinary cold-launch case.
   const hostHandoff =
     initialHostHandoff || (ownerId ? readHostHandoff(ownerId) : null);
+  let adoptedCarryRespawn = null;
   if (hostHandoff) {
     // Use the predecessor's argv VERBATIM. It was minted from an argv that had
     // already been through this launcher's whole normalization pass, so
@@ -11563,37 +12186,32 @@ export function runWrapper(options) {
       process.stderr.write(
         `psu: host handoff carried no ${healedRender.join(", ")} — re-derived from terminalRenderEnv\n`,
       );
-    // The successor's first turn is the carry, delivered through the argv above.
     // A kickoff from THIS process's own command line would be the ORIGINAL
     // launch's first prompt replayed into a session that is many turns past it.
-    kickoff = null;
+    // The argv above carries the carry DOCUMENT only, NOT the successor's first
+    // turn: the predecessor would have injected that turn after spawn, but it
+    // exited to adopt fresh code. So seed the predecessor's first turn instead,
+    // verbatim (it already carries its own turn-origin marker, so it is never
+    // re-tagged as a fleet kickoff). EI-23076695727837648: without this the
+    // successor idled until an unrelated loop fire or wake, up to 48 min.
+    kickoff = handoffFirstTurnText(hostHandoff);
     kickoffFile = null;
     sessionPort = null;
-    if (hostHandoff.nativeId) {
-      // The in-process respawn re-anchors identity through `onRespawn` AFTER
-      // spawning the child; the adopting predecessor exits before it ever gets
-      // there, so the successor owes both halves of that hook. Skipping the
-      // second one is the P-018 successor-kill loop: adv_sessions keeps naming
-      // the predecessor's native id, and the compaction watchdog then reaps a
-      // session that is very much alive.
+    adoptedCarryRespawn = adoptedCarryRespawnFromHandoff(hostHandoff);
+    if (!adoptedCarryRespawn && hostHandoff.nativeId) {
+      // Non-carry handoffs with a known native id retain the immediate mapping
+      // repair. Carry handoffs wait for the successor's exact first-turn proof
+      // before reporting, so a late Codex id is not skipped.
       recordSessionOwner(hostHandoff.nativeId, ownerId, {
         advSessionId: env.PAPERCUSP_ADV_SESSION_ID || null,
       });
-      if (hostHandoff.mode === "carry-respawn") {
-        void announceAdoptedCarryRespawn(
-          ownerId,
-          env.PAPERCUSP_ADV_SESSION_ID || null,
-          hostHandoff.nativeId,
-        );
-      } else {
-        void reportSessionRespawned(
-          env.PAPERCUSP_ADV_SESSION_ID || null,
-          hostHandoff.nativeId,
-          {
-            coordOwnerId: ownerId,
-          },
-        );
-      }
+      void reportSessionRespawnedDurably(
+        env.PAPERCUSP_ADV_SESSION_ID || null,
+        hostHandoff.nativeId,
+        {
+          coordOwnerId: ownerId,
+        },
+      );
     }
     process.stderr.write(
       `psu: adopted updated host code for ${ownerId} (predecessor pid ${hostHandoff.fromPid ?? "?"}, ` +
@@ -11603,8 +12221,42 @@ export function runWrapper(options) {
   // EI-203876: stamp Codex's diagnostic filter after host-handoff env overlay,
   // so a successor cannot inherit a predecessor's missing/stale RUST_LOG.
   applyCodexDiagnosticEnv(env, env.PAPERCUSP_AGENT);
-  if (ownerId && usePtyHost({ env })) {
+  // WI-10006049: a model-less Claude launch (fresh, `psu --resume`, or host adoption) reads its
+  // model from the session settings — upgrade a saved 200k `/model` menu pick to the same family's
+  // 1M twin before the CLI boots. The respawn mints below repeat this per successor.
+  const launchModelFix = normalizeSessionSettingsModelForLaunch(args, {
+    agent: env.PAPERCUSP_AGENT,
+    configDir: env.CLAUDE_CONFIG_DIR || null,
+  });
+  if (launchModelFix) {
+    process.stderr.write(
+      `psu: session model ${launchModelFix.from ?? "(default)"} → ${launchModelFix.to} (1M default, WI-10006049)\n`,
+    );
+  }
+  const managedPtyEnabled = Boolean(ownerId && usePtyHost({ env }));
+  if (adoptedCarryRespawn) {
+    const handoffFirstTurn = hostHandoff?.firstTurnText;
+    appendHostEvent(ownerId, "host-code-adoption-launch-prepared", {
+      mode: hostHandoff?.mode ?? null,
+      nativeId: adoptedCarryRespawn.nativeId ?? null,
+      firstTurnPresent:
+        typeof handoffFirstTurn === "string" && handoffFirstTurn.length > 0,
+      firstTurnBytes:
+        typeof handoffFirstTurn === "string"
+          ? Buffer.byteLength(handoffFirstTurn, "utf8")
+          : 0,
+      kickoffPresent: typeof kickoff === "string" && kickoff.length > 0,
+      kickoffBytes:
+        typeof kickoff === "string" ? Buffer.byteLength(kickoff, "utf8") : 0,
+      argsCount: Array.isArray(args) ? args.length : null,
+      managedPtyEnabled,
+    });
+  }
+  if (managedPtyEnabled) {
     try {
+      // A restore can immediately carry before its first native turn. Keep its
+      // requested model until a turn from this launcher confirms a user change.
+      const modelObservationNotBeforeMs = Date.now();
       hostThroughPty({
         command: wrapperBin,
         args,
@@ -11629,7 +12281,14 @@ export function runWrapper(options) {
         // to read is the one named by the argv being replaced) and is
         // fail-soft: a null keeps the inherited spec. An explicit `model` from
         // the host still wins, so this can never fight a deliberate caller.
+        // WI-10006049: each respawn of a model-less Claude session first upgrades a `/model`
+        // menu save in its settings to the 1M twin (normalizeSessionSettingsModel); the mint
+        // itself is unchanged.
         mintRecycleArgs: (a, o = {}) =>
+          (normalizeSessionSettingsModelForLaunch(a, {
+            agent: env.PAPERCUSP_AGENT,
+            configDir: env.CLAUDE_CONFIG_DIR || null,
+          }),
           mintRecycleArgs(a, {
             ...o,
             model:
@@ -11639,11 +12298,16 @@ export function runWrapper(options) {
                 agent: env.PAPERCUSP_AGENT,
                 configDir: env.CLAUDE_CONFIG_DIR || null,
                 codexHome: env.CODEX_HOME || null,
-                advSessionId: env.PAPERCUSP_ADV_SESSION_ID || advSessionId || null,
+                advSessionId: env.PAPERCUSP_ADV_SESSION_ID || null,
                 modelSource: env.PAPERCUSP_MODEL_SOURCE || null,
+                notBeforeMs: modelObservationNotBeforeMs,
               }),
-          }),
+          })),
         mintCarryRespawnArgs: (a, o = {}) =>
+          (normalizeSessionSettingsModelForLaunch(a, {
+            agent: o.agent ?? env.PAPERCUSP_AGENT,
+            configDir: env.CLAUDE_CONFIG_DIR || null,
+          }),
           mintCarryRespawnArgs(a, {
             ...o,
             model:
@@ -11653,27 +12317,37 @@ export function runWrapper(options) {
                 agent: o.agent ?? env.PAPERCUSP_AGENT,
                 configDir: env.CLAUDE_CONFIG_DIR || null,
                 codexHome: env.CODEX_HOME || null,
-                advSessionId: env.PAPERCUSP_ADV_SESSION_ID || advSessionId || null,
+                advSessionId: env.PAPERCUSP_ADV_SESSION_ID || null,
                 modelSource: env.PAPERCUSP_MODEL_SOURCE || null,
+                notBeforeMs: modelObservationNotBeforeMs,
               }),
-          }),
+          })),
+        // psu-process-free-parking-2026-10-06 P-017: the host parks an idle
+        // Claude child and resumes it on this argv (same session id, same
+        // persona file, no kickoff). Injected like the other mints so the host
+        // stays launcher-agnostic; without it the host never parks.
+        mintParkResumeArgs: (a, o = {}) =>
+          mintParkResumeArgs(a, { agent: o.agent ?? env.PAPERCUSP_AGENT, nativeId: o.nativeId ?? null }),
         ensureCodexHome: () =>
           ensureCodexHomeViaOperator(
             ownerId,
             env.CODEX_HOME || null,
-            env.PAPERCUSP_ADV_SESSION_ID || advSessionId || null,
+            env.PAPERCUSP_ADV_SESSION_ID || null,
             {
               model: detectRespawnModelSpec(args, {
                 ownerId,
                 agent: env.PAPERCUSP_AGENT,
                 configDir: env.CLAUDE_CONFIG_DIR || null,
                 codexHome: env.CODEX_HOME || null,
-                advSessionId: env.PAPERCUSP_ADV_SESSION_ID || advSessionId || null,
+                advSessionId: env.PAPERCUSP_ADV_SESSION_ID || null,
                 modelSource: env.PAPERCUSP_MODEL_SOURCE || null,
+                includeInherited: true,
+                notBeforeMs: modelObservationNotBeforeMs,
               }),
               routeMode: env[ACCOUNT_ROUTING_MODE_ENV] || null,
               accountId: env.PAPERCUSP_ACCOUNT_ID || null,
               priority: env.PAPERCUSP_AGENT_ROLE || "su",
+              headless: env.PAPERCUSP_PSU_HEADLESS === "1",
             },
           ),
         // stale-prompt-render-in-live-sessions-2026-08-02 P-002: a respawn must
@@ -11694,9 +12368,15 @@ export function runWrapper(options) {
         // the target backend's native transcript.
         kickoffFile,
         sessionPort,
+        adoptedCarryRespawn,
         onKickoffPersisted: (proof) =>
           reportSessionPortDelivery(sessionPort, proof),
-        onRespawn: (freshId) => {
+        // Codex chooses its id at startup, before it persists a user turn.
+        // Read the existing writer lock and accept only this PTY's process tree.
+        resolveRespawnNativeId: env.PAPERCUSP_AGENT === "codex" && process.platform === "linux"
+          ? (pid) => codexNativeIdForPty(env.CODEX_HOME, pid)
+          : null,
+        onRespawn: (freshId, { onConfirmed } = {}) => {
           recordSessionOwner(freshId, ownerId, {
             advSessionId: env.PAPERCUSP_ADV_SESSION_ID || null,
           });
@@ -11706,11 +12386,13 @@ export function runWrapper(options) {
           // adv_sessions.session_id, which otherwise keeps naming the dead
           // predecessor — the P-018 successor-kill loop. coordOwnerId rides along
           // so an interactive/resumed launch (no adv id in env) re-anchors too.
-          return reportSessionRespawned(
+          // WI-10004917: durable — a report lost to an operator restart is retried.
+          return reportSessionRespawnedDurably(
             env.PAPERCUSP_ADV_SESSION_ID || null,
             freshId,
             {
               coordOwnerId: ownerId,
+              onConfirmed,
             },
           );
         },
@@ -11958,11 +12640,18 @@ export function codexThreadWriterLockPath(codexHome, sessionId) {
   return join(codexHome, "thread-writer-locks", `${sessionId}.lock`);
 }
 
+export function codexThreadWriterStatErrorCode(error) {
+  const code = error && typeof error === "object" && typeof error.code === "string"
+    ? error.code
+    : "unknown";
+  return /^[A-Z0-9_]{1,32}$/.test(code) ? code : "unknown";
+}
+
 const readProcLocksText = () => readFileSync("/proc/locks", "utf8");
 
 /**
  * Is a codex thread currently open by a live writer?
- * `{ held, pid, lockPath, sessionId, reason }` — fail-open on every error path.
+ * `{ held, pid, lockPath, sessionId, reason, statErrorCodes? }` — fail-open on every error path.
  *
  * `sessionId` null ⇒ scan the whole home. psu resumes a tracked row with no
  * recorded native id as `resume --last`, which lands on the home's most recent
@@ -11972,6 +12661,10 @@ const readProcLocksText = () => readFileSync("/proc/locks", "utf8");
  * carry-respawn mints a new uuid, and adv row #18052 still recorded 01a036a4-…
  * while 01a038ff-… was the live thread.
  * Pure apart from the injected readers — exported for tests.
+ * @param {string | null | undefined} codexHome
+ * @param {string | null} sessionId
+ * @param {{readProcLocks?: () => string, statFile?: typeof statSync,
+ * listDir?: typeof safeReaddir, holderPid?: number | null}} [options]
  */
 export function codexThreadWriterHolder(
   codexHome,
@@ -11980,14 +12673,16 @@ export function codexThreadWriterHolder(
     readProcLocks = readProcLocksText,
     statFile = statSync,
     listDir = safeReaddir,
+    holderPid = null,
   } = {},
 ) {
-  const miss = (reason, lockPath = null) => ({
+  const miss = (reason, lockPath = null, statErrorCodes = []) => ({
     held: false,
     pid: null,
     lockPath,
     sessionId: null,
     reason,
+    ...(statErrorCodes.length ? { statErrorCodes } : {}),
   });
   if (!codexHome) return miss("no-home");
   let procLocks;
@@ -12019,11 +12714,13 @@ export function codexThreadWriterHolder(
   // so they must not be conflated. Only a candidate we could actually stat proves
   // a lock file exists.
   let sawLockFile = false;
+  const statErrorCodes = [];
   for (const c of candidates) {
     let st;
     try {
       st = statFile(c.lockPath);
-    } catch {
+    } catch (error) {
+      statErrorCodes.push(codexThreadWriterStatErrorCode(error));
       continue; // never opened, or already cleaned up
     }
     sawLockFile = true;
@@ -12033,18 +12730,24 @@ export function codexThreadWriterHolder(
       minor,
       inode: st.ino,
     });
-    if (pid)
+    if (pid && (holderPid == null || pid === holderPid))
       return {
         held: true,
         pid,
         lockPath: c.lockPath,
         sessionId: c.sessionId,
         reason: "held",
+        ...(statErrorCodes.length ? { statErrorCodes } : {}),
       };
   }
+  const nonMissingStatError = statErrorCodes.find((code) => code !== "ENOENT");
+  const reason = nonMissingStatError
+    ? "stat-error-" + nonMissingStatError
+    : sawLockFile ? "free" : "no-lock-file";
   return miss(
-    sawLockFile ? "free" : "no-lock-file",
+    reason,
     candidates[0]?.lockPath ?? null,
+    statErrorCodes,
   );
 }
 
@@ -12125,6 +12828,29 @@ export function procAncestorPids(
 }
 
 const readProcStatText = (pid) => readFileSync(`/proc/${pid}/stat`, "utf8");
+
+/** The startup native id of THIS PTY, never a sibling/nested writer in its home.
+ * Reuses Codex's writer-lock oracle and the existing native-process reader.
+ * @param {string | undefined} codexHome
+ * @param {number} ptyPid
+ * @param {{readHolder?: typeof codexThreadWriterHolder, readStartupPid?: typeof resolveLinuxCodexStartupPid}} [options]
+ */
+export function codexNativeIdForPty(codexHome, ptyPid, {
+  readHolder = codexThreadWriterHolder,
+  readStartupPid = resolveLinuxCodexStartupPid,
+} = {}) {
+  if (!Number.isSafeInteger(ptyPid) || ptyPid <= 0) return null;
+  try {
+    const nativePid = readStartupPid(ptyPid);
+    if (!nativePid) return null;
+    const holder = readHolder(codexHome, null, { holderPid: nativePid });
+    if (!holder.held || !holder.sessionId || !holder.pid) return null;
+    if (holder.pid !== nativePid) return null;
+    return holder.sessionId;
+  } catch {
+    return null;
+  }
+}
 const readProcCmdlineText = (pid) =>
   readFileSync(`/proc/${pid}/cmdline`, "utf8");
 
@@ -12135,8 +12861,10 @@ const readProcCmdlineText = (pid) =>
  * BACKEND-NEUTRAL by construction, and used by two of them: the caller supplies
  * whichever id its resume actually puts on the command line — claude's
  * `--resume <session_id>` or omp's `-r <omp_thread_id>` (resumeArgsFor). It asks
- * only "is this string in a live argv", so nothing here knows or cares which
- * backend it is serving.
+ * only "is this an exact identity argument in a live argv", so nothing here
+ * knows or cares which backend it is serving. Embedded request/prompt text is
+ * not an identity argument: a remote ptool caller is outside this launcher's
+ * ancestor chain, but its shell command can still contain the resume JSON.
  * `{ held, pid, cmdline, reason }` — fail-CLOSED: `held` is false ONLY on a
  * complete, successful scan that found nothing.
  *
@@ -12154,14 +12882,23 @@ export function sessionProcessHolder(
     selfPid = process.pid,
   } = {},
 ) {
-  const miss = (reason) => ({ held: false, pid: null, cmdline: null, reason });
+  const miss = (reason, error) => ({
+    held: false,
+    pid: null,
+    cmdline: null,
+    reason,
+    ...(error ? { error } : {}),
+  });
   const id = String(sessionId ?? "").trim();
   if (!id) return miss("no-session-id");
   let pids;
   try {
     pids = listProcPids();
-  } catch {
-    return miss("no-proc");
+  } catch (error) {
+    // Keep WHY the listing failed: a bare "no-proc" cost a day of guessing
+    // (EI-24661719545676832). Only an errno-shaped token, never a message.
+    const code = error?.code;
+    return miss("no-proc", typeof code === "string" && /^E[A-Z0-9]+$/.test(code) ? code : undefined);
   }
   if (!Array.isArray(pids) || pids.length === 0) return miss("scan-empty");
   const excluded = procAncestorPids(selfPid, { readStat });
@@ -12177,6 +12914,19 @@ export function sessionProcessHolder(
       continue;
     }
     if (!cmdline || !cmdline.includes(id)) continue;
+    // /proc preserves argv boundaries with NULs. Never split a shell's single
+    // `-c` argument into words: doing so turns incidental request text into a
+    // fictitious writer. The whitespace form supports injected text readers.
+    const argv = cmdline.includes("\0")
+      ? cmdline.split("\0")
+      : cmdline.trim().split(/\s+/);
+    const namesSession = argv.some((arg) =>
+      arg === id ||
+      arg === `--resume=${id}` ||
+      arg === `--session-id=${id}` ||
+      arg === `-r=${id}`,
+    );
+    if (!namesSession) continue;
     return {
       held: true,
       pid,
@@ -12187,16 +12937,27 @@ export function sessionProcessHolder(
   return miss("clean-scan");
 }
 
-/** Numeric pid entries under `/proc`. Exported for tests via the injectable. */
-function defaultListProcPids() {
+/**
+ * Numeric pid entries under `/proc`, by NAME only. Never `withFileTypes`: Node
+ * then lstat()s entries, and a pid that exits between getdents() and that
+ * lstat() throws ENOENT for the WHOLE listing (measured 2026-09-30: 9 of 5,740
+ * scans at load ~90). Resume scans right after an engine exits, when that race
+ * is likeliest, so it surfaced as `probe=no-proc` refusals of a recoverable
+ * session (EI-24661719545676832). Throws, with the errno, when the listing
+ * itself fails. Exported for tests.
+ * @param {{ readdir?: (path: string) => string[] }} [options]
+ * @returns {number[]}
+ */
+export function listProcPids({ readdir = readdirSync } = {}) {
   const out = [];
-  for (const entry of safeReaddir("/proc")) {
-    const name = typeof entry === "string" ? entry : entry?.name;
-    if (!name || !/^\d+$/.test(name)) continue;
-    out.push(Number(name));
+  for (const name of readdir("/proc")) {
+    if (typeof name === "string" && /^\d+$/.test(name)) out.push(Number(name));
   }
   if (out.length === 0) throw new Error("/proc listed no pids");
   return out;
+}
+function defaultListProcPids() {
+  return listProcPids();
 }
 
 /**
@@ -12410,6 +13171,7 @@ async function launchResume(
   {
     brain = false,
     fork = false,
+    headless = false,
     passthrough = [],
     addDir = [],
     accountEnv = null,
@@ -12636,7 +13398,12 @@ async function launchResume(
     // agent-session marker arms the hook-level scheduler guard (bash gate / omp
     // coord-hook) for the brain only — never the owner's own sessions (D-003).
     const env = buildResumeEnv(session, { fork, brain, accountEnv, ownerId });
-    const restoredClaudeToolRefs = addClaudeResumeToolReferencesToEnv(session, env);
+    const restoredClaudeToolRefs = addClaudeResumeToolReferencesToEnv(session, env, { neutralizeNative: !fork });
+    if (restoredClaudeToolRefs.nativeNeutralized?.rewritten > 0) {
+      console.error(
+        `psu: dropped ${restoredClaudeToolRefs.nativeNeutralized.rewritten} native deferred tool reference(s) (${restoredClaudeToolRefs.nativeNeutralized.toolNames.join(", ")}) so this Claude resume does not 400 on replay.`,
+      );
+    }
     if (restoredClaudeToolRefs.restored > 0) {
       console.error(
         `psu: restored ${restoredClaudeToolRefs.restored} deferred Papercusp tool reference(s) for this Claude resume.`,
@@ -12783,6 +13550,7 @@ async function launchResume(
         {
           requireGatewayProvider: boundProvider === CODEX_GATEWAY_PROVIDER_ID,
           model: resumeModel || lastActiveModelFor(session) || null,
+          headless,
         },
       );
       // An exact resume reuses an older per-session CODEX_HOME. If that home
@@ -12829,6 +13597,10 @@ async function launchResume(
       allowSubagents,
       model: resumeModel,
       personaFile,
+      // WI-10005900: the effort this resume would inherit from its (isolated)
+      // settings.json, so an Opus 5 `xhigh` written there is clamped to `max`.
+      claudeSettings:
+        session.agent === "claude" ? readClaudeLaunchSettings(env) : null,
     });
     if (brain && session.agent === "claude")
       args.push(NATIVE_SCHEDULER_DENY_FLAG);
@@ -12922,7 +13694,21 @@ export function forkBootstrapBody(
   account = null,
   launchMode = null,
   ownerId = null,
+  launchArgs = null,
 ) {
+  // A fork bootstraps a fresh row, but its provenance is the actual resume/fork
+  // invocation. Reuse the normal launch record so the parent, owner pin and
+  // headless discriminator survive bootstrap and session:end can recognize an
+  // agent-launched child. Calls without launch args retain the legacy body.
+  const launchArgv = launchArgs ? psuLaunchArgvRecord({
+    agent: "claude", workspace: session.workspaceId || null,
+    harness: null, plan: session.planSlug || null,
+  }, {
+    ...launchArgs, sessionPortSourceAdvSessionId: null,
+    ownerId: ownerId || launchArgs.ownerId || null,
+    account: account || launchArgs.account || null,
+  }) : null;
+  if (launchArgv) launchArgv.splice(2, 0, `--resume=${session.sessionId}`, "--fork");
   return {
     agent: "claude",
     workspace: session.workspaceId || null,
@@ -12935,6 +13721,9 @@ export function forkBootstrapBody(
     // must name its responder BEFORE the answering session boots, so it pins the
     // id here and bootstrap-su adopts it exactly as on a fresh --owner-id launch.
     ...(ownerId ? { owner_id: ownerId } : {}),
+    ...(launchArgv ? { launch_argv: launchArgv } : {}),
+    ...(launchArgs?.launchedBy ? { launched_by: launchArgs.launchedBy } : {}),
+    ...(launchArgs?.headless ? { headless: true } : {}),
     // A tracked fork mints a fresh session, so the gateway account pin is folded
     // server-side (resolveAccountPin) into the new launch envelope — the same path
     // a fresh psu launch takes. Omitted → no `account` key (byte-identical).
@@ -13132,7 +13921,11 @@ export function psuLaunchArgvRecord(selections, args, { brain = false } = {}) {
 export function freshSuBootstrapBody(
   selections,
   args,
-  { brain = false, bootstrapIdempotencyKey = null } = {},
+  {
+    brain = false,
+    bootstrapIdempotencyKey = null,
+    mcpBaseUrl = OPERATOR_TARGET.url,
+  } = {},
 ) {
   bootstrapIdempotencyKey ||= args.bootstrapIdempotencyKey || null;
   const launchMode = launchModeFromArgs(args);
@@ -13154,6 +13947,11 @@ export function freshSuBootstrapBody(
     workspace: selections.workspace,
     harness_slug: selections.harness,
     plan_slug: selections.plan,
+    // Codex writes this base into its per-session MCP config. Keep it separate
+    // from the bootstrap request origin, which the server uses for control-plane env.
+    ...(selections.agent === "codex" && mcpBaseUrl
+      ? { mcp_base_url: mcpBaseUrl }
+      : {}),
     // WI-41363: stable across every fetchWithResilience replay of THIS launch.
     // bootstrap-su caches the completed response under the existing agent-launch
     // ledger, so an upstream-silent 502 can be retried without minting a second
@@ -13241,6 +14039,8 @@ export function roleBootstrapBody({
   role,
   agent,
   ownerId,
+  launchedBy,
+  bootstrapIdempotencyKey,
   workspace,
   harness,
   feature,
@@ -13270,6 +14070,10 @@ export function roleBootstrapBody({
     feature,
     plan,
     ...(ownerId ? { owner_id: ownerId } : {}),
+    ...(launchedBy ? { launched_by: launchedBy } : {}),
+    ...(bootstrapIdempotencyKey
+      ? { bootstrap_idempotency_key: bootstrapIdempotencyKey }
+      : {}),
     ...(account ? { account } : {}),
     ...(effectiveModel ? { model: effectiveModel } : {}),
     ...(codexSelection ? { model_source: codexSelection.source } : {}),
@@ -13387,6 +14191,7 @@ export async function launchTrackedFork(
   // side via accountEnv (it never hits bootstrap-su).
   const forkOpts = {
     fork: true,
+    headless: args.headless === true,
     passthrough: args.passthrough,
     addDir: args.addDir,
     accountEnv: forkFallbackAccountRoute(acct),
@@ -13429,6 +14234,7 @@ export async function launchTrackedFork(
           acct?.forward ?? acct?.id ?? null,
           launchModeFromArgs(args),
           args.ownerId || null,
+          { ...args, model: model || args.model || null },
         ),
       ),
     });
@@ -13461,6 +14267,20 @@ export async function launchTrackedFork(
       `psu: could not seed the fork transcript (${e?.message ?? e}) — continuing; claude --resume may not find the original.`,
     );
   }
+  // WI-10005612: the fork advertises its OWN tool set (headless, its own deny
+  // list and seed), so a tool_reference the source loaded can be absent here and
+  // the provider 400s the fork's first request. Drop them from the fork's seeded
+  // COPY only; the original transcript is untouched.
+  try {
+    const neutralized = neutralizeForkSeedToolReferences(dst, session.sessionId);
+    if (neutralized.rewritten > 0) {
+      console.error(
+        `psu: removed ${neutralized.rewritten} inherited tool reference(s) from the fork seed (${neutralized.toolNames.slice(0, 8).join(", ")}).`,
+      );
+    }
+  } catch (e) {
+    console.error(`psu: could not neutralize inherited tool references in the fork seed (${e?.message ?? e}).`);
+  }
   // Resume the ORIGINAL's id, fork into the FORCED fork id. No playbook turn is
   // re-injected, but the fork's OWN render rides in argv (EI-24628537598753105):
   // without it the first fresh conversation of this process boots stock.
@@ -13471,6 +14291,10 @@ export async function launchTrackedFork(
     allowSubagents: args.allowSubagents,
     model,
     personaFile: res.promptFile || null,
+    claudeSettings: readClaudeLaunchSettings({
+      ...process.env,
+      ...(res?.envelopeEnv ?? {}),
+    }),
   });
   if (args.passthrough?.length) forkArgs.push(...args.passthrough);
   console.error(
@@ -13739,20 +14563,13 @@ export function resolveResumeTarget(session, args = {}, selected = {}) {
   }
   const pair = validateAgentModelPair(targetAgent, modelSpec);
   if (!pair.ok) throw new Error(pair.message);
-  const operation = targetAgent === sourceAgent ? "native" : "port";
+  const isolatedOwner = args.ownerId && args.ownerId !== session.coordOwnerId && !args.fork;
+  const operation = targetAgent === sourceAgent && !isolatedOwner ? "native" : "port";
   if (operation === "port") {
     if (args.fork)
       throw new Error(
         "--fork is a native same-backend operation and cannot be combined with a session port",
       );
-    if (
-      sourceAgent !== "claude" ||
-      (targetAgent !== "codex" && targetAgent !== "omp")
-    ) {
-      throw new Error(
-        `session-port protocol v1 supports tracked plain Claude → Codex/OMP only (got ${sourceAgent} → ${targetAgent})`,
-      );
-    }
   }
   return {
     operation,
@@ -13825,6 +14642,10 @@ export function sessionPortRequestBody(source, target, account, args = {}) {
       "cross-backend resume requires the tracked source coordination identity",
     );
   }
+  const isolatedOwner = args.ownerId && args.ownerId !== source.coordOwnerId ? args.ownerId : null;
+  if (isolatedOwner && !/^su-[A-Za-z0-9][A-Za-z0-9._-]{5,118}$/.test(isolatedOwner)) {
+    throw new Error("isolated target owner must be a valid distinct su coordination identity");
+  }
   let consultEvidenceSpan = args.consultEvidenceSpan ?? null;
   if (consultEvidenceSpan == null && process.env.PAPERCUSP_CONSULT_EVIDENCE_SPAN) {
     try {
@@ -13843,6 +14664,7 @@ export function sessionPortRequestBody(source, target, account, args = {}) {
     targetBackend: target.targetAgent,
     targetModel: target.modelSpec,
     targetAccount: sessionPortTargetAccount(account),
+    ...(isolatedOwner ? { targetOwnerId: isolatedOwner } : {}),
     contextSize: args.contextSize ?? null,
     launchContext: args.launchContext ?? null,
     currentInstruction: resumeKickoffText(args),
@@ -14396,7 +15218,7 @@ export function isCodexHomeLaunchReady(codexHome, expectedOwner = null) {
  * @param {string | null} owner
  * @param {string | null} codexHome
  * @param {string | number | null} advSessionId
- * @param {{requireGatewayProvider?: boolean, model?: string | null, routeMode?: string | null, accountId?: string | null, priority?: string | null, fetchImpl?: (...args: any[]) => Promise<any>, operatorUrl?: string, env?: NodeJS.ProcessEnv, probe?: typeof probeOmpOperatorMcp, onRecovery?: Function, token?: string | null, timeoutMs?: number}} options
+ * @param {{requireGatewayProvider?: boolean, model?: string | null, headless?: boolean, routeMode?: string | null, accountId?: string | null, priority?: string | null, fetchImpl?: (...args: any[]) => Promise<any>, operatorUrl?: string, env?: NodeJS.ProcessEnv, probe?: typeof probeOmpOperatorMcp, onRecovery?: Function, token?: string | null, timeoutMs?: number}} options
  */
 export async function ensureCodexHomeViaOperator(
   owner,
@@ -14405,6 +15227,7 @@ export async function ensureCodexHomeViaOperator(
   {
     requireGatewayProvider = false,
     model = null,
+    headless = null,
     routeMode = null,
     accountId = null,
     priority = null,
@@ -14453,6 +15276,7 @@ export async function ensureCodexHomeViaOperator(
           advSessionId,
           requireGatewayProvider,
           ...(model ? { model } : {}),
+          ...(typeof headless === "boolean" ? { headless } : {}),
         }),
       },
     );
@@ -14519,8 +15343,8 @@ export function sessionPortTargetArgs(source, target, account, args, prepared) {
     // consult convert died at boot that way (WI-10003858).
     kickoff: false,
     kickoffPromptText: null,
-    launchedBy: null,
-    ownerId: source.coordOwnerId,
+    launchedBy: args.ownerId && args.ownerId !== source.coordOwnerId ? args.launchedBy ?? null : null,
+    ownerId: args.ownerId || source.coordOwnerId,
     resumeSession: null,
     sessionPortProtocol: SESSION_PORT_PROTOCOL_VERSION,
     sessionPortTransformVersion: SESSION_PORT_TRANSFORM_VERSION,
@@ -14693,6 +15517,7 @@ async function launchResolvedResume(source, args, { tracked }) {
   }
   await launchResume(source, {
     fork: args.fork,
+    headless: args.headless === true,
     passthrough: args.passthrough,
     addDir: args.addDir,
     accountEnv: account,
@@ -14723,7 +15548,7 @@ async function resumeFlow(args = {}) {
     //    id (OMP), or discovered rollout UUID in the tracked CODEX_HOME
     //    (Codex). Resuming by any handle finds the tracked row with NO false
     //    "not started by psu" warning.
-    const tracked = resolveTrackedResumeSession(sessions, args.resumeId);
+    const tracked = await resolveDirectTrackedResumeSession(sessions, args.resumeId);
     if (tracked) {
       // A tracked row alone doesn't prove resumability — a launch that died
       // (or was closed) before its first persisted message has NO transcript,
@@ -15045,6 +15870,9 @@ async function roleFlow(args, role, rolesMeta) {
   if (!(await preflightCodexAutoPool({ agent, model: args.model, account })))
     process.exit(WALLED_POOL_REFUSAL_EXIT);
 
+  // One logical launch owns one key. fetchWithResilience reuses this exact body
+  // for every bounded bootstrap retry, allowing the route to replay its receipt.
+  const bootstrapIdempotencyKey = randomUUID();
   const res = await api("/api/agent-mcp/console/bootstrap-role", {
     method: "POST",
     body: JSON.stringify(
@@ -15052,6 +15880,8 @@ async function roleFlow(args, role, rolesMeta) {
         role,
         agent,
         ownerId: args.ownerId,
+        launchedBy: args.launchedBy,
+        bootstrapIdempotencyKey,
         workspace,
         harness,
         feature,
@@ -15067,6 +15897,7 @@ async function roleFlow(args, role, rolesMeta) {
         stack: args.stack,
       }),
     ),
+    retryBootstrapFailures: true,
   });
   // WI-1408 (fleet-join-startup-assertion): a requested fleet must have actually
   // registered — see assertFleetJoined's doc comment.
@@ -15115,6 +15946,11 @@ async function roleFlow(args, role, rolesMeta) {
     nativeSessionId: res.envelopeEnv?.PAPERCUSP_NATIVE_SESSION_ID || null,
     // Subagent-launch deny is DEFAULT-ON; `--allow-subagents` (or the picker) opts in.
     allowSubagents: args.allowSubagents,
+    // WI-10005900: clamp an unsupported effortLevel the role would inherit.
+    claudeSettings:
+      res.agent === "claude"
+        ? readClaudeLaunchSettings({ ...process.env, ...(res.envelopeEnv ?? {}) })
+        : null,
     // P-021/D-013: may this omp session KEEP its native `lsp` builtin? bootstrap-role
     // resolves FLAGS.OMP_NATIVE_LSP_BUILTIN *and* the local-model tier gate
     // server-side and threads the answer here. Absent ⇒ strip, byte-identical to
@@ -15391,18 +16227,25 @@ function runInstallerInherit(spec) {
  * it's usable (already present, or installed here + made resolvable), false when the
  * user declined or it didn't land — the caller then aborts the launch. Non-interactive
  * (scripted / non-TTY) launches never prompt; they fail with guidance instead.
+ * Exported for tests; `detect` is injectable so a test can stage a missing backend.
  */
-async function ensureBackendInstalled(
+export async function ensureBackendInstalled(
   agent,
-  { interactive = Boolean(process.stdout.isTTY) } = {},
+  { interactive = Boolean(process.stdout.isTTY), detect = detectBackendBin } = {},
 ) {
-  const present = detectBackendBin(agent);
+  const present = detect(agent);
   if (present) {
     if (!present.onPath) ensureDirOnPath(present.path);
     return true;
   }
   const label = AGENT_LABELS[agent] ?? agent;
   console.error(`psu: the ${label} backend (\`${agent}\`) is not installed.`);
+  // D-002 rule 2: never offered on a hosted customer's psu — the installer would run as the
+  // service user. The customer toolchain is the root-owned one the host image carries (D-423).
+  if (isHostedPsuCustomer(process.env)) {
+    console.error(`psu: this cloud workspace's agent toolchain has no ${label}; choose another agent with --agent.`);
+    return false;
+  }
   if (!interactive) {
     console.error(
       "psu: install it with `papercusp setup` (or run psu interactively to be prompted), then re-run.",
@@ -15651,7 +16494,22 @@ async function main() {
   // even the connection front controller: a remote-profile lookup or transport
   // bootstrap must not become an accidental prerequisite during an outage.
   const rawArgv = process.argv.slice(2);
-  if (rawArgv.includes("--version") || rawArgv.includes("-V")) {
+  const hostReexecExitCode = reexecExitCodeFrom(process.env);
+  const isHostAdoptionReexec = hostReexecExitCode != null;
+  const adoptionOwnerId = process.env.PAPERCUSP_SID || null;
+  // D-002 rule 4: a psu the workspace host started for a customer runs as the service user, so
+  // it admits only the host's allowlist, checked again here in case a host let a flag through.
+  // It also never reaches the connection front controller: it is already where it runs.
+  const hostedCustomer = isHostedPsuCustomer(process.env);
+  if (hostedCustomer) {
+    const checked = parseHostedPsuCustomerArgv(rawArgv);
+    if (!checked.ok) {
+      console.error(`psu: this cloud workspace does not accept these arguments (${checked.reason}).`);
+      process.exitCode = 2;
+      return;
+    }
+  }
+  if (!hostedCustomer && (rawArgv.includes("--version") || rawArgv.includes("-V"))) {
     const versionArgs = parseArgs(rawArgv);
     if (versionArgs.version) {
       process.stdout.write(`psu ${psuClientVersion()}\n`);
@@ -15662,9 +16520,37 @@ async function main() {
     const recoveryArgs = parseArgs(rawArgv);
     if (await recoveryFlow(recoveryArgs, { rawArgv })) return;
   }
-  const connection = await runPsuConnectionFrontController(
-    rawArgv,
-  );
+  const frontControllerStartedAt = Date.now();
+  if (isHostAdoptionReexec && adoptionOwnerId) {
+    appendHostEvent(adoptionOwnerId, "host-code-adoption-front-controller-started", {
+      reexecExitCode: hostReexecExitCode,
+      argsCount: rawArgv.length,
+    });
+  }
+  let connection;
+  try {
+    connection = hostedCustomer
+      ? { handled: false, argv: rawArgv }
+      : await runPsuConnectionFrontController(rawArgv);
+  } catch (error) {
+    if (isHostAdoptionReexec && adoptionOwnerId) {
+      appendHostEvent(adoptionOwnerId, "host-code-adoption-front-controller-failed", {
+        reexecExitCode: hostReexecExitCode,
+        elapsedMs: Math.max(0, Date.now() - frontControllerStartedAt),
+        errorName: typeof error?.name === "string" ? error.name : "Error",
+        errorCode: typeof error?.code === "string" ? error.code : null,
+      });
+    }
+    throw error;
+  }
+  if (isHostAdoptionReexec && adoptionOwnerId) {
+    appendHostEvent(adoptionOwnerId, "host-code-adoption-front-controller-finished", {
+      reexecExitCode: hostReexecExitCode,
+      handled: connection.handled === true,
+      argsCount: Array.isArray(connection.argv) ? connection.argv.length : null,
+      elapsedMs: Math.max(0, Date.now() - frontControllerStartedAt),
+    });
+  }
   if (connection.handled) {
     process.exitCode = connection.exitCode ?? 0;
     return;
@@ -15685,10 +16571,32 @@ async function main() {
   // flow. Re-running bootstrap-su here would select or mint another adv row
   // while the handoff's already-minted child belongs to the predecessor row.
   if (args.headless) process.env.PAPERCUSP_PSU_HEADLESS = "1";
-  const hostHandoff =
-    reexecExitCodeFrom(process.env) != null
-      ? readHostHandoffForParentPid(process.ppid)
-      : null;
+  const handoffReadStartedAt = Date.now();
+  const hostHandoff = isHostAdoptionReexec
+    ? readHostHandoffForParentPid(process.ppid)
+    : null;
+  if (isHostAdoptionReexec) {
+    const ownerIdForHandoff = hostHandoff?.ownerId || adoptionOwnerId;
+    if (ownerIdForHandoff) {
+      const firstTurnText = hostHandoff?.firstTurnText;
+      appendHostEvent(ownerIdForHandoff, "host-code-adoption-handoff-acceptance", {
+        reexecExitCode: hostReexecExitCode,
+        parentPid: process.ppid,
+        accepted: Boolean(hostHandoff),
+        mode: hostHandoff?.mode ?? null,
+        firstTurnPresent:
+          typeof firstTurnText === "string" && firstTurnText.length > 0,
+        firstTurnBytes:
+          typeof firstTurnText === "string"
+            ? Buffer.byteLength(firstTurnText, "utf8")
+            : 0,
+        argsCount: Array.isArray(hostHandoff?.args)
+          ? hostHandoff.args.length
+          : null,
+        elapsedMs: Math.max(0, Date.now() - handoffReadStartedAt),
+      });
+    }
+  }
   if (hostHandoff) {
     await launchHostHandoff(hostHandoff);
     return;
@@ -15888,6 +16796,7 @@ export function sessionPortLaunchAbortError(args, failure, stage) {
 }
 
 async function launchFreshSu(selections, args, { brain = false } = {}) {
+  args = inheritFreshCodexConfiguredModel(selections.agent, args);
   if (
     !(await preflightCodexAutoPool({
       agent: selections.agent,
@@ -16037,6 +16946,10 @@ async function launchFreshSu(selections, args, { brain = false } = {}) {
   const extra = suWrapperExtraArgs(res.agent, {
     model: launchModel,
     resumeSession: args.resumeSession,
+    claudeSettings:
+      res.agent === "claude"
+        ? readClaudeLaunchSettings({ ...process.env, ...(res.envelopeEnv ?? {}) })
+        : null,
   });
   if (args.addDir?.length && res.agent === "omp") {
     console.error(

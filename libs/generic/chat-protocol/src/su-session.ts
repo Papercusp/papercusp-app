@@ -142,6 +142,19 @@ export interface SuSessionCapabilities {
   features: Readonly<Record<SuSessionFeature, SuSessionCapabilitySupport>>;
 }
 
+/**
+ * Engine-neutral approvals modes (plan pui-chat-first-ux-2026-09-28 D-026).
+ * `ask`: ask before edits and commands. `auto-edit`: make edits without
+ * asking, ask before other commands. `read-only`: look and plan, change
+ * nothing. There is deliberately no full-access mode.
+ */
+export const SU_APPROVALS_MODES = ["ask", "auto-edit", "read-only"] as const;
+export type SuApprovalsMode = (typeof SU_APPROVALS_MODES)[number];
+
+export function isSuApprovalsMode(value: unknown): value is SuApprovalsMode {
+  return typeof value === "string" && (SU_APPROVALS_MODES as readonly string[]).includes(value);
+}
+
 export type SuSessionDescriptor<B extends SuSessionBackend = SuSessionBackend> =
   B extends SuSessionBackend
     ? {
@@ -151,6 +164,11 @@ export type SuSessionDescriptor<B extends SuSessionBackend = SuSessionBackend> =
         runtimeGeneration: number;
         role: "su";
         model: string | null;
+        /**
+         * The approvals mode the engine runs in now (plan D-026). Omitted by an
+         * engine that has no switchable mode (OMP always asks).
+         */
+        approvals?: SuApprovalsMode;
         /** The account that actually served the latest completed native turn. */
         accountServed: string | null;
         accountRoute: string | null;
@@ -177,6 +195,19 @@ export type SuSessionCommandFor<B extends SuSessionBackend> =
   | (SuSessionCommandBase<B, "owner_turn"> & {
       turnId: string;
       content: string;
+      /**
+       * The model this turn and later ones run on, as a `model[:effort]`
+       * spec. Omitted keeps the current model. The engine applies it before
+       * the turn, so a refused switch refuses the turn rather than running
+       * it on a model the owner did not pick.
+       */
+      model?: string;
+      /**
+       * The approvals mode this turn and later ones run in (plan D-026).
+       * Omitted keeps the current mode. Like `model`, a refused switch
+       * refuses the turn.
+       */
+      approvals?: SuApprovalsMode;
     })
   | (SuSessionCommandBase<B, "interrupt"> & {
       reason?: string;

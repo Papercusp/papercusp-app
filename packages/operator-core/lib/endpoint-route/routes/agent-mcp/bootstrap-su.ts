@@ -21,6 +21,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { isIP } from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
 import { defineTool } from '@papercusp/agent-mcp';
 import { activeWorkspaceId, isKnownWorkspace, readRegistry } from '../../../workspace-registry';
@@ -85,6 +86,7 @@ import {
   releaseAgentLaunchClaim,
   type LaunchMode,
 } from '../../../agent-launch-core';
+import { renderModeInstructionsFact } from '../../../agent-tools/mode/set';
 import { resolveRemoteSeatInventory } from '../../../agent-tools/plans/remote-seat-inventory';
 import { writeSuCodexHome } from '../../../role-codex-home';
 // EI-11366: the real liveness check wired into writeSuCodexHome's identity-
@@ -109,6 +111,11 @@ import {
 } from '../../../backend-feature-capabilities';
 import { SESSION_PORT_PROTOCOL_VERSION, SESSION_PORT_TRANSFORM_VERSION, type SessionPortContractSummary } from '../../../session-port/types';
 import { recordSessionPortTelemetry } from '../../../session-port/telemetry';
+import {
+  consumePendingCarryRespawn,
+  restorePendingCarryRespawn,
+  type PendingCarryRespawn,
+} from '../../../session-brief';
 import { readOmpModelCatalog, type OmpModelCatalogEntry } from '../../../omp-config';
 import { bindLiveAgentSessionTasksToNativeSession } from '../../../task-manager/store';
 import { resolveCodexModel, resolveCodexModelSelection } from '../../../model-context-budget.mjs';
@@ -348,9 +355,10 @@ export async function resolveAccountPin(
   /** Present only when an explicit nondefault route could not be honored. Route
    * handlers reject the launch before recording/spawning anything. */
   error?: string;
-  /** WI-3645: explicit-auto routing for a config-FILE-carried backend (codex) — the CODEX_HOME
-   *  writers translate this into an UNPINNED gateway provider block (codexGatewayAuto). Claude
-   *  auto needs no marker (its routing rides entirely in `env`); absent on pins/default/fail. */
+  /** Unpinned gateway routing for every backend. Session-port bootstrap uses this
+   * marker to verify the canonical prepared account independently of how each
+   * backend carries its credentials. CODEX_HOME writers also translate it into
+   * codexGatewayAuto; absent on pins/default/fail. */
   gatewayAuto?: boolean;
 }> {
   const raw = requested?.trim();
@@ -487,6 +495,7 @@ export async function resolveAccountPin(
             : 'routing through the inference gateway (auto — it selects an available pool account and fails over).',
           accountId: null,
           provider: expected,
+          gatewayAuto: true,
         };
       }
       if (expected === 'codex' && agent !== 'omp') {
@@ -691,7 +700,8 @@ export async function resolveAccountChoices(
  *
  * A boot arg is not evidence about who leads a fleet, and on every re-entry into a
  * launch it is actively WRONG: `--fleet=<slug>` hard-sets the role to `member`
- * unconditionally (psu-launcher.mjs:416 and :578 — there is no `--fleet-role=` flag),
+ * unless `--fleet-role=leader` is passed (WI-10004449 added that flag for the spawned
+ * leader of fleet:launch-on-plan; it is never re-emitted into launch_argv),
  * and `psuLaunchArgvRecord` re-emits only `--fleet=<slug>`, so the role is not carried
  * on `adv_sessions.launch_argv` at all. Any launch rebuilt that way for an agent that
  * DURABLY leads the fleet silently demotes it, and the demotion is what composes a
@@ -934,6 +944,32 @@ export async function stampPresenceAtBoot(opts: {
  * only in the sense of not failing the request — this function itself never
  * throws, returning a message instead, mirroring stampFleetMembershipAtBoot).
  */
+/**
+ * A launcher's session scope is not a member's role assignment. In particular,
+ * copying a leader's pre-rendered DRAIN fact also copied "set by the owner" and
+ * made the child owner-sticky. Derive member scope from the registered fleet
+ * role and reuse its admitted claim spec for the work boundary instead.
+ * Use this same normalization for both durable writes and first-turn prose.
+ */
+export function normalizeBootstrapLaunchMode(
+  value: unknown,
+  fleet?: { slug: string; role: string | null } | null,
+): LaunchMode | null {
+  const mode = normalizeLaunchMode(value);
+  if (!mode || mode.mode !== 'drain' || fleet?.role !== 'member') return mode;
+  return normalizeLaunchMode({
+    ...mode,
+    ownerDirected: false,
+    instructions: renderModeInstructionsFact({
+      modeId: mode.mode,
+      instructions: `Work as a member of fleet '${fleet.slug}' under its current registered leader. ` +
+        'Use only the fleet\'s admitted claim spec. Do not take leadership or monitor the fleet.',
+      ownerDirected: false,
+      setBy: 'bootstrap-su:registered-fleet-member',
+    }),
+  });
+}
+
 export async function syncLaunchModeToRegistry(opts: {
   workspaceId: string;
   ownerId: string;
@@ -945,6 +981,7 @@ export async function syncLaunchModeToRegistry(opts: {
   subject?: string | null;
   instructions?: string | null;
   ownerDirected?: boolean;
+  fleet?: { slug: string; role: string | null } | null;
 }): Promise<string | null> {
   const namedMode = opts.namedMode ?? (opts.drainMode ? 'drain' : null);
   if (!opts.autoMode && !namedMode) return null;
@@ -954,19 +991,21 @@ export async function syncLaunchModeToRegistry(opts: {
       '../../../agent-tools/coordination/control-anchor'
     );
     const launchMode: LaunchMode | null = namedMode
-      ? normalizeLaunchMode({
+      ? normalizeBootstrapLaunchMode({
           mode: namedMode,
           subject: opts.subject,
           instructions: opts.instructions,
           ownerDirected: opts.ownerDirected,
-        })
+        }, opts.fleet)
       : null;
+    const memberDrain = namedMode === 'drain' && opts.fleet?.role === 'member';
+    let namedModeCommitted = false;
     for (const modeId of [...(opts.autoMode ? ['auto'] : []), ...(namedMode ? [namedMode] : [])]) {
       const namedFields =
-        modeId === namedMode && (opts.subject !== undefined || opts.ownerDirected !== undefined)
+        modeId === namedMode && (opts.subject !== undefined || opts.ownerDirected !== undefined || memberDrain)
           ? {
               ...(opts.subject !== undefined ? { subject: launchMode?.subject ?? null } : {}),
-              ...(opts.ownerDirected !== undefined ? { ownerDirected: launchMode?.ownerDirected === true } : {}),
+              ...(opts.ownerDirected !== undefined || memberDrain ? { ownerDirected: launchMode?.ownerDirected === true } : {}),
             }
           : {};
       const res = await setMode({
@@ -983,13 +1022,14 @@ export async function syncLaunchModeToRegistry(opts: {
         // which just means a peer/earlier launch already armed it more strongly)
         return res.error ?? `setMode('${modeId}') failed`;
       }
+      if (modeId === namedMode) namedModeCommitted = res.ok;
     }
     // D-002: when a launch carries the parent's bounded standing instruction,
     // assert that exact body under the canonical mode key. Do not render it a
     // second time: callers read the already-rendered fact from the parent, and
     // duplicating the prefix would alter the operative instruction on every
     // resumption. A supplied empty value deliberately retracts stale scope.
-    if (namedMode && opts.instructions !== undefined) {
+    if (namedMode && namedModeCommitted && (opts.instructions !== undefined || memberDrain)) {
       const { assertFact, retractFact } = await import('../../../agent-facts/store');
       const { modeInstructionsFactKey } = await import('../../../agent-tools/mode/set');
       const key = modeInstructionsFactKey(namedMode);
@@ -1099,6 +1139,37 @@ export const AUTO_MODE_DIRECTIVE_LOOP_ARMED =
   "(The persona's AUTO-mode section governs; the narrow irreversible-high-stakes brakes " +
   'still apply.)';
 
+/**
+ * WI-10004449: the AUTO activation for a fleet LEADER. The member directive above
+ * ("You are a fleet member… self-assign + advance a work_item every wake") was also
+ * handed to leaders, including the leader `fleet:launch-on-plan { leader:'spawn' }`
+ * launches, and it contradicted the leader brief each one carries. A leader
+ * supervises the fleet and never takes plan items itself.
+ */
+export const LEADER_AUTO_MODE_KICKOFF_DIRECTIVE =
+  'AUTO mode is ON for this session — act on your judgment, do not stop to ask. You are this ' +
+  "fleet's LEADER, not a member: you do NOT claim or implement plan items yourself — your " +
+  'members do. Your job is the standing leader job in your launch brief: keep the fleet claim ' +
+  'spec scoped to the plan, verify members actually claim its items, answer member messages, ' +
+  'reclaim stalled claims, audit completions, and keep a monitor loop armed (loop:status; ' +
+  'loop:arm if none) so your leadership persists. If the fleet is short of hands, relaunch ' +
+  "members; never fall back to doing the work solo. (The persona's AUTO-mode section governs; " +
+  'the narrow irreversible-high-stakes brakes still apply.)';
+
+/** WI-10004449: the plan kickoff for a LEADER — orient on the plan and the fleet,
+ *  then lead. Replaces the member plan kickoff's "claim your lane and work that item". */
+export function leaderPlanKickoff(planSlug: string, harnessSlug?: string | null, fleetSlug?: string | null): string {
+  const harness = harnessSlug ? `, harness: "${harnessSlug}"` : '';
+  const fleet = fleetSlug ? `fleet \`${fleetSlug}\` on ` : 'your fleet on ';
+  return (
+    `Begin: lead ${fleet}plan \`${planSlug}\`. Orient FIRST: call \`coord:orient\` with ` +
+    `{ intent: "Lead fleet on ${planSlug}", planSlug: "${planSlug}"${harness} }, then ` +
+    '`fleet:leader-brief` for your fleet. Check that the fleet claim spec selects this plan\'s ' +
+    "items and that members are claiming them; fix the spec if they are not. Do not claim the " +
+    "plan's items yourself."
+  );
+}
+
 /** The AUTO activation a launch bakes/prepends, picked by whether P-001's
  *  server-side auto-arm actually took (never assume — a leader, an unplanned
  *  member, a disabled flag, or an arm error all fall back to the full
@@ -1179,8 +1250,16 @@ export function deriveKickoffPrompt(opts: {
    *  fn stays synchronous/pure). Only affects the AUTO-OFF routing-gate text;
    *  omitted ⇒ today's static option (C) (no behavior change). */
   remoteSeats?: RemoteSeatSummary | null;
+  /** WI-10004449: the resolved fleet role. An AUTO `leader` launch gets the leader
+   *  activation + leader plan kickoff instead of the member ones. Omitted/member ⇒
+   *  unchanged. A DRAIN launch keeps the DRAIN directive (it already leads). */
+  fleetRole?: string | null;
+  fleetSlug?: string | null;
 }): string | null {
-  const base = opts.planSlug
+  const autoLeader = opts.autoMode && !opts.drainMode && opts.fleetRole === 'leader';
+  const base = opts.planSlug && autoLeader
+    ? leaderPlanKickoff(opts.planSlug, opts.harnessSlug, opts.fleetSlug)
+    : opts.planSlug
     ? deriveLaunchPromptText(
         null,
         opts.autoMode,
@@ -1196,7 +1275,9 @@ export function deriveKickoffPrompt(opts: {
       : null;
   const activation = opts.drainMode
     ? [DRAIN_MODE_DIRECTIVE, CONTEXT_DISCIPLINE_DIRECTIVE]
-    : opts.autoMode
+    : autoLeader
+      ? [LEADER_AUTO_MODE_KICKOFF_DIRECTIVE, CONTEXT_DISCIPLINE_DIRECTIVE]
+      : opts.autoMode
       ? [autoModeDirective(opts.loopAutoArmed === true), CONTEXT_DISCIPLINE_DIRECTIVE]
       : [];
   return activation.length ? [...activation, base].filter(Boolean).join('\n\n') : base;
@@ -1611,6 +1692,8 @@ export const bootstrapSu = defineTool({
        *  is on + the id is a valid, allowed pool account. Explicit auto/pin requests
        *  fail closed when unavailable; default/omitted uses the system login. */
       account?: string | null;
+      /** Launcher-selected origin for the Codex superuser MCP config. */
+      mcp_base_url?: string | null;
       /** named-su-agent-fleets P-006: the durable slug of a named fleet to JOIN
        *  (member). Folded into PAPERCUSP_FLEET_SLUG/PAPERCUSP_FLEET_ROLE on the
        *  spawn env. Ignored when `fleet_name` is present (a new fleet wins). */
@@ -1717,6 +1800,47 @@ export const bootstrapSu = defineTool({
       );
     }
     const agent: SuAgent = body.agent;
+    const requestOriginUrl = new URL(req.url);
+    let launchMcpBaseUrl = requestOriginUrl.origin;
+    const rawMcpBaseUrl = body.mcp_base_url;
+    if (rawMcpBaseUrl != null) {
+      if (agent !== 'codex') {
+        return jsonRes({ status: 'error', error: 'mcp_base_url is only supported for Codex launches' }, 400);
+      }
+      if (
+        typeof rawMcpBaseUrl !== 'string' ||
+        rawMcpBaseUrl.length > 512 ||
+        rawMcpBaseUrl.trim() !== rawMcpBaseUrl
+      ) {
+        return jsonRes({ status: 'error', error: 'mcp_base_url must be a root HTTP(S) origin' }, 400);
+      }
+      let selectedMcpBaseUrl: URL;
+      try {
+        selectedMcpBaseUrl = new URL(rawMcpBaseUrl);
+      } catch {
+        return jsonRes({ status: 'error', error: 'mcp_base_url must be a root HTTP(S) origin' }, 400);
+      }
+      const hostnameIsLoopback = (hostname: string) => {
+        const normalized = hostname.startsWith('[') && hostname.endsWith(']')
+          ? hostname.slice(1, -1).toLowerCase()
+          : hostname.toLowerCase();
+        return normalized === 'localhost' || normalized === '::1' ||
+          (isIP(normalized) === 4 && normalized.startsWith('127.'));
+      };
+      const sameHost = selectedMcpBaseUrl.hostname.toLowerCase() === requestOriginUrl.hostname.toLowerCase();
+      const sameLocalHost = hostnameIsLoopback(selectedMcpBaseUrl.hostname) &&
+        hostnameIsLoopback(requestOriginUrl.hostname);
+      if (
+        (selectedMcpBaseUrl.protocol !== 'http:' && selectedMcpBaseUrl.protocol !== 'https:') ||
+        selectedMcpBaseUrl.protocol !== requestOriginUrl.protocol ||
+        selectedMcpBaseUrl.username || selectedMcpBaseUrl.password ||
+        selectedMcpBaseUrl.pathname !== '/' || selectedMcpBaseUrl.search || selectedMcpBaseUrl.hash ||
+        (!sameHost && !sameLocalHost)
+      ) {
+        return jsonRes({ status: 'error', error: 'mcp_base_url must be a root HTTP(S) origin on the request host or local loopback' }, 400);
+      }
+      launchMcpBaseUrl = selectedMcpBaseUrl.origin;
+    }
     const workspace = body.workspace?.trim() || activeWorkspaceId();
     const rawGoalBootstrapSubject = body.goal_bootstrap_subject;
     const goalBootstrapSubject = typeof rawGoalBootstrapSubject === 'string'
@@ -1890,9 +2014,19 @@ export const bootstrapSu = defineTool({
     try {
       identityModelDefault = await resolveLaunchIdentityModelDefault({
         cwd, harnessSlug, role: suRoleRaw ?? 'su', stack: body.stack,
+        impliedStack: 'su-static',
       });
     } catch (error: any) {
-      return jsonRes({ status: 'error', code: 'identity_model_default_denied', error: error?.message ?? String(error) }, 400);
+      return jsonRes({ status: 'error', code: 'identity_model_default_denied', error: error?.message ?? String(error),
+        refusal: {
+          observed: { harness: harnessSlug, role: suRoleRaw ?? 'su', stack: Array.isArray(body.stack) ? body.stack.join(',') : null },
+          liftsWhen:
+            'the selected launch identity stack resolves against this launch\'s blueprint source: every ' +
+            'stack ref (and a `composition:` root) exists and loads, so its model default can be read ' +
+            '(`error` names the failing ref). Retrying the identical request cannot lift it: correct the ' +
+            'stack ref or repair the identity definition',
+          whoCanMakeItTrue: ['self', 'owner'],
+        } }, 400);
     }
     const suppliedModel = body.model?.trim() || null;
     const requestedModel = body.model_source === 'configured-default' ? null : suppliedModel;
@@ -1950,7 +2084,7 @@ export const bootstrapSu = defineTool({
         kind: 'su',
         agent,
         workspaceId: workspace,
-        operatorBaseUrl: new URL(req.url).origin,
+        operatorBaseUrl: launchMcpBaseUrl,
         harnessSlug,
         profile,
         contextSize,
@@ -1985,6 +2119,7 @@ export const bootstrapSu = defineTool({
       row: import('../../../session-port/store').SessionPortRow;
       seed: string;
       requestHash: string;
+      targetOwnerId: string;
     } | null = null;
     const portToken = body.session_port_token?.trim() || null;
     const portProtocol = body.session_port_protocol;
@@ -2064,14 +2199,20 @@ export const bootstrapSu = defineTool({
       }
       const sourceCoordOwnerId =
         typeof row.metadata.sourceCoordOwnerId === 'string' ? row.metadata.sourceCoordOwnerId.trim() : '';
+      let targetOwnerId: string;
+      try {
+        targetOwnerId = service.resolveSessionPortTargetOwner(sourceCoordOwnerId, summary?.target?.ownerId);
+      } catch (error) {
+        return jsonRes({ status: 'error', error: error instanceof Error ? error.message : String(error) }, 409);
+      }
       const requestedOwnerId = body.owner_id?.trim() || '';
-      if (!sourceCoordOwnerId || requestedOwnerId !== sourceCoordOwnerId) {
+      if (requestedOwnerId !== targetOwnerId) {
         return jsonRes(
           {
             status: 'error',
-            error: sourceCoordOwnerId
-              ? `session port must continue source coordination identity ${sourceCoordOwnerId}; got ${requestedOwnerId || 'none'}`
-              : 'prepared session port is missing its source coordination identity; inspect again with the current launcher/operator',
+            error: summary?.target?.ownerId === undefined
+              ? `session port must continue source coordination identity ${targetOwnerId}; got ${requestedOwnerId || 'none'}`
+              : `session port must use prepared isolated target owner ${targetOwnerId}; got ${requestedOwnerId || 'none'}`,
           },
           409,
         );
@@ -2081,10 +2222,10 @@ export const bootstrapSu = defineTool({
         logicalRequestHash: row.idempotencyKey,
         workspaceId: workspace,
         sourceAdvSessionId: row.sourceAdvSessionId,
-        ownerId: sourceCoordOwnerId,
+        ownerId: targetOwnerId,
         target: {
           ...summary.target,
-          backend: row.targetBackend === 'omp' ? 'omp' : 'codex',
+          backend: row.targetBackend,
         },
         cwd,
         planSlug,
@@ -2151,7 +2292,7 @@ export const bootstrapSu = defineTool({
           error: `prepared session port no longer fits the target launch budget (${estimatedTokens} > ${previewBudget.availableInputTokens}); inspect again`,
         }, 409);
       }
-      sessionPortContext = { row, seed, requestHash };
+      sessionPortContext = { row, seed, requestHash, targetOwnerId };
     }
 
     // WI-41363: claim before the first session/fleet/account write. A replay
@@ -2161,6 +2302,8 @@ export const bootstrapSu = defineTool({
     // durable idempotency surface for every launch path.
     let bootstrapClaimWon = false;
     let bootstrapCompleted = false;
+    let pendingCarryRespawnForBootstrap: PendingCarryRespawn | null = null;
+    let pendingCarryRespawnOwnerId: string | null = null;
     // EI-21365235532676472 recurrence: the bootstrap route records/adopts its
     // adv_sessions row BEFORE several later fallible artifact/presence writes.
     // If one of those throws, a same-key client replay is safe only after that
@@ -2210,17 +2353,11 @@ export const bootstrapSu = defineTool({
     let adoptableStartingRowId: number | null = null;
     const requestedSid = body.owner_id?.trim() || null;
     if (sessionPortContext) {
-        const sourceCoordOwnerId =
-          typeof sessionPortContext.row.metadata.sourceCoordOwnerId === 'string'
-        ? sessionPortContext.row.metadata.sourceCoordOwnerId.trim()
-        : '';
-      if (!sourceCoordOwnerId || requestedSid !== sourceCoordOwnerId) {
+      if (requestedSid !== sessionPortContext.targetOwnerId) {
         return jsonRes(
           {
             status: 'error',
-            error: sourceCoordOwnerId
-              ? `session port must continue source coordination identity ${sourceCoordOwnerId}; got ${requestedSid ?? 'none'}`
-              : 'prepared session port is missing its source coordination identity; inspect again with the current launcher/operator',
+            error: `session port must use its prepared target coordination identity ${sessionPortContext.targetOwnerId}; got ${requestedSid ?? 'none'}`,
           },
           409,
         );
@@ -2327,6 +2464,10 @@ export const bootstrapSu = defineTool({
     // the false "not started by psu" path). omp's native handle is the
     // omp_thread_id (linked post-launch); codex resumes via its per-session
     // CODEX_HOME and can't have its rollout id forced — so both stay null.
+    // A fresh bootstrap is the durable fallback when the host cannot reuse the
+    // existing PTY incarnation. Consume only after the caller's owner id has
+    // passed stable-identity and liveness checks; a minted launch or prepared
+    // session-port transfer must not take another launch's carry.
     const nativeSessionId = backendFeatureGuard(agent, 'forced-native-session-id').supported ? randomUUID() : null;
 
     // launch-path-argv-reconstruction (WI-1343): the exact `psu …` invocation that
@@ -2591,12 +2732,12 @@ export const bootstrapSu = defineTool({
     // shared core is the single bound for subject/instructions, so a direct
     // loopback POST cannot smuggle an unbounded scope into a child session.
     const launchMode = modeRaw
-      ? normalizeLaunchMode({
+      ? normalizeBootstrapLaunchMode({
           mode: modeRaw,
           subject: body.mode_subject,
           instructions: body.mode_instructions,
           ownerDirected: body.mode_owner_directed === true,
-        })
+        }, fleetPin.fleetSlug ? { slug: fleetPin.fleetSlug, role: fleetPin.fleetRole } : null)
       : null;
 
     // EI-11110 / WI-5976: keep the mode REGISTRY in sync with the AUTO/DRAIN prose
@@ -2609,6 +2750,7 @@ export const bootstrapSu = defineTool({
       autoMode,
       drainMode,
       namedMode: launchMode?.mode ?? null,
+      fleet: fleetPin.fleetSlug ? { slug: fleetPin.fleetSlug, role: fleetPin.fleetRole } : null,
       ...(launchMode?.subject !== null && launchMode?.subject !== undefined
         ? { subject: launchMode.subject }
         : body.mode_subject !== undefined
@@ -2762,11 +2904,41 @@ export const bootstrapSu = defineTool({
     // agent-launched. Fail-soft: a write hiccup just reverts to the pre-fix inherited
     // default, never blocks the launch (a coordination-quality write, not a
     // correctness gate — unlike the WI-1893 membership stamp above).
+    let wakeModeTools: typeof import('../../../agent-tools/coordination/wake-mode') | null = null;
     try {
-      const { ensureLaunchedWakeAuto } = await import('../../../agent-tools/coordination/wake-mode');
+      wakeModeTools = await import('../../../agent-tools/coordination/wake-mode');
+      const { ensureLaunchedWakeAuto } = wakeModeTools;
       await ensureLaunchedWakeAuto(sid, { fleetRole: fleetPin.fleetRole, launchedByAgent: !!launchedBy });
     } catch {
       /* degrade to the inherited default; non-fatal */
+    }
+    if (requestedSid != null && !sessionPortContext) {
+      if (!wakeModeTools) {
+        return jsonRes({ status: 'error', error: 'wake_mode_unavailable' }, 503);
+      }
+      let wakeMode: 'auto' | 'manual';
+      try {
+        wakeMode = await wakeModeTools.resolveWakeMode(sid);
+      } catch (error) {
+        return jsonRes({
+          status: 'error',
+          error: 'wake_mode_unavailable',
+          detail: error instanceof Error ? error.message : String(error),
+        }, 503);
+      }
+      if (wakeMode !== 'manual') {
+        pendingCarryRespawnOwnerId = sid;
+        try {
+          pendingCarryRespawnForBootstrap = await consumePendingCarryRespawn(sid);
+        } catch (error) {
+          return jsonRes({
+            status: 'error',
+            error: 'pending_carry_respawn_unavailable',
+            detail: error instanceof Error ? error.message : String(error),
+          }, 503);
+        }
+        if (!pendingCarryRespawnForBootstrap) pendingCarryRespawnOwnerId = null;
+      }
     }
 
     // kickoff-prompt-absorption-2026-07-17 P-001: auto-arm a plan-bound fleet
@@ -2836,6 +3008,12 @@ export const bootstrapSu = defineTool({
     });
     let promptText = overlaid.promptText;
     let instructionLint = overlaid.instructionLint;
+    if (pendingCarryRespawnForBootstrap) {
+      // Append the saved system carry after normal launch overlays, then audit
+      // those final bytes and include them in the immutable launch artifact.
+      promptText += '\n\n' + pendingCarryRespawnForBootstrap.systemPromptAddendum;
+      instructionLint = lintInstructionText(promptText, 20, instructionRuntime);
+    }
     if (
       instructionLint.conflicts.length > 0 ||
       instructionLint.staleRules.length > 0 ||
@@ -2877,6 +3055,8 @@ export const bootstrapSu = defineTool({
         harnessSlug,
         role: suRoleRaw ?? 'su',
         stack: spec.stack,
+        // WI-10004747: the persona always composes the su static layers; record them.
+        impliedStack: 'su-static',
         expectedModelDefault: identityModelDefault,
         compositionRootId: body.stack?.length === 1 && body.stack[0]?.startsWith('composition:')
           ? body.stack[0].slice('composition:'.length) : null,
@@ -2905,11 +3085,19 @@ export const bootstrapSu = defineTool({
           throw new Error('selected identity source revision changed after picker selection');
         }
       }
+      // agent-economy-flywheel P-016 (D-011): a priced Cupboard identity release
+      // activates only with funds behind it; the refusal is typed (402 below).
+      const { assertIdentityActivationFunded } = await import('../../../cupboard/identity-activation-gate-io');
+      await assertIdentityActivationFunded({ stack: launchArtifact.stack, repoDir: cwd, workspaceId: workspace });
       if (launchArtifact.resourceArtifacts.length > 0) {
         await provisionLaunchIdentityResources(launchArtifact, getOrgPg().sql, { ownerId: sid });
       }
       promptText = launchArtifact.promptText;
     } catch (e: any) {
+      const { isIdentityActivationRefusedError } = await import('../../../cupboard/identity-activation-gate');
+      if (isIdentityActivationRefusedError(e)) {
+        return jsonRes({ status: 'error', error: e.code, detail: e.message, refused: e.refused }, 402);
+      }
       return jsonRes({ status: 'error', error: `compile su launch artifact: ${e?.message ?? e}` }, 500);
     }
 
@@ -2936,6 +3124,7 @@ export const bootstrapSu = defineTool({
           // the gateway auto-selects). False whenever a pin resolved or routing is off.
           codexGatewayAuto: accountPin.provider === 'codex' && !!accountPin.gatewayAuto,
           codexGatewayPriority: accountPin.provider === 'codex' ? 'su' : null,
+          headless,
           // Seed launch-dir trust so a fresh CODEX_HOME doesn't block at codex's
           // "Do you trust this directory?" boot prompt (an su launch is trusted).
           trustDir: cwd,
@@ -3017,7 +3206,7 @@ export const bootstrapSu = defineTool({
       try {
         // P-020: a fleet-tier member gets the pruned plugin/MCP surface
         // (github/cloudflare/firecrawl plugins + the playwright mcpServer dropped).
-        claudeConfigDir = writeInteractiveClaudeConfig({
+        claudeConfigDir = (await writeInteractiveClaudeConfig({
           sid,
           prunePlugins: spec.personaTier === 'fleet',
           // WI-3280: park the playbook so the SessionStart recovery hook can
@@ -3028,7 +3217,7 @@ export const bootstrapSu = defineTool({
           // fleet member) can't wedge forever on an external-CLAUDE.md-
           // imports / trust-dialog TTY prompt nobody is there to answer.
           cwd,
-        }).configDir;
+        })).configDir;
       } catch (e: any) {
         process.stderr.write(`[bootstrap-su] claude config-dir materialize failed (non-fatal): ${e?.message}\n`);
       }
@@ -3177,6 +3366,7 @@ export const bootstrapSu = defineTool({
         autoMode,
         drainMode,
         loopArmed,
+        headless,
         fleet: fleetPin.fleetSlug ? { slug: fleetPin.fleetSlug, role: fleetPin.fleetRole } : null,
         stack: spec.stack,
         ...(body.selected_identity_revision && body.stack?.length === 1
@@ -3265,9 +3455,11 @@ export const bootstrapSu = defineTool({
     // --no-kickoff); the server supplies the canonical text (deriveKickoffPrompt,
     // pure + tested) — shared with plans:launch's headless kickoff via
     // ./launch-prompt, so the two never drift.
-    const kickoffPrompt = sessionPortContext
-      ? null
-      : deriveKickoffPrompt({
+    const kickoffPrompt = pendingCarryRespawnForBootstrap
+      ? pendingCarryRespawnForBootstrap.firstPrompt
+      : sessionPortContext
+        ? null
+        : deriveKickoffPrompt({
           planSlug,
           harnessSlug,
           autoMode,
@@ -3278,6 +3470,8 @@ export const bootstrapSu = defineTool({
           agent,
           loopAutoArmed: loopAutoArm?.armed === true,
           remoteSeats,
+          fleetRole: fleetPin.fleetRole,
+          fleetSlug: fleetPin.fleetSlug,
         });
 
     const result: BootstrapSuResult = {
@@ -3341,6 +3535,21 @@ export const bootstrapSu = defineTool({
     incompleteBootstrapSessionId = null;
     return jsonRes(result);
     } finally {
+      if (pendingCarryRespawnForBootstrap && pendingCarryRespawnOwnerId && !bootstrapCompleted) {
+        try {
+          await restorePendingCarryRespawn(
+            pendingCarryRespawnOwnerId,
+            workspace,
+            pendingCarryRespawnForBootstrap,
+          );
+        } catch (error) {
+          process.stderr.write(
+            '[bootstrap-su] pending carry-respawn restore failed for ' +
+              pendingCarryRespawnForBootstrap.nonce + ': ' +
+              (error instanceof Error ? error.message : String(error)) + '\n',
+          );
+        }
+      }
       // A validation/storage exception after winning the claim must not strand
       // an empty replay row. EI-21365235532676472 recurrence: when the exception
       // happened AFTER recordAdvSession, releasing the claim first let the

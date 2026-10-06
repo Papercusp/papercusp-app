@@ -98,6 +98,7 @@ import {
 import { resolveGoalHolderPolicy } from '../goal-launch-settings-shared';
 import { startGoalById, type StartGoalByIdResult } from '../goals/start-goal-by-id';
 import {
+  isGoalHolderLaunchPolicyRefusal,
   launchGoalHolderSession,
   neutralizeGoalHolderSession,
 } from '../harness/routines/goal-holder-launch-action';
@@ -106,7 +107,11 @@ import {
   type GoalModeElectionExpectation,
   type GoalModeElectionReceipt,
 } from '../modes/store';
-import { notifyGoalHolderHandoff } from '../goals/holder-handoff';
+import {
+  notifyGoalHolderHandoff,
+  retireSupersededGoalHolderModes,
+  type SupersededGoalHolderRetirement,
+} from '../goals/holder-handoff';
 import { refreshControlAnchorAfterMutation } from '../agent-tools/coordination/control-anchor';
 import { appendGoalWriteAudit } from '../goals/write-audit';
 import {
@@ -133,8 +138,20 @@ import {
 import {
   assessGoalHolderLaunchCapacityForGoal,
   formatCapacityUntil,
+  holderLaunchAccountUnhonored,
   type GoalHolderLaunchCapacityVerdict,
 } from '../goals/holder-launch-capacity';
+import {
+  fileUnplannedClusterNudge,
+  overdueUnplannedClusters,
+  readUnplannedGoalClusters,
+  type UnplannedClusterAlert,
+  type UnplannedClusterRead,
+} from '../goals/unplanned-clusters';
+import {
+  GOAL_OWNER_REPORT_MAX_SILENCE_MS,
+  GOAL_OWNER_REPORT_STANDING_MAX_SILENCE_MS,
+} from './goal-owner-report-watchdog';
 
 /**
  * P-001: `holderCountsAsAlive` moved to `../goals/holder`, which is now the ONE
@@ -179,6 +196,26 @@ export const GOAL_HOLDER_CAPACITY_DEFER_ESCALATE_MS = 10 * 60_000;
  */
 export const GOAL_HOLDER_CAPACITY_RESUME_CONFIRM_TICKS = 2;
 /**
+ * WI-10005904 (measured 2026-10-03 05:24–05:29Z): a holder launch whose agent
+ * dies at boot because the launch door refused its account route ("--account
+ * auto could not be honored") is not a holder death. Six of them in five
+ * minutes filled the 6-per-hour rate cap and paused the goal for a human,
+ * though no holder ever ran. Such a death returns its rate slot, leaves the
+ * flap-damping budget untouched, and opens a capacity HOLD: no re-kick, slot or
+ * launch until it passes, whatever the capacity reading says (the reading is
+ * exactly what failed to foresee the death). The hold doubles per consecutive
+ * unhonored launch, from this base up to the max below, so a route that stays
+ * refused costs one launch per max-hold instead of a paused goal.
+ */
+export const GOAL_HOLDER_UNHONORED_LAUNCH_HOLD_MS = 10 * 60_000;
+export const GOAL_HOLDER_UNHONORED_LAUNCH_HOLD_MAX_MS = 2 * 60 * 60_000;
+
+/** The hold after the `count`-th consecutive unhonored launch (count ≥ 1). */
+export function unhonoredLaunchHoldMs(count: number): number {
+  const doublings = Math.max(0, Math.min(Math.floor(count) - 1, 16));
+  return Math.min(GOAL_HOLDER_UNHONORED_LAUNCH_HOLD_MS * 2 ** doublings, GOAL_HOLDER_UNHONORED_LAUNCH_HOLD_MAX_MS);
+}
+/**
  * WI-2140573 (measured 2026-09-01): a `lost` holder whose PROCESS is still up
  * (`holderIsRekickable`) is WOKEN with a retry brief before any launch is paid.
  * Re-kicks to one holder are spaced by the interval and capped at the max;
@@ -193,6 +230,22 @@ export const GOAL_HOLDER_REKICK_INTERVAL_MS = 5 * 60_000;
 export const GOAL_HOLDER_REKICK_MAX = 3;
 /** Give a new elected holder time to complete its first turn before recovery. */
 export const GOAL_HOLDER_FIRST_TURN_GRACE_MS = 15 * 60_000;
+/**
+ * WI-10005559: how long an elected holder must be CONTINUOUSLY judged lost
+ * before recovery acts (re-kick, damping restart, rate slot, launch).
+ *
+ * A same-owner restart — a carry-respawn (`session:request-compaction`), a
+ * cold-boot drill cut, a resume — stamps `adv_sessions.ended_at`, and the
+ * liveness oracle's recorded-ended leg reads the owner `ended` until the
+ * successor process registers, typically one to two minutes later. With no
+ * confirmation window a single such gap bought a replacement launch: on
+ * 2026-10-02 goal 60d3a8 was re-elected six times in 23 minutes while its
+ * holders were still making tool calls, and paused needs-human with its
+ * hourly cap spent. Any tick that reads the holder alive, or a change of
+ * elected holder, restarts the window; an `unknown` tick neither confirms nor
+ * clears it.
+ */
+export const GOAL_HOLDER_LOSS_CONFIRM_MS = 5 * 60_000;
 
 /**
  * How long a goal may show no live holder before it is called abandoned.
@@ -488,6 +541,16 @@ export interface GoalLivenessSweepDeps {
   /** How long a live holder may place nothing before the goal is reportable. */
   portfolioIdleAfterMs: number;
   /**
+   * The UNPLANNED-CLUSTER leg's measurement (goal-holder-plans-ideation-truthful-reports
+   * P-002): per HELD goal, its open unplanned goal-stamped items clustered by shared
+   * link / topic / cited path / title prefix, keyed `workspaceId:goalId`. Absent from the
+   * map ⇒ `not-measured` ⇒ silent, like every other leg.
+   */
+  readUnplannedClusters: (goals: readonly GoalRowLike[]) => Promise<Map<string, UnplannedClusterRead>>;
+  /** Files the holder-assigned, goal-stamped nudge for one overdue cluster; null when a
+   *  nudge for that cluster anchor already exists. */
+  fileUnplannedCluster: (alert: UnplannedClusterAlert) => Promise<string | null>;
+  /**
    * P-020: the goal-activation primitive, dispatched for a `became-ready` goal
    * that opted in via `launch_settings.autoStart` (D-006 — every trigger leg
    * converges on the ONE primitive; this leg never spawns by hand). Bound over
@@ -770,6 +833,35 @@ function makeReadPortfolioThroughput(
     }
     return out;
   };
+}
+
+/** The default cluster measurement — one read per HELD goal; a per-goal failure is that
+ *  goal's silence, never a dead sweep. */
+function makeReadUnplannedClusters(sql: Sql): GoalLivenessSweepDeps['readUnplannedClusters'] {
+  return async (goals) => {
+    const out = new Map<string, UnplannedClusterRead>();
+    for (const g of goals) {
+      try {
+        out.set(
+          goalReadinessKey(g),
+          await readUnplannedGoalClusters(sql, { workspaceId: g.workspaceId, goalId: g.goalId }),
+        );
+      } catch (e) {
+        console.warn(
+          `[goal-liveness-watchdog] unplanned-cluster read failed for ${goalReadinessKey(g)} (non-fatal): ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
+    return out;
+  };
+}
+
+/** One reporting cycle for a goal — the owner-report cadence floor the GOAL contract
+ *  already holds the holder to (standing goals report hourly, others every 4h). */
+export function goalReportCycleMs(g: Pick<GoalRowLike, 'standing'>): number {
+  return g.standing ? GOAL_OWNER_REPORT_STANDING_MAX_SILENCE_MS : GOAL_OWNER_REPORT_MAX_SILENCE_MS;
 }
 
 async function defaultFlagEnabled(): Promise<boolean> {
@@ -1223,6 +1315,8 @@ function sweepDeps(
     readPortfolioThroughput: makeReadPortfolioThroughput(sql, GOAL_PORTFOLIO_IDLE_AFTER_MS),
     escalatePortfolioIdle: defaultEscalatePortfolioIdle,
     portfolioIdleAfterMs: GOAL_PORTFOLIO_IDLE_AFTER_MS,
+    readUnplannedClusters: makeReadUnplannedClusters(sql),
+    fileUnplannedCluster: fileUnplannedClusterNudge,
     startGoal: (input) => startGoalById(sql, input),
     flagEnabled: defaultFlagEnabled,
     now: Date.now,
@@ -1249,6 +1343,7 @@ export async function runGoalLivenessSweepOnce(
   autoStarted: number;
   wedgeEscalated: number;
   portfolioIdleEscalated: number;
+  unplannedClustersFiled: number;
   skipped: boolean;
 }> {
   const deps = sweepDeps(sql, overrides);
@@ -1260,6 +1355,7 @@ export async function runGoalLivenessSweepOnce(
       autoStarted: 0,
       wedgeEscalated: 0,
       portfolioIdleEscalated: 0,
+      unplannedClustersFiled: 0,
       skipped: true,
     };
   }
@@ -1273,6 +1369,7 @@ export async function runGoalLivenessSweepOnce(
       autoStarted: 0,
       wedgeEscalated: 0,
       portfolioIdleEscalated: 0,
+      unplannedClustersFiled: 0,
       skipped: false,
     };
   }
@@ -1434,6 +1531,50 @@ export async function runGoalLivenessSweepOnce(
     }
   }
 
+  // ── the UNPLANNED-CLUSTER leg — clustered work placed as loose singletons ──
+  // (goal-holder-plans-ideation-truthful-reports P-002). The GOAL contract places
+  // clustered work as a started plan; this leg finds 3+ open goal-stamped items that
+  // share one cluster, are in no plan, and have been so for more than 2 reporting
+  // cycles, and files ONE holder-assigned, goal-stamped nudge per cluster. Judges the
+  // same held population as the legs above: an unheld goal is the liveness leg's job.
+  let unplannedClustersFiled = 0;
+  if (heldHolders.size > 0) {
+    const heldGoals = goals.filter((g) => heldHolders.has(goalReadinessKey(g)));
+    let clusterReads = new Map<string, UnplannedClusterRead>();
+    try {
+      clusterReads = await deps.readUnplannedClusters(heldGoals);
+    } catch (e) {
+      console.warn(
+        `[goal-liveness-watchdog] unplanned-cluster read failed (non-fatal, cluster leg skipped): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      clusterReads = new Map();
+    }
+    for (const g of heldGoals) {
+      const read = clusterReads.get(goalReadinessKey(g));
+      const fold = heldHolders.get(goalReadinessKey(g));
+      const holderOwnerId = fold?.elected?.ownerId ?? fold?.live[0]?.ownerId;
+      if (!read || !holderOwnerId) continue;
+      const reportCycleMs = goalReportCycleMs(g);
+      for (const cluster of overdueUnplannedClusters(read.clusters, deps.now(), reportCycleMs)) {
+        try {
+          const filed = await deps.fileUnplannedCluster({
+            workspaceId: g.workspaceId,
+            goalId: g.goalId,
+            goalTitle: g.title,
+            holderOwnerId,
+            cluster,
+            reportCycleMs,
+          });
+          if (filed) unplannedClustersFiled += 1;
+        } catch (e) {
+          console.warn(
+            `[goal-liveness-watchdog] unplanned-cluster nudge failed for ${cluster.key} (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+    }
+  }
+
   return {
     scanned: goals.length,
     escalated,
@@ -1441,6 +1582,7 @@ export async function runGoalLivenessSweepOnce(
     autoStarted,
     wedgeEscalated,
     portfolioIdleEscalated,
+    unplannedClustersFiled,
     skipped: false,
   };
 }
@@ -1461,6 +1603,17 @@ export interface GoalHolderRespawnSummary {
   attempted: number;
   respawned: number;
   launchFailed: number;
+  /**
+   * WI-10004329: launches the goal's launch policy refused before any process
+   * was minted. Their rate-cap slot is returned, so they never count as recoveries.
+   */
+  launchRefused: number;
+  /**
+   * WI-10005904: launches whose agent died at boot because the launch door
+   * refused the account route ("--account … could not be honored"). Their rate
+   * slot is returned, damping is untouched, and a capacity hold opens.
+   */
+  launchUnhonored: number;
   attachFailed: number;
   /** Attach threw and durable authority could not be read; no cleanup was attempted. */
   attachUnresolved: number;
@@ -1477,7 +1630,20 @@ export interface GoalHolderRespawnSummary {
    * restart, no rate-cap slot, no launch.
    */
   deferredCapacity: number;
+  /**
+   * WI-10005559: lost holders whose recovery waited this tick because the loss
+   * has not yet persisted for GOAL_HOLDER_LOSS_CONFIRM_MS. Nothing was spent.
+   */
+  lossUnconfirmed: number;
   skipped: boolean;
+}
+
+/** Process-local record of ONE goal's unconfirmed holder loss (WI-10005559). */
+export interface GoalHolderLossObservation {
+  /** The elected holder judged lost, or null for a lost attachment with no elected row. */
+  ownerId: string | null;
+  /** ms epoch of the first tick in this continuous run that judged it lost. */
+  sinceMs: number;
 }
 
 /** Process-local record of ONE goal's ongoing capacity deferral episode. */
@@ -1499,6 +1665,18 @@ export interface GoalHolderCapacityDeferral {
    * whose readings go stale after it lifts cannot hold recovery forever.
    */
   untilMs: number | null;
+  /**
+   * WI-10005904: a floor set by an unhonored boot death. Until it passes the
+   * episode cannot close, whatever the capacity readings say — the readings are
+   * what failed to foresee that death. Absent on reading-opened episodes.
+   */
+  holdUntilMs?: number | null;
+}
+
+/** Process-local count of ONE goal's consecutive unhonored holder launches (WI-10005904). */
+export interface GoalHolderUnhonoredLaunchState {
+  count: number;
+  lastAtMs: number;
 }
 
 /** Process-local re-kick ledger for ONE goal: attempts against the CURRENT elected holder. */
@@ -1534,6 +1712,12 @@ export interface GoalHolderRespawnDeps {
   refreshControlAnchor?: typeof refreshControlAnchorAfterMutation;
   /** Atomically reserve one durable per-goal launch slot before a process is minted. */
   reserveRateSlot?: (goal: GoalRowLike, nowMs: number) => Promise<GoalHolderRespawnRateDecision>;
+  /**
+   * Return the slot reserved at `reservedAtMs` when launch policy refused the
+   * launch before a process was minted (WI-10004329). Resolves true when a
+   * matching attempt was removed.
+   */
+  releaseRateSlot?: (goal: GoalRowLike, reservedAtMs: number) => Promise<boolean>;
   /** Move a capped goal onto the canonical non-terminal human-attention hold. */
   pauseNeedsHuman?: (goal: GoalRowLike, attemptsInWindow: number, nowMs: number) => Promise<boolean>;
   /**
@@ -1546,6 +1730,12 @@ export interface GoalHolderRespawnDeps {
     goal: GoalRowLike,
     nowMs: number,
   ) => Promise<GoalHolderRespawnLatchReconciliation>;
+  /**
+   * WI-10005573: retire GOAL-mode rows (and the AUTO/IDEATE they implied) of
+   * holders a newer election superseded, once its handoff window expired. Runs
+   * for every swept goal regardless of holder health; failures are non-fatal.
+   */
+  retireSuperseded?: (goal: GoalRowLike) => Promise<SupersededGoalHolderRetirement>;
   escalateGiveUp: (goal: GoalRowLike, restartsInWindow: number) => Promise<void>;
   /**
    * WI-2140573: wake a live-but-idle elected holder with a retry brief. Default
@@ -1576,6 +1766,20 @@ export interface GoalHolderRespawnDeps {
   ) => Promise<void>;
   /** Deferral episodes, keyed like `states`. */
   capacityDeferrals?: Map<string, GoalHolderCapacityDeferral>;
+  /** WI-10005904: consecutive unhonored launches per goal, keyed like `states`. */
+  unhonoredLaunches?: Map<string, GoalHolderUnhonoredLaunchState>;
+  /** WI-10005904: deduped owner escalation for a launch the account route refused at boot. */
+  escalateUnhonoredLaunch?: (
+    goal: GoalRowLike,
+    detail: { refusal: string; count: number; holdMs: number },
+  ) => Promise<void>;
+  /**
+   * WI-10005559: minimum continuous-loss duration before recovery acts.
+   * Production wires GOAL_HOLDER_LOSS_CONFIRM_MS; 0 disables the window.
+   */
+  lossConfirmMs?: number;
+  /** Loss episodes, keyed like `states`. Defaults to the module-level map. */
+  lossObservations?: Map<string, GoalHolderLossObservation>;
   now: () => number;
   states: Map<string, FlapDampingState>;
 }
@@ -1810,6 +2014,73 @@ export async function reserveGoalHolderRespawnRateSlot(
 }
 
 /**
+ * Return ONE rate-cap slot that `reserveGoalHolderRespawnRateSlot` reserved at
+ * `reservedAtMs`, because the launch it paid for was refused by launch policy
+ * before any process was minted (WI-10004329).
+ *
+ * The cap bounds process minting ("reserve one durable per-goal launch slot
+ * before a process is minted"). A policy refusal mints nothing, so keeping its
+ * slot turned a persistent budget refusal into a false "6/6 recoveries" cap on
+ * goal 60d3a8 with zero holders launched. Removes exactly one attempt equal to
+ * `reservedAtMs`; anything else in the ledger, including the needs-human
+ * latch, is untouched. Returns false when no matching attempt exists.
+ */
+export async function releaseGoalHolderRespawnRateSlot(
+  sql: Sql,
+  goal: Pick<GoalRowLike, 'goalId' | 'workspaceId'>,
+  reservedAtMs: number,
+): Promise<boolean> {
+  const rows = await sql<Array<{ released: boolean }>>`
+    WITH candidate AS (
+      SELECT id, workspace_id, metadata,
+             metadata #> '{holderRespawn,attempts}' AS raw_attempts
+        FROM harness_shared.goals
+       WHERE id = ${goal.goalId}
+         AND workspace_id = ${goal.workspaceId}
+         AND jsonb_typeof(metadata #> '{holderRespawn,attempts}') = 'array'
+       FOR UPDATE
+    ), target AS (
+      SELECT c.*,
+             (SELECT min(e.ord)
+                FROM jsonb_array_elements(c.raw_attempts) WITH ORDINALITY AS e(value, ord)
+               WHERE jsonb_typeof(e.value) = 'number'
+                 AND (e.value #>> '{}')::numeric = ${reservedAtMs}::numeric) AS drop_ord
+        FROM candidate c
+    )
+    UPDATE harness_shared.goals AS g
+       SET metadata = jsonb_set(
+             t.metadata,
+             '{holderRespawn,attempts}',
+             COALESCE(
+               (SELECT jsonb_agg(e.value ORDER BY e.ord)
+                  FROM jsonb_array_elements(t.raw_attempts) WITH ORDINALITY AS e(value, ord)
+                 WHERE e.ord <> t.drop_ord),
+               '[]'::jsonb
+             ),
+             false
+           )
+      FROM target t
+     WHERE g.id = t.id AND g.workspace_id = t.workspace_id AND t.drop_ord IS NOT NULL
+    RETURNING true AS released
+  `;
+  const released = rows.length > 0;
+  await appendGoalWriteAudit(sql as unknown as GoalSqlTag, {
+    workspaceId: goal.workspaceId,
+    goalId: goal.goalId,
+    author: HOLDER_RESPAWNER_IDENTITY.ownerId,
+    writeKind: 'holder-respawn-release',
+    actorClass: 'holder-agent-respawner',
+    detail: `launch refused by policy; slot ${reservedAtMs} ${released ? 'returned' : 'not found'}`,
+    atMs: reservedAtMs,
+  }).catch((error) => {
+    console.warn(
+      `[goal-liveness-watchdog] goal:write release audit failed for ${goal.goalId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+  return released;
+}
+
+/**
  * Goals have no `needs-human` status. Their canonical non-terminal hold is
  * `paused`; this marker preserves the stronger reason while the shared stop
  * executor gates placement and disarms attributed loops.
@@ -1956,8 +2227,10 @@ async function defaultEscalateHolderRespawnGiveUp(
 }
 
 const goalHolderRespawnStates = new Map<string, FlapDampingState>();
+const goalHolderLossObservations = new Map<string, GoalHolderLossObservation>();
 const goalHolderRekickStates = new Map<string, GoalHolderRekickState>();
 const goalHolderCapacityDeferrals = new Map<string, GoalHolderCapacityDeferral>();
+const goalHolderUnhonoredLaunches = new Map<string, GoalHolderUnhonoredLaunchState>();
 
 /**
  * WI-2140573 finding 5: the owner-facing record of a capacity deferral. Deduped
@@ -1974,6 +2247,43 @@ async function defaultEscalateHolderCapacityDeferral(
   const now = Date.now();
   const provider = verdict.target.provider ?? 'unknown';
   const pinned = verdict.target.accountId ? `pinned account '${verdict.target.accountId}'` : `the '${provider}' pool`;
+  const meta = {
+    dedupKind: 'goal-holder-respawn-capacity-deferred',
+    subjectSignature: `${goal.workspaceId}:${goal.goalId}:${verdict.binding}`,
+    goalId: goal.goalId,
+    goalWorkspaceId: goal.workspaceId,
+    provider,
+    accountIds: verdict.accountIds,
+    binding: verdict.binding,
+    untilMs: verdict.untilMs,
+    deferredForMs,
+  };
+  if (verdict.binding === 'session-override') {
+    // WI-10005904: the owner's account steer, not a provider wall — it never
+    // lifts on its own, and the way out is the steer or the holder's route.
+    await openEscalation(HOLDER_RESPAWNER_IDENTITY, {
+      severity: 'advisory',
+      summary:
+        `Goal '${goal.goalId}' has no live holder and recovery is DEFERRED: the account session override ` +
+        `disallows ${pinned} its holder launches on`,
+      body:
+        `The goal "${goal.title}" (${goal.goalId}, workspace ${goal.workspaceId}) opted into ` +
+        `holder.onLoss='respawn' and its holder is lost, but ${verdict.reason}.\n\n` +
+        `A launch now would die at boot before its first turn (measured 2026-10-03 05:24–05:29Z: six such ` +
+        `holders in five minutes filled the hourly rate cap and paused the goal). So the respawner is NOT ` +
+        `launching: no re-kick, no damping restart, no rate-cap slot, no launch, while the override stands ` +
+        `(deferred ${Math.round(deferredForMs / 60_000)} min so far). Recovery resumes AUTOMATICALLY once the ` +
+        `override allows an account for this holder.\n\n` +
+        `Ways out, any one of them:\n` +
+        `  • widen the session override to include a '${provider}' account (Accounts tab, or ` +
+        `accounts:set-session-override);\n` +
+        `  • re-point the holder: goals:update { id: '${goal.goalId}', launchSettings } with roles.goal.agent / ` +
+        `account on a provider the override allows (the next tick launches onto it);\n` +
+        `  • leave it: if the override is meant to keep '${provider}' idle, this goal waits until it changes.`,
+      meta,
+    });
+    return;
+  }
   const wall = verdict.binding === 'usage-wall' ? 'USAGE-WALLED' : 'RATE-PAUSED';
   await openEscalation(HOLDER_RESPAWNER_IDENTITY, {
     severity: 'advisory',
@@ -1997,16 +2307,45 @@ async function defaultEscalateHolderCapacityDeferral(
       `model / account on a provider that has headroom (the next tick launches onto it);\n` +
       `  • wait for the window reset above — nothing else is needed.\n` +
       `Do NOT respawn by hand into the same wall; it costs a launch and a rate-cap slot and produces nothing.`,
+    meta,
+  });
+}
+
+/**
+ * WI-10005904 default: one deduped advisory per goal for holder launches the
+ * account route refused at boot. Each call repeats the same escalation (dedup by
+ * subject), so a route that stays refused is one row with a repeat count. It
+ * exists because the pre-launch capacity check SHOULD have foreseen the death
+ * and did not — the escalation names that gap instead of hiding it in a log.
+ */
+async function defaultEscalateUnhonoredHolderLaunch(
+  goal: GoalRowLike,
+  detail: { refusal: string; count: number; holdMs: number },
+): Promise<void> {
+  await openEscalation(HOLDER_RESPAWNER_IDENTITY, {
+    severity: 'advisory',
+    summary:
+      `Goal '${goal.goalId}' holder launch was refused at boot by its account route ` +
+      `(${detail.count} in a row); recovery held ${Math.round(detail.holdMs / 60_000)} min`,
+    body:
+      `The goal "${goal.title}" (${goal.goalId}, workspace ${goal.workspaceId}) lost its holder, and the ` +
+      `replacement the respawner launched died at boot before its first turn: ${detail.refusal}\n\n` +
+      `That is a route refusal, not a holder death, so it did NOT spend the hourly rate cap or the ` +
+      `flap-damping budget, and the goal is not paused. Recovery is HELD for ` +
+      `${Math.round(detail.holdMs / 60_000)} min (doubling per consecutive refusal, max ` +
+      `${Math.round(GOAL_HOLDER_UNHONORED_LAUNCH_HOLD_MAX_MS / 60_000)} min), then retries on its own.\n\n` +
+      `The pre-launch capacity check did not foresee this refusal, which means its account predicate and ` +
+      `the launch door's disagree — that gap is a bug worth filing. Ways out: check the account session ` +
+      `override and pool (accounts:get-session-override / accounts:status), or re-point the holder with ` +
+      `goals:update { id: '${goal.goalId}', launchSettings }.`,
     meta: {
-      dedupKind: 'goal-holder-respawn-capacity-deferred',
-      subjectSignature: `${goal.workspaceId}:${goal.goalId}:${verdict.binding}`,
+      dedupKind: 'goal-holder-launch-account-unhonored',
+      subjectSignature: `${goal.workspaceId}:${goal.goalId}:account-unhonored`,
       goalId: goal.goalId,
       goalWorkspaceId: goal.workspaceId,
-      provider,
-      accountIds: verdict.accountIds,
-      binding: verdict.binding,
-      untilMs: verdict.untilMs,
-      deferredForMs,
+      refusal: detail.refusal,
+      consecutive: detail.count,
+      holdMs: detail.holdMs,
     },
   });
 }
@@ -2125,8 +2464,12 @@ function holderRespawnDeps(
       workspaceId: goal.workspaceId, goalId: goal.goalId, holder,
     }),
     reserveRateSlot: async (goal, nowMs) => await reserveGoalHolderRespawnRateSlot(sql, goal, nowMs),
+    releaseRateSlot: async (goal, reservedAtMs) =>
+      await releaseGoalHolderRespawnRateSlot(sql, goal, reservedAtMs),
     reconcileStrandedLatch: async (goal, nowMs) =>
       await reconcileStrandedGoalHolderRespawnLatch(sql, goal, nowMs),
+    retireSuperseded: async (goal) =>
+      await retireSupersededGoalHolderModes(sql, goal.workspaceId, goal.goalId),
     pauseNeedsHuman: async (goal, attemptsInWindow, nowMs) =>
       await pauseGoalForHolderRespawnRateCap(sql, goal, attemptsInWindow, nowMs),
     escalateGiveUp: defaultEscalateHolderRespawnGiveUp,
@@ -2135,6 +2478,10 @@ function holderRespawnDeps(
     assessLaunchCapacity: async (goal) => await assessGoalHolderLaunchCapacityForGoal(goal),
     escalateCapacityDeferral: defaultEscalateHolderCapacityDeferral,
     capacityDeferrals: goalHolderCapacityDeferrals,
+    unhonoredLaunches: goalHolderUnhonoredLaunches,
+    escalateUnhonoredLaunch: defaultEscalateUnhonoredHolderLaunch,
+    lossConfirmMs: GOAL_HOLDER_LOSS_CONFIRM_MS,
+    lossObservations: goalHolderLossObservations,
     now: Date.now,
     states: goalHolderRespawnStates,
     ...overrides,
@@ -2165,6 +2512,8 @@ export async function runGoalHolderRespawnOnce(
     attempted: 0,
     respawned: 0,
     launchFailed: 0,
+    launchRefused: 0,
+    launchUnhonored: 0,
     attachFailed: 0,
     attachUnresolved: 0,
     neutralizeFailed: 0,
@@ -2172,11 +2521,17 @@ export async function runGoalHolderRespawnOnce(
     rekicked: 0,
     partialFirstTurn: 0,
     deferredCapacity: 0,
+    lossUnconfirmed: 0,
     skipped: false,
   };
   if (!(await deps.flagEnabled())) return { ...summary, skipped: true };
   const rekickStates = deps.rekickStates ?? new Map<string, GoalHolderRekickState>();
   const capacityDeferrals = deps.capacityDeferrals ?? new Map<string, GoalHolderCapacityDeferral>();
+  const unhonoredLaunches = deps.unhonoredLaunches ?? new Map<string, GoalHolderUnhonoredLaunchState>();
+  // Never a fresh per-call map: a window measured against a map that dies with
+  // the tick could never elapse, and recovery would silently stop for good.
+  const lossObservations = deps.lossObservations ?? goalHolderLossObservations;
+  const lossConfirmMs = Math.max(0, deps.lossConfirmMs ?? 0);
 
   const { goals, holders } = await deps.readGoals();
   summary.scanned = goals.length;
@@ -2192,8 +2547,14 @@ export async function runGoalHolderRespawnOnce(
   for (const key of rekickStates.keys()) {
     if (!eligibleKeys.has(key)) rekickStates.delete(key);
   }
+  for (const key of lossObservations.keys()) {
+    if (!eligibleKeys.has(key)) lossObservations.delete(key);
+  }
   for (const key of capacityDeferrals.keys()) {
     if (!eligibleKeys.has(key)) capacityDeferrals.delete(key);
+  }
+  for (const key of unhonoredLaunches.keys()) {
+    if (!eligibleKeys.has(key)) unhonoredLaunches.delete(key);
   }
   if (eligible.length === 0) return summary;
 
@@ -2246,6 +2607,30 @@ export async function runGoalHolderRespawnOnce(
       );
     }
 
+    // WI-10005573: a superseded holder keeps its GOAL row and implied AUTO
+    // unless something retires them; the handoff notice only disarms its loop.
+    // Health-independent on purpose: the residue exists whether or not the
+    // current holder is healthy. Never blocks the recovery path below.
+    if (deps.retireSuperseded) {
+      try {
+        const retirement = await deps.retireSuperseded(goal);
+        if (retirement.retired.length > 0 || retirement.leftArmed.length > 0) {
+          console.info(
+            `[goal-holder-respawner] ${goal.goalId}: retired superseded holder GOAL rows ` +
+              `[${retirement.retired.join(', ')}]; cancelled ${retirement.awaitsCancelled} goal-scoped await(s)` +
+              (retirement.leftArmed.length > 0
+                ? `; refused (left armed) [${retirement.leftArmed.join(', ')}]`
+                : ''),
+          );
+        }
+      } catch (error) {
+        console.warn(
+          `[goal-holder-respawner] superseded holder retirement failed for ${goal.goalId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     // A stub that was never picked up is not a lost holder and must not be
     // auto-started. But startGoalById stamps metadata.agentOwnerId only after a
     // successful GOAL-mode attach. When that proof survives while the mode row
@@ -2283,6 +2668,8 @@ export async function runGoalHolderRespawnOnce(
     }
 
     const previous = deps.states.get(key);
+    // A tick that reads the holder alive ends any loss episode (WI-10005559).
+    if (fold.liveness === 'held') lossObservations.delete(key);
     if (fold.liveness === 'held' && !partialFirstTurn) {
       // A holder that is alive again has spent nothing: a later idle spell
       // earns a fresh re-kick budget (a re-kick that WORKED is the whole point).
@@ -2296,7 +2683,40 @@ export async function runGoalHolderRespawnOnce(
       // A holder that is alive again is proof the account served: close any
       // deferral episode without a "capacity back" line (it was never lost).
       capacityDeferrals.delete(key);
+      unhonoredLaunches.delete(key);
       continue;
+    }
+
+    // WI-10005559 (measured 2026-10-02): a loss must PERSIST before any
+    // recovery is paid. A same-owner restart (carry-respawn, cold-boot drill,
+    // resume) reads `ended` until its successor registers; acting on the first
+    // such tick launched a duplicate holder per restart and spent the hourly
+    // cap in 23 minutes. The partial-first-turn case is exempt: it has already
+    // waited out GOAL_HOLDER_FIRST_TURN_GRACE_MS.
+    if (!partialFirstTurn && lossConfirmMs > 0) {
+      const lostOwnerId = fold.elected?.ownerId ?? null;
+      const nowMs = deps.now();
+      const observed = lossObservations.get(key);
+      const episode =
+        observed && observed.ownerId === lostOwnerId ? observed : { ownerId: lostOwnerId, sinceMs: nowMs };
+      if (episode !== observed) {
+        lossObservations.set(key, episode);
+        // WI-10005579: name the verdict INPUTS. `ended` during a holder's own CLI
+        // relaunch gap (measured 2026-10-02: host-teardown/self-relaunch at the
+        // exact ticks two 'lost' lines fired) and `parked` with no wake source are
+        // different stories, and the bare liveness label could tell neither.
+        const inputs = fold.elected
+          ? `sessionState=${fold.elected.sessionState ?? 'unknown'} selfWake=${fold.elected.selfWake ?? 'unknown'}`
+          : 'no elected row';
+        console.info(
+          `[goal-holder-respawner] ${goal.goalId}: holder ${lostOwnerId ?? '(none elected)'} judged lost ` +
+            `(${fold.liveness}; ${inputs}); confirming for ${Math.round(lossConfirmMs / 1000)}s before recovery`,
+        );
+      }
+      if (nowMs - episode.sinceMs < lossConfirmMs) {
+        summary.lossUnconfirmed += 1;
+        continue;
+      }
     }
 
     // WI-2140573 finding 5 (measured 2026-09-02): before ANY recovery is paid,
@@ -2310,10 +2730,12 @@ export async function runGoalHolderRespawnOnce(
     // episode, and let the next tick that measures capacity back resume the
     // ordinary path on its own. An unreadable or unmeasured verdict is
     // `unknown` and proceeds — this guard only stops launches CERTAIN to die.
-    if (deps.assessLaunchCapacity) {
+    // An episode opened by an unhonored boot death (WI-10005904) holds even when
+    // no capacity reader is wired, so the hold below is never silently skipped.
+    if (deps.assessLaunchCapacity || capacityDeferrals.has(key)) {
       let capacity: GoalHolderLaunchCapacityVerdict | null = null;
       try {
-        capacity = await deps.assessLaunchCapacity(goal);
+        capacity = deps.assessLaunchCapacity ? await deps.assessLaunchCapacity(goal) : null;
       } catch (error) {
         console.warn(
           `[goal-holder-respawner] launch-capacity read failed for ${goal.goalId} (proceeding as unknown): ` +
@@ -2351,7 +2773,9 @@ export async function runGoalHolderRespawnOnce(
         }
         const escalateNow =
           !current.escalated &&
-          (capacity.binding === 'usage-wall' || deferredForMs >= GOAL_HOLDER_CAPACITY_DEFER_ESCALATE_MS);
+          // Only a rate pause clears by itself in minutes; a usage wall or the
+          // owner's session override (WI-10005904) escalates on the first tick.
+          (capacity.binding !== 'rate-pause' || deferredForMs >= GOAL_HOLDER_CAPACITY_DEFER_ESCALATE_MS);
         if (escalateNow && deps.escalateCapacityDeferral) {
           try {
             await deps.escalateCapacityDeferral(goal, capacity, deferredForMs);
@@ -2381,13 +2805,16 @@ export async function runGoalHolderRespawnOnce(
         if (capacity?.kind === 'clear') episode.clearStreak += 1;
         const wallLifted = episode.untilMs != null && nowMs >= episode.untilMs;
         const confirmed = episode.clearStreak >= GOAL_HOLDER_CAPACITY_RESUME_CONFIRM_TICKS;
-        if (!confirmed && !wallLifted) {
+        // WI-10005904: a boot-death hold is a floor no reading can lift early.
+        const held = episode.holdUntilMs != null && nowMs < episode.holdUntilMs;
+        if (held || (!confirmed && !wallLifted)) {
           if (nowMs - episode.lastLoggedAtMs >= GOAL_HOLDER_CAPACITY_DEFER_LOG_INTERVAL_MS) {
             episode.lastLoggedAtMs = nowMs;
             console.warn(
               `[goal-holder-respawner] capacity NOT confirmed for ${goal.goalId}: ` +
                 `${capacity?.kind ?? 'unreadable'} reading (${episode.clearStreak}/${GOAL_HOLDER_CAPACITY_RESUME_CONFIRM_TICKS} consecutive clear) ` +
                 `after ${Math.round((nowMs - episode.sinceMs) / 60_000)} min deferred — still no re-kick, no rate slot, no launch` +
+                (held ? ` — boot-death hold until ${new Date(episode.holdUntilMs as number).toISOString()}` : '') +
                 (capacity ? ` — ${capacity.reason}` : ''),
             );
           }
@@ -2513,10 +2940,11 @@ export async function runGoalHolderRespawnOnce(
     if (decision.action.kind !== 'restart') continue;
 
     let rate: GoalHolderRespawnRateDecision;
+    const reservedAtMs = deps.now();
     try {
       rate = await (deps.reserveRateSlot ?? (async () => ({ kind: 'reserved', attemptsInWindow: 0 }) as const))(
         goal,
-        deps.now(),
+        reservedAtMs,
       );
     } catch (error) {
       // Fail closed: when the durable budget cannot be read/updated, launching
@@ -2558,12 +2986,82 @@ export async function runGoalHolderRespawnOnce(
     try {
       launched = await deps.launch(goal);
     } catch (error) {
+      if (isGoalHolderLaunchPolicyRefusal(error)) {
+        // WI-10004329: policy refused BEFORE a process was minted. Give the
+        // slot back so a persistent refusal cannot fill the cap and page the
+        // owner about recoveries that never happened. Budget refusals already
+        // open their own deduped owner escalation in the launch resolver;
+        // headcount refusals clear when a goal agent ends.
+        summary.launchRefused += 1;
+        let released = false;
+        try {
+          released = await (deps.releaseRateSlot ?? (async () => false))(goal, reservedAtMs);
+        } catch (releaseError) {
+          console.warn(
+            `[goal-holder-respawner] rate-slot release failed for ${goal.goalId} (slot stays spent): ` +
+              `${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+          );
+        }
+        console.warn(
+          `[goal-holder-respawner] launch refused by policy for ${goal.goalId} ` +
+            `(${error.refusal.reason}; no process minted; rate slot ${released ? 'returned' : 'NOT returned'}): ${error.message}`,
+        );
+        continue;
+      }
+      const refusal = holderLaunchAccountUnhonored(error);
+      if (refusal) {
+        // WI-10005904: the launch door refused the account route and the agent
+        // exited before its first turn. Not a holder death: return the slot,
+        // undo this tick's damping restart, and HOLD recovery (doubling per
+        // consecutive refusal) instead of relaunching into the same refusal.
+        summary.launchUnhonored += 1;
+        const nowMs = deps.now();
+        if (previous) deps.states.set(key, previous);
+        else deps.states.delete(key);
+        let released = false;
+        try {
+          released = await (deps.releaseRateSlot ?? (async () => false))(goal, reservedAtMs);
+        } catch (releaseError) {
+          console.warn(
+            `[goal-holder-respawner] rate-slot release failed for ${goal.goalId} (slot stays spent): ` +
+              `${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+          );
+        }
+        const streak = unhonoredLaunches.get(key);
+        const count = (streak?.count ?? 0) + 1;
+        unhonoredLaunches.set(key, { count, lastAtMs: nowMs });
+        const holdMs = unhonoredLaunchHoldMs(count);
+        capacityDeferrals.set(key, {
+          sinceMs: nowMs,
+          lastLoggedAtMs: nowMs,
+          reason: `launch refused at boot: ${refusal}`,
+          escalated: false,
+          clearStreak: 0,
+          untilMs: nowMs + holdMs,
+          holdUntilMs: nowMs + holdMs,
+        });
+        console.warn(
+          `[goal-holder-respawner] launch for ${goal.goalId} died at boot on its account route ` +
+            `(${count} in a row; rate slot ${released ? 'returned' : 'NOT returned'}; damping untouched; ` +
+            `recovery held ${Math.round(holdMs / 60_000)} min): ${refusal}`,
+        );
+        try {
+          await (deps.escalateUnhonoredLaunch ?? (async () => {}))(goal, { refusal, count, holdMs });
+        } catch (escalationError) {
+          console.warn(
+            `[goal-holder-respawner] unhonored-launch escalation failed for ${goal.goalId}: ` +
+              `${escalationError instanceof Error ? escalationError.message : String(escalationError)}`,
+          );
+        }
+        continue;
+      }
       summary.launchFailed += 1;
       console.warn(
         `[goal-holder-respawner] launch failed for ${goal.goalId} (non-fatal, damped): ${error instanceof Error ? error.message : String(error)}`,
       );
       continue;
     }
+    unhonoredLaunches.delete(key);
     for (const warning of launched.warnings) {
       console.warn(`[goal-holder-respawner] ${goal.goalId}: ${warning}`);
     }

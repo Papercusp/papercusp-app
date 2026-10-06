@@ -107,6 +107,11 @@ export const behaviourRunTool = defineTool({
     seeAlso: ['behaviour:catalog (the 8 checks + what each catches)', 'cert:run (headless model-cert battery)', 'omp:sessions'],
   },
   capability: 'harness:read',
+  // WI-10004577: mode:'launch' SPAWNS a real agent and scores it, so the tool as a whole mutates even
+  // though it shares the `harness:read` capability with genuine readers. Declare the write effect
+  // explicitly — it must not infer 'read' (code:run dryRun gate) nor be admitted by the host's
+  // late-completion READ exemption (a completed-late result would report success for a cancelled launch).
+  effect: 'write',
   requirePrincipal: false,
   agentRoles: [...COORD_ROLES],
   args: z

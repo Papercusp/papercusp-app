@@ -37,6 +37,9 @@ export interface ChatModelFailure {
   retryAfterMs?: number;
 }
 
+/** Safe fallback stored in transcript JSONB instead of backend error prose. */
+export const CHAT_TURN_FAILURE_SAFE_MESSAGE = 'That turn did not complete. Try asking again.';
+
 /** Only these precisions name an instant explicitly; `clock`/`relative` are partly inferred. */
 const NAMED_RESET: ReadonlySet<UsageResetPrecision> = new Set<UsageResetPrecision>(['header', 'dated']);
 
@@ -47,7 +50,7 @@ const NAMED_RESET: ReadonlySet<UsageResetPrecision> = new Set<UsageResetPrecisio
  * it in the local zone of the host that ran it. Converting it to an instant is only right
  * where that zone is this process's zone — i.e. the operator classifying its own backend's
  * output. A classifier on ANOTHER host (the portal reading an older operator's prose) does
- * not know the emitter's zone: measured WI-10003494, owner-test runs Etc/UTC and the portal
+ * not know the emitter's zone: measured WI-10003494, avi-test runs Etc/UTC and the portal
  * host America/New_York, so the same text parsed there lands 4h late. `'unknown'` keeps the
  * code and drops every wall-clock-derived instant; a `header` instant is zone-free and stays.
  */
@@ -106,4 +109,89 @@ export function chatModelFailureFields(
   now: number = Date.now(),
 ): Partial<ChatModelFailure> {
   return classifyChatModelFailure(message, now) ?? {};
+}
+
+export interface SafeChatFailureTranscriptFields extends Partial<ChatModelFailure> {
+  content: string;
+  error: true;
+}
+
+/** Persist a safe transcript sentence plus any actionable, stable failure fields. */
+export function safeChatFailureTranscriptFields(
+  message: string | null | undefined,
+  now: number = Date.now(),
+): SafeChatFailureTranscriptFields {
+  return {
+    content: CHAT_TURN_FAILURE_SAFE_MESSAGE,
+    error: true,
+    ...chatModelFailureFields(message, now),
+  };
+}
+
+export interface ChatFailureTranscriptTurnInput {
+  content?: unknown;
+  error?: unknown;
+  code?: unknown;
+  resetAt?: unknown;
+  retryAfterMs?: unknown;
+}
+
+const CHAT_MODEL_FAILURE_CODES: readonly ChatModelFailureCode[] = [
+  'model_usage_limited',
+  'model_auth_required',
+  'model_rate_limited',
+];
+
+/**
+ * Project a persisted error turn for a viewer. Old transcript rows may still
+ * contain backend prose in `content`; keep the stable actionable fields and
+ * replace that prose before it reaches a transcript reader.
+ */
+export function projectChatFailureTranscriptTurn<T extends ChatFailureTranscriptTurnInput>(
+  turn: T,
+  now?: number,
+): T;
+export function projectChatFailureTranscriptTurn(turn: unknown, now?: number): unknown;
+export function projectChatFailureTranscriptTurn(turn: unknown, now: number = Date.now()): unknown {
+  if (!turn || typeof turn !== 'object' || Array.isArray(turn)) return turn;
+  const source = turn as Record<string, unknown>;
+  if (source.error !== true) return turn;
+
+  // The original prose was emitted by another host, whose local timezone this
+  // reader does not know. Keep an explicit UTC/header reset, but do not parse a
+  // provider's unzoned wall-clock date into a misleading instant here.
+  const classified = classifyChatModelFailure(
+    typeof source.content === 'string' ? source.content : undefined,
+    now,
+    { wallClockZone: 'unknown' },
+  );
+  const code = CHAT_MODEL_FAILURE_CODES.includes(source.code as ChatModelFailureCode)
+    ? source.code as ChatModelFailureCode
+    : classified?.code;
+  const resetAt = typeof source.resetAt === 'number' && Number.isFinite(source.resetAt) && source.resetAt > 0
+    ? source.resetAt
+    : classified?.resetAt;
+  const retryAfterMs = typeof source.retryAfterMs === 'number' && Number.isFinite(source.retryAfterMs) && source.retryAfterMs > 0
+    ? source.retryAfterMs
+    : classified?.retryAfterMs;
+
+  const projected: Record<string, unknown> = {
+    ...source,
+    content: CHAT_TURN_FAILURE_SAFE_MESSAGE,
+    error: true,
+  };
+  if (code) projected.code = code;
+  else delete projected.code;
+  if (resetAt !== undefined) projected.resetAt = resetAt;
+  else delete projected.resetAt;
+  if (retryAfterMs !== undefined) projected.retryAfterMs = retryAfterMs;
+  else delete projected.retryAfterMs;
+  return projected;
+}
+
+/** Preserve non-array transcript values, and project each turn in valid arrays. */
+export function projectChatFailureTranscript(transcript: unknown, now: number = Date.now()): unknown {
+  return Array.isArray(transcript)
+    ? transcript.map((turn) => projectChatFailureTranscriptTurn(turn, now))
+    : transcript;
 }

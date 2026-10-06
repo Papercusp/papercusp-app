@@ -26,6 +26,28 @@ export interface PlanContentRow {
   harness_slug: string;
   plan_slug: string;
   content: string;
+  /**
+   * Epoch ms of the write that produced `content`: the created_at of the latest
+   * plan_revisions row whose content_hash matches the body, capped by
+   * harness_plans.updated_at (updated_at alone when no revision matches). updated_at is
+   * not used by itself because non-content writes bump it too; a stale body stamped with
+   * such a bump out-ranked newer remote parts that were not recomposed yet
+   * (WI-10006276). The capture is stamped with THIS, never with the sweep's clock. The sweep loads every
+   * plan up front and reaches each one minutes later, so a plan edited in between is
+   * held here as its OLD body. Stamped `now()`, that old body beat the edit's own
+   * capture in the parts LWW and the next recompose rewrote the plan with it — with
+   * no revision and no outbox row (WI-10004610). Stamped with its own write time, it
+   * is older than the edit's capture and the store's LWW guard rejects it.
+   */
+  content_ts: number;
+  /**
+   * harness_plans.origin. 'remote' means the per-part recompose (or the bootstrap
+   * whole-blob insert) wrote this body, so it is DERIVED from the parts. Its updated_at is
+   * the LOCAL recompose time, which can be later than the authoring time of newer parts
+   * that arrived but are not recomposed yet, so content_ts cannot protect it. Such a body
+   * is never re-captured over existing parts (WI-10006276). Absent = treated as local.
+   */
+  origin?: string | null;
 }
 
 export interface ReconcilePlanPartsDeps {
@@ -35,9 +57,6 @@ export interface ReconcilePlanPartsDeps {
   loadPlans?: (sql: Sql, workspaceId: string) => Promise<PlanContentRow[]>;
   /** Test seam — the per-(ws,harness) store factory (default: PgPlanPartsStore). */
   storeFor?: (sql: Sql, workspaceId: string, harnessSlug: string) => PlanPartsStore;
-  /** Test seam — the local-capture timestamp (default: Date.now). Local edits are
-   *  "now", so they win LWW over older remote state. */
-  now?: () => number;
 }
 
 export interface ReconcilePlanPartsResult {
@@ -47,11 +66,28 @@ export interface ReconcilePlanPartsResult {
 }
 
 async function defaultLoadPlans(sql: Sql, workspaceId: string): Promise<PlanContentRow[]> {
-  return (await sql`
-    SELECT harness_slug, plan_slug, content
-      FROM harness_shared.harness_plans
-     WHERE workspace_id = ${workspaceId} AND archived = false
-  `) as unknown as PlanContentRow[];
+  // content_ts = when THIS body was written: the latest revision whose hash matches the
+  // current body, capped by updated_at (LEAST ignores the NULL when no revision matches,
+  // which falls back to updated_at). updated_at alone is not a content clock: mig 211
+  // bumps it on op_status / archived / supersede writes too (WI-10006276).
+  const rows = await sql<Array<{ harness_slug: string; plan_slug: string; content: string; content_ts: string; origin: string | null }>>`
+    SELECT p.harness_slug, p.plan_slug, p.content, p.origin,
+           LEAST(
+             (EXTRACT(EPOCH FROM p.updated_at) * 1000)::bigint,
+             (SELECT r.created_at
+                FROM harness_shared.plan_revisions r
+               WHERE r.workspace_id = p.workspace_id
+                 AND r.harness_slug = p.harness_slug
+                 AND r.plan_slug = p.plan_slug
+                 AND r.content_hash = p.content_hash
+               ORDER BY r.seq DESC
+               LIMIT 1)
+           ) AS content_ts
+      FROM harness_shared.harness_plans p
+     WHERE p.workspace_id = ${workspaceId} AND p.archived = false
+  `;
+  // bigint comes back as a string from postgres.js
+  return rows.map((r) => ({ ...r, content_ts: Number(r.content_ts) }));
 }
 
 /**
@@ -62,7 +98,6 @@ export async function reconcilePlanParts(deps: ReconcilePlanPartsDeps): Promise<
   const result: ReconcilePlanPartsResult = { plansScanned: 0, partsWritten: 0, errors: 0 };
   const sql = deps.sql ?? getOrgPg().sql;
   const storeFor = deps.storeFor ?? ((s, ws, h) => new PgPlanPartsStore(s, ws, h));
-  const now = deps.now ?? (() => Date.now());
 
   let plans: PlanContentRow[];
   try {
@@ -76,7 +111,10 @@ export async function reconcilePlanParts(deps: ReconcilePlanPartsDeps): Promise<
     result.plansScanned++;
     try {
       const store = storeFor(sql, deps.workspaceId, p.harness_slug);
-      const ops = await capturePlanParts(store, p.plan_slug, p.content, now(), 'local');
+      // A recompose-derived body is already represented in its parts; the parts are the
+      // authority. Only a body with no parts yet (backfill) is captured (WI-10006276).
+      if (p.origin === 'remote' && (await store.getParts(p.plan_slug)).size > 0) continue;
+      const ops = await capturePlanParts(store, p.plan_slug, p.content, p.content_ts, 'local');
       result.partsWritten += ops.length;
     } catch {
       result.errors++;

@@ -27,11 +27,14 @@ import {
   getDecisionClient,
   JEV_PINNED_MODEL,
   type DecisionClient,
+  type DecisionPricing,
 } from '@papercusp/decision-model';
 import { pinModuleState } from '@papercusp/module-singleton';
 import { recordDecisionModelCall } from '../decision-model-ledger';
 import { maskIntegrationKey, readIntegrationKey, writeIntegrationCredentials } from '../integration-credentials';
 import { activeWorkspaceId } from '../workspace-registry';
+import { alertOwnerOnJevAccountRefusal } from './jev-account-alert';
+import { jevFetch } from './jev-transport';
 
 export const JEV_MODES = ['off', 'shadow', 'on'] as const;
 export type JevMode = (typeof JEV_MODES)[number];
@@ -39,8 +42,31 @@ export type JevMode = (typeof JEV_MODES)[number];
 /** Name of the Jev key in operator_integration_credentials. */
 export const JEV_API_KEY_NAME = 'TYPESAFE_API_KEY';
 
-/** Budget for one Jev call on the memory push path: an answer or a fallback within this. */
-export const JEV_MEMORY_TIMEOUT_MS = 400;
+/**
+ * The most one Jev call on the memory push path may take: an answer or a fallback
+ * within this. A port whose turn waits for the answer gets less when its hook's
+ * wall is closer (jev-memory-gate: jevMemoryWaitMs).
+ *
+ * Was 400 ms until WI-10004485 step C. Measured 2026-10-01 from quiet processes
+ * (no operator-worker stalls; ~600 answered calls in healthy-provider windows):
+ * 2.3% of answers took longer than 400 ms, 1 longer than 600 ms, the slowest 639 ms.
+ * So 400 ms alone failed the pre-registered <2% inconclusive bar before any stall;
+ * 800 ms clears every healthy-provider answer seen. Live Log-only traffic at 400 ms
+ * timed out 10.6% of calls, 4 in 10 of them worker stalls (EI-24748208098755918).
+ */
+export const JEV_MEMORY_TIMEOUT_MS = 800;
+
+/**
+ * Token rates for the pinned Jev model, so every ledger row carries `cost_usd`.
+ * Jev's API returns token counts but no price, so the host supplies the rates.
+ * Source: the OpenRouter listing for typesafe/jev-1.13 (and its jev-latest alias),
+ * checked 2026-09-30: $0.042 per million input tokens, output tokens free.
+ * Re-check this when JEV_PINNED_MODEL changes.
+ */
+export const JEV_PRICING: DecisionPricing = {
+  inputUsdPerMillionTokens: 0.042,
+  outputUsdPerMillionTokens: 0,
+};
 
 /** Keys shorter than this are rejected (they are typos, and would not mask). */
 export const JEV_API_KEY_MIN_LENGTH = 8;
@@ -56,8 +82,20 @@ export function jevModeKey(workspaceId: string): string {
   return `jev_memory_injection:${workspaceId}`;
 }
 
+/**
+ * How long a read of the stored key is reused (WI-10004485). Every memory recall
+ * resolves the key once for the effective-mode gate and, in Log only / On, once
+ * more inside the decision client, so an uncached read cost two Postgres
+ * round-trips per recall (about 60,000 recalls a day). That read sits BEFORE the
+ * client arms its 400 ms deadline, so a slow pool acquire inflated the recorded
+ * latency (answered calls at 1-3 s on 2026-10-01). A save in this process
+ * refreshes the entry at once; a save in another process is seen within the TTL.
+ */
+const KEY_TTL_MS = 10_000;
+
 const state = pinModuleState('@papercusp/operator-core.jev-settings', () => ({
   modeCache: new Map<string, { value: JevMode; at: number }>(),
+  keyCache: null as { value: string | null; at: number } | null,
 }));
 
 /**
@@ -102,11 +140,18 @@ export async function setJevMode(mode: JevMode, workspaceId: string = activeWork
   return mode;
 }
 
-/** The stored Jev key, or null. A read failure is treated as "no key" (fail open to today's system). */
+/**
+ * The stored Jev key, or null. A read failure is treated as "no key" (fail open to
+ * today's system) and is NOT cached, so the next call reads again.
+ */
 export async function readJevApiKey(): Promise<string | null> {
+  const hit = state.keyCache;
+  if (hit && Date.now() - hit.at < KEY_TTL_MS) return hit.value;
   try {
     const key = await readIntegrationKey(JEV_API_KEY_NAME);
-    return key && key.trim().length > 0 ? key.trim() : null;
+    const value = key && key.trim().length > 0 ? key.trim() : null;
+    state.keyCache = { value, at: Date.now() };
+    return value;
   } catch {
     return null;
   }
@@ -128,6 +173,7 @@ export async function setJevApiKey(key: string | null): Promise<void> {
     if (problem) throw new Error(problem);
   }
   await writeIntegrationCredentials({ [JEV_API_KEY_NAME]: key === null ? null : key.trim() });
+  state.keyCache = { value: key === null ? null : key.trim(), at: Date.now() };
 }
 
 export interface JevMemoryInjectionResolution {
@@ -179,9 +225,21 @@ export function ensureJevDecisionClient(): DecisionClient {
     provider: createJevProvider(),
     resolveKey: readJevApiKey,
     timeoutMs: JEV_MEMORY_TIMEOUT_MS,
+    // P-006 (jev-memory-timeouts-to-zero-2026-10-01): keep the Jev socket open between
+    // calls — the default global fetch reconnected on almost every call.
+    fetch: jevFetch,
     // P-003: every call — answered or inconclusive — lands in decision_model_calls.
     // Fire-and-forget; the client never awaits it and swallows its faults.
-    onCall: (record) => recordDecisionModelCall(record).then(() => undefined),
+    // Pricing is passed so cost_usd is filled in; without it every row's cost is null.
+    // WI-10005694: a provider refusal only the owner can fix (402 no credits,
+    // 401/403 bad key) notifies the owner once a day instead of failing silently.
+    onCall: (record) =>
+      Promise.all([
+        recordDecisionModelCall(record, { pricing: JEV_PRICING }),
+        alertOwnerOnJevAccountRefusal(record).catch((err) => {
+          console.warn(`[jev-account-alert] owner notification failed: ${err instanceof Error ? err.message : String(err)}`);
+        }),
+      ]).then(() => undefined),
   });
   configureDecisionModel(client);
   return client;
@@ -189,4 +247,5 @@ export function ensureJevDecisionClient(): DecisionClient {
 
 export function __resetJevSettingsCacheForTest(): void {
   state.modeCache.clear();
+  state.keyCache = null;
 }

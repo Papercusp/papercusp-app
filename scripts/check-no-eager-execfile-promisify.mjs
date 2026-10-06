@@ -69,6 +69,12 @@ export const isExcluded = (f) =>
 
 /** The tell: a column-0 (module-scope) `const`/`let` assigned from `promisify(execFile...)`. */
 export function usesEagerExecFilePromisify(text, fileName) {
+  // Raw-text pre-filter (WI-10005282). It is SOUND: the stripper only blanks characters in
+  // place (offset-preserving), so it cannot create a `promisify(` the raw text lacks. A file
+  // without one cannot match, and skipping it avoids the stripper's per-file parse, which
+  // made a whole-tree scan cost ~5.7 s. That cost matters because affected-tests.mjs now
+  // runs this guard on every gate pass that touches a scanned file.
+  if (!text.includes('promisify(')) return false;
   return /^(export\s+)?(const|let)\s+\w+\s*=\s*promisify\(\s*execFile\w*\s*\)/m.test(
     stripCommentsAndStrings(text, fileName),
   );
@@ -121,7 +127,6 @@ export const BASELINE = new Set([
   'packages/operator-core/lib/harness-insights/github-facts.ts',
   'packages/operator-core/lib/harness/join-steps.ts',
   'packages/operator-core/lib/harness/open-fork-pr.ts',
-  'packages/operator-core/lib/harness/routines/supervision-reconcile-action.ts',
   'packages/operator-core/lib/harness/upstream-repo-context.ts',
   'packages/operator-core/lib/papercup/papercup-pane-input.ts',
   'packages/operator-core/lib/pot-eval/ground-truth.ts',

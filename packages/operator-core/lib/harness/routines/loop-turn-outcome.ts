@@ -103,8 +103,9 @@ export function loopRoutineIdFromSource(source: string | null | undefined): stri
  * EI-19381528967421062: below this, a rate_limited/overloaded backoff is ORDINARY
  * governor-absorbed noise — turn-error.ts's `SURFACE_TO_USER` set deliberately excludes
  * `rate_limited` (an isolated 429 recovers in well under this; alerting on every one would
- * be pure spam). At or above it, the loop has gone SILENT long enough that a leader/owner
- * needs to know even though the error CLASS alone says "handle silently": measured live, a
+ * be pure spam). At or above this EXTRA delay beyond the loop's configured cadence, the loop
+ * has gone SILENT long enough that a leader/owner needs to know even though the error CLASS
+ * alone says "handle silently": measured live, a
  * dead-egress-proxy streak of bare 429s (not a normal RPM bump) pushed two members' waits
  * to ~50-100 minutes with NOTHING alerted, because the wedge alert below was gated on
  * `surfaceToUser` alone — a fleet ran with two stranded claims and no leader signal for the
@@ -296,15 +297,17 @@ function recoveryMaterializeInput(ref: LoopRoutineRef, ownerId: string, now: num
   };
 }
 
-function recoveryFirstPrompt(ownerId: string, spec: RespawnLaunchSpec): string {
+async function recoveryFirstPrompt(ownerId: string, spec: RespawnLaunchSpec): Promise<string> {
   if (spec.firstPrompt?.trim()) return spec.firstPrompt;
   const recoveryPrompt = addressContinuationToOwner(CONTEXT_OVERFLOW_RECOVERY_PROMPT, ownerId);
   try {
-    return tagTurnForInjection({
-      sid: ownerId,
-      origin: 'watchdog',
-      text: recoveryPrompt,
-    }).taggedText;
+    return (
+      await tagTurnForInjection({
+        sid: ownerId,
+        origin: 'watchdog',
+        text: recoveryPrompt,
+      })
+    ).taggedText;
   } catch {
     return recoveryPrompt;
   }
@@ -363,7 +366,7 @@ async function recoverContextOverflow(
       availability.host.sock,
       {
         mode: 'carry-respawn',
-        data: recoveryFirstPrompt(ownerId, spec),
+        data: await recoveryFirstPrompt(ownerId, spec),
         systemPromptAddendum: spec.systemPromptAddendum,
         ownerId,
       },
@@ -504,6 +507,7 @@ export async function handleLoopResumeTurnExit(
     const contextOverflow = String(klass) === 'context_overflow';
     const authWall = String(klass) === 'auth';
     const malformedAuthorization = authWall && outcome.error.message.startsWith('malformed Authorization header:');
+    const intervalMs = (ref.intervalSec ?? 60) * 1000;
     let delayMs: number | undefined;
     let rearmed = false;
     let recovery: ContextOverflowRecoveryResult | undefined;
@@ -536,7 +540,6 @@ export async function handleLoopResumeTurnExit(
       }
     } else {
       // 429-aware re-arm (P1a) — only while still parked at 'infinity' (the dead turn).
-      const intervalMs = (ref.intervalSec ?? 60) * 1000;
       delayMs = computeDeathRearmMs(outcome, intervalMs, now);
       rearmed = await rearmLoopAfterDeath(sql, routineId, delayMs, now).catch((e) => {
         log(`re-arm failed for loop ${routineId}: ${e instanceof Error ? e.message : e}`);
@@ -581,11 +584,18 @@ export async function handleLoopResumeTurnExit(
     // reported — a `rate_limited` streak (dead egress proxy, not a normal RPM bump) whose
     // computed re-arm delay ran ~50-100 minutes with no alert, because `rate_limited` is
     // deliberately excluded from `SURFACE_TO_USER` (a single isolated 429 SHOULD stay
-    // silent). `chronicBackoff` widens the net for exactly the case the class-based gate
-    // structurally cannot see: the delay computed for THIS fire is long enough that a human
-    // needs to know regardless of class. See CHRONIC_BACKOFF_ALERT_FLOOR_MS's own doc for why.
+    // silent). `chronicBackoff` widens the net for exactly the rate-limit classes the
+    // class-based gate structurally cannot see. Compare provider-added delay with the
+    // configured cadence: a 10-minute loop interval is not itself a 10-minute backoff.
+    // See CHRONIC_BACKOFF_ALERT_FLOOR_MS's own doc for why.
+    const chronicBackoffExtraMs = delayMs == null ? 0 : Math.max(0, delayMs - intervalMs);
     const chronicBackoff =
-      !contextOverflow && !staleResumeTarget && !authWall && !outcome.error.surfaceToUser && delayMs! >= CHRONIC_BACKOFF_ALERT_FLOOR_MS;
+      !contextOverflow &&
+      !staleResumeTarget &&
+      !authWall &&
+      !outcome.error.surfaceToUser &&
+      (klass === 'rate_limited' || klass === 'overloaded') &&
+      chronicBackoffExtraMs >= CHRONIC_BACKOFF_ALERT_FLOOR_MS;
     if (contextOverflow || staleResumeTarget || authWall || outcome.error.surfaceToUser || chronicBackoff) {
       try {
         const { claimWatchdogFire } = await import('../../pot/watchdog');
@@ -670,9 +680,9 @@ export async function handleLoopResumeTurnExit(
                 ? ` [stale-resume-target terminal guard: the loop was paused instead of re-arming a ` +
                   `missing native session; relaunch or rebind the owner before resuming the loop.]`
                 : chronicBackoff
-                ? ` [chronic-backoff trigger: ${klass} is normally auto-absorbed silently, but the computed ` +
-                  `re-arm delay for this fire was ${Math.round(delayMs! / 60_000)}min — well past a normal ` +
-                  `transient wait, so this alerted despite the class alone saying "handle silently".]`
+                ? ` [chronic-backoff trigger: ${klass} is normally auto-absorbed silently, but the added ` +
+                  `delay beyond the configured cadence was ${Math.round(chronicBackoffExtraMs / 60_000)}min — ` +
+                  `well past a normal transient wait, so this alerted despite the class alone saying "handle silently".]`
                 : ''),
             scope: `harness:${ref.installSlug}`,
             foundDuring: 'loop-turn-outcome resume-turn wedge classification (EI-13818/EI-19381528967421062)',

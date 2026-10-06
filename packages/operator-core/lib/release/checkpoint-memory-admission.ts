@@ -74,6 +74,18 @@ const CHECKPOINT_CMDLINE_MARKER = 'green-checkpoint.ts';
  */
 export const CHECKPOINT_MEMORY_BUDGET_FRACTION = 0.5;
 
+/**
+ * A run requesting at most this many GiB is a SMALL run (WI-10006274): it is the fixed scope
+ * overhead with no Vitest fork heaps, i.e. a foreign pot's own suite (`npm test`, node:test).
+ */
+export const CHECKPOINT_SMALL_RUN_MAX_G = 8;
+
+/**
+ * GiB small runs may commit beyond the budget, in total. Bounded so the host can never be
+ * committed past budget + allowance; large runs are still admitted only under the budget.
+ */
+export const CHECKPOINT_SMALL_RUN_ALLOWANCE_G = 16;
+
 /** Env var carrying an absolute budget in GiB, overriding the fraction above. */
 export const CHECKPOINT_MEMORY_BUDGET_ENV = 'PAPERCUSP_CHECKPOINT_MEMORY_BUDGET_G';
 
@@ -115,6 +127,8 @@ export type CheckpointAdmissionReason =
   | 'admitted-unmeasurable'
   /** The bound is switched off by env. */
   | 'admitted-disabled'
+  /** Over the budget, but a small run within the bounded small-run allowance (WI-10006274). */
+  | 'admitted-small-run'
   /** Measured, and committed + request exceeds the budget. */
   | 'over-budget';
 
@@ -313,6 +327,24 @@ export function admitCheckpointMemory(opts: {
       detail:
         `checkpoint-memory: admitting ${requestG} GiB — ${commitment.committedG.toFixed(1)} + ${requestG} = ` +
         `${wouldCommitG.toFixed(1)} GiB of ${budgetG} GiB budget across ${commitment.scopes.length} live scope(s)`,
+    };
+  }
+
+  // WI-10006274: a small run may overcommit the budget by a bounded allowance. Without it,
+  // three Papercusp-scale runs (40 GiB each against a 125 GiB budget) defer every small pot's
+  // gate until one of them finishes, and a working-copy pot's standing PR waits with it. The
+  // budget is a FRACTION of the host, so the allowance stays well inside physical memory, and
+  // the total can never exceed budget + allowance: large runs still need the plain budget.
+  const smallRunCeilingG = budgetG + CHECKPOINT_SMALL_RUN_ALLOWANCE_G;
+  if (requestG <= CHECKPOINT_SMALL_RUN_MAX_G && wouldCommitG <= smallRunCeilingG) {
+    return {
+      ...base,
+      admit: true,
+      reason: 'admitted-small-run',
+      detail:
+        `checkpoint-memory: admitting small run ${requestG} GiB — ${commitment.committedG.toFixed(1)} + ${requestG} = ` +
+        `${wouldCommitG.toFixed(1)} GiB, over the ${budgetG} GiB budget but within the ` +
+        `${CHECKPOINT_SMALL_RUN_ALLOWANCE_G} GiB small-run allowance (${smallRunCeilingG} GiB)`,
     };
   }
 

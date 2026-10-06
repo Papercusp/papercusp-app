@@ -1,7 +1,7 @@
 /** In-process publisher feeding the out-of-process live-health monitor. */
 
 import { randomUUID } from 'node:crypto';
-import { readdir, unlink } from 'node:fs/promises';
+import { readFile, readdir, unlink } from 'node:fs/promises';
 import { platform } from 'node:os';
 import { PerformanceObserver } from 'node:perf_hooks';
 import { pinModuleState } from '@papercusp/module-singleton';
@@ -34,12 +34,18 @@ interface ProcessCounters {
   readonly majorFaults: number;
 }
 
+export interface ProcessIoCounters {
+  readonly readBytes: number;
+  readonly writeBytes: number;
+}
+
 export interface ProcessLiveHealthPublisherOptions {
   readonly paths?: LiveHealthPaths;
   readonly cadenceMs?: number;
   readonly now?: () => number;
   readonly pid?: number;
   readonly readCounters?: () => ProcessCounters;
+  readonly readIoCounters?: (pid: number) => Promise<ProcessIoCounters | null>;
   readonly readDescriptorCount?: () => Promise<number | null>;
   readonly writeFragment?: typeof writeLiveHealthJson;
   readonly readLoopLag?: typeof currentLoopLag;
@@ -61,6 +67,30 @@ function processCounters(nowMs: number): ProcessCounters {
     minorFaults: usage.minorPageFault,
     majorFaults: usage.majorPageFault,
   };
+}
+
+export function parseProcessIoCounters(text: string | null): ProcessIoCounters | null {
+  if (!text) return null;
+  let readBytes: number | null = null;
+  let writeBytes: number | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^(read_bytes|write_bytes):\s*(\d+)\s*$/);
+    if (!match) continue;
+    const value = Number(match[2]);
+    if (!Number.isSafeInteger(value)) continue;
+    if (match[1] === 'read_bytes') readBytes = value;
+    else writeBytes = value;
+  }
+  return readBytes === null || writeBytes === null ? null : { readBytes, writeBytes };
+}
+
+async function processIoCounters(pid: number): Promise<ProcessIoCounters | null> {
+  if (platform() !== 'linux') return null;
+  try {
+    return parseProcessIoCounters(await readFile('/proc/' + pid + '/io', 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 async function descriptorCount(pid = process.pid): Promise<number | null> {
@@ -104,11 +134,13 @@ export class ProcessLiveHealthPublisher {
   readonly fragmentPath: string;
   private readonly now: () => number;
   private readonly readCounters: () => ProcessCounters;
+  private readonly readIoCounters: (pid: number) => Promise<ProcessIoCounters | null>;
   private readonly readDescriptorCount: () => Promise<number | null>;
   private readonly writeFragment: typeof writeLiveHealthJson;
   private readonly readLoopLag: typeof currentLoopLag;
   private readonly allowTimerInTest: boolean;
   private previous: ProcessCounters | null = null;
+  private previousIo: ProcessIoCounters | null = null;
   private timer: ManagedHandle | null = null;
   private readonly gcDurationsMs: number[] = [];
   private readonly gcObserver: PerformanceObserver;
@@ -128,6 +160,7 @@ export class ProcessLiveHealthPublisher {
     };
     this.fragmentPath = liveHealthFragmentPath(this.paths, this.writer.id);
     this.readCounters = options.readCounters ?? (() => processCounters(this.now()));
+    this.readIoCounters = options.readIoCounters ?? processIoCounters;
     this.readDescriptorCount = options.readDescriptorCount ?? (() => descriptorCount(pid));
     this.writeFragment = options.writeFragment ?? writeLiveHealthJson;
     this.readLoopLag = options.readLoopLag ?? currentLoopLag;
@@ -142,8 +175,20 @@ export class ProcessLiveHealthPublisher {
   async publishOnce(): Promise<LiveHealthFragment> {
     const current = this.readCounters();
     const previous = this.previous;
+    const currentIo = await this.readIoCounters(this.writer.pid ?? process.pid);
+    const previousIo = this.previousIo;
     const startMs = previous?.atMs ?? current.atMs;
     const elapsedMs = Math.max(0, current.atMs - startMs);
+    const ioStartMs = previousIo ? startMs : current.atMs;
+    const ioReadRate =
+      currentIo && previousIo ? deltaRate(currentIo.readBytes, previousIo.readBytes, elapsedMs) : null;
+    const ioWriteRate =
+      currentIo && previousIo ? deltaRate(currentIo.writeBytes, previousIo.writeBytes, elapsedMs) : null;
+    const ioUnknownReason = !currentIo
+      ? 'procfs-process-io-unavailable'
+      : !previousIo
+        ? 'publisher-warmup'
+        : 'procfs-counter-reset-or-nonpositive-window';
     const lag = this.readLoopLag();
     const descriptors = await this.readDescriptorCount();
     const gcP95 = percentile95(this.gcDurationsMs);
@@ -226,6 +271,24 @@ export class ProcessLiveHealthPublisher {
         'delta',
         'publisher-warmup-or-counter-reset',
       ),
+      'io.processReadBytesPerSec': reading(
+        'io.processReadBytesPerSec',
+        this.writer.id,
+        ioReadRate,
+        current.atMs,
+        ioStartMs,
+        'delta',
+        ioUnknownReason,
+      ),
+      'io.processWriteBytesPerSec': reading(
+        'io.processWriteBytesPerSec',
+        this.writer.id,
+        ioWriteRate,
+        current.atMs,
+        ioStartMs,
+        'delta',
+        ioUnknownReason,
+      ),
       'descriptor.openCount': reading(
         'descriptor.openCount',
         this.writer.id,
@@ -244,6 +307,7 @@ export class ProcessLiveHealthPublisher {
     };
     await this.writeFragment(this.fragmentPath, fragment);
     this.previous = current;
+    this.previousIo = currentIo;
     return fragment;
   }
 

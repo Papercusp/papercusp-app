@@ -147,7 +147,22 @@ export function warningFor(marker, editedPath, ledger = null) {
 }
 
 /** Every path an Edit/Write/MultiEdit payload touched. */
-export function editedPathsFrom(payload) {
+/**
+ * A trimmed psu surface reaches capability:edit/write only through tools:invoke — MUST match
+ * `unwrapToolsInvoke` in frozen-repair-edit-ledger.ts. Returns the payload in direct-call form;
+ * an invoke of any other tool keeps its name with an empty input, so it extracts nothing.
+ */
+export function unwrapToolsInvoke(payload) {
+  const name = String(payload?.tool_name ?? '').toLowerCase();
+  if (!/(^|_)tools_invoke$/.test(name)) return payload;
+  const input = payload?.tool_input;
+  const inner = typeof input?.name === 'string' ? input.name : '';
+  if (!/^capability:(edit|write|multi_?edit)$/i.test(inner)) return { ...payload, tool_input: {} };
+  return { ...payload, tool_name: inner.replace(':', '_'), tool_input: input.args };
+}
+
+export function editedPathsFrom(rawPayload) {
+  const payload = unwrapToolsInvoke(rawPayload);
   const input = payload?.tool_input ?? {};
   const name = String(payload?.tool_name ?? '').toLowerCase();
   if (name === 'apply_patch') return codexPatchPaths(input);
@@ -166,6 +181,7 @@ export function editedPathsFrom(payload) {
  *   Edit / capability_edit         { file_path, old_string, new_string, replace_all? }
  *   Write / capability_write       { file_path, content }
  *   MultiEdit / capability_multi_edit { file_path, edits:[{ old_string, new_string, replace_all? }] }
+ *   tools_invoke                   { name:'capability:edit'|…, args } — unwrapped to the shape above
  *   Codex write_file               { path, content }
  *   Codex edit_file                { path, old_string, new_string, replace_all? }
  *   Codex apply_patch              Add/Update patch operations become replayable hunks;
@@ -286,7 +302,8 @@ function hunksFromCodexApplyPatch(toolInput) {
   return output;
 }
 
-export function hunksFrom(payload) {
+export function hunksFrom(rawPayload) {
+  const payload = unwrapToolsInvoke(rawPayload);
   const input = payload?.tool_input;
   const name = String(payload?.tool_name ?? '').toLowerCase();
   if (name === 'apply_patch') return hunksFromCodexApplyPatch(input);

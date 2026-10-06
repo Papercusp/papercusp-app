@@ -105,10 +105,21 @@ export async function insertScore(sql: Sql, runId: string, s: GymScore): Promise
       SET d1 = EXCLUDED.d1, d2 = EXCLUDED.d2, d3 = EXCLUDED.d3, composite = EXCLUDED.composite, rationale = EXCLUDED.rationale`;
 }
 
+/** Recorded runner/rubric declarations, not measured loaded/runtime identity. */
+export interface GymRunParams {
+  harnessCommit: string;
+  substrateCommit: string;
+  mutableRoles?: unknown;
+  judgeModel?: string;
+  judgeTemp?: number;
+  weights?: unknown;
+  rubricHash?: string;
+}
+
 export async function insertRunParams(
   sql: Sql,
   runId: string,
-  p: { harnessCommit: string; substrateCommit: string; mutableRoles?: unknown; judgeModel?: string; judgeTemp?: number; weights?: unknown; rubricHash?: string },
+  p: GymRunParams,
 ): Promise<void> {
   await sql`
     INSERT INTO harness_gym.gym_runs_params (run_id, harness_commit, substrate_commit, mutable_roles, judge_model, judge_temp, weights, rubric_hash)
@@ -180,8 +191,10 @@ function jsonbPassthrough(v: unknown, fallback: string | null): string | null {
  * live-DB harness_gym tables (`dst`), stamping every row with (workspace_id, harness_slug)
  * so multiple gym harnesses share the tables without id collisions ('baseline',
  * 'gym-loop-health', 'cyc-0' repeat across harnesses). Idempotent upserts — a re-run of the
- * same cycle overwrites its own rows. Only the columns the UI read-paths need are copied;
- * the heavy blobs (deterministic_signals, trace/distilled refs, run params) stay in `src`.
+ * same cycle overwrites its own rows. Preserve the recorded deterministic signals (including
+ * oracle pre/post receipts) and run parameters before the temporary source DB is destroyed.
+ * Trace references keep their original identity; this does not retain the referenced files
+ * or turn declared commits into complete runtime identity. Missing evidence stays NULL.
  * The whole copy runs in one `dst` transaction so a reader never sees a half-copied cycle.
  */
 export async function copyRunAnalyticsToDurable(
@@ -197,8 +210,11 @@ export async function copyRunAnalyticsToDurable(
           FROM harness_gym.gym_tasks` as Promise<Row[]>,
     src`SELECT variant_id, parent_id, label, prompt_overrides, diff_from_parent, proposer_rationale, status, created_at
           FROM harness_gym.gym_variants` as Promise<Row[]>,
-    src`SELECT run_id, variant_id, task_id, cycle, repeat, terminal_state, started_at, finished_at, elapsed_ms
-          FROM harness_gym.gym_runs` as Promise<Row[]>,
+    src`SELECT r.run_id, r.variant_id, r.task_id, r.cycle, r.repeat, r.terminal_state,
+               r.started_at, r.finished_at, r.elapsed_ms,
+               row_to_json(r) AS run_evidence, row_to_json(p) AS run_params
+          FROM harness_gym.gym_runs r
+          LEFT JOIN harness_gym.gym_runs_params p ON p.run_id = r.run_id` as Promise<Row[]>,
     src`SELECT run_id, judge_model, rubric_hash, judge_temp, weights, d1, d2, d3, composite, rationale, scored_at
           FROM harness_gym.gym_scores` as Promise<Row[]>,
     src`SELECT cycle_id, cycle, parent_id, candidate_id, decision, gate_results, budget_spent_usd, created_at
@@ -240,13 +256,17 @@ export async function copyRunAnalyticsToDurable(
     }
     for (const r of runs) {
       await tx`
-        INSERT INTO harness_gym_durable.gym_runs (workspace_id, harness_slug, run_id, variant_id, task_id, cycle, repeat, terminal_state, started_at, finished_at, elapsed_ms)
+        INSERT INTO harness_gym_durable.gym_runs (workspace_id, harness_slug, run_id, variant_id, task_id, cycle, repeat, terminal_state, started_at, finished_at, elapsed_ms,
+                                                run_evidence, run_params)
         VALUES (${ws}, ${hs}, ${r.run_id as string}, ${r.variant_id as string}, ${r.task_id as string}, ${Number(r.cycle ?? 0)}, ${Number(r.repeat ?? 0)},
                 ${(r.terminal_state ?? null) as string | null}, ${(r.started_at ?? null) as Date | null}, ${(r.finished_at ?? null) as Date | null},
-                ${r.elapsed_ms == null ? null : Number(r.elapsed_ms)})
+                ${r.elapsed_ms == null ? null : Number(r.elapsed_ms)},
+                ${jsonbPassthrough(r.run_evidence, null)}::text::jsonb,
+                ${jsonbPassthrough(r.run_params, null)}::text::jsonb)
         ON CONFLICT (workspace_id, harness_slug, run_id) DO UPDATE
           SET variant_id = EXCLUDED.variant_id, task_id = EXCLUDED.task_id, cycle = EXCLUDED.cycle, repeat = EXCLUDED.repeat,
-              terminal_state = EXCLUDED.terminal_state, finished_at = EXCLUDED.finished_at, elapsed_ms = EXCLUDED.elapsed_ms`;
+              terminal_state = EXCLUDED.terminal_state, finished_at = EXCLUDED.finished_at, elapsed_ms = EXCLUDED.elapsed_ms,
+              run_evidence = EXCLUDED.run_evidence, run_params = EXCLUDED.run_params`;
     }
     for (const r of scores) {
       await tx`

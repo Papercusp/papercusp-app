@@ -2,8 +2,12 @@
  * Provider-neutral mail capability seam (D-019 Tier 1, plan item P-029).
  *
  * The verbs are `mail:*`, never `gmail:*` — the provider is a property of the
- * connected source, so an Outlook adapter later is a new branch here, not a
- * new verb for agents to learn and not a new line of prompt weight.
+ * connected source. Since P-007 (plan generalized-integrations-google-migration-
+ * cupboard-workflows-2026-10-05, D-014) every verb selects its source through
+ * `provider-dispatch.ts` and calls the registered provider that owns it, with
+ * the `mail.draft` / `mail.send` capabilities. The rails below run first, in the
+ * host, identically for every provider. Gmail is one such registered provider
+ * (P-008, `libs/papercusp/plugins/gmail`); the host holds no Gmail code of its own.
  *
  * Threading, MIME encoding and header propagation live BELOW this seam, in the
  * adapter. That is deliberate: correct reply threading needs the thread id on
@@ -14,24 +18,23 @@
 import { readFile } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import type postgres from 'postgres';
-import {
-  createGoogleGmailDraft,
-  updateGoogleGmailDraft,
-  sendGoogleGmailMessage,
-  sendGoogleGmailDraft,
-  readGoogleGmailDraftRecipients,
-  replySubjectFor,
-  type GoogleGmailAttachment,
-  type GoogleGmailOutboundInput,
-} from '../external-triggers/google-gmail';
-import { resolveGoogleWorkspaceAccessToken } from '../external-triggers/google-workspace';
+import { assertDisclosurePermits } from '../personal-vault/disclosure-ledger';
 import { assertTrustedAddressees, type AddresseeDecision, type AddresseeProvenance } from './addressing';
 import {
   assertDeliverableAddressees,
   type DeliverabilityReport,
   type MailboxProbe,
 } from './deliverability';
-import { resolveCanonicalDocument, resolveOutboundContext, string, type CanonicalDocument } from './resolve';
+import {
+  invokeOutboundProvider,
+  OUTBOUND_CAPABILITIES,
+  resolveCapabilitySource,
+  resultString,
+  resultStrings,
+  type OutboundDispatchDeps,
+  type OutboundTarget,
+} from './provider-dispatch';
+import { CANONICAL_SOURCE_BY_DATATYPE, resolveCanonicalDocument, string, type CanonicalDocument } from './resolve';
 
 export interface MailReplyCoordinates {
   to: string;
@@ -94,15 +97,27 @@ export interface MailSendDraftResult {
   deliverability: DeliverabilityReport[];
 }
 
-export type MailDeps = {
-  resolveAccessToken?: typeof resolveGoogleWorkspaceAccessToken;
-  createDraft?: typeof createGoogleGmailDraft;
-  updateDraft?: typeof updateGoogleGmailDraft;
-  sendMessage?: typeof sendGoogleGmailMessage;
-  sendDraft?: typeof sendGoogleGmailDraft;
-  readDraftRecipients?: typeof readGoogleGmailDraftRecipients;
-  fetch?: typeof fetch;
-  apiOrigin?: string;
+/** A declared attachment as read from disk, before it is handed to a provider. */
+export interface MailAttachment {
+  filename: string;
+  contentType: string;
+  content: Buffer;
+}
+
+/**
+ * `Re:`-prefix a subject exactly once. The reply subject is derived here, from
+ * the stored document, so it is part of rail 1 rather than a provider choice.
+ */
+export function replySubjectFor(subject: string): string {
+  const normalized = String(subject ?? '').trim();
+  return /^re\s*:/i.test(normalized) ? normalized : `Re: ${normalized}`;
+}
+
+/**
+ * Injectable seams. `registry` / `hostFetchFor` / `hostFetchImpl` reach the
+ * registered provider that owns the selected source.
+ */
+export type MailDeps = OutboundDispatchDeps & {
   /** Injected so attachment handling is testable without touching the disk. */
   readAttachment?: (path: string) => Promise<Buffer>;
   /**
@@ -137,10 +152,10 @@ const MAIL_ATTACHMENT_CONTENT_TYPES: Readonly<Record<string, string>> = {
 async function readMailAttachments(
   declared: readonly { path: string }[] | undefined,
   deps: MailDeps,
-): Promise<GoogleGmailAttachment[]> {
+): Promise<MailAttachment[]> {
   if (!declared?.length) return [];
   const read = deps.readAttachment ?? (async (path: string) => readFile(path));
-  const out: GoogleGmailAttachment[] = [];
+  const out: MailAttachment[] = [];
   for (const entry of declared) {
     const path = String(entry?.path ?? '').trim();
     if (!path) throw new Error('mail_attachment_path_required');
@@ -161,6 +176,21 @@ async function readMailAttachments(
   return out;
 }
 
+/** Attachments as a provider receives them: base64 content, no host buffers. */
+function providerAttachments(attachments: readonly MailAttachment[]) {
+  return attachments.map((entry) => ({
+    filename: entry.filename,
+    contentType: entry.contentType,
+    contentBase64: entry.content.toString('base64'),
+  }));
+}
+
+/** Recipient lists as cleared by the addressee rail (its canonical address, else the trimmed input). */
+function clearedAddresses(values: readonly string[], recipients: readonly AddresseeDecision[]): string[] {
+  const cleared = new Map(recipients.map((decision) => [decision.address, decision]));
+  return values.map((value) => cleared.get(value.trim().toLowerCase())?.address ?? value.trim());
+}
+
 /**
  * D-020 rail 1: derive every reply coordinate from the STORED document.
  *
@@ -170,7 +200,13 @@ async function readMailAttachments(
  * than merely asserted.
  */
 export function resolveMailReplyCoordinates(doc: CanonicalDocument): MailReplyCoordinates {
-  if (doc.source !== 'gmail') throw new Error(`mail_reply_source_unsupported:${doc.source}`);
+  // A datatype check, never a provider one (D-014.3). Legacy rows predate the
+  // datatype stamp; their Vault category is then the only evidence.
+  const datatype =
+    doc.datatypeId ?? (doc.source === CANONICAL_SOURCE_BY_DATATYPE['email-message'] ? 'email-message' : null);
+  if (datatype !== 'email-message') {
+    throw new Error(`mail_reply_datatype_unsupported:${doc.datatypeId ?? doc.source}`);
+  }
   const payload = doc.payload;
   const direction = string(payload.direction);
   if (direction && direction !== 'inbound') {
@@ -202,6 +238,8 @@ export async function replyToCanonicalMail(
     sourceId?: string | null;
     text: string;
     mode?: 'draft' | 'send';
+    /** See `sendNewMail`. Checked only for `mode:'send'`: a draft is not a sink. */
+    agentOwnerId: string | null;
   },
   deps: MailDeps = {},
 ): Promise<MailReplyResult> {
@@ -212,62 +250,182 @@ export async function replyToCanonicalMail(
   const doc = await resolveCanonicalDocument(sql, {
     workspaceId: params.workspaceId,
     userId: params.userId,
-    source: 'gmail',
+    source: CANONICAL_SOURCE_BY_DATATYPE['email-message'],
     externalId: params.messageId,
     sourceId: params.sourceId,
   });
   const coordinates = resolveMailReplyCoordinates(doc);
-  const ctx = await resolveOutboundContext(sql, {
-    workspaceId: params.workspaceId,
-    userId: params.userId,
-    vaultSource: 'gmail',
-    sourceId: doc.sourceId,
-  });
-  const token = await (deps.resolveAccessToken ?? resolveGoogleWorkspaceAccessToken)(ctx.source, ctx.installSlug);
-  const transport = { fetch: deps.fetch, apiOrigin: deps.apiOrigin };
-
   if (mode === 'send') {
-    const sent = await (deps.sendMessage ?? sendGoogleGmailMessage)(
-      token,
-      {
-        to: coordinates.to,
-        subject: coordinates.subject,
-        text,
-        threadId: coordinates.threadId,
-        inReplyTo: coordinates.inReplyTo,
-        references: coordinates.references,
-      },
-      transport,
-    );
-    return {
-      mode: 'send',
-      to: coordinates.to,
-      subject: coordinates.subject,
-      threadId: sent.threadId,
-      messageId: sent.messageId,
-    };
+    await assertDisclosurePermits(sql, {
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      agentOwnerId: params.agentOwnerId,
+      recipients: [coordinates.to],
+      sink: 'mail:reply',
+    });
   }
-
-  const draft = await (deps.createDraft ?? createGoogleGmailDraft)(
-    token,
+  // The reply goes out through the source that holds the message, so it is
+  // sent AS the account the message was received on.
+  const capability = mode === 'send' ? OUTBOUND_CAPABILITIES.mailSend : OUTBOUND_CAPABILITIES.mailDraft;
+  const target = await resolveCapabilitySource(
+    sql,
     {
-      to: coordinates.to,
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      datatype: 'email-message',
+      capabilities: [capability],
+      sourceId: doc.sourceId,
+    },
+    deps,
+  );
+
+  const result = await invokeOutboundProvider(
+    sql,
+    target,
+    capability,
+    {
+      operation: mode === 'send' ? 'message' : 'create',
+      to: [coordinates.to],
       subject: coordinates.subject,
       text,
       threadId: coordinates.threadId,
       inReplyTo: coordinates.inReplyTo,
       references: coordinates.references,
     },
-    transport,
+    deps,
   );
   return {
-    mode: 'draft',
+    mode,
     to: coordinates.to,
     subject: coordinates.subject,
-    threadId: draft.threadId,
-    messageId: draft.messageId,
-    draftId: draft.draftId,
+    threadId: resultString(result, 'threadId', target, capability, false) || coordinates.threadId,
+    messageId: resultString(result, 'messageId', target, capability, mode === 'send'),
+    ...(mode === 'draft' ? { draftId: resultString(result, 'draftId', target, capability) } : {}),
   };
+}
+
+export interface MailRunReplyResult extends MailReplyResult {
+  planRunId: number;
+  /** True only when THIS call produced the reply. */
+  created: boolean;
+  /** The run already replied; the stored result is returned and nothing is re-sent. */
+  alreadyCreated: boolean;
+}
+
+interface TriggerRunReplyRow {
+  id: string;
+  args: unknown;
+  outcome: unknown;
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+/**
+ * Whether a TRIGGERED plan run may send mail rather than draft it. A run that
+ * an inbound email launched acts with no human in the loop, so its send is
+ * automatic sending: owner-authority flag papercusp-gmail-auto-send (default
+ * OFF). The retired gmail:create-draft had no send branch at all; this keeps
+ * that property for every mail provider now that the reply verb can send.
+ */
+async function triggeredRunSendEnabled(workspaceId: string): Promise<boolean> {
+  const { getFlag } = await import('@papercusp/flags/server');
+  const { FLAGS } = await import('@papercusp/flags');
+  return getFlag(FLAGS.GMAIL_AUTO_SEND, `mail-run-reply:${workspaceId}`);
+}
+
+/**
+ * `mail:reply { planRunId }` — reply to the message that LAUNCHED a triggered
+ * plan run (plan generalized-integrations-…-2026-10-05 D-019.1).
+ *
+ * The run anchors the target: the message coordinates come from the run's
+ * stored trigger envelope (`trigger_runs.args.trigger.{externalId, sourceId}`),
+ * never from the caller, so a triggered plan can only answer the message that
+ * started it. Everything after that is `replyToCanonicalMail`, rails included.
+ * The result is recorded on the trigger run under `outcome.mailReply`, so a
+ * retried step returns the first reply instead of drafting or sending twice.
+ * `mode:'send'` is refused while automatic sending is off (see
+ * `triggeredRunSendEnabled`); the refusal happens before any read or write.
+ */
+export async function replyToTriggerPlanRun(
+  sql: postgres.Sql | postgres.TransactionSql,
+  params: {
+    workspaceId: string;
+    userId: string;
+    planRunId: number;
+    text: string;
+    mode?: 'draft' | 'send';
+    agentOwnerId: string | null;
+  },
+  deps: MailDeps & { now?: () => Date; runSendEnabled?: (workspaceId: string) => Promise<boolean> } = {},
+): Promise<MailRunReplyResult> {
+  const planRunId = params.planRunId;
+  if (!Number.isSafeInteger(planRunId) || planRunId <= 0) throw new Error('mail_reply_plan_run_id_invalid');
+  if (params.mode === 'send' && !(await (deps.runSendEnabled ?? triggeredRunSendEnabled)(params.workspaceId))) {
+    throw new Error(
+      'mail_reply_run_send_withheld: a triggered plan run may only draft its reply. Automatic sending is an owner-authority action (flag papercusp-gmail-auto-send, default OFF); omit mode to create a draft for a person to review and send.',
+    );
+  }
+  const replyInTransaction = async (tx: postgres.TransactionSql | postgres.Sql): Promise<MailRunReplyResult> => {
+    const rows = await tx<TriggerRunReplyRow[]>`
+      SELECT tr.id::text, tr.args, tr.outcome
+        FROM harness_shared.trigger_runs tr
+       WHERE tr.workspace_id = ${params.workspaceId}
+         AND tr.plan_run_ref = ${String(planRunId)}
+         AND tr.status = 'succeeded'
+       ORDER BY tr.completed_at DESC NULLS LAST, tr.id
+       LIMIT 1
+       FOR UPDATE OF tr`;
+    const row = rows[0];
+    if (!row) throw new Error(`mail_reply_trigger_run_not_found:${planRunId}`);
+    const outcome = recordOf(row.outcome);
+    const prior = recordOf(outcome.mailReply);
+    if (string(prior.to)) {
+      const priorMode = prior.mode === 'send' ? 'send' : 'draft';
+      return {
+        planRunId,
+        created: false,
+        alreadyCreated: true,
+        mode: priorMode,
+        to: string(prior.to),
+        subject: string(prior.subject),
+        threadId: string(prior.threadId),
+        messageId: string(prior.messageId),
+        ...(string(prior.draftId) ? { draftId: string(prior.draftId) } : {}),
+      };
+    }
+    const trigger = recordOf(recordOf(row.args).trigger);
+    const datatype = string(trigger.datatypeId);
+    if (datatype !== 'email-message') {
+      throw new Error(`mail_reply_run_not_email:${datatype || 'unknown'} — this run was not started by an email`);
+    }
+    const messageId = string(trigger.externalId);
+    if (!messageId) throw new Error('mail_reply_trigger_coordinates_missing');
+    const reply = await replyToCanonicalMail(
+      tx as unknown as postgres.Sql,
+      {
+        workspaceId: params.workspaceId,
+        userId: params.userId,
+        messageId,
+        sourceId: string(trigger.sourceId) || null,
+        text: params.text,
+        mode: params.mode,
+        agentOwnerId: params.agentOwnerId,
+      },
+      deps,
+    );
+    const repliedAt = (deps.now ?? (() => new Date()))().toISOString();
+    await tx`
+      UPDATE harness_shared.trigger_runs
+         SET outcome = ${JSON.stringify({ ...outcome, mailReply: { ...reply, repliedAt } })}::text::jsonb,
+             updated_at = now()
+       WHERE workspace_id = ${params.workspaceId} AND id = ${row.id}::uuid`;
+    return { planRunId, created: true, alreadyCreated: false, ...reply };
+  };
+  return 'begin' in sql
+    ? (sql as postgres.Sql).begin((tx) => replyInTransaction(tx)) as Promise<MailRunReplyResult>
+    : replyInTransaction(sql);
 }
 
 /**
@@ -301,13 +459,15 @@ export async function sendNewMail(
      * look like a Gmail/credential outage rather than one missing parameter.
      */
     from?: string | null;
+    /** The connected source to send through; narrows `from` when both are given. */
+    sourceId?: string | null;
     /**
      * Local files to attach, by absolute path — read here rather than by the
      * caller, so the message either carries every declared file or fails
      * loudly. Identical contract to `draftNewMail`'s, deliberately: until
      * WI-10001671 this parameter existed ONLY on the draft, so the two verbs
      * disagreed about whether attaching was possible at all even though both
-     * funnel into the same `buildGoogleGmailRawMessage` encoder, which has
+     * funnelled into the same Gmail MIME encoder, which had
      * emitted `multipart/mixed` for either one since it was written.
      *
      * That asymmetry is invisible from the tool description and cost a real
@@ -323,6 +483,13 @@ export async function sendNewMail(
      * cannot report that bounce on this call.
      */
     allowUndeliverable?: boolean;
+    /**
+     * The calling agent's identity, whose Personal Vault disclosures bound who it
+     * may send to (reader-set labels). Required so no caller can forget it; null
+     * only for a caller with no attributable identity, from which restricted
+     * content is withheld at delivery.
+     */
+    agentOwnerId: string | null;
   },
   deps: MailDeps = {},
 ): Promise<MailSendResult> {
@@ -343,6 +510,16 @@ export async function sendNewMail(
     provenance: params.provenance,
   });
 
+  // After the trust rail, so an injected addressee is named as THAT; before the
+  // deliverability probe, which would otherwise contact a recipient we refuse.
+  await assertDisclosurePermits(sql, {
+    workspaceId: params.workspaceId,
+    userId: params.userId,
+    agentOwnerId: params.agentOwnerId,
+    recipients: recipients.map((decision) => decision.address),
+    sink: 'mail:send',
+  });
+
   // AFTER the trust rail, deliberately. The probe opens an outbound connection
   // to a host the recipient's domain controls, so probing an unvalidated address
   // would turn an addressee injected by a hostile inbound message into a beacon
@@ -352,31 +529,39 @@ export async function sendNewMail(
     { probe: deps.probeMailbox, allowUndeliverable: params.allowUndeliverable },
   );
 
-  const ctx = await resolveOutboundContext(sql, {
-    workspaceId: params.workspaceId,
-    userId: params.userId,
-    vaultSource: 'gmail',
-    providerAccountId: params.from,
-  });
-  const token = await (deps.resolveAccessToken ?? resolveGoogleWorkspaceAccessToken)(ctx.source, ctx.installSlug);
-  const cleared = new Map(recipients.map((decision) => [decision.address, decision]));
-  const outbound: GoogleGmailOutboundInput = {
-    to: params.to.map((value) => cleared.get(value.trim().toLowerCase())?.address ?? value.trim()),
-    cc: params.cc?.map((value) => cleared.get(value.trim().toLowerCase())?.address ?? value.trim()),
-    subject,
-    text,
-    ...(attachments.length ? { attachments } : {}),
-  };
-  const sent = await (deps.sendMessage ?? sendGoogleGmailMessage)(token, outbound, {
-    fetch: deps.fetch,
-    apiOrigin: deps.apiOrigin,
-  });
+  const target = await resolveCapabilitySource(
+    sql,
+    {
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      datatype: 'email-message',
+      capabilities: [OUTBOUND_CAPABILITIES.mailSend],
+      sourceId: params.sourceId,
+      providerAccountId: params.from,
+    },
+    deps,
+  );
+  const capability = OUTBOUND_CAPABILITIES.mailSend;
+  const result = await invokeOutboundProvider(
+    sql,
+    target,
+    capability,
+    {
+      operation: 'message',
+      to: clearedAddresses(params.to, recipients),
+      cc: clearedAddresses(params.cc ?? [], recipients),
+      subject,
+      text,
+      attachments: providerAttachments(attachments),
+    },
+    deps,
+  );
   return {
     mode: 'send',
     recipients,
     subject,
-    threadId: sent.threadId,
-    messageId: sent.messageId,
+    threadId: resultString(result, 'threadId', target, capability, false),
+    messageId: resultString(result, 'messageId', target, capability),
     deliverability,
   };
 }
@@ -444,11 +629,15 @@ export async function sendMailDraft(
     provenance: AddresseeProvenance;
     /** Which connected account holds the draft; required once more than one is. */
     from?: string | null;
+    /** The connected source holding the draft; narrows `from` when both are given. */
+    sourceId?: string | null;
     /**
      * Send even to a recipient whose own server has already stated the mailbox
      * does not exist. Off by default. See `sendNewMail`.
      */
     allowUndeliverable?: boolean;
+    /** See `sendNewMail`. Checked against the LIVE recipients, like the rail. */
+    agentOwnerId: string | null;
   },
   deps: MailDeps = {},
 ): Promise<MailSendDraftResult> {
@@ -456,20 +645,34 @@ export async function sendMailDraft(
   if (!draftId) throw new Error('mail_send_draft_id_required');
   if (!params.expectedTo?.length) throw new Error('mail_send_draft_expected_to_required');
 
-  const ctx = await resolveOutboundContext(sql, {
-    workspaceId: params.workspaceId,
-    userId: params.userId,
-    vaultSource: 'gmail',
-    providerAccountId: params.from,
-  });
-  const token = await (deps.resolveAccessToken ?? resolveGoogleWorkspaceAccessToken)(ctx.source, ctx.installSlug);
-
-  const live = await (deps.readDraftRecipients ?? readGoogleGmailDraftRecipients)(token, draftId, {
-    fetch: deps.fetch,
-    apiOrigin: deps.apiOrigin,
-  });
+  // Both capabilities up front: reading the live draft (for the rail) and
+  // sending it. A provider that can only do one refuses before either call.
+  const target = await resolveCapabilitySource(
+    sql,
+    {
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      datatype: 'email-message',
+      capabilities: [OUTBOUND_CAPABILITIES.mailDraft, OUTBOUND_CAPABILITIES.mailSend],
+      sourceId: params.sourceId,
+      providerAccountId: params.from,
+    },
+    deps,
+  );
+  const read = await invokeOutboundProvider(
+    sql,
+    target,
+    OUTBOUND_CAPABILITIES.mailDraft,
+    { operation: 'read', draftId },
+    deps,
+  );
+  const live = {
+    to: resultStrings(read, 'to'),
+    cc: resultStrings(read, 'cc'),
+    subject: resultString(read, 'subject', target, OUTBOUND_CAPABILITIES.mailDraft, false) || null,
+  };
   // A draft addressed to nobody cannot be sent to the right person by accident,
-  // but it can be sent — Gmail decides. Refuse here so the failure names the
+  // but it can be sent — the provider decides. Refuse here so the failure names the
   // cause instead of arriving as a provider error after the attempt.
   if (!live.to.length) throw new Error('mail_send_draft_no_recipients');
 
@@ -478,6 +681,15 @@ export async function sendMailDraft(
     userId: params.userId,
     addresses: [...live.to, ...live.cc],
     provenance: params.provenance,
+  });
+
+  // The draft itself was not a sink; sending it is.
+  await assertDisclosurePermits(sql, {
+    workspaceId: params.workspaceId,
+    userId: params.userId,
+    agentOwnerId: params.agentOwnerId,
+    recipients: recipients.map((decision) => decision.address),
+    sink: 'mail:send-draft',
   });
 
   if (
@@ -505,16 +717,14 @@ export async function sendMailDraft(
     { probe: deps.probeMailbox, allowUndeliverable: params.allowUndeliverable },
   );
 
-  const sent = await (deps.sendDraft ?? sendGoogleGmailDraft)(token, draftId, {
-    fetch: deps.fetch,
-    apiOrigin: deps.apiOrigin,
-  });
+  const capability = OUTBOUND_CAPABILITIES.mailSend;
+  const result = await invokeOutboundProvider(sql, target, capability, { operation: 'draft', draftId }, deps);
   return {
     mode: 'send',
     recipients,
     draftId,
-    threadId: sent.threadId,
-    messageId: sent.messageId,
+    threadId: resultString(result, 'threadId', target, capability, false),
+    messageId: resultString(result, 'messageId', target, capability),
     sentTo: live.to,
     sentCc: live.cc,
     subject: live.subject,
@@ -550,6 +760,8 @@ export async function draftNewMail(
     provenance: AddresseeProvenance;
     /** Which connected account to draft in; required once more than one is. */
     from?: string | null;
+    /** The connected source to draft in; narrows `from` when both are given. */
+    sourceId?: string | null;
     /**
      * Local files to attach, by absolute path. Read here rather than by the
      * caller so the draft either carries every declared file or fails loudly —
@@ -600,38 +812,42 @@ export async function draftNewMail(
     { probe: deps.probeMailbox, allowUndeliverable: params.allowUndeliverable },
   );
 
-  const ctx = await resolveOutboundContext(sql, {
-    workspaceId: params.workspaceId,
-    userId: params.userId,
-    vaultSource: 'gmail',
-    providerAccountId: params.from,
-  });
-  const token = await (deps.resolveAccessToken ?? resolveGoogleWorkspaceAccessToken)(ctx.source, ctx.installSlug);
-  const cleared = new Map(recipients.map((decision) => [decision.address, decision]));
-  const outbound: GoogleGmailOutboundInput = {
-    to: params.to.map((value) => cleared.get(value.trim().toLowerCase())?.address ?? value.trim()),
-    cc: params.cc?.map((value) => cleared.get(value.trim().toLowerCase())?.address ?? value.trim()),
-    subject,
-    text,
-    ...(attachments.length ? { attachments } : {}),
-  };
+  const target = await resolveCapabilitySource(
+    sql,
+    {
+      workspaceId: params.workspaceId,
+      userId: params.userId,
+      datatype: 'email-message',
+      capabilities: [OUTBOUND_CAPABILITIES.mailDraft],
+      sourceId: params.sourceId,
+      providerAccountId: params.from,
+    },
+    deps,
+  );
   const reviseId = params.draftId?.trim();
-  const draft = reviseId
-    ? await (deps.updateDraft ?? updateGoogleGmailDraft)(token, reviseId, outbound, {
-        fetch: deps.fetch,
-        apiOrigin: deps.apiOrigin,
-      })
-    : await (deps.createDraft ?? createGoogleGmailDraft)(token, outbound, {
-        fetch: deps.fetch,
-        apiOrigin: deps.apiOrigin,
-      });
+  const capability = OUTBOUND_CAPABILITIES.mailDraft;
+  const result = await invokeOutboundProvider(
+    sql,
+    target,
+    capability,
+    {
+      operation: reviseId ? 'update' : 'create',
+      ...(reviseId ? { draftId: reviseId } : {}),
+      to: clearedAddresses(params.to, recipients),
+      cc: clearedAddresses(params.cc ?? [], recipients),
+      subject,
+      text,
+      attachments: providerAttachments(attachments),
+    },
+    deps,
+  );
   return {
     mode: 'draft',
     recipients,
     subject,
-    threadId: draft.threadId,
-    messageId: draft.messageId,
-    draftId: draft.draftId,
+    threadId: resultString(result, 'threadId', target, capability, false),
+    messageId: resultString(result, 'messageId', target, capability, false),
+    draftId: resultString(result, 'draftId', target, capability),
     deliverability,
   };
 }

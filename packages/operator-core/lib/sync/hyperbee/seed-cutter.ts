@@ -87,6 +87,8 @@ export interface CorestoreCutSpec {
   readonly filtered?: boolean;
   /** Identity literals emitted by the desktop release audit for the projection scrub. */
   readonly redactValues?: readonly string[];
+  /** D-166: private exact-source row drops; never included in the public manifest. */
+  readonly uuidIdempotencyDropPlans?: CorestoreCutContext['uuidIdempotencyDropPlans'];
   /** Optional bounded source-scan progress sink for filtered release cuts. */
   readonly onProgress?: CorestoreCutContext['onProgress'];
   /** Optional cursor-stall sink for filtered release cuts. */
@@ -224,6 +226,7 @@ export async function cutHiveSeed(inputs: HiveSeedCutInputs): Promise<HiveSeedCu
       ...(corestore.sparse ? { sparse: true } : {}),
       ...(corestore.filtered ? { filtered: true } : {}),
       ...(corestore.redactValues ? { redactValues: corestore.redactValues } : {}),
+      ...(corestore.uuidIdempotencyDropPlans ? { uuidIdempotencyDropPlans: corestore.uuidIdempotencyDropPlans } : {}),
       ...(corestore.onProgress ? { onProgress: corestore.onProgress } : {}),
       ...(corestore.onStall ? { onStall: corestore.onStall } : {}),
       ...(corestore.filteredScanStallMs !== undefined ? { filteredScanStallMs: corestore.filteredScanStallMs } : {}),

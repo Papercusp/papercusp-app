@@ -75,12 +75,17 @@ async function loadIndexedSessionTurn(
   identity: AgentIdentity,
   ref: SessionTurnRef,
 ): Promise<IndexedSessionTurnProvenance | null> {
-  const [{ getOrgPg }, { activeWorkspaceId }] = await Promise.all([
+  const [{ getOrgPg }, { activeWorkspaceId }, { restrictedTurnSql }] = await Promise.all([
     import('@papercusp/db-org'),
     import('../../workspace-registry'),
+    import('../../personal-vault/transcript-exclusion'),
   ]);
   const workspaceId = identity.workspaceId?.trim() || activeWorkspaceId();
-  const [row] = await getOrgPg().sql<IndexedSessionTurnProvenance[]>`
+  const { sql } = getOrgPg();
+  // D-006: the resolved text is copied into a fact as its quote, so a turn
+  // another agent recorded inside its disclosure window resolves as absent
+  // for every asserter but that agent.
+  const [row] = await sql<IndexedSessionTurnProvenance[]>`
     SELECT source_kind AS "sourceKind",
            session_id AS "sessionId",
            turn_idx AS "turnIdx",
@@ -94,6 +99,7 @@ async function loadIndexedSessionTurn(
        AND source_kind = ${ref.sourceKind}
        AND session_id = ${ref.sessionId}
        AND turn_idx = ${ref.turnIdx}
+       AND NOT ${restrictedTurnSql(sql, 'session_turns', [identity.ownerId])}
      ORDER BY CASE WHEN workspace_id = ${workspaceId} THEN 0 ELSE 1 END
      LIMIT 1
   `;

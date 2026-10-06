@@ -448,6 +448,13 @@ function isStaleAgainst(env: OpEnvelope, prev: WinnerMeta): boolean {
 export const STORED_ORDER_PREFETCH_WINDOW = 2048;
 /** Per-window budget for the look-ahead reads; an op not read in time is read normally. */
 export const STORED_ORDER_PEEK_TIMEOUT_MS = 1000;
+/**
+ * WI-10005291: the most look-ahead reads in flight at once. The window is 2048 ops, and a
+ * window can hold a whole snapshot set (~1,040 chunks of ~4 MiB). Reading all of it at once
+ * read ~4 GB per skipped set on the tower's own log and spiked bg-host RSS by GBs (bpftrace
+ * pread census, 2026-10-02). Bounded, a skipped set costs at most this many chunk reads.
+ */
+export const STORED_ORDER_PEEK_CONCURRENCY = 32;
 
 /** F4: processing an entry is distinct from materializing it. Boolean sinks
  * retain their existing handled/changed contract; typed sinks can defer or reject. */
@@ -572,12 +579,13 @@ export interface MergeCursor {
    */
   readStalls?: Map<string, number>;
   /**
-   * P-203 / D-018: `${log.keyHex}:${position}` → late results from timed-out
-   * reads. A result that eventually arrives is consumed before another read is
-   * issued, while a never-settling attempt still permits the existing retry
+   * P-203 / D-018: `${log.keyHex}:${position}` → one late result from timed-out
+   * reads. Attempts for the same immutable log position are interchangeable;
+   * retain a served block in preference to an error, rather than accumulating
+   * duplicate results. A never-settling attempt still permits the existing retry
    * semantics on the next pass.
    */
-  lateReadResults?: Map<string, ReadAttemptResult[]>;
+  lateReadResults?: Map<string, ReadAttemptResult>;
   /**
    * p2p-join-catchup-speed P-004: per-log memo of the snapshot scan (keyHex →
    * what `[?, scannedTo)` held). A far-behind cursor looks for a set ahead of it on
@@ -756,14 +764,21 @@ function loadSnapshotApplyMark(
  *  - `coversUpTo` 0: there is no prefix to be redundant with. The seed core
  *    (`produceFilteredSnapshotIntoLog`) is exactly this. It is a fresh core whose
  *    only content is a set summarizing ANOTHER log, anchored at 0.
- *  - `excludeTables`: the filtered producers. A filtered set written into a
- *    separate core summarizes that other log, never this one's prefix.
+ *  - `excludeTables` WITHOUT `ownPrefix`: a filtered set written into a separate
+ *    core summarizes that other log, never this one's prefix. Unmarked legacy
+ *    filtered sets land here too, since nothing says which kind they are.
+ *
+ * WI-10005425: a filtered set marked `ownPrefix` IS eligible. The release cut writes
+ * one into the live own log (`produceLogSnapshot` with `SEED_EXCLUDED_TABLES`), and
+ * it summarizes exactly the prefix a crossing cursor already folded op by op, so the
+ * excluded tables are already in that cursor's state. Applying it anyway re-applied
+ * every row of the set (~968k on the tower) for each cut.
  */
 function isSkipEligibleSnapshot(payload: SnapshotPayload | undefined, pos: number): boolean {
   if (!payload) return false;
   const c = payload.coversUpTo;
   if (typeof c !== 'number' || !Number.isFinite(c) || c <= 0 || c > pos) return false;
-  return !payload.excludeTables?.length;
+  return !payload.excludeTables?.length || payload.ownPrefix === true;
 }
 
 /**
@@ -1407,12 +1422,13 @@ export const SNAPSHOT_SEED_UNREADABLE_DEFER_MAX_MS = 3 * 60_000;
  */
 function holdFreshSeed(cursor: MergeCursor, keyHex: string, maxMs: number, scan: SnapshotScanAnswer): boolean {
   if (maxMs <= 0) return false;
-  const pending = (cursor.snapshotSeedPending ??= new Map());
+  // Per-log hold metadata, not queued work; repeated scans update this same entry.
+  const seedHolds = (cursor.snapshotSeedPending ??= new Map());
   const now = Date.now();
-  const held = pending.get(keyHex);
+  const held = seedHolds.get(keyHex);
   const stuckMaxMs = Math.min(maxMs, SNAPSHOT_SEED_UNREADABLE_DEFER_MAX_MS);
   if (held === undefined) {
-    pending.set(keyHex, { sinceMs: now, progressLoggedAtMs: now });
+    seedHolds.set(keyHex, { sinceMs: now, progressLoggedAtMs: now });
     // console.info, not warn: a fresh joiner's scan routinely needs more than one pass.
     // Only the give-up below is an anomaly.
     console.info(
@@ -1791,14 +1807,25 @@ export interface MergeCursorStore {
  * of those events would be the same unsafe skip the original latch avoided.
  */
 export interface PgMergeCursorSeedCache {
+  /**
+   * Seed `cursor` from progress persisted under `applyBinding`. When
+   * `fallbackApplyBinding` is given, an admitted key the primary binding left
+   * unpositioned is then seeded from progress persisted under that binding, and
+   * the keys seeded that way are returned so the caller can owe whatever the
+   * fallback binding did not apply (WI-10005575: a boot that resolves the memory
+   * flag differently from the stamp otherwise re-folds every log from 0).
+   */
   seed(
     cursor: MergeCursor,
     store: MergeCursorStore,
     applyBinding: string | null,
     admittedKeyHexes: Iterable<string>,
-  ): Promise<void>;
+    fallbackApplyBinding?: string | null,
+  ): Promise<ReadonlySet<string>>;
   invalidate(): void;
 }
+
+const NO_FALLBACK_SEEDS: ReadonlySet<string> = new Set();
 
 /** Copy safe persisted positions into a cursor, optionally filtering to keys
  * admitted RIGHT NOW. Exported for the direct one-shot helper and focused tests. */
@@ -1852,13 +1879,20 @@ export function createPgMergeCursorSeedCache(): PgMergeCursorSeedCache {
   let failures: ReadonlyMap<string, MergeApplyFailure> | undefined;
   let marks: ReadonlyMap<string, SnapshotApplyMark> | undefined;
   let savedApplyBinding: string | null | undefined;
+  // WI-10005575: the fallback binding's load, cached separately so a primary
+  // reload never discards it and vice versa.
+  let fallbackSaved: ReadonlyMap<string, number> | undefined;
+  let fallbackFailures: ReadonlyMap<string, MergeApplyFailure> | undefined;
+  let fallbackMarks: ReadonlyMap<string, SnapshotApplyMark> | undefined;
+  let savedFallbackBinding: string | null | undefined;
   let invalidated = false;
   let loadFailed = false;
   return {
-    async seed(cursor, store, applyBinding, admittedKeyHexes) {
+    async seed(cursor, store, applyBinding, admittedKeyHexes, fallbackApplyBinding) {
+      const admitted = [...admittedKeyHexes];
       if (invalidated) {
-        if (loadFailed) pinUnknownDurableState(cursor, admittedKeyHexes);
-        return;
+        if (loadFailed) pinUnknownDurableState(cursor, admitted);
+        return NO_FALLBACK_SEEDS;
       }
       if (!saved || savedApplyBinding !== applyBinding) {
         try {
@@ -1871,17 +1905,42 @@ export function createPgMergeCursorSeedCache(): PgMergeCursorSeedCache {
         } catch (error) {
           invalidated = true;
           loadFailed = true;
-          pinUnknownDurableState(cursor, admittedKeyHexes);
+          pinUnknownDurableState(cursor, admitted);
           throw error;
         }
       }
-      seedCursorFromPgCache(cursor, saved, admittedKeyHexes, failures, marks);
+      seedCursorFromPgCache(cursor, saved, admitted, failures, marks);
+      if (fallbackApplyBinding === undefined || fallbackApplyBinding === applyBinding) {
+        return NO_FALLBACK_SEEDS;
+      }
+      const unpositioned = admitted.filter((keyHex) => !cursor.positions.has(keyHex));
+      if (unpositioned.length === 0) return NO_FALLBACK_SEEDS;
+      if (!fallbackSaved || savedFallbackBinding !== fallbackApplyBinding) {
+        try {
+          [fallbackSaved, fallbackFailures, fallbackMarks] = await Promise.all([
+            store.load(fallbackApplyBinding),
+            store.loadApplyFailures?.(fallbackApplyBinding),
+            store.loadSnapshotMarks?.(fallbackApplyBinding),
+          ]);
+          savedFallbackBinding = fallbackApplyBinding;
+        } catch {
+          // The primary binding's state is known, so a failed fallback read only
+          // forfeits the shortcut: those keys fold from 0 as before.
+          return NO_FALLBACK_SEEDS;
+        }
+      }
+      seedCursorFromPgCache(cursor, fallbackSaved, unpositioned, fallbackFailures, fallbackMarks);
+      const seeded = unpositioned.filter((keyHex) => cursor.positions.has(keyHex));
+      return seeded.length === 0 ? NO_FALLBACK_SEEDS : new Set(seeded);
     },
     invalidate() {
       invalidated = true;
       saved = undefined;
       failures = undefined;
       marks = undefined;
+      fallbackSaved = undefined;
+      fallbackFailures = undefined;
+      fallbackMarks = undefined;
       savedApplyBinding = undefined;
     },
   };
@@ -2317,8 +2376,10 @@ async function applyRecordingWinner(
   let batchOpId = 0;
   let timedOut = false;
   try {
-    const pending = (cursor.pendingApplies ??= new Map<string, PendingMergeApply>());
-    let physical = pending.get(ident);
+    // Single-flight identities for physical writes; admission controls their start
+    // and their actual result removes the entry, including after a caller timeout.
+    const inFlightApplies = (cursor.pendingApplies ??= new Map<string, PendingMergeApply>());
+    let physical = inFlightApplies.get(ident);
     if (!physical) {
       // WI-10003427: never wait for admission while holding an open batch transaction. The
       // gate is process-wide, so the wait can outlast Postgres's idle-in-transaction timeout;
@@ -2366,10 +2427,10 @@ async function applyRecordingWinner(
       }
       void admission.catch((err: unknown) => settleResult(Promise.reject(err)));
       physical = entry;
-      pending.set(ident, physical);
+      inFlightApplies.set(ident, physical);
       const current = physical;
       void result.finally(() => {
-        if (pending.get(ident) === current) pending.delete(ident);
+        if (inFlightApplies.get(ident) === current) inFlightApplies.delete(ident);
       }).catch(() => {});
     } else if (!physical.admitted && batch?.fold.holdsTransaction) {
       // The same rule for a queued write reused from an earlier pass.
@@ -3465,53 +3526,77 @@ async function peekAndSeedStoredOrder(args: {
   // first chunk to arrive says where the set sits, so every other read in its span is
   // cancelled then, even after the deadline (a read outlives the peek). The fold's own
   // next position and the set's last block stay: the fold's jump reads exactly those.
+  // WI-10005291: cancelling withdraws only a NETWORK request. On a local log (the own log)
+  // every block is already in storage, so an issued read is a storage read that cannot be
+  // withdrawn: issuing the whole window at once read a whole skipped set (~4 GB) per
+  // crossing. So reads go out in position order, at most STORED_ORDER_PEEK_CONCURRENCY at
+  // a time, and none is issued inside a span already known to be skipped.
   const cancellable = (log as CancellableReadLog).getCancellable;
   const inFlight = typeof cancellable === 'function' ? new Map<number, CancellableRead>() : null;
-  const dropSkippedSpan = (op: PeerLogOp | null, i: number): void => {
-    if (!inFlight || !op || !isSnapshotOp(op)) return;
+  const skippedSpans: { from: number; to: number }[] = [];
+  const inSkippedSpan = (i: number): boolean => skippedSpans.some((s) => i >= s.from && i < s.to);
+  const noteSkippedSpan = (op: PeerLogOp | null, i: number): void => {
+    if (!op || !isSnapshotOp(op)) return;
     const span = skippedSetSpan(cursor, log.keyHex, op.value as SnapshotPayload | undefined, i);
     if (!span) return;
-    for (let j = Math.max(span.start, start) + 1; j < Math.min(span.end - 1, end); j++) {
+    const from = Math.max(span.start, start) + 1;
+    const to = Math.min(span.end - 1, end);
+    if (to <= from) return;
+    skippedSpans.push({ from, to });
+    if (!inFlight) return;
+    for (let j = from; j < to; j++) {
       inFlight.get(j)?.cancel();
       inFlight.delete(j);
     }
   };
-  try {
-    const reads: Promise<void>[] = [];
-    for (let i = start; i < end; i++) {
-      let read: Promise<{ ok: true; op: PeerLogOp | null } | { ok: false }>;
-      if (inFlight) {
-        const handle = cancellable!.call(log, i);
-        inFlight.set(i, handle);
-        read = handle.op.then(
-          (op) => {
-            inFlight.delete(i);
-            dropSkippedSpan(op, i);
-            return { ok: true as const, op };
-          },
-          () => {
-            inFlight.delete(i);
-            return { ok: false as const };
-          },
-        );
-      } else {
-        read = Promise.resolve()
-          .then(() => log.get(i))
-          .then(
-            (op) => ({ ok: true as const, op }),
-            () => ({ ok: false as const }),
-          );
-      }
-      reads.push(
-        Promise.race([read, deadline]).then((r) => {
-          // P-532 (D-027): a snapshot chunk is never kept. Neither consumer reads one, and
-          // a window can span a whole set: a VM peer held 477 chunks of ~4 MiB here, 3.6 GB
-          // decoded, until the heap limit killed it. The main loop reads each chunk itself.
-          if (r !== TIMEOUT && r.ok && !isSnapshotOp(r.op)) peeked.set(i, r.op);
-        }),
+  const readAt = (i: number): Promise<{ ok: true; op: PeerLogOp | null } | { ok: false }> => {
+    if (inFlight) {
+      const handle = cancellable!.call(log, i);
+      inFlight.set(i, handle);
+      return handle.op.then(
+        (op) => {
+          inFlight.delete(i);
+          noteSkippedSpan(op, i);
+          return { ok: true as const, op };
+        },
+        () => {
+          inFlight.delete(i);
+          return { ok: false as const };
+        },
       );
     }
-    await Promise.all(reads);
+    return Promise.resolve()
+      .then(() => log.get(i))
+      .then(
+        (op) => {
+          noteSkippedSpan(op, i);
+          return { ok: true as const, op };
+        },
+        () => ({ ok: false as const }),
+      );
+  };
+  let expired = false;
+  void deadline.then(() => {
+    expired = true;
+  });
+  let next = start;
+  const worker = async (): Promise<void> => {
+    while (!expired && next < end) {
+      const i = next++;
+      if (inSkippedSpan(i)) continue;
+      const r = await Promise.race([readAt(i), deadline]);
+      // Out of budget: stop issuing. A read still in flight outlives the peek, as before.
+      if (r === TIMEOUT) return;
+      // P-532 (D-027): a snapshot chunk is never kept. Neither consumer reads one, and
+      // a window can span a whole set: a VM peer held 477 chunks of ~4 MiB here, 3.6 GB
+      // decoded, until the heap limit killed it. The main loop reads each chunk itself.
+      if (r.ok && !isSnapshotOp(r.op)) peeked.set(i, r.op);
+    }
+  };
+  try {
+    const workers: Promise<void>[] = [];
+    for (let w = 0; w < Math.min(STORED_ORDER_PEEK_CONCURRENCY, end - start); w++) workers.push(worker());
+    await Promise.all(workers);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -4348,9 +4433,8 @@ async function mergeIncrementalPass(
       let op: PeerLogOp | null;
       try {
         const readIdent = `${log.keyHex}:${pos}`;
-        const lateQueue = cursor.lateReadResults?.get(readIdent);
-        const cached = lateQueue?.shift();
-        if (lateQueue && lateQueue.length === 0) cursor.lateReadResults?.delete(readIdent);
+        const cached = cursor.lateReadResults?.get(readIdent);
+        cursor.lateReadResults?.delete(readIdent);
         const peekedOp =
           cached || !peeked.has(pos) ? undefined : { kind: 'op' as const, op: peeked.get(pos) ?? null };
         peeked.delete(pos);
@@ -4363,9 +4447,10 @@ async function mergeIncrementalPass(
             // the same position. If another attempt already advanced it, drop
             // the stale result rather than applying it at a later position.
             if ((cursor.positions.get(log.keyHex) ?? 0) !== pos) return;
-            const queue = cursor.lateReadResults?.get(readIdent) ?? [];
-            queue.push(result);
-            (cursor.lateReadResults ??= new Map()).set(readIdent, queue);
+            const retained = cursor.lateReadResults?.get(readIdent);
+            if (!retained || (retained.kind === 'read-error' && result.kind === 'op')) {
+              (cursor.lateReadResults ??= new Map()).set(readIdent, result);
+            }
           }));
         // A cached result (or an immediate fresh result) owns this position;
         // any additional late results for it are stale once the cursor moves.

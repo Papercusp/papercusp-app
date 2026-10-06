@@ -1,5 +1,6 @@
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
 import {
-  assertWorkspaceHostSecretIsolation,
+assertWorkspaceHostSecretIsolation,
   type CloudCredentialRef,
   type WorkspaceHostProviderConnection,
 } from '@papercusp/deployment-driver';
@@ -359,6 +360,8 @@ export interface AzureWorkspaceHostPreflightIssue {
     | 'probe-failed';
   message: string;
   remediation: string;
+  /** Present on fail-closed authority refusals (WI-10005197): what compared, what lifts it, who can. */
+  refusal?: RefusalContract;
 }
 
 export interface AzureWorkspaceHostPreflightRequest {
@@ -735,6 +738,13 @@ export async function preflightAzureWorkspaceHostConnection(
         code: 'permission-denied',
         message: `Azure permission '${action}' is denied${evidence.reason ? `: ${evidence.reason}` : '.'}`,
         remediation: `Grant '${action}' at the narrowest applicable subscription or resource-group scope.`,
+        refusal: {
+          observed: { action, allowed: 'false', reason: evidence.reason ?? null },
+          liftsWhen:
+            `the selected principal is granted '${action}' at the subscription/resource-group scope (an Azure ` +
+            'administrator assigns the role) and the preflight is re-run. Re-running unchanged cannot pass',
+          whoCanMakeItTrue: ['owner'],
+        } satisfies RefusalContract,
       });
     }
   }

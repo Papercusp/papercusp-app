@@ -58,19 +58,27 @@ import {
   parseGradedGeneration,
   computeWorkOnEverythingRollup,
   resolveScorecardInstrumentSnapshots,
-  validateWorkOnEverythingEvidenceEnvelope,
+  validateRubricRatingContracts,
   type ScorecardInstrumentSnapshot,
   type ScorecardReleaseGateSnapshot,
 } from '../../scorecards';
 import { realGitProbe } from '../../release/judged-sha-containment';
 import { scorecardInstrumentSnapshotSchema, scorecardRatingEntrySchema } from './evaluate';
 import {
+  CLIPPED_SCORECARD_TEXT_CODE,
+  clippedScorecardTextMessage,
+  findClippedScorecardText,
+} from './emit-clipped-text';
+import {
   adequacyCardRevisionDisposition,
   PLAN_CLASS_RUBRIC_REFS,
   SPEC_TEST_ADEQUACY_RUBRIC_REF,
   specTestAdequacySubjectRef,
 } from '../plans/spec-test-adequacy';
-import { argsSchema as evaluatorArgsSchema } from '../plans/evaluate-spec-test-adequacy';
+import {
+  argsSchema as evaluatorArgsSchema,
+  replaySpecTestAdequacyForHistoricalAudit,
+} from '../plans/evaluate-spec-test-adequacy';
 import {
   collapseCriticsToSoleParty,
   resolveAcceptanceGraderEligibility,
@@ -531,6 +539,9 @@ const specTestAdequacyRerunRecipeSchema = z
               .strict(),
           )
           .max(500),
+        // The evaluator pins immutable binding rows as well as their references.
+        // Reuse its selector schema so a generated replay keeps the same cohort.
+        bindingIds: evaluatorArgsSchema.shape.bindingIds,
       })
       .strict(),
     current: z
@@ -559,7 +570,7 @@ const scorecardEmitBaseShape = {
       .max(120)
       .optional()
       .describe(
-        "Hive that produced/filed this scorecard; omitted defaults to the caller's hive. In cross-hive grading, use the grader/source hive here, not the harness owning the rubric subject plan; use targetHive for that subject hive.",
+        "Producing/grader hive; defaults to caller hive. For cross-hive grading put the subject plan's hive in targetHive.",
       ),
     targetHive: z
       .string()
@@ -567,7 +578,7 @@ const scorecardEmitBaseShape = {
       .max(120)
       .optional()
       .describe(
-        "Hive whose plan/repository is being graded. In cross-hive acceptance grading, this is the rubric subject plan's harness and directs deterministic checks to the subject tree; it does not change sourceHive.",
+        "Subject plan/repository hive; directs deterministic checks to that tree. Independent of sourceHive.",
       ),
     title: z.string().min(1).max(240).optional(),
     body: z.string().max(8000).optional(),
@@ -954,6 +965,7 @@ export async function validateGradingAuditReplayConsistency(
   gradedObservation: NonNullable<ReturnType<typeof asStructuredObservation>>,
   auditRatings: z.infer<typeof scorecardEmitArgs>['ratings'],
   dispatchTool: ((name: string, args: Record<string, unknown>) => Promise<unknown>) | undefined,
+  historicalContext?: { gradedCardCreatedAt?: string; workspaceId?: string },
 ): Promise<GradingAuditReplayConsistencyError | undefined> {
   if (
     gradedObservation.rubricRef !== SPEC_TEST_ADEQUACY_RUBRIC_REF ||
@@ -998,7 +1010,7 @@ export async function validateGradingAuditReplayConsistency(
     };
   }
 
-  const payload =
+  let payload =
     replay && typeof replay === 'object' && !Array.isArray(replay)
       ? (replay as {
           ok?: unknown;
@@ -1006,8 +1018,72 @@ export async function validateGradingAuditReplayConsistency(
           error?: unknown;
           evaluatorBuild?: unknown;
           evaluatorBuildDrift?: unknown;
+          historicalAuditOnly?: unknown;
         })
       : null;
+  if (
+    payload?.ok === false &&
+    payload.error === 'selection_empty' &&
+    parsedRecipe.data.args.bindingIds === undefined &&
+    parsedRecipe.data.selection.bindingIds === undefined &&
+    (parsedRecipe.data.args.evidenceRefs?.length ?? 0) > 0
+  ) {
+    const createdAt = historicalContext?.gradedCardCreatedAt;
+    const auditAsOf = createdAt ? new Date(createdAt) : null;
+    if (!auditAsOf || !Number.isFinite(auditAsOf.getTime()) || !historicalContext?.workspaceId) {
+      return {
+        code: 'grading_audit_replay_uncorroborated',
+        error:
+          'grading-integrity cannot use the legacy historical replay because the graded card creation time or workspace scope is unavailable; no audit card was persisted',
+      };
+    }
+    try {
+      replay = await replaySpecTestAdequacyForHistoricalAudit({
+        args: {
+          ...parsedRecipe.data.args,
+          ...(recordedEvaluatorBuild && !parsedRecipe.data.args.evaluatorBuild
+            ? { evaluatorBuild: recordedEvaluatorBuild }
+            : {}),
+        },
+        selection: parsedRecipe.data.selection,
+        workspaceId: historicalContext.workspaceId,
+        auditAsOf,
+      });
+    } catch (error) {
+      return {
+        code: 'grading_audit_replay_uncorroborated',
+        error:
+          `grading-integrity cannot replay the legacy card's historical evidence (${error instanceof Error ? error.message : String(error)}); no audit card was persisted`,
+      };
+    }
+    payload =
+      replay && typeof replay === 'object' && !Array.isArray(replay)
+        ? (replay as {
+            ok?: unknown;
+            rows?: unknown;
+            error?: unknown;
+            evaluatorBuild?: unknown;
+            evaluatorBuildDrift?: unknown;
+            historicalAuditOnly?: unknown;
+          })
+        : null;
+    const historicalMarker = payload?.historicalAuditOnly;
+    if (
+      payload?.ok === true &&
+      (!historicalMarker ||
+        typeof historicalMarker !== 'object' ||
+        Array.isArray(historicalMarker) ||
+        (historicalMarker as { provenance?: unknown }).provenance !== 'historical-audit-only' ||
+        (historicalMarker as { asOf?: unknown }).asOf !== auditAsOf.toISOString() ||
+        (historicalMarker as { freshness?: unknown }).freshness !== 'audit-only')
+    ) {
+      return {
+        code: 'grading_audit_replay_uncorroborated',
+        error:
+          'grading-integrity refused a legacy replay without matching historical audit-only provenance; no audit card was persisted',
+      };
+    }
+  }
   if (payload?.ok === false) {
     return {
       code: 'grading_audit_replay_uncorroborated',
@@ -1358,6 +1434,20 @@ export async function emitScorecard(
     generationAncestry?: GenerationAncestryProbe;
   } = {},
 ) {
+  // WI-10005715: a field that ENDS in the MCP result door's clip marker is a clipped
+  // tool response re-typed as evidence. Refuse before ANY store read, so a clipped
+  // draft costs nothing and persists nothing. Covers every route into the write
+  // facade (scorecards:emit and plans:certify-spec-clauses share this function).
+  const clippedPath = findClippedScorecardText(args);
+  if (clippedPath) {
+    // An inline literal on purpose: see clippedScorecardTextMessage for why a helper-built
+    // object here strands readers of the result's optional fields.
+    return {
+      ok: false as const,
+      code: CLIPPED_SCORECARD_TEXT_CODE,
+      error: clippedScorecardTextMessage(clippedPath),
+    };
+  }
   const rubric = await getRubric(args.rubricRef);
   if (!rubric) return { ok: false as const, error: `rubric '${args.rubricRef}' not found` };
   // P-004: the meta-rubric is an attestation surface, not a free-standing
@@ -1494,8 +1584,12 @@ export async function emitScorecard(
       // task cleanup, so a BAR-only or divergent contract is refused before a
       // costly grading pass is spent.
       if (rubric.barContract?.adoptionEpoch != null && rubric.subjectPlan) {
+        // Scope to the subject plan's own harness: a plan slug is unique per harness, not per
+        // workspace, so an unscoped read can span two copies and refuse
+        // `bar_snapshot_plan_ambiguous` (WI-10005160).
         const lifecycle = await readAndEvaluateAcceptanceBarLifecycle(rubric.subjectPlan, 'pre-grading', {
           expectedApplicable: true,
+          harnessSlug: rubric.subjectHarnessSlug,
         });
         if (!lifecycle.satisfied) {
           return {
@@ -1829,7 +1923,7 @@ export async function emitScorecard(
     // `disregard` — the agent-facing emit door enforces what the schema teaches.
     validateScorecardPoorRatingDisposition(observationForValidation, rubric);
     try {
-      validateWorkOnEverythingEvidenceEnvelope(args.rubricRef, ratings);
+      validateRubricRatingContracts(args.rubricRef, ratings);
     } catch (error) {
       return {
         ok: false as const,
@@ -2015,7 +2109,9 @@ export async function emitScorecard(
         // P-003: vetting is the first phase that requires the as-built METHOD
         // and its runnable/manual check. Reuse the same snapshot rather than
         // inspecting the submitted meta-scorecard in isolation.
-        const lifecycle = await readAndEvaluateAcceptanceBarLifecycle(vettedRubric.subjectPlan, 'pre-vetting');
+        const lifecycle = await readAndEvaluateAcceptanceBarLifecycle(vettedRubric.subjectPlan, 'pre-vetting', {
+          harnessSlug: vettedRubric.subjectHarnessSlug,
+        });
         if (!lifecycle.satisfied) {
           return {
             ok: false as const,
@@ -2428,6 +2524,7 @@ export async function emitScorecard(
         gradedObservation,
         args.ratings,
         deps.dispatchTool,
+        { gradedCardCreatedAt: graded?.createdAt, workspaceId: identityWorkspace },
       );
       if (replayConsistencyError) {
         if (
@@ -2515,19 +2612,43 @@ export async function emitScorecard(
     // far-end completion gate notices. Refuse the ambiguous form before any
     // scorecard write and teach the only form that settles the pending stamp.
     if (args.subject) {
-      const pendingSubject = (
+      const pendingSameSubject = (
         await listScorecards({
           rubricRef: args.rubricRef,
           subjectRef: args.subject.ref,
           limit: 100,
         })
-      ).find(
+      ).filter(
         (card) =>
           card.gradingAudit?.state === 'pending' &&
           card.subject?.ref === args.subject?.ref &&
           (card.subject?.kind ?? null) === (args.subject?.kind ?? null) &&
           card.supersededBy == null &&
           card.issueId !== args.supersedes,
+      );
+      // WI-10005211: a grading-integrity revision re-opens every settled audit
+      // (reservePendingGradingAudit), so a windowed grader's whole back-catalogue
+      // turns pending at once and each old card blocked the author's next card
+      // until it was re-audited, one at a time. A RE-OPENED audit is not the
+      // P-013 case: the card already carries an independent verdict, and its
+      // own author can never be the auditor. So the author's new card is not
+      // blocked by its own re-opened cards. A never-audited pending card still
+      // blocks everyone, and a non-author is still taught the audit shape.
+      const ownPending = pendingSameSubject.filter((card) => card.createdBy === input.createdBy);
+      const previouslyAudited = new Set<string>();
+      if (ownPending.length > 0) {
+        for (const audit of await listScorecards({
+          rubricRef: GRADING_INTEGRITY_RUBRIC_REF,
+          subjectRefs: ownPending.map((card) => card.issueId),
+          limit: 500,
+        })) {
+          if (audit.subject?.kind === 'scorecard' && audit.subject.ref && !audit.retracted) {
+            previouslyAudited.add(audit.subject.ref);
+          }
+        }
+      }
+      const pendingSubject = pendingSameSubject.find(
+        (card) => !(card.createdBy === input.createdBy && previouslyAudited.has(card.issueId)),
       );
       if (pendingSubject) {
         return {
@@ -2924,13 +3045,19 @@ export async function emitScorecard(
           // the judge's own contract treats an empty planItems list as "not supplied"
           // (never as "the plan has no items"), so a transient read failure degrades to
           // the pre-P-016 behaviour instead of convicting every target.
+          // Item rows are owned per (harness, slug), so scope them to the subject plan's
+          // harness (WI-10005167). The two audit reads stay (workspace, slug): plan_audits
+          // is keyed that way and its harness_slug is only a citation context.
           const [activationAudit, itemAudits, planItems] = await Promise.all([
             getLatestActivationAudit(requirementsPlan),
             getEffectiveItemAudits(requirementsPlan),
-            getPlanItemStatuses(requirementsPlan),
+            getPlanItemStatuses(requirementsPlan, { harnessSlug: rubric.subjectHarnessSlug }),
           ]);
           const proof = itemAudits.some(({ entry }) => entry.verdict === 'not-code')
-            ? await readAndEvaluateAcceptanceBarLifecycle(requirementsPlan, 'pre-grading', { current: args.current })
+            ? await readAndEvaluateAcceptanceBarLifecycle(requirementsPlan, 'pre-grading', {
+                current: args.current,
+                harnessSlug: rubric.subjectHarnessSlug,
+              })
             : null;
           return {
             planSlug: requirementsPlan,
@@ -3071,6 +3198,21 @@ export async function emitScorecard(
     // anyone (a refused or re-read emit fires nothing), and fail-soft inside, so a failed
     // emit can never fail the scorecard write that already succeeded.
     if (result.created && result.issue?.id) {
+      // EI-24852356444105284: a settled grading audit also fires
+      // `scorecard:grading-audit:<audited id>` — the audited card is already terminal,
+      // so no work-item status event can tell its author the verdict landed.
+      const settledStamp = auditContext && auditSettlement?.ok ? auditSettlement.gradingAudit : undefined;
+      const settledAudit =
+        auditContext && settledStamp && (settledStamp.state === 'passed' || settledStamp.state === 'failed')
+          ? {
+              issueId: auditContext.subjectIssueId,
+              state: settledStamp.state,
+              auditIssueId: settledStamp.auditIssueId ?? result.issue.id,
+              auditor: settledStamp.auditor ?? null,
+              auditedAt: settledStamp.auditedAt ?? null,
+              rubricRevision: settledStamp.rubricRevision ?? null,
+            }
+          : undefined;
       await emitScorecardEmitted(
         {
           issueId: result.issue.id,
@@ -3081,7 +3223,10 @@ export async function emitScorecard(
           createdBy: input.createdBy ?? null,
           hasAcceptance: Boolean(args.acceptance),
         },
-        input.workspaceId ? { workspaceId: input.workspaceId } : {},
+        {
+          ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+          ...(settledAudit ? { settledAudit } : {}),
+        },
       );
     }
     // P-013 backlog repair: every newly filed non-audit scorecard is a cheap,

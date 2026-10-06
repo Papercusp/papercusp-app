@@ -21,6 +21,7 @@ import {
   loadRoleToolsMd,
   renderToolsCatalog,
 } from '../../prompt-assembly';
+import { readServingGeneration } from '../../serving-generation';
 import { listAgentsAcrossWorkspace } from '../../agents-list';
 import { buildMemoryContextBlock } from '../../memory/injection';
 import { loadHarnessRegistry } from '../../harness-registry';
@@ -229,7 +230,8 @@ export async function composeOraclePrompt(
   const last = messages[messages.length - 1];
   const userContent = typeof last?.content === 'string' ? last.content : '';
 
-  const toolBlock = renderToolsCatalog('oracle', ORACLE_TOOL_NAMES);
+  const servingGeneration = await readServingGeneration();
+  const toolBlock = renderToolsCatalog('oracle', ORACLE_TOOL_NAMES, 'text', undefined, servingGeneration);
   const playbook = loadRoleToolsMd('oracle') ?? '';
   const inventoryBlock = await buildOracleInventoryBlock().catch(() => '');
 

@@ -75,7 +75,18 @@
     "    the instrument, never evidence against a curated reason.",
     "",
     "Re-seed from `--list`, which now prints the derived disposition and the range it was",
-    "derived from beside each row."
+    "derived from beside each row.",
+    "",
+    "RE-MEASURED 2026-10-01 (frozen-repair lint:reachable-advisories red): 68 total, 8 gating,",
+    "1 NEW offender (next, CRITICAL GHSA-vcvr-r3jv-pc5j, >=16.2.0 <16.3.6) — PATCHED by",
+    "next 16.3.4 -> 16.3.8 in package-lock.json, not baselined. js-yaml was re-adjudicated",
+    "to patch-eligible after ADVISORY_DISPOSITION_DRIFT (js-yaml 4.3.2 fixes it inside ^4.1.1).",
+    "⚠ The same morning's tree reported style-dictionary STALE and stagehand as drifted. Both",
+    "were ARTIFACTS: package-lock.json had drifted from the manifests (npm ls: invalid",
+    "@modelcontextprotocol/sdk, @anthropic-ai/sdk, …), and in that state `npm audit --omit=dev`",
+    "dropped style-dictionary's GHSA-vj5c-m527-mpff and reported stagehand's vulnerable range",
+    "narrower than it is. Once the lock was reconciled, both reverted, and their entries stand",
+    "unchanged. Judge STALE and drift only on a tree where `npm ls --omit=dev` is clean."
   ],
   "seededAt": "2026-09-05",
   "seededFrom": "npm audit --omit=dev --json (reachability/severity) + npm audit --json (fix feasibility, tree as installed) + npm ls --omit=dev --all --json, attributed by workspace",
@@ -122,8 +133,8 @@
     },
     "js-yaml": {
       "severity": "high",
-      "disposition": "deferred-semver-major",
-      "reason": "Only fix routes through @mdxeditor/editor@4.2.3, a semver-major editor upgrade. Deferred: the editor surface is feature-bearing and P-007 forbids forcing it.",
+      "disposition": "patch-eligible",
+      "reason": "RE-ADJUDICATED 2026-10-01 from deferred-semver-major after ADVISORY_DISPOSITION_DRIFT: the vulnerable range is now `4.0.0 - 4.3.1` (worst: GHSA-2883-xcg3-v3hh, <4.3.2) and js-yaml 4.3.2 is published. Every prod dependent of the single hoisted 4.1.1 copy (operator-core, astro, @astrojs/*) declares `^4.1.1`, so 4.3.2 is reachable without a breaking bump. The earlier reason (fix only via @mdxeditor/editor@4.2.3) no longer holds. Still accepted here only because the bump was kept out of the frozen-candidate repair that found the drift; patch it on staging and remove this entry.",
       "owners": [
         "@papercupai/operator-docs",
         "@papercusp/docs-engine",

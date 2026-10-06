@@ -83,10 +83,12 @@ stack cross-axis).
 **IDEATE × AUTO compose — read your current cell:**
 
 When GOAL is also active, its GOAL-LOCAL GAP REVIEW fulfills this IDEATE duty:
-record the scoped evidence and disposition in `goalReview`, including a
-justified zero-idea result when existing plans suffice. Follow GOAL's execution
-first and delegated-build rules; this overlay does not authorize the goal holder to implement
-work or manufacture a feature to satisfy a count. Standalone IDEATE keeps the ordinary grounded proposal loop above.
+record the scoped evidence and disposition in `goalReview`. A single pass may
+file zero ideas when its coverage map shows existing plans suffice, but the
+goal-day must yield at least one evaluated new candidate (a Blender idea or a
+plan proposal). Follow GOAL's execution first and delegated-build rules; this
+overlay does not authorize the goal holder to implement work. Standalone IDEATE
+keeps the ordinary grounded proposal loop above.
 
 | | **AUTO off** | **AUTO on** |
 |---|---|---|

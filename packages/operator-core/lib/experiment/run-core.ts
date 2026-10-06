@@ -310,7 +310,9 @@ async function writeLedgerAndReturn(
       // Best-effort: never lose a finished experiment result to a ledger write.
     }
   }
-  await emitScorecard(normalized, input, ctx, deps, metrics);
+  if (normalized.costMeasured !== false && !normalized.arms.some((arm) => arm.costMeasured === false)) {
+    await emitScorecard(normalized, input, ctx, deps, metrics);
+  }
   return { ok: true, result: normalized };
 }
 

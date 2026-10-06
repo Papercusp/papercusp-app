@@ -1,0 +1,52 @@
+---
+title: Talking to an agent
+description: Use the portal's voice controls, manage microphone access and recover from connection problems.
+documents:
+  - packages/operator-core/lib/agent-tools/voice/agent.ts
+  - packages/operator-core/lib/agent-tools/voice/channels.ts
+---
+
+Voice is another way to communicate with an agent, not a different permission
+model. Check the selected workspace and intended conversation before starting.
+Availability depends on your installation, configured voice provider and
+browser support.
+
+## Before starting
+
+Use a supported browser, a working microphone and a connected workspace.
+Review which microphone the browser will share. Start from the voice control
+offered by the portal or the session rather than granting access through an
+unrelated page.
+
+If the browser requests microphone permission, allow it only for the intended
+site. A denied permission or missing device can prevent voice even while text
+chat works.
+
+## Start, listen and stop
+
+Open the available voice control and wait for its connection state to become
+ready before speaking. State the target project, goal and constraints just
+as you would in text. Ask for a written plan or durable work-item reference
+when the task needs one.
+
+Use the displayed stop or disconnect control when finished and verify that
+the session is no longer capturing. Muting a microphone and ending an agent's
+background work are different actions.
+
+Voice instructions do not bypass approval, tool permissions or the need for
+verification. For a destructive or public action, confirm the target and
+consequences explicitly. Do not read credentials aloud into the session.
+
+## When voice does not connect
+
+Check the microphone permission and selected input device first. Then read
+the connection/provider error and confirm that the intended workspace is
+reachable. Do not repeatedly start parallel voice sessions to clear an error.
+
+Continue in text if necessary, preserving the same plan and execution route.
+For support, include the browser, time and error message, not recordings of
+private conversations or credentials.
+
+See [Your first successful task](/docs/quickstart),
+[Agent modes and fleets](/docs/agent-modes-and-fleets) and
+[Troubleshooting](/docs/troubleshooting).

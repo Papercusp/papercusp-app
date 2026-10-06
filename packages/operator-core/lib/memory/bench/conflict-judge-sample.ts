@@ -13,7 +13,7 @@
  *
  * The `duplicates` and `refines` pairs are the hard negatives for the one decision
  * that matters: a false `contradicts` refuses a legitimate write. Many `unrelated`
- * neighbours share a topic with the new memory (ports, flags, owner, git-sync), as
+ * neighbours share a topic with the new memory (ports, flags, Avi, git-sync), as
  * real top-K neighbours do.
  *
  * Written in the style of this workspace's memories. Labelled by the implementer
@@ -44,18 +44,18 @@ const c = (id: string, newText: string, neighbours: [string, JevConflictLabel][]
 });
 
 export const CONFLICT_JUDGE_SAMPLE: readonly ConflictSampleCase[] = [
-  c('k01', 'owner prefers terse status reports with no preamble.', [
-    ['owner wants long, detailed status reports that walk through every step.', 'contradicts'],
-    ['Keep status reports to owner short, with no preamble.', 'duplicates'],
+  c('k01', 'Avi prefers terse status reports with no preamble.', [
+    ['Avi wants long, detailed status reports that walk through every step.', 'contradicts'],
+    ['Keep status reports to Avi short, with no preamble.', 'duplicates'],
     ['The deploy pipeline promotes staging to main after a green checkpoint.', 'unrelated'],
   ]),
-  c('k02', 'owner prefers terse status reports, and wants anything waiting on him listed in its own block.', [
-    ['owner prefers terse status reports.', 'refines'],
-    ["owner's timezone is Eastern time.", 'unrelated'],
+  c('k02', 'Avi prefers terse status reports, and wants anything waiting on him listed in its own block.', [
+    ['Avi prefers terse status reports.', 'refines'],
+    ["Avi's timezone is Eastern time.", 'unrelated'],
   ]),
   c('k03', 'New durable state goes in MySQL.', [
     ['New durable state goes in Postgres unless there is a specific reason it must be a file.', 'contradicts'],
-    ['owner prefers to be addressed by name.', 'unrelated'],
+    ['Avi prefers to be addressed by name.', 'unrelated'],
   ]),
   c('k04', 'New durable state goes in Postgres, using the helpers in operator-state-pg.ts.', [
     ['New durable state goes in Postgres unless there is a specific reason it must be a file.', 'refines'],
@@ -83,7 +83,7 @@ export const CONFLICT_JUDGE_SAMPLE: readonly ConflictSampleCase[] = [
   ]),
   c('k10', "Use pnpm to run a single package's tests.", [
     ['Never use pnpm or yarn in this repo; it is npm only.', 'contradicts'],
-    ['owner prefers terse status reports.', 'unrelated'],
+    ['Avi prefers terse status reports.', 'unrelated'],
   ]),
   c('k11', 'New feature flags ship default OFF.', [
     ['New feature flags default to enabled; default-off needs a registered justification.', 'contradicts'],
@@ -117,9 +117,9 @@ export const CONFLICT_JUDGE_SAMPLE: readonly ConflictSampleCase[] = [
     ['Main only fast-forwards after the green checkpoint passes.', 'refines'],
     ['Git-sync pushes to origin/staging every few minutes.', 'unrelated'],
   ]),
-  c('k19', 'owner wants to be asked before any file edit, even in AUTO mode.', [
+  c('k19', 'Avi wants to be asked before any file edit, even in AUTO mode.', [
     ['In AUTO mode, act on your own judgment and report after; do not ask before edits.', 'contradicts'],
-    ["The owner's name is owner.", 'unrelated'],
+    ["The owner's name is Avi.", 'unrelated'],
   ]),
   c('k20', 'In AUTO mode, list every assumption you made in the status report.', [
     ['In AUTO mode, act on your own judgment and report after.', 'refines'],
@@ -161,9 +161,9 @@ export const CONFLICT_JUDGE_SAMPLE: readonly ConflictSampleCase[] = [
     ['Recurring work must not use a bare setInterval; use a DBOS workflow or an ephemeral trigger.', 'contradicts'],
     ['Owner directives are captured verbatim by a hook.', 'unrelated'],
   ]),
-  c('k30', "owner's timezone is Pacific time.", [
-    ['owner works on Eastern time.', 'contradicts'],
-    ['The owner is called owner.', 'unrelated'],
+  c('k30', "Avi's timezone is Pacific time.", [
+    ['Avi works on Eastern time.', 'contradicts'],
+    ['The owner is called Avi.', 'unrelated'],
   ]),
   c('k31', 'Tool results are uncapped, so large outputs arrive in full.', [
     ['Every tool result is capped at about 1,500 tokens and the rest spills to a scratch file.', 'contradicts'],
@@ -173,9 +173,9 @@ export const CONFLICT_JUDGE_SAMPLE: readonly ConflictSampleCase[] = [
     ['Do not use pkill -f or other kill-by-pattern commands.', 'duplicates'],
     ['Kill a managed process with processes:kill, which kills its whole cgroup subtree.', 'refines'],
   ]),
-  c('k33', "The owner's name is owner.", [
-    ['The owner is called owner.', 'duplicates'],
-    ['owner works on Eastern time.', 'unrelated'],
+  c('k33', "The owner's name is Avi.", [
+    ['The owner is called Avi.', 'duplicates'],
+    ['Avi works on Eastern time.', 'unrelated'],
   ]),
   c('k34', 'Port 3070 serves the green operator built from main.', [
     ['The green operator on :3070 runs the main branch.', 'duplicates'],
@@ -189,9 +189,9 @@ export const CONFLICT_JUDGE_SAMPLE: readonly ConflictSampleCase[] = [
     ["Verify UI with scripts/verify-tauri-headless.sh, never on the owner's live desktop.", 'refines'],
     ['Memory injection uses a similarity floor of 0.58.', 'unrelated'],
   ]),
-  c('k37', 'owner dislikes menu-style questions at the end of a turn.', [
-    ['owner does not want turns to end with a list of options to pick from.', 'duplicates'],
-    ["owner's timezone is Eastern time.", 'unrelated'],
+  c('k37', 'Avi dislikes menu-style questions at the end of a turn.', [
+    ['Avi does not want turns to end with a list of options to pick from.', 'duplicates'],
+    ["Avi's timezone is Eastern time.", 'unrelated'],
   ]),
   c('k38', 'Every plan needs a graded acceptance rubric before it ships.', [
     ['A plan cannot ship without a graded acceptance rubric.', 'duplicates'],

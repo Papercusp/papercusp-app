@@ -104,6 +104,22 @@ export interface HostedDesktopBackendDeps {
    * (WI-10002797). A failure is warned and retried on the next call.
    */
   reconcile?: () => Promise<number>;
+  /**
+   * Grab one frame on demand for a desktop this host leases when the capture loop has
+   * no fresh file for it — `desktopThumbnailer().thumbnail` (plan
+   * agent-multi-desktops-grid-2026-10-06 P-005 / D-008). The loop's display list is
+   * fixed at frame bootstrap, so a desktop an agent starts later is only ever seen
+   * through this path. Only a grid read calls it, so idle cost stays zero. Omitted:
+   * no fallback (a missing or stale capture file answers null).
+   */
+  grabThumbnail?: (display: number) => Promise<Buffer | null>;
+  /**
+   * The work-item an agent is on right now — its most recent live claim
+   * (`work-item-claims.getActiveClaimForOwner`). Plan agent-multi-desktops-grid
+   * D-009: the grid labels each agent desktop with it, derived at roster time and
+   * never stored on the desktop row. Omitted, or a failed read: no label.
+   */
+  activeClaimFor?: (owner: string) => Promise<HostedDesktopOwnerClaim | null>;
   /** Override the capture directory (tests, or a pack that relocates it). */
   captureDir?: string;
   /** Override the KasmVNC websocket path. */
@@ -178,7 +194,7 @@ export const KASMVNC_WEBSOCKET_SUBPROTOCOL = 'binary';
  * The host sends `desktop.ready` only after the dial resolves, so a dial with no
  * deadline turns a stalled upgrade into a viewer that says "Opening your desktop…"
  * forever with no error anywhere — measured on the owner's first Take control on
- * owner-test, 2026-09-30. A loopback upgrade that has not opened in this long is not
+ * avi-test, 2026-09-30. A loopback upgrade that has not opened in this long is not
  * going to; failing it reports `desktop_dial_failed` and lets the viewer retry.
  */
 export const KASMVNC_DIAL_TIMEOUT_MS = 10_000;
@@ -249,16 +265,61 @@ export function desktopRecordForLease(desktop: SandboxDesktop): HostedDesktopSes
 }
 
 /** One registry row as the viewer's picker renders it. */
-export function rosterEntryForSession(session: DesktopSessionRecord): HostedDesktopRosterEntry {
+/** An owner's current work-item, as the roster labels its desktops. */
+export interface HostedDesktopOwnerClaim {
+  workItemId: string;
+  intent: string | null;
+}
+
+/** Longest claim intent the roster carries: a tile label, not the claim's full text. */
+export const HOSTED_ROSTER_INTENT_MAX_CHARS = 160;
+
+export function rosterEntryForSession(
+  session: DesktopSessionRecord,
+  claim: HostedDesktopOwnerClaim | null = null,
+): HostedDesktopRosterEntry {
   const display = displayNumber(session.display);
   const { width, height } = session.displayGeometry;
+  // A workspace desktop's scopeRef is the workspace id, which names no owner.
+  const owner = session.scope === 'workspace' ? '' : session.scopeRef;
+  const intent = claim?.intent?.trim().slice(0, HOSTED_ROSTER_INTENT_MAX_CHARS) ?? '';
   return {
     desktopSessionId: session.id,
     state: session.state,
     ...(display === null ? {} : { displayNumber: display }),
     ...(width && height ? { geometry: `${width}x${height}` } : {}),
     ...(session.lastActiveAt ? { lastActiveAt: session.lastActiveAt.toISOString() } : {}),
+    scope: session.scope,
+    ...(owner ? { owner } : {}),
+    ...(session.name ? { name: session.name } : {}),
+    ...(claim ? { workItemId: claim.workItemId } : {}),
+    ...(claim && intent ? { workItemIntent: intent } : {}),
   };
+}
+
+/**
+ * Each agent owner's current claim, read once per owner. A failed read is a missing
+ * label, never a failed roster: the grid must still show every desktop.
+ */
+async function claimsForSessions(
+  sessions: readonly DesktopSessionRecord[],
+  activeClaimFor: HostedDesktopBackendDeps['activeClaimFor'],
+  warn: (message: string) => void,
+): Promise<Map<string, HostedDesktopOwnerClaim>> {
+  const claims = new Map<string, HostedDesktopOwnerClaim>();
+  if (!activeClaimFor) return claims;
+  const owners = [...new Set(sessions.filter((s) => s.scope === 'agent').map((s) => s.scopeRef))];
+  await Promise.all(
+    owners.map(async (owner) => {
+      try {
+        const claim = await activeClaimFor(owner);
+        if (claim) claims.set(owner, claim);
+      } catch (error) {
+        warn(`hosted-desktop-backend — claim lookup for ${owner} failed: ${String(error)}`);
+      }
+    }),
+  );
+  return claims;
 }
 
 /**
@@ -438,7 +499,11 @@ export function createHostedDesktopBackend(deps: HostedDesktopBackendDeps): Host
 
     async roster(): Promise<HostedDesktopRosterEntry[]> {
       await reconcile();
-      return (await deps.listSessions()).map(rosterEntryForSession);
+      const sessions = await deps.listSessions();
+      const claims = await claimsForSessions(sessions, deps.activeClaimFor, warn);
+      return sessions.map((session) =>
+        rosterEntryForSession(session, session.scope === 'agent' ? (claims.get(session.scopeRef) ?? null) : null),
+      );
     },
 
     async start(): Promise<HostedDesktopRosterEntry | null> {
@@ -462,14 +527,25 @@ export function createHostedDesktopBackend(deps: HostedDesktopBackendDeps): Host
       const display = await displayFor(desktopSessionId);
       if (display === null) return null;
       const path = `${captureDir}/display-${display}.jpg`;
+      let fromLoop: Buffer | null = null;
       try {
         const info = await stat(path);
-        if (now() - info.mtimeMs > HOSTED_THUMBNAIL_MAX_AGE_MS) return null;
-        return await readFile(path);
+        if (now() - info.mtimeMs <= HOSTED_THUMBNAIL_MAX_AGE_MS) fromLoop = await readFile(path);
       } catch {
         // Absent is the capture loop's NORMAL answer for a display with no active
-        // client (it removes the stale jpeg on purpose), so this is null, never an
-        // error — the picker renders "no recent frame" instead of a dead screen.
+        // client (it removes the stale jpeg on purpose), so this is not an error.
+      }
+      if (fromLoop) return fromLoop;
+      // A stale or absent file is never served as live. A desktop this host LEASES is
+      // grabbed directly instead — a fresh frame is the truth, and a dead display just
+      // yields null. A display number known only from a registry row is not grabbed:
+      // it could name an X server this process does not own.
+      const leased = displayNumber(deps.leasedDesktop(desktopSessionId)?.display);
+      if (leased === null || !deps.grabThumbnail) return null;
+      try {
+        return await deps.grabThumbnail(leased);
+      } catch (error) {
+        warn(`hosted-desktop-backend — on-demand thumbnail for ${desktopSessionId} failed: ${String(error)}`);
         return null;
       }
     },

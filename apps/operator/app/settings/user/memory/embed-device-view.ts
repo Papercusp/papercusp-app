@@ -30,7 +30,7 @@ export type EmbedDeviceHealthView = {
 export type EmbedDeviceEnvelopeView = {
   setting: string | null;
   settingError: string | null;
-  host: { kind: 'sidecar'; url: string } | { kind: 'in-process' };
+  host: { kind: 'sidecar'; url: string } | { kind: 'sidecar-idle' } | { kind: 'in-process' };
   health: EmbedDeviceHealthView | null;
   healthError: string | null;
   reloadSupported: boolean | null;
@@ -83,7 +83,9 @@ export function embedDeviceView(env: EmbedDeviceEnvelopeView): EmbedDeviceView {
   const hostLine =
     env.host.kind === 'sidecar'
       ? `Embeddings run in the shared embedding sidecar (${env.host.url}).`
-      : 'Embeddings run inside this app.';
+      : env.host.kind === 'sidecar-idle'
+        ? 'Embeddings run in an embedding sidecar this app starts when needed. It is not running now and will use this setting when it next starts.'
+        : 'Embeddings run inside this app.';
   const h = env.health;
   if (!h) {
     return { choice, inUse: null, perModel: [], hostLine, demotionWarning: null, notices: [], why: null };

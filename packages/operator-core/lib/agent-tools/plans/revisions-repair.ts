@@ -9,14 +9,17 @@
  * authorship, session provenance, and timestamps remain immutable.
  */
 import { withWorkspace } from '@papercusp/db-org';
+import { isDeepStrictEqual } from 'node:util';
 import {
   acquirePlanAdvisoryLock,
   planAdvisoryLockKey,
 } from './plan-lock-key';
 import {
   acquirePlanRevisionAdvisoryLock,
+  recordPlanRevisionInTransaction,
   type PlanRevisionSql,
 } from './revisions';
+import type { AgentIdentity } from '../coordination/identity';
 
 export interface PlanRevisionRepairScope {
   workspaceId: string;
@@ -63,6 +66,8 @@ export interface PlanRevisionRepairExpectedPlan {
   template: string | null;
   templateSlug: string | null;
   archived: boolean;
+  /** Optional exact structured state for repairs whose proof depends on it. */
+  templateData?: unknown;
 }
 
 export interface PlanRevisionSnapshotReplacement {
@@ -78,6 +83,25 @@ export interface PlanRevisionSnapshotRepairSpec {
   expectedRevisionIds: number[];
   replacements: PlanRevisionSnapshotReplacement[];
 }
+
+/** Append-only repair of a missing snapshot for the exact current plan version. */
+export interface PlanRevisionSnapshotBackfillPlan {
+  scope: PlanRevisionRepairScope;
+  expectedPlan: PlanRevisionRepairExpectedPlan & { templateData: unknown };
+  expectedRevisionIds: number[];
+  contentSnapshot: string;
+  rationale: string;
+}
+
+export interface PlanRevisionSnapshotBackfillSpec extends PlanRevisionSnapshotBackfillPlan {
+  identity: AgentIdentity;
+}
+
+export type PlanRevisionSnapshotBackfillResult =
+  | { status: 'recorded'; revisionSeq: number }
+  | { status: 'not_found' }
+  | { status: 'cas_lost'; reason: string }
+  | { status: 'error'; reason: string };
 
 export type PlanRevisionSnapshotRepairResult =
   | { status: 'repaired'; revisionsRepaired: number }
@@ -98,7 +122,8 @@ export function planRevisionRepairPlanMatches(
     actual.owner === expected.owner &&
     actual.template === expected.template &&
     actual.templateSlug === expected.templateSlug &&
-    actual.archived === expected.archived
+    actual.archived === expected.archived &&
+    (expected.templateData === undefined || isDeepStrictEqual(actual.templateData, expected.templateData))
   );
 }
 
@@ -349,6 +374,93 @@ export async function applyPlanRevisionSnapshotRepair(
     return {
       status: 'error',
       revisionsRepaired: 0,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Append a repaired snapshot for one missing CURRENT plan version. The live plan
+ * and complete prior revision-id set are rechecked under the same plan/revision
+ * lock order used by ordinary writers. The old history is left byte-for-byte
+ * intact, and the new row records the actual repair actor and rationale.
+ */
+export async function applyPlanRevisionSnapshotBackfill(
+  spec: PlanRevisionSnapshotBackfillSpec,
+): Promise<PlanRevisionSnapshotBackfillResult> {
+  try {
+    return await withWorkspace(spec.scope.workspaceId, async (tx) => {
+      await acquirePlanAdvisoryLock(
+        tx,
+        planAdvisoryLockKey(spec.scope.workspaceId, spec.scope.harnessSlug, spec.scope.planSlug),
+      );
+      await acquirePlanRevisionAdvisoryLock(
+        tx as unknown as PlanRevisionSql,
+        spec.scope.workspaceId,
+        spec.scope.harnessSlug,
+        spec.scope.planSlug,
+      );
+
+      const planRows = await tx<
+        {
+          workspace_id: string;
+          harness_slug: string;
+          plan_slug: string;
+          version: string | number;
+          content_hash: string;
+          content: string;
+          owner: string | null;
+          template: string | null;
+          template_slug: string | null;
+          archived: boolean;
+          template_data: unknown;
+        }[]
+      >`
+        SELECT workspace_id, harness_slug, plan_slug, version, content_hash, content,
+               owner, template, template_slug, archived, template_data
+          FROM harness_shared.harness_plans
+         WHERE workspace_id = ${spec.scope.workspaceId}
+           AND harness_slug = ${spec.scope.harnessSlug}
+           AND plan_slug = ${spec.scope.planSlug}
+         FOR UPDATE
+      `;
+      const planRow = planRows[0];
+      if (!planRow) return { status: 'not_found' };
+      if (!planRevisionRepairPlanMatches(spec.expectedPlan, mapPlanRow(planRow))) {
+        return {
+          status: 'cas_lost',
+          reason: 'current plan version, body, structured data, or identity changed after preparation',
+        };
+      }
+
+      const revisionRows = await tx<{ id: string | number }[]>`
+        SELECT id
+          FROM harness_shared.plan_revisions
+         WHERE workspace_id = ${spec.scope.workspaceId}
+           AND harness_slug = ${spec.scope.harnessSlug}
+           AND plan_slug = ${spec.scope.planSlug}
+         ORDER BY seq ASC
+         FOR UPDATE
+      `;
+      const currentRevisionIds = revisionRows.map((row) => ({ id: Number(row.id) }));
+      if (!planRevisionRepairRevisionIdsMatch(spec.expectedRevisionIds, currentRevisionIds)) {
+        return { status: 'cas_lost', reason: 'revision chain changed after preparation' };
+      }
+
+      const recorded = await recordPlanRevisionInTransaction(tx as unknown as PlanRevisionSql, {
+        workspaceId: spec.scope.workspaceId,
+        harnessSlug: spec.scope.harnessSlug,
+        planSlug: spec.scope.planSlug,
+        content: spec.contentSnapshot,
+        contentHash: spec.expectedPlan.contentHash,
+        rationale: spec.rationale,
+        identity: spec.identity,
+      });
+      return { status: 'recorded', revisionSeq: recorded.seq };
+    });
+  } catch (error) {
+    return {
+      status: 'error',
       reason: error instanceof Error ? error.message : String(error),
     };
   }

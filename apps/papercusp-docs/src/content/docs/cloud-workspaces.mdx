@@ -1,0 +1,150 @@
+---
+title: Cloud workspaces
+description: Run workspace hosts on Papercusp Cloud or in your own Google Cloud project or AWS account, with only the access they need.
+documents:
+  - packages/operator-core/lib/workspace-host/hosted-provider-delegation.ts
+  - packages/operator-core/lib/workspace-host/aws-customer-setup-template.ts
+  - packages/operator-core/lib/workspace-host/aws-connection.ts
+---
+
+A cloud workspace runs your agents on a workspace host: a virtual machine that
+keeps working while your computer is off. You choose where that machine runs.
+
+- **Papercusp Cloud:** Papercusp runs and pays for the host. There is nothing
+  to set up in a cloud account.
+- **Your own cloud:** the host runs in your Google Cloud project or AWS
+  account, and you pay your cloud provider directly. You grant a narrow,
+  dedicated identity that can manage workspace hosts and nothing else.
+
+You can connect your own cloud from [app.papercusp.com](https://app.papercusp.com)
+or from the desktop app. Both use the same least-privilege permission set; they
+differ in who holds the credentials.
+
+## Before creating a host
+
+Sign in to the intended account and organization. Check the available hosting
+choices, region, configuration and any limits shown by the portal.
+For your own cloud, confirm that you can create the required provider identity
+and resources. Do not paste cloud credentials into an agent conversation.
+
+Creating a workspace is not the same as connecting to a ready host.
+Wait for provisioning and connection to complete before starting a task.
+Keep a failed host's status and provider error for diagnosis instead of
+creating duplicates. Billing and access are separate from provisioning:
+see [Accounts and billing](/docs/accounts-and-billing).
+
+## Connect your own Google Cloud project
+
+From app.papercusp.com, choose **Google Cloud** when you create a workspace and
+enter your project ID and the service account Papercusp should use. The setup
+steps shown there create:
+
+- a custom role, **Papercusp Workspace Host Operator**, holding only the
+  permissions workspace hosts need (Compute Engine, IAM, Identity-Aware Proxy,
+  OS Login, Resource Manager and Service Usage);
+- a binding that lets Papercusp act as that service account, and only that
+  service account.
+
+Papercusp creates the host's network itself. It reaches the host through
+Identity-Aware Proxy, so the host has no public address.
+
+## Connect your own AWS account
+
+### From app.papercusp.com
+
+1. Choose **AWS** when you create a workspace, then enter your 12-digit account
+   ID and the region the host should run in.
+2. The page shows the role Papercusp will use, your organization's ExternalId,
+   and a **Download the setup file** link. The ExternalId is filled in for you;
+   leave it as provided.
+3. Signed in to that account, follow **open CloudFormation** to the setup page in
+   your chosen region and create the stack from the downloaded file.
+4. When the stack shows `CREATE_COMPLETE`, return to app.papercusp.com and
+   create the workspace again. Papercusp finds the stack's resources itself;
+   you do not copy anything back. Until the stack is complete, the page keeps
+   showing these same steps.
+
+The stack refuses to create in any region other than the one you chose.
+
+### From the desktop app
+
+The desktop app manages hosts with your own AWS credentials (a local AWS
+profile), so Papercusp's servers are not involved.
+
+1. Download the AWS setup template from the desktop app's AWS connection form,
+   for your account ID and region. You can name the IAM role or user your local
+   profile signs in as; if you don't, the role trusts your account, and your own
+   IAM policies decide who may assume it.
+2. Create a CloudFormation stack from the template in that region.
+3. Copy the stack's outputs into the connection form:
+
+   | Stack output | Connection form field |
+   | --- | --- |
+   | `OperatorRoleArn` | Role to assume (with your local profile as the source) |
+   | `VpcId` | VPC |
+   | `PrivateSubnetId` | Subnet |
+   | `SecurityGroupId` | Security group |
+   | `LaunchTemplateId` | Launch template |
+   | `InstanceProfileArn` | Instance profile |
+   | `KmsKeyArn` | KMS key |
+
+4. Pick a workspace image from the list the form offers, then connect. The app
+   checks your permissions before it creates anything.
+
+If you already connected the same account and region through app.papercusp.com,
+that stack already holds these resources; use its outputs instead of creating a
+second stack.
+
+### What the AWS stack creates
+
+- **A least-privilege role.** Its only policy allows the actions below, and only
+  the principal you trust can assume it (Papercusp's principal with your
+  ExternalId from app.papercusp.com; your own account from the desktop app).
+- **A private network:** a VPC with a private subnet for hosts, a public subnet
+  holding a NAT gateway for outbound traffic, and a security group that allows
+  no inbound connections. Hosts get no public address; Papercusp reaches them
+  through AWS Systems Manager Session Manager.
+- **An instance profile** for the host itself, limited to Session Manager.
+- **A KMS key** that Papercusp uses to encrypt the host's disks.
+- **A launch template** that requires instance metadata service v2.
+
+### AWS permissions, by service
+
+| Service | Action prefix | Used to |
+| --- | --- | --- |
+| Amazon EC2 | `ec2:` | find images, subnets, security groups and launch templates; start, stop, reboot and terminate hosts; manage their disks, snapshots and tags; read the console output when a host fails to boot |
+| AWS Systems Manager | `ssm:` | open and close Session Manager sessions to the host and check that it is reachable |
+| AWS IAM | `iam:` | read the host's role and instance profile, pass the host role to a new instance, and simulate the policy during the permission check |
+| AWS KMS | `kms:` | read the disk encryption key and grant EC2 use of it |
+| Service Quotas | `servicequotas:` | check that the account can start another instance before trying |
+| AWS Price List | `pricing:` | estimate what a host will cost |
+
+The exact action list is in the template; review it before you create the stack.
+
+## Removing access
+
+- **AWS:** terminate the account's workspace hosts from Papercusp first, then
+  delete the CloudFormation stack. Deleting it removes the role, network, key
+  and launch template together.
+- **Google Cloud:** delete the workspace hosts, then remove the service-account
+  binding and the custom role.
+
+Once access is removed, Papercusp can no longer reach that account or project.
+
+## Stop, delete and recover deliberately
+
+Read the lifecycle action offered for the selected host before confirming it.
+Stopping, restarting and deleting are different operations. Stopping a host
+does not necessarily remove disks, snapshots, networking or provider charges.
+This guide does not promise that stopped resources are free.
+
+Before deleting a host, preserve the source and data you need and identify a
+completed backup and restore route. Provider permissions or a cloud snapshot
+alone do not prove that the workspace database can be recovered.
+See [Snapshots and backups](/docs/harness-snapshots).
+
+If setup fails, record the provider, region, stage and exact non-secret error.
+For AWS, check the stack's events and completion state before trying the
+workspace creation again. For Google Cloud, check that the intended project
+and service-account binding match the displayed setup. Do not broaden
+permissions to administrator simply to suppress an error.

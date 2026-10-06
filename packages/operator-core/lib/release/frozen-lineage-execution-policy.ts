@@ -11,6 +11,7 @@
 import { basename, isAbsolute, relative, resolve } from 'node:path';
 import { atomizePipeline } from '../bash-substitution/atomize';
 import { readFrozenRepairMarker, type FrozenRepairEditMarker } from './frozen-repair-edit-marker';
+import type { GateVerdictTarget } from './gate-verdict-target';
 
 export interface FrozenLineageIdentity {
   candidate: string;
@@ -52,8 +53,10 @@ export function frozenLineageIdentityFromMarker(
   return frozenLineageIdentityFromQueue(marker);
 }
 
-export function readFrozenLineageIdentity(path?: string): FrozenLineageIdentity | null {
-  const marker = path === undefined ? readFrozenRepairMarker() : readFrozenRepairMarker(path);
+export function readFrozenLineageIdentity(
+  targetOrPath: GateVerdictTarget | string | null | undefined,
+): FrozenLineageIdentity | null {
+  const marker = readFrozenRepairMarker(targetOrPath);
   return marker ? frozenLineageIdentityFromMarker(marker) : null;
 }
 
@@ -156,6 +159,8 @@ export type FrozenLineagePolicyVerdict =
 export interface FrozenLineagePolicyProbe {
   /** Injected by tests/callers that already performed the live marker read. */
   marker?: FrozenRepairEditMarker | null;
+  /** Scope for the live marker read when no marker/identity has been injected. */
+  target?: GateVerdictTarget | null;
   /** Injected identity from the authoritative repair_queue reader. */
   identity?: FrozenLineageIdentity | null;
 }
@@ -196,7 +201,11 @@ export function evaluateFrozenLineagePolicy(
   probe: FrozenLineagePolicyProbe = {},
 ): FrozenLineagePolicyVerdict {
   const hasInjectedIdentity = Object.prototype.hasOwnProperty.call(probe, 'identity');
-  const marker = hasInjectedIdentity ? null : 'marker' in probe ? probe.marker : readFrozenRepairMarker();
+  const marker = hasInjectedIdentity
+    ? null
+    : 'marker' in probe
+      ? probe.marker
+      : readFrozenRepairMarker(probe.target);
   const liveIdentity = hasInjectedIdentity
     ? probe.identity ?? null
     : marker
@@ -288,6 +297,8 @@ export interface FrozenLineageShellCommandInput {
 export interface FrozenLineageShellCommandProbe {
   /** Inject one stable marker for a pure test. */
   marker?: FrozenRepairEditMarker | null;
+  /** Scope for the live marker fallback; production adapters pass the home gate target. */
+  target?: GateVerdictTarget | null;
   /** Production/default is the live marker read; a sequence makes CAS races testable. */
   readMarker?: () => FrozenRepairEditMarker | null;
   /** The authoritative persisted repair_queue read; takes precedence over marker I/O. */
@@ -395,7 +406,14 @@ function canonicalRootTestCwd(atom: string, cwd: string | null): string | null |
   const words = peelHeavyWrapper(parsed);
   const head = commandName(words[0]);
 
-  if (head === 'node' && words[1]?.replace(/^\.\//, '') === 'scripts/affected-tests.mjs') return cwd;
+  if (head === 'node' && words[1]?.replace(/^\.\//, '') === 'scripts/affected-tests.mjs') {
+    // These modes only enumerate the affected-test plan and exit before a suite
+    // runs, so they do not judge a frozen candidate's test verdict.
+    const selectionOnly = words.slice(2).some(
+      (word) => word === '--dry' || word === '--dry-run' || word === '--print-affected',
+    );
+    return selectionOnly ? undefined : cwd;
+  }
   if (head !== 'npm') return undefined;
 
   let effectiveCwd = cwd;
@@ -434,6 +452,7 @@ function canonicalRootTestCwd(atom: string, cwd: string | null): string | null |
     'test:affected:integration',
     'test:all',
     'test:all:integration',
+    'test:integration-only',
   ]);
   return canonicalScripts.has(script) ? effectiveCwd : undefined;
 }
@@ -564,7 +583,9 @@ export async function evaluateFrozenLineageShellCommand(
   }
 
   const hasInjectedMarker = Object.prototype.hasOwnProperty.call(probe, 'marker');
-  const readMarker = hasInjectedMarker ? () => probe.marker ?? null : (probe.readMarker ?? readFrozenRepairMarker);
+  const readMarker = hasInjectedMarker
+    ? () => probe.marker ?? null
+    : (probe.readMarker ?? (() => readFrozenRepairMarker(probe.target)));
   const readLiveIdentity = async (): Promise<FrozenLineageIdentity | null> => {
     if (probe.readFrozenRepairQueue) {
       const queue = await probe.readFrozenRepairQueue();
@@ -648,6 +669,8 @@ export interface UnsafeFrozenCarryInstruction {
 export interface FrozenLineageCarryPolicyInput {
   surface: FrozenLineageCarrySurface;
   text: string;
+  /** Exact workspace/install whose persisted queue governs this carry boundary. */
+  target: GateVerdictTarget | null;
 }
 
 export type FrozenLineageCarryPolicyVerdict =
@@ -682,8 +705,12 @@ const CARRY_PIN_INSTRUCTION_PREFIX =
 const CARRY_EXECUTION_ACTIONS = String.raw`(?:create|check\s*out|checkout|launch|run|test|verify|judge|evaluate)`;
 const CARRY_JUDGED_CONTEXT =
   /\b(?:candidate|judged|canonical(?:\s+(?:test|verification|verdict|run))|verdict|verification|worktree|root\s+test|full[-\s]+suite)\b/i;
+// Candidate/source relations must stay within one clause. Otherwise
+// "candidate fix is uncommitted and no approved staging route was provided"
+// pairs the first clause's "candidate ... is" with the second clause's "staging".
+const CARRY_RELATION_GAP = String.raw`(?:(?!\b(?:and|or|nor|while|unless|because|so)\b|[,;:]).)`;
 const CARRY_NEGATION_BEFORE =
-  /\b(?:do\s+not|don't|never|must\s+not|should\s+not|cannot|can't|refus(?:e|es|ed|ing)|reject(?:s|ed|ing)?|forbid(?:s|den|ding)?|block(?:s|ed|ing)?)\b(?:\s+\S+){0,7}\s*$/i;
+  /\b(?:not(?!\s+only)|don't|never|cannot|can't|refus(?:e|es|ed|ing)|reject(?:s|ed|ing)?|forbid(?:s|den|ding)?|block(?:s|ed|ing)?)\b(?:\s+\S+){0,7}\s*$/i;
 const CARRY_RETRACTION_AFTER =
   /\b(?:is|are|was|were|has\s+been|have\s+been|must\s+be|will\s+be)\s+(?:wrong|unsafe|invalid|retracted|withdrawn|superseded|rejected|refused|forbidden|blocked)\b/i;
 // A carry row may quote the unsafe wording while explaining why a previous write
@@ -692,6 +719,13 @@ const CARRY_RETRACTION_AFTER =
 // followed by a reporting verb before the candidate relation.
 const CARRY_DIAGNOSTIC_BEFORE =
   /\b(?:refusal|refused|diagnostic|description|describ(?:e|es|ed|ing)|report(?:s|ed|ing)?|match(?:es|ed)?|contain(?:s|ed|ing)?|mention(?:s|ed|ing)?|quot(?:e|es|ed|ing)?|explain(?:s|ed|ing)?|error|message|row|prose|text|guard|policy|receipt|checkpoint|run|verdict|note|record|output|log|evidence|result)\b(?:\s+\S+){0,10}\s+(?:say(?:s|ing)?|said|report(?:s|ed|ing)?|match(?:es|ed)?|contain(?:s|ed|ing)?|mention(?:s|ed|ing)?|quot(?:e|es|ed|ing)?|describ(?:e|es|ed|ing)?|explain(?:s|ed|ing)?|read(?:s|ing)?|flag(?:s|ged|ging)?|reject(?:s|ed|ing)?|refus(?:e|es|ed|ing)?|block(?:s|ed|ing)?)\b/i;
+// A false positive can itself be described as a classifier result: “It classified
+// the sentence as selecting staging for the judged candidate.” That reports the
+// guard's prior decision; it does not instruct a successor to select staging.
+// Require both a classification verb and a text-bearing object so ordinary
+// candidate-selection directions remain governed.
+const CARRY_CLASSIFICATION_DIAGNOSTIC_BEFORE =
+  /\bclassif(?:y|ies|ied|ying)\b.{0,80}\b(?:sentence|text|note|prose|statement|clause|phrase|message|receipt)\b.{0,40}\bas\b/i;
 
 // A candidate's distance from a moving branch is measurement prose, not a
 // selection of that branch. Keep this relation list deliberately narrow: broad
@@ -713,6 +747,7 @@ function carryDirectiveIsNegated(clause: string, start: number, end: number): bo
   const after = clause.slice(end, Math.min(clause.length, end + 160));
   if (CARRY_NEGATION_BEFORE.test(before)) return true;
   if (CARRY_DIAGNOSTIC_BEFORE.test(before)) return true;
+  if (CARRY_CLASSIFICATION_DIAGNOSTIC_BEFORE.test(before)) return true;
   if (/\b(?:not|never)\b/i.test(span)) return true;
   if (CARRY_RETRACTION_AFTER.test(after)) return true;
   return false;
@@ -727,7 +762,10 @@ function carryDirectiveIsNegated(clause: string, start: number, end: number): bo
  */
 export function detectUnsafeFrozenCarryInstruction(text: string): UnsafeFrozenCarryInstruction | null {
   const clauses = text
-    .split(/\n+|[.!?;](?:\s+|$)/)
+    // Keep contrastive facts local. In a containment statement such as “absent
+    // from the frozen candidate, but present on staging”, carrying “candidate”
+    // across “but” misreads the positive-control mention as candidate selection.
+    .split(/\n+|[.!?;](?:\s+|$)|\b(?:but|however|whereas|yet)\b/i)
     .map((clause) => clause.trim())
     .filter(Boolean);
 
@@ -757,19 +795,19 @@ export function detectUnsafeFrozenCarryInstruction(text: string): UnsafeFrozenCa
         // still catch instructions that actually run or judge against a
         // moving source.
         const directRelationBefore = new RegExp(
-          String.raw`\b(?:candidate|judged\s+candidate|canonical(?:\s+(?:test|verification|verdict|run))|worktree(?!\s+list\b))\b.{0,140}\b(?:from|at|on|to|is|equals?)\b.{0,70}${pattern}\s*$`,
+          String.raw`\b(?:candidate|judged\s+candidate|judged\s+worktree|canonical(?:\s+(?:test|verification|verdict|run)))\b${CARRY_RELATION_GAP}{0,140}\b(?:from|at|on|to|is|equals?)\b${CARRY_RELATION_GAP}{0,70}${pattern}\s*$`,
           'i',
         ).exec(throughSource);
         const directRelationAfter = new RegExp(
-          String.raw`^${pattern}.{0,100}\b(?:as|for)\b.{0,60}\b(?:the\s+)?(?:judged\s+)?(?:candidate|canonical(?:\s+(?:test|verification|verdict|run))?|worktree)\b`,
+          String.raw`^${pattern}${CARRY_RELATION_GAP}{0,100}\b(?:as|for)\b${CARRY_RELATION_GAP}{0,60}\b(?:the\s+)?(?:judged\s+)?(?:candidate|canonical(?:\s+(?:test|verification|verdict|run))?|worktree)\b`,
           'i',
         ).exec(sourceThroughNext);
         const strongAction = new RegExp(
-          String.raw`\b(${CARRY_STRONG_SELECTION_ACTIONS})\b.{0,160}${pattern}\s*$`,
+          String.raw`\b(${CARRY_STRONG_SELECTION_ACTIONS})\b${CARRY_RELATION_GAP}{0,160}${pattern}\s*$`,
           'i',
         ).exec(throughSource);
         const executionAction = new RegExp(
-          String.raw`\b(${CARRY_EXECUTION_ACTIONS})\b.{0,160}${pattern}\s*$`,
+          String.raw`\b(${CARRY_EXECUTION_ACTIONS})\b${CARRY_RELATION_GAP}{0,160}${pattern}\s*$`,
           'i',
         ).exec(throughSource);
         const strongActionHasJudgedContext =
@@ -833,7 +871,7 @@ export function evaluateFrozenLineageCarryText(
   input: FrozenLineageCarryPolicyInput,
   probe: FrozenLineagePolicyProbe = {},
 ): FrozenLineageCarryPolicyVerdict {
-  const marker = 'marker' in probe ? probe.marker : readFrozenRepairMarker();
+  const marker = 'marker' in probe ? probe.marker : readFrozenRepairMarker(input.target);
   if (!marker) {
     return {
       allowed: true,

@@ -10,17 +10,7 @@ import { z } from 'zod';
 import { entityRef } from '@papercusp/tooldef';
 import { OperationEventBodySchema, OperationHandleSchema } from './operation-service';
 
-export const BLUEPRINT_OPERATION_TOOLS = {
-  submit: 'blueprint:submit',
-  status: 'blueprint:status',
-  result: 'blueprint:result',
-  events: 'blueprint:events',
-  cancel: 'blueprint:cancel',
-  signal: 'blueprint:signal',
-  resume: 'blueprint:resume',
-} as const;
-
-export type BlueprintOperationVerb = keyof typeof BLUEPRINT_OPERATION_TOOLS;
+export { BLUEPRINT_OPERATION_TOOLS, type BlueprintOperationVerb } from './operation-tool-names';
 
 export const BlueprintOperationHandleSchema = OperationHandleSchema;
 

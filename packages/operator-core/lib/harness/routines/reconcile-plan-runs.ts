@@ -19,6 +19,7 @@ import { getOrgPg } from '@papercusp/db-org';
 import { disarmPlanSchedule } from './arm-plan-schedule';
 import { autoPauseOnCostBreach } from './plan-run-cost';
 import { routineStorageSlug } from '../../pot-membership';
+import { retireRunInstancePlan } from './retire-run-instance-plan';
 // The orphan threshold has ONE definition; this module drives the same reclaim on the
 // tick rather than re-deciding what "orphaned" means (see sweepOrphanedPlanRuns below).
 import { PLAN_RUN_ORPHAN_FAIL_MS } from '../../agent-tools/plans/runs';
@@ -53,9 +54,10 @@ export async function reconcileScheduledPlanRuns(
       plan_slug: string;
       workspace_id: string;
       instance_plan_slug: string | null;
+      launched_at: string | number | null;
     }>
   >`
-    SELECT id, harness_slug, plan_slug, workspace_id, instance_plan_slug
+    SELECT id, harness_slug, plan_slug, workspace_id, instance_plan_slug, launched_at
       FROM harness_shared.plan_runs
      WHERE run_type = 'scheduled' AND status = 'running' ${harnessFilter}
   `;
@@ -70,10 +72,31 @@ export async function reconcileScheduledPlanRuns(
     // Still in flight — leave it running.
     if (wis.length > 0 && !wis.every((w) => TERMINAL.includes(w.status))) continue;
 
+    // Zero work-items is success ONLY for a genuinely item-less (prose) plan. An
+    // instance that still has open items but no work-items means promotion never
+    // completed — the fire threw, or died, between its seed transaction and
+    // promotion. Reading that as success is how every refused plan-cleanup sweep
+    // fire was recorded done/success (WI-10004731). Wait out the grace window so
+    // an in-flight promotion is never raced, then settle it failed.
+    let unpromoted = false;
+    if (wis.length === 0) {
+      const openItems = await countOpenInstanceItems(db, run);
+      if (openItems > 0) {
+        const launchedAt = run.launched_at == null ? null : Number(run.launched_at);
+        if (launchedAt != null && Date.now() - launchedAt < PLAN_RUN_PROMOTION_GRACE_MS) continue;
+        unpromoted = true;
+      }
+    }
+
     const passed = wis.filter((w) => PASSED.includes(w.status)).length;
     const failed = wis.filter((w) => FAILED.includes(w.status)).length;
-    const outcome: RunOutcome =
-      wis.length === 0 || failed === 0 ? 'success' : passed === 0 ? 'failed' : 'partial';
+    const outcome: RunOutcome = unpromoted
+      ? 'failed'
+      : wis.length === 0 || failed === 0
+        ? 'success'
+        : passed === 0
+          ? 'failed'
+          : 'partial';
     const status = outcome === 'failed' ? 'failed' : 'done';
     const now = Date.now();
 
@@ -85,27 +108,56 @@ export async function reconcileScheduledPlanRuns(
     //
     // plan_runs stores the raw install slug while harness_plans is Hive-scoped. Resolve
     // the latter with the same mapping used by plan-run-action before updating it.
+    //
+    // Retire through `retireRunInstancePlan`, never a bare `UPDATE … status='superseded'`:
+    // that left every never-promoted `plan_items` row open forever (28 phantom-open items
+    // on 10 superseded instances, WI-10005040). The helper closes the items with the status.
     if (run.instance_plan_slug) {
       const planStorageSlug = await routineStorageSlug(run.harness_slug, run.workspace_id);
-      await db`
-        UPDATE harness_shared.harness_plans
-           SET status = 'superseded'
-         WHERE workspace_id = ${run.workspace_id}
-           AND harness_slug = ${planStorageSlug}
-           AND plan_slug = ${run.instance_plan_slug}
-           AND template_slug = ${run.plan_slug}
-           AND status = 'active'
-      `;
+      await retireRunInstancePlan(db, {
+        workspaceId: run.workspace_id,
+        planStorageSlug,
+        instanceSlug: run.instance_plan_slug,
+        templateSlug: run.plan_slug,
+        outcome,
+      });
     }
 
     await db`
       UPDATE harness_shared.plan_runs
          SET status = ${status}, outcome = ${outcome}, finished_at = ${now}, updated_at = ${now}
+             ${unpromoted ? db`, note = ${'promotion never completed: the instance has open items but the run minted no work-items'}` : db``}
        WHERE id = ${run.id}
     `;
     settled.push({ runId: run.id, harnessSlug: run.harness_slug, planSlug: run.plan_slug, outcome });
   }
   return { reconciled: settled.length, settled };
+}
+
+/**
+ * How long a scheduled run may sit with zero work-items before reconcile treats
+ * its promotion as never completed. Promotion runs right after the seed
+ * transaction commits, so a few seconds is normal; ten minutes is generous.
+ */
+export const PLAN_RUN_PROMOTION_GRACE_MS = 10 * 60_000;
+
+/** Non-terminal items on a run's instance plan (0 for a prose plan or a missing instance). */
+async function countOpenInstanceItems(
+  db: Sql,
+  run: { harness_slug: string; workspace_id: string; instance_plan_slug: string | null },
+): Promise<number> {
+  if (!run.instance_plan_slug) return 0;
+  const planStorageSlug = await routineStorageSlug(run.harness_slug, run.workspace_id);
+  const rows = await db<Array<{ n: number }>>`
+    SELECT count(*)::int AS n
+      FROM harness_shared.harness_plans p,
+           jsonb_array_elements(COALESCE(p.items, '[]'::jsonb)) AS item
+     WHERE p.workspace_id = ${run.workspace_id}
+       AND p.harness_slug = ${planStorageSlug}
+       AND p.plan_slug = ${run.instance_plan_slug}
+       AND COALESCE(item ->> 'status', 'todo') NOT IN ('done', 'dropped')
+  `;
+  return rows[0]?.n ?? 0;
 }
 
 /**

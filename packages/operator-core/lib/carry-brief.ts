@@ -42,6 +42,14 @@ import {
   type LoopCarryNoteWithMeta,
   type WallEntry,
 } from './carry-note';
+import {
+  extractClaimMentions,
+  normalizeClaimId,
+  readClaimStandings,
+  renderRetractedMarker,
+  isRetracted,
+  type ClaimStanding,
+} from './claim-retractions';
 import { harnessOfScope } from './work-item-scope';
 import { renderOwnerDirectivesBlock, type OwnerDirectiveRow } from './owner-directives';
 import type { QueryHandle } from './ambient-push';
@@ -198,6 +206,11 @@ export interface CarryBrief {
    *  probes, parsed out of the note's `## Checks` section — same structured
    *  delivery as walls so a capped/stale-collapsed note can't dissolve them. */
   checks?: CheckEntry[];
+  /** EI-23765337478012299: claims (check-row ids / `claim:<id>` mentions found in the
+   *  loop note + held checkpoints) whose CURRENT standing is RETRACTED in the claim
+   *  event log. Assigned only when non-empty, so absence means "none retracted or the
+   *  read degraded" — never a confirmed all-clear. Rendered as `⛔ RETRACTED`. */
+  retractedClaims?: ClaimStanding[];
   /** Owner-scoped standing facts — the softer standing-context carrier (structured
    *  walls live in `walls` since P-006; facts remain for everything else).
    *  `sourceRef`/`sourceProvenance` ride along (when the store has them) both
@@ -844,6 +857,9 @@ export async function readDeferredWorkItems(
            AND wi.item_kind IN ('bug', 'change', 'task')
            AND NULLIF(wi.payload #>> '{_ei,created_by}', '') = ${ownerId}
            AND wi.created_ts >= ${Math.floor(sessionStartedAtMs)}
+           -- WI-10004968: observation-lane rows are turn-end reflections
+           -- (e.g. a loop:checkpoint insight), never claimable work.
+           AND wi.lane IS DISTINCT FROM 'observation'
            AND (
              wi.taken_by IS NULL
              OR btrim(wi.taken_by) = ''
@@ -879,6 +895,7 @@ export async function readDeferredWorkItems(
          WHERE post.workspace_id = ${ws}
            AND post.author_id = ${ownerId}
            AND post.created_at >= to_timestamp(${sessionStartedAtMs}::double precision / 1000.0)
+           AND wi.lane IS DISTINCT FROM 'observation'
            AND (
              wi.taken_by IS NULL
              OR btrim(wi.taken_by) = ''
@@ -1095,7 +1112,7 @@ export function renderPostNoteInboxLine(e: Record<string, unknown>): string {
  *  single `↪ ` prefix. This used to call ref-hydrate's `renderHydratedRef`, which
  *  ALSO prefixes `↪ ` — doubling the glyph in every real (non-test) carry doc
  *  ("↪ ↪ EI-… [bug/done]: …", found while fixing EI-18726068732447732). */
-const CARRY_NOTE_REF = /\b(?:WI|EI)-\d+\b|\bplan:[a-z0-9][a-z0-9-]*#P-\d{3,}\b|\bP-\d{3,}\b/gi;
+const CARRY_NOTE_REF = /\b(?:WI|EI)-\d+\b|\bconv-[a-z0-9][a-z0-9-]*\b|\bplan:[a-z0-9][a-z0-9-]*#P-\d{3,}\b|\bP-\d{3,}\b/gi;
 
 /**
  * Resolve references in note prose without guessing. WI-/EI- ids are global;
@@ -1118,6 +1135,15 @@ export function detectCarryNoteRefs(
       if (!seen.has(key)) {
         seen.add(key);
         refs.push({ kind: 'work-item', id });
+      }
+      continue;
+    }
+    if (/^conv-/i.test(token)) {
+      const id = token;
+      const key = `conversation:${id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        refs.push({ kind: 'conversation', id });
       }
       continue;
     }
@@ -1154,10 +1180,14 @@ export function detectCarryNoteRefs(
 async function defaultHydrateNoteRefs(
   noteText: string,
   heldItems: readonly CarryBriefHeldItem[],
+  workspaceId?: string,
 ): Promise<string[]> {
   try {
-    const [{ hydrateRefs, makePlanItemResolver }] = await Promise.all([
+    const [{ hydrateRefs, makePlanItemResolver }, conversations, workspace, { clampSnippet }] = await Promise.all([
       import('./agent-tools/coordination/ref-hydrate-resolve'),
+      import('./agent-tools/coordination/conversations'),
+      import('./workspace-als'),
+      import('./agent-tools/coordination/ref-hydrate'),
     ]);
     const refs = detectCarryNoteRefs(noteText, heldItems);
     if (refs.length === 0) return [];
@@ -1170,8 +1200,46 @@ async function defaultHydrateNoteRefs(
         );
         return makePlanItemResolver(held?.harness ?? undefined)(ref, budget);
       };
-    const hydrated = await hydrateRefs(refs, { resolvers: { 'plan-item': planItemResolver } });
-    return hydrated.filter((h) => h.ok).map((h) => (h.snippet ? `${h.label}: "${h.snippet}"` : h.label));
+    const conversationResolver: import('./agent-tools/coordination/ref-hydrate-resolve').RefResolver =
+      async (ref, budget) => {
+        if (ref.kind !== 'conversation') return null;
+        const detail = await workspace.runWithWorkspaceIfConcrete(workspaceId, () =>
+          conversations.getConversation(ref.id),
+        );
+        if (!detail) return null;
+        const conversation = detail.conversation;
+        let consultState: string | null = null;
+        if (conversation.kind === 'consult') {
+          try {
+            const states = await workspace.runWithWorkspaceIfConcrete(workspaceId, () =>
+              conversations.getConsultStates([conversation.id]),
+            );
+            consultState = states.get(conversation.id)?.state ?? null;
+          } catch {
+            // Consult lifecycle is supplemental to the conversation's own state.
+          }
+        }
+        const requested = detail.resolvedFromPrefix
+          ? ` (requested: ${detail.resolvedFromPrefix})`
+          : '';
+        const consult = consultState ? ` (consult_state=${consultState})` : '';
+        const label = `${conversation.id} [conversation/${conversation.state}]${requested}${consult}`;
+        const snippet = [conversation.kind, conversation.title, conversation.body]
+          .filter((part): part is string => typeof part === 'string' && part.length > 0)
+          .join(' — ');
+        return { label, snippet: clampSnippet(snippet, budget.snippetChars) };
+      };
+    const hydrated = await hydrateRefs(refs, {
+      resolvers: { 'plan-item': planItemResolver, conversation: conversationResolver },
+    });
+    return hydrated.flatMap((h) => {
+      if (!h.ok) {
+        return h.ref.kind === 'conversation'
+          ? [`${h.label} — unresolved (${h.error ?? 'unknown'})`]
+          : [];
+      }
+      return [h.snippet ? `${h.label}: "${h.snippet}"` : h.label];
+    });
   } catch {
     return [];
   }
@@ -1182,7 +1250,7 @@ async function defaultHydrateNoteRefs(
  *  `<id> [<kind>/<state>...]`. Regex-only (never throws); returns null for a
  *  line with no recognizable id or tag (a custom hydrator, or a non-work-item
  *  ref shape) so callers degrade to "not terminal" rather than misfire. */
-const CITED_REF_ID = /\b((?:WI|EI|F)-\d+)\b/;
+const CITED_REF_ID = /\b((?:WI|EI|F)-\d+|conv-[a-z0-9][a-z0-9-]*)\b/i;
 const CITED_REF_STATE_TAG = /\[[a-z0-9_]+\/([a-z0-9_-]+)/i;
 export function parseCitedRefStateTag(line: string): { id: string; state: string } | null {
   const idMatch = CITED_REF_ID.exec(line);
@@ -1199,8 +1267,11 @@ const CITED_PLAN_ITEM_STATE_TAG = /\b(plan:([a-z0-9][a-z0-9-]*)#(P-\d{3,}))\s+\[
 export function parseCitedLiveState(
   line: string,
 ): { id: string; mention: string; state: string } | null {
-  const workItem = parseCitedRefStateTag(line);
-  if (workItem) return { ...workItem, mention: workItem.id };
+  const citedRef = parseCitedRefStateTag(line);
+  if (citedRef) {
+    const requestedPrefix = /\(requested:\s*(conv-[a-z0-9][a-z0-9-]*)\)/i.exec(line)?.[1];
+    return { ...citedRef, mention: requestedPrefix ?? citedRef.id };
+  }
   const planItem = CITED_PLAN_ITEM_STATE_TAG.exec(line);
   if (!planItem) return null;
   return {
@@ -1357,6 +1428,41 @@ async function bestEffort<T>(read: () => Promise<T>, fallback: T): Promise<T> {
   } catch {
     return fallback;
   }
+}
+
+/** Upper bound on distinct claim ids resolved per brief — one indexed lookup, never a scan. */
+export const MAX_CLAIM_IDS_PER_BRIEF = 200;
+
+/**
+ * EI-23765337478012299: every claim id the brief is about to render — check-row ids on
+ * the loop note and on each held item's checkpoint, plus `claim:<id>` mentions in that
+ * prose. PURE. Ids are normalized + de-duplicated, in first-seen order.
+ */
+export function collectClaimIds(brief: Pick<CarryBrief, 'loop' | 'checks' | 'heldItems'>): string[] {
+  const ids = new Set<string>();
+  const add = (raw: unknown): void => {
+    const id = normalizeClaimId(raw);
+    if (id) ids.add(id);
+  };
+  for (const c of brief.checks ?? []) add(c.id);
+  for (const id of extractClaimMentions(brief.loop?.carryNote)) ids.add(id);
+  for (const h of brief.heldItems ?? []) {
+    if (!h.checkpoint) continue;
+    for (const c of splitCarryNoteChecks(h.checkpoint).checks) add(c.id);
+    for (const id of extractClaimMentions(h.checkpoint)) ids.add(id);
+  }
+  return [...ids].slice(0, MAX_CLAIM_IDS_PER_BRIEF);
+}
+
+/** The `⛔ RETRACTED CLAIMS` section — a retraction recorded once by claim id, shown
+ *  wherever the brief carries that claim. PURE. Empty input renders nothing. */
+export function renderRetractedClaimsSection(retracted: readonly ClaimStanding[] | undefined): string[] {
+  if (!retracted || retracted.length === 0) return [];
+  return [
+    `⛔ RETRACTED CLAIMS — retracted by claim id (claims:retract). Treat each as FALSE wherever it is cited below — in checks, checkpoints or prose:\n${retracted
+      .map((s) => `  • [#${s.claimId}] ${renderRetractedMarker(s)}`)
+      .join('\n')}`,
+  ];
 }
 
 type CarryLoopRead = Pick<CarryBrief, 'loop' | 'walls'> & Partial<Pick<CarryBrief, 'checks'>>;
@@ -1546,7 +1652,8 @@ export async function buildCarryBrief(ownerId: string, opts: BuildCarryBriefOpts
 
   const citedRefsPromise = Promise.all([loopPromise, heldItemsPromise]).then(([loopRead, heldItems]) => {
     if (!loopRead.loop?.carryNote) return undefined;
-    const hydrate = opts.hydrateNoteRefsFn ?? defaultHydrateNoteRefs;
+    const hydrate = opts.hydrateNoteRefsFn ?? ((note: string, items?: readonly CarryBriefHeldItem[]) =>
+      defaultHydrateNoteRefs(note, items ?? heldItems, concreteWorkspaceId ?? workspaceId));
     return bestEffort(() => hydrate(loopRead.loop!.carryNote!, heldItems), [] as string[]);
   });
 
@@ -1621,6 +1728,26 @@ export async function buildCarryBrief(ownerId: string, opts: BuildCarryBriefOpts
   if (neverDropFacts !== undefined) brief.neverDropFacts = neverDropFacts;
   brief.awaits = awaits;
   brief.fleet = fleet;
+
+  // EI-23765337478012299: resolve the CURRENT standing of every claim id this brief
+  // carries, so a retraction recorded once (claims:retract) reaches every surface that
+  // renders the claim. Best-effort like every other leg: a failed read leaves the field
+  // absent (never a false all-clear).
+  const claimIds = collectClaimIds(brief);
+  if (claimIds.length > 0) {
+    const retractedClaims = await bestEffort(
+      async () => {
+        const standings = await readClaimStandings(
+          claimIds,
+          { workspaceId: concreteWorkspaceId ?? workspaceId },
+          opts.sql,
+        );
+        return [...standings.values()].filter(isRetracted);
+      },
+      [] as ClaimStanding[],
+    );
+    if (retractedClaims.length > 0) brief.retractedClaims = retractedClaims;
+  }
 
   return brief;
 }
@@ -1940,11 +2067,29 @@ export function renderCarryBriefColdExtras(
   // the same warning used by cold-loop notes before the checkpoint excerpt so
   // the successor reconciles durable evidence instead of blindly polling or
   // launching a duplicate command.
-  const transientExecHandleItems = brief.heldItems.filter(
-    (item) => item.checkpoint != null && transientExecHandleWarning(item.checkpoint) != null,
+  const transientExecHandleItems = brief.heldItems.flatMap((item) => {
+    const carriedText = [item.title, item.body, item.checkpoint].filter(Boolean).join('\n');
+    const warning = transientExecHandleWarning(carriedText);
+    return warning ? [{ id: item.id, warning }] : [];
+  });
+  const deviceAuthExecHandleItems = transientExecHandleItems.filter((item) =>
+    item.warning.includes('CARRIED DEVICE-AUTH EXEC HANDLE'),
   );
-  if (transientExecHandleItems.length > 0) {
-    const ids = transientExecHandleItems.map((item) => item.id).join(', ');
+  if (deviceAuthExecHandleItems.length > 0) {
+    const ids = deviceAuthExecHandleItems.map((item) => item.id).join(', ');
+    sections.push(
+      `⚠ CARRIED DEVICE-AUTH EXEC HANDLE(S) — held work-item(s) ${ids} contain a predecessor-local ` +
+        '`codex login --device-auth` handle. Do NOT call `write_stdin` with it or start another ' +
+        'device login until you verify current process/task state and the prior code has expired. ' +
+        'For future logins that must survive a carry, use the durable `capability:bash` tracked-task ' +
+        'flow, persist its `task_id` + log pointer, and resume via `capability:bash_output`.',
+    );
+  }
+  const genericExecHandleItems = transientExecHandleItems.filter(
+    (item) => !item.warning.includes('CARRIED DEVICE-AUTH EXEC HANDLE'),
+  );
+  if (genericExecHandleItems.length > 0) {
+    const ids = genericExecHandleItems.map((item) => item.id).join(', ');
     sections.push(
       `⚠ CARRIED TRANSIENT EXEC HANDLE(S) — held-item checkpoint(s) ${ids} contain a numeric ` +
         '`exec_command`/`write_stdin` session or process handle from the predecessor. ' +
@@ -2002,6 +2147,8 @@ export function renderCarryBriefColdExtras(
       );
     }
   }
+  sections.push(...renderRetractedClaimsSection(brief.retractedClaims));
+  const retractedById = new Map((brief.retractedClaims ?? []).map((s) => [s.claimId, s] as const));
   if (brief.checks && brief.checks.length > 0) {
     // P-001 delivery parity: same double-delivery rationale as walls — a carried
     // claim whose probe dissolves in a capped note is the phantom-re-anchor shape.
@@ -2022,7 +2169,11 @@ export function renderCarryBriefColdExtras(
         : '';
     sections.push(
       `🧪 CARRIED CHECKS (this LOOP's) — claims + their probes (✓ verified w/ evidence · ? PREDICTED — run the re-check before relying; clear via loop:checkpoint { checks }):\n${brief.checks
-        .map((c) => `  ${renderCheckLine(c).replace(/^-\s*/, '• ')}`)
+        .map((c) => {
+          const line = `  ${renderCheckLine(c).replace(/^-\s*/, '• ')}`;
+          const retracted = retractedById.get(normalizeClaimId(c.id) ?? '');
+          return retracted ? `${line}\n      ↳ ${renderRetractedMarker(retracted)}` : line;
+        })
         .join('\n')}${alsoOnItems}`,
     );
   }

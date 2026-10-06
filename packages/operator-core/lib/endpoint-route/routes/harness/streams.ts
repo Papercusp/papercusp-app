@@ -307,6 +307,9 @@ export function createAgentTimelineParser() {
           if (block.type === 'text') out.push({ kind: 'text', text: block.text, ts });
           else if (block.type === 'tool_use') out.push({ kind: 'tool_use', toolName: block.name, toolInput: block.input, toolId: block.id, ts });
         }
+        if (obj.message.stop_reason === 'end_turn' && typeof obj.uuid === 'string' && obj.uuid && ts && Number.isFinite(Date.parse(ts))) {
+          out.push({ kind: 'result', outcome: 'succeeded', text: '', ts });
+        }
       } else if (type === 'user' && obj.message?.content != null) {
         const content = obj.message.content;
         if (typeof content === 'string') {
@@ -338,6 +341,7 @@ export function createAgentTimelineParser() {
         flushText(out);
         out.push({
           kind: 'result',
+          ...(obj.is_error === true ? { outcome: 'failed' as const } : obj.is_error === false || obj.subtype === 'success' ? { outcome: 'succeeded' as const } : {}),
           text: obj.result ?? '',
           costUsd: obj.total_cost_usd,
           inputTokens: obj.usage?.input_tokens,

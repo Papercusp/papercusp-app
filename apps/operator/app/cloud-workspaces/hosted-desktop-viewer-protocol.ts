@@ -11,7 +11,7 @@ export type HostedDesktopViewerMode = "watch" | "takeover";
  * How long one viewer attempt may take to reach `connected` before it is abandoned
  * and retried on a fresh ticket (WI-10004214). Without it a dial that never settled
  * left the stage on "Opening your desktop…" forever, with no error and Reconnect
- * disabled — the owner's first Take control on owner-test, 2026-09-30.
+ * disabled — the owner's first Take control on avi-test, 2026-09-30.
  */
 export const HOSTED_DESKTOP_CONNECT_DEADLINE_MS = 15_000;
 
@@ -29,6 +29,12 @@ export interface HostedDesktopRosterEntry {
   displayNumber?: number;
   geometry?: string;
   lastActiveAt?: string;
+  /** P-006 / D-009: who the desktop belongs to and what its owner is on now. */
+  scope?: "pot" | "agent" | "workspace";
+  owner?: string;
+  name?: string;
+  workItemId?: string;
+  workItemIntent?: string;
 }
 
 export interface HostedDesktopThumbnailResult {
@@ -83,6 +89,14 @@ function roster(value: unknown): HostedDesktopRosterEntry[] {
     const displayNumber = safeInteger(item?.displayNumber);
     const geometry = nonEmptyString(item?.geometry);
     const lastActiveAt = nonEmptyString(item?.lastActiveAt);
+    const scope =
+      item?.scope === "pot" || item?.scope === "agent" || item?.scope === "workspace"
+        ? item.scope
+        : null;
+    const owner = nonEmptyString(item?.owner);
+    const name = nonEmptyString(item?.name);
+    const workItemId = nonEmptyString(item?.workItemId);
+    const workItemIntent = nonEmptyString(item?.workItemIntent);
     return [
       {
         desktopSessionId,
@@ -92,6 +106,11 @@ function roster(value: unknown): HostedDesktopRosterEntry[] {
           : {}),
         ...(geometry ? { geometry } : {}),
         ...(lastActiveAt ? { lastActiveAt } : {}),
+        ...(scope ? { scope } : {}),
+        ...(owner ? { owner } : {}),
+        ...(name ? { name } : {}),
+        ...(workItemId ? { workItemId } : {}),
+        ...(workItemId && workItemIntent ? { workItemIntent } : {}),
       },
     ];
   });
@@ -297,8 +316,37 @@ export class HostedDesktopRelayChannel implements HostedDesktopRawChannel {
   readyState = this.CONNECTING;
   inputAllowed = false;
   onerror: ((event: unknown) => void) | null = null;
-  onmessage: ((event: { data: ArrayBuffer }) => void) | null = null;
   onopen: (() => void) | null = null;
+  /**
+   * WI-10004214: bytes that arrived before noVNC attached. The viewer constructs
+   * noVNC after an async import, and on a page's first open the host's version
+   * greeting beats that import; dropping it left noVNC waiting in ProtocolVersion.
+   */
+  private held: ArrayBuffer[] = [];
+  private messageHandler: ((event: { data: ArrayBuffer }) => void) | null =
+    null;
+
+  get onmessage(): ((event: { data: ArrayBuffer }) => void) | null {
+    return this.messageHandler;
+  }
+
+  set onmessage(handler: ((event: { data: ArrayBuffer }) => void) | null) {
+    this.messageHandler = handler;
+    if (!handler || this.held.length === 0) return;
+    // noVNC assigns onmessage inside attach(), BEFORE _socketOpen() starts the
+    // handshake, so bytes delivered synchronously here would be unparseable.
+    queueMicrotask(() => this.deliverHeld());
+  }
+
+  private deliverHeld(): void {
+    while (this.held.length > 0 && this.messageHandler) {
+      if (this.readyState !== this.OPEN) {
+        this.held = [];
+        return;
+      }
+      this.messageHandler({ data: this.held.shift()! });
+    }
+  }
   onready: ((event: HostedDesktopReadyEvent) => void) | null = null;
   onclose: ((event: { code?: number; reason?: string }) => void) | null = null;
 
@@ -327,7 +375,13 @@ export class HostedDesktopRelayChannel implements HostedDesktopRawChannel {
         this.onopen?.();
       } else if (parsed.kind === "data") {
         if (this.readyState !== this.OPEN) return;
-        this.onmessage?.({ data: toArrayBuffer(parsed.data) });
+        const data = toArrayBuffer(parsed.data);
+        // Behind anything still held, so the stream keeps its order.
+        if (this.messageHandler && this.held.length === 0) {
+          this.messageHandler({ data });
+        } else {
+          this.held.push(data);
+        }
       } else if (parsed.kind === "error") {
         this.onerror?.(parsed);
       }
@@ -340,6 +394,7 @@ export class HostedDesktopRelayChannel implements HostedDesktopRawChannel {
       if (this.readyState === this.CLOSED) return;
       this.readyState = this.CLOSED;
       this.inputAllowed = false;
+      this.held = [];
       this.onclose?.(event);
     });
   }

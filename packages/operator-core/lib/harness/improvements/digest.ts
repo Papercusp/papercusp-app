@@ -340,6 +340,302 @@ export function admissionIdentity(title: string, signalKey?: string): AdmissionI
   };
 }
 
+/**
+ * Lossless intake projection shared by the digest/fold lane and the saved review
+ * flow (observation-candidate-acceptance-promotion-2026-09-30 P-003).
+ *
+ * This is deliberately a GROUPING contract, not an acceptance contract. Exact
+ * stable identities and already-recorded canonical references may assemble the
+ * evidence for one problem. Similarity, recurrence volume, consumption stamps,
+ * and even the presence of a prior intake decision never grant execution
+ * authority here; the later acceptance layer evaluates that independently.
+ */
+export const INTAKE_CANDIDATE_GROUP_SCHEMA_VERSION = 'intake-candidate-group-v1' as const;
+export type IntakeEvidenceState = 'current' | 'stale' | 'unknown';
+
+export interface IntakeEvidenceRef {
+  /** Typed, navigable evidence reference (for example wi:, run:, test-run:). */
+  ref: string;
+  /** Currentness of the evidence bytes/revision themselves. */
+  state: IntakeEvidenceState;
+  /** Currentness of the code/runtime the evidence describes. */
+  codeRuntimeState: IntakeEvidenceState;
+  revision?: string;
+  detail?: string;
+}
+
+export interface IntakeOccurrenceRef {
+  ref: string;
+  occurredAt?: string;
+  kind?: string;
+  evidenceRefs?: string[];
+}
+
+export interface IntakeRemedyRef {
+  /** Stable identity of the proposed remedy, independent of the problem key. */
+  key: string;
+  ref: string;
+  summary?: string;
+}
+
+export interface IntakeConsumptionRef {
+  ref: string;
+  mode: 'read' | 'backfill';
+  at?: string;
+}
+
+export interface IntakeDecisionRef {
+  ref: string;
+  revision: string;
+  disposition: string;
+}
+
+/** One already-resolved storage/input row supplied to the pure grouping pass. */
+export interface IntakeCandidateSource {
+  id: string;
+  title: string;
+  admissionIdentity?: AdmissionIdentity | null;
+  conditionKey?: string | null;
+  watchdogKey?: string | null;
+  /** Existing canonical work-item refs, when a writer already resolved them. */
+  canonicalRefs?: readonly string[];
+  /** Additional navigable source refs (observation, report, thread, etc.). */
+  sourceRefs?: readonly string[];
+  occurrenceHistory?: readonly IntakeOccurrenceRef[];
+  digestFoldRefs?: readonly string[];
+  remedies?: readonly IntakeRemedyRef[];
+  evidence?: readonly IntakeEvidenceRef[];
+  consumption?: readonly IntakeConsumptionRef[];
+  decisions?: readonly IntakeDecisionRef[];
+}
+
+export interface IntakeCandidateGroup {
+  schemaVersion: typeof INTAKE_CANDIDATE_GROUP_SCHEMA_VERSION;
+  /** Stable representative chosen by identity strength, never by similarity. */
+  groupKey: string;
+  /** Every exact identity that connected this component. */
+  identityRefs: string[];
+  sourceIds: string[];
+  /** Complete navigable union, while typed collections below retain semantics. */
+  sourceRefs: string[];
+  canonicalRefs: string[];
+  occurrenceHistory: Array<IntakeOccurrenceRef & { sourceId: string }>;
+  digestFoldRefs: string[];
+  remedies: Array<IntakeRemedyRef & { sourceIds: string[] }>;
+  unresolvedRemedySourceIds: string[];
+  evidence: Array<IntakeEvidenceRef & { sourceId: string }>;
+  evidenceStates: Record<IntakeEvidenceState, number>;
+  codeRuntimeStates: Record<IntakeEvidenceState, number>;
+  consumption: Array<IntakeConsumptionRef & { sourceId: string }>;
+  decisions: Array<IntakeDecisionRef & { sourceId: string }>;
+  authority: {
+    state: 'not-evaluated';
+    reason: 'grouping-is-not-acceptance';
+  };
+}
+
+function nonBlank(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function uniqueSorted(values: Iterable<string>): string[] {
+  return [...new Set([...values].map((value) => value.trim()).filter(Boolean))].sort();
+}
+
+/**
+ * Strong producer/problem identity outranks the lexical fallback. In particular,
+ * two machine producers with different keys must not be joined merely because
+ * their display titles are identical. Legacy/keyless rows fall back to the exact
+ * persisted admission title key; no fuzzy similarity enters this function.
+ */
+function intakeIdentityRefs(source: IntakeCandidateSource): string[] {
+  const canonical = uniqueSorted(source.canonicalRefs ?? []).map((ref) => `canonical:${ref}`);
+  const conditionKey = nonBlank(source.conditionKey);
+  const signalKey = nonBlank(source.admissionIdentity?.signalKey);
+  const watchdogKey = nonBlank(source.watchdogKey);
+  const strong = [
+    ...canonical,
+    ...(conditionKey ? [`condition:${conditionKey}`] : []),
+    ...(signalKey ? [`signal:${signalKey}`] : []),
+    ...(watchdogKey ? [`watchdog:${watchdogKey}`] : []),
+  ];
+  if (strong.length > 0) return uniqueSorted(strong);
+
+  const persistedTitleKey =
+    source.admissionIdentity?.schemaVersion === 'admission-identity-v1'
+      ? nonBlank(source.admissionIdentity.titleKey)
+      : null;
+  return [`admission-title:${persistedTitleKey ?? admissionIdentity(source.title).titleKey}`];
+}
+
+const INTAKE_IDENTITY_PREFIX_ORDER = ['canonical:', 'condition:', 'signal:', 'watchdog:', 'admission-title:'] as const;
+
+function intakeIdentityOrder(a: string, b: string): number {
+  const rank = (value: string): number => {
+    const index = INTAKE_IDENTITY_PREFIX_ORDER.findIndex((prefix) => value.startsWith(prefix));
+    return index < 0 ? INTAKE_IDENTITY_PREFIX_ORDER.length : index;
+  };
+  return rank(a) - rank(b) || a.localeCompare(b);
+}
+
+class IntakeUnionFind {
+  private readonly parent: number[];
+
+  constructor(size: number) {
+    this.parent = Array.from({ length: size }, (_, index) => index);
+  }
+
+  find(index: number): number {
+    const parent = this.parent[index]!;
+    if (parent === index) return index;
+    const root = this.find(parent);
+    this.parent[index] = root;
+    return root;
+  }
+
+  union(a: number, b: number): void {
+    const rootA = this.find(a);
+    const rootB = this.find(b);
+    if (rootA === rootB) return;
+    this.parent[Math.max(rootA, rootB)] = Math.min(rootA, rootB);
+  }
+}
+
+function uniqueBy<T>(values: readonly T[], key: (value: T) => string): T[] {
+  const out = new Map<string, T>();
+  for (const value of values) if (!out.has(key(value))) out.set(key(value), value);
+  return [...out.values()];
+}
+
+/**
+ * Assemble exact-identity intake groups without making a triage or execution
+ * decision. All output ordering is deterministic so a saved bulk run can pin the
+ * projection and resume without recomputing a different membership order.
+ */
+export function assembleIntakeCandidateGroups(sources: readonly IntakeCandidateSource[]): IntakeCandidateGroup[] {
+  const uf = new IntakeUnionFind(sources.length);
+  const identities = sources.map(intakeIdentityRefs);
+  const firstByIdentity = new Map<string, number>();
+  for (let index = 0; index < identities.length; index += 1) {
+    for (const identity of identities[index]!) {
+      const first = firstByIdentity.get(identity);
+      if (first === undefined) firstByIdentity.set(identity, index);
+      else uf.union(first, index);
+    }
+  }
+
+  const membersByRoot = new Map<number, Array<{ source: IntakeCandidateSource; index: number }>>();
+  for (let index = 0; index < sources.length; index += 1) {
+    const root = uf.find(index);
+    const members = membersByRoot.get(root) ?? [];
+    members.push({ source: sources[index]!, index });
+    membersByRoot.set(root, members);
+  }
+
+  const groups: IntakeCandidateGroup[] = [];
+  for (const members of membersByRoot.values()) {
+    const identityRefs = uniqueSorted(members.flatMap(({ index }) => identities[index]!)).sort(intakeIdentityOrder);
+    const sourceIds = uniqueSorted(members.map(({ source }) => source.id));
+    const canonicalRefs = uniqueSorted(members.flatMap(({ source }) => source.canonicalRefs ?? []));
+    const digestFoldRefs = uniqueSorted(members.flatMap(({ source }) => source.digestFoldRefs ?? []));
+
+    const occurrenceHistory = uniqueBy(
+      members.flatMap(({ source }) =>
+        (source.occurrenceHistory ?? []).map((occurrence) => ({
+          ...occurrence,
+          evidenceRefs: occurrence.evidenceRefs ? uniqueSorted(occurrence.evidenceRefs) : undefined,
+          sourceId: source.id,
+        })),
+      ),
+      (occurrence) =>
+        [occurrence.sourceId, occurrence.ref, occurrence.occurredAt ?? '', occurrence.kind ?? ''].join('\0'),
+    ).sort(
+      (a, b) =>
+        (a.occurredAt ?? '').localeCompare(b.occurredAt ?? '') ||
+        a.ref.localeCompare(b.ref) ||
+        a.sourceId.localeCompare(b.sourceId),
+    );
+
+    const remedyByIdentity = new Map<string, IntakeRemedyRef & { sourceIds: string[] }>();
+    for (const { source } of members) {
+      for (const remedy of source.remedies ?? []) {
+        const key = `${remedy.key.trim()}\0${remedy.ref.trim()}`;
+        const prior = remedyByIdentity.get(key);
+        if (prior) prior.sourceIds = uniqueSorted([...prior.sourceIds, source.id]);
+        else
+          remedyByIdentity.set(key, {
+            ...remedy,
+            key: remedy.key.trim(),
+            ref: remedy.ref.trim(),
+            sourceIds: [source.id],
+          });
+      }
+    }
+    const remedies = [...remedyByIdentity.values()].sort(
+      (a, b) => a.key.localeCompare(b.key) || a.ref.localeCompare(b.ref),
+    );
+
+    const evidence = uniqueBy(
+      members.flatMap(({ source }) => (source.evidence ?? []).map((item) => ({ ...item, sourceId: source.id }))),
+      (item) =>
+        [item.sourceId, item.ref, item.revision ?? '', item.state, item.codeRuntimeState, item.detail ?? ''].join('\0'),
+    ).sort((a, b) => a.ref.localeCompare(b.ref) || a.sourceId.localeCompare(b.sourceId));
+    const evidenceStates: Record<IntakeEvidenceState, number> = { current: 0, stale: 0, unknown: 0 };
+    const codeRuntimeStates: Record<IntakeEvidenceState, number> = { current: 0, stale: 0, unknown: 0 };
+    for (const item of evidence) {
+      evidenceStates[item.state] += 1;
+      codeRuntimeStates[item.codeRuntimeState] += 1;
+    }
+
+    const consumption = uniqueBy(
+      members.flatMap(({ source }) => (source.consumption ?? []).map((item) => ({ ...item, sourceId: source.id }))),
+      (item) => [item.sourceId, item.ref, item.mode, item.at ?? ''].join('\0'),
+    ).sort((a, b) => a.ref.localeCompare(b.ref) || a.sourceId.localeCompare(b.sourceId));
+    const decisions = uniqueBy(
+      members.flatMap(({ source }) => (source.decisions ?? []).map((item) => ({ ...item, sourceId: source.id }))),
+      (item) => [item.sourceId, item.ref, item.revision, item.disposition].join('\0'),
+    ).sort((a, b) => a.ref.localeCompare(b.ref) || a.sourceId.localeCompare(b.sourceId));
+
+    const sourceRefs = uniqueSorted(
+      members.flatMap(({ source }) => [
+        `wi:${source.id}`,
+        ...(source.sourceRefs ?? []),
+        ...(source.canonicalRefs ?? []),
+        ...(source.digestFoldRefs ?? []),
+        ...(source.occurrenceHistory ?? []).flatMap((item) => [item.ref, ...(item.evidenceRefs ?? [])]),
+        ...(source.evidence ?? []).map((item) => item.ref),
+        ...(source.consumption ?? []).map((item) => item.ref),
+        ...(source.decisions ?? []).map((item) => item.ref),
+        ...(source.remedies ?? []).map((item) => item.ref),
+      ]),
+    );
+
+    groups.push({
+      schemaVersion: INTAKE_CANDIDATE_GROUP_SCHEMA_VERSION,
+      groupKey: identityRefs[0]!,
+      identityRefs,
+      sourceIds,
+      sourceRefs,
+      canonicalRefs,
+      occurrenceHistory,
+      digestFoldRefs,
+      remedies,
+      unresolvedRemedySourceIds: uniqueSorted(
+        members.filter(({ source }) => (source.remedies?.length ?? 0) === 0).map(({ source }) => source.id),
+      ),
+      evidence,
+      evidenceStates,
+      codeRuntimeStates,
+      consumption,
+      decisions,
+      authority: { state: 'not-evaluated', reason: 'grouping-is-not-acceptance' },
+    });
+  }
+
+  return groups.sort((a, b) => a.groupKey.localeCompare(b.groupKey));
+}
+
 function tokenSet(title: string): Set<string> {
   return new Set(dedupSignature(title).split(' ').filter(Boolean));
 }

@@ -14,6 +14,7 @@
  *                                          the headless bee creds-only dir).
  *   - `session-mcp/<ownerId>`           — the per-session signed `.mcp.json`.
  *   - `su-codex-homes/session-<id>`     — the per-session `CODEX_HOME` (su + role).
+ *   - `codex-sqlite-homes/session-<id>` — fast companion for Codex SQLite state.
  *   - `role-codex-homes/session-<id>`   — LEGACY codex-home root (no longer
  *                                          written since unify-launch-mechanics
  *                                          P-004 folded role homes into
@@ -59,11 +60,12 @@
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { listLiveHosts, type PsuPtyHost } from './events/await/psu-pty-discovery';
+import { listLiveHostsAsync, type PsuPtyHost } from './events/await/psu-pty-discovery';
 import {
   sessionClaudeRoot,
   sessionMcpRoot,
   codexHomesRoot,
+  codexSqliteHomesRoot,
 } from '@papercusp/orchestrator/session-launch-dirs';
 
 /** Default retention: a not-live, not-resumable dir is collected once it has not
@@ -239,6 +241,7 @@ export function defaultSessionDirRoots(): SessionDirRoot[] {
     { root: sessionClaudeRoot(), keyKind: 'owner', label: 'session-claude' },
     { root: sessionMcpRoot(), keyKind: 'owner', label: 'session-mcp' },
     { root: codexHomesRoot(), keyKind: 'session', label: 'su-codex-homes' },
+    { root: codexSqliteHomesRoot(), keyKind: 'session', label: 'codex-sqlite-homes' },
     {
       root: join(homedir(), '.papercusp', 'role-codex-homes'),
       keyKind: 'session',
@@ -416,7 +419,7 @@ export async function gatherProtectedSessionIdentity(): Promise<ProtectedSession
     console.warn('[session-dir-gc] PG protected-set read failed:', (e as Error).message);
   }
 
-  protectLivePtyHostHomes({ ownerIds, sessionKeys }, listLiveHosts());
+  protectLivePtyHostHomes({ ownerIds, sessionKeys }, await listLiveHostsAsync());
   return { ownerIds, sessionKeys, degraded };
 }
 

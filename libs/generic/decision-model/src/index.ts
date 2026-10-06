@@ -28,11 +28,23 @@ export {
   configureDecisionModel,
   getDecisionClient,
   decide,
+  eventLoopUtilizationMeter,
+  type HostLoadMeter,
   type DecisionClient,
   type DecisionClientOptions,
   type DecideOptions,
+  type DeadlineHook,
   type FetchLike,
+  type TransportTiming,
 } from './client.js';
+export {
+  createWorkerTransport,
+  WORKER_TRANSPORT_MAX_FAILURES,
+  type WorkerTransport,
+  type WorkerTransportEvent,
+  type WorkerTransportOptions,
+} from './worker-transport.js';
+export { describeError, errorFields, isErrorFields, type ErrorFields } from './error-detail.js';
 export {
   toDecisionLedgerEntry,
   canonicalJson,

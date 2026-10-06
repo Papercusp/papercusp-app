@@ -35,14 +35,17 @@
  *
  * ── The envelope, read from the tool, not assumed ────────────────────────────
  * `testing:run` (lib/agent-tools/testing/run.ts) takes
- * `{ files: string[1..50], changedPaths?, testNamePattern?: string(1..200),
+ * `{ files: string[1..50], changedPaths?, rootHarnessSlug?, testNamePattern?: string(1..200),
  * timeoutMs?, maxFailures? }`. Consequences that decide coverage below:
  *  • `changedPaths` is mutually exclusive with `files` and DERIVES the
  *    test:affected plan from edited source files — then runs nothing. It is why
  *    `tests.affected` below is not-a-substitute for "planning is not running",
  *    NOT for "the tool cannot compute a list"; that older reason is false.
  *  • `files` are handed to the router as-is, so a path must be REPO-ROOT
- *    relative or absolute. `atomize` splits `cd apps/operator && vitest run
+ *    anchored, relative or absolute. `rootHarnessSlug` can select another registered checkout for
+ *    explicit files; these substitutions use the default checkout and still
+ *    exclude arbitrary Vitest `--root`/`--config` commands.
+ *    `atomize` splits `cd apps/operator && vitest run
  *    app/x.test.ts` into two atoms, so a cwd-relative operand arrives with the
  *    `cd` that gave it meaning already gone. Those are excluded by the pattern
  *    (see {@link ROOT_ANCHOR}), not failed by the envelope — D-008.

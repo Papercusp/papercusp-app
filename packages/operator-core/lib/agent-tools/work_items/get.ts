@@ -23,7 +23,11 @@ import {
 import { mergeIds, runBulk, bulkContent, bulkEnvelopeSchema } from "../_bulk";
 import { cachedRead, type CachedReadCtx } from "../../cache";
 import { getWorkItemCheckpointWithMeta, getWorkItemCheckpointFreshness } from "../../work-item-checkpoint";
-import { compareWorkItemSubjectFingerprint, type WorkItemSubjectFingerprintComparison } from "../../carry-note";
+import {
+  compareWorkItemSubjectFingerprint,
+  normalizeWorkItemSubjectFingerprint,
+  type WorkItemSubjectFingerprintComparison,
+} from "../../carry-note";
 import { scanCheckpointRetractions } from "./retraction-advisory";
 import { getClaimTimePriorWorkHint, priorWorkWarning } from "../../work-item-prior-work";
 import { computeCheckpointStaleness } from "../../checkpoint-staleness";
@@ -209,7 +213,7 @@ async function withWorkItemsGetBudget<T>(
 export const THREAD_WINDOW_MAX = 10;
 
 const RESUME_ARGUMENT_CONSTRAINT =
-  'resume requires one item and cannot be combined with detail, checksOnly, threadLimit or priorAttemptRefs; use a separate read for those enrichments';
+  'resume requires one item and cannot be combined with detail, checksOnly, threadLimit, priorAttemptRefs or operationalBrief; use a separate read for those enrichments (two calls: work_items:get { id, resume:true } for the continuation, then work_items:get { id, detail:true } for the full record)';
 
 /**
  * P-002 (WI-2145856): every undeclared key a real caller reached for when they
@@ -390,8 +394,8 @@ function checkpointCheckIdentities(checks: readonly CheckEntry[]): {
 }
 
 /** Compare the newest checkpoint journal subject with the authoritative item row.
- * A failed or empty metadata read deliberately remains `unknown`; the current
- * fingerprint is still useful context when the item row itself was available. */
+ * A failed or incomplete read deliberately remains `unknown`; a partial source
+ * projection must not manufacture a fingerprint for a different subject. */
 function checkpointSubjectFingerprintForRead(
   workItem: {
     id: string;
@@ -403,7 +407,16 @@ function checkpointSubjectFingerprintForRead(
   },
   readFailed: boolean,
   stored: unknown,
+  subjectComplete = true,
 ): WorkItemSubjectFingerprintComparison {
+  // A bodyless issue projection maps SQL NULL to summary="" so the WorkItem
+  // shape stays total. That value is not the subject's real summary and cannot
+  // participate in an equality check. Preserve the stored side, but report the
+  // comparison as unknown until a read includes the body.
+  if (!subjectComplete) {
+    const normalized = normalizeWorkItemSubjectFingerprint(readFailed ? undefined : stored);
+    return { status: 'unknown', ...(normalized ? { stored: normalized } : {}) };
+  }
   return compareWorkItemSubjectFingerprint(workItem, readFailed ? undefined : stored);
 }
 
@@ -459,6 +472,13 @@ export function workItemsGetSourceReadOptions(
     if (path === null || path === '') continue;
 
     if (path === 'workItem.summary') {
+      includeBody = true;
+      continue;
+    }
+    if (path === 'checkpointSubjectFingerprint' || path.startsWith('checkpointSubjectFingerprint.')) {
+      // The current subject hash includes issue.body (mapped as WorkItem.summary).
+      // A caller selecting this field needs that source column even if it did not
+      // also request the summary in its result projection.
       includeBody = true;
       continue;
     }
@@ -597,6 +617,8 @@ const workItemsGetReadSchema = z.object({
   baseReadMaxMs: z.number().int().nonnegative().nullable(),
   enrichmentMaxMs: z.number().int().nonnegative().nullable(),
   outerStageAttribution: z.literal('tool_invocations.duration_ms minus elapsedMs is combined dispatch/projection/serialization time'),
+  detailRows: z.number().int().nonnegative().optional(),
+  stubbedRows: z.number().int().nonnegative().optional(),
 });
 
 export default defineTool({
@@ -670,7 +692,7 @@ export default defineTool({
           'return only the stored checkpoint check-row ledger (`checkpointChecks.rows` with caller-facing id/claim identities) plus recency/failure metadata; omit the checkpoint narrative and other enrichments. Use this before building `retireIds` instead of fetching the full checkpoint body.',
         ),
       resume: z.boolean().optional().describe(
-        'Standalone one-item continuation view: current claim, complete structured next action, saved checks and exact evidence references, with freshness and scoped recovery. Uses checkpoint:{did,left,next} written by work_items:checkpoint; missing/unreadable state remains explicit. Do not combine with detail, checksOnly, threadLimit, or priorAttemptRefs; use a separate read for those enrichments.',
+        'Standalone one-item continuation view: current claim, complete structured next action, saved checks and exact evidence references, with freshness and scoped recovery. Uses checkpoint:{did,left,next} written by work_items:checkpoint; missing/unreadable state remains explicit. Do not combine with detail, checksOnly, threadLimit, priorAttemptRefs, or operationalBrief; use a separate read for those enrichments.',
       ),
       operationalBrief: z.boolean().optional().describe(
         'Add `operationalBrief` per row: claim/state, blockers, last verified evidence, next action and successor residue, projected from this same read. Unmeasured fields are explicit `unknown` with a reason, never zero. Forces a complete read; not with resume or checksOnly.',
@@ -680,7 +702,7 @@ export default defineTool({
         .max(20)
         .optional()
         .describe(
-          "raw drill-down for the requested work-item(s): pass `id` (one) or `ids` (many) together with these refs. Resolve refs back to their FULL untruncated source records. Take them from a brief's `omission.omittedRefs` (records the budget could only COUNT) or from a clipped record's own `rawRef` — the brief names them precisely so a bounded read is never a dead end. Refs that no longer resolve come back in `unresolved[]`, which is an answer about the history, not an error.",
+          "raw drill-down for the requested work-item(s): pass `id` (one) or `ids` (many) together with these refs. Resolve refs back to their FULL untruncated source records. When combined with `detail:true`, this replaces the bounded `priorAttempts` brief so the response does not mix clipped history with the raw records; make a separate read if you need both views. Take refs from a brief's `omission.omittedRefs` (records the budget could only COUNT) or from a clipped record's own `rawRef` — the brief names them precisely so a bounded read is never a dead end. Refs that no longer resolve come back in `unresolved[]`, which is an answer about the history, not an error.",
         ),
       threadLimit: z
         .number()
@@ -712,11 +734,11 @@ export default defineTool({
     .refine((a) => Boolean(a.id) || (a.ids?.length ?? 0) > 0, {
       message: 'pass `id` (one) or `ids` (many)',
     })
-    .refine((a) => !a.resume || (mergeIds(a.id, a.ids).length === 1 && !a.checksOnly && !a.detail && a.threadLimit === undefined && a.priorAttemptRefs === undefined), {
+    .refine((a) => !a.resume || (mergeIds(a.id, a.ids).length === 1 && !a.checksOnly && !a.detail && a.threadLimit === undefined && a.priorAttemptRefs === undefined && !a.operationalBrief), {
       message: RESUME_ARGUMENT_CONSTRAINT,
     })
-    .refine((a) => !a.operationalBrief || (!a.resume && !a.checksOnly), {
-      message: 'operationalBrief projects the complete row; it cannot be combined with resume or checksOnly',
+    .refine((a) => !a.operationalBrief || !a.checksOnly, {
+      message: 'operationalBrief projects the complete row; it cannot be combined with checksOnly',
     })
     .meta({ 'x-papercusp-call-constraint': RESUME_ARGUMENT_CONSTRAINT }),
   // EI-19447969329510166: without a declared shaper this tool fell through to the
@@ -775,7 +797,12 @@ export default defineTool({
     const needsCompletionFreshness = sourceSelectionWants(sourceSelection, 'completionFreshness');
     const needsDeploymentPosition = sourceSelectionWants(sourceSelection, 'deploymentPosition');
     const needsLifecycle = sourceSelectionWants(sourceSelection, 'lifecycle');
-    const needsPriorAttempts = sourceSelectionWants(sourceSelection, 'priorAttempts');
+    // A raw-ref drill-down is the fuller view of this same history. Returning
+    // the bounded brief alongside it duplicates the records and can leave
+    // `textTruncated` markers in an explicit-full result, which makes the
+    // result door correctly refuse to call the spilled response recoverable.
+    const needsPriorAttempts =
+      sourceSelectionWants(sourceSelection, 'priorAttempts') && !args.priorAttemptRefs?.length;
     const needsPriorAttemptResolution = sourceSelectionWants(sourceSelection, 'priorAttemptRefResolution');
     const needsWorkItemDetail = sourceSelectionWants(
       sourceSelection,
@@ -808,6 +835,10 @@ export default defineTool({
       !needsWorkItemDetail &&
       sourceReadOptions !== undefined;
     const stageSamples: Array<{ baseReadMs: number | null; enrichmentMs: number | null }> = [];
+    const checkpointLatestUpdateById = new Map<
+      string,
+      NonNullable<Awaited<ReturnType<typeof getWorkItemCheckpointWithMeta>>['latestUpdate']>
+    >();
     // P-030: resolved ONCE for the whole bulk read. The reader is an argument to
     // the holder lens, never a cache-key dimension — the per-id `cachedRead`
     // below is deliberately non-principal-scoped, so reader-relative holder
@@ -933,6 +964,9 @@ export default defineTool({
           stage.enrichmentMs = Date.now() - started;
           return { ok: true as const, id, availability: 'available' as const, resume };
         }
+        // Feature summaries remain present in bodyless reads. Issue summaries are
+        // projected from the body column, so includeBody:false leaves them unknown.
+        const subjectComplete = workItem.family === 'feature' || sourceReadOptions?.includeBody !== false;
         // `checksOnly` is the retire-id recovery path. Read the item only far enough
         // to resolve its canonical harness, then read the checkpoint ledger and stop:
         // the narrative, payload, thread, holder, plan, and prior-work enrichments
@@ -963,7 +997,7 @@ export default defineTool({
               checkpointAgeMs: null,
               checkpointUpdatedAtMs: null,
               checkpointContentHash: null,
-              checkpointSubjectFingerprint: checkpointSubjectFingerprintForRead(workItem, true, undefined),
+              checkpointSubjectFingerprint: checkpointSubjectFingerprintForRead(workItem, true, undefined, subjectComplete),
               checkpointReadFailed: true as const,
             };
           }
@@ -990,6 +1024,7 @@ export default defineTool({
               workItem,
               false,
               checkpointRead.subjectFingerprint,
+              subjectComplete,
             ),
           };
         }
@@ -1076,6 +1111,7 @@ export default defineTool({
                 // sibling loop carry-note has exposed exactly this on its READ side
                 // since loop/status.ts:78; this closes the asymmetry.
                 checkpointContentHash: r.checkpoint === null ? null : shortCarryHash(r.checkpoint),
+                latestUpdate: r.latestUpdate,
                 subjectFingerprint: r.subjectFingerprint,
                 readFailed: false as const,
               };
@@ -1092,9 +1128,10 @@ export default defineTool({
               // exactly what `checkpointReadFailed` disambiguates for every other
               // field on this leg.
               checkpointContentHash: null,
+              latestUpdate: undefined,
               subjectFingerprint: undefined,
               readFailed: true as const,
-            })) : Promise.resolve({ checkpoint: null, updatedAtMs: null, checkpointChecks: null, checkpointBody: null, checkpointContentHash: null, subjectFingerprint: undefined, readFailed: false as const }),
+            })) : Promise.resolve({ checkpoint: null, updatedAtMs: null, checkpointChecks: null, checkpointBody: null, checkpointContentHash: null, latestUpdate: undefined, subjectFingerprint: undefined, readFailed: false as const }),
           needsPlanItemBlocked ? planItemLaneBlockReason(workItem).catch(() => null) : Promise.resolve(null),
           needsClaimCollision ? planItemClaimCollision(workItem).catch(() => null) : Promise.resolve(null),
           // WI-40825: has the linked plan item been REWRITTEN since this
@@ -1119,13 +1156,16 @@ export default defineTool({
           checkpointChecks,
           checkpointBody,
           checkpointContentHash,
+          latestUpdate: checkpointLatestUpdate,
           subjectFingerprint: storedSubjectFingerprint,
           readFailed: checkpointReadFailed,
         } = checkpointRead;
+        if (checkpointLatestUpdate) checkpointLatestUpdateById.set(workItem.id, checkpointLatestUpdate);
         const checkpointSubjectFingerprint = checkpointSubjectFingerprintForRead(
           workItem,
           checkpointReadFailed,
           storedSubjectFingerprint,
+          subjectComplete,
         );
         const checkpointAgeMs = checkpointUpdatedAtMs != null ? Math.max(0, Date.now() - checkpointUpdatedAtMs) : null;
         // EI-15184: RELATIVE checkpoint staleness. `checkpointAgeMs` above is
@@ -1419,7 +1459,8 @@ export default defineTool({
       const { projectWorkItemOperationalBrief, renderOperationalBrief, renderWorkItemFactLines } = await import('../../operational-brief');
       for (const result of env.results as Array<Record<string, unknown>>) {
         if (result.ok !== true || result.availability !== 'available') continue;
-        const brief = projectWorkItemOperationalBrief(result, { linksRead: readDetail });
+        const latestUpdate = typeof result.id === 'string' ? checkpointLatestUpdateById.get(result.id) : undefined;
+        const brief = projectWorkItemOperationalBrief(result, { linksRead: readDetail, latestUpdate });
         result.operationalBrief = {
           ...brief,
           text: [renderOperationalBrief(brief), ...renderWorkItemFactLines(brief)].join('\n'),

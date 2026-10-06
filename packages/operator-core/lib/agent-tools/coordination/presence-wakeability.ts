@@ -141,6 +141,28 @@ export const LIVE_TURN_WINDOW_MS = PRESENCE_STALE_MS;
 export const WAKE_MISS_EVIDENCE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * How long a HANDED-OFF wake is pickup-pending before its silence can count as a
+ * confirmed miss (WI-10004329).
+ *
+ * A `delivered` turn-channel row or a `queued` required-send attempt proves only
+ * that a live session was re-invoked, not that the turn has started yet. Before
+ * this grace, the miss was "confirmed" at the delivery timestamp itself, so every
+ * owner read `ended` for the few seconds between a normal wake landing and its
+ * first activity row. Measured 2026-09-30: goal 60d3a8's holder had its loop fire
+ * injected at 18:28:04.731Z and logged its first tool call at 18:28:08.547Z; the
+ * goal-holder respawner read liveness inside that 3.8 s gap, saw `ended`, and
+ * launched a replacement that took the lease from a healthy holder.
+ *
+ * DEFINITIVE failures (`dropped` / `dead` deliveries, `missed` attempts, where no
+ * session was re-invoked at all) need no grace and still confirm immediately.
+ * The grace applies per attempt, to evidence that has MATURED past it, so waking a
+ * warm-dead owner again cannot keep resetting it (EI-21356139961831796's loop).
+ * Five minutes matches the interval the goal-holder respawner already gives a
+ * re-kicked live session to take (GOAL_HOLDER_REKICK_INTERVAL_MS).
+ */
+export const WAKE_PICKUP_GRACE_MS = 5 * 60 * 1000;
+
+/**
  * How far back the activity clock reads. `agent_activity` is retained for
  * seven days, so the liveness query must cover that same bounded horizon:
  * otherwise a heartbeat-fresh owner whose last turn is older than the
@@ -387,7 +409,9 @@ export function overrideIntentStaleForSessionState(
  *     wake channel whose attempt timestamp is not followed by agent activity.
  *     Pending/parked/delivering rows and no-turn channels are intentionally
  *     excluded: queueing is not pickup, and settlement without a turn is not a
- *     confirmed wake attempt.
+ *     confirmed wake attempt. A handed-off wake (`delivered` turn channel,
+ *     `queued` attempt) only counts once it has outlived WAKE_PICKUP_GRACE_MS;
+ *     a definitive failure (`dropped`/`dead`, `missed`) counts at once.
  */
 export async function fetchWakeability(
   ownerIds: string[],
@@ -405,6 +429,7 @@ export async function fetchWakeability(
   // reads as null through a 10-minute window. liveTurn keeps its own 10-minute
   // meaning via the explicit recency check below.
   const missWindowSec = Math.max(windowSec, Math.round(WAKE_MISS_EVIDENCE_WINDOW_MS / 1000));
+  const pickupGraceSec = Math.max(1, Math.round(WAKE_PICKUP_GRACE_MS / 1000));
   const activityWindowSec = Math.max(windowSec, Math.round(ACTIVITY_LOOKBACK_WINDOW_MS / 1000));
   const nowMs = Date.now();
 
@@ -435,7 +460,12 @@ export async function fetchWakeability(
              AND status IN ('delivered', 'dropped', 'dead')
              AND (
                status IN ('dropped', 'dead')
-               OR channel = ANY(${WAKE_TURN_CHANNELS as unknown as string[]}::text[])
+               -- WI-10004329: a delivered turn-channel wake is pickup-PENDING,
+               -- not missed, until it has outlived the pickup grace.
+               OR (
+                 channel = ANY(${WAKE_TURN_CHANNELS as unknown as string[]}::text[])
+                 AND COALESCE(delivered_at, created_at) <= now() - make_interval(secs => ${pickupGraceSec})
+               )
              )
              AND COALESCE(delivered_at, created_at) > now() - make_interval(secs => ${missWindowSec})
            GROUP BY subscriber_id
@@ -445,6 +475,12 @@ export async function fetchWakeability(
             FROM harness_shared.event_wake_attempts
            WHERE subscriber_id = ANY(${ownerIds}::text[])
              AND event_key = ${COORD_INBOX_WAKE_PREFIX} || subscriber_id
+             -- 'missed' = no session was re-invoked (definitive); 'queued' is
+             -- pickup-pending until it outlives the grace (WI-10004329).
+             AND (
+               outcome = 'missed'
+               OR attempted_at <= now() - make_interval(secs => ${pickupGraceSec})
+             )
              AND attempted_at > now() - make_interval(secs => ${missWindowSec})
            GROUP BY subscriber_id
        ) AS evidence
@@ -452,12 +488,23 @@ export async function fetchWakeability(
     // Codex turns can emit tool_invocations without a newer agent_activity row.
     // invoked_at is stamped at dispatch-settle time with coord_owner_id; this is
     // the same per-owner freshness source already used by fleet presence.
+    // P-014(b): a top-1 probe per owner on tool_invocations_coord_owner_idx
+    // (coord_owner_id, invoked_at DESC). The former GROUP BY max() aggregated
+    // every invocation in the 7-day window for each owner (~265k buffers for
+    // 155 live owners vs ~1.7k for this form, identical rows) and ran ~17×/s.
     sql<{ owner_id: string; last_tool_call_at: Date | string | null }[]>`
-      SELECT coord_owner_id AS owner_id, max(invoked_at) AS last_tool_call_at
-        FROM harness_shared.tool_invocations
-       WHERE coord_owner_id = ANY(${ownerIds}::text[])
-         AND invoked_at > now() - make_interval(secs => ${activityWindowSec})
-       GROUP BY coord_owner_id`,
+      SELECT owner_id, last_tool_call_at
+        FROM (
+          SELECT o.owner_id,
+                 (SELECT t.invoked_at
+                    FROM harness_shared.tool_invocations t
+                   WHERE t.coord_owner_id = o.owner_id
+                     AND t.invoked_at > now() - make_interval(secs => ${activityWindowSec})
+                   ORDER BY t.invoked_at DESC
+                   LIMIT 1) AS last_tool_call_at
+            FROM (SELECT DISTINCT unnest(${ownerIds}::text[]) AS owner_id) o
+        ) latest
+       WHERE last_tool_call_at IS NOT NULL`,
   ]);
 
   const wakeSet = new Set(wake.map((r) => r.subscriber_id));

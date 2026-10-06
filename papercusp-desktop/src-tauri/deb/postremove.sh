@@ -42,6 +42,15 @@ case "$1" in
     rm -f /usr/share/applications/papercusp-tutorial.desktop
     command -v update-desktop-database >/dev/null 2>&1 && \
       update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+    # The postinst's bwrap userns grant (WI-10004618) exists only for the
+    # Server's Codex agents: withdraw it with the package, but only when the
+    # profile is ours (an administrator's own /etc/apparmor.d/bwrap stays).
+    if [ -z "${DPKG_ROOT:-}" ] \
+      && grep -qF '# Managed by the papercusp-server package (WI-10004618).' /etc/apparmor.d/bwrap 2>/dev/null; then
+      command -v apparmor_parser >/dev/null 2>&1 && \
+        apparmor_parser -R /etc/apparmor.d/bwrap >/dev/null 2>&1 || true
+      rm -f /etc/apparmor.d/bwrap
+    fi
     ;;
 esac
 exit 0

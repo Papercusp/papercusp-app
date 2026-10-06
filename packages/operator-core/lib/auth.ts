@@ -228,7 +228,7 @@ export async function login(
   // customer account, whose uid runs arbitrary code (PTY, customer-driven agents). A
   // loopback peer whose socket is not owned by the service uid proves nothing about who
   // is calling, so it may not mint an operator session at all: a passwordless login here
-  // handed uid 1001 a '*' session (measured on owner-test r57 through GET /api/auth/me) and
+  // handed uid 1001 a '*' session (measured on avi-test r57 through GET /api/auth/me) and
   // with it every principal-tier route, which is the D-417 exposure through a cookie.
   // Refused BEFORE the user lookup so a foreign peer cannot enumerate accounts either.
   // The customer's legitimate entry points (the portal via the controller, the direct

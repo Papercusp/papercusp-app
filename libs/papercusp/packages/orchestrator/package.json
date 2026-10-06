@@ -132,7 +132,7 @@
   "scripts": {
     "test": "vitest run",
     "test:unit": "vitest run",
-    "test:legacy": "node --test --import tsx src/**/*.test.ts",
+    "test:legacy": "node --test --test-global-setup=monorepo-host-preflight.mjs --import tsx src/**/*.test.ts",
     "typecheck": "node ../../../../scripts/lint-tsc-orchestrator.mjs"
   },
   "dependencies": {

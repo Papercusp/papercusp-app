@@ -1,0 +1,28 @@
+{
+  "protocol": {
+    "version": "dream-evaluation-v1",
+    "sourceSnapshot": "8fca95108e236676bf250f0d955ba76b79d8b0d2dd2e42a1ac79a3d2cf63d346",
+    "benchmarkHash": "9005ba90ff237c53970e02a4660b5f53ca61c56f45f8f6279daa887067ccd924",
+    "oracleHash": "fa65a24a2b8aaa514caf04da6919fdc45c2fa4253c8368c6ca8cec9e62de87ff",
+    "independentLabelsRef": "work-item:WI-10000489#comment-200846",
+    "seed": "dream-2026-09-09-v1",
+    "models": { "generator": "gpt-5.6-luna:medium", "reviewer": "gpt-5.6-sol:xhigh" },
+    "arms": ["blender", "uniform-pair", "structured-pair", "structured-triple"],
+    "utilityHash": "616d1e533d668a0a3b1ebde93ff859ab387104fd263c8fcd85b66e13e8912410",
+    "costPhases": ["indexing", "retrieval", "generation", "review", "verification", "experiment"],
+    "limits": {
+      "attempts": 200, "attemptsPerArm": 50, "discoveryUsd": 200, "discoveryUsdPerArm": 50,
+      "cycleAttempts": 3, "cycleUsd": 10, "rollingDayUsd": 200,
+      "experimentMinutes": 60, "experimentCount": 12, "experimentComputeUsd": 100
+    },
+    "analysis": {
+      "blocks": "source-snapshot/domain-coverage/model/run-window",
+      "seedPolicy": "seed:arm:attempt; matched A/B subset holds pair fixed with and without C",
+      "uncertainty": "cluster by source snapshot and proposal family; exploratory, not powered",
+      "stop": "stop on provenance/budget fault; stop at first cap; insufficient evidence is inconclusive",
+      "rejectionSample": "stratified blinded sample of rejected cases, same utility rubric",
+      "ablations": "A-only/B-only; faceted/flat; paired with/without C; calibration disjoint from held-out"
+    }
+  },
+  "pin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf"
+}

@@ -24,7 +24,7 @@ export function runShare(argv: any, { env, out, err }?: {
         (...data: any[]): void;
         (message?: any, ...optionalParams: any[]): void;
     } | undefined;
-}): 2 | 0 | 1;
+}): 0 | 1 | 2;
 export const PREVIEW_REPO: "Papercusp/papercusp-preview";
 export const PERMISSION: "pull";
 export class ShareRefused extends Error {

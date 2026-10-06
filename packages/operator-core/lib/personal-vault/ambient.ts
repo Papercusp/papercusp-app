@@ -9,6 +9,8 @@
 import { getOrgPg } from '@papercusp/db-org';
 import type { Sql } from 'postgres';
 import { authorizePersonalAccess, type PersonalAuthorization } from './authorization';
+import type { DocumentLabel } from './disclosure-labels';
+import { discloseDocuments, type DisclosedDocuments } from './disclosure-ledger';
 import { buildPersonalQueryEmbedder } from './embedding';
 import { searchPersonalDocuments } from './store';
 import type { PersonalSearchResult, PersonalToolContext } from './types';
@@ -103,6 +105,26 @@ export interface PersonalAmbientDeps {
     userId: string,
     input: { query: string; scopes: string[]; limit: number; snippetChars: number; queryEmbedding: number[] | null },
   ) => Promise<PersonalSearchResult[]>;
+  /** Label the results and record a disclosure for each restricted one (reader-set labels P-008). */
+  disclose: (
+    sql: Sql,
+    params: { workspaceId: string; userId: string; agentOwnerId: string; documents: PersonalSearchResult[] },
+  ) => Promise<DisclosedDocuments<PersonalSearchResult>>;
+}
+
+/**
+ * Its own transaction with the workspace GUC set, so the rules read and the
+ * ledger write see this workspace's rows under RLS whichever role the pool
+ * connects as. A rules read that RLS silently emptied would label nothing.
+ */
+export function disclosePersonalAmbientResults(
+  sql: Sql,
+  params: Parameters<PersonalAmbientDeps['disclose']>[1],
+): Promise<DisclosedDocuments<PersonalSearchResult>> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('app.workspace_id', ${params.workspaceId}, true)`;
+    return discloseDocuments(tx, { ...params, via: 'personal:ambient' });
+  }) as Promise<DisclosedDocuments<PersonalSearchResult>>;
 }
 
 function defaultDeps(): PersonalAmbientDeps {
@@ -122,6 +144,7 @@ function defaultDeps(): PersonalAmbientDeps {
     },
     search: (db, workspaceId, userId, input) =>
       searchPersonalDocuments(db, workspaceId, userId, input),
+    disclose: disclosePersonalAmbientResults,
   };
 }
 
@@ -131,7 +154,7 @@ function compact(value: string, max: number): string {
 }
 
 export function renderPersonalAmbientBlock(
-  results: PersonalSearchResult[],
+  results: Array<PersonalSearchResult & { privacy?: DocumentLabel | null }>,
   scopes: string[],
   budgetChars = PERSONAL_AMBIENT_BUDGET_CHARS,
 ): string | null {
@@ -149,7 +172,10 @@ export function renderPersonalAmbientBlock(
     ]
       .filter(Boolean)
       .join(' · ');
-    const line = `- ${compact(result.title || '(untitled)', 120)} — ${compact(result.snippet, 360)} [${provenance}]`;
+    const restriction = result.privacy
+      ? ` (restricted ${result.privacy.level}: send only to ${result.privacy.readerSet.join(', ')} or the owner)`
+      : '';
+    const line = `- ${compact(result.title || '(untitled)', 120)} — ${compact(result.snippet, 360)} [${provenance}]${restriction}`;
     if (used + line.length + 1 > budgetChars) break;
     lines.push(line);
     used += line.length + 1;
@@ -157,16 +183,22 @@ export function renderPersonalAmbientBlock(
   return lines.length > 2 ? lines.join('\n') : null;
 }
 
-export async function buildPersonalAmbientContextBlock(
-  input: {
-    ownerId: string;
-    userId: string;
-    workspaceId: string;
-    query: string;
-    budgetChars?: number;
-  },
+export interface PersonalAmbientResults {
+  scopes: string[];
+  documents: Array<PersonalSearchResult & { privacy: DocumentLabel | null }>;
+}
+
+/**
+ * The granted-only core of the ambient leg: resolve identity, authorize, search,
+ * disclose. Returns null on refusal, an empty query, or any failure — the
+ * caller renders. Shared by the Personal Vault block below and by the
+ * generalized granted-sources leg (data-sources/granted-sources-injection.ts),
+ * so both run the exact same authorization.
+ */
+export async function collectPersonalAmbientResults(
+  input: { ownerId: string; userId: string; workspaceId: string; query: string },
   deps: PersonalAmbientDeps = defaultDeps(),
-): Promise<string | null> {
+): Promise<PersonalAmbientResults | null> {
   const query = input.query.trim().slice(0, 500);
   if (!query || !input.ownerId.trim() || !input.userId.trim()) return null;
   try {
@@ -181,10 +213,34 @@ export async function buildPersonalAmbientContextBlock(
       snippetChars: 360,
       queryEmbedding,
     });
-    return renderPersonalAmbientBlock(results, authorization.scopes, input.budgetChars);
+    // Same rule as personal:search: a restricted result reaches the session only
+    // with its disclosure row, which then constrains every send it makes. A
+    // failure to record lands in the catch below — silence, never unlabelled.
+    const disclosed = await deps.disclose(deps.sql, {
+      workspaceId: input.workspaceId,
+      userId: input.userId,
+      agentOwnerId: input.ownerId.trim(),
+      documents: results,
+    });
+    return { scopes: authorization.scopes, documents: disclosed.documents };
   } catch {
     // Turn-start injection is fail-soft. A vault/store/embedder failure is
     // silence; it must never cost the caller's turn or weaken authorization.
     return null;
   }
+}
+
+export async function buildPersonalAmbientContextBlock(
+  input: {
+    ownerId: string;
+    userId: string;
+    workspaceId: string;
+    query: string;
+    budgetChars?: number;
+  },
+  deps: PersonalAmbientDeps = defaultDeps(),
+): Promise<string | null> {
+  const collected = await collectPersonalAmbientResults(input, deps);
+  if (!collected) return null;
+  return renderPersonalAmbientBlock(collected.documents, collected.scopes, input.budgetChars);
 }

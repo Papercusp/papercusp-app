@@ -33,21 +33,22 @@ export interface StagingFirstBlockerProblem {
   detail: string;
 }
 
-// `main` is overloaded: it can mean the release branch, or a browser build
-// artifact (`main bundle`, `main chunk`, ...). Only the former belongs to the
-// staging-first release guard. Keep this lexical fence close to the token so a
-// later gate phrase in the same sentence cannot turn build prose into a wait.
+// `main` can name a browser artifact, and `deployment` can name metadata that
+// source work inventories (including a deployment model under legal review).
+// Neither means waiting for released code. Fence those nouns at the token; an
+// actual main/deployed-host prerequisite elsewhere in the same text must still
+// be recognized.
 const DEPLOYED_ENV_RE =
-  /(?:\bmain\b(?!(?:\s+|-)\b(?:bundle|chunk|entry|thread)\b)|:3070\b|\bgreen[- ]checkpoint\b|\bdeploy(?:ed|ment|ing)?\b)/i;
+  /(?:\bmain\b(?!(?:\s+|-)(?:bundle|chunk|entry|thread|loop|event(?:\s+|-)loop)\b)|:3070\b|\bgreen[- ]checkpoint\b|\b(?:deploy(?:ed|ing)?(?!(?:\s+|-)\bmodel\b)|deployment(?!(?:\s+|-)\b(?:ownership|configuration|topology|source|model)\b))\b)/i;
 const STRONG_GATE_RE =
   /(?:\bwait(?:ing)?\s+(?:for|on)\b|\bblock(?:ed|ing|s)?\b.{0,40}\b(?:on|until|before|by)\b|\bprerequisite\b|\bonly\s+after\b|\bbefore\s+(?:continu(?:e|ing)|implement(?:ation|ing)?|clos(?:e|ing)|mark(?:ing)?\s+(?:it\s+)?done)\b|\b(?:must|required?|requires?)\b.{0,80}\b(?:before|until|prior to)\b)/i;
 // A bare `until` is ordinary ordering prose. It is a strong gate only when
 // its object is itself a release-plane token. This prevents e.g. `main bundle
 // ... cannot begin until: parse` from pairing unrelated words.
 const RELEASE_PLANE_UNTIL_RE =
-  /\buntil\b\s*:?[\s,-]*(?:(?:the\s+)?main\b(?!(?:\s+|-)\b(?:bundle|chunk|entry|thread)\b)|:3070\b|\bgreen[- ]checkpoint\b|\bdeploy(?:ed|ment|ing)?\b)/i;
+  /\buntil\b\s*:?[\s,-]*(?:(?:the\s+)?main\b(?!(?:\s+|-)(?:bundle|chunk|entry|thread|loop|event(?:\s+|-)loop)\b)|:3070\b|\bgreen[- ]checkpoint\b|\bdeploy(?:ed|ment|ing)?\b)/i;
 const NEGATED_OR_META_GATE_RE =
-  /(?:\b(?:reject|refus|forbid|prevent|detect|flag|exclud)\w*\b|\bguard(?:s|ed|ing)?\s+against\b|\bno\b.{0,80}\b(?:block|wait|required?|prerequisite)\w*\b|\bnot\s+(?:an?\s+)?(?:\w+[- ]){0,3}(?:prerequisite|wait|block(?:er|ing)?|gate)\b|\b(?:does|do|must|should|is|are)\s+not\b.{0,80}\b(?:block|wait|required?|prerequisite)\w*\b|\bnever\s+(?:an?\s+)?(?:block|wait|require|prerequisite)\w*\b|\bwithout\s+wait(?:ing)?\s+(?:for|on)\b|\binstead\s+of\s+wait(?:ing)?\s+(?:for|on)\b)/i;
+  /(?:\b(?:reject|refus|forbid|prevent|detect|flag|exclud)\w*\b|\bguard(?:s|ed|ing)?\s+against\b|\bno\b.{0,80}\b(?:block|wait|require(?:d|ment)?|prerequisite)\w*\b|\bnot\s+(?:an?\s+)?(?:\w+[- ]){0,3}(?:prerequisite|wait|block(?:er|ing)?|gate)\b|\b(?:does|do|must|should|is|are)\s+not\b.{0,80}\b(?:block|wait|require(?:d|ment)?|prerequisite)\w*\b|\bnever\s+(?:an?\s+)?(?:block|wait|require|prerequisite)\w*\b|\bwithout\s+wait(?:ing)?\s+(?:for|on)\b|\binstead\s+of\s+wait(?:ing)?\s+(?:for|on)\b)/i;
 const FINAL_LIFECYCLE_RE =
   /(?:\bfinal\s+(?:shipment|promotion|deploy(?:ment)?|release|rollout|verification|acceptance)\b|\bship(?:ment)?\s+verification\b|\brelease\s+packag(?:e|ing)\b|\brollback\b|\bmigration\s+order(?:ing)?\b)/i;
 const FINAL_PHASE_RE = /(?:\brelease\b|\bshipment\b|\brollout\b|\bclosure\b|\bship\b)/i;
@@ -58,7 +59,7 @@ const CONCRETE_REASON_RE =
   /(?:\bbecause\b|\bdue to\b|\bsince\b|\breason\b|\brollback\b|\brelease\s+packag(?:e|ing)\b|\bmigration\s+order(?:ing)?\b|\bproduction[- ]only\b|\bdeployed[- ]host\b)/i;
 const ACCEPTANCE_SECTION_RE = /^(?:acceptance|requirements?|validation|verification)\b/i;
 const MAIN_RELEASE_BLOCKER_RE =
-  /(?:\bmain\b|:3070\b|green[- ]checkpoint|greenCheckpoint|\bgreen[- ]pin\b|\bproduction\b)/i;
+  /(?:\bmain\b(?!(?:\s+|-)(?:bundle|chunk|entry|thread|loop|event(?:\s+|-)loop)\b)|:3070\b|green[- ]checkpoint|greenCheckpoint|\bgreen[- ]pin\b|\bproduction\b)/i;
 const GENERIC_DEPLOY_BLOCKER_RE = /(?:\brelease\b|\bdeploy(?:ed|ment|ing)?\b)/i;
 const EXPLICIT_STAGING_ENV_RE = /(?:\bstaging\b|\bcurrent[- ]build\b)/i;
 const LIVE_GATE_OPERATION_RE =
@@ -283,7 +284,16 @@ export function stagingFirstActivationProblems(plan: ParsedPlan): StagingFirstAc
         const blocker = plan.items.find((candidate) => candidate.id === ref);
         // A terminal blocker imposes no wait, even when its text names the release plane.
         if (!blocker || isTerminalItemStatus(blocker.storedStatus)) return false;
-        return DEPLOYED_ENV_RE.test(blocker.text);
+        // Preparing or auditing a service's deployment is source work, not proof
+        // that dependent implementation must await released code. Keep actual
+        // deployed/main/production and final obligations protected for every verb.
+        const sourcePreparation = /^(?:prepare|configure|inventory|audit|review|inspect|document|map)\b/i.test(blocker.text);
+        return DEPLOYED_ENV_RE.test(blocker.text) && (
+          !sourcePreparation ||
+          /\bdeploy(?:ed|ing)?\b/i.test(blocker.text) ||
+          MAIN_RELEASE_BLOCKER_RE.test(blocker.text) ||
+          FINAL_LIFECYCLE_RE.test(blocker.text)
+        );
       })
     ) {
       problems.push({

@@ -3,6 +3,7 @@ import type postgres from 'postgres';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { getSessionUserOrDefault } from '../../auth';
 import { authorizePersonalAccess } from '../../personal-vault/authorization';
+import { disclosureSubject } from '../_disclosure-subject';
 import { parseSocialPostRef } from '../../capability-verbs/social';
 import { readSocialPost } from '../../capability-verbs/social-read';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
@@ -38,6 +39,7 @@ export default defineTool({
       workspaceId,
       userId: user.id,
       postId: args.postId,
+      agentOwnerId: disclosureSubject(ctx),
     });
     return { data: { allowed: true, post } };
   },

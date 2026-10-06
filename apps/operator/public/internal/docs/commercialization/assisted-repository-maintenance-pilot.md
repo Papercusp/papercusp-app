@@ -1,0 +1,58 @@
+# Assisted repository-maintenance pilot — offer and acceptance
+URL: /internal/docs/commercialization/assisted-repository-maintenance-pilot
+
+Reviewable 30-day paid-pilot offer, bounded workflow, pricing hypotheses, support/cancellation scope, demonstration and interview/quote material. Customer payment and acceptance remain evidence gates.
+
+# Assisted repository-maintenance pilot — offer v1
+
+Status: reviewable offer and experiment specification, authored 2026-10-03 under WI-10005829 for papercusp-monetization-2026-09-04 P-001. This document prepares the commercial offer; it is not a payment receipt, customer validation, live-hosting readiness claim or approved public license.
+
+## Buyer and job hypothesis
+
+A small engineering team or agency maintaining an active TypeScript/JavaScript repository wants a recurring queue of narrow, tested maintenance changes without supervising an agent all day. The initial job is a weekly repository-maintenance review: reproduce one agreed failing check or select one bounded dependency/maintenance change, prepare a reviewable patch, and provide evidence a maintainer can assess. The customer supplies the repository, permission scope and acceptance command.
+
+Initial fit: an existing repository with a reproducible test command, a named maintainer and one agreed maintenance backlog. Exclude production database changes, credentials rotation, security exploitation, broad rewrites and publishing/merging changes without separately granted authority. The hypotheses remain unvalidated until interviews and payment/outcome evidence establish them.
+
+## Concrete offer
+
+A 30-day assisted pilot for one organization and one repository, with one setup session and four weekly maintenance deliveries. Each delivery contains a problem/expected-result statement, a bounded patch or draft pull request, before/after focused test evidence, relevant affected checks, a concise risk/review note and an exact source revision. A customer maintainer accepts each delivery against the agreed behavior/test command. A delivery does not become accepted merely because an agent closes a work item.
+
+The maintainer chooses a target that fits one independently reviewable patch. If a target proves too broad, record the findings and agree a smaller target before incurring additional spend. An explicit investigated-no-change result may close an individual review only if the customer accepts that result; it is not silently counted as a successful patch.
+
+Support includes setup plus up to two staff hours during the pilot, with responses on the next business day. Confirm the actual operator/support contact and timezone before a quote is issued. Additional work is quoted separately. No 24/7 support, uptime SLA, guaranteed number of agents or promised enterprise confidentiality is included. The pilot has no automatic renewal: any subsequent month requires affirmative agreement.
+
+## Pricing hypotheses and exposure
+
+Test a $500/month and a $1,000/month platform/service-fee hypothesis in interviews, without treating either as a validated price or issuing a quote before P-003 cost measurement. These are experiments, not live Stripe configuration.
+
+Compute, retained resources and inference are separately visible and finite. The purchase order sets a funded usage allowance and a maximum request exposure before work starts. Default pilot inference uses the customer's OpenRouter key, with the customer's own provider/retention choices and disclosed fees; managed inference remains unavailable until P-007 production terms, key policy and accounting qualify it. BYOK does not mean free model access or zero OpenRouter fees.
+
+No automatic top-up, unapproved overage or unlimited consumption. At exhaustion, stop new spend and checkpoint/drain safely. State any retained disk/IP/snapshot costs and the export/retention/offboarding period in the final quote. A platform fee is not permission to bypass the customer's spending policy.
+
+## Customer acceptance and demonstration
+
+Demonstration: reproduce a narrowly scoped failure in a disposable copy of a real repository, implement the smallest behavior fix, add a canonical regression, and show the failed-then-passed test with the exact patch revision. Keep example/test-mode/demo evidence visibly separate from customer acceptance and payment evidence.
+
+A current engineering example is EI-24787677967034419: the staging-first activation classifier rejected a hosted-readiness audit as a release prerequisite. The canonical regression suite first showed six failures and then passed all 80 tests after the classifier fix. This demonstrates the proposed delivery shape; it is not a paying customer case study. The test receipt and remaining serving-runtime integration limit live on that item.
+
+Before the first customer delivery, require P-009 assembled current-build security/readiness acceptance and P-010 final served-release identity. Do not sell a staging demo as available paid hosting.
+
+## Interview and quote material
+
+Interview sequence:
+
+1. Which recurring repository-maintenance tasks consume time today, and how often?
+2. Show a recent task, its accepted result, test command and review effort.
+3. What scope may an agent execute, and which actions require maintainer approval?
+4. Is the reviewed patch plus reproducible evidence valuable at $500/month, $1,000/month, or neither? Record objections without converting verbal interest into demand proof.
+5. What setup, support, data handling and cancellation commitments are required?
+
+Quote fields: organization/contact; repository and workflow; four delivery dates; acceptance command/maintainer; platform fee; finite compute allowance and rate basis; OpenRouter/BYOK responsibility; approved support hours; payment/merchant identity and tax treatment; no automatic renewal/top-up; cancellation/refund terms; export/retention/resource-disposition policy; start prerequisites and exact served release. Unresolved fields block issuing that quote.
+
+Cancellation hypothesis: the customer may end future work/renewal at any time. Paid usage already incurred remains itemized; treatment of undelivered service fees is stated before payment. Ending renewal does not authorize deletion of retained data. Use the existing cancellation/export/offboarding mechanisms and verify resource obligations to terminal disposition.
+
+## Learning and stop conditions
+
+Target three unrelated paying organizations as a recruitment experiment. Proposed observation window is 30 days after each organization begins; record exact dates. Before quoting, P-003 sets numeric margin, support, onboarding and repeat-use thresholds. P-011 records a dated continue/reprice/narrow/stop decision using real receipts, customer-approved comparable jobs, rework, repeat use, reliability and costs.
+
+Stop recruiting/charging if the current security/readiness gate is unresolved, quote exposure cannot be bounded, payment/merchant prerequisites are unknown, or actual costs breach the agreed limits. Preparation and tests continue independently. No pilot evidence is currently asserted by this document.

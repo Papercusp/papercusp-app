@@ -616,6 +616,14 @@ export interface StalledLoopsSweepResult {
    */
   vetoedByWithheldFire: string[];
   /**
+   * WI-10005352: owners whose most recent fire loop-fire's BLOCKING-AWAIT SUPPRESSION withheld
+   * (`lastWithheldReason === 'await-blocking'`, `lastWithheldAt >= lastFiredAt`) and whose
+   * suppression re-arm still has a resume pending (`nextFireAt` in the future). The owner is
+   * parked on an await it registered itself; the loop is deliberately silent until that await
+   * fires or its threshold passes. Left alone, exactly like `vetoedByProviderWall`.
+   */
+  vetoedByAwaitSuppression: string[];
+  /**
    * EI-19966210024116714: the subset of `stalledOwners` whose loop is armed against a harness
    * their OWN session scope cannot address. The routine sits on workspace X while the owner's
    * `session_briefs` row resolves to workspace Y, so every harness-scoped call that session makes
@@ -1042,6 +1050,8 @@ export async function sweepStalledLoops(
   const repairedWakeStarved: string[] = [];
   /** WI-36792: owners whose last fire the GATE withheld — never sent, so never answerable. */
   const vetoedByWithheldFire: string[] = [];
+  /** WI-10005352: owners parked on a blocking await whose suppression re-arm is still pending. */
+  const vetoedByAwaitSuppression: string[] = [];
   /** EI-19966210024116714: disarmed owners whose loop harness their own session cannot address. */
   const disarmedUnaddressableHarness: string[] = [];
   const nowMs = Date.now();
@@ -1133,6 +1143,46 @@ export async function sweepStalledLoops(
           `(~${Math.round(wall.resumesInMs / 1000)}s away) — refusing to disarm. It is waiting out a ` +
           `TRANSIENT capacity condition, not wedged; disarming would make a self-healing backoff ` +
           `permanent (EI-19441932615368003).`,
+      );
+      continue;
+    }
+
+    // WI-10005352 — AWAIT-SUPPRESSED, NOT STALLED. The provider-wall shape with a different cause.
+    //
+    // loop-fire's blocking-await suppression (EI-10901) withholds a due fire while the owner is
+    // parked on an await it registered itself, and re-arms `next_fire_at` to the await's resume
+    // threshold. The claim has already stamped `lastFiredAt`, no wake goes out, and presence goes
+    // stale because the owner is correctly asleep. After a floor's worth of that,
+    // computeTurnsStalled's frozen-gap branch reads it as dead. Measured 2026-10-02: su-ce50c06d
+    // answered its 01:14Z wake (turn 01:19:37Z); the 01:25:33Z fire was suppressed on
+    // conversation:answered with resume at 02:14:04Z; the 02:07:04Z sweep disarmed it as
+    // `turns-stalled`. The session was alive and took a turn at 02:08Z.
+    //
+    // Keyed on THREE facts, all from this sweep's status: the withhold was the await path
+    // (`lastWithheldReason`, so a fire-gate withhold keeps its own veto above), it is the MOST
+    // RECENT fire (`lastWithheldAt >= lastFiredAt`), and the re-arm's resume is still in the future.
+    //
+    // No reachability probe, unlike the withheld-fire veto: the suppression itself only happens
+    // while the owner holds a live blocking await, and SessionEnd cancels a dead session's awaits.
+    // A session that dies after the withhold is held off only until the resume fires: that wake
+    // then goes out, no turn follows, `lastFiredAt` passes `lastWithheldAt`, and the ordinary
+    // disarm applies on a later sweep. Bounded delay, same trade as `vetoedByProviderWall`.
+    const suppressedWithheldMs = status.lastWithheldAt ? Date.parse(status.lastWithheldAt) : NaN;
+    const suppressedFiredMs = status.lastFiredAt ? Date.parse(status.lastFiredAt) : NaN;
+    const suppressedResumeMs = status.nextFireAt ? Date.parse(status.nextFireAt) : NaN;
+    if (
+      status.lastWithheldReason === 'await-blocking' &&
+      Number.isFinite(suppressedWithheldMs) &&
+      Number.isFinite(suppressedFiredMs) &&
+      suppressedWithheldMs >= suppressedFiredMs &&
+      Number.isFinite(suppressedResumeMs) &&
+      suppressedResumeMs > nowMs
+    ) {
+      vetoedByAwaitSuppression.push(ownerId);
+      console.warn(
+        `[stalled-loops-guard] AWAIT-SUPPRESSED ${ownerId}: the last fire (${status.lastFiredAt}) was ` +
+          `withheld at ${status.lastWithheldAt} because the owner is parked on a blocking await, and the ` +
+          `loop resumes at ${status.nextFireAt} — refusing to disarm (WI-10005352).`,
       );
       continue;
     }
@@ -1893,6 +1943,7 @@ export async function sweepStalledLoops(
     disarmedWhileReachable,
     repairedWakeStarved,
     vetoedByWithheldFire,
+    vetoedByAwaitSuppression,
     disarmedUnaddressableHarness,
     vetoedByToolActivity,
     reArmedToolLiveParked,

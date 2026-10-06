@@ -202,7 +202,9 @@ async function peekHumanRelevant(): Promise<boolean> {
     SELECT id::text AS id, surface, body->'to' AS to_json
       FROM harness_shared.coord_event_log
      WHERE workspace_id = ${WS} AND id > ${cursor}
-     ORDER BY id ASC
+     -- id::bigint: a bare ORDER BY id binds to the text output alias (WI-10004608). The
+     -- max-fold below is order-insensitive today, but rows must not arrive in text order.
+     ORDER BY id::bigint ASC
   `;
   let human = false;
   for (const r of rows) {

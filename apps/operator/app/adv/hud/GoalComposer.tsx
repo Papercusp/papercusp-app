@@ -25,13 +25,15 @@
  * The agent-proposes-a-goal flow (`goals:propose` → GoalProposalCard) is a
  * SEPARATE, still-live path and is not replaced by this.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal } from '@/app/harness/Modal';
 import './hud.css';
 import {
   postGoalStart,
+  getGoalStartRequestIdentity,
   validateGoalDraft,
   type GoalComposerDraft,
+  type GoalStartRequestIdentity,
 } from './goal-composer-model';
 
 const EMPTY: GoalComposerDraft = { title: '', killCriterion: '', ceiling: '', body: '' };
@@ -78,6 +80,7 @@ export default function GoalComposer({
   const [errors, setErrors] = useState<Partial<Record<keyof GoalComposerDraft, string>>>({});
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const requestIdentity = useRef<GoalStartRequestIdentity | null>(null);
 
   // Reopening starts clean. A half-typed goal surviving a close reads as a
   // draft the surface has no way to save, and the previous attempt's error
@@ -88,6 +91,7 @@ export default function GoalComposer({
       setErrors({});
       setFailure(null);
       setBusy(false);
+      requestIdentity.current = null;
     }
   }, [open]);
 
@@ -100,9 +104,19 @@ export default function GoalComposer({
       return;
     }
     setErrors({});
+    const identity = getGoalStartRequestIdentity(
+      validated.args,
+      { workspaceId, harnessSlug },
+      requestIdentity.current,
+    );
+    requestIdentity.current = identity;
     setBusy(true);
     try {
-      const res = await postGoalStart(validated.args, { workspaceId, harnessSlug });
+      const res = await postGoalStart(validated.args, {
+        workspaceId,
+        harnessSlug,
+        requestKey: identity.requestKey,
+      });
       if (res.ok) {
         onStarted(res.goalId, res.agentOwnerId);
         onClose();

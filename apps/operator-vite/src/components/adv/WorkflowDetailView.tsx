@@ -114,6 +114,17 @@ export default function WorkflowDetailView({
             >
               {armed === null ? "Unwired" : armed ? "Armed" : "Disarmed"}
             </span>
+            {binding?.pack ? (
+              <span
+                className="pc-workflow-detail__badge"
+                data-pack-reviewed={String(binding.pack.reviewed)}
+                title="Installed by a trigger pack: arming reviews the whole pack first"
+              >
+                {binding.pack.reviewed
+                  ? `Pack: ${binding.pack.pluginName}`
+                  : `Pack: ${binding.pack.pluginName} · needs review`}
+              </span>
+            ) : null}
             {lastFiredLabel ? (
               <span className="pc-workflow-detail__lastfired">
                 {lastFiredLabel}

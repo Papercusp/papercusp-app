@@ -17,7 +17,7 @@
  * want true isolation, run shell-omp under a different OS user.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
@@ -28,19 +28,16 @@ function tokenPath(): string {
   return join(process.env.PAPERCUSP_HOME || join(homedir(), '.papercusp'), 'superuser-token');
 }
 
-let _cached: { path: string; token: string; mtimeMs: number } | null = null;
-
 function loadToken(): string | null {
   try {
     const path = tokenPath();
-    const st = statSync(path);
-    if (_cached?.path === path && _cached.mtimeMs === st.mtimeMs) return _cached.token;
+    // This is an authentication boundary. Do not cache by mtime: a token can
+    // be replaced at the same path without a distinguishable mtime update,
+    // leaving a long-lived operator process accepting only the old bearer.
     const tok = readFileSync(path, 'utf8').trim();
     if (tok.length < 16) return null; // sanity: refuse short tokens
-    _cached = { path, token: tok, mtimeMs: st.mtimeMs };
     return tok;
   } catch {
-    _cached = null;
     return null;
   }
 }
@@ -48,8 +45,8 @@ function loadToken(): string | null {
 /**
  * Read the on-disk superuser bearer token, or null if not yet installed.
  * The single shared reader — `console-launcher` and `buildLaunchSpec`'s
- * `su` branch both use this so the "where's the token" logic (path,
- * mtime cache, short-token sanity) lives in exactly one place.
+ * `su` branch both use this so the "where's the token" logic (path and
+ * short-token sanity) lives in exactly one place.
  */
 export function readSuperuserToken(): string | null {
   return loadToken();

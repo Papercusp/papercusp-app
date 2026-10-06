@@ -16,7 +16,7 @@ import { inboxWakeKey } from '../inbox-wake';
 export default defineTool({
   name: 'coord:whoami',
   description:
-    'Return the coordination identity the server resolved for you: ownerId (the stable per-agent id), ownerLabel, source, workspaceId, userId, your current named-fleet membership (fleetSlug/fleetRole, from live presence with launch-env fallback on read failure), and your inbox_wake_key (the key a coord:send {wake:true} fires + the one coord:await-inbox watches). A debug aid for confirming how the coordination layer sees this agent.',
+    "Show this agent's identity. Includes ownerId (the stable per-agent id), ownerLabel, source, workspaceId, userId, named-fleet membership (fleetSlug/fleetRole, live presence with launch-env fallback on read failure), and inbox_wake_key (the key coord:send {wake:true} fires + the one coord:await-inbox watches). Debug aid for how the coordination layer sees this agent.",
   guidance: {
     when: 'Debugging identity — "what ownerId am I?" before relying on lock or message behaviour.',
     notWhen: 'Routine work — identity is resolved automatically by every coord:* and locks:* call.',

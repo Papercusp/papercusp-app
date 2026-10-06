@@ -18,7 +18,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { decisionModelLedgerStats } from '../../decision-model-ledger';
-import { JevConflictInconclusiveError, judgeConflictsWithJev, type ConflictVerdict } from '../jev-conflict-judge';
+import {
+  JevConflictInconclusiveError,
+  judgeConflictsWithJev,
+  parseConflictWording,
+  type ConflictVerdict,
+} from '../jev-conflict-judge';
 import { ensureJevDecisionClient, readJevApiKey } from '../jev-settings';
 import {
   evaluateD015,
@@ -37,6 +42,8 @@ function flag(name: string): string | undefined {
 }
 
 const concurrency = Math.max(1, Number(flag('--concurrency') ?? 4));
+/** P-009 / D-007: which wording to ask; absent means the production wording. */
+const wording = parseConflictWording(flag('--wording'));
 
 interface RunTally {
   calls: number;
@@ -56,7 +63,7 @@ async function judge(
   try {
     const r = await judgeConflictsWithJev(
       { newText: kase.newText, neighbors: neighbours.map((n) => ({ id: n.id, text: n.text })) },
-      { client: ensureJevDecisionClient, consumer: CONSUMER },
+      { client: ensureJevDecisionClient, consumer: CONSUMER, wording },
     );
     tally.models.add(r.model);
     neighbours.forEach((n, i) => out.set(n.id, r.verdicts[i]));
@@ -115,7 +122,7 @@ try {
   const metrics = scoreConflictBench(pairs, calls);
   const verdict = evaluateD015(metrics);
   const generatedAt = new Date().toISOString();
-  const md = renderConflictBenchReport({ generatedAt, calls, metrics, verdict, pairs });
+  const md = renderConflictBenchReport({ generatedAt, wording, calls, metrics, verdict, pairs });
 
   // Ledger rows are written fire-and-forget; give them a bounded moment to land.
   const deadline = Date.now() + 10_000;
@@ -131,7 +138,7 @@ try {
   const stamp = generatedAt.replace(/[:.]/g, '-');
   const jsonPath = path.join(dir, `jev-conflict-${stamp}.json`);
   const mdPath = path.join(dir, `jev-conflict-${stamp}.md`);
-  fs.writeFileSync(jsonPath, JSON.stringify({ generatedAt, calls, metrics, verdict, ledger, pairs }, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(jsonPath, JSON.stringify({ generatedAt, wording, calls, metrics, verdict, ledger, pairs }, null, 2) + '\n', 'utf8');
   fs.writeFileSync(mdPath, md + '\n', 'utf8');
   console.log('\n' + md + '\n');
   console.log(`ledger: written=${ledger.written} failed=${ledger.failed}${ledger.lastError ? ` lastError=${ledger.lastError}` : ''}`);

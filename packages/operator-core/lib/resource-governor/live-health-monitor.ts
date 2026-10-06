@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, statfs, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, readdir, rename, statfs, unlink, writeFile } from 'node:fs/promises';
 import { arch, cpus, freemem, homedir, platform, release, totalmem } from 'node:os';
 import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -37,6 +37,9 @@ export const LIVE_HEALTH_DEFAULT_CADENCE_MS = 2_000;
 export const LIVE_HEALTH_SNAPSHOT_MAX_AGE_MS = 15_000;
 export const LIVE_HEALTH_FRAGMENT_RETENTION_MS = 24 * 60 * 60_000;
 export const LIVE_HEALTH_PAGE_BYTES = 4_096;
+export const LIVE_HEALTH_HISTORY_MAX_BYTES = 16 * 1024 * 1024;
+export const LIVE_HEALTH_HISTORY_MAX_SAMPLES = 3_600;
+export const LIVE_HEALTH_HISTORY_MAX_RECORD_BYTES = 256 * 1024;
 
 export interface LiveHealthPaths {
   readonly rootDir: string;
@@ -70,6 +73,154 @@ export async function writeLiveHealthJson(path: string, value: unknown): Promise
   } catch (error) {
     await unlink(tmp).catch(() => {});
     throw error;
+  }
+}
+
+async function writeLiveHealthText(path: string, value: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = join(dirname(path), '.' + process.pid + '-' + randomUUID() + '.tmp');
+  try {
+    await writeFile(tmp, value, { encoding: 'utf8', mode: 0o600 });
+    await rename(tmp, path);
+  } catch (error) {
+    await unlink(tmp).catch(() => {});
+    throw error;
+  }
+}
+
+interface LiveHealthHistoryWriterOptions {
+  readonly maxBytes?: number;
+  readonly maxSamples?: number;
+  readonly maxRecordBytes?: number;
+}
+
+interface LiveHealthHistoryTail {
+  readonly text: string;
+  readonly needsRewrite: boolean;
+}
+
+/**
+ * Append complete snapshots as JSONL while bounding disk use and sample count.
+ * The monitor is the sole writer for this path; appends are serialized so an
+ * overlapping slow sample cannot race a retention compaction.
+ */
+export class LiveHealthHistoryWriter {
+  readonly path: string;
+  readonly maxBytes: number;
+  readonly maxSamples: number;
+  readonly maxRecordBytes: number;
+  private initialized = false;
+  private rowCount = 0;
+  private byteCount = 0;
+  private pending: Promise<void> = Promise.resolve();
+
+  constructor(path: string, options: LiveHealthHistoryWriterOptions = {}) {
+    this.path = path;
+    this.maxBytes = Math.max(1, Math.floor(options.maxBytes ?? LIVE_HEALTH_HISTORY_MAX_BYTES));
+    this.maxSamples = Math.max(1, Math.floor(options.maxSamples ?? LIVE_HEALTH_HISTORY_MAX_SAMPLES));
+    this.maxRecordBytes = Math.max(
+      1,
+      Math.min(this.maxBytes, Math.floor(options.maxRecordBytes ?? LIVE_HEALTH_HISTORY_MAX_RECORD_BYTES)),
+    );
+  }
+
+  append(snapshot: LiveHealthSnapshot): Promise<boolean> {
+    const result = this.pending.then(() => this.appendSerial(snapshot));
+    this.pending = result.then(() => {}, () => {});
+    return result;
+  }
+
+  private async readTail(): Promise<LiveHealthHistoryTail> {
+    const file = await open(this.path, 'r').catch(() => null);
+    if (!file) return { text: '', needsRewrite: false };
+    try {
+      const size = (await file.stat()).size;
+      const length = Math.min(size, this.maxBytes);
+      if (length === 0) return { text: '', needsRewrite: size > 0 };
+      const start = size - length;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await file.read(buffer, 0, length, start);
+      let text = buffer.subarray(0, bytesRead).toString('utf8');
+      let needsRewrite = start > 0;
+      if (start > 0) {
+        const firstNewline = text.indexOf('\n');
+        text = firstNewline < 0 ? '' : text.slice(firstNewline + 1);
+      }
+      if (text && !text.endsWith('\n')) {
+        const lastNewline = text.lastIndexOf('\n');
+        text = lastNewline < 0 ? '' : text.slice(0, lastNewline + 1);
+        needsRewrite = true;
+      }
+      return { text, needsRewrite };
+    } finally {
+      await file.close();
+    }
+  }
+
+  private validRows(text: string): string[] {
+    return text.split(/\r?\n/).filter((line) => {
+      if (!line) return false;
+      try {
+        const value: unknown = JSON.parse(line);
+        return value !== null && typeof value === 'object' && !Array.isArray(value);
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  private async replaceRows(rows: readonly string[], targetRows: number, targetBytes: number): Promise<void> {
+    const kept: string[] = [];
+    let bytes = 0;
+    for (let index = rows.length - 1; index >= 0 && kept.length < targetRows; index -= 1) {
+      const row = rows[index]!;
+      const rowBytes = Buffer.byteLength(row) + 1;
+      if (bytes + rowBytes > targetBytes) break;
+      kept.push(row);
+      bytes += rowBytes;
+    }
+    const ordered = kept.reverse();
+    await writeLiveHealthText(this.path, ordered.length ? ordered.join('\n') + '\n' : '');
+    this.rowCount = ordered.length;
+    this.byteCount = bytes;
+  }
+
+  private async initialize(): Promise<void> {
+    if (this.initialized) return;
+    const tail = await this.readTail();
+    const rawRows = tail.text.split(/\r?\n/).filter(Boolean);
+    const rows = this.validRows(tail.text);
+    this.rowCount = rows.length;
+    this.byteCount = rows.reduce((total, row) => total + Buffer.byteLength(row) + 1, 0);
+    this.initialized = true;
+    if (
+      tail.needsRewrite ||
+      rows.length !== rawRows.length ||
+      this.rowCount > this.maxSamples ||
+      this.byteCount > this.maxBytes
+    ) {
+      await this.replaceRows(rows, this.maxSamples, this.maxBytes);
+    }
+  }
+
+  private async appendSerial(snapshot: LiveHealthSnapshot): Promise<boolean> {
+    const row = JSON.stringify(snapshot) + '\n';
+    const rowBytes = Buffer.byteLength(row);
+    if (rowBytes > this.maxRecordBytes || rowBytes > this.maxBytes) return false;
+    await this.initialize();
+    if (this.rowCount + 1 > this.maxSamples || this.byteCount + rowBytes > this.maxBytes) {
+      const tail = await this.readTail();
+      await this.replaceRows(
+        this.validRows(tail.text),
+        Math.floor(this.maxSamples / 2),
+        Math.floor(this.maxBytes / 2),
+      );
+    }
+    await mkdir(dirname(this.path), { recursive: true });
+    await appendFile(this.path, row, { encoding: 'utf8', mode: 0o600 });
+    this.rowCount += 1;
+    this.byteCount += rowBytes;
+    return true;
   }
 }
 
@@ -218,6 +369,7 @@ export interface HostLiveHealthCounters {
   readonly freeMemoryBytes: number;
   readonly cpuPsi: PsiSample;
   readonly memoryPsi: PsiSample;
+  readonly ioPsi: PsiSample;
   readonly scheduler: SchedulerSample;
   readonly memoryKernel: MemoryKernelSample;
   readonly network: NetworkCounters | null;
@@ -250,8 +402,9 @@ export async function collectHostLiveHealthCounters(
           readTextOrNull('/proc/net/dev'),
           readTextOrNull('/proc/net/tcp'),
           readTextOrNull('/proc/net/tcp6'),
+          readTextOrNull('/proc/pressure/io'),
         ])
-      : [null, null, null, null, null, null, null, null];
+      : [null, null, null, null, null, null, null, null, null];
   const fs = await statfs(paths.rootDir).catch(() => null);
   const diskFreeBytes = fs ? Number(fs.bavail) * Number(fs.bsize) : null;
   return {
@@ -261,6 +414,7 @@ export async function collectHostLiveHealthCounters(
     freeMemoryBytes: freemem(),
     cpuPsi: parsePsi(linuxReads[0]),
     memoryPsi: parsePsi(linuxReads[1]),
+    ioPsi: parsePsi(linuxReads[8]),
     scheduler: parseProcStat(linuxReads[2]),
     memoryKernel: parseMemoryKernel(linuxReads[3], linuxReads[4]),
     network: parseNetworkCounters(linuxReads[5]),
@@ -358,6 +512,20 @@ export function applyHostLiveHealthReadings(
     writerId,
     current,
     current.memoryPsi.full60,
+    current.atMs - 60_000,
+  );
+  signals['io.psiSomePct'] = monitorReading(
+    'io.psiSomePct',
+    writerId,
+    current,
+    current.ioPsi.some60,
+    current.atMs - 60_000,
+  );
+  signals['io.psiFullPct'] = monitorReading(
+    'io.psiFullPct',
+    writerId,
+    current,
+    current.ioPsi.full60,
     current.atMs - 60_000,
   );
   signals['memory.swapUsedBytes'] = monitorReading(
@@ -469,6 +637,7 @@ export interface LiveHealthMonitorOptions {
   readonly collectHost?: typeof collectHostLiveHealthCounters;
   readonly readFragments?: typeof readLiveHealthFragments;
   readonly writeSnapshot?: typeof writeLiveHealthJson;
+  readonly writeHistory?: (snapshot: LiveHealthSnapshot) => Promise<void>;
   readonly log?: (message: string) => void;
 }
 
@@ -481,6 +650,7 @@ export class LiveHealthMonitor {
   private readonly collectHost: typeof collectHostLiveHealthCounters;
   private readonly readFragments: typeof readLiveHealthFragments;
   private readonly writeSnapshot: typeof writeLiveHealthJson;
+  private readonly writeHistory: (snapshot: LiveHealthSnapshot) => Promise<void>;
   private readonly log: (message: string) => void;
   private previous: HostLiveHealthCounters | null = null;
   private sequence = 0;
@@ -494,6 +664,12 @@ export class LiveHealthMonitor {
     this.readFragments = options.readFragments ?? readLiveHealthFragments;
     this.writeSnapshot = options.writeSnapshot ?? writeLiveHealthJson;
     this.log = options.log ?? ((message) => console.warn(message));
+    const history = new LiveHealthHistoryWriter(join(this.paths.rootDir, 'live-health-history.jsonl'));
+    this.writeHistory = options.writeHistory ?? (async (snapshot) => {
+      if (!(await history.append(snapshot))) {
+        this.log('[resource-governor-health] history row exceeded its configured cap; skipped');
+      }
+    });
     const startedAtMs = this.now();
     this.writer = {
       id: `monitor.host:${process.pid}`,
@@ -543,6 +719,14 @@ export class LiveHealthMonitor {
     };
     await this.writeSnapshot(this.paths.snapshotPath, snapshot);
     this.previous = current;
+    try {
+      await this.writeHistory(snapshot);
+    } catch (error) {
+      this.log(
+        '[resource-governor-health] history write failed: ' +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
     return snapshot;
   }
 

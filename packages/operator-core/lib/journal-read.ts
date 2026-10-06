@@ -536,7 +536,12 @@ export function buildJournalctlArgs(opts: JournalReadOptions): string[] {
   const args: string[] = [...journalScopeArgs(scope)];
   args.push('--no-pager', '-o', 'json');
   args.push(`--output-fields=${JOURNAL_OUTPUT_FIELDS.join(',')}`);
-  for (const unit of opts.units ?? []) args.push('-u', unit);
+  for (const unit of opts.units ?? []) {
+    args.push('-u', unit);
+    // Without --user, -u selects only system units. In the all-journal
+    // stream, include the user-unit arm in journalctl's unit OR filter too.
+    if (scope === 'all') args.push('--user-unit', unit);
+  }
   if (opts.identifier) args.push('-t', opts.identifier);
   args.push('--since', normalizeJournalWindow(opts.since ?? JOURNAL_READ_DEFAULT_SINCE));
   if (opts.until) args.push('--until', normalizeJournalWindow(opts.until));
@@ -651,7 +656,13 @@ export function parseJournalJson(stdout: string): RawJournalRecord[] {
       clipped,
     });
   }
-  return out;
+  // A narrow journalctl --grep query can satisfy its -n cap with a newest-first
+  // reverse scan. Normalize before collapseConsecutive, whose ts/lastTs fields
+  // represent the first and final row in chronological order.
+  return out.sort((a, b) => {
+    if (!a.ts || !b.ts) return 0;
+    return a.ts.localeCompare(b.ts);
+  });
 }
 
 /** Decode one timestamp emitted by `log show --style json`. */
@@ -930,6 +941,49 @@ async function readJournalSlices(
 /** Resolves each requested unit to whether systemd knows it. */
 export type UnitLoadProbe = (units: string[], scope: JournalScope) => Promise<string[]>;
 
+/** Resolves requested systemd names to the Id journalctl records in the journal. */
+export type UnitCanonicalizer = (units: string[], scope: JournalScope) => Promise<string[]>;
+
+async function systemdUnitId(
+  manager: '--user' | '--system',
+  unit: string,
+  runSystemctl: ExecFileAsync,
+): Promise<string> {
+  try {
+    const { stdout } = await runSystemctl(
+      'systemctl',
+      [manager, 'show', '-p', 'Id', '--value', unit],
+      { timeout: 3000 },
+    );
+    return stdout.trim() || unit;
+  } catch {
+    // Keep the caller's name when systemd cannot resolve it. The existing
+    // unknown-unit probe remains responsible for making a confident unknown
+    // claim; a failed canonicalization is not evidence that the name is wrong.
+    return unit;
+  }
+}
+
+/**
+ * Resolve aliases before journalctl's `-u` filter is built. systemctl accepts
+ * aliases but journal entries carry the canonical unit Id, so querying the
+ * alias directly can produce a confident false zero while the service is
+ * active and writing records.
+ */
+export async function defaultUnitCanonicalizer(
+  units: string[],
+  scope: JournalScope,
+  runSystemctl: ExecFileAsync = execFileAsync,
+): Promise<string[]> {
+  if (!units.length) return [];
+  const managers: Array<'--user' | '--system'> =
+    scope === 'all' ? ['--user', '--system'] : [scope === 'system' ? '--system' : '--user'];
+  const resolved = await Promise.all(units.map(async (unit) =>
+    Promise.all(managers.map((manager) => systemdUnitId(manager, unit, runSystemctl))),
+  ));
+  return [...new Set(resolved.flat())];
+}
+
 /** Does THIS systemd manager report the unit as not-found? Null ⇒ cannot tell. */
 async function unitIsUnknownTo(manager: '--user' | '--system', unit: string): Promise<boolean | null> {
   try {
@@ -1036,15 +1090,19 @@ export async function readJournal(
   exec?: JournalExec,
   probeUnits: UnitLoadProbe = defaultUnitLoadProbe,
   resolveWindow: WindowResolver = defaultWindowResolver,
+  canonicalizeUnits: UnitCanonicalizer = defaultUnitCanonicalizer,
 ): Promise<JournalReadResult> {
   const backend = journalBackendForPlatform(opts.platform);
   const limit = clampLimit(opts.limit);
-  const args = backend === 'macos-unified'
-    ? buildMacLogArgs({ ...opts, limit })
-    : backend === 'systemd'
-      ? buildJournalctlArgs({ ...opts, limit })
-      : [];
   const units = opts.units ?? [];
+  const scope = opts.scope ?? JOURNAL_DEFAULT_SCOPE;
+  const queryUnits = backend === 'systemd' ? await canonicalizeUnits(units, scope) : units;
+  const queryOpts = { ...opts, units: queryUnits };
+  const args = backend === 'macos-unified'
+    ? buildMacLogArgs({ ...queryOpts, limit })
+    : backend === 'systemd'
+      ? buildJournalctlArgs({ ...queryOpts, limit })
+      : [];
   const commandName = backend === 'macos-unified' ? 'log' : 'journalctl';
   const base = {
     matched: 0,
@@ -1197,10 +1255,10 @@ export async function readJournal(
   };
 
   const slices = backend === 'systemd'
-    ? await resolveWideJournalSlices(opts, resolveWindow)
+    ? await resolveWideJournalSlices(queryOpts, resolveWindow)
     : [];
   if (slices.length) {
-    const sliced = await readJournalSlices(opts, slices, limit, run);
+    const sliced = await readJournalSlices(queryOpts, slices, limit, run);
     if (sliced.failure) {
       const { kind, message } = sliced.failure;
       return {

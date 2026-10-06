@@ -252,6 +252,79 @@ export async function persistSuSessionDescriptor(
   }
 }
 
+/**
+ * The operator worker process that holds a session's live engine
+ * (WI-10003879). `hostId` names the operator service (two services share this
+ * database), `nonce` is minted once per process so a recycled pid is never
+ * mistaken for the original owner.
+ */
+export interface SuSessionHostOwner {
+  pid: number;
+  hostId: string;
+  nonce: string;
+  recordedAt: string;
+}
+
+export function isSuSessionHostOwner(value: unknown): value is SuSessionHostOwner {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as Partial<SuSessionHostOwner>;
+  return (
+    typeof v.pid === 'number' && Number.isSafeInteger(v.pid) && v.pid > 0 &&
+    typeof v.hostId === 'string' && v.hostId.length > 0 &&
+    typeof v.nonce === 'string' && v.nonce.length > 0 &&
+    typeof v.recordedAt === 'string'
+  );
+}
+
+/**
+ * Record the worker that just attached an engine to this session. Kept out of
+ * the descriptor write on purpose: the descriptor is the protocol snapshot,
+ * while ownership is a fact about this operator's process layout. Returns
+ * false (never throws) when the row or column is missing — the caller then
+ * stays on the local, pre-routing behaviour.
+ */
+export async function recordSuSessionHostOwner(
+  advSessionId: number,
+  owner: SuSessionHostOwner,
+  workspaceId = activeWorkspaceId(),
+): Promise<boolean> {
+  if (!Number.isSafeInteger(advSessionId) || advSessionId <= 0 || !isSuSessionHostOwner(owner)) return false;
+  try {
+    const { sql } = getOrgPg();
+    const rows = await sql<{ id: number }[]>`
+      UPDATE harness_shared.adv_sessions
+         SET su_host_owner = ${JSON.stringify(owner)}::jsonb
+       WHERE id = ${advSessionId} AND workspace_id = ${workspaceId}
+       RETURNING id`;
+    return rows.length > 0;
+  } catch (error) {
+    console.warn('[su-session] could not record the owning worker', error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
+/** Read the recorded owning worker for one chat; null when unknown or unreadable. */
+export async function readSuSessionHostOwner(input: {
+  agentChatId: string;
+  workspaceId?: string;
+}): Promise<SuSessionHostOwner | null> {
+  if (!input.agentChatId) return null;
+  try {
+    const { sql } = getOrgPg();
+    const workspaceId = input.workspaceId ?? activeWorkspaceId();
+    const rows = await sql<{ su_host_owner: unknown }[]>`
+      SELECT su_host_owner
+        FROM harness_shared.adv_sessions
+       WHERE workspace_id = ${workspaceId} AND su_agent_chat_id = ${input.agentChatId}
+       ORDER BY started_at DESC
+       LIMIT 1`;
+    const owner = rows[0]?.su_host_owner;
+    return isSuSessionHostOwner(owner) ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Pure stale-pid / native-identity decision used by startup reconciliation. */
 export function classifySuSessionRuntime(
   record: Pick<DurableSuSessionRecord, 'pid' | 'nativeSessionId' | 'endedAt' | 'lifecycle'>,

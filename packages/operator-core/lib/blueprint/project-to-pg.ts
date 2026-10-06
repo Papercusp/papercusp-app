@@ -260,6 +260,31 @@ export async function readBlueprintHashFromPg(
   return rows[0]?.content_hash ?? null;
 }
 
+/**
+ * The projected blueprint hash, projecting the git-canonical `.papercusp/blueprint.yaml`
+ * first when nothing has been projected yet. `harness:create` writes the file and leaves
+ * projection lazy (`getEffectiveBlueprint`), so a reader that needs the specification must
+ * go through that projector instead of reading PG alone (WI-10004001). One query when the
+ * projection exists; the projection runs only on a miss. Never call it inside a transaction.
+ */
+export async function readOrProjectBlueprintHash(
+  sql: Sql,
+  workspaceId: string,
+  harnessSlug: string,
+): Promise<string | null> {
+  const hash = await readBlueprintHashFromPg(sql, workspaceId, harnessSlug);
+  if (hash) return hash;
+  // resolveProject is the harness-resolution chokepoint (registry + retired-slug alias).
+  // Dynamic import: harness-core must not become a static dependency of this module.
+  const { resolveProject } = await import('../harness-core');
+  const project = await resolveProject(harnessSlug, workspaceId);
+  if (!project?.path) return null;
+  const blueprintPath = join(project.path, '.papercusp', 'blueprint.yaml');
+  if (!existsSync(blueprintPath)) return null;
+  await getEffectiveBlueprint(sql, { workspaceId, harnessSlug, blueprintPath });
+  return readBlueprintHashFromPg(sql, workspaceId, harnessSlug);
+}
+
 export interface EffectiveBlueprintOpts {
   workspaceId: string;
   harnessSlug: string;

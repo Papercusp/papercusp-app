@@ -56,6 +56,8 @@ export default defineTool({
       .optional()
       .describe('USD budget for the autoloop + governor row. number sets, null clears (governor then refuses unattended spend), omitted preserves.'),
     dryRun: z.boolean().optional(),
+  }).refine((args) => args.enabled !== undefined || args.budgetUsd !== undefined, {
+    message: 'provide enabled and/or budgetUsd — a call with neither changes nothing',
   }),
   async handler(args, ctx) {
     if (!isOperatorConfigWriteRole(ctx.role)) {

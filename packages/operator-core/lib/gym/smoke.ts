@@ -16,6 +16,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, readFileSync, 
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 // A DEDICATED (non-reused) PG container for the smoke. The shared test-config
@@ -31,7 +32,7 @@ import { collectTrace } from './collector';
 import { distillTrace } from './distill';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
 const FAKE_AGENT = join(__dirname, 'fixtures/fake-agent.mjs');
 const PORT = Number(process.env.GYM_SMOKE_PORT ?? 3971);
 const HEX = randomBytes(4).toString('hex');

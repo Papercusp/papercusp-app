@@ -377,6 +377,10 @@ export const INFRA_SIGNAL_SOURCES: readonly string[] = [
   // "drop the object" needs judgment about which side is wrong. Neither is a call
   // an auto-implement worker should make unsupervised.
   'schema-object-drift',
+  // WI-10004651. INFRA for the same reason: the repair is a NEW migration against the
+  // shared live database, and deciding which side (file or live object) is right
+  // needs judgment.
+  'migration-content-drift',
   // EI-5994: a dead-owner engine loop (loop:arm) parked with no completion signal is an
   // environment/session-liveness fact (the owner's process/wake-channel died), not a
   // product idea a worker can code-fix — misrouting it to ideaType:product/triageDecision:place

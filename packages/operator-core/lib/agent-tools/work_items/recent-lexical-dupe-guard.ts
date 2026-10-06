@@ -55,11 +55,31 @@ export interface RecentDupeCandidateRow {
   summary?: string;
   state: string;
   harness: string | null;
+  /** Whether the semantic guard's embedding-filtered query could see this row. */
+  hasEmbedding: boolean;
+}
+
+export interface RecentDupeCensus {
+  rows: RecentDupeCandidateRow[];
+  /** True when at least one row beyond the bounded candidate window exists. */
+  truncated: boolean;
+}
+
+export interface RecentDupeCoverage {
+  scanned: number;
+  unembedded: number;
+  truncated: boolean;
+  complete: boolean;
+}
+
+export interface RecentLexicalDupeResult {
+  candidates: SemanticDupeCandidate[];
+  coverage: RecentDupeCoverage;
 }
 
 /** Injectable seam (tests + any future non-work_items space). */
 export interface RecentLexicalDupeDeps {
-  queryRecentOpenItems: (windowMin: number, harness?: string) => Promise<RecentDupeCandidateRow[]>;
+  queryRecentOpenItems: (windowMin: number, harness?: string) => Promise<RecentDupeCensus>;
 }
 
 function threshold(raw: string | undefined, dflt: number): number {
@@ -108,28 +128,44 @@ function withBudget<T>(ms: number, p: Promise<T | null>): Promise<T | null> {
   });
 }
 
-async function queryRecentOpenItemsReal(windowMin: number, harness?: string): Promise<RecentDupeCandidateRow[]> {
+async function queryRecentOpenItemsReal(windowMin: number, harness?: string): Promise<RecentDupeCensus> {
   const { sql } = getOrgPg();
   const terminal = [...ALL_TERMINAL_STATUSES];
   const workspaces = [...new Set([issuesScopeWorkspace(), activeWorkspaceId()])];
-  const rows = await sql<Array<{ id: string; title: string; summary: string; state: string; harness_slug: string }>>`
+  const rows = await sql<Array<{
+    id: string;
+    title: string;
+    summary: string;
+    state: string;
+    harness_slug: string;
+    has_embedding: boolean;
+  }>>`
     SELECT feature_id AS id, COALESCE(title, '') AS title, COALESCE(summary, '') AS summary,
-           COALESCE(status, 'todo') AS state, harness_slug
+           COALESCE(status, 'todo') AS state, harness_slug,
+           (embedding IS NOT NULL) AS has_embedding
       FROM harness_shared.work_items
      WHERE workspace_id = ANY(${workspaces}::text[])
        AND created_ts >= now() - (${windowMin} || ' minutes')::interval
        AND (status IS NULL OR NOT (status = ANY(${terminal}::text[])))
        AND ${harness ? sql`harness_slug = ${harness}` : sql`TRUE`}
      ORDER BY created_ts DESC
-     LIMIT ${CANDIDATE_LIMIT}`;
-  return rows.map((r) => ({
-    id: r.id,
-    title: r.title,
-    summary: r.summary,
-    state: r.state,
-    harness: r.harness_slug || null,
-  }));
+     LIMIT ${CANDIDATE_LIMIT + 1}`;
+  const truncated = rows.length > CANDIDATE_LIMIT;
+  return {
+    rows: rows.slice(0, CANDIDATE_LIMIT).map((r) => ({
+      id: r.id,
+      title: r.title,
+      summary: r.summary,
+      state: r.state,
+      harness: r.harness_slug || null,
+      hasEmbedding: r.has_embedding,
+    })),
+    truncated,
+  };
 }
+
+/** Test seam for the real bounded query and its embedding/truncation evidence. */
+export const __queryRecentOpenItemsForTest = queryRecentOpenItemsReal;
 
 const realDeps: RecentLexicalDupeDeps = { queryRecentOpenItems: queryRecentOpenItemsReal };
 
@@ -151,9 +187,10 @@ async function classify(
   d: RecentLexicalDupeDeps,
   input: { title: string; summary?: string; harness?: string; excludeId?: string },
   overlap: typeof measurementOverlap = measurementOverlap,
-): Promise<SemanticDupeCandidate[]> {
+): Promise<RecentLexicalDupeResult> {
   const cfg = recentDupeConfig();
-  const rows = (await d.queryRecentOpenItems(cfg.windowMin, input.harness)).filter(
+  const census = await d.queryRecentOpenItems(cfg.windowMin, input.harness);
+  const rows = census.rows.filter(
     (r) => r.id !== input.excludeId,
   );
   const newTokens = titleTokens(input.title);
@@ -182,7 +219,8 @@ async function classify(
       // swallow: advisory signal only
     }
   }
-  return hits
+  const unembedded = rows.filter((row) => !row.hasEmbedding).length;
+  const candidates = hits
     .sort((a, b) => b.similarity - a.similarity)
     .slice(0, TOP_K)
     .map((r) => ({
@@ -193,6 +231,15 @@ async function classify(
       similarity: r.similarity,
       source: r.source,
     }));
+  return {
+    candidates,
+    coverage: {
+      scanned: rows.length,
+      unembedded,
+      truncated: census.truncated,
+      complete: !census.truncated && unembedded === 0,
+    },
+  };
 }
 
 /** Test seam: classify with an injectable overlap function (R-5 thrown-extractor case). */
@@ -201,14 +248,14 @@ export const __classifyRecentForTest = classify;
 /**
  * Prescreen a new work-item's title against OPEN items created within the last
  * `windowMin` minutes in the same harness, by word-overlap (no embedding needed).
- * Returns [] for "screened, no dupes" and null for "no verdict" (disabled,
- * timed out, errored) — the caller MUST treat null the same as [] (proceed; this
- * is advisory-only and NEVER blocks a create).
+ * Returns candidates plus bounded-census coverage evidence; null means "no verdict"
+ * (disabled, timed out, errored). This remains advisory-only and NEVER blocks a
+ * create by itself.
  */
 export async function findRecentLexicalDupes(
   input: { title: string; summary?: string; harness?: string; excludeId?: string },
   deps?: RecentLexicalDupeDeps,
-): Promise<SemanticDupeCandidate[] | null> {
+): Promise<RecentLexicalDupeResult | null> {
   if (process.env.PAPERCUSP_WI_RECENT_DUPE === 'off') return null;
   // Inert under vitest unless a test injects deps — mirrors semantic-dupe-guard so
   // unrelated tool tests never pay a real DB round-trip.

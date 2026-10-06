@@ -16,6 +16,14 @@
  */
 
 .page {
+  /* Bind the maintained shared chat renderer to this dark Cloud host. */
+  --pc-chat-fg: var(--fg);
+  --pc-chat-fg-mute: var(--fg-dim);
+  --pc-chat-border: var(--border);
+  --pc-chat-bubble-assistant: var(--bg);
+  --pc-chat-bubble-assistant-fg: var(--fg);
+  --pc-chat-bubble-user: var(--bg-popover, var(--bg));
+  --pc-chat-bubble-user-fg: var(--fg);
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -133,6 +141,17 @@
 
 .stageArea {
   min-width: 0;
+}
+
+.withGuide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 1300px) {
+  .withGuide { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ── The rail ─────────────────────────────────────────────────────────────── */
@@ -501,30 +520,6 @@
     font-size: 13px;
   }
 
-  .hostRow {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0;
-    padding: 5px;
-  }
-
-  .hostRowMain {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 10px;
-    width: 100%;
-    padding: 9px;
-  }
-
-  .hostCost {
-    grid-row: 2;
-    grid-column: 2;
-    margin-top: 2px;
-  }
-
-  .hostRowActions {
-    justify-content: flex-end;
-    padding: 0 8px 7px;
-  }
 }
 
 @container cw-page (max-width: 500px) {
@@ -744,13 +739,9 @@
 }
 
 .connectLayout[data-panel-open="true"] {
-  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
-}
-
-@media (max-width: 900px) {
-  .connectLayout[data-panel-open="true"] {
-    grid-template-columns: minmax(0, 1fr);
-  }
+  /* The desktop pane can be narrow inside a wide window. Fit both children
+     to this grid's width so provider controls never overlap the form. */
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
 }
 
 .providerRows {
@@ -888,25 +879,21 @@
 
 .configureColumns {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
   gap: 16px;
   align-items: start;
 }
 
-@media (max-width: 1000px) {
-  .configureColumns {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 .configureFields {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 12px;
 }
 
 .configureSummary {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 12px;
   position: sticky;
@@ -1291,6 +1278,7 @@
 .hostIdentity strong {
   font-size: 13px;
   font-weight: 590;
+  overflow-wrap: anywhere;
 }
 
 .hostIdentity span {
@@ -1830,6 +1818,35 @@
 .disposition:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Keep row overrides after the base row rules so narrow containers stack the
+ * actions instead of squeezing the workspace name into the status badge. */
+@container cw-page (max-width: 760px) {
+  .hostRow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding: 5px;
+  }
+
+  .hostRowMain {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 10px;
+    width: 100%;
+    padding: 9px;
+  }
+
+  .hostCost {
+    grid-row: 2;
+    grid-column: 2;
+    margin-top: 2px;
+  }
+
+  .hostRowActions {
+    justify-content: flex-end;
+    padding: 0 8px 7px;
+  }
 }
 
 /* ── Motion ───────────────────────────────────────────────────────────────── */

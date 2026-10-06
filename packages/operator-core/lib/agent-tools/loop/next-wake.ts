@@ -40,7 +40,8 @@
  * while a real turn is actively settling.
  *
  * A fourth shape, P-013 / EI-24023838400909760: the loop's newest fire PARKED undelivered
- * (see {@link lastLoopFireParked}).
+ * (see {@link lastLoopFireParked}). A fifth: reconciliation confirmed a delivered wake
+ * produced no loop-origin turn and recorded that failure in lastDeliveryOutcome.
  */
 import type { LoopStatus } from '../../harness/routines/loop';
 import type { ActiveLoopRewakeBlockedReason } from '../coordination/tools/continuation-gate';
@@ -60,7 +61,16 @@ export type LoopNextWakeInput =
     > &
       // Optional so hand-built inputs (and older fixtures) stay valid; getLoopStatus
       // always populates both from the loop's newest wake-delivery row.
-      Partial<Pick<LoopStatus, 'lastWakeStatus' | 'lastWakeError'>>)
+      Partial<
+        Pick<
+          LoopStatus,
+          | 'lastWakeStatus'
+          | 'lastWakeError'
+          | 'lastDeliveryOutcome'
+          | 'lastFiredAt'
+          | 'lastFailedFireLoopTurnCompletedAt'
+        >
+      >)
   | null
   | undefined;
 
@@ -83,6 +93,20 @@ export function lastLoopFireParked(
 ): boolean {
   if (loop?.lastWakeStatus !== 'parked') return false;
   return !/retry remains durable/i.test(loop.lastWakeError ?? '');
+}
+
+function hasCompletedLoopTurnAfterLastFire(
+  loop:
+    | Partial<Pick<LoopStatus, 'lastFiredAt' | 'lastFailedFireLoopTurnCompletedAt'>>
+    | null
+    | undefined,
+): boolean {
+  const firedAtMs = loop?.lastFiredAt == null ? Number.NaN : Date.parse(loop.lastFiredAt);
+  const completedAtMs =
+    loop?.lastFailedFireLoopTurnCompletedAt == null
+      ? Number.NaN
+      : Date.parse(loop.lastFailedFireLoopTurnCompletedAt);
+  return Number.isFinite(firedAtMs) && Number.isFinite(completedAtMs) && completedAtMs > firedAtMs;
 }
 
 export type LoopNextWakeVerdict =
@@ -122,6 +146,19 @@ export function classifyLoopNextWake(
   // P-013 / EI-24023838400909760: the last fire parked undelivered — the next one on the
   // same delivery path is expected to park too, so this loop does not guarantee a wake.
   if (lastLoopFireParked(loop)) return { guaranteed: false, reason: 'last-fire-parked' };
+
+  // EI-24609463764219558: a delivered wake can still fail to produce a model turn. The
+  // reconciler records this exact outcome only after its bounded grace found no
+  // loop-origin assistant turn and re-armed the loop as an error. A delayed turn may
+  // complete after that verdict, including after a later loop:arm; clear the failure
+  // only when the per-fire status query proves completion strictly after lastFiredAt.
+  // Missing, stale, or malformed proof keeps the previous fail-closed behavior.
+  if (
+    loop.lastDeliveryOutcome === 'loop-delivered-wake-no-loop-turn' &&
+    !hasCompletedLoopTurnAfterLastFire(loop)
+  ) {
+    return { guaranteed: false, reason: 'last-fire-no-loop-turn' };
+  }
 
   return { guaranteed: true, reason: null };
 }

@@ -23,6 +23,8 @@ import { COORD_ROLES } from '../coordination/roles';
 import { planItemRef, PLAN_ITEM_KIND } from '../../issue-blocks-merge';
 import { updateWorkItem, mergeWorkItemPayload, explainIssueClaimFloors, linkWorkItem, unlinkWorkItem } from '../../work-items';
 import { runBulk, bulkContent } from '../_bulk';
+import { refuseExternalOwnedPatch } from '../../work-admission/admit';
+import { activeWorkspaceId } from '../../workspace-registry';
 import { rejectBodySummaryConflict, resolveBodyAlias } from './_body-alias';
 import { unresolvedRefsInBody, unresolvedRefsWarning } from './unresolved-refs';
 
@@ -431,6 +433,17 @@ export default defineTool({
               `the dedicated args instead: plan_item, needsTwoMachineRig, needsHuman. Keys prefixed ` +
               `"_" are system-written bookkeeping and are never caller-writable.`,
           };
+        }
+        // P-020 / D-004: an admitted item's title and description are owned by its source.
+        // Refuse before any write so the edit is never half-applied.
+        const sourceOwned = [it.title !== undefined ? 'title' : null, it.body !== undefined ? 'body' : null].filter(
+          (f): f is string => f !== null,
+        );
+        if (sourceOwned.length > 0) {
+          const workspaceId =
+            (ctx.workspaceId && ctx.workspaceId !== '*' ? ctx.workspaceId : ctx.principal?.workspaceId) ?? activeWorkspaceId();
+          const owned = await refuseExternalOwnedPatch(workspaceId, it.id, sourceOwned);
+          if (owned) return { ok: false as const, id: it.id, error: `${owned.code}: ${owned.message}` };
         }
         const res = await updateWorkItem(
           it.id,

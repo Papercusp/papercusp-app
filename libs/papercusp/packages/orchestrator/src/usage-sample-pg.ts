@@ -23,7 +23,7 @@
  * `@papercusp/papercusp-shared/agent`'s governor profile without inverting the package
  * dependency. Model-family bucketing remains a tiny pure helper at this boundary.
  */
-import { costFromTokens } from '@papercusp/model-pricing';
+import { PRICE_TABLE_VERSION, USAGE_LEDGER_PRICING, costFromTokens } from '@papercusp/model-pricing';
 import type { OrchestratorPg } from './invoke';
 import type { RunUsage } from './cost-cap';
 import { harnessProfile } from './harness-profile';
@@ -99,30 +99,43 @@ export async function recordUsageSamplePg(
     requestedModel: usage.requestedModel ?? run.model,
     actualModels: usage.observedModels ?? [],
     backend: run.backend,
+    // 'lower' when the estimate is a tier floor (D-020): a run aggregate has no request size, so a
+    // long-context model prices at its standard tier. Written as null otherwise, never omitted.
+    costBound: null as 'lower' | null,
   };
   const n = (v: number | undefined): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
   // Provider-reported cost wins; else estimate from list prices; else NULL (never a fake 0).
   let costUsd: number | null = n(usage.costUsd);
   let costSource: string | null = costUsd !== null ? 'provider' : null;
+  // Keep this call's usage shape — the four counters, absent ones priced as zero — in step with
+  // operator-core `storedSampleTokenUsage` ('jsonl'): the repricer re-derives this row from its
+  // stored columns whenever the price table changes (WI-10004517 / D-018).
   if (costUsd === null && model) {
-    const est = costFromTokens(model, usage);
+    const est = costFromTokens(model, {
+      inputTokens: usage.inputTokens, outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens, cacheCreationTokens: usage.cacheCreationTokens,
+    }, USAGE_LEDGER_PRICING);
     if (est.priced) {
       costUsd = est.usd;
       costSource = 'estimated';
+      usageProvenance.costBound = est.bound ?? null;
     }
   }
+  // Every row not carrying provider cost was derived under this table version; the repricer
+  // treats any other stamp as stale. Provider cost is an observation, so it carries none.
+  const priceTableVersion = costSource === 'provider' ? null : PRICE_TABLE_VERSION;
 
   await ctx.pg`
     INSERT INTO harness_shared.agent_usage_samples
       (workspace_id, ts, bucket_key, provider, model_class, source,
        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd,
-       model, cost_source, harness_slug, run_id, role, turn_count, usage_provenance,
+       model, cost_source, price_table_version, harness_slug, run_id, role, turn_count, usage_provenance,
        session_id, goal_id, tool_name, turn_trigger, account_id)
     VALUES (
       ${ctx.workspaceId}, ${Date.now()}, ${`${provider}:${modelClass}`}, ${provider}, ${modelClass}, ${'jsonl'},
       ${n(usage.inputTokens)}, ${n(usage.outputTokens)}, ${n(usage.cacheReadTokens)}, ${n(usage.cacheCreationTokens)}, ${costUsd},
-      ${model || null}, ${costSource}, ${run.harnessSlug ?? null}, ${run.runId ?? null}, ${run.role ?? null}, ${n(usage.turns)},
+      ${model || null}, ${costSource}, ${priceTableVersion}, ${run.harnessSlug ?? null}, ${run.runId ?? null}, ${run.role ?? null}, ${n(usage.turns)},
       ${JSON.stringify(usageProvenance)}::jsonb,
       ${run.sessionId ?? null},
       (SELECT harness_shared.goal_id_for_usage_session(${ctx.workspaceId}, ${run.sessionId ?? null})),

@@ -44,7 +44,7 @@
  * different space than production writes — WI-3616's whole failure mode.
  */
 import { sidecarEmbedBatch } from '@papercusp/memory';
-import { cosine, isDistinctiveProbe, rankKeys, summarizeRankings } from '@papercusp/search-core';
+import { runWidthSweep, type WidthSweepArm } from '@papercusp/search-core';
 import pg from 'pg';
 
 import { getHarnessAdminUrl } from '../../embedded-pg-discovery';
@@ -95,11 +95,6 @@ const PROBE_LEN = 240;
 const CHUNK = Number(argOf('--chunk') ?? TURN_CHUNK_CHARS);
 const CHUNK_OVERLAP = Number(argOf('--chunk-overlap') ?? TURN_CHUNK_OVERLAP);
 
-interface Turn {
-  key: string;
-  text: string;
-}
-
 /**
  * Embed in small batches. A single 60-text call of ~5k-char documents aborts on
  * the client timeout — production batches at BATCH_SIZE for the same reason, so
@@ -129,40 +124,22 @@ async function embedChunked(
 }
 
 /**
- * Score one arm and print its row.
- *
- * `sim(probeIdx, turnIdx)` is the arm's whole identity — a single vector per
- * turn for the width arms, a max over the turn's chunk vectors for the chunked
- * arm — so every arm is ranked by identical logic and the only thing that
- * varies is the similarity it exposes.
- *
- * RANK-based on purpose (plan D-010): cosine under gemma carries a large
- * positive offset, so absolute similarity is uninterpretable and only the
- * position of the true parent turn among distractors means anything. Ranking
- * and its summary are @papercusp/search-core's (the chunking bench's), so both
- * instruments score by the same rule, including ties going against the target.
+ * Print one arm's row. The sweep itself (probe selection, the RANK-based scoring of plan
+ * D-010, and the identical-to-first-width count) is @papercusp/search-core's runWidthSweep
+ * (shared-vector-search-libraries-2026-09-29 P-003); this CLI supplies the corpus (recent
+ * long session_turns) and the embedder (the sidecar), and prints.
  */
-function report(
-  label: string,
-  n: number,
-  sim: (probeIdx: number, turnIdx: number) => number,
-  note: string,
-): void {
-  const keys = Array.from({ length: n }, (_, j) => String(j));
-  const ranked = keys.map((target, i) => rankKeys(keys, keys.map((_, j) => sim(i, j)), target));
-  const s = summarizeRankings(ranked, keys);
+function printArm(arm: WidthSweepArm, n: number): void {
   const pct = (x: number | null) => ((x ?? 0) * 100).toFixed(1);
+  const note =
+    arm.width === null ? `${(arm.meanChunks ?? 0).toFixed(1)} ch/turn` : `${arm.identicalToFirst ?? 0}/${n}`;
   console.log(
-    `${label.padEnd(10)} ${(s.mrr ?? 0).toFixed(4)} ${pct(s.recallAt1).padStart(7)}% ` +
-      `${pct(s.recallAt5).padStart(8)}% ${(s.meanRank ?? 0).toFixed(2).padStart(9)}  ${note}`,
+    `${arm.label.padEnd(10)} ${(arm.mrr ?? 0).toFixed(4)} ${pct(arm.recallAt1).padStart(7)}% ` +
+      `${pct(arm.recallAt5).padStart(8)}% ${(arm.meanRank ?? 0).toFixed(2).padStart(9)}  ${note}`,
   );
 }
 
 async function main(): Promise<void> {
-  // `resolveProcessSidecarUrl` reads the OPERATOR process's capability registry,
-  // which a standalone CLI has no part of — it returns null here even while the
-  // sidecar is up and answering. Fall back to the same env var / default port the
-  // other bench CLIs use rather than reporting a live sidecar as absent.
   const url =
     argOf('--sidecar') ??
     process.env.PAPERCUSP_EMBED_SIDECAR_URL ??
@@ -185,14 +162,20 @@ async function main(): Promise<void> {
   );
   await client.end();
 
-  const turns: Turn[] = [];
-  for (const r of rows) {
-    if (turns.length >= SAMPLE) break;
-    if (isDistinctiveProbe(r.text.slice(PROBE_START, PROBE_START + PROBE_LEN))) turns.push(r);
-  }
-  if (turns.length < 10) throw new Error(`only ${turns.length} usable turns — sample too small`);
-
-  const probes = turns.map((t) => t.text.slice(PROBE_START, PROBE_START + PROBE_LEN));
+  const result = await runWidthSweep({
+    docs: rows,
+    widths: WIDTHS,
+    probeStart: PROBE_START,
+    probeLength: PROBE_LEN,
+    sample: SAMPLE,
+    embed: (kind, texts) => embedChunked(url, kind, [...texts]),
+    // The chunked arm splits with the SHIPPED splitWindows and constants (see CHUNK above).
+    chunkArm: {
+      label: `chunk${CHUNK}`,
+      split: (text) => splitWindows(text, { size: CHUNK, overlap: CHUNK_OVERLAP, maxChunks: MAX_CHUNKS_PER_TURN }),
+    },
+  });
+  const turns = result.docs;
 
   console.log(
     `[turn-truncation] model=${MODEL} turns=${turns.length} ` +
@@ -204,59 +187,9 @@ async function main(): Promise<void> {
     )} chars`,
   );
 
-  // 'query' side — asymmetric model, must match production's query kind.
-  const qvecs = await embedChunked(url, 'query', probes);
-
   console.log('\narm          MRR    recall@1  recall@5  meanRank  note');
   console.log('──────────────────────────────────────────────────────────────────');
-
-  const baseline: { width: number; vecs: number[][] } = { width: 0, vecs: [] };
-  for (const w of WIDTHS) {
-    const docs = turns.map((t) => t.text.slice(0, w));
-    const dvecs = await embedChunked(url, 'document', docs);
-    if (baseline.vecs.length === 0) {
-      baseline.width = w;
-      baseline.vecs = dvecs;
-    }
-
-    // Does widening change the VECTOR at all? If the model already truncated
-    // internally, a wider cut is a no-op and this is how that shows up — a
-    // flat MRR alone could not distinguish "no gain" from "no change applied".
-    const identical = dvecs.filter((v, j) => cosine(v, baseline.vecs[j]) > 0.9999).length;
-
-    report(String(w), probes.length, (i, j) => cosine(qvecs[i], dvecs[j]), `${identical}/${probes.length}`);
-  }
-
-  // ─── THE CHUNKED ARM — what P-028 actually proposes ──────────────────────
-  // Every width arm above embeds the turn as ONE vector, so a longer cut spends
-  // the same 768 dimensions on more text and the probe's signal is averaged
-  // away. That dilution is why the width sweep peaks and then DECLINES, and no
-  // choice of single width escapes it.
-  //
-  // Chunking removes the trade entirely: each chunk gets its own vector, so a
-  // turn is scored by its BEST-matching chunk (max, not mean — a turn is
-  // relevant if ANY part of it is, which is exactly how a chunked index is
-  // queried). Overlap keeps a probe that straddles a boundary from being split
-  // across two chunks and diluted in both.
-  const chunksPerTurn: string[][] = turns.map((t) =>
-    splitWindows(t.text, { size: CHUNK, overlap: CHUNK_OVERLAP, maxChunks: MAX_CHUNKS_PER_TURN }),
-  );
-  const flat = chunksPerTurn.flat();
-  const flatVecs = await embedChunked(url, 'document', flat);
-  const chunkVecs: number[][][] = [];
-  let off = 0;
-  for (const cs of chunksPerTurn) {
-    chunkVecs.push(flatVecs.slice(off, off + cs.length));
-    off += cs.length;
-  }
-  const avgChunks = (flat.length / turns.length).toFixed(1);
-
-  report(
-    `chunk${CHUNK}`,
-    probes.length,
-    (i, j) => Math.max(...chunkVecs[j].map((cv) => cosine(qvecs[i], cv))),
-    `${avgChunks} ch/turn`,
-  );
+  for (const arm of result.arms) printArm(arm, turns.length);
 
   console.log(
     '\nReading it: the probe text lives at chars ' +

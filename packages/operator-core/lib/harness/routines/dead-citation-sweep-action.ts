@@ -7,10 +7,10 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import path, { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { promisify } from 'node:util';
 import { getOrgPg } from '@papercusp/db-org';
+import { moduleRepoRoot } from '../../module-repo-root';
 import { captureImprovement } from '../improvements/capture-core';
 import {
   deadCitationSweepWatchdogKey,
@@ -23,11 +23,17 @@ import { registerSystemAction, type SystemActionCtx } from './system-actions';
 
 export const DEAD_CITATION_SWEEP = 'dead-citation-sweep';
 
-const execFileAsync = promisify(execFile);
+// Lazy + memoized, NOT promisified at module scope (EI-10161): under a narrow
+// `vi.mock('node:child_process')` `execFile` is undefined, and an eager `promisify` throws at
+// IMPORT time — crashing every test file that reaches this module, even one that never calls it.
+let execFileAsyncMemo: typeof execFile.__promisify__ | null = null;
+const execFileAsync = ((...args: unknown[]) =>
+  Reflect.apply((execFileAsyncMemo ??= promisify(execFile)), undefined, args)) as typeof execFile.__promisify__;
 
-/** Repo root: lib/harness/routines -> lib -> operator-core -> packages -> <repo root>. */
+/** Repo root. Not a fixed `../` climb: bg-host runs this inlined into the host bundle, where
+ *  `import.meta.url` is the bundle's URL and a climb lands outside the checkout (P-016). */
 function repoRoot(): string {
-  return path.resolve(dirname(fileURLToPath(import.meta.url)), '../../../../..');
+  return moduleRepoRoot(import.meta.url);
 }
 
 /**

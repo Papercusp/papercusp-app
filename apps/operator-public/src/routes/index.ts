@@ -6,7 +6,9 @@ import { bindingRoute } from './binding.ts';
 import { adminRoute } from './admin.ts';
 import { workspaceHostArtifactsRoute } from './workspace-host-artifacts.ts';
 import { creatorDraftsRoute } from './creator-drafts.ts';
+import { selfDescribingArtifactsRoute } from './self-describing-artifacts.ts';
 import { releaseMirrorRoute } from './release-mirror.ts';
+import { githubWebhookRoute } from './github-webhook.ts';
 import { commerceRoute } from './commerce.ts';
 import { walletBindingRoute } from './wallet-binding.ts';
 import { prepaidCreditsRoute } from './prepaid-credits.ts';
@@ -14,6 +16,8 @@ import { paymentChannelsRoute } from './payment-channels.ts';
 import { meteredUsageRoute } from './metered-usage.ts';
 import { settlementsRoute } from './settlements.ts';
 import { treasuryRoute } from './treasury.ts';
+import { reconciliationRoute } from './reconciliation.ts';
+import { transparencyRoute } from './transparency.ts';
 import type { SafeTreasuryAdapter } from '../treasury-adapter.ts';
 import type { PaymentChannelFundingAdapter } from '@papercusp/operator-core/lib/p2p/channel-funding.ts';
 import type { EvmSettlementFacilitator } from '@papercusp/operator-core/lib/p2p/evm-settlement.ts';
@@ -50,10 +54,17 @@ export function buildApi(
   api.route('/', adminRoute());
   api.route('/', workspaceHostArtifactsRoute());
   api.route('/', creatorDraftsRoute());
+  // R2 ORIGIN for self-describing release bytes (cupboard-release-pipeline-content-trust
+  // P-011): content-addressed PUT (Merkle-root verified) + tokenless GET.
+  api.route('/', selfDescribingArtifactsRoute());
   // Public mirror publication (P-045). Shares `fetchImpl` with the commerce
   // route for the same reason: its only outbound call is to a third party, and
   // an unexercised credential path is the one that rots.
   api.route('/', releaseMirrorRoute({ fetchImpl: options.fetchImpl }));
+  // The "Papercusp Cupboard" GitHub App's push receiver (P-006). Fails closed
+  // (503) until the three GITHUB_APP_* secrets exist — registering the App is
+  // the owner-only P-005, so until then this route is inert by construction.
+  api.route('/', githubWebhookRoute({ fetchImpl: options.fetchImpl }));
   // The top-up SKU is a fixed idempotent catalog fact. Install it immediately
   // before the existing Checkout handler reads the commerce ledger, without
   // modifying that shared route while parallel commerce work is in flight.
@@ -89,6 +100,11 @@ export function buildApi(
   // on what that route produces and only once it is FINAL: a claim can still be
   // dropped by a reorg, and a transfer out of the Safe cannot be unwound.
   api.route('/', treasuryRoute({ adapter: options.treasuryAdapter }));
+  // P-043 reconciliation seam: the operator's run pushes the DAO-transfer gate
+  // the treasury door above reads, and reads back credits + DAO transfers.
+  // HMAC-signed, not bearer-authenticated: the caller is a machine.
+  api.route('/', reconciliationRoute());
+  api.route('/', transparencyRoute());
   api.onError((err, c) => {
     const msg = err instanceof Error ? err.message : String(err);
     return c.json({ error: 'internal', detail: msg }, 500);

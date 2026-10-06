@@ -29,6 +29,7 @@
  */
 import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
+import type { AbortCompletionReceipt, ToolResult } from '@papercusp/tooldef';
 import { getOrgPg } from '@papercusp/db-org';
 
 import { gradeRoutedIdea, type GradeRoutedIdeaInput, type GradeRoutedIdeaResult } from '../../scout/routed-ledger';
@@ -39,8 +40,12 @@ import {
   type AgentReviewGradePreflight,
   type AgentReviewReconcileOutcome,
 } from '../../harness/improvements/agent-review';
-import { softText, clampText, LIMITS } from '../limits';
+import { hardText, LIMITS } from '../limits';
 import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
+import { completedResultPayload } from '../abort-completion-payload';
+
+/** Reviewer feedback is a brief, and over-limit input must fail instead of being clipped. */
+export const GRADE_IDEA_FEEDBACK_MAX_CHARS = LIMITS.BRIEF;
 
 /** Grader attribution vocabulary (C-1 / D-004) — the seam's input type is the pin. */
 export type GradedBy = GradeRoutedIdeaInput['gradedBy'];
@@ -120,6 +125,7 @@ export interface GradeIdeaOutcome extends Omit<GradeRoutedIdeaResult, 'reason'> 
     | GradeRoutedIdeaResult['reason']
     | 'no-self-grade'
     | 'not-routed'
+    | 'agent-review-ledger-id-required'
     | NonNullable<AgentReviewGradePreflight['refusal']>;
   gradedBy: GradedBy;
   /** The resolved ledger key (null when a routedRef resolved to nothing). */
@@ -133,6 +139,10 @@ export interface GradeIdeaOutcome extends Omit<GradeRoutedIdeaResult, 'reason'> 
   revisionWake?: RevisionWakeOutcome;
   /** D-003: work-item routing transition driven by this standing ledger grade. */
   agentReview?: AgentReviewReconcileOutcome;
+  /** Canonical pending-review ledger key when a bare work-item key collides. */
+  ledgerIdeaId?: string;
+  /** Ready-to-use retry args for a refused bare-key review collision. */
+  gradeWith?: { ideaId: string };
 }
 
 export const gradeIdeaArgs = z
@@ -147,8 +157,10 @@ export const gradeIdeaArgs = z
     routedRef: z.string().min(1).max(512).optional(),
     /** 1–5 integer (D-001): 5 = clear win, 3 = neutral, 1 = clear loss. */
     grade: z.number().int().min(1).max(5),
-    /** Free-text critique shown to next cycles' ideators (C-4). Omitting it on a regrade clears the stored feedback. */
-    feedback: softText(LIMITS.ANNOTATION).optional(),
+    /** Full reviewer feedback shown to the author and next cycles' ideators (C-4). */
+    feedback: hardText(GRADE_IDEA_FEEDBACK_MAX_CHARS)
+      .optional()
+      .describe('Reviewer feedback up to 16,000 characters; longer input is rejected before grading.'),
   })
   .refine((a) => (a.ideaId == null) !== (a.routedRef == null), {
     message: 'Pass exactly one of ideaId or routedRef.',
@@ -239,7 +251,53 @@ async function resolveIdeaIdFromKey(ideaId: string): Promise<string | null> {
   return rows[0]?.idea_id ?? null;
 }
 
+interface AgentReviewLedgerCollision {
+  workItemId: string;
+  ledgerIdeaId: string;
+}
+
+/** Refuse a bare work-item key that collides with a historical routed ledger row. */
+async function findAgentReviewLedgerCollision(ideaId: string): Promise<AgentReviewLedgerCollision | null> {
+  const { sql } = getOrgPg();
+  const rows = await sql<{ work_item_id: string; ledger_idea_id: string }[]>`
+    SELECT wi.feature_id AS work_item_id,
+           wi.payload #>> '{agentReview,ledgerIdeaId}' AS ledger_idea_id
+      FROM harness_shared.work_items wi
+     WHERE wi.feature_id = ${ideaId}
+       AND wi.status = 'open'
+       AND wi.payload #>> '{agentReview,status}' = 'pending'
+       AND NULLIF(btrim(wi.payload #>> '{agentReview,ledgerIdeaId}'), '') IS NOT NULL
+       AND wi.payload #>> '{agentReview,ledgerIdeaId}' <> ${ideaId}
+       AND EXISTS (
+         SELECT 1
+           FROM harness_shared.scout_routed_ideas historical
+          WHERE historical.workspace_id = wi.workspace_id
+            AND historical.idea_id = ${ideaId}
+            AND historical.routed_ref IS NOT NULL
+       )
+     LIMIT 1`;
+  const row = rows[0];
+  return row ? { workItemId: row.work_item_id, ledgerIdeaId: row.ledger_idea_id } : null;
+}
+
 const WORK_ITEM_ID_PREFIX = /^(?:WI|EI|F|PR)-/i;
+
+/**
+ * EI-24742538368325488: `agent-review:<work-item-id>` is the ledger PK of a review
+ * round ONLY when enrollment found the bare work-item id already occupied by a
+ * historical routed row ({@link findAgentReviewLedgerCollision}); otherwise the
+ * round is keyed by the BARE id. Peers are told to grade with the prefixed form,
+ * which therefore misses for every review that never collided. This returns the
+ * bare work-item id behind such a key so the resolver can fall back to it AFTER
+ * the exact (prefixed) lookup misses — an exact match always wins, so the rows
+ * that really are keyed `agent-review:<id>` are never re-pointed. Null when the
+ * key carries no `agent-review:` prefix or the remainder is not work-item-shaped.
+ */
+export function bareIdBehindAgentReviewKey(key: string): string | null {
+  const match = /^agent-review:(.+)$/i.exec(key);
+  const bare = match?.[1]?.trim();
+  return bare && WORK_ITEM_ID_PREFIX.test(bare) ? bare : null;
+}
 
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
@@ -248,16 +306,20 @@ function unique(values: readonly string[]): string[] {
 /**
  * The exact key forms considered by the two resolver paths. Keeping this pure
  * makes the diagnostic stable and keeps the probe from inventing a lookup that
- * the ledger resolver never attempted.
+ * the ledger resolver never attempted. An `agent-review:<id>` key also lists the
+ * bare-id forms because {@link runGradeIdea} retries with them after the exact
+ * lookup misses (EI-24742538368325488).
  */
 export function gradeIdeaResolutionAttempts(args: GradeIdeaArgs): GradeIdeaResolutionDiagnostic['attempted'] {
   const key = args.ideaId ?? args.routedRef;
   if (!key) {
     return { ideaId: [], routedRef: [] };
   }
+  const bare = bareIdBehindAgentReviewKey(key);
+  const forms = bare ? [key, bare] : [key];
   return {
-    ideaId: [key],
-    routedRef: unique([key, `wi:${key}`, `gym:${key}`]),
+    ideaId: forms,
+    routedRef: unique(forms.flatMap((k) => [k, `wi:${k}`, `gym:${k}`])),
   };
 }
 
@@ -265,7 +327,7 @@ export function gradeIdeaResolutionAttempts(args: GradeIdeaArgs): GradeIdeaResol
 export function candidateWorkItemId(args: GradeIdeaArgs): string | null {
   const key = args.ideaId ?? args.routedRef;
   if (!key || /^(?:plan|gym):/i.test(key)) return null;
-  const candidate = key.replace(/^wi:/i, '');
+  const candidate = bareIdBehindAgentReviewKey(key) ?? key.replace(/^wi:/i, '');
   return WORK_ITEM_ID_PREFIX.test(candidate) ? candidate : null;
 }
 
@@ -524,6 +586,8 @@ export interface GradeIdeaDeps {
   resolveIdeaIdFromRef: typeof resolveIdeaIdFromRef;
   /** EI-15389: resolve an ideaId-keyed call (bare work-item id or full idea_id) to the ledger PK. */
   resolveIdeaIdFromKey: typeof resolveIdeaIdFromKey;
+  /** Detect a bare work-item key that would select a historical routed row. */
+  findAgentReviewLedgerCollision: typeof findAgentReviewLedgerCollision;
   /** Resolution-miss probe; a positive issue-family row is an unrouted candidate. */
   getWorkItem: WorkItemExistenceProbe;
   readIdeaSummary: typeof readIdeaSummary;
@@ -541,6 +605,7 @@ const defaultDeps: GradeIdeaDeps = {
   gradeRoutedIdea,
   resolveIdeaIdFromRef,
   resolveIdeaIdFromKey,
+  findAgentReviewLedgerCollision,
   getWorkItem: async (id) => getWorkItem(id),
   readIdeaSummary,
   readCreatedBy,
@@ -555,18 +620,61 @@ export async function runGradeIdea(
   ctx: { role?: string; ownerId?: string | null } | undefined,
   deps: GradeIdeaDeps = defaultDeps,
 ): Promise<GradeIdeaOutcome> {
+  // Internal callers can bypass the tool dispatcher, so enforce the same hard cap
+  // here before any ledger mutation or revision delivery.
+  args = gradeIdeaArgs.parse(args);
   const gradedBy = deriveGradedBy(ctx);
-  const feedback = clampText(args.feedback, LIMITS.ANNOTATION);
+  const feedback = args.feedback;
+
+  // A pending review owns the canonical ledger id in its work-item payload. If a
+  // bare work-item key is already routed as a different historical idea, do not
+  // let exact-id-first resolution grade that older row by accident.
+  const candidateId = args.ideaId != null ? candidateWorkItemId(args) : null;
+  if (args.ideaId != null && candidateId === args.ideaId) {
+    const collision = await deps.findAgentReviewLedgerCollision(args.ideaId);
+    if (collision) {
+      return {
+        applied: false,
+        reason: 'agent-review-ledger-id-required',
+        gradedBy,
+        ideaId: collision.ledgerIdeaId,
+        idea: null,
+        ledgerIdeaId: collision.ledgerIdeaId,
+        gradeWith: { ideaId: collision.ledgerIdeaId },
+      };
+    }
+  }
 
   // EI-15389: resolve the key to the real ledger PK. An ideaId-keyed call may
   // carry a bare routed work-item id (`EI-15375`) rather than the cycle-prefixed
   // idea_id — resolveIdeaIdFromKey handles both (direct idea_id OR routed_ref
   // match), so a natural `{ ideaId: 'EI-15375' }` lands instead of silently
   // no-op'ing. An unresolvable key returns null → the LOUD not-found below.
-  const ideaId =
+  let ideaId =
     args.ideaId != null
       ? await deps.resolveIdeaIdFromKey(args.ideaId)
       : await deps.resolveIdeaIdFromRef(args.routedRef as string);
+  // EI-24742538368325488: an `agent-review:<id>` key that matched no ledger row is
+  // the common case (enrollment only prefixes the PK when the bare id was already
+  // occupied), so retry with the bare work-item id — through the SAME collision
+  // guard a directly-passed bare id gets. The exact lookup above ran first, so a
+  // row genuinely keyed `agent-review:<id>` is never re-pointed.
+  const bareReviewId = ideaId == null && args.ideaId != null ? bareIdBehindAgentReviewKey(args.ideaId) : null;
+  if (bareReviewId != null) {
+    const collision = await deps.findAgentReviewLedgerCollision(bareReviewId);
+    if (collision) {
+      return {
+        applied: false,
+        reason: 'agent-review-ledger-id-required',
+        gradedBy,
+        ideaId: collision.ledgerIdeaId,
+        idea: null,
+        ledgerIdeaId: collision.ledgerIdeaId,
+        gradeWith: { ideaId: collision.ledgerIdeaId },
+      };
+    }
+    ideaId = await deps.resolveIdeaIdFromKey(bareReviewId);
+  }
   if (ideaId == null) {
     const miss = await diagnoseResolutionMiss(args, deps);
     return { applied: false, ...miss, gradedBy, ideaId: null, idea: null };
@@ -724,13 +832,55 @@ function resolveCallerOwnerId(ctx: ResolveIdentityCtx | undefined): string | nul
   }
 }
 
+/**
+ * Completion receipt for a grade whose handler RETURNED after the dispatch deadline
+ * (WI-10005670: 5 `blender:grade-idea` calls in 8 days reported `timeout` although the
+ * grade had landed, because the revision-notice/reconcile tail pushed the call past
+ * 60s). The returned outcome already says whether the ledger write applied, so it IS
+ * the commit proof — no second read is needed:
+ *   - `applied:true`                       → `recorded`, effect = the ledger row + its stamp;
+ *   - `applied:false` + a stated `reason`  → `not-recorded` (a designed no-op/refusal such
+ *     as owner-grade-sovereign or no-self-grade), so a late refusal is reported as the
+ *     refusal it is instead of a retryable timeout;
+ *   - anything else (unparseable, no ideaId, no verdict) → `recovery-incomplete`, which
+ *     fails closed to the timeout path.
+ * The grade write is itself an idempotent UPDATE (see {@link gradeRoutedIdea}); this does
+ * not make the best-effort revision wake idempotent, only the REPORT truthful.
+ */
+export function gradeIdeaAbortCompletionReceipt(_args: unknown, result: ToolResult): AbortCompletionReceipt {
+  const payload = completedResultPayload(result);
+  const ideaId = typeof payload?.ideaId === 'string' && payload.ideaId.length > 0 ? payload.ideaId : null;
+  if (!payload || !ideaId) {
+    return {
+      status: 'recovery-incomplete',
+      reason: 'blender:grade-idea result did not identify the graded idea after abort',
+      failures: ['missing-idea-id'],
+    };
+  }
+  if (payload.applied === true) {
+    const gradedAt = (payload.idea as { gradedAt?: unknown } | null | undefined)?.gradedAt;
+    return {
+      status: 'recorded',
+      effectRef: `blender-grade-idea:${ideaId}${typeof gradedAt === 'string' && gradedAt ? `:${gradedAt}` : ''}`,
+    };
+  }
+  if (payload.applied === false && typeof payload.reason === 'string' && payload.reason.length > 0) {
+    return { status: 'not-recorded', reason: payload.reason };
+  }
+  return {
+    status: 'recovery-incomplete',
+    reason: 'blender:grade-idea result carried no applied verdict after abort',
+    failures: ['missing-applied-verdict'],
+  };
+}
+
 export default defineTool({
   name: 'blender:grade-idea',
   description:
-    'Grade a routed Blender idea 1–5 with optional feedback (≤2000 chars). Grades steer learning: fractional win credit in lens weights + critique primed into later ideator prompts. Key by ideaId or routedRef. On a su-ideate filing, a grade ≤3 with feedback wakes the originator to revise or defend (higher grades + feedback deliver an unwoken FYI) — best-effort, reported as revisionWake.',
+    'Grade a routed Blender idea 1–5 with optional feedback (≤16,000 chars; longer input is rejected). Grades steer learning: fractional win credit in lens weights + critique primed into later ideator prompts. Key by ideaId or routedRef. On a su-ideate filing, a grade ≤3 with feedback wakes the originator to revise or defend (higher grades + feedback deliver an unwoken FYI) — best-effort, reported as revisionWake.',
   capability: 'harness:write',
   guidance: {
-    when: "You want to score a routed Blender idea 1–5 (optional one-line critique) so Blender learns which lenses to favor. Key by ideaId (Blender view / learning.scout snapshot callers) or by routedRef — the routed artifact's change-feed ref 'plan:<slug>' | 'wi:<id>' | 'gym:<id>' — when you hold the artifact but not the ideaId (the triage path: grade each ungraded routed draft).",
+    when: "You want to score a routed Blender idea 1–5 with optional critique or detailed reviewer feedback (up to 16,000 characters) so Blender learns which lenses to favor. Key by ideaId (Blender view / learning.scout snapshot callers) or by routedRef — the routed artifact's change-feed ref 'plan:<slug>' | 'wi:<id>' | 'gym:<id>' — when you hold the artifact but not the ideaId (the triage path: grade each ungraded routed draft).",
     notWhen:
       'Not an accept/reject of the routed artifact — a grade is a pure learning signal; the draft proceeds through normal triage regardless. Never pass grader attribution: gradedBy is derived from the caller identity (resolved agent ownerId, or the human owner surface).',
     chaining:
@@ -738,6 +888,7 @@ export default defineTool({
   },
   requirePrincipal: false,
   agentRoles: [...SU_ROLES],
+  abortCompletionReceipt: gradeIdeaAbortCompletionReceipt,
   args: gradeIdeaArgs,
   async handler(args, ctx) {
     // Thread the caller's coord ownerId (D-012 self-grade guard) alongside the role

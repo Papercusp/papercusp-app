@@ -7,9 +7,47 @@
  * hosts.yml must not count as signed in.
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+
+/** Run `security` without blocking the event loop. Wrapped at CALL time (not a module-level
+ *  `promisify(execFile)`), so a test that mocks node:child_process without `execFile` still
+ *  imports this module; the missing function then surfaces inside the callers' try/catch. */
+function runSecurity(
+  args: string[],
+  opts: { timeout?: number; maxBuffer?: number } = {},
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'security',
+      args,
+      { encoding: 'utf8', timeout: opts.timeout ?? 5000, ...(opts.maxBuffer ? { maxBuffer: opts.maxBuffer } : {}) },
+      (error, stdout) => (error ? reject(error) : resolve(String(stdout))),
+    );
+  });
+}
+
+/** Parse `security dump-keychain` output (metadata only) into service + account pairs. Each item
+ *  block prints its `"acct"<blob>="…"` attribute before its `"svce"<blob>="…"`, so pair the
+ *  last-seen account with the next service line. Pure; shared by the sync and async listers. */
+export function parseDumpKeychainItems(stdout: string): { service: string; account: string | null }[] {
+  const items: { service: string; account: string | null }[] = [];
+  let account: string | null = null;
+  for (const line of stdout.split('\n')) {
+    const a = /"acct"<blob>="([^"]*)"/.exec(line);
+    if (a) {
+      account = a[1];
+      continue;
+    }
+    const s = /"svce"<blob>="([^"]*)"/.exec(line);
+    if (s) {
+      items.push({ service: s[1], account });
+      account = null;
+    }
+  }
+  return items;
+}
 
 function anyExists(paths: readonly string[]): boolean {
   return paths.some((p) => existsSync(p));
@@ -103,23 +141,7 @@ const defaultKeychainAccess: KeychainAccess = {
         maxBuffer: 32 * 1024 * 1024,
       });
       if (r.status !== 0 || typeof r.stdout !== 'string') return [];
-      // Each item block prints its `"acct"<blob>="…"` attribute before its `"svce"<blob>="…"`,
-      // so pair the last-seen account with the next service line.
-      const items: { service: string; account: string | null }[] = [];
-      let account: string | null = null;
-      for (const line of r.stdout.split('\n')) {
-        const a = /"acct"<blob>="([^"]*)"/.exec(line);
-        if (a) {
-          account = a[1];
-          continue;
-        }
-        const s = /"svce"<blob>="([^"]*)"/.exec(line);
-        if (s) {
-          items.push({ service: s[1], account });
-          account = null;
-        }
-      }
-      return items;
+      return parseDumpKeychainItems(r.stdout);
     } catch {
       return [];
     }
@@ -139,10 +161,71 @@ const defaultKeychainAccess: KeychainAccess = {
   },
 };
 
+/**
+ * Non-blocking `security` shim for callers on an event loop (WI-10005231). The credential
+ * reconcile runs on the operator main thread at boot, on every watch kick and every 5 min; a
+ * `spawnSync('security', …)` there blocks the whole host for the length of the Keychain call. A
+ * sync {@link KeychainAccess} fake is assignable here, because `await` accepts plain values.
+ */
+export interface KeychainAccessAsync {
+  read(service: string): Promise<string | null> | string | null;
+  write(service: string, account: string, secret: string): Promise<boolean> | boolean;
+  /** Non-blocking {@link KeychainAccess.list} (WI-10005306): `dump-keychain` metadata only.
+   *  Optional so existing fakes keep compiling; absent/erroring → an empty list. */
+  list?(): Promise<{ service: string; account: string | null }[]> | { service: string; account: string | null }[];
+}
+
+const defaultKeychainAccessAsync: KeychainAccessAsync = {
+  async read(service) {
+    try {
+      const stdout = await runSecurity(['find-generic-password', '-s', service, '-w']);
+      if (stdout.trim()) return stdout;
+    } catch {
+      /* security absent / ACL-blocked / non-zero exit / timeout → treated as not-found */
+    }
+    return null;
+  },
+  async list() {
+    try {
+      return parseDumpKeychainItems(
+        await runSecurity(['dump-keychain'], { timeout: 15_000, maxBuffer: 32 * 1024 * 1024 }),
+      );
+    } catch {
+      return [];
+    }
+  },
+  async write(service, account, secret) {
+    try {
+      // `-U` updates the item in place if it exists (same service+account), else creates it.
+      await runSecurity(['add-generic-password', '-U', '-s', service, '-a', account, '-w', secret]);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
 let keychainAccess: KeychainAccess = defaultKeychainAccess;
-/** Test seam — inject a fake Keychain (or null to restore the real `security` CLI). */
+let keychainAccessAsync: KeychainAccessAsync = defaultKeychainAccessAsync;
+/** Test seam — inject a fake Keychain (or null to restore the real `security` CLI). It backs both
+ *  the sync and the async helpers. */
 export function _setClaudeKeychainAccessForTests(access: KeychainAccess | null): void {
   keychainAccess = access ?? defaultKeychainAccess;
+  keychainAccessAsync = access ?? defaultKeychainAccessAsync;
+}
+/** Test seam for the async helpers only — e.g. a fake whose reads settle on a later tick. */
+export function _setClaudeKeychainAsyncAccessForTests(access: KeychainAccessAsync | null): void {
+  keychainAccessAsync = access ?? defaultKeychainAccessAsync;
+}
+
+function parseKeychainOAuthSecret(raw: string): ClaudeKeychainOAuthBundle | null {
+  try {
+    const parsed = JSON.parse(raw.trim()) as ClaudeKeychainOAuthBundle;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch {
+    /* not JSON */
+  }
+  return null;
 }
 
 /**
@@ -162,12 +245,28 @@ export function readClaudeKeychainOAuthBundle(
   for (const service of CLAUDE_KEYCHAIN_SERVICES) {
     const raw = keychainAccess.read(service);
     if (!raw) continue;
+    const bundle = parseKeychainOAuthSecret(raw);
+    if (bundle) return { bundle, service };
+  }
+  return null;
+}
+
+/** Non-blocking {@link readClaudeKeychainOAuthBundle} for event-loop callers (the credential
+ *  reconcile). Same contract: null on any miss, never throws. */
+export async function readClaudeKeychainOAuthBundleAsync(
+  platform: NodeJS.Platform = process.platform,
+): Promise<{ bundle: ClaudeKeychainOAuthBundle; service: string } | null> {
+  if (platform !== 'darwin') return null;
+  for (const service of CLAUDE_KEYCHAIN_SERVICES) {
+    let raw: string | null = null;
     try {
-      const parsed = JSON.parse(raw.trim()) as ClaudeKeychainOAuthBundle;
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return { bundle: parsed, service };
+      raw = await keychainAccessAsync.read(service);
     } catch {
-      /* not JSON — try the next service label */
+      /* a throwing shim is a miss, never a failed launch */
     }
+    if (typeof raw !== 'string' || !raw) continue;
+    const bundle = parseKeychainOAuthSecret(raw);
+    if (bundle) return { bundle, service };
   }
   return null;
 }
@@ -183,14 +282,44 @@ export function readClaudeKeychainOAuthBundle(
  * platform gate here, so tests can fake the shim without faking process.platform.
  */
 export function listClaudeKeychainCredentialItems(): { service: string; account: string | null }[] {
+  return filterClaudeKeychainItems(keychainAccess.list?.() ?? []);
+}
+
+function filterClaudeKeychainItems(
+  all: readonly { service: string; account: string | null }[],
+): { service: string; account: string | null }[] {
   const base = CLAUDE_KEYCHAIN_SERVICES[0];
-  const all = keychainAccess.list?.() ?? [];
   return all.filter(
     (m) =>
       m.service === base ||
       m.service.startsWith(`${base}-`) ||
       m.service === CLAUDE_KEYCHAIN_SERVICES[1],
   );
+}
+
+/** Non-blocking {@link listClaudeKeychainCredentialItems} for event-loop callers — the inference
+ *  gateway's freshest-scan (WI-10005306). Same contract: empty on any miss, never throws. */
+export async function listClaudeKeychainCredentialItemsAsync(): Promise<
+  { service: string; account: string | null }[]
+> {
+  try {
+    const all = await keychainAccessAsync.list?.();
+    return filterClaudeKeychainItems(Array.isArray(all) ? all : []);
+  } catch {
+    return [];
+  }
+}
+
+/** Non-blocking read of one Keychain item's raw secret (`-w`), or null on ANY miss — `security`
+ *  absent, ACL-blocked, item absent, timeout. Never throws. No platform gate (like the lister), so
+ *  tests can fake the shim without faking process.platform; off macOS `security` is absent. */
+export async function readKeychainSecretAsync(service: string): Promise<string | null> {
+  try {
+    const raw = await keychainAccessAsync.read(service);
+    return typeof raw === 'string' && raw.trim() ? raw : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -210,6 +339,21 @@ export function writeClaudeKeychainOAuthBundle(
 ): boolean {
   if (platform !== 'darwin') return false;
   return keychainAccess.write(service, account, bundleJson);
+}
+
+/** Non-blocking {@link writeClaudeKeychainOAuthBundle} for event-loop callers. Never throws. */
+export async function writeClaudeKeychainOAuthBundleAsync(
+  service: string,
+  account: string,
+  bundleJson: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (platform !== 'darwin') return false;
+  try {
+    return (await keychainAccessAsync.write(service, account, bundleJson)) === true;
+  } catch {
+    return false;
+  }
 }
 
 export function claudeSignedIn(): boolean {
@@ -411,6 +555,165 @@ export function codexSignedIn(): boolean {
   return anyExists([
     join(home, '.codex', 'auth.json'),
   ]);
+}
+
+/**
+ * Whether a backend's login can still authenticate a NEW spawn, judged without a model
+ * call (WI-10004897).
+ *
+ * A hosted workspace host receives copies of the claude/codex logins whose refresh tokens
+ * are deliberately blanked (D-311: no rotating refresh secret crosses to a host; see
+ * WORKSPACE_HOST_*_NEUTRALIZED_REFRESH_TOKEN in the deployment driver). Such a copy works
+ * until its access token expires and then fails every call with a 401. The papercup chat's
+ * failover used to move a capped turn onto exactly such a dead copy, so the turn failed
+ * twice and reported only the second (useless) error.
+ *
+ * The verdict is UNUSABLE only on positive evidence: no credential at all, an unparseable
+ * file, or an access token past its recorded expiry with no refresh token and no API key.
+ * Anything that cannot be judged from local state (a gateway route, an env key, the macOS
+ * keychain, a token with no recorded expiry) is reported usable, which keeps the previous
+ * behavior (try it) rather than inventing a refusal.
+ *
+ * Only booleans and expiry numbers are derived; no credential value is returned or logged.
+ */
+export type AgentCredentialBasis =
+  | 'gateway'
+  | 'env-key'
+  | 'keychain'
+  | 'api-key'
+  | 'refreshable'
+  | 'live-access'
+  | 'no-expiry';
+export type AgentCredentialUnusableReason = 'absent' | 'expired-no-refresh' | 'unreadable';
+export type AgentCredentialVerdict =
+  | { usable: true; basis: AgentCredentialBasis }
+  | { usable: false; reason: AgentCredentialUnusableReason };
+
+export interface AgentCredentialProbeInput {
+  home?: string;
+  env?: Readonly<Record<string, string | undefined>>;
+  now?: number;
+  platform?: NodeJS.Platform;
+}
+
+/** Tokens this close to expiry are treated as expired (mirrors chat-stream's TOKEN_EXPIRY_SKEW_MS). */
+const CREDENTIAL_EXPIRY_SKEW_MS = 60_000;
+
+function nonEmptyString(v: unknown): boolean {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+function isLoopbackUrl(raw: string | undefined): boolean {
+  if (!raw?.trim()) return false;
+  try {
+    const host = new URL(raw).hostname.replace(/^\[|\]$/g, '');
+    return host === 'localhost' || host === '::1' || /^127\./.test(host);
+  } catch {
+    return false;
+  }
+}
+
+function readJsonObject(path: string): Record<string, unknown> | 'absent' | 'unreadable' {
+  if (!existsSync(path)) return 'absent';
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : 'unreadable';
+  } catch {
+    return 'unreadable';
+  }
+}
+
+function accessVerdict(input: {
+  hasAccess: boolean;
+  hasRefresh: boolean;
+  expiresAtMs: number | null;
+  now: number;
+}): AgentCredentialVerdict {
+  if (!input.hasAccess) return { usable: false, reason: 'absent' };
+  if (input.hasRefresh) return { usable: true, basis: 'refreshable' };
+  if (input.expiresAtMs === null) return { usable: true, basis: 'no-expiry' };
+  return input.expiresAtMs > input.now + CREDENTIAL_EXPIRY_SKEW_MS
+    ? { usable: true, basis: 'live-access' }
+    : { usable: false, reason: 'expired-no-refresh' };
+}
+
+/** The `claude` CLI login the papercup brain spawn uses (`~/.claude/.credentials.json`, symlinked per spawn). */
+export function claudeCredentialVerdict(input: AgentCredentialProbeInput = {}): AgentCredentialVerdict {
+  const env = input.env ?? process.env;
+  const now = input.now ?? Date.now();
+  // A loopback ANTHROPIC_BASE_URL is the inference gateway, which re-auths to its own pool.
+  if (isLoopbackUrl(env.ANTHROPIC_BASE_URL)) return { usable: true, basis: 'gateway' };
+  if (nonEmptyString(env.ANTHROPIC_API_KEY) || nonEmptyString(env.ANTHROPIC_AUTH_TOKEN)) {
+    return { usable: true, basis: 'env-key' };
+  }
+  if (claudeKeychainSignedIn(input.platform ?? process.platform)) return { usable: true, basis: 'keychain' };
+  const file = readJsonObject(join(input.home ?? homedir(), '.claude', '.credentials.json'));
+  if (file === 'absent') return { usable: false, reason: 'absent' };
+  if (file === 'unreadable') return { usable: false, reason: 'unreadable' };
+  const oauth = (file.claudeAiOauth && typeof file.claudeAiOauth === 'object' ? file.claudeAiOauth : {}) as Record<
+    string,
+    unknown
+  >;
+  return accessVerdict({
+    hasAccess: nonEmptyString(oauth.accessToken),
+    hasRefresh: nonEmptyString(oauth.refreshToken),
+    expiresAtMs: typeof oauth.expiresAt === 'number' && Number.isFinite(oauth.expiresAt) ? oauth.expiresAt : null,
+    now,
+  });
+}
+
+/** The `exp` claim (seconds) of a JWT, as epoch ms; null when the token is not a decodable JWT. */
+function jwtExpiryMs(token: unknown): number | null {
+  if (typeof token !== 'string') return null;
+  const payload = token.split('.')[1];
+  if (!payload) return null;
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    const exp = claims && typeof claims === 'object' ? (claims as { exp?: unknown }).exp : undefined;
+    return typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The `codex` CLI login the papercup brain spawn uses (`~/.codex/auth.json`, symlinked into CODEX_HOME). */
+export function codexCredentialVerdict(input: AgentCredentialProbeInput = {}): AgentCredentialVerdict {
+  const env = input.env ?? process.env;
+  const now = input.now ?? Date.now();
+  // Mirrors chat-stream's codex spawn: either flag routes codex through the gateway's provider block.
+  if (env.PAPERCUSP_CODEX_GATEWAY === '1' || nonEmptyString(env.PAPERCUSP_ACCOUNT_ID)) {
+    return { usable: true, basis: 'gateway' };
+  }
+  if (nonEmptyString(env.CODEX_API_KEY) || nonEmptyString(env.OPENAI_API_KEY)) return { usable: true, basis: 'env-key' };
+  const file = readJsonObject(join(input.home ?? homedir(), '.codex', 'auth.json'));
+  if (file === 'absent') return { usable: false, reason: 'absent' };
+  if (file === 'unreadable') return { usable: false, reason: 'unreadable' };
+  if (nonEmptyString(file.OPENAI_API_KEY)) return { usable: true, basis: 'api-key' };
+  const tokens = (file.tokens && typeof file.tokens === 'object' ? file.tokens : {}) as Record<string, unknown>;
+  return accessVerdict({
+    hasAccess: nonEmptyString(tokens.access_token),
+    hasRefresh: nonEmptyString(tokens.refresh_token),
+    expiresAtMs: jwtExpiryMs(tokens.access_token),
+    now,
+  });
+}
+
+/**
+ * The verdict for a backend whose login lives in a local credential file; null when not judged here.
+ *
+ * ⚠ It judges the CALLING process's own home (or `input.home`). A caller whose agent CLI
+ * spawns as a DIFFERENT identity (the D-421 hosted customer-identity spawn transform) is
+ * asking about a home this process cannot read, and must not use this verdict for it.
+ */
+export function agentBackendCredentialVerdict(
+  backend: string,
+  input: AgentCredentialProbeInput = {},
+): AgentCredentialVerdict | null {
+  if (backend === 'claude-code') return claudeCredentialVerdict(input);
+  if (backend === 'codex') return codexCredentialVerdict(input);
+  return null;
 }
 
 /**

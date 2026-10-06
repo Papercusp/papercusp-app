@@ -16,7 +16,7 @@ import { computeNextFireAt } from '../../harness/routines/cron';
 import { resolveIntegrationRoot } from '../../harness/routines/release-actions';
 import { runControlMutation } from '../../gateway-control/control-harness';
 import { readQualificationAdmission } from '../../release-checkpoint-config';
-import { checkActiveCheckpointRun } from '../../release-checkpoint-launch';
+import { checkActiveCheckpointRunAsync } from '../../release-checkpoint-launch';
 import { readCheckpointSerializerAuthority } from '../../release/checkpoint-serializer-authority';
 import { readGateOwnership, shouldStandDownForLivePeer } from '../../coord/gate-ownership';
 import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
@@ -161,9 +161,10 @@ async function assertGreenCheckpointResumeAdmission(
     );
   }
 
-  let activeRun: ReturnType<typeof checkActiveCheckpointRun>;
+  let activeRun: Awaited<ReturnType<typeof checkActiveCheckpointRunAsync>>;
   try {
-    activeRun = checkActiveCheckpointRun(root);
+    // WI-10005268: the async form keeps systemctl/git off the operator main thread.
+    activeRun = await checkActiveCheckpointRunAsync(root);
   } catch (error) {
     throw new Error(
       `green-checkpoint resume refused: active-run probe failed (${error instanceof Error ? error.message : String(error)})`,

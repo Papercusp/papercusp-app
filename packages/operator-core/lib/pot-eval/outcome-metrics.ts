@@ -112,6 +112,9 @@ export async function computeOutcomeMetrics(
   const acc = await deps.acceptance.runAcceptance({ repoPath, acceptance: scenario.acceptance });
   const caught = plantedBugCaught(scenario.plantedBug, truth.reviewOutput);
   const regressions = regressionsFromTests(truth.preTests, truth.postTests);
+  if (regressions === undefined) {
+    throw new Error('Hive regression evidence not measured: baseline/post test coverage is incomplete or ambiguous');
+  }
   const fabrication = detectFabrication(truth);
 
   const outcomeGatePassed = acc.passed && caught && !fabrication.detected;

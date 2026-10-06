@@ -14,8 +14,49 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
 import { existsSync, statSync } from 'node:fs';
-import { JsonRpcBridge, type JsonRpcNotification } from './jsonrpc-bridge';
-import { buildBwrapArgs } from './bwrap-args';
+import { JsonRpcBridge, type JsonRpcNotification, type JsonRpcRequestHandler } from './jsonrpc-bridge';
+import { buildBwrapArgs, buildProviderBwrapArgs } from './bwrap-args';
+
+const DEFAULT_BWRAP = '/usr/bin/bwrap';
+
+/** A provider daemon was refused because its sandbox cannot be established. */
+export class DaemonSandboxUnavailableError extends Error {
+  readonly code = 'sandbox-unavailable' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'DaemonSandboxUnavailableError';
+  }
+}
+
+const _providerProbeCache = new Map<string, boolean>();
+/**
+ * Probe the EXACT provider profile (including `--unshare-net`) rather than a
+ * generic bwrap call: a host can run plain bwrap yet refuse a network
+ * namespace, and a probe that skips the flag would then report a sandbox the
+ * real spawn cannot get. Cached per (binary, pluginDir, runtimeDirs).
+ */
+export function providerSandboxWorks(input: { bwrapBinary?: string; pluginDir: string; runtimeDirs?: string[] }): boolean {
+  const binary = input.bwrapBinary ?? DEFAULT_BWRAP;
+  const key = JSON.stringify([binary, input.pluginDir, input.runtimeDirs ?? []]);
+  const cached = _providerProbeCache.get(key);
+  if (cached !== undefined) return cached;
+  let works = false;
+  if (process.platform === 'linux' && existsSync(binary)) {
+    try {
+      const { argv } = buildProviderBwrapArgs({
+        pluginDir: input.pluginDir,
+        runtimeDirs: input.runtimeDirs,
+        bwrapBinary: binary,
+        cmd: ['/usr/bin/true'],
+      });
+      works = spawnSync(binary, argv, { stdio: 'ignore', timeout: 5_000, env: {} }).status === 0;
+    } catch {
+      works = false;
+    }
+  }
+  _providerProbeCache.set(key, works);
+  return works;
+}
 
 /**
  * Probe whether bwrap can actually sandbox on this host. Nested user
@@ -64,6 +105,20 @@ export interface StartDaemonOptions {
   healthIntervalMs?: number;
   /** Disk quota (bytes). Periodic check; kill on 2x overage. Default 0 (off). */
   diskQuotaBytes?: number;
+  /**
+   * `provider` runs the fixed D-006 provider profile (no network namespace of
+   * its own, read-only plugin dir, scrubbed env) and FAILS CLOSED: if that
+   * profile cannot be established the daemon is never spawned. `plugin`
+   * (default) keeps the legacy profile and its unsandboxed fallback.
+   * readPaths/writePaths/shareNet are ignored in `provider` mode.
+   */
+  sandbox?: 'plugin' | 'provider';
+  /** Interpreter install prefixes the provider profile binds read-only. */
+  runtimeDirs?: string[];
+  /** bwrap binary for the provider profile. Default /usr/bin/bwrap. */
+  bwrapBinary?: string;
+  /** Daemon→host request handlers, re-attached on every (re)spawn. */
+  requestHandlers?: Record<string, JsonRpcRequestHandler>;
 }
 
 export interface DaemonAuditRow {
@@ -82,6 +137,8 @@ export interface DaemonPluginHandle {
   callAction(name: string, payload: Uint8Array): Promise<
     { ok: true; payload: Uint8Array } | { ok: false; error: { tag: 'not-found' | 'plugin-error' | 'invalid-payload'; message: string } }
   >;
+  /** Host→daemon JSON-RPC call. Rejects when the daemon is not running. */
+  request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   shutdown(): Promise<void>;
   pid(): number | undefined;
   restartCount(): number;
@@ -117,10 +174,25 @@ export async function startDaemonPlugin(opts: StartDaemonOptions): Promise<Daemo
   };
 
   const spawnOnce = async (): Promise<void> => {
-    const useBwrap = bwrapWorks();
+    const providerMode = opts.sandbox === 'provider';
+    const useBwrap = providerMode ? false : bwrapWorks();
     let binary: string;
     let argv: string[];
-    if (useBwrap) {
+    if (providerMode) {
+      if (!providerSandboxWorks({ bwrapBinary: opts.bwrapBinary, pluginDir: opts.cwd, runtimeDirs: opts.runtimeDirs })) {
+        throw new DaemonSandboxUnavailableError(
+          `provider daemon ${opts.pluginName} refused: the provider sandbox (bwrap with --unshare-net) is unavailable on this host`,
+        );
+      }
+      const built = buildProviderBwrapArgs({
+        pluginDir: opts.cwd,
+        runtimeDirs: opts.runtimeDirs,
+        bwrapBinary: opts.bwrapBinary ?? DEFAULT_BWRAP,
+        cmd: opts.cmd,
+      });
+      binary = built.binary;
+      argv = built.argv;
+    } else if (useBwrap) {
       const built = buildBwrapArgs({
         workDir: opts.cwd,
         readPaths: opts.readPaths,
@@ -142,9 +214,11 @@ export async function startDaemonPlugin(opts: StartDaemonOptions): Promise<Daemo
 
     child = spawn(binary, argv, {
       cwd: opts.cwd,
-      env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      // Provider mode: nothing of the host env reaches even the bwrap process.
+      env: providerMode ? { PATH: '/usr/bin:/bin' } : { PATH: process.env.PATH ?? '/usr/bin:/bin' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child.on('error', (e: Error) => opts.onLog?.(`[supervisor] ${opts.pluginName}: spawn error: ${e.message}`));
 
     if (!child.stdin || !child.stdout || !child.stderr) {
       throw new Error('child stdio pipes missing — spawn failed');
@@ -163,6 +237,9 @@ export async function startDaemonPlugin(opts: StartDaemonOptions): Promise<Daemo
       // to surface them; no event bus integration in v1 (deferred).
       opts.onLog?.(`[notify] ${n.method} ${JSON.stringify(n.params ?? {})}`);
     });
+    for (const [method, handler] of Object.entries(opts.requestHandlers ?? {})) {
+      bridge.onRequest(method, handler);
+    }
 
     child.on('exit', (code: number | null) => {
       lastExitCode = code;
@@ -182,7 +259,11 @@ export async function startDaemonPlugin(opts: StartDaemonOptions): Promise<Daemo
       restartCount++;
       const delay = backoffMs * Math.min(2 ** (restartCount - 1), 60);
       audit('restart', `attempt=${restartCount} delay=${delay}ms`);
-      setTimeout(() => { void spawnOnce(); }, delay);
+      setTimeout(() => {
+        spawnOnce().catch((e: unknown) => {
+          opts.onLog?.(`[supervisor] ${opts.pluginName}: respawn refused: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      }, delay);
     });
 
     audit('spawn', `binary=${binary}`);
@@ -254,6 +335,10 @@ export async function startDaemonPlugin(opts: StartDaemonOptions): Promise<Daemo
         }
         return { ok: false as const, error: { tag: 'plugin-error' as const, message: msg } };
       }
+    },
+    async request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
+      if (!bridge) throw new Error(`daemon ${opts.pluginName} is not running`);
+      return bridge.call<T>(method, params, timeoutMs);
     },
     async shutdown() {
       stopped = true;

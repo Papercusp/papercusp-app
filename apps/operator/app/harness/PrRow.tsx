@@ -53,6 +53,8 @@ interface Props {
   autoStatus?: PrAutoStatus;
   /** Whether this row's report panel is expanded (nuqs-driven in PrsTab). */
   expanded?: boolean;
+  showDetails?: boolean;
+  details?: React.ReactNode;
   onToggleExpand?: () => void;
   onApprove?: (prNumber: number) => void;
   onApproveAndMerge?: (prNumber: number) => void;
@@ -184,7 +186,7 @@ function Fact({ label, danger }: { label: string; danger?: boolean }) {
   );
 }
 
-function ReportPanel({ report }: { report: NonNullable<PrRowData['report']> }) {
+export function ReportPanel({ report }: { report: NonNullable<PrRowData['report']> }) {
   // checksObserved is the deterministic facts shape (PR-2). Read defensively —
   // a legacy/garbled row may be missing fields the type promises.
   const co = (report.checksObserved ?? {}) as Partial<PrReviewChecksObserved>;
@@ -246,7 +248,7 @@ function ReportPanel({ report }: { report: NonNullable<PrRowData['report']> }) {
   );
 }
 
-export function PrRow({ pr, autoStatus, expanded, onToggleExpand, onApprove, onApproveAndMerge }: Props) {
+export function PrRow({ pr, autoStatus, expanded, showDetails, details, onToggleExpand, onApprove, onApproveAndMerge }: Props) {
   const cannotReach = pr.state === 'gone';
   const report = pr.report ?? null;
 
@@ -260,11 +262,11 @@ export function PrRow({ pr, autoStatus, expanded, onToggleExpand, onApprove, onA
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
         {/* Expand chevron (only when there's a report to expand). */}
-        {report ? (
+        {report || showDetails ? (
           <button
             type="button"
             onClick={() => onToggleExpand?.()}
-            aria-label={expanded ? `Collapse report for PR #${pr.number}` : `Expand report for PR #${pr.number}`}
+            aria-label={`${expanded ? 'Collapse' : 'Expand'} ${showDetails ? 'details' : 'report'} for PR #${pr.number}`}
             aria-expanded={!!expanded}
             style={{
               background: 'transparent',
@@ -373,6 +375,7 @@ export function PrRow({ pr, autoStatus, expanded, onToggleExpand, onApprove, onA
               </span>
             )}
             <span style={{ fontSize: 12, color: COLORS.textMuted }}>@{pr.author_login}</span>
+            <span aria-label={`PR state: ${pr.state}`} style={{ fontSize: 11, color: COLORS.textMuted }}>{pr.state}</span>
             <ChecksBadge conclusion={pr.check_conclusion} />
             <ReviewBadge decision={pr.review_decision} />
             {autoStatus && <AutoStatusLine status={autoStatus} />}
@@ -433,7 +436,7 @@ export function PrRow({ pr, autoStatus, expanded, onToggleExpand, onApprove, onA
       </div>
 
       {/* Expanded report detail. */}
-      {report && expanded && (
+      {expanded && showDetails ? <div style={{ padding: '8px 8px 0 26px' }}>{details}</div> : report && expanded && (
         <div style={{ paddingLeft: 58 }}>
           <ReportPanel report={report} />
         </div>

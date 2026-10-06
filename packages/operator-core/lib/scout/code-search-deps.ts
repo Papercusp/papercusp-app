@@ -23,7 +23,7 @@
  * `-F` keeps it a fixed string rather than a regex.
  */
 
-import { execFile } from 'node:child_process';
+import { execFileViaSidecar } from '../fleet/git-via-sidecar';
 import type { CodeSearchDeps, SemanticPriorArtMatch } from './code-existence-probe';
 import type { PlanRecord } from './plan-slug-leg';
 
@@ -156,24 +156,40 @@ export function isEvidencePath(path: string, extra: RegExp[] = []): boolean {
   return ![...NON_EVIDENCE_PATTERNS, ...extra].some((re) => re.test(path));
 }
 
-const defaultExec: ExecRunner = (file, args, opts) =>
-  new Promise((resolve, reject) => {
-    execFile(
-      file,
-      args,
-      { cwd: opts.cwd, timeout: opts.timeoutMs, maxBuffer: opts.maxBuffer },
-      (err, stdout) => {
-        if (!err) return resolve({ stdout: stdout ?? '', code: 0 });
-        const code = typeof (err as { code?: unknown }).code === 'number'
-          ? ((err as { code: number }).code)
-          : NaN;
-        // A killed process reports a signal, not a numeric code — that is a real
-        // failure (timeout / OOM), never an empty result.
-        if (Number.isFinite(code)) return resolve({ stdout: stdout ?? '', code });
-        return reject(err instanceof Error ? err : new Error(String(err)));
-      },
-    );
-  });
+/**
+ * Map an execFile-style outcome onto {@link ExecOutcome}: a numeric exit code
+ * resolves (exit 1 is `git grep`'s honest "no match"), anything else rejects. A
+ * killed process reports a signal, not a numeric code — that is a real failure
+ * (timeout / OOM), never an empty result.
+ */
+export function execOutcomeFromError(err: unknown): ExecOutcome {
+  const code = typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : NaN;
+  if (Number.isFinite(code) && code >= 0) {
+    const stdout = (err as { stdout?: unknown }).stdout;
+    return { stdout: typeof stdout === 'string' ? stdout : '', code };
+  }
+  throw err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * WI-10005424 — the fork happens in the spawner sidecar, not here. Measured on the
+ * tower 2026-10-02 09:26Z: a bg-host main-thread fork took 256–512 ms at 11.7 GB RSS,
+ * and `probeCodeExistence`'s `git grep` was one of them. `execFileViaSidecar` falls
+ * back to a local spawn (counted under `scout-code-search`) when no sidecar is up.
+ */
+const defaultExec: ExecRunner = async (file, args, opts) => {
+  try {
+    const { stdout } = await execFileViaSidecar(file, args, {
+      timeoutMs: opts.timeoutMs,
+      subsystem: 'scout-code-search',
+      cwd: opts.cwd,
+      maxBuffer: opts.maxBuffer,
+    });
+    return { stdout, code: 0 };
+  } catch (err) {
+    return execOutcomeFromError(err);
+  }
+};
 
 /**
  * Search tracked files for `term` as a literal substring.

@@ -82,6 +82,19 @@ function profileEndpoint(scheme: string, address: string, instanceId: string, re
 
 const SSH_FEATURES = ['command', 'pty', 'tcpForward', 'fileTransfer'] as const;
 
+/**
+ * What both AWS SSH transports can carry. The initialization resolver reads this to decide which
+ * credential channels an AWS host can receive (D-215 point 6), so it is declared once here rather
+ * than restated beside GCP's.
+ */
+export const AWS_WORKSPACE_HOST_TRANSPORT_FEATURES = Object.freeze({
+  command: true,
+  pty: true,
+  tcpForward: true,
+  fileTransfer: true,
+  clipboard: false,
+} as const);
+
 function hostKeyPolicy(): WorkspaceHostTransportProfile['compatibility']['hostKey'] {
   return {
     initialEnrollment: 'verify-before-connect',
@@ -106,7 +119,7 @@ export function buildAwsWorkspaceHostTransportProfile(
   const region = requiredMatch(input.region, 'AWS region', AWS_REGION);
   const common = {
     supportedClientPlatforms: ['linux', 'macos', 'windows'],
-    features: { command: true, pty: true, tcpForward: true, fileTransfer: true, clipboard: false },
+    features: { ...AWS_WORKSPACE_HOST_TRANSPORT_FEATURES },
     reconnect: 'recreate' as const,
   };
 

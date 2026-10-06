@@ -340,7 +340,15 @@ export function decideGcpWorkspaceHostRuntimeSafety(
   return { action, stopInstance, blockStart, preserveData: true, evaluatedAt: input.evaluatedAt, reasons };
 }
 
-export interface GcpManagedWorkspaceHostResourceObservation {
+// --- managed-resource census ---------------------------------------------------------------------
+// The census below is PROVIDER-NEUTRAL (aws-byoc-gcp-parity-2026-10-01 P-003): it reconciles a
+// fresh, complete provider inventory against durable controller records, parameterized by a
+// `WorkspaceHostCensusProfile` (target, census kinds, managed-label keys). GCP was its first
+// provider, so it lives here; `aws-safety.ts` supplies the AWS profile. The `Gcp*` names remain as
+// aliases of the neutral types for existing callers.
+
+export type GcpManagedWorkspaceHostResourceObservation = ManagedWorkspaceHostResourceObservation;
+export interface ManagedWorkspaceHostResourceObservation {
   resource: WorkspaceHostResourceRef;
   labels: Readonly<Record<string, string>>;
   observedAt: string;
@@ -360,14 +368,16 @@ export const GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS = [
 
 export type GcpWorkspaceHostCensusResourceKind = (typeof GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS)[number];
 
-export interface GcpWorkspaceHostInventoryEvidence {
-  kind: GcpWorkspaceHostCensusResourceKind;
+export type GcpWorkspaceHostInventoryEvidence = WorkspaceHostInventoryEvidence<GcpWorkspaceHostCensusResourceKind>;
+export interface WorkspaceHostInventoryEvidence<K extends string = string> {
+  kind: K;
   strategy: 'managed-labels' | 'deterministic-name';
   providerEvidenceRef: string;
   deterministicNames?: readonly string[];
 }
 
-export interface GcpWorkspaceHostOrphanReaperStep {
+export type GcpWorkspaceHostOrphanReaperStep = WorkspaceHostOrphanReaperStep;
+export interface WorkspaceHostOrphanReaperStep {
   resource: WorkspaceHostResourceRef;
   state: 'quarantine' | 'eligible';
   notBefore: string;
@@ -382,7 +392,8 @@ export interface GcpWorkspaceHostOrphanReaperStep {
   )[];
 }
 
-export interface GcpWorkspaceHostResourceCensusInput {
+export type GcpWorkspaceHostResourceCensusInput = WorkspaceHostResourceCensusInput<GcpWorkspaceHostCensusResourceKind>;
+export interface WorkspaceHostResourceCensusInput<K extends string = string> {
   hostId: string;
   workspaceId: string;
   expected: readonly WorkspaceHostResourceRef[];
@@ -399,38 +410,64 @@ export interface GcpWorkspaceHostResourceCensusInput {
    * deleted a backup). An UNREGISTERED managed snapshot stays untracked: that is a real finding.
    */
   retained?: readonly WorkspaceHostResourceRef[];
-  observed: readonly GcpManagedWorkspaceHostResourceObservation[];
-  inventoryEvidence: readonly GcpWorkspaceHostInventoryEvidence[];
+  observed: readonly ManagedWorkspaceHostResourceObservation[];
+  inventoryEvidence: readonly WorkspaceHostInventoryEvidence<K>[];
   evaluatedAt: string;
   orphanGraceMs: number;
 }
 
-export interface GcpWorkspaceHostResourceCensus {
+export type GcpWorkspaceHostResourceCensus = WorkspaceHostResourceCensus<GcpWorkspaceHostCensusResourceKind>;
+export interface WorkspaceHostResourceCensus<K extends string = string> {
   controllerIndependent: true;
   inventoryComplete: true;
   clean: boolean;
   evaluatedAt: string;
-  inventoryEvidence: readonly GcpWorkspaceHostInventoryEvidence[];
-  managed: readonly GcpManagedWorkspaceHostResourceObservation[];
-  untracked: readonly GcpManagedWorkspaceHostResourceObservation[];
+  inventoryEvidence: readonly WorkspaceHostInventoryEvidence<K>[];
+  managed: readonly ManagedWorkspaceHostResourceObservation[];
+  untracked: readonly ManagedWorkspaceHostResourceObservation[];
   missing: readonly WorkspaceHostResourceRef[];
-  labelMismatches: readonly GcpManagedWorkspaceHostResourceObservation[];
-  reaperPlan: readonly GcpWorkspaceHostOrphanReaperStep[];
+  labelMismatches: readonly ManagedWorkspaceHostResourceObservation[];
+  reaperPlan: readonly WorkspaceHostOrphanReaperStep[];
 }
+
+/** What makes a census provider-specific: everything else in the reconciliation is shared. */
+export interface WorkspaceHostCensusProfile<K extends string = string> {
+  /** `WorkspaceHostResourceRef.target` every expected / observed resource must carry. */
+  target: string;
+  /** Human prefix for refusal messages ('GCP', 'AWS'). */
+  providerLabel: string;
+  /** Every kind the inventory must cover before the census can claim completeness. */
+  kinds: readonly K[];
+  /** Kinds identified by deterministic name instead of managed labels (GCP shared networking). */
+  deterministicKinds: ReadonlySet<K>;
+  /** The provider's managed-label (GCP label / AWS tag) keys. */
+  managedLabelKeys: { readonly managed: string; readonly hostId: string; readonly workspaceId: string };
+  /** Normalize an id into the provider's label-value form (GCP lowercases; AWS tags are verbatim). */
+  labelValue: (value: string) => string;
+}
+
+export const GCP_WORKSPACE_HOST_CENSUS_PROFILE: WorkspaceHostCensusProfile<GcpWorkspaceHostCensusResourceKind> = {
+  target: 'gcp',
+  providerLabel: 'GCP',
+  kinds: GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS,
+  deterministicKinds: new Set<GcpWorkspaceHostCensusResourceKind>(['firewall', 'subnetwork', 'network', 'router', 'nat']),
+  managedLabelKeys: GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS,
+  labelValue: gcpWorkspaceHostLabelValue,
+};
 
 function resourceKey(resource: WorkspaceHostResourceRef): string {
   return `${resource.target}:${resource.kind}:${resource.providerId}`;
 }
 
-function assertGcpResource(resource: WorkspaceHostResourceRef, label: string): void {
-  if (resource.target !== 'gcp') throw new Error(`${label} must target 'gcp'`);
+function assertCensusResource(resource: WorkspaceHostResourceRef, label: string, target: string): void {
+  if (resource.target !== target) throw new Error(`${label} must target '${target}'`);
   requireNonEmpty(resource.kind, `${label} kind`);
   requireNonEmpty(resource.providerId, `${label} providerId`);
 }
 
 function cloneObserved(
-  observation: GcpManagedWorkspaceHostResourceObservation,
-): GcpManagedWorkspaceHostResourceObservation {
+  observation: ManagedWorkspaceHostResourceObservation,
+): ManagedWorkspaceHostResourceObservation {
   return { ...observation, resource: { ...observation.resource }, labels: { ...observation.labels } };
 }
 
@@ -438,26 +475,36 @@ function cloneObserved(
 export function censusGcpWorkspaceHostResources(
   input: GcpWorkspaceHostResourceCensusInput,
 ): GcpWorkspaceHostResourceCensus {
-  assertWorkspaceHostSecretIsolation(input, 'gcpSafety.census');
+  return censusManagedWorkspaceHostResources(input, GCP_WORKSPACE_HOST_CENSUS_PROFILE);
+}
+
+/** The provider-neutral census; `censusGcpWorkspaceHostResources` / `censusAwsWorkspaceHostResources` bind a profile. */
+export function censusManagedWorkspaceHostResources<K extends string>(
+  input: WorkspaceHostResourceCensusInput<K>,
+  profile: WorkspaceHostCensusProfile<K>,
+): WorkspaceHostResourceCensus<K> {
+  assertWorkspaceHostSecretIsolation(input, `${profile.target}Safety.census`);
+  const assertResource = (resource: WorkspaceHostResourceRef, label: string) =>
+    assertCensusResource(resource, label, profile.target);
   requireNonEmpty(input.hostId, 'census hostId');
   requireNonEmpty(input.workspaceId, 'census workspaceId');
   const evaluatedAtMs = timestamp(input.evaluatedAt, 'census evaluatedAt');
   const orphanGraceMs = positiveDuration(input.orphanGraceMs, 'census orphanGraceMs');
-  input.expected.forEach((resource, index) => assertGcpResource(resource, `census expected[${index}]`));
+  input.expected.forEach((resource, index) => assertResource(resource, `census expected[${index}]`));
   input.registeredHostResources?.forEach((resource, index) =>
-    assertGcpResource(resource, `census registeredHostResources[${index}]`),
+    assertResource(resource, `census registeredHostResources[${index}]`),
   );
   input.retained?.forEach((resource, index) => {
-    assertGcpResource(resource, `census retained[${index}]`);
+    assertResource(resource, `census retained[${index}]`);
     if (resource.kind !== 'snapshot') {
       throw new Error(`census retained[${index}] must be a snapshot recovery point, not '${resource.kind}'`);
     }
   });
-  input.observed.forEach((entry, index) => assertGcpResource(entry.resource, `census observed[${index}].resource`));
-  const inventoryByKind = new Map<GcpWorkspaceHostCensusResourceKind, GcpWorkspaceHostInventoryEvidence>();
+  input.observed.forEach((entry, index) => assertResource(entry.resource, `census observed[${index}].resource`));
+  const inventoryByKind = new Map<K, WorkspaceHostInventoryEvidence<K>>();
   for (const [index, evidence] of input.inventoryEvidence.entries()) {
     requireNonEmpty(evidence.providerEvidenceRef, `census inventoryEvidence[${index}].providerEvidenceRef`);
-    if (!GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS.includes(evidence.kind)) {
+    if (!profile.kinds.includes(evidence.kind)) {
       throw new Error(`census inventoryEvidence[${index}].kind is unsupported`);
     }
     if (inventoryByKind.has(evidence.kind)) {
@@ -465,54 +512,48 @@ export function censusGcpWorkspaceHostResources(
     }
     inventoryByKind.set(evidence.kind, evidence);
   }
-  const missingInventoryKinds = GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS.filter((kind) => !inventoryByKind.has(kind));
+  const missingInventoryKinds = profile.kinds.filter((kind) => !inventoryByKind.has(kind));
   if (missingInventoryKinds.length > 0) {
-    throw new Error(`GCP workspace-host census inventory incomplete: ${missingInventoryKinds.join(', ')}`);
+    throw new Error(`${profile.providerLabel} workspace-host census inventory incomplete: ${missingInventoryKinds.join(', ')}`);
   }
-  const deterministicKinds = new Set<GcpWorkspaceHostCensusResourceKind>([
-    'firewall',
-    'subnetwork',
-    'network',
-    'router',
-    'nat',
-  ]);
-  const deterministicNames = new Map<GcpWorkspaceHostCensusResourceKind, Set<string>>();
-  for (const kind of GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS) {
+  const deterministicKinds = profile.deterministicKinds;
+  const deterministicNames = new Map<K, Set<string>>();
+  for (const kind of profile.kinds) {
     const evidence = inventoryByKind.get(kind)!;
     if (deterministicKinds.has(kind)) {
       if (evidence.strategy !== 'deterministic-name' || !evidence.deterministicNames?.length) {
-        throw new Error(`GCP workspace-host census '${kind}' inventory requires deterministic names`);
+        throw new Error(`${profile.providerLabel} workspace-host census '${kind}' inventory requires deterministic names`);
       }
       deterministicNames.set(
         kind,
         new Set(evidence.deterministicNames.map((name) => requireNonEmpty(name, `${kind} name`))),
       );
     } else if (evidence.strategy !== 'managed-labels') {
-      throw new Error(`GCP workspace-host census '${kind}' inventory requires managed-label enumeration`);
+      throw new Error(`${profile.providerLabel} workspace-host census '${kind}' inventory requires managed-label enumeration`);
     }
   }
-  const requiredLabels = {
-    [GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.managed]: 'true',
-    [GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.hostId]: gcpWorkspaceHostLabelValue(input.hostId),
-    [GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.workspaceId]: gcpWorkspaceHostLabelValue(input.workspaceId),
-  } as const;
+  const labelKeys = profile.managedLabelKeys;
+  const requiredLabels: Readonly<Record<string, string>> = {
+    [labelKeys.managed]: 'true',
+    [labelKeys.hostId]: profile.labelValue(input.hostId),
+    [labelKeys.workspaceId]: profile.labelValue(input.workspaceId),
+  };
   const expectedKeys = new Set(input.expected.map(resourceKey));
   const registeredKeys = new Set(input.registeredHostResources?.map(resourceKey));
   const observedByKey = new Map(input.observed.map((entry) => [resourceKey(entry.resource), entry]));
-  const matchesManagedIdentity = (entry: GcpManagedWorkspaceHostResourceObservation) => {
-    const kind = entry.resource.kind as GcpWorkspaceHostCensusResourceKind;
+  const matchesManagedIdentity = (entry: ManagedWorkspaceHostResourceObservation) => {
+    const kind = entry.resource.kind as K;
     if (deterministicKinds.has(kind)) {
       return deterministicNames.get(kind)?.has(entry.resource.providerId) === true;
     }
     return Object.entries(requiredLabels).every(([key, value]) => entry.labels[key] === value);
   };
-  const matchesManagedWorkspace = (entry: GcpManagedWorkspaceHostResourceObservation) => {
-    const kind = entry.resource.kind as GcpWorkspaceHostCensusResourceKind;
+  const matchesManagedWorkspace = (entry: ManagedWorkspaceHostResourceObservation) => {
+    const kind = entry.resource.kind as K;
     return (
       !deterministicKinds.has(kind) &&
-      entry.labels[GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.managed] === 'true' &&
-      entry.labels[GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.workspaceId] ===
-        requiredLabels[GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.workspaceId]
+      entry.labels[labelKeys.managed] === 'true' &&
+      entry.labels[labelKeys.workspaceId] === requiredLabels[labelKeys.workspaceId]
     );
   };
   const managed = input.observed.filter(matchesManagedIdentity);
@@ -523,7 +564,7 @@ export function censusGcpWorkspaceHostResources(
         registeredKeys.has(resourceKey(entry.resource)) ||
         (matchesManagedWorkspace(entry) &&
           (input.registeredHostResources === undefined ||
-            !entry.labels[GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.hostId]?.trim()))),
+            !entry.labels[labelKeys.hostId]?.trim()))),
   );
   const retainedKeys = new Set(input.retained?.map(resourceKey));
   const untracked = managed.filter(
@@ -533,7 +574,7 @@ export function censusGcpWorkspaceHostResources(
     const observed = observedByKey.get(resourceKey(entry));
     return !observed || !matchesManagedIdentity(observed);
   });
-  const reaperPlan = untracked.map((entry): GcpWorkspaceHostOrphanReaperStep => {
+  const reaperPlan = untracked.map((entry): WorkspaceHostOrphanReaperStep => {
     const firstObservedAtMs = timestamp(entry.firstObservedAt ?? entry.observedAt, 'orphan firstObservedAt');
     const notBeforeMs = firstObservedAtMs + orphanGraceMs;
     return {
@@ -557,7 +598,7 @@ export function censusGcpWorkspaceHostResources(
     inventoryComplete: true,
     clean: untracked.length === 0 && missing.length === 0 && labelMismatches.length === 0,
     evaluatedAt: input.evaluatedAt,
-    inventoryEvidence: GCP_WORKSPACE_HOST_CENSUS_RESOURCE_KINDS.map((kind) => {
+    inventoryEvidence: profile.kinds.map((kind) => {
       const evidence = inventoryByKind.get(kind)!;
       return {
         ...evidence,
@@ -583,22 +624,28 @@ export const GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RUNBOOK = {
   ],
 } as const;
 
-export type GcpWorkspaceHostAmbiguousAction = 'create' | 'update' | 'delete' | 'start' | 'stop';
-export type GcpWorkspaceHostAmbiguousObservedState = 'present' | 'absent' | 'running' | 'stopped';
+export type WorkspaceHostAmbiguousAction = 'create' | 'update' | 'delete' | 'start' | 'stop';
+export type GcpWorkspaceHostAmbiguousAction = WorkspaceHostAmbiguousAction;
+/** Provider-neutral observed state; each provider maps its own vocabulary onto it before recording. */
+export type WorkspaceHostAmbiguousObservedState = 'present' | 'absent' | 'running' | 'stopped';
+export type GcpWorkspaceHostAmbiguousObservedState = WorkspaceHostAmbiguousObservedState;
 
-export interface GcpWorkspaceHostAmbiguousProviderRead {
+export type GcpWorkspaceHostAmbiguousProviderRead = WorkspaceHostAmbiguousProviderRead;
+export interface WorkspaceHostAmbiguousProviderRead {
   resource: WorkspaceHostResourceRef;
-  state: GcpWorkspaceHostAmbiguousObservedState;
+  state: WorkspaceHostAmbiguousObservedState;
   observedAt: string;
   providerEvidenceRef: string;
+  /** GCP labels or AWS tags, keyed by the provider's managed keys. */
   labels?: Readonly<Record<string, string>>;
   providerRequestId?: string;
 }
 
-export interface GcpWorkspaceHostAmbiguousOperationRecoveryInput {
+export type GcpWorkspaceHostAmbiguousOperationRecoveryInput = WorkspaceHostAmbiguousOperationRecoveryInput;
+export interface WorkspaceHostAmbiguousOperationRecoveryInput {
   operationId: string;
   idempotencyKey: string;
-  attemptedAction: GcpWorkspaceHostAmbiguousAction;
+  attemptedAction: WorkspaceHostAmbiguousAction;
   resource: WorkspaceHostResourceRef;
   hostId: string;
   workspaceId: string;
@@ -606,20 +653,48 @@ export interface GcpWorkspaceHostAmbiguousOperationRecoveryInput {
   reason: string;
   issuedAt: string;
   maxEvidenceAgeMs: number;
-  providerRead: GcpWorkspaceHostAmbiguousProviderRead;
+  providerRead: WorkspaceHostAmbiguousProviderRead;
   providerEvidence?: Readonly<Record<string, unknown>>;
 }
 
-export interface GcpWorkspaceHostAmbiguousOperationRecoveryRecord extends GcpWorkspaceHostAmbiguousOperationRecoveryInput {
-  kind: 'gcp-workspace-host-ambiguous-operation-recovery';
-  runbookRef: typeof GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RUNBOOK_REF;
+export interface WorkspaceHostAmbiguousOperationRecoveryRecord<
+  Kind extends string = string,
+  RunbookRef extends string = string,
+> extends WorkspaceHostAmbiguousOperationRecoveryInput {
+  kind: Kind;
+  runbookRef: RunbookRef;
   closesOperation: boolean;
   nextAction: 'mark-step-applied' | 'mark-step-destroyed' | 'resume-reconcile-with-same-idempotency-key';
 }
 
+export type GcpWorkspaceHostAmbiguousOperationRecoveryRecord = WorkspaceHostAmbiguousOperationRecoveryRecord<
+  'gcp-workspace-host-ambiguous-operation-recovery',
+  typeof GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RUNBOOK_REF
+>;
+
+/**
+ * What makes ambiguous-operation recovery provider-specific: the managed identity a present
+ * resource must carry (the census profile's target, keys and value encoding), and the record's
+ * kind and runbook. The freshness, identity and completion rules are shared.
+ */
+export interface WorkspaceHostAmbiguousOperationRecoveryProfile<Kind extends string, RunbookRef extends string> {
+  census: Pick<WorkspaceHostCensusProfile, 'target' | 'managedLabelKeys' | 'labelValue'>;
+  kind: Kind;
+  runbookRef: RunbookRef;
+}
+
+const GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RECOVERY_PROFILE: WorkspaceHostAmbiguousOperationRecoveryProfile<
+  'gcp-workspace-host-ambiguous-operation-recovery',
+  typeof GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RUNBOOK_REF
+> = {
+  census: GCP_WORKSPACE_HOST_CENSUS_PROFILE,
+  kind: 'gcp-workspace-host-ambiguous-operation-recovery',
+  runbookRef: GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RUNBOOK_REF,
+};
+
 function ambiguousActionCompleted(
-  action: GcpWorkspaceHostAmbiguousAction,
-  state: GcpWorkspaceHostAmbiguousObservedState,
+  action: WorkspaceHostAmbiguousAction,
+  state: WorkspaceHostAmbiguousObservedState,
 ): boolean {
   if (action === 'delete') return state === 'absent';
   if (action === 'start') return state === 'running';
@@ -631,7 +706,19 @@ function ambiguousActionCompleted(
 export function createGcpWorkspaceHostAmbiguousOperationRecoveryRecord(
   input: GcpWorkspaceHostAmbiguousOperationRecoveryInput,
 ): GcpWorkspaceHostAmbiguousOperationRecoveryRecord {
-  assertWorkspaceHostSecretIsolation(input, 'gcpSafety.ambiguousRecovery');
+  return createManagedWorkspaceHostAmbiguousOperationRecoveryRecord(
+    input,
+    GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RECOVERY_PROFILE,
+  );
+}
+
+/** Produce the only typed evidence that may manually close an ambiguous operation on any provider. */
+export function createManagedWorkspaceHostAmbiguousOperationRecoveryRecord<Kind extends string, RunbookRef extends string>(
+  input: WorkspaceHostAmbiguousOperationRecoveryInput,
+  profile: WorkspaceHostAmbiguousOperationRecoveryProfile<Kind, RunbookRef>,
+): WorkspaceHostAmbiguousOperationRecoveryRecord<Kind, RunbookRef> {
+  const census = profile.census;
+  assertWorkspaceHostSecretIsolation(input, `${census.target}Safety.ambiguousRecovery`);
   requireNonEmpty(input.operationId, 'ambiguous operationId');
   requireNonEmpty(input.idempotencyKey, 'ambiguous idempotencyKey');
   requireNonEmpty(input.hostId, 'ambiguous hostId');
@@ -648,12 +735,12 @@ export function createGcpWorkspaceHostAmbiguousOperationRecoveryRecord(
   if (resourceKey(input.resource) !== resourceKey(input.providerRead.resource)) {
     throw new Error('Ambiguous-operation provider read does not match the attempted resource');
   }
-  assertGcpResource(input.resource, 'ambiguous resource');
+  assertCensusResource(input.resource, 'ambiguous resource', census.target);
   if (input.providerRead.state !== 'absent') {
     const expectedLabels = {
-      [GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.managed]: 'true',
-      [GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.hostId]: gcpWorkspaceHostLabelValue(input.hostId),
-      [GCP_WORKSPACE_HOST_MANAGED_LABEL_KEYS.workspaceId]: gcpWorkspaceHostLabelValue(input.workspaceId),
+      [census.managedLabelKeys.managed]: 'true',
+      [census.managedLabelKeys.hostId]: census.labelValue(input.hostId),
+      [census.managedLabelKeys.workspaceId]: census.labelValue(input.workspaceId),
     };
     if (
       !input.providerRead.labels ||
@@ -669,8 +756,8 @@ export function createGcpWorkspaceHostAmbiguousOperationRecoveryRecord(
       : 'mark-step-applied'
     : 'resume-reconcile-with-same-idempotency-key';
   return {
-    kind: 'gcp-workspace-host-ambiguous-operation-recovery',
-    runbookRef: GCP_WORKSPACE_HOST_AMBIGUOUS_OPERATION_RUNBOOK_REF,
+    kind: profile.kind,
+    runbookRef: profile.runbookRef,
     ...input,
     resource: { ...input.resource },
     providerRead: {

@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod';
+import type { RefusalContract } from './capability-envelope/refusal-contract-types';
 
 export const PROPERTY_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 
@@ -49,7 +50,13 @@ export type TypedPropertyMutationFailure =
   | { ok: false; code: 'bad_property_schema'; issues: string[] }
   | { ok: false; code: 'bad_properties'; issues: string[] }
   | { ok: false; code: 'unknown_property'; property: string }
-  | { ok: false; code: 'forbidden'; property: string; editableBy: PropertyEditableBy }
+  | {
+      ok: false;
+      code: 'forbidden';
+      property: string;
+      editableBy: PropertyEditableBy;
+      refusal: RefusalContract;
+    }
   | { ok: false; code: 'stale'; property: string; expectedVersion: number; actualVersion: number }
   | { ok: false; code: 'invalid_value'; property: string; datatype: string; issues: string[] }
   | {
@@ -60,6 +67,7 @@ export type TypedPropertyMutationFailure =
       proposedLength: number;
       actualVersion: number;
       recovery: { confirmShrink: true };
+      refusal: RefusalContract;
     };
 
 export type TypedPropertyMutationResult =
@@ -163,6 +171,14 @@ export function prepareTypedPropertyMutation(
       code: 'forbidden',
       property: args.property,
       editableBy: definition.editable_by,
+      refusal: {
+        observed: { property: args.property, editableBy: definition.editable_by, actor, provenance: args.provenance },
+        liftsWhen:
+          `the edit is made as ${definition.editable_by === 'owner' ? 'an owner-edit' : 'an agent-edit'} ` +
+          `(the property declares editable_by=${definition.editable_by}), or the declaration is changed to ` +
+          'editable_by=both. Retrying with the same provenance changes nothing',
+        whoCanMakeItTrue: definition.editable_by === 'owner' ? ['owner'] : ['another-agent'],
+      } satisfies RefusalContract,
     };
   }
 
@@ -204,6 +220,17 @@ export function prepareTypedPropertyMutation(
       proposedLength: args.value.length,
       actualVersion,
       recovery: { confirmShrink: true },
+      refusal: {
+        observed: {
+          property: args.property,
+          priorLength: String(priorValue.length),
+          proposedLength: String(args.value.length),
+        },
+        liftsWhen:
+          'the caller resubmits the same value with confirmShrink:true (it asserts the shorter list is ' +
+          'intentional), or submits a value at least as long as the stored one',
+        whoCanMakeItTrue: ['self'],
+      } satisfies RefusalContract,
     };
   }
 

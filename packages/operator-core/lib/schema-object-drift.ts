@@ -134,19 +134,30 @@ export interface SchemaObjectDrift {
  * the definition from `pg_index` columns — the rendered form is what Postgres
  * itself considers the index's definition, so two identical schemas cannot
  * disagree through a reconstruction bug of ours.
+ *
+ * `constraintBacked` is an EXISTS over the index's OWN constraint kinds
+ * (primary key, unique, exclusion), never a join on `conindid` alone. A foreign
+ * key also sets `conindid` — to the REFERENCED table's unique index — so a join
+ * emitted one census row per referencing FK (duplicate (schema, name) keys,
+ * inflated counts) and labelled a plain unique index constraint-backed merely
+ * because an FK pointed at it (WI-10005064). Filtering on `conrelid` instead
+ * would not be enough: a self-referencing FK has the index's own table there.
  */
 export const INDEX_CENSUS_SQL = `
   SELECT i.schemaname                             AS schema,
          i.indexname                              AS name,
          i.tablename                              AS "table",
          i.indexdef                               AS definition,
-         (con.conindid IS NOT NULL)               AS "constraintBacked"
+         EXISTS (
+           SELECT 1
+             FROM pg_constraint con
+            WHERE con.conindid = ic.oid
+              AND con.contype IN ('p', 'u', 'x')
+         )                                        AS "constraintBacked"
     FROM pg_indexes i
     JOIN pg_class ic
       ON ic.relname = i.indexname
      AND ic.relnamespace = i.schemaname::regnamespace
-    LEFT JOIN pg_constraint con
-      ON con.conindid = ic.oid
    WHERE i.schemaname NOT LIKE 'pg\\_%'
      AND i.schemaname <> 'information_schema'
    ORDER BY i.schemaname, i.indexname

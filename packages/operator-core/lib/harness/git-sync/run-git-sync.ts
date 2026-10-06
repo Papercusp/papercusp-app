@@ -37,17 +37,24 @@ import { spawn } from 'node:child_process';
 import { collectChildOutput } from '../../child-output.js';
 import { processGroupLifetime } from '../../fleet/process-group-lifetime';
 import { withGitFetchHeadroom } from './git-fetch-headroom';
-import { lstat, open, readFile, readlink, readdir, realpath, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, open, readFile, readlink, readdir, realpath, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { mapLiveLockHoldingsForRepo } from './live-lock-coordinates';
 import { projectDirForSlug } from '../../operator-notes';
 import { gitSidecarEnabled, isSidecarInfrastructureFault, noteSidecarFallback, runGitViaSpawnerSidecar } from '../../fleet/git-via-sidecar';
 import { detectContentOffenders, parseDirtyPaths, type ContentOffender } from './content-guard';
-import { detectUnsafeDeletions, normalizeModulePath, RESOLVABLE_EXTS } from './deletion-import-guard';
+import {
+  detectStagedDeletionsStillImported,
+  detectUnsafeDeletions,
+  normalizeModulePath,
+  RESOLVABLE_EXTS,
+} from './deletion-import-guard';
 import { detectWholesaleDeletion } from './wholesale-deletion-guard';
+import { runSyncBack, type SyncBackConfig, type SyncBackResult } from './sync-back';
 import { detectQuarantineImporters } from './quarantine-import-guard';
 import { DEFAULT_CONTENT_DETECTORS, type ContentDetector } from '../../content-lint/registry';
 import { armedMigrationFilename } from '../../migration-reservation';
+import { acquireInstallBoundaryLease, type InstallBoundaryLease } from '../../install-boundary-lease';
 import {
   groupFilesForAttribution,
   attributionMapForRepo,
@@ -59,6 +66,9 @@ import {
 } from './git-sync-attribution';
 
 export type RunGit = (args: string[], cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
+
+const gitFailureDetail = (result: Awaited<ReturnType<RunGit>>): string =>
+  (result.stderr.trim() || result.stdout.trim() || `git exited with code ${result.code} without output`).slice(0, 300);
 
 const envMs = (name: string, dflt: number): number => {
   const v = Number(process.env[name]);
@@ -123,9 +133,9 @@ const gitSubcommand = (args: string[]): string => {
   return index >= 0 ? args[index] : '';
 };
 
-/** These read-only commands need no optional Git locks while offloaded. */
+/** These read-only commands must not refresh the shared index while offloaded. */
 const GIT_SIDECAR_READ_ONLY_COMMANDS = new Set([
-  'rev-parse', 'cat-file', 'ls-files', 'ls-tree', 'merge-base', 'rev-list',
+  'rev-parse', 'status', 'cat-file', 'ls-files', 'ls-tree', 'merge-base', 'rev-list',
   'for-each-ref',
 ]);
 
@@ -211,6 +221,9 @@ const runGitLocalBounded = (
         LANG: 'C',
         PAPERCUSP_GIT_SYNC_PUSH: '1',
         GIT_TERMINAL_PROMPT: '0',
+        ...(GIT_SIDECAR_READ_ONLY_COMMANDS.has(gitSubcommand(args))
+          ? { GIT_OPTIONAL_LOCKS: '0' }
+          : {}),
       },
     });
     const out = collectChildOutput(child);
@@ -307,7 +320,8 @@ const runGitLocalBounded = (
       // A failed spawn has no child to drain. Other errors are not exit proof.
       if (child.pid === undefined) finish(-1);
     });
-    child.on('close', async (code) => {
+    child.on('close', async (code, signal) => {
+      if (signal) out.stderr.append(`${out.stderr.peek() ? '\n' : ''}git terminated by signal ${signal}`);
       await groupLifetime.waitForExit();
       finish(code ?? -1);
     });
@@ -364,7 +378,7 @@ const runGitBoundedUnchecked = async (
     try {
       options.onProgress?.();
       const result = await runGitViaSpawnerSidecar(effectiveArgs, cwd, hardTimeoutMs,
-        options.signal && readOnly ? { ...env, GIT_OPTIONAL_LOCKS: '0' } : env, {
+        readOnly ? { ...env, GIT_OPTIONAL_LOCKS: '0' } : env, {
         idleTimeoutMs: network ? timeoutMs : undefined,
         signal: options.signal,
         onProgress: options.onProgress,
@@ -416,7 +430,7 @@ export interface ToolCatalogGeneratorResult {
   stderr: string;
 }
 
-export type RunToolCatalogGenerator = (repoPath: string) => Promise<ToolCatalogGeneratorResult>;
+export type RunToolCatalogGenerator = (repoPath: string, dependencies?: GitSyncTsxDependencies) => Promise<ToolCatalogGeneratorResult>;
 
 export interface ToolCatalogRegeneratorContext {
   runGit: RunGit;
@@ -426,15 +440,64 @@ export interface ToolCatalogRegeneratorContext {
 
 export type ToolCatalogRegenerator = (context: ToolCatalogRegeneratorContext) => Promise<void>;
 
+export type GitSyncInstallBoundaryAcquirer = (repoPath: string) => Promise<InstallBoundaryLease>;
+export interface GitSyncTsxDependencies {
+  acquire?: GitSyncInstallBoundaryAcquirer;
+  spawnChild?: typeof spawn;
+}
+export type GitSyncInstallBoundaryResult<T> =
+  | { status: 'launched'; value: T }
+  | { status: 'refused'; lease: InstallBoundaryLease };
+
+/**
+ * Keep git-sync children that import from node_modules inside the same
+ * repo-keyed read boundary used by install:safe. If the lease cannot be
+ * acquired, refuse launch instead of racing npm's dependency rewrite.
+ */
+export async function runGitSyncUnderInstallBoundary<T>(
+  repoPath: string,
+  launch: () => Promise<T>,
+  acquire: GitSyncInstallBoundaryAcquirer = acquireInstallBoundaryLease,
+): Promise<GitSyncInstallBoundaryResult<T>> {
+  const lease = await acquire(repoPath);
+  if (lease.outcome !== 'acquired' && lease.outcome !== 'nested') {
+    return { status: 'refused', lease };
+  }
+  try {
+    return { status: 'launched', value: await launch() };
+  } finally {
+    lease.release();
+  }
+}
+
+interface GitSyncGeneratorChildResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+function gitSyncInstallBoundaryRefusal(
+  lease: InstallBoundaryLease,
+  generator: string,
+): GitSyncGeneratorChildResult {
+  const detail = lease.detail ? ': ' + lease.detail : '';
+  return {
+    code: -1,
+    stdout: '',
+    stderr: 'git-sync ' + generator + ' refused to start because install:safe boundary was ' + lease.outcome + detail,
+  };
+}
+
 /**
  * Run the catalog writer in a bounded child. The generator cold-imports the full
  * registry, so a peer's half-written tool module can make that import hang or
  * fail; neither condition may wedge the fleet-wide git-sync commit path.
  */
-const defaultRunToolCatalogGenerator: RunToolCatalogGenerator = (repoPath) =>
-  new Promise((resolve) => {
+export const defaultRunToolCatalogGenerator: RunToolCatalogGenerator = (repoPath, dependencies) =>
+  runGitSyncUnderInstallBoundary(repoPath, () =>
+    new Promise<ToolCatalogGeneratorResult>((resolve) => {
     const timeoutMs = envMs('PAPERCUSP_GIT_SYNC_TOOL_CATALOG_TIMEOUT_MS', 60_000);
-    const child = spawn(join(repoPath, 'node_modules', '.bin', 'tsx'), [TOOL_CATALOG_GENERATOR_PATH], {
+    const child = (dependencies?.spawnChild ?? spawn)(join(repoPath, 'node_modules', '.bin', 'tsx'), [TOOL_CATALOG_GENERATOR_PATH], {
       cwd: repoPath,
       env: process.env,
     });
@@ -468,7 +531,10 @@ const defaultRunToolCatalogGenerator: RunToolCatalogGenerator = (repoPath) =>
       finish(-1);
     });
     child.on('close', (code) => finish(timedOut ? -1 : (code ?? -1)));
-  });
+    }),
+    dependencies?.acquire).then((result) => result.status === 'launched'
+    ? result.value
+    : gitSyncInstallBoundaryRefusal(result.lease, 'tool-catalog regeneration'));
 
 /**
  * Regenerate the tracked tool catalog immediately before the superproject
@@ -575,7 +641,7 @@ export interface GeneratedDeclarationsGeneratorResult {
   stderr: string;
 }
 
-export type RunGeneratedDeclarationsGenerator = (repoPath: string) => Promise<GeneratedDeclarationsGeneratorResult>;
+export type RunGeneratedDeclarationsGenerator = (repoPath: string, dependencies?: GitSyncTsxDependencies) => Promise<GeneratedDeclarationsGeneratorResult>;
 
 export type GeneratedDeclarationsRepairResult =
   | { status: 'not-needed'; atomicPaths: string[] }
@@ -593,10 +659,11 @@ export type GeneratedDeclarationsRegenerator = (
  * failure is returned to the caller as `blocked`: committing the source without
  * its generated declaration is the exact torn-snapshot class this seam closes.
  */
-const defaultRunGeneratedDeclarationsGenerator: RunGeneratedDeclarationsGenerator = (repoPath) =>
-  new Promise((resolve) => {
+export const defaultRunGeneratedDeclarationsGenerator: RunGeneratedDeclarationsGenerator = (repoPath, dependencies) =>
+  runGitSyncUnderInstallBoundary(repoPath, () =>
+    new Promise<GeneratedDeclarationsGeneratorResult>((resolve) => {
     const timeoutMs = envMs('PAPERCUSP_GIT_SYNC_DECLARATIONS_TIMEOUT_MS', 120_000);
-    const child = spawn(join(repoPath, 'node_modules', '.bin', 'tsx'), [DECLARATIONS_GENERATOR_PATH], {
+    const child = (dependencies?.spawnChild ?? spawn)(join(repoPath, 'node_modules', '.bin', 'tsx'), [DECLARATIONS_GENERATOR_PATH], {
       cwd: repoPath,
       env: process.env,
     });
@@ -628,7 +695,10 @@ const defaultRunGeneratedDeclarationsGenerator: RunGeneratedDeclarationsGenerato
       finish(-1);
     });
     child.on('close', (code) => finish(timedOut ? -1 : (code ?? -1)));
-  });
+    }),
+    dependencies?.acquire).then((result) => result.status === 'launched'
+    ? result.value
+    : gitSyncInstallBoundaryRefusal(result.lease, 'declaration regeneration'));
 
 /** A status read is a cheap census, but it can still lose a race with the
  * sidecar/admission layer. Retry that read briefly before deciding whether the
@@ -848,7 +918,7 @@ export interface ToolRoutingCheckResult {
   stderr: string;
 }
 
-export type RunToolRoutingCheck = (repoPath: string) => Promise<ToolRoutingCheckResult>;
+export type RunToolRoutingCheck = (repoPath: string, dependencies?: GitSyncTsxDependencies) => Promise<ToolRoutingCheckResult>;
 
 export interface ToolRoutingCheckerContext {
   runGit: RunGit;
@@ -863,10 +933,11 @@ export type ToolRoutingChecker = (context: ToolRoutingCheckerContext) => Promise
  * canonical doc-part store, so a broken DB/client or a half-written peer module
  * must be observable without allowing it to wedge the fleet-wide git-sync pass.
  */
-const defaultRunToolRoutingCheck: RunToolRoutingCheck = (repoPath) =>
-  new Promise((resolve) => {
+export const defaultRunToolRoutingCheck: RunToolRoutingCheck = (repoPath, dependencies) =>
+  runGitSyncUnderInstallBoundary(repoPath, () =>
+    new Promise<ToolRoutingCheckResult>((resolve) => {
     const timeoutMs = envMs('PAPERCUSP_GIT_SYNC_TOOL_ROUTING_TIMEOUT_MS', 60_000);
-    const child = spawn(join(repoPath, 'node_modules', '.bin', 'tsx'), [TOOL_ROUTING_GENERATOR_PATH, '--check'], {
+    const child = (dependencies?.spawnChild ?? spawn)(join(repoPath, 'node_modules', '.bin', 'tsx'), [TOOL_ROUTING_GENERATOR_PATH, '--check'], {
       cwd: repoPath,
       env: process.env,
     });
@@ -900,7 +971,10 @@ const defaultRunToolRoutingCheck: RunToolRoutingCheck = (repoPath) =>
       finish(-1);
     });
     child.on('close', (code) => finish(timedOut ? -1 : (code ?? -1)));
-  });
+    }),
+    dependencies?.acquire).then((result) => result.status === 'launched'
+    ? result.value
+    : gitSyncInstallBoundaryRefusal(result.lease, 'tool-routing check'));
 
 /**
  * Run the generated tool-routing drift check immediately before the
@@ -1082,6 +1156,10 @@ export interface GitSyncConfig {
    *  does not extend to submodules, each an independent GitHub repo the bridge never
    *  touches. Non-legacy callers also require owning-hive authorization at each push. */
   pushSubmoduleOrigins?: boolean;
+  /** pot-review-integration-mode P-016: a working-copy pot merges the MAIN repository's
+   *  branch into its staging each tick (set by `applyIntegrationPushTarget`). Applied to
+   *  the SUPERPROJECT only — submodules are the main repositories' own and never absorb. */
+  syncBack?: SyncBackConfig;
   /** Reconcile the SUPERPROJECT worktree with its configured Git remote
    *  (fetch + merge) before an optional push. Default true.
    *
@@ -1191,12 +1269,114 @@ export interface GitSyncLockHolding {
   goalRef?: string;
 }
 
-/** A dirty path excluded from this pass because a live editor holds its lock. */
-export interface GitSyncSkippedPath {
-  scope: string;
-  path: string;
-  owner: string;
-  intent: string;
+/** A dirty path deferred by this pass, with lock provenance or a guard reason. */
+export type GitSyncSkippedPath =
+  | { scope: string; path: string; owner: string; intent: string }
+  | { scope: string; path: string; reason: 'migration-reservation'; detail: string }
+  | {
+      scope: string;
+      path: string;
+      reason: 'migration-dependency-fence';
+      detail: string;
+      /**
+       * WI-10006493: the structured provenance of the deferral, so a reader such as
+       * dev:pipeline_position can name the migration that is blocking this path and
+       * who owns it, instead of telling the caller to force a sync that defers the
+       * path again. Each is a superproject-relative path, agent id or work-item id.
+       */
+      blockingMigrations?: string[];
+      blockingAgents?: string[];
+      blockingWorkItems?: string[];
+    };
+
+/**
+ * Keep a superproject edit from outrunning a migration quarantined in one of its
+ * submodules. Reuse git-sync's edit-ledger attribution: same-work-item paths are
+ * held together, while confidently attributed unrelated work can still commit.
+ * If a refused migration or a dirty root path cannot be attributed, fail closed
+ * for that root path; if the refused migration itself is unknown, hold all root
+ * changes because their dependency cannot be ruled out.
+ */
+export function migrationDependencyFenceSkips(
+  refusedMigrations: readonly Extract<GitSyncSkippedPath, { reason: 'migration-reservation' }>[],
+  dirtySuperprojectPaths: readonly string[],
+  roster: readonly AttributionRosterEntry[],
+  /** Superproject root, so absolute presence `current_files` normalize like every other caller's. */
+  superRoot?: string,
+): GitSyncSkippedPath[] {
+  if (refusedMigrations.length === 0 || dirtySuperprojectPaths.length === 0) return [];
+
+  const attributionsByScope = new Map<string, Map<string, FileAttribution>>();
+  const mapFor = (scope: string): Map<string, FileAttribution> => {
+    let map = attributionsByScope.get(scope);
+    if (!map) {
+      map = attributionMapForRepo([...roster], scope, superRoot);
+      attributionsByScope.set(scope, map);
+    }
+    return map;
+  };
+  // EI-25203408414398603: the edit ledger records a NESTED repo's edit relative to THAT repo
+  // with repo=NULL (edit-attribution.ts — locks:acquire never learns the true repo root), so a
+  // child migration's roster entry reads 'libs/db/sql/NNNN-x.sql', never
+  // '<scope>/libs/db/sql/NNNN-x.sql'. Matching only the scope-qualified form left every child
+  // migration unattributed, and an unattributed migration holds EVERY dirty superproject path —
+  // one stray migration froze the whole superproject. Prefer the scope-qualified match, then
+  // accept the nested-relative shape the ledger actually writes.
+  const migrationAttribution = (migration: { scope: string; path: string }): FileAttribution | undefined =>
+    mapFor(migration.scope).get(migration.path) ??
+    (migration.scope && migration.scope !== 'superproject' ? mapFor('').get(migration.path) : undefined);
+
+  const blockedWorkItems = new Set<string>();
+  const blockedAgents = new Set<string>();
+  const agentsWithoutWorkItem = new Set<string>();
+  let unknownMigration = roster.length === 0;
+  for (const migration of refusedMigrations) {
+    const attribution = migrationAttribution(migration);
+    if (!attribution) {
+      unknownMigration = true;
+      continue;
+    }
+    blockedAgents.add(attribution.agent);
+    const workItems = (attribution.workItems ?? []).map((id) => id.trim()).filter(Boolean);
+    if (workItems.length === 0) agentsWithoutWorkItem.add(attribution.agent);
+    for (const id of workItems) blockedWorkItems.add(id);
+  }
+
+  const rootAttributions = mapFor('');
+  // Superproject-relative, so a reader can match them against the paths it is asked about.
+  const blockingMigrations = [
+    ...new Set(
+      refusedMigrations.map((migration) =>
+        migration.scope && migration.scope !== 'superproject' ? migration.scope + '/' + migration.path : migration.path,
+      ),
+    ),
+  ];
+  const migrationLocations = blockingMigrations.slice(0, 3).join(', ');
+  const details = (path: string): GitSyncSkippedPath => ({
+    scope: 'superproject',
+    path,
+    reason: 'migration-dependency-fence',
+    detail: unknownMigration
+      ? 'deferred because a reservation-blocked migration could not be attributed; holding this path until its dependency is known'
+      : 'deferred because this path shares work-item attribution with a reservation-blocked migration at ' + migrationLocations,
+    blockingMigrations,
+    blockingAgents: [...blockedAgents],
+    blockingWorkItems: [...blockedWorkItems],
+  });
+
+  return [...new Set(dirtySuperprojectPaths)]
+    .filter((path) => {
+      if (unknownMigration) return true;
+      const attribution = rootAttributions.get(path);
+      if (!attribution) return true;
+      const workItems = (attribution.workItems ?? []).map((id) => id.trim()).filter(Boolean);
+      const sharesWorkItem = workItems.some((id) => blockedWorkItems.has(id));
+      const sameAgentWithoutKnownWorkItem =
+        blockedAgents.has(attribution.agent) &&
+        (agentsWithoutWorkItem.has(attribution.agent) || workItems.length === 0 || blockedWorkItems.size === 0);
+      return sharesWorkItem || sameAgentWithoutKnownWorkItem;
+    })
+    .map(details);
 }
 
 /** True when two repo-relative paths overlap as a file or directory lock. */
@@ -1273,6 +1453,60 @@ export function expandAtomicLiveLockExclusions(
   }
   outputGroups.sort((a, b) => a.key.localeCompare(b.key));
   return { paths: [...paths].sort(), groups: outputGroups };
+}
+
+/**
+ * A lock on one Rust source file must withhold the rest of that dirty Cargo package.
+ *
+ * Goal attribution is useful when it exists, but it is optional metadata and cannot
+ * establish Rust module completeness. In particular, publishing callers and a new
+ * sibling module while the locked crate root is withheld leaves a tree that does not
+ * compile even though the directional importer guard sees no import from the old root.
+ * Find the nearest Cargo package for each directly-excluded dirty file, then keep all
+ * dirty paths in that package together for this repository pass. Workspace-only
+ * Cargo.toml files ([workspace] without [package]) are not package boundaries.
+ */
+export async function expandCargoPackageLiveLockExclusions(
+  dirtyFiles: readonly string[],
+  excludedPaths: readonly string[],
+  readText: (path: string) => Promise<string | null>,
+): Promise<{ paths: string[]; packages: Array<{ root: string; paths: string[] }> }> {
+  const dirty = [...new Set(dirtyFiles.map((path) => path.trim()).filter(Boolean))];
+  const excluded = [...new Set(excludedPaths.map((path) => path.trim()).filter(Boolean))];
+  const packageRoots = new Set<string>();
+  const manifestCache = new Map<string, Promise<string | null>>();
+  const readManifest = (path: string): Promise<string | null> => {
+    let result = manifestCache.get(path);
+    if (!result) {
+      result = readText(path);
+      manifestCache.set(path, result);
+    }
+    return result;
+  };
+
+  for (const file of dirty) {
+    if (!excluded.some((path) => gitSyncPathsOverlap(file, path))) continue;
+    let dir = file === 'Cargo.toml' ? '.' : file.slice(0, Math.max(0, file.lastIndexOf('/')));
+    if (!dir) dir = '.';
+    while (true) {
+      const manifestPath = dir === '.' ? 'Cargo.toml' : `${dir}/Cargo.toml`;
+      const manifest = await readManifest(manifestPath);
+      if (manifest != null && /^\s*\[package\]\s*$/m.test(manifest)) {
+        packageRoots.add(dir);
+        break;
+      }
+      const parent = dir === '.' ? '.' : dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) || '.' : '.';
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  const packages = [...packageRoots].sort().map((root) => ({
+    root,
+    paths: dirty.filter((file) => (root === '.' ? true : file.startsWith(`${root}/`))).sort(),
+  }));
+  const paths = [...new Set(packages.flatMap((pkg) => pkg.paths))].sort();
+  return { paths, packages };
 }
 
 const FETCH_FAILURE_REASON_MAX_CHARS = 300;
@@ -1382,6 +1616,13 @@ export type GitSyncOutcome = {
    * stage ran without a conflict and is safe for escalation clearing.
    */
   mergeCompleted?: string[];
+  /**
+   * P-016: the superproject's sync-back result for this pass — upstream `main`
+   * merged into the working copy's `staging` (review integration mode only).
+   * Absent when sync-back is not configured or did not run this pass. The
+   * action layer files a fix-it work-item when `status === 'conflict'`.
+   */
+  syncBack?: SyncBackResult;
 } & (
   | { status: 'nothing' }
   | { status: 'synced'; headSha: string; pushed: string[]; merged: string[] }
@@ -1465,6 +1706,7 @@ export interface RunGitSyncOpts {
    *  derives a per-repo attribution map and peels per-agent commits; when absent (flag OFF / no
    *  caller) commits are unchanged (today's single whole-tree commit). DERIVED, never authored. */
   loadRoster?: () => Promise<AttributionRosterEntry[]>;
+  loadMigrationFenceRoster?: () => Promise<AttributionRosterEntry[]>;
   /** WI-38594 (flag GIT_SYNC_DIFF_SUBJECTS, default ON): commit subjects are DIFF-derived
    *  (`sync(<areas>): <what> (<n> files, +A/-D)`) with the agent's intent line demoted to
    *  the commit body. false = the pre-WI-38594 subjects (intent line / message stem). */
@@ -1813,7 +2055,17 @@ async function transplantInstallerSeedSnapshot(
   }
 
   if (replayedCommits === 0) {
-    const adopt = await runGit(['reset', '--hard', remoteRef], repo);
+    // WI-10004413: `reset --hard` writes the index, so route it through the shared
+    // stale-lock recovery like every other index writer in this file.
+    const adoptArgs = ['reset', '--hard', remoteRef];
+    const adopt = await recoverIndexLockContention(
+      await runGit(adoptArgs, repo),
+      () => runGit(adoptArgs, repo),
+      runGit,
+      repo,
+      'git reset --hard (seed snapshot adopt)',
+      log,
+    );
     if (adopt.code !== 0) {
       return {
         status: 'error',
@@ -3277,6 +3529,18 @@ export async function findOversizedDirtyFiles(
  * guard's real purpose (a stray 90MB blob, a 2,261MB extracted AppImage) is intact
  * while a declared generated output is never starved by it.
  *
+ * SMALL SOURCE LAST (WI-10004416). The repair above over-corrected: "not a projection"
+ * was treated as "unexpected artifact", so every hand-written source file ranked
+ * AHEAD of the mirror. Whenever a docs rebuild alone nearly filled the cap, the
+ * first pass peeled ALL ordinary source down to the smallest file. Measured
+ * 2026-09-30 20:17Z: the sweep commit was 249 MB, 992 of its 999 files were the
+ * docs mirror, and 305 ordinary source files (532 KB down to ~3 KB) were left dirty.
+ * The content guard then quarantined their importers, so the fleet's source edits
+ * never reached a commit while git-sync reported success. A non-projection file now
+ * ranks as an artifact only at or above `bulkArtifactMinBytes`; smaller files are
+ * peeled after every projection. The mirror still commits across several ticks,
+ * and a real bulk accident is still peeled first.
+ *
  * Deliberately NOT a hard failure: a legitimately large commit is possible, and
  * refusing to commit at all would just relocate the wedge upstream.
  */
@@ -3301,12 +3565,16 @@ export async function findBulkDirtyExcess(
     }
   }
   if (total <= maxTotalBytes) return [];
-  // Peel the largest until the remainder fits — but a DECLARED regenerable
-  // projection is only eligible once every unexpected artifact has been peeled and
-  // the set is still over the cap (EI-21906459740652039; see the header).
+  // Peel in three tiers, each largest-first, stopping as soon as the remainder fits
+  // (EI-21906459740652039 + WI-10004416; see the header):
+  //   1. artifact-sized files that are NOT declared projections — the accident class;
+  //   2. declared regenerable projections (the docs mirror);
+  //   3. small hand-written files — only when 1 and 2 together are not enough.
   sized.sort((a, b) => b.sizeBytes - a.sizeBytes);
+  const artifactMinBytes = bulkArtifactMinBytes(maxTotalBytes);
   const excluded: OversizedFile[] = [];
   const deferredProjections: OversizedFile[] = [];
+  const deferredSmall: OversizedFile[] = [];
   const probe = { spent: 0 };
   for (const f of sized) {
     if (total <= maxTotalBytes) break;
@@ -3314,15 +3582,35 @@ export async function findBulkDirtyExcess(
       deferredProjections.push(f);
       continue;
     }
+    if (f.sizeBytes < artifactMinBytes) {
+      deferredSmall.push(f);
+      continue;
+    }
     excluded.push({ ...f, exclusionReason: 'cumulative-limit' });
     total -= f.sizeBytes;
   }
-  for (const f of deferredProjections) {
-    if (total <= maxTotalBytes) break;
-    excluded.push({ ...f, exclusionReason: 'cumulative-limit' });
-    total -= f.sizeBytes;
+  for (const tier of [deferredProjections, deferredSmall]) {
+    for (const f of tier) {
+      if (total <= maxTotalBytes) break;
+      excluded.push({ ...f, exclusionReason: 'cumulative-limit' });
+      total -= f.sizeBytes;
+    }
   }
   return excluded;
+}
+
+/**
+ * WI-10004416 — the size at which a non-projection dirty file counts as an
+ * ARTIFACT (tier 1 of the peel) rather than hand-written source (tier 3).
+ *
+ * A fixed fraction of the cap rather than a fixed byte count: 1/250 is ~1 MB at the
+ * production 250 MB cap, which is above every hand-written source file in this repo
+ * (the largest are a few hundred KB) and below the files a bulk accident is made of.
+ * Scaling with the cap keeps the tiering meaningful at any configured limit, and
+ * keeps a byte-scale test cap from classifying every fixture as source.
+ */
+export function bulkArtifactMinBytes(maxTotalBytes: number): number {
+  return Math.max(1, Math.floor(maxTotalBytes / 250));
 }
 
 /**
@@ -3451,7 +3739,7 @@ async function unstagePreStagedProtectedPaths(
   if (staged.code !== 0) {
     return {
       ok: false,
-      error: `could not inspect pre-staged protected paths: ${(staged.stderr || staged.stdout).trim().slice(0, 300)}`,
+      error: `could not inspect pre-staged protected paths: ${gitFailureDetail(staged)}`,
     };
   }
   const protectedStaged = [
@@ -3464,11 +3752,23 @@ async function unstagePreStagedProtectedPaths(
   ];
   if (protectedStaged.length === 0) return { ok: true, paths: [] };
 
-  const unstage = await runGit(['reset', '-q', 'HEAD', '--', ...protectedStaged], repoPath);
+  // WI-10004413: this reset WRITES the index and is often the tick's first index
+  // writer, so an orphaned index.lock blocks it exactly like `git add`/`git commit`.
+  // Without the shared age-checked, live-holder-guarded recovery, every tick failed
+  // here until someone removed the lock by hand (2026-09-30: superproject frozen for over an hour).
+  const resetArgs = ['reset', '-q', 'HEAD', '--', ...protectedStaged];
+  const unstage = await recoverIndexLockContention(
+    await runGit(resetArgs, repoPath),
+    () => runGit(resetArgs, repoPath),
+    runGit,
+    repoPath,
+    'git reset (unstage protected paths)',
+    log,
+  );
   if (unstage.code !== 0) {
     return {
       ok: false,
-      error: `could not unstage protected paths: ${(unstage.stderr || unstage.stdout).trim().slice(0, 300)}`,
+      error: `could not unstage protected paths: ${gitFailureDetail(unstage)}`,
     };
   }
   log(
@@ -3476,6 +3776,248 @@ async function unstagePreStagedProtectedPaths(
       `(${protectedStaged.join(', ')}) — working-tree edits remain locked`,
   );
   return { ok: true, paths: protectedStaged };
+}
+
+/** Outcome of {@link guardStagedIndexBeforeCommit}. */
+export type PostStageGuardResult =
+  | {
+      ok: true;
+      /** Holdings (this repo's coordinates) that overlap a staged path but were not visible pre-stage. */
+      lateLockedHoldings: GitSyncLockHolding[];
+      /** Staged paths whose working-tree content changed after they were staged. */
+      drifted: string[];
+      /** Every path removed from the index (late-locked + drifted + their dirty importers). */
+      unstaged: string[];
+    }
+  | { ok: false; error: string };
+
+/**
+ * EI-24712906810240170: close the window between STAGING and COMMIT.
+ *
+ * The pre-stage live-lock refresh protects every path locked BEFORE `git add`. It cannot
+ * protect a path whose lock is taken after that read: a mutation probe that acquires its
+ * file lock and mutates between the refresh and the add has its MUTANT staged, and a probe
+ * that then restores the file and releases the lock before the commit leaves no lock for
+ * anyone to see. `git commit` records the index, so either way the mutant would publish.
+ * That gap is why top-level probes used to need the fleet-wide exclusive git-sync lease.
+ *
+ * Call this after the final add and before the commit it guards. It unstages:
+ *  - LATE-LOCKED paths: staged paths that a live lock now covers;
+ *  - DRIFTED paths: staged paths whose working-tree content no longer matches the index
+ *    (the staged blob was a transient state, e.g. a probe's mutant since restored);
+ *  - their dirty importers, so an importer never lands without the module it needs.
+ * Unstaged paths stay dirty in the working tree and are re-examined by the next tick,
+ * with the full content guard pipeline, instead of being re-staged here unscanned.
+ *
+ * ⚠ ORDER IS LOAD-BEARING: the staged set is read first (the index is fixed after the add),
+ * then the lock census, then the working-tree drift. A probe locks before it mutates
+ * (L < M) and releases after it restores (R < Rel). A mutant is staged only when M < add.
+ * If the lock is still held at the census, the late-lock check catches it. If it was
+ * released before the census, the restore happened earlier still (R < Rel < census <
+ * drift read), so the drift check sees worktree ≠ index. Reading drift BEFORE the census
+ * would miss a restore+release that lands between the two reads.
+ *
+ * Submodule gitlinks are ignored by the drift read (`--ignore-submodules=all`): a moved or
+ * dirty submodule is not a transient superproject blob, and its files are guarded by that
+ * submodule's own pass. Fails closed (ok:false) when the lock plane or the index cannot be read.
+ */
+export async function guardStagedIndexBeforeCommit(opts: {
+  runGit: RunGit;
+  repoPath: string;
+  scope: string;
+  refreshLiveLockHoldings?: () => Promise<GitSyncLockHolding[]>;
+  readText: (relPath: string) => Promise<string | null>;
+  /** Paths excluded before staging (content/deletion/size guards, explicit exclusions, and package closures). */
+  excludedDependencies?: readonly string[];
+  /** Live-lock/cohort paths remain infectious even when an older copy exists in HEAD. */
+  alwaysInfectiousDependencies?: readonly string[];
+  log: (message: string) => void;
+}): Promise<PostStageGuardResult> {
+  const { runGit, repoPath, scope, log } = opts;
+  // 1. The staged set. Fixed since the add, so reading it before the census is safe.
+  const stagedRes = await runGit(['diff', '--cached', '--name-only', '--no-renames', '-z'], repoPath);
+  if (stagedRes.code !== 0) {
+    return {
+      ok: false,
+      error: `post-stage guard could not read the index: ${gitFailureDetail(stagedRes)}`,
+    };
+  }
+  const staged = stagedRes.stdout.split('\0').filter(Boolean);
+  if (staged.length === 0) return { ok: true, lateLockedHoldings: [], drifted: [], unstaged: [] };
+  const stagedSet = new Set(staged);
+
+  // 2. The lock census, AFTER the add.
+  let lateLockedHoldings: GitSyncLockHolding[] = [];
+  const lateLocked = new Set<string>();
+  if (opts.refreshLiveLockHoldings) {
+    let holdings: GitSyncLockHolding[];
+    try {
+      holdings = await opts.refreshLiveLockHoldings();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      log(`[git-sync] ${scope}: post-stage live lock refresh failed (fail-closed) — ${detail}`);
+      return { ok: false, error: `post-stage live lock refresh failed (fail-closed): ${detail}` };
+    }
+    const byPath = new Map<string, GitSyncLockHolding>();
+    for (const holding of holdings) {
+      const lockPath = holding.path.trim().replace(/^\.\/+|\/+$/g, '');
+      if (!lockPath) continue;
+      const covered = staged.filter((path) => gitSyncPathsOverlap(path, lockPath));
+      if (covered.length === 0) continue;
+      for (const path of covered) lateLocked.add(path);
+      byPath.set(lockPath, { ...holding, path: lockPath });
+    }
+    lateLockedHoldings = [...byPath.values()];
+  }
+
+  // 3. Working-tree drift, AFTER the census.
+  const driftRes = await runGit(['diff', '--name-only', '--no-renames', '-z', '--ignore-submodules=all'], repoPath);
+  if (driftRes.code !== 0) {
+    return {
+      ok: false,
+      error: `post-stage guard could not compare the working tree to the index: ${gitFailureDetail(driftRes)}`,
+    };
+  }
+  const drifted = new Set(
+    driftRes.stdout
+      .split('\0')
+      .filter(Boolean)
+      .filter((path) => stagedSet.has(path) && !lateLocked.has(path)),
+  );
+  // A staged DELETION whose file has reappeared is untracked, so `git diff` cannot list it;
+  // ask for it as a non-ignored untracked file. An IGNORED file that stays on disk is the
+  // deliberate untracking of runtime state (EI-22737671025165479), not drift, and
+  // `--exclude-standard` leaves it out.
+  const deletedRes = await runGit(
+    ['diff', '--cached', '--name-only', '--no-renames', '-z', '--diff-filter=D'],
+    repoPath,
+  );
+  if (deletedRes.code !== 0) {
+    return {
+      ok: false,
+      error: `post-stage guard could not read staged deletions: ${gitFailureDetail(deletedRes)}`,
+    };
+  }
+  const stagedDeletions = deletedRes.stdout.split('\0').filter((path) => path && !lateLocked.has(path));
+  for (let i = 0; i < stagedDeletions.length; i += 500) {
+    const chunk = stagedDeletions.slice(i, i + 500);
+    const reappeared = await runGit(['ls-files', '-z', '--others', '--exclude-standard', '--', ...chunk], repoPath);
+    if (reappeared.code !== 0) {
+      return {
+        ok: false,
+        error: `post-stage guard could not check reappeared deletions: ${gitFailureDetail(reappeared)}`,
+      };
+    }
+    for (const path of reappeared.stdout.split('\0').filter(Boolean)) {
+      if (stagedSet.has(path)) drifted.add(path);
+    }
+  }
+
+  const held = [...new Set([...lateLocked, ...drifted])];
+  const packageClosure =
+    held.length > 0 ? await expandCargoPackageLiveLockExclusions(staged, held, opts.readText) : { paths: [], packages: [] };
+  // Re-scan the actual index immediately before commit, not only the earlier dirty
+  // census. New untracked importers can arrive while the lock refresh and content
+  // guards run, then enter through the later `git add -A`; they must stay with every
+  // dependency this commit is excluding.
+  const alwaysInfectious = new Set([
+    ...(opts.alwaysInfectiousDependencies ?? []),
+    ...lateLocked,
+    ...drifted,
+    ...packageClosure.paths,
+  ]);
+  const excludedDependencies = [...new Set([...(opts.excludedDependencies ?? []), ...alwaysInfectious])];
+  const importerOffenders = excludedDependencies.length > 0
+    ? await detectQuarantineImporters({
+        readText: opts.readText,
+        dirtyFiles: staged,
+        alreadyQuarantined: excludedDependencies,
+        isResolvableAtHead: async (path) => {
+          if (alwaysInfectious.has(path)) return false;
+          return isModuleResolvableAtHead(runGit, repoPath, path, log);
+        },
+        exclusionLabel: 'post-stage exclusion',
+        log,
+      })
+    : [];
+  const importers = importerOffenders.map((offender) => offender.file).filter((file) => stagedSet.has(file));
+  const pathsToUnstage = [...new Set([...excludedDependencies, ...importers])].filter((path) => stagedSet.has(path));
+  let unstagedPaths: string[] = [];
+  if (pathsToUnstage.length > 0) {
+    const unstage = await unstagePreStagedProtectedPaths(runGit, repoPath, pathsToUnstage, log);
+    if (!unstage.ok) return { ok: false, error: `post-stage guard ${unstage.error}` };
+    log(
+      `[git-sync] ${scope}: post-stage guard held back ${unstage.paths.length} staged path(s) from this commit — ` +
+        `late-locked [${[...lateLocked].join(', ')}], drifted after staging [${[...drifted].join(', ')}]` +
+        (packageClosure.paths.length > 0
+          ? `, same Cargo package [${packageClosure.paths.join(', ')}]`
+          : '') +
+        (importers.length > 0 ? `, dirty importers [${[...new Set(importers)].join(', ')}]` : '') +
+        ' — they stay dirty for the next tick',
+    );
+    unstagedPaths = unstage.paths;
+  }
+  // WI-10006352: LAST, once nothing else will change the index — a staged deletion the
+  // commit's own tree still imports. The first round reuses the listing read above unless
+  // the hold just changed the index.
+  const deletionHold = await holdStagedDeletionsStillImported({
+    runGit,
+    repoPath,
+    scope,
+    log,
+    firstListing: unstagedPaths.length === 0 ? deletedRes.stdout.split('\0').filter(Boolean) : undefined,
+  });
+  if (!deletionHold.ok) return deletionHold;
+  return {
+    ok: true,
+    lateLockedHoldings,
+    drifted: [...drifted],
+    unstaged: [...new Set([...unstagedPaths, ...deletionHold.unstaged])],
+  };
+}
+
+/**
+ * WI-10006352: unstage every staged module deletion that the index (the tree `git commit`
+ * records) still imports, to a fixed point — a held deletion returns its HEAD text to the
+ * index, which may import another staged deletion. Each round unstages at least one path or
+ * stops, so it terminates. The working tree is untouched: the file stays deleted and the next
+ * tick retries the deletion once its importer has landed. Fails closed like the rest of the
+ * post-stage guard when the index cannot be read.
+ */
+export async function holdStagedDeletionsStillImported(opts: {
+  runGit: RunGit;
+  repoPath: string;
+  scope: string;
+  log: (message: string) => void;
+  firstListing?: readonly string[];
+}): Promise<{ ok: true; unstaged: string[] } | { ok: false; error: string }> {
+  const { runGit, repoPath, scope, log } = opts;
+  const unstaged: string[] = [];
+  let listing = opts.firstListing;
+  for (;;) {
+    const scan = await detectStagedDeletionsStillImported({ runGit, repoPath, stagedDeletions: listing, log });
+    listing = undefined;
+    if (!scan.ok) return { ok: false, error: `post-stage guard ${scan.error}` };
+    if (scan.holds.length === 0) break;
+    const unstage = await unstagePreStagedProtectedPaths(
+      runGit,
+      repoPath,
+      scan.holds.map((hold) => hold.path),
+      log,
+    );
+    if (!unstage.ok) return { ok: false, error: `post-stage guard ${unstage.error}` };
+    log(
+      `[git-sync] ${scope}: post-stage guard held back ${unstage.paths.length} staged deletion(s) the commit ` +
+        `would still import — ` +
+        scan.holds
+          .map((hold) => `${hold.path} (${hold.scanError ? `index scan failed: ${hold.scanError}` : `imported by ${hold.importedBy.join(', ')}`})`)
+          .join('; ') +
+        ' — they stay deleted in the working tree for the next tick',
+    );
+    if (unstage.paths.length === 0) break;
+    unstaged.push(...unstage.paths);
+  }
+  return { ok: true, unstaged };
 }
 
 /** The CI-skip suffix git-sync's message carries (e.g. ` [skip ci]`), so every per-agent
@@ -3498,7 +4040,12 @@ export async function commitAttributedGroups(
   attribution: Map<string, FileAttribution>,
   excludePaths: string[],
   message: string,
-  opts: { diffSubjects?: boolean } = {},
+  opts: {
+    diffSubjects?: boolean;
+    /** EI-24712906810240170: runs after each group's add and before its commit (see
+     *  guardStagedIndexBeforeCommit). A failure aborts the phase with that error. */
+    beforeCommit?: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  } = {},
 ): Promise<{ committedAny: boolean; committedCount: number; error?: string }> {
   const excludeSet = new Set(excludePaths);
   const dirty = (await dirtyFiles(runGit, repoPath)).filter((f) => !excludeSet.has(f));
@@ -3508,7 +4055,18 @@ export async function commitAttributedGroups(
   let committedCount = 0;
   for (const g of groups) {
     if (g.agent === null || g.files.length === 0) continue; // catch-all handled by the caller's add -A
-    await runGit(['add', '--', ...g.files], repoPath);
+    const add = await runGit(['add', '--', ...g.files], repoPath);
+    if (add.code !== 0) {
+      return {
+        committedAny,
+        committedCount,
+        error: `attributed add failed: ${gitFailureDetail(add)}`,
+      };
+    }
+    if (opts.beforeCommit) {
+      const guard = await opts.beforeCommit();
+      if (!guard.ok) return { committedAny, committedCount, error: guard.error };
+    }
     // WI-38594 (flag GIT_SYNC_DIFF_SUBJECTS): the subject describes the DIFF (what this
     // commit actually contains — from the just-staged numstat); the agent's intent line
     // (the pre-WI-38594 subject) rides as the first BODY paragraph, ahead of the
@@ -3542,7 +4100,7 @@ export async function commitAttributedGroups(
       return {
         committedAny,
         committedCount,
-        error: `attributed commit failed: ${(c.stderr || c.stdout).trim().slice(0, 300)}`,
+        error: `attributed commit failed: ${gitFailureDetail(c)}`,
       };
     }
   }
@@ -3583,10 +4141,22 @@ interface CommitRepoOpts {
   diffSubjects?: boolean;
   /** Fail-closed reservation check for newly armed migration files, before staging. */
   migrationReservationChecker?: MigrationReservationChecker;
+  /** Reservation refusals from child repos whose paired superproject sources must stay dirty. */
+  migrationDependencyRefusals?: readonly Extract<GitSyncSkippedPath, { reason: 'migration-reservation' }>[];
+  /** Root paths that are submodule gitlinks, not superproject source files for dependency fencing. */
+  migrationDependencySubmodulePaths?: readonly string[];
+  migrationFenceRoster?: readonly AttributionRosterEntry[];
+  loadMigrationFenceRoster?: () => Promise<AttributionRosterEntry[]>;
 }
 
 /** The commit-stage seam for the shared migration reservation admission guard. */
-export type MigrationReservationChecker = (dirtyPaths: readonly string[]) => Promise<void>;
+export interface MigrationReservationRefusal {
+  path: string;
+  reason: string;
+}
+export type MigrationReservationChecker = (
+  dirtyPaths: readonly string[],
+) => Promise<readonly MigrationReservationRefusal[]>;
 
 const migrationPaths = (paths: readonly string[]): string[] =>
   paths.filter((path) => armedMigrationFilename(path) !== null);
@@ -3594,16 +4164,61 @@ const migrationPaths = (paths: readonly string[]): string[] =>
 async function checkMigrationReservations(
   options: CommitRepoOpts,
   paths: readonly string[],
-): Promise<string | null> {
-  if (!options.migrationReservationChecker) return null;
+): Promise<
+  | { ok: true; refusals: MigrationReservationRefusal[] }
+  | { ok: false; error: string }
+> {
+  if (!options.migrationReservationChecker) return { ok: true, refusals: [] };
   const candidates = migrationPaths(paths);
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return { ok: true, refusals: [] };
   try {
-    await options.migrationReservationChecker(candidates);
-    return null;
+    const checked = await options.migrationReservationChecker(candidates);
+    if (!Array.isArray(checked)) return { ok: false, error: 'checker returned a non-array result' };
+    const candidateSet = new Set(candidates);
+    if (
+      checked.some(
+        (entry) =>
+          !entry ||
+          typeof entry.path !== 'string' ||
+          !candidateSet.has(entry.path) ||
+          typeof entry.reason !== 'string' ||
+          entry.reason.length === 0,
+      )
+    ) {
+      return { ok: false, error: 'checker returned an invalid or out-of-scope refusal' };
+    }
+    const byPath = new Map(checked.map((entry) => [entry.path, entry]));
+    return { ok: true, refusals: [...byPath.values()] };
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function migrationReservationSkips(
+  scope: string,
+  refusals: readonly MigrationReservationRefusal[],
+  skippedPaths: GitSyncSkippedPath[],
+  log: (message: string) => void,
+): string[] {
+  const paths: string[] = [];
+  for (const refusal of refusals) {
+    if (paths.includes(refusal.path)) continue;
+    paths.push(refusal.path);
+    if (
+      !skippedPaths.some(
+        (entry) => entry.path === refusal.path && 'reason' in entry && entry.reason === 'migration-reservation',
+      )
+    ) {
+      skippedPaths.push({
+        scope,
+        path: refusal.path,
+        reason: 'migration-reservation',
+        detail: refusal.reason,
+      });
+    }
+    log(`[git-sync] ${scope}: deferring migration ${refusal.path} — ${refusal.reason}`);
+  }
+  return paths;
 }
 
 
@@ -3614,7 +4229,16 @@ async function checkMigrationReservations(
 type ReconcileRepoOpts = Pick<
   CommitRepoOpts,
   'remote' | 'defaultBranch' | 'log' | 'staleTempPackMs' | 'isTempPackOpen'
-> & { doPush: boolean };
+> & {
+  doPush: boolean;
+  /** A child repo's stale remote-tracking ref cannot prove its current pin is publishable. */
+  requireRemoteVerification?: boolean;
+  /**
+   * pot-review-integration-mode P-016: a working-copy pot absorbs the MAIN repository's
+   * branch into its staging before pushing the fork. Set only by working-copy mode.
+   */
+  syncBack?: SyncBackConfig;
+};
 
 /** JSON-serializable — checkpointed as the superproject `git-sync:pointer-bump` step output. */
 interface CommitRepoResult {
@@ -3659,9 +4283,16 @@ async function untrackLegacyDependencyGenerationStore(
   const paths = tracked.stdout.split('\0').filter(Boolean);
   if (paths.length === 0) return { ok: true, trackedCount: 0 };
 
-  const removed = await runGit(
-    ['rm', '-r', '-f', '--cached', '--ignore-unmatch', '--', DEPENDENCY_GENERATION_STORE],
+  // WI-10004413: `rm --cached` writes the index. It is idempotent (--ignore-unmatch),
+  // so the shared stale-lock recovery may safely re-run it.
+  const rmArgs = ['rm', '-r', '-f', '--cached', '--ignore-unmatch', '--', DEPENDENCY_GENERATION_STORE];
+  const removed = await recoverIndexLockContention(
+    await runGit(rmArgs, repoPath),
+    () => runGit(rmArgs, repoPath),
+    runGit,
     repoPath,
+    'git rm --cached (dependency-generation store)',
+    log,
   );
   if (removed.code !== 0) {
     return {
@@ -3676,6 +4307,104 @@ async function untrackLegacyDependencyGenerationStore(
       'from the index; cached-only repair preserved the ignored host-local store on disk',
   );
   return { ok: true, trackedCount: paths.length };
+}
+
+/**
+ * The env-named generation-store record dependency-generation.sh writes under an
+ * integration root (WI-10005159). MUST equal the repo-relative form of
+ * `dependencyGenerationRootRecord()` in release/dependency-generation-prebuild.ts — pinned
+ * by a test, because importing that module here would drag Postgres into git-sync.
+ */
+export const DEPENDENCY_GENERATION_ROOT_RECORD = '.papercusp/dependency-generation-root';
+
+/**
+ * WI-10006277: the store above ignores itself through its own `.gitignore` (WI-42354),
+ * but a single FILE cannot, and only Papercusp's own root `.gitignore` names this
+ * record. In every other repository — a user's repo behind a repo pot — git-sync
+ * therefore committed a host-local absolute path, and a working-copy pot carried it
+ * into the standing PR to the user's main repository.
+ *
+ * Repair at the same seam as the store: make the record ignored through the repo's
+ * PRIVATE `info/exclude` (never the user's tracked `.gitignore`, which would itself
+ * become a change in their PR), then drop any copy an older git-sync already committed
+ * from the index, leaving the file on disk. No-op when the record is absent and
+ * untracked, or when the repo's own rules already ignore it (Papercusp's tree).
+ */
+async function excludeDependencyGenerationRootRecord(
+  runGit: RunGit,
+  repoPath: string,
+  log: (message: string) => void,
+): Promise<{ ok: true; excluded: boolean; untracked: boolean } | { ok: false; error: string }> {
+  const record = DEPENDENCY_GENERATION_ROOT_RECORD;
+  const fail = (what: string, r: { stdout: string; stderr: string }) => ({
+    ok: false as const,
+    error: `${what} (${record}): ${(r.stderr || r.stdout).trim().slice(0, 300)}`,
+  });
+  const tracked = await runGit(['ls-files', '-z', '--', record], repoPath);
+  if (tracked.code !== 0) return fail('could not census the dependency-generation root record', tracked);
+  const isTracked = tracked.stdout.split('\0').some(Boolean);
+  if (!isTracked) {
+    try {
+      await lstat(join(repoPath, record));
+    } catch {
+      return { ok: true, excluded: false, untracked: false };
+    }
+  }
+
+  // `--no-index`: a TRACKED file is otherwise never reported ignored.
+  const checkIgnored = () => runGit(['check-ignore', '-q', '--no-index', '--', record], repoPath);
+  let ignored = await checkIgnored();
+  let excluded = false;
+  if (ignored.code === 1) {
+    const gitPath = await runGit(['rev-parse', '--path-format=absolute', '--git-path', 'info/exclude'], repoPath);
+    if (gitPath.code !== 0) return fail('could not locate info/exclude', gitPath);
+    const excludeFile = gitPath.stdout.trim();
+    let existing = '';
+    try {
+      existing = await readFile(excludeFile, 'utf8');
+    } catch {
+      existing = '';
+    }
+    const rule = `/${record}`;
+    if (!existing.split('\n').includes(rule)) {
+      const sep = existing === '' || existing.endsWith('\n') ? '' : '\n';
+      await mkdir(dirname(excludeFile), { recursive: true });
+      await writeFile(
+        excludeFile,
+        `${existing}${sep}# Papercusp host-local state (WI-10006277) - never committed\n${rule}\n`,
+        'utf8',
+      );
+      excluded = true;
+    }
+    ignored = await checkIgnored();
+  }
+  if (ignored.code !== 0) {
+    // Still not ignored (e.g. the repo's own rules re-include it with `!`): leave the
+    // index alone — untracking a file the catch-all add re-adds would only churn.
+    if (ignored.code !== 1) return fail('could not check-ignore the dependency-generation root record', ignored);
+    log(`[git-sync] ${repoPath}: ${record} is re-included by the repo's own ignore rules; leaving it tracked`);
+    return { ok: true, excluded, untracked: false };
+  }
+  if (!isTracked) {
+    if (excluded) log(`[git-sync] ${repoPath}: excluded host-local ${record} via info/exclude`);
+    return { ok: true, excluded, untracked: false };
+  }
+
+  const rmArgs = ['rm', '-f', '--cached', '--ignore-unmatch', '--', record];
+  const removed = await recoverIndexLockContention(
+    await runGit(rmArgs, repoPath),
+    () => runGit(rmArgs, repoPath),
+    runGit,
+    repoPath,
+    'git rm --cached (dependency-generation root record)',
+    log,
+  );
+  if (removed.code !== 0) return fail('could not untrack the dependency-generation root record', removed);
+  log(
+    `[git-sync] ${repoPath}: removed legacy tracked ${record} from the index; ` +
+      'cached-only repair kept the host-local file on disk',
+  );
+  return { ok: true, excluded, untracked: true };
 }
 
 /**
@@ -3700,6 +4429,7 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
   let oversized: OversizedFile[] = [];
   let contentErrors: ContentOffender[] = [];
   let skippedPaths: GitSyncSkippedPath[] = [];
+  let migrationQuarantinedPaths: string[] = [];
   // A torn index makes `git status` report an empty census and would therefore
   // strand every working-tree edit. Preflight before the first status call for
   // both the superproject and each submodule. The helper is idempotent, so the
@@ -3731,32 +4461,94 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
       skippedPaths: [],
     };
   }
+  const rootRecordRepair = await excludeDependencyGenerationRootRecord(runGit, repoPath, o.log);
+  noteSlowPhase('dependency generation root record');
+  if (!rootRecordRepair.ok) {
+    return {
+      committedLocal: false,
+      dirtyPathCount: 0,
+      committedCount,
+      error: rootRecordRepair.error,
+      oversized,
+      contentErrors,
+      skippedPaths: [],
+    };
+  }
   const dirty = await dirtyFiles(runGit, repoPath);
   noteSlowPhase('dirty census');
   const dirtyPathCount = dirty.length;
   const migrationCandidates = migrationPaths(dirty);
-  const preStageMigrationError = await checkMigrationReservations(o, migrationCandidates);
+  const preStageMigrationCheck = await checkMigrationReservations(o, migrationCandidates);
   noteSlowPhase('migration reservation');
-  if (preStageMigrationError) {
-    // A migration may have been staged by an earlier process before this tick's
-    // reservation check. Remove only the refused migration paths; leave every
-    // unrelated index entry and every working-tree byte recoverable for the next
-    // tick.
-    const unstage = await unstagePreStagedProtectedPaths(runGit, repoPath, migrationCandidates, o.log);
-    const unstageError = unstage.ok ? '' : `; could not unstage refused migration paths: ${unstage.error}`;
+  const preStageMigrationRefusals = preStageMigrationCheck.ok
+    ? preStageMigrationCheck.refusals
+    : migrationCandidates.map((path) => ({
+        path,
+        reason: `reservation check failed; deferring fail-closed: ${preStageMigrationCheck.error}`,
+      }));
+  if (!preStageMigrationCheck.ok) {
     o.log(
-      `[git-sync] ${o.scope}: migration reservation preflight refused ${migrationCandidates.join(', ')}: ` +
-        `${preStageMigrationError}${unstageError}`,
+      `[git-sync] ${o.scope}: migration reservation check failed; deferring candidate migrations fail-closed: ` +
+        `${preStageMigrationCheck.error}`,
     );
-    return {
-      committedLocal: false,
-      dirtyPathCount,
-      committedCount,
-      error: `migration reservation preflight failed: ${preStageMigrationError}${unstageError}`,
-      oversized,
-      contentErrors,
-      skippedPaths,
-    };
+  }
+  if (preStageMigrationRefusals.length > 0) {
+    // A migration may have been staged by an earlier process before this tick's
+    // reservation check. Quarantine only refused paths; leave unrelated staged
+    // entries and every working-tree byte recoverable while the rest of the repo
+    // continues through this tick.
+    migrationQuarantinedPaths = migrationReservationSkips(o.scope, preStageMigrationRefusals, skippedPaths, o.log);
+    const unstage = await unstagePreStagedProtectedPaths(runGit, repoPath, migrationQuarantinedPaths, o.log);
+    const unstageError = unstage.ok ? '' : `; could not unstage refused migration paths: ${unstage.error}`;
+    if (!unstage.ok) {
+      o.log(`[git-sync] ${o.scope}: migration quarantine could not remove refused paths from the index${unstageError}`);
+      return {
+        committedLocal: false,
+        dirtyPathCount,
+        committedCount,
+        error: `migration reservation quarantine failed${unstageError}`,
+        oversized,
+        contentErrors,
+        skippedPaths,
+      };
+    }
+  }
+  // Only a child repo's refusal creates a cross-repo dependency fence in the
+  // superproject. A refusal found in this repo is already quarantined by path
+  // above; treating it as a child refusal would hold every root path when its
+  // attribution is unknown and strand unrelated work.
+  const migrationFenceRefusals = [...(o.migrationDependencyRefusals ?? [])];
+  const migrationDependencyFenceSkippedPaths: GitSyncSkippedPath[] = [];
+  if (o.scope === 'superproject' && migrationFenceRefusals.length > 0 && dirty.length > 0) {
+    const nestedRepoPaths = o.migrationDependencySubmodulePaths ?? [];
+    const dirtySuperprojectPaths = dirty.filter(
+      (path) => !nestedRepoPaths.some((submodule) => path === submodule || path.startsWith(submodule + '/')),
+    );
+    if (dirtySuperprojectPaths.length > 0) {
+      let migrationFenceRoster = [...(o.migrationFenceRoster ?? [])];
+      if (o.loadMigrationFenceRoster) {
+        try {
+          const loaded = await o.loadMigrationFenceRoster();
+          migrationFenceRoster = Array.isArray(loaded) ? loaded : [];
+        } catch (error) {
+          migrationFenceRoster = [];
+          o.log(
+            '[git-sync] superproject: migration attribution read failed; holding dirty source paths fail-closed: ' +
+              (error instanceof Error ? error.message : String(error)),
+          );
+        }
+      }
+      migrationDependencyFenceSkippedPaths.push(
+        ...migrationDependencyFenceSkips(migrationFenceRefusals, dirtySuperprojectPaths, migrationFenceRoster, repoPath),
+      );
+      skippedPaths.push(...migrationDependencyFenceSkippedPaths);
+      if (migrationDependencyFenceSkippedPaths.length > 0) {
+        o.log(
+          '[git-sync] superproject: migration dependency fence deferred ' +
+            migrationDependencyFenceSkippedPaths.map((entry) => entry.path).join(', '),
+        );
+      }
+    }
   }
   const hasDirtyFiles = await isDirty(runGit, repoPath);
   noteSlowPhase('dirty check');
@@ -3873,7 +4665,14 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
     // attribution add or catch-all staging command, and fail closed if the
     // lock plane cannot be read.
     let protectedHoldings = o.protectedHoldings;
-    let effectiveExcludePaths = [...o.excludePaths, ...protectedHoldings.map((holding) => holding.path)];
+    let effectiveExcludePaths = [
+      ...new Set([
+        ...o.excludePaths,
+        ...protectedHoldings.map((holding) => holding.path),
+        ...migrationQuarantinedPaths,
+        ...migrationDependencyFenceSkippedPaths.map((entry) => entry.path),
+      ]),
+    ];
     if (o.refreshLiveLockHoldings) {
       let refreshedHoldings: GitSyncLockHolding[];
       try {
@@ -3902,23 +4701,29 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
       }
       protectedHoldings = [...byPath.values()];
       effectiveExcludePaths = [
-        ...new Set([...o.excludePaths, ...refreshedHoldings.map((holding) => holding.path.trim()).filter(Boolean)]),
+        ...new Set([
+          ...o.excludePaths,
+          ...refreshedHoldings.map((holding) => holding.path.trim()).filter(Boolean),
+          ...migrationQuarantinedPaths,
+          ...migrationDependencyFenceSkippedPaths.map((entry) => entry.path),
+        ]),
       ];
     }
     const directSkippedHoldings = protectedHoldings.filter((holding) =>
       dirty.some((file) => gitSyncPathsOverlap(file, holding.path)),
     );
     const atomicExclusions = expandAtomicLiveLockExclusions(dirty, protectedHoldings, o.attribution);
-    skippedPaths = directSkippedHoldings.map((holding) => ({
+    const directSkippedPaths = directSkippedHoldings.map((holding) => ({
       scope: o.scope,
       path: holding.path,
       owner: holding.owner,
       intent: holding.intent,
     }));
-    if (skippedPaths.length > 0) {
+    skippedPaths.push(...directSkippedPaths);
+    if (directSkippedPaths.length > 0) {
       o.log(
         `[git-sync] ${o.scope}: excluding live-locked dirty path(s) while committing the unlocked remainder: ` +
-          skippedPaths.map((p) => `${p.path} (${p.owner}: ${p.intent})`).join('; '),
+          directSkippedPaths.map((p) => `${p.path} (${p.owner}: ${p.intent})`).join('; '),
       );
       if (atomicExclusions.groups.some((group) => group.paths.length > 1)) {
         o.log(
@@ -3961,16 +4766,30 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
         ...contentErrors.map((c) => c.file),
       ]),
     ];
+    const cargoPackageClosure = await expandCargoPackageLiveLockExclusions(
+      dirty,
+      baseExcludePaths,
+      (rel) => o.readText(repoPath, rel),
+    );
+    if (cargoPackageClosure.paths.length > 0) {
+      o.log(
+        `[git-sync] ${o.scope}: keeping dirty Rust package(s) atomic — ` +
+          cargoPackageClosure.packages
+            .map((pkg) => `${pkg.root} [${pkg.paths.join(', ')}]`)
+            .join('; '),
+      );
+    }
+    const packageSafeBaseExcludePaths = [...new Set([...baseExcludePaths, ...cargoPackageClosure.paths])];
     // EI-24649116564770033: a withheld dirty manifest holds back every other dirty manifest
     // in this repo, so a dependency change never lands without its root entry or lockfile.
-    const manifestClosure = expandNpmManifestClosure(dirty, baseExcludePaths);
+    const manifestClosure = expandNpmManifestClosure(dirty, packageSafeBaseExcludePaths);
     if (manifestClosure.paths.length > 0) {
       o.log(
         `[git-sync] ${o.scope}: keeping npm manifests atomic — ${manifestClosure.triggers.join(', ')} ` +
           `withheld this pass, so also deferring ${manifestClosure.paths.join(', ')}`,
       );
     }
-    const excludePaths = [...new Set([...baseExcludePaths, ...manifestClosure.paths])];
+    const excludePaths = [...new Set([...packageSafeBaseExcludePaths, ...manifestClosure.paths])];
     const preStagedProtected = await unstagePreStagedProtectedPaths(runGit, repoPath, excludePaths, o.log);
     noteSlowPhase('protected path unstage');
     if (!preStagedProtected.ok) {
@@ -3995,7 +4814,7 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
     const ignoredUntrackedExcludes = protectedPathPreflight.ignoredUntracked;
     const beyondSymlinkExcludes = protectedPathPreflight.beyondSymlink;
     const omittedPreflightExcludes = new Set([...ignoredUntrackedExcludes, ...beyondSymlinkExcludes]);
-    const stagingExcludePaths = excludePaths.filter((path) => !omittedPreflightExcludes.has(path));
+    let stagingExcludePaths = excludePaths.filter((path) => !omittedPreflightExcludes.has(path));
     if (ignoredUntrackedExcludes.size > 0) {
       o.log(
         `[git-sync] ${repoPath}: pre-filtering ignored untracked protected path(s) ` +
@@ -4009,6 +4828,31 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
       );
     }
     let committedAny = false;
+    // EI-24712906810240170: the post-stage guard for every commit below. A late lock is
+    // reported like a pre-stage one (skippedPaths), deduped by path.
+    const postStageGuard = async (): Promise<PostStageGuardResult> => {
+      const guard = await guardStagedIndexBeforeCommit({
+        runGit,
+        repoPath,
+        scope: o.scope,
+        refreshLiveLockHoldings: o.refreshLiveLockHoldings,
+        readText: (rel) => o.readText(repoPath, rel),
+        excludedDependencies: excludePaths,
+        alwaysInfectiousDependencies: [
+          ...protectedHoldings.map((holding) => holding.path),
+          ...atomicExclusions.paths,
+          ...cargoPackageClosure.paths,
+        ],
+        log: o.log,
+      });
+      if (guard.ok) {
+        for (const holding of guard.lateLockedHoldings) {
+          if (skippedPaths.some((p) => p.path === holding.path)) continue;
+          skippedPaths.push({ scope: o.scope, path: holding.path, owner: holding.owner, intent: holding.intent });
+        }
+      }
+      return guard;
+    };
     // P-004: when an attribution map is supplied (flag GIT_SYNC_DERIVED_ATTRIBUTION on), peel
     // each declaring agent's dirty files into its OWN commit (intent subject + Co-Authored-By)
     // BEFORE the catch-all. Absent/empty → no-op, so the flag-OFF path stays byte-identical.
@@ -4019,7 +4863,7 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
         o.attribution,
         [...stagingExcludePaths, ...migrationCandidates, ...(o.forceCatchAllPaths ?? [])],
         message,
-        { diffSubjects: o.diffSubjects },
+        { diffSubjects: o.diffSubjects, beforeCommit: postStageGuard },
       );
       if (res.error) {
         // STRANDING GUARD (2026-06-30): a failed per-agent attributed commit — e.g. an
@@ -4113,37 +4957,64 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
           committedLocal: false,
           dirtyPathCount,
           committedCount,
-          error: `git add -A failed — the tree would strand uncommitted: ${(addRes.stderr || addRes.stdout).trim().slice(0, 300)}`,
+          error: `git add -A failed — the tree would strand uncommitted: ${gitFailureDetail(addRes)}`,
           oversized,
           contentErrors,
           skippedPaths,
         };
       }
     }
-    // Keep migration files out of any commit whose reservation changed or became
-    // unreadable after the pre-stage check. Only the migration paths are unstaged;
-    // unrelated work remains staged and can be committed on the next tick.
+    // Recheck after staging to catch a reservation removed during the add. A
+    // known conflict defers only that migration; a failed/invalid read defers all
+    // staged migration candidates fail-closed while unrelated staged work commits.
     if (o.migrationReservationChecker) {
       const stagedMigrationPaths = await stagedFiles(runGit, repoPath);
-      const postStageMigrationError = await checkMigrationReservations(o, stagedMigrationPaths);
-      if (postStageMigrationError) {
-        const refused = migrationPaths(stagedMigrationPaths);
+      const postStageMigrationCheck = await checkMigrationReservations(o, stagedMigrationPaths);
+      const postStageMigrationRefusals = postStageMigrationCheck.ok
+        ? postStageMigrationCheck.refusals
+        : migrationPaths(stagedMigrationPaths).map((path) => ({
+            path,
+            reason: `reservation check failed; deferring fail-closed: ${postStageMigrationCheck.error}`,
+          }));
+      if (!postStageMigrationCheck.ok) {
+        o.log(
+          `[git-sync] ${o.scope}: post-stage migration reservation check failed; deferring staged migrations fail-closed: ` +
+            `${postStageMigrationCheck.error}`,
+        );
+      }
+      if (postStageMigrationRefusals.length > 0) {
+        const refused = migrationReservationSkips(o.scope, postStageMigrationRefusals, skippedPaths, o.log);
+        migrationQuarantinedPaths = [...new Set([...migrationQuarantinedPaths, ...refused])];
+        stagingExcludePaths = [...new Set([...stagingExcludePaths, ...refused])];
         const unstage = await unstagePreStagedProtectedPaths(runGit, repoPath, refused, o.log);
         const unstageError = unstage.ok ? '' : `; could not unstage refused migration paths: ${unstage.error}`;
-        o.log(
-          `[git-sync] ${o.scope}: post-stage migration reservation check refused ${refused.join(', ')}: ` +
-            `${postStageMigrationError}${unstageError}`,
-        );
-        return {
-          committedLocal: committedAny,
-          dirtyPathCount,
-          committedCount,
-          error: `migration reservation check after staging failed: ${postStageMigrationError}${unstageError}`,
-          oversized,
-          contentErrors,
-          skippedPaths,
-        };
+        if (!unstage.ok) {
+          o.log(`[git-sync] ${o.scope}: post-stage migration quarantine could not remove refused paths${unstageError}`);
+          return {
+            committedLocal: committedAny,
+            dirtyPathCount,
+            committedCount,
+            error: `migration reservation quarantine after staging failed${unstageError}`,
+            oversized,
+            contentErrors,
+            skippedPaths,
+          };
+        }
       }
+    }
+    // EI-24712906810240170: a lock taken, or a transient edit made and undone, after the
+    // pre-stage refresh must not publish through the index this add just built.
+    const catchAllGuard = await postStageGuard();
+    if (!catchAllGuard.ok) {
+      return {
+        committedLocal: committedAny,
+        dirtyPathCount,
+        committedCount,
+        error: catchAllGuard.error,
+        oversized,
+        contentErrors,
+        skippedPaths,
+      };
     }
     // WI-38594 (flag GIT_SYNC_DIFF_SUBJECTS): the catch-all subject too is derived from
     // what is ACTUALLY staged (numstat over the staged set); the original message (the
@@ -4182,7 +5053,7 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
         committedLocal: false,
         dirtyPathCount,
         committedCount,
-        error: `commit failed: ${(c.stderr || c.stdout).trim().slice(0, 300)}`,
+        error: `commit failed: ${gitFailureDetail(c)}`,
         oversized,
         contentErrors,
         skippedPaths,
@@ -4195,8 +5066,8 @@ async function commitOneRepo(runGit: RunGit, repoPath: string, o: CommitRepoOpts
 
 /** JSON-serializable — checkpointed as the superproject `git-sync:push` step output. */
 type ReconcilePushResult =
-  | { status: 'nothing'; mergeCompleted?: boolean }
-  | { status: 'synced'; pushed: boolean; merged: boolean; mergeCompleted?: boolean }
+  | { status: 'nothing'; mergeCompleted?: boolean; syncBack?: SyncBackResult }
+  | { status: 'synced'; pushed: boolean; merged: boolean; mergeCompleted?: boolean; syncBack?: SyncBackResult }
   | { status: 'conflict'; conflictedFiles: string[] }
   | { status: 'error'; message: string; mergeCompleted?: boolean };
 
@@ -4279,7 +5150,7 @@ export async function bridgeContainedCommitIntoCurrentBranch(
     await runGit(['merge', '--abort'], repoPath);
     return {
       status: 'error',
-      message: `contained ${sourceRef} ancestry bridge failed: ${(merge.stderr || merge.stdout).trim().slice(0, 300)}`,
+      message: `contained ${sourceRef} ancestry bridge failed: ${gitFailureDetail(merge)}`,
     };
   }
   const joined = await runGit(['rev-parse', 'HEAD'], repoPath);
@@ -4475,6 +5346,15 @@ async function reconcileAndPushOneRepo(
     // commit + push a gitlink pointing at an unpushed submodule commit, which a fresh
     // clone can't resolve (this actually corrupted origin once). With push disabled, a
     // local commit is the expected local-only result.
+    if (o.requireRemoteVerification) {
+      const reason = summarizeFetchFailure(fetch.stderr || fetch.stdout);
+      return {
+        status: 'error',
+        message:
+          `fetch failed; submodule remote state could not be verified before superproject publication` +
+          `${reason ? `: ${reason}` : ''}${cleanupNote}`,
+      };
+    }
     if (doPush) {
       const rl = await runGit(['rev-list', '--count', `${remote}/${branch}..HEAD`], repoPath);
       const aheadCount = rl.code === 0 ? Number.parseInt(rl.stdout.trim(), 10) || 0 : 1; // ref missing → assume unpushed
@@ -4552,6 +5432,23 @@ async function reconcileAndPushOneRepo(
   let mergeCompleted = true;
   let mergedNew = seedTransplanted || !/Already up to date/i.test(merge.stdout);
 
+  // P-016 sync-back: a working-copy pot pushes its fork, so the main repository's
+  // branch (including our merged standing PR) must be merged into staging here, or the
+  // next PR re-lists already-merged work. A conflict aborts to a clean tree and is
+  // reported on the result; it never blocks pushing the copy's own work.
+  let syncBack: SyncBackResult | undefined;
+  if (o.syncBack && doPush && branch === 'staging') {
+    syncBack = await runSyncBack(runGit, repoPath, {
+      ...o.syncBack,
+      integrationBranch: branch,
+      runNetworkGit: (args, cwd) => runNetworkGitWithGitHubHttpsFallback(runGit, args, cwd, o.log),
+      identityArgs: GIT_SYNC_IDENTITY_ARGS,
+      log: o.log,
+    });
+    if (syncBack.status === 'merged') mergedNew = true;
+    if (syncBack.status === 'error') o.log(`[git-sync] ${repoPath}: sync-back skipped this tick — ${syncBack.message}`);
+  }
+
   // Frozen repair heads are allowed to prove a patch, but canonical staging remains
   // the only branch git-sync publishes. If a previously-promoted repair head is a
   // sibling whose exact content is already represented here, join only its ancestry
@@ -4628,8 +5525,8 @@ async function reconcileAndPushOneRepo(
     }
   }
 
-  if (!committedLocal && !mergedNew && !pushed) return { status: 'nothing', mergeCompleted };
-  return { status: 'synced', pushed, merged: mergedNew, mergeCompleted };
+  if (!committedLocal && !mergedNew && !pushed) return { status: 'nothing', mergeCompleted, ...(syncBack ? { syncBack } : {}) };
+  return { status: 'synced', pushed, merged: mergedNew, mergeCompleted, ...(syncBack ? { syncBack } : {}) };
 }
 
 /**
@@ -4641,10 +5538,22 @@ async function reconcileAndPushOneRepo(
 async function syncOneRepo(
   runGit: RunGit,
   repoPath: string,
-  o: CommitRepoOpts & { remote: string; defaultBranch: string; doPush: boolean },
+  o: CommitRepoOpts & {
+    remote: string;
+    defaultBranch: string;
+    doPush: boolean;
+    requireRemoteVerification?: boolean;
+  },
 ): Promise<RepoSyncResult> {
   const c = await commitOneRepo(runGit, repoPath, o);
-  if (c.skippedPaths && c.skippedPaths.length > 0) {
+  // A reservation refusal is a path-level quarantine: commitOneRepo has
+  // excluded the migration while still committing unrelated files. Blocking
+  // this repo's push here would strand that safe commit and the unrelated work.
+  // Other skip kinds (such as live locks) still defer the repo's network step.
+  const repoWideSkip = (c.skippedPaths ?? []).some(
+    (entry) => !('reason' in entry && entry.reason === 'migration-reservation'),
+  );
+  if (repoWideSkip) {
     return {
       status: 'skipped-locked',
       dirtyPathCount: c.dirtyPathCount,
@@ -4667,6 +5576,7 @@ async function syncOneRepo(
   const r = await reconcileAndPushOneRepo(runGit, repoPath, o, c.committedLocal);
   return {
     ...r,
+    ...(c.skippedPaths && c.skippedPaths.length > 0 ? { skippedPaths: c.skippedPaths } : {}),
     dirtyPathCount: c.dirtyPathCount,
     committedCount: c.committedCount,
     oversized: c.oversized,
@@ -4821,6 +5731,7 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
     isTempPackOpen: opts.isTempPackOpen,
     diffSubjects: opts.diffSubjects ?? true,
     migrationReservationChecker: opts.migrationReservationChecker,
+    loadMigrationFenceRoster: opts.loadMigrationFenceRoster,
     excludePaths: protectedPaths,
   };
 
@@ -5024,6 +5935,10 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
         ...repoO,
         scope: s,
         doPush: doSubPush,
+        // A failed fetch with no commits ahead of a stale tracking ref used to
+        // look like `nothing`, so the superproject could publish imports against
+        // an older submodule pin. The remote must be measured before publication.
+        requireRemoteVerification: true,
         defaultBranch: 'main',
         // The caller supplies workspace/superproject-root-relative paths, while
         // git commands inside a submodule use that submodule's own root. This is
@@ -5085,6 +6000,8 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
   // push"; now the code does only that.
   const supr = emptyPhase();
   let superHeadSha: string | undefined;
+  // P-016: the superproject reconcile's sync-back result, surfaced on every final outcome.
+  let superSyncBack: SyncBackResult | undefined;
   const pushBlocked = sub.conflicts.length > 0 || sub.errors.length > 0;
   // A submodule-relative protected path is valid for `git add` inside that
   // submodule, but Git rejects the same pathspec from the superproject with
@@ -5160,6 +6077,12 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
     return commitOneRepo(runGit, repo, {
       ...repoO,
       scope: 'superproject',
+      migrationFenceRoster: roster,
+      migrationDependencyRefusals: sub.skippedPaths.filter(
+        (entry): entry is Extract<GitSyncSkippedPath, { reason: 'migration-reservation' }> =>
+          'reason' in entry && entry.reason === 'migration-reservation',
+      ),
+      migrationDependencySubmodulePaths: submodulePaths,
       excludePaths: [...superprojectExcludePaths, ...deferredDeclarationPaths],
       protectedHoldings: superprojectProtectedHoldings,
       refreshLiveLockHoldings: refreshLiveLockHoldingsForRepo?.('', submodulePaths),
@@ -5275,10 +6198,17 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
   } else {
     // PHASE `git-sync:push` — superproject fetch + merge + push (the network half).
     const pushRes = await step('git-sync:push', async () => ({
-      ...(await reconcileAndPushOneRepo(runGit, repo, { ...repoO, defaultBranch: branch }, commitRes.committedLocal)),
+      ...(await reconcileAndPushOneRepo(
+        runGit,
+        repo,
+        // P-016: sync-back rides the superproject reconcile only (never syncOneRepo's submodules).
+        { ...repoO, defaultBranch: branch, ...(cfg.syncBack ? { syncBack: cfg.syncBack } : {}) },
+        commitRes.committedLocal,
+      )),
       headSha: await headSha(runGit, repo),
     }));
     superHeadSha = pushRes.headSha;
+    superSyncBack = 'syncBack' in pushRes ? pushRes.syncBack : undefined;
     repoResult = {
       ...pushRes,
       ...commitMetrics,
@@ -5304,6 +6234,9 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
   const dirtyPathCount = (sub.dirtyPathCount ?? 0) + (supr.dirtyPathCount ?? 0);
   const committedCount = (sub.committedCount ?? 0) + (supr.committedCount ?? 0);
   const didSomething = sub.didSomething || supr.didSomething;
+  // P-016: present on every status so a sync-back conflict is reported even when the
+  // pass itself is otherwise clean ('nothing' / 'synced' are the common cases).
+  const syncBackField = superSyncBack ? { syncBack: superSyncBack } : {};
 
   if (conflicts.length > 0)
     return {
@@ -5320,6 +6253,7 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
       contentErrors,
       skippedPaths,
       strandedSubmodules,
+      ...syncBackField,
     };
   if (errors.length > 0)
     return {
@@ -5335,12 +6269,12 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
       contentErrors,
       skippedPaths,
       strandedSubmodules,
+      ...syncBackField,
     };
   // A live lock is a partial exclusion, not a fleet-wide stop. Report the legacy
-  // skipped verdict only when every visible dirty path was protected and the pass
-  // made no progress anywhere. A pass that committed/pushed an unlocked sibling is
-  // `synced` and still carries skippedPaths for observability + the next retry.
-  if (skippedPaths.length > 0 && !didSomething)
+  // skipped verdict only when a live-lock path prevented progress. Migration-only
+  // deferrals remain visible in skippedPaths without being mislabeled as locks.
+  if (skippedPaths.some((path) => 'owner' in path) && !didSomething)
     return {
       status: 'skipped-locked',
       dirtyPathCount,
@@ -5351,6 +6285,7 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
       bulkExcluded,
       contentErrors,
       strandedSubmodules,
+      ...syncBackField,
     };
   // NOTE 'nothing' carries the census too. A tick that commits nothing is the MOST likely
   // one to be stranding work — the visible tree is clean precisely because the dirty repo
@@ -5366,6 +6301,7 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
       bulkExcluded,
       contentErrors,
       strandedSubmodules,
+      ...syncBackField,
     };
   // superHeadSha comes from the push step's checkpoint; a 'synced' verdict implies that
   // step ran (blocked/commit-error passes return above). Fallback read for safety only.
@@ -5382,5 +6318,6 @@ export async function runGitSync(slug: string, opts: RunGitSyncOpts = {}): Promi
     contentErrors,
     skippedPaths,
     strandedSubmodules,
+    ...syncBackField,
   };
 }

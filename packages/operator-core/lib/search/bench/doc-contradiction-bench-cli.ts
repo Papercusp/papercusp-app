@@ -26,6 +26,7 @@ import { createGatewayContradictionJudge, DOC_CONTRADICTION_JUDGE_MODEL } from '
 import {
   JevContradictionInconclusiveError,
   judgeContradictionWithJev,
+  parseContradictionWording,
   type ContradictionJudgement,
 } from '../jev-contradiction-judge';
 import {
@@ -45,6 +46,8 @@ function flag(name: string): string | undefined {
 }
 
 const concurrency = Math.max(1, Number(flag('--concurrency') ?? 4));
+/** P-009 / D-007: which Jev wording to ask; absent means the production wording. */
+const wording = parseContradictionWording(flag('--wording'));
 
 interface Tally {
   jevCalls: number;
@@ -61,6 +64,7 @@ async function askJev(p: DocContradictionSamplePair, swapped: boolean, t: Tally)
     const j = await judgeContradictionWithJev(swapped ? { a: p.b, b: p.a } : { a: p.a, b: p.b }, {
       client: ensureJevDecisionClient,
       consumer: CONSUMER,
+      wording,
     });
     t.models.add(j.model);
     return j;
@@ -143,7 +147,7 @@ try {
   const metrics = scoreDocContradictionBench(pairs, calls);
   const verdict = evaluateD017(metrics);
   const generatedAt = new Date().toISOString();
-  const md = renderDocContradictionReport({ generatedAt, calls, metrics, verdict, pairs });
+  const md = renderDocContradictionReport({ generatedAt, wording, calls, metrics, verdict, pairs });
 
   // Ledger rows are written fire-and-forget; give them a bounded moment to land.
   const expected = t.jevCalls + probeTally.jevCalls;
@@ -160,7 +164,7 @@ try {
   const stamp = generatedAt.replace(/[:.]/g, '-');
   const jsonPath = path.join(dir, `jev-doc-contradiction-${stamp}.json`);
   const mdPath = path.join(dir, `jev-doc-contradiction-${stamp}.md`);
-  fs.writeFileSync(jsonPath, JSON.stringify({ generatedAt, calls, metrics, verdict, ledger, pairs }, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(jsonPath, JSON.stringify({ generatedAt, wording, calls, metrics, verdict, ledger, pairs }, null, 2) + '\n', 'utf8');
   fs.writeFileSync(mdPath, md + '\n', 'utf8');
   console.log('\n' + md + '\n');
   console.log(`ledger: written=${ledger.written} failed=${ledger.failed}${ledger.lastError ? ` lastError=${ledger.lastError}` : ''}`);

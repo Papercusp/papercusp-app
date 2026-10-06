@@ -397,7 +397,7 @@ export function formatNudge(relPath, hit) {
     `  ${hit.reason}`,
     '',
     '  This is not a type error and not baselined. bundle-host.sh esbuild-bundles',
-    '  operator-core as ExecStartPre for papercup-staging-api, papercup-bg-host and',
+    '  operator-core as ExecStartPre for papercusp-staging-api, papercusp-bg-host and',
     '  the release host, and it bundles the WORKING TREE — so an unparseable file',
     '  takes those services down with no commit involved. On 2026-08-03 exactly this',
     '  crash-looped :3170 into systemd start-limit for 17 minutes, fleet-wide.',

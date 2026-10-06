@@ -51,9 +51,19 @@
  * things an agent deliberately learned is a data-loss bug wearing a hygiene
  * costume.
  *
+ * CONTENT-FREE LAYER (plan jev-performance-improvements-2026-09-30, P-011),
+ * opt-in: the save-time substance question memory:remember asks (P-010), asked
+ * of every live row, so memories stored BEFORE the save gate existed can be found.
+ * A judged verdict, unlike an exact duplicate, can be wrong (the save gate
+ * refuses ~0.5% of real memories), so it never resolves on its own: a report run
+ * lists flagged rows, a reviewer confirms ids, and only an `apply` run given those
+ * ids (`forgetContentFreeIds`) soft-forgets a confirmed row — and only when that
+ * same run flags it again and it is not federated.
+ *
  * Deps injectable throughout; the unit tests run with fakes — zero PG, zero
  * LLM.
  */
+import { isContentFree } from './jev-conflict-judge';
 
 /** The pools this sweep is allowed to touch. Anything else is skipped. */
 export type RealPoolKind = 'harness' | 'hive' | 'user';
@@ -246,6 +256,16 @@ export interface CorpusSweepDeps {
    * at all rather than emit a zero we cannot stand behind.
    */
   judgeAvailable?: () => boolean;
+  /**
+   * P(concrete) for one stored memory — the save-time substance question
+   * (`judgeSubstanceWithJev`) in production. `null` = no usable answer.
+   */
+  judgeSubstance?: (text: string) => Promise<number | null>;
+  /**
+   * Is the substance judge wired (a Jev key resolves)? Same trap as
+   * `judgeAvailable`: an unwired judge must not read as "nothing content-free".
+   */
+  substanceAvailable?: () => boolean;
 }
 
 export interface CorpusSweepOpts {
@@ -261,6 +281,37 @@ export interface CorpusSweepOpts {
   judgeConflicts?: boolean;
   /** Max pools judged per run — the LLM cost bound. Default 4. */
   maxPoolsJudged?: number;
+  /**
+   * Run the content-free layer (P-011): one substance question per live, non-
+   * redundant row. Default false — it is one Jev call per memory. REPORT-ONLY in
+   * both modes: `apply` never touches a content-free row.
+   */
+  contentFree?: boolean;
+  /** Concurrent substance calls. Default 4. */
+  contentFreeConcurrency?: number;
+  /**
+   * Ids a reviewer CONFIRMED from an earlier content-free report. Honored only
+   * with `mode:'apply'` + `contentFree:true`, and only for a row this run flags
+   * again and that is not federated; that row is soft-forgotten (recoverable via
+   * include_superseded). Any other listed id is returned in `contentFreeUnconfirmed`.
+   */
+  forgetContentFreeIds?: string[];
+  /**
+   * In `apply` mode, also close exact-duplicate redundant rows. Default true.
+   * Pass false to apply ONLY the reviewer-confirmed content-free forgets, so a
+   * content-free review never widens into an unreviewed duplicate cleanup.
+   */
+  closeDuplicates?: boolean;
+}
+
+/** A row the substance judge found content-free. Reported, never auto-resolved. */
+export interface ContentFreeRow {
+  pool: string;
+  id: string;
+  text: string;
+  pConcrete: number;
+  /** Set when `memory:forget` must not touch this row locally (federation rules). */
+  blocked: BlockedReason | null;
 }
 
 export interface CorpusPoolReport {
@@ -276,6 +327,13 @@ export interface CorpusPoolReport {
   resolveErrors: number;
   judged: boolean;
   conflictPairs: number;
+  /** Rows the substance judge was asked about (0 when the layer did not run). */
+  contentFreeJudged: number;
+  contentFree: number;
+  /** Asked but no usable answer — NOT concrete, just unmeasured. */
+  contentFreeUnanswered: number;
+  /** Reviewer-confirmed content-free rows soft-forgotten this run. */
+  contentFreeResolved: number;
 }
 
 export interface CorpusSweepResult {
@@ -286,10 +344,22 @@ export interface CorpusSweepResult {
    * do not read it as a result.
    */
   judgeUnavailable: boolean;
+  /**
+   * True when the content-free layer was requested but no substance judge is
+   * wired. Every `contentFree: 0` then means "not measured", NOT "none".
+   */
+  contentFreeUnavailable: boolean;
   pools: CorpusPoolReport[];
   skippedPools: Array<{ pool: string; reason: 'not-a-real-pool' }>;
   duplicates: DuplicateGroup[];
   conflicts: Array<{ pool: string; pair: CorpusConflictPair }>;
+  /** Most content-free first (ascending P(concrete)). */
+  contentFree: ContentFreeRow[];
+  /**
+   * `forgetContentFreeIds` entries NOT forgotten: not flagged again this run,
+   * federated, outside the swept pools, not in apply mode, or the forget failed.
+   */
+  contentFreeUnconfirmed: string[];
   totals: {
     rows: number;
     duplicateGroups: number;
@@ -297,7 +367,25 @@ export interface CorpusSweepResult {
     blocked: number;
     resolved: number;
     conflictPairs: number;
+    contentFreeJudged: number;
+    contentFree: number;
+    contentFreeUnanswered: number;
+    contentFreeResolved: number;
   };
+}
+
+async function mapConcurrent<T, R>(items: readonly T[], width: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, width), items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i]);
+      }
+    }),
+  );
+  return out;
 }
 
 /**
@@ -317,6 +405,14 @@ export async function sweepCorpus(
   const judgeUnavailable = wantJudge && (deps.judgeAvailable?.() ?? true) === false;
   const judgeConflicts = wantJudge && !judgeUnavailable;
   const maxPoolsJudged = Math.max(0, opts.maxPoolsJudged ?? 4);
+  // Same rule for the content-free layer: unwired ⇒ skip it and say so.
+  const wantContentFree = opts.contentFree === true;
+  const contentFreeUnavailable =
+    wantContentFree && (!deps.judgeSubstance || (deps.substanceAvailable?.() ?? true) === false);
+  const judgeContentFree = wantContentFree && !contentFreeUnavailable;
+  const contentFreeConcurrency = opts.contentFreeConcurrency ?? 4;
+  const confirmed = new Set(opts.forgetContentFreeIds ?? []);
+  const forgotten = new Set<string>();
 
   const skippedPools: CorpusSweepResult['skippedPools'] = [];
   const candidates: Array<{ pool: string; kind: RealPoolKind }> = [];
@@ -345,6 +441,7 @@ export async function sweepCorpus(
   const pools: CorpusPoolReport[] = [];
   const duplicates: DuplicateGroup[] = [];
   const conflicts: CorpusSweepResult['conflicts'] = [];
+  const contentFree: ContentFreeRow[] = [];
   let judgedCount = 0;
 
   for (const { pool, kind } of candidates) {
@@ -359,6 +456,10 @@ export async function sweepCorpus(
       resolveErrors: 0,
       judged: false,
       conflictPairs: 0,
+      contentFreeJudged: 0,
+      contentFree: 0,
+      contentFreeUnanswered: 0,
+      contentFreeResolved: 0,
     };
 
     let rows: CorpusRow[] = [];
@@ -376,7 +477,7 @@ export async function sweepCorpus(
       report.redundant += group.redundantIds.length;
       report.blocked += group.blocked.length;
       duplicates.push(group);
-      if (mode !== 'apply') continue;
+      if (mode !== 'apply' || opts.closeDuplicates === false) continue;
       for (const id of group.redundantIds) {
         try {
           if (await deps.softForget(id)) report.resolved += 1;
@@ -403,16 +504,61 @@ export async function sweepCorpus(
       }
     }
 
+    if (judgeContentFree && deps.judgeSubstance) {
+      // Live rows only, and one copy of each duplicate group: a redundant row is
+      // already reported above, and judging it again would double-count.
+      const redundant = new Set(groups.flatMap((g) => g.redundantIds));
+      const judge = deps.judgeSubstance;
+      const asked = rows.filter((r) => r.invalidAt === null && r.text.trim() !== '' && !redundant.has(r.id));
+      const answers = await mapConcurrent(asked, contentFreeConcurrency, async (row) => {
+        try {
+          return await judge(row.text);
+        } catch {
+          return null;
+        }
+      });
+      report.contentFreeJudged = asked.length;
+      const toForget: string[] = [];
+      asked.forEach((row, i) => {
+        const p = answers[i];
+        if (p === null || !Number.isFinite(p)) {
+          report.contentFreeUnanswered += 1;
+          return;
+        }
+        if (!isContentFree(p)) return;
+        report.contentFree += 1;
+        const reason = blockedReason(row);
+        const blocked = reason === 'already-closed' ? null : reason;
+        contentFree.push({ pool, id: row.id, text: row.text, pConcrete: p, blocked });
+        // Forget only what a reviewer confirmed AND this run flags again.
+        if (mode === 'apply' && blocked === null && confirmed.has(row.id)) toForget.push(row.id);
+      });
+      for (const id of toForget) {
+        try {
+          if (await deps.softForget(id)) {
+            report.contentFreeResolved += 1;
+            forgotten.add(id);
+          } else report.resolveErrors += 1;
+        } catch {
+          report.resolveErrors += 1;
+        }
+      }
+    }
+
     pools.push(report);
   }
+  contentFree.sort((a, b) => a.pConcrete - b.pConcrete);
 
   return {
     mode,
     judgeUnavailable,
+    contentFreeUnavailable,
     pools,
     skippedPools,
     duplicates,
     conflicts,
+    contentFree,
+    contentFreeUnconfirmed: [...confirmed].filter((id) => !forgotten.has(id)),
     totals: {
       rows: pools.reduce((n, p) => n + p.rows, 0),
       duplicateGroups: pools.reduce((n, p) => n + p.duplicateGroups, 0),
@@ -420,6 +566,10 @@ export async function sweepCorpus(
       blocked: pools.reduce((n, p) => n + p.blocked, 0),
       resolved: pools.reduce((n, p) => n + p.resolved, 0),
       conflictPairs: pools.reduce((n, p) => n + p.conflictPairs, 0),
+      contentFreeJudged: pools.reduce((n, p) => n + p.contentFreeJudged, 0),
+      contentFree: pools.reduce((n, p) => n + p.contentFree, 0),
+      contentFreeUnanswered: pools.reduce((n, p) => n + p.contentFreeUnanswered, 0),
+      contentFreeResolved: pools.reduce((n, p) => n + p.contentFreeResolved, 0),
     },
   };
 }

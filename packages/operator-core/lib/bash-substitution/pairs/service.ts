@@ -126,12 +126,15 @@ export const PROBED_PORTS: Record<string, string> = {
  * `supervision[]` block — they are answered because something probes them.
  */
 export const UNIT_TO_PROBE: Record<string, string> = {
+  'papercusp-dev-api': 'operator',
   'papercup-dev-api': 'operator',
+  'papercusp-bg-host': 'bg-host-ticker',
   'papercup-bg-host': 'bg-host-ticker',
   'papercup-embed-sidecar': 'embed-sidecar',
   // WI-6146: staging-api is now genuinely probed (:3170), so `is-active
-  // papercup-staging-api` HAS a faithful tool expression. It moved out of
-  // SUPERVISED_BUT_UNPROBED below.
+  // papercusp-staging-api` HAS a faithful tool expression. The papercup-* key
+  // remains as a compatibility alias while the installed unit exposes both.
+  'papercusp-staging-api': 'staging-api',
   'papercup-staging-api': 'staging-api',
   // WI-6149 (D-010 item 4): the single most-asked-about unit in this pair's
   // corpus that had no answer at all (73 `is-active` atoms). Now probed on
@@ -373,7 +376,7 @@ export const systemctlIsActive: BashSubstitutionPair = {
   bashPattern: /^systemctl\s+(?:--\S+\s+)*(?:is-active|is-failed)\b/,
   toolName: 'dev:service_health',
   advisoryText:
-    'dev:service_health { units:[…], scope:\'user\'|\'system\'|\'all\' } answers is-active/is-failed for ANY unit — pass several at once, and pass scope:\'system\' for auditd/ufw/pgbouncer (a bare `systemctl` defaults to system, `--user` does not). READ unitsUnknown[] FIRST: systemd prints `inactive` for a unit it has never heard of, byte-identical to a stopped one, and three units agents queried in the last week do not exist on this host at all. For a REGISTERED unit the snapshot is richer than ActiveState: services[].up is a real HTTP probe (papercup-dev-api :3070, staging-api :3170, bg-host, embed-sidecar :3384, oddsmith-sidecar :46229, vite :3055), and supervision[].healthy is the reconciler\'s own verdict — an `episodic` timer-driven unit is idle, not down, while inactive.',
+    'dev:service_health { units:[…], scope:\'user\'|\'system\'|\'all\' } answers is-active/is-failed for ANY unit — pass several at once, and pass scope:\'system\' for auditd/ufw/pgbouncer (a bare `systemctl` defaults to system, `--user` does not). READ unitsUnknown[] FIRST: systemd prints `inactive` for a unit it has never heard of, byte-identical to a stopped one, and three units agents queried in the last week do not exist on this host at all. For a REGISTERED unit the snapshot is richer than ActiveState: services[].up is a real HTTP probe (papercusp-dev-api :3070, staging-api :3170, bg-host, embed-sidecar :3384, oddsmith-sidecar :46229, vite :3055), and supervision[].healthy is the reconciler\'s own verdict — an `episodic` timer-driven unit is idle, not down, while inactive.',
   routing: {
     want: 'whether a systemd unit is active / failed',
     use: '`dev:service_health { units:["<unit>"], scope }` — unitStates[].{loadState,activeState,active,failed} for any unit, plus unitsUnknown[] for ones systemd does not know; services[].up / supervision[].healthy for registered units',

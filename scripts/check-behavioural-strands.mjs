@@ -53,12 +53,37 @@
  * under-naming reports a clean bill for a strand that is really there, which is the whole
  * defect this exists to prevent.
  *
+ * THE INJECTED-MEMBER TRIGGER (EI-23824032487848760). A second strand shape has NO count or
+ * order assertion to anchor on. A function gains a call to an OPTIONAL member of its injected
+ * Deps bundle (`(deps.reconcileStrandedLatch ?? fb)(…)`); a test fixture that builds that bundle
+ * PARTIALLY never supplies the member, so the new call reaches an uninjected dependency, throws,
+ * the catch logs, and vitest-fail-on-console fails the test. The fixture asserts nothing about
+ * the new seam, `tsc` is silent (the member is optional), and — the measured instance,
+ * 0205cd785c — the stranded files (`standing-goal-boot-arm.test.ts:77`,
+ * `goal-liveness-watchdog.test.ts:777`) sit in the SAME workspace as the change, which the
+ * cross-workspace band excludes by design. So this trigger has its own band:
+ *   - `invokedInjectedMembers` — optional members of a Deps-shaped interface (INJECTED_TYPE_NAME_RE)
+ *     whose callee-position invocation count rose (looking through `(x ?? fb)()`, `!`, `as`, `?.`),
+ *     plus `receiver.member` seams on an injected PARAMETER. A REQUIRED member is not a trigger:
+ *     a fixture that omits one is a type error `lint:tsc` already reports.
+ *   - `partialInjectionFixtures` — any reachable test file (changed workspace INCLUDED) holding an
+ *     object literal that names >= min(2, siblings) sibling members of the bundle but NOT the new
+ *     one. The SIBLING members are the stable join key. It over-names on purpose (a literal that
+ *     overrides two members of a `{ ...base }` spread matches too); running the named file is the
+ *     detector. An injection-only trigger skips the count-assertion band — naming every reachable
+ *     count assertion for it would be pure noise. Do not widen seam detection beyond the `??`/`||`
+ *     peel: peers keep filing false positives against this script (EI-24442819396601796,
+ *     EI-24305142907074152, EI-24343822128966827, EI-24661855321504237).
+ *
  *   node scripts/check-behavioural-strands.mjs                  # advisory: name the trigger, the seam, and the command
  *   node scripts/check-behavioural-strands.mjs --run            # RUN the named tests, exit 1 on real failures
  *   node scripts/check-behavioural-strands.mjs --base "$C"      # pin the pre-edit commit (see below)
  *   node scripts/check-behavioural-strands.mjs --files=a.ts,b.ts
  *   node scripts/check-behavioural-strands.mjs --json
  *   node scripts/check-behavioural-strands.mjs --all            # do not clip the named-test list
+ *
+ * `--json` carries the injected-member evidence as `triggers[].injections` and the named
+ * partial fixtures as `injectionBand`; `--run` runs those files with the rest of the set.
  *
  * ⚠ `--base HEAD` DECAYS WITHIN MINUTES ON THIS TREE. git-sync commits the whole working
  * tree on a schedule, so a few minutes after your edit `working tree == HEAD` and the diff
@@ -78,7 +103,12 @@
  *       `--run` found no failures
  *   1 — `--run` confirmed failing tests among the named blast radius
  *   2 — EXIT_NOT_CHECKED: nothing was compared (empty diff, or every declared file was
- *       byte-identical to its base), so this run proved nothing
+ *       byte-identical to its base), so this run proved nothing; OR a `--files=` path names
+ *       nothing in the working tree or at the base, so the verdict cannot cover it
+ *
+ * Declared mode names every `--files=` path it did not examine, with the reason (not
+ * source, a test, a declaration, a generated path, new since the base, deleted, not found).
+ * JS (.js/.jsx/.mjs/.cjs) is examined like TS (WI-10004906).
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -93,11 +123,90 @@ import { stripCommentsOnly } from './lib/strip-comments-and-strings.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Repo-relative prefixes whose changes can strand another workspace's fixtures. */
-const SOURCE_RE = /\.(?:ts|tsx|mts|cts)$/;
-const TEST_RE = /\.(?:test|spec)\.(?:ts|tsx|mts|mjs|js|jsx)$/;
+/**
+ * Source files whose changes can strand another workspace's fixtures: TypeScript AND
+ * JavaScript. JS was missing until WI-10004906 (2026-10-01): `scripts/*.mjs` and the hook
+ * layer hold injected-collaborator seams that TS tests in other workspaces assert on, and
+ * `--files=a.mjs,b.ts` dropped the .mjs without a word, so a clean verdict could cover a
+ * file that was never read. Every analyser here parses with `ScriptKind.TSX`, which accepts
+ * JS as-is.
+ */
+const SOURCE_RE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const PACKAGE_JSON_RE = /(?:^|\/)package\.json$/;
+const TEST_RE = /\.(?:test|spec)\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/;
+/** Type declarations (.d.ts / .d.mts / .d.cts) have no call sites, so no seam to count. */
+const DECLARATION_RE = /\.d\.[cm]?ts$/;
 const EXCLUDED_DIR_RE = /(?:^|\/)(?:dist|build|node_modules|coverage|\.next|\.papercusp)\//;
 const EXCLUDED_ROOT_RE = /^(?:papercup-release|papercup-checkpoint)\//;
+/**
+ * Type names that denote an INJECTED collaborator bundle (`GoalHolderRespawnDeps`,
+ * `SearchSource`, …). One definition: it types an injected PARAMETER for the seam walk and it
+ * marks a Deps-shaped INTERFACE whose members a partial test fixture may fail to supply
+ * (EI-23824032487848760).
+ */
+const INJECTED_TYPE_NAME_RE =
+  /(?:Deps?|Dependencies|Context|Ctx|Ports?|Services?|Source|Embedder|Probe|Runner|Fetcher|Transport|Adapter|Client|Repositories?|Store|Database|Gateway|Logger|Clock|Cache|Queue|Scheduler|Publisher|Reader|Writer|Validator|Authorizer|Provider|Api)$/i;
+
+/**
+ * Why a repo-relative path is NOT a candidate for this guard, or `null` when it is.
+ * Package manifests are candidates for their scripts.<name> output values; ordinary JSON is not.
+ *
+ * The ONE definition of the candidate set. The CLI's declared mode and its tree-diff mode
+ * both use it, and the PostToolUse nudge hook mirrors it (the hook is installed detached
+ * from the repo and must decide before it loads TypeScript). The hook's test asserts the two
+ * agree path by path, so a widening made here and not there fails a test instead of
+ * silently narrowing the nudge.
+ *
+ * @param {string} file repo-relative POSIX path
+ * @returns {null | 'not-source' | 'declaration' | 'test-file' | 'excluded-path'}
+ */
+export function candidateSkipReason(file) {
+  if (PACKAGE_JSON_RE.test(file)) return keepPath(file) ? null : 'excluded-path';
+  if (!SOURCE_RE.test(file)) return 'not-source';
+  if (DECLARATION_RE.test(file)) return 'declaration';
+  if (TEST_RE.test(file)) return 'test-file';
+  if (!keepPath(file)) return 'excluded-path';
+  return null;
+}
+
+/** Human text for each reason a declared file was not examined. */
+const SKIP_REASON_TEXT = {
+  'not-source': 'not JS/TS source — no call sites to compare',
+  declaration: 'type declaration — no runtime call sites',
+  'test-file': 'test file — a consumer of seams, not a shared seam',
+  'excluded-path': 'generated/vendored path (dist, build, node_modules, .papercusp, …)',
+  'invalid-package-json': 'package.json could not be parsed — script values were not checked',
+  'new-file': 'no version at the base — a new file cannot strand an existing assertion',
+  deleted: 'deleted since the base — nothing left to compare',
+  'not-found': 'NOT FOUND in the working tree or at the base — check the path',
+};
+
+/**
+ * Skip reasons that mean "this declared file may hold a changed seam, and it was not read".
+ * Any one of them makes the run NOT CHECKED: the caller named the file, so a verdict that
+ * covered the rest of the set while quietly omitting it would be the false clean bill this
+ * guard exists to prevent. The other reasons are outside the guard's domain by design, and
+ * are disclosed rather than counted against the run.
+ */
+const UNEXAMINED_REASONS = new Set(['not-found', 'invalid-package-json']);
+
+/**
+ * Exit status for a no-findings run, given the declared files that were not examined.
+ * Pure, so it is unit-testable without a git fixture.
+ *
+ * @param {{ examinedFiles?: string[], identicalFiles?: string[], declared?: boolean,
+ *           skipped?: Array<{ file: string, reason: string }> }} [opts]
+ * @returns {0 | 2}
+ */
+export function exitForDeclaredRun({ examinedFiles = [], identicalFiles = [], declared = false, skipped = [] } = {}) {
+  if (declared && skipped.some((s) => UNEXAMINED_REASONS.has(s.reason))) return EXIT_NOT_CHECKED;
+  return exitForNoFindings({ examinedFiles, identicalFiles, declared });
+}
+
+/** One line per skipped declared file, for the text report. */
+export function formatSkipped(skipped) {
+  return skipped.map((s) => `  - ${s.file}: ${SKIP_REASON_TEXT[s.reason] ?? s.reason}`);
+}
 /** Anything whose import specifiers are worth indexing. */
 const IMPORTABLE_RE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 /** A file bigger than this is a generated bundle, not a hand-written importer. */
@@ -297,81 +406,305 @@ function workspaceOf(file, packageDirs) {
 // ── the trigger: a seam's call count went up ────────────────────────────────────────────
 
 /**
- * Every call in `text` whose callee is rooted at a FUNCTION PARAMETER — i.e. an injected
- * collaborator, the only kind of call a downstream test can mock and count.
+ * Calls in `text` whose callee resolves to an imported binding or an explicitly injected
+ * collaborator parameter. Arbitrary function parameters are often values or callback
+ * arguments (`Buffer`, strings, Promise executors, event payloads), not seams a downstream
+ * test can mock and count. The parameter-name/type checks below keep those local bindings
+ * out while preserving the common deps/context and typed collaborator forms.
  *
  * Keyed by `param.member` (or `param()` for a directly-called parameter) and counted at
  * FILE level rather than per function: a call that merely MOVES between functions in the
  * same file strands nobody, and counting per function would report that move as an
- * increase. Nested closures still count, because the parameter they capture is the same
- * seam the caller injected.
+ * increase. Nested closures still count when they capture an injected parameter.
  *
  * @returns {Map<string, number>} seam key -> number of call sites
  */
-export function seamCallCounts(text, fileName = 'file.ts') {
-  const counts = new Map();
-  let source;
-  try {
-    source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  } catch {
-    return counts;
+function seamCallSites(text, fileName = 'file.ts', sourceOverride = null) {
+  const callSites = [];
+  let source = sourceOverride;
+  if (!source) {
+    try {
+      source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    } catch {
+      return callSites;
+    }
   }
 
-  const paramScopes = [];
-  const declaresParam = (name) => paramScopes.some((scope) => scope.has(name));
+  const BUILTIN_METHODS = new Set([
+    'at', 'charAt', 'charCodeAt', 'codePointAt', 'concat', 'endsWith', 'every', 'filter', 'find',
+    'findIndex', 'flat', 'flatMap', 'forEach', 'includes', 'indexOf', 'join', 'lastIndexOf', 'map',
+    'match', 'matchAll', 'padEnd', 'padStart', 'pop', 'push', 'reduce', 'reduceRight', 'replace',
+    'replaceAll', 'reverse', 'search', 'shift', 'slice', 'some', 'sort', 'splice', 'split', 'startsWith',
+    'substring', 'substr', 'toLocaleLowerCase', 'toLocaleString', 'toLocaleUpperCase', 'toLowerCase',
+    'toString', 'toUpperCase', 'trim', 'trimEnd', 'trimStart', 'unshift', 'valueOf',
+  ]);
+  const INJECTED_PARAM_NAME_RE =
+    /^(?:deps?|dependencies|ctx|context|ports?|services?|source|embedder|probe|runner|fetcher|transport|adapter|client|repositories?|repo|store|storage|database|db|gateway|logger|clock|cache|queue|scheduler|publisher|writer|reader|validator|authorizer|connector|provider|api)$/i;
+  const BUILTIN_TYPE_RE =
+    /^(?:string|number|boolean|bigint|symbol|String|Number|Boolean|BigInt|Symbol|Buffer|Uint(?:8|8Clamped|16|32|Big64|8|16|32)Array|Int(?:8|16|32|Big64)Array|Float(?:32|64)Array|ArrayBuffer|SharedArrayBuffer|DataView|ReadonlyArray|Array|Date|RegExp|Map|Set|WeakMap|WeakSet|URL|URLSearchParams)(?:\s*<|\s*\[|\s*\||\s*&|$)/i;
 
-  const collectParamNames = (node, into) => {
-    for (const param of node.parameters ?? []) {
-      const bind = param.name;
-      if (ts.isIdentifier(bind)) {
-        into.add(bind.text);
-      } else if (ts.isObjectBindingPattern(bind) || ts.isArrayBindingPattern(bind)) {
-        // A destructured seam (`{ lexical }`) is injected exactly like a named one.
-        for (const el of bind.elements) {
-          if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) into.add(el.name.text);
-        }
+  const isFunctionLike = (node) =>
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node);
+
+  const addBindingNames = (name, into, binding) => {
+    if (ts.isIdentifier(name)) {
+      into.set(name.text, binding);
+      return;
+    }
+    if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (ts.isBindingElement(element)) addBindingNames(element.name, into, binding);
       }
     }
   };
 
-  /** `p(...)` -> `p()`; `p.m(...)` / `p?.m(...)` -> `p.m`; anything else -> null. */
-  const seamKeyFor = (callee) => {
-    if (ts.isIdentifier(callee)) return declaresParam(callee.text) ? `${callee.text}()` : null;
-    if (ts.isPropertyAccessExpression(callee)) {
-      const root = callee.expression;
-      if (ts.isIdentifier(root) && declaresParam(root.text)) return `${root.text}.${callee.name.text}`;
-      return null;
+  const imported = new Set();
+  for (const statement of source.statements) {
+    if (ts.isImportDeclaration(statement) && statement.importClause && !statement.importClause.isTypeOnly) {
+      const clause = statement.importClause;
+      if (clause.name) imported.add(clause.name.text);
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        imported.add(clause.namedBindings.name.text);
+      } else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) {
+          if (!element.isTypeOnly) imported.add(element.name.text);
+        }
+      }
+    } else if (ts.isImportEqualsDeclaration(statement)) {
+      imported.add(statement.name.text);
     }
-    if (ts.isNonNullExpression(callee) || ts.isParenthesizedExpression(callee)) {
-      return seamKeyFor(callee.expression);
+  }
+
+  const directLexicalBindings = (container) => {
+    const bindings = new Map();
+    const visitDeclarations = (node) => {
+      if (node !== container && (isFunctionLike(node) || ts.isBlock(node))) {
+        if (ts.isFunctionDeclaration(node) && node.name) {
+          bindings.set(node.name.text, { kind: 'local' });
+        }
+        return;
+      }
+      if (ts.isVariableDeclaration(node)) {
+        const list = node.parent;
+        if (ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.BlockScoped) !== 0) {
+          addBindingNames(node.name, bindings, { kind: 'local' });
+        }
+      } else if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+        bindings.set(node.name.text, { kind: 'local' });
+      }
+      ts.forEachChild(node, visitDeclarations);
+    };
+    visitDeclarations(container);
+    return bindings;
+  };
+
+  const functionScopedVars = (node) => {
+    const bindings = new Map();
+    const visitVars = (current) => {
+      if (current !== node && isFunctionLike(current)) return;
+      if (ts.isVariableDeclaration(current)) {
+        const list = current.parent;
+        if (ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.BlockScoped) === 0) {
+          addBindingNames(current.name, bindings, { kind: 'local' });
+        }
+      }
+      ts.forEachChild(current, visitVars);
+    };
+    if (node.body) visitVars(node.body);
+    return bindings;
+  };
+
+  const isInlineCallback = (node) => {
+    let current = node;
+    while (current.parent && (ts.isParenthesizedExpression(current.parent) || ts.isAsExpression(current.parent))) {
+      current = current.parent;
+    }
+    const parent = current.parent;
+    return (
+      (ts.isCallExpression(parent) || ts.isNewExpression(parent)) &&
+      (parent.arguments ?? []).some((argument) => argument === current)
+    );
+  };
+
+  const typeName = (typeNode) => {
+    if (!typeNode) return '';
+    if (ts.isTypeReferenceNode(typeNode)) return typeNode.typeName.getText(source);
+    return '';
+  };
+
+  const isBuiltinType = (typeNode) => {
+    if (!typeNode) return false;
+    if ([
+      ts.SyntaxKind.StringKeyword,
+      ts.SyntaxKind.NumberKeyword,
+      ts.SyntaxKind.BooleanKeyword,
+      ts.SyntaxKind.BigIntKeyword,
+      ts.SyntaxKind.SymbolKeyword,
+    ].includes(typeNode.kind)) return true;
+    if (ts.isUnionTypeNode(typeNode)) {
+      const meaningful = typeNode.types.filter(
+        (part) => part.kind !== ts.SyntaxKind.UndefinedKeyword && part.kind !== ts.SyntaxKind.NullKeyword,
+      );
+      return meaningful.length > 0 && meaningful.every(isBuiltinType);
+    }
+    if (ts.isArrayTypeNode(typeNode)) return true;
+    if (ts.isTypeReferenceNode(typeNode)) {
+      const name = typeName(typeNode);
+      return BUILTIN_TYPE_RE.test(name);
+    }
+    return false;
+  };
+
+  const isInjectedType = (typeNode) => {
+    if (!typeNode) return false;
+    if (ts.isUnionTypeNode(typeNode) || ts.isIntersectionTypeNode(typeNode)) {
+      return typeNode.types.some(isInjectedType);
+    }
+    return INJECTED_TYPE_NAME_RE.test(typeName(typeNode));
+  };
+
+  const isInjectedParameter = (param, callback) => {
+    if (callback || isBuiltinType(param.type)) return false;
+    const names = new Map();
+    addBindingNames(param.name, names, { kind: 'parameter' });
+    return [...names.keys()].some((name) => INJECTED_PARAM_NAME_RE.test(name)) || isInjectedType(param.type);
+  };
+
+  const scopes = [{ kind: 'module', bindings: new Map() }];
+  for (const name of imported) scopes[0].bindings.set(name, { kind: 'import' });
+  for (const [name, binding] of directLexicalBindings(source)) scopes[0].bindings.set(name, binding);
+
+  const resolveBinding = (name) => {
+    for (let index = scopes.length - 1; index >= 0; index -= 1) {
+      const binding = scopes[index].bindings.get(name);
+      if (binding) return binding;
     }
     return null;
   };
 
-  const visit = (node) => {
-    const isFunctionLike =
-      ts.isFunctionDeclaration(node) ||
-      ts.isFunctionExpression(node) ||
-      ts.isArrowFunction(node) ||
-      ts.isMethodDeclaration(node) ||
-      ts.isConstructorDeclaration(node);
+  const isSeamBinding = (binding) =>
+    Boolean(binding && (binding.kind === 'import' || (binding.kind === 'parameter' && binding.injected)));
 
-    if (isFunctionLike) {
-      const names = new Set();
-      collectParamNames(node, names);
-      paramScopes.push(names);
+  const rootIdentifier = (expression) => {
+    let current = expression;
+    while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+      current = current.expression;
+    }
+    return ts.isIdentifier(current) ? current : null;
+  };
+
+  const terminalMember = (expression) => {
+    if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+    if (ts.isElementAccessExpression(expression) && expression.argumentExpression &&
+        (ts.isStringLiteral(expression.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(expression.argumentExpression))) {
+      return expression.argumentExpression.text;
+    }
+    return null;
+  };
+
+  /** Imported calls and injected dependency/context parameters are seams; local values are not. */
+  const seamDetailsFor = (callee) => {
+    if (ts.isNonNullExpression(callee) || ts.isParenthesizedExpression(callee) || ts.isAsExpression(callee)) {
+      return seamDetailsFor(callee.expression);
+    }
+    // `(deps.optionalSeam ?? fallback)(args)` — the optional-seam-with-a-default idiom. The
+    // callee is a BINARY expression, which has no root identifier, so this call was invisible
+    // and a NEW such call reported zero added call sites (EI-23824032487848760). Either operand
+    // may be the injected one.
+    if (
+      ts.isBinaryExpression(callee) &&
+      (callee.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+        callee.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+    ) {
+      return seamDetailsFor(callee.left) ?? seamDetailsFor(callee.right);
+    }
+    const root = rootIdentifier(callee);
+    if (!root) return null;
+    const binding = resolveBinding(root.text);
+    if (!isSeamBinding(binding)) return null;
+    if (binding.kind === 'parameter' && binding.builtinReceiver) return null;
+    const member = terminalMember(callee);
+    if (binding.kind === 'parameter' && member && BUILTIN_METHODS.has(member)) return null;
+    return {
+      key: ts.isIdentifier(callee) ? `${root.text}()` : callee.getText(source),
+      kind: binding.kind,
+    };
+  };
+
+  const visit = (node) => {
+    const pushed = [];
+    if (isFunctionLike(node)) {
+      const bindings = functionScopedVars(node);
+      const callback = isInlineCallback(node);
+      if (node.name && ts.isIdentifier(node.name)) bindings.set(node.name.text, { kind: 'local' });
+      for (const param of node.parameters ?? []) {
+        const injected = isInjectedParameter(param, callback);
+        addBindingNames(param.name, bindings, {
+          kind: 'parameter',
+          injected,
+          builtinReceiver: isBuiltinType(param.type),
+        });
+      }
+      scopes.push({ kind: 'function', bindings });
+      pushed.push('function');
+    }
+    if (ts.isBlock(node) || ts.isSourceFile(node)) {
+      scopes.push({ kind: 'block', bindings: directLexicalBindings(node) });
+      pushed.push('block');
+    }
+    if (ts.isCatchClause(node) && node.variableDeclaration) {
+      const bindings = new Map();
+      addBindingNames(node.variableDeclaration.name, bindings, { kind: 'local' });
+      scopes.push({ kind: 'catch', bindings });
+      pushed.push('catch');
+    }
+
+    // Preserve a seam's identity through a local alias (`const fetcher = deps.fetcher`).
+    // The initializer must resolve to an imported or explicitly injected binding; an
+    // arbitrary local value or callback parameter never acquires seam status by its name.
+    if (ts.isVariableDeclaration(node) && node.initializer) {
+      const root = rootIdentifier(node.initializer);
+      const sourceBinding = root ? resolveBinding(root.text) : null;
+      if (isSeamBinding(sourceBinding)) {
+        const aliasBinding = sourceBinding.kind === 'import'
+          ? { kind: 'import' }
+          : { kind: 'parameter', injected: true, builtinReceiver: false };
+        const aliases = new Map();
+        addBindingNames(node.name, aliases, aliasBinding);
+        for (const [name, binding] of aliases) {
+          for (let index = scopes.length - 1; index >= 0; index -= 1) {
+            if (!scopes[index].bindings.has(name)) continue;
+            scopes[index].bindings.set(name, binding);
+            break;
+          }
+        }
+      }
     }
 
     if (ts.isCallExpression(node)) {
-      const key = seamKeyFor(node.expression);
-      if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+      const details = seamDetailsFor(node.expression);
+      if (details) {
+        callSites.push({ start: node.getStart(source), end: node.getEnd(), seam: details.key, kind: details.kind });
+      }
     }
 
     ts.forEachChild(node, visit);
-    if (isFunctionLike) paramScopes.pop();
+    for (let index = pushed.length - 1; index >= 0; index -= 1) scopes.pop();
   };
 
   ts.forEachChild(source, visit);
+  return callSites;
+}
+
+export function seamCallCounts(text, fileName = 'file.ts') {
+  const counts = new Map();
+  for (const { seam } of seamCallSites(text, fileName)) {
+    counts.set(seam, (counts.get(seam) ?? 0) + 1);
+  }
   return counts;
 }
 
@@ -392,6 +725,249 @@ export function increasedSeams(beforeText, afterText, fileName = 'file.ts') {
   }
   rows.sort((a, b) => b.after - b.before - (a.after - a.before) || a.seam.localeCompare(b.seam));
   return rows;
+}
+
+// ── the injected-member trigger: a Deps-shaped member gained an invoker (EI-23824032487848760) ──
+//
+// The strand this names is NOT a call-count change. A function gains a call to an OPTIONAL
+// member of its injected Deps bundle; a test fixture that builds that bundle PARTIALLY never
+// supplies the member, the new call reaches an uninjected dependency, throws, and the catch
+// logs — which vitest-fail-on-console turns into a failure. The fixture asserts NOTHING about
+// the new seam, so no call-count/order anchor can name it, and (the measured instance) it sits
+// in the SAME workspace as the change, which the cross-workspace band excludes by design. The
+// stable join key is the SIBLING members: the fixture injects the members that were already
+// there and lacks the new one.
+
+const parseTsx = (text, fileName) => {
+  try {
+    return ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  } catch {
+    return null;
+  }
+};
+
+const memberKeyText = (name) =>
+  name && (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name))
+    ? name.text
+    : null;
+
+/**
+ * interface/type-literal name -> (member name -> declared OPTIONAL), for Deps-shaped types
+ * declared in `source`. Optionality is the point: a REQUIRED member a fixture omits is a type
+ * error `lint:tsc` reports, whereas an OPTIONAL one is silently omittable — the strand `tsc`
+ * cannot see.
+ */
+function depsInterfaceMembers(source) {
+  const out = new Map();
+  for (const statement of source.statements) {
+    let name = null;
+    let members = null;
+    if (ts.isInterfaceDeclaration(statement)) {
+      name = statement.name.text;
+      members = statement.members;
+    } else if (ts.isTypeAliasDeclaration(statement) && ts.isTypeLiteralNode(statement.type)) {
+      name = statement.name.text;
+      members = statement.type.members;
+    }
+    if (!name || !members || !INJECTED_TYPE_NAME_RE.test(name)) continue;
+    const names = new Map();
+    for (const member of members) {
+      const text = (ts.isPropertySignature(member) || ts.isMethodSignature(member)) && memberKeyText(member.name);
+      if (text) names.set(text, Boolean(member.questionToken));
+    }
+    if (names.size > 0) out.set(name, names);
+  }
+  return out;
+}
+
+/** `x.m` / `x['m']` -> `m`. */
+function accessedMember(node) {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node)) return memberKeyText(node.argumentExpression);
+  return null;
+}
+
+/**
+ * Is `node` the thing a call invokes, looking through the wrappers that do not change WHICH
+ * expression runs: `(x)`, `x!`, `x as T`, and the optional-seam default idiom `(x ?? fb)()`.
+ */
+function isInvokedThroughWrappers(node) {
+  let current = node;
+  for (;;) {
+    const parent = current.parent;
+    if (!parent) return false;
+    if (ts.isParenthesizedExpression(parent) || ts.isNonNullExpression(parent) || ts.isAsExpression(parent)) {
+      current = parent;
+      continue;
+    }
+    if (
+      ts.isBinaryExpression(parent) &&
+      (parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+        parent.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+    ) {
+      current = parent;
+      continue;
+    }
+    return ts.isCallExpression(parent) && parent.expression === current;
+  }
+}
+
+function memberInvocationCounts(source, names) {
+  const counts = new Map();
+  const visit = (node) => {
+    const member = accessedMember(node);
+    if (member && names.has(member) && isInvokedThroughWrappers(node)) {
+      counts.set(member, (counts.get(member) ?? 0) + 1);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return counts;
+}
+
+/**
+ * Members of an injected Deps bundle whose INVOCATION count rose between `before` and `after`.
+ *
+ * Two sources, merged by member:
+ *  - `interface`: members declared by a Deps-shaped interface / type literal IN this file, counted
+ *    wherever they are invoked — through a factory-built local (`const deps = makeDeps(o)`, which
+ *    the receiver-based seam walk cannot see) and through `(deps.m ?? fb)(…)`.
+ *  - `receiver`: `param.member` seams on an injected PARAMETER whose call count rose (the bundle's
+ *    interface may live in another file); siblings are the other members called on that receiver.
+ *
+ * Each row carries `siblings` — the members already on the bundle, which is the join key against
+ * partial fixtures. A row with no siblings is dropped: there is nothing to match a fixture on.
+ */
+export function invokedInjectedMembers(beforeText, afterText, fileName = 'file.ts') {
+  const beforeSource = parseTsx(beforeText, fileName);
+  const afterSource = parseTsx(afterText, fileName);
+  if (!beforeSource || !afterSource) return [];
+  const rows = new Map();
+
+  const afterTypes = depsInterfaceMembers(afterSource);
+  const names = new Set();
+  for (const members of [...depsInterfaceMembers(beforeSource).values(), ...afterTypes.values()]) {
+    for (const member of members.keys()) names.add(member);
+  }
+  if (names.size > 0) {
+    const was = memberInvocationCounts(beforeSource, names);
+    for (const [member, count] of memberInvocationCounts(afterSource, names)) {
+      const before = was.get(member) ?? 0;
+      if (count <= before) continue;
+      // Only members declared OPTIONAL: a required one a fixture omits is a `lint:tsc` error.
+      const owners = [...afterTypes].filter(([, members]) => members.get(member) === true);
+      if (owners.length === 0) continue;
+      const siblings = [...new Set(owners.flatMap(([, members]) => [...members.keys()]))]
+        .filter((m) => m !== member)
+        .sort();
+      rows.set(member, { member, owner: owners.map(([n]) => n).join('|'), source: 'interface', before, after: count, siblings });
+    }
+  }
+
+  const receiverCalls = (text, source) => {
+    const byKey = new Map();
+    for (const site of seamCallSites(text, fileName, source)) {
+      if (site.kind !== 'parameter') continue;
+      const key = site.seam.replace(/\?\./g, '.').replace(/!/g, '');
+      if (!key.includes('.') || key.endsWith(')')) continue;
+      byKey.set(key, (byKey.get(key) ?? 0) + 1);
+    }
+    return byKey;
+  };
+  const receiverBefore = receiverCalls(beforeText, beforeSource);
+  const receiverAfter = receiverCalls(afterText, afterSource);
+  for (const [key, count] of receiverAfter) {
+    const before = receiverBefore.get(key) ?? 0;
+    if (count <= before) continue;
+    const cut = key.lastIndexOf('.');
+    const receiver = key.slice(0, cut);
+    const member = key.slice(cut + 1);
+    if (rows.has(member) || !/^[A-Za-z_$][\w$]*$/.test(member)) continue;
+    const siblings = [...receiverAfter.keys()]
+      .filter((k) => k.startsWith(`${receiver}.`) && k !== key && !k.slice(receiver.length + 1).includes('.'))
+      .map((k) => k.slice(receiver.length + 1))
+      .sort();
+    rows.set(member, { member, owner: receiver, source: 'receiver', before, after: count, siblings });
+  }
+
+  return [...rows.values()].filter((row) => row.siblings.length > 0).sort((a, b) => a.member.localeCompare(b.member));
+}
+
+/** Names a fixture object literal supplies: `{ a: 1 }`, `{ a }`, `{ a() {} }`. */
+function objectLiteralKeys(literal) {
+  const keys = new Set();
+  for (const property of literal.properties) {
+    if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property) || ts.isMethodDeclaration(property)) {
+      const key = memberKeyText(property.name);
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+
+/**
+ * Test files holding a PARTIAL fixture for an injected member: an object literal that names at
+ * least `min(2, siblings)` sibling members of the bundle but NOT the new member. The fixture
+ * must also be in a test that directly imports the changed module. Transitive reachability is
+ * useful for assertion strands, but it lets generic keys such as `sql`, `workspaceId`, and `log`
+ * make unrelated fixtures look like this dependency bundle.
+ *
+ * Over-names on purpose (a literal that overrides two members of a `{ ...base }` spread matches
+ * too): running the named file is the detector, and a clean bill for a real strand is the failure.
+ *
+ * @returns {{ file: string, hits: { member: string, line: number, present: string[] }[] }[]}
+ */
+export function partialInjectionFixtures({ tests, readFile, injections, directlyImportsSource }) {
+  const usable = injections.filter((inj) => inj.siblings.length > 0);
+  if (usable.length === 0) return [];
+  const result = [];
+  for (const file of tests) {
+    const raw = readFile(file);
+    if (!raw || raw.length > MAX_SCAN_BYTES) continue;
+    const candidates = usable.filter((inj) => {
+      if (
+        inj.sourceFile &&
+        (typeof directlyImportsSource !== 'function' || !directlyImportsSource(file, inj.sourceFile))
+      ) {
+        return false;
+      }
+      const need = Math.min(2, inj.siblings.length);
+      let seen = 0;
+      for (const sibling of inj.siblings) if (raw.includes(sibling) && ++seen >= need) return true;
+      return false;
+    });
+    if (candidates.length === 0) continue;
+    const source = parseTsx(raw, file);
+    if (!source) continue;
+    const best = new Map();
+    const visit = (node) => {
+      if (ts.isObjectLiteralExpression(node)) {
+        const keys = objectLiteralKeys(node);
+        for (const inj of candidates) {
+          if (keys.has(inj.member)) continue;
+          const present = inj.siblings.filter((s) => keys.has(s));
+          if (present.length < Math.min(2, inj.siblings.length)) continue;
+          const hitKey = [inj.sourceFile ?? inj.owner, inj.member].join('\0');
+          const prior = best.get(hitKey);
+          if (!prior || present.length > prior.present.length) {
+            best.set(hitKey, {
+              member: inj.member,
+              line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
+              present,
+            });
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    if (best.size > 0) result.push({ file, hits: [...best.values()] });
+  }
+  return result.sort(
+    (a, b) =>
+      Math.max(...b.hits.map((h) => h.present.length)) - Math.max(...a.hits.map((h) => h.present.length)) ||
+      a.file.localeCompare(b.file),
+  );
 }
 
 // ── the semantic trigger: a dependency-bearing call's control-flow path changed ─────────
@@ -445,10 +1021,326 @@ function callableIdentity(node, sourceFile, anonymousOrdinal) {
   return `<anonymous:${anonymousOrdinal}>`;
 }
 
+function callableScopeLabel(node) {
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+    return `variable:${node.name.text}`;
+  }
+  if (ts.isPropertyAssignment(node)) {
+    const name = propertyNameText(node.name);
+    if (name) return `property:${name}`;
+  }
+  if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.name) {
+    return `class:${node.name.text}`;
+  }
+  return null;
+}
+
+function isLoopStatement(node) {
+  return (
+    ts.isForStatement(node) ||
+    ts.isForInStatement(node) ||
+    ts.isForOfStatement(node) ||
+    ts.isWhileStatement(node) ||
+    ts.isDoStatement(node)
+  );
+}
+
+function loopHeaderCallExecutesOnce(callNode, loopNode) {
+  if (ts.isForStatement(loopNode)) {
+    return Boolean(loopNode.initializer && isWithinNode(callNode, loopNode.initializer));
+  }
+  if (ts.isForInStatement(loopNode) || ts.isForOfStatement(loopNode)) {
+    return isWithinNode(callNode, loopNode.expression);
+  }
+  return false;
+}
+
+function isAbruptFlowNode(node) {
+  return (
+    ts.isReturnStatement(node) ||
+    ts.isThrowStatement(node) ||
+    ts.isBreakStatement(node) ||
+    ts.isContinueStatement(node)
+  );
+}
+
+function ifBranchFor(node, ifStatement) {
+  if (isWithinNode(node, ifStatement.thenStatement)) return 'then';
+  if (ifStatement.elseStatement && isWithinNode(node, ifStatement.elseStatement)) return 'else';
+  if (isWithinNode(node, ifStatement.expression)) return 'condition';
+  return null;
+}
+
+function nearestConstScope(node, functionNode) {
+  for (let current = node.parent; current && current !== functionNode; current = current.parent) {
+    if (ts.isBlock(current) || ts.isCaseBlock(current) || isLoopStatement(current)) return current;
+  }
+  return functionNode;
+}
+
+function lexicalDistance(node, ancestor) {
+  // The cursor is read after the loop, so it must live outside it (WI-10005809: a loop-scoped
+  // `let` here threw `ReferenceError: current is not defined` on every const-bound seam argument).
+  let distance = 0;
+  let current = node;
+  for (; current && current !== ancestor; current = current.parent) distance++;
+  return current === ancestor ? distance : Number.MAX_SAFE_INTEGER;
+}
+
+function visibleConstBinding(identifier, bindings, sourceFile) {
+  const start = identifier.getStart(sourceFile);
+  return bindings
+    .filter(
+      (binding) =>
+        binding.name === identifier.text &&
+        binding.node.getStart(sourceFile) < start &&
+        isWithinNode(identifier, binding.scope),
+    )
+    .sort(
+      (a, b) =>
+        lexicalDistance(identifier, a.scope) - lexicalDistance(identifier, b.scope) ||
+        b.node.getStart(sourceFile) - a.node.getStart(sourceFile),
+    )[0];
+}
+
+function conjunctionTerms(node, result = []) {
+  if (ts.isParenthesizedExpression(node)) return conjunctionTerms(node.expression, result);
+  if (
+    ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+  ) {
+    conjunctionTerms(node.left, result);
+    conjunctionTerms(node.right, result);
+  } else {
+    result.push(node);
+  }
+  return result;
+}
+
+function canonicalFlowExpression(
+  node,
+  sourceFile,
+  fileName,
+  bindings,
+  knownTruthy = new Set(),
+  resolving = new Set(),
+) {
+  if (ts.isParenthesizedExpression(node)) {
+    return canonicalFlowExpression(
+      node.expression,
+      sourceFile,
+      fileName,
+      bindings,
+      knownTruthy,
+      resolving,
+    );
+  }
+  if (
+    ts.isBinaryExpression(node) &&
+    node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+  ) {
+    const truthy = new Set(knownTruthy);
+    const prefix = [];
+    const terms = conjunctionTerms(node);
+    for (const term of terms) {
+      const value = canonicalFlowExpression(
+        term,
+        sourceFile,
+        fileName,
+        bindings,
+        truthy,
+        resolving,
+      );
+      prefix.push(value);
+      truthy.add(value);
+      truthy.add(prefix.join(' && '));
+    }
+    return prefix.join(' && ');
+  }
+  if (ts.isIdentifier(node)) {
+    const binding = visibleConstBinding(node, bindings, sourceFile);
+    if (binding && !resolving.has(binding.name)) {
+      const nextResolving = new Set(resolving);
+      nextResolving.add(binding.name);
+      return canonicalFlowExpression(
+        binding.initializer,
+        sourceFile,
+        fileName,
+        bindings,
+        knownTruthy,
+        nextResolving,
+      );
+    }
+    return normalisedExpressionText(node, sourceFile, fileName);
+  }
+  if (ts.isConditionalExpression(node)) {
+    const condition = canonicalFlowExpression(
+      node.condition,
+      sourceFile,
+      fileName,
+      bindings,
+      knownTruthy,
+      resolving,
+    );
+    if (knownTruthy.has(condition)) {
+      return canonicalFlowExpression(
+        node.whenTrue,
+        sourceFile,
+        fileName,
+        bindings,
+        knownTruthy,
+        resolving,
+      );
+    }
+    const whenTrue = canonicalFlowExpression(
+      node.whenTrue,
+      sourceFile,
+      fileName,
+      bindings,
+      new Set([...knownTruthy, condition]),
+      resolving,
+    );
+    const whenFalse = canonicalFlowExpression(
+      node.whenFalse,
+      sourceFile,
+      fileName,
+      bindings,
+      knownTruthy,
+      resolving,
+    );
+    return '(' + condition + ' ? ' + whenTrue + ' : ' + whenFalse + ')';
+  }
+  return normalisedExpressionText(node, sourceFile, fileName);
+}
+
+function mutuallyExclusiveIfBranches(a, b, functionNode) {
+  for (let parent = a.parent; parent && parent !== functionNode; parent = parent.parent) {
+    if (!ts.isIfStatement(parent)) continue;
+    const aBranch = ifBranchFor(a, parent);
+    const bBranch = ifBranchFor(b, parent);
+    if (
+      aBranch &&
+      bBranch &&
+      aBranch !== 'condition' &&
+      bBranch !== 'condition' &&
+      aBranch !== bBranch
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function abruptFlowTarget(node) {
+  const isBreak = ts.isBreakStatement(node);
+  for (let parent = node.parent; parent; parent = parent.parent) {
+    if (isCallableNode(parent)) return null;
+    if (isBreak && ts.isSwitchStatement(parent)) return parent;
+    if (isLoopStatement(parent)) return parent;
+  }
+  return null;
+}
+
+function exitAffectsCall(exitNode, callNode, functionNode) {
+  if (ts.isReturnStatement(exitNode) || ts.isThrowStatement(exitNode)) {
+    return !mutuallyExclusiveIfBranches(exitNode, callNode, functionNode);
+  }
+  const target = abruptFlowTarget(exitNode);
+  return Boolean(
+    target &&
+      isWithinNode(callNode, target) &&
+      !mutuallyExclusiveIfBranches(exitNode, callNode, functionNode),
+  );
+}
+
+function exitAffectsLoopIterations(exitNode, loopNode) {
+  if (ts.isReturnStatement(exitNode) || ts.isThrowStatement(exitNode)) return true;
+  return abruptFlowTarget(exitNode) === loopNode;
+}
+
+function invocationFlowToken(node, child, sourceFile, fileName, bindings) {
+  if (ts.isIfStatement(node)) {
+    const condition = canonicalFlowExpression(node.expression, sourceFile, fileName, bindings);
+    const branch = ifBranchFor(child, node) ?? 'outside';
+    return 'if:' + condition + ':' + branch;
+  }
+  const token = controlFlowToken(node, sourceFile, fileName);
+  if (!token) return null;
+  if (isLoopStatement(node)) {
+    return token + (isWithinNode(child, node.statement) ? ':body' : ':header');
+  }
+  return token;
+}
+
+function flowPathTokens(node, root, sourceFile, fileName, bindings, callNode = null) {
+  const tokens = [];
+  let child = node;
+  for (let parent = node.parent; parent && parent !== root; parent = parent.parent) {
+    const oneShotHeader = callNode && isLoopStatement(parent) && loopHeaderCallExecutesOnce(callNode, parent);
+    const token = oneShotHeader
+      ? null
+      : invocationFlowToken(parent, child, sourceFile, fileName, bindings);
+    if (token) tokens.push(token);
+    child = parent;
+  }
+  return tokens.reverse();
+}
+
+function seamInvocationContext(callNode, functionNode, flowNodes, sourceFile, fileName, bindings) {
+  const callStart = callNode.getStart(sourceFile);
+  const context = flowPathTokens(callNode, functionNode, sourceFile, fileName, bindings, callNode).map(
+    (token) => 'path:' + token,
+  );
+
+  for (const { node, token } of flowNodes) {
+    if (
+      !isAbruptFlowNode(node) ||
+      node.getStart(sourceFile) >= callStart ||
+      !exitAffectsCall(node, callNode, functionNode)
+    ) {
+      continue;
+    }
+    const path = flowPathTokens(node, functionNode, sourceFile, fileName, bindings);
+    context.push('prior-exit:' + [...path, token].join(' > '));
+  }
+
+  const enclosingLoops = flowNodes
+    .filter(
+      ({ node }) =>
+        isLoopStatement(node) &&
+        isWithinNode(callNode, node) &&
+        !loopHeaderCallExecutesOnce(callNode, node),
+    )
+    .sort((a, b) => a.node.getStart(sourceFile) - b.node.getStart(sourceFile));
+  for (const loop of enclosingLoops) {
+    for (const exit of flowNodes) {
+      if (
+        !isAbruptFlowNode(exit.node) ||
+        !isWithinNode(exit.node, loop.node.statement) ||
+        !exitAffectsLoopIterations(exit.node, loop.node)
+      ) {
+        continue;
+      }
+      const relation = exit.node.getStart(sourceFile) < callStart ? 'before' : 'after';
+      const path = flowPathTokens(exit.node, loop.node, sourceFile, fileName, bindings);
+      context.push(
+        'loop-exit:' +
+          loop.token +
+          ':' +
+          relation +
+          ':' +
+          [...path, exit.token].join(' > '),
+      );
+    }
+  }
+
+  return context;
+}
+
 /**
  * Summarise each function that calls an injected collaborator. Nested functions are recorded
  * independently; a captured outer parameter is still a seam in the nested function, while
- * control-flow tokens from the nested body do not contaminate the outer function's identity.
+ * control-flow context from the nested body does not contaminate the outer function's identity.
  */
 export function seamControlFlowRecords(text, fileName = 'file.ts') {
   let source;
@@ -458,137 +1350,101 @@ export function seamControlFlowRecords(text, fileName = 'file.ts') {
     return [];
   }
 
-  const bindingScopes = [];
+  const seamSites = new Map(
+    seamCallSites(text, fileName, source).map(({ start, end, seam }) => [`${start}:${end}`, seam]),
+  );
   const functionStack = [];
+  const callableScope = [];
   const records = [];
   let anonymousOrdinal = 0;
-  const lookupBinding = (name) => {
-    for (let index = bindingScopes.length - 1; index >= 0; index -= 1) {
-      const binding = bindingScopes[index].get(name);
-      if (binding) return binding;
-    }
-    return null;
-  };
-  const collectParamBindings = (node, into) => {
-    for (const param of node.parameters ?? []) {
-      const bind = param.name;
-      if (ts.isIdentifier(bind)) into.set(bind.text, bind.text);
-      else if (ts.isObjectBindingPattern(bind) || ts.isArrayBindingPattern(bind)) {
-        for (const el of bind.elements) {
-          if (ts.isBindingElement(el) && ts.isIdentifier(el.name)) {
-            const property = el.propertyName && ts.isIdentifier(el.propertyName) ? el.propertyName.text : el.name.text;
-            into.set(el.name.text, property);
-          }
-        }
-      }
-    }
-  };
-  const expressionPath = (node) => {
-    if (!node) return null;
-    if (ts.isIdentifier(node)) return lookupBinding(node.text);
-    if (ts.isPropertyAccessExpression(node)) {
-      const base = expressionPath(node.expression);
-      return base ? `${base}.${node.name.text}` : null;
-    }
-    if (ts.isElementAccessExpression(node)) {
-      const base = expressionPath(node.expression);
-      const index = node.argumentExpression;
-      if (!base) return null;
-      if (ts.isStringLiteral(index) || ts.isNumericLiteral(index)) return `${base}[${index.text}]`;
-      return `${base}[*]`;
-    }
-    if (ts.isNonNullExpression(node) || ts.isParenthesizedExpression(node)) return expressionPath(node.expression);
-    return null;
-  };
-  const firstDependencyPath = (node) => {
-    const direct = expressionPath(node);
-    if (direct) return direct;
-    let found = null;
-    const visit = (current) => {
-      if (found) return;
-      const path = expressionPath(current);
-      if (path) {
-        found = path;
-        return;
-      }
-      ts.forEachChild(current, visit);
-    };
-    visit(node);
-    return found;
-  };
-  const bindPattern = (pattern, basePath, into) => {
-    if (ts.isIdentifier(pattern)) {
-      into.set(pattern.text, basePath);
-      return;
-    }
-    if (ts.isObjectBindingPattern(pattern)) {
-      for (const el of pattern.elements) {
-        if (!ts.isBindingElement(el) || !ts.isIdentifier(el.name)) continue;
-        const property = el.propertyName && ts.isIdentifier(el.propertyName) ? el.propertyName.text : el.name.text;
-        bindPattern(el.name, `${basePath}.${property}`, into);
-      }
-    }
-  };
-  const calleeLabel = (callee, sourceFile) => {
-    if (ts.isIdentifier(callee)) return callee.text;
-    if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
-    return callee.getText(sourceFile);
-  };
-  const seamKeyFor = (callee) => {
-    const path = expressionPath(callee);
-    return path ? `${path}()` : null;
-  };
   const visit = (node) => {
-    const isFunctionLike =
-      ts.isFunctionDeclaration(node) ||
-      ts.isFunctionExpression(node) ||
-      ts.isArrowFunction(node) ||
-      ts.isMethodDeclaration(node) ||
-      ts.isConstructorDeclaration(node);
+    const isFunctionLike = isCallableNode(node);
     if (isFunctionLike) {
-      const bindings = new Map();
-      for (const param of node.parameters ?? []) {
-        const bind = param.name;
-        if (ts.isIdentifier(bind)) bindings.set(bind.text, bind.text);
-        else if (ts.isObjectBindingPattern(bind) || ts.isArrayBindingPattern(bind)) {
-          collectParamBindings({ parameters: [param] }, bindings);
-        }
-      }
-      bindingScopes.push(bindings);
+      const name = callableIdentity(node, source, anonymousOrdinal++);
       const record = {
-        function: callableIdentity(node, source, anonymousOrdinal++),
+        function: name,
+        // A display name alone is not unique: separate injected-search sources all
+        // have a `lexical` method. Include stable named containers so a harmless
+        // edit cannot compare one sibling's flow against another's.
+        identity: [...callableScope, `function:${name}`].join('/'),
         seams: [],
         controlFlow: [],
+        seamContexts: [],
+        _node: node,
+        _parentRecord: functionStack.at(-1) ?? null,
+        _flowNodes: [],
+        _seamOccurrences: [],
+        _constBindings: [],
       };
       records.push(record);
       functionStack.push(record);
+      callableScope.push(`function:${name}`);
     }
+
+    const scopeLabel = isFunctionLike ? null : callableScopeLabel(node);
+    if (scopeLabel) callableScope.push(scopeLabel);
 
     const current = functionStack.at(-1);
     if (current) {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer &&
+        ts.isVariableDeclarationList(node.parent) &&
+        (node.parent.flags & ts.NodeFlags.Const) !== 0
+      ) {
+        current._constBindings.push({
+          name: node.name.text,
+          node,
+          initializer: node.initializer,
+          scope: nearestConstScope(node, current._node),
+        });
+      }
       const token = controlFlowToken(node, source, fileName);
-      if (token) current.controlFlow.push(token);
-      if (ts.isVariableDeclaration(node) && node.initializer) {
-        const basePath = expressionPath(node.initializer);
-        if (basePath) bindPattern(node.name, basePath, bindingScopes.at(-1));
+      if (token) {
+        current.controlFlow.push(token);
+        current._flowNodes.push({ node, token });
       }
       if (ts.isCallExpression(node)) {
-        const seam = seamKeyFor(node.expression) ??
-          (node.arguments.some((argument) => firstDependencyPath(argument))
-            ? `${calleeLabel(node.expression, source)}()`
-            : null);
-        if (seam) current.seams.push(seam);
+        const seam = seamSites.get(`${node.getStart(source)}:${node.getEnd()}`) ?? null;
+        if (seam) {
+          current.seams.push(seam);
+          current._seamOccurrences.push({ node, seam });
+        }
       }
     }
 
     ts.forEachChild(node, visit);
-    if (isFunctionLike) {
-      functionStack.pop();
-      bindingScopes.pop();
-    }
+    if (scopeLabel) callableScope.pop();
+    if (isFunctionLike) functionStack.pop();
+    if (isFunctionLike) callableScope.pop();
   };
   ts.forEachChild(source, visit);
-  return records.filter((record) => record.seams.length > 0);
+  return records
+    .filter((record) => record.seams.length > 0)
+    .map((record) => {
+      const bindings = [];
+      for (let owner = record; owner; owner = owner._parentRecord) {
+        bindings.push(...owner._constBindings);
+      }
+      return {
+        function: record.function,
+        identity: record.identity,
+        seams: record.seams,
+        controlFlow: record.controlFlow,
+        seamContexts: record._seamOccurrences.map(({ node, seam }) => ({
+          seam,
+          context: seamInvocationContext(
+            node,
+            record._node,
+            record._flowNodes,
+            source,
+            fileName,
+            bindings,
+          ),
+        })),
+      };
+    });
 }
 
 /**
@@ -599,22 +1455,29 @@ export function seamControlFlowRecords(text, fileName = 'file.ts') {
 export function changedSeamControlFlow(beforeText, afterText, fileName = 'file.ts') {
   const before = seamControlFlowRecords(beforeText, fileName);
   const after = seamControlFlowRecords(afterText, fileName);
-  const beforeByFunction = new Map(before.map((record) => [record.function, record]));
+  const beforeByFunction = new Map(before.map((record) => [record.identity, record]));
   const rows = [];
   for (const record of after) {
-    const prior = beforeByFunction.get(record.function);
-    if (!prior || prior.controlFlow.join('\u0000') === record.controlFlow.join('\u0000')) continue;
+    const prior = beforeByFunction.get(record.identity);
+    if (!prior) continue;
     const beforeCounts = new Map();
     for (const seam of prior.seams) beforeCounts.set(seam, (beforeCounts.get(seam) ?? 0) + 1);
     const afterCounts = new Map();
     for (const seam of record.seams) afterCounts.set(seam, (afterCounts.get(seam) ?? 0) + 1);
     for (const [seam, count] of afterCounts) {
       if (count !== (beforeCounts.get(seam) ?? 0)) continue;
+      const beforeContexts = prior.seamContexts
+        .filter((entry) => entry.seam === seam)
+        .map((entry) => entry.context.join('\u0000'));
+      const afterContexts = record.seamContexts
+        .filter((entry) => entry.seam === seam)
+        .map((entry) => entry.context.join('\u0000'));
+      if (JSON.stringify(beforeContexts) === JSON.stringify(afterContexts)) continue;
       rows.push({
         function: record.function,
         seam,
-        before: prior.controlFlow,
-        after: record.controlFlow,
+        before: beforeContexts,
+        after: afterContexts,
         reason: 'control-flow-changed',
       });
     }
@@ -1096,6 +1959,38 @@ export function diffOutputValues(beforeText, afterText, fileName = 'file.ts') {
 export const changedOutputValues = diffOutputValues;
 export const diffPersistedOutputValues = diffOutputValues;
 
+/**
+ * Changed package-manager script values are observable contracts too: tests may pin the
+ * command string even though package.json is not an importable JS/TS seam.
+ * Returns null when either manifest is invalid, so the CLI can report NOT CHECKED.
+ */
+export function diffPackageScriptValues(beforeText, afterText) {
+  const readScripts = (text) => {
+    let manifest;
+    try {
+      manifest = JSON.parse(String(text));
+    } catch {
+      return null;
+    }
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return null;
+    if (manifest.scripts === undefined || manifest.scripts === null) return new Map();
+    if (typeof manifest.scripts !== 'object' || Array.isArray(manifest.scripts)) return null;
+    return new Map(Object.entries(manifest.scripts));
+  };
+
+  const before = readScripts(beforeText);
+  const after = readScripts(afterText);
+  if (!before || !after) return null;
+  const names = [...new Set([...before.keys(), ...after.keys()])].sort();
+  return names.flatMap((property) => {
+    const hasBefore = before.has(property);
+    const hasAfter = after.has(property);
+    const beforeValue = hasBefore ? JSON.stringify(before.get(property)) : '<missing>';
+    const afterValue = hasAfter ? JSON.stringify(after.get(property)) : '<missing>';
+    return beforeValue === afterValue ? [] : [{ property, before: beforeValue, after: afterValue }];
+  });
+}
+
 /** Does an AST node contain a property read/fixture key matching one of the changed outputs? */
 function nodeMentionsOutputProperty(node, wanted, sourceFile) {
   let found = false;
@@ -1186,6 +2081,66 @@ export function hasValueAssertion(text, properties, fileName = 'test.ts') {
 }
 
 export const hasOutputValueAssertion = hasValueAssertion;
+
+function isScriptsObject(node) {
+  if (ts.isIdentifier(node)) return node.text === 'scripts';
+  if (ts.isPropertyAccessExpression(node)) return node.name.text === 'scripts';
+  return (
+    ts.isElementAccessExpression(node) &&
+    (ts.isStringLiteral(node.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(node.argumentExpression)) &&
+    node.argumentExpression.text === 'scripts'
+  );
+}
+
+function packageScriptAccessName(node) {
+  if (ts.isPropertyAccessExpression(node) && isScriptsObject(node.expression)) return node.name.text;
+  if (
+    ts.isElementAccessExpression(node) &&
+    isScriptsObject(node.expression) &&
+    (ts.isStringLiteral(node.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(node.argumentExpression))
+  ) {
+    return node.argumentExpression.text;
+  }
+  return null;
+}
+
+function nodeMentionsPackageScript(node, wanted) {
+  let found = false;
+  const visit = (current) => {
+    if (found) return;
+    const name = packageScriptAccessName(current);
+    if (name !== null && wanted.has(name)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(current, visit);
+  };
+  visit(node);
+  return found;
+}
+
+/** Does an assertion read one of the changed scripts.<name> values? */
+export function hasPackageScriptAssertion(text, scriptNames, fileName = 'test.ts') {
+  const wanted = new Set((scriptNames ?? []).filter((name) => typeof name === 'string' && name.length > 0));
+  if (wanted.size === 0 || !String(text).includes('scripts')) return false;
+  let sourceFile;
+  try {
+    sourceFile = ts.createSourceFile(fileName, String(text), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  } catch {
+    return false;
+  }
+  let found = false;
+  const visit = (node) => {
+    if (found) return;
+    if (isAssertionCall(node, sourceFile) && nodeMentionsPackageScript(node, wanted)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+  return found;
+}
 
 // ── the blast radius: downstream assertions in OTHER workspaces ─────────────────────────
 
@@ -1306,13 +2261,19 @@ export function mentionsSeamMember(text, members) {
 
 const CLIP = 25;
 
+function packageScriptAccess(property) {
+  return `scripts[${JSON.stringify(property)}]`;
+}
+
 function formatFindings({
   triggers,
   tests,
   wider,
   narrow,
+  injectionBand = [],
   members,
   valueProperties,
+  scriptProperties = [],
   usedWide,
   clipped,
   baseNote,
@@ -1322,8 +2283,16 @@ function formatFindings({
   const hasCallTriggers = triggers.some((t) => (t.seams ?? []).length > 0);
   const hasControlFlowTriggers = triggers.some((t) => (t.controlFlow ?? []).length > 0);
   const hasValueTriggers = triggers.some((t) => (t.values ?? []).length > 0);
+  const hasScriptTriggers = triggers.some((t) => (t.scriptValues ?? []).length > 0);
+  const hasInjectionTriggers = triggers.some((t) => (t.injections ?? []).length > 0);
+  const scriptOnly =
+    hasScriptTriggers && !hasCallTriggers && !hasControlFlowTriggers && !hasValueTriggers && !hasInjectionTriggers;
   lines.push(
-    (hasCallTriggers || hasControlFlowTriggers) && hasValueTriggers
+    scriptOnly
+      ? '⚠ PACKAGE-SCRIPT STRAND RISK — a package.json scripts.<name> value changed.'
+      : hasInjectionTriggers && !hasCallTriggers && !hasControlFlowTriggers && !hasValueTriggers && !hasScriptTriggers
+      ? '⚠ INJECTED-MEMBER STRAND RISK — an injected dependency member gained an invoker.'
+      : (hasCallTriggers || hasControlFlowTriggers) && hasValueTriggers
       ? '⚠ BEHAVIOURAL STRAND RISK — a shared seam invocation contract and a writer output value changed.'
       : hasCallTriggers && hasControlFlowTriggers
         ? '⚠ BEHAVIOURAL STRAND RISK — a shared seam gained call sites and its invocation eligibility changed.'
@@ -1345,8 +2314,26 @@ function formatFindings({
     for (const v of t.values ?? []) {
       lines.push(`    output ${v.property}: ${v.before} -> ${v.after}`);
     }
+    for (const value of t.scriptValues ?? []) {
+      lines.push(`    package script ${packageScriptAccess(value.property)}: ${value.before} -> ${value.after}`);
+    }
+    for (const inj of t.injections ?? []) {
+      lines.push(
+        `    injected ${inj.owner}.${inj.member}: ${inj.before} invocation(s) -> ${inj.after} (${inj.siblings.length} sibling member(s) a partial fixture may supply)`,
+      );
+    }
   }
   lines.push('');
+  if (hasInjectionTriggers) {
+    lines.push(
+      'A test fixture that builds that injected bundle PARTIALLY never supplies the new member, so the first run',
+      'that reaches the new call hits an UNINJECTED dependency. The failure channel is often NOT an assertion about',
+      'the call: a throw swallowed into console.warn trips vitest-fail-on-console, so the fixture asserts nothing',
+      'about the seam and no call-count anchor names it (EI-23824032487848760). The proxy is a fixture object',
+      'that supplies SIBLING members of the bundle but NOT the new one — in ANY workspace, the changed one included.',
+      '',
+    );
+  }
   if (hasCallTriggers || hasControlFlowTriggers) {
     lines.push(
       'A downstream test in ANOTHER workspace that mocks this seam and asserts on its call count,',
@@ -1363,20 +2350,44 @@ function formatFindings({
     );
     lines.push('`test:affected` cannot prove that a runtime value contract stayed compatible.');
   }
-  lines.push('');
-  if (tests.length === 0) {
-    lines.push('No downstream call-count/order or output-value assertions reachable from this change. Nothing to run.');
-  } else {
+  if (hasScriptTriggers) {
     lines.push(
-      `Reachable test files in other workspaces asserting on call count/order or changed output values: ${wider.length}` +
-        (members.length > 0 || valueProperties.length > 0
-          ? `; of those, ${narrow.length} also name a relevant anchor (${[...members, ...valueProperties].join(', ')}).`
+      'A test may pin a package command through scripts["<name>"] or scripts.<name>.',
+      'Changed script keys are joined to assertions that read those values, including same-workspace tests.',
+    );
+  }
+  lines.push('');
+  const runList = [...new Set([...tests, ...injectionBand.map((entry) => entry.file)])];
+  if (tests.length === 0) {
+    const noTests = hasScriptTriggers
+      ? 'No tracked test assertion reads a changed package script key.'
+      : 'No downstream call-count/order or output-value assertions reachable from this change.';
+    lines.push(
+      runList.length === 0
+        ? `${noTests} Nothing to run.`
+        : noTests,
+    );
+  } else {
+    const anchorNames = [
+      ...members,
+      ...valueProperties,
+      ...scriptProperties.map((property) => packageScriptAccess(property)),
+    ];
+    const bandDescription = hasScriptTriggers
+      ? `Test files selected for changed package-script assertions and other matched behavioral contracts: ${wider.length}`
+      : `Reachable test files in other workspaces asserting on call count/order or changed output values: ${wider.length}`;
+    lines.push(
+      bandDescription +
+        (anchorNames.length > 0
+          ? `; of those, ${narrow.length} also name a relevant anchor (${anchorNames.join(', ')}).`
           : '.'),
     );
     lines.push(
       usedWide
         ? narrow.length === 0
-          ? 'No test names a seam member, so the WIDER band is named below — a narrow set is a ranking, never a reason to report less.'
+          ? hasScriptTriggers
+            ? 'No test names a changed script key or other focused anchor, so the WIDER band is named below — a narrow set is a ranking, never a reason to report less.'
+            : 'No test names a seam member, so the WIDER band is named below — a narrow set is a ranking, never a reason to report less.'
           : 'Naming the WIDER band (--wide).'
         : 'Naming the narrowed set. The wider band is still real — an aliased mock can carry a stale count without naming the seam; --wide names it.',
     );
@@ -1386,12 +2397,27 @@ function formatFindings({
       lines.push(`  … and ${tests.length - CLIP} more (--all to list them, --json for the full set)`);
     }
     lines.push('');
-    if (!ran) {
-      lines.push('RUN THEM — running them IS the detector for this class; there is no tsc for it:');
-      lines.push(`  node scripts/check-behavioural-strands.mjs --run${usedWide ? ' --wide' : ''}`);
-      lines.push('or, from an agent, the same set through the router:');
-      lines.push(`  testing:run { files: [${tests.slice(0, 3).map((f) => `"${f}"`).join(', ')}${tests.length > 3 ? ', …' : ''}] }`);
+  }
+  if (injectionBand.length > 0) {
+    lines.push(
+      `Partial-injection fixtures (an object literal supplying sibling member(s) of the injected bundle but NOT the new member; any workspace): ${injectionBand.length}`,
+    );
+    for (const entry of injectionBand.slice(0, clipped ? CLIP : injectionBand.length)) {
+      const hit = entry.hits.reduce((a, b) => (b.present.length > a.present.length ? b : a));
+      lines.push(
+        `  ${entry.file}:${hit.line}  (lacks ${hit.member}; supplies ${hit.present.slice(0, 3).join(', ')}${hit.present.length > 3 ? ', …' : ''})`,
+      );
     }
+    if (clipped && injectionBand.length > CLIP) {
+      lines.push(`  … and ${injectionBand.length - CLIP} more (--all to list them, --json for the full set)`);
+    }
+    lines.push('');
+  }
+  if (runList.length > 0 && !ran) {
+    lines.push('RUN THEM — running them IS the detector for this class; there is no tsc for it:');
+    lines.push(`  node scripts/check-behavioural-strands.mjs --run${usedWide ? ' --wide' : ''}`);
+    lines.push('or, from an agent, the same set through the router:');
+    lines.push(`  testing:run { files: [${runList.slice(0, 3).map((f) => `"${f}"`).join(', ')}${runList.length > 3 ? ', …' : ''}] }`);
   }
   if (baseNote) {
     lines.push('');
@@ -1438,9 +2464,17 @@ function main() {
   }
 
   // Which files to examine. Declared mode fixes WHICH files, never WHETHER they differ.
+  // Every declared file that is not examined is recorded with its reason — never dropped
+  // silently (WI-10004906) — and an unexamined in-domain file makes the run NOT CHECKED.
   let candidates;
+  const skipped = [];
   if (declared) {
-    candidates = declaredFiles.filter((f) => SOURCE_RE.test(f) && !TEST_RE.test(f) && keepPath(f));
+    candidates = [];
+    for (const f of declaredFiles) {
+      const reason = candidateSkipReason(f);
+      if (reason === null) candidates.push(f);
+      else skipped.push({ file: f, reason });
+    }
   } else {
     const changed = new Set();
     const superDiff = git(['diff', '--name-only', requestedBase], { allowFail: true }) ?? '';
@@ -1450,7 +2484,7 @@ function main() {
       const out = git(['diff', '--name-only', 'HEAD'], { cwd, allowFail: true }) ?? '';
       for (const f of out.split('\n')) if (f) changed.add(`${sub}/${f}`);
     }
-    candidates = [...changed].filter((f) => SOURCE_RE.test(f) && !TEST_RE.test(f) && keepPath(f));
+    candidates = [...changed].filter((f) => candidateSkipReason(f) === null);
   }
 
   // Compare each candidate against its OWNING repo's base.
@@ -1470,20 +2504,35 @@ function main() {
       if (requestedBase !== 'HEAD') usedSubmoduleHead.add(submodule);
     }
     const beforeText = git(['show', `${base}:${relPath}`], { cwd, allowFail: true });
-    if (beforeText === null) continue; // new file: it can strand nothing that already exists
     const abs = resolve(ROOT, file);
-    if (!existsSync(abs)) continue;
+    const present = existsSync(abs);
+    if (beforeText === null || !present) {
+      // No base version: a new file can strand nothing that already exists. No working copy:
+      // a deletion. Neither at all: a path that names nothing — most often a typo, which in
+      // declared mode must not pass as part of a clean verdict.
+      if (declared) {
+        skipped.push({ file, reason: beforeText === null ? (present ? 'new-file' : 'not-found') : 'deleted' });
+      }
+      continue;
+    }
     const afterText = readFileSync(abs, 'utf8');
     examined.push(file);
     if (afterText === beforeText) {
       identical.push(file);
       continue;
     }
-    const seams = increasedSeams(beforeText, afterText, file);
-    const controlFlow = changedSeamControlFlow(beforeText, afterText, file);
-    const values = diffOutputValues(beforeText, afterText, file);
-    if (seams.length > 0 || controlFlow.length > 0 || values.length > 0) {
-      triggers.push({ file, seams, controlFlow, values });
+    const isPackageManifest = PACKAGE_JSON_RE.test(file);
+    const scriptValues = isPackageManifest ? diffPackageScriptValues(beforeText, afterText) : [];
+    if (scriptValues === null) {
+      skipped.push({ file, reason: 'invalid-package-json' });
+      continue;
+    }
+    const seams = isPackageManifest ? [] : increasedSeams(beforeText, afterText, file);
+    const controlFlow = isPackageManifest ? [] : changedSeamControlFlow(beforeText, afterText, file);
+    const values = isPackageManifest ? [] : diffOutputValues(beforeText, afterText, file);
+    const injections = isPackageManifest ? [] : invokedInjectedMembers(beforeText, afterText, file);
+    if (seams.length > 0 || controlFlow.length > 0 || values.length > 0 || injections.length > 0 || scriptValues.length > 0) {
+      triggers.push({ file, seams, controlFlow, values, injections, scriptValues });
     }
   }
 
@@ -1492,25 +2541,38 @@ function main() {
       ? `ⓘ base: superproject compared against '${requestedBase}'; submodule(s) ${[...usedSubmoduleHead].join(', ')} compared against their own HEAD (a superproject revision does not name submodule content).`
       : '';
 
+  const unexamined = skipped.filter((s) => UNEXAMINED_REASONS.has(s.reason));
+  const skippedNote =
+    skipped.length > 0
+      ? [`ⓘ ${skipped.length} declared file(s) not examined:`, ...formatSkipped(skipped)].join('\n')
+      : '';
+
   if (triggers.length === 0) {
-    const exit = exitForNoFindings({ examinedFiles: examined, identicalFiles: identical, declared });
+    const exit = unexamined.length > 0
+      ? EXIT_NOT_CHECKED
+      : exitForDeclaredRun({ examinedFiles: examined, identicalFiles: identical, declared, skipped });
     const notChecked = exit === EXIT_NOT_CHECKED;
-    const text = notChecked
-      ? `⚠ NOT CHECKED — nothing was compared against '${requestedBase}' (${examined.length} file(s) examined, ${identical.length} identical).\n` +
-        '  On this tree git-sync commits the working tree on a schedule, so a few minutes after an\n' +
-        '  edit the default --base HEAD diff is EMPTY. Pin the pre-edit sha: --base "$C".\n' +
-        '  This is NOT a clean bill.'
-      : `✓ no behavioural seam or output value changed (${examined.length} changed source file(s) examined vs '${requestedBase}')`;
+    const text = !notChecked
+      ? `✓ no behavioural seam or output value changed (${examined.length} changed source file(s) examined vs '${requestedBase}')`
+      : unexamined.length > 0
+        ? `⚠ NOT CHECKED — ${unexamined.length} declared file(s) could not be examined: ${unexamined.map((s) => s.file).join(', ')}.\n` +
+          `  ${examined.length} other file(s) examined vs '${requestedBase}', ${identical.length} identical. A verdict that\n` +
+          '  silently omits a file you named is not a verdict on that file. This is NOT a clean bill.'
+        : `⚠ NOT CHECKED — nothing was compared against '${requestedBase}' (${examined.length} file(s) examined, ${identical.length} identical).\n` +
+          '  On this tree git-sync commits the working tree on a schedule, so a few minutes after an\n' +
+          '  edit the default --base HEAD diff is EMPTY. Pin the pre-edit sha: --base "$C".\n' +
+          '  This is NOT a clean bill.';
     if (wantJson) {
       console.log(
         JSON.stringify(
-          { ok: true, notChecked, base: requestedBase, examined, identical, triggers: [], tests: [] },
+          { ok: true, notChecked, base: requestedBase, examined, identical, skipped, triggers: [], tests: [] },
           null,
           2,
         ),
       );
     } else {
       console.log(text);
+      if (skippedNote) console.log(skippedNote);
       if (baseNote) console.log(baseNote);
     }
     return exit;
@@ -1535,21 +2597,78 @@ function main() {
   const changedWorkspaces = new Set(seeds.map((f) => workspaceOf(f, packageDirs)));
   const members = seamMemberNames(triggers);
   const valueProperties = outputPropertyNames(triggers);
+  const scriptProperties = [...new Set(triggers.flatMap((t) => (t.scriptValues ?? []).map((value) => value.property)))];
 
-  const wider = [...reachable]
-    .filter((f) => TEST_RE.test(f))
-    .filter((f) => !changedWorkspaces.has(workspaceOf(f, packageDirs)))
-    .filter(
-      (f) =>
-        hasCountOrOrderAssertion(readFile(f)) ||
-        hasValueAssertion(readFile(f), valueProperties, f),
-    )
-    .sort();
+  // An injection-only trigger (a new invoked Deps member, no call-count/order/value change) has
+  // no count-assertion band: naming every reachable count assertion for it would be pure noise.
+  const needsCountBand = triggers.some(
+    (t) =>
+      (t.seams?.length ?? 0) +
+        (t.controlFlow?.length ?? 0) +
+        (t.values?.length ?? 0) +
+        (t.scriptValues?.length ?? 0) >
+      0,
+  );
+  const reachableTests = needsCountBand
+    ? [...reachable]
+        .filter((f) => TEST_RE.test(f))
+        .filter((f) => !changedWorkspaces.has(workspaceOf(f, packageDirs)))
+        .filter(
+          (f) =>
+            hasCountOrOrderAssertion(readFile(f)) ||
+            hasValueAssertion(readFile(f), valueProperties, f),
+        )
+        .sort()
+    : [];
+  const scriptTests =
+    scriptProperties.length > 0
+      ? allFiles
+          .filter((f) => TEST_RE.test(f))
+          .filter((f) => hasPackageScriptAssertion(readFile(f), scriptProperties, f))
+      : [];
+  const wider = [...new Set([...reachableTests, ...scriptTests])].sort();
+  // Candidate tests come from the reachability walk, then each injection is joined only to its
+  // changed module's direct importers.
+  const injections = triggers.flatMap((t) =>
+    (t.injections ?? []).map((injection) => ({ ...injection, sourceFile: t.file })),
+  );
+  const injectionFileSet = new Set(allFiles);
+  const directImportTargetsByTest = new Map();
+  const directlyImportsSource = (fromFile, sourceFile) => {
+    let targets = directImportTargetsByTest.get(fromFile);
+    if (!targets) {
+      targets = new Set();
+      const raw = readFile(fromFile);
+      if (raw && raw.length <= MAX_SCAN_BYTES) {
+        const text = stripCommentsOnly(raw);
+        for (const specifier of parseImportSpecifiers(text)) {
+          const target = resolveAcrossPackages({
+            specifier,
+            fromFile,
+            fileSet: injectionFileSet,
+            byDir,
+            byEntryDir,
+          });
+          if (target) targets.add(target);
+        }
+      }
+      directImportTargetsByTest.set(fromFile, targets);
+    }
+    return targets.has(sourceFile);
+  };
+  const injectionBand = partialInjectionFixtures({
+    tests: [...reachable].filter((f) => TEST_RE.test(f)).sort(),
+    readFile,
+    injections,
+    directlyImportsSource,
+  });
+  const injectionFiles = injectionBand.map((entry) => entry.file);
 
   const narrow = wider.filter(
     (f) =>
       (members.length > 0 && mentionsSeamMember(readFile(f), members)) ||
-      (valueProperties.length > 0 && hasValueAssertion(readFile(f), valueProperties, f)),
+      (valueProperties.length > 0 && hasValueAssertion(readFile(f), valueProperties, f)) ||
+      (scriptProperties.length > 0 && hasPackageScriptAssertion(readFile(f), scriptProperties, f)),
   );
   // The narrow set is a ranking, not a filter that may hide work: when it comes out empty
   // the wider band is what gets named, so this can never print "nothing to run" while
@@ -1560,9 +2679,10 @@ function main() {
   let exit = 0;
   let ran = false;
   let runResult = null;
-  if (wantRun && tests.length > 0) {
+  const runSet = [...new Set([...tests, ...injectionFiles])];
+  if (wantRun && runSet.length > 0) {
     ran = true;
-    const proc = spawnSync('npm', ['run', 'test:file', '--', ...tests], {
+    const proc = spawnSync('npm', ['run', 'test:file', '--', ...runSet], {
       cwd: ROOT,
       encoding: 'utf8',
       stdio: wantJson ? 'pipe' : 'inherit',
@@ -1571,22 +2691,28 @@ function main() {
     runResult = { status: proc.status ?? null };
     if (proc.status !== 0) exit = 1;
   }
+  // Findings for the files that WERE read do not cover a declared file that was not: a 0
+  // here would vouch for it. Real failures (1) still outrank it.
+  if (exit === 0 && unexamined.length > 0) exit = EXIT_NOT_CHECKED;
 
   if (wantJson) {
     console.log(
       JSON.stringify(
         {
           ok: true,
-          notChecked: false,
+          notChecked: exit === EXIT_NOT_CHECKED,
           base: requestedBase,
           examined,
           identical,
+          skipped,
           triggers,
           seamMembers: members,
           outputProperties: valueProperties,
+          packageScriptProperties: scriptProperties,
           tests,
           narrow,
           wider,
+          injectionBand,
           usedWide,
           ran,
           runResult,
@@ -1602,18 +2728,40 @@ function main() {
         tests,
         wider,
         narrow,
+        injectionBand,
         members,
         valueProperties,
+        scriptProperties,
         usedWide,
         clipped: !wantAll,
-        baseNote,
+        baseNote: [skippedNote, baseNote].filter(Boolean).join('\n'),
         ran,
       }),
     );
+    if (exit === EXIT_NOT_CHECKED) {
+      console.log(
+        `⚠ NOT CHECKED — declared file(s) could not be examined: ${unexamined.map((s) => s.file).join(', ')}. The findings above do not cover them.`,
+      );
+    }
   }
   return exit;
 }
 
-if (isCliEntry(import.meta.url)) process.exit(main());
+/**
+ * Run the detector and map an INTERNAL error to EXIT_NOT_CHECKED (WI-10005809). An uncaught throw
+ * otherwise exits 1, the code this script reserves for "strands named", so a crashed detector read
+ * as a finding. A crash measured nothing, which is exactly what exit 2 means.
+ */
+export function runCli(run = main, { writeError = (line) => console.error(line) } = {}) {
+  try {
+    return run();
+  } catch (err) {
+    const detail = err instanceof Error ? err.stack || err.message : String(err);
+    writeError(`⚠ NOT CHECKED — check-behavioural-strands crashed before it could compare anything:\n${detail}`);
+    return EXIT_NOT_CHECKED;
+  }
+}
+
+if (isCliEntry(import.meta.url)) process.exit(runCli());
 
 export { main, EXIT_NOT_CHECKED };

@@ -52,6 +52,23 @@ import { EXIT_NOT_CHECKED } from './not-checked.mjs';
 export { EXIT_NOT_CHECKED };
 
 /**
+ * The work-item that owns the still-UNDIAGNOSED torn-index writer (three recurrences:
+ * 2026-09-08 ×2, 2026-10-01; the earlier items closed without a cause). The banner names it so
+ * the agent who hits the NEXT recurrence posts evidence there instead of filing a fourth orphan.
+ */
+export const INDEX_FAULT_TRACKING_ITEM = 'WI-10004911';
+
+/**
+ * Reads the auditd watch (key `papercusp-gitindex`, /etc/audit/rules.d/60-papercusp-gitindex.rules)
+ * that records every process writing `.git/index` / `index.lock`. `--start recent` is the last 10
+ * minutes — the banner fires while the index is torn, so the write that tore it is in that window.
+ * Do NOT swap in an explicit `--start 'MM/DD/YYYY HH:MM:SS'`: on this box that form returned 0
+ * records for a window the raw log proved held thousands (measured 2026-10-01).
+ */
+export const INDEX_FAULT_CAPTURE_COMMAND =
+  "sudo -n ausearch -k papercusp-gitindex -i --start recent | grep -E '^type=(SYSCALL|PATH|PROCTITLE)'";
+
+/**
  * Git's own error strings for an unreadable/torn index, from read-cache.c.
  *
  * Each is unambiguous about the INDEX specifically — none can be produced by a guard's own
@@ -189,9 +206,13 @@ export function reportIndexFaultNotChecked(error, { guard, log = console.error }
   log('  This is an INSTRUMENT FAILURE, not a finding: no file was examined, so nothing here');
   log('  says anything about your code. Do not read it as a pass or as a violation.\n');
   log(`  git said: ${indexFaultDiagnostic(error)}\n`);
-  log('  A torn .git/index is a known transient on this shared tree — git-sync repairs it via');
-  log('  preflightInvalidIndex (`git read-tree HEAD`, run-git-sync.ts). It already retried and');
-  log('  the index was still unreadable, so this run stood down rather than guess.\n');
+  log('  A torn .git/index is a RECURRING defect on this shared tree whose WRITER IS STILL UNKNOWN');
+  log(`  (${INDEX_FAULT_TRACKING_ITEM}). It is NOT a benign transient: git-sync only MITIGATES it, repairing via`);
+  log('  preflightInvalidIndex (`git read-tree HEAD`, run-git-sync.ts). This run already retried');
+  log('  and the index was still unreadable, so it stood down rather than guess.\n');
+  log('  CAPTURE THE WRITER NOW. Where the auditd watch is armed, it names every process that wrote');
+  log(`  .git/index / index.lock, but the audit log rotates within ~3h. Post this to ${INDEX_FAULT_TRACKING_ITEM}:`);
+  log(`      ${INDEX_FAULT_CAPTURE_COMMAND}\n`);
   log(`  Re-run the guard once the index is healthy:`);
   log(`      stat -c '%s' .git/index && git ls-files | wc -l\n`);
   return EXIT_NOT_CHECKED;

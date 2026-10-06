@@ -8,6 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { OutputAudience, OutputEvidenceClass } from './output-envelope';
 import { reserveScratchSpace, RETENTION_MS } from './scratch-gc';
@@ -177,6 +178,16 @@ export function writeScratchReference(input: {
   nowMs?: number;
   /** Payload-relative start of the machine-readable body; see the manifest field. */
   bodyOffsetInPayload?: number;
+  /**
+   * When given, the file is written with fs.promises and the write's promise is pushed
+   * here instead of blocking: the caller MUST await it before handing the reference to
+   * anyone (see applyResultDoorAsync). Omitted ⇒ the synchronous write below.
+   *
+   * WI-10004533: the synchronous mkdirSync + writeFileSync runs on the request worker's
+   * main thread; under ext4/jbd2 contention it sat in D-state long enough for the
+   * event-loop sentinel to SIGKILL the operator with every in-flight MCP call.
+   */
+  deferredWrites?: Promise<void>[];
 }): ScratchReferenceManifest {
   const payload = Buffer.isBuffer(input.payload) ? input.payload : Buffer.from(input.payload, 'utf8');
   const nowMs = input.nowMs ?? Date.now();
@@ -208,8 +219,21 @@ export function writeScratchReference(input: {
   };
   const header = scratchReferenceHeader(manifest);
   reserveScratchSpace({ workspaceId: input.workspaceId, bytes: header.length + payload.length });
+  const bytes = Buffer.concat([header, payload]);
+  if (input.deferredWrites) {
+    const filePath = input.filePath;
+    const write = (async () => {
+      await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+      await writeFile(filePath, bytes, { mode: 0o600 });
+    })();
+    // Mark handled now: the caller awaits it later, and a fast failure must not reach the
+    // process-level unhandledRejection handler (which terminates the host) first.
+    write.catch(() => {});
+    input.deferredWrites.push(write);
+    return manifest;
+  }
   mkdirSync(dirname(input.filePath), { recursive: true, mode: 0o700 });
-  writeFileSync(input.filePath, Buffer.concat([header, payload]), { mode: 0o600 });
+  writeFileSync(input.filePath, bytes, { mode: 0o600 });
   return manifest;
 }
 

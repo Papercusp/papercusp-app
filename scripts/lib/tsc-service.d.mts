@@ -10,6 +10,61 @@
  */
 export function tscServiceSocketPath(env?: Record<string, string | undefined>): string;
 /**
+ * `systemd-escape --path`, so the client names the same instance the unit's `%f` resolves back to.
+ * Byte-wise over UTF-8: `/` becomes `-`, a leading `.` and anything outside `[0-9A-Za-z:_.]`
+ * becomes `\xNN`, and empty / `.` components are dropped first.
+ *
+ * @param {string} path
+ * @returns {string}
+ */
+export function systemdEscapePath(path: string): string;
+/**
+ * The socket unit serving `root` under a template base.
+ *
+ * @param {string} template
+ * @param {string} root
+ * @returns {string}
+ */
+export function tscServiceTemplateSocketUnit(template: string, root: string): string;
+/**
+ * Start (idempotently) the per-checkout socket unit and read the path systemd actually bound, so
+ * the client never re-derives the unit's `ListenStream` expansion. Synchronous: two short
+ * `systemctl --user` calls in the caller's own user manager, no root and no detached process.
+ *
+ * @param {{
+ *   template: string,
+ *   root: string,
+ *   env?: Record<string, string | undefined>,
+ *   run?: (command: string, args: string[], options: object) => { status: number | null, stdout?: string | null, stderr?: string | null, error?: Error },
+ * }} opts
+ * @returns {{ socketPath: string, unit: string } | { error: string, unit: string }}
+ */
+export function tscServiceTemplateSocket({ template, root, env, run }: {
+    template: string;
+    root: string;
+    env?: Record<string, string | undefined>;
+    run?: (command: string, args: string[], options: object) => {
+        status: number | null;
+        stdout?: string | null;
+        stderr?: string | null;
+        error?: Error;
+    };
+}): {
+    socketPath: string;
+    unit: string;
+} | {
+    error: string;
+    unit: string;
+};
+/**
+ * `systemctl show` C-escapes property values: the escaped instance's literal `\x2d` in the socket
+ * path prints as `\\x2d` (measured, systemd 255), so the printed path is not the path on disk.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+export function unescapeSystemctlValue(value: string): string;
+/**
  * The tsconfig a gate's `tscCommand` compiles, or null when the command carries anything the
  * service does not reproduce. Deliberately a whitelist: every leg today is exactly
  * `npx tsc -p <cfg> --noEmit --incremental false`, and a new flag (say `--strict false`) would
@@ -104,6 +159,71 @@ export function renderDiagnostics(diagnostics: ApiDiagnostic[], { root, textFor 
  */
 export function importsAnyModule(content: string, importerAbs: string, namedKeys: Set<string>, namedTails: Set<string>): boolean;
 /**
+ * Compare a loaded project's root files with a fresh parse of its tsconfig.
+ * `invalidateAll` refreshes contents and imports but does not re-evaluate include globs, so the
+ * service must tell the native API about both new and removed roots explicitly.
+ *
+ * @param {readonly string[]} knownRootFiles
+ * @param {readonly string[]} configuredRootFiles
+ * @returns {{ created: string[], deleted: string[] }}
+ */
+export function projectRootFileChanges(knownRootFiles: readonly string[], configuredRootFiles: readonly string[]): {
+    created: string[];
+    deleted: string[];
+};
+/**
+ * Reconcile a loaded snapshot's root files with the current tsconfig include set.
+ *
+ * @param {{
+ *   api: {
+ *     parseConfigFile(config: string): Promise<{ fileNames?: string[] }>,
+ *     updateSnapshot(params: { fileChanges: { created?: string[], deleted?: string[] } }): Promise<{
+ *       getProject(config: string): { rootFiles?: string[] } | undefined,
+ *       dispose(): void,
+ *     }>,
+ *   },
+ *   snapshot: {
+ *     getProject(config: string): { rootFiles?: string[] } | undefined,
+ *     dispose(): void,
+ *   },
+ *   projects: string[],
+ * }} opts
+ * @returns {Promise<{
+ *   getProject(config: string): { rootFiles?: string[] } | undefined,
+ *   dispose(): void,
+ * }>}
+ */
+export function refreshProjectRootFiles({ api, snapshot, projects }: {
+    api: {
+        parseConfigFile(config: string): Promise<{
+            fileNames?: string[];
+        }>;
+        updateSnapshot(params: {
+            fileChanges: {
+                created?: string[];
+                deleted?: string[];
+            };
+        }): Promise<{
+            getProject(config: string): {
+                rootFiles?: string[];
+            } | undefined;
+            dispose(): void;
+        }>;
+    };
+    snapshot: {
+        getProject(config: string): {
+            rootFiles?: string[];
+        } | undefined;
+        dispose(): void;
+    };
+    projects: string[];
+}): Promise<{
+    getProject(config: string): {
+        rootFiles?: string[];
+    } | undefined;
+    dispose(): void;
+}>;
+/**
  * The files a scoped verdict about `named` depends on, drawn from the project's program:
  *
  *   - the named files themselves;
@@ -176,15 +296,26 @@ export function requestTscService({ socketPath, request, timeoutMs }: {
  * The gate's side: ask the service to check `files` in `project`, returning null (with the
  * reason already printed) whenever the caller must fall back to the full compile.
  *
- * @param {{ root: string, project: string, files: string[], label: string, log?: (line: string) => void }} opts
+ * Under {@link TSC_SERVICE_UNIT_TEMPLATE_ENV} the socket is this checkout's template instance,
+ * started on demand; otherwise the one fixed socket of {@link tscServiceSocketPath}.
+ *
+ * @param {{
+ *   root: string,
+ *   project: string,
+ *   files: string[],
+ *   label: string,
+ *   log?: (line: string) => void,
+ *   env?: Record<string, string | undefined>,
+ * }} opts
  * @returns {Promise<Extract<TscServiceResponse, { ok: true }> | null>}
  */
-export function typecheckViaService({ root, project, files, label, log }: {
+export function typecheckViaService({ root, project, files, label, log, env }: {
     root: string;
     project: string;
     files: string[];
     label: string;
     log?: (line: string) => void;
+    env?: Record<string, string | undefined>;
 }): Promise<Extract<TscServiceResponse, {
     ok: true;
 }> | null>;
@@ -211,6 +342,14 @@ export const TSC_SERVICE_ENV: "PAPERCUSP_TSC_SERVICE";
 export const TSC_SERVICE_MAX_CHECKED_FILES: number;
 /** Queue wait plus check. A refusal or timeout falls back to the CLI, so this bounds the loss. */
 export const TSC_SERVICE_TIMEOUT_MS: number;
+/**
+ * WI-10005362 — hosted workspace hosts run one service PER CHECKOUT. Set (by the operator, never
+ * the customer) to the base name of the systemd user template units the host bootstrap installs,
+ * `/etc/systemd/user/<base>@.{socket,service}`; the instance is the systemd-escaped checkout path.
+ * A template, not the tower's fixed-ROOT unit, because a hosted host's checkouts are cloned under
+ * its workspace root after the bootstrap ran, so the bootstrap cannot name them.
+ */
+export const TSC_SERVICE_UNIT_TEMPLATE_ENV: "PAPERCUSP_TSC_SERVICE_UNIT_TEMPLATE";
 export type ApiDiagnostic = {
     fileName?: string;
     pos: number;

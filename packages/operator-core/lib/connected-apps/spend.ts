@@ -10,7 +10,7 @@
  */
 
 import { getOrgPg } from '@papercusp/db-org';
-import { BLUEPRINT_OPERATION_TOOLS } from '../blueprint/operation-contract';
+import { BLUEPRINT_OPERATION_TOOLS } from '../blueprint/operation-tool-names';
 import { APP_PRINCIPAL_SLUG_PREFIX } from './principal';
 
 /**

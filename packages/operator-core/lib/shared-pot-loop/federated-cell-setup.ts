@@ -90,7 +90,7 @@ export async function coordCellSetup(sql: postgres.Sql): Promise<void> {
  */
 export async function presenceCellSetup(sql: postgres.Sql): Promise<void> {
   await sql.unsafe(`
-    CREATE TABLE harness_shared.shared_presence (
+    CREATE TABLE IF NOT EXISTS harness_shared.shared_presence (
       workspace_id   text        NOT NULL DEFAULT '',
       harness_slug   text        NOT NULL,
       github_user_id bigint      NOT NULL,

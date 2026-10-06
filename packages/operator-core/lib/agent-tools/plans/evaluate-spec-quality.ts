@@ -5,7 +5,7 @@ import { harnessArg, harnessScopedCtx } from '../_harness-scope';
 import { ctxToPlanSourceOpts, resolveEffectiveHarnessSlug } from './_ctx-opts';
 import { readPlanBySlug } from './source';
 import { listSpecClauses } from './spec-clauses-store';
-import { evaluatePlanSpecQuality } from './spec-quality';
+import { evaluatePlanSpecQuality, specQualityPlanItemIds } from './spec-quality';
 import { PLAN_CLASS_RUBRIC_REFS } from './spec-test-adequacy';
 import { evaluatePlanStartReadiness } from './plan-input-validation';
 import { resolvePersistedClassRef } from './plan-spec-quality-gate';
@@ -15,7 +15,7 @@ const argsSchema = z.object({
   harness: harnessArg,
   slug: z.string().min(1),
   expectedSpecSetHash: z.string().regex(/^[a-f0-9]{64}$/).optional().describe(
-    'Optional replay guard. When supplied, the current clauses must hash to this exact value or spec-set-freshness is unknown and blocks the verdict.',
+    'Optional fail-closed replay guard. When supplied, the current clauses must hash to this exact value; a mismatch returns ok:false with a blocker and no scorecard draft.',
   ),
   classRef: z.enum(PLAN_CLASS_RUBRIC_REFS).optional().describe(
     'Optional assertion against the authoritative persisted acceptance-rubric class. Omit to derive it; a mismatch is refused, never used as an override.',
@@ -63,6 +63,7 @@ export default defineTool({
       wouldBlock: z.array(z.string()).optional(),
       planSlug: z.string().optional(),
       classRef: z.string().optional(),
+      expectedSpecSetHash: z.string().optional(),
       specSetHash: z.string().optional(),
       clauseCount: z.number().optional(),
       planItemCount: z.number().optional(),
@@ -130,7 +131,7 @@ export default defineTool({
         wouldBlock: blockers.map((b) => b.code),
       } };
     }
-    const planItemIds = (read.row.items.length ? read.row.items : read.parsed.items).map((item) => item.id);
+    const planItemIds = specQualityPlanItemIds(read.row.items.length ? read.row.items : read.parsed.items);
     const evaluation = evaluatePlanSpecQuality({
       planSlug: args.slug,
       harnessSlug,
@@ -139,6 +140,21 @@ export default defineTool({
       classRef: classResolution.classRef,
       expectedSpecSetHash: args.expectedSpecSetHash,
     });
+    if (args.expectedSpecSetHash && args.expectedSpecSetHash !== evaluation.specSetHash) {
+      const message =
+        `Expected specSetHash ${args.expectedSpecSetHash}, but the current clauses hash to ` +
+        `${evaluation.specSetHash}; refusing to evaluate a different clause set.`;
+      return { data: {
+        ok: false,
+        error: 'spec_set_hash_mismatch',
+        slug: args.slug,
+        harnessSlug,
+        expectedSpecSetHash: args.expectedSpecSetHash,
+        specSetHash: evaluation.specSetHash,
+        blockers: [{ check: 'clauses', state: 'blocked', code: 'spec_set_hash_mismatch', message }],
+        wouldBlock: ['spec_set_hash_mismatch'],
+      } };
+    }
     return {
       data: {
         ok: true,

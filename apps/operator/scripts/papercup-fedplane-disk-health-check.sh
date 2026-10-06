@@ -50,7 +50,6 @@
 #                                                  window per still-bad condition, not
 #                                                  a fresh EI every tick)
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 # State-aware RED dedup (EI-22240553542994017). Sourced, not optional: without it
 # this probe would silently fall back to age-only suppression, which is the defect.

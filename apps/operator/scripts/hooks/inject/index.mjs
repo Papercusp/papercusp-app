@@ -38,8 +38,40 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { runInjection } from './core.mjs';
+import { runInjection, sessionId } from './core.mjs';
 import { openDeliveryLedger } from './delivery-ledger.mjs';
+
+/**
+ * ── A NESTED CLI MUST NOT SPEND THE SU'S PER-SESSION STATE (WI-10004953) ──
+ * A `claude`/`codex` run from an su's Bash tool, or under a capability:bash job, inherits
+ * that su's PAPERCUSP_SID, so every request this dispatcher builds for it names the SU as
+ * `owner`. Four ports then consume state that belongs to the su's own turns:
+ *   - turn-start: the one-shot CTRL transition, the ack-on-proof orientation token
+ *     (delivery-ledger.mjs) and the session-epoch recall dedup;
+ *   - mid-turn: the same recall dedup and the failure-loop detector;
+ *   - stop: charges the su's identity hook-turn budget (identity_hook_turns);
+ *   - compaction: BEGINS a new hook turn for the su (zeroes its spend, rotates turn_id).
+ * Those ports are skipped for a nested CLI. `pre-tool` is NOT: it only ever votes deny,
+ * from the su's worn identity rules, and writes nothing. A nested CLI acts in the shared
+ * tree on the su's behalf, so the su's guard rails stay on it, as the lock hooks do.
+ */
+export const NESTED_CLI_SKIP_PORTS = new Set(['turn-start', 'mid-turn', 'stop', 'compaction']);
+
+/**
+ * The cached nested verdict (../cc/pc_nested_cli.mjs, beside this dir in the repo and in
+ * the installed hooks root). Loaded lazily and FAIL-OPEN: a missing sibling must never
+ * take injection down, it only means the guard is absent.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {Promise<boolean>}
+ */
+async function nestedCliVerdict(env) {
+  try {
+    const { nestedCliCached } = await import('../cc/pc_nested_cli.mjs');
+    return nestedCliCached({ env });
+  } catch {
+    return false;
+  }
+}
 
 /**
  * @typedef {import('./ports.mjs').InjectionPort} InjectionPort
@@ -126,6 +158,8 @@ function readStdin(stream) {
  * @param {typeof fetch} [opts.fetchImpl]
  * @param {Parameters<typeof runInjection>[0]['openDeliveryLedger']} [opts.openDeliveryLedger]
  *   see runInjection; the CLI entry below is the only caller that can commit it
+ * @param {(env: NodeJS.ProcessEnv) => boolean | Promise<boolean>} [opts.isNested]
+ *   is this CLI nested inside another agent? (tests inject it; see NESTED_CLI_SKIP_PORTS)
  * @returns {Promise<string | null>} the stdout payload, or null to emit nothing
  */
 export async function dispatch(opts = {}) {
@@ -135,6 +169,7 @@ export async function dispatch(opts = {}) {
     env = process.env,
     openDeliveryLedger,
     fetchImpl,
+    isNested = nestedCliVerdict,
   } = opts;
   // TEST-ONLY SEAM (EI-19989482108652654): dispatch()'s own try/catch below
   // absorbs every error a real invocation can produce, so nothing in this repo
@@ -155,7 +190,11 @@ export async function dispatch(opts = {}) {
     if (!adapter) return null;
 
     // Cheap pre-check: if this event maps to no port, never read stdin at all.
-    if (!adapter.portForEvent(nativeEvent)) return null;
+    const port = adapter.portForEvent(nativeEvent);
+    if (!port) return null;
+
+    // The SID check first keeps a non-psu session from paying for the nested verdict.
+    if (NESTED_CLI_SKIP_PORTS.has(port) && sessionId(env) && (await isNested(env))) return null;
 
     const raw = await readStdin(stdin);
     if (!raw || !raw.trim()) return null;

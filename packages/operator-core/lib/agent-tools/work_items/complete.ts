@@ -29,7 +29,6 @@
 
 import { z } from 'zod';
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import * as nodePath from 'node:path';
 import { detectPapercupRoot } from '../../harness/register-papercusp';
 import { HARVESTED_COORD_NOTES_RULE } from '../../harness/improvements/observation-title-guidance';
@@ -60,6 +59,7 @@ import { lookupRemoteAuthorEndedAt } from '../../work-items-orphan-author';
 // standalone module, not from '../../work-items', which this file's unit tests mock
 // wholesale — the guard would be `undefined` exactly here.
 import { decideTerminalOwnerOriginHeal } from '../../work-items-terminal-owner-origin-heal';
+import { activeExternalBlockers, externalBlockerCapabilityPolicy } from '../../external-blockers';
 import {
   getWorkItem,
   getWorkItemsByIds,
@@ -75,8 +75,10 @@ import {
   commentWorkItem,
   type TerminalCompletionConflict,
 } from '../../work-items';
+import { refuseNonAgentWorkAtDoor } from '../../work-nature/agent-work-door-gate';
 import {
   CompletionRecordSchema,
+  CompletionVerificationEvidenceSchema,
   COMPLETION_COVERAGE_CONTRACT,
   COMPLETION_SETTLEMENT_MANIFEST_CONTRACT,
   ROOT_CAUSE_VERIFICATION_CONTRACT_VERSION,
@@ -138,6 +140,25 @@ export const WORK_ITEMS_COMPLETION_CONTRACT = {
 type CompletionContractRequirementKey = (typeof WORK_ITEMS_COMPLETION_CONTRACT.requirements)[number]['key'];
 
 /**
+ * EI-24814178215040083: ONE tree-stamp route for every close. The registry lookup that
+ * yields `registeredRepoRoots` is deliberately paid only when a path is unresolved or names
+ * another checkout, but the STAMP must not branch on it. The old fallback stamped through
+ * the single-repo `completionTreeStamp`, which silently drops an absolute path outside the
+ * checkout. A close whose only deliverable lived outside every repository (a tunnel config,
+ * a systemd drop-in) therefore persisted a treeStamp with NO contentIdentity, and both
+ * authority floors read that as "unproven" and pinned it at `proposed` forever, against the
+ * tool's own promise that such paths are recorded as `outOfRepoArtifact`.
+ * `completionTreeStampForEvidence` records them as artifacts, so it is the only route.
+ */
+export async function completionTreeStampForClose(
+  evidence: CompletionVerificationEvidence,
+  registeredRepoRoots: string[] | undefined,
+  primaryRoot: string | null,
+): ReturnType<typeof completionTreeStampForEvidence> {
+  return completionTreeStampForEvidence(evidence, registeredRepoRoots ?? (primaryRoot ? [primaryRoot] : []));
+}
+
+/**
  * EI-22166138797743784: completion settlement is local-only. A proposed close whose
  * content identity is merely waiting for this install's git-sync can converge without
  * another completion call; a remote-authored row must not receive that same advice because
@@ -147,8 +168,17 @@ export function contentIdentityAdviceForOrigin(
   origin: string | null | undefined,
   createdBy: string | null | undefined,
   localAdvice: string | undefined,
+  /**
+   * EI-24814178215040083: did THIS close persist a `settlementManifest`? The reconciler's
+   * candidate query keys on exactly that (`authority='proposed'` + a manifest naming this
+   * install's repository root) and never reads `origin`, so a remote-origin row the caller
+   * was allowed to close locally (its author, its terminal owner, an own-node row) IS
+   * upgraded here. Measured: WI-10004437, origin 'remote', settled proposed -> committed
+   * with a historyAttestation. Telling that closer "cannot upgrade it" named no settler.
+   */
+  settlesLocally = false,
 ): string | undefined {
-  if (origin !== 'remote') return localAdvice;
+  if (origin !== 'remote' || settlesLocally) return localAdvice;
   return (
     `This row is REMOTE-AUTHORED${createdBy ? ` by '${createdBy}'` : ''}; this install's ` +
     `git-sync completion-settlement reconciler cannot upgrade it. The originating authoring ` +
@@ -170,6 +200,7 @@ import {
   type CompletionEvidenceFindings,
 } from '../../work-item-completion-authority';
 import { evaluateCompletionClaims, repoSourceReader, type CompletionClaimsReport } from '../../completion-claims';
+import { attestCompletionConsumerView } from './complete-consumer-view';
 import { completionClaimBaseline } from '../../completion-claim-recheck';
 import { fabricatedPathsInCompletion } from './fabricated-paths';
 import { untouchedPathsInCompletion } from './untouched-paths';
@@ -181,22 +212,26 @@ import {
   type TestingRunInvocation,
 } from './test-result-binding';
 import { gateRedCompletionClaimVerdict, gateRedCompletionClaimWarning } from '../../release/gate-red-completion-claim';
-import { GATE_RED_STREAK_CONDITION_PREFIX } from '../../work-items-admission';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
+import { GATE_RED_STREAK_CONDITION_PREFIX, isOwnNodeAuthoredRemoteRow } from '../../work-items-admission';
 import { FROZEN_REPAIR_CONVERGENCE_CONDITION_PREFIX } from '../../coord/actionable-conditions';
 import { renderCompletion } from '../../coord-lifecycle/render';
 import { renderReflectStep } from '../../harness/improvements/friction-markers';
-import { runBulk, bulkContent, type BulkItemResult } from '../_bulk';
+import { runBulk, bulkContent, bulkEnvelopeSchema, type BulkItemResult } from '../_bulk';
 import { shapeWorkItemWriteEcho } from './write-echo-shape';
 import {
   COMPLETION_OBJECT_EXAMPLE,
+  COMPLETION_FIELDS,
   COMPLETION_STRING_REJECTION,
   coerceCompletionShape,
+  describeUnparseableCompletionJsonString,
   gatherFlatCompletion,
   hoistMisplacedCompletionFields,
 } from './completion-coerce';
 import { getFlag } from '@papercusp/flags/server';
 import { FLAGS } from '@papercusp/flags';
 import { withBoundedTimeout } from '../../bounded-timeout';
+import { isGitTrackedPath, repoRelativePathUnderRoot, type GitTrackednessProbe } from '../../git-trackedness';
 import { getOrgPg } from '@papercusp/db-org';
 import {
   itemIsArmB,
@@ -269,6 +304,50 @@ function defaultCompletionStatus(value: unknown): unknown {
   return record.status === undefined ? { ...record, status: 'done', __statusDefaulted: true } : value;
 }
 
+// Coverage is accepted through two aliases. Register their identical field once
+// and reuse the optional wrapper, as with specAdequacyCompletionField below.
+// Two separate metadata-bearing object clones would collide during strictArgs.
+const completionCoverageField = CompletionRecordSchema.shape.coverage.meta({
+  ...CompletionRecordSchema.shape.coverage.meta(),
+  id: 'wi-coverage',
+});
+
+const completionInputSchema = CompletionRecordSchema.extend({
+  coverage: completionCoverageField,
+  workItem: z.string().min(1).optional(),
+  // The preprocess below owns the default so Zod 4 does not publish this
+  // defaulted field as required to completion callers.
+  status: z.string().min(1).optional(),
+  // EI-24820676473298331: `treeStamp` and `settlementManifest` are SERVER-STAMPED.
+  // coerceCompletionShape deletes them before this schema runs, so publishing them
+  // in the caller INPUT schema only invited callers to send them and cost ~2.4 KB of
+  // tool-delivery floor bytes. The persisted record (CompletionRecordSchema) keeps them.
+  // The one-line describe keeps the caller contract EI-21310406381433990 pins
+  // (complete.test.ts) without re-publishing both subtrees.
+  verification: CompletionVerificationEvidenceSchema.omit({
+    treeStamp: true,
+    settlementManifest: true,
+  })
+    .extend({ coverage: completionCoverageField })
+    .describe(
+      'Server-stamped verification metadata: the server records `treeStamp` and `settlementManifest`; ' +
+        'callers must omit `treeStamp` and `settlementManifest`. Their persisted headSha is a full ' +
+        'lowercase 40- or 64-character commit SHA; short hashes are invalid.',
+    )
+    .optional(),
+  // EI-20724228359175431: 'truncated-json' marks a
+  // JSON-stringified completion whose tail was cut off and whose closers were
+  // rebuilt, so the caller can be told the record may be missing a field that
+  // never arrived.
+  __shapeCoercedFrom: z.literal('truncated-json').optional(),
+  // EI-15711: internal marker set by the preprocess above when it supplied the
+  // `status` default, so the close inference can tell an omitted status from an
+  // explicit `status:'done'`. Stripped before the record is stored or broadcast,
+  // exactly like __shapeCoercedFrom. `z.literal(true)` means a caller can only ever
+  // make this MORE conservative (suppressing their own inference), never less.
+  __statusDefaulted: z.literal(true).optional(),
+});
+
 const completionSpec = z
   .preprocess(
     (raw, ctx) => {
@@ -278,32 +357,20 @@ const completionSpec = z
       // string, so reject it with the exact object-form repair example before Zod's
       // generic "expected object, received string" message can obscure the fix.
       if (typeof raw === 'string' && typeof coerced === 'string') {
-        ctx.addIssue({ code: 'custom', message: COMPLETION_STRING_REJECTION });
+        // WI-10005684: a brace-delimited string that failed JSON parsing/repair gets the
+        // parser's reason PREPENDED — the generic text alone read as "you sent prose".
+        const jsonReason = describeUnparseableCompletionJsonString(raw);
+        ctx.addIssue({
+          code: 'custom',
+          message: jsonReason ? `${jsonReason} ${COMPLETION_STRING_REJECTION}` : COMPLETION_STRING_REJECTION,
+        });
       }
       return coerced;
     },
-    CompletionRecordSchema.extend({
-      workItem: z.string().min(1).optional(),
-      // The preprocess above owns the default so Zod 4 does not publish this
-      // defaulted field as required to completion callers.
-      status: z.string().min(1).optional(),
-      // EI-20724228359175431: 'truncated-json' marks a
-      // JSON-stringified completion whose tail was cut off and whose closers were
-      // rebuilt, so the caller can be told the record may be missing a field that
-      // never arrived.
-      __shapeCoercedFrom: z.literal('truncated-json').optional(),
-      // EI-15711: internal marker set by the preprocess above when it supplied the
-      // `status` default, so the close inference can tell an omitted status from an
-      // explicit `status:'done'`. Stripped before the record is stored or broadcast,
-      // exactly like __shapeCoercedFrom. `z.literal(true)` means a caller can only ever
-      // make this MORE conservative (suppressing their own inference), never less.
-      __statusDefaulted: z.literal(true).optional(),
-    }),
+    completionInputSchema,
   )
   .describe(
-    // EI-23379068490085254: this string is serialized TWICE (the single `completion`
-    // shorthand and every `items[].completion`), so each byte here is paid twice on
-    // every tools/list. It therefore carries ONLY rules the structure cannot express.
+    // EI-23379068490085254: keep only rules the structure cannot express.
     // Deliberately NOT restated: the field/type enumeration (published in this schema's
     // own `properties` — and the hand-copy that stood here had already drifted 9 fields
     // behind), `verifiedHow`'s label list and the residue rule (each field's own
@@ -312,10 +379,10 @@ const completionSpec = z
     'Structured completion record; its fields and types are published in this schema. ' +
       // The three wrong-key literals are spelled in full ON PURPOSE: complete.test.ts
       // asserts each one, and they are what a caller greps for after a strict-key refusal.
-      '`completion.verification` is strict: put test/typecheck/diff details in `testsRun`/`testResult`, ' +
-      'not `verification.tests`, `verification.typecheck`, or `verification.diff`. Put structured evidence under ' +
-      '`completion.verification`; the top-level evidence fields are legacy aliases. Keep `deferred` ' +
-      'and `coordNotes` at the completion level, not inside `verification`. ' +
+      '`completion` owns `testsRun`, `testResult`, `verifiedHow`, and `filesChanged`; `completion.verification` ' +
+      'is for structured coverage. The single-item call also accepts those fields at the argument root as ' +
+      'legacy aliases. Do not put test/typecheck/diff details under the strict `completion.verification`; keep ' +
+      '`deferred`/`coordNotes` at completion level, not inside `verification`. ' +
       // The two live-mode ARTIFACT requirements are enforced at close time and are stated
       // nowhere else; `verifiedHow`'s own describe defines the labels but not these floors.
       "For a terminal close, `verifiedHow:'live-drove-ui'` requires a real artifact citation in " +
@@ -331,14 +398,14 @@ const completionSpec = z
       // loop:checkpoint { insight }. Shared constant, never re-worded here — the guard test
       // asserts every harvest-fed surface still names it.
       `${HARVESTED_COORD_NOTES_RULE} ` +
-      // EI-39573: publish the same repair shape that the schema-level string refusal returns.
+      // EI-39573: publish the repair shape used by the schema-level refusal.
       `A bare STRING is rejected because it cannot carry structured evidence. ${COMPLETION_STRING_REJECTION} ` +
       'Bug/capability-gap terminal closes also require `rootCauseVerification` (its own schema lists the keys).',
   )
   // EI-23318249512516833: the completion record is reused by both single-item
   // branches and each `items[]` entry. Register it once so tools/list emits one
   // `$defs` entry and refs rather than copying the full nested record per branch.
-  .meta({ id: 'work-items-completion-record-v1' });
+  .meta({ id: 'wi-completion' });
 
 const SPEC_ADEQUACY_CURRENTNESS_GUIDANCE =
   '`specAdequacy.current` entries use `{ planSlug?, specId?, specRevision?, specFingerprint?, evidenceKind, evidenceRef, sourceFingerprint, testFingerprint?, fixtureFingerprint?, rubricFingerprint?, environmentFingerprint? }`; provide one entry for every selected bound evidence ref (`specAdequacy.evidenceRefs` narrows the selection; when omitted, use all bound refs) and every stored fingerprint dimension. `planSlug`, `specId`, `specRevision`, and `specFingerprint` are an all-or-none clause identity; omitted values remain unknown and cannot pass.';
@@ -439,7 +506,7 @@ const specAdequacyCompletionSpec = z
   // entry and two refs. MEASURED 1,591 B off this tool's compact definition — which is
   // what puts the derived OMP/claude/codex seed back under D-009's 100,000 B budget
   // (it was 100,189 B, floors alone, with nothing discretionary left to defer).
-  .meta({ id: 'work-items-spec-adequacy-attestation-v1' });
+  .meta({ id: 'wi-adequacy' });
 
 /**
  * ⚠ BOTH call sites MUST share THIS ONE instance — do not re-spell
@@ -492,9 +559,9 @@ const CLOSE_INTENT_STATES = new Set([...TERMINAL_WORK_ITEM_STATES, 'done', 'comp
 const COMPLETE_CLOSE_SHAPE_MESSAGE =
   'to CLOSE a work-item, pass { id, state, assumptions: "none"|[fact keys], completion: { summary } } ' +
   '(or items:[{ id, state, assumptions: "none"|[fact keys], completion: { summary } }] for many) — ' +
-  '`state` is the terminal lifecycle (feature/chunk: "passed"|"deprecated"; issue: "resolved"|"closed"; ' +
-  'the unified aliases "done"|"dropped" are also accepted and preserve success vs discard semantics) ' +
-  'and is REQUIRED to actually close it: a completion with no `state` only records the note, ' +
+  '`state` expresses terminal intent: feature/chunk success is "passed" and discard is "deprecated"; ' +
+  'issue success is "resolved" and discard is "closed". Unified "done" (success) and "dropped" ' +
+  '(discard) are also accepted; legacy issue "closed" maps to "dropped". `state` is REQUIRED to actually close it: a completion with no `state` only records the note, ' +
   'the item stays claimable. `assumptions` is also REQUIRED; pass "none" when no recorded fact ' +
   'supports the close (see work_items:set_state to change state alone, without a completion record).';
 
@@ -551,6 +618,87 @@ function firstUnrecognizedKeyMessage(value: unknown): string | undefined {
 }
 
 /**
+ * Keep specAdequacy field errors from the completion-envelope branch that
+ * matches the caller's shape. A single-item payload and a bulk payload both
+ * fail the other strict branch, so union-wide traversal can otherwise surface
+ * that unrelated branch's unrecognized-key error first.
+ */
+function firstSpecAdequacyIssueMessage(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  if (Array.isArray(value)) {
+    for (const nested of value) {
+      const message = firstSpecAdequacyIssueMessage(nested);
+      if (message) return message;
+    }
+    return undefined;
+  }
+  const record = value as { code?: unknown; message?: unknown; path?: unknown; errors?: unknown };
+  if (record.code === 'unrecognized_keys') return undefined;
+  if (Array.isArray(record.errors)) {
+    const message = firstSpecAdequacyIssueMessage(record.errors);
+    if (message) return message;
+  }
+  if (
+    record.code !== 'invalid_union' &&
+    typeof record.message === 'string' &&
+    record.message !== 'Invalid input'
+  ) {
+    const segments = Array.isArray(record.path) ? record.path.map(String) : [];
+    if (segments.includes('specAdequacy')) {
+      return `${segments.join('.')}: ${record.message}`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * EI-24866603915783845: the first FIELD-level issue (non-empty path) in the caller's matching
+ * branch, rendered as `<path>: <message>`. Without it, a well-formed close whose only defect is
+ * a wrong-typed field (e.g. `completion.addedTests` sent as a string array; it is a boolean)
+ * fell through to COMPLETE_CLOSE_SHAPE_MESSAGE, which tells the caller to pass the `state` and
+ * `assumptions` they had already passed. Root-level refinements (path []) are skipped on purpose:
+ * a genuinely missing `id`/`completion` still gets the full close shape. A MISSING leaf
+ * ("received undefined") is skipped too: those already have dedicated messages (the close shape,
+ * or rootCauseVerification's "Missing required fields"), so only a PRESENT value of the wrong
+ * type or shape is named here.
+ */
+function firstFieldIssueMessage(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  if (Array.isArray(value)) {
+    for (const nested of value) {
+      const message = firstFieldIssueMessage(nested);
+      if (message) return message;
+    }
+    return undefined;
+  }
+  const record = value as { code?: unknown; message?: unknown; path?: unknown; errors?: unknown };
+  if (record.code === 'invalid_union') {
+    return Array.isArray(record.errors) ? firstFieldIssueMessage(record.errors) : undefined;
+  }
+  if (record.code === 'unrecognized_keys') return undefined;
+  const segments = Array.isArray(record.path) ? record.path.map(String) : [];
+  if (segments.length === 0 || typeof record.message !== 'string' || record.message.length === 0) return undefined;
+  if (/received undefined$/.test(record.message)) return undefined;
+  return `${segments.join('.')}: ${record.message}`;
+}
+
+function firstCompletionEnvelopeBranchMessage(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as { code?: unknown; input?: unknown; errors?: unknown };
+  if (record.code !== 'invalid_union' || !Array.isArray(record.errors)) return undefined;
+  if (!record.input || typeof record.input !== 'object' || Array.isArray(record.input)) return undefined;
+
+  const input = record.input as Record<string, unknown>;
+  const hasBulkItems = Object.prototype.hasOwnProperty.call(input, 'items') && input.items !== undefined;
+  const matchingBranch = record.errors[hasBulkItems ? 1 : 0];
+  return (
+    firstSpecAdequacyIssueMessage(matchingBranch) ??
+    firstUnrecognizedKeyMessage(matchingBranch) ??
+    firstFieldIssueMessage(matchingBranch)
+  );
+}
+
+/**
  * WI-39573: the completion schema deliberately emits an actionable repair for a
  * bare-string `completion`. Zod wraps that issue inside the union branch errors;
  * if the union-level mapper ignores it, callers instead see the generic close
@@ -568,7 +716,11 @@ function firstCompletionStringRejection(value: unknown): string | undefined {
     return undefined;
   }
   const record = value as { message?: unknown; errors?: unknown };
-  if (record.message === COMPLETION_STRING_REJECTION) return COMPLETION_STRING_REJECTION;
+  // WI-10005684: the issue may carry a JSON-parse reason PREFIX before the shared repair
+  // text, so match the shared text as a suffix and return the full (prefixed) message.
+  if (typeof record.message === 'string' && record.message.endsWith(COMPLETION_STRING_REJECTION)) {
+    return record.message;
+  }
   if (!Array.isArray(record.errors)) return undefined;
   for (const nested of record.errors) {
     const message = firstCompletionStringRejection(nested);
@@ -701,7 +853,17 @@ function issuesNotCoveredByPreflight(issues: readonly z.core.$ZodIssue[], prefli
     list.flatMap((issue): z.core.$ZodIssue[] => {
       if (isCovered(issue.path)) return [];
       if (issue.code === 'invalid_union' && Array.isArray(issue.errors)) {
-        return [{ ...issue, errors: issue.errors.map((branch) => filter(branch)) } as z.core.$ZodIssue];
+        const filtered = {
+          ...issue,
+          errors: issue.errors.map((branch) => filter(branch)),
+        } as z.core.$ZodIssue;
+        // formatIssues preserves a union's contract-specific message and expands
+        // only the generic "Invalid input" form. Keep the guidance and add a
+        // generic-message copy so its shared issueLeaves selector exposes the
+        // matching branch's remaining field errors alongside the preflight issue.
+        return issue.message === 'Invalid input'
+          ? [filtered]
+          : [filtered, { ...filtered, message: 'Invalid input' } as z.core.$ZodIssue];
       }
       return [issue];
     });
@@ -763,6 +925,11 @@ function isPlanGateRejection(error: string): boolean {
   return /linked plan-item .* is STILL effectively /i.test(error);
 }
 
+const closeAssumptionsField = z
+  .preprocess(normalizePersistedAssumptionDeclaration, assumptionsArg.optional())
+  .describe('Required for a terminal close; omit for record-only completions. Pass "none" or fact keys.')
+  .meta({ id: 'wi-assumptions' });
+
 const itemSpec = z.object({
   id: z.string().min(1),
   harness: z.string().max(80).optional().describe('per-item harness (else the batch `harness` default)'),
@@ -799,7 +966,7 @@ const itemSpec = z.object({
    * without an assumption declaration. The handler enforces the required declaration
    * once it knows the effective state, including the issue-family status inference.
   */
-  assumptions: z.preprocess(normalizePersistedAssumptionDeclaration, assumptionsArg.optional()),
+  assumptions: closeAssumptionsField,
   /** Optional successor/boundary note, posted only after a terminal finish converges. */
   boundaryNote: z
     .string()
@@ -1768,10 +1935,7 @@ function completionHasFilesChanged(completion: unknown): boolean {
  * definite positive suppresses the generic scratch warning; every other result stays
  * fail-open and keeps the warning visible.
  */
-export type CompletionTrackednessProbe = (
-  repoRoot: string,
-  repoRelativePath: string,
-) => boolean | null | undefined;
+export type CompletionTrackednessProbe = GitTrackednessProbe;
 
 export interface CompletionEphemeralDeliverableProbe {
   /** Compatibility seam for one candidate checkout. */
@@ -1792,41 +1956,6 @@ export interface CompletionEphemeralDeliverableProbe {
  * warning-bearing population here. Any other failure is ownership uncertainty and remains
  * `undefined` so a broken Git/package install cannot silently suppress a warning.
  */
-function defaultCompletionTrackedness(repoRoot: string, repoRelativePath: string): boolean | undefined {
-  try {
-    execFileSync('git', ['-C', repoRoot, 'ls-files', '--error-unmatch', '--', repoRelativePath], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'ignore', 'ignore'],
-      timeout: 5_000,
-      killSignal: 'SIGKILL',
-    });
-    return true;
-  } catch (error) {
-    const status =
-      typeof error === 'object' && error !== null && 'status' in error
-        ? (error as { status?: unknown }).status
-        : undefined;
-    return status === 1 ? false : undefined;
-  }
-}
-
-function completionScratchRepoRelativePath(reference: string, repoRoot: string): string | undefined {
-  const value = reference.trim();
-  if (!value || value.startsWith('~')) return undefined;
-
-  // A leading parent traversal is an external/ambiguous ownership claim. Keep it warning-
-  // bearing even if normalisation would happen to land under a candidate root.
-  if (value === '..' || value.startsWith('../') || value.startsWith('..\\')) return undefined;
-
-  const root = nodePath.resolve(repoRoot);
-  const absolute = nodePath.isAbsolute(value) ? nodePath.resolve(value) : nodePath.resolve(root, value);
-  const relative = nodePath.relative(root, absolute);
-  if (!relative || relative === '..' || relative.startsWith('..' + nodePath.sep) || nodePath.isAbsolute(relative)) {
-    return undefined;
-  }
-  return relative.split(nodePath.sep).join('/');
-}
-
 function completionCandidateRoots(probe: CompletionEphemeralDeliverableProbe): string[] {
   const rawRoots = 'repoRoots' in probe ? probe.repoRoots : ['repoRoot' in probe ? probe.repoRoot : completionRoot()];
   return [
@@ -1868,10 +1997,10 @@ function completionIdentityMatchesChangedPath(
   });
 }
 
-function filterTrackedCompletionScratchReferences(
+async function filterTrackedCompletionScratchReferences(
   references: ReturnType<typeof detectEphemeralDeliverableReferences>,
   probe: CompletionEphemeralDeliverableProbe = {},
-): ReturnType<typeof detectEphemeralDeliverableReferences> {
+): Promise<ReturnType<typeof detectEphemeralDeliverableReferences>> {
   // An artifact URL is normally account/session-local, but it is a legitimate source
   // citation when the same completion also names a non-deleted repository path whose
   // server-observed working-tree and HEAD blobs match.  Do not infer this from
@@ -1890,26 +2019,37 @@ function filterTrackedCompletionScratchReferences(
     ),
   );
   const roots = completionCandidateRoots(probe);
-  const isTracked = probe.isTracked ?? defaultCompletionTrackedness;
+  const isTracked = probe.isTracked ?? isGitTrackedPath;
 
-  return references.filter((reference) => {
-    if (reference.kind === 'artifact-url') return !hasProvenDurableChangedPath;
-    if (reference.kind !== 'scratch-path') return true;
-    if (roots.length === 0) return true;
+  const kept: ReturnType<typeof detectEphemeralDeliverableReferences> = [];
+  for (const reference of references) {
+    if (reference.kind === 'artifact-url') {
+      if (!hasProvenDurableChangedPath) kept.push(reference);
+      continue;
+    }
+    if (reference.kind !== 'scratch-path' || roots.length === 0) {
+      kept.push(reference);
+      continue;
+    }
     // Suppress only a definite positive. A false result (untracked/ignored), an unknown
     // result, an exception, or a path that cannot be mapped to a candidate root all preserve
     // the original advisory warning.
+    let definitelyTracked = false;
     for (const root of roots) {
-      const relativePath = completionScratchRepoRelativePath(reference.reference, root);
+      const relativePath = repoRelativePathUnderRoot(reference.reference, root);
       if (!relativePath) continue;
       try {
-        if (isTracked(root, relativePath) === true) return false;
+        if (await isTracked(root, relativePath) === true) {
+          definitelyTracked = true;
+          break;
+        }
       } catch {
         // Unknown ownership is deliberately fail-open: leave this reference in the warning.
       }
     }
-    return true;
-  });
+    if (!definitelyTracked) kept.push(reference);
+  }
+  return kept;
 }
 
 /**
@@ -1921,11 +2061,11 @@ function filterTrackedCompletionScratchReferences(
  * suspect only in deliverable-facing fields; verification and causal prose
  * routinely quote those references as forensic evidence.
  */
-export function completionEphemeralDeliverableReferences(
+export async function completionEphemeralDeliverableReferences(
   completion: unknown,
   evidence: unknown,
   probe: CompletionEphemeralDeliverableProbe = {},
-) {
+): Promise<ReturnType<typeof detectEphemeralDeliverableReferences>> {
   const deliverableTextParts = (value: unknown): string[] => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
     const record = value as Record<string, unknown>;
@@ -2606,6 +2746,8 @@ export interface FinishWorkReceipt {
   planItem: string;
   /** Present only when `planItem` did not reach the reflected status: what plans:set-status answered. */
   planItemReflection?: string;
+  /** True when a live plan-item claim blocked the terminal reflection and must be coordinated before replay. */
+  planItemClaimConflict?: boolean;
   claimRelease: 'not-linked' | 'released-or-absent' | 'failed';
   errors?: string[];
 }
@@ -2690,6 +2832,26 @@ function isBusyReactionBody(statusResult: { result?: unknown }): boolean {
   return Array.isArray(results) && results.some((r) => (r as { error?: unknown } | null)?.error === 'busy');
 }
 
+function isClaimConflictReactionBody(body: Record<string, unknown> | null): boolean {
+  if (!body) return false;
+  if (body.error === 'claim_conflict') return true;
+  const results = body.results;
+  return Array.isArray(results) && results.some(
+    (result) => result !== null && typeof result === 'object' &&
+      (result as { error?: unknown }).error === 'claim_conflict',
+  );
+}
+
+export function finishFailureRecoveryAdvice(finish: FinishWorkReceipt): string {
+  if (finish.planItemClaimConflict) {
+    return (
+      'Do not retry immediately: plans:set-status returned claim_conflict. Coordinate with the plan-item claim holder ' +
+      'via coord:send (or inspect claimHold provenance if present), then re-call the SAME completion only after the conflict clears.'
+    );
+  }
+  return 'Re-call the SAME completion; finish legs are retry-safe and resume the missing legs.';
+}
+
 function describeReactionResult(result: unknown): string {
   if (result === undefined || result === null) return '(no result payload)';
   const content = (result as { content?: Array<{ type?: string; text?: string }> }).content;
@@ -2771,6 +2933,7 @@ export async function synchronizeFinishWork(
 
   let planItem: FinishWorkReceipt['planItem'] = 'not-linked';
   let planItemReflection: string | undefined;
+  let planItemClaimConflict = false;
   let claimRelease: FinishWorkReceipt['claimRelease'] = 'not-linked';
   if (stamp && reflected) {
     const fireSetStatus = () => fire({
@@ -2839,9 +3002,14 @@ export async function synchronizeFinishWork(
           if (committedStatus !== reflected) {
             planItemReflection = describeReactionResult((statusResult as { result?: unknown }).result);
           }
-          if (committedStatus !== reflected && body && body.ok === false) {
+          if (
+            committedStatus !== reflected &&
+            body &&
+            (body.ok === false || isClaimConflictReactionBody(body))
+          ) {
             // `complete:false` tells the caller the saga did not converge (retry-safe).
             planItem = 'failed';
+            planItemClaimConflict = isClaimConflictReactionBody(body);
             errors.push(
               `plan-item reflection did not commit: ${stamp.plan_slug}#${stamp.item_id} is ` +
                 `'${committedStatus}', not '${reflected}'; plans:set-status returned ` +
@@ -2897,6 +3065,7 @@ export async function synchronizeFinishWork(
     checkpointCleared,
     planItem,
     ...(planItemReflection ? { planItemReflection } : {}),
+    ...(planItemClaimConflict ? { planItemClaimConflict: true } : {}),
     claimRelease,
     ...(errors.length ? { errors } : {}),
   };
@@ -2930,19 +3099,42 @@ const SELF_REVIEW_UNCLAIMED_LOOKBACK_MS = 24 * 60 * 60 * 1000;
  */
 async function latestTestingRunForOwner(
   ownerId: string,
+  workItemId: string,
   workspaceId: string | null,
   harnessSlug: string | null,
 ): Promise<TestingRunInvocation | null | undefined> {
   try {
     if (!ownerId) return null;
+    if (!workItemId.trim()) return undefined;
     const { sql } = getOrgPg();
     const cutoff = new Date(Date.now() - MAX_TEST_BINDING_LOOKBACK_MS);
-    const rows = await sql<Array<{ invoked_at: Date; duration_ms: number | null; files: unknown }>>`
-      SELECT invoked_at, duration_ms, args_json->'files' AS files
+    const rows = await sql<Array<{
+      invoked_at: Date;
+      duration_ms: number | null;
+      files: unknown;
+      work_item_id: string | null;
+    }>>`
+      SELECT invoked_at, duration_ms, args_json->'files' AS files,
+             COALESCE(
+               NULLIF(args_json->>'work_item_id', ''),
+               NULLIF(args_json #>> '{evidence,workItemId}', '')
+             ) AS work_item_id
         FROM harness_shared.tool_invocations
        WHERE coord_owner_id = ${ownerId}
          AND invoked_at >= ${cutoff}
          AND tool_name = 'testing:run'
+         AND (
+           NULLIF(args_json->>'work_item_id', '') = ${workItemId}
+           OR NULLIF(args_json #>> '{evidence,workItemId}', '') = ${workItemId}
+         )
+         AND (
+           NULLIF(args_json->>'work_item_id', '') IS NULL
+           OR NULLIF(args_json->>'work_item_id', '') = ${workItemId}
+         )
+         AND (
+           NULLIF(args_json #>> '{evidence,workItemId}', '') IS NULL
+           OR NULLIF(args_json #>> '{evidence,workItemId}', '') = ${workItemId}
+         )
          AND (${workspaceId}::text IS NULL OR workspace_id = ${workspaceId})
          AND (${harnessSlug}::text IS NULL OR harness_slug = ${harnessSlug})
        ORDER BY invoked_at DESC
@@ -2951,7 +3143,12 @@ async function latestTestingRunForOwner(
     const row = rows[0];
     if (!row) return null;
     const files = Array.isArray(row.files) ? row.files.filter((f): f is string => typeof f === 'string') : [];
-    return { invokedAt: new Date(row.invoked_at), durationMs: row.duration_ms ?? null, files };
+    return {
+      invokedAt: new Date(row.invoked_at),
+      durationMs: row.duration_ms ?? null,
+      workItemId: row.work_item_id ?? null,
+      files,
+    };
   } catch {
     return undefined;
   }
@@ -3026,6 +3223,29 @@ async function completeOne(
 
   const existing = await getWorkItem(it.id, it.harness);
   if (!existing) return { ok: false, id: it.id, error: `work_item '${it.id}' not found` };
+  // D-035 (WI-10005358): before ANY completion record, evidence or state write — a row that is
+  // not agent work by category (record, document, event, human-audience) is refused exactly as
+  // the by-id claim refuses it (D-024). Typed, no agent-passable override.
+  // ctx carries the server-derived caller identity: only the owner's UI is exempt (D-038).
+  const notAgentWork = await refuseNonAgentWorkAtDoor('work_items:complete', it.id, it.harness, ctx);
+  if (notAgentWork) return notAgentWork;
+  // P-007 Phase C (D-028 §5): a completion verification task closes only with a verdict, and
+  // never by its subject's closer (the D-021 conflict rule holds at this door too, not only
+  // at the claim doors). Rows without a completion verification block are never affected.
+  if (it.state && TERMINAL_WORK_ITEM_STATES.has(it.state.toLowerCase())) {
+    const { completionVerdictRefusal } = await import('../../harness/improvements/completion-verification');
+    const { verificationTaskConflict } = await import('../../harness/improvements/agent-review-policy');
+    const verdictRefusal = completionVerdictRefusal({ payload: existing.payload, completion: it.completion, terminal: true });
+    if (verdictRefusal) return { ok: false, id: it.id, error: verdictRefusal };
+    const conflict = verificationTaskConflict(existing.payload, ident.ownerId);
+    if (conflict && (existing.payload as Record<string, unknown> | null)?.completionVerification) {
+      return {
+        ok: false,
+        id: it.id,
+        error: `verifier_conflict: you are the ${conflict} of the completion this task verifies; a different agent must record the verdict`,
+      };
+    }
+  }
   // EI-19313515375179600 (WI-6822 follow-up): `origin` can flip local→remote well after
   // creation (still-under-investigation federation/replay-provenance defect). Trusting it
   // ALONE strands the true author — check IDENTITY first: createdBy === the caller means
@@ -3066,7 +3286,13 @@ async function completeOne(
     // terminal close. Fail-closed: a live author, an unrecorded author, or a lookup
     // outage all return null here and the refusal below stands unchanged.
     const orphanedAuthorEndedAt = await lookupRemoteAuthorEndedAt(existing.createdBy);
-    if (!orphanedAuthorEndedAt) {
+    // WI-10003565: an own-node row (author key this workspace has written locally) is healed by
+    // the write path below (selfHealOwnNodeOriginIfStranded) — refusing it here would strand it,
+    // since the "authoring peer" this error names is this node. Fail-closed on a read error.
+    const ownNodeRow =
+      !orphanedAuthorEndedAt &&
+      (await isOwnNodeAuthoredRemoteRow(ctx.workspaceId ?? ctx.principal?.workspaceId ?? activeWorkspaceId(), it.id));
+    if (!orphanedAuthorEndedAt && !ownNodeRow) {
       return {
         ok: false,
         id: it.id,
@@ -3795,6 +4021,7 @@ async function completeOne(
     }
     const gateRedVerdict = gateRedCompletionClaimVerdict(completionEvidenceForGate, {
       gateRedConditionItem,
+      target: resolveHomeGateVerdictTarget(),
       // A duplicate or explicit drop/discard settles an administrative condition item; it
       // does not assert that the frozen gate is green. The helper still checks any explicit
       // gate-progress prose claim carried by the same completion.
@@ -4024,9 +4251,14 @@ async function completeOne(
   // gating discipline as the fabricated-path probe above.
   const testRunContradiction =
     authorityByEvidence === 'committed'
-      ? await testResultContradictedByRun(completionEvidenceForGate, {
-          latestTestingRun: () =>
-            latestTestingRunForOwner(ident.ownerId, ctx.workspaceId ?? null, it.harness ?? existing.harness ?? null),
+      ? await testResultContradictedByRun(completionEvidenceForGate, it.id, {
+          latestTestingRun: (workItemId) =>
+            latestTestingRunForOwner(
+              ident.ownerId,
+              workItemId,
+              ctx.workspaceId ?? null,
+              it.harness ?? existing.harness ?? null,
+            ),
           ledgerRowsInWindow: (paths, from, to) => testRunLedgerRowsInWindow(paths, from, to),
         })
       : undefined;
@@ -4098,10 +4330,18 @@ async function completeOne(
         cited,
         found.map((w) => {
           const createdAtMs = Date.parse(String(w.createdAt ?? ''));
+          const structuredHumanOwnerAction = activeExternalBlockers(w.payload).some(
+            (blocker) =>
+              blocker.kind === 'human' &&
+              externalBlockerCapabilityPolicy(blocker.capability).requiresOwnerCapability &&
+              Boolean(blocker.summary.trim()) &&
+              Boolean(blocker.nextVerb?.trim()),
+          );
           return {
             id: w.id,
             settled: TERMINAL_WORK_ITEM_STATES.has(String(w.state ?? '').toLowerCase()),
             assignee: w.assignee,
+            structuredHumanOwnerAction,
             createdBy: w.createdBy,
             ...(Number.isFinite(createdAtMs) ? { createdAtMs } : {}),
           };
@@ -4179,15 +4419,15 @@ async function completeOne(
   // the verdict checkable — the agent can re-read that exact run rather than take the
   // server's word — and naming what is silent stops it reading as a general accusation.
   const testRunContradictionWarning = testRunContradiction
-    ? `completion for ${it.id} landed authority:'proposed' rather than 'committed': your most recent ` +
+    ? `completion for ${it.id} landed authority:'proposed' rather than 'committed': your latest run explicitly tied to work item ${it.id} ` +
       `\`testing:run\` (run group ${testRunContradiction.runGroupId}) is recorded in the test_runs ledger ` +
       `with ${testRunContradiction.failingFiles.length} of ${testRunContradiction.filesInRun} file(s) ` +
       `FAILING: ${testRunContradiction.failingFiles.join(', ')}. The declared \`testResult\` is therefore ` +
       `contradicted by a real run — before this check, any non-empty string satisfied the gate, so the ` +
       `literal "3 failed" earned 'committed'. This is NOT triggered by an earlier red you already fixed ` +
-      `(only your LATEST run is read), by a run another agent made (a window resolving to more than one ` +
+      `(only the latest run explicitly tied to this item is read), by a run without item attribution, by a run tied to another item, or by a run another agent made (a window resolving to more than one ` +
       `run group is refused outright), or by \`skip\`/\`cancelled\`/\`running\` rows, all of which are ` +
-      `silent. To fix: make those files pass, re-run them with testing:run, and re-call ` +
+      `silent. To fix: make those files pass, re-run with work-item attribution matching ${it.id} (work_item_id or evidence.workItemId), then re-call ` +
       `work_items:complete — the newer green run then supersedes this one.`
     : undefined;
 
@@ -4207,7 +4447,8 @@ async function completeOne(
         `To fix: re-read the originating item body and pass ` +
         `\`verification.requirementDisposition: [{ requirement: "<VERBATIM quote from that body>", ` +
         `disposition: "deferred", followUp: "EI-123" }, …]\` — one entry per distinct requirement, ` +
-        `each quote a literal span of the body, \`implemented\` entries citing a path that exists.`
+        `each quote a literal span of the body, and each \`implemented\` entry passes ` +
+        `\`citations: ["repo/relative/path.ts"]\` with a path that exists.`
       : `completion for ${it.id} landed authority:'proposed' rather than 'committed': its ` +
         `\`verification.requirementDisposition\` does not hold up. ` +
         (requirementShortfall.notQuotedFromSource.length
@@ -4280,13 +4521,7 @@ async function completeOne(
   // all stays `undefined` rather than gaining an `_completionEvidence` object whose one
   // key came from the server, which a later reader could mistake for caller-supplied proof.
   const treeStamp = completionEvidenceBeforeStamp
-    ? registeredRepoRoots
-      ? await completionTreeStampForEvidence(completionEvidenceBeforeStamp, registeredRepoRoots)
-      : await completionTreeStamp({
-          repoRoot: completionRoot(),
-          filesChanged: completionEvidenceBeforeStamp.filesChanged,
-          filesDeleted: completionEvidenceBeforeStamp.filesDeleted,
-        })
+    ? await completionTreeStampForClose(completionEvidenceBeforeStamp, registeredRepoRoots, completionRoot())
     : undefined;
   const completionEvidenceToPersist: PersistedCompletionEvidence | undefined = (() => {
     const base = withClaimBaseline(completionEvidenceBeforeStamp, claimVerdicts, new Date().toISOString());
@@ -4371,7 +4606,7 @@ async function completeOne(
   let ephemeralDeliverableWarning: string | undefined;
   let unretainedLiveUiPaths: string[] = [];
   try {
-    const references = completionEphemeralDeliverableReferences(it.completion, completionEvidenceToPersist, {
+    const references = await completionEphemeralDeliverableReferences(it.completion, completionEvidenceToPersist, {
       repoRoots: registeredRepoRoots ?? [completionRoot()],
       treeStamp: completionEvidenceToPersist?.treeStamp,
     });
@@ -4403,6 +4638,7 @@ async function completeOne(
       countsTowardBurnDown: countsTowardBurnDown(completionAuthority, true, isAbandonedClose),
       ...(completionEvidenceFindings ? { completionEvidenceFindings } : {}),
       ...(ephemeralDeliverableWarning ? { ephemeralDeliverableWarning } : {}),
+      ...(terminalCriteriaWarning ? { terminalCriteriaWarning } : {}),
       completionContract: completionContract(),
     };
   }
@@ -4668,7 +4904,7 @@ async function completeOne(
   const claimabilityHint = planGateParked
     ? `it is durably parked out of scheduler:get_next until the linked plan-item gate is cleared`
     : nonTerminalHint;
-  const terminalVocab = `(feature: 'passed'|'deprecated'; issue: 'resolved'|'closed')`;
+  const terminalVocab = `(feature/chunk success: 'passed', discard: 'deprecated'; issue success: 'resolved'/'done', discard: 'closed'/'dropped')`;
   //
   // EI-19362441037986499: the terminal arm of that first condition is what made the
   // record-only-on-a-closed-item discard SILENT — "the item is closed" was read as "there is
@@ -4680,9 +4916,9 @@ async function completeOne(
     (!finalState || TERMINAL_WORK_ITEM_STATES.has(finalState)
       ? undefined
       : stateError
-        ? `recorded a completion for ${it.id} but it is NOT closed — still '${workItem?.state ?? existing.state}', ${claimabilityHint}. Your state '${effectiveState}' was REJECTED by the state write: ${stateError}. Re-sending the same state will fail the same way — fix the cause, or pass a valid TERMINAL state ${terminalVocab}.`
+        ? `recorded a completion for ${it.id} but it is NOT closed — still '${workItem?.state ?? existing.state}', ${claimabilityHint}. Your state '${effectiveState}' was REJECTED by the state write: ${stateError}. Re-sending the same state will fail the same way — fix the cause, or choose a terminal state by intent ${terminalVocab}.`
         : effectiveState
-          ? `recorded a completion for ${it.id} but it is NOT closed — still '${workItem?.state ?? existing.state}', ${nonTerminalHint}. Your state '${requestedState ?? effectiveState}' WAS received and applied as '${appliedState ?? workItem?.state ?? existing.state}', which is NOT terminal${aliasNote ? ` (${aliasNote})` : ''}. Do NOT re-send the same value — pass a TERMINAL state ${terminalVocab}.`
+          ? `recorded a completion for ${it.id} but it is NOT closed — still '${workItem?.state ?? existing.state}', ${nonTerminalHint}. Your state '${requestedState ?? effectiveState}' WAS received and applied as '${appliedState ?? workItem?.state ?? existing.state}', which is NOT terminal${aliasNote ? ` (${aliasNote})` : ''}. Do NOT re-send the same value — choose a terminal state by intent ${terminalVocab}.`
           : `recorded a completion for ${it.id} but it is NOT closed — still '${workItem?.state ?? existing.state}', ${nonTerminalHint}. No top-level \`state\` was passed. Pass top-level \`state\` ${terminalVocab} to close it.`);
 
   // flush-to-proceed-stretch-discipline-2026-07-04 P-006: verification linting. A settled
@@ -4791,8 +5027,9 @@ async function completeOne(
       `external contents are not hashed. For repo-backed files, if \`filesChanged\` was a scalar/comma-separated ` +
       `string or any entry contains a prose annotation, re-call work_items:complete with an ARRAY of bare ` +
       `repo-relative paths, ` +
-      `for example \`filesChanged: ["path/to/file.ts", "path/to/test.ts"]\`. Otherwise verify the paths on disk ` +
-      `before re-calling. For a workspace-qualified \`.papercusp/apps/<app>/...\` entry with an absolute repair ` +
+      `for example \`filesChanged: ["path/to/file.ts", "path/to/test.ts"]\`. If NO files changed (a ` +
+      `not-a-defect or verification-only close), pass \`filesChanged: []\` — prose is never a path. Otherwise verify ` +
+      `the paths on disk before re-calling. For a workspace-qualified \`.papercusp/apps/<app>/...\` entry with an absolute repair ` +
       `shown above, re-call with an ARRAY containing that absolute filesChanged path instead.`
     : undefined;
 
@@ -4800,7 +5037,9 @@ async function completeOne(
   // progress, but names failing paths the JUDGED sha does not carry. Sibling of the check
   // above and warn-only for the same reason — the fix is real, it just landed above the
   // frozen candidate, so the gate cannot see it and the claim would enter the record as fact.
-  const gateRedClaim = gateRedCompletionClaimWarning(completionEvidenceForGate);
+  const gateRedClaim = gateRedCompletionClaimWarning(completionEvidenceForGate, {
+    target: resolveHomeGateVerdictTarget(),
+  });
   const gateRedClaimWarning = gateRedClaim ? `completion for ${it.id}: ${gateRedClaim.detail}` : undefined;
 
   // EI-20288629053504794: a positive path claim is not evidence that this item touched
@@ -4890,6 +5129,14 @@ async function completeOne(
       (completionEvidenceForGate?.filesChanged?.length ?? 0) + (completionEvidenceForGate?.filesDeleted?.length ?? 0),
     inProcessContentIdentityMissing: committedContentIdentityMissing,
   });
+  // WI-10005199 (EI-23770243810745552): attest the authority a CONSUMER reads back (the
+  // post-write row, after migration 972's floor trigger) against the one this call computed.
+  // Exception-only — `undefined` on agreement — so an ordinary close's response is unchanged.
+  const consumerAttestation = attestCompletionConsumerView({
+    stamped: !stateError && Boolean(finalState) && TERMINAL_WORK_ITEM_STATES.has(finalState),
+    computedAuthority: completionAuthority,
+    stampedAuthority,
+  });
   // The change is worthless if it is silent. An agent whose close just landed `proposed`
   // must be TOLD, in the response to the call that did it, what it costs and what would
   // have avoided it — otherwise the first they learn of it is a leader asking why their
@@ -4911,6 +5158,7 @@ async function completeOne(
     existing.origin,
     existing.createdBy,
     contentIdentityDetail,
+    Boolean(completionEvidenceToPersist?.settlementManifest),
   );
   const authorityWarning =
     stampedAuthority === 'proposed'
@@ -4934,6 +5182,8 @@ async function completeOne(
                 // Keep the rule-level text rather than inventing a per-path story we do not have.
                 (contentIdentityDetail ??
                 `The server could not prove that every declared \`filesChanged\` path has the same Git blob content in the working tree and committed HEAD. Missing, mismatched, or unavailable content identity never qualifies as \`committed\`; re-run verification from a committed tree and settle this close.`)
+          : terminalCriteriaUnmet && insufficientEvidenceReason(completionEvidenceForGate) === undefined
+            ? `Its evidence fields are complete; terminal criteria lowered the grade. ${terminalCriteriaWarning}`
           : insufficientEvidenceReason(completionEvidenceForGate) === 'added-tests-without-path'
             ? `Its evidence says \`addedTests: true\` but names no file in \`filesChanged\`. Those cannot both ` +
               `be true: if this close added or changed tests, it changed at least one file, and a completion ` +
@@ -4954,6 +5204,55 @@ async function completeOne(
               `work_items:complete for this id with those fields filled; if the work genuinely cannot be verified, ` +
               `say so in \`deferred\` and leave it proposed.`)
       : undefined;
+
+  // P-007 Phase C (D-028 §1, §5): after a terminal close lands, (a) a completion task's verdict
+  // is applied (reject reopens the subject to its closer), and (b) a 'proposed' close of an
+  // item that still blocks live work spawns the completion verification task that gates those
+  // dependents. The close already landed, so a failure here is reported, never thrown.
+  let completionVerification: Record<string, unknown> | undefined;
+  let completionVerificationWarning: string | undefined;
+  if (!stateError && Boolean(finalState) && TERMINAL_WORK_ITEM_STATES.has(finalState as string)) {
+    try {
+      const store = await import('../../harness/improvements/completion-verification-store');
+      const verdict = await store.applyCompletionVerdictForClose({
+        taskPayload: existing.payload,
+        completion: it.completion,
+        verifier: ident.ownerId,
+      });
+      if (verdict) completionVerification = { verdict };
+      // Read the authority that LANDED: the downgrade trigger can turn a stamped 'committed'
+      // into 'proposed' on the write itself.
+      const landedAuthority = workItem?.completionAuthority ?? stampedAuthority;
+      const successfulClose = ROOT_CAUSE_SUCCESSFUL_CLOSE_STATES.some(
+        (state) => state === String(finalState).trim().toLowerCase(),
+      );
+      if (
+        landedAuthority &&
+        landedAuthority !== 'proposed' &&
+        existing.completionAuthority === 'proposed' &&
+        existing.state &&
+        TERMINAL_WORK_ITEM_STATES.has(existing.state.toLowerCase())
+      ) {
+        // D-028 §6 on this door: a re-sent close upgraded a stored 'proposed' completion, the
+        // same upgrade settlement makes — accept any open verification task for it.
+        const accepted = await store.acceptCompletionOnSettlementForSubject(it.id, landedAuthority);
+        if (accepted) completionVerification = { ...completionVerification, acceptedBySettlement: accepted };
+      } else if (landedAuthority === 'proposed' && successfulClose) {
+        const spawned = await store.spawnCompletionVerificationForClose({
+          id: it.id,
+          title: existing.title ?? it.id,
+          kind: String(existing.kind ?? 'task'),
+          closer: workItem?.terminalOwner ?? ident.ownerId,
+          harness: it.harness && it.harness !== '*' ? it.harness : undefined,
+        });
+        if (spawned.outcome !== 'no-dependents') completionVerification = { ...completionVerification, spawned };
+      }
+    } catch (error) {
+      completionVerificationWarning =
+        `${it.id} closed, but completion verification could not be recorded: ` +
+        `${error instanceof Error ? error.message : String(error)}. Dependents are not gated by a verification task.`;
+    }
+  }
 
   // Fill provenance defaults so the rendered notification is complete (D-006).
   const completion = {
@@ -5081,8 +5380,8 @@ async function completeOne(
     : stateError
       ? `COMPLETION RECORDED, BUT ${it.id} DID NOT CLOSE — it is still '${landedState}' and ${claimabilityHint}. The state write failed: ${stateError}`
       : ambiguousOmittedState
-        ? `COMPLETION RECORDED, BUT ${it.id} DID NOT CLOSE — no top-level state was passed and recordOnly:true was not requested; the item is still '${landedState}'. Re-call the SAME completion with a terminal state (issue: 'resolved'|'closed'; feature: 'passed'|'deprecated'), or pass recordOnly:true for a deliberate progress record.`
-      : `COMPLETION RECORDED, BUT ${it.id} DID NOT CLOSE — you requested state '${requestedState ?? effectiveState}' and it applied as '${appliedState ?? landedState}'${aliasNote ? ` (${aliasNote})` : ''}, which is NOT terminal, so the item stays claimable and the auto-loop may re-place work on it. Pass a TERMINAL state (issue: 'resolved'|'closed'; feature: 'passed'|'deprecated').`;
+        ? `COMPLETION RECORDED, BUT ${it.id} DID NOT CLOSE — no top-level state was passed and recordOnly:true was not requested; the item is still '${landedState}'. Re-call the SAME completion with a terminal state by intent (issue success: 'resolved'/'done', discard: 'closed'/'dropped'; feature/chunk success: 'passed', discard: 'deprecated'), or pass recordOnly:true for a deliberate progress record.`
+      : `COMPLETION RECORDED, BUT ${it.id} DID NOT CLOSE — you requested state '${requestedState ?? effectiveState}' and it applied as '${appliedState ?? landedState}'${aliasNote ? ` (${aliasNote})` : ''}, which is NOT terminal, so the item stays claimable and the auto-loop may re-place work on it. Choose a terminal state by intent (issue success: 'resolved'/'done', discard: 'closed'/'dropped'; feature/chunk success: 'passed', discard: 'deprecated').`;
 
   const finish = closeLanded
     ? await synchronizeFinishWork({
@@ -5096,7 +5395,7 @@ async function completeOne(
     : undefined;
   const finishFailed = Boolean(finish && !finish.complete);
   const finishFailure = finishFailed
-    ? `COMPLETION RECORDED AND ITEM CLOSED, BUT FINISH DID NOT FULLY CONVERGE — ${finish!.errors?.join('; ') ?? 'a finish leg failed'}. Re-call the SAME completion; finish legs are retry-safe and resume the missing legs.`
+    ? `COMPLETION RECORDED AND ITEM CLOSED, BUT FINISH DID NOT FULLY CONVERGE — ${finish!.errors?.join('; ') ?? 'a finish leg failed'}. ${finishFailureRecoveryAdvice(finish!)}`
     : undefined;
 
   // EI-22701142802555885: a successor/boundary note is intentionally a THREAD post,
@@ -5113,6 +5412,7 @@ async function completeOne(
       const post = await commentWorkItem(it.id, it.boundaryNote!, ident.ownerId, {
         workspaceId: ctx.workspaceId,
         harness: it.harness ?? existing.harness ?? undefined,
+        writerOwnerId: ident.ownerId,
       });
       if (post) boundaryNotePosted = true;
       else boundaryNoteError = `boundaryNote for ${it.id} could not be persisted: work-item comment returned no post`;
@@ -5200,6 +5500,8 @@ async function completeOne(
         }
       : {}),
     ...(authorityWarning ? { authorityWarning } : {}),
+    ...(completionVerification ? { completionVerification } : {}),
+    ...(completionVerificationWarning ? { completionVerificationWarning } : {}),
     ...(verificationWarning ? { verificationWarning } : {}),
     ...(skippedTestsWarning ? { skippedTestsWarning } : {}),
     ...(typeEvidenceWarning ? { typeEvidenceWarning } : {}),
@@ -5247,6 +5549,7 @@ async function completeOne(
           countsTowardBurnDown: countsTowardBurnDown(stampedAuthority, true, isAbandonedClose),
         }
       : {}),
+    ...(consumerAttestation ?? {}),
     ...(completionFleetSlug ? { fleetSlug: completionFleetSlug } : {}),
     ...(duplicateOfWarning ? { duplicateOfWarning } : {}),
     completionContractVersion: WORK_ITEMS_COMPLETION_CONTRACT.version,
@@ -5273,14 +5576,53 @@ async function completeOne(
 }
 
 // Named so the args preprocess can reach its own inner schema at parse time (RSR-P-008-A).
+// gatherFlatCompletion consumes these legacy single-item aliases before this schema runs.
+// Declare them here too so the projected schema and invalid-argument help describe the
+// same input contract that the preprocess actually accepts. Reuse the caller-facing
+// completion fields so legacy aliases such as `coordNotes` publish their real types;
+// `z.unknown()` was rendered by direct wrappers as an object and invited invalid calls.
+const completionInputFields = completionInputSchema.shape as Record<string, z.ZodTypeAny>;
+// WI-10005648: these four nested records are ALREADY published once, in full, under the
+// `$defs` entry that `completion` references. Re-publishing each at the argument root as a
+// flat alias copied ~4.5 KB of identical structure onto the tool-delivery FLOOR (the
+// psu-launcher `budgetOverrun` gate). `gatherFlatCompletion` folds an alias into
+// `completion` before any schema runs, so the strict, typed validation of these fields
+// happens against `completion.<field>` regardless of what the root publishes; the root
+// therefore advertises only that the key exists and where its typed shape lives. A
+// `z.record` (not `z.object` / `z.looseObject`) is deliberate: strictArgs strictifies every
+// `object` node, which would turn a loose object into one that rejects every key.
+const FLAT_ALIAS_POINTER_FIELDS: ReadonlySet<string> = new Set([
+  'verification',
+  'rootCauseVerification',
+  'coverage',
+  'selfReview',
+]);
+const flatCompletionAliasShape = Object.fromEntries(
+  COMPLETION_FIELDS.map((field) => {
+    const schema = completionInputFields[field];
+    if (!schema) throw new Error(`Missing completion input schema for flat alias: ${field}`);
+    if (FLAT_ALIAS_POINTER_FIELDS.has(field)) {
+      return [
+        field,
+        z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe(`Legacy flat alias; the typed shape is \`completion.${field}\`.`),
+      ];
+    }
+    return [field, schema.optional()];
+  }),
+);
+
 const workItemsCompleteTool = defineTool({
   name: 'work_items:complete',
   profile: 'engineer',
   description:
-    'Complete work-items with evidence. For terminal closes use `passed`/`deprecated` (feature/chunk) or `resolved`/`closed` (issue); `done`/`dropped` aliases are accepted. `closed`/`deprecated` discard work. Pass terminal `state` plus `assumptions` (`"none"` or fact keys); deliberate record-only calls pass `recordOnly:true`. Check `finish.complete`/`stateWarning`.',
+    'Complete work-items with evidence. For terminal closes use `passed`/`deprecated` (feature/chunk) or `resolved`/`closed` (issue); `done`/`dropped` aliases are accepted. `closed`/`deprecated` discard work. Pass terminal `state` plus `assumptions` (`"none"` or fact keys); deliberate record-only calls pass `recordOnly:true`.',
   guidance: {
-    when: 'After verification, pass `completion`, terminal `state` (`passed`/`deprecated` for feature/chunk; `resolved`/`closed` for issue; `done`/`dropped` aliases), and required `assumptions` (`\"none\"` or fact keys). Use discard states only for discard/wontfix. `specAdequacy`/`outputPayload` are top-level siblings of `completion` (nested placement is auto-hoisted); read `outputPayload` back at `work_items:get` → `results[].workItem.payload.out` with `payloadTier:"full"`, not inside `completion`. Universal claims require `completion.verification.coverage` to partition each entry exactly once across checked/notChecked/notApplicable; residue is separate (`[]` or `["none"]` means zero). Keep `deferred`/`coordNotes` outside verification; put test/typecheck/diff details in top-level aliases; use `filesDeleted` for removals, not `filesChanged`; use `completion.duplicateOf` for duplicates.',
-    notWhen: 'Use coord:send for notes; use work_items:set_state only with completion evidence; do not summarize.',
+    returns: 'Check `finish.complete`/`stateWarning`.',
+    when: 'Pass `completion`, terminal `state`, required `assumptions`. Use discard states only for discard/wontfix. `specAdequacy`/`outputPayload` are top-level siblings of `completion` (auto-hoisted); read `results[].workItem.payload.out` from `work_items:get` (`payloadTier:"full"`). Universal claims require `completion.verification.coverage`: partition each entry exactly once across checked/notChecked/notApplicable; residue is separate (`[]` or `["none"]` means zero). Keep deferred/coordNotes at completion level, not inside verification. Put `testsRun`, `testResult`, `verifiedHow`, and `filesChanged` at the root of `completion`; the single-item call also accepts those fields at the argument root as legacy aliases. Keep `verification.tests`, `verification.typecheck`, `verification.diff` out of `completion.verification`. Removals: `filesDeleted`; dupes: `completion.duplicateOf`.',
+    notWhen: 'Use coord:send for notes; use work_items:set_state only with completion evidence; do not summarize; never non-work/human-audience rows.',
     chaining:
       'work_items:claim → work_items:complete { id, state, assumptions, completion }; `finish.complete:true` confirms convergence and emits.',
     seeAlso: [
@@ -5459,6 +5801,7 @@ const workItemsCompleteTool = defineTool({
       [
         z
           .object({
+            ...flatCompletionAliasShape,
             id: z
               .string()
               .min(1)
@@ -5493,9 +5836,7 @@ const workItemsCompleteTool = defineTool({
             /** Read-only preflight: evaluate every applicable completion requirement without writing. */
             validateOnly: z.boolean().optional(),
             /** Required only when this single item requests a terminal close. */
-            assumptions: z
-              .preprocess(normalizePersistedAssumptionDeclaration, assumptionsArg.optional())
-              .describe('Required for a terminal close; omit for record-only completions. Pass "none" or fact keys.'),
+            assumptions: closeAssumptionsField,
             // Keep the union's handler type uniform while ensuring a bulk payload
             // cannot accidentally parse through this branch and have `items` stripped.
             items: z.never().optional(),
@@ -5539,9 +5880,7 @@ const workItemsCompleteTool = defineTool({
             outputPayload: z.unknown().optional(),
             /** Read-only preflight for every item in this envelope unless an item overrides it. */
             validateOnly: z.boolean().optional(),
-            assumptions: z
-              .preprocess(normalizePersistedAssumptionDeclaration, assumptionsArg.optional())
-              .describe('Required for a terminal close; omit for record-only completions. Pass "none" or fact keys.'),
+            assumptions: closeAssumptionsField,
             items: z
               .array(itemSpec)
               .min(1)
@@ -5559,12 +5898,15 @@ const workItemsCompleteTool = defineTool({
             firstCompletionCoverageContract(issue) ??
             firstCompletionStringRejection(issue) ??
             firstRootCauseVerificationInputError(issue) ??
+            firstCompletionEnvelopeBranchMessage(issue) ??
             firstUnrecognizedKeyMessage(issue) ??
             COMPLETE_CLOSE_SHAPE_MESSAGE,
         }),
       },
     ),
   ),
+  // Reuse the envelope produced by runBulk; per-item finish/warning fields stay open.
+  result: bulkEnvelopeSchema(),
   // context-trimming-tiers P-025 (write-echo diet): trimmed/standard sessions
   // get a compact workItem ref per result instead of the full echoed row;
   // outcome fields (ok/error/holder/hint/reflect) pass through verbatim —

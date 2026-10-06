@@ -7,8 +7,10 @@
  * decaying immediately on a tree where git-sync commits every few minutes. A definition
  * lookup against a stale graph silently returns a symbol that has moved — or misses one
  * that is new — and the caller cannot tell which happened. That unowned decay is what
- * pins the `code-search.definition-lookup` substitution pair at `observe`
- * (`lib/bash-substitution/pairs/code-search.ts`).
+ * pinned the `code-search.definition-lookup` substitution pair at `observe`
+ * (`lib/bash-substitution/pairs/code-search.ts`) — a pair that, since D-010 of
+ * gitnexus-deterministic-integration-2026-10-05, routes definition lookups to
+ * `lsp:query` instead. The graph still answers callers, impact and topology.
  *
  * WHY A GATED HOURLY TICK RATHER THAN A PLAIN CRON. Every spawn is a FULL rebuild (see
  * `--force` below) that was measured on this box at **309s cold** on the 2026-08 graph,
@@ -67,6 +69,7 @@
  * and analyzeEnv/analyzeNodeArgs for why the budget is split across env and argv.
  */
 import { execFile } from 'node:child_process';
+import { execFileViaSidecar } from '../../fleet/git-via-sidecar';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -94,6 +97,7 @@ import {
   type IndexDiskVerdict,
 } from '../../code-intelligence/contracts';
 import { SELECTIVE_ACCEPTANCE_CORPUS, SELECTIVE_SOURCE_BLOBS } from '../../code-intelligence/selective-corpus';
+import { classifyAnalyzeFailure, describeAnalyzeFailure } from '../../code-intelligence/gitnexus-analyze-failure';
 
 /** Registry alias this repo is indexed under (`analyze --name papercusp`). The alias
  *  disambiguates it from other checkouts on the box whose basename would collide. */
@@ -1795,6 +1799,8 @@ export interface GitnexusHealth {
   indexDiskAlerted?: boolean;
   /** Vector-leg status from the last canary that ran (plan gitnexus-embeddings-enablement). */
   vectorSearch?: GitnexusVectorSearchHealth;
+  /** The test-selection dependency snapshot this routine keeps fresh (gitnexus-deterministic-integration P-001). */
+  dependencySnapshot?: DependencySnapshotHealth;
 }
 
 /**
@@ -2259,6 +2265,26 @@ export interface AnalyzeRunResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /**
+   * The terminating signal, when the child died from one. Node reports a signal death as
+   * `code=null`, which `runGitnexusAnalyze` collapses to `code: 1` — so without this field a vendor
+   * SIGSEGV (WI-10005680) is indistinguishable from an ordinary failure. Optional: absent = no signal.
+   */
+  signal?: NodeJS.Signals | null;
+}
+
+/**
+ * Map a child's `close` event to an `AnalyzeRunResult`. Node reports a signal death as
+ * `code=null` + `signal`; the exit code collapses to 1 (a failure the loop already understands) but
+ * the signal MUST ride along — dropping it was the WI-10005680 defect (a vendor SIGSEGV read as
+ * a plain `exited 1`). Pure so a test can pin the mapping without spawning an analyzer.
+ */
+export function analyzeResultFromClose(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  out: { stdout: string; stderr: string; timedOut: boolean },
+): AnalyzeRunResult {
+  return { code: code ?? 1, stdout: out.stdout, stderr: out.stderr, timedOut: out.timedOut, signal };
 }
 
 /** A completed index is healthy only after its graph canary actually passed. */
@@ -2430,7 +2456,7 @@ export function runGitnexusAnalyze(root: string, repoName: string, timeoutMs: nu
     child.stdout?.on('data', (d) => (stdout += d.toString()));
     child.stderr?.on('data', (d) => (stderr += d.toString()));
     child.on('error', (e) => finish({ code: 1, stdout, stderr: stderr + String(e), timedOut }));
-    child.on('close', (code) => finish({ code: code ?? 1, stdout, stderr, timedOut }));
+    child.on('close', (code, signal) => finish(analyzeResultFromClose(code, signal, { stdout, stderr, timedOut })));
     });
   })();
 }
@@ -2455,36 +2481,59 @@ export function canaryCypherArgv(repoName: string, query: string): string[] {
   return ['cypher', '--repo', repoName, query];
 }
 
-function cypherScalar(bin: string, root: string, repoName: string, query: string, timeoutMs: number): Promise<number | null> {
-  return new Promise((resolvePromise) => {
-    execFile(bin, canaryCypherArgv(repoName, query), { cwd: root, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-      // A CRASH (segfault) arrives here as an error with no usable stdout — which is
-      // exactly the condition the canary exists to catch, so it must map to null
-      // ("unreadable"), never to 0 ("empty"). Conflating those two is what made the
-      // original outage look like an empty graph instead of a broken one.
-      if (err) return resolvePromise(null);
-      const m = /\|\s*(\d+)\s*\|/.exec(String(stdout));
-      resolvePromise(m ? Number.parseInt(m[1], 10) : null);
+/** Per-site kill-switch for the canary's sidecar route (`0` = force a local spawn). */
+export const GITNEXUS_CANARY_SIDECAR_VAR = 'PAPERCUSP_GITNEXUS_CANARY_SPAWN_SIDECAR';
+
+/**
+ * One canary `gitnexus cypher` query → its stdout, or `null` when the child failed.
+ * Forked by the spawner sidecar where the host has one (WI-10004975: canary queries were
+ * ~9% of a 13 GB bg-host's spawn samples — each local fork costs time proportional to the
+ * parent's RSS). A CRASH (segfault) arrives as a rejection with no usable stdout — exactly
+ * the condition the canary exists to catch — so it must map to null ("unreadable"), never
+ * to 0 ("empty"). Conflating those two is what made the original outage look like an
+ * empty graph instead of a broken one.
+ */
+export async function runCanaryCypher(
+  bin: string,
+  root: string,
+  repoName: string,
+  query: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execFileViaSidecar(bin, canaryCypherArgv(repoName, query), {
+      cwd: root,
+      timeoutMs,
+      maxBuffer: 4 * 1024 * 1024,
+      subsystem: 'gitnexus-canary',
+      sidecarVar: GITNEXUS_CANARY_SIDECAR_VAR,
     });
-  });
+    return stdout;
+  } catch {
+    return null;
+  }
 }
 
-function cypherFirstString(bin: string, root: string, repoName: string, query: string, timeoutMs: number): Promise<string | null> {
-  return new Promise((resolvePromise) => {
-    execFile(bin, canaryCypherArgv(repoName, query), { cwd: root, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-      if (err) return resolvePromise(null);
-      // Rows render as a markdown table; take the first data cell after the separator.
-      const rows = String(stdout).split('\\n');
-      for (const r of rows) {
-        const m = /^\s*\|\s*([^|\s][^|]*?)\s*\|/.exec(r.replace(/\\\\n/g, '\n'));
-        if (m && m[1] !== '---' && !/^-+$/.test(m[1])) {
-          const v = m[1].trim();
-          if (v && v !== 'name' && v !== 'n') return resolvePromise(v);
-        }
-      }
-      resolvePromise(null);
-    });
-  });
+async function cypherScalar(bin: string, root: string, repoName: string, query: string, timeoutMs: number): Promise<number | null> {
+  const stdout = await runCanaryCypher(bin, root, repoName, query, timeoutMs);
+  if (stdout === null) return null;
+  const m = /\|\s*(\d+)\s*\|/.exec(stdout);
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
+async function cypherFirstString(bin: string, root: string, repoName: string, query: string, timeoutMs: number): Promise<string | null> {
+  const stdout = await runCanaryCypher(bin, root, repoName, query, timeoutMs);
+  if (stdout === null) return null;
+  // Rows render as a markdown table; take the first data cell after the separator.
+  const rows = stdout.split('\\n');
+  for (const r of rows) {
+    const m = /^\s*\|\s*([^|\s][^|]*?)\s*\|/.exec(r.replace(/\\\\n/g, '\n'));
+    if (m && m[1] !== '---' && !/^-+$/.test(m[1])) {
+      const v = m[1].trim();
+      if (v && v !== 'name' && v !== 'n') return v;
+    }
+  }
+  return null;
 }
 
 export const CANARY_PROBE_TIMEOUT_MS = 90_000;
@@ -2555,6 +2604,308 @@ export async function runCanary(
     embeddings,
     embeddingsExpected,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Dependency snapshot for test selection (gitnexus-deterministic-integration P-001).
+//
+// `test:affected` / `test:related` ADD workspaces from a graph-derived import snapshot
+// (scripts/lib/graph-dependency-suggestions.mjs, P-008). It was produced once by hand on
+// 2026-10-02 and nothing regenerated it, so it aged past the selector's 24h ceiling and every
+// run since applied no graph suggestion, silently (WI-10006138). The routine that rebuilds the
+// index is the one place that knows the graph changed, so it now owns the snapshot: refreshed
+// whenever the file is absent, unparseable, nearing the ceiling or bound to an older index. It
+// is written OUTSIDE every checkout so the green-checkpoint's isolated tree reads the same file.
+// Never fails the tick; a snapshot the selector cannot use alerts once per streak.
+// ---------------------------------------------------------------------------
+
+export const DEPENDENCY_SNAPSHOT_SCHEMA = 'graph-dependency-snapshot-v1';
+/** The selector's own ceiling — DEFAULT_MAX_AGE_MS in scripts/lib/graph-dependency-suggestions.mjs. */
+export const DEPENDENCY_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60_000;
+/** Refresh before the ceiling, so an unchanged index never lets the file age out between hourly ticks. */
+export const DEPENDENCY_SNAPSHOT_REFRESH_AGE_MS = 20 * 60 * 60_000;
+/** The direct-mode producer took ~2 min for 59,067 edge rows (2026-10-06); bounded well inside the routine budget. */
+export const DEPENDENCY_SNAPSHOT_PRODUCER_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * `fresh` and `behind-index` are both READ by the selector (every edge is re-corroborated
+ * against the importer's current source, so an older index still yields valid suggestions);
+ * `stale`, `absent` and `invalid` mean test selection is applying no graph suggestion at all.
+ */
+export type DependencySnapshotStatus = 'fresh' | 'behind-index' | 'stale' | 'absent' | 'invalid';
+
+export interface DependencySnapshotJudgement {
+  status: DependencySnapshotStatus;
+  reason: string | null;
+  generatedAt: string | null;
+  ageMs: number | null;
+  indexCommit: string | null;
+  edges: number | null;
+}
+
+export interface DependencySnapshotHealth extends DependencySnapshotJudgement {
+  checkedAt: number;
+  path: string;
+  lastProducerAt: number | null;
+  /** Producer exit code; null when it never started (no binary) or was killed by a signal. */
+  lastProducerExit: number | null;
+  /** The producer's final `GRAPH_SNAPSHOT status=…` line — its own account of what it did. */
+  lastProducerLine: string | null;
+  /** Suppresses a re-alert on every tick until the snapshot is usable again. */
+  alerted: boolean;
+}
+
+/** Mirrors `sharedSnapshotPath()` in scripts/lib/graph-dependency-suggestions.mjs (the reader). */
+export function dependencySnapshotPath(repoName: string, home: string = os.homedir()): string {
+  return path.join(home, '.papercusp', 'graph-snapshot', repoName, 'dependency-snapshot.json');
+}
+
+export function judgeDependencySnapshot(
+  text: string | null,
+  nowMs: number,
+  opts: { maxAgeMs?: number; currentIndexCommit?: string | null } = {},
+): DependencySnapshotJudgement {
+  const unknown = { generatedAt: null, ageMs: null, indexCommit: null, edges: null };
+  if (text == null) return { status: 'absent', reason: 'no snapshot file', ...unknown };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return { status: 'invalid', reason: `unparseable: ${e instanceof Error ? e.message : String(e)}`, ...unknown };
+  }
+  const o = (raw && typeof raw === 'object' ? raw : {}) as {
+    schema?: unknown;
+    index?: { lastCommit?: unknown } | null;
+    generatedAt?: unknown;
+    edges?: unknown;
+  };
+  if (o.schema !== DEPENDENCY_SNAPSHOT_SCHEMA) {
+    return { status: 'invalid', reason: `schema is ${JSON.stringify(o.schema ?? null)}`, ...unknown };
+  }
+  const lastCommit = o.index?.lastCommit;
+  if (typeof lastCommit !== 'string' || lastCommit.length === 0) {
+    return { status: 'invalid', reason: 'no index.lastCommit', ...unknown };
+  }
+  const generatedMs = typeof o.generatedAt === 'string' ? Date.parse(o.generatedAt) : Number.NaN;
+  if (!Number.isFinite(generatedMs) || !Array.isArray(o.edges)) {
+    return { status: 'invalid', reason: 'missing generatedAt or edges', ...unknown, indexCommit: lastCommit };
+  }
+  const known = { generatedAt: o.generatedAt as string, ageMs: nowMs - generatedMs, indexCommit: lastCommit, edges: o.edges.length };
+  if (known.edges === 0) return { status: 'invalid', reason: 'zero edges', ...known };
+  const maxAgeMs = opts.maxAgeMs ?? DEPENDENCY_SNAPSHOT_MAX_AGE_MS;
+  if (known.ageMs > maxAgeMs) {
+    return { status: 'stale', reason: `older than the ${Math.round(maxAgeMs / 3_600_000)}h selector ceiling`, ...known };
+  }
+  const current = opts.currentIndexCommit ?? null;
+  if (current && current !== lastCommit) {
+    return { status: 'behind-index', reason: `bound to ${lastCommit.slice(0, 10)}, index is at ${current.slice(0, 10)}`, ...known };
+  }
+  return { status: 'fresh', reason: null, ...known };
+}
+
+export function dependencySnapshotUsable(status: DependencySnapshotStatus): boolean {
+  return status === 'fresh' || status === 'behind-index';
+}
+
+export function dependencySnapshotNeedsRefresh(
+  j: DependencySnapshotJudgement,
+  refreshAgeMs: number = DEPENDENCY_SNAPSHOT_REFRESH_AGE_MS,
+): boolean {
+  return j.status !== 'fresh' || (j.ageMs ?? Number.POSITIVE_INFINITY) > refreshAgeMs;
+}
+
+/** The producer's last `GRAPH_SNAPSHOT status=…` line (progress lines are `GRAPH_SNAPSHOT_PROGRESS`). */
+export function parseProducerLine(stderr: string): { status: string; line: string } | null {
+  const lines = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('GRAPH_SNAPSHOT '));
+  const last = lines[lines.length - 1];
+  if (!last) return null;
+  return { status: /\bstatus=(\S+)/.exec(last)?.[1] ?? 'unknown', line: last.slice(0, 400) };
+}
+
+/** `--out` is always explicit, so the writer and the routine's own reader cannot disagree on HOME. */
+export function dependencySnapshotProducerArgv(root: string, repoName: string, bin: string, out: string): string[] {
+  return [
+    path.join(root, 'scripts', 'gen-graph-dependency-snapshot.mjs'),
+    '--gitnexus-bin',
+    bin,
+    '--repo',
+    repoName,
+    '--source-root',
+    root,
+    '--out',
+    out,
+  ];
+}
+
+export interface DependencySnapshotProducerRun {
+  exit: number | null;
+  line: string | null;
+  at: number;
+}
+
+export interface DependencySnapshotProducerDeps {
+  exec?: typeof execFileViaSidecar;
+  bin?: string;
+  nodeBin?: string;
+  exists?: (p: string) => boolean;
+  now?: () => number;
+}
+
+/** Run the producer once. Resolves on every outcome — a failure is recorded, never thrown. */
+export async function runDependencySnapshotProducer(
+  root: string,
+  repoName: string,
+  out: string,
+  deps: DependencySnapshotProducerDeps = {},
+): Promise<DependencySnapshotProducerRun> {
+  const at = (deps.now ?? Date.now)();
+  const bin = deps.bin ?? canaryBin();
+  if (!(deps.exists ?? existsSync)(bin)) {
+    return { exit: null, line: `GRAPH_SNAPSHOT status=not-attempted reason=no gitnexus binary at ${bin}`, at };
+  }
+  const nodeBin = deps.nodeBin ?? process.env.GITNEXUS_NODE_BIN ?? process.execPath;
+  try {
+    const { stderr } = await (deps.exec ?? execFileViaSidecar)(nodeBin, dependencySnapshotProducerArgv(root, repoName, bin, out), {
+      cwd: root,
+      timeoutMs: DEPENDENCY_SNAPSHOT_PRODUCER_TIMEOUT_MS,
+      maxBuffer: 4 * 1024 * 1024,
+      subsystem: 'gitnexus-dependency-snapshot',
+    });
+    return { exit: 0, line: parseProducerLine(stderr)?.line ?? null, at };
+  } catch (e) {
+    const err = (e ?? {}) as { code?: unknown; stderr?: unknown; message?: unknown };
+    const parsed = typeof err.stderr === 'string' ? parseProducerLine(err.stderr) : null;
+    const detail = typeof err.message === 'string' ? err.message : String(e);
+    return {
+      exit: typeof err.code === 'number' ? err.code : null,
+      line: parsed?.line ?? `GRAPH_SNAPSHOT status=spawn-failed detail=${JSON.stringify(detail.slice(0, 300))}`,
+      at,
+    };
+  }
+}
+
+export interface DependencySnapshotHealthUpdate {
+  next: DependencySnapshotHealth;
+  shouldAlert: boolean;
+  shouldResolve: boolean;
+}
+
+/** Pure: fold one tick's judgement (+ the producer run, if any) into the persisted record. */
+export function decideDependencySnapshotHealth(
+  prev: Partial<DependencySnapshotHealth> | null,
+  judged: DependencySnapshotJudgement,
+  run: DependencySnapshotProducerRun | null,
+  nowMs: number,
+  outPath: string,
+): DependencySnapshotHealthUpdate {
+  const usable = dependencySnapshotUsable(judged.status);
+  const wasAlerted = prev?.alerted === true;
+  const shouldAlert = !usable && !wasAlerted;
+  return {
+    next: {
+      ...judged,
+      checkedAt: nowMs,
+      path: outPath,
+      lastProducerAt: run ? run.at : (prev?.lastProducerAt ?? null),
+      lastProducerExit: run ? run.exit : (prev?.lastProducerExit ?? null),
+      lastProducerLine: run ? run.line : (prev?.lastProducerLine ?? null),
+      alerted: !usable,
+    },
+    shouldAlert,
+    shouldResolve: usable && wasAlerted,
+  };
+}
+
+export interface RefreshDependencySnapshotDeps {
+  readText?: (p: string) => string | null;
+  produce?: (root: string, repoName: string, out: string) => Promise<DependencySnapshotProducerRun>;
+  now?: () => number;
+  out?: string;
+}
+
+function readTextOrNull(p: string): string | null {
+  try {
+    return readFileSync(p, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Judge the snapshot, run the producer when it needs a refresh, re-judge, fold into health. */
+export async function refreshDependencySnapshot(
+  i: { root: string; repoName: string; currentIndexCommit: string | null; prev: Partial<DependencySnapshotHealth> | null },
+  deps: RefreshDependencySnapshotDeps = {},
+): Promise<DependencySnapshotHealthUpdate & { ran: boolean }> {
+  const now = deps.now ?? Date.now;
+  const out = deps.out ?? dependencySnapshotPath(i.repoName);
+  const read = deps.readText ?? readTextOrNull;
+  const judge = () => judgeDependencySnapshot(read(out), now(), { currentIndexCommit: i.currentIndexCommit });
+  let judged = judge();
+  let run: DependencySnapshotProducerRun | null = null;
+  if (dependencySnapshotNeedsRefresh(judged)) {
+    run = await (deps.produce ?? runDependencySnapshotProducer)(i.root, i.repoName, out);
+    judged = judge();
+  }
+  return { ...decideDependencySnapshotHealth(i.prev, judged, run, now(), out), ran: run != null };
+}
+
+/**
+ * The tick-level IO half: read the previous record, refresh, persist under
+ * `metadata.gitnexus_health.dependencySnapshot`, alert once per unusable streak. Fully
+ * fail-soft — test selection without graph suggestions is the PRE-P-008 baseline, so this
+ * must never cost the reindex tick itself.
+ */
+async function trackDependencySnapshot(ctx: SystemActionCtx, root: string, repoName: string): Promise<void> {
+  try {
+    const { getOrgPg } = await import('@papercusp/db-org');
+    const { sql } = getOrgPg();
+    const rows = (await sql.unsafe(
+      `SELECT metadata->'gitnexus_health'->'dependencySnapshot' AS ds FROM harness_shared.routines
+        WHERE install_slug = $1 AND target_role = 'system:gitnexus-reindex'`,
+      [ctx.installSlug],
+    )) as Array<{ ds: Partial<DependencySnapshotHealth> | null }>;
+    const currentIndexCommit = pickIndexFreshness(readRegistryEntry(registryPath(), repoName), readIndexMetaFreshness(root)).lastCommit ?? null;
+    const update = await refreshDependencySnapshot({ root, repoName, currentIndexCommit, prev: rows[0]?.ds ?? null });
+    const s = update.next;
+    if (update.ran || !dependencySnapshotUsable(s.status)) {
+      const age = s.ageMs == null ? 'n/a' : `${(s.ageMs / 3_600_000).toFixed(1)}h`;
+      const line = `[gitnexus-reindex] dependency snapshot ${s.status} (edges=${s.edges ?? 'n/a'} age=${age}${s.reason ? ` — ${s.reason}` : ''})${update.ran ? ` after producer: ${s.lastProducerLine ?? `exit ${s.lastProducerExit}`}` : ''}`;
+      if (dependencySnapshotUsable(s.status)) console.log(line);
+      else console.warn(line);
+    }
+    await sql.unsafe(
+      `UPDATE harness_shared.routines
+          SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                'gitnexus_health',
+                COALESCE(metadata->'gitnexus_health', '{}'::jsonb) || jsonb_build_object('dependencySnapshot', $2::jsonb)),
+              updated_at = now()
+        WHERE install_slug = $1 AND target_role = 'system:gitnexus-reindex'`,
+      [ctx.installSlug, JSON.stringify(s)],
+    );
+    if (update.shouldAlert) {
+      const { notifyAttention } = await import('../../attention-notify');
+      await notifyAttention({
+        kind: 'intervention',
+        title: 'Graph test-selection snapshot unusable — test:affected is adding no graph suggestions',
+        body:
+          `The dependency snapshot at ${s.path} is ${s.status}${s.reason ? ` (${s.reason})` : ''} after this tick's refresh attempt ` +
+          `on ${ctx.installSlug}. test:affected / test:related fall back to the static import index alone until it is ` +
+          `regenerated. Producer: ${s.lastProducerLine ?? 'not run this tick'}. Re-run by hand: ` +
+          `node scripts/gen-graph-dependency-snapshot.mjs --gitnexus-bin ${canaryBin()}`,
+        importance: 'normal',
+        workspaceId: ctx.workspaceId,
+        harnessSlug: ctx.installSlug,
+        data: { ...s },
+      });
+    } else if (update.shouldResolve) {
+      console.log('[gitnexus-reindex] dependency snapshot usable again');
+    }
+  } catch (e) {
+    console.warn(`[gitnexus-reindex] dependency snapshot tracking failed: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
 /** The graph indexes the operator-home repo; a per-hive coding repo has no business
@@ -2770,6 +3121,9 @@ registerSystemAction('gitnexus-reindex', async (ctx: SystemActionCtx) => {
 
   if (!decision.run) {
     console.log(`[gitnexus-reindex] skip: ${decision.reason}`);
+    // P-001: the index did not move, but the snapshot ages on its own clock and may be absent.
+    // A no-op unless it needs a refresh (absent/invalid/behind the index/nearing the ceiling).
+    await trackDependencySnapshot(ctx, root, repoName);
     return;
   }
 
@@ -2839,6 +3193,11 @@ async function finishAnalyzeTick(i: FinishAnalyzeTickInput): Promise<void> {
   const strandedNote = describeStrandedIncompleteIndex(stranded);
   if (strandedNote) console.warn(`[gitnexus-reindex]${strandedNote}`);
 
+  // WI-10005680: classify the failure ONCE so the warn line and the alert body agree. A deadline kill
+  // is reported by its own branch below, and a success has nothing to classify.
+  const analyzeFailure = success || r.timedOut ? null : classifyAnalyzeFailure(r);
+  const analyzeFailureNote = analyzeFailure ? describeAnalyzeFailure(analyzeFailure) : '';
+
   if (r.timedOut) {
     // Recover the residue HERE, not on the next tick.
     //
@@ -2880,7 +3239,12 @@ async function finishAnalyzeTick(i: FinishAnalyzeTickInput): Promise<void> {
         livenessNote,
     );
   } else if (r.code !== 0) {
-    console.warn(`[gitnexus-reindex] exited ${r.code} after ${elapsedSec}s — ${(r.stderr || r.stdout).slice(-500)}`);
+    // WI-10005680: name the failure (which knob, which residue) ahead of the raw tail — the line that
+    // names GITNEXUS_LBUG_MAX_DB_SIZE can sit outside a 500-char tail, and a SIGSEGV arrives as code 1.
+    console.warn(
+      `[gitnexus-reindex] exited ${r.code}${r.signal ? ` (signal ${r.signal})` : ''} after ${elapsedSec}s — ` +
+        `${analyzeFailureNote ? `${analyzeFailureNote} — ` : ''}${(r.stderr || r.stdout).slice(-500)}`,
+    );
   } else if (!success) {
     console.warn(`[gitnexus-reindex] CANARY FAILED after ${elapsedSec}s — ${canary?.summary ?? 'canary could not run'}`);
   } else {
@@ -2920,8 +3284,8 @@ async function finishAnalyzeTick(i: FinishAnalyzeTickInput): Promise<void> {
         body:
           `system:gitnexus-reindex has now failed ${update.next.consecutiveFailures} consecutive time(s) on ` +
           `${ctx.installSlug}. gitnexus.query / gitnexus.context lookups may be erroring while this persists. ` +
-          `Latest failure: ${r.timedOut ? `timed out after ${timeoutMs}ms` : r.code !== 0 ? `exited ${r.code}` : canary?.summary ?? 'canary could not run'} — ` +
-          `${(r.stderr || r.stdout).slice(-300)}${strandedNote}`,
+          `Latest failure: ${r.timedOut ? `timed out after ${timeoutMs}ms` : r.code !== 0 ? `exited ${r.code}${r.signal ? ` (signal ${r.signal})` : ''}` : canary?.summary ?? 'canary could not run'} — ` +
+          `${analyzeFailureNote ? `${analyzeFailureNote} — ` : ''}${(r.stderr || r.stdout).slice(-300)}${strandedNote}`,
         importance: 'urgent',
         workspaceId: ctx.workspaceId,
         harnessSlug: ctx.installSlug,
@@ -2929,6 +3293,8 @@ async function finishAnalyzeTick(i: FinishAnalyzeTickInput): Promise<void> {
           consecutiveFailures: update.next.consecutiveFailures,
           timedOut: r.timedOut,
           code: r.code,
+          signal: r.signal ?? null,
+          failureKind: analyzeFailure?.kind ?? null,
           incompleteIndex: stranded,
         },
       });
@@ -2938,4 +3304,8 @@ async function finishAnalyzeTick(i: FinishAnalyzeTickInput): Promise<void> {
   } catch (e) {
     console.warn(`[gitnexus-reindex] health tracking failed: ${e instanceof Error ? e.message : e}`);
   }
+
+  // P-001: the graph may have just changed — rebind the test-selection snapshot to it. After the
+  // health write, so this record merges into the one finishAnalyzeTick just persisted.
+  await trackDependencySnapshot(ctx, root, repoName);
 }

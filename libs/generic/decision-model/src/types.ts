@@ -115,6 +115,12 @@ export type InconclusiveReason =
   | 'rate-limited'
   /** 529 after the retry budget was spent. */
   | 'overloaded'
+  /**
+   * 402: the provider refused for billing (for example, the account has no credits left).
+   * After a 402 the client sends nothing for `paymentRequiredCooldownMs`, and each call in
+   * that window returns this reason with attempts 0 and no status.
+   */
+  | 'payment-required'
   /** Any other non-2xx status. */
   | 'http-error'
   /** The deadline expired before an answer arrived. */
@@ -189,6 +195,20 @@ export interface DecisionProvider {
 }
 
 /**
+ * How busy the CALLING thread was while one call was open: the event loop's
+ * utilization over the call window. It separates the two ways a call can miss its
+ * deadline — the provider answered late, or the answer arrived on time and sat
+ * unread while this thread ran other code (a synchronous spawn, a blocking file
+ * read, a long callback).
+ */
+export interface HostLoad {
+  /** Milliseconds the thread spent running code, not idle waiting on I/O, during the call. */
+  readonly busyMs: number;
+  /** `busyMs` over the call window, in [0, 1]. */
+  readonly utilization: number;
+}
+
+/**
  * One completed call, handed to the host's observer (the audit ledger). Carries
  * no raw state text and no key: the host decides what to hash or store.
  */
@@ -201,9 +221,27 @@ export interface DecisionCallRecord {
   /** The consumer label passed to `decide`, e.g. `memory-injection`. */
   readonly consumer: string | null;
   /**
+   * Where in the host the call was made (the `surface` passed to `decide`), e.g.
+   * the injection port for the memory consumer. Null when the caller passed none.
+   */
+  readonly surface: string | null;
+  /**
    * Ids of what the state was built from (memory ids, doc ids, …), passed to
    * `decide`. They let an audit resolve the judged content by id without the
    * ledger keeping a raw copy of it. Empty when the caller passed none.
    */
   readonly subjectIds: readonly string[];
+  /**
+   * The calling thread's event-loop activity over the call. Null when the
+   * measurement is disabled (`hostLoad: null` on the client) or failed.
+   */
+  readonly hostLoad: HostLoad | null;
+  /**
+   * Request-to-complete-response time of the last attempt that got a response, as
+   * measured by a transport running off the calling thread (the worker transport).
+   * Unlike `outcome.latencyMs` it excludes time the answer waited for the calling
+   * thread, so the two together split a slow call between provider and host. Null
+   * when no attempt got a response or the transport does not measure it.
+   */
+  readonly transportLatencyMs: number | null;
 }

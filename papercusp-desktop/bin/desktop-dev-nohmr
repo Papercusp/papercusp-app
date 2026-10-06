@@ -2,7 +2,7 @@
 # Launch the desktop app in DEV mode WITHOUT HMR.
 #
 # ⚠ THIS SCRIPT LOADS THIS SESSION'S OWN WORKING-TREE OPERATOR (default :3270;
-#    it relocates when papercup-bg-host reserves the default). Not :3070.
+#    it relocates when papercusp-bg-host reserves the default). Not :3070.
 #
 # Do not restate the port here. The `exec` at the bottom of this file is the
 # authority, and tauri.conf.json's `devUrl` is the fallback when it is bypassed.
@@ -104,4 +104,4 @@ export PAPERCUSP_DEV_API_TARGET="${PAPERCUSP_DEV_API_TARGET:-$OPERATOR_DEV_PORT}
 # only (0.0.0.0), a `localhost` devUrl makes WebKitGTK hit ::1, fail, and the
 # webview reload-loops on first load before limping onto IPv4. (Same reason
 # main.rs injects the runtime base as 127.0.0.1.)
-exec npm run tauri -- dev --no-dev-server-wait --config "{\"build\":{\"devUrl\":\"http://127.0.0.1:${OPERATOR_DEV_PORT}\"}}"
+exec npm run tauri -- dev --no-watch --no-dev-server-wait --config "{\"build\":{\"devUrl\":\"http://127.0.0.1:${OPERATOR_DEV_PORT}\"}}"

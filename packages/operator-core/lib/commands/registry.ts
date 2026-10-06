@@ -84,12 +84,10 @@ export async function runCommand<T = unknown>(
   if (!parsed.success)
     return err('invalid-args', formatZodError(parsed.error), false);
 
-  // Browser-requirement gate. Commands needing a browser but called from
-  // a non-browser context (Pi, server-side cron) get a structured
-  // 'no-active-session' before the handler runs. The shim that has a
-  // back-channel pre-resolves the session and passes it via ctx.sessionId;
-  // if set, the gate is satisfied.
-  if (def.browser === 'required' && !ctx.sessionId)
+  // Local palette/shortcut handlers already run in the target webview, even
+  // before voice assigns its optional tab ID. Only a server-side caller needs
+  // a pre-resolved session for delivery to a browser over the back-channel.
+  if (def.browser === 'required' && typeof window === 'undefined' && !ctx.sessionId)
     return err(
       'no-active-session',
       'this command needs an open browser tab',

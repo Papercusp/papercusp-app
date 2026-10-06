@@ -38,7 +38,7 @@ import { listAutoloopsForWorkspace, setAutoloop } from '../../gym/control-plane'
 import { resolveProject } from '../../harness-core';
 import { getEffectiveBlueprint } from '../../blueprint/project-to-pg';
 import {
-  GYM_AUTOLOOP_BUDGET_FLOOR_USD,
+  gymBudgetFloorUsd,
   runGymAutoloopTick,
   selectRoutedGymIdeas,
   type GymCycleRequest,
@@ -52,6 +52,8 @@ import {
   launchDetachedGymCycle,
   type LaunchGymCycleResult,
 } from '../../gym/gym-cycle-launch';
+
+export { gymBudgetFloorUsd };
 
 /** The autoloop_state role the gym tick's fire-gate/backoff is keyed under. */
 export const GYM_CYCLE_FIRE_ROLE = 'gym-cycle';
@@ -119,18 +121,6 @@ async function isHarnessBlueprintRetired(workspaceId: string, slug: string): Pro
     return null;
   });
   return bp ? blueprintRetirement(bp) : null;
-}
-
-/** Budget floor (USD): env override PAPERCUSP_GYM_BUDGET_FLOOR_USD, else the tick default. */
-export function gymBudgetFloorUsd(): number {
-  const raw = process.env.PAPERCUSP_GYM_BUDGET_FLOOR_USD;
-  if (raw == null || raw.trim() === '') return GYM_AUTOLOOP_BUDGET_FLOOR_USD;
-  const n = Number(raw.trim());
-  if (!Number.isFinite(n) || n < 0) {
-    console.warn(`[gym-cycle] PAPERCUSP_GYM_BUDGET_FLOOR_USD="${raw}" is not a non-negative number — using ${GYM_AUTOLOOP_BUDGET_FLOOR_USD}`);
-    return GYM_AUTOLOOP_BUDGET_FLOOR_USD;
-  }
-  return n;
 }
 
 /** The original in-process action body, also used by the detached CLI fallback. */

@@ -13,14 +13,15 @@
  * an id to act on ahead of the automated review.
  */
 import { z } from 'zod';
-import { defineTool } from '@papercusp/agent-mcp';
+import { defineTool, entityRef } from '@papercusp/agent-mcp';
+import { resolveConcreteWorkspaceId } from '../../workspace-registry';
 import { FLAG_OFF, knowledgePacksEnabled, text } from './_shared';
 
 export default defineTool({
   name: 'knowledge_packs:candidates',
   capability: 'memory:read',
   description:
-    'List knowledge-pack item CANDIDATEs — cross-hive recurring lessons the recurrence-escalation loop staged (default: pending only). Most are auto-reviewed and auto-adopted/dismissed on a schedule; this lists whatever is still pending that sweep (or filter to adopted/dismissed to see the outcome). Each carries provenance: the friction signature, the scopes it recurred across, the recurrence count, and the source improvement-item ids.',
+    'List pending knowledge-pack candidates: global fleet lessons and explicit identity lessons from your workspace. Fleet lessons are auto-reviewed; identity lessons require an explicit adopt/dismiss decision. Filter by identityId or status. Each carries its source and target provenance.',
   guidance: {
     when:
       'Check what fleet lessons are pending the automated review, or before knowledge_packs:decide_candidate (the id comes from here) to override ahead of the sweep.',
@@ -40,14 +41,18 @@ export default defineTool({
       .optional()
       .describe('Filter by status. Default pending (the review queue).'),
     limit: z.number().int().min(1).max(500).optional(),
+    identityId: z.string().min(1).max(120).optional().describe('Only reviewed learning candidates for this identity in the calling workspace.'),
+    workspace: entityRef('workspace', { soft: true, max: 120 }).optional(),
   }),
-  async handler(args) {
+  async handler(args, ctx) {
     if (!(await knowledgePacksEnabled())) return text(FLAG_OFF);
-    // Candidates are GLOBAL (P-002) — no workspace filter; the queue is fleet-wide.
+    // Fleet candidates are global; identity lessons are visible only in their workspace.
     const { listKnowledgePackCandidates } = await import('../../knowledge-packs/candidates');
     const candidates = await listKnowledgePackCandidates({
       status: args.status ?? 'pending',
       ...(args.limit ? { limit: args.limit } : {}),
+      workspaceId: resolveConcreteWorkspaceId(args.workspace, ctx.principal?.workspaceId),
+      ...(args.identityId ? { identityId: args.identityId } : {}),
     });
     return text({ ok: true, count: candidates.length, candidates });
   },

@@ -27,6 +27,7 @@ export type AcceptanceBarContractGap =
   | 'method_missing'
   | 'check_missing'
   | 'test_layers_missing'
+  | 'test_layer_unrecordable'
   | 'check_layer_mismatch';
 
 export interface AcceptanceBarContractGapInput {
@@ -51,9 +52,12 @@ export interface AcceptanceBarContractGapFinding {
 // layer that a test_runs row can record, so this is the recorder's type, not a copy of it.
 export type CheckFileTestLayer = RecordedTestLayer;
 
-/** Only declared layers in this vocabulary are judged against check files. Any other
- * declared layer (e.g. `mutation`, `property`) has no filename convention, so a
- * mismatch cannot be established and none is reported. */
+/** The only layers a BAR may require. spec-test-adequacy's correct-layer passes a layer
+ * only when a bound evidence row RECORDS it, and binding refuses any testLayer outside
+ * RECORDED_TEST_LAYERS, so a declared layer outside this set (e.g. `component`,
+ * `mutation`, `live`) is unsatisfiable and is reported as `test_layer_unrecordable`
+ * (WI-10006536). Before, such layers were silently skipped here, passed authoring, and
+ * failed correct-layer forever at grading. */
 const JUDGED_LAYERS: ReadonlySet<string> = new Set<CheckFileTestLayer>(RECORDED_TEST_LAYERS);
 
 const SCRIPT_EXT = '[cm]?[jt]sx?';
@@ -117,13 +121,24 @@ export function acceptanceBarContractGaps(input: AcceptanceBarContractGapInput):
         "at (unit, integration, e2e, ...), or declare the check explicitly manual (instrumentKey:'none')",
     });
   }
+  const unrecordable = layers.filter((layer) => !JUDGED_LAYERS.has(layer));
+  if (unrecordable.length > 0) {
+    findings.push({
+      gap: 'test_layer_unrecordable',
+      detail:
+        `requiredTestLayers declares ${unrecordable.join(', ')}, which the test-run ledger never records ` +
+        `(recorded layers: ${[...RECORDED_TEST_LAYERS].join(', ')}), so correct-layer can never pass: ` +
+        'name the recorded layer the proof actually runs at (a *.component.test.tsx or mutation-probe run ' +
+        "records as unit/integration); a live or deployed observation belongs in requiredEvidence, not requiredTestLayers",
+    });
+  }
 
   if (isExplicitlyManualCheck(input.check) && layers.length > 0) {
     findings.push({
       gap: 'check_layer_mismatch',
       detail:
         `the check is explicitly manual (instrumentKey:'none') yet requiredTestLayers declares ${layers.join(', ')}; ` +
-        'a BAR cannot be both: drop the layers (a manual BAR) or give it a runnable check',
+        'a BAR cannot be both: omit the `requiredTestLayers` field (a manual BAR) or give it a runnable check',
     });
   } else if (input.check?.kind === 'tests' && layers.length > 0) {
     const classified = input.check.files.map((file) => ({ file, layers: checkFileTestLayers(file) }));

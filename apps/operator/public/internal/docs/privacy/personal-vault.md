@@ -9,7 +9,7 @@ Personal Vault is an owner-controlled, local data pool for Gmail, Google Calenda
 
 ## What stays local
 
-Archive files are parsed on this machine. Gmail mbox, Calendar ICS, Contacts vCard, Facebook/Instagram message JSON, and X archive data are normalized directly into `harness_shared.personal_documents`. The original archive is not uploaded by the importer.
+Archive files are parsed on this machine. Gmail mbox, Calendar ICS, Contacts vCard, Facebook/Instagram message JSON, and X archive data are normalized directly into `harness_shared.documents` (named `personal_documents` until migration 1327 renamed it; a compatibility view keeps the old name readable until the contract step). The original archive is not uploaded by the importer.
 
 Personal document and query embeddings use the local EmbeddingGemma-300m path. The database requires the personal embedding mode discriminator; cloud embedding modes cannot be written into the personal vector space. Personal content must not be sent to a cloud embedding API.
 

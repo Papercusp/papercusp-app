@@ -22,6 +22,7 @@
  * (it registers every first-party tool on import).
  */
 import { normalizeMcpName } from '@papercusp/tooldef';
+import { parseProjection, PROJECTION_ARG } from '../../../result-projection';
 import type { LoopPressure } from '../../../event-loop-lag-monitor';
 
 export const ADMISSION_CONTROL_ENABLED = process.env.PAPERCUSP_MCP_ADMISSION_CONTROL !== '0';
@@ -184,6 +185,7 @@ const CRITICAL_PRESSURE_DIAGNOSTIC_TOOLS = new Set(
     'dev:dogfood_substrate_status',
     'backup:snapshot_list',
     'coord:whoami',
+    'facts:list',
     'coord:declare-intent',
     'coord:inbox',
     'locks:list',
@@ -233,11 +235,14 @@ const CRITICAL_LOOP_CHECKPOINT_MAX_ARGUMENT_CHARS = 16_000;
 const CRITICAL_LOOP_CHECKPOINT_MAX_FIELD_CHARS = 8_000;
 const CRITICAL_LOOP_CHECKPOINT_MAX_ARRAY_ITEMS = 12;
 const CRITICAL_EVENTS_STATUS_MAX_EVENT_CHARS = 200;
+const CRITICAL_FACTS_LIST_MAX_KEY_CHARS = 200;
+const CRITICAL_FACTS_LIST_MAX_SCOPE_REF_CHARS = 120;
 const TOOLS_INVOKE_NAME = normalizeMcpName('tools:invoke');
 const COORD_SEND_NAME = normalizeMcpName('coord:send');
 const COORD_WHOAMI_NAME = normalizeMcpName('coord:whoami');
 const COORD_DECLARE_INTENT_NAME = normalizeMcpName('coord:declare-intent');
 const COORD_INBOX_NAME = normalizeMcpName('coord:inbox');
+const FACTS_LIST_NAME = normalizeMcpName('facts:list');
 const BACKUP_SNAPSHOT_LIST_NAME = normalizeMcpName('backup:snapshot_list');
 const CAPABILITY_BASH_OUTPUT_NAME = normalizeMcpName('capability:bash_output');
 const WORK_ITEMS_COMMENT_NAME = normalizeMcpName('work_items:comment');
@@ -1468,6 +1473,37 @@ export function isBoundedSessionsSearchArgs(args: unknown): boolean {
 }
 
 /**
+ * facts:list supports broad pages and version history, but recovery needs one
+ * exact live fact. Its no-versions key branch reads at most one live version
+ * plus bounded typed-slot aliases. Admit only a canonical scope/key selector
+ * and an optional bounded scopeRef/full-body flag.
+ */
+export function isBoundedFactsListArgs(args: unknown): boolean {
+  if (!isRecord(args)) return false;
+  const allowed = new Set(['scope', 'scopeRef', 'key', 'full']);
+  if (Object.keys(args).some((key) => !allowed.has(key))) return false;
+  if (!['workspace', 'role', 'owner', 'harness', 'work_item'].includes(args.scope as string)) return false;
+  if (
+    typeof args.key !== 'string' ||
+    args.key.trim().length === 0 ||
+    args.key.length > CRITICAL_FACTS_LIST_MAX_KEY_CHARS
+  ) {
+    return false;
+  }
+  if (
+    args.scopeRef !== undefined &&
+    (typeof args.scopeRef !== 'string' ||
+      args.scopeRef.trim().length === 0 ||
+      args.scopeRef.length > CRITICAL_FACTS_LIST_MAX_SCOPE_REF_CHARS)
+  ) {
+    return false;
+  }
+  if (args.scope === 'workspace' && args.scopeRef !== undefined) return false;
+  if (args.full !== undefined && typeof args.full !== 'boolean') return false;
+  return true;
+}
+
+/**
  * `sessions:timeline` is the historical recovery read used to reconstruct a
  * stale wake's actual tool/coord activity, but its normal page may request up
  * to 300 merged entries from three sources. Keep the critical-pressure
@@ -1478,6 +1514,16 @@ export function isBoundedSessionsSearchArgs(args: unknown): boolean {
  */
 export function isBoundedSessionsTimelineArgs(args: unknown): boolean {
   if (!isRecord(args)) return false;
+  // `projection` is reserved dispatch metadata, accepted both on a direct
+  // tools/call and inside tools:invoke's nested target args. The dispatcher
+  // validates and strips it before sessions:timeline sees its input schema;
+  // mirror that normalization here so a bounded diagnostic is not shed just
+  // because the caller asks the proxy to reduce its result.
+  const timelineArgs = { ...args };
+  if (PROJECTION_ARG in timelineArgs) {
+    if (!parseProjection(timelineArgs[PROJECTION_ARG]).ok) return false;
+    delete timelineArgs[PROJECTION_ARG];
+  }
   const allowed = new Set([
     'owner',
     'since',
@@ -1491,37 +1537,37 @@ export function isBoundedSessionsTimelineArgs(args: unknown): boolean {
     'group_repeated',
     'cursor',
   ]);
-  if (Object.keys(args).some((key) => !allowed.has(key))) return false;
+  if (Object.keys(timelineArgs).some((key) => !allowed.has(key))) return false;
   if (
-    typeof args.owner !== 'string' ||
-    args.owner.trim().length === 0 ||
-    args.owner.length > CRITICAL_SESSIONS_TIMELINE_MAX_OWNER_CHARS
+    typeof timelineArgs.owner !== 'string' ||
+    timelineArgs.owner.trim().length === 0 ||
+    timelineArgs.owner.length > CRITICAL_SESSIONS_TIMELINE_MAX_OWNER_CHARS
   ) {
     return false;
   }
   for (const field of ['since', 'until'] as const) {
     if (
-      args[field] !== undefined &&
-      (typeof args[field] !== 'string' ||
-        args[field].trim().length === 0 ||
-        args[field].length > CRITICAL_SESSIONS_TIMELINE_MAX_BOUND_CHARS)
+      timelineArgs[field] !== undefined &&
+      (typeof timelineArgs[field] !== 'string' ||
+        timelineArgs[field].trim().length === 0 ||
+        timelineArgs[field].length > CRITICAL_SESSIONS_TIMELINE_MAX_BOUND_CHARS)
     ) {
       return false;
     }
   }
   if (
-    args.limit !== undefined &&
-    (!Number.isInteger(args.limit) ||
-      (args.limit as number) < 1 ||
-      (args.limit as number) > CRITICAL_SESSIONS_TIMELINE_MAX_LIMIT)
+    timelineArgs.limit !== undefined &&
+    (!Number.isInteger(timelineArgs.limit) ||
+      (timelineArgs.limit as number) < 1 ||
+      (timelineArgs.limit as number) > CRITICAL_SESSIONS_TIMELINE_MAX_LIMIT)
   ) {
     return false;
   }
   if (
-    args.kinds !== undefined &&
-    (!Array.isArray(args.kinds) ||
-      args.kinds.length > 3 ||
-      args.kinds.some((kind) => !['turn', 'tool', 'coord'].includes(kind as string)))
+    timelineArgs.kinds !== undefined &&
+    (!Array.isArray(timelineArgs.kinds) ||
+      timelineArgs.kinds.length > 3 ||
+      timelineArgs.kinds.some((kind) => !['turn', 'tool', 'coord'].includes(kind as string)))
   ) {
     return false;
   }
@@ -1532,16 +1578,16 @@ export function isBoundedSessionsTimelineArgs(args: unknown): boolean {
     ['cursor', CRITICAL_SESSIONS_TIMELINE_MAX_CURSOR_CHARS],
   ] as const) {
     if (
-      args[field] !== undefined &&
-      (typeof args[field] !== 'string' ||
-        args[field].trim().length === 0 ||
-        args[field].length > max)
+      timelineArgs[field] !== undefined &&
+      (typeof timelineArgs[field] !== 'string' ||
+        timelineArgs[field].trim().length === 0 ||
+        timelineArgs[field].length > max)
     ) {
       return false;
     }
   }
-  if (args.include_auto !== undefined && typeof args.include_auto !== 'boolean') return false;
-  if (args.group_repeated !== undefined && typeof args.group_repeated !== 'boolean') return false;
+  if (timelineArgs.include_auto !== undefined && typeof timelineArgs.include_auto !== 'boolean') return false;
+  if (timelineArgs.group_repeated !== undefined && typeof timelineArgs.group_repeated !== 'boolean') return false;
   return true;
 }
 
@@ -2827,6 +2873,7 @@ function isCriticalPressureDiagnostic(toolName: unknown, args?: unknown, request
   if (normalized === LOOP_STATUS_NAME) return isBoundedLoopStatusArgs(args);
   if (normalized === LOOP_ARM_NAME) return isBoundedLoopArmArgs(args);
   if (normalized === LOOP_CHECKPOINT_NAME) return isBoundedLoopCheckpointArgs(args);
+  if (normalized === FACTS_LIST_NAME) return isBoundedFactsListArgs(args);
   if (normalized === EVENTS_STATUS_NAME) return isBoundedEventsStatusArgs(args);
   if (normalized === CAPABILITY_READ_NAME) return isBoundedScratchCapabilityReadArgs(args);
   if (normalized === WORK_ITEMS_LIST_NAME) return isBoundedWorkItemsListArgs(args);

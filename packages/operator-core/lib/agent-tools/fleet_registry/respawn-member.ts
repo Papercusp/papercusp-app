@@ -34,6 +34,7 @@ import { PAIR_ROLE_IMPLEMENTER } from './pair-launch-options';
 import { json, ROUTING_LADDER } from './_shared';
 import { resolveSavedFleetLaunchSpec } from './saved-launch-spec';
 import { readAgentConfig } from '../../agent-config';
+import { resolveGoalLaunch } from '../../goal-launch-settings';
 import {
   backendForModelSpec,
   CLOUD_MODEL_MENU,
@@ -937,7 +938,19 @@ async function preflightSavedModel(opts: {
   // Native Claude aliases are only safe when the current catalog still exposes them. OMP is a
   // multi-provider backend, so it may run a registered native cloud model explicitly; provider/id
   // models are likewise classified as OMP by launchAgentBackendForModel and need no native menu row.
-  if (backend === 'claude' && !inEffectiveTiers && !inCloudMenu) {
+  // A CONCRETE versioned id of a menu family (`claude-sonnet-5-5`, the spelling a goal's own
+  // launchSettings use and capability:launch-agent accepts) is not a typo of the alias the menu
+  // carries (`sonnet`). Requiring the exact alias refused the goal's own configured model and,
+  // via the `[1m]`-stripped comparison above, every versioned id (EI-24909345582884838). The
+  // family prefix must still be a menu family: `claude-sonet-5` stays refused.
+  const inClaudeMenuFamily =
+    catalogModel !== null &&
+    CLOUD_MODEL_MENU.some(
+      (choice) =>
+        choice.backend === 'claude' &&
+        new RegExp(`^claude-${choice.value.toLowerCase().replace(/[^a-z0-9]/g, '')}(-|$)`).test(catalogModel),
+    );
+  if (backend === 'claude' && !inEffectiveTiers && !inCloudMenu && !inClaudeMenuFamily) {
     return {
       ok: false,
       error: 'saved_model_invalid',
@@ -1199,6 +1212,59 @@ export default defineTool({
       );
     }
 
+    // Validate the goal ceilings (maxAgents / maxPerFleet) BEFORE the destructive drain, the same
+    // way the model/persona preflights above do (EI-24909345582884838). capability:launch-agent
+    // runs this same check, but only AFTER the old member has been SIGTERMed — so a fleet already
+    // AT maxPerFleet killed its member and then refused the replacement, leaving it a seat short.
+    // A respawn is net-zero on headcount, so the member being replaced is excluded from the count
+    // (it is still `live` while draining). The launcher repeats the check with the same exclusion
+    // (`__respawnReplacesOwnerId`), so the two cannot disagree. An unresolved goal context or an
+    // unreadable count fails OPEN here exactly as it does in the launcher; only a REAL refusal (or
+    // a fatal goal-holder verdict the launcher would also throw on) stops the drain.
+    // The caller is the one resolveFleetMemberTarget already authenticated (it is what the launcher
+    // resolves from the same ctx), so reuse it rather than re-deriving identity here.
+    const respawnCallerOwnerId = target.callerId;
+    if (respawnCallerOwnerId) {
+      let ceilingPreflight: Awaited<ReturnType<typeof resolveGoalLaunch>> | null = null;
+      let ceilingPreflightError: string | null = null;
+      try {
+        ceilingPreflight = await resolveGoalLaunch({
+          workspaceId,
+          launcherOwnerId: respawnCallerOwnerId,
+          goalRole: null,
+          fleetSlug: slug,
+          count: 1,
+          excludeOwnerIds: [memberOwnerId],
+        });
+      } catch (error) {
+        ceilingPreflightError = error instanceof Error ? error.message : String(error);
+      }
+      if (ceilingPreflightError !== null || ceilingPreflight?.refusal) {
+        return json(
+          {
+            ok: false,
+            error: ceilingPreflightError !== null ? 'goal_ceiling_preflight_failed' : 'goal_ceiling_refused',
+            fleet: slug,
+            member: memberOwnerId,
+            ...(ceilingPreflight?.refusal ? { refusal: ceilingPreflight.refusal } : {}),
+            message:
+              (ceilingPreflight?.refusal?.message ??
+                `Could not validate the goal launch ceilings before draining: ${ceilingPreflightError}.`) +
+              ' The old member was NOT killed and no replacement was launched.',
+            killed: false,
+            launched: false,
+            launchSpec: {
+              provenance: savedLaunchSpec.provenance,
+              reusePath: savedLaunchSpec.reusePath,
+              overrides: savedLaunchSpec.overrides,
+              preservedFields: savedLaunchSpec.preservedFields,
+            },
+          },
+          true,
+        );
+      }
+    }
+
     // Snapshot the transaction revision before the destructive drain. A respawn is allowed to
     // reconcile only the launch lineage it observed; if another launch starts while this one is
     // draining, persistRespawnLaunchTransaction reports and preserves that newer transaction.
@@ -1445,6 +1511,9 @@ export default defineTool({
         members: [spec],
         __savedLaunchCarry: savedLaunchSpec.effective.member.carry,
         __respawnOwnerId: replacementOwner,
+        // Net-zero headcount: the launcher's goal-ceiling check must not charge the seat of the
+        // member this launch replaces (it may still read as `live` while its SIGTERM lands).
+        __respawnReplacesOwnerId: memberOwnerId,
         ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
       } as never,
       ctx,

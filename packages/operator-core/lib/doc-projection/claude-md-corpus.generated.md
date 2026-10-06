@@ -13,7 +13,7 @@
   here disagrees with the part manifest. That is the drift alarm: this file, the
   manifest and the rows are three artifacts derived from one CLAUDE.md snapshot,
   and regenerating any one of them alone silently desynchronises the set.
-  corpus-parts: 318
+  corpus-parts: 321
   corpus-blocks: 268
   source-sha256: 77afdc4a46a5af9d0b5e7f604c6e2e1e592d51bef791b59633d4f00d1af8db2b
 -->
@@ -843,15 +843,24 @@ Two specifics worth knowing:
 
 So when the gate is red: **author the fix on the shared staging checkout as normal — there is NO repair worktree (D-010) — wait for git-sync to commit it, then land it on the frozen lineage BY PATH: `release:repair-queue { op:'admit', paths:[...] }`**, naming exactly the files you changed (dry run by default; `confirm:true` publishes). That lands your fix ON TOP of the frozen candidate (advancing `repairHead`); the queue re-tests that head itself, and the immutable candidate never moves. Admission is hunk-exact (D-008): only YOUR ledgered hunks ride in, so a peer's concurrent edit in the same file stays out. An admission whose file imports a sibling you did not name is refused `admission-incomplete` naming that path — admit it too; **the tip is NEVER widened for you.**
 
-Do NOT fire `release:checkpoint-run` to "try again" as a bypass: when a frozen queue exists, it applies the queue policy and resumes the exact frozen lineage (`ready-to-test` uses `queue.candidate`; `ready-to-verify` uses `queue.repairHead`; non-suite states refuse before launch). Only when no frozen queue exists does it cut a fresh candidate from the current quiet cut at tip. Do not hand-pin with `--candidate` either — that fights the mechanism instead of using it.
+Do NOT fire `release:checkpoint-run` to "try again" as a bypass: when a frozen queue exists, it applies the queue policy and resumes the exact frozen lineage (`ready-to-test` uses `queue.candidate`; `ready-to-verify` uses `queue.repairHead`; non-suite states refuse before launch). Only when no frozen queue exists does it cut a fresh candidate from the current quiet cut at tip. Do not hand-pin with `--candidate` either.
 
 `release:repair-queue { op:'retire' }` clears ONE queue ROW, not the mechanism, and is **not a "make the gate move" lever**. Retire ONLY when the queue is provably *unreachable-green*: its fixer is dead AND the fixes are absent from the frozen candidate (per path, `git rev-parse <candidate>:<path>` vs `git rev-parse staging:<path>` — equal blobs mean the fix is NOT in it). Then let the next run re-freeze; do not start re-cutting.
 
 ✅ **"Is the freeze ON, and if not WHY" is a READ — do not grep run logs.** `gate_health.freezeAndConverge` returns `{ enabled, state, reason, candidate }`; `release:deploy status` renders it as one line. `state` is **`off` · `none` · `held` · `retired` · `converging`**, and **`reason` is load-bearing** — a state without its reason sends you back to the logs this read replaces.
 
-⚠ **`off` and `none` are NOT synonyms.** `off` = the mechanism is switched off, so reds do not freeze at all; `none` = it is ON and simply had no frozen candidate this tick, which is a green gate's normal state. Conflating them is how freeze-and-converge sat off fleet-wide for a full day — 20 frozen candidates retired, 0 resumed — while looking like an ordinary week. A retire CLEARS the queue row, so `repairQueue` reads null exactly when it matters most: read the disposition, not the queue's absence.
+⚠ **`off` and `none` are NOT synonyms.** `off` = the mechanism is switched off, so reds do not freeze at all; `none` = it is ON and simply had no frozen candidate this tick, which is a green gate's normal state. A retire CLEARS the queue row, so `repairQueue` reads null exactly when it matters most: read the disposition, not the queue's absence.
 
-If a refusal is surprising, treat its policy fields as build-scoped evidence: compare `refusal_provenance` with the health/build SHA on staging `:3170` and green `:3070` ([two-port A/B](/internal/docs/agent-insights/connection-closed-6432-is-an-idle-tx-kill-not-pgbouncer)) before attributing it to current queue policy — **a deployed refusal can be stale while staging accepts the same request.**
+A surprising refusal is build-scoped: compare `refusal_provenance` with `/api/health` on `:3170` and `:3070` ([two-port A/B](/internal/docs/agent-insights/connection-closed-6432-is-an-idle-tx-kill-not-pgbouncer)) — **a deployed refusal can be stale while staging accepts the request.**
+Evidence behind the freeze-and-converge rule (the rule itself is the invariant sibling; this is the case history, kept out of the projected guide).
+
+## Why `off` and `none` must never be conflated
+
+`gate_health.freezeAndConverge.state` has two values that both read as "nothing frozen right now" and mean opposite things. `off` = the mechanism is switched off, so reds do not freeze at all; `none` = it is ON and simply had no frozen candidate this tick, which is a green gate's normal state. Conflating them is how freeze-and-converge sat off fleet-wide for a full day — 20 frozen candidates retired, 0 resumed — while looking like an ordinary week. A retire CLEARS the queue row, so `repairQueue` reads null exactly when it matters most: read the disposition, not the queue's absence.
+
+## Why a surprising refusal is build-scoped
+
+A refusal carries `refusal_provenance`, the build that produced it. The serving host is recorded per call, so the same owner has been served by both `:3070` and `:3170`; a refusal from a deployed (`:3070`) build can be STALE while staging (`:3170`) accepts the identical request. Compare `refusal_provenance` with `/api/health` on each port before attributing a refusal to current queue policy. Worked example: [two-port A/B](/internal/docs/agent-insights/connection-closed-6432-is-an-idle-tx-kill-not-pgbouncer).
 
 
 ✅ **It DOES answer *"which sha is the run judging right now"*, AND it now names its own
@@ -1666,6 +1675,18 @@ judged candidate before calling it stale. ⚠ For a SUBMODULE path do that **ins
 (`git -C <sub> show <pin>:<repo-relative path>`): from the superproject `git status`/`git show`
 answer about the gitlink and report nothing, so the one check that catches this returns empty.
 
+⛔ **The converse holds too: a FAIL in the shared tree is NOT proof the leg is really red.** Some
+suites assert over the LIVE WORKING TREE itself (`REAL TREE …`, shrink-only-baseline guards) while
+dozens of agents mutate it and the gate judges an isolated clean checkout — the populations differ
+by construction (EI-23817115274707255: ~26 failures across 18 unrelated files on the `lane-stateful`
+leg). Read the gate run's OWN result (`state:read { cell:'gate.greenCheckpoint.candidateFailures' }`,
+or `testing:runs { status:["fail","error"] }` `outputTail`) and never loosen such a guard. Tells it is
+not substantive: process-level termination (SIGKILL/SIGTERM, per-file durations pinned at one
+constant) and ZERO `Test timed out` strings. Before reproducing a HEAVY leg run
+`node scripts/proc-guard.mjs check green-checkpoint` — a repro beside the gate's own run can cause
+that signature. Leg-specific: `lint:tsc` reproduces faithfully.
+
+
 ## Server-side edits and the two-port model — no hot-reload
 
 The Hono host (`bin/hono-host.ts`, MCP tools, `lib/endpoint-route`,
@@ -1695,11 +1716,16 @@ restart does **NOT** pick up your edits:
 stale, restart the *right* host and re-probe. Detail:
 [repo-conventions § two-port model](/internal/docs/system/repo-conventions).
 
-⚠ **Your own MCP tool calls execute `:3070` — NOT your edit.** The `papercusp-su`
-client points at `http://127.0.0.1:9071/api/mcp` (`papercup-mcp-proxy.service`),
-which forwards to **`:3070`**, the release checkout. So a landed `operator-core` fix
-is live in your tree, your tests and (after publication) `:3170`, while the very tool
-you would call to exercise it still runs the RELEASED build until the deploy lands.
+⚠ **The MCP client URL does not prove which build served a call.** The `papercusp-su`
+client connects through `http://127.0.0.1:9071/api/mcp`; the proxy's default upstream
+is `:3070`, but the serving host is recorded separately for each tool invocation.
+Records have shown the same owner served by both `port-3070` and `port-3170`. For a
+specific call, use `dev:pg_query` to query `harness_shared.tool_invocations` by
+`coord_owner_id`, `tool_name`, and `invoked_at`; read `serving_host` and
+`serving_build_sha`. The writer captures the service and loaded build at invocation
+time (`packages/operator-core/lib/projected-tool-deps.ts`), unlike the proxy URL or
+current checkout. Compare that SHA with `/api/health` on the recorded host before
+treating a route-level result as current.
 
 Confirm which build an endpoint runs from its **health sha** — never a proxy's cwd or
 boot time, which describe the proxy, not the code it forwards to:
@@ -1764,7 +1790,7 @@ The duplicate-number race is EI-6843 — it cost a rename plus every in-code ref
 
 | you want | use | not |
 |---|---|---|
-| how many tests fail on the **frozen candidate** | `state:read { cell:'gate.greenCheckpoint.candidateFailures' }` — read `stillBrokenCount` (files with NO fix yet), not `failingFileCount`; `fixInRepairHead` says whether a file's fix already landed | ANY hand-written `test_runs` query. That table mixes THREE populations and only one judges the candidate: full-suite rows carry `commit_sha=NULL`, and `worktree_dirty=true` rows measure a tree ~100 agents are mutating. Aggregating them reports fleet churn as the gate's verdict |
+| how many tests fail on the **frozen candidate** | `state:read { cell:'gate.greenCheckpoint.candidateFailures' }` — read `stillBrokenCount` (files with NO fix yet), not `failingFileCount`; `fixInRepairHead` says whether a file's fix already landed | ANY hand-written `test_runs` query — it mixes THREE populations and only one judges the candidate; aggregating them reports fleet churn as the gate's verdict |
 | what issue-family work is claimable now | `work_items:claimable { harness }` | `WHERE status='open'` / the `work_items_claimable` view (overcounts ~13×) |
 | a filtered work-item / issue slice | `work_items:list` (server-side filters) | a hand-written `harness_shared.work_items` query |
 | what plans exist / the recent ones | `plans:list { updatedSince, createdSince, order, limit }` — `order` is `'updated'\|'created'\|'slug'` (NOT `'recent'` — that is `invalid_input`) | a hand-written `harness_plans` query |
@@ -1784,6 +1810,8 @@ SELECT file_path, status FROM harness_shared.test_runs
 ```
 
 Then per path, `git rev-parse <candidate>:<path>` vs `git rev-parse <repairHead>:<path>`: **DIFFERENT blobs mean the fix ALREADY LANDED** and the file awaits re-verification, not repair. Equal blobs are the real queue. For a SUBMODULE path the blobs are identical while the gitlink moved — use `git diff --raw <candidate> <repairHead> -- <sub> | grep '^:160000'`. And `filesJudged` is the AFFECTED RADIUS, never the ~6,700-file suite: an empty failing list is **not** "the gate is green".
+
+`testing:runs` has no root filter; its isolated-checkpoint row locator (rows only — never candidate failures) is in the corpus evidence part.
 #### Why the `test_runs` routing row exists — the measured failure
 
 `harness_shared.test_runs` mixes three populations and only one of them judges the frozen
@@ -1811,6 +1839,28 @@ shorter and strictly weaker of the two — it lacked the four-weeks-earlier tren
 472) and the "a remediation sized from the first number can be an order of magnitude too large"
 consequence — so it was removed and the standalone part kept. Nothing was lost; the duplication
 was.
+
+#### Measured figures behind the observation-lane warning
+
+The standalone invariant part states the rule; its measured support lives here. A `lane='observation'` row is correctly never claimable and never triaged, and correctly carries no assignee and no plan link — its absence from those columns is not a defect. Measured 2026-09-01: of open items whose title matches `P-[0-9]{3}`, 2,194 of 2,340 were observations; four weeks earlier the same query was 417 of 472 — the gap was widening fast. The same title/prose regex cannot distinguish an item that EXECUTES a reference from one that merely CITES it: observations cite constantly ("…defeats P-006", "another agent owns P-018", "do not claim P-008").
+
+#### `testing:runs` root locator (relocated from the routing part, WI-10004675)
+
+`testing:runs` returns a parser-validated `root` from `execution_details` but has no root filter. To LOCATE rows recorded under an isolated checkpoint tree, use the exact non-null root it returned and the frozen candidate SHA in a separate **diagnostic locator only**:
+
+```sql
+SELECT id, file_path, status, source, worktree_dirty, commit_sha, run_group_id
+  FROM harness_shared.test_runs
+ WHERE workspace_id='<workspace id from testing:runs>'
+   AND harness_slug='<harness slug from testing:runs>'
+   AND execution_details->>'root'='<exact checkpoint root from testing:runs>'
+   AND commit_sha='<the frozen candidate sha>'
+   AND source='local' AND worktree_dirty=true
+   AND status IN ('fail','error')
+ ORDER BY finished_at DESC NULLS LAST, started_at DESC;
+```
+
+If `root` is null, do not guess the checkout path or treat zero rows as absence. Add the exact `run_group_id` when known to narrow the query to one invocation. This is only a locator for rows and files: dirty `source='local'` rows do **NOT** prove those failures occurred on the frozen candidate and must never be counted as candidate failures. Use only `candidateFailures` or the clean `source='ci' AND worktree_dirty=false` population above for that verdict.
 
 
   Nothing in the table fits and the shape is genuinely one-off? Then **`dev:pg_query`**
@@ -1873,9 +1923,9 @@ was.
   `lock_timeout` and rolls back (wedged all deploys ~1h on 2026-06-09). If you
   must `psql -f`, INSERT the schema_migrations row in the same transaction.
 
-⚠ **A hand-written population query over `harness_shared.work_items` is mostly OBSERVATION LANE — the tools exclude it by default and raw SQL does not.** `work_items:list` / `:search` / `:claimable` all default `includeObservations:false`, because a `lane='observation'` row is an agent's turn-end reflection: never claimable, never triaged, and correctly carrying no assignee and no plan link. Raw SQL has no such default, so `SELECT … FROM work_items WHERE <predicate>` answers about a different population than every tool you would compare it against — and the gap is widening fast (measured 2026-09-01: of open items whose title matches `P-[0-9]{3}`, 2,194 of 2,340 were observations; four weeks earlier the same query was 417 of 472). Add `AND lane IS DISTINCT FROM 'observation'` whenever you mean WORK, and say which population a count describes.
+⚠ **A hand-written population query over `harness_shared.work_items` is mostly OBSERVATION LANE — the tools exclude it by default and raw SQL does not.** `work_items:list` / `:search` / `:claimable` all default `includeObservations:false`, because a `lane='observation'` row is an agent's turn-end reflection (never claimable, never triaged). Raw SQL has no such default, so `SELECT … FROM work_items WHERE <predicate>` answers about a different population than every tool you would compare it against. Add `AND lane IS DISTINCT FROM 'observation'` whenever you mean WORK, and say which population a count describes.
 
-A title or prose regex compounds it, because it cannot distinguish an item that EXECUTES a reference from one that merely CITES it — observations cite constantly ("…defeats P-006", "another agent owns P-018", "do not claim P-008"). So "N items reference X" is never "N items are doing X", and a remediation sized from the first number can be an order of magnitude too large.
+A title/prose regex compounds it — it cannot tell an item that EXECUTES a reference from one that merely CITES it.
 
 
 Full guide (acceptable file uses, two-axes model, topology):
@@ -1886,7 +1936,7 @@ Full guide (acceptable file uses, two-axes model, topology):
 
 ## Code-describing metadata: derive, pin, or attest — never hand-maintain
 
-**A value that DESCRIBES code — a path, a tool/event/flag/table name, an `exists`/`enabled`/`retired` boolean, a count, a list of emitters/call-sites — is a second copy of a truth the code owns, and it WILL drift** (EVENT_CATALOG's hand-authored `emitter`/`exists`: the system's most-fired key sat unregistered; 14 awaits parked on a key with no emitter anywhere). Take the FIRST rung that fits; hand-maintained prose is the last resort and needs a stated reason, exactly like file-over-Postgres:
+**A value that DESCRIBES code — a path, a tool/event/flag/table name, an `exists`/`enabled`/`retired` boolean, a count, a list of emitters/call-sites — is a second copy of a truth the code owns, and it WILL drift** (EVENT_CATALOG's hand-authored `emitter`/`exists` drifted; the case history is in the worked plan below). Take the FIRST rung that fits; hand-maintained prose is the last resort and needs a stated reason, exactly like file-over-Postgres:
 
 1. **DERIVE** — generate from the single source: `buildKey`, `gen:agent-env` + `doctor`, `gen:tool-routing`, allowlists re-seeded from a measuring `--list` run — never a hand-run grep.
 2. **PIN** — prose that must remain gets a build-time divergence check: doc-claims (`packages/operator-core/lib/doc-claims/`), drift-tracked docs.
@@ -1959,7 +2009,7 @@ row says so and bash remains correct.
 | the load average / how busy the box is | `host.load` + `host.cores` — already in your coord:orient payload. Call nothing | `uptime` (`uptime -p` / `-s` ask for BOOT TIME — a different question, still bash) |
 | how many CPU cores this machine has | `host.cores` — already in your coord:orient payload. Call nothing | `nproc` / `nproc --all` |
 | free memory / whether the box is out of RAM | `host.memFreePct` + `host.psiMemSome60` — already in your coord:orient payload. Call nothing | `free -h` / `free -g` |
-| to find where a symbol is DEFINED (and who calls it) | `gitnexus.context { name: "managedSetInterval", kind: "Function" }` | `grep -rn "export function managedSetInterval" --include=*.ts --exclude-dir={node_modules,.vitest-tmp,dist,coverage} --exclude-dir=sidecar libs packages` (generated bundles/caches are not source evidence; exhaustive exact-text search remains grep's job) |
+| to find where a symbol is DEFINED | `lsp:query { op: "workspace_symbols", name: "X", file: "<grep root>" }`; body: `capability:read` | `grep -rn "export function X" <one project dir>` (repo-wide: add `--exclude-dir={node_modules,.vitest-tmp,dist,coverage} --exclude-dir=sidecar` — generated bundles/caches are not source evidence; exhaustive exact-text search remains grep's job) |
 | to install dependencies in this shared tree | `npm run install:safe` (or `npm run install:safe -- ci` / `-- install --legacy-peer-deps`) — serializes concurrent agents behind an fs-mutex, then verifies every declared dep actually landed on disk | a bare `npm install` / `npm ci` — including a named-package add — because it rewrites `node_modules/.bin` under every other agent's in-flight test run. ⚠ NOT claimed: explicit `--prefix` scratch installs or `--dry-run` |
 | one relation's columns and their types | `dev:pg_query { describe: "schema.table" }` (same tool — also returns indexes, constraints and column comments) | a hand-written `SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='…' AND table_name='…'`. ⚠ A column SEARCH across relations (`column_name ILIKE '%x%'`) has no describe form — keep querying the catalog for that |
 | to FIND a relation whose name you half-remember | `dev:pg_query { describe: "*fragment*" }` — glob matched case-insensitively against `schema.name`; `{ describe: "schema.*" }` lists one schema | a hand-written `SELECT table_name FROM information_schema.tables WHERE table_name ILIKE '%fragment%'`. ⚠ Names only, one glob per call — an explicit `table_name IN (…)` list, a `table_type` filter, or anything else the catalog holds still wants information_schema |
@@ -2001,28 +2051,25 @@ a `\du`), the bash form is the right answer — the gate will not fight you on t
   new handshakes under load). Pass your OWN `--client`, or writes land under an
   anonymous `mcp-call-*` (EI-8509):
   `node scripts/mcp-call.mjs <server:verb> --json-file <args.json> --client <your-su-id> --port 3170`
-- **DISCONNECTED** — tools worked, then every call says `MCP server papercusp-su is not
-  connected` (`WaitForMcpServers` / `/mcp`: `Failed to connect`). After an operator
-  restart the client stops re-dialing, so this NEVER heals on its own, and it does NOT
-  need a human `/mcp` (EI-24657708696146012). Flush your checkpoints through
-  `mcp-call.mjs` as above, then respawn YOURSELF; the relaunched CLI reconnects:
+- **DISCONNECTED** — tools worked, then every call says `ECONNREFUSED` or `MCP server
+  papercusp-su is not connected`: the operator you dial (often a `:3170` pin) is
+  restarting. Re-dial is INCONSISTENT, not never (EI-24755204180385597): once its
+  `/api/health` answers, retry the original failed Papercusp tool call. No human
+  `/mcp` needed (EI-24657708696146012). Still down? Flush checkpoints via
+  `mcp-call.mjs` as above, then respawn YOURSELF:
   `node scripts/mcp-call.mjs session:request-compaction '{"reason":"papercusp-su MCP disconnected"}' --client <your-su-id> --port 3070`
-- **IDENTITY** — tools ARE listed, but every call refuses `Identity capability
-  (unresolved): stale-artifact`. ⛔ **`mcp-call.mjs` CANNOT open this one** — it is a
-  server-side kernel preflight, so every client, port and transport gets the same
-  denial (WI-10002028). `coord:orient` can be refused by it too, so read
-  `activation.status` FIRST:
+- **IDENTITY** — tools are listed, but calls refuse `Identity capability (unresolved):
+  stale-artifact`. ⛔ **`mcp-call.mjs` CANNOT open this one**: server-side preflight
+  rejects every client and port (WI-10002028); even `coord:orient` may be refused.
+  Read `activation.status` first:
   `sudo -n -u postgres psql -d papercusp -At -c "SELECT jsonb_pretty(control_state->'activation') FROM harness_shared.session_briefs WHERE owner_id = '<your-su-id>';"`
-  - `'desired'`/`'prepared'`, `applied` merely lagging → `coord:orient { afterCompaction: true }`
-    acknowledges but does not apply it (WI-10002717). Send one more prompt; if it
-    still reads `desired`, converge.
+  - `desired`/`prepared` with lagging `applied` → `coord:orient { afterCompaction: true }`
+    only acknowledges (WI-10002717); send another prompt, then converge if it remains `desired`.
   - `'failed'` → converge directly; there is nothing for orient to acknowledge.
-  - **Converge** only when `adv_sessions.launch_spec->>'specificationRevision'` shows
-    you ALREADY run the desired revision (that is what makes it true, not forged):
-    set `applied` and `prepared` := `desired`, `status` := `'applied'`, with a `WHERE`
-    on that exact desired revision. It is a MITIGATION — add your occurrence to
-    EI-23703586803892464 rather than filing a fresh row.
-
+  - **Converge** only if `adv_sessions.launch_spec->>'specificationRevision'` equals
+    `desired`: set `applied` and `prepared` to `desired` and
+    `status` to `'applied'`, with `WHERE` on that revision. This mitigates; add the
+    occurrence to EI-23703586803892464.
 Evidence behind the IDENTITY-refusal rule in "Reaching for bash? These reads already have a tool".
 
 **Why `mcp-call.mjs` cannot open the identity class (WI-10002028).** The `stale-artifact`
@@ -2310,11 +2357,20 @@ same call).
 
 **1. Timestamps.** `find` here is **bfs 4.1.1**. With `-newermt` it REJECTS human-relative values (`12 minutes ago`, `-10 minutes`, `America/New_York`) and can SILENTLY mis-parse absolute ones (`2026-08-28 18:35:00 UTC`), under-reporting by hundreds of times. With stderr hidden, either case looks like a valid "nothing changed". For "files modified since T" use `git status --porcelain` or `TZ=UTC stat -c '%y %n' <paths>`; if you must use `find`, pass an epoch predicate (`@<unix-seconds>`) or an ISO-8601 timestamp with `Z`/a numeric offset, keep stderr visible, and corroborate with a positive control.
 
-**2. Symlinked sibling hives are SKIPPED.** Some "checkouts" under `~/papercupai-workspace/` (e.g. `sidestage`) are symlinks into `~/.papercusp/hives/`, and `find` does not descend a symlinked directory without `-L`. Measured: a workspace-wide `find -name '<file>'` returned the real checkouts and silently omitted `sidestage`'s copy — output that looked complete. For any cross-checkout search prefer `git ls-files` / `grep -rl`.
+**2. Symlinked sibling hives are SKIPPED.** Some "checkouts" under `~/papercupai-workspace/` (e.g. `sidestage`) are symlinks into `~/.papercusp/hives/`, and `find` does not descend a symlinked directory without `-L`. A workspace-wide `find -name '<file>'` silently omitted `sidestage`'s copy. For any cross-checkout search prefer `git ls-files` / `grep -rl`.
 
-**3. ⛔ But NEVER an UNBOUNDED `find -L` over a broad root** (`~`, `~/.papercusp`, `~/.papercusp/hives`, `~/papercupai-workspace`). Those roots reach ~50 checkouts whose `node_modules/@papercusp/*` symlink back into workspace packages, and bfs expands that DAG without bound — it never finishes and never errors. Measured 2026-09-08: one such call ran 32 h, reached 70 GB RSS + 1.86 TB swap and made the owner's desktop unusable (WI-10000836). The bash gate now DENIES `-L`/`-follow` from those roots unless bounded: `find -L <root> -maxdepth 6 -name node_modules -prune -o -name '<file>' -print`.
+**3. ⛔ But NEVER an UNBOUNDED `find -L` over a broad root** (`~`, `~/.papercusp`, `~/.papercusp/hives`, `~/papercupai-workspace`). Those roots reach ~50 checkouts whose `node_modules/@papercusp/*` symlink back into workspace packages, and bfs expands that DAG without bound — it never finishes and never errors. One such call ran 32 h and made the owner's desktop unusable (WI-10000836). The bash gate now DENIES `-L`/`-follow` from those roots unless bounded: `find -L <root> -maxdepth 6 -name node_modules -prune -o -name '<file>' -print`.
 
 **The general rule behind all three: AN ABSENCE CLAIM NEEDS A POSITIVE CONTROL.** Before reporting "X does not exist", run the same search for something you KNOW is in that haystack. If the control also comes back empty, the instrument is broken, not the subject.
+Evidence behind the `find` traps (the rule itself is the invariant sibling; this is the measured case history, kept out of the projected guide).
+
+## Trap 2 — the symlinked sibling hive that a plain `find` skipped
+
+A workspace-wide `find -name '<file>'` returned the real checkouts and silently omitted `sidestage`'s copy — output that looked complete, because `find` does not descend a symlinked directory without `-L` and `sidestage` is a symlink into `~/.papercusp/hives/`.
+
+## Trap 3 — the unbounded `find -L` that made the desktop unusable (WI-10000836)
+
+Measured 2026-09-08: one `find -L` over a broad root ran 32 h, reached 70 GB RSS + 1.86 TB swap and made the owner's desktop unusable. The roots reach ~50 checkouts whose `node_modules/@papercusp/*` symlink back into workspace packages, so bfs expands the DAG without bound — it never finishes and never errors. The durable guard is the bash gate's deny in `apps/operator/scripts/hooks/cc/pretooluse-bash-resource-gate.sh`, pinned by `bash-resource-gate.test.ts`.
 
 
 ⚠⚠ **`pgrep -q` DOES NOT EXIST on this box** (procps here has no `-q`), and this one
@@ -2768,8 +2824,7 @@ committed files, caught ~10 min before the gate run that would have red-pinned o
 assertions in ANOTHER workspace**, and nothing you run locally sees it: `lint:tsc` is clean
 (no type changed, only a runtime count) and `test:affected` selects by the workspaces your
 changed PATHS map into, so it cannot select the stranded fixtures by construction. One
-instance (WI-37582, a second `source.lexical()` call in `libs/generic/search`) cost ~3 gate
-reds and ~2h of frozen `main`.
+instance (WI-37582) cost ~3 gate reds and ~2h of frozen `main`.
 
 `npm run lint:behavioural-strands` is the detector; a PostToolUse hook fires it at the edit,
 which is the only moment it works — git-sync sweeps your edit into HEAD within minutes, and
@@ -2780,14 +2835,20 @@ count assertion fails, UPDATE the count — deleting or loosening it removes the
 that makes the next such change detectable.
 
 The detector also covers the value half of this runtime strand: rewriting the expression
-assigned to a returned or persisted output property (for example, `spentCents:
-rollup.potCents` → a conditional) can strand a downstream assertion even when the object
-shape and every type still agree. It joins on the PROPERTY NAME, not on one matcher spelling,
-and ranks reachable tests that read the property directly, by element access, an object
-matcher, `toHaveProperty`, or an `assert.*` call. A value trigger is advisory for the same
+assigned to a returned or persisted output property can strand a downstream assertion even when the object
+shape and every type still agree. It joins on the PROPERTY NAME, not on one matcher spelling. A value trigger is advisory for the same
 reason as a call-count trigger: RUN the named tests, then update the expectation only when the
 new runtime contract is intentional; otherwise repair the writer. Pin the pre-edit commit
 with `--base <sha>` when git-sync may already have swept the edit into `HEAD`.
+Evidence behind the behavioural-strand rule (the rule itself is the invariant sibling; this is the case history, kept out of the projected guide).
+
+## The measured instance — WI-37582
+
+A second `source.lexical()` call in `libs/generic/search` added a CALL to an injected collaborator. `lint:tsc` stayed clean (no type changed, only a runtime count) and `test:affected` selected by the workspaces the changed PATHS map into, so it could not select the downstream call-COUNT fixtures that the new call stranded. The result was ~3 gate reds and ~2h of frozen `main`.
+
+## The value half — a worked example
+
+Rewriting the expression assigned to a returned or persisted output property (for example, `spentCents: rollup.potCents` → a conditional) can strand a downstream assertion even when the object shape and every type still agree. The detector joins on the PROPERTY NAME, not on one matcher spelling, and ranks reachable tests that read the property directly, by element access, an object matcher, `toHaveProperty`, or an `assert.*` call.
 
 
 **A migration that ADDS a column to a `harness_shared` table can silently strand a
@@ -2803,11 +2864,12 @@ table and is missing the exact new column, not on every fixture that happens to 
 that's normal, not drift). `npm run lint:migration-fixture-drift` runs it by hand.
 
 Schema/migration edits (`libs/papercusp/libs/db/**`) → `npm run
-test:all:integration` (the dependency graph won't catch them). Don't run
-`npm run test:all` for routine edits. Each app/lib ships a `TESTING.md` — read it
+test:integration-only` (integration suites only; the graph won't catch them).
+Don't run `npm run test:all` for routine edits. Each app/lib ships a `TESTING.md` — read it
 before adding tests. Infra (Vitest 4, testcontainers PG, Docker required, CI,
 property tests, knip, quarantine, secrets):
 [repo-conventions § test infrastructure](/internal/docs/system/repo-conventions).
+
 
 **npm only — never `pnpm`/`yarn` in this repo, even for a single-package test
 run.** This is an **npm workspaces** monorepo (root `package.json`'s
@@ -2970,21 +3032,13 @@ locks:acquire {
 }
 ```
 
-For a file in the top-level repository, omit `coordination_domain`. For a submodule, use its physical root from `git -C <file-directory> rev-parse --show-toplevel`; keep `paths` relative to that root. `--sweep-lock-held` queries the exact path and refuses unless this session owns a live lock with intent `mutation probe`; it then heartbeats the file lock to 1200 seconds. The in-tree mutation window is capped at 600 seconds. After the trap verifies restoration, release the file lock:
+Top-level file: omit `coordination_domain`. Submodule: use its physical root (`git -C <file-directory> rev-parse --show-toplevel`) and keep `paths` relative to it. `--sweep-lock-held` refuses unless this session owns a live lock with intent `mutation probe`, then heartbeats it to 1200 s; the in-tree window is capped at 600 s. After the trap verifies restoration: `locks:release { lock_id }`.
 
-```
-locks:release { lock_id: '<returned lock_id>' }
-```
+The file lock is the whole fence, superproject and submodule alike. Do **not** take the exclusive `git-sync:<harness>` lease (it freezes every agent's commits): git-sync re-reads the lock census AFTER staging and unstages any late-locked or drifted path (EI-24712906810240170), provided the lock precedes the mutation and is released only AFTER the verified restore, the order the probe enforces. Evidence binders refuse to fingerprint a locked path.
 
-For a file under a submodule, also hold the enclosing harness's exclusive git-sync resource lock:
+`--accept-sweep-race` is only for a checkout known not to be swept or a consciously accepted risk; prefer copy-out mode (no dirty window).
 
-```
-locks:acquire_resource { resource: 'git-sync:<harness>', mode: 'exclusive', ttl_sec: 1200 }
-```
-
-The probe verifies that this session owns the lease and that it outlasts the dirty window. Release the resource lock immediately after restoration. Evidence binders refuse to fingerprint a path while its `mutation probe` file lock is live.
-
-`--accept-sweep-race` is only for a checkout known not to be swept or a consciously accepted risk. Prefer copy-out mode, which has no dirty window at all.
+⚠ **The dirty window is visible to PEERS** (EI-18750303030034478): a peer's raw `test:file` / `test:affected` can read the mutant and report an unrelated red. While a probe's `original.manifest` exists, a failing raw run prints `TEST_FILE_MUTATION_PROBE_WINDOW` naming the subject; treat a red on it or an importer as probe evidence and re-run once the window closes. `testing:run` refuses with `mutation_probe_active`.
 
 
 ⚠ **A `trap` alone does NOT restore promptly — bash will not run a trap handler while

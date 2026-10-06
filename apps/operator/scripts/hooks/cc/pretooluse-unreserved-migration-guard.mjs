@@ -93,7 +93,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import process from 'node:process';
 
-import { isFileWritingTool } from './pretooluse-generated-file-edit-guard.mjs';
+import { isFileWritingTool, targetPathsForTool } from './pretooluse-generated-file-edit-guard.mjs';
 
 /** The one path segment that makes a file a superproject migration. */
 export const SQL_DIR_SEGMENT = 'libs/papercusp/libs/db/sql/';
@@ -135,38 +135,47 @@ async function main() {
     const hook = JSON.parse(await readStdin(250));
     const tool = hook.tool_name || '';
     if (!isFileWritingTool(tool)) return done();
-    const filePath = (hook.tool_input || {}).file_path || '';
-    if (!filePath) return done();
-
-    const target = migrationTargetFrom(filePath);
-    if (!target) return done();
+    const toolInput = hook.tool_input || {};
+    const filePaths = targetPathsForTool(tool, toolInput);
+    if (filePaths.length === 0) return done();
     if (bypassed()) return done();
 
-    const lint = join(target.repoRoot, 'scripts', 'lint-migrations.mjs');
-    if (!existsSync(lint)) {
-      inert = `no scripts/lint-migrations.mjs under the derived repo root ${target.repoRoot}`;
-      return done(inert);
-    }
-    const { ENFORCED_FROM } = await import(pathToFileURL(lint).href);
-    if (!Number.isInteger(ENFORCED_FROM)) {
-      inert = 'lint-migrations.mjs exported no numeric ENFORCED_FROM';
-      return done(inert);
-    }
-    const state = await lookupNumber(target);
-    if (!state.ok) {
-      inert = `could not read harness_shared.migration_reservations (${state.error})`;
-      return done(inert);
-    }
+    const workspaceRoot = process.env.PAPERCUSP_WORKSPACE_ROOT || process.cwd();
+    for (const rawPath of filePaths) {
+      // Codex apply_patch commonly supplies checkout-relative paths. Resolve them
+      // against the managed workspace root before deriving the same superproject
+      // root the Claude Edit/Write path gets from its absolute file_path.
+      const filePath = resolve(workspaceRoot, rawPath);
+      const target = migrationTargetFrom(filePath);
+      if (!target) continue;
 
-    // Filename-keyed history is immutable regardless of whether the allocator
-    // recorded a reservation. The runner skips an applied filename, so an edit
-    // here would help fresh installs only while silently leaving live databases
-    // on the old bytes. This check must precede the reservation/baseline branch:
-    // both allocated and grandfathered applied migrations are frozen.
-    if (state.applied) return deny(target, tool, ENFORCED_FROM, true, state.reserved);
-    if (target.num < ENFORCED_FROM || state.reserved) return done();
+      const lint = join(target.repoRoot, 'scripts', 'lint-migrations.mjs');
+      if (!existsSync(lint)) {
+        inert = `no scripts/lint-migrations.mjs under the derived repo root ${target.repoRoot}`;
+        return done(inert);
+      }
+      const { ENFORCED_FROM } = await import(pathToFileURL(lint).href);
+      if (!Number.isInteger(ENFORCED_FROM)) {
+        inert = 'lint-migrations.mjs exported no numeric ENFORCED_FROM';
+        return done(inert);
+      }
+      const state = await lookupNumber(target);
+      if (!state.ok) {
+        inert = `could not read harness_shared.migration_reservations (${state.error})`;
+        return done(inert);
+      }
 
-    return deny(target, tool, ENFORCED_FROM, false, false);
+      // Filename-keyed history is immutable regardless of whether the allocator
+      // recorded a reservation. The runner skips an applied filename, so an edit
+      // here would help fresh installs only while silently leaving live databases
+      // on the old bytes. This check must precede the reservation/baseline branch:
+      // both allocated and grandfathered applied migrations are frozen.
+      if (state.applied) return deny(target, tool, ENFORCED_FROM, true, state.reserved);
+      if (target.num < ENFORCED_FROM || state.reserved) continue;
+
+      return deny(target, tool, ENFORCED_FROM, false, false);
+    }
+    return done();
   } catch (e) {
     inert = `internal error (${e?.code ?? e?.message ?? e})`;
   }

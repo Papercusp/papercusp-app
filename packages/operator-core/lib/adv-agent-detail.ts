@@ -1130,10 +1130,10 @@ async function getAgentCodexDiagnostics(owner: string): Promise<CodexHomeDiagnos
   try {
     const session = await latestAdvSessionByCoordOwner(owner);
     if (session?.agent !== 'codex') return null;
-    return readCodexHomeDiagnostics(session.id);
+    return await readCodexHomeDiagnostics(session.id);
   } catch (e) {
     return {
-      ...readCodexHomeDiagnostics(`unknown-${owner}`),
+      ...(await readCodexHomeDiagnostics(`unknown-${owner}`)),
       error: e instanceof Error ? e.message : String(e),
     };
   }
@@ -1145,7 +1145,7 @@ async function getAgentNativeSession(owner: string): Promise<NativeSessionHandle
     if (!session) return null;
     let handle: NativeSessionHandle | null;
     if (session.agent === 'codex') {
-      const diagnostics = readCodexHomeDiagnostics(session.id);
+      const diagnostics = await readCodexHomeDiagnostics(session.id);
       handle = nativeSessionHandleForAdvSession(session, {
         findCodexRolloutId: () => diagnostics.latestRolloutId,
       });

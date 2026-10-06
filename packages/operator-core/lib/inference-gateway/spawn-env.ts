@@ -13,6 +13,7 @@ import { DEFAULT_GATEWAY_PORT } from './launch';
 import { ACCOUNT_HEADER, ACCOUNT_PIN_HEADER, OWNER_HEADER, PRIORITY_HEADER } from './gateway';
 import { accountFromArgv } from '../agent-config-constants';
 import { subscriptionRelayAllowed } from '../anthropic-auth-policy';
+import { isProviderCredentialEnvName } from '../personal-vault/provider-egress.mjs';
 import {
   accountProviderForInteractiveBackend,
   interactiveBackendFromSpawnBackend,
@@ -115,13 +116,16 @@ export interface WakeAccountRoute {
 }
 
 /** Remove account/gateway state inherited from the operator before applying a
- * wake's explicit route. Non-route environment is preserved byte-for-byte. */
+ * wake's explicit route, and every mail/chat/calendar/social provider
+ * credential (P-007 / BAR R-11: provider credentials live in the sidecars
+ * only, so an agent cannot reach a provider around the gated verbs). Other
+ * environment is preserved byte-for-byte. */
 export function sanitizeInheritedWakeEnv(
   env: Record<string, string | undefined>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (typeof value === 'string') out[key] = value;
+    if (typeof value === 'string' && !isProviderCredentialEnvName(key)) out[key] = value;
   }
   for (const key of INHERITED_WAKE_ROUTE_ENV_KEYS) delete out[key];
   return out;

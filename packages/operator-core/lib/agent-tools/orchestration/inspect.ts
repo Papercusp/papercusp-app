@@ -4,6 +4,7 @@ import type { ProjectedTool } from '@papercusp/tooldef';
 import { listAllProjectedTools } from '@papercusp/agent-mcp';
 import type { CapabilityManifestV1, RecipeBindingSchemaV1 } from '../../recipe-contract';
 import { inspectScriptContract } from './contract-preflight';
+import type { RefusalContract } from '../../capability-envelope/identity-refusal-contract';
 import { inspectDurability } from './durability-inspection';
 import { getDurableOrchestrationStatus } from '../../dbos/durable-orchestration-workflow';
 import {
@@ -48,6 +49,14 @@ export async function inspectOrchestration(
           code: 'capability_denied',
           message: 'durable run does not belong to the current workspace',
           path: 'durableRun.workflowId',
+          refusal: {
+            observed: { workflowId: args.durableRun.workflowId, workspaceId: workspaceId ?? null },
+            liftsWhen:
+              `durableRun.workflowId starts with 'orchestrate-durable:<current workspaceId>:' and the session has a ` +
+              'workspace. Pass the workflowId of a run started in THIS workspace, or call from a session scoped to the ' +
+              'workspace that owns the run (a run is never inspectable across workspaces)',
+            whoCanMakeItTrue: ['self', 'owner'],
+          } satisfies RefusalContract,
         },
       });
     }

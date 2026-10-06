@@ -1132,6 +1132,8 @@ defineTestDomain({
         'scripts/*.test.mjs',
         'scripts/lib/**/*.test.ts',
         'scripts/lib/**/*.test.mjs',
+        'scripts/agent-capacity/**/*.test.ts',
+        'scripts/relay/**/*.test.ts',
       ] },
     { id: 'integration', label: 'Integration (test/)', globs: [
         'apps/operator/test/**/*.test.ts',
@@ -1451,15 +1453,10 @@ defineTestDomain({
     'The adversarial, multi-session, real-seam coordination suite that closes the EI-152/EI-153 escape classes: cross-agent isolation, real-seam integration, multi-session concurrency, and the liveness matrix. Cross-subsystem view; files overlap their home domains by design.',
   tier: 'domain',
   sections: [
-    {
-      id: 'feature-change-reconciliation',
-      label: 'Feature-change reconciliation',
-      description:
-        'Durable aggregate validation for feature-change candidate settlement, terminal-shard coverage, and honest zero-state readiness.',
-      globs: [
-        'scratchpad/feature-change-reconciliation-and-zero-state-clarity-2026-09-05-p004-validation-aggregate.test.mjs',
-      ],
-    },
+    // No 'feature-change-reconciliation' section (WI-10005450): its only glob named an
+    // untracked file under the gitignored /scratchpad, so it existed only in the shared tree.
+    // Every clean checkout, including the green-checkpoint gate, failed lint:tests with
+    // STALE_GLOB + EMPTY_SECTION. A registry glob must name a tracked, canonical test.
     {
       id: 'wake-liveness',
       label: 'C4 liveness matrix + EI-152',
@@ -1626,6 +1623,8 @@ defineTestDomain({
         { kind: 'shell', cmd: 'bash', args: ['papercusp-desktop/bin/lib/mac-vm-fresh-state.selftest.sh'], label: 'macOS fresh-install state isolation: trap-restores both Papercusp roots across PASS/FAIL/TERM and refuses stale backups (EI-20332777704574867)' },
         { kind: 'shell', cmd: 'bash', args: ['papercusp-desktop/bin/lib/streak-escalation.selftest.sh'], label: 'live-federation-gate streak escalation: a run of consecutive non-GREEN verdicts computes its own streak length and escalates, instead of going quiet because each repeat reason was already filed (WI-39354)' },
         { kind: 'shell', cmd: 'bash', args: ['papercusp-desktop/bin/lib/remote-object-state.selftest.sh'], label: 'upload-release.sh remote_state: a multipart object is never accepted on SIZE alone, so a rebuilt-but-same-size artifact cannot be silently kept as already-uploaded (EI-23963309971611146)' },
+        { kind: 'shell', cmd: 'bash', args: ['papercusp-desktop/bin/lib/offline-installer-evidence-redaction.selftest.sh'], label: "offline-installer journey evidence: the operator's home dir and username are redacted in every spelling, incl. the dash-encoded scratch dir, while the guest's /home/tester paths survive (WI-10004119)" },
+        { kind: 'shell', cmd: 'bash', args: ['papercusp-desktop/bin/lib/vm-port-alloc.selftest.sh'], label: "linux-test-vm ports: a running VM's ports are read from its own qemu argv, each ad-hoc name gets its own slot at boot, and a stopped ad-hoc name fails loudly instead of resolving to another agent's VM (WI-10004354)" },
       ],
     },
   ],

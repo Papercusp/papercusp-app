@@ -93,6 +93,18 @@ export interface SearchTurnHit {
   lexicalScore?: number;
   /** Pre-fusion cosine similarity, when the vector leg returned this turn. */
   semanticScore?: number;
+  /** Precedence tier that won this turn (P-004 exact/fuzzy recall): `exact` = the raw typed
+   *  text occurs in the turn, `fuzzy` = a near-spelling did, `hybrid` = the tokenized/semantic
+   *  engine. Absent from an older server ⇒ no claim. */
+  tier?: 'exact' | 'fuzzy' | 'hybrid';
+  /** Lower-precedence tiers that ALSO returned this turn. */
+  alsoMatchedBy?: Array<'exact' | 'fuzzy' | 'hybrid'>;
+  /** The lowercased literal this turn actually contains (the exact needle, or the fuzzy
+   *  vocabulary word). A deep-link must anchor on THIS — the viewer requires the focused
+   *  message to contain its term, so a fuzzy hit anchored on the typo'd query misses itself. */
+  focusTerm?: string;
+  /** Fuzzy hits only: which query token matched which vocabulary word, and how closely. */
+  fuzzy?: { token: string; word: string; similarity: number };
 }
 
 /** One matched SESSION (classified server-side against roster + adv rows). */
@@ -184,10 +196,14 @@ export function idMatchStreamUrl(
  */
 export function searchHitStreamUrl(
   s: Pick<SearchSessionResult, 'sourceKind' | 'sessionId' | 'active' | 'session'>,
-  hit: Pick<SearchTurnHit, 'ts' | 'owner'>,
+  hit: Pick<SearchTurnHit, 'ts' | 'owner' | 'focusTerm'>,
   query: string,
 ): string | null {
-  const anchor = `&find=${encodeURIComponent(query)}${hit.ts ? `&anchorTs=${encodeURIComponent(hit.ts)}` : ''}`;
+  // Anchor on the literal this turn ACTUALLY contains (P-004): an exact hit inside a longer
+  // token ("furnishedfinder" in www.furnishedfinder.com) and a fuzzy hit (the typed "plam"
+  // matched "plan") both contain `focusTerm`, not necessarily the typed query, and the viewer
+  // only highlights/scrolls to a message that contains its `find` term.
+  const anchor = `&find=${encodeURIComponent(hit.focusTerm || query)}${hit.ts ? `&anchorTs=${encodeURIComponent(hit.ts)}` : ''}`;
   // A hit on an INACTIVE (no live roster agent) session is ended → ended=1 so the
   // thinking route rematerializes an archived transcript / terminates instead of
   // polling forever (WI-3990). An ACTIVE result's agent is still running, so its
@@ -258,8 +274,23 @@ export function endedSessionStreamUrl(
  * as fallbacks.
  */
 export function hitMatchLabel(
-  hit: Pick<SearchTurnHit, 'matchedBy' | 'semanticScore' | 'highlight' | 'excerpt'>,
+  hit: Pick<SearchTurnHit, 'matchedBy' | 'semanticScore' | 'highlight' | 'excerpt' | 'tier' | 'fuzzy'>,
 ): { label: string; title: string; unhighlighted: boolean } | null {
+  // P-004 fuzzy tier: the turn does NOT contain what was typed — it contains a near spelling.
+  // Always say so (the highlighted word is the vocabulary word, not the query), whatever the
+  // hybrid legs think; an exact-tier hit needs no chip (its <mark> IS the typed text).
+  if (hit.tier === 'fuzzy') {
+    const f = hit.fuzzy;
+    const shownText = hit.highlight || hit.excerpt || '';
+    return {
+      label: 'fuzzy match',
+      unhighlighted: !shownText.includes('<mark>'),
+      title: f
+        ? `Approximate spelling match: "${f.token}" ≈ "${f.word}" (similarity ${f.similarity.toFixed(2)}). ` +
+          'The highlighted word is what the turn actually says, not what you typed.'
+        : 'Approximate spelling match — the highlighted word is what the turn actually says, not what you typed.',
+    };
+  }
   // Mirror what the row actually RENDERS — asking whether `highlight` alone
   // has marks would misjudge the fallback case. The row renders through
   // `hitDisplayHtml`, whose precedence this reproduces; it does NOT reuse that

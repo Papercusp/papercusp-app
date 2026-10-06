@@ -247,7 +247,7 @@ export default defineTool({
               rubricRef,
               error:
                 `rubric revision ${args.revision} exists, but its immutable snapshot could not be projected.` +
-                ' If this is a first-party exact-current-body legacy chain, preview rubrics:repair with dryRun:true.' +
+                ` Preview rubrics:repair { rubricRef, rubricRevision: ${args.revision}, dryRun:true } for a missing current first-party version; omit rubricRevision to inspect an exact-current-body legacy chain.` +
                 vintageHint +
                 freshCodeHint,
             };

@@ -62,7 +62,9 @@ export async function resolveOwnerIntentEventId(ownerId: string): Promise<number
          AND surface = 'messages'
          AND writer_key = ${owner}
          AND body->>'lifecycle' = 'intent'
-       ORDER BY id DESC
+       -- id::bigint, never a bare ORDER BY id: that binds to the text output alias above,
+       -- and '999' sorts above '1000', returning an older intent (WI-10004608).
+       ORDER BY id::bigint DESC
        LIMIT 1`;
     const raw = rows[0]?.id;
     if (raw == null) return null;

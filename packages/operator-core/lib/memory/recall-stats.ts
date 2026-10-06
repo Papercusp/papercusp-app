@@ -346,6 +346,44 @@ export interface RecallAdmissionStats {
    * absence means an older caller that predates this measurement.
    */
   corpus?: CorpusAdmissionStats | null;
+  /**
+   * The Jev memory filter's part in this recall (WI-10004485). Absent when the
+   * filter was Off, never reached (no candidates), or faulted.
+   */
+  jev?: JevFunnelEntry;
+}
+
+/**
+ * One recall's Jev filter record, written by jev-memory-gate `jevFunnelEntry`. The
+ * per-port skip rate is the share of a waiting port's recalls with
+ * `skipped: 'no-time'`; the timeout rate of the calls actually made is in
+ * decision_model_calls (consumer `memory-injection`), whose rows on a waiting port
+ * are exactly the calls On would wait on. Together they are On's fail-open rate.
+ */
+export interface JevFunnelEntry {
+  readonly effective: 'shadow' | 'on';
+  /** What the caller could give Jev, net of its response margin, rounded. Absent: no bound. */
+  readonly budgetMs?: number;
+  /** No call was made: On would have had too little time left to wait. */
+  readonly skipped?: 'no-time';
+  /**
+   * On only. In Log only the answer lands after this row is written, so its
+   * outcome is read from decision_model_calls instead.
+   */
+  readonly outcome?: 'answered' | 'inconclusive';
+  readonly reason?: string;
+  /** The answer was reused from an earlier identical call; no request went out. */
+  readonly cached?: true;
+  /**
+   * Whether a caller still waited on the build when Jev's time was set. False: a
+   * background (stale-while-revalidate) rebuild or an already-answered caller, so
+   * the client wall did not bound Jev. Absent: the caller did not say.
+   */
+  readonly callerWaiting?: boolean;
+  /** What was left of the client wall, ms, whether or not it applied (negative: already past). Absent: no wall. */
+  readonly wallLeftMs?: number;
+  /** What was left of the build's own deadline, ms. Absent: unbounded. */
+  readonly deadlineLeftMs?: number;
 }
 
 export type CorpusAdmissionDropReason =

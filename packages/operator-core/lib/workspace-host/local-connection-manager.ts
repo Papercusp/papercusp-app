@@ -199,6 +199,52 @@ export function quotePosixShellArg(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+/** An AWS region code (us-east-2, us-gov-west-1, …); also refuses anything shell-shaped. */
+export const AWS_REGION_PATTERN = /^[a-z]{2}(?:-gov|-iso[a-z]*)?-[a-z]+-[0-9]$/;
+/** An EC2 instance id, short (8 hex) or long (17 hex) form. */
+export const AWS_EC2_INSTANCE_ID_PATTERN = /^i-[0-9a-f]{8}(?:[0-9a-f]{9})?$/;
+/** A named AWS CLI profile (`--profile`). */
+export const AWS_CLI_PROFILE_PATTERN = /^[A-Za-z0-9_.+-]{1,64}$/;
+
+export interface AwsSsmProxyCommandSpec {
+  region: string;
+  /** Named AWS CLI profile; absent = the CLI's default credential chain. */
+  awsProfile?: string;
+  /** AWS CLI v2 executable; it drives the Session Manager plugin installed beside it. */
+  awsExecutable?: string;
+}
+
+/**
+ * The OpenSSH ProxyCommand that carries SSH to an EC2 instance over an AWS Systems Manager
+ * Session Manager tunnel (the AWS-managed `AWS-StartSSHSession` document), so the instance needs
+ * no public IP or inbound port. OpenSSH expands `%h` to the SSH destination host — callers make
+ * that the instance id — and `%p` to the SSH port. The one builder behind both the controller's
+ * initialization transport and `psu --connect` (aws-byoc-gcp-parity-2026-10-01 P-005, P-009).
+ */
+export function buildAwsSsmProxyCommand(spec: AwsSsmProxyCommandSpec): string {
+  if (typeof spec.region !== 'string' || !AWS_REGION_PATTERN.test(spec.region)) {
+    throw new Error('AWS region has an invalid value');
+  }
+  if (spec.awsProfile !== undefined && !AWS_CLI_PROFILE_PATTERN.test(spec.awsProfile)) {
+    throw new Error('AWS CLI profile has an invalid value');
+  }
+  const awsExecutable = requireArg(spec.awsExecutable ?? 'aws', 'AWS CLI executable');
+  if (/\s/.test(awsExecutable)) throw new Error('AWS CLI executable must be one path without whitespace');
+  return [
+    awsExecutable,
+    'ssm',
+    'start-session',
+    '--target',
+    '%h',
+    '--document-name',
+    'AWS-StartSSHSession',
+    '--parameters',
+    'portNumber=%p',
+    `--region=${spec.region}`,
+    ...(spec.awsProfile === undefined ? [] : [`--profile=${spec.awsProfile}`]),
+  ].join(' ');
+}
+
 function openSshOptionName(value: string, label: string): string {
   const option = requireArg(value, label).trim();
   const match = /^([A-Za-z][A-Za-z0-9]*)\s*(?:=|\s)\s*\S/.exec(option);

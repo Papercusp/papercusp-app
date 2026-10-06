@@ -117,6 +117,24 @@ export interface SpecEvidenceForAdequacy {
   /** True when evidenceRef resolves to a provisional scorecard working note. */
   provisionalProofBase?: boolean;
   provisionalScorecard?: ProvisionalScorecardProof;
+  /** Binding rows whose same-proof coverage metadata was preserved on this active row. */
+  supportingBindingIds?: number[];
+}
+
+function logicalEvidenceReferenceKey(row: SpecEvidenceForAdequacy): string {
+  return JSON.stringify([row.planSlug, row.specId, row.specRevision, row.evidenceKind, row.evidenceRef]);
+}
+
+function proofIdentity(row: SpecEvidenceForAdequacy): string {
+  return JSON.stringify([
+    row.testRunId ?? null,
+    row.coverageEvidenceRef ?? null,
+    row.fingerprints.sourceFingerprint ?? null,
+    row.fingerprints.testFingerprint ?? null,
+    row.fingerprints.fixtureFingerprint ?? null,
+    row.fingerprints.rubricFingerprint ?? null,
+    row.fingerprints.environmentFingerprint ?? null,
+  ]);
 }
 
 function hasTestAttemptReference(row: SpecEvidenceForAdequacy): boolean {
@@ -266,7 +284,53 @@ export function activeSpecEvidence<T extends SpecEvidenceForAdequacy>(rows: read
     if (!previous || row.id! < previous.id) anchors.set(key, { id: row.id!, scope });
   }
   const latest = latestLogicalEvidence(rows);
-  const candidates = latest.map((row) => {
+  const byReference = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = logicalEvidenceReferenceKey(row);
+    const bucket = byReference.get(key) ?? [];
+    bucket.push(row);
+    byReference.set(key, bucket);
+  }
+  // Scenario and causal-pair ids are set-valued coverage metadata. When a re-bind
+  // changes only that metadata, the newest immutable row must retain the union from
+  // earlier rows for the same proof; otherwise latestLogicalEvidence silently hides
+  // coverage the unchanged run already established. A new run or changed fingerprint
+  // remains a new proof identity and starts a new metadata set.
+  const reconciled = latest.map((row) => {
+    const rawAdequacy = row.details.adequacy;
+    if (
+      rawAdequacy !== undefined &&
+      (!rawAdequacy || typeof rawAdequacy !== 'object' || Array.isArray(rawAdequacy))
+    ) return row;
+    const adequacy = (rawAdequacy ?? {}) as Record<string, unknown>;
+    const ownDetails = detailsOf(row);
+    const sameProofRows = (byReference.get(logicalEvidenceReferenceKey(row)) ?? [row])
+      .filter((candidate) => proofIdentity(candidate) === proofIdentity(row));
+    const mergedAdequacy = { ...adequacy };
+    let changed = false;
+    for (const key of ['scenarioIds', 'causalPairIds'] as const) {
+      if (ownDetails.contractMetadataIssues?.includes(`${key}:invalid`)) continue;
+      const values = [...new Set(sameProofRows.flatMap((candidate) => {
+        const details = detailsOf(candidate);
+        return details.contractMetadataIssues?.includes(`${key}:invalid`) ? [] : details[key] ?? [];
+      }))].sort((a, b) => a.localeCompare(b));
+      const own = ownDetails[key] ?? [];
+      if (JSON.stringify(values) === JSON.stringify(own)) continue;
+      if (values.length === 0) continue;
+      mergedAdequacy[key] = values;
+      changed = true;
+    }
+    if (!changed) return row;
+    const supportingBindingIds = [...new Set(sameProofRows
+      .map((candidate) => candidate.id)
+      .filter((id): id is number => Number.isSafeInteger(id) && id! > 0))].sort((a, b) => a - b);
+    return {
+      ...row,
+      details: { ...row.details, adequacy: mergedAdequacy },
+      ...(supportingBindingIds.length > 1 ? { supportingBindingIds } : {}),
+    };
+  });
+  const candidates = reconciled.map((row) => {
     const scope = identity(row);
     const anchor = anchors.get(logicalKey(row));
     // An annotation cannot change the registered proof's identity or source scope.
@@ -292,7 +356,7 @@ export function activeSpecEvidence<T extends SpecEvidenceForAdequacy>(rows: read
     )
       superseded.add(candidate.row);
   }
-  return latest.filter((row) => !superseded.has(row));
+  return reconciled.filter((row) => !superseded.has(row));
 }
 
 export type SpecEvidenceLineage = 'durable' | 'ephemeral' | 'unknown';
@@ -413,7 +477,25 @@ export const LEDGER_PROOF_HINT =
   'scripts/mutation-probe.sh with PAPERCUSP_TEST_RUN_HARNESS set records source=mutation-probe rows ' +
   "(listed only by testing:runs { source:'mutation-probe' }).";
 
-const DURABLE_WORK_ITEM_REF_RE = /\b(?:WI|EI|F)-\d+\b/i;
+/**
+ * A work-item id anchors a binding only when it IS the reference: its first
+ * token, optionally after a typed-prefix chain (`scorecard:EI-…`,
+ * `testing:run :: WI-…`), a tool-call verb (`work_items:get WI-…`), or a
+ * hyphen-joined kind (`work-item-thread-WI-…#post-…`). An id mentioned inside
+ * prose (`LIVE PLANE RE-VERIFICATION … (su-…, WI-…)`) names who did the work,
+ * not where the proof can be re-run, and must not make the row durable
+ * (WI-10005325).
+ */
+const DURABLE_WORK_ITEM_REF_RE =
+  /^(?:[a-z][\w-]*\s*:{1,2}\s*)*(?:[a-z][\w-]*:[a-z][\w-]*\s+)?(?:[a-z][a-z-]*-)?(?:WI|EI|F)-\d+\b/i;
+/**
+ * A repo file that LEADS the reference is a rerun anchor even when prose
+ * follows it (`apps/…/x.test.ts — 21 passed @ b97d892c71`). DURABLE_FILE_REF_RE
+ * already accepts a path followed by `#`/`:` and any text; this accepts the
+ * same path followed by whitespace, `,` or `;`.
+ */
+const DURABLE_LEADING_FILE_REF_RE =
+  /^(?:(?:file|path|repo-file):(?:\/\/)?)?(?:\.\.\/|\.\/)?(?:apps|packages|libs|scripts|src|lib|test|tests|bin|docs|rubrics)\/[^\s,;]+\.(?:[cm]?[jt]sx?|json|sql|rs|mdx?|sh)(?=[\s,;#:]|$)/i;
 const DURABLE_ARTIFACT_REF_RE =
   /\b(?:artifact|artifact[-_ ]?ref|artifact[-_ ]?id)\s*(?:[:/#=]|\s+)\s*[a-z0-9][^\s,;]*/i;
 const DURABLE_TEST_RUN_REF_RE =
@@ -453,6 +535,7 @@ export function classifySpecEvidenceLineage(
     DURABLE_TEST_RUN_REF_RE.test(evidenceRef) ||
     DURABLE_COVERAGE_REF_RE.test(evidenceRef) ||
     DURABLE_FILE_REF_RE.test(evidenceRef) ||
+    DURABLE_LEADING_FILE_REF_RE.test(evidenceRef) ||
     DURABLE_ABSOLUTE_FILE_REF_RE.test(evidenceRef)
   ) {
     return { lineage: 'durable', reason: 'explicit durable evidence reference' };
@@ -593,6 +676,9 @@ function bindingDescription(row: SpecEvidenceForAdequacy): string {
     // P-019: lead with the row id so a reader can act on THIS row (retract it, or re-bind
     // over it with supersedeAtRevision) without a separate plans:get-spec-evidence hunt.
     Number.isSafeInteger(row.id) ? `id=${row.id}` : null,
+    row.supportingBindingIds && row.supportingBindingIds.length > 1
+      ? `sameProofMetadataBindingIds=${JSON.stringify(row.supportingBindingIds)}`
+      : null,
     `kind=${row.evidenceKind}`,
     `ref=${JSON.stringify(evidenceRef)}`,
     `lineage=${lineage.lineage}`,
@@ -656,6 +742,28 @@ function bindingSummary(rows: SpecEvidenceForAdequacy[]): string {
   const maxRows = 6;
   const shown = ordered.slice(0, maxRows).map(bindingDescription).join('; ');
   return ordered.length > maxRows ? `${shown}; +${ordered.length - maxRows} more binding(s)` : shown;
+}
+
+function bindingNotesSummary(rows: SpecEvidenceForAdequacy[]): string {
+  const notes = rows
+    .map((row) => {
+      const note = typeof row.details.note === 'string' ? row.details.note.trim() : '';
+      if (note.length === 0) return null;
+      const excerpt = note.length > 500 ? note.slice(0, 500) + '…[truncated]' : note;
+      const id = Number.isSafeInteger(row.id) ? 'id=' + row.id + ' ' : '';
+      return id + 'note=' + JSON.stringify(excerpt);
+    })
+    .filter((note): note is string => note !== null);
+  if (notes.length === 0) return '';
+  const maxNotes = 6;
+  const shown = notes.slice(0, maxNotes).join('; ');
+  const omitted = notes.length > maxNotes ? '; +' + (notes.length - maxNotes) + ' more note(s)' : '';
+  return (
+    ' Free-form binding notes are visible for review but are not interpreted as disclosures: ' +
+    shown +
+    omitted +
+    '.'
+  );
 }
 
 function evidenceWithBindings(statement: string, rows: SpecEvidenceForAdequacy[]): string {
@@ -861,16 +969,23 @@ function riskFloorRating(
     };
   }
   const detailRows = evidence.map((row) => ({ row, details: detailsOf(row) }));
+  const isMutation = (row: SpecEvidenceForAdequacy) =>
+    row.evidenceKind === 'mutation' || row.evidenceKind === 'counterexample';
+  const hasClauseBoundMutationProof = (row: SpecEvidenceForAdequacy) =>
+    isClauseBoundMutationProof(clause, row, evidence);
   const isL4Proof = ({ row, details }: (typeof detailRows)[number]): boolean =>
-    details.coverageRungs?.l4 === true ||
-    ((row.evidenceKind === 'mutation' || row.evidenceKind === 'counterexample') &&
-      (details.targeted === true || typeof details.targeted === 'string') &&
-      SUCCESS_OUTCOMES.has(details.outcome?.toLowerCase() ?? ''));
+    isMutation(row) ? hasClauseBoundMutationProof(row) : details.coverageRungs?.l4 === true;
   const meetsL4 = detailRows.some(isL4Proof);
-  const meetsL3 = meetsL4 || detailRows.some(({ details }) => details.coverageRungs?.l3 === true);
-  const meetsL3Rows = detailRows.filter(
-    ({ row, details }) => details.coverageRungs?.l3 === true || isL4Proof({ row, details }),
-  );
+  const isL3Proof = ({ row, details }: (typeof detailRows)[number]): boolean =>
+    isL4Proof({ row, details }) ||
+    (details.coverageRungs?.l3 === true && (!isMutation(row) || hasClauseBoundMutationProof(row)));
+  const meetsL3 = detailRows.some(isL3Proof);
+  const meetsL3Rows = detailRows.filter(isL3Proof);
+  const proofBindings = (rows: typeof detailRows) =>
+    [...new Set(rows.flatMap(({ row }) => {
+      const pairedTest = isMutation(row) ? clauseBoundMutationTest(clause, row, evidence) : null;
+      return pairedTest ? [row, pairedTest] : [row];
+    }))];
   if (floor === 'l4') {
     if (meetsL4) {
       return {
@@ -879,7 +994,7 @@ function riskFloorRating(
           rating: 'pass',
           evidence: evidenceWithBindings(
             `Targeted L4 proof meets the ${clauseIdentity(clause)} floor.`,
-            detailRows.filter(isL4Proof).map(({ row }) => row),
+            proofBindings(detailRows.filter(isL4Proof)),
           ),
         },
       };
@@ -922,7 +1037,7 @@ function riskFloorRating(
           rating: 'pass',
           evidence: evidenceWithBindings(
             `Targeted L3 or stronger proof meets the ${clauseIdentity(clause)} floor.`,
-            meetsL3Rows.map(({ row }) => row),
+            proofBindings(meetsL3Rows),
           ),
         }
       : {
@@ -957,7 +1072,7 @@ function rerunRecipeFor(
   current: EvidenceCurrentInput[] | undefined,
   harness: string | undefined,
   classRef: PlanClassRubricRef,
-  selection: { workItemIds?: string[]; evidenceRefs?: string[]; planItemIds?: string[] } | undefined,
+  selection: { workItemIds?: string[]; evidenceRefs?: string[]; bindingIds?: number[]; planItemIds?: string[] } | undefined,
 ): SpecTestAdequacyRerunRecipe {
   const evaluatorBuild = getBuildInfo();
   const selectedEvidence = [
@@ -981,6 +1096,16 @@ function rerunRecipeFor(
     selectedEvidenceRefs.length > 0
       ? selectedEvidenceRefs
       : [...new Set(selection?.evidenceRefs ?? [])].sort((a, b) => a.localeCompare(b));
+  const replayBindingIds =
+    evidence.length > 0 && evidence.every((row) => Number.isSafeInteger(row.id) && row.id! > 0)
+      ? [...new Set(evidence.flatMap((row) => row.supportingBindingIds ?? [row.id!]))].sort((a, b) => a - b)
+      : selection?.bindingIds !== undefined
+        ? [...new Set(selection.bindingIds)].sort((a, b) => a - b)
+        // An empty graded population is still an exact selection. Leaving the selector
+        // omitted would let a later binding silently enter this scorecard's rerun.
+        : evidence.length === 0
+          ? []
+          : undefined;
   const currentByKey = new Map((current ?? []).map((row) => [evidenceCurrentInputKey(row), row]));
   const currentForEvidence = (row: SpecEvidenceForAdequacy): EvidenceCurrentInput | undefined => {
     const scopedCurrentKey = evidenceCurrentInputKey({
@@ -1055,6 +1180,7 @@ function rerunRecipeFor(
       // item. Reusing only the caller's optional evidenceRefs would let later
       // bindings silently widen a persisted scorecard's replay.
       ...(replayEvidenceRefs.length ? { evidenceRefs: replayEvidenceRefs } : {}),
+      ...(replayBindingIds !== undefined ? { bindingIds: replayBindingIds } : {}),
       ...(selection?.planItemIds?.length ? { planItemIds: [...selection.planItemIds] } : {}),
       includeDraft: true,
       limit: SPEC_TEST_ADEQUACY_REPLAY_LIMIT,
@@ -1076,6 +1202,7 @@ function rerunRecipeFor(
       specRevision: clause.revision,
       specFingerprint: clause.contentHash,
       evidence: selectedEvidence,
+      ...(replayBindingIds !== undefined ? { bindingIds: replayBindingIds } : {}),
     },
     current: {
       supplied: current !== undefined,
@@ -1125,8 +1252,10 @@ function appendRatingRerunProbes(
  *   2 — the a49fca9b96 scenario-scoped falsifiability target + the WI-10002724 own-specId
  *       fallback (D-009), which the stamp was introduced alongside.
  *   3 — correct-layer requires the declared live/deployed evidence plane on a current binding.
+ *   4 — a mutation/counterexample target must be corroborated by successful current test evidence
+ *       for its canonical test file on the same clause revision.
  */
-export const SPEC_TEST_ADEQUACY_EVALUATOR_REVISION = 3;
+export const SPEC_TEST_ADEQUACY_EVALUATOR_REVISION = 4;
 
 type MutationTargetClause = Pick<SpecClauseRevision, 'specId' | 'falsifier'>;
 
@@ -1159,6 +1288,50 @@ export function mutationTargetRequirement(clause: MutationTargetClause): {
 
 export function isAcceptedMutationTarget(clause: MutationTargetClause, targeted: unknown): boolean {
   return typeof targeted === 'string' && mutationTargetRequirement(clause).acceptedTargets.includes(targeted);
+}
+
+/**
+ * `adequacy.targeted` is caller-authored metadata. A mutation probe is clause-scoped only when
+ * its canonical test file also has successful, current test evidence bound to the same immutable
+ * clause revision. This prevents a killed mutant from a sibling clause's test suite from
+ * satisfying falsifiability or the proof floor by naming this clause in its own binding.
+ */
+function clauseBoundMutationTest(
+  clause: SpecClauseRevision,
+  mutation: SpecEvidenceForAdequacy,
+  evidence: readonly SpecEvidenceForAdequacy[],
+): SpecEvidenceForAdequacy | null {
+  const filePath = mutation.testRunProvenance?.filePath;
+  if (!filePath || filePath.trim().length === 0) return null;
+  return evidence.find(
+    (row) =>
+      row.evidenceKind === 'test' &&
+      row.planSlug === clause.planSlug &&
+      row.specId === clause.specId &&
+      row.specRevision === clause.revision &&
+      row.specFingerprint === clause.contentHash &&
+      row.testRunProvenance?.filePath === filePath &&
+      row.currentness.overall === 'current' &&
+      isSuccessfulRepairedEvidence(row),
+  ) ?? null;
+}
+
+function isClauseBoundMutationTest(
+  clause: SpecClauseRevision,
+  mutation: SpecEvidenceForAdequacy,
+  evidence: readonly SpecEvidenceForAdequacy[],
+): boolean {
+  return clauseBoundMutationTest(clause, mutation, evidence) !== null;
+}
+
+function isClauseBoundMutationProof(
+  clause: SpecClauseRevision,
+  mutation: SpecEvidenceForAdequacy,
+  evidence: readonly SpecEvidenceForAdequacy[],
+): boolean {
+  return isSuccessfulExecutableEvidence(mutation) &&
+    isAcceptedMutationTarget(clause, detailsOf(mutation).targeted) &&
+    isClauseBoundMutationTest(clause, mutation, evidence);
 }
 
 export type AdequacyCardRevisionDisposition = {
@@ -1219,7 +1392,7 @@ export function evaluateSpecTestAdequacy(input: {
   /** The caller-attested current fingerprints used by listSpecEvidence. */
   current?: EvidenceCurrentInput[];
   /** Exact caller selectors that constrain the evidence population on replay. */
-  rerunSelection?: { workItemIds?: string[]; evidenceRefs?: string[]; planItemIds?: string[] };
+  rerunSelection?: { workItemIds?: string[]; evidenceRefs?: string[]; bindingIds?: number[]; planItemIds?: string[] };
   /** Work-item classification; `task` is the canonical non-code kind. */
   workItemKind?: string | null;
   now?: Date;
@@ -1341,11 +1514,25 @@ export function evaluateSpecTestAdequacy(input: {
     );
   });
   // The targeting rule (scenario ids, or the WI-10002724 own-specId fallback) lives in
-  // mutationTargetRequirement so plans:bind-spec-evidence refuses at bind exactly what fails here.
+  // mutationTargetRequirement. A syntactically valid target remains a claim until the
+  // mutation run's canonical test file has its own successful test binding to this clause.
   const { selfTarget: clauseSelfTarget, requirement: clauseTargetRequirement } = mutationTargetRequirement(clause);
   const clauseScopedMutationOrCounterexample = boundMutationOrCounterexample.filter((row) =>
-    isAcceptedMutationTarget(clause, detailsOf(row).targeted),
+    isClauseBoundMutationProof(clause, row, evidence),
   );
+  const targetedMutationWithoutTestBinding = boundMutationOrCounterexample.filter(
+    (row) =>
+      isAcceptedMutationTarget(clause, detailsOf(row).targeted) &&
+      !isClauseBoundMutationTest(clause, row, evidence),
+  );
+  const clauseScopedProofBindings = [
+    ...new Set(
+      clauseScopedMutationOrCounterexample.flatMap((row) => [
+        row,
+        clauseBoundMutationTest(clause, row, evidence)!,
+      ]),
+    ),
+  ];
   const exactMutationOrCounterexample = exactEvidence.filter(
     (row) => row.evidenceKind === 'mutation' || row.evidenceKind === 'counterexample',
   );
@@ -1385,6 +1572,8 @@ export function evaluateSpecTestAdequacy(input: {
       ? `${mutationInCohortNotExecutable.length} mutation or counterexample binding(s) are in the current grading cohort for ${clauseIdentity(clause)} but do not qualify as successful executable evidence (${summarizeExecutableEvidenceGaps(mutationInCohortNotExecutable)}).`
       : mutationOutsideCohort.length > 0
         ? `${mutationOutsideCohort.length} mutation or counterexample binding(s) exist in the exact clause population but are outside the current grading cohort for ${clauseIdentity(clause)}.`
+        : targetedMutationWithoutTestBinding.length > 0
+          ? `${targetedMutationWithoutTestBinding.length} successful mutation or counterexample binding(s) name ${clauseIdentity(clause)} but their canonical test file is not also bound as a successful current test for this clause.`
         : boundMutationOrCounterexample.length > 0
           ? clauseSelfTarget !== null
             ? `Successful mutation or counterexample binding(s) for ${clauseIdentity(clause)} do not target this clause's own specId.`
@@ -1396,19 +1585,22 @@ export function evaluateSpecTestAdequacy(input: {
           rating: 'pass',
           evidence: evidenceWithBindings(
             clauseSelfTarget !== null
-              ? `A bound mutation or counterexample binding targets ${clauseIdentity(clause)} itself, which declares no falsifier.requiredScenarios${clause.falsifier ? ' (its falsifier observation and probe method do not name scenarios)' : ''}.`
-              : `A bound mutation or counterexample binding targets a declared falsifier scenario for ${clauseIdentity(clause)}.`,
-            clauseScopedMutationOrCounterexample,
+              ? `A bound mutation or counterexample targets ${clauseIdentity(clause)} itself, which declares no structured falsifier.requiredScenarios list; its canonical test file is separately bound as a successful current test for this clause.`
+              : `A bound mutation or counterexample targets a declared falsifier scenario for ${clauseIdentity(clause)}; its canonical test file is separately bound as a successful current test for this clause.`,
+            clauseScopedProofBindings,
           ),
         }
       : boundMutationOrCounterexample.length > 0
         ? {
             rating: 'unknown',
             evidence: evidenceWithBindings(
-              `Successful mutation or counterexample binding(s) lack a target matching ${clauseTargetRequirement} for ${clauseIdentity(clause)}; ${unboundMutationReason}`,
+              `Successful mutation or counterexample binding(s) do not establish clause-scoped falsifiability for ${clauseIdentity(clause)}; ${unboundMutationReason}`,
               boundMutationOrCounterexample,
             ),
-            suggestion: `Set adequacy.targeted to ${clauseTargetRequirement}; a boolean or sibling-case target is insufficient.`,
+            suggestion:
+              targetedMutationWithoutTestBinding.length > 0
+                ? `Bind a successful test result for the mutation run's canonical test file to ${clauseIdentity(clause)}; adequacy.targeted alone cannot establish that link.`
+                : `Set adequacy.targeted to ${clauseTargetRequirement}; a boolean or sibling-case target is insufficient.`,
           }
       : attestedFalsifiableOnly.length > 0
         ? {
@@ -1899,9 +2091,32 @@ export function evaluateSpecTestAdequacy(input: {
   // could record a known hole in the proof on the binding and still collect a
   // machine PASS, because no evaluator field read the disclosure — so the gap
   // travelled with the evidence while the verdict said the clause was proven.
-  // Reading it here makes the disclosure cost something: it fails, and the gap
-  // text itself is named in the would-block reason rather than left on the row.
-  const disclosedGapRows = evidence.filter((row) => (detailsOf(row).disclosedGap ?? []).length > 0);
+  // Re-binding the same immutable proof can also append a newer metadata row
+  // without the disclosure. Keep that gap attached to the active logical
+  // reference while its run/fingerprints are unchanged, and until changed proof
+  // is server-current. A stale or unknown replacement has not closed the gap.
+  const activeByLogicalReference = new Map(exactEvidence.map((row) => [logicalEvidenceReferenceKey(row), row]));
+  const disclosedGapRows = exactSelectorMatches.filter((row) => {
+    if ((detailsOf(row).disclosedGap ?? []).length === 0) return false;
+    const active = activeByLogicalReference.get(logicalEvidenceReferenceKey(row));
+    if (!active) return false;
+    return proofIdentity(row) === proofIdentity(active) || active.currentness.overall !== 'current';
+  });
+  const freeFormNoteRows = exactSelectorMatches.filter((row) => {
+    const note = row.details.note;
+    if (typeof note !== 'string' || note.trim().length === 0) return false;
+    const active = activeByLogicalReference.get(logicalEvidenceReferenceKey(row));
+    if (!active) return false;
+    return proofIdentity(row) === proofIdentity(active) || active.currentness.overall !== 'current';
+  });
+  const noDisclosureStatement =
+    'No bound proof for ' +
+    clauseIdentity(clause) +
+    ' records a structured author-disclosed gap.' +
+    bindingNotesSummary(freeFormNoteRows) +
+    (freeFormNoteRows.length > 0
+      ? ' Record any coverage limitation under details.adequacy.disclosedGap so machine grading blocks it.'
+      : '');
   ratings['disclosed-gap'] =
     disclosedGapRows.length > 0
       ? {
@@ -1922,11 +2137,8 @@ export function evaluateSpecTestAdequacy(input: {
           // provisional one especially), including the criteria that found nothing.
           evidence:
             evidence.length > 0
-              ? evidenceWithBindings(
-                  `No bound proof for ${clauseIdentity(clause)} records a disclosed gap.`,
-                  evidence,
-                )
-              : `No bound proof for ${clauseIdentity(clause)} records a disclosed gap.`,
+              ? evidenceWithBindings(noDisclosureStatement, evidence)
+              : noDisclosureStatement,
         };
 
   // P-019: surface the ledger requirement on every ledger-gated criterion that is still

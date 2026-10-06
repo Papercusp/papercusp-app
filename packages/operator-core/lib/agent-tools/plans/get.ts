@@ -193,7 +193,7 @@ const argsSchema = z
       .boolean()
       .optional()
       .describe(
-        'Live issue/feature/test/rubric/audit decorations (default true); false = fast body-first read.',
+        'Live lifecycle/issue/feature/test/rubric/audit decorations (default true); false = fast body-first read.',
       ),
     includeRaw: z
       .boolean()
@@ -1160,7 +1160,8 @@ export default defineTool({
             // writes to the plan.
             let lifecycle: Awaited<ReturnType<typeof derivePlanLifecycleForRead>> | null = null;
             try {
-              lifecycle = await derivePlanLifecycleForRead({
+              // Body-first readers must not wait on advisory lifecycle signals.
+              lifecycle = includeEnrichments ? await derivePlanLifecycleForRead({
                 items: parsed.items,
                 storedStatus: status,
                 // expensive-verification-loops P-002 (R-3): mark items whose work item is
@@ -1183,7 +1184,7 @@ export default defineTool({
                   timings: detailMs,
                   acceptanceRubricRef: row.activeAcceptanceRubricRef,
                 },
-              });
+              }) : null;
             } catch {
               // Advisory overlay on an unrelated payload — it must never fail
               // the plan read. Absent means "not derived", which the schema

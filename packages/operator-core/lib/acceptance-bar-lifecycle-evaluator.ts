@@ -85,6 +85,9 @@ const CONTRACT_GAP_CODE: Record<AcceptanceBarContractGap, AcceptanceBarSnapshotC
   // A check that contradicts its layers is an invalid check; the gate routes that code
   // to rubrics:amend (contract repair), which is the right repair.
   check_layer_mismatch: 'bar_snapshot_check_invalid',
+  // An unrecordable declared layer can never pass correct-layer; the repair is the same
+  // contract amendment (WI-10006536).
+  test_layer_unrecordable: 'bar_snapshot_check_invalid',
 };
 
 /** Any evidence row at all — current, stale, superseded, uncertain or truncated. */

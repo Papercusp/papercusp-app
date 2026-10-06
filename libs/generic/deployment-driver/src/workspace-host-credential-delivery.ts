@@ -432,14 +432,20 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Create a private directory one component at a time and reject symlinks at every component.
+ * Create a directory one component at a time and reject symlinks at every component.
  * `mkdir(..., { recursive:true })` follows an existing symlink, which is unsafe when a root-owned
- * consumer is writing into a user-selected home or credential root.
+ * consumer is writing into a user-selected home, credential root or customer-writable workspace
+ * root. `kind` names the directory in errors; `mode` is applied to every created component and
+ * to the leaf.
  */
-async function ensurePrivateDirectory(path: string): Promise<void> {
+async function ensureDirectoryWithoutFollowingSymlinks(
+  path: string,
+  mode: number,
+  kind: string,
+): Promise<void> {
   if (!isAbsolute(path) || normalize(path) !== path || /[\0\r\n]/.test(path)) {
     throw new Error(
-      `private directory must be an absolute canonical path: '${path}'`,
+      `${kind} must be an absolute canonical path: '${path}'`,
     );
   }
   const components = path.split("/").filter(Boolean);
@@ -453,7 +459,7 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
     } catch (error) {
       if (nodeErrorCode(error) !== "ENOENT") throw error;
       try {
-        await mkdir(current, { mode: 0o700 });
+        await mkdir(current, { mode });
         created = true;
       } catch (mkdirError) {
         if (nodeErrorCode(mkdirError) !== "EEXIST") throw mkdirError;
@@ -462,13 +468,33 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
     }
     if (!info.isDirectory() || info.isSymbolicLink()) {
       throw new Error(
-        `refusing non-directory or symlink at private directory '${current}'`,
+        `refusing non-directory or symlink at ${kind} '${current}'`,
       );
     }
     // Existing ancestors may be shared system directories (/var, /var/lib, …); only the newly
-    // created components and the requested leaf receive the private mode.
-    if (created || current === path) await chmod(current, 0o700);
+    // created components and the requested leaf receive the mode.
+    if (created || current === path) await chmod(current, mode);
   }
+}
+
+/** A credential/home directory: mode `0700`, readable by its owner alone. */
+async function ensurePrivateDirectory(path: string): Promise<void> {
+  await ensureDirectoryWithoutFollowingSymlinks(path, 0o700, "private directory");
+}
+
+/**
+ * A workspace directory under the ACL'd workspace root (`/srv/papercusp/workspaces`), mode `0770`.
+ *
+ * NOT `0700`. The bootstrap gives that root a default ACL naming the service, SSH and agent
+ * accounts, and on a file with an ACL the mode's GROUP bits are the ACL MASK. A `0700`
+ * mkdir/chmod therefore sets `mask::---`, which silently voids every named-user entry: the
+ * operator service account could not traverse the customer's workspace root, so the portal's
+ * "add a pot" answered "path does not exist" (WI-10004594). `0770` keeps the mask at `rwx` and
+ * leaves "other" closed. Re-running on an existing directory repairs its mask, because the leaf
+ * is always re-chmodded.
+ */
+export async function ensureSharedWorkspaceDirectory(path: string): Promise<void> {
+  await ensureDirectoryWithoutFollowingSymlinks(path, 0o770, "workspace directory");
 }
 
 const fallbackFilesystemLocks = new WeakMap<

@@ -17,7 +17,8 @@ contributions:
     refresh: turn
     inputKind: prompt-file
     ref: provider:turn-start-orientation
-    producerRef: turn-start-orientation:buildTurnStartOrientationBlock
+    producerRef: papercusp.turn-start-orientation@1
+    verb: render
     availability: optional
   - id: coord-orientation
     purpose: operational
@@ -25,5 +26,6 @@ contributions:
     refresh: on-demand
     inputKind: setting
     ref: coord-orient
-    producerRef: agent-tools/coordination/tools/orient:composeOrient
+    producerRef: papercusp.coord-orientation@1
+    verb: compose
     availability: optional

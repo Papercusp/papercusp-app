@@ -37,10 +37,53 @@ export interface PotLearningScope {
   potSlug: string;
   /** false = no learning lane may run for this pot, whatever its own arming says. */
   enabled: boolean;
-  /** Who last flipped it — an ownerId, or a human identity. */
+  /** Who last flipped it — an ownerId, or a human identity. Bare identity: never carries a provenance suffix. */
   setBy: string | null;
   /** Epoch ms. */
   setAt: number;
+  /**
+   * WHY the pot is off (migration 1271, WI-10002099) — a real citation (owner
+   * directive id/date, work-item), recorded only while `enabled:false`. NULL on
+   * an unexplained pause and on every enabled row.
+   */
+  pauseReason: string | null;
+  /**
+   * The pause is a standing OWNER decision, not an agent's or an automation's.
+   * The DB forbids `true` without a `pauseReason`, so the claim always carries an
+   * inspectable citation. This replaces the old free-text ' (owner directive)'
+   * suffix on `setBy`, which had already drifted (absent on the main pot's row).
+   */
+  ownerDirected: boolean;
+  /** Epoch ms when the pause should be re-examined, or null = no scheduled review. */
+  reviewBy: number | null;
+}
+
+/**
+ * THE one predicate for "is this pot off ON PURPOSE?" — the question a
+ * producer-silence detector (and any human reading a quiet pot) must ask BEFORE
+ * treating silence as a fault. A pot is deliberately paused when it is switched
+ * off AND someone recorded why (`pauseReason`) or flagged it as the owner's call
+ * (`ownerDirected`, which the DB guarantees carries a reason). A bare
+ * `enabled:false` with neither is an UNEXPLAINED pause — still off, but not
+ * provably intentional, so a detector should keep flagging it.
+ */
+export function isDeliberatePause(
+  row: Pick<PotLearningScope, 'enabled' | 'pauseReason' | 'ownerDirected'> | null | undefined,
+): boolean {
+  if (!row || row.enabled !== false) return false;
+  return row.ownerDirected === true || (typeof row.pauseReason === 'string' && row.pauseReason.trim().length > 0);
+}
+
+/**
+ * True when a deliberate pause has outlived its scheduled review date — the pot
+ * is still off, the owner asked to be reminded, and the reminder is due.
+ * Never true for an open-ended pause (`reviewBy` null) or a pot that is enabled.
+ */
+export function pauseReviewOverdue(
+  row: Pick<PotLearningScope, 'enabled' | 'reviewBy'> | null | undefined,
+  nowMs: number,
+): boolean {
+  return !!row && row.enabled === false && row.reviewBy !== null && row.reviewBy <= nowMs;
 }
 
 /**

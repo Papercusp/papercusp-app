@@ -36,7 +36,15 @@ import { createHash } from 'node:crypto';
 import { mcnemarExact, pairedBootstrapCI, type McNemarResult, type PairedComparison } from '@papercusp/bench-metrics';
 import type { DecisionOutcome, QuestionMap } from '@papercusp/decision-model';
 
-import { admissionPYes, RELEVANCE_CRITERIA, RELEVANCE_INSTRUCTIONS, type AdmissionEncoding } from '../jev-admission-request';
+import {
+  admissionPYes,
+  admissionVariantTexts,
+  RELEVANCE_CRITERIA,
+  RELEVANCE_INSTRUCTIONS,
+  type AdmissionEncoding,
+  type AdmissionJudgement,
+  type AdmissionVariant,
+} from '../jev-admission-request';
 import {
   aggregateByClass,
   latencyStats,
@@ -87,9 +95,13 @@ export {
   admissionQuestionId,
   alternateEncoding,
   buildAdmissionRequest,
+  buildAdmissionRequests,
+  judgeAdmission,
   parseAdmissionEncoding,
+  parseAdmissionVariant,
   type AdmissionEncoding,
   type AdmissionRequest,
+  type AdmissionVariant,
 } from '../jev-admission-request';
 
 function sha256(text: string): string {
@@ -100,10 +112,16 @@ function sha256(text: string): string {
  * The cache rubric version. It embeds a hash of the question template, so a
  * reworded question can never be served a grade the old wording produced, and
  * the floor, because a grade is given in the context of its co-candidates.
+ * The v1 string is unchanged from before variants existed, so v1 grades already
+ * cached stay valid; every other variant hashes its own question texts.
  */
-export function admissionRubricVersion(encoding: AdmissionEncoding, floor: number): string {
-  const template = sha256(JSON.stringify({ RELEVANCE_INSTRUCTIONS, RELEVANCE_CRITERIA, encoding })).slice(0, 8);
-  return `jev-memory-admission-v1:${encoding}:${template}:floor=${floor.toFixed(2)}`;
+export function admissionRubricVersion(encoding: AdmissionEncoding, floor: number, variant: AdmissionVariant = 'v1'): string {
+  if (variant === 'v1') {
+    const template = sha256(JSON.stringify({ RELEVANCE_INSTRUCTIONS, RELEVANCE_CRITERIA, encoding })).slice(0, 8);
+    return `jev-memory-admission-v1:${encoding}:${template}:floor=${floor.toFixed(2)}`;
+  }
+  const template = sha256(JSON.stringify({ texts: admissionVariantTexts(variant), encoding })).slice(0, 8);
+  return `jev-memory-admission-${variant}:${encoding}:${template}:floor=${floor.toFixed(2)}`;
 }
 
 // ─── Per-query scores from a filter ────────────────────────────────────────
@@ -121,9 +139,31 @@ export interface QueryScores {
   readonly costUsd: number | null;
 }
 
+/**
+ * Map a whole query's judgement (one request, or a `pair` fan-out) onto candidate-aligned
+ * scores. Latency is the slowest request's; tokens and list cost are summed over requests,
+ * so a fan-out that repeats the message in every request pays for each repeat.
+ */
+export function scoresFromJudgement(j: AdmissionJudgement): QueryScores {
+  if ('failure' in j.result) {
+    return { scores: null, failure: j.result.failure, latencyMs: j.latencyMs, cached: false, inputTokens: null, costUsd: null };
+  }
+  return {
+    scores: j.result.scores,
+    latencyMs: j.latencyMs,
+    cached: false,
+    inputTokens: j.inputTokens,
+    costUsd: j.inputTokens === null ? null : (j.inputTokens * JEV_LIST_USD_PER_MILLION_INPUT) / 1_000_000,
+  };
+}
+
 /** Map a decision outcome onto candidate-aligned P(yes) scores. */
-export function scoresFromDecision(outcome: DecisionOutcome<QuestionMap>, questionIds: readonly string[]): QueryScores {
-  const p = admissionPYes(outcome, questionIds);
+export function scoresFromDecision(
+  outcome: DecisionOutcome<QuestionMap>,
+  questionIds: readonly string[],
+  substanceIds?: readonly string[],
+): QueryScores {
+  const p = admissionPYes(outcome, questionIds, substanceIds);
   if (outcome.kind === 'inconclusive' || 'failure' in p) {
     const failure = outcome.kind === 'inconclusive' ? outcome.reason : 'failure' in p ? p.failure : 'malformed-response';
     return { scores: null, failure, latencyMs: outcome.latencyMs, cached: false, inputTokens: null, costUsd: null };
@@ -527,6 +567,35 @@ export interface GradeCacheScope {
 /** The cache's doc id: the corpus key (stable across re-seeds), else the ephemeral backend id. */
 export function gradeDocId(c: Pick<CandidateHit, 'id' | 'key'>): string {
   return c.key ?? `id:${c.id}`;
+}
+
+/** One (hard-negative query, retrieved memory) pair to grade with the LLM relevance judge. */
+export interface NegativeJudgePair {
+  readonly queryId: string;
+  readonly docId: string;
+  readonly text: string;
+}
+
+/**
+ * The distinct (query, memory) pairs that survive the cosine floor for HARD-NEGATIVE
+ * queries, across every replay passed in (arm A's floor and arm C's lower floor).
+ * These are the only pairs that can make a hard negative count as "admitted", so
+ * grading them is what verifies the label: a pair the judge calls relevant means the
+ * query is not really off-topic and must be replaced (jev-performance P-002).
+ */
+export function negativeJudgePairs(runs: readonly (readonly QueryOutcome[])[]): NegativeJudgePair[] {
+  const seen = new Map<string, NegativeJudgePair>();
+  for (const outcomes of runs) {
+    for (const o of outcomes) {
+      if (o.expected.length !== 0) continue;
+      for (const c of o.candidates ?? []) {
+        const docId = gradeDocId(c);
+        const k = `${o.queryId}|${docId}`;
+        if (!seen.has(k)) seen.set(k, { queryId: o.queryId, docId, text: c.text });
+      }
+    }
+  }
+  return [...seen.values()];
 }
 
 interface CachedGradeRow {

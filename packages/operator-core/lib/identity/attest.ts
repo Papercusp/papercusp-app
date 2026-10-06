@@ -28,9 +28,9 @@ import {
   verifyEd25519,
 } from './ed25519';
 import {
-  AttestationGistBody,
-  AttestationVerificationResult,
-  DeviceKeypairId,
+  type AttestationGistBody,
+  type AttestationVerificationResult,
+  type DeviceKeypairId,
   ATTESTATION_VERIFY_CACHE_TTL_MS,
   ATTESTATION_VERIFY_NEGATIVE_CACHE_TTL_MS,
   attestationGistFilename,

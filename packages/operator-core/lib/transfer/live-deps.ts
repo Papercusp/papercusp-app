@@ -22,6 +22,7 @@ import type { Sql } from 'postgres';
 import type { JudgeLlmCall } from '@papercusp/eval-battery';
 import { runGovernedSpendAttempt } from '../learning-governor/registrants';
 import { LEARNING_MODEL_SPEC } from '../learning/model-policy';
+import { computeOwnSourceHash } from '../scout/src-hash';
 import { getMemoryBackend } from '../memory/backend';
 import { harnessDir } from '../harness-core';
 import { loadHarnessRegistry } from '../harness-registry';
@@ -46,6 +47,7 @@ import {
 
 export const TRANSFER_DISTILL_MODEL = LEARNING_MODEL_SPEC;
 export const TRANSFER_STUDENT_MODEL = LEARNING_MODEL_SPEC;
+const TRANSFER_LIVE_SOURCE_HASH = computeOwnSourceHash(import.meta.url);
 const DISTILL_TIMEOUT_MS = 180_000;
 const STUDENT_MAX_TOKENS = 2_048;
 const STUDENT_TIMEOUT_MS = 120_000;
@@ -156,6 +158,10 @@ export function learningStudentRunner(opts: TransferLearningLlmOptions = {}): Re
       inputTokens: response.inputTokens,
       outputTokens: response.outputTokens,
       replayed: true,
+      execution: { model: response.execution?.model ?? model, codeHash: null,
+        loadedCode: { ...response.execution?.loadedCode, student: TRANSFER_LIVE_SOURCE_HASH },
+        unresolved: response.execution?.unresolved?.length ? response.execution.unresolved :
+          ['student-transport-completeness'] },
     };
   };
 }

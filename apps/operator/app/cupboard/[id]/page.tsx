@@ -45,6 +45,7 @@ import type {
   ResolvedCapabilityGrant,
 } from '@papercusp/operator-core/lib/cupboard/capability-grant-resolver';
 import type { CapabilityProviderPackageClosureReview } from '@papercusp/operator-core/lib/cupboard/capability-provider-package-closure';
+import type { InstallPluginManifestReview } from '@papercusp/operator-core/lib/cupboard/install-plugin-core';
 import {
   appPlatformFamilies,
   viewerOsFamily,
@@ -207,6 +208,10 @@ export default function CupboardDetailPage() {
   const [claiming, setClaiming] = useState(false);
   const activeHarnessSlug = useResolvedHarnessSlug();
   const [capabilityFlow, setCapabilityFlow] = useState<BlueprintCapabilityFlow | null>(null);
+  // Server-returned provider review a plugin install must be consented to
+  // (generalized-integrations P-001 / D-006). Response data, not URL state:
+  // it is only valid against the exact manifest the server just cloned.
+  const [providerConsent, setProviderConsent] = useState<InstallPluginManifestReview | null>(null);
   const [capabilityProviderSelections, setCapabilityProviderSelections] = useState<Record<string, string>>({});
 
   const fetchListing = useCallback(() => {
@@ -441,19 +446,27 @@ export default function CupboardDetailPage() {
     }
   };
 
-  // plugin / pack Install: clone the listing's repo into global-plugins. We do
-  // NOT pass harness/acceptCapabilities — the global install only registers the
-  // unit; per-harness capability consent stays explicit at enable-time (D-009).
+  // plugin / pack Install: clone the listing's repo into global-plugins. We
+  // never pass a harness — the global install only registers the unit;
+  // per-harness capability consent stays explicit at enable-time (D-009).
+  // A plugin that declares a DATA PROVIDER is the one exception that needs
+  // consent at install (generalized-integrations D-006): the first call
+  // refuses 409 `provider_install_consent_required` with the exact review,
+  // the panel renders it, and the confirmed second call echoes that review
+  // as `expectedReview` so the server installs only what was shown.
   // The toast surfaces the manifest's requested capabilities + any installable
   // declared deps for transparency.
-  const installPluginFromCupboard = async () => {
+  const installPluginFromCupboard = async (consentedReview: InstallPluginManifestReview | null = null) => {
     if (!listing || busy) return;
     setBusy(true);
     try {
       const r = await fetch('/api/cupboard/install-plugin', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ listingId: listing.id }),
+        body: JSON.stringify({
+          listingId: listing.id,
+          ...(consentedReview ? { acceptCapabilities: true, expectedReview: consentedReview } : {}),
+        }),
       });
       const d = (await r.json().catch(() => ({}))) as {
         ok?: boolean;
@@ -464,11 +477,25 @@ export default function CupboardDetailPage() {
         installableDependencies?: { tools?: string[]; packs?: string[]; plugins?: string[] } | null;
         error?: string;
         detail?: string;
+        code?: string;
+        data?: { review?: InstallPluginManifestReview };
       };
       if (!r.ok || !d.ok) {
+        if (d.code === 'provider_install_consent_required' && d.data?.review) {
+          setProviderConsent(d.data.review);
+          return;
+        }
+        if (d.code === 'plugin_review_changed') {
+          // The package moved between review and consent: show the CURRENT
+          // review and make the owner look again rather than installing it.
+          setProviderConsent(d.data?.review ?? null);
+          toast.error('This plugin changed since you reviewed it. Review the updated provider access before installing.');
+          return;
+        }
         toast.error(`Install failed: ${d.error ?? `HTTP ${r.status}`}${d.detail ? ` — ${d.detail}` : ''}`);
         return;
       }
+      setProviderConsent(null);
       const unit = d.kind === 'pack' ? 'Pack' : 'Plugin';
       const caps = d.capabilities ?? [];
       const installable = [
@@ -866,6 +893,13 @@ export default function CupboardDetailPage() {
           />
         )}
 
+        {providerConsent?.provider && (
+          <PluginProviderReview
+            review={providerConsent}
+            onCancel={() => setProviderConsent(null)}
+          />
+        )}
+
         {/* Per-listing primary CTA — hidden for legacy harness rows (per-harness
             join is retired; nothing to act on), for knowledge packs (the
             KnowledgePackInstall panel owns their Install action), and for an
@@ -887,10 +921,14 @@ export default function CupboardDetailPage() {
             )}
             data-testid="cupboard-detail-action"
             data-action={action}
-            data-capability-stage={capabilityFlow?.stage ?? 'initial'}
+            data-capability-stage={providerConsent ? 'provider-consent' : (capabilityFlow?.stage ?? 'initial')}
             onClick={() => {
               if (kind === 'blueprint') {
                 void installBlueprintFromCupboard(capabilityFlow?.stage === 'consent');
+                return;
+              }
+              if (providerConsent) {
+                void installPluginFromCupboard(providerConsent);
                 return;
               }
               handleAction();
@@ -906,6 +944,8 @@ export default function CupboardDetailPage() {
               <><ShieldCheck size={14} /> Review provider set</>
             ) : capabilityFlow?.stage === 'consent' ? (
               <><ShieldCheck size={14} /> Install reviewed set</>
+            ) : providerConsent ? (
+              <><ShieldCheck size={14} /> Install with provider access</>
             ) : (
               <><ActionIcon action={action} /> {LISTING_ACTION_LABEL[action]}{action === 'install' ? ` ${kind}` : ''}</>
             )}
@@ -969,6 +1009,74 @@ export default function CupboardDetailPage() {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * The install-time consent surface for a plugin that declares a data provider
+ * (generalized-integrations P-001 / D-006). Renders the EXACT review the
+ * server returned — what the provider produces, which capability subset it
+ * serves, the OAuth scopes it will request, and every host it may reach
+ * through host.fetch — because that review is what the confirming re-call pins.
+ */
+function PluginProviderReview({
+  review,
+  onCancel,
+}: {
+  review: InstallPluginManifestReview;
+  onCancel: () => void;
+}) {
+  const provider = review.provider;
+  if (!provider) return null;
+  const rows: Array<{ label: string; testId: string; values: string[]; empty: string }> = [
+    { label: 'Data it provides', testId: 'cupboard-provider-datatypes', values: provider.datatypes, empty: 'none declared' },
+    { label: 'Operations it serves', testId: 'cupboard-provider-capabilities', values: provider.capabilities, empty: 'none declared' },
+    { label: 'Account access (OAuth scopes)', testId: 'cupboard-provider-scopes', values: provider.oauthScopes, empty: 'no account access' },
+    { label: 'Network hosts it may reach', testId: 'cupboard-provider-egress', values: provider.egressHosts, empty: 'no network access' },
+  ];
+  return (
+    <section
+      data-testid="cupboard-provider-review"
+      data-provider-id={provider.id}
+      style={{
+        marginTop: SIZES.md,
+        padding: SIZES.md,
+        border: `1px solid ${COLORS.border}`,
+        borderRadius: RADIUS.lg,
+        background: COLORS.surface,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, color: COLORS.text }}>
+        <ShieldCheck size={15} />
+        <strong style={{ fontFamily: FONTS.ui, fontSize: SIZES.sm }}>Provider access review</strong>
+        <code style={{ fontSize: 11 }}>{provider.id}</code>
+      </div>
+      <p style={{ margin: '7px 0 0', color: COLORS.textMuted, fontFamily: FONTS.ui, fontSize: 12 }}>
+        {review.name}@{review.version} connects to your accounts. It runs sandboxed with no network of its
+        own and never sees your tokens; the operator makes each request for it, only to the hosts below.
+      </p>
+      <dl style={{ margin: `${SIZES.sm}px 0 0`, display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 12px' }}>
+        {rows.map((row) => (
+          <React.Fragment key={row.testId}>
+            <dt style={{ color: COLORS.textMuted, fontFamily: FONTS.ui, fontSize: 12 }}>{row.label}</dt>
+            <dd data-testid={row.testId} style={{ margin: 0, fontFamily: FONTS.ui, fontSize: 12, color: COLORS.text }}>
+              {row.values.length > 0 ? (
+                row.values.map((value) => (
+                  <code key={value} style={{ fontSize: 11, marginRight: 6 }}>{value}</code>
+                ))
+              ) : (
+                <span style={{ color: COLORS.textMuted }}>{row.empty}</span>
+              )}
+            </dd>
+          </React.Fragment>
+        ))}
+      </dl>
+      <div style={{ marginTop: SIZES.sm }}>
+        <Button size="sm" variant="ghost" onClick={onCancel} data-testid="cupboard-provider-review-cancel">
+          Cancel
+        </Button>
+      </div>
+    </section>
   );
 }
 

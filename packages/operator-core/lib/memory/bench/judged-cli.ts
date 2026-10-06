@@ -13,8 +13,9 @@
  */
 import path from 'node:path';
 
+import { writeStdoutSync } from '../../../../../scripts/lib/write-stdout-sync.mjs';
 import { llmCall } from '../../llm-testing/llm-client';
-import { runJudgedTier, writeJudgedReport } from './judged';
+import { collectIndependentCohort, parseBlindTargetBudget, runJudgedTier, writeJudgedReport } from './judged';
 import type { BenchBackendName } from './run-bench';
 
 function argValue(flag: string): string | undefined {
@@ -30,6 +31,33 @@ const doubleScoreN = argValue('--double-score')
 const keep = process.argv.includes('--keep');
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', '..', '..');
+
+// Both label collection and judged retrieval use in-process LLM calls. Apply
+// the standing gateway flag at the same seam as the maintained llm-test CLI;
+// a generic shell task need not inherit the operator's gateway environment.
+const { FLAGS } = await import('@papercusp/flags');
+const { getFlag } = await import('@papercusp/flags/server');
+const { installFlagOverrideStore } = await import('../../flag-override-store');
+installFlagOverrideStore();
+if (await getFlag(FLAGS.INFERENCE_GATEWAY, 'system')) {
+  const { applyGatewayLlmEnv } = await import('../../inference-gateway/spawn-env');
+  applyGatewayLlmEnv(true);
+}
+
+if (process.argv.includes('--label-cohort')) {
+  const snapshot = argValue('--snapshot'), out = argValue('--label-out');
+  if (!snapshot || !out) throw new Error('--label-cohort requires --snapshot and --label-out');
+  const receipt = await collectIndependentCohort({ snapshot, out, llm: llmCall,
+    ...(argValue('--reuse-authors-from') ? { reuseAuthorsFrom: argValue('--reuse-authors-from') } : {}),
+    ...(argValue('--reuse-calls-from') ? { reuseCallsFrom: argValue('--reuse-calls-from') } : {}),
+    ...(process.argv.includes('--reuse-snapshot-expansion') ? { reuseSnapshotExpansion: true } : {}),
+    ...(argValue('--adopt-donor-owner') ? { adoptDonorOwner: argValue('--adopt-donor-owner') } : {}),
+    ...(argValue('--targets-per-partition') ? { targetsPerPartition: parseBlindTargetBudget(argValue('--targets-per-partition')!) } : {}),
+    log: (message) => console.log(new Date().toISOString(), message) });
+  // The receipt is a data-derived JSON dump that gets piped; process.exit() does not drain an
+  // async pipe write, so write it synchronously first (EI-20055889379250637).
+  writeStdoutSync(JSON.stringify(receipt)); process.exit(0);
+}
 
 const report = await runJudgedTier({
   llm: llmCall,

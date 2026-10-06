@@ -38,6 +38,9 @@ export function shapeLocksList(data: unknown, tier: LocksTier): unknown {
       owner: r.owner ?? null,
       mode: r.mode ?? null,
       status: r.status ?? null,
+      // locks:list sets this only for the current caller's own resource holds;
+      // keep the key (null for peers) at every payload tier for stable shape.
+      lock_id: r.lock_id ?? null,
       expires_ts: r.expires_ts ?? null,
       // EI-21733256625452096: this projection is an ALLOWLIST, so a field added
       // upstream is silently dropped here. locks:list merges holders across

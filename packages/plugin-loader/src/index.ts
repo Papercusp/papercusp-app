@@ -153,6 +153,12 @@ export interface LoadedPlugin {
   manifestReactions?: import('@papercusp/plugin-sdk').PluginReactionRule[];
   /** Pure-data external source → plan-template declaration (never armed by discovery). */
   triggerPack?: import('@papercusp/plugin-sdk').PluginTriggerPack;
+  /**
+   * Integration provider descriptor from the manifest, validated by
+   * `readManifest` (generalized-integrations D-006 / P-001). The host
+   * registers it with the entry's `providerAdapter` on load.
+   */
+  provider?: import('@papercusp/plugin-sdk').ProviderDescriptor;
 }
 
 export interface LoaderOptions {
@@ -211,6 +217,8 @@ interface ManifestShape {
   dependencies?: import('@papercusp/plugin-sdk').ManifestDependencies;
   /** Pure-data trigger-pack declaration (external-triggers P-012). */
   triggerPack?: import('@papercusp/plugin-sdk').PluginTriggerPack;
+  /** Integration provider descriptor (generalized-integrations D-006 / P-001). */
+  provider?: import('@papercusp/plugin-sdk').ProviderDescriptor;
 }
 
 async function readManifest(dir: string): Promise<ManifestShape | { __error: string } | null> {
@@ -240,6 +248,11 @@ async function readManifest(dir: string): Promise<ManifestShape | { __error: str
     const triggerPackIssues = validateTriggerPackDeclaration(parsed);
     if (triggerPackIssues.length > 0) {
       return { __error: `manifest invalid: ${triggerPackIssues.join('; ')}` };
+    }
+    const { validateProviderDeclaration } = await import('@papercusp/plugin-sdk');
+    const providerIssues = validateProviderDeclaration(parsed);
+    if (providerIssues.length > 0) {
+      return { __error: `manifest invalid: ${providerIssues.join('; ')}` };
     }
     if (parsed.triggerPack) {
       for (const target of parsed.triggerPack.targets) {
@@ -660,6 +673,7 @@ function toLoadedPlugin(r: CoreLoadedPlugin<Plugin, ManifestShape>): LoadedPlugi
     runtime,
     manifestReactions: manifest.reactions ?? [],
     triggerPack: manifest.triggerPack,
+    provider: manifest.provider,
   };
 }
 
@@ -741,6 +755,7 @@ function makeManifestOnlyPluginShim(manifest: ManifestShape): import('@papercusp
     provides: manifest.provides,
     dependencies: manifest.dependencies,
     triggerPack: manifest.triggerPack,
+    provider: manifest.provider,
     __runtime: 'manifest-only',
   } as unknown as import('@papercusp/plugin-sdk').Plugin;
 }

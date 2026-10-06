@@ -1088,7 +1088,9 @@ export default function HudView({
       const hit = searchHitsRef.current?.get(ownerId) ?? null;
       void setOpenFocus(searchHitAnchor(hit));
       void setOpenFocusTs(hit?.ts ?? null);
-      void setOpenFocusQ(hit ? (queryRef.current.trim() || null) : null);
+      // P-004: anchor on the literal the matched turn actually contains (an exact hit inside a
+      // longer token, or a fuzzy hit's near spelling) — the typed query may not occur in it.
+      void setOpenFocusQ(hit ? (hit.focusTerm || queryRef.current.trim() || null) : null);
       void setOpenFocusSid(hit?.sessionId || null);
     },
     [setOpenOwner, setOpenFocus, setOpenFocusTs, setOpenFocusQ, setOpenFocusSid],

@@ -1,0 +1,87 @@
+---
+title: Your first successful task
+description: Go from a new account to a connected workspace and a small, verified agent task.
+documents:
+  - packages/operator-core/lib/auth/hosted/self-signup.ts
+  - packages/operator-core/lib/agent-tools/plans/start.ts
+  - packages/operator-core/lib/workspace-host/hosted-provider-delegation.ts
+---
+
+This guide gets you to **one completed, verified task**. You need a browser,
+an account you can sign in to, and a workspace that is connected. Reading the
+public manual does not require an account or subscription.
+
+## 1. Create an account or sign in
+
+Open the portal and choose **Create account** if you are new, or **Sign in**
+if you already registered. Complete identity verification and, for a new
+account, review the terms and privacy notice. Return to the portal using the
+same identity you verified.
+
+Account creation and signing in are different operations. If the portal says
+the identity already exists, choose **Sign in** instead of repeatedly creating
+the account. Connecting Gmail or Calendar does not sign you in to Papercusp.
+See [Accounts and billing](/docs/accounts-and-billing).
+
+## 2. Connect a place for the work to run
+
+Open **Workspaces**. Select an existing connected workspace or follow the
+creation flow shown for your account:
+
+- **Papercusp Cloud** uses a Papercusp-managed host.
+- **Your own cloud** requires provider setup and a dedicated, limited identity.
+  Follow [Cloud workspaces](/docs/cloud-workspaces) for Google Cloud or AWS.
+- **Local work** runs on a connected computer with Papercusp installed.
+  Keep that computer awake while its agents are working.
+
+Wait for provisioning and connection to finish. A workspace card existing is
+not proof that its host is ready. If it reports an error, preserve the message
+and use [Troubleshooting](/docs/troubleshooting), rather than creating duplicate
+hosts.
+
+## 3. Select a project and start a session
+
+Check the workspace **and project** before opening the agent conversation.
+Give the agent a task with a small scope and a result you can inspect:
+
+> In this project, inspect the README and propose a clearer getting-started
+> section. Show me the plan before editing. Preserve installation commands
+> unless you verify a replacement. Check the links and report what changed.
+
+For a new app, specify browser or desktop, where data should live, who may
+access it, and whether publication is intended. Ask to see the available
+[app templates](/docs/harness-templates) before scaffolding.
+
+## 4. Approve the intended work
+
+Read the proposed scope, acceptance conditions, dependencies and execution
+route. For a first task, one agent is usually easier to follow than a fleet.
+You can say:
+
+> Approved. Implement this plan yourself in this session. Do not publish it.
+> Stop if you need a credential or an irreversible data change.
+
+Use [Agent modes and fleets](/docs/agent-modes-and-fleets) when you want
+autonomous continuation or parallel workers. AUTO changes the approval
+posture, not the permissions or the requirement to verify.
+
+## 5. Check the result before calling it finished
+
+Open the changed document or app and compare it with the acceptance
+conditions. The completion report should name the changes, the checks that
+ran, their results, and anything not checked.
+
+**Implemented**, **verified**, and **shipped** are different claims. If you
+asked for publication, open the actual destination and confirm that it
+contains the new result. A working-build screenshot is not production proof.
+See [Plans and work](/docs/plans-and-work).
+
+## If the first task gets stuck
+
+Ask the agent for its current work-item reference, next concrete action and
+blocker. Respond to an approval or connection request in the same session.
+If you want to stop, ask explicitly and check the acknowledgement; closing
+the browser tab alone does not stop remote work.
+
+Before any destructive follow-up, establish a completed backup and a restore
+procedure using [Snapshots and backups](/docs/harness-snapshots).

@@ -1,127 +1,66 @@
 ---
 title: Harness templates
-description: Reusable harness configurations — what they are, how to author one, and how to publish to the marketplace.
+description: Use a maintained app template and its guides to start a new managed project.
+documents:
+  - packages/operator-core/lib/agent-tools/templates/list.ts
+  - packages/operator-core/lib/agent-tools/templates/get-guide.ts
+  - packages/operator-core/lib/agent-tools/templates/new-app.ts
 ---
 
-A **harness template** is a recipe for spinning up a new project. It
-bundles the role prompts, the orchestrator's decision logic, the default
-plugin set, and any seed files needed to start a mission. Installing a
-template creates a fresh project directory wired to run.
+A template is a **maintained, pre-built app scaffold**: a starting chassis,
+data layer and conventions. It saves you and your agents from inventing the
+same setup for every project.
 
-Templates are how you turn "this kind of harness" into something
-shareable. The reference templates that ship with Papercusp —
-`coding`, `briefings`, `org` — are themselves just templates published
-to the marketplace.
+## Choose from the installed catalog
 
-## Anatomy of a template
+The catalog changes. Ask your agent to list the available templates rather
+than copying a template name from an old example. The maintained tool sequence
+is `templates:list` → `templates:get-guide` → `templates:new-app`.
 
-A template is a directory containing:
+The catalog distinguishes:
 
-```
-my-template/
-├── papercusp.json              # manifest: name, version, kind: 'template', ...
-├── .papercusp/
-│   ├── config.json             # default config (primaryRole, smokeTest, …)
-│   ├── prompts/                # role prompt templates (orchestrator.md, worker.md, validator.md)
-│   ├── features.json.template  # optional: starter feature set
-│   └── enabled-plugins.json    # which plugins this template wants enabled
-├── ├── SPEC.md.template            # acceptance bar for "done"
-├── AGENTS.md.template          # cross-cutting agent instructions
-└── README.md                   # what this template builds
-```
+- **App-scope templates**, which provide the root of a whole app.
+- **Aspect templates**, which compose capabilities such as a desktop/web
+  chassis, data layer, user interface or agent plane onto that root.
 
-The `.template` suffix means "copy on install, prompt the user to fill
-in the placeholders." Files without that suffix are copied verbatim.
+Read the template's guide before choosing. A web app and a desktop app need
+different hosting and packaging decisions; an app with embedded agents also
+needs the appropriate agent integration.
 
-## Manifest fields
+## Tell the agent what you want
 
-The minimum:
+For example:
 
-```json
-{
-  "name": "@you/my-template",
-  "version": "0.1.0",
-  "kind": "template",
-  "papercusp": "^0.1.0",
-  "description": "What this template builds.",
-  "author": "you",
-  "license": "MIT",
-  "harness_kind": "coding",
-  "topology": "single",
-  "requires": []
-}
-```
+> Create a browser app for tracking reading notes. First show the maintained
+> app templates that fit, explain the hosting and agent choices, and propose a
+> plan with acceptance tests. Do not publish my notes publicly.
 
-`harness_kind` sets the family (`coding`, `org`, `business`, etc.) so
-the operator knows which UI affordances to surface. `topology` is
-`single` or `multi` (multi-harness templates spawn sub-harnesses on
-install).
+Specify the target platform, who can use it, where its data lives, and how you
+will tell it works. If you want your own framework instead of a template, say
+so explicitly and name the framework.
 
-`requires` lists plugin slugs the template depends on. The CLI installs
-those plugins automatically as part of `papercusp install <template>`.
+## Materialize, then build
 
-## Authoring workflow
+Materialization creates a managed project from the selected template. Its
+**PROTOCOL.md** and **GUIDE.md** explain the building conventions and
+verification contract. Read those files in the new project; an old guide from
+a different template is not interchangeable.
 
-```bash
-# 1. Scaffold a new template from one of the reference templates.
-papercusp template scaffold @you/my-template --from coding
+The template workflow can start a building agent. If you want only the
+scaffold, make that intent clear before materialization and have the agent
+check the current tool options.
 
-# 2. Edit. Customize prompts in .papercusp/prompts/, set defaults in
-#    .papercusp/config.json, write SPEC.md.template.
+## Verification and sharing
 
-# 3. Iterate locally — install your in-progress template into a test
-#    project and run a mission against it.
-papercusp install ./my-template/ --as test-project
-papercusp dev --watch    # if you want hot-reload while editing prompts
+A template is a starting point, not a finished product. Run the selected
+template's registered checks plus tests for your app's behavior. For hosted
+apps, verify the actual deployed destination before calling it shipped.
 
-# 4. Validate — checks the manifest, ensures every required file exists,
-#    and runs trufflehog/gitleaks on the bundle.
-papercusp template validate
+First-party templates can be bundled with the installation. Marketplace
+availability and template publication depend on the current catalog and
+configuration. Ask the agent to inspect the supported Cupboard publishing
+workflow; do not assume a generic `publish` command exists. Review the files,
+license, secrets and destination before sharing a template.
 
-# 5. Publish.
-papercusp publish
-```
-
-`papercusp publish` does a final secret scan, signs the tarball
-(Ed25519), uploads it to the marketplace, and writes the resulting
-slug+version to a sidecar so `papercusp retract` can roll it back later.
-
-## Submitting to the marketplace
-
-The first publish under `@your-handle/...` triggers GitHub-OAuth: prove
-ownership of the GitHub user, get a service token, future publishes
-under that scope use the token. See the
-[Authors page](https://papercuspai.com/authors) for the full flow.
-
-> *(Screenshot: the GitHub OAuth flow from `papercusp publish`.)*
-
-After publish:
-
-- Listed in the [Templates marketplace](https://papercuspai.com/marketplace).
-- Operators can install yours via the UI's "Install" button.
-- You can `papercusp retract --action deprecate --reason "..."` to flag
-  a version as deprecated; it stays installable but warns on use. Use
-  `withdraw` to refuse new installs entirely, or `yank` to pull a
-  specific version.
-
-## Tips
-
-- **Keep prompts terse**. Long prompts cost more tokens and are harder
-  for agents to follow. Reference the [reference templates](https://github.com/papercupai)
-  for proven shapes.
-- **Use `requires` aggressively**. A template that depends on
-  `@papercupai/cloudflare-pages-hosted` should declare it; users
-  shouldn't have to manually enable plugins after install.
-- **Test against `papercusp doctor`**. If your template needs `ffmpeg`
-  or `gh` or any other binary, declare it in
-  `.papercusp/config.json#requires.binaries` so the operator surfaces a
-  pre-flight warning.
-- **Version conservatively**. Per the [migration story](http://localhost:3055/docs/spec/plugin-migration),
-  a major bump means you've broken existing harnesses on this template.
-  Operators with `^0.1` pinned will refuse to upgrade.
-
-## See also
-
-- [Plugins](/docs/plugins) — for the things templates `requires`.
-- [Harness snapshots](/docs/harness-snapshots) — the difference between
-  *templates* (recipes) and *snapshots* (frozen state).
+For related capabilities, see [Plugins](/docs/plugins) and
+[Workspaces and agents](/docs/workspaces-and-agents).

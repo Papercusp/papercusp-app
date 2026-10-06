@@ -40,6 +40,7 @@ import { RichGrid, type ColumnDef, type FilterableColumn } from '@papercusp/grid
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { AlertTriangle, ArrowLeft, ArrowUpRight, Bot, CheckCircle2, Inbox, MessageCircle, MessagesSquare, Plus, RefreshCw, Radio, Megaphone, Search, Send, SlidersHorizontal, UserRound } from 'lucide-react';
 import { listCountLabel, readListTotal } from '@papercusp/operator-core/lib/sync-resolver/list-meta';
+import { projectChatFailureTranscriptTurn } from '@papercusp/operator-core/lib/chat-model-failure';
 import { Tooltip } from '@/app/harness/Tooltip';
 import {
   useColumnFilters,
@@ -2293,15 +2294,18 @@ function AgentChatsView({
               />
             ) : (
               <ol className="pc-coord__thread pc-advconv__transcript">
-                {(detail.transcript ?? []).map((t, i) => (
-                  <li key={i} className={`pc-advconv__turn pc-advconv__turn--${t.role ?? 'unknown'}`}>
-                    <span className="pc-advconv__postmeta">
-                      <strong>{t.role ?? 'unknown'}</strong>
-                      {t.ts ? <span>{fmtTs(t.ts)}</span> : null}
-                    </span>
-                    <p>{turnText(t.content)}</p>
-                  </li>
-                ))}
+                {(detail.transcript ?? []).map((t, i) => {
+                  const projectedTurn = projectChatFailureTranscriptTurn(t);
+                  return (
+                    <li key={i} className={`pc-advconv__turn pc-advconv__turn--${t.role ?? 'unknown'}`}>
+                      <span className="pc-advconv__postmeta">
+                        <strong>{t.role ?? 'unknown'}</strong>
+                        {t.ts ? <span>{fmtTs(t.ts)}</span> : null}
+                      </span>
+                      <p>{turnText(projectedTurn.content)}</p>
+                    </li>
+                  );
+                })}
               </ol>
             )}
           </article>

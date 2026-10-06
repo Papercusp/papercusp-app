@@ -293,7 +293,7 @@ async function insertRow(row: TestRunRow): Promise<void> {
   const pg = await tryGetPg();
   if (!pg) return;
 
-  const source = resolveTestRunSource();
+  const source = resolveTestRunSource(process.env, row.filePath);
   const runGroupId = process.env.PAPERCUSP_TEST_RUN_GROUP ?? null;
   // P-007: when the dogfood run is harness-scoped (env stamped by the operator),
   // carry harness_slug/workspace_id so its rows stay consistent with the new

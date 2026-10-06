@@ -19,6 +19,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
+import { resolveReleaseRoot } from '../release/release-root';
 
 export interface WorkspaceMapConfig {
   integrationRoot: string;
@@ -62,7 +63,8 @@ export function resolveWorkspaceMapConfig(): WorkspaceMapConfig {
   const parent = path.dirname(integrationRoot);
   return {
     integrationRoot,
-    releaseRoot: process.env.PAPERCUSP_RELEASE_ROOT ?? path.join(parent, 'papercup-release'),
+    // WI-10005161: the one shared release-checkout resolver.
+    releaseRoot: resolveReleaseRoot({ integrationRoot }),
     // Per-root, matching release-config.ts (2026-07-02 cross-lineage race fix):
     // <basename(integrationRoot)>-checkpoint, never a fixed shared name.
     checkpointRoot:

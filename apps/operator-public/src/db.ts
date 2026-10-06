@@ -363,6 +363,16 @@ export interface NewHarnessInput {
   pinned_commit_sha?: string | null;
   pinned_tree_digest?: string | null;
   pinned_at?: number | null;
+  // Worker-computed recipe authority (migration 039 / P-007). Recipe kind only;
+  // null on every other kind. 1 = could not prove the script's effects statically
+  // (the Worker never writes 0 on a failure path).
+  authority_unresolved?: number | null;
+  authority_unresolved_cause?: string | null;
+  // Optional provenance badge (migration 041 / P-010). 'attestation' ONLY when a
+  // Sigstore build attestation from the reusable cupboard-actions workflow was
+  // verified against the Worker's own pin; 'worker' (the default) otherwise.
+  // A label on a row the Worker already pinned and scanned — never a substitute.
+  verified_by?: 'worker' | 'attestation';
   created_at: number;
 }
 
@@ -385,9 +395,11 @@ export async function insertHarness(db: D1Database, h: NewHarnessInput): Promise
           release_version, release_content_hash, release_manifest_digest,
           release_signature, release_manifest, identity_surface, release_published_at,
           pinned_commit_sha, pinned_tree_digest, pinned_at,
+          authority_unresolved, authority_unresolved_cause,
+          verified_by,
           claim_status,
           created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unclaimed', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unclaimed', ?, ?)`,
     )
     .bind(
       h.id,
@@ -438,6 +450,9 @@ export async function insertHarness(db: D1Database, h: NewHarnessInput): Promise
       h.pinned_commit_sha ?? null,
       h.pinned_tree_digest ?? null,
       h.pinned_at ?? null,
+      h.authority_unresolved ?? null,
+      h.authority_unresolved_cause ?? null,
+      h.verified_by ?? 'worker',
       h.created_at,
       h.created_at,
     )
@@ -460,6 +475,166 @@ export async function setReviewStatus(
     )
     .bind(status, now, reason, now, id)
     .run();
+}
+
+/** A version of one (repo, kind, listing_ref) identity (P-008). */
+export interface ListingVersionIdentity {
+  github_repository_id: number;
+  listing_kind: ListingKind;
+  listing_ref: string;
+}
+
+/**
+ * The active approved version of an identity other than `excludeId` — the
+ * baseline an operator's review diff is taken against ("the previously approved
+ * SHA"). Null when nothing is approved yet (the first-ever version) or the only
+ * approved row was taken down.
+ */
+export async function getPreviouslyApprovedVersion(
+  db: D1Database,
+  identity: ListingVersionIdentity,
+  excludeId: string,
+): Promise<HarnessRow | null> {
+  const row = await db
+    .prepare(
+      `SELECT * FROM harnesses
+        WHERE github_repository_id = ? AND listing_kind = ? AND listing_ref = ?
+          AND review_status = 'approved' AND unlisted_at IS NULL AND id != ?
+        ORDER BY COALESCE(approved_at, reviewed_at, created_at) DESC
+        LIMIT 1`,
+    )
+    .bind(identity.github_repository_id, identity.listing_kind, identity.listing_ref, excludeId)
+    .first<HarnessRow>();
+  return row ?? null;
+}
+
+/**
+ * The rows approving `row` makes obsolete: the previously approved version(s) of
+ * the same identity, and any pending version published BEFORE it. A pending
+ * version published AFTER it is a newer candidate and stays in the queue.
+ */
+export async function listVersionsSupersededByApproval(
+  db: D1Database,
+  row: Pick<HarnessRow, 'id' | 'github_repository_id' | 'listing_kind' | 'listing_ref' | 'created_at'>,
+): Promise<HarnessRow[]> {
+  const res = await db
+    .prepare(
+      `SELECT * FROM harnesses
+        WHERE github_repository_id = ? AND listing_kind = ? AND listing_ref = ?
+          AND id != ? AND unlisted_at IS NULL
+          AND (review_status = 'approved' OR (review_status = 'pending' AND created_at <= ?))
+        ORDER BY created_at ASC`,
+    )
+    .bind(row.github_repository_id, row.listing_kind, row.listing_ref, row.id, row.created_at)
+    .all<HarnessRow>();
+  return res.results ?? [];
+}
+
+export interface ApproveListingVersionInput {
+  id: string;
+  reason: string | null;
+  now: number;
+  /** The commit + canonical tree digest the operator reviewed (self-describing
+   *  kinds); null for a kind that carries no pin. When it differs from the row's
+   *  stored pin the row is RE-PINNED to it — `pinned_*` and `approved_*` end up
+   *  equal, so what is served is exactly what was reviewed. */
+  approved: { commitSha: string; treeDigest: string } | null;
+  /** True when `approved` replaces a different stored pin (a drifted row). */
+  repinned: boolean;
+  /** The Worker's authority verdict for the RE-PINNED bytes (recipe kind, P-007). Applied
+   *  only when `repinned`; null leaves the stored verdict untouched. */
+  authority?: { unresolved: boolean; cause: string | null } | null;
+  /** The identity whose older versions this approval retires; null = retire none. */
+  retire: Pick<HarnessRow, 'github_repository_id' | 'listing_kind' | 'listing_ref' | 'created_at'> | null;
+  /** The admin-decision audit row, written in the SAME atomic batch as the approval (WI-10004643).
+   *  D1 has no transaction spanning two separate calls, so a Worker failure between an approve
+   *  `batch` and a following `audit()` left an approval with no audit entry. The insert is guarded
+   *  on the approval having landed, so a lost race records no phantom "approved" decision. */
+  audit?: { kind: string; detail: Record<string, unknown> } | null;
+}
+
+/**
+ * Approve a pending listing AND make it the single served version of its
+ * identity, in ONE atomic batch (P-008 / WI-10004625). The retire statement is
+ * guarded by `EXISTS (the new row is approved)`, so a lost race on the first
+ * statement can never unlist the previously approved row without a successor.
+ */
+export async function approveListingVersion(db: D1Database, input: ApproveListingVersionInput): Promise<void> {
+  const { id, now, approved } = input;
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `UPDATE harnesses
+            SET review_status = 'approved', reviewed_at = ?, review_reason = ?, updated_at = ?,
+                approved_commit_sha = ?, approved_tree_digest = ?, approved_at = ?,
+                drift = 0,
+                pinned_commit_sha = COALESCE(?, pinned_commit_sha),
+                pinned_tree_digest = COALESCE(?, pinned_tree_digest),
+                pinned_at = COALESCE(?, pinned_at),
+                authority_unresolved = COALESCE(?, authority_unresolved),
+                authority_unresolved_cause = CASE WHEN ? = 1 THEN ? ELSE authority_unresolved_cause END
+          WHERE id = ? AND review_status = 'pending' AND unlisted_at IS NULL`,
+      )
+      .bind(
+        now,
+        input.reason,
+        now,
+        approved?.commitSha ?? null,
+        approved?.treeDigest ?? null,
+        approved ? now : null,
+        input.repinned ? (approved?.commitSha ?? null) : null,
+        input.repinned ? (approved?.treeDigest ?? null) : null,
+        input.repinned ? now : null,
+        // P-007: the Worker's verdict for the re-pinned bytes. The cause is replaced (possibly by
+        // NULL = resolved) only when a verdict accompanies the re-pin; otherwise both are kept.
+        input.repinned && input.authority ? (input.authority.unresolved ? 1 : 0) : null,
+        input.repinned && input.authority ? 1 : 0,
+        input.repinned && input.authority ? input.authority.cause : null,
+        id,
+      ),
+  ];
+  if (input.retire) {
+    statements.push(
+      db
+        .prepare(
+          `UPDATE harnesses
+              SET superseded_by = ?, claim_status = 'superseded', unlisted_at = ?,
+                  unlisted_reason = 'superseded_by_approved_version', updated_at = ?
+            WHERE github_repository_id = ? AND listing_kind = ? AND listing_ref = ?
+              AND id != ? AND unlisted_at IS NULL
+              AND (review_status = 'approved' OR (review_status = 'pending' AND created_at <= ?))
+              AND EXISTS (SELECT 1 FROM harnesses n
+                           WHERE n.id = ? AND n.review_status = 'approved' AND n.unlisted_at IS NULL)`,
+        )
+        .bind(
+          id,
+          now,
+          now,
+          input.retire.github_repository_id,
+          input.retire.listing_kind,
+          input.retire.listing_ref,
+          id,
+          input.retire.created_at,
+          id,
+        ),
+    );
+  }
+  if (input.audit) {
+    // Same batch = same transaction: the approval and its audit row commit or roll back together.
+    // Guarded on THIS approval having landed (reviewed_at = now on an approved row), so a lost
+    // race on the approve UPDATE records no phantom "approved" decision.
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO audit (ts, kind, detail)
+           SELECT ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM harnesses a
+                           WHERE a.id = ? AND a.review_status = 'approved' AND a.reviewed_at = ?)`,
+        )
+        .bind(now, input.audit.kind, JSON.stringify(input.audit.detail), id, now),
+    );
+  }
+  await db.batch(statements);
 }
 
 /** The operator's pending-review queue, oldest first. */
@@ -530,6 +705,46 @@ export async function getHarnessesByGithubRepoIds(
   );
   const res = await bound.all<HarnessRow>();
   return res.results ?? [];
+}
+
+/**
+ * Every ACTIVE (not unlisted) listing of the given kinds that a GitHub repo
+ * holds (cupboard-release-pipeline-content-trust-2026-09-16 P-006). A repo can
+ * host several — one per `(listing_kind, listing_ref)` — so the push webhook
+ * walks all of them. The caller passes the kinds (the self-describing set from
+ * `content-pin.ts`) rather than this module importing it, which would close an
+ * import cycle (`content-pin.ts` already imports types from here).
+ */
+export async function listActiveListingsByGithubRepoId(
+  db: D1Database,
+  github_repository_id: number,
+  kinds: readonly ListingKind[],
+): Promise<HarnessRow[]> {
+  if (kinds.length === 0) return [];
+  const placeholders = kinds.map(() => '?').join(',');
+  const stmt = db.prepare(
+    `SELECT * FROM harnesses
+       WHERE github_repository_id = ? AND unlisted_at IS NULL
+         AND listing_kind IN (${placeholders})
+       ORDER BY listing_kind ASC, listing_ref ASC`,
+  );
+  const bound = (stmt as unknown as { bind: (...vs: unknown[]) => D1PreparedStatement }).bind(
+    github_repository_id,
+    ...kinds,
+  );
+  const res = await bound.all<HarnessRow>();
+  return res.results ?? [];
+}
+
+/**
+ * Record whether a listing's repo head has moved past the commit review pinned.
+ * This is the ONLY listing write the GitHub push webhook performs, and it
+ * deliberately touches `drift` alone: the `pinned_*` columns are the reviewed
+ * identity and move only through the admin approve path (P-008), so a push can
+ * flag a newer unverified version but can never advance what install serves.
+ */
+export async function setListingDrift(db: D1Database, id: string, drift: boolean): Promise<void> {
+  await db.prepare('UPDATE harnesses SET drift = ? WHERE id = ?').bind(drift ? 1 : 0, id).run();
 }
 
 export interface ListOpts {

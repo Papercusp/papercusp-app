@@ -46,6 +46,7 @@
  * call retries.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { CanonicalVectorStore } from './canonical-store';
 import type { ManagedMemoryWrites } from './backend';
 import { memoryHost, memoryLocalStoreDir, memorySchema } from './config';
@@ -71,6 +72,22 @@ let _llmFactoryPatched = false;
 let _currentEmbedFn: ((text: string, signal?: AbortSignal) => Promise<number[]>) | null = null;
 let _currentEmbeddingProfile: EmbedderProfileSpec | null = null;
 const embeddedQueryProfiles = new WeakMap<number[], EmbedderProfileSpec>();
+// mem0's query and entity-boost embed methods have no signal argument. Keep
+// the caller lifetime on this existing adapter seam, isolated per search,
+// rather than changing ranking or bypassing mem0's entity boost.
+const memoryClientSignal = new AsyncLocalStorage<AbortSignal>();
+export function withMemoryClientSignal<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  signal?.throwIfAborted();
+  return signal ? memoryClientSignal.run(signal, run) : run();
+}
+
+async function embedForMemoryClient(text: string): Promise<number[]> {
+  const signal = memoryClientSignal.getStore();
+  signal?.throwIfAborted();
+  const vector = await (signal ? _currentEmbedFn!(text, signal) : _currentEmbedFn!(text));
+  signal?.throwIfAborted();
+  return vector;
+}
 /**
  * Register CanonicalVectorStore as a `'canonical'` provider on mem0's
  * VectorStoreFactory. mem0's OSS factory uses a hard-coded switch with
@@ -275,8 +292,8 @@ export function patchEmbedderFactory(mem0Module: {
   Factory.create = (provider: string, config: Record<string, unknown>) => {
     if (provider === 'custom') {
       return {
-        embed: (text: string) => _currentEmbedFn!(text),
-        embedBatch: (texts: string[]) => Promise.all(texts.map((t) => _currentEmbedFn!(t))),
+        embed: embedForMemoryClient,
+        embedBatch: (texts: string[]) => Promise.all(texts.map(embedForMemoryClient)),
       };
     }
     return orig(provider, config);
@@ -690,21 +707,20 @@ async function buildClient(): Promise<MemoryClient | null> {
     config: { embed: coalescedEmbed, embeddingDims: resolved.dims },
   };
 
-  // mem0 tracks add/update/delete event history in SQLite. Default is
-  // `:memory:` (lost on restart). When the host provides a `localStoreDir`
-  // (default the OS tmpdir; the operator passes ~/.papercusp), persist
-  // there so the event log survives restarts. `localStoreDir: null`
-  // forces the in-memory history.
+  // mem0 tracks add/update/delete event history (and the recent messages it
+  // feeds back into extraction) in SQLite through better-sqlite3, which runs
+  // every write synchronously on this thread. In memory (`:memory:`, the
+  // default) a write costs microseconds and touches no file lock. A
+  // persisted file is used only when the host names a directory; see
+  // `MemoryHost.localStoreDir` for why that is opt-in (WI-10003284).
   let historyDbPath = ':memory:';
   const localStoreDir = memoryLocalStoreDir();
   if (localStoreDir !== null) {
     try {
-      const os = await import('node:os');
       const path = await import('node:path');
       const fs = await import('node:fs/promises');
-      const dir = localStoreDir ?? os.tmpdir();
-      await fs.mkdir(dir, { recursive: true });
-      historyDbPath = path.join(dir, 'mem0-history.db');
+      await fs.mkdir(localStoreDir, { recursive: true });
+      historyDbPath = path.join(localStoreDir, 'mem0-history.db');
     } catch {
       /* fall back to in-memory if we can't write */
     }

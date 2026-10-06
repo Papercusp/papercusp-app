@@ -234,19 +234,30 @@ export function createMcpOAuthRoutes(deps: McpOAuthRouteDependencies): ReadonlyA
           expiresAt: new Date(now.getTime() + OAUTH_REQUEST_TTL_MS),
         });
         if (!created) continue;
-        return consentPage(req, client, userCode, requestedScopes, handle);
+        return consentPage(req, client, userCode, requestedScopes, handle, redirectUri);
       }
       return fail('temporarily_unavailable', 'could not open an authorization request');
     },
   });
 
-  function consentPage(req: Request, client: OAuthClient, userCode: string, scopes: AppKeyScopes, handle: string): Response {
+  function consentPage(
+    req: Request,
+    client: OAuthClient,
+    userCode: string,
+    scopes: AppKeyScopes,
+    handle: string,
+    redirectUri: string,
+  ): Response {
     const name = escapeHtml(client.clientName);
     if (deps.isLocal(req)) {
+      // The form's answer goes decision → /oauth/continue → redirectUri; the page must admit that
+      // last hop or the browser stays here and the client never gets its code (WI-10004470).
       return htmlPage(
         `Allow ${client.clientName} to use a workspace?`,
         `<p><b>${name}</b> wants to connect to a Papercusp workspace on this computer.</p>
 ${consentFormHtml({ userCode, scopes, workspaces: deps.listWorkspaces(), hidden: { oauth_handle: handle } })}`,
+        200,
+        [redirectUri],
       );
     }
     // A browser elsewhere cannot be trusted to speak for the owner: the owner approves on the

@@ -49,6 +49,71 @@ const num = (v: string | number | null | undefined): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
+export interface HarnessPipelineSpend {
+  /** Priced subtotal; a lower bound when complete is false. */
+  knownUsd: number;
+  providerUsd: number;
+  estimatedUsd: number;
+  complete: boolean;
+  measured: boolean;
+  /** This census covers retained output/usage rows, not unrecorded invocations. */
+  coverageBasis: 'retained-run-output-and-usage-samples';
+  missingRunIds: string[];
+  samples: Array<{ runId: string | null; sampleId: string; costUsd: number | null;
+    costSource: string | null; provenance: unknown }>;
+}
+
+/** Native pipeline accounting uses the attributed usage ledger, never the FS mirror.
+ * Keep the UI's empty-state projection separate from this evidence-bearing read. */
+export async function loadHarnessPipelineSpend(
+  opts: Pick<LoadHarnessSpendOpts, 'workspace_id' | 'harness_slug' | 'runQuery'>,
+): Promise<HarnessPipelineSpend> {
+  const rows = await opts.runQuery<{ run_id: string | null; archived: boolean;
+    sample_id: string | number | null; cost_usd: string | number | null;
+    cost_source: string | null; usage_provenance: unknown }>(
+    `WITH runs AS (
+       SELECT run_id FROM harness_shared.harness_run_output
+        WHERE workspace_id = $1 AND harness_slug = $2
+     ), samples AS (
+       SELECT id, run_id, cost_usd, cost_source, usage_provenance
+         FROM harness_shared.agent_usage_samples
+        WHERE workspace_id = $1 AND harness_slug = $2 AND source = 'jsonl'
+     )
+     SELECT COALESCE(r.run_id, s.run_id) AS run_id, r.run_id IS NOT NULL AS archived,
+            s.id AS sample_id, s.cost_usd, s.cost_source, s.usage_provenance
+       FROM runs r FULL JOIN samples s ON s.run_id = r.run_id
+      ORDER BY COALESCE(r.run_id, s.run_id), s.id`,
+    [opts.workspace_id, opts.harness_slug],
+  );
+  const out: HarnessPipelineSpend = { knownUsd: 0, providerUsd: 0, estimatedUsd: 0,
+    complete: rows.length > 0, measured: rows.length > 0,
+    coverageBasis: 'retained-run-output-and-usage-samples', missingRunIds: [], samples: [] };
+  const missing = new Set<string>();
+  for (const row of rows) {
+    const cost = row.cost_usd == null ? null : Number(row.cost_usd);
+    const priced = cost !== null && Number.isFinite(cost) && cost >= 0
+      && (row.cost_source === 'provider' || row.cost_source === 'estimated');
+    if (!row.archived || row.sample_id == null || !priced) {
+      out.complete = false;
+      if (row.run_id) missing.add(row.run_id);
+    }
+    if (row.sample_id != null) {
+      out.samples.push({ runId: row.run_id, sampleId: String(row.sample_id),
+        costUsd: priced ? cost : null, costSource: row.cost_source,
+        provenance: row.usage_provenance });
+      if (priced) {
+        out.knownUsd += cost!;
+        if (row.cost_source === 'provider') out.providerUsd += cost!;
+        else out.estimatedUsd += cost!;
+      }
+    }
+    if (!priced || row.cost_source !== 'provider') out.measured = false;
+  }
+  out.measured = out.measured && out.complete;
+  out.missingRunIds = [...missing];
+  return out;
+}
+
 export async function loadHarnessSpend(
   opts: LoadHarnessSpendOpts,
 ): Promise<SpendCardProps> {

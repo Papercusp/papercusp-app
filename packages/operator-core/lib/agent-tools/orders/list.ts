@@ -24,12 +24,12 @@ import { resolveAgentIdentity } from '../coordination/identity';
 export default defineTool({
   name: 'orders:list',
   profile: 'engineer',
-  description: `List recorded owner directives for this workspace — open (the ones still owed) with { open: true }, closed with { open: false }, all when omitted. Directives ≤ ${OWNER_DIRECTIVE_VERBATIM_CAP} chars come back verbatim; longer ones as their agent summary + an orders:get pointer.`,
+  description: `List recorded owner directives for this workspace — open (the ones still owed) with { open: true }, closed with { open: false }, and only this session's rows with { mine: true } (or other sessions' rows with { mine: false }). Omit mine for the full ledger. Directives ≤ ${OWNER_DIRECTIVE_VERBATIM_CAP} chars come back verbatim; longer ones as their agent summary + an orders:get pointer.`,
   guidance: {
     when:
       'Orienting on what the workspace still OWES the owner, before loop:end / wind-down, or auditing how past directives were closed. Use { state } to separate done from declined.',
     notWhen:
-      'Finding YOUR directive: use the id your turn gave you, or `mine`/`yours` — never a text match (the same text is often open in other sessions). Full verbatim by id: orders:get. Filter state with { state }, not client-side (`limit` cuts first).',
+      'Finding YOUR directive: use { mine: true } or the `yours` id list; never a text match (the same text is often open in other sessions). Full verbatim by id: orders:get. Filter state with { state }, not client-side (`limit` cuts first).',
     seeAlso: ['orders:get', 'orders:record', 'orders:disposition'],
   },
   capability: 'coord:read',
@@ -44,16 +44,14 @@ export default defineTool({
       ])
       .optional()
       .describe('Exact lifecycle state(s): open | done | declined. Applied in SQL before `limit`.'),
-    limit: z.number().int().min(1).max(200).optional().describe('Max rows (default 50).'),
+    mine: z
+      .boolean()
+      .optional()
+      .describe('true = only directives recorded by this session; false = only other sessions; omit = the full ledger. Applied in SQL before `limit`.'),
+    limit: z.number().int().min(1).max(200).optional().describe('Max rows: integer 1–200 (default 50).'),
   }),
   async handler(args, ctx) {
     const workspaceId = ctx.workspaceId ?? ctx.principal?.workspaceId ?? activeWorkspaceId() ?? 'default';
-    const rows = await listOwnerDirectives({
-      workspaceId,
-      open: args.open,
-      state: args.state as Parameters<typeof listOwnerDirectives>[0]['state'],
-      limit: args.limit,
-    });
     // This is the LEDGER, so it deliberately does NOT apply `viewerOwnerId`:
     // the rows you cleared off your own banner must stay findable here, or
     // `clear` becomes an untraceable disappearance rather than a per-session
@@ -67,6 +65,17 @@ export default defineTool({
     } catch {
       /* unattributable caller — no agenda to annotate against */
     }
+    if (args.mine !== undefined && !me) {
+      throw new Error('orders:list cannot filter by mine without a resolved session ownerId.');
+    }
+    const rows = await listOwnerDirectives({
+      workspaceId,
+      open: args.open,
+      state: args.state as Parameters<typeof listOwnerDirectives>[0]['state'],
+      ...(args.mine === true && me ? { recordedBy: me } : {}),
+      ...(args.mine === false && me ? { excludeRecordedBy: me } : {}),
+      limit: args.limit,
+    });
     // directive-ownership-clarity-2026-09-23 P-003 / D-001: every row says whose it
     // is, your own rows come first, and `byAddressee` groups the rest under their
     // session. On 2026-09-23 an agent regex-filtered this list by text and closed

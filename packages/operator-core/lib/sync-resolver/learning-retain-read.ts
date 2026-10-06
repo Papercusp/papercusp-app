@@ -137,7 +137,7 @@ export async function readRetainExtras(
       SELECT count(*)::int AS n
         FROM harness_shared.harness_plans hp
        WHERE hp.workspace_id = ${workspaceId}
-         AND hp.created > now() - interval '7 days'
+         AND hp.created_at > now() - interval '7 days'
          AND ${opts.memberSlugs ? sql`hp.harness_slug = ANY(${opts.memberSlugs as string[]}::text[])` : sql`TRUE`}
     `) as Array<{ n: number }>;
     plansDrafted7d = Number(rows[0]?.n ?? 0);

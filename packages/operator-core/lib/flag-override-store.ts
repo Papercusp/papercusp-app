@@ -113,11 +113,20 @@ export function installFlagOverrideStore(): void {
       return globalOverrides ?? workspaceOverrides ?? {};
     },
     async set(key, enabled) {
+      const globalRow = await readOperatorState<Partial<Record<FlagKey, boolean>>>(
+        FLAG_OVERRIDES_STATE_KEY,
+        GLOBAL_FLAG_OVERRIDES_WORKSPACE_ID,
+      );
+      // WI-10005101: the FIRST global write IS the cutover — creating the '@global' row
+      // makes load() ignore every legacy workspace row from then on. Seed it from the
+      // active workspace's legacy row so the cutover carries those overrides forward
+      // instead of silently reverting them to code defaults. Measured 2026-10-01: a single
+      // flags:set at 2026-09-30 00:15Z dropped 12 owner-set overrides; 4 flipped ON→OFF
+      // (WATCHDOG_AUTO_CLOSE among them, so no watchdog item auto-closed for ~2 days).
+      // Only the absent-row case seeds — once '@global' exists, legacy rows stay unread.
       const current =
-        (await readOperatorState<Partial<Record<FlagKey, boolean>>>(
-          FLAG_OVERRIDES_STATE_KEY,
-          GLOBAL_FLAG_OVERRIDES_WORKSPACE_ID,
-        )) ?? {};
+        globalRow ??
+        { ...((await readOperatorState<Partial<Record<FlagKey, boolean>>>(FLAG_OVERRIDES_STATE_KEY)) ?? {}) };
       if (enabled === null) delete current[key];
       else current[key] = enabled;
       await writeOperatorState(

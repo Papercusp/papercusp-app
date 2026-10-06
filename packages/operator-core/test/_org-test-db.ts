@@ -56,6 +56,8 @@ import {
   PG_TIMESTAMP_NO_TZ_AS_UTC_TYPES,
   restoreRawDateSerializers,
   restoreRawJsonbSerializer,
+  seedBuiltinArrayTypes,
+  installNumericArrayTyping,
 } from '../../../libs/papercusp/libs/db/src/raw-serializers';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -115,14 +117,18 @@ const clientOpts = {
   types: { ...PG_BIGINT_AS_NUMBER_TYPES, ...PG_TIMESTAMP_NO_TZ_AS_UTC_TYPES },
 };
 
-/** Apply the same hybrid Date/jsonb serializer restoration `buildClient` (in
- *  the canonical `@papercusp/db-org` connection layer) installs on every
- *  production client — see `raw-serializers.ts`'s docs. Without this, a raw
- *  `sql` write of a Date or jsonb column through THIS fixture's clients binds
- *  parameters differently than production does (EI-18698602043482898). */
+/** Apply every client fix `buildClient` (in the canonical `@papercusp/db-org`
+ *  connection layer) installs on a production client — see `raw-serializers.ts`'s
+ *  docs. Without these, THIS fixture's clients bind parameters differently than
+ *  production does: a raw Date or jsonb write (EI-18698602043482898), or a
+ *  `sql.array(...)` on a cold pool, sent as `text` instead of `text[]`/`bigint[]`
+ *  (WI-10004177). lib/__tests__/org-test-db-client-fixes-parity.test.ts fails if
+ *  buildClient gains a fix this function does not apply. */
 function applyRawSerializerFixes(client: postgres.Sql): postgres.Sql {
   restoreRawDateSerializers(client);
   restoreRawJsonbSerializer(client);
+  seedBuiltinArrayTypes(client);
+  installNumericArrayTyping(client);
   return client;
 }
 

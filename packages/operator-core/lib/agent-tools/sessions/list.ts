@@ -128,14 +128,31 @@ async function readHistoricalCensus(
              source_kind,
              harness_slug,
              cwd,
-             COALESCE(ts, ingested_at) AS event_at,
+             ts AS event_at,
              'session_turns'::text AS event_source
         FROM harness_shared.session_turns
        WHERE (workspace_id = ${options.workspaceId} OR workspace_id = 'default')
          AND owner IS NOT NULL
          AND session_id IS NOT NULL
-         AND COALESCE(ts, ingested_at) >= ${options.since}::timestamptz
-         AND COALESCE(ts, ingested_at) < ${options.until}::timestamptz
+         AND ts >= ${options.since}::timestamptz
+         AND ts < ${options.until}::timestamptz
+      UNION ALL
+      -- Keep the fallback timestamp disjoint from the indexed ts range above:
+      -- wrapping both columns in COALESCE forced a full scan for bounded history.
+      SELECT owner AS owner_id,
+             session_id,
+             source_kind,
+             harness_slug,
+             cwd,
+             ingested_at AS event_at,
+             'session_turns'::text AS event_source
+        FROM harness_shared.session_turns
+       WHERE (workspace_id = ${options.workspaceId} OR workspace_id = 'default')
+         AND owner IS NOT NULL
+         AND session_id IS NOT NULL
+         AND ts IS NULL
+         AND ingested_at >= ${options.since}::timestamptz
+         AND ingested_at < ${options.until}::timestamptz
       UNION ALL
       SELECT owner_id,
              session_id,
@@ -163,25 +180,48 @@ async function readHistoricalCensus(
          AND invoked_at >= ${options.since}::timestamptz
          AND invoked_at < ${options.until}::timestamptz
     ),
-    enriched_events AS (
-      SELECT e.*,
+    -- Each source event can repeat the same owner/session key many times.
+    -- Resolve the immutable session evidence once per distinct key, then join
+    -- it back to the event stream. Keeping this CTE materialized prevents the
+    -- planner from pulling the lateral lookup back below the deduplication.
+    session_map AS MATERIALIZED (
+      SELECT k.owner_id,
+             k.session_id AS raw_session_id,
              a.session_id AS adv_session_id,
              a.agent AS adv_agent,
              a.first_seen_at AS adv_first_seen_at,
              a.launch_spec AS adv_launch_spec,
              a.harness_slug AS adv_harness_slug,
              a.cwd AS adv_cwd
-        FROM raw_events e
+        FROM (
+          SELECT DISTINCT owner_id, session_id
+            FROM raw_events
+        ) k
         LEFT JOIN LATERAL (
-          SELECT session_id, agent, first_seen_at, launch_spec, harness_slug, cwd
+          SELECT session_id, agent, first_seen_at, launch_spec,
+                 launch_spec->>'harnessSlug' AS harness_slug,
+                 cwd
             FROM harness_shared.adv_sessions
-           WHERE coord_owner_id = e.owner_id
-             AND (e.session_id IS NULL OR session_id = e.session_id)
-           ORDER BY CASE WHEN e.session_id IS NOT NULL AND session_id = e.session_id THEN 0 ELSE 1 END,
+           WHERE coord_owner_id = k.owner_id
+             AND (k.session_id IS NULL OR session_id = k.session_id)
+           ORDER BY CASE WHEN k.session_id IS NOT NULL AND session_id = k.session_id THEN 0 ELSE 1 END,
                     first_seen_at ASC NULLS LAST,
                     id ASC
            LIMIT 1
         ) a ON true
+    ),
+    enriched_events AS (
+      SELECT e.*,
+             a.adv_session_id,
+             a.adv_agent,
+             a.adv_first_seen_at,
+             a.adv_launch_spec,
+             a.adv_harness_slug,
+             a.adv_cwd
+        FROM raw_events e
+        LEFT JOIN session_map a
+          ON a.owner_id = e.owner_id
+         AND a.raw_session_id IS NOT DISTINCT FROM e.session_id
     ),
     event_groups AS (
       SELECT owner_id AS owner,

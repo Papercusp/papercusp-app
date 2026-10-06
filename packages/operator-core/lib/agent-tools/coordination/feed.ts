@@ -234,8 +234,8 @@ export async function readCoordFeed(
 
   // Union every surface. Tag each envelope with its origin surface.
   const tagged: CoordFeedRow[] = [];
-  // Push kinds/since_ts/plan_slug down to the store where the bounded methods
-  // support it — fewer rows fetched+held in memory, not just a bounded count.
+  // Push filters down to the store where the bounded methods support them —
+  // fewer rows fetched+held in memory, not just a bounded count.
   const kindsForPushdown = opts.kinds && opts.kinds.length > 0 ? opts.kinds : undefined;
 
   // Per-surface id-cursor state (WI-3880) — undefined cursor = read the
@@ -246,6 +246,8 @@ export async function readCoordFeed(
   const eventState = new Map<(typeof EVENT_SURFACES)[number], CursorSurfaceState>(
     EVENT_SURFACES.map((s) => [s, { cursor: undefined, exhausted: false }]),
   );
+  const allSurfacesExhausted = (): boolean =>
+    [...lineState.values(), ...eventState.values()].every((surface) => surface.exhausted);
 
   // Filter predicate — extracted so the deepening loop below can cheaply
   // check "do we have enough yet?" without duplicating the filter logic.
@@ -292,6 +294,7 @@ export async function readCoordFeed(
         ...(kindsForPushdown ? { kinds: kindsForPushdown } : {}),
         ...(opts.since_ts ? { sinceTs: opts.since_ts } : {}),
         ...(opts.plan_slug ? { planSlug: opts.plan_slug } : {}),
+        ...(opts.before_ts ? { beforeTs: opts.before_ts, beforeMsgId: opts.before_msg_id } : {}),
         ...(st.cursor !== undefined ? { beforeId: st.cursor } : {}),
       });
       for (const row of page.rows) {
@@ -306,6 +309,7 @@ export async function readCoordFeed(
       const page = await coordLog.readEventsBoundedCursor(surface, {
         limit: RAW_SURFACE_FETCH_CAP,
         ...(kindsForPushdown ? { kinds: kindsForPushdown } : {}),
+        ...(opts.before_ts ? { beforeTs: opts.before_ts, beforeMsgId: opts.before_msg_id } : {}),
         ...(st.cursor !== undefined ? { beforeId: st.cursor } : {}),
       });
       for (const row of page.rows) {
@@ -325,9 +329,7 @@ export async function readCoordFeed(
   // still short of `limit` AND at least one surface has more history, capped
   // at MAX_CURSOR_ROUNDS so a query with no realistic match still terminates.
   if (opts.before_ts) {
-    const allExhausted = () =>
-      [...lineState.values(), ...eventState.values()].every((s) => s.exhausted);
-    for (let round = 1; round < MAX_CURSOR_ROUNDS && !allExhausted(); round += 1) {
+    for (let round = 1; round < MAX_CURSOR_ROUNDS && !allSurfacesExhausted(); round += 1) {
       const filteredSoFar = tagged.filter(passesFilter).length;
       if (filteredSoFar >= limit) break;
       await fetchRound();
@@ -371,8 +373,14 @@ export async function readCoordFeed(
   }
   const hasMore = visible.length > page.length;
   const oldestPageRow = page[page.length - 1];
-  const nextCursor = hasMore ? (oldestPageRow?.ts ?? null) : null;
-  const nextCursorMsgId = hasMore ? (oldestPageRow?.msg_id ?? null) : null;
+  // A bounded before_ts scan may stop at MAX_CURSOR_ROUNDS while one or more
+  // raw surfaces still have older rows. If this page has a visible row, its
+  // timestamp tuple is a safe public anchor for continuing that scan even when
+  // the filtered result is shorter than `limit`.
+  const rawHistoryMayRemain = Boolean(opts.before_ts) && !allSurfacesExhausted();
+  const hasContinuation = hasMore || (page.length > 0 && rawHistoryMayRemain);
+  const nextCursor = hasContinuation ? (oldestPageRow?.ts ?? null) : null;
+  const nextCursorMsgId = hasContinuation ? (oldestPageRow?.msg_id ?? null) : null;
 
   // P-004 follow-up: annotate superseded messages. Migration 732 records the
   // marker and coord:supersede writes it, but nothing on the READ side surfaced

@@ -262,6 +262,8 @@ const num = (v: number | null, digits = 3): string => (v === null ? 'n/a' : v.to
 
 export function renderDocContradictionReport(input: {
   readonly generatedAt: string;
+  /** The Jev wording measured (plan jev-performance-improvements-2026-09-30, D-007); omitted on older runs. */
+  readonly wording?: string;
   readonly calls: DocContradictionCalls;
   readonly metrics: DocContradictionMetrics;
   readonly verdict: ReturnType<typeof evaluateD017>;
@@ -271,6 +273,7 @@ export function renderDocContradictionReport(input: {
   const lines: string[] = [
     `# Jev doc-contradiction judge vs incumbent (D-017) — ${input.generatedAt}`,
     '',
+    ...(input.wording ? [`Jev wording: ${input.wording}.`, ''] : []),
     `Pairs: ${m.pairs}. Jev models: ${calls.jevModels.join(', ') || 'none'}; incumbent: ${calls.incumbentModel}.`,
     `Jev calls ${calls.jevCalls}, inconclusive ${calls.jevInconclusive} ${JSON.stringify(calls.jevInconclusiveReasons)}. Incumbent calls ${calls.incumbentCalls}, errors ${calls.incumbentErrors}.`,
     '',

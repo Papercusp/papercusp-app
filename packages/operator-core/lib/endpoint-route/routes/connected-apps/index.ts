@@ -42,6 +42,7 @@ import {
   type RotatedAppKey,
 } from '../../../connected-apps/store';
 import { RotationOverlapError, SpendCapError } from '../../../connected-apps/service-keys';
+import { consentPageCsp } from '../../../connected-apps/consent-csp';
 import { PostgresDeviceGrantStore, type DeviceGrantStore } from '../../../connected-apps/device-grants';
 import { DEFAULT_CLIENT_LABEL, normalizeUserCode, sanitizeClientLabel } from '../hosted-cli';
 
@@ -160,7 +161,12 @@ export function grantedScopeRequestOf(fields: Record<string, unknown>): AppKeySc
   return any ? out : {};
 }
 
-export function htmlPage(title: string, body: string, status = 200): Response {
+/**
+ * `redirectTargets`: where a form on this page can end up. An OAuth consent form's answer
+ * redirects (via /oauth/continue) to the client's registered redirect_uri, and the browser
+ * enforces form-action on every hop of that chain (WI-10004470), so the page must admit it.
+ */
+export function htmlPage(title: string, body: string, status = 200, redirectTargets: readonly string[] = []): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(title)} · Papercusp</title><style>:root{color-scheme:light dark;font-family:system-ui,sans-serif}
 body{margin:0;min-height:100vh;display:grid;place-items:center}main{max-width:30rem;padding:2rem}
@@ -173,7 +179,7 @@ button,input,select{font:inherit;padding:.45rem .9rem;border-radius:8px}</style>
       'content-type': 'text/html; charset=utf-8',
       ...noStore,
       'x-frame-options': 'DENY',
-      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      'content-security-policy': consentPageCsp(redirectTargets, ["base-uri 'none'"]),
       'referrer-policy': 'same-origin',
     },
   });

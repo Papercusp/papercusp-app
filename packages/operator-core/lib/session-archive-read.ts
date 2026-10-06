@@ -19,10 +19,14 @@ import {
   parseClaudeLine,
   parseCodexLine,
   parseOmpLine,
+  type TurnTextParseOptions,
 } from './search/session-ingest';
 import {
-  decompressArchiveBlob,
+  decompressArchiveBlobBounded,
   pgSessionArchiveStore,
+  SESSION_ARCHIVE_MAX_FILES,
+  SESSION_ARCHIVE_MAX_TOTAL_RAW_BYTES,
+  sha256Hex,
   type ArchiveSourceKind,
   type SessionArchiveStore,
 } from './session-archive';
@@ -41,19 +45,29 @@ export interface ArchivedFileError {
   error: string;
 }
 
-const PARSERS: Record<ArchiveSourceKind, (line: string) => { speaker: string; text: string; ts?: Date | null } | null> = {
+const PARSERS: Record<
+  ArchiveSourceKind,
+  (line: string, options?: TurnTextParseOptions) => { speaker: string; text: string; ts?: Date | null } | null
+> = {
   claude: parseClaudeLine,
   omp: parseOmpLine,
   codex: parseCodexLine,
 };
 
-/** Turns of one archived session, index-equivalent (capped + redacted).
+export interface ReadArchivedSessionTurnsOptions extends TurnTextParseOptions {
+  /** Retain only these parsed turn indexes while scanning the archive. */
+  turnIndices?: readonly number[];
+}
+
+/** Turns of one archived session, index-equivalent by default (capped + redacted).
  *  Returns null when the session has no archive under any (or the given)
- *  source kind. */
+ *  source kind. `fullSource` removes only the per-turn index cap; redaction
+ *  and the parser's normal turn filtering still apply. */
 export async function readArchivedSessionTurns(
   sessionId: string,
   sourceKind?: ArchiveSourceKind,
   store: SessionArchiveStore = pgSessionArchiveStore(),
+  options: ReadArchivedSessionTurnsOptions = {},
 ): Promise<{
   sourceKind: ArchiveSourceKind;
   owner: string | null;
@@ -69,23 +83,42 @@ export async function readArchivedSessionTurns(
       .sort((a, b) => (a.relpath < b.relpath ? -1 : 1));
     const turns: ArchivedTurn[] = [];
     const errors: ArchivedFileError[] = [];
+    const totalRawBytes = rows.reduce((total, row) => total + row.bytes_raw, 0);
+    if (
+      rows.length > SESSION_ARCHIVE_MAX_FILES ||
+      rows.some((row) => !Number.isSafeInteger(row.bytes_raw) || row.bytes_raw < 0) ||
+      !Number.isSafeInteger(totalRawBytes) ||
+      totalRawBytes > SESSION_ARCHIVE_MAX_TOTAL_RAW_BYTES
+    ) {
+      return {
+        sourceKind: kind,
+        owner: stamp.owner,
+        turns,
+        errors: [{ path: '(archive)', error: 'archive exceeds the admitted file or raw-byte limit' }],
+      };
+    }
+    const wantedTurnIndices = options.turnIndices ? new Set(options.turnIndices) : null;
+    let turnIndex = 0;
     for (const row of rows) {
       try {
-        const raw = await decompressArchiveBlob(row);
+        const raw = await decompressArchiveBlobBounded(row, SESSION_ARCHIVE_MAX_TOTAL_RAW_BYTES);
+        if (sha256Hex(raw) !== row.sha256) throw new Error('archive sha256 mismatch');
         for (const line of raw.toString('utf8').split('\n')) {
           if (!line.trim()) continue;
           let parsed: ReturnType<(typeof PARSERS)['claude']> = null;
           try {
-            parsed = PARSERS[kind](line);
+            parsed = PARSERS[kind](line, options);
           } catch {
             continue; // one malformed line never kills the read
           }
           if (!parsed) continue;
-          const text = cleanTurnText(parsed.text);
+          const currentTurnIndex = turnIndex++;
+          if (wantedTurnIndices && !wantedTurnIndices.has(currentTurnIndex)) continue;
+          const text = cleanTurnText(parsed.text, options);
           if (!text) continue;
           turns.push({
             source_kind: kind,
-            turn_idx: turns.length,
+            turn_idx: currentTurnIndex,
             speaker: parsed.speaker,
             owner: stamp.owner,
             ts: parsed.ts ? parsed.ts.toISOString() : null,

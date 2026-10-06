@@ -193,19 +193,37 @@ export const GCP_IMAGE_SCAN_POLICY: ImageScanPolicy = Object.freeze({
   // Attached HERE and not on the baseline for the same reason `evaluatedScope` is passed
   // explicitly: allowances are statements about one concrete bundle, measured against one
   // concrete scanner. A provider that inherited them by default would be excusing findings in
-  // content nobody examined. AWS and Azure carry none until their bundles are triaged.
+  // content nobody examined. AWS carries them since its bundle was triaged (WI-10006421);
+  // Azure carries none until its bundle is.
   secretAllowances: WORKSPACE_HOST_SECRET_ALLOWANCES,
 });
 
 /**
  * AWS AMI scanners emit the coverage pair and must prove it at the release gate.
- * `'all'` until an AWS scanner emits the attribution maps: a scoped policy against a
- * non-attributing scanner denies (correctly, fail-closed), so this is a statement of
- * where AWS actually is, not a concession.
+ *
+ * Scoped like GCP since WI-10006421: papercusp-aws-ami-scan now emits the same four
+ * attribution maps plus the bundled secret list (aws-ami-scan-measure.mjs), with the same
+ * bundle-path boundary, so D-204's ruling applies to it unchanged. Measured on the first
+ * bootc candidate to reach the gate (A-r62b, 2026-10-06): 1066 of 1073 at/above-high
+ * findings were CentOS Stream 10 base packages (840 of them kernel CVEs with no fix
+ * published), and zero were in the bundle. Judging the whole distribution was
+ * unsatisfiable by construction, exactly as D-201 found for GCP. Thresholds are untouched.
+ *
+ * The allowances are the same committed list as GCP's because the subject is the same
+ * release bundle scanned by the same pinned gitleaks with the same rules; the AWS bundle's
+ * findings were triaged one by one before they were added (image-scan-secret-allowances.ts).
  */
-export const AWS_IMAGE_SCAN_POLICY: ImageScanPolicy = providerImageScanPolicy('all');
+export const AWS_IMAGE_SCAN_POLICY: ImageScanPolicy = Object.freeze({
+  ...providerImageScanPolicy('papercusp-bundled'),
+  secretAllowances: WORKSPACE_HOST_SECRET_ALLOWANCES,
+});
 
-/** Azure Compute Gallery scanners emit the coverage pair and must prove it at the release gate. Same `'all'` reasoning as AWS. */
+/**
+ * Azure Compute Gallery scanners emit the coverage pair and must prove it at the release gate.
+ * `'all'` until an Azure scanner emits the attribution maps: a scoped policy against a
+ * non-attributing scanner denies (correctly, fail-closed), so this is a statement of where
+ * Azure actually is, not a concession.
+ */
 export const AZURE_IMAGE_SCAN_POLICY: ImageScanPolicy = providerImageScanPolicy('all');
 
 /**

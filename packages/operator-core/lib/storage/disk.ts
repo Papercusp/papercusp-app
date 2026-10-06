@@ -18,7 +18,7 @@ import {
   type SessionDirCandidate,
   type ProtectedSessionIdentity,
 } from '../session-dir-gc';
-import { listLiveHosts } from '../events/await/psu-pty-discovery';
+import { listLiveHostsAsync } from '../events/await/psu-pty-discovery';
 import { cooperativeYield } from '../event-loop-lag-monitor';
 import { scratchRoot } from '../scratch-uri';
 import type { DiskStorageCategory } from './categories';
@@ -75,6 +75,8 @@ export interface DiskRootChildScanOptions {
   registeredPaths?: readonly string[];
   /** Maximum number of immediate children returned across all roots. */
   maxChildren?: number;
+  /** False for attribution: do not traverse symlinked checkouts or cycles. */
+  followSymlinks?: boolean;
 }
 
 const DEFAULT_UNDECLARED_DISK_SCAN_MS = 20_000;
@@ -237,17 +239,15 @@ export function dirSizeBytes(path: string, maxEntries = 400_000, budget?: DiskWa
  * routine ticker — the periodic `setImmediate` macrotask hop guarantees it runs
  * (and the gate yields EVERY iteration once loop pressure is already elevated).
  */
-export async function dirSizeBytesAsync(path: string, maxEntries = 400_000, budget?: DiskWalkBudget): Promise<number> {
+export async function dirSizeBytesAsync(path: string, maxEntries = 400_000, budget?: DiskWalkBudget, followSymlinks = true): Promise<number> {
   let total = 0;
   let seen = 0;
-  let iters = 0;
   let yielded = 0;
   const stack: string[] = [path];
   while (stack.length > 0) {
-    if (seen >= maxEntries) break;
-    // Wall-clock bound (EI-6045) — identical to the sync twin: checked only every
-    // 4096 iters so the Date.now() cost is negligible.
-    if (budget && (iters++ & 0xfff) === 0 && Date.now() >= budget.deadlineMs) {
+    if (seen >= maxEntries) { if (budget) budget.truncated = true; break; }
+    // Check every entry: a diagnostic must not overrun its shared deadline.
+    if (budget && Date.now() >= budget.deadlineMs) {
       budget.truncated = true;
       break;
     }
@@ -255,21 +255,23 @@ export async function dirSizeBytesAsync(path: string, maxEntries = 400_000, budg
     const cur = stack.pop()!;
     let st: Awaited<ReturnType<typeof fsp.stat>>;
     try {
-      st = await fsp.stat(cur);
+      st = followSymlinks ? await fsp.stat(cur) : await fsp.lstat(cur);
     } catch {
+      if (budget) budget.truncated = true;
       continue; // raced removal / permission — skip
     }
+    seen++;
     if (st.isDirectory()) {
       let names: string[];
       try {
         names = await fsp.readdir(cur);
       } catch {
+        if (budget) budget.truncated = true;
         continue;
       }
       for (const n of names) stack.push(join(cur, n));
     } else if (st.isFile()) {
       total += st.size;
-      seen += 1;
     }
   }
   return total;
@@ -342,6 +344,7 @@ export async function listDiskRootChildrenAsync(options: DiskRootChildScanOption
     try {
       names = await fsp.readdir(root);
     } catch {
+      budget.truncated = true;
       continue; // missing / unreadable root
     }
     for (const name of names) {
@@ -354,12 +357,13 @@ export async function listDiskRootChildrenAsync(options: DiskRootChildScanOption
       seen.add(path);
       let st: Awaited<ReturnType<typeof fsp.stat>>;
       try {
-        st = await fsp.stat(path);
+        st = options.followSymlinks === false ? await fsp.lstat(path) : await fsp.stat(path);
       } catch {
+        budget.truncated = true;
         continue; // raced removal / permission — skip
       }
       const registered = isRegisteredDiskPath(path, registeredPaths);
-      const sizeBytes = registered ? (st.isFile() ? st.size : 0) : await dirSizeBytesAsync(path, 400_000, budget);
+      const sizeBytes = registered ? (st.isFile() ? st.size : 0) : await dirSizeBytesAsync(path, 400_000, budget, options.followSymlinks);
       entries.push({ path, mtimeMs: st.mtimeMs, sizeBytes });
       if (budget.truncated) break rootsLoop;
     }
@@ -544,6 +548,6 @@ export async function gatherProtectedSessionIdentity(
   } catch {
     return { ok: false, identity: { ownerIds, sessionKeys } };
   }
-  const identity = protectLivePtyHostHomes({ ownerIds, sessionKeys }, listLiveHosts());
+  const identity = protectLivePtyHostHomes({ ownerIds, sessionKeys }, await listLiveHostsAsync());
   return { ok: true, identity };
 }

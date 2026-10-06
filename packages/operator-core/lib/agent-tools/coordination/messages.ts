@@ -46,6 +46,7 @@ import {
 import { shouldDerivePlanSlug, derivePlanSlug, PLAN_SLUG_DERIVED_PROVENANCE } from './derived-plan-slug';
 import { shouldDeriveWhyGoal, deriveWhyGoal, WHY_GOAL_DERIVED_PROVENANCE } from './derived-why-goal';
 import { noteIntentDeclared, readAgentStateStamp } from '../../agent-state-stamp';
+import { sealCoordEnvelope } from '../../personal-vault/sealed-contents';
 
 export type { InboxOptions };
 
@@ -73,6 +74,9 @@ export function getUnreachableAudienceSelectors(
 
 /** Options for sendMessage / generalised coord append. */
 export interface SendOptions {
+  /** Internal producer seam: validate/prepare and persist one envelope atomically.
+   * The GOAL reference bridge uses the existing PG event log, including its stamp. */
+  persistEnvelope?: (envelope: CoordEnvelope) => Promise<CoordEnvelope>;
   /** Recipient ownerIds. Use ['*'] for broadcast, ['human'] for the human inbox. */
   to: string[];
   /**
@@ -261,7 +265,7 @@ export async function sendMessage(
       opts = { ...opts, extra: { ...opts.extra, [CUE_AUTHORITY_FIELD]: stamp } };
     }
   }
-  const env: CoordEnvelope = {
+  let env: CoordEnvelope = {
     ts: new Date().toISOString(),
     msg_id: opts.msgId ?? newMsgId(),
     from: identity.ownerId,
@@ -442,6 +446,17 @@ export async function sendMessage(
       env.fieldProvenance = { ...existing, why: WHY_GOAL_DERIVED_PROVENANCE };
     }
   }
+  // personal-data-reader-set-labels P-006 / D-006: a sender holding a restricted
+  // Personal Vault disclosure has what it authored moved to the sealed store, and
+  // only the stub is parked, persisted and federated. Runs after every stamp
+  // above and before the first write below, so no copy leaves unsealed. Skipped
+  // only where nothing is persisted to Postgres (the in-memory test seam) or the
+  // sender has no concrete workspace, which is also where no disclosure can be
+  // recorded. A ledger failure throws disclosure_ledger_unavailable.
+  const sealWorkspaceId = identity.workspaceId?.trim();
+  if (coordHasPgFastPath() && sealWorkspaceId && sealWorkspaceId !== '*') {
+    env = await sealCoordEnvelope(coordSql(), { workspaceId: sealWorkspaceId, env });
+  }
   // Park the envelope durably for each addressed slot (./slot-parked-store) —
   // drained into the spawnee's handoff when an agent spawns into the slot (P-023).
   if (slots.length) {
@@ -472,7 +487,9 @@ export async function sendMessage(
     // Calls without an explicit msg_id intentionally retain append-only
     // semantics. In particular, appendAck uses this path so repeated acks stay
     // visible, and mailbox re-delivery below remains append-only.
-    if (opts.msgId !== undefined) {
+    if (opts.persistEnvelope) {
+      persistedEnv = await opts.persistEnvelope(env);
+    } else if (opts.msgId !== undefined) {
       const result = await coordLog.appendLineIfAbsent('messages', identity.ownerId, env);
       persistedEnv = result.envelope;
       persistedSequence = result.sequence;
@@ -682,6 +699,68 @@ export async function readInbox(
   }
   const lines = await coordLog.readLines('messages');
   return suppressRetracted(filterInbox(lines, ownerId, opts), collectRetractedIds(lines));
+}
+
+/** Row cap for {@link readDirectedInbox}: directed traffic to one session id is small
+ *  (no broadcast rows match), so this bounds a pathological id, not a normal read. */
+export const DIRECTED_INBOX_ROW_CAP = 2_000;
+
+/**
+ * WI-10005678: entries addressed EXPLICITLY to `ownerId` — never the `'*'` broadcasts
+ * {@link readInbox} also returns. coord:inbox uses it for a caller's VERIFIED session
+ * alias (identity.ts `verifiedSpawnSessionAlias`): the caller's own read already carries
+ * every broadcast, so re-reading them here would only re-pay the ~20k-row broadcast scan
+ * (WI-6939) for rows that dedupe away. Same recipient predicate, index and post-filter as
+ * readInbox; the recipient match is narrowed to an explicit `to` entry.
+ */
+export async function readDirectedInbox(
+  ownerId: string,
+  opts: InboxOptions = {},
+): Promise<CoordEnvelope[]> {
+  if (!ownerId) return [];
+  const directed = (entries: CoordEnvelope[]): CoordEnvelope[] =>
+    entries.filter((e) => Array.isArray(e.to) && (e.to as unknown[]).includes(ownerId));
+  if (coordHasPgFastPath()) {
+    const sql = coordSql();
+    const sinceBound = opts.since_ts
+      ? new Date(new Date(opts.since_ts).getTime() - INBOX_SINCE_TS_SKEW_PAD_MS).toISOString()
+      : null;
+    const rows = await sql<{ body: unknown }[]>`
+      SELECT body
+        FROM harness_shared.coord_event_log
+       WHERE workspace_id = ${coordWorkspaceId()}
+         AND surface = 'messages'
+         ${sinceBound ? sql`AND ts >= ${sinceBound}` : sql``}
+         AND jsonb_typeof(body->'to') = 'array'
+         AND (body->'to') ? ${ownerId}
+       ORDER BY id DESC
+       LIMIT ${DIRECTED_INBOX_ROW_CAP}
+    `;
+    const lines = rows.map((r) => (typeof r.body === 'string' ? JSON.parse(r.body) : r.body) as CoordEnvelope);
+    return directed(suppressRetracted(filterInbox(lines, ownerId, opts), collectRetractedIds(lines)));
+  }
+  const lines = await coordLog.readLines('messages');
+  return directed(suppressRetracted(filterInbox(lines, ownerId, opts), collectRetractedIds(lines)));
+}
+
+/**
+ * WI-10005678: fold `extra` into `base` without duplicating a message delivered to both
+ * ids, keeping filterInbox's ascending (ts, msg_id) order. Pure; `base` wins on a
+ * msg_id collision.
+ */
+export function mergeInboxEntries<T extends { msg_id?: unknown; ts?: unknown }>(
+  base: readonly T[],
+  extra: readonly T[],
+): T[] {
+  if (extra.length === 0) return [...base];
+  const seen = new Set(base.map((e) => e.msg_id).filter((id): id is string => typeof id === 'string'));
+  const added = extra.filter((e) => typeof e.msg_id !== 'string' || !seen.has(e.msg_id));
+  if (added.length === 0) return [...base];
+  return [...base, ...added].sort(
+    (a, b) =>
+      String(a.ts ?? '').localeCompare(String(b.ts ?? '')) ||
+      String(a.msg_id ?? '').localeCompare(String(b.msg_id ?? '')),
+  );
 }
 
 /** Rows fetched per keyset page by {@link readInboxWindow}. Sized so a normal

@@ -206,11 +206,16 @@ async function runDependencyQuery<T>(
   const sql = client ?? getOrgPg().sql;
   const callDeadlineMs = DEPENDENCY_QUERY_TIMEOUT_MS + PG_READ_QUERY_CALL_OVERHEAD_MS;
   let rows: T[] = [];
-  const work = sql.begin(async (tx) => {
+  const work = (assertActive: () => void) => sql.begin(async (tx) => {
+    assertActive();
     await tx.unsafe('SET TRANSACTION READ ONLY');
+    assertActive();
     await tx.unsafe(`SET LOCAL statement_timeout = ${DEPENDENCY_QUERY_TIMEOUT_MS}`);
+    assertActive();
     await tx.unsafe(SET_LOCAL_UTC);
+    assertActive();
     rows = (await tx.unsafe(text, params as never[])) as unknown as T[];
+    assertActive();
   });
   await withCallDeadline(work, callDeadlineMs, callTimeoutMessage(DEPENDENCY_QUERY_TIMEOUT_MS, callDeadlineMs));
   return rows;

@@ -25,6 +25,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { linuxProcStateFromStat, readProcessGroupId, readProcessIdentity } from '../process-identity';
 import { absCgroupDir, nodeCgroupFs, walkCgroupTree, type CgroupFs } from './cgroup-read';
+import { reportFreezeDeadlines, type InnerTimeoutHint, type LedgerDeadline } from './freeze-deadline';
 import { notifyTaskKillRequested } from './kill-notify';
 import { closeTask, getSubtree, getTask, reopenStrandedTask, updateTaskLimits } from './store';
 import { isLiveOwnedState, taskIdFromScopeUnit, type TaskRow } from './types';
@@ -51,7 +52,17 @@ function execFileAsync(file: string, args: string[], opts?: Record<string, unkno
 }
 
 export type ControlOutcome =
-  | { ok: true; taskId: string; action: string; detail?: string }
+  | {
+      ok: true;
+      taskId: string;
+      action: string;
+      detail?: string;
+      /** freeze/thaw only (EI-24796665684871321): wall-clock deadlines the task carries — the
+       *  freezer stops CPU, never the clock, so a deadline keeps burning while frozen. */
+      deadline?: LedgerDeadline | null;
+      innerTimeouts?: InnerTimeoutHint[];
+      warnings?: string[];
+    }
   | { ok: false; taskId: string; action: string; error: ControlError; detail?: string };
 
 export type ControlError =
@@ -259,6 +270,22 @@ async function scopeCgroupPath(
   }
 }
 
+/**
+ * After a `systemctl kill` FAILED, is the scope simply already collected?
+ *
+ * A payload can exit on its own between a caller's liveness read and the signal,
+ * so systemd collects its transient scope and the kill fails with `Unit … not
+ * loaded`. That is not a failure to signal; the subtree is gone
+ * (WI-10004447: su-session-stdio-peer close() waited 5 s, the real omp engine
+ * exited just after, and teardown failed as command_failed). Re-ask systemd;
+ * never parse the kill's error text. Returns the already_gone detail, or null
+ * when the unit is still known or the question itself failed.
+ */
+async function collectedAfterFailedSignal(scopeUnit: string, d: ReturnType<typeof deps>): Promise<string | null> {
+  const resolved = await scopeCgroupPath(scopeUnit, d);
+  return !resolved.ok && resolved.error === 'already_gone' ? resolved.detail : null;
+}
+
 export async function killTask(taskId: string, opts: KillTaskOptions = {}): Promise<ControlOutcome> {
   const d = deps(opts);
   const row = await getTask(taskId);
@@ -338,6 +365,11 @@ export async function killTask(taskId: string, opts: KillTaskOptions = {}): Prom
     notifyTaskKillRequested(taskId, signal);
     const res = await systemctl(['kill', `--signal=${signal}`, row.scopeUnit], d);
     if (!res.ok) {
+      // The payload exited on its own and systemd collected the scope: nothing
+      // was left to signal. The exit watcher records the real exit, so the row
+      // is not closed here (WI-10004447).
+      const collected = await collectedAfterFailedSignal(row.scopeUnit, d);
+      if (collected) return { ok: false, taskId, action: 'kill', error: 'already_gone', detail: collected };
       return { ok: false, taskId, action: 'kill', error: 'command_failed', detail: res.detail };
     }
     let escalated = false;
@@ -347,14 +379,16 @@ export async function killTask(taskId: string, opts: KillTaskOptions = {}): Prom
         notifyTaskKillRequested(taskId, 'SIGKILL');
         const escalation = await systemctl(['kill', '--signal=SIGKILL', row.scopeUnit], d);
         // Pending termination is a success only when SIGKILL was delivered.
-        // A failed command must not suppress recovery or close a live task.
-        if (!escalation.ok) {
+        // A failed command must not suppress recovery or close a live task,
+        // unless the scope was collected in between: then the verification
+        // below reads it as empty (WI-10004447).
+        if (!escalation.ok && !(await collectedAfterFailedSignal(row.scopeUnit, d))) {
           return {
             ok: false, taskId, action: 'kill', error: 'command_failed',
             detail: `SIGKILL escalation failed for scope ${row.scopeUnit}: ${escalation.detail}`,
           };
         }
-        escalated = true;
+        escalated = escalation.ok;
       }
     }
     // EI-19478780721557822: a `systemctl kill` exit code only proves the SIGNAL was
@@ -491,8 +525,10 @@ export async function killTask(taskId: string, opts: KillTaskOptions = {}): Prom
  * a ledger row. The scope unit is validated, systemd supplies the authoritative
  * cgroup path, and the cgroup is positively non-empty before signalling. A
  * bounded deep re-probe is required before success, matching `killTask`'s
- * no-false-green contract. Automatic reconciliation remains report-only; this
- * path exists only for an explicit operator `processes:kill { scopeUnit }`.
+ * no-false-green contract. Both explicit `processes:kill { scopeUnit }` calls
+ * and trusted lifecycle-verdict enforcement use this primitive. The lifecycle
+ * enforcer records a durable audit intent before signalling; this function does
+ * not invent or mutate a task-ledger row.
  */
 export async function killScopeUnit(
   scopeUnit: string,
@@ -520,6 +556,9 @@ export async function killScopeUnit(
   const signal = opts.signal ?? 'SIGTERM';
   const res = await systemctl(['kill', `--signal=${signal}`, scopeUnit], d);
   if (!res.ok) {
+    // Collected between the probe above and the signal (WI-10004447).
+    const collected = await collectedAfterFailedSignal(scopeUnit, d);
+    if (collected) return { ok: false, scopeUnit, action, error: 'already_gone', detail: collected };
     return { ok: false, scopeUnit, action, error: 'command_failed', detail: res.detail };
   }
 
@@ -528,13 +567,13 @@ export async function killScopeUnit(
     await d.sleep(opts.escalateAfterMs);
     if (countCgroupProcesses(resolved.cgroupPath, d) > 0) {
       const escalation = await systemctl(['kill', '--signal=SIGKILL', scopeUnit], d);
-      if (!escalation.ok) {
+      if (!escalation.ok && !(await collectedAfterFailedSignal(scopeUnit, d))) {
         return {
           ok: false, scopeUnit, action, error: 'command_failed',
           detail: `SIGKILL escalation failed for scope ${scopeUnit}: ${escalation.detail}`,
         };
       }
-      escalated = true;
+      escalated = escalation.ok;
     }
   }
 
@@ -863,9 +902,21 @@ async function setFrozen(taskId: string, frozen: boolean, opts: ControlDeps): Pr
     };
   }
   const res = await systemctl([action, row.scopeUnit], d);
-  return res.ok
-    ? { ok: true, taskId, action, detail: `scope ${row.scopeUnit} ${frozen ? 'frozen' : 'thawed'}` }
-    : { ok: false, taskId, action, error: 'command_failed', detail: res.detail };
+  if (!res.ok) return { ok: false, taskId, action, error: 'command_failed', detail: res.detail };
+  // The freezer stops CPU, not the clock: report every wall-clock deadline the task carries so
+  // the caller can see a freeze that will trip it on thaw (EI-24796665684871321). Warn, never
+  // refuse — freeze is pressure relief and a deadline-bearing task is still better frozen than
+  // thrashing; what was missing was the information to choose.
+  const report = reportFreezeDeadlines(row, d.now(), action);
+  return {
+    ok: true,
+    taskId,
+    action,
+    detail: `scope ${row.scopeUnit} ${frozen ? 'frozen' : 'thawed'}`,
+    ...(report.ledgerDeadline ? { deadline: report.ledgerDeadline } : {}),
+    ...(report.innerTimeouts.length > 0 ? { innerTimeouts: report.innerTimeouts } : {}),
+    ...(report.warnings.length > 0 ? { warnings: report.warnings } : {}),
+  };
 }
 
 export interface LimitInput {

@@ -45,7 +45,7 @@
  *    reader demotes them to the alert tier and the reconcile sweep TTL-reaps
  *    them — noise-bounded by construction.
  */
-import { readdirSync, statSync } from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
 import {
@@ -59,7 +59,7 @@ import type { AgentIdentity } from '../agent-tools/coordination/identity';
 import {
   PSU_PTY_DIR,
   findLiveHost,
-  readHostEventTail,
+  readHostEventTailAsync,
   type PtyHostEvent,
 } from '../events/await/psu-pty-discovery';
 import {
@@ -114,6 +114,13 @@ export interface ProductionCarryDeliveryReading {
   delivered: number;
   dropped: number;
   respawnFailed: number;
+  /**
+   * Host RETIREMENT rows (`respawn-carry-dropped {reason:'superseded'}`, WI-10005752): a real
+   * successor already existed, so a moot older request was retired. NOT a delivery outcome —
+   * excluded from `dropped`, `terminalOutcomes`, `deliveryRate` and `failureReasons`, and
+   * surfaced here so the exclusion is visible rather than silent.
+   */
+  retiredSuperseded: number;
   terminalOutcomes: number;
   /** `null` means the window had no terminal outcomes, not a 0% delivery rate. */
   deliveryRate: number | null;
@@ -133,7 +140,7 @@ export interface OrphanedRespawnAlert {
 
 export interface OrphanedRespawnSweepDeps {
   /** mtime-banded candidate owners; see {@link listOrphanCandidateOwners}. */
-  listCandidates: (now: number) => string[];
+  listCandidates: (now: number) => Promise<string[]>;
   readPrior: (ownerId: string, now: number) => Promise<PriorRespawn>;
   /** Liveness of the owner's pty host. Throwing is treated as ALIVE (stay quiet). */
   hostLive: (ownerId: string) => boolean;
@@ -176,6 +183,7 @@ export function summarizeProductionCarryDelivery(
   let delivered = 0;
   let dropped = 0;
   let respawnFailed = 0;
+  let retiredSuperseded = 0;
   const failureReasons = new Map<string, number>();
 
   for (const event of events) {
@@ -188,6 +196,13 @@ export function summarizeProductionCarryDelivery(
       continue;
     }
     if (kind !== 'respawn-carry-dropped' && kind !== 'respawn-failed') continue;
+    // A retirement is not a failed delivery (see carry-respawn-outcome RESPAWN_RETIRED_REASON):
+    // counting it measured ~5.4k such rows against ~1.6k deliveries across the owner ledgers,
+    // which would pin the rate under the floor with no continuation actually lost.
+    if (kind === 'respawn-carry-dropped' && event.reason === 'superseded') {
+      retiredSuperseded += 1;
+      continue;
+    }
 
     const reason = typeof event.reason === 'string' && event.reason.trim() ? event.reason.trim() : 'unknown';
     const reasonKey = kind === 'respawn-failed' ? `respawn-failed:${reason}` : reason;
@@ -203,6 +218,7 @@ export function summarizeProductionCarryDelivery(
     delivered,
     dropped,
     respawnFailed,
+    retiredSuperseded,
     terminalOutcomes,
     deliveryRate: terminalOutcomes > 0 ? delivered / terminalOutcomes : null,
     failureReasons: Object.fromEntries([...failureReasons.entries()].sort(([a], [b]) => a.localeCompare(b))),
@@ -214,34 +230,55 @@ export function summarizeProductionCarryDelivery(
  * 256 KiB cap. The shared drill ledger is excluded: some production drop rows
  * are mirrored there for drill-report compatibility and would be double-counted.
  */
-export function readRecentProductionCarryEvents(
+export async function readRecentProductionCarryEvents(
   dir: string = PSU_PTY_DIR,
   now: number = Date.now(),
   windowMs: number = PRODUCTION_CARRY_WINDOW_MS,
   maxBytes: number = PRODUCTION_CARRY_SCAN_TAIL_BYTES,
-): PtyHostEvent[] {
-  const cutoff = now - windowMs;
+): Promise<PtyHostEvent[]> {
+  const events: PtyHostEvent[] = [];
+  for (const ownerId of await listRecentHostEventOwners(dir, now - windowMs)) {
+    events.push(...(await readHostEventTailAsync(ownerId, dir, maxBytes)));
+  }
+  return events;
+}
+
+/**
+ * Owners whose per-owner event ledger was modified at or after `cutoff` (mtime).
+ *
+ * ASYNC ON PURPOSE, and this is the load-bearing property (WI-10004559). The watchdog
+ * calls this twice a minute on the operator's main thread, against a directory that
+ * holds thousands of ledgers and is written by every psu host on the box. When the
+ * ext4 journal stalls, a host creating a file there holds the directory's inode lock,
+ * and a reader waits in D-state behind it. Done synchronously, that wait froze the
+ * whole operator; the event-loop sentinel then killed it, dropping every in-flight MCP
+ * request (46 of 66 :3070 kills in 24h were blocked in `iterate_dir` on this
+ * directory). Async moves the wait onto one libuv worker thread.
+ *
+ * The stats run ONE AT A TIME rather than in parallel: under a stall each pending stat
+ * pins a worker thread, and the pool (4 by default) is shared with every other async
+ * fs call in the process. Sequential holds at most one.
+ */
+async function listRecentHostEventOwners(dir: string, cutoff: number): Promise<string[]> {
   let entries;
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    entries = await fsp.readdir(dir, { withFileTypes: true });
   } catch {
     return [];
   }
-
-  const events: PtyHostEvent[] = [];
+  const owners: string[] = [];
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(HOST_EVENT_SUFFIX) || entry.name === SHARED_DRILL_LEDGER) {
       continue;
     }
     try {
-      if (statSync(join(dir, entry.name)).mtimeMs < cutoff) continue;
+      if ((await fsp.stat(join(dir, entry.name))).mtimeMs < cutoff) continue;
     } catch {
       continue;
     }
-    const ownerId = entry.name.slice(0, -HOST_EVENT_SUFFIX.length);
-    events.push(...readHostEventTail(ownerId, dir, maxBytes));
+    owners.push(entry.name.slice(0, -HOST_EVENT_SUFFIX.length));
   }
-  return events;
+  return owners;
 }
 
 /**
@@ -307,27 +344,8 @@ export function listOrphanCandidateOwners(
   dir: string = PSU_PTY_DIR,
   now: number = Date.now(),
   maxAgeMs: number = ORPHANED_RESPAWN_MAX_AGE_MS,
-): string[] {
-  const cutoff = now - maxAgeMs;
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const owners: string[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(HOST_EVENT_SUFFIX) || entry.name === SHARED_DRILL_LEDGER) {
-      continue;
-    }
-    try {
-      if (statSync(join(dir, entry.name)).mtimeMs < cutoff) continue;
-    } catch {
-      continue;
-    }
-    owners.push(entry.name.slice(0, -HOST_EVENT_SUFFIX.length));
-  }
-  return owners;
+): Promise<string[]> {
+  return listRecentHostEventOwners(dir, now - maxAgeMs);
 }
 
 async function defaultFlagEnabled(): Promise<boolean> {
@@ -458,7 +476,7 @@ function sweepDeps(overrides: Partial<CarryDrillDropSweepDeps>): CarryDrillDropS
 
 function productionSweepDeps(overrides: Partial<ProductionCarryDeliverySweepDeps>): ProductionCarryDeliverySweepDeps {
   return {
-    readEvents: async (now, windowMs) => readRecentProductionCarryEvents(PSU_PTY_DIR, now, windowMs),
+    readEvents: (now, windowMs) => readRecentProductionCarryEvents(PSU_PTY_DIR, now, windowMs),
     escalate: defaultEscalateProduction,
     flagEnabled: defaultFlagEnabled,
     now: Date.now,
@@ -526,7 +544,7 @@ export async function runOrphanedRespawnSweepOnce(
   if (!(await deps.flagEnabled())) return { scanned: 0, alerts: 0, escalated: 0, skipped: true };
 
   const now = deps.now();
-  const owners = deps.listCandidates(now);
+  const owners = await deps.listCandidates(now);
   let alerts = 0;
   let escalated = 0;
 

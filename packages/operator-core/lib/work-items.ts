@@ -28,6 +28,7 @@
  * trigger (already wired) — so neither path needs an extra fan-out call here.
  */
 import { getOrgPg } from '@papercusp/db-org';
+import type { GoalSqlTag } from '@papercusp/agent-mcp/goals';
 import { healOrphanedRemoteOriginIfAuthorEnded } from './work-items-orphan-author';
 import { selfHealTerminalOwnerOriginIfStranded } from './work-items-terminal-owner-origin-heal';
 import type { Fragment, TransactionSql } from 'postgres';
@@ -56,11 +57,13 @@ import { activeWorkspaceId } from './workspace-registry';
 import { canonicalizeAssigneeOwnerId } from './work-item-holder-identity';
 import { checkAndEscalateSteeringChurn } from './steering-churn';
 import { checkSteeringLease, recordSteeringProposal } from './steering-lease';
-import { featureRef, FEATURE_KIND, isQualifiedFeatureRef } from './issue-blocks-merge';
+import { featureRef, FEATURE_KIND, isQualifiedFeatureRef, implementsLinkScopes } from './issue-blocks-merge';
 import { type InjectEvent } from './agent-tools/coordination/fanout-delivery';
 import { fanoutForObject } from './sync/hyperbee/fanout-projection';
 import { normalizeTakenBy } from './sync/hyperbee/projections/harness-features';
 import { boundedOrgTxn } from './pg-bounded-txn';
+import type { ActiveOperationWorkerClaimRead } from './blueprint/operation-worker-binding';
+import { sealSharedTextInTxOrRefuse } from './personal-vault/shared-store-seal';
 import {
   admittedWhereSql,
   admittedWhereSqlWi,
@@ -77,14 +80,17 @@ import {
   isAutoPickable,
   isIssueLocallyClaimable,
   isIssueLocallyClaimableWhereSql,
+  isOwnNodeAuthoredRemoteRow,
   liveGateOpsSelfSelectExclusionSql,
   liveGateOpsSelfSelectExplanation,
   loadTrustedGithubUserIds,
+  selfHealOwnNodeOriginIfStranded,
   STOP_THE_LINE_RED_HOURS,
   stopTheLineExclusionSql,
 } from './work-items-admission';
+import { resolveIssuePhysicalSlug } from './work-items-physical-row';
 import { frontierPlacementKindClause } from './datatype-frontier-placement';
-import { hasGenericKind } from './datatype-registry-store';
+import { hasGenericKind, type DatatypeNature } from './datatype-registry-store';
 import {
   ANY_FAMILY_TERMINAL_STATES,
   FEATURE_NON_REQUEUE_STATES,
@@ -125,9 +131,11 @@ import {
   agentReviewNormalExclusionSql,
   matchesAgentReviewClaimAdmission,
   readAgentReviewState,
-  readStructuredOwnerAsk,
+  verificationTaskConflict,
+  verificationTaskConflictSql,
   type AgentReviewClaimAdmission,
 } from './harness/improvements/agent-review-policy';
+import { hasActiveStrictHumanAsk } from './hold-registry';
 import { hasResourceGovernorReceiptPayload, ResourceGovernorReleaseRequiredError } from './resource-governor/queue';
 import { projectWorkItemColumns, type WorkItemReadOptions } from './work-item-read-projection';
 import type { LegacyFleetScopeDowngradeAdmission } from './work-item-fleet-scope-recovery';
@@ -211,6 +219,7 @@ import {
   chunkAwareVectorLegSql,
   runHybridSearch,
   withIterativeScan,
+  type ChunkLegScan,
   type ChunkSurface,
   type PgHandle,
   type SearchSource,
@@ -266,7 +275,8 @@ export function isDeprecatedWorkItemKind(kind: string): kind is 'chunk' {
 // `task` (collapse-delegate D-001) is an issue-family work_item kind — the operator's
 // delegated-work record. It lives in engineer_issues alongside bug|change but is
 // excluded from the issues:* surface (listIssues default).
-export const ISSUE_FAMILY_KINDS: readonly IssueStoreKind[] = ['bug', 'change', 'task'];
+// P-009 / D-022: the single routing list lives in work-nature/agent-work-predicate.ts.
+export const ISSUE_FAMILY_KINDS: readonly IssueStoreKind[] = ISSUE_FAMILY_ROUTE_KINDS;
 
 /**
  * Hard ceiling for a single work-items LIST read (both families). Local desktop
@@ -999,6 +1009,20 @@ export interface ListWorkItemsFilter {
   /** Case-insensitive literal substring matched against title + body/summary. */
   q?: string;
   kind?: WorkItemKind;
+  /**
+   * P-010 / D-011: restrict to rows of these natures (work | record | document | event).
+   * Unset or empty means nature 'work' only, UNLESS `kind` names one kind: naming a kind is
+   * an explicit ask, so `kind: 'pipeline-deal'` still returns its record rows. The issue
+   * family is bug/change/task, all nature 'work' (D-013), so a set without 'work' drops it.
+   */
+  natures?: readonly DatatypeNature[];
+  /**
+   * D-041 (WI-10005358): 'agent' keeps only rows the write doors accept (the shared
+   * agentWorkCategoryWhereSql predicate); 'human' keeps human-audience rows; unset or 'any'
+   * applies no audience filter. Applied in BOTH family shape fragments, so list and both
+   * counts agree (WI-5512 parity). The work_items:list TOOL chooses the agent default.
+   */
+  audience?: WorkAudienceFilter;
   state?: string;
   /**
    * WI-38339 — `state` as a SET, for the question a single value cannot ask. Measured
@@ -1249,6 +1273,28 @@ function likeContainsPattern(query: string): string {
  *
  * Returns `TRUE` when nothing is set, so a call site can AND it unconditionally.
  */
+/**
+ * P-010 / D-011 — the default-read nature boundary, ONE definition for list, both counts
+ * and search. Non-empty `natures` → that set. Otherwise an explicit `kind` → no nature
+ * filter (the caller named the kind). Otherwise only nature 'work', so a record-, document-
+ * or event-nature row never surfaces in a default work read. `nature` is stamped on every
+ * work_items row by the 1322 trigger from datatype_registry (D-018).
+ */
+export function natureWhereSql(
+  sql: OrgSql,
+  natures: readonly DatatypeNature[] | undefined,
+  kind: string | undefined,
+) {
+  if (natures && natures.length > 0) return sql`nature = ANY(${natures as string[]}::text[])`;
+  if (kind) return sql`TRUE`;
+  return sql`nature = 'work'`;
+}
+
+/** Whether a `natures` filter admits the issue family (bug/change/task are nature 'work'). */
+export function naturesAdmitWork(natures: readonly DatatypeNature[] | undefined): boolean {
+  return !natures || natures.length === 0 || natures.includes('work');
+}
+
 function featureShapeWhereSql(sql: OrgSql, filter: ListWorkItemsFilter) {
   // An EMPTY `states` array is NO filter, never "match nothing": `= ANY('{}')` is false
   // for every row, so an empty list would return zero rows — indistinguishable from a
@@ -1274,7 +1320,9 @@ function featureShapeWhereSql(sql: OrgSql, filter: ListWorkItemsFilter) {
             OR payload -> 'plan_item' ->> 'plan_slug' = ${filter.sourcePlanSlug}
           )`
         : sql`TRUE`
-    }`;
+    }
+    AND ${natureWhereSql(sql, filter.natures, filter.kind)}
+    AND ${audienceWhereSql(sql, filter.audience)}`;
 }
 
 /**
@@ -1290,6 +1338,7 @@ function issueShapeFilterArgs(filter: ListWorkItemsFilter) {
     createdSince: filter.createdSince,
     updatedSince: filter.updatedSince,
     sourcePlanSlug: filter.sourcePlanSlug,
+    audience: filter.audience,
   };
 }
 
@@ -1316,7 +1365,7 @@ async function listWorkItemsWithLimit(filter: ListWorkItemsFilter, rowLimit: num
   const q = filter.q?.trim();
   // assignedBy is an issue-family-only concept, so it excludes all feature rows.
   const wantFeature = (!filter.kind || familyOf(filter.kind) === 'feature') && !filter.assignedBy;
-  const wantIssue = !filter.kind || familyOf(filter.kind) === 'issue';
+  const wantIssue = (!filter.kind || familyOf(filter.kind) === 'issue') && naturesAdmitWork(filter.natures);
   const out: WorkItem[] = [];
 
   if (wantFeature) {
@@ -1455,7 +1504,7 @@ export async function listAllWorkItemsForFileExport(filter: ListWorkItemsFilter 
 export async function countWorkItems(filter: ListWorkItemsFilter = {}): Promise<number> {
   const { sql } = getOrgPg();
   const wantFeature = (!filter.kind || familyOf(filter.kind) === 'feature') && !filter.assignedBy;
-  const wantIssue = !filter.kind || familyOf(filter.kind) === 'issue';
+  const wantIssue = (!filter.kind || familyOf(filter.kind) === 'issue') && naturesAdmitWork(filter.natures);
   let total = 0;
 
   if (wantFeature) {
@@ -1581,7 +1630,7 @@ export async function countWorkItems(filter: ListWorkItemsFilter = {}): Promise<
 export async function countWorkItemsByState(filter: ListWorkItemsFilter = {}): Promise<Record<string, number>> {
   const { sql } = getOrgPg();
   const wantFeature = (!filter.kind || familyOf(filter.kind) === 'feature') && !filter.assignedBy;
-  const wantIssue = !filter.kind || familyOf(filter.kind) === 'issue';
+  const wantIssue = (!filter.kind || familyOf(filter.kind) === 'issue') && naturesAdmitWork(filter.natures);
   const byState: Record<string, number> = {};
   const add = (state: string | null | undefined, n: number) => {
     const k = state ?? 'unknown';
@@ -1657,6 +1706,7 @@ export async function getWorkItem(
   id: string,
   harness?: string,
   opts: WorkItemReadOptions = {},
+  client?: ReturnType<typeof getOrgPg>['sql'],
 ): Promise<WorkItem | null> {
   // ⚠ `harness` is NOT applied to the issue-family branch — see harnessScopeMismatch()
   // below for why that is deliberate, and for the guard that covers what it leaves open.
@@ -1670,9 +1720,24 @@ export async function getWorkItem(
   // `getFeatureWorkItemOnly` 12 lines below already states the correct rule (F-B3: "a
   // bare WI/F id is unique only within a (workspace, harness), not globally") — the two
   // halves of one id space disagreed, and the issue half was the one being trusted.
-  const issue = await getIssue(id, opts);
-  if (issue) return issueToWorkItem(issue);
-  return getFeatureWorkItemOnly(id, harness, opts);
+  // WI-10006010: `harness` is a PREFERENCE among same-id slug twins, never a filter.
+  const issue = await getIssue(id, opts, client, harness);
+  if (issue) {
+    const issueItem = issueToWorkItem(issue);
+    // WI-10006534: the preference must also hold ACROSS families. When the caller named a
+    // harness, the issue row that came back belongs to a DIFFERENT harness, and that named
+    // harness owns a FEATURE-family row with the same id, the caller's row is the feature
+    // row. Returning the issue row made the feature row unreachable by any tool (measured
+    // 2026-10-06: email's WI-10000680 could not be dropped; set_state wrote papercusp's
+    // WI-10000680 instead). Still a preference, not a filter: with no exact-harness
+    // feature row, the issue row is returned exactly as before (harnessScopeMismatch warns).
+    if (harness && harnessScopeMismatchLeaf(issueItem, harness)) {
+      const exact = await getFeatureWorkItemOnly(id, harness, opts, client);
+      if (exact) return exact;
+    }
+    return issueItem;
+  }
+  return getFeatureWorkItemOnly(id, harness, opts, client);
 }
 
 /**
@@ -1685,6 +1750,7 @@ export async function getWorkItem(
  * `undefined` at precisely the call sites it exists to protect.
  */
 export { harnessScopeMismatch, type HarnessScopeMismatch } from './work-items-harness-scope';
+import { harnessScopeMismatch as harnessScopeMismatchLeaf } from './work-items-harness-scope';
 // EI-21919769900781478: kept in a LEAF module (the write verbs mock this file wholesale
 // in their unit tests), re-exported here so it stays discoverable beside
 // `selfHealAuthorOriginIfStranded`, which handles the sibling stranding.
@@ -1703,6 +1769,13 @@ export {
   type TerminalOwnerOriginHealReason,
 } from './work-items-terminal-owner-origin-heal';
 import { trackDetached } from './detached-imports';
+import {
+  ISSUE_FAMILY_ROUTE_KINDS,
+  agentWorkCategoryWhereSql,
+  audienceWhereSql,
+  issueFamilyRouteSql,
+  type WorkAudienceFilter,
+} from './work-nature/agent-work-predicate';
 
 /**
  * The FEATURE-family half of {@link getWorkItem} (its issue-family half is a bare
@@ -1714,8 +1787,9 @@ async function getFeatureWorkItemOnly(
   id: string,
   harness?: string,
   opts: WorkItemReadOptions = {},
+  client?: ReturnType<typeof getOrgPg>['sql'],
 ): Promise<WorkItem | null> {
-  const { sql } = getOrgPg();
+  const sql = client ?? getOrgPg().sql;
   // F-B3 (workspace-data-isolation-leaks): a bare WI/F id is unique only within a
   // (workspace, harness), not globally — scope to the active workspace so an id
   // collision across workspaces can't return the wrong row (getOrgPg bypasses RLS).
@@ -1916,6 +1990,8 @@ interface WorkItemSearchFilters {
   /** Already narrowed to the source's own family by the caller (see `searchWorkItems`). */
   kind?: WorkItemKind;
   includeObservations?: boolean;
+  /** P-010: see {@link ListWorkItemsFilter.natures}; same default (work only unless `kind`). */
+  natures?: readonly DatatypeNature[];
 }
 
 /** Ranker/source labels. Stable — they appear in `legs.failures[].source`. */
@@ -1954,6 +2030,8 @@ async function workItemChunkLeg(
     selection: ProseProfileSelection | null;
     qVec: string;
     limit: number;
+    /** 'exact' for a family whose filter keeps a small slice (see featureSearchSource). */
+    scan?: ChunkLegScan;
   },
 ): Promise<Array<{ id: string; title: string; body: string | null; score: number }>> {
   return withIterativeScan(pg, async (handle) => {
@@ -1967,6 +2045,7 @@ async function workItemChunkLeg(
         qVec: opts.qVec,
         limit: opts.limit,
         mode: 'retrieve',
+        scan: opts.scan ?? 'ann',
         parentFilter: opts.filter(sql),
         // D-011: the embedding-space rule stays here; the helper only names the
         // qualified columns. A missing column fails closed.
@@ -2001,7 +2080,8 @@ function issueSearchSource(f: WorkItemSearchFilters, selection: ProseProfileSele
       AND item_kind IN ('bug', 'change', 'task')
       AND ${f.kind ? sql`item_kind = ${f.kind}` : sql`TRUE`}
       AND ${f.harness ? issueHarnessClause(sql, f.harness) : sql`TRUE`}
-      AND ${f.includeObservations ? sql`TRUE` : sql`lane IS DISTINCT FROM 'observation'`}`;
+      AND ${f.includeObservations ? sql`TRUE` : sql`lane IS DISTINCT FROM 'observation'`}
+      AND ${naturesAdmitWork(f.natures) ? sql`TRUE` : sql`FALSE`}`;
   const toListing = (
     rows: Array<{ id: string; title: string; body: string | null; score: number }>,
     ranker: string,
@@ -2063,7 +2143,8 @@ function featureSearchSource(f: WorkItemSearchFilters, selection: ProseProfileSe
           ${featureFamilyKindClause(sql, ws, { includeDeprecatedChunk: f.kind === 'chunk' })}
       AND workspace_id = ${ws}
       AND ${f.kind ? sql`item_kind = ${f.kind}` : sql`TRUE`}
-      AND ${f.harness ? sql`harness_slug = ${f.harness}` : sql`TRUE`}`;
+      AND ${f.harness ? sql`harness_slug = ${f.harness}` : sql`TRUE`}
+      AND ${natureWhereSql(sql, f.natures, f.kind)}`;
   const toListing = (
     rows: Array<{ id: string; title: string; body: string | null; score: number }>,
     ranker: string,
@@ -2099,12 +2180,17 @@ function featureSearchSource(f: WorkItemSearchFilters, selection: ProseProfileSe
           async embedding({ sql: pg, limit, qVec }): Promise<Listing> {
             // The feature-family view is a straight projection of work_items
             // under the same key names, so it is the chunk leg's parent here.
+            // 'exact' (generic-rag-chunking D-032): the family is about 2% of
+            // work_items and of the surface's chunks, so an HNSW scan discards
+            // about 20k rows per query to fill the LIMIT (131 ms measured on
+            // 2026-09-30); ranking the filtered slice exhaustively does not.
             const rows = await workItemChunkLeg(pg, {
               parent: { table: 'harness_shared.harness_features_consolidated', key: WORK_ITEMS_CHUNK_SURFACE.parent.key },
               filter: scoped,
               selection,
               qVec,
               limit,
+              scan: 'exact',
             });
             return toListing(rows, 'embeddings');
           },
@@ -2297,6 +2383,8 @@ export async function searchWorkItems(
      * include raw observations in search results.
      */
     includeObservations?: boolean;
+    /** P-010 / D-011: nature set to match; unset → nature 'work' only unless `kind` is named. */
+    natures?: readonly DatatypeNature[];
     /**
      * Test seam for the WI-9393 coverage assessment, mirroring `embedderResolver`.
      * Injecting it also OPTS IN under vitest, where the assessment is otherwise
@@ -2320,6 +2408,7 @@ export async function searchWorkItems(
     // always one that source can match.
     ...(opts.kind ? { kind: opts.kind } : {}),
     ...(opts.includeObservations ? { includeObservations: true } : {}),
+    ...(opts.natures && opts.natures.length > 0 ? { natures: opts.natures } : {}),
   };
 
   // Resolve the query embedder BEFORE building the sources: its mode is the
@@ -3182,6 +3271,8 @@ async function isStaleHoldOpenAndCleared(
   id: string,
   heldOpen: { by: string; reason: string | null; at: string | null },
   harness?: string,
+  /** The row's `origin` — a peer-written ('remote') row's holder is never judged here (WI-10005916). */
+  origin?: string | null,
 ): Promise<boolean> {
   try {
     const [{ isHoldOpenExpired }, { readCoordLivenessConfig }] = await Promise.all([
@@ -3194,6 +3285,7 @@ async function isStaleHoldOpenAndCleared(
       graceMs: cfg.reclaimGraceMs,
       parkedGraceMs: cfg.reclaimParkedGraceMs,
       holdOpenGraceMs: cfg.holdOpenGraceMs,
+      origin,
     });
     if (!expired) return false;
     // Lift it for real — not just "ignore it this once". Leaving the stamp in place would keep
@@ -3208,7 +3300,13 @@ async function isStaleHoldOpenAndCleared(
         `Reason was: ${heldOpen.reason ?? '(none)'}`,
     );
     return true;
-  } catch {
+  } catch (e: unknown) {
+    // Still fails closed, but never silently: a liveness check that cannot run looks
+    // exactly like a LIVE holder, so say why the dead-hold lift was skipped.
+    console.warn(
+      `[hold-open] liveness check for ${id} (holder ${heldOpen.by}) could not run; hold stays enforced: ` +
+        (e instanceof Error ? e.message : String(e)),
+    );
     return false;
   }
 }
@@ -3236,6 +3334,26 @@ export interface TerminalCompletionConflict {
   note: string;
 }
 
+interface WorkItemPhysicalRow {
+  workspaceId: string;
+  harnessSlug: string;
+}
+
+/** Pin a follow-up write to the physical row returned by getWorkItem. */
+async function resolveWorkItemPhysicalRow(
+  wi: WorkItem,
+  preferredHarness?: string | null,
+): Promise<WorkItemPhysicalRow> {
+  const workspaceId = wi.family === 'issue' ? await resolveIssueWorkspace(wi.id) : activeWorkspaceId();
+  const harnessSlug = wi.family === 'issue'
+    ? await resolveIssuePhysicalSlug(getOrgPg().sql, workspaceId, wi.id, preferredHarness ?? wi.harness)
+    : wi.harness;
+  if (harnessSlug === null) {
+    throw new Error(`work_item '${wi.id}' has no harness_slug for a row-scoped write`);
+  }
+  return { workspaceId, harnessSlug };
+}
+
 /**
  * Record a non-authoritative terminal close beside the authoritative one.
  *
@@ -3250,6 +3368,7 @@ async function appendCompletionAttestation(
   id: string,
   priorPayload: unknown,
   entry: CompletionAttestation,
+  physicalRow: WorkItemPhysicalRow,
 ): Promise<void> {
   const existing = (priorPayload as Record<string, unknown> | null)?.[COMPLETION_ATTESTATIONS_KEY];
   const prior = Array.isArray(existing) ? existing : [];
@@ -3260,7 +3379,8 @@ async function appendCompletionAttestation(
        SET payload = COALESCE(payload, '{}'::jsonb) || ${merged}::text::jsonb,
            updated_ts = ${Date.now()}
      WHERE feature_id = ${id}
-       AND workspace_id IN (${issuesScopeWorkspace()}, ${activeWorkspaceId()})`;
+       AND workspace_id = ${physicalRow.workspaceId}
+       AND harness_slug = ${physicalRow.harnessSlug}`;
 }
 
 /**
@@ -3347,6 +3467,7 @@ export async function attachCompletionEvidenceToSettledItem(
   // The caller decides WHEN this applies; this is the backstop that keeps a non-terminal
   // row from being stamped with a terminal record by a path that writes no state.
   if (!isSettledWorkItemState(wi.state)) return { outcome: 'not-terminal', workItem: wi };
+  const physicalRow = await resolveWorkItemPhysicalRow(wi, opts.harness);
 
   const evidencePayloadJson = terminalPayloadMergeJson(opts.completionEvidence, opts.assumptions);
   // Nothing to record ⇒ nothing to write. Without this, a bare call would reassign
@@ -3377,8 +3498,9 @@ export async function attachCompletionEvidenceToSettledItem(
                             ELSE COALESCE(payload, '{}'::jsonb) || ${evidencePayloadJson}::text::jsonb
                        END,
              updated_ts = ${Date.now()}
-       WHERE feature_id = ${id}
-         AND workspace_id IN (${issuesScopeWorkspace()}, ${activeWorkspaceId()})`;
+       WHERE workspace_id = ${physicalRow.workspaceId}
+         AND harness_slug = ${physicalRow.harnessSlug}
+         AND feature_id = ${id}`;
     return (await getWorkItem(id, opts.harness)) ?? wi;
   };
 
@@ -3404,7 +3526,7 @@ export async function attachCompletionEvidenceToSettledItem(
   // same tolerance as the state-write reshape. The order is what matters: if the install
   // failed after a successful archive the loser is merely stored twice, whereas installing
   // first and failing to archive would destroy the record this function exists to keep.
-  await appendCompletionAttestation(id, wi.payload, attestation).catch(() => {});
+  await appendCompletionAttestation(id, wi.payload, attestation, physicalRow).catch(() => {});
   if (!upgrade) {
     opts.onTerminalConflict?.({
       outcome: 'attested',
@@ -3473,13 +3595,20 @@ export async function attachCompletionEvidenceToSettledItem(
  * Returns true iff a row was actually healed (false: not remote, not this caller's row, or
  * the id doesn't resolve to an issue-family row in the base table).
  */
-export async function selfHealAuthorOriginIfStranded(id: string, callerOwnerId: string): Promise<boolean> {
-  if (!id || !callerOwnerId) return false;
+export async function selfHealAuthorOriginIfStranded(
+  id: string,
+  callerOwnerId: string,
+  /** WI-10006010: only this resolved physical row may be healed. */
+  physicalRow: { workspaceId: string; harnessSlug: string },
+): Promise<boolean> {
+  if (!id || !callerOwnerId || !physicalRow.workspaceId || !physicalRow.harnessSlug) return false;
   const { sql } = getOrgPg();
   const rows = await sql<{ feature_id: string }[]>`
     UPDATE harness_shared.work_items
        SET origin = 'local'
-     WHERE feature_id = ${id}
+     WHERE workspace_id = ${physicalRow.workspaceId}
+       AND harness_slug = ${physicalRow.harnessSlug}
+       AND feature_id = ${id}
        AND origin = 'remote'
        AND payload #>> '{_ei,created_by}' = ${callerOwnerId}
     RETURNING feature_id`;
@@ -3643,12 +3772,15 @@ export async function setWorkItemState(
       opts.outputPayload === undefined ? priorOutput : opts.outputPayload,
     );
   }
-  if (state === 'needs-human' && !readStructuredOwnerAsk(wi.payload)) {
+  // D-029: the ONE needs-human precondition every writer applies — a structured owner ask that is
+  // also answerable (defaultIfUnanswered says what happens if the owner never replies).
+  if (state === 'needs-human' && !hasActiveStrictHumanAsk(wi.payload)) {
     throw new Error(
-      `work_item '${id}' → 'needs-human' rejected — the item carries no structured owner ask. ` +
+      `work_item '${id}' → 'needs-human' rejected — the item carries no answerable owner ask. ` +
         `Record the ask first with work_items:set_blocker { id: '${id}', kind: 'human', ` +
-        `capability: 'credential' | 'physical-device' | 'external-service-action', ref, summary, nextVerb }. ` +
-        `That typed blocker records the question, asker/time, responsible owner capability, and what unblocks the item.`,
+        `capability: 'credential' | 'physical-device' | 'external-service-action', ref, summary, nextVerb, ` +
+        `defaultIfUnanswered }. That typed blocker records the question, asker/time, responsible owner ` +
+        `capability, what unblocks the item, and what happens if the owner never answers.`,
     );
   }
   if (state === 'needs-human') {
@@ -3791,7 +3923,12 @@ export async function setWorkItemState(
     // Best-effort, and deliberately so on the ATTESTED path: failing to file the second
     // record must not turn a harmless duplicate close into a hard error for the caller. The
     // authoritative record is untouched either way, which is the property that matters.
-    await appendCompletionAttestation(id, wi.payload, attestation).catch(() => {});
+    await appendCompletionAttestation(
+      id,
+      wi.payload,
+      attestation,
+      await resolveWorkItemPhysicalRow(wi, opts.harness),
+    ).catch(() => {});
     if (!upgrade) {
       opts.onTerminalConflict?.({
         outcome: 'attested',
@@ -3853,7 +3990,7 @@ export async function setWorkItemState(
     // leader force-clear. Enforcing here (not only in the sweep) means the guard still holds
     // when the sweep is wedged or has not ticked — which is exactly the failure this fixes.
     // Only reached on the rare refusal path, so the extra round-trip costs nothing hot.
-    !(await isStaleHoldOpenAndCleared(id, heldOpen, wi.harness ?? undefined))
+    !(await isStaleHoldOpenAndCleared(id, heldOpen, wi.harness ?? undefined, wi.origin))
   ) {
     // WI-4530: name the REAL verbs. This message used to say "or { force: true }", which is
     // true for work_items:set_state but NOT for work_items:complete (it has no `force` arg) —
@@ -3955,6 +4092,17 @@ export async function setWorkItemState(
   // must continue to report the truthful, unclaimed terminal state.
   const priorAssignee = wi.assignee;
   if (wi.family === 'issue') {
+    // WI-10006010: pin the ONE physical row (workspace_id, harness_slug, feature_id) this write
+    // may touch — the same row `wi` was read from — and scope every origin heal AND the state
+    // write to it. Keyed on feature_id alone, closing one slug twin rewrote all of them.
+    const issueWorkspaceId = await resolveIssueWorkspace(id);
+    const issueSlug = await resolveIssuePhysicalSlug(
+      getOrgPg().sql,
+      issueWorkspaceId,
+      id,
+      opts.harness,
+    );
+    if (issueSlug === null) return null;
     // EI-19313515375179600 (WI-6822 follow-up): `origin` can flip local→remote well after
     // creation (an unresolved federation/replay-provenance defect, still under investigation —
     // see the work-item's own body). Trusting `origin` ALONE here strands the true author: they
@@ -3972,7 +4120,10 @@ export async function setWorkItemState(
     // never a row genuinely owned by a different peer) — this un-blocks the trigger for the
     // write that follows.
     if (wi.origin === 'remote' && opts.by && wi.createdBy && opts.by === wi.createdBy) {
-      const healed = await selfHealAuthorOriginIfStranded(id, opts.by);
+      const healed = await selfHealAuthorOriginIfStranded(id, opts.by, {
+        workspaceId: issueWorkspaceId,
+        harnessSlug: issueSlug,
+      });
       if (healed) wi.origin = 'local';
     }
     // EI-22189521072988065: a THIRD stranding, sibling to the two below — the caller
@@ -3988,6 +4139,7 @@ export async function setWorkItemState(
         origin: wi.origin,
         wasAlreadySettled: isSettledWorkItemState(wi.state),
         terminalOwner: wi.terminalOwner,
+        harnessSlug: issueSlug,
       });
       if (healed) wi.origin = 'local';
     }
@@ -4003,8 +4155,17 @@ export async function setWorkItemState(
       const orphan = await healOrphanedRemoteOriginIfAuthorEnded(id, {
         isCompletingTransition,
         by: opts.by ?? null,
+        harnessSlug: issueSlug,
       });
       if (orphan.healed) wi.origin = 'local';
+    }
+    // WI-10003565: the row's author key is one THIS workspace has written locally, so this
+    // node IS the authoring peer the refusal below would send the caller to — the same own-node
+    // rule the claim gate applies (issueOwnAuthorWhereSql). Without this a system-filed row
+    // (createdBy="system:*", matching none of the caller-identity hatches above) whose origin
+    // flipped could be claimed but never closed. The UPDATE's WHERE clause is the identity check.
+    if (wi.origin === 'remote' && (await selfHealOwnNodeOriginIfStranded(issueWorkspaceId, id, issueSlug))) {
+      wi.origin = 'local';
     }
     if (wi.origin === 'remote') {
       throw new Error(
@@ -4031,6 +4192,7 @@ export async function setWorkItemState(
       // second time; direct setIssueState callers omit the bit and stay guarded.
       secondTerminalCloseHandledByUnified: isSecondTerminalClose,
       terminalReason: requestedTerminalReason,
+      harnessSlug: issueSlug,
     });
     result = updated ? issueToWorkItem(updated) : null;
   } else {
@@ -4557,14 +4719,20 @@ export async function setWorkItemStateWithAliasInfo(
     const current = priorWorkItem;
     if (current?.family === 'issue') {
       const review = readAgentReviewState(current.payload);
-      if (current.origin === 'remote' || review?.status === 'pending' || review?.status === 'revision-requested') {
+      // WI-10006515: `origin` records how a row ARRIVED, not who wrote it. An own-node row
+      // stranded at origin='remote' is ours; the canonical writer below heals it, so it must
+      // not be short-circuited here as "remote-owned".
+      const remoteOwned =
+        current.origin === 'remote' &&
+        !(await isOwnNodeAuthoredRemoteRow(await resolveIssueWorkspace(id), id));
+      if (remoteOwned || review?.status === 'pending' || review?.status === 'revision-requested') {
         return {
           workItem: current,
           aliased: current.state !== requestedState,
           requestedState,
           appliedState: current.state,
           aliasNote:
-            current.origin === 'remote'
+            remoteOwned
               ? "requested state 'needs-human' was ignored because this item is remote-owned and must reconcile on its authoring peer."
               : "requested state 'needs-human' was ignored because this item is already in agent review.",
         };
@@ -4593,7 +4761,10 @@ export async function setWorkItemStateWithAliasInfo(
   if (workItem && workItem.family === 'issue') {
     try {
       if (appliedLower === 'needs-human') {
-        await mergeIssuePayload(id, { needsOwnerAction: true }, { unset: ['needsHuman'] });
+        await mergeIssuePayload(id, { needsOwnerAction: true }, {
+          unset: ['needsHuman'],
+          harnessSlug: opts.harness ?? workItem.harness,
+        });
         autoGateNote =
           " Its stored status='needs-human' is reserved for a strict typed owner capability; payload.needsOwnerAction is the admission floor and legacy payload.needsHuman was removed.";
         // WI-5689: mergeIssuePayload durably persists payload.needsHuman, but the
@@ -5070,7 +5241,7 @@ export async function mergeWorkItemOutputPayload(
     const wi = await getWorkItem(id, opts.harness);
     if (!wi) return;
     if (wi.family === 'issue') {
-      await mergeIssuePayload(id, { out: outputPayload });
+      await mergeIssuePayload(id, { out: outputPayload }, { harnessSlug: opts.harness ?? wi.harness });
       return;
     }
     const { sql } = getOrgPg();
@@ -5114,7 +5285,7 @@ export async function mergeWorkItemPayload(
   const clearingPlanItem = unset.includes('plan_item');
   const settingPlanItem = clearingPlanItem ? null : planItemSourceFromPayloadPatch(patchValue);
   if (wi.family === 'issue') {
-    await mergeIssuePayload(id, patchValue, { unset });
+    await mergeIssuePayload(id, patchValue, { unset, harnessSlug: opts.harness ?? wi.harness });
   } else {
     const featureHarness = wi.harness?.trim();
     if (!featureHarness) {
@@ -5187,7 +5358,7 @@ export async function mergeWorkItemPayload(
         if (refs.size > 0) {
           await tx`
             DELETE FROM harness_shared.coord_links
-             WHERE workspace_id = ${DEFAULT_COORD_WORKSPACE}
+             WHERE workspace_id = ANY(${implementsLinkScopes()})
                AND src_kind = ${FEATURE_KIND}
                AND src_ref = ${featureRef(featureHarness, id)}
                AND dst_kind = 'plan_item'
@@ -5265,6 +5436,8 @@ export async function claimWorkItem(
   assignee: string,
   opts: {
     harness?: string;
+    /** Authenticated assigning actor, supplied by a dispatch after admission checks. */
+    assignedBy?: string;
     /**
      * EI-20731607691070897 — ATOMIC SELF-HELD TRANSFER. The compare-and-claim below
      * only matches an UNHELD row, so a holder handing their own item to a named peer
@@ -5339,6 +5512,10 @@ export async function claimWorkItem(
   let prior: WorkItem | null = null;
   if (issue) {
     prior = issueToWorkItem(issue);
+    // P-007 / D-021: a verification task (payload.verification) is never claimable by
+    // its own reporter or implementer. This is the by-id writer every assign path
+    // funnels through, so the refusal holds for claim, assign and dispatch alike.
+    if (verificationTaskConflict(prior.payload, assignee)) return null;
     const agentReviewAdmission = matchesAgentReviewClaimAdmission(opts.agentReviewAdmission, prior, assignee)
       ? opts.agentReviewAdmission
       : null;
@@ -5371,6 +5548,7 @@ export async function claimWorkItem(
         : null;
     const updated = await claimIssue(id, assignee, {
       workspaceId: issueWs,
+      ...(opts.assignedBy ? { assignedBy: opts.assignedBy } : {}),
       fromHolder: opts.fromHolder,
       expectedAssignee: opts.expectedAssignee,
       forceTakeoverAdmission: opts.forceTakeoverAdmission,
@@ -5386,6 +5564,7 @@ export async function claimWorkItem(
     const wi = await getFeatureWorkItemOnly(id, opts.harness);
     if (!wi) return null;
     prior = wi;
+    if (verificationTaskConflict(prior.payload, assignee)) return null;
     const operationClaims = await import('./blueprint/operation-worker-binding');
     const operationClaimRead = await operationClaims.readActiveOperationWorkerClaimBinding(activeWorkspaceId(), assignee);
     if (!operationClaims.matchOperationWorkerClaim(operationClaimRead, wi).allowed) return null;
@@ -5460,6 +5639,10 @@ export async function claimWorkItem(
          -- can't bypass the auditor either — remote, un-admitted stays unclaimable
          -- (unless its verified author is trusted — P-010 trust leg, ws-scoped).
          AND ${autoPickableWhereSql(sql, ws)}
+         -- P-009 / D-022 pt 4 / D-024: a named claim cannot take a row that is not agent
+         -- work at all (a record, document or event, or human-audience work such as
+         -- email-draft-proposal). Category half only: readiness floors stay off this path.
+         AND ${agentWorkCategoryWhereSql(sql, 'target')}
          -- P-002 born-pending: duplicate screening is a second, orthogonal gate.
          AND ${(() => {
            const forceAdmission =
@@ -5590,6 +5773,27 @@ export type ClaimFailure =
   | { reason: 'not_found'; holder: null }
   | { reason: 'conflict'; holder: string }
   | { reason: 'gated'; holder: null };
+
+/**
+ * P-009 / D-024 — explain a by-id claim refused by the CATEGORY half of the work predicate.
+ * Returns the row's nature/audience when the feature-family row exists and is NOT agent work
+ * by category (nature 'work' AND audience 'agent'); null when it is agent work or absent.
+ * The test is the same SQL function the claim UPDATE applies (agentWorkCategoryWhereSql), so
+ * the explanation cannot disagree with the refusal. Read-only and diagnostic: it never
+ * changes a claim verdict, it only names one.
+ */
+export async function readNonAgentWorkCategory(
+  id: string,
+  harness: string,
+): Promise<{ nature: string; audience: string | null } | null> {
+  const { sql } = getOrgPg();
+  const rows = await sql<{ nature: string; audience: string | null }[]>`
+    SELECT nature, audience FROM harness_shared.work_items
+     WHERE workspace_id = ${activeWorkspaceId()} AND harness_slug = ${harness} AND feature_id = ${id}
+       AND NOT ${agentWorkCategoryWhereSql(sql, null)}
+     LIMIT 1`;
+  return rows[0] ?? null;
+}
 
 export function classifyClaimFailure(current: { assignee?: string | null } | null, claimer: string): ClaimFailure {
   if (!current) return { reason: 'not_found', holder: null };
@@ -5882,8 +6086,8 @@ export function claimFloorsWhereSql(sql: OrgSql, opts: ClaimFloorsOpts) {
     -- Rows released by another agent remain eligible for this caller; a peer can
     -- no longer overwrite this caller's cooldown in the shared row stamp.
     AND ${releaseCooldownFloor}
-    -- Built-in placeable kinds + any generic-kind datatype that opted into placement
-    -- (the 'hive-placement' tag — frontierPlacementKindClause). DARK until a datatype opts in.
+    -- Feature-family agent work only: not issue-routed, and nature work / audience agent
+    -- through the single work predicate (frontierPlacementKindClause, P-009 / D-022).
     AND ${frontierPlacementKindClause(sql, opts.workspaceId)}
     -- G2 admission (shared-hive-trust-admission P-002): never self-select a remote,
     -- un-admitted item — the same gate the feature frontier enforces (P-010 trust leg,
@@ -5942,6 +6146,9 @@ export function claimFloorsWhereSql(sql: OrgSql, opts: ClaimFloorsOpts) {
       claimSpecReferencesFleet: opts.claimSpecReferencesFleet,
       claimSpecReferencesGoal: opts.claimSpecReferencesGoal,
     })}
+    -- P-007 / D-021: a verification task never self-selects to its own reporter or
+    -- implementer. Claimant-specific, so it is a claim-door filter, not a claim floor.
+    AND NOT ${verificationTaskConflictSql(sql, opts.cooldownAssignee ?? '', 'payload')}
     -- EI-14806: the cross-machine-rig floor, extended to the FEATURE family. The issue-family
     -- claim has honored payload.needs_2_machine_rig since WI-2796, but a FEATURE-family item can
     -- ALSO carry the tag (WI-3487, a p2p rig-readiness feature) and this path — getNextWorkItem
@@ -6325,41 +6532,6 @@ export function reservedPlanLaneExclusionSql(
            AND c.expires_ts > now()
            AND c.owner <> ${assignee}
       ))
-      -- WI-41737: a recorded SELF-ONLY / DIRECT execution-route decision is durable
-      -- plan ownership even when the plan is lifecycle-ready and its implementing
-      -- session is between item leases/assignments. Before this leg, generic
-      -- scheduler:get_next could claim the linked work-item, discover the D-NNN ruling
-      -- only after pickup, release it, and immediately serve it again.
-      --
-      -- Keep the marker deliberately narrow and STRUCTURED around the decision title:
-      --   * "... self-only execution route ..." is explicit by itself;
-      --   * the exact conventional title "Direct execution route" additionally needs
-      --     affirmative direct/no-fleet language in its body.
-      -- A title such as "Direct execution route rejected" therefore does not reserve.
-      -- Scope the reservation to item_refs when the decision names them; an empty ref
-      -- set is plan-wide. Generic self-select is denied, while claim-by-id remains the
-      -- deliberate escape hatch for the named route owner.
-      OR EXISTS (
-        SELECT 1 FROM harness_shared.plan_decisions d
-         WHERE d.workspace_id = ${wsCol}
-           AND d.plan_slug = ${col}->'plan_item'->>'plan_slug'
-           AND (
-             cardinality(COALESCE(d.item_refs, ARRAY[]::text[])) = 0
-             OR ${col}->'plan_item'->>'item_id' = ANY(COALESCE(d.item_refs, ARRAY[]::text[]))
-           )
-           AND (
-             LOWER(d.title) LIKE '%self-only execution route%'
-             OR (
-               LOWER(BTRIM(d.title)) = 'direct execution route'
-               AND (
-                 LOWER(d.body) LIKE '%implements the plan directly%'
-                 OR LOWER(d.body) LIKE '%implement it itself%'
-                 OR LOWER(d.body) LIKE '%no fleet%'
-                 OR LOWER(d.body) LIKE '%no subagents%'
-               )
-             )
-           )
-      )
       -- EI-22040912157347872: ASSIGNMENT is the durable ownership intent underneath the
       -- leased claim. A route-owning plan session can legitimately be between claims while
       -- its assignment remains active; without this leg a generic kind-drain claims the
@@ -6516,6 +6688,58 @@ export function reservedPlanLaneExclusionSql(
            AND dep_it->>'id' = dep_id
            AND COALESCE(dep_it->>'status', '') NOT IN ('done', 'dropped')
       )
+    )
+    -- WI-10006159 extends WI-41737 at the existing decision writer/read seam.
+    -- A direct execution master may be ad-hoc, and a solo authorization may have
+    -- an ordinary title. Keep this OUTSIDE the plan_item gate. Require affirmative
+    -- route language; extract only explicit "WI-N owns execution" clauses, never
+    -- every WI mentioned in the body. The token lookup uses migration 1364's GIN
+    -- index. Item refs, tenant scope and deliberate by-id pickup remain unchanged.
+    -- The real-PG SSOT agreement suite binds this to migration 1364.
+    OR EXISTS (
+      SELECT 1 FROM harness_shared.plan_decisions d
+      WHERE d.workspace_id = ${wsCol}
+        AND (
+          (
+            d.plan_slug = ${col}->'plan_item'->>'plan_slug'
+            AND (
+              cardinality(COALESCE(d.item_refs, ARRAY[]::text[])) = 0
+              OR ${col}->'plan_item'->>'item_id' = ANY(COALESCE(d.item_refs, ARRAY[]::text[]))
+            )
+          )
+          OR (
+            regexp_split_to_array(d.body, '[^A-Za-z0-9_-]+') @> ARRAY[${idCol}]::text[]
+            AND EXISTS (
+              SELECT 1 FROM regexp_matches(d.body,
+                '(^|[^A-Za-z0-9_-])(WI-[0-9]+)[[:space:]]+owns execution([[:space:]]+and([[:space:]]|$)|[.;]|$)', 'g') AS master(ref)
+              WHERE master.ref[2] = ${idCol}
+            )
+          )
+        )
+        AND (
+          LOWER(d.title) LIKE '%self-only execution route%'
+          OR (
+            LOWER(BTRIM(d.title)) = 'direct execution route'
+            AND (
+              LOWER(d.body) LIKE '%implements the plan directly%'
+              OR LOWER(d.body) LIKE '%implement it itself%'
+              OR LOWER(d.body) LIKE '%no fleet%'
+              OR LOWER(d.body) LIKE '%no subagents%'
+            )
+          )
+          OR LOWER(d.body) ~ '(^|[^a-z0-9_-])su-[a-f0-9-]{8,36} is the (single|sole) implementer([[:space:].;]|$)'
+          OR LOWER(d.body) ~ '(^|[^a-z0-9_-])route is this session implementing directly, without (a new )?fleet([[:space:].;]|$)'
+        )
+    )
+    -- WI-10006417: an explicit Route A sentence names one session as the plan's
+    -- implementer, so it reserves the whole plan even when the decision's itemRefs
+    -- describe only its other clauses (D-006's refs omit P-002). The durable
+    -- plan_item_assignments surface is per-item and is not populated by this ruling.
+    OR EXISTS (
+      SELECT 1 FROM harness_shared.plan_decisions d
+      WHERE d.workspace_id = ${wsCol}
+        AND d.plan_slug = ${col}->'plan_item'->>'plan_slug'
+        AND LOWER(d.body) ~ '(^|[^a-z0-9_-])route[[:space:]]+a:[[:space:]]+this session[[:space:]]+[(]su-[a-f0-9-]{8,36}[)][[:space:]]+implements the plan([[:space:].;]|$)'
     )
   )`;
 }
@@ -6949,7 +7173,7 @@ export async function readUnresolvedDepBlockers(id: string, harness?: string): P
         ON d.workspace_id = 'default'
        AND d.dep_type = 'blocks'
        AND d.blocked_ref = CASE
-             WHEN wi.item_kind IN ('bug', 'change', 'task') THEN wi.feature_id
+             WHEN ${issueFamilyRouteSql(sql, 'wi')} THEN wi.feature_id
              ELSE wi.harness_slug || '#' || wi.feature_id
            END
      WHERE wi.feature_id = ${id}
@@ -6959,6 +7183,60 @@ export async function readUnresolvedDepBlockers(id: string, harness?: string): P
      ORDER BY d.blocker_ref
      LIMIT 25`;
   return rows.map((r) => ({ ref: r.blocker_ref, kind: r.blocker_kind, satisfaction: r.satisfaction }));
+}
+
+/** One unresolved `blocks` edge on an item the reader holds — see `readHeldUnresolvedDepBlockers`. */
+export interface HeldUnresolvedDepBlocker {
+  /** The held (blocked) item's feature_id. */
+  featureId: string;
+  /** The edge's blocker ref, in the blocker family's own form (bare issue id, or `<harness>#<id>`). */
+  blockerRef: string;
+  blockerKind: string;
+  /** When the edge was written, so a reader can age the wait. */
+  since: string | null;
+}
+
+/**
+ * Every unresolved `blocks` edge on the work items `ownerId` currently holds — the EDGE-side
+ * twin of the held-item `externalBlockers` read in `derive-awaiting.ts` (WI-10005020, plan
+ * feature-drain-delivery-readiness-and-outcome-accounting-2026-10-01 D-008 §4a). R-15 moves
+ * work-item-ref external blockers onto `work_item_deps` edges; without this read a migrated item
+ * silently drops out of the sender's `awaiting` stamp.
+ *
+ * It uses the same per-family blocked-ref form and the same `unsatisfiedBlockerSql` predicate as
+ * the claim floor, so it names exactly the edges that gate the queue: a `settled` edge whose
+ * blocker is done OR dropped is satisfied and is not listed. Bounded; throws like any read — the
+ * caller owns fail-soft.
+ */
+export async function readHeldUnresolvedDepBlockers(args: {
+  ownerId: string;
+  workspaceId: string;
+  limit: number;
+}): Promise<HeldUnresolvedDepBlocker[]> {
+  if (!args.ownerId || !args.workspaceId || args.limit <= 0) return [];
+  const { sql } = getOrgPg();
+  const rows = await sql<{ feature_id: string; blocker_ref: string; blocker_kind: string; created_at: Date | string | null }[]>`
+    SELECT wi.feature_id, d.blocker_ref, d.blocker_kind, d.created_at
+      FROM harness_shared.work_items wi
+      JOIN harness_shared.work_item_deps d
+        ON d.workspace_id = 'default'
+       AND d.dep_type = 'blocks'
+       AND d.blocked_ref = CASE
+             WHEN wi.item_kind IN ('bug', 'change', 'task') THEN wi.feature_id
+             ELSE wi.harness_slug || '#' || wi.feature_id
+           END
+     WHERE wi.workspace_id = ${args.workspaceId}
+       AND wi.taken_by = ${args.ownerId}
+       AND wi.status NOT IN ('done', 'resolved', 'deprecated', 'dropped')
+       AND ${unsatisfiedBlockerSql(sql)}
+     ORDER BY d.created_at DESC NULLS LAST, wi.feature_id, d.blocker_ref
+     LIMIT ${args.limit}`;
+  return rows.map((r) => ({
+    featureId: r.feature_id,
+    blockerRef: r.blocker_ref,
+    blockerKind: r.blocker_kind,
+    since: r.created_at == null ? null : new Date(r.created_at).toISOString(),
+  }));
 }
 
 /**
@@ -7879,6 +8157,7 @@ export async function diagnoseClaimNextMiss(filter: ClaimNextFilter): Promise<Cl
          AND ${observationLaneExclusionSql(sql)}
          AND ${needsOwnerActionExclusionSql(sql)}
          AND ${agentReviewNormalExclusionSql(sql)}
+         AND NOT ${verificationTaskConflictSql(sql, filter.assignee, 'wi.payload')}
          AND ${externalBlockersExclusionSql(sql)}
          -- WI-2633: a replication-liveness detector EI is gated to the p2p fleet — same floor the
          -- claim applies (below), so the miss diagnosis never disagrees with what it serves.
@@ -8118,6 +8397,12 @@ export async function explainIssueClaimFloors(
     claimantFleetSlug?: string;
     claimSpecReferencesFleet?: boolean;
     claimSpecReferencesGoal?: boolean;
+    /**
+     * Scope-authoring preview ONLY: evaluate the remaining shared floors for rows
+     * already held by these verified target-fleet members. Never used by a claim
+     * acquisition door; omitting it preserves the ordinary already-taken floor.
+     */
+    scopeHeldBy?: readonly string[];
   } = {},
 ): Promise<ClaimFloorAttribution[]> {
   if (ids.length === 0) return [];
@@ -8186,7 +8471,7 @@ export async function explainIssueClaimFloors(
       : // Order MATTERS: report the floor a human would act on first.
         !r.ok_status
         ? 'not-claimable-status'
-        : !r.ok_untaken
+        : !r.ok_untaken && !(r.taken_by && opts.scopeHeldBy?.includes(r.taken_by))
           ? 'already-taken'
           : !r.ok_origin
             ? 'origin'
@@ -8295,6 +8580,8 @@ export async function claimNextIssueWorkItem(
   opts: {
     /** Optional caller-owned client; scheduler:get_next uses its isolated claim pool. */
     client?: OrgSql;
+    /** Reuse the scheduler's bounded authority read across candidate families. */
+    operationClaimRead?: ActiveOperationWorkerClaimRead;
     issueKinds?: readonly IssueStoreKind[];
     ids?: readonly string[];
     /** WI-5258: ids the caller's spec NEGATIVELY excludes (e.g. `not:{id in [...]}` —
@@ -8391,7 +8678,7 @@ export async function claimNextIssueWorkItem(
   // live 2026-07-17, WI-5261).
   const issueWs = resolveIssuesScopeWorkspace(explicitActiveWorkspaceId || undefined);
   const operationClaims = await import('./blueprint/operation-worker-binding');
-  const operationClaimRead = await operationClaims.readActiveOperationWorkerClaimBinding(
+  const operationClaimRead = opts.operationClaimRead ?? await operationClaims.readActiveOperationWorkerClaimBinding(
     explicitActiveWorkspaceId, filter.assignee,
   );
   if (operationClaimRead.status === 'unavailable') {
@@ -8604,6 +8891,8 @@ export async function claimNextIssueWorkItem(
           -- submitter-owned revision interval. The dedicated reviewer tool is the only
           -- selector for pending; approved rows pass this floor again.
           AND ${agentReviewNormalExclusionSql(tx)}
+          -- P-007 / D-021: never self-select a verification task to its reporter or implementer.
+          AND NOT ${verificationTaskConflictSql(tx, filter.assignee, 'wi.payload')}
           AND ${externalBlockersExclusionSql(tx)}
           -- WI-2633: never self-select an auto-filed replication-liveness detector EI
           -- (payload._ei.created_by='system:replication-liveness'). A generic backlog-drain
@@ -9011,7 +9300,7 @@ export async function releaseWorkItem(
     releasingOwnerId?: string;
   } = {},
 ): Promise<WorkItem | null> {
-  const wi = await getWorkItem(id, opts.harness);
+  const wi = await boundedOrgTxn((tx) => getWorkItem(id, opts.harness, {}, tx), { readOnly: true });
   if (!wi) return null;
   if (hasResourceGovernorReceiptPayload(wi.payload)) {
     throw new ResourceGovernorReleaseRequiredError(id);
@@ -9715,14 +10004,26 @@ export async function commentWorkItem(
   id: string,
   body: string,
   authorId?: string,
-  opts: { workspaceId?: string; harness?: string } = {},
+  opts: {
+    workspaceId?: string;
+    harness?: string;
+    /**
+     * personal-data-reader-set-labels P-012 / D-006: the agent that authored
+     * `body`. While it holds a restricted Personal Vault disclosure the post is a
+     * sealed stub (personal:open-sealed opens it). Pass it wherever an agent's own
+     * text is posted; omit for system-templated comments.
+     */
+    writerOwnerId?: string | null;
+  } = {},
 ): Promise<ThreadPostRow | null> {
   const wi = await getWorkItem(id, opts.harness);
   if (!wi) return null;
   const workspaceId = opts.workspaceId?.trim() && opts.workspaceId.trim() !== '*' ? opts.workspaceId.trim() : undefined;
   const harness = opts.harness ?? wi.harness;
   // issue-family: commentIssue already creates the thread + fires the issue_commented fan-out.
-  if (wi.family === 'issue') return commentIssue(id, body, authorId, { workspaceId, harness });
+  if (wi.family === 'issue') {
+    return commentIssue(id, body, authorId, { workspaceId, harness, writerOwnerId: opts.writerOwnerId });
+  }
   // feature-family: thread on the feature ObjectRef + fan out to the work-item's subscribers.
   const ref = workItemObjectRef(wi);
   // Durable write (get-or-create thread + add post) in ONE bounded txn: ATOMIC
@@ -9735,6 +10036,17 @@ export async function commentWorkItem(
       getSql: () => tx,
       getWorkspaceId: () => workspaceId ?? activeWorkspaceId(),
     });
+    // P-012 / D-006: seal in THIS transaction, so the sealed row and its stub post
+    // commit together and the authored text never reaches coord_thread_posts.
+    const stored = opts.writerOwnerId?.trim()
+      ? await sealSharedTextInTxOrRefuse(tx, {
+          workspaceId: workspaceId ?? activeWorkspaceId(),
+          writerOwnerId: opts.writerOwnerId,
+          store: 'work-item-comment',
+          text: body,
+          context: { workItemId: id },
+        })
+      : null;
     const thread = await txThreads.getOrCreateThread(ref, {
       thread_id: `work-item-thread-${id}`,
       title: wi.title,
@@ -9742,7 +10054,7 @@ export async function commentWorkItem(
       created_ts: wi.createdAt,
       harness_slug: harness ?? undefined,
     });
-    return txThreads.addPost({ thread_id: thread.thread_id, author_id: authorId, body, created_ts: nowIso() });
+    return txThreads.addPost({ thread_id: thread.thread_id, author_id: authorId, body: stored?.text ?? body, created_ts: nowIso() });
   });
   const ev: InjectEvent = {
     from: authorId ?? 'substrate',
@@ -9772,23 +10084,104 @@ export interface UpdateWorkItemPatch {
   confirmShrink?: boolean;
 }
 
-/** Persist the shared goal attribution directly on the base table. The issue-family
- * compat view already exposes goal_id for reads, but its INSTEAD OF UPDATE trigger
- * intentionally preserves that column; writing through the view would therefore report
- * success while leaving the goal unchanged. This helper uses the row family's canonical
- * workspace and is deliberately limited to the one shared field. */
-async function updateWorkItemGoal(id: string, wi: WorkItem, goal: string | null): Promise<WorkItem | null> {
-  const { sql } = getOrgPg();
-  const workspace = wi.family === 'issue' ? issuesScopeWorkspace() : activeWorkspaceId();
+type WorkItemGoalIdentity =
+  | { family: 'issue'; kind: IssueKind }
+  | { family: 'feature'; harness: string | null }
+  | { family: 'source'; harness: string };
+
+/** The one base-table writer for `work_items.goal_id`. Issue-family's compat view
+ * deliberately preserves this column on UPDATE, so every path uses this writer. */
+async function writeWorkItemGoalColumn(
+  sql: GoalSqlTag,
+  opts: {
+    id: string;
+    workspaceId: string | null;
+    goal: string | null;
+    identity: WorkItemGoalIdentity;
+    /** When supplied, compare-and-set this exact prior value (including null). */
+    expectedGoalId?: string | null;
+  },
+): Promise<boolean> {
+  const identityWhere = opts.identity.family === 'issue'
+    ? sql`item_kind = ${opts.identity.kind}`
+    : sql`harness_slug = ${opts.identity.harness}`;
+  const expectedWhere = opts.expectedGoalId !== undefined
+    ? sql`AND goal_id IS NOT DISTINCT FROM ${opts.expectedGoalId}`
+    : sql``;
   const rows = await sql<{ feature_id: string }[]>`
     UPDATE harness_shared.work_items
-       SET goal_id = ${goal}, updated_ts = ${Date.now()}
-     WHERE workspace_id = ${workspace}
-       AND feature_id = ${id}
-       AND ${wi.family === 'issue' ? sql`item_kind = ${wi.kind}` : sql`harness_slug = ${wi.harness}`}
+       SET goal_id = ${opts.goal}, updated_ts = ${Date.now()}
+     WHERE workspace_id = ${opts.workspaceId}
+       AND feature_id = ${opts.id}
+       AND ${identityWhere}
+       ${expectedWhere}
      RETURNING feature_id`;
-  if (!rows[0]) return null;
+  return rows.length > 0;
+}
+
+/** Persist goal attribution through the canonical base-table writer. */
+async function updateWorkItemGoal(id: string, wi: WorkItem, goal: string | null): Promise<WorkItem | null> {
+  const sql = getOrgPg().sql as unknown as GoalSqlTag;
+  const workspaceId = wi.family === 'issue' ? issuesScopeWorkspace() : activeWorkspaceId();
+  const written = await writeWorkItemGoalColumn(sql, {
+    id,
+    workspaceId,
+    goal,
+    identity: wi.family === 'issue'
+      ? { family: 'issue', kind: wi.kind as IssueKind }
+      : { family: 'feature', harness: wi.harness },
+  });
+  if (!written) return null;
   return getWorkItem(id, wi.family === 'feature' ? (wi.harness ?? undefined) : undefined);
+}
+
+export type GoalStartWorkItemStampResult =
+  | { ok: true; changed: boolean }
+  | { ok: false; reason: 'not_found' | 'wrong_harness' | 'already_attributed' | 'changed' };
+
+/** Attribute a goal's explicit source item before its goal-drain fleet is minted.
+ * The caller supplies its goal SQL handle; the conditional UPDATE is the actual
+ * compare-and-set, so concurrent autocommit callers cannot both claim a NULL goal_id.
+ * This deliberately refuses cross-harness links and never reparents an item already
+ * owned by another goal. */
+export async function stampWorkItemGoalAtStart(
+  tx: GoalSqlTag,
+  opts: { id: string; workspaceId: string; harness: string; goalId: string },
+): Promise<GoalStartWorkItemStampResult> {
+  const rows = await tx<{ goal_id: string | null; harness_slug: string | null }[]>`
+    SELECT goal_id, harness_slug
+      FROM harness_shared.work_items
+     WHERE workspace_id = ${opts.workspaceId} AND feature_id = ${opts.id}
+     FOR UPDATE`;
+  const existing = rows[0];
+  if (!existing) return { ok: false, reason: 'not_found' };
+  if (existing.harness_slug !== opts.harness) return { ok: false, reason: 'wrong_harness' };
+  if (existing.goal_id === opts.goalId) return { ok: true, changed: false };
+  if (existing.goal_id !== null) return { ok: false, reason: 'already_attributed' };
+
+  const changed = await writeWorkItemGoalColumn(tx, {
+    id: opts.id,
+    workspaceId: opts.workspaceId,
+    goal: opts.goalId,
+    identity: { family: 'source', harness: opts.harness },
+    expectedGoalId: null,
+  });
+  return changed ? { ok: true, changed: true } : { ok: false, reason: 'changed' };
+}
+
+/** Compensate a source-item stamp if goals:start later has to roll the goal back.
+ * The compare-and-set ensures the rollback never clears a newer/different attribution. */
+export async function clearWorkItemGoalAtStart(
+  tx: GoalSqlTag,
+  opts: { id: string; workspaceId: string; harness: string; goalId: string },
+): Promise<boolean> {
+  return writeWorkItemGoalColumn(tx, {
+    id: opts.id,
+    workspaceId: opts.workspaceId,
+    goal: null,
+    identity: { family: 'source', harness: opts.harness },
+    expectedGoalId: opts.goalId,
+  });
 }
 
 function hasIssueFieldPatch(patch: UpdateWorkItemPatch): boolean {
@@ -9833,6 +10226,14 @@ export async function updateWorkItem(
     const updated = await updateWorkItemGoal(id, wi, patch.goal);
     return updated ? { ok: true, item: updated } : { ok: false, reason: 'not_found' };
   }
+  const issueWorkspaceId = await resolveIssueWorkspace(id);
+  const issueSlug = await resolveIssuePhysicalSlug(
+    getOrgPg().sql,
+    issueWorkspaceId,
+    id,
+    opts.harness ?? wi.harness,
+  );
+  if (issueSlug === null) return { ok: false, reason: 'not_found' };
   // EI-14948: a federated (origin='remote') issue-family row is owned by its authoring
   // peer's core — the engineer_issues view's INSTEAD OF trigger (516/521) deliberately
   // no-ops a local UPDATE against it and reports 0 rows affected (RETURN NULL) so the
@@ -9848,8 +10249,18 @@ export async function updateWorkItem(
   // back to 'local' first (see selfHealAuthorOriginIfStranded's docblock) so the write
   // that follows isn't ALSO silently blocked by the same trigger.
   if (wi.origin === 'remote' && by && wi.createdBy && by === wi.createdBy) {
-    const healed = await selfHealAuthorOriginIfStranded(id, by);
+    const healed = await selfHealAuthorOriginIfStranded(id, by, {
+      workspaceId: issueWorkspaceId,
+      harnessSlug: issueSlug,
+    });
     if (healed) wi.origin = 'local';
+  }
+  // WI-10006515: the same own-node rule setWorkItemState applies (WI-10003565). A row whose
+  // author key THIS workspace has written locally is ours however it last arrived, so a
+  // system-filed row (createdBy="system:*", which no caller can match) is healed, not refused.
+  // The UPDATE's WHERE clause is the identity check; a true peer row is left untouched.
+  if (wi.origin === 'remote' && (await selfHealOwnNodeOriginIfStranded(issueWorkspaceId, id, issueSlug))) {
+    wi.origin = 'local';
   }
   if (wi.origin === 'remote') return { ok: false, reason: 'remote_origin_not_editable' };
   // `goal` is written against the base table after the issue-family metadata update:
@@ -9857,7 +10268,10 @@ export async function updateWorkItem(
   // in the view patch would be a silent no-op. Destructuring also keeps the issue writer's
   // patch contract honest and makes this separation compile-time visible.
   const { goal, ...issuePatch } = patch;
-  const issue = await updateIssue(id, { ...issuePatch, by });
+  const issue = await updateIssue(id, { ...issuePatch, by }, {
+    workspaceId: issueWorkspaceId,
+    harnessSlug: issueSlug,
+  });
   if (issue === null) return { ok: false, reason: 'not_found' };
   if ('shrinkGuardTripped' in issue) {
     return { ok: false, reason: 'body_shrink_guard', existingLength: issue.existingLength, newLength: issue.newLength };

@@ -85,6 +85,9 @@ export const BLUEPRINT_ROLE_CAPS: Readonly<Record<string, readonly string[]>> = 
     'plans:read',
     'testing:run',
     'capability:fs-read',
+    // EI-24903256825782248: a rubric method can mandate a grading-runbook
+    // read; docs:get is the only reader (allowlists `judge`). Read-only.
+    'docs:read',
   ],
   // The SENTINEL — the fleet WATCHER (unify-launch-mechanics-2026-06-09 D-004,
   // split out of the overloaded "operator"). READ-MOSTLY: it observes fleet

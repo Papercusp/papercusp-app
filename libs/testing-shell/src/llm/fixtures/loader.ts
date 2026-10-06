@@ -25,6 +25,8 @@ import {
   type ControlTag,
   type ToolCallEvent,
   type ToolResultEvent,
+  type ToolInvocationRow,
+  type ContinueChainRow,
 } from '../types';
 
 export function loadFixtureTurn(filePath: string): TurnResult {
@@ -36,8 +38,8 @@ export function loadFixtureTurn(filePath: string): TurnResult {
 }
 
 export interface FixtureTelemetry {
-  toolInvocations: Array<{ name: string; metadata_json?: Record<string, unknown> }>;
-  continueChainRows: Array<{ ts: string; trigger: string; secondsSinceChainStart: number; chainTurnCount: number }>;
+  toolInvocations: ToolInvocationRow[];
+  continueChainRows: ContinueChainRow[];
 }
 
 /**
@@ -47,21 +49,83 @@ export interface FixtureTelemetry {
  * (exportFixtureFromRun) emits a paired `.telemetry.json` so the
  * replay path can re-evaluate deterministic asserts that read
  * tool_invocations / operator_continue_chains. Returns null when the
- * sibling is absent (back-compat: older fixtures keep working,
- * telemetry-dependent asserts just under-report).
+ * sibling is absent. A present but invalid sidecar throws: discarding
+ * captured evidence could make telemetry-dependent assertions pass.
  */
 export function loadFixtureTelemetry(sseFilePath: string): FixtureTelemetry | null {
   const telemetryPath = sseFilePath.replace(/\.sse$/, '.telemetry.json');
   if (!existsSync(telemetryPath)) return null;
-  try {
-    const text = readFileSync(telemetryPath, 'utf8');
-    const parsed = JSON.parse(text) as FixtureTelemetry;
-    if (!Array.isArray(parsed.toolInvocations)) parsed.toolInvocations = [];
-    if (!Array.isArray(parsed.continueChainRows)) parsed.continueChainRows = [];
-    return parsed;
-  } catch {
-    return null;
+  const parsed: unknown = JSON.parse(readFileSync(telemetryPath, 'utf8'));
+  const row = telemetryObject(parsed);
+  return {
+    toolInvocations: telemetryArray(row.toolInvocations).map(normalizeToolInvocation),
+    continueChainRows: telemetryArray(row.continueChainRows).map(normalizeContinueChain),
+  };
+}
+
+function telemetryObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid fixture telemetry: expected an object');
   }
+  return value as Record<string, unknown>;
+}
+
+function telemetryArray(value: unknown): unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('Invalid fixture telemetry: expected a row array');
+  return value;
+}
+
+function telemetryNumber(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error('Invalid fixture telemetry: expected a finite nonnegative number');
+  }
+  return value;
+}
+
+function normalizeToolInvocation(value: unknown): ToolInvocationRow {
+  const row = telemetryObject(value);
+  const toolName = row.toolName ?? row.name;
+  if (typeof toolName !== 'string' || toolName.length === 0) {
+    throw new Error('Invalid fixture telemetry: missing tool name');
+  }
+  return {
+    toolName,
+    argsJson: row.argsJson ?? null,
+    resultJson: row.resultJson ?? null,
+    // Legacy sidecars did not record these fields, just like the live pull.
+    costUsd: telemetryNumber(row.costUsd ?? 0),
+    latencyMs: telemetryNumber(row.latencyMs ?? 0),
+    metadataJson: telemetryObject(row.metadataJson ?? row.metadata_json ?? {}),
+  };
+}
+
+function normalizeContinueChain(value: unknown): ContinueChainRow {
+  const row = telemetryObject(value);
+  if (typeof row.chainId !== 'string' || row.chainId.length === 0 ||
+      typeof row.turnIdx !== 'number' || !Number.isInteger(row.turnIdx) || row.turnIdx < 0) {
+    // The retired aggregate format cannot identify individual chains/turns.
+    // Inventing those identities would change cap assertions; re-export instead.
+    throw new Error('Invalid fixture telemetry: missing chainId/turnIdx; re-export the fixture from its source run');
+  }
+  if (row.trigger !== 'continue' && row.trigger !== 'auto_fire_terminal' && row.trigger !== 'reset') {
+    throw new Error('Invalid fixture telemetry: unknown continue-chain trigger');
+  }
+  if (typeof row.startedAt !== 'string') throw new Error('Invalid fixture telemetry: missing chain start date');
+  const startedAt = new Date(row.startedAt);
+  if (!Number.isFinite(startedAt.getTime())) throw new Error('Invalid fixture telemetry: invalid chain start date');
+  if (typeof row.wasCapped !== 'boolean' || (row.capReason !== null && typeof row.capReason !== 'string')) {
+    throw new Error('Invalid fixture telemetry: invalid chain cap evidence');
+  }
+  return {
+    chainId: row.chainId,
+    turnIdx: row.turnIdx,
+    trigger: row.trigger,
+    startedAt,
+    elapsedSecsInChain: telemetryNumber(row.elapsedSecsInChain),
+    wasCapped: row.wasCapped,
+    capReason: row.capReason,
+  };
 }
 
 export function loadFixtureTurns(filePaths: string[]): TurnResult[] {

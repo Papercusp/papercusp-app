@@ -10,8 +10,9 @@ union rule — `@papercusp/template-kit` `composeTemplates`).
 | check | file | pins |
 |---|---|---|
 | `confinement-guard` | `confinement-guard.test.ts` | no app-agent role's `capabilities:`/`tools:` matches a dangerous pattern (cart/checkout/vault/approvals-write analogs) |
-| `seam-round-trip` | `seam-round-trip.test.ts` | the contract package exposes both wire gates; valid in/out payloads parse; the join key echoes unchanged; a malformed payload.out is REJECTED; the stable app-agent blueprint declares the same seam kind plus a typed, pinned plan-target operation; delegates the live operation→result→ingest leg to the app's own integration suite |
+| `seam-round-trip` | `seam-round-trip.test.ts` | the contract package exposes both wire gates; valid in/out payloads parse; the join key echoes unchanged; a malformed payload.out is REJECTED; the stable app-agent blueprint declares the same seam kind and NO operations; the app's root `.papercusp/blueprint.yaml` (`seam.rootBlueprint`) declares the typed, pinned plan-target operation; delegates the live operation→result→ingest leg to the app's own integration suite |
 | `gym-signals` | `gym-signals.test.ts` | the stable app-agent blueprint declares `gym.collectTrace` + every required guardrail signal id |
+| `operation-first-triggers` | `operation-first-triggers.test.ts` | no trigger in the app's source creates agent work directly (direct-create binding kind, or the work-item create tool as a trigger target); every agent-execution operation's worker role is declared in the root blueprint (D-003); built-in positive/negative detector controls always run |
 
 ## How they run
 

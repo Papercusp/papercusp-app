@@ -12,6 +12,7 @@ import { Checkbox } from './Checkbox';
 import { Select } from './Select';
 import SavedPromptsSection from './SavedPromptsSection';
 import HarnessPluginsSection from './HarnessPluginsSection';
+import IntegrationModeSection from './IntegrationModeSection';
 import { VirtualGrid, type ColumnDef } from '@papercusp/grid-core';
 
 /**
@@ -1060,6 +1061,11 @@ export default function HarnessSettingsPanel({
           )}
         </section>
       )}
+
+      {/* P-017 (pot-review-integration-mode-2026-10-05, D-007): "Where should the
+          agents' work go?" with guided switching. Saves independently of the
+          config.json Save bar; hidden for projects that are not pots. */}
+      <IntegrationModeSection slug={slug} />
 
       <SavedPromptsSection scope={{ kind: 'harness', slug }} />
 

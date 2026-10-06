@@ -319,6 +319,12 @@
         ]
       },
       {
+        "name": "doc-vector-seed",
+        "paths": [
+          "doc-vector-seed/**/*"
+        ]
+      },
+      {
         "name": "windows-wsl-runtime",
         "platforms": [
           "windows"

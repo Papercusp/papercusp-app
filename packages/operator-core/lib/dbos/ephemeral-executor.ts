@@ -23,7 +23,8 @@
  */
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
 import { getOrgPg, listActiveEphemeralRoutines, recordEphemeralFire } from '@papercusp/db-org';
-import { getSystemAction, SYSTEM_TARGET_PREFIX } from '../harness/routines/system-actions';
+import { getSystemAction, getSystemActionEntry, SYSTEM_TARGET_PREFIX, type SystemActionResult } from '../harness/routines/system-actions';
+import { restrictedTreeSkipReason } from '../harness/routines/restricted-tree-skip';
 // host-bootstrap imports this executor directly, without importing routines-workflow. Keep the
 // side-effect registry load on this production fire path or every `system:` ephemeral action is
 // absent and each cadence silently records "no system action ... registered" on every tick.
@@ -70,8 +71,12 @@ export interface EphemeralRoutineSpec {
 export interface EphemeralExecutorDeps {
   /** The ACTIVE ephemeral routines to arm. */
   list: () => Promise<EphemeralRoutineSpec[]>;
-  /** Fire one routine's action (resolve + run). Throws on a missing/failed action. */
-  fire: (r: EphemeralRoutineSpec) => Promise<void>;
+  /**
+   * Fire one routine's action (resolve + run). Throws on a missing/failed action.
+   * Resolves with the action's result: a `softError` there is recorded as
+   * `last_error` without counting as a failed fire (WI-10005164).
+   */
+  fire: (r: EphemeralRoutineSpec) => Promise<void | SystemActionResult>;
   /** Durable per-schedule liveness — UPDATE the ONE routine row (D-004), never INSERT per fire. */
   recordFire: (r: EphemeralRoutineSpec, error: string | null) => Promise<void>;
   /** Optional durable global heartbeat (best-effort). The inventory-visible heartbeat timer is the
@@ -104,7 +109,11 @@ function armOne(spec: EphemeralRoutineSpec, deps: EphemeralExecutorDeps): ArmedE
     async () => {
       let err: string | null = null;
       try {
-        await deps.fire(spec);
+        const result = await deps.fire(spec);
+        // WI-10005164: a fail-soft sub-pass failure. Recorded like a throw so the
+        // routine stops reading healthy, but not logged here: the action logs it
+        // when it happens, and a sticky failure would repeat this line every tick.
+        if (result && typeof result.softError === 'string' && result.softError) err = result.softError;
       } catch (e) {
         err = e instanceof Error ? e.message : String(e);
         logWith(deps, `fire failed for ${spec.id} (${spec.targetRole}): ${err}`);
@@ -318,7 +327,13 @@ export function productionEphemeralExecutorDeps(): EphemeralExecutorDeps {
       const name = r.targetRole.slice(SYSTEM_TARGET_PREFIX.length);
       const action = getSystemAction(name);
       if (!action) throw new Error(`no system action "${name}" registered (ephemeral routine ${r.id})`);
-      await runWithWorkspace(r.workspaceId, () =>
+      // WI-10005745 (D-012): same restricted-hold skip as the durable routine workflow.
+      const skip = await restrictedTreeSkipReason(name, getSystemActionEntry(name));
+      if (skip) {
+        console.warn(`[ephemeral] ${skip} (routine ${r.id})`);
+        return { diagnostics: { restrictedHoldSkip: skip } };
+      }
+      return await runWithWorkspace(r.workspaceId, () =>
         action({
           installSlug: r.installSlug,
           workspaceId: r.workspaceId,

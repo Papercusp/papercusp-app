@@ -146,6 +146,9 @@ export interface DesktopSessionRecord {
   kind: DesktopKind;
   scope: DesktopScope;
   scopeRef: string;
+  /** Migration 1386 / D-003: the agent-chosen name of an agent-scoped desktop, unique
+   *  per live (workspace, agent). NULL for pot, workspace and deployed-frame rows. */
+  name: string | null;
   hostRef: string | null;
   ownerPid: number | null;
   ownerBootId: string | null;
@@ -177,6 +180,8 @@ export interface RegisterDesktopSessionInput {
   kind: DesktopKind;
   scope: DesktopScope;
   scopeRef: string;
+  /** Agent-scoped desktops only (the DB CHECK refuses a name on any other scope). */
+  name?: string | null;
   display: string;
   displayGeometry: { width: number; height: number; depth?: number };
   /** Omit to take the D-006 default. Raise it deliberately when an agent
@@ -250,6 +255,7 @@ export function toRecord(r: any): DesktopSessionRecord {
     kind: r.kind,
     scope: r.scope,
     scopeRef: r.scope_ref,
+    name: r.name ?? null,
     hostRef: r.host_ref ?? null,
     ownerPid: r.owner_pid ?? null,
     ownerBootId: r.owner_boot_id ?? null,
@@ -301,14 +307,14 @@ export async function registerDesktopSession(
   const capture = input.captureGeometry ?? DEFAULT_CAPTURE_GEOMETRY;
   const rows = await db(sql)`
     INSERT INTO harness_shared.desktop_sessions (
-      id, workspace_id, harness_slug, kind, scope, scope_ref, host_ref,
+      id, workspace_id, harness_slug, kind, scope, scope_ref, name, host_ref,
       owner_pid, owner_boot_id, display,
       display_width, display_height, display_depth,
       capture_width, capture_height,
       state, lease_holder, capabilities, ttl_sec, task_id, idle_after_sec
     ) VALUES (
       ${id}, ${input.workspaceId}, ${input.harnessSlug ?? null}, ${input.kind},
-      ${input.scope}, ${input.scopeRef}, ${input.hostRef ?? null},
+      ${input.scope}, ${input.scopeRef}, ${input.name ?? null}, ${input.hostRef ?? null},
       ${input.ownerPid ?? process.pid}, ${input.ownerBootId ?? currentBootId()},
       ${input.display},
       ${input.displayGeometry.width}, ${input.displayGeometry.height},
@@ -504,6 +510,8 @@ export interface ListDesktopSessionsFilter {
   workspaceId: string;
   harnessSlug?: string | null;
   scope?: DesktopScope;
+  /** With `scope`, narrows to one owner — e.g. scope 'agent' + an ownerId is "my desktops". */
+  scopeRef?: string;
   /** Include released/dead rows. Off by default: the common question is "what is
    *  live right now", and a terminal row answering it is the bug this guards. */
   includeTerminal?: boolean;
@@ -525,6 +533,7 @@ export async function listDesktopSessions(
      WHERE workspace_id = ${filter.workspaceId}
        ${filter.harnessSlug ? client`AND harness_slug = ${filter.harnessSlug}` : client``}
        ${filter.scope ? client`AND scope = ${filter.scope}` : client``}
+       ${filter.scopeRef ? client`AND scope_ref = ${filter.scopeRef}` : client``}
        ${filter.includeTerminal ? client`` : client`AND state NOT IN ('released', 'dead')`}
      ORDER BY created_at DESC
      LIMIT ${Math.min(filter.limit ?? 200, 1000)}`;
@@ -567,16 +576,52 @@ export async function listGovernableDesktopSessions(
   return rows.map(toRecord);
 }
 
+/**
+ * `name` (migration 1386 / D-003): a string selects that agent desktop exactly; an
+ * explicit `null` selects the scope's UNNAMED row (pot, workspace, deployed frame);
+ * omitted means "any live row for this scope", most recently used first — the D-005
+ * default when an agent holds several desktops and names none.
+ */
 export async function resolveDesktopForScope(
-  args: { workspaceId: string; scope: DesktopScope; scopeRef: string },
+  args: { workspaceId: string; scope: DesktopScope; scopeRef: string; name?: string | null },
   sql?: Sql,
 ): Promise<DesktopSessionRecord | undefined> {
-  const rows = await db(sql)`
+  const client = db(sql);
+  const nameFilter =
+    args.name === undefined
+      ? client``
+      : args.name === null
+        ? client`AND name IS NULL`
+        : client`AND name = ${args.name}`;
+  const rows = await client`
     SELECT * FROM harness_shared.desktop_sessions
      WHERE workspace_id = ${args.workspaceId}
        AND scope        = ${args.scope}
        AND scope_ref    = ${args.scopeRef}
+       ${nameFilter}
        AND state NOT IN ('released', 'dead')
+     ORDER BY last_active_at DESC
+     LIMIT 1`;
+  return rows[0] ? toRecord(rows[0]) : undefined;
+}
+
+/**
+ * One session by id, tenant-scoped. Includes terminal rows only when asked: the
+ * common caller is "release / drive this desktop", for which a released row is the
+ * same answer as no row.
+ */
+export async function getDesktopSession(
+  args: { workspaceId: string; id: string; includeTerminal?: boolean },
+  sql?: Sql,
+): Promise<DesktopSessionRecord | undefined> {
+  // A malformed id is a miss, not a Postgres `invalid input syntax for type uuid` error.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.id)) return undefined;
+  const client = db(sql);
+  const rows = await client`
+    SELECT * FROM harness_shared.desktop_sessions
+     WHERE workspace_id = ${args.workspaceId}
+       AND id = ${args.id}
+       ${args.includeTerminal ? client`` : client`AND state NOT IN ('released', 'dead')`}
      LIMIT 1`;
   return rows[0] ? toRecord(rows[0]) : undefined;
 }

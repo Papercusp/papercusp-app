@@ -451,6 +451,11 @@ export interface HudSearchHit {
   /** How many OTHER turns in this session also matched. A single excerpt with
    *  no hint that 40 more exist misrepresents the result as the whole answer. */
   more: number;
+  /** The lowercased literal this turn actually contains (P-004 exact/fuzzy tiers) — the
+   *  deep-link must anchor on THIS rather than the typed query: a fuzzy hit's turn contains
+   *  the near spelling, not the typo, and the viewer only focuses a message containing its
+   *  term. Absent ⇒ anchor on the typed query (an older server / a hybrid-only hit). */
+  focusTerm?: string;
 }
 
 /** A run of excerpt text, flagged as matched or not — see `parseHighlight`. */
@@ -471,6 +476,8 @@ export interface HudTranscriptSearchSession {
     highlight?: string | null;
     speaker?: string | null;
     ts?: string | null;
+    /** P-004: the literal the turn contains — see {@link HudSearchHit.focusTerm}. */
+    focusTerm?: string | null;
   }[];
 }
 
@@ -513,6 +520,7 @@ export function rollUpTranscriptSearch(
       sessionId: s.sessionId ?? '',
       sourceKind: s.sourceKind ?? '',
       more: Math.max(0, (s.hits?.length ?? 0) - 1),
+      ...(top.focusTerm ? { focusTerm: top.focusTerm } : {}),
     });
   }
   return { owners, hits };

@@ -4,7 +4,22 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
-import { getFleet, getFleetHeadcountTarget, setFleetHeadcountTarget } from '../../agent-fleets-store';
+import {
+  getFleet,
+  getFleetHeadcountTarget,
+  setFleetHeadcountTarget,
+  type FleetHeadcountTarget,
+} from '../../agent-fleets-store';
+// Pure rule helpers live outside agent-fleets-store: this module reads the
+// constants at load time (the zod schema), and that store is fully vi.mock'ed
+// by many test files.
+import {
+  FLEET_TOP_UP_RULE_DEFAULT_HOURS,
+  FLEET_TOP_UP_RULE_MAX_HOURS,
+  parseFleetTopUpRule,
+  type FleetTopUpRule,
+  type FleetTopUpRuleKind,
+} from '../../fleet/top-up-rule';
 import { FLEET_MAX_TARGET_MEMBERS } from '../../agent-config-constants';
 import { resolveHarnessPlansDir, readPlanBySlug } from '../plans/source';
 import {
@@ -13,10 +28,50 @@ import {
 } from './saved-launch-spec';
 import { json, resolveFleetCaller } from './_shared';
 
+/**
+ * P-005 / D-030: build the no-top-up rule a call ratifies. What it SUSPENDS is
+ * read from the row as it stands before this write; a re-ratification of a rule
+ * that already suspended the target carries the original values forward, so a
+ * renewal can never lose the target the expiry will restore.
+ */
+export function buildFleetTopUpRule(args: {
+  kind: FleetTopUpRuleKind;
+  existing: FleetHeadcountTarget | null;
+  /** The target this write leaves in force (supervise-revoked); null for target-disabled. */
+  targetInForce: number | null;
+  ratifiedBy: string;
+  reason: string;
+  untilHours?: number;
+  now: number;
+}): FleetTopUpRule {
+  const prior = parseFleetTopUpRule(args.existing?.config?.topUpRule);
+  const suspendedTarget =
+    args.kind === 'supervise-revoked'
+      ? args.targetInForce
+      : args.existing?.enabled
+        ? args.existing.target
+        : prior?.kind === 'target-disabled'
+          ? prior.suspendedTarget
+          : null;
+  const currentSupervise = args.existing?.config?.supervise;
+  const suspendedSupervise =
+    currentSupervise === true ? true : prior ? prior.suspendedSupervise : currentSupervise === false ? false : null;
+  const hours = Math.min(args.untilHours ?? FLEET_TOP_UP_RULE_DEFAULT_HOURS, FLEET_TOP_UP_RULE_MAX_HOURS);
+  return {
+    kind: args.kind,
+    ratifiedBy: args.ratifiedBy,
+    ratifiedAt: args.now,
+    reason: args.reason,
+    until: args.now + Math.round(hours * 3_600_000),
+    suspendedTarget,
+    suspendedSupervise,
+  };
+}
+
 export default defineTool({
   name: 'fleet:headcount-target',
   description:
-    'Persist a bounded target member count and canonical launch recipe for a fleet. target:null disables automatic top-up but PRESERVES the launch recipe for takeover/respawn. Existing boot-baked settings fail closed unless replaceExisting:true includes an audit reason.',
+    'Persist a bounded target member count and canonical launch recipe for a fleet. target:null disables automatic top-up but PRESERVES the launch recipe for takeover/respawn. target:null or supervise:false records an attributed no-top-up rule (reason required) that EXPIRES after untilHours (default 24, max 72), when the governor restores what it suspended; re-call to re-ratify. Existing boot-baked settings fail closed unless replaceExisting:true includes an audit reason.',
   guidance: {
     when: 'After a fleet:launch-on-plan wave, when the fleet should maintain a target member count across member death and operator restarts.',
     notWhen: 'For a one-off launch wave, use fleet:launch-on-plan. Disable the governor with target:null; the saved launch recipe deliberately survives.',
@@ -38,8 +93,8 @@ export default defineTool({
       .boolean()
       .optional()
       .describe('R5 per-fleet governor grant: true opts this fleet into fleet-headcount auto-top-up while FLEET_HEADCOUNT_GOVERNOR is ON; false revokes; omit preserves the stored grant. A governance knob, not a boot setting — changing it needs no replaceExisting.'),
-    harness: z.string().min(1).describe('Harness containing the plan.'),
-    plan: z.string().min(1).describe('Plan whose work the top-up members should pull.'),
+    harness: z.string().min(1).describe('Harness for the launch recipe and optional plan validation.'),
+    plan: z.string().min(1).optional().describe('Plan whose work the top-up members should pull. Omit for a planless claim-spec fleet.'),
     agent: z.enum(['claude', 'omp', 'codex']).optional().describe('Agent backend. Omit to preserve an existing profile; a new profile defaults to claude.'),
     model: z.string().min(1).optional(),
     effort: z.string().min(1).max(40).optional(),
@@ -57,10 +112,37 @@ export default defineTool({
     carry: z.enum(['warm', 'cold']).optional(),
     extraArgs: z.array(z.string()).max(20).optional(),
     replaceExisting: z.boolean().optional().default(false).describe('Allow an intentional change to an existing canonical launch recipe. Requires reason.'),
-    reason: z.string().min(1).max(500).optional().describe('Audit reason required with replaceExisting:true.'),
+    reason: z
+      .string()
+      .min(1)
+      .max(500)
+      .optional()
+      .describe('Audit reason. Required with replaceExisting:true, and for a no-top-up rule (target:null or supervise:false), where it is shown to every later leader.'),
+    untilHours: z
+      .number()
+      .min(1)
+      .max(FLEET_TOP_UP_RULE_MAX_HOURS)
+      .optional()
+      .describe(`No-top-up rules only: hours until the rule expires and the governor restores what it suspended (default ${FLEET_TOP_UP_RULE_DEFAULT_HOURS}, max ${FLEET_TOP_UP_RULE_MAX_HOURS}). Re-call to re-ratify.`),
   }).superRefine((args, ctx) => {
     if (args.replaceExisting && !args.reason) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['reason'], message: 'reason is required when replaceExisting=true' });
+    }
+    const ratifiesRule = args.target == null || args.supervise === false;
+    if (ratifiesRule && !args.reason) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['reason'],
+        message:
+          'reason is required for a no-top-up rule (target:null or supervise:false): the rule is attributed, expires, and is shown to every later leader of this fleet',
+      });
+    }
+    if (!ratifiesRule && args.untilHours != null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['untilHours'],
+        message: 'untilHours applies only to a no-top-up rule (target:null or supervise:false)',
+      });
     }
     if (args.target != null && args.productiveCapacityFloor != null && args.productiveCapacityFloor > args.target) {
       ctx.addIssue({
@@ -97,7 +179,6 @@ export default defineTool({
         'carry',
         'extraArgs',
         'replaceExisting',
-        'reason',
       ].filter((field) => {
         const value = (args as Record<string, unknown>)[field];
         // replaceExisting defaults to false during schema parsing; that
@@ -117,17 +198,51 @@ export default defineTool({
             'Pass a non-null target to update the recipe, or omit the recipe fields to disable the governor.',
         }, true);
       }
-      await setFleetHeadcountTarget({ workspaceId, fleetSlug: args.fleet, target: null });
-      return json({ ok: true, fleet: args.fleet, target: null, disabled: true, launchProfilePreserved: true, by: ownerId });
+      // P-005 / D-030: a disable is a no-top-up RULE — attributed, reasoned and
+      // expiring — never a silent null a successor inherits without knowing it.
+      const existingProfile = await getFleetHeadcountTarget(workspaceId, args.fleet);
+      const topUpRule = buildFleetTopUpRule({
+        kind: 'target-disabled',
+        existing: existingProfile,
+        targetInForce: null,
+        ratifiedBy: ownerId,
+        reason: args.reason as string,
+        untilHours: args.untilHours,
+        now: Date.now(),
+      });
+      await setFleetHeadcountTarget({ workspaceId, fleetSlug: args.fleet, target: null, topUpRule });
+      return json({
+        ok: true,
+        fleet: args.fleet,
+        target: null,
+        disabled: true,
+        launchProfilePreserved: existingProfile != null,
+        // A row with no saved recipe cannot store the rule (nothing to restore).
+        topUpRule: existingProfile != null ? topUpRule : null,
+        by: ownerId,
+      });
     }
+    let resolvedHarness: Awaited<ReturnType<typeof resolveHarnessPlansDir>>;
     try {
-      const resolved = await resolveHarnessPlansDir(args.harness, { workspaceId });
-      const plan = await readPlanBySlug(args.plan, { harnessSlug: resolved.harnessSlug, workspaceId: resolved.workspaceId });
-      if (!plan) return json({ ok: false, error: `plan '${args.plan}' was not found in harness '${args.harness}'` }, true);
+      resolvedHarness = await resolveHarnessPlansDir(args.harness, { workspaceId });
     } catch (error) {
-      return json({ ok: false, error: `could not validate plan: ${error instanceof Error ? error.message : String(error)}` }, true);
+      return json({ ok: false, error: `could not validate harness: ${error instanceof Error ? error.message : String(error)}` }, true);
     }
     const existing = await getFleetHeadcountTarget(workspaceId, args.fleet);
+    const planToValidate = args.plan ?? existing?.config.plan;
+    if (planToValidate) {
+      try {
+        const plan = await readPlanBySlug(planToValidate, {
+          harnessSlug: resolvedHarness.harnessSlug,
+          workspaceId: resolvedHarness.workspaceId,
+        });
+        if (!plan) {
+          return json({ ok: false, error: `plan '${planToValidate}' was not found in harness '${args.harness}'` }, true);
+        }
+      } catch (error) {
+        return json({ ok: false, error: `could not validate plan: ${error instanceof Error ? error.message : String(error)}` }, true);
+      }
+    }
     let replacementConflicts: unknown[] = [];
     if (existing) {
       const resolution = resolveLoadedSavedFleetLaunchSpec({
@@ -152,9 +267,15 @@ export default defineTool({
         replacementConflicts = resolution.conflicts;
       }
     }
+    // P-005 / D-030: the no-top-up rule is not part of the launch recipe. It is
+    // decided below and written apart, so a stale stored rule never rides the
+    // recipe spread into the response.
+    const { topUpRule: _storedRule, ...existingRecipe } = (existing?.config ?? {}) as Partial<
+      FleetHeadcountTarget['config']
+    >;
     const config = normalizePersistedFleetLaunchConfig({
-      ...(existing?.config ?? {}),
-      plan: args.plan,
+      ...existingRecipe,
+      ...(args.plan !== undefined ? { plan: args.plan } : {}),
       harness: args.harness,
       agent: args.agent ?? existing?.config.agent ?? 'claude',
       ...(args.model ? { model: args.model } : {}),
@@ -210,12 +331,30 @@ export default defineTool({
       // the governor forwards the stored value to psu.
       (config as { launchContext?: string }).launchContext = launchContext;
     }
-    await setFleetHeadcountTarget({ workspaceId, fleetSlug: args.fleet, target: args.target, config });
+    // P-005 / D-030: supervise:false ratifies a rule; an untouched supervise keeps
+    // a still-standing supervise-revoked rule; anything else ends the rule.
+    const priorRule = parseFleetTopUpRule(existing?.config?.topUpRule);
+    const topUpRule: FleetTopUpRule | undefined =
+      args.supervise === false
+        ? buildFleetTopUpRule({
+            kind: 'supervise-revoked',
+            existing,
+            targetInForce: args.target,
+            ratifiedBy: ownerId,
+            reason: args.reason as string,
+            untilHours: args.untilHours,
+            now: Date.now(),
+          })
+        : args.supervise === undefined && priorRule?.kind === 'supervise-revoked'
+          ? priorRule
+          : undefined;
+    await setFleetHeadcountTarget({ workspaceId, fleetSlug: args.fleet, target: args.target, config, topUpRule });
     return json({
       ok: true,
       fleet: args.fleet,
       target: args.target,
       config,
+      topUpRule: topUpRule ?? null,
       enabled: true,
       launchProfile: {
         existed: !!existing,

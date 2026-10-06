@@ -31,7 +31,7 @@ import { shapeBurnDown } from './burn_down-shape';
 import { getModes } from '../../modes/store';
 import { readDrainFlow, type DrainFlowReport } from './drain-flow';
 import { readIssueOccurrenceCounts, type IssueOccurrenceCounts } from '../../issue-occurrence-ledger';
-import { readAgentReviewState } from '../../harness/improvements/agent-review-policy';
+import { readAgentReviewState, countWorkItemPresentationStages } from '../../harness/improvements/agent-review-policy';
 import {
   classifyAuditAge,
   classifyDurableParkReleaseLiveness,
@@ -41,15 +41,21 @@ import {
   type UnparkConditionStatus,
 } from '../../work-items-durable-park-audit';
 import { resolveConcreteWorkspaceId } from '../../workspace-registry';
+import { getOrgPg } from '@papercusp/db-org';
 import {
   FLEET_METRIC_ADMISSION_PARITY,
+  FLEET_METRIC_FEATURE_INHERITED_CLAIM_TO_CLOSE_MAX_MS,
+  FLEET_METRIC_FEATURE_ORIGIN_RULE,
+  FLEET_METRIC_PAUSED_TIME_RULE,
   FLEET_METRIC_REMAINING_PRECEDENCE,
   FLEET_METRIC_UNITS,
   FLEET_METRIC_WRITERS,
   FLEET_METRICS_SCHEMA_VERSION,
   fleetMetricsResultSchema,
   parseFleetMetricsResult,
+  type FleetFeatureOutcomes,
   type FleetMetricsResult,
+  type FleetPausedTime,
 } from '../fleet/fleet-metrics-contract';
 import {
   resolveFleetMetricScope,
@@ -850,6 +856,312 @@ function fleetMetricsUnavailable(args: {
   return parsed;
 }
 
+/** P-001: one recorded claim from `worked_by_history` (migrations 806/1036 append `{ at, owner }`). */
+export interface FleetMetricClaimEntry {
+  owner: string;
+  atMs: number;
+}
+
+/**
+ * Parse the raw `worked_by_history` column into time-ordered claims. `null` means the row
+ * carries no usable timed history — the origin is then UNKNOWN, never "no prior worker".
+ * Legacy bare-string entries have no timestamp and are therefore not usable here.
+ */
+export function parseFleetMetricClaimHistory(raw: unknown): FleetMetricClaimEntry[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: FleetMetricClaimEntry[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const rec = entry as Record<string, unknown>;
+    const owner = String(rec.owner ?? rec.ownerId ?? rec.agent ?? rec.by ?? '').trim();
+    const atMs = typeof rec.at === 'string' ? Date.parse(rec.at) : Number.NaN;
+    if (owner && Number.isFinite(atMs)) out.push({ owner, atMs });
+  }
+  return out.length > 0 ? out.sort((a, b) => a.atMs - b.atMs) : null;
+}
+
+export type FleetFeatureCloseOrigin = 'fleetDone' | 'inherited' | 'unknown';
+
+/**
+ * Label one feature close (FLEET_METRIC_FEATURE_ORIGIN_RULE). The closing claim is the latest
+ * claim at or before the close by a fleet ever-member or by the terminal owner (else the close
+ * itself, made by the terminal owner). The close is INHERITED when a worker outside the cohort claimed the row
+ * before that closing claim AND the close followed the closing claim within
+ * FLEET_METRIC_FEATURE_INHERITED_CLAIM_TO_CLOSE_MAX_MS — a short finish of someone else's work.
+ */
+export function classifyFeatureCloseOrigin(
+  item: Pick<WorkItem, 'closedAt' | 'terminalOwner'>,
+  history: readonly FleetMetricClaimEntry[] | null,
+  members: ReadonlySet<string>,
+): FleetFeatureCloseOrigin {
+  if (!history || history.length === 0) return 'unknown';
+  const closedMs = item.closedAt ? Date.parse(item.closedAt) : Number.NaN;
+  if (!Number.isFinite(closedMs)) return 'unknown';
+  // The completion path re-stamps `taken_by`, so the closer's completion entry lands AFTER
+  // closedAt (measured live 2026-10-01: 1,694 of ~1,772 done features, +1ms..+12s) and is
+  // excluded here. That stamp is not evidence of pre-close work: the trigger fires only on
+  // UPDATE OF taken_by, so a creation-time assignee never appears in the history at all.
+  const beforeClose = history.filter((entry) => entry.atMs <= closedMs);
+  if (beforeClose.length === 0) return 'unknown';
+  let closingIndex = -1;
+  for (let i = beforeClose.length - 1; i >= 0; i -= 1) {
+    const owner = beforeClose[i].owner;
+    if (members.has(owner) || owner === item.terminalOwner) {
+      closingIndex = i;
+      break;
+    }
+  }
+  if (closingIndex < 0) {
+    // Nobody in the cohort and not the closer ever claimed before the close: every recorded
+    // pre-close worker is an outsider, and the closer's own claim is the close itself
+    // (claim-to-close 0). That is an inherited finish. With no known closer, the actor who
+    // finished it is unrecorded, so the origin is unknown rather than guessed.
+    return item.terminalOwner ? 'inherited' : 'unknown';
+  }
+  const closing = beforeClose[closingIndex];
+  const outsiderBefore = beforeClose
+    .slice(0, closingIndex)
+    .some((entry) => entry.owner !== closing.owner && !members.has(entry.owner));
+  const shortFinish = closedMs - closing.atMs <= FLEET_METRIC_FEATURE_INHERITED_CLAIM_TO_CLOSE_MAX_MS;
+  return outsiderBefore && shortFinish ? 'inherited' : 'fleetDone';
+}
+
+/** One successful fleet control invocation, in invocation order. */
+export interface FleetMetricControlEvent {
+  tool: 'fleet:pause' | 'fleet:wind-down' | 'fleet:resume';
+  at: string;
+}
+
+export interface FleetMetricPauseSource {
+  events: readonly FleetMetricControlEvent[];
+  /** The registry's CURRENT control flag; a non-active state with no open recorded interval was set by a routine. */
+  current: { controlState: string | null; controlAt: string | null } | null;
+}
+
+/**
+ * PURE: paused vs working time over the window. Pause and wind-down open an interval; resume
+ * closes it. A resume with no recorded opening (a routine flipped the flag) makes the total
+ * UNKNOWN rather than silently counting that interval as working time.
+ */
+export function computeFleetPausedTime(
+  source: FleetMetricPauseSource,
+  window: { startAt: string; endAt: string },
+): FleetPausedTime {
+  const startMs = Date.parse(window.startAt);
+  const endMs = Date.parse(window.endAt);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+    return {
+      status: 'unknown',
+      reason: 'fleet metric window bounds are not valid timestamps',
+      recoverVia: 'retry fleet:metrics; the resolver must emit an ordered ISO window',
+    };
+  }
+  const intervals: Array<{ start: number; end: number | null }> = [];
+  let open: number | null = null;
+  for (const event of [...source.events].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) {
+    const at = Date.parse(event.at);
+    if (!Number.isFinite(at) || at >= endMs) continue;
+    if (event.tool === 'fleet:resume') {
+      if (open === null) {
+        // Only an unpaired resume INSIDE the window hides paused time we can see.
+        if (at > startMs) {
+          return {
+            status: 'unknown',
+            reason: `fleet:resume at ${event.at} has no recorded fleet:pause/fleet:wind-down opening it (the control flag was set by a routine)`,
+            recoverVia: 'read harness_shared.agent_fleets control history or the fleet-control-reconcile routine fires for the opening time',
+          };
+        }
+        continue;
+      }
+      intervals.push({ start: open, end: at });
+      open = null;
+    } else if (open === null) {
+      open = at;
+    }
+  }
+  const currentlyParked = source.current?.controlState != null && source.current.controlState !== 'active';
+  if (open !== null && source.current?.controlState === 'active') {
+    // The registry says the fleet is running again, but no successful fleet:resume closed the
+    // interval (a refused resume or a routine flipped the flag). Close it at the flag's time —
+    // never run it to the window end, which would count working time as paused.
+    const at = source.current.controlAt ? Date.parse(source.current.controlAt) : Number.NaN;
+    if (!Number.isFinite(at) || at < open) {
+      return {
+        status: 'unknown',
+        reason: 'fleet control_state is active but no recorded resume or control_at time closes the open pause',
+        recoverVia: 'read harness_shared.agent_fleets.control_at for this fleet',
+      };
+    }
+    intervals.push({ start: open, end: at });
+    open = null;
+  }
+  if (open === null && currentlyParked) {
+    const at = source.current?.controlAt ? Date.parse(source.current.controlAt) : Number.NaN;
+    if (!Number.isFinite(at)) {
+      return {
+        status: 'unknown',
+        reason: `fleet control_state is '${source.current?.controlState}' with no recorded opening time`,
+        recoverVia: 'read harness_shared.agent_fleets.control_at for this fleet',
+      };
+    }
+    open = at;
+  }
+  if (open !== null) intervals.push({ start: open, end: null });
+  let pausedMs = 0;
+  let intervalCount = 0;
+  for (const interval of intervals) {
+    const start = Math.max(interval.start, startMs);
+    const end = Math.min(interval.end ?? endMs, endMs);
+    if (end <= start) continue;
+    pausedMs += end - start;
+    intervalCount += 1;
+  }
+  const windowMs = endMs - startMs;
+  return {
+    status: 'measured',
+    windowMs,
+    pausedMs,
+    workingMs: windowMs - pausedMs,
+    intervalCount,
+    openAtGeneratedAt: open !== null,
+    source: 'harness_shared.tool_invocations fleet:pause|fleet:wind-down -> fleet:resume',
+    rule: FLEET_METRIC_PAUSED_TIME_RULE,
+  };
+}
+
+export type FleetMetricHistoryReader = (args: {
+  workspaceId: string;
+  harness: string;
+  ids: readonly string[];
+}) => Promise<ReadonlyMap<string, unknown>>;
+
+export type FleetMetricPauseReader = (args: {
+  workspaceId: string;
+  fleet: string;
+  endAt: string;
+}) => Promise<FleetMetricPauseSource>;
+
+/** Default writer read: the claim history the claim path appends (harness_shared.work_items). */
+export const readFleetMetricClaimHistory: FleetMetricHistoryReader = async ({ workspaceId, harness, ids }) => {
+  if (ids.length === 0) return new Map();
+  const { sql } = getOrgPg();
+  const rows = await sql<Array<{ feature_id: string; worked_by_history: unknown }>>`
+    SELECT feature_id, worked_by_history
+      FROM harness_shared.work_items
+     WHERE workspace_id = ${workspaceId}
+       AND harness_slug = ${harness}
+       AND feature_id = ANY(${[...ids]}::text[])`;
+  return new Map(rows.map((row) => [row.feature_id, row.worked_by_history]));
+};
+
+/** Default writer read: successful fleet control invocations plus the registry's current flag. */
+export const readFleetMetricPauseSource: FleetMetricPauseReader = async ({ workspaceId, fleet, endAt }) => {
+  const { sql } = getOrgPg();
+  const [events, current] = await Promise.all([
+    sql<Array<{ tool_name: FleetMetricControlEvent['tool']; invoked_at: Date | string }>>`
+      SELECT tool_name, invoked_at
+        FROM harness_shared.tool_invocations
+       WHERE workspace_id = ${workspaceId}
+         AND tool_name IN ('fleet:pause', 'fleet:wind-down', 'fleet:resume')
+         AND status = 'ok'
+         AND args_json->>'fleet' = ${fleet}
+         AND invoked_at < ${endAt}::timestamptz
+       ORDER BY invoked_at, id`,
+    sql<Array<{ control_state: string | null; control_at: string | number | null }>>`
+      SELECT control_state, control_at
+        FROM harness_shared.agent_fleets
+       WHERE workspace_id = ${workspaceId} AND fleet_slug = ${fleet}
+       LIMIT 1`,
+  ]);
+  const row = current[0];
+  return {
+    events: events.map((event) => ({
+      tool: event.tool_name,
+      at: event.invoked_at instanceof Date ? event.invoked_at.toISOString() : new Date(event.invoked_at).toISOString(),
+    })),
+    current: row
+      ? {
+          controlState: row.control_state,
+          controlAt: row.control_at == null ? null : new Date(Number(row.control_at)).toISOString(),
+        }
+      : null,
+  };
+};
+
+function errorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * P-001 (R-1, R-11..R-14): feature-fleet outcomes. Only feature-family closes count; issue-family
+ * closes in the same window are listed as SUPPORTING and never added in; every close carries an
+ * origin label; authority stays partitioned so a proposed close is never a committed outcome.
+ */
+export async function buildFleetFeatureOutcomes(args: {
+  featureCloses: readonly WorkItem[];
+  supportingCloses: readonly WorkItem[];
+  members: ReadonlySet<string>;
+  workspaceId: string | null;
+  harness: string;
+  readHistory: FleetMetricHistoryReader;
+}): Promise<FleetFeatureOutcomes> {
+  let rawHistory: ReadonlyMap<string, unknown> = new Map();
+  if (args.featureCloses.length > 0) {
+    if (!args.workspaceId) {
+      return {
+        status: 'unknown',
+        reason: 'workspace identity is unavailable, so feature claim history could not be read',
+        recoverVia: 'retry work_items:burn_down { fleetMetrics } from a workspace-scoped session',
+      };
+    }
+    try {
+      rawHistory = await args.readHistory({
+        workspaceId: args.workspaceId,
+        harness: args.harness,
+        ids: args.featureCloses.map((item) => item.id),
+      });
+    } catch (error) {
+      return {
+        status: 'unknown',
+        reason: `feature claim history read failed: ${errorReason(error)}`,
+        recoverVia: 'retry; the history writer is harness_shared.work_items.worked_by_history',
+      };
+    }
+  }
+  const origin = { fleetDone: 0, inherited: 0, unknown: 0 };
+  for (const item of args.featureCloses) {
+    origin[classifyFeatureCloseOrigin(item, parseFleetMetricClaimHistory(rawHistory.get(item.id)), args.members)] += 1;
+  }
+  const tasks = args.supportingCloses.filter((item) => item.kind === 'task').length;
+  const bugs = args.supportingCloses.filter((item) => item.kind === 'bug').length;
+  return {
+    status: 'measured',
+    unit: 'distinct canonical feature-family work-item ids',
+    population: 'feature-family-lifecycle-terminal-in-window',
+    closes: authorityPartition(args.featureCloses),
+    origin: {
+      ...origin,
+      partitionsLifecycleTerminal: true,
+      claimToCloseMaxMs: FLEET_METRIC_FEATURE_INHERITED_CLAIM_TO_CLOSE_MAX_MS,
+      rule: FLEET_METRIC_FEATURE_ORIGIN_RULE,
+      historyWriter: 'harness_shared.work_items.worked_by_history',
+    },
+    shipped: {
+      status: 'unknown',
+      reason: 'no writer records a shipped transition for feature-family work-items; lifecycle closes are not shipments',
+      recoverVia: 'join each closed feature to its plan ship record (plans:get) or the release ledger',
+    },
+    supporting: {
+      unit: 'distinct canonical issue-family work-item ids',
+      tasks,
+      bugs,
+      other: args.supportingCloses.length - tasks - bugs,
+      total: args.supportingCloses.length,
+      countedInFeatureOutcomes: false,
+    },
+  };
+}
+
 /** Build the canonical snapshot after the shared resolver has fixed the fleet/spec/window. */
 export async function buildFleetMetricsResult(
   resolution: FleetMetricScopeResolution,
@@ -859,6 +1171,10 @@ export async function buildFleetMetricsResult(
     sourceCapExhausted: boolean;
     assignee?: string;
     explainFloors?: typeof explainIssueClaimFloors;
+    /** P-001: the workspace the claim-history and fleet-control reads are scoped to. */
+    workspaceId?: string | null;
+    readHistory?: FleetMetricHistoryReader;
+    readPauseSource?: FleetMetricPauseReader;
   },
 ): Promise<FleetMetricsResult> {
   if (!resolution.ok) return parseFleetMetricsResult(resolution);
@@ -888,21 +1204,69 @@ export async function buildFleetMetricsResult(
       .map((item) => ({ item, at: item.closedAt!, value: item.terminalOwner })),
   );
   if (!terminalSelection.ok) return parseFleetMetricsResult(terminalSelection);
+  // P-001: the feature cohort is its own population, admitted by the SAME spec evaluator.
+  const featureTerminalSelection = selectFleetMetricFlowEvents(
+    resolution,
+    items
+      .filter(
+        (item) =>
+          item.family === 'feature' &&
+          !isObservationLane(item) &&
+          TERMINAL_STATES.has(item.state) &&
+          inWindow(item.closedAt),
+      )
+      .map((item) => ({ item, at: item.closedAt!, value: item.terminalOwner })),
+  );
+  if (!featureTerminalSelection.ok) return parseFleetMetricsResult(featureTerminalSelection);
 
   const openedItems = openedSelection.events.map((event) => event.item);
   const terminalItems = terminalSelection.events.map((event) => event.item);
+  const featureCloses = featureTerminalSelection.events.map((event) => event.item);
   const remainingItems = currentCanonical.filter((item) => !TERMINAL_STATES.has(item.state));
   const explainFloors = opts.explainFloors ?? explainIssueClaimFloors;
   // The occurrence census and claim-floor explanation are independent reads. Keep
   // the caller's occurrence promise deferred until this point so the two expensive
   // legs overlap instead of consuming the metric budget back-to-back.
-  const [floorRows, issueOccurrences] = await Promise.all([
+  const workspaceId = opts.workspaceId ?? null;
+  const readPauseSource = opts.readPauseSource ?? readFleetMetricPauseSource;
+  const [floorRows, issueOccurrences, featureOutcomes, pausedTime] = await Promise.all([
     explainFloors(
       resolution.scope.harness,
       remainingItems.map((item) => item.id),
       { assignee: opts.assignee },
     ),
     Promise.resolve(opts.issueOccurrences),
+    buildFleetFeatureOutcomes({
+      featureCloses,
+      supportingCloses: terminalItems,
+      members: new Set(resolution.everMemberIds),
+      workspaceId,
+      harness: resolution.scope.harness,
+      readHistory: opts.readHistory ?? readFleetMetricClaimHistory,
+    }),
+    (async (): Promise<FleetPausedTime> => {
+      if (!workspaceId) {
+        return {
+          status: 'unknown',
+          reason: 'workspace identity is unavailable, so fleet control history could not be read',
+          recoverVia: 'retry work_items:burn_down { fleetMetrics } from a workspace-scoped session',
+        };
+      }
+      try {
+        const source = await readPauseSource({
+          workspaceId,
+          fleet: resolution.scope.fleet,
+          endAt: resolution.scope.window.endAt,
+        });
+        return computeFleetPausedTime(source, resolution.scope.window);
+      } catch (error) {
+        return {
+          status: 'unknown',
+          reason: `fleet control history read failed: ${errorReason(error)}`,
+          recoverVia: 'retry; the writer is harness_shared.tool_invocations (fleet:pause|fleet:wind-down|fleet:resume)',
+        };
+      }
+    })(),
   ]);
   const floorById = new Map(floorRows.map((row: ClaimFloorAttribution) => [row.id, row]));
   const buckets = {
@@ -1004,7 +1368,20 @@ export async function buildFleetMetricsResult(
           occurrences: FLEET_METRIC_WRITERS.occurrences,
         },
       },
+      intakeStages: {
+        ...countWorkItemPresentationStages(currentMatched.filter(item => item.family === 'issue').map(item => ({
+          kind: item.kind, title: item.title, summary: item.summary, payload: item.payload,
+          status: item.state, assignee: item.assignee, terminalOwner: item.terminalOwner,
+          terminalCompletionRef: item.terminalCompletionRef, completionAuthority: item.completionAuthority,
+          blocked: ['blocked-dep', 'external-blocker', 'claim-hold', 'needs-owner-action']
+            .includes(floorById.get(item.id)?.refusedBy ?? ''),
+        }))),
+        scope: 'current-spec issue-family rows including observation evidence',
+        window: 'current stock at generatedAt',
+      },
       populationLifecycle: resolution.populationLifecycle,
+      featureOutcomes,
+      pausedTime,
       admissionParity: FLEET_METRIC_ADMISSION_PARITY,
     },
   });
@@ -1821,6 +2198,7 @@ export default defineTool({
         issueOccurrences: metricOccurrences,
         sourceCapExhausted: fleetMetricSourceItems.length >= WORK_ITEMS_MAX_LIMIT,
         assignee: self?.ownerId,
+        workspaceId,
       });
     })();
     // P-011: apply the lane fence BEFORE the census is built, so every count in the

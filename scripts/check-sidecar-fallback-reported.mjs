@@ -44,6 +44,7 @@ import { presentOnDisk } from './lib/tracked-files.mjs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
+import ts from 'typescript';
 import { stripCommentsAndStrings } from './lib/strip-comments-and-strings.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,44 +71,87 @@ export const BASELINE = new Set([]);
 /**
  * Does `text` contain a sidecar call whose `catch` does not report?
  *
- * Deliberately a SOURCE scan rather than a full AST parse: the shape being
- * policed is small and syntactic (`try { ...sidecarCall... } catch { ... }`),
- * and a scan has no parser/toolchain dependency to drift. It errs toward FALSE
- * NEGATIVES (an exotic formatting could slip through) and never toward false
- * positives, which is the right bias for a guard that blocks the build.
+ * Reuse the TypeScript parser already required by the shared source masker.
+ * Inspect the governing catch, not a lookahead slice that can include another
+ * function. Resolve const reporter callbacks in lexical scope so an injected
+ * test seam does not hide its reporting production default from this guard.
  */
 export function findUnreportedFallbacks(text) {
+  const source = ts.createSourceFile('fallback.ts', text, ts.ScriptTarget.Latest, true);
   const offenders = [];
-  for (const call of SIDECAR_CALLS) {
-    let idx = text.indexOf(call);
-    while (idx !== -1) {
-      // Skip the import/export lines and the declaration itself.
-      const lineStart = text.lastIndexOf('\n', idx) + 1;
-      const line = text.slice(lineStart, text.indexOf('\n', idx));
-      const isDecl = /^\s*(export\s+)?(async\s+)?function\s/.test(line);
-      const isImport = /^\s*(import|export)\b/.test(line) || /^\s*[\w$]+,?\s*$/.test(line);
-      if (isDecl || isImport) {
-        idx = text.indexOf(call, idx + 1);
-        continue;
-      }
 
-      // Find the catch block governing this call: the next `catch` after it.
-      const catchIdx = text.indexOf('catch', idx);
-      if (catchIdx === -1) {
-        idx = text.indexOf(call, idx + 1);
-        continue;
-      }
-
-      // The catch body runs to its closing brace; bound the search generously
-      // rather than brace-matching, then require the reporter inside it.
-      const bodyStart = text.indexOf('{', catchIdx);
-      const body = bodyStart === -1 ? '' : text.slice(bodyStart, bodyStart + 800);
-      if (!body.includes(REPORTER)) {
-        offenders.push({ call, line: text.slice(0, idx).split('\n').length });
-      }
-      idx = text.indexOf(call, idx + 1);
+  function unwrap(expression) {
+    while (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) ||
+      ts.isNonNullExpression(expression) || ts.isTypeAssertionExpression(expression)) {
+      expression = expression.expression;
     }
+    return expression;
   }
+
+  function binding(name, reference) {
+    for (let scope = reference.parent; scope; scope = scope.parent) {
+      if (ts.isCatchClause(scope) && scope.variableDeclaration?.name.getText(source) === name) return null;
+      if (ts.isFunctionLike(scope) && scope.parameters.some((p) => p.name.getText(source) === name)) return null;
+      if (!ts.isBlock(scope) && !ts.isSourceFile(scope)) continue;
+      for (const statement of scope.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        const declaration = statement.declarationList.declarations.find((d) => ts.isIdentifier(d.name) && d.name.text === name);
+        if (!declaration) continue;
+        return statement.declarationList.flags & ts.NodeFlags.Const && declaration.pos < reference.pos
+          ? declaration.initializer : null;
+      }
+    }
+    return null;
+  }
+
+  function reporter(expression, seen = new Set()) {
+    expression = unwrap(expression);
+    if (ts.isIdentifier(expression)) {
+      if (expression.text === REPORTER) return true;
+      const initializer = binding(expression.text, expression);
+      if (!initializer || seen.has(initializer)) return false;
+      return reporter(initializer, new Set([...seen, initializer]));
+    }
+    if (ts.isBinaryExpression(expression) && expression.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) {
+      return reporter(expression.right, seen);
+    }
+    if (ts.isArrowFunction(expression) || ts.isFunctionExpression(expression)) {
+      const body = expression.body;
+      const forwarded = ts.isBlock(body)
+        ? body.statements.length === 1 && (ts.isExpressionStatement(body.statements[0]) || ts.isReturnStatement(body.statements[0]))
+          ? body.statements[0].expression : null
+        : body;
+      return !!forwarded && ts.isCallExpression(unwrap(forwarded)) && reporter(unwrap(forwarded).expression, seen);
+    }
+    return false;
+  }
+
+  function catchReports(block) {
+    let found = false;
+    function visit(node) {
+      // Merely declaring a callback in catch does not execute the reporter.
+      if (ts.isFunctionLike(node)) return;
+      if (ts.isCallExpression(node) && reporter(node.expression)) found = true;
+      if (!found) ts.forEachChild(node, visit);
+    }
+    visit(block);
+    return found;
+  }
+
+  function visit(node) {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && SIDECAR_CALLS.includes(node.expression.text)) {
+      for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
+        if (!ts.isTryStatement(ancestor)) continue;
+        if (node.pos >= ancestor.tryBlock.pos && node.end <= ancestor.tryBlock.end &&
+          ancestor.catchClause && !catchReports(ancestor.catchClause.block)) {
+          offenders.push({ call: node.expression.text, line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1 });
+        }
+        break;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
   return offenders;
 }
 
@@ -133,8 +177,13 @@ export function scanTree() {
   // The ENUMERATION is the collapse detector and must stay whole-tree: it is what proves
   // the guard is looking at a repository at all. It costs nothing — no file is read.
   // WI-10004176: drop index entries a peer's plain `rm` left until git-sync commits it.
+  // maxBuffer: the default 1 MiB is a hard ceiling on the listing, and the tracked *.ts list
+  // crossed it on 2026-10-01 (1,059,013 bytes). Past it execFileSync kills git (ENOBUFS) and the
+  // guard dies before checking anything. 128 MiB matches doc-claims/tracked-text-files.ts.
   const enumerated = presentOnDisk(
-    execFileSync('git', ['ls-files', '*.ts'], { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(Boolean),
+    execFileSync('git', ['ls-files', '*.ts'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+      .split('\n')
+      .filter(Boolean),
     ROOT,
   ).filter(eligible);
 

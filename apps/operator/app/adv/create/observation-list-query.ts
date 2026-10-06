@@ -14,6 +14,7 @@ export function observationServerFilters(
   signalKind: string | null,
 ) {
   return {
+    ...(strings(state.triageState).length ? { triageStates: strings(state.triageState) } : {}),
     ...(strings(state.scope).length ? { scopes: strings(state.scope) } : {}),
     ...(strings(state.sourceRole).length
       ? { sourceRoles: strings(state.sourceRole) }
@@ -31,7 +32,7 @@ export function observationFacetOptions(
   summary: CompanionListSummary | null | undefined,
 ): ReadonlyMap<string, EnumOption[]> {
   const out = new Map<string, EnumOption[]>();
-  for (const key of ['scope', 'sourceRole', 'confidence']) out.set(key, []);
+  for (const key of ['scope', 'sourceRole', 'confidence', 'triageState']) out.set(key, []);
   for (const group of summary?.facets ?? []) {
     if (!out.has(group.key)) continue;
     out.set(

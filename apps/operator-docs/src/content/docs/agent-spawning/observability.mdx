@@ -4,20 +4,23 @@
 # Edit the doc with docs:author { overwrite: true } — a hand-edit here is REFUSED by
 # the next projection (it cannot tell your edit from corruption), so it blocks the
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
-title: Observability
-description: How to see what spawns happened — the spawn-tree feed, useful PG queries, and what you can't see (yet).
+title: "Observability"
+description: "How to see what spawns happened — the spawn-tree feed, useful PG queries, and what you can't see (yet)."
+type: Insight
+discovered: 2026-10-01
+status: active
+documents:
+  - "packages/agent-mcp/src/tools/intel/spawn_tree.ts"
+  - "packages/operator-core/lib/endpoint-route/routes/harness/intel-spawn-tree.ts"
+  - "packages/operator-core/lib/fleet/pg-stores.ts"
 plans:
-  - fumadocs-to-starlight-2026-05-20
-  - unify-agent-spawn-chokepoint-2026-06-06
-  - rate-limit-layer-v2-2026-06-05
-  - admin-testing-tab-restructure-2026-05-24
-  - apiary-generation-0-battery-2026-06-08
+  - "fumadocs-to-starlight-2026-05-20"
+  - "unify-agent-spawn-chokepoint-2026-06-06"
+  - "rate-limit-layer-v2-2026-06-05"
+  - "admin-testing-tab-restructure-2026-05-24"
+  - "apiary-generation-0-battery-2026-06-08"
 sidebar:
   order: 5
-documents:
-  - packages/agent-mcp/src/tools/intel/spawn_tree.ts
-  - packages/operator-core/lib/endpoint-route/routes/harness/intel-spawn-tree.ts
-  - packages/operator-core/lib/fleet/pg-stores.ts
 ---
 
 ## Spawn-tree feed
@@ -32,9 +35,11 @@ same data.
 What the feed returns:
 
 - Every `tool_invocations` row scoped to one harness, last 24h by default
-- A `depth` per row (parent_spawn_id chain) — depth 0 is a top-level tool call,
-  depth 1 is a child agent's call, depth 2 is a grandchild's, … Indent by
-  `depth` to render the lineage (the PG query below does `repeat('  ', depth)`).
+- A `depth` per row (parent_spawn_id chain). **Today every row is `depth = 0`;**
+  Phase 9's spawn-of-spawn work has not shipped, so child-agent tool calls do not
+  yet appear at depth greater than 0. When it ships, depth 1 can represent a
+  child agent's call, depth 2 a grandchild's, and so on. Indent by `depth` to
+  render the lineage (the PG query below does `repeat('  ', depth)`).
 - Per-row: when, tool, role, status, duration, output size + ref, feature/chunk
   attribution, spawnId
 - An optional `status` filter — note these are **tool-invocation** statuses
@@ -42,8 +47,10 @@ What the feed returns:
   different set from the `spawned_agents` lifecycle statuses
   (`running` / `restarting` / `done` / `failed` / `cancelled` / `reaped`).
 
-The feed is built from `harness_shared.tool_invocations_spawn_tree`, so depth>0
-rows appear automatically when a spawned child agent makes its own tool calls.
+The feed is built from `harness_shared.tool_invocations_spawn_tree_filtered`
+(Migration 460). Its result includes `depth` and `root_spawn_id` for future
+lineage, but today the feed's rows are depth 0. A child's own tool calls will
+appear as deeper rows only after Phase 9's spawn-of-spawn work ships.
 
 ## PG queries
 

@@ -1,0 +1,41 @@
+{
+  "kind": "plugin",
+  "name": "github-issues",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "GitHub Issues as a ticket provider: issues become ticket records, open/close/reopen become ticket-status-change events, issue comments become ticket-comment documents, and the host can post a comment on an issue (ticket.comment). Synced by the host's connector driver; the plugin only maps GitHub's REST API.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "main": "./index.cjs",
+  "capabilities": [],
+  "tools": [],
+  "provider": {
+    "id": "github-issues",
+    "contractVersion": 1,
+    "displayName": "GitHub Issues",
+    "datatypes": ["ticket", "ticket-status-change", "ticket-comment"],
+    "capabilities": ["ticket.read", "ticket.comment"],
+    "oauth": {
+      "authorizeUrl": "https://github.com/login/oauth/authorize",
+      "tokenUrl": "https://github.com/login/oauth/access_token",
+      "scopes": ["repo"],
+      "clientRegistrationRef": "github",
+      "identity": {
+        "url": "https://api.github.com/user",
+        "idField": "id",
+        "displayNameField": "login"
+      }
+    },
+    "egressHosts": ["api.github.com", "github.com"],
+    "configSchema": {
+      "type": "object",
+      "required": ["owner", "repo"],
+      "properties": {
+        "owner": { "type": "string", "minLength": 1 },
+        "repo": { "type": "string", "minLength": 1 },
+        "harnessSlug": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    }
+  }
+}

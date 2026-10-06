@@ -21,6 +21,7 @@ import {
   type RepoError,
   type ScopedOversized,
 } from './run-git-sync';
+import { isLocalDiskFullError } from './git-fetch-headroom-refusal';
 
 /** Consecutive error ticks before the failure escalates (3 ticks ≈ 30 min).
  *  NOTE the name is historical: this counts ANY failing leg, not just pushes
@@ -45,8 +46,9 @@ export const PUSH_FAILURE_ESCALATION_TICKS = 3;
 export const CHRONIC_CUMULATIVE_PEEL_TICKS = 3;
 export const CHRONIC_CUMULATIVE_REBROADCAST_TICKS = 18;
 
-/** Which LEG of a git-sync tick failed (EI-19275994927087666). */
-export type GitSyncFailingLeg = 'commit' | 'push' | 'conflict' | 'config-lock' | 'unknown';
+/** Which LEG of a git-sync tick failed (EI-19275994927087666). `disk-headroom` (WI-10004397)
+ *  is not a git leg at all: the local disk is full, so no leg can run. */
+export type GitSyncFailingLeg = 'commit' | 'push' | 'conflict' | 'config-lock' | 'disk-headroom' | 'unknown';
 
 /**
  * PURE: classify which leg actually failed, from the error text git-sync recorded.
@@ -67,6 +69,10 @@ export function classifyGitSyncFailingLeg(
   lastError: string | null,
   pushMode: string | null,
 ): GitSyncFailingLeg {
+  // WI-10004397: checked FIRST. A disk-full refusal is wrapped in git-sync's generic fetch
+  // prefix, and its "HEAD has unpushed commits" form contains "push", so any later arm
+  // would misname it: that form read as "push failing — commits NOT reaching origin".
+  if (isLocalDiskFullError(lastError)) return 'disk-headroom';
   const e = (lastError ?? '').toLowerCase();
   if (e.includes('conflict')) return 'conflict';
   if (e.includes('could not lock config file') && e.includes('config')) return 'config-lock';
@@ -89,6 +95,11 @@ export function gitSyncLegPhrase(leg: GitSyncFailingLeg | null): string {
       return 'merge conflict — needs a resolver';
     case 'config-lock':
       return 'submodule config-lock contention — canonical URL sync blocked locally; origin is unaffected';
+    case 'disk-headroom':
+      return (
+        "LOCAL DISK FULL — free space is at or under git-sync's fetch-headroom reserve, so every fetch " +
+        'is refused and nothing commits; free space on that filesystem (network, credentials and origin are unaffected)'
+      );
     default:
       return "cause unclassified — read that routine's last_error";
   }

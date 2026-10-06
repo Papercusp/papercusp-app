@@ -125,6 +125,11 @@ export interface ClaudeAccount {
    * Resolve via `egressEntries(account)`. The owner provisions the IPs (owner-gated infra, like creds).
    */
   egressPool?: AccountEgress[];
+  /** Metered spend policy (anthropic-credits-gateway-2026-09-30 P-008, D-003). `overflow` (absent ⇒
+   *  this): metered serving — an api-key account, or usage-credits overage on a subscription — is used
+   *  only when no included-allowance account can serve. `never`: the gateway never serves this account
+   *  while it is metered. */
+  meteredPolicy?: 'overflow' | 'never';
   /** When added (epoch ms). */
   addedAt: number;
   /** Swarm member harness slugs currently bound to this account (P-020). A MANUAL / deploy-time
@@ -208,6 +213,10 @@ export interface AccountRateState {
   windowResetAt?: number;
   /** Epoch ms `utilization`/`windowResetAt` were last observed — lets the selector ignore stale budget. */
   utilizationAt?: number;
+  /** Codex upstream credit eligibility; included-meter exhaustion alone is not an account wall. */
+  usageCreditsAvailable?: boolean;
+  /** When credit eligibility was observed; a credit-only update is not a new usage-window reading. */
+  usageCreditsObservedAt?: number;
   /**
    * Unified-7d (weekly) rolling utilization (a fraction; 1.0 = 100%) from
    * `anthropic-ratelimit-unified-7d-utilization` — the LONGER Claude Max limit alongside the 5h.
@@ -370,6 +379,7 @@ export function registerAccount(
     egress?: AccountEgress;
     egressPool?: AccountEgress[];
     provider?: AccountProvider;
+    meteredPolicy?: 'overflow' | 'never';
   },
   now: number,
 ): AccountPool {
@@ -393,6 +403,7 @@ export function registerAccount(
               label: input.label ?? a.label,
               egress: input.egress ?? a.egress,
               egressPool: input.egressPool ?? a.egressPool,
+              ...((input.meteredPolicy ?? a.meteredPolicy) ? { meteredPolicy: input.meteredPolicy ?? a.meteredPolicy } : {}),
             }
           : a,
       ),
@@ -405,6 +416,7 @@ export function registerAccount(
     label: input.label,
     egress: input.egress,
     egressPool: input.egressPool,
+    ...(input.meteredPolicy ? { meteredPolicy: input.meteredPolicy } : {}),
     addedAt: now,
     boundTo: [],
     rate: freshRate(),
@@ -548,7 +560,7 @@ export function recordAccountReset(pool: AccountPool, id: string, opts: { resetW
 export function recordAccountWindow(
   pool: AccountPool,
   id: string,
-  w: { utilization?: number; windowResetAt?: number; utilization7d?: number; windowResetAt7d?: number },
+  w: { utilization?: number; windowResetAt?: number; utilization7d?: number; windowResetAt7d?: number; usageCreditsAvailable?: boolean },
   now: number,
 ): AccountPool {
   return {
@@ -560,7 +572,12 @@ export function recordAccountWindow(
         windowResetAt: w.windowResetAt ?? a.rate.windowResetAt,
         utilization7d: w.utilization7d ?? a.rate.utilization7d,
         windowResetAt7d: w.windowResetAt7d ?? a.rate.windowResetAt7d,
-        utilizationAt: now,
+        utilizationAt:
+          w.utilization !== undefined || w.windowResetAt !== undefined ||
+          w.utilization7d !== undefined || w.windowResetAt7d !== undefined
+            ? now : a.rate.utilizationAt,
+        ...(accountProvider(a) === 'codex' && w.usageCreditsAvailable !== undefined
+          ? { usageCreditsAvailable: w.usageCreditsAvailable, usageCreditsObservedAt: now } : {}),
         // WI-41147: retain a spaced history of 7d readings so the burn governor can derive
         // d(utilization7d)/dt. Only a real 7d observation appends — a 5h-only update leaves
         // the history untouched (appending the STALE carried-forward 7d value would flatten
@@ -792,7 +809,7 @@ export const SOFT_PIN_AFFINITY_WEIGHT = Number(process.env.PAPERCUSP_SPAWN_SOFT_
  */
 export function accountBurnVerdict(rate: AccountRateState, now: number): BurnVerdict {
   const at = rate.utilizationAt;
-  if (at === undefined || now - at > DRAIN_UTIL_STALE_MS) {
+  if (rate.usageCreditsAvailable === true || at === undefined || now - at > DRAIN_UTIL_STALE_MS) {
     return {
       burnRatePerHr: null,
       headroomFraction: rate.utilization7d !== undefined && Number.isFinite(rate.utilization7d)
@@ -808,7 +825,9 @@ export function accountBurnVerdict(rate: AccountRateState, now: number): BurnVer
       // the deciding branch rather than re-derived from `utilization7d` by a reader (P-001).
       disposition: 'no-verdict',
       reason:
-        at === undefined
+        rate.usageCreditsAvailable === true
+          ? 'Codex usage credits available — included allowance does not bound account capacity'
+          : at === undefined
           ? 'usage window never observed — burn governor stands down'
           : 'usage reading stale — burn governor stands down (the wall machinery owns stale readings)',
     };
@@ -866,7 +885,10 @@ export function drainUtil7d(a: ClaudeAccount, now: number): number {
  * in favor of an account with real headroom in both windows (7d-aware-account-selection-2026-06-17).
  */
 export function effectiveDrainUtil(a: ClaudeAccount, now: number): number {
-  return Math.max(drainUtil(a, now), drainUtil7d(a, now));
+  const included = Math.max(drainUtil(a, now), drainUtil7d(a, now));
+  return accountProvider(a) === 'codex' && a.rate.usageCreditsAvailable === true && included >= DRAIN_FULL_UTIL
+    ? 0
+    : included;
 }
 
 /**
@@ -901,6 +923,7 @@ export function accountFull(a: ClaudeAccount, now: number): boolean {
  * (provider-supplied) window reset itself.
  */
 export function usageWalledUntil(a: ClaudeAccount, now: number): number {
+  if (accountProvider(a) === 'codex' && a.rate.usageCreditsAvailable === true) return 0;
   let until = 0;
   const r = a.rate;
   if (drainUtil(a, now) >= DRAIN_FULL_UTIL && r.windowResetAt !== undefined && r.windowResetAt > now) {
@@ -935,7 +958,7 @@ export function usageWalledUntil(a: ClaudeAccount, now: number): number {
  * up) but whose MOST RECENT individual pause had already lapsed by the time of the check (each pause
  * was short; `isAvailable` back to true) read as unconditionally eligible, the sustained-penalty
  * signal never consulted at all. Live symptom (accounts:status, 2026-07-06): ownerhandle7/ownerhandle8/
- * ownerhandle8-direct/aviowner.com showed `sustainedlyLimited:true` with `available:true` — fresh
+ * ownerhandle8-direct/avistorewolf.com showed `sustainedlyLimited:true` with `available:true` — fresh
  * spawns kept getting routed to them (nothing here excluded them) and crash-looped within ~20-30s on
  * their first inference call, zero progress, across repeated placements. Now: budget below the full
  * mark AND not sustainedly-limited, in either order — a lapsed pause no longer hides an active
@@ -1076,7 +1099,7 @@ export function selectAccountForSpawn(pool: AccountPool, now: number, opts: Spaw
   // repeated-429 streak (isSustainedlyLimited via penaltyCount, not util) whose most recent
   // individual pause had already lapsed by selection time read as perfectly fine and kept getting
   // freshly-spawned bees hard-pinned onto it — they died on their first inference call. Live:
-  // accounts:status showed ownerhandle7/ownerhandle8/ownerhandle8-direct/aviowner.com as
+  // accounts:status showed ownerhandle7/ownerhandle8/ownerhandle8-direct/avistorewolf.com as
   // sustainedlyLimited:true with available:true; fresh cup:spawn placements kept landing there and
   // crash-looped (sessionState:ended within ~20-30s, zero progress).
   // WI-41147: the burn governor's SHED verdict (window projected to exhaust before it resets,

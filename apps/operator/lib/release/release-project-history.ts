@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '@papercusp/operator-core/lib/module-repo-root';
 import {
   assembleProjectHistory,
   assertProjectHistoryDocument,
@@ -97,8 +97,7 @@ export async function buildReleaseHistoryAssets(
   outDir: string,
   timings: ReleaseHistoryAssetTimings = {},
 ): Promise<void> {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const root = path.resolve(here, '../../../..');
+  const root = moduleRepoRoot(import.meta.url);
   const assets = path.join(outDir, 'assets');
   fs.mkdirSync(outDir, { recursive: true });
   const staged = fs.mkdtempSync(path.join(outDir, '.history-assets-'));

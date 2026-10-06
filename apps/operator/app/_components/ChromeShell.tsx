@@ -184,13 +184,19 @@ export default function ChromeShell({ chatFaces }: { chatFaces?: readonly OpChat
     if (typeof ResizeObserver === 'undefined') {
       return () => header.classList.remove('pc-header--compact');
     }
+    let resizeFrame: number | null = null;
     const observer = new ResizeObserver((entries) => {
       const ownEntry = entries.find((entry) => entry.target === header);
-      syncCompactState(ownEntry?.contentRect.width ?? header.getBoundingClientRect().width);
+      const width = ownEntry?.contentRect.width ?? header.getBoundingClientRect().width;
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
+      // Compact mode changes the observed header's height. Mutate after
+      // observer delivery so that change cannot trigger a resize-loop error.
+      resizeFrame = requestAnimationFrame(() => { resizeFrame = null; syncCompactState(width); });
     });
     observer.observe(header);
     return () => {
       observer.disconnect();
+      if (resizeFrame !== null) cancelAnimationFrame(resizeFrame);
       header.classList.remove('pc-header--compact');
     };
   }, [chromeless]);

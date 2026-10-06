@@ -9,6 +9,8 @@
  * top of a transcript row: the change itself (a bounded -/+ diff for an edit,
  * the full command for a shell call) and the raw arguments, which stay out of
  * the prompt and are shown only behind the PUI details toggle. */
+import { existsSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 
 const TARGET_CHARS = 60;
 const BODY_LINES = 12;
@@ -33,7 +35,7 @@ function clip(text: string, max: number): string {
 
 /** A path relative to the chat's launch directory, the way Claude Code shows
  * `calc.js` rather than `/tmp/…/calc.js`; a path outside it stays absolute. */
-function displayPath(path: string, cwd?: string): string {
+export function displayPath(path: string, cwd?: string): string {
   const base = cwd?.replace(/\/+$/, '');
   if (base && path.startsWith(`${base}/`) && path.length > base.length + 1) return path.slice(base.length + 1);
   return path;
@@ -182,22 +184,68 @@ export interface ApprovalCardText {
   /** The raw arguments, sent as the card's `details`: the PUI shows them only
    * behind its details toggle. */
   details: string;
+  /** The tool call's row title, `Update(calc.js)` (pui-chat-first-ux D-028). */
+  title: string;
+  /** The question Claude Code asks for this kind of call: `Do you want to make
+   * this edit to calc.js?`, `Do you want to run this command?`. */
+  question: string;
+  /** The lines between the title and the question: the change itself. */
+  body: string[];
+}
+
+/** Claude Code's own question for one tool call (stock 2.1.289 frames,
+ * D-028). A Write to a file that does not exist yet asks to create it. */
+function approvalQuestion(name: string, path: string | undefined, shownPath: string | undefined, cwd?: string): string {
+  const file = shownPath ?? 'this file';
+  if (name === 'Write' && path && !existsSync(isAbsolute(path) ? path : resolve(cwd ?? process.cwd(), path))) {
+    return `Do you want to create ${file}?`;
+  }
+  if (['Edit', 'MultiEdit', 'Write', 'NotebookEdit'].includes(name)) return `Do you want to make this edit to ${file}?`;
+  if (name === 'Bash') return 'Do you want to run this command?';
+  return 'Do you want to proceed?';
+}
+
+/** Whether `text` names `path` as a whole token: `a.js` is not named by
+ * `data.js`, and `calc.js` is not named by `/tmp/proj/calc.js`. */
+function names(text: string, path: string): boolean {
+  for (let at = text.indexOf(path); at !== -1; at = text.indexOf(path, at + 1)) {
+    const before = at === 0 ? '' : text[at - 1]!;
+    const after = text[at + path.length] ?? '';
+    if (!/[\w./-]/.test(before) && !/[\w/-]/.test(after)) return true;
+  }
+  return false;
 }
 
 /** The text of one native tool-approval card. A `title` Claude supplies is
  * kept (it is already human text); otherwise the readable tool title is asked
- * about. The full path is shown under the title when the title shortened it,
- * so the owner always sees exactly which file is affected. */
+ * about. The file's path, relative to the chat's launch directory like the
+ * title's, is added once under the headline only when the headline does not
+ * already name it (a clipped title, or a Claude title that omits the file), so
+ * the owner always sees which file is affected without reading it twice
+ * (pui-chat-first-ux P-020). */
 export function approvalCardText(toolName: string, input: unknown,
   options: { title?: string; description?: string; decisionReason?: string; cwd?: string } = {}): ApprovalCardText {
   const { name, input: args } = effective(toolName, record(input));
   const display = toolTitle(toolName, input, options.cwd);
   const path = str(args, 'file_path') ?? str(args, 'notebook_path');
-  const fullPath = path && !display.title.includes(`(${path})`) ? [path] : [];
-  const lines = [options.title || `Allow ${display.title}?`, ...fullPath, ...display.body,
+  const headline = options.title || `Allow ${display.title}?`;
+  const shownPath = path ? displayPath(path, options.cwd) : undefined;
+  const pathLine = path && shownPath && !names(headline, shownPath) && !names(headline, path) ? [shownPath] : [];
+  const lines = [headline, ...pathLine, ...display.body,
     options.description, options.decisionReason].filter((line): line is string => Boolean(line && line.trim()));
   // Claude's permission-request description is usually the tool input's own
   // description (a Bash call's), which the body already shows: say it once.
   const shown = lines.filter((line, index) => lines.findIndex((other) => other.trim() === line.trim()) === index);
-  return { prompt: shown.join('\n'), details: `Raw arguments (${name}):\n${JSON.stringify(record(input), null, 2)}` };
+  // The approval body never repeats a file its title already names: a
+  // description that is only the path read as a stray `calc.js` under the
+  // diff (P-025 frame 13-edit-approval.approval-1, 2026-10-06).
+  const titleNamesFile = Boolean(path && shownPath && (names(display.title, shownPath) || names(display.title, path)));
+  const body = shown.slice(1).filter((line) => !(titleNamesFile && [path, shownPath].includes(line.trim())));
+  return {
+    prompt: shown.join('\n'),
+    details: `Raw arguments (${name}):\n${JSON.stringify(record(input), null, 2)}`,
+    title: display.title,
+    question: approvalQuestion(name, path, shownPath, options.cwd),
+    body,
+  };
 }

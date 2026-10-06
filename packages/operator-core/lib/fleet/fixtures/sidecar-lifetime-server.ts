@@ -7,6 +7,7 @@ import { execProcess } from '../sidecar-exec-process';
 runSpawnerSidecarServer({
   executeProcess: (params, deps) => execProcess(params, {
     ...deps,
+    lazyReceiptMs: 0, // the fixture's explicit admission barrier must gate the spawn
     beginExecution: async () => {
       if (process.env.PC_TEST_WAIT_ADMISSION_PATH) {
         await writeFile(process.env.PC_TEST_WAIT_ADMISSION_PATH, 'waiting');

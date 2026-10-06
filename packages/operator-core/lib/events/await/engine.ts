@@ -959,8 +959,18 @@ export async function pumpWakeDeliveries(workspaceId?: string, deps: ExecuteWake
       // an inbox-wake for mail the subscriber's own coord:inbox/coord:orient polling
       // already surfaced. Cheap pre-check (no DB read) gates the actual watermark
       // lookup to just the common always-armed-standing-wake case.
+      // A psu-host acceptance is not turn-start proof. While that accepted payload
+      // waits behind the host's final busy gate, the recipient can read the inbox;
+      // suppressing the parked retry then would leave the host's old pre-rendered
+      // text queued indefinitely. Retry the same delivery so the host can refresh
+      // its pending payload from this delivery-time render and report commitment.
+      const hasUnconfirmedPsuHostAcceptance = group.some(
+        (d) =>
+          d.lastError?.startsWith('psu-host accepted:') ||
+          d.lastError?.startsWith('psu-host pending-delivery-id:'),
+      );
       const allInboxWakeNoUrgent = group.every(
-        (d) => !d.urgent && d.eventKey.startsWith(COORD_INBOX_WAKE_PREFIX),
+        (d) => !hasUnconfirmedPsuHostAcceptance && !d.urgent && d.eventKey.startsWith(COORD_INBOX_WAKE_PREFIX),
       );
       if (allInboxWakeNoUrgent) {
         const lastRead = await lastInboxReadAtBatch([subscriberId]);
@@ -1107,7 +1117,12 @@ export async function pumpWakeDeliveries(workspaceId?: string, deps: ExecuteWake
         // a busy psu host that never proves a turn start). Park retries consume the
         // same delivery-attempt budget as errors, so honor the ceiling here too and
         // use the contract's inbox fallback instead of re-parking without end.
-        if (headline.attempts >= MAX_ATTEMPTS) {
+        // An accepted psu-host delivery remains owned by its detached host
+        // pipeline until a later retry observes completion or a terminal miss.
+        // Inbox fallback here would race that still-live commit and deliver the
+        // same wake twice, so the normal park recheck continues past the generic
+        // attempt ceiling for this explicitly tagged outcome.
+        if (headline.attempts >= MAX_ATTEMPTS && !outcome.hostCommitPending) {
           const degraded = await degradeToInboxOrDrop(
             coalesced,
             `delivery remained parked and exhausted ${MAX_ATTEMPTS} attempts: ${outcome.reason}`,
@@ -1138,10 +1153,11 @@ export async function pumpWakeDeliveries(workspaceId?: string, deps: ExecuteWake
           );
           continue;
         }
-        // One-time inbox nudge on the first park: the awake-but-uninjectable agent sees it
-        // mid-turn (PostToolUse hook) or on its next turn; the parked row converts to a
-        // resume when its process exits. Siblings re-coalesce with the headline next tick.
-        if (headline.attempts <= 1) {
+        // One-time inbox nudge for parks without an accepted host-side commit: the
+        // awake-but-uninjectable agent sees it mid-turn (PostToolUse hook) or on its next
+        // turn. A host-owned pending delivery must not get a parallel inbox wake that can
+        // race its later pty commit. Siblings re-coalesce with the headline next tick.
+        if (headline.attempts <= 1 && !outcome.hostCommitPending) {
           try {
             await sendMessage(emitterIdentity('await-event', headline.workspaceId), {
               to: [subscriberId],
@@ -1575,15 +1591,57 @@ export async function sweepOnce(workspaceId?: string): Promise<void> {
         log(`declared-gate recovery skipped: ${e instanceof Error ? e.message : e}`);
       }
       const generic = wakes.filter((a) => !recovery.has(a.id));
-      if (generic.length > 0) {
+      const predicateWakes = generic.filter((a) => a.eventKey.startsWith('predicate:'));
+      const ordinaryGeneric = generic.filter((a) => !a.eventKey.startsWith('predicate:'));
+      if (ordinaryGeneric.length > 0) {
         await insertDeliveries({
-          awaits: generic,
+          awaits: ordinaryGeneric,
           // P-004: the non-event is a prompt to RECONCILE, not to give up — carry the
           // re-orient/re-arm guidance so the woken agent reconciles instead of re-hanging.
           payload: { timeout: true, guidance: TIMEOUT_WAKE_GUIDANCE },
           summary: TIMEOUT_WAKE_SUMMARY,
         });
       }
+      await Promise.all(
+        predicateWakes.map(async (awaited) => {
+          let predicate: {
+            tool: string;
+            args: Record<string, unknown>;
+            path: string;
+            op: string;
+            value?: unknown;
+            intervalSec: number;
+            once: boolean;
+          } | null = null;
+          try {
+            const { getPredicateTimeoutContext } = await import('./predicate-watch');
+            predicate = await getPredicateTimeoutContext({
+              eventKey: awaited.eventKey,
+              subscriberId: awaited.subscriberId,
+            });
+          } catch (e) {
+            log('predicate timeout context unavailable for ' + awaited.eventKey + ': ' + (e instanceof Error ? e.message : e));
+          }
+          const elapsedSec =
+            awaited.expiresTs && awaited.createdAt
+              ? (Date.parse(awaited.expiresTs) - Date.parse(awaited.createdAt)) / 1000
+              : undefined;
+          const { buildPredicateTimeoutFallback, buildPredicateTimeoutRecovery } = await import('./timeout-fallback');
+          const predicateRecovery = predicate
+            ? buildPredicateTimeoutRecovery({ spec: predicate, timeoutSec: elapsedSec })
+            : undefined;
+          const fallback = buildPredicateTimeoutFallback(awaited.eventKey, predicateRecovery);
+          await insertDeliveries({
+            awaits: [awaited],
+            payload: {
+              timeout: true,
+              guidance: fallback.guidance,
+              ...(fallback.predicateRecovery ? { predicateRecovery: fallback.predicateRecovery } : {}),
+            },
+            summary: fallback.summary,
+          });
+        }),
+      );
       for (const awaited of wakes) {
         const declaredGateRecovery = recovery.get(awaited.id);
         if (!declaredGateRecovery) continue;

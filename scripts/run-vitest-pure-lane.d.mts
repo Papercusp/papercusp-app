@@ -24,10 +24,20 @@ export function runVitestProcess(
   },
 ): Promise<number>;
 
+export function remainingPureLaneFiles(
+  pureFiles: string[],
+  reuseSkipFiles?: Iterable<string>,
+): string[];
+
 export function runPureLaneShards(options?: {
   env?: Readonly<Record<string, string | undefined>>;
   forwardedArgs?: string[];
   run?: (args: string[]) => Promise<number>;
   stderr?: Pick<Writable, "write">;
-  pureFileCount?: number;
+  /** Workspace root the lane runs in (default: process cwd). */
+  wsAbsDir?: string;
+  /** Workspace-relative pure-lane files (default: resolveLaneInclude(wsAbsDir, 'pure')). */
+  pureFiles?: string[];
+  /** Validated skip-list files (default: resolveReuseSkipFiles(env)). */
+  reuseSkipFiles?: string[];
 }): Promise<number>;

@@ -183,6 +183,8 @@ import './consult/get-feedback';
 import './consult/reply';
 import './consult/decline';
 import './consult/close';
+// EI-23764501791910357 slice 3: the requester's terminal disposition of a proceed consult.
+import './consult/reconcile';
 // review-routing-through-relevance-router-2026-09-26 P-004: per-policy routing health.
 import './consult/routing-health';
 import './roles/list';
@@ -300,7 +302,14 @@ import './search/fulltext';
 import './search/semantic';
 // personal-vault-2026-08-22: default-deny owner-local recall + owner-only purge.
 import './personal/search';
+// P-007 / R-12: hidden-delegate read — an answer without restricted content leaves the caller unlabelled.
+import './personal/ask';
 import './personal/purge';
+import './personal/privacy-rules';
+import './personal/declassify';
+import './personal/open-sealed';
+import './documents/search';
+import './documents/subscriptions';
 // external-triggers P-008: reply only to the Slack thread anchored by a durable plan run.
 import './slack/respond-in-thread';
 // external-triggers D-019 Tier 1 (P-029/P-030/P-031): provider-neutral capability
@@ -325,10 +334,12 @@ import './chat/post';
 import './memory/remember';
 import './memory/search';
 import './memory/list';
+import './memory/get';
 // queen-memory-hybrid-2026-07-02 L1b — the generalized standing-facts ledger
 // (deterministic scoped conclusions folded verbatim into briefs/dossiers/orients)
 import './facts/assert';
 import './facts/retract';
+import './claims/retract';
 import './facts/list';
 // unified-agent-state-plane-2026-07-27 P-011 — assumptions in tension over the
 // same typed referent. A read, never a push: see the file header for why.
@@ -881,8 +892,9 @@ import './coordination/tools/topics-merge';
 import './coordination/tools/topics-tag';
 import './coordination/tools/topics-feed';
 
-// Conversations — questions + discussions on the substrate (the first consumer:
-// coordination-conversations-2026-06-03). coord:ask is knowledge-first.
+// Conversations — questions + discussions on the substrate
+// (coordination-conversations-2026-06-03). coord:ask is owner-UI-only; agents
+// contact peers with coord:send or coord:message-agent.
 import './coordination/tools/ask';
 import './coordination/tools/conversations-post';
 import './coordination/tools/conversations-answer';
@@ -972,6 +984,7 @@ import './routines/revert';
 // git-sync:run — fire git-sync once on demand (WI-1320; the manual lever git-sync lacked,
 // so a force-deploy ships CURRENT staging not stale).
 import './git_sync/run';
+import './git_sync/send_green';
 // WI-1555 — the owner ratify surface for the multi-owner integration-requests queue
 // (lib/sync/pot-git/integration-requests.ts had no exposed verb until this tool).
 import './pot_git/integration_requests';
@@ -1178,6 +1191,7 @@ import './work_items/checkpoint';
 import './work_items/amend';
 import './work_items/expand';
 import './work_items/promote';
+import './work_items/admit'; // enterprise-data-sources P-020: data -> work admission
 // work-queue-admission-and-bulk-dedup P-006 — model-backed staged corpus pass,
 // reusing the admission census + promoter charter under a transactional ratchet.
 import './work_items/bulk_dedup';
@@ -1244,6 +1258,9 @@ import './work_items/redundancy_status';
 // work_items:completion_stats — the genuine-completions-vs-dedup metric
 // (work-item-completion-integrity-2026-07-01 WI-1405, contract C-1 consumer).
 import './work_items/completion_stats';
+// work_items:acceptance_adoption — legacy acceptance cohorts + current-build canary
+// (observation-candidate-acceptance-promotion-2026-09-30 P-011, WI-10004574).
+import './work_items/acceptance_adoption';
 
 // Fleet — structured concurrency / supervision over the spawn tree
 // (fleet-as-supervised-blackboard-2026-06-04). fleet:cancel is the transitive
@@ -1566,7 +1583,20 @@ import './cupboard/publish-offer';
 import './cupboard/refund-request';
 import './cupboard/support-request';
 import './cupboard/commerce-dashboards';
+// agent-economy-flywheel-2026-08-30 P-040 — hash-chained governance ledger:
+// verify/export (read) and witness (write) over harness_shared.ledger_chain_links.
+import './cupboard/ledger-chain';
+import './cupboard/ledger-chain-witness';
+// P-041 — hourly Merkle anchoring of those chains (EAS on Base Sepolia): status/prove/verify
+// (read) and run-now (write).
+import './cupboard/ledger-anchor';
+import './cupboard/ledger-anchor-run';
+// agent-economy-flywheel-2026-08-30 P-046 (D-029) — per-payment receipts.
+import './cupboard/payment-receipt';
+import './cupboard/statement-attestation';
+import './cupboard/reconciliation';
 import './cupboard/bind-wallet';
+import './cupboard/bind-identity-funding';
 // P-031 — the per-unit half of the same commerce surface. A per-use offer has no
 // single purchase to authorize, so checkout only opens the channel and EVERY
 // billable unit is metered through this door.
@@ -1674,19 +1704,21 @@ import './events/status';
 // installation, explicit arm/disarm, and health/run visibility.
 import './triggers/list';
 import './triggers/create';
+import './triggers/create-webhook';
+import './triggers/rotate-webhook-secret';
 import './triggers/bind';
 import './triggers/arm';
 import './triggers/disarm';
+import './trigger-packs/review';
+import './trigger-packs/arm';
+import './trigger-packs/uninstall';
+import './trigger-packs/export';
 import './triggers/run-with-last-event';
 import './triggers/status';
 // WI-2143575 — the READ half of the trigger pair. The private ingest is no
 // longer embedded in federated plan-run inputs, so the agent pulls it
 // server-side by planRunId, exactly as the write tools already resolve theirs.
 import './triggers/read-payload';
-// external-triggers-gmail-slack-2026-08-22 P-011 — anchored, draft-only
-// Gmail response seam. Recipient/thread/token come from the trigger run; there
-// is deliberately no send branch on this tool.
-import './gmail/create-draft';
 // WI-4014 Part 2 (linking-system follow-up to WI-3956): the lifecycle verb for a
 // standing event-key INJECT subscription (watch:create wake:false targetKind:'event')
 // — the wake:false sibling of events:cancel, mirroring topics:unsubscribe's shape.
@@ -1701,6 +1733,7 @@ import './state/subscribe';
 // EI-20449419111876508: read-only resolver lens for the host.memoryPressure cell.
 import './state/host-memory';
 import './state/governor-state';
+import './state/lsp-admission';
 // event-await-discoverability-and-coverage-2026-07-03 P-002 — the awaitable-key
 // catalog ("what can I wait on instead of polling?"), rendered from the SSOT
 // registry events/await/catalog.ts.
@@ -1788,7 +1821,7 @@ import { backgroundWorkspaceIds } from '../workspace-registry';
 // (EI-312 leg 1: a test worker must not poke the live wake system). The
 // PAPERCUSP_BACKGROUND_WORKERS flag only controls background loops and is `0`
 // in the request workers whose process-local matcher must remain armed.
-import { isHostSingleton, reactionMatcherShouldArm } from '../background-workers';
+import { isHostSingleton, reactionMatcherShouldArm, whenOperatorHostProcess } from '../background-workers';
 try {
   if (reactionMatcherShouldArm()) {
     // WI-4890: :3070 is a reuse-port cluster, but event-reaction rules are
@@ -1882,22 +1915,19 @@ import '../harness/routines/loop-turn-outcome';
 // P-020: terminal work-item rows carry a durable done-event intent. Register
 // its source reconciler on this existing await sweep before the first tick.
 import '../work-item-completion-event-reconciler';
-try {
-  startAwaitSweeper();
-} catch {
-  /* never block boot */
-}
+// WI-10006280: these three loops claim and EXECUTE other agents' wake deliveries,
+// so they start only in an operator HOST — `whenOperatorHostProcess` runs them once
+// `runBootstrap()` declares the process a host (immediately if it already has).
+// Importing this registry from a script, a build generator or a vitest worker no
+// longer starts them. The wrapper keeps the never-block-boot contract.
+whenOperatorHostProcess('await-event-sweeper', startAwaitSweeper);
 
 // fleet-deltas-leader-primitives-2026-07-10 P-008 — the predicate-watch poller
 // (engine-side "wake me when a tool result crosses a threshold"). Boot-started so
 // rows registered before a host restart keep polling; same fail-soft contract as
 // the sweeper above (missing table pre-migration-541 must never block boot).
 import { startPredicateWatchPoller } from '../events/await/predicate-watch';
-try {
-  startPredicateWatchPoller();
-} catch {
-  /* never block boot */
-}
+whenOperatorHostProcess('predicate-watch-poller', startPredicateWatchPoller);
 
 // get-feedback-relevance-consults-2026-08-16 P-008 — the interest-watch sweeper
 // (push-interjection: peer in-flight work matched against standing embedded
@@ -1905,11 +1935,7 @@ try {
 // sweeping; same fail-soft contract (missing table pre-migration-839 must
 // never block boot — the tick catches its own errors).
 import { startInterestWatchSweeper } from '../events/await/interest-watch';
-try {
-  startInterestWatchSweeper();
-} catch {
-  /* never block boot */
-}
+whenOperatorHostProcess('interest-watch-sweeper', startInterestWatchSweeper);
 
 // EI-10966 — prompt-weight budget self-check. LAST import: every tool above has
 // registered, so this sees the full projected catalog. Warns (operator logs only,

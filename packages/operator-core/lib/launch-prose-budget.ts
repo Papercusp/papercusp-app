@@ -383,3 +383,103 @@ export function renderProseBudgetReport(report: ProseBudgetReport): string {
   );
   return lines.join('\n');
 }
+
+// ── Edit-time headroom signal (WI-10004682) ─────────────────────────────────────────────
+//
+// WHY THIS EXISTS. A part edit (`set-doc-part` + `project-doc-parts --write`) can push the
+// projected guide — and every su-playbook render that embeds it — over its ceiling, and the
+// only thing that said so was `lint:launch-prose-budget` at the GATE: the guide re-breached
+// three times in three days (EI-24511252962859723, WI-10004465, WI-10004675), the last one
+// seven hours after a ratchet left ~100 B of headroom. `set-doc-part`'s own "projection
+// impact" reports headroom against the PROJECTION CUT SET, a different budget from this
+// lint ceiling, so its clean-looking number was no help. This reuses the lint's report and
+// ceilings — it adds NO second measurement — and only reshapes them into the edit-time
+// view: per-surface headroom, optionally after a predicted byte delta.
+
+/**
+ * Which budget surfaces a projected client FILE feeds. The su-playbook renders embed the
+ * Claude project guide verbatim, so a CLAUDE.md delta moves them too — and they are the
+ * TIGHTER surfaces (54 B vs the guide's 102 B at the 2026-10-01 measurement), which is
+ * exactly why checking the guide file alone would miss the breach.
+ */
+export const GUIDE_FILE_SURFACES: Readonly<Record<string, readonly string[]>> = {
+  'CLAUDE.md': [
+    'project-guide:claude-md',
+    'su-playbook-render:engineer:full:claude',
+    'su-playbook-render:power:full:claude',
+  ],
+  'AGENTS.md': ['project-guide:agents-md'],
+};
+
+/** Every surface a projection can move — the only ones a projection write is gated on. */
+export const PROJECTION_GOVERNED_SURFACES: ReadonlySet<string> = new Set(
+  Object.values(GUIDE_FILE_SURFACES).flat(),
+);
+
+/** Fan a per-file byte delta (`{ 'CLAUDE.md': +120 }`) out to the surfaces that file feeds. */
+export function surfaceDeltasFromFileDeltas(
+  fileDeltaBytes: Readonly<Record<string, number>>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [file, delta] of Object.entries(fileDeltaBytes)) {
+    for (const surface of GUIDE_FILE_SURFACES[file] ?? []) out[surface] = (out[surface] ?? 0) + delta;
+  }
+  return out;
+}
+
+export interface LaunchProseHeadroomRow {
+  surface: string;
+  /** Measured bytes plus the predicted delta (0 when none was supplied). */
+  afterBytes: number;
+  ceilingBytes: number;
+  /** ceiling − afterBytes. Negative means over. */
+  headroomBytes: number;
+  over: boolean;
+}
+
+export interface LaunchProseHeadroom {
+  rows: LaunchProseHeadroomRow[];
+  /** The rows that are over — what a write gate refuses on. */
+  over: LaunchProseHeadroomRow[];
+  /** Printable lines; every row's line carries the literal `launch-prose headroom: N B`. */
+  lines: string[];
+}
+
+/**
+ * Per-surface headroom after an optional predicted byte delta.
+ *
+ * A surface with no measurement or no ceiling yields NO row: this is a headroom VIEW, not
+ * the gate — `compareProseBudget` already fails `unmeasured`/`unbaselined` loudly, and
+ * inventing a number for one here would be exactly the false reading that gate exists to
+ * prevent. Restricted to `PROJECTION_GOVERNED_SURFACES` by default so a peer's unrelated
+ * prompt growth cannot block a projection write.
+ */
+export function launchProseHeadroom(
+  report: ProseBudgetReport,
+  opts: {
+    surfaceDeltaBytes?: Readonly<Record<string, number>>;
+    surfaces?: ReadonlySet<string>;
+  } = {},
+): LaunchProseHeadroom {
+  const surfaces = opts.surfaces ?? PROJECTION_GOVERNED_SURFACES;
+  const rows: LaunchProseHeadroomRow[] = [];
+  for (const v of report.verdicts) {
+    if (!surfaces.has(v.surface)) continue;
+    if (v.bytes === null || v.ceilingBytes === null) continue;
+    const afterBytes = v.bytes + (opts.surfaceDeltaBytes?.[v.surface] ?? 0);
+    const headroomBytes = v.ceilingBytes - afterBytes;
+    rows.push({
+      surface: v.surface,
+      afterBytes,
+      ceilingBytes: v.ceilingBytes,
+      headroomBytes,
+      over: headroomBytes < 0,
+    });
+  }
+  const lines = rows.map(
+    (r) =>
+      `  launch-prose headroom: ${fmt(r.headroomBytes)} B  ${r.surface.padEnd(42)} ` +
+      `(${fmt(r.afterBytes)} / ${fmt(r.ceilingBytes)} B)${r.over ? `  ← OVER by ${fmt(-r.headroomBytes)} B` : ''}`,
+  );
+  return { rows, over: rows.filter((r) => r.over), lines };
+}

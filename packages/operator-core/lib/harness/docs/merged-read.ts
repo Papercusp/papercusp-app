@@ -109,7 +109,7 @@ export async function buildMergedDocs(harnessSlug: string, opts: BuildMergedDocs
   const workspaceId = await resolveWorkspaceForHarness(harnessSlug, opts.workspaceId);
 
   const [fsFiles, records] = await Promise.all([
-    listDocBodies(docsRoot),
+    listDocBodies(paths.sources ? paths : docsRoot),
     listDocRecords(harnessSlug, workspaceId),
   ]);
 
@@ -132,7 +132,7 @@ export async function buildMergedDocs(harnessSlug: string, opts: BuildMergedDocs
   let content: string | null = null;
   let activeEntry: (MergedDocEntry & { overlay: string | null }) | null = null;
   if (activePath) {
-    content = fsSet.has(activePath) ? await readDocBody(docsRoot, activePath) : null;
+    content = fsSet.has(activePath) ? await readDocBody(paths.sources ? paths : docsRoot, activePath) : null;
     const rec = records.get(activePath);
     let base = entries.find((e) => e.docId === activePath)!;
 

@@ -71,6 +71,42 @@ export const LINE_INDEX_BASE: Readonly<Record<CodeIntelBackend, 0 | 1>> = Object
 });
 
 /**
+ * GitNexus raw `startLine` base PER VERSION — the version-aware companion to
+ * `LINE_INDEX_BASE.gitnexus` (WI-10005091 residue of plan
+ * gitnexus-selective-hardening-and-comparison-2026-09-13 D-002).
+ *
+ * `LINE_INDEX_BASE.gitnexus` is a single number, which is only true for the
+ * pinned install (`PINNED_GITNEXUS_VERSION`, 1.6.9). GitNexus 1.6.12 reports a
+ * 1-BASED `startLine`, so `toOneIndexed('gitnexus', …)`'s unconditional +1 would
+ * put EVERY site one line late and an exact path:line consumer would score 0 by
+ * construction (the bench's attempt 2 did exactly that). Measured on ONE source
+ * tree, `getLongLivedAdminPool` (declared on 1-based line 145 of
+ * long-lived-admin-pool.ts): raw `startLine` 144 on 1.6.9, 145 on 1.6.12.
+ *
+ * A version absent from this table is UNMEASURED: `gitnexusStartLineBase`
+ * returns null and callers must refuse rather than guess. Adding a version here
+ * requires re-measuring it against the fixture above — never infer it from a
+ * neighbouring release. `contracts.test.ts` pins the pinned version to this
+ * table so a pin bump cannot ship without the measurement.
+ */
+export const GITNEXUS_START_LINE_BASE_BY_VERSION: Readonly<Record<string, 0 | 1>> = Object.freeze({
+  '1.6.9': 0,
+  '1.6.12': 1,
+});
+
+/**
+ * Raw `startLine` base for a GitNexus version string (`1.6.9`, or a banner such
+ * as `GitNexus Analyzer (1.6.12)` — the first `x.y.z` found wins). Returns null
+ * for an unparseable or UNMEASURED version, never a default.
+ */
+export function gitnexusStartLineBase(version: string | null | undefined): 0 | 1 | null {
+  const m = typeof version === 'string' ? /(\d+\.\d+\.\d+)/.exec(version) : null;
+  if (!m) return null;
+  const base = GITNEXUS_START_LINE_BASE_BY_VERSION[m[1]!];
+  return base === undefined ? null : base;
+}
+
+/**
  * Normalize a backend-reported line to the one-indexed convention every human
  * tool in this repo uses. Pass the RAW number exactly as the backend returned
  * it. Returns null for a missing line so a caller cannot silently turn an
@@ -108,6 +144,13 @@ export interface SymbolSite {
    * detail to give", never "the detail was empty".
    */
   readonly detail?: string | null;
+  /**
+   * The symbol's own name, on sites that name a symbol (a workspace-symbol
+   * hit). OPTIONAL for the same reason as `detail`. Exact-name questions need
+   * it: tsserver's symbol search is fuzzy, so a hit's location alone cannot say
+   * whether it IS the symbol that was asked for.
+   */
+  readonly name?: string | null;
 }
 
 /** Whether returned matches were cut off. This says nothing about index coverage. */

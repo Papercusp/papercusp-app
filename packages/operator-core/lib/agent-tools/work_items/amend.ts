@@ -82,6 +82,7 @@ export default defineTool({
     // assignee bee sees a NEEDS-COMPENSATION amend on the node it is executing).
     const post = await commentWorkItem(args.id, renderAmendment(rec), ident.ownerId, {
       harness: args.harness ?? wi.harness ?? undefined,
+      writerOwnerId: ident.ownerId,
     });
     return json({ ok: true, amendment: rec, recorded: !!post });
   },

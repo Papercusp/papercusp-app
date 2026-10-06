@@ -14,6 +14,7 @@ import { basename, join } from 'node:path';
 import {
   assertNeverSuSession,
   type OpenCardSnapshot,
+  type SuApprovalsMode,
   type SuSessionCapabilities,
   type SuSessionCommand,
   type SuSessionDescriptor,
@@ -72,7 +73,8 @@ export type ClaudeNativeCommandVerdict =
   | { ok: false; code: string; message: string; retryable: boolean };
 
 export interface ClaudeSuSessionControls {
-  ownerTurn(input: { ownerId: string; turnId: string; content: string }): Promise<ClaudeNativeCommandVerdict>;
+  /** `model` (P-026): a `model[:effort]` spec to apply before this turn; omitted keeps the current one. */
+  ownerTurn(input: { ownerId: string; turnId: string; content: string; model?: string; approvals?: SuApprovalsMode }): Promise<ClaudeNativeCommandVerdict>;
   interrupt(input: { ownerId: string; reason?: string }): Promise<ClaudeNativeCommandVerdict>;
   resume(input: {
     ownerId: string;
@@ -86,6 +88,8 @@ export interface ClaudeSuSessionControls {
 export interface ClaudeSuSessionDescriptorOptions {
   agentChatId: string;
   model?: string | null;
+  /** D-026: the approvals mode the engine launched in, when it has one. */
+  approvals?: SuApprovalsMode;
   accountRoute?: string | null;
   servedAccountReader?: SuSessionServedAccountReader;
   carry?: 'warm' | 'cold';
@@ -102,6 +106,11 @@ export interface CreateClaudeSuSessionAdapterOptions extends ClaudeSuSessionDesc
   runtimeReady?: () => boolean;
   ownerTurnCorrelation?: 'command' | 'transport';
   cardSource?: 'transcript' | 'transport';
+  /** Who reports a failed `result` record as an error event. The structured
+   * engine reports it itself (with the native errors and child stderr), so it
+   * sets 'transport'; reporting it here too gave every refused turn two error
+   * events, which PUI drew as two failure lines (pui-chat-first-ux P-025). */
+  resultErrorSource?: 'transcript' | 'transport';
   /** Saved owner turns for this session (production: loadSuOwnerTurnReceipts).
    * A replayed prompt takes its saved turn id; without them it gets a fresh one. */
   ownerTurnReceipts?: (identity: SuSessionDescriptor<'claude'>['identity']) => Promise<readonly SuOwnerTurnReceiptRef[]>;
@@ -337,6 +346,7 @@ function descriptorFor(
     runtimeGeneration: options.runtimeGeneration ?? 0,
     role: 'su',
     model: options.model ?? null,
+    ...(options.approvals ? { approvals: options.approvals } : {}),
     accountServed: null,
     accountRoute: options.accountRoute ?? null,
     carry: options.carry ?? 'warm',
@@ -419,6 +429,7 @@ export class ClaudeSuSessionAdapter {
   private lastErrorKey: string | null = null;
   private readonly transportCorrelatesTurns: boolean;
   private readonly transportHandlesCards: boolean;
+  private readonly transportReportsResultErrors: boolean;
   private streamingMessageId: string | null = null;
   private readonly textStreams = new Map<string, Map<number, ClaudeTextStream>>();
   private readonly servedAccountReader: SuSessionServedAccountReader;
@@ -434,6 +445,7 @@ export class ClaudeSuSessionAdapter {
     this.servedAccountReader = options.servedAccountReader ?? gatewayServedAccountForOwner;
     this.transportCorrelatesTurns = options.ownerTurnCorrelation === 'transport';
     this.transportHandlesCards = options.cardSource === 'transport';
+    this.transportReportsResultErrors = options.resultErrorSource === 'transport';
     this.ownerTurnReceipts = options.ownerTurnReceipts ?? null;
     this.controls ={ ...defaultControls(), ...(options.controls ?? {}) };
     const hostOptions = {
@@ -697,7 +709,7 @@ export class ClaudeSuSessionAdapter {
 
     if (record.type === 'result') {
       const isError = record.is_error === true || String(record.subtype ?? '').toLowerCase().includes('error');
-      if (isError) {
+      if (isError && !this.transportReportsResultErrors) {
         const code = firstString(record.error_code, record.subtype) ?? 'claude_runtime_error';
         const message = firstString(record.result, record.error) ?? code;
         const key = `${code}\u0000${message}`;
@@ -791,7 +803,11 @@ export class ClaudeSuSessionAdapter {
         if (!this.transportCorrelatesTurns) this.currentTurnId = command.turnId;
         this.receiptMatcher.markUsed(command.turnId);
         context.transition('running', 'owner turn accepted');
-        verdict = await this.controls.ownerTurn({ ownerId, turnId: command.turnId, content: command.content });
+        verdict = await this.controls.ownerTurn({
+          ownerId, turnId: command.turnId, content: command.content,
+          ...(command.model ? { model: command.model } : {}),
+          ...(command.approvals ? { approvals: command.approvals } : {}),
+        });
         if (!verdict.ok) context.transition('waiting-for-owner', verdict.message);
         break;
       case 'interrupt':

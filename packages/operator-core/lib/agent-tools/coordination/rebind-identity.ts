@@ -38,6 +38,7 @@
  * force, and keeps `force` meaningful. See REBIND_BLOCKING_SESSION_STATES.
  */
 import type { Sql } from 'postgres';
+import { AWAIT_CANCEL_REASONS } from '../../events/await/cancel-reasons';
 import { getOrgPg } from '@papercusp/db-org';
 import { loopRoutineId, loopRoutineName } from '../../harness/routines/loop';
 import { WORK_ITEM_NON_REQUEUE_STATES } from '../../work-items-stale-claims';
@@ -522,7 +523,11 @@ export async function rebindIdentity(
          LIMIT 1
       `;
       if (dup.length > 0) {
-        await sql`UPDATE harness_shared.event_awaits SET cancelled_at = now() WHERE id = ${a.id}`;
+        await sql`
+          UPDATE harness_shared.event_awaits
+             SET cancelled_at = now(), cancel_reason = ${AWAIT_CANCEL_REASONS.identityRebound}
+           WHERE id = ${a.id}
+        `;
         r.cancelled = (r.cancelled ?? 0) + 1;
       } else {
         await sql`
@@ -684,7 +689,7 @@ export async function rebindIdentity(
   //      two columns' roles are inverted relative to their names, and until
   //      that was measured this UPDATE ran against `owner_id` — where it could
   //      never match a row, because that column holds the HUMAN owner label
-  //      ('owner' ×181, 'owner' ×22 across all 203 live rows; zero session-shaped,
+  //      ('owner' ×181, 'Avi' ×22 across all 203 live rows; zero session-shaped,
   //      never equal to recorded_by). `recorded_by` is the column that says
   //      which SESSION the owner was addressing, and it is what `orders:*` and
   //      the turn-start Orientation banner key on — so it is the one that has

@@ -6,17 +6,32 @@
  *  against a COPY outside the checkout — never by mutating this file in the
  *  shared tree, which git-sync would sweep into a commit mid-probe. */
 export function hashHostScript(path?: string): string | null;
-/** WI-38292: is this host executing code older than what is on disk?
- *  `stale` is true ONLY when both hashes are known and differ — an unreadable file
+/**
+ * Persist only this closed classification of the operator target. The full URL can
+ * contain credentials, paths, or query tokens and is never host-event evidence.
+ *
+ * @param {EnvironmentMap} [env]
+ * @returns {'direct-3170'|'other'|'unset'}
+ */
+export function operatorPinEvidence(env?: EnvironmentMap): "direct-3170" | "other" | "unset";
+/** WI-38292: is this host or its launcher executing code older than disk?
+ *  `stale` is true when either component's known hashes differ — an unreadable file
  *  degrades to "not stale" so a transient fs error can never turn a working respawn
  *  path into a warning storm. Pure + exported for tests. */
-export function hostCodeStaleness({ loaded, path, }?: {
+export function hostCodeStaleness({ loaded, path, launcherLoaded, launcherPath, }?: {
     loaded?: string | null | undefined;
     path?: string | undefined;
+    launcherLoaded?: string | null | undefined;
+    launcherPath?: string | undefined;
 }): {
     stale: boolean;
     loaded: string | null;
     onDisk: string | null;
+    launcher: {
+        stale: boolean;
+        loaded: string | null;
+        onDisk: string | null;
+    };
 };
 /** WI-38292: does the process that launched us promise to re-run us if we exit
  *  with the sentinel? The shim exports `PAPERCUSP_PSU_REEXEC=<code>`; anything
@@ -142,7 +157,7 @@ export function interactiveAdoptionOptIn(env?: NodeJS.ProcessEnv): boolean;
  *
  * @param {{persisted?: boolean, nativeRef?: string | null, reason?: string | null}} proof
  * @param {EnvironmentMap} [env]
- * @returns {{published: boolean, reason?: string}}
+ * @returns {{published: boolean, reason?: string, errorMessage?: string, errorCode?: string | null}}
  */
 export function publishKickoffProofReceipt(proof: {
     persisted?: boolean;
@@ -151,6 +166,8 @@ export function publishKickoffProofReceipt(proof: {
 }, env?: EnvironmentMap): {
     published: boolean;
     reason?: string;
+    errorMessage?: string;
+    errorCode?: string | null;
 };
 /** Byte-accurate (not JS-code-unit) wire limit check. Exported so the exact
  * UTF-8 boundary is regression-tested without weakening the runtime guard. */
@@ -177,6 +194,94 @@ export function tagSessionPortTurn(text: string, sid: string, env?: EnvironmentM
  * units is at most 64 KiB of UTF-8, keeping node-pty writes bounded while the
  * concatenated stream remains byte-identical. */
 export function ptyWriteChunks(value: any, maxCodeUnits?: number): string[];
+/**
+ * Confirm a fresh Codex kickoff reached the visible composer before Enter can
+ * submit it. A backend frame proves the TUI rendered; child.write only proves
+ * the host attempted input. Neither proves the composer accepted the marker.
+ *
+ * @param {{
+ *   read?: () => unknown,
+ *   text?: string,
+ *   timeoutMs?: number,
+ *   pollMs?: number,
+ *   headLossGraceMs?: number,
+ *   shouldCancel?: () => boolean,
+ *   onPending?: (state: { elapsedMs: number, observedChars: number, markerTailSeen: boolean }) => void,
+ * }} [options]
+ */
+export function waitForPtyTextEcho({ read, text, timeoutMs, pollMs, headLossGraceMs, shouldCancel, onPending, }?: {
+    read?: () => unknown;
+    text?: string;
+    timeoutMs?: number;
+    pollMs?: number;
+    headLossGraceMs?: number;
+    shouldCancel?: () => boolean;
+    onPending?: (state: {
+        elapsedMs: number;
+        observedChars: number;
+        markerTailSeen: boolean;
+    }) => void;
+}): Promise<{
+    echoed: boolean;
+    reason: string;
+    elapsedMs: number;
+    cancelled?: undefined;
+    observedChars?: undefined;
+    markerTailSeen?: undefined;
+    markerWhitespaceLost?: undefined;
+    markerHeadLost?: undefined;
+    visibleTail?: undefined;
+} | {
+    echoed: boolean;
+    cancelled: boolean;
+    elapsedMs: number;
+    reason?: undefined;
+    observedChars?: undefined;
+    markerTailSeen?: undefined;
+    markerWhitespaceLost?: undefined;
+    markerHeadLost?: undefined;
+    visibleTail?: undefined;
+} | {
+    echoed: boolean;
+    elapsedMs: number;
+    observedChars: number;
+    markerTailSeen: boolean;
+    reason?: undefined;
+    cancelled?: undefined;
+    markerWhitespaceLost?: undefined;
+    markerHeadLost?: undefined;
+    visibleTail?: undefined;
+} | {
+    echoed: boolean;
+    markerWhitespaceLost: number;
+    elapsedMs: number;
+    observedChars: number;
+    markerTailSeen: boolean;
+    reason?: undefined;
+    cancelled?: undefined;
+    markerHeadLost?: undefined;
+    visibleTail?: undefined;
+} | {
+    echoed: boolean;
+    markerHeadLost: number;
+    elapsedMs: number;
+    observedChars: number;
+    markerTailSeen: boolean;
+    reason?: undefined;
+    cancelled?: undefined;
+    markerWhitespaceLost?: undefined;
+    visibleTail?: undefined;
+} | {
+    echoed: boolean;
+    reason: string;
+    elapsedMs: number;
+    observedChars: number;
+    markerTailSeen: boolean;
+    visibleTail: string;
+    cancelled?: undefined;
+    markerWhitespaceLost?: undefined;
+    markerHeadLost?: undefined;
+}>;
 /**
  * P-006 (psu-pty-turn-boundary-generalization-2026-09-22): may a ROUTINE host
  * diagnostic be written to stderr right now?
@@ -214,6 +319,8 @@ export function shouldWriteHostDiagnostic({ bridgeTty, env }?: {
     bridgeTty?: boolean;
     env?: EnvironmentMap;
 }): boolean;
+/** The pasted text when `text` is entirely one Claude Code paste block; otherwise `text`. */
+export function unwrapWholePaste(text: any): string;
 export function leadingTurnOriginMarker(text: any): string | null;
 /** WI-10002752: Codex has no system-prompt CLI flag, so a carry-respawn's carry
  * document rides in the first TYPED turn (`mintCarryRespawnArgs` returns it as
@@ -261,6 +368,41 @@ export function findNativeTranscriptMarker({ agent, env, marker, sinceMs, home, 
 export function truncatedTurnOriginMarkerLoss(marker: any, value: any, { minNonceChars }?: {
     minNonceChars?: number | undefined;
 }): number | null;
+/** WI-10005331: the pre-submit composer echo loses leading marker bytes the same
+ * way the native transcript does (WI-10002745). Measured 2026-10-02: Codex resolver
+ * su-df88c37b echoed 49 of 50 marker characters with the tail visible, the exact
+ * proof could never match, and the host waited ~557s and then dropped the kickoff,
+ * so inbox-resolve run bulk-bf4040d6 failed with every item undecided.
+ *
+ * Returns how many leading characters of `marker` were lost when `visible` holds a
+ * proper suffix of it that keeps at least `minNonceChars` nonce characters and the
+ * closing bracket; otherwise null (including when the exact marker is present, which
+ * the exact proof owns). Unlike truncatedTurnOriginMarkerLoss the suffix may sit
+ * anywhere in `visible`: the echo tap holds only output written after this kickoff's
+ * own write, so its leading bytes are composer chrome rather than a transcript row
+ * that could quote another injection, and the nonce tail is this injection's own
+ * random value. The suffix must start the text or follow chrome: when the nearest
+ * preceding non-space character could belong to a marker, the echo is either another
+ * nonce that shares this tail or a marker that lost a MIDDLE byte (which the
+ * post-submit proof rejects), so it is refused. Pure and exported for tests. */
+export function composerEchoMarkerHeadLoss(marker: any, visible: any, { minNonceChars }?: {
+    minNonceChars?: number | undefined;
+}): number | null;
+/** WI-10005331: the composer word-wraps a long kickoff, and a wrap that lands on the
+ * marker's only space renders the two halves on separate rows with the break space
+ * omitted. The echo tap strips ANSI and row breaks, so the visible text holds every
+ * other marker byte in order. Measured 2026-10-02 15:11:07Z on a host already running
+ * the head-loss fix: visibleTail `⟦turn-origin:fleet-kickoffnonce:b413517be82f7380⟧`
+ * (49 of 50 characters, the space missing), and the kickoff was dropped after ~586s.
+ *
+ * Returns how many of `marker`'s whitespace characters are missing when `visible`
+ * holds the marker with only its whitespace changed (dropped, or padded to the row
+ * end, which counts 0 lost); otherwise null, including when the exact marker is
+ * present (the exact proof owns that case). Only turn-origin markers qualify: their
+ * random nonce keeps the whitespace-insensitive match specific to this injection.
+ * Any non-whitespace loss (a dropped head or middle byte) does not match. Pure and
+ * exported for tests. */
+export function composerEchoMarkerWhitespaceLoss(marker: any, visible: any): number | null;
 /** A carry requested in THIS turn may use its exact native completion as a
  * safe boundary even while the terminal keeps repainting. Never scan other
  * sessions or accept an older turn's completion. Missing/partial proof falls
@@ -348,6 +490,55 @@ export function classifyClaudeTranscriptRow(row: any, { receivedAtMs, nowMs }: {
 export function nativeTurnVerifierSupport(agent: string | undefined, env?: EnvironmentMap): {
     supported: boolean;
     reason: "no-classifier" | "no-isolated-root" | null;
+};
+/** Is this native row the kickoff PROMPT itself?
+ *
+ * WI-10004982: for claude this must be the real `type:'user'` prompt row.
+ * Claude also copies the prompt into other rows: `last-prompt` bookkeeping
+ * rows (measured on transcript 98404f60: rows 14, 21 and 34, written before
+ * AND after the reply) and a `queue-operation` row when the prompt is queued
+ * behind a running turn. Binding to a queued copy would count the PREVIOUS
+ * turn's assistant row as this kickoff's activity. Codex keeps the original
+ * any-row match, because no codex copy written after the turn is measured. */
+export function kickoffMarkerPromptRow(agent: any, row: any, markerText: any): boolean;
+/** A plain launch's marker proves submission. A native task-start or assistant
+ * row AFTER that exact marker proves model activity, including a short turn
+ * that completed before the marker scan returned. PTY output is not used as
+ * execution proof when this isolated transcript is available.
+ *
+ * WI-10004982: this reads FORWARD from the prompt row. It used to read only
+ * the last 256 KiB, but a fresh Claude session writes rows far larger than
+ * that right after the reply (measured: `instructions` 276 KB, then
+ * `prompt_snapshot` rows of 168 KB and 258 KB). The window then started PAST
+ * the reply, bound to a later `last-prompt` copy of the marker, saw no
+ * assistant row, and the host re-sent the kickoff 40 s later as a duplicate
+ * turn. Now the first call scans from the file start to the first real prompt
+ * row and records it in `anchor`. Later calls re-check that exact row, then read
+ * only the bytes not yet scanned (`anchor.scannedEndOffset`), so the cost stays
+ * flat as the transcript grows.
+ *
+ * A `started:true` answer does not advance the cursor, so repeated calls keep
+ * answering true. Every unreadable or inconsistent case returns
+ * `available:false`, which keeps the existing retry path.
+ *
+ * @typedef {{fileIdentity: string | null, markerStartOffset: number | null,
+ *   markerEndOffset: number | null, scannedEndOffset: number | null}} KickoffMarkerAnchor
+ * @param {{agent?: string, env?: EnvironmentMap, transcriptPath?: string | null,
+ *   marker?: string | null, markerLostChars?: number, anchor?: KickoffMarkerAnchor | null,
+ *   home?: string, maxScanBytes?: number}} options
+ * @returns {{available: boolean, started: boolean}} */
+export function nativeKickoffTurnActivityAfterMarker({ agent, env, transcriptPath, marker, markerLostChars, anchor, home, maxScanBytes, }: {
+    agent?: string;
+    env?: EnvironmentMap;
+    transcriptPath?: string | null;
+    marker?: string | null;
+    markerLostChars?: number;
+    anchor?: KickoffMarkerAnchor | null;
+    home?: string;
+    maxScanBytes?: number;
+}): {
+    available: boolean;
+    started: boolean;
 };
 /** A queued kickoff retry may wait behind the original turn. At the final
  * write boundary only positive native execution proof cancels the retry;
@@ -528,6 +719,89 @@ export function shouldRetryCarryOnFreshEpoch({ drillId, reason, proofReason, ret
     retryCount?: number | undefined;
     maxRetries?: number | undefined;
 }): boolean;
+/** WI-10004943: the per-host retry budget for a launch kickoff's fresh-child
+ *  replacement. A missing, empty, or malformed value keeps the default; an explicit
+ *  integer >= 0 wins, so `0` is the kill switch. Pure; exported for tests.
+ * @param {unknown} value
+ * @param {number} [fallback]
+ */
+export function codexLaunchStartingRetryMax(value: unknown, fallback?: number): number;
+/** WI-10004943: should an undelivered launch kickoff be retried on a fresh child?
+ *  Only a plain fresh Codex launch qualifies: a managed kickoff (session-port seed)
+ *  has a native-transcript proof that owns its own timeout and child kill, and a
+ *  resume/fork may already be running a turn. Only the stuck `Starting` footer
+ *  qualifies, because that state belongs to the child: every measured drop had other
+ *  sessions' Codex children booting in under 60s alongside it. Pure; exported for tests.
+ * @param {object} [opts]
+ * @param {string} [opts.agent]
+ * @param {string} [opts.reason]
+ * @param {boolean} [opts.managedKickoff]
+ * @param {boolean} [opts.isResume]
+ * @param {number} [opts.retryCount]
+ * @param {number} [opts.maxRetries]
+ */
+export function shouldRetryLaunchKickoffOnFreshChild({ agent, reason, managedKickoff, isResume, retryCount, maxRetries, }?: {
+    agent?: string | undefined;
+    reason?: string | undefined;
+    managedKickoff?: boolean | undefined;
+    isResume?: boolean | undefined;
+    retryCount?: number | undefined;
+    maxRetries?: number | undefined;
+}): boolean;
+/** EI-24818010361425604: should an undelivered launch kickoff be re-delivered to
+ *  the successor of a same-host respawn? `superseded` means THIS host replaced the
+ *  child the kickoff targeted (a managed carry-respawn, a loop recycle) while the
+ *  kickoff was in flight. The owner continues in the successor, so the kickoff
+ *  belongs there; publishing `kickoff-not-submitted:superseded` instead makes the
+ *  launching parent kill the task, successor included. Measured 2026-10-02
+ *  20:44Z: a resumed Codex thread's first turn tripped native auto-compaction,
+ *  the PreCompact bridge turned it into a managed carry-respawn 1s after the
+ *  kickoff was written, and capability:launch-agent stopped the healthy successor.
+ *  A host that is tearing down has no successor, and a managed kickoff's native
+ *  transcript proof owns its own verdict and child kill. Pure; exported for tests.
+ * @param {object} [opts]
+ * @param {string} [opts.reason]
+ * @param {boolean} [opts.managedKickoff]
+ * @param {boolean} [opts.hostShuttingDown]
+ * @param {number} [opts.redeliveries]
+ * @param {number} [opts.maxRedeliveries]
+ */
+export function shouldRedeliverLaunchKickoffAfterRespawn({ reason, managedKickoff, hostShuttingDown, redeliveries, maxRedeliveries, }?: {
+    reason?: string | undefined;
+    managedKickoff?: boolean | undefined;
+    hostShuttingDown?: boolean | undefined;
+    redeliveries?: number | undefined;
+    maxRedeliveries?: number | undefined;
+}): boolean;
+/** WI-10004943: the Codex `Starting` options for one launch-kickoff attempt. While a
+ *  fresh-child retry remains, give up early on a child still at `Starting` after
+ *  `stuckMs` so the host can replace it (the WI-10005106 carry remedy). The last
+ *  attempt, and any launch that cannot be retried, keeps the (d) hold for the frame.
+ *  Pure; exported for tests.
+ * @param {object} [opts]
+ * @param {string} [opts.agent]
+ * @param {boolean} [opts.managedKickoff]
+ * @param {boolean} [opts.isResume]
+ * @param {number} [opts.retryCount]
+ * @param {number} [opts.maxRetries]
+ * @param {number} [opts.stuckMs]
+ * @param {number} [opts.holdCeilingMs]
+ */
+export function launchKickoffCodexStartingOptions({ agent, managedKickoff, isResume, retryCount, maxRetries, stuckMs, holdCeilingMs, }?: {
+    agent?: string | undefined;
+    managedKickoff?: boolean | undefined;
+    isResume?: boolean | undefined;
+    retryCount?: number | undefined;
+    maxRetries?: number | undefined;
+    stuckMs?: number | undefined;
+    holdCeilingMs?: number | undefined;
+}): {
+    codexStartingStuckMs: number;
+    codexStartingHoldCeilingMs?: undefined;
+} | {
+    codexStartingHoldCeilingMs: number;
+    codexStartingStuckMs?: undefined;
+};
 /** Filename-safe key for an ownerId (SIDs are already `[a-z0-9-]`-ish, but a
  *  defensive sanitize keeps a stray char from escaping the dir). Pure. */
 export function sanitizeKey(ownerId: any): string;
@@ -580,6 +854,145 @@ export function startCodexStartupProcessTrace({ agent, ownerId, pid, readCounter
     clear?: typeof clearInterval | undefined;
     platform?: NodeJS.Platform | undefined;
 }): (reason?: string) => void;
+export function redactSnapshotText(text: any, maxChars?: number): string;
+/** argv -> one bounded, redacted string. A credential-named flag also redacts
+ * the separate argument that follows it (`--token abc`). */
+export function redactSnapshotArgv(argv: any, { maxArgs, maxChars }?: {
+    maxArgs?: number | undefined;
+    maxChars?: number | undefined;
+}): string;
+/** Decode a /proc/net/tcp{,6} address ("0100007F:23C3") to "127.0.0.1:9155".
+ * The kernel prints each 32-bit word in host (little-endian) byte order.
+ * @param {string} value */
+export function decodeProcNetAddress(value: string): string;
+/**
+ * Socket inventory of one process (WI-10005178): which TCP peers it holds, in what
+ * state, plus a unix-socket count. A Codex child stuck at "Starting" logs nothing
+ * and is recycled within minutes, so the snapshot is the only place this evidence
+ * can be caught. Reads the process's fd links and its OWN network namespace's
+ * /proc/<pid>/net tables, parsed once per namespace via `netCache`. Never throws;
+ * null when the fd list is unreadable.
+ * @param {number} pid
+ * @param {{ readFile?: SnapshotReadFile, readDir?: SnapshotReadDir, readLink?: (path: string) => unknown, netCache?: Map<string, { tcp: Map<string, { remote: string, state: string }>, unix: Set<string> }>, maxTcp?: number }} [options]
+ */
+export function collectProcSockets(pid: number, { readFile, readDir, readLink, netCache, maxTcp, }?: {
+    readFile?: SnapshotReadFile;
+    readDir?: SnapshotReadDir;
+    readLink?: (path: string) => unknown;
+    netCache?: Map<string, {
+        tcp: Map<string, {
+            remote: string;
+            state: string;
+        }>;
+        unix: Set<string>;
+    }>;
+    maxTcp?: number;
+}): {
+    unix: number;
+    other: number;
+    tcpTruncated?: number | undefined;
+    total: number;
+    tcp: {
+        remote: string;
+        state: string;
+        count: number;
+    }[];
+} | null;
+/** Walk the descendants of `rootPid` breadth-first. Children are read from
+ * EVERY thread's /proc/PID/task/TID/children: the kernel lists a child under the
+ * thread that forked it, and Codex (a multithreaded Rust runtime) forks its MCP
+ * servers from worker threads, so the main thread's list alone is empty
+ * (measured on a live Codex: 156 threads, main-thread children empty, three
+ * worker threads holding all of them). */
+/** @typedef {(path: string, encoding: 'utf8') => string | Buffer} SnapshotReadFile */
+/** @typedef {(path: string) => ReadonlyArray<unknown>} SnapshotReadDir */
+/** @typedef {(path: string, maxBytes: number) => ({ text: string, size: number, truncatedHead: boolean } | null)} SnapshotReadTail */
+/** @typedef {{ path: string, present: false } | { path: string, present: true, bytes: number, totalLinesInTail: number, lastTs: string | null, tail: string[] }} CodexTuiLogTail */
+/**
+ * @param {number | undefined} rootPid
+ * @param {{ readFile?: SnapshotReadFile, readDir?: SnapshotReadDir, readLink?: (path: string) => unknown, maxDepth?: number, maxProcs?: number }} [options]
+ */
+export function collectCodexStuckProcessTree(rootPid: number | undefined, { readFile, readDir, readLink, maxDepth, maxProcs, }?: {
+    readFile?: SnapshotReadFile;
+    readDir?: SnapshotReadDir;
+    readLink?: (path: string) => unknown;
+    maxDepth?: number;
+    maxProcs?: number;
+}): {
+    procs: any[];
+    truncated: boolean;
+};
+/** Last `maxBytes` of a file as utf8 text, or null when it cannot be read.
+ * @param {string} path
+ * @param {number} maxBytes
+ * @returns {{ text: string, size: number, truncatedHead: boolean } | null}
+ */
+export function readFileTail(path: string, maxBytes: number): {
+    text: string;
+    size: number;
+    truncatedHead: boolean;
+} | null;
+/** The tail of the CURRENT child's codex-tui.log, which covers only this
+ * child's startup because Codex starts the file fresh at launch.
+ * @param {string | undefined} codexHome
+ * @param {{ readTail?: SnapshotReadTail, maxLines?: number, maxLineChars?: number, maxBytes?: number }} [options]
+ * @returns {CodexTuiLogTail | null}
+ */
+export function readCodexTuiLogTail(codexHome: string | undefined, { readTail, maxLines, maxLineChars, maxBytes, }?: {
+    readTail?: SnapshotReadTail;
+    maxLines?: number;
+    maxLineChars?: number;
+    maxBytes?: number;
+}): CodexTuiLogTail | null;
+/** One bounded, never-throwing snapshot of a Codex child stuck at `Starting`.
+ * @param {{ rootPid?: number, codexHome?: string, platform?: string, readFile?: SnapshotReadFile, readDir?: SnapshotReadDir, readLink?: (path: string) => unknown, readTail?: SnapshotReadTail, startupOutput?: string, screenDims?: { rows?: number, cols?: number } }} [options]
+ */
+export function collectCodexStartingStuckSnapshot({ rootPid, codexHome, platform, readFile, readDir, readLink, readTail, startupOutput, screenDims, }?: {
+    rootPid?: number;
+    codexHome?: string;
+    platform?: string;
+    readFile?: SnapshotReadFile;
+    readDir?: SnapshotReadDir;
+    readLink?: (path: string) => unknown;
+    readTail?: SnapshotReadTail;
+    startupOutput?: string;
+    screenDims?: {
+        rows?: number;
+        cols?: number;
+    };
+}): {
+    rootPid: number | null | undefined;
+    procs: any[];
+    procsTruncated: boolean;
+    log: CodexTuiLogTail | null;
+    footer: {
+        state: string | null;
+        streamState: string | null;
+        screenFooter: string | null;
+        footerMatchCount: number;
+        lastMatches: {
+            status: string;
+            fromEnd: number;
+            text: string;
+        }[];
+        readyAfterLastFooter: boolean;
+        startingAfterLastFooter: boolean;
+        mcpLines: string[];
+        visibleChars: number;
+        rawTail: string;
+    } | null;
+    error?: undefined;
+} | {
+    rootPid: number | null | undefined;
+    error: {
+        errorCode?: string | undefined;
+        errorName: string;
+    };
+    procs?: undefined;
+    procsTruncated?: undefined;
+    log?: undefined;
+    footer?: undefined;
+};
 /** Small, non-secret error identity for durable host events. Exception messages can
  * contain command arguments or credentials; the local stderr keeps the full
  * diagnostic while the shared event store gets only a stable error class/code. */
@@ -732,6 +1145,17 @@ export function listHosts(): any[];
 /** Remove discovery files + sockets whose host process is gone. */
 export function pruneDead(): void;
 export function reportOwnerHumanTurn(now?: number): void;
+/**
+ * Read the effective per-agent wake mode through the loopback admin coord
+ * read-only verb. A missing route, failed request, or malformed response is
+ * deliberately `null`: carry-rearm must retain its payload unless the server
+ * confirms that automatic wakes are enabled.
+ */
+export function readEffectiveWakeMode(ownerId: any, { env, fetchImpl, timeoutMs }?: {
+    env?: NodeJS.ProcessEnv | undefined;
+    fetchImpl?: typeof fetch | undefined;
+    timeoutMs?: number | undefined;
+}): Promise<any>;
 /**
  * The mid-keystroke idle gate (P-013). `touch()` on every stdin byte records
  * activity; `waitIdle()` resolves once `idleMs` of quiet has elapsed (or the cap
@@ -975,6 +1399,93 @@ export function makeOwnerComposerGate({ capMs, now }?: {
     waitClear(): Promise<any>;
 };
 /**
+ * Resolve the park threshold from PAPERCUSP_PSU_PARK_IDLE_MS. Unset/blank or
+ * unparseable falls back to the default (the feature ships ON); an explicit
+ * `0` is the kill-switch. Pure; exported for tests.
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function parkIdleMsFromEnv(env?: Record<string, string | undefined>): number;
+/**
+ * Count the live descendant processes of `rootPid` from /proc (one ppid map
+ * built from every /proc/<pid>/stat, then a walk down from the root). The park
+ * policy refuses while the CLI has ANY descendant: a running background shell,
+ * an in-flight hook or a stdio MCP server is work a SIGKILL of the tree would
+ * destroy. Returns null when the count cannot be taken (no /proc, unreadable
+ * root), and the policy FAILS CLOSED on null. Exported for tests (procRoot and
+ * the fs readers are injectable).
+ * @param {number} rootPid
+ * @param {{ procRoot?: string, readdir?: (p: string) => string[], readFile?: (p: string, enc: 'utf8') => string }} [opts]
+ * @returns {number | null}
+ */
+export function countProcessDescendants(rootPid: number, { procRoot, readdir, readFile }?: {
+    procRoot?: string;
+    readdir?: (p: string) => string[];
+    readFile?: (p: string, enc: "utf8") => string;
+}): number | null;
+/**
+ * psu-process-free-parking-2026-10-06 P-016: should the host park its child
+ * NOW? Every refusal names its reason (reported on the host event so "why
+ * didn't it park" is a read, not a guess). Ordered cheapest-first; the caller
+ * only pays for the /proc descendant walk when every other gate passed (pass a
+ * `descendants` thunk). Pure; exported for tests.
+ *
+ * @param {{
+ *   idleMs: number,
+ *   agent?: string | null,
+ *   now: number,
+ *   lastActivityAt: number,
+ *   childPromptReady: boolean,
+ *   parked?: boolean,
+ *   busy?: boolean,
+ *   quotaBlocked?: boolean,
+ *   composerPending?: boolean,
+ *   resumable?: boolean,
+ *   descendants: () => number | null,
+ * }} input
+ * @returns {{ park: boolean, reason: string, idleForMs?: number, descendants?: number | null }}
+ */
+export function parkVerdict({ idleMs, agent, now, lastActivityAt, childPromptReady, parked, busy, quotaBlocked, composerPending, resumable, descendants, }: {
+    idleMs: number;
+    agent?: string | null;
+    now: number;
+    lastActivityAt: number;
+    childPromptReady: boolean;
+    parked?: boolean;
+    busy?: boolean;
+    quotaBlocked?: boolean;
+    composerPending?: boolean;
+    resumable?: boolean;
+    descendants: () => number | null;
+}): {
+    park: boolean;
+    reason: string;
+    idleForMs?: number;
+    descendants?: number | null;
+};
+/**
+ * psu-process-free-parking P-017: the id of the newest top-level Claude
+ * transcript in a PER-SESSION config dir (`<configDir>/projects/<cwd>/<id>.jsonl`).
+ * An in-TUI `/clear` starts a new conversation under a new id that the launch
+ * argv never learns, so resuming the argv's id alone could revive the wrong
+ * conversation. Only trusted when the config dir is this session's isolation
+ * dir (its path names `ownerId`): in a shared dir the newest file can belong to
+ * another session. Returns null when it cannot tell. Exported for tests.
+ * @param {string | null | undefined} configDir
+ * @param {{ ownerId?: string | null, readdir?: (p: string) => string[], stat?: (p: string) => { mtimeMs: number, isFile: () => boolean } }} [opts]
+ * @returns {{ id: string, mtimeMs: number } | null}
+ */
+export function newestSessionTranscriptId(configDir: string | null | undefined, { ownerId, readdir, stat }?: {
+    ownerId?: string | null;
+    readdir?: (p: string) => string[];
+    stat?: (p: string) => {
+        mtimeMs: number;
+        isFile: () => boolean;
+    };
+}): {
+    id: string;
+    mtimeMs: number;
+} | null;
+/**
  * Session activity tracker (agent-liveness-heartbeat-hardening-2026-06-12
  * P-006): the OUTPUT-side sibling of makeIdleGate. The pty stream is a true
  * mid-turn signal — a generating agent repaints its TUI constantly — so
@@ -1118,7 +1629,7 @@ export function makeAgentBusyGate({ lastOutputAt, quietMs, capMs, now, }?: {
         started: boolean;
     }>;
 };
-export function makeCarryRearmController({ acquireInject, waitIdle, hasPendingOwnerInput, waitForOwnerInputClear, waitAtPrompt, recycle, performDelivery, emitEvent, capMs, maxProductionAttempts, yieldAfterDefer, onSettlement, isStale, isSuperseded, }: {
+export function makeCarryRearmController({ acquireInject, waitIdle, hasPendingOwnerInput, waitForOwnerInputClear, waitAtPrompt, recycle, performDelivery, emitEvent, capMs, maxProductionAttempts, yieldAfterDefer, onSettlement, isStale, isSuperseded, readWakeMode, wakeModeRetryMs, waitWakeModeRetry, }: {
     acquireInject: any;
     waitIdle?: (() => Promise<{
         deferred: boolean;
@@ -1139,13 +1650,26 @@ export function makeCarryRearmController({ acquireInject, waitIdle, hasPendingOw
     onSettlement?: ((_messages: any, _outcome: any) => void) | undefined;
     isStale?: (() => boolean) | undefined;
     isSuperseded?: ((_msg: any) => boolean) | undefined;
+    readWakeMode?: (() => Promise<string>) | undefined;
+    wakeModeRetryMs?: number | undefined;
+    waitWakeModeRetry?: ((delayMs: any) => Promise<any>) | undefined;
 }): {
-    /** Live count of carry-respawns either awaiting their first delivery
-     *  attempt's outcome OR a re-armed retry (diagnostics/tests, and the input
-     *  to shouldDeferWakeForPendingRespawn). */
-    pendingCount(): number;
+    /** Live count of accepted first attempts and re-armed retries.
+     *  Filter carry-respawn for wake arbitration: the controller also owns
+     *  turn retries, which must never suppress themselves as pending carries.
+     *  @param {string | null} [mode]
+     */
+    pendingCount(mode?: string | null): number;
     /** Whether a message is still owned by the detached re-arm loop. */
     isPendingMessage(msg: any): boolean;
+    /**
+     * Refresh an already-queued retry only when the same delivery is still the
+     * current payload. A later distinct delivery may have superseded it, so a
+     * delayed duplicate of the older id must never roll the re-arm backwards.
+     * Keep the original receipt time: retrying the delivery updates its snapshot,
+     * not its age or ordering against a newer host generation.
+     */
+    refreshPendingMessage(msg: any): boolean;
     /** EI-18681914950138372: call the MOMENT a carry-respawn control message is
      *  accepted by the host, before it enters its own busy-gate wait — marks it
      *  in-flight so a wake arriving during that wait is correctly deferred. */
@@ -1292,6 +1816,24 @@ export function submitExhaustionTerminatesHost(label: any): boolean;
  * not proof that the injected turn landed, so it must remain distinguishable
  * from both success and bounded exhaustion. Pure; exported for tests. */
 export function submitVerificationFailureReason(result: any): string | null;
+/** @param {string} dropReason @returns {string} */
+export function describeStartupTurnDropReason(dropReason: string): string;
+/** WI-10004926: the ONE writer of the startup-turn drop receipt.
+ *  packages/operator-core/lib/acceptance-grader.ts parses this exact line with
+ *  `$`-anchored regexes (LAUNCHER_QUOTA_KICKOFF_DROP_RE,
+ *  LAUNCHER_KICKOFF_DROP_RE). Keep the parenthesised tail
+ *  `within <N>ms over <N> attempt(s))` LAST. Anything appended inside or after
+ *  it silently stops grader drop detection;
+ *  apps/operator/lib/psu-pty-host-drop-line-contract.test.ts pins this.
+ *  @param {{ label: string, ownerId: string, dropReason: string, budgetMs: number, attempts: number }} drop
+ *  @returns {string} */
+export function formatStartupTurnDroppedLine({ label, ownerId, dropReason, budgetMs, attempts }: {
+    label: string;
+    ownerId: string;
+    dropReason: string;
+    budgetMs: number;
+    attempts: number;
+}): string;
 export function makeQuotaBlockStarvationGuard({ thresholdMs, now, onStarvation, }?: {
     thresholdMs?: number | undefined;
     now?: (() => number) | undefined;
@@ -1842,7 +2384,7 @@ export function makeClaudeResumeCompactionRecoveryStateMachine({ enabled, startu
     isTimedOut: () => boolean;
     recoveryStarted: () => boolean;
     status: () => {
-        startedAt: number;
+        startedAt: any;
         detectionExpiresAt: any;
         recoveryExpiresAt: any;
         bufferedChars: number;
@@ -1862,12 +2404,65 @@ export function makeScrollbackGuard(): {
     /** Flush whatever is held (child exit / teardown) so nothing is swallowed. */
     flush(): string;
 };
-export function headlessClaudeKickoffReadiness({ enabled, requireInitialOutput, promptReady, }?: {
+export function renderTerminalScreen(output: any, { rows, cols }?: {
+    rows?: number | undefined;
+    cols?: number | undefined;
+}): string[];
+/** WI-10005178: the Codex footer state as the terminal shows it. The rendered
+ * screen decides; the flattened stream is only the fallback for a screen that
+ * holds no complete footer (the bounded startup buffer trimmed the full paint and
+ * left only cell diffs), the one case the screen cannot decide. Pass the child's
+ * PTY size: a CUP beyond the rendered grid is clamped onto the wrong cell.
+ * @param {unknown} output
+ * @param {{ rows?: number, cols?: number }} [dims]
+ * @returns {string | null} */
+export function codexFooterStateFromOutput(output: unknown, dims?: {
+    rows?: number;
+    cols?: number;
+}): string | null;
+/** WI-10005178: the screen text a `codex-startup-still-starting` verdict was read
+ * from. Measured 2026-10-02T01:40-01:44Z (su-6a2603be, codex home session-32862):
+ * the dropped child's own codex-tui.log shows session init, MCP resolution and the
+ * model websocket warmup all complete within ~6s of spawn, yet the host judged its
+ * footer `Starting` for 3m16s. Two readings fit that (WI-10004943 H1/H2): Codex
+ * genuinely kept painting `Starting` (an MCP server still booting, e.g. the
+ * OAuth-only `tsenta`), or a partial repaint wrote only the new status word so the
+ * last COMPLETE footer the regex can match is a stale `Starting`. This evidence
+ * separates them: `readyAfterLastFooter` true with state `starting` is the stale-read
+ * signature; `mcpLines` names a server Codex was still waiting on. Bounded and
+ * redacted, because host events reach a shared store. */
+export function codexStartingFooterEvidence(output: any, { maxMatches, tailChars, maxLineChars, dims }?: {
+    maxMatches?: number | undefined;
+    tailChars?: number | undefined;
+    maxLineChars?: number | undefined;
+}): {
+    state: string | null;
+    streamState: string | null;
+    screenFooter: string | null;
+    footerMatchCount: number;
+    lastMatches: {
+        status: string;
+        fromEnd: number;
+        text: string;
+    }[];
+    readyAfterLastFooter: boolean;
+    startingAfterLastFooter: boolean;
+    mcpLines: string[];
+    visibleChars: number;
+    rawTail: string;
+} | null;
+export function headlessClaudeKickoffReadiness({ enabled, requireInitialOutput, promptReady, onboardingExpired, }?: {
     enabled?: boolean | undefined;
     requireInitialOutput?: boolean | undefined;
     promptReady?: boolean | undefined;
-}): "ordinary-gate" | "composer-ready" | "wait-for-composer";
-export function startupOutputReady(agent: any, output: any): boolean;
+    onboardingExpired?: boolean | undefined;
+}): "ordinary-gate" | "composer-ready" | "composer-unseen-ordinary-gate" | "wait-for-composer";
+/** @param {*} agent @param {*} output
+ *  @param {{ rows?: number, cols?: number }} [dims] the child's PTY size (WI-10005178) */
+export function startupOutputReady(agent: any, output: any, dims?: {
+    rows?: number;
+    cols?: number;
+}): boolean;
 /** WI-10002745: the first thing a Codex TUI writes is a burst of terminal
  * capability queries (`ESC[?2004h ESC[>7u ESC[?1004h ESC[6n OSC10? OSC11?
  * ESC[?u ESC[c`). A headless PTY answers none of them, so Codex spends ~3.6s
@@ -1877,7 +2472,7 @@ export function startupOutputReady(agent: any, output: any): boolean;
  * request is the earliest byte that is unambiguously the Codex TUI rather than
  * the psu launcher's own banner. Pure and exported for tests. */
 export function codexTuiStartObserved(output: any): boolean;
-export function codexSessionFrameObserved(output: any, { probeAlreadySeen }?: {
+export function codexSessionFrameObserved(output: any, { probeAlreadySeen, dims }?: {
     probeAlreadySeen?: boolean | undefined;
 }): boolean;
 /** Has the startup-ready fallback window elapsed? For most backends it is
@@ -2115,6 +2710,11 @@ export function makeDeliveryDedup({ ttlMs, now }?: {
     markAccepted(id: any): void;
     size(): number;
 };
+/** Decide how the detached host pipeline settles one delivery ID.
+ * A busy-gate deferral remains pending only when the re-arm controller still
+ * owns that exact delivery; folded IDs that the re-arm does not own stay
+ * retryable. */
+export function deliveryDedupSettlement(deliveryOutcome: any, rearmOwnsDelivery?: boolean): "clear" | "pending" | "completed";
 /**
  * A minimal FIFO async mutex serializing the GATED-inject critical section within
  * a single host (EI-8822). Each control-socket connection runs its OWN async
@@ -2389,6 +2989,60 @@ export function clearSettleMs(env?: EnvironmentMap): any;
  *  @param {EnvironmentMap} [env]
  */
 export function submitVerifyQuietMs(env?: EnvironmentMap): any;
+/** EI-24961854655864836: authenticate the successor before submitting its work.
+ * A failed first report may confirm through the launcher's existing durable retry.
+ * The bounded wait never treats submission/transcript proof as identity authority.
+ * @param {{nativeId?: string | null, readNativeId?: () => string | null,
+ * report?: (id: string, options: {onConfirmed: (id?: string) => void}) => any,
+ * isCurrent?: () => boolean, timeoutMs?: number, pollMs?: number,
+ * alreadyConfirmed?: boolean}} options
+ */
+export function waitForRespawnBinding({ nativeId, readNativeId, report, isCurrent, timeoutMs, pollMs, alreadyConfirmed, }: {
+    nativeId?: string | null;
+    readNativeId?: () => string | null;
+    report?: (id: string, options: {
+        onConfirmed: (id?: string) => void;
+    }) => any;
+    isCurrent?: () => boolean;
+    timeoutMs?: number;
+    pollMs?: number;
+    alreadyConfirmed?: boolean;
+}): Promise<{
+    ok: boolean;
+    nativeId: string | null;
+    reason: string;
+}>;
+/**
+ * Complete the existing carry lifecycle after native delivery and mapping are
+ * proven. Codex assigns its id at startup: use the exact isolated rollout from
+ * native proof, never "latest" (which can still be the critical predecessor).
+ * @param {{ownerId: string, agent?: string, nativeId?: string | null,
+ *   proof?: {persisted?: boolean, nativeRef?: string | null} | null,
+ *   alreadyReported?: boolean,
+ *   report?: (nativeId: string, options: {onConfirmed: () => void}) => any,
+ *   isCurrent?: () => boolean,
+ *   emit?: typeof fireSessionCompactedEvent, timeoutMs?: number}} options
+ */
+export function announceVerifiedCarryRespawn({ ownerId, agent, nativeId, proof, alreadyReported, report, emit, timeoutMs, isCurrent, }: {
+    ownerId: string;
+    agent?: string;
+    nativeId?: string | null;
+    proof?: {
+        persisted?: boolean;
+        nativeRef?: string | null;
+    } | null;
+    alreadyReported?: boolean;
+    report?: (nativeId: string, options: {
+        onConfirmed: () => void;
+    }) => any;
+    isCurrent?: () => boolean;
+    emit?: typeof fireSessionCompactedEvent;
+    timeoutMs?: number;
+}): Promise<{
+    announced: boolean;
+    nativeId: string | null;
+    reason: string;
+}>;
 /**
  * Fire the server-side `session:compacted:<owner>` event (event-await-discoverability
  * P-103) after a server-requested compaction COMPLETES, so a peer can
@@ -2462,6 +3116,9 @@ export function fleetOscFromEnv(env?: EnvironmentMap): string | null;
 export function injectTurn(sock: string, text: string, ownerId?: string): Promise<any>;
 /**
  * EI-24091823697677465: heal a DEAD loopback operator pin before an in-place respawn.
+ * Direct :3170 pins also route proactively through the same-build staging proxy (:9171),
+ * including explicit pins. The ordinary launcher already applies this rule, but an
+ * in-place carry-respawn reuses this host's environment and bypasses that resolver.
  *
  * The in-place respawn below re-spawns the CLI with THIS host's env, so whatever
  * PAPERCUSP_OPERATOR_URL the session was launched with rides into every successor
@@ -2474,9 +3131,10 @@ export function injectTurn(sock: string, text: string, ownerId?: string): Promis
  * Only launcher-managed URLs may heal, using the existing provenance marker shared
  * with ptool. An explicit target stays authoritative even when its server is down:
  * a refusal does not authorize moving a current-build session to stable code.
- * A managed pin is replaced only when it REFUSES the connection. A slow or erroring
- * operator stays authoritative. The replacement is the local MCP proxy, and only when it
- * answers /api/health. Mutates `env` in place and returns `{ from, to }` when it
+ * A managed pin is replaced only when it refuses connections or its /api/mcp route
+ * is confirmed missing. A slow/erroring service and a live MCP endpoint stay
+ * authoritative. The replacement is the local MCP proxy, and it must answer both
+ * /api/health and /api/mcp. Mutates `env` in place and returns `{ from, to }` when it
  * healed, otherwise null. Never throws.
  *
  * @param {EnvironmentMap} env
@@ -2488,6 +3146,11 @@ export function healDeadOperatorPin(env: EnvironmentMap, { fetchImpl, timeoutMs 
 }): Promise<{
     from: string;
     to: string;
+    route: string;
+} | {
+    from: string;
+    to: string;
+    route?: undefined;
 } | null>;
 /**
  * D-424 (plan byoc-cloud-workspaces-gcp-aws-azure-2026-08-22, P-326): the process the pty
@@ -2542,15 +3205,21 @@ export function resolveAgentPtyTarget({ command, args, env, cwd }: {
  * @param {string} [o.kickoffFile]      server-owned session-port seed (never a CLI arg)
  * @param {{renderedHash?: string}} [o.sessionPort] { renderedHash } for the managed seed
  * @param {(proof:any)=>Promise<void>} [o.onKickoffPersisted] lifecycle acknowledgement
+ * @param {{nativeId?:string|null}|null} [o.adoptedCarryRespawn] host-code adoption of a carry;
+ *   its kickoff must prove the late native id and re-anchor before it announces completion
  * @param {object} [o.signalSource]      process-like on/off signal source (tests)
  * @param {()=>object} [o.reapScopeResidue] exact-session-cgroup cleanup (tests)
  * @param {string} [o.normalizedLogPath] optional headless grep-safe log path; normally
  *   supplied through {@link HEADLESS_NORMALIZED_LOG_ENV} in `o.env`
- * @param {(args:string[])=>any} [o.mintRecycleArgs] mint argv for an ordinary recycle
- * @param {(args:string[])=>any} [o.mintCarryRespawnArgs] mint argv for a carry respawn
+ * @param {(args:string[], options:{agent?:string, personaFile?:string|null})=>any} [o.mintRecycleArgs] mint argv for an ordinary recycle
+ * @param {(args:string[], options:{systemPromptAddendum:string, ownerId:string, agent?:string, personaFile?:string|null, codexHome?:string})=>any} [o.mintCarryRespawnArgs] mint argv for a carry respawn
+ * @param {(args:string[], options:{agent?:string})=>({args:string[], nativeId:string}|null)} [o.mintParkResumeArgs]
+ *   mint the argv that resumes a parked child (null = not resumable, never park)
  * @param {()=>Promise<any>} [o.ensureCodexHome] repair the per-session Codex home before a carry mint
  * @param {()=>Promise<any>} [o.refreshPersonaFile] refresh the rendered persona before respawn
  * @param {(...args:any[])=>any} [o.onRespawn] lifecycle callback after a respawn
+ * @param {((pid:number)=>string|null)|null} [o.resolveRespawnNativeId] startup native identity of the exact PTY child
+ * @param {typeof fireSessionCompactedEvent} [o.emitCompacted] verified carry completion bridge (tests)
  * @param {((...args:any[])=>any) | null} [o.onReexec] handoff callback for host re-exec
  * @param {()=>any} [o.hostCodeStalenessFn] injectable loaded-vs-disk probe
  * @param {(env: EnvironmentMap)=>Promise<{from:string,to:string}|null>} [o.healOperatorPin]
@@ -2558,6 +3227,7 @@ export function resolveAgentPtyTarget({ command, args, env, cwd }: {
  * @param {()=>number} [o.parentPidFn] injectable parent-pid probe
  * @param {number} [o.activityPersistMs] discovery activity refresh interval
  * @param {number} [o.nativePersistenceTimeoutMs] managed kickoff persistence deadline
+ * @param {(...args:any[])=>any} [o.mcpReconnectMacro] injectable carry MCP reconnect macro
  */
 export function hostThroughPty(o: {
     command: string;
@@ -2579,14 +3249,34 @@ export function hostThroughPty(o: {
         renderedHash?: string;
     } | undefined;
     onKickoffPersisted?: ((proof: any) => Promise<void>) | undefined;
+    adoptedCarryRespawn?: {
+        nativeId?: string | null;
+    } | null | undefined;
     signalSource?: object | undefined;
     reapScopeResidue?: (() => object) | undefined;
     normalizedLogPath?: string | undefined;
-    mintRecycleArgs?: ((args: string[]) => any) | undefined;
-    mintCarryRespawnArgs?: ((args: string[]) => any) | undefined;
+    mintRecycleArgs?: ((args: string[], options: {
+        agent?: string;
+        personaFile?: string | null;
+    }) => any) | undefined;
+    mintCarryRespawnArgs?: ((args: string[], options: {
+        systemPromptAddendum: string;
+        ownerId: string;
+        agent?: string;
+        personaFile?: string | null;
+        codexHome?: string;
+    }) => any) | undefined;
+    mintParkResumeArgs?: ((args: string[], options: {
+        agent?: string;
+    }) => ({
+        args: string[];
+        nativeId: string;
+    } | null)) | undefined;
     ensureCodexHome?: (() => Promise<any>) | undefined;
     refreshPersonaFile?: (() => Promise<any>) | undefined;
     onRespawn?: ((...args: any[]) => any) | undefined;
+    resolveRespawnNativeId?: ((pid: number) => string | null) | null | undefined;
+    emitCompacted?: typeof fireSessionCompactedEvent | undefined;
     onReexec?: ((...args: any[]) => any) | null | undefined;
     hostCodeStalenessFn?: (() => any) | undefined;
     healOperatorPin?: ((env: EnvironmentMap) => Promise<{
@@ -2596,6 +3286,7 @@ export function hostThroughPty(o: {
     parentPidFn?: (() => number) | undefined;
     activityPersistMs?: number | undefined;
     nativePersistenceTimeoutMs?: number | undefined;
+    mcpReconnectMacro?: ((...args: any[]) => any) | undefined;
 }): Promise<any>;
 /** Environment fragments injected by launchers and tests need not carry every
  * ambient key that an application framework merges into NodeJS.ProcessEnv.
@@ -2663,6 +3354,20 @@ export const TURN_ROW_CLASSIFIERS: Readonly<{
     codex: typeof classifyCodexTranscriptRow;
     claude: typeof classifyClaudeTranscriptRow;
 }>;
+/** WI-10004982: how far one launch-activity probe call reads FORWARD. It
+ * matches the 64 MiB cap of the marker proof scan, so any transcript whose
+ * marker the proof could find is one this probe can also read from the start. */
+export const NATIVE_KICKOFF_SCAN_BYTES: number;
+/** EI-24818010361425604: how many times one launch kickoff may follow its owner
+ *  into the successor of a same-host respawn. One: a successor that is itself
+ *  replaced before its kickoff lands is a respawn loop, not a delivery problem. */
+export const LAUNCH_KICKOFF_RESPAWN_REDELIVERY_MAX: 1;
+/** The persona-refresh `reason` the operator returns when a restart would activate a
+ *  priced Cupboard identity that has no funds behind it and cannot be dropped from the
+ *  stack (agent-economy-flywheel P-016, D-012). The respawn is refused on it, never
+ *  fail-soft. Mirrors IDENTITY_ACTIVATION_REFUSED_REASON in
+ *  packages/operator-core/lib/cupboard/identity-activation-restart.ts. */
+export const IDENTITY_ACTIVATION_REFUSED_REASON: "identity-activation-refused";
 /**
  * WI-38292: persist the successor's marching orders — the child argv this host
  * had already minted (rotated native session id + the carry's
@@ -2685,6 +3390,16 @@ export const TURN_ROW_CLASSIFIERS: Readonly<{
  *  psu-host-handoff-env.test.ts pins this list ⊇ contextTrimmingEnv's keys. */
 export const HOST_HANDOFF_ENV_KEYS: readonly string[];
 /**
+ * psu-process-free-parking-2026-10-06 P-016: how long a Claude child must sit
+ * idle at its prompt before the host PARKS it (SIGKILLs the CLI to free its
+ * ~215 MB while the host, socket and terminal stay up; D-002). 15 minutes:
+ * long enough that an attended session the owner is reading is not parked
+ * under them, short enough that an idle fleet sheds its CLI memory. A park
+ * costs no tokens inside the 1h prompt-cache TTL and ~1 s of wake latency
+ * (D-018/D-025 of agent-capacity-and-cost-gcp-2026-09-30).
+ */
+export const DEFAULT_PARK_IDLE_MS: number;
+/**
  * How long a SHUTDOWN gives the child to exit on SIGHUP before the host escalates
  * to a whole-process-tree SIGKILL. A claude TUI flushes its transcript on SIGHUP,
  * so the pause is what makes the exit clean rather than lossy.
@@ -2698,6 +3413,23 @@ export const SHUTDOWN_GRACE_MS: number;
  * already on its way out.
  */
 export const SHUTDOWN_ACK_DELAY_MS: number;
+/** WI-10004926: human text for each startup-turn drop reason, printed inside
+ *  the parentheses of the `<label> DROPPED for <owner> (...)` stderr receipt.
+ *  `submit-verification-aborted-<why>` is handled by prefix in
+ *  describeStartupTurnDropReason; any other unmapped reason is still NAMED
+ *  (WI-10004919: an unnamed reason hid a 75s frame-budget drop behind the
+ *  generic text). */
+export const STARTUP_TURN_DROP_REASON_TEXT: Readonly<{
+    'no-startup-ready-marker-last-resort-failed': "the child never emitted its startup-ready marker AND the last-resort attempt found no prompt";
+    'no-startup-ready-marker': "the child never emitted its startup-ready marker";
+    'kickoff-marker-echo-unconfirmed': "the exact Codex kickoff marker never appeared in the composer echo";
+    'submit-verification-exhausted': "submit verification exhausted without observing output after a resubmit";
+    'fresh-child-owner-input': "the owner used the fresh child before its carry prompt was submitted";
+    'resume-compaction-timeout': "Claude resume compaction recovery timed out before a standalone composer prompt appeared";
+    'codex-backend-frame-not-observed': "the Codex session frame, a Ready footer or model header, never appeared in its backend-frame budget";
+    'codex-startup-still-starting': "the Codex footer still read Starting, MCP servers booting, at the kickoff deadline";
+    'never-settled': "the child never settled to its prompt";
+}>;
 /** Is THIS line a usage advisory rather than a wall? Scoped to the single line
  *  carrying the match so an advisory cannot suppress a real wall elsewhere on the
  *  same screen. Pure; exported for tests. */
@@ -2811,6 +3543,51 @@ export const BRACKETED_PASTE_TAIL_CHARS: 32;
  *  event-await-discoverability plan / P-103). The host resolves it relative to itself so
  *  the same path works from the staging AND release checkouts. */
 export const SESSION_COMPACTED_EMIT_ENTRY: string;
+/**
+ * A plain launch's marker proves submission. A native task-start or assistant
+ * row AFTER that exact marker proves model activity, including a short turn
+ * that completed before the marker scan returned. PTY output is not used as
+ * execution proof when this isolated transcript is available.
+ *
+ * WI-10004982: this reads FORWARD from the prompt row. It used to read only
+ * the last 256 KiB, but a fresh Claude session writes rows far larger than
+ * that right after the reply (measured: `instructions` 276 KB, then
+ * `prompt_snapshot` rows of 168 KB and 258 KB). The window then started PAST
+ * the reply, bound to a later `last-prompt` copy of the marker, saw no
+ * assistant row, and the host re-sent the kickoff 40 s later as a duplicate
+ * turn. Now the first call scans from the file start to the first real prompt
+ * row and records it in `anchor`. Later calls re-check that exact row, then read
+ * only the bytes not yet scanned (`anchor.scannedEndOffset`), so the cost stays
+ * flat as the transcript grows.
+ *
+ * A `started:true` answer does not advance the cursor, so repeated calls keep
+ * answering true. Every unreadable or inconsistent case returns
+ * `available:false`, which keeps the existing retry path.
+ */
+export type KickoffMarkerAnchor = {
+    fileIdentity: string | null;
+    markerStartOffset: number | null;
+    markerEndOffset: number | null;
+    scannedEndOffset: number | null;
+};
+export type SnapshotReadFile = (path: string, encoding: "utf8") => string | Buffer;
+export type SnapshotReadDir = (path: string) => ReadonlyArray<unknown>;
+export type SnapshotReadTail = (path: string, maxBytes: number) => ({
+    text: string;
+    size: number;
+    truncatedHead: boolean;
+} | null);
+export type CodexTuiLogTail = {
+    path: string;
+    present: false;
+} | {
+    path: string;
+    present: true;
+    bytes: number;
+    totalLinesInTail: number;
+    lastTs: string | null;
+    tail: string[];
+};
 /**
  * Environment fragments injected by launchers and tests need not carry every
  * ambient key that an application framework merges into NodeJS.ProcessEnv.

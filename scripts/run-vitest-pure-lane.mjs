@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 
 import { isCliEntry } from "@papercusp/operator-core/lib/util/cli-entry";
 import { resolveLaneInclude } from "@papercusp/test-config/lane-split";
+import { resolveReuseSkipFiles } from "@papercusp/test-config/test-pass-reuse-skip";
+import { reuseSkipCoversRun } from "./lib/empty-suite-guard.mjs";
 import {
   buildGovernedProcessDemand,
   classifyGovernedTestProcessOutcome,
@@ -162,20 +164,57 @@ export function runVitestProcess(
   });
 }
 
-/** Run every shard for complete failure inventory; return the first non-zero result. */
+const normalizeWsRel = (f) => String(f).replaceAll("\\", "/").replace(/^\.\//, "");
+
+/** The lane's files left to run once the (already validated) reuse skip list is applied. */
+export function remainingPureLaneFiles(pureFiles, reuseSkipFiles = []) {
+  const skipped = new Set([...reuseSkipFiles].map(normalizeWsRel));
+  return pureFiles.filter((f) => !skipped.has(normalizeWsRel(f)));
+}
+
+/**
+ * Run every shard for complete failure inventory; return the first non-zero result.
+ *
+ * Pass reuse (gate-test-reuse-yield-2026-10-01 P-006, D-005): `reuseSkipFiles` is the skip list
+ * resolved by the SAME validating reader each shard's vitest config applies
+ * (resolveReuseSkipExclude), so the shard count is sized from the files that will actually run.
+ * A list the reader declines resolves to [], and the full lane is sharded as before. When the
+ * list covers every lane file (reuseSkipCoversRun, the EI-11132 guard's own predicate), no vitest
+ * is spawned: an empty run is a deliberate pass here, never a silently empty glob.
+ */
 export async function runPureLaneShards({
   env = process.env,
   forwardedArgs = process.argv.slice(2),
   run = (args) => runVitestProcess(args, { env }),
   stderr = process.stderr,
-  pureFileCount =
-    resolveLaneInclude(process.cwd(), "pure").include?.length ?? 0,
+  wsAbsDir = process.cwd(),
+  pureFiles = resolveLaneInclude(wsAbsDir, "pure").include ?? [],
+  reuseSkipFiles = resolveReuseSkipFiles(env, (line) =>
+    stderr.write(`VITEST_PURE_LANE_REUSE ${line}\n`),
+  ),
 } = {}) {
-  if (pureFileCount === 0) {
+  if (pureFiles.length === 0) {
     throw new Error(
-      `PC_TEST_LANE=pure found ZERO files under ${process.cwd()}`,
+      `PC_TEST_LANE=pure found ZERO files under ${wsAbsDir}`,
     );
   }
+  if (
+    reuseSkipCoversRun({
+      wsAbsDir,
+      script: "test:lane-pure",
+      reuseSkipped: reuseSkipFiles,
+      selectedFiles: pureFiles,
+    })
+  ) {
+    stderr.write(
+      `VITEST_PURE_LANE_SHARD state=all-reused pureFiles=${pureFiles.length} ` +
+        `reused=${pureFiles.length} exitStatus=0\n`,
+    );
+    return 0;
+  }
+  const remaining = remainingPureLaneFiles(pureFiles, reuseSkipFiles);
+  const reused = pureFiles.length - remaining.length;
+  const pureFileCount = remaining.length;
   const shardCount = resolvePureLaneShardCount(env, pureFileCount);
   const workerCaps = WORKER_ENV_KEYS.map((key) =>
     positiveInteger(env[key]),
@@ -186,7 +225,7 @@ export async function runPureLaneShards({
     const args = buildPureLaneShardArgs(shard, shardCount, forwardedArgs);
     stderr.write(
       `VITEST_PURE_LANE_SHARD state=started shard=${shard}/${shardCount} ` +
-        `workerCap=${workerCap} pureFiles=${pureFileCount}\n`,
+        `workerCap=${workerCap} pureFiles=${pureFileCount} reused=${reused}\n`,
     );
     const code = await run(args);
     stderr.write(
@@ -197,4 +236,17 @@ export async function runPureLaneShards({
   return result;
 }
 
-if (isCliEntry(import.meta.url)) process.exitCode = await runPureLaneShards();
+// No top-level await: green-checkpoint.ts reaches this module through
+// pure-lane-proof-capture.mjs, and tsx loads that chain as CJS, which cannot
+// compile a top-level await (every gate run died at load on 2026-10-01).
+if (isCliEntry(import.meta.url)) {
+  runPureLaneShards().then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (e) => {
+      console.error(e?.stack ?? e);
+      process.exitCode = 1;
+    },
+  );
+}

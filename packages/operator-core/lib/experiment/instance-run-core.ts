@@ -97,12 +97,14 @@ export function instanceResultsToExperimentResult(
       cells: result.outcomes.length,
       scored: scored.length,
       costUsd: beekeeperCostUsd(result),
+      costMeasured: result.costMeasured !== false && result.outcomes.every((o) => o.judgeCostMeasured !== false),
     };
   });
   const baseline = arms.find((a) => a.id === BASELINE_ID);
   const candidates = arms.filter((a) => a.id !== BASELINE_ID);
+  const costMeasured = arms.every((a) => a.costMeasured);
   let comparison: Omit<CompareSelectResult, 'scenarioId'> | null = null;
-  if (baseline && candidates.length > 0) {
+  if (costMeasured && baseline && candidates.length > 0) {
     const toArm = (a: ExperimentArmResult): CompareArm => ({
       variantId: a.id,
       metrics: { composite: a.meanScore ?? undefined },
@@ -128,12 +130,13 @@ export function instanceResultsToExperimentResult(
     comparison,
     winner: comparison?.selected ?? null,
     totalCostUsd: perArm.reduce((s, { result }) => s + beekeeperCostUsd(result), 0),
+    costMeasured,
     budgetExhausted: false,
     scorecardScores: {
-      composite: selected?.result.meanComposite ?? null,
-      d1: meanDimension('d1'),
-      d2: meanDimension('d2'),
-      d3: meanDimension('d3'),
+      composite: costMeasured ? selected?.result.meanComposite ?? null : null,
+      d1: costMeasured ? meanDimension('d1') : null,
+      d2: costMeasured ? meanDimension('d2') : null,
+      d3: costMeasured ? meanDimension('d3') : null,
     },
   };
 }
@@ -190,6 +193,7 @@ export async function instanceRunCore(
     };
     const result = await deps.runBeekeeperBattery(config, liveDeps);
     perArm.push({ variant, result });
+    if (result.costMeasured === false || result.outcomes.some((o) => o.judgeCostMeasured === false)) break;
   }
   return instanceResultsToExperimentResult(perArm);
 }

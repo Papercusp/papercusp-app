@@ -15,6 +15,7 @@ import { resolveAgentIdentity } from '../coordination/identity';
 import { COORD_ROLES } from '../coordination/roles';
 import { linkWorkItem, unlinkWorkItem, resolveWorkItemRef } from '../../work-items';
 import { guardFeatureBlockEdgeAcyclic } from '../../dbos/feature-blockers-edges';
+import { EVENT_SUBSCRIPTION_KIND } from '../coordination/event-subscriptions';
 import type { ObjectRef } from '@papercusp/coordination/capabilities';
 import { runBulk, bulkContent } from '../_bulk';
 
@@ -44,6 +45,33 @@ export const LINK_RELS = [
   'revises',
 ] as const;
 export type LinkRel = (typeof LINK_RELS)[number];
+
+/**
+ * Spellings a caller naturally types for a CONDITION edge (WI-10004344). The
+ * condition store (`findConditionObjects`) reads only edges whose dst kind is
+ * EVENT_SUBSCRIPTION_KIND, which is also what `linkWorkItemToCondition` writes.
+ * A hand link with `target_kind:'condition'` therefore stored an edge no reader
+ * honours: on 2026-09-30 the owning gate-red-streak item was invisible, the
+ * gate-ownership cell read 'unowned' while a live fixer held it, and a second
+ * owner was filed whose claim then blocked the real fixer's repair-queue admit.
+ */
+const CONDITION_TARGET_KIND_ALIASES: ReadonlySet<string> = new Set([
+  'condition',
+  'conditionkey',
+  'condition-key',
+  'condition_key',
+]);
+
+/**
+ * Canonicalise an explicit `target_kind`. Condition aliases map to the one kind
+ * the condition store reads; every other kind passes through unchanged.
+ */
+export function canonicalLinkTargetKind(kind: string): { kind: string; normalizedFrom?: string } {
+  if (CONDITION_TARGET_KIND_ALIASES.has(kind.trim().toLowerCase())) {
+    return { kind: EVENT_SUBSCRIPTION_KIND, normalizedFrom: kind };
+  }
+  return { kind };
+}
 
 const itemSpec = z.object({
   id: z.string().min(1).describe('the source work-item id'),
@@ -160,6 +188,7 @@ export default defineTool({
       items,
       async (it) => {
         let dst: ObjectRef | null = null;
+        let normalizedFrom: string | undefined;
         if (it.target_id) {
           dst = await resolveWorkItemRef(it.target_id, it.target_harness);
           if (!dst)
@@ -170,7 +199,9 @@ export default defineTool({
               error: `target work_item '${it.target_id}' not found`,
             };
         } else if (it.target_kind && it.target_ref) {
-          dst = { kind: it.target_kind, ref: it.target_ref };
+          const canon = canonicalLinkTargetKind(it.target_kind);
+          dst = { kind: canon.kind, ref: it.target_ref };
+          normalizedFrom = canon.normalizedFrom;
         } else {
           return { ok: false as const, id: it.id, rel: it.rel, error: 'pass target_id, or target_kind + target_ref' };
         }
@@ -202,7 +233,21 @@ export default defineTool({
             });
         return 'error' in res
           ? { ok: false as const, id: it.id, rel: it.rel, error: res.error }
-          : { ok: true as const, id: it.id, rel: it.rel, dst };
+          : {
+              ok: true as const,
+              id: it.id,
+              rel: it.rel,
+              dst,
+              ...(normalizedFrom
+                ? {
+                    targetKindNormalized: {
+                      from: normalizedFrom,
+                      to: dst.kind,
+                      why: 'condition edges are stored under the kind the condition store reads',
+                    },
+                  }
+                : {}),
+            };
       },
       { keyOf: (it) => ({ id: it.id, rel: it.rel }) },
     );

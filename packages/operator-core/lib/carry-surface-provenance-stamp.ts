@@ -32,6 +32,7 @@ import {
   type TypedSlotLintMatch,
 } from './carry-surface-typed-slots';
 import { gateClaimCarryLint, type GateClaimCarryLint } from './release/gate-claim-carry-lint';
+import { resolveHomeGateVerdictTarget } from './release/gate-verdict-target';
 import {
   suppressProvenActionClaims,
   type SuccessfulActionInvocation,
@@ -345,11 +346,29 @@ export function ownerAttributionEnforcement(
   };
 }
 
+/** Keep generated provenance preambles to one standalone marker per note. */
+export function normalizeUnverifiedOwnerAttributionMarkers(
+  text: string | null | undefined,
+): string | null | undefined {
+  if (text == null || !text.includes(UNVERIFIED_OWNER_ATTRIBUTION_MARKER)) return text;
+  let kept = false;
+  return text
+    .split(/\r?\n/)
+    .filter((line) => {
+      if (line.trim() !== UNVERIFIED_OWNER_ATTRIBUTION_MARKER) return true;
+      if (kept) return false;
+      kept = true;
+      return true;
+    })
+    .join('\n');
+}
+
 /** Prefix an idempotent marker onto persisted narrative text. */
 export function markUnverifiedOwnerAttribution(text: string | null | undefined): string | null | undefined {
   if (text == null || !text.trim()) return text;
-  if (text.includes(UNVERIFIED_OWNER_ATTRIBUTION_MARKER)) return text;
-  return `${UNVERIFIED_OWNER_ATTRIBUTION_MARKER}\n${text}`;
+  const normalized = normalizeUnverifiedOwnerAttributionMarkers(text) ?? text;
+  if (normalized.includes(UNVERIFIED_OWNER_ATTRIBUTION_MARKER)) return normalized;
+  return `${UNVERIFIED_OWNER_ATTRIBUTION_MARKER}\n${normalized}`;
 }
 
 /**
@@ -621,7 +640,7 @@ export async function carryProvenanceFields(
   const retainedProvenance = options.retainedText ? provenanceLintField(options.retainedText) : undefined;
   // P-007: silent unless a repair queue is actually frozen, so this costs one failed marker
   // read in the ordinary case and never depends on the stamp having produced anything.
-  const gateClaimLint = gateClaimCarryLint(text);
+  const gateClaimLint = gateClaimCarryLint(text, { target: resolveHomeGateVerdictTarget() });
   if (!stamp && !retainedProvenance && !gateClaimLint) return {};
   const out: CarryProvenanceFields = {};
   if (gateClaimLint) out.gateClaimLint = gateClaimLint;

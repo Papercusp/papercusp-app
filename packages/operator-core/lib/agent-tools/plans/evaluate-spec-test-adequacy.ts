@@ -78,6 +78,8 @@ export const argsSchema = refineEvenWithShapeIssues(z.object({
   evaluatorBuild: evaluatorBuildSchema.optional(),
   workItemIds: z.array(z.string().min(1)).min(1).max(500).optional(),
   evidenceRefs: z.array(z.string().trim().min(1).max(2000)).min(1).max(500).optional(),
+  /** Exact immutable evidence binding row ids; an empty array selects no rows. */
+  bindingIds: z.array(z.number().int().positive().max(Number.MAX_SAFE_INTEGER)).max(500).optional(),
   specIds: z.array(z.string().min(1)).min(1).max(500).optional(),
   /** Immutable clause revision/fingerprint selected by a persisted replay recipe. */
   specRevision: z.number().int().positive().optional().describe(
@@ -126,10 +128,159 @@ export const argsSchema = refineEvenWithShapeIssues(z.object({
   }
 });
 
+type HistoricalAuditSelection = {
+  planSlug: string;
+  specId: string;
+  specRevision: number;
+  specFingerprint: string;
+  evidence: Array<{ evidenceKind: string; evidenceRef: string }>;
+  bindingIds?: number[];
+};
+
+/**
+ * Internal-only replay for an already-issued legacy scorecard whose recipe predates
+ * exact bindingIds. The normal tool deliberately stays current-only; this path is
+ * called by the grading auditor only after that tool returns selection_empty.
+ */
+export async function replaySpecTestAdequacyForHistoricalAudit(input: {
+  args: z.infer<typeof argsSchema>;
+  selection: HistoricalAuditSelection;
+  workspaceId: string;
+  auditAsOf: Date;
+}): Promise<Record<string, unknown>> {
+  const { args, selection, workspaceId, auditAsOf } = input;
+  const evidenceRefs = [...new Set(selection.evidence.map((entry) => entry.evidenceRef))].sort();
+  const recipeEvidenceRefs = [...new Set(args.evidenceRefs ?? [])].sort();
+  const selectedEvidence = selection.evidence.map((entry) => JSON.stringify([entry.evidenceKind, entry.evidenceRef]));
+  const exactEvidence = new Set(selectedEvidence);
+  const validCutoff = Number.isFinite(auditAsOf.getTime());
+  if (
+    !validCutoff ||
+    !workspaceId ||
+    args.bindingIds !== undefined ||
+    selection.bindingIds !== undefined ||
+    args.replaySnapshot !== true ||
+    args.slug !== selection.planSlug ||
+    args.specRevision !== selection.specRevision ||
+    args.specFingerprint !== selection.specFingerprint ||
+    !args.specIds?.includes(selection.specId) ||
+    evidenceRefs.length === 0 ||
+    JSON.stringify(evidenceRefs) !== JSON.stringify(recipeEvidenceRefs)
+  ) {
+    return { ok: false, error: 'historical_audit_recipe_not_exact' };
+  }
+
+  const current =
+    args.current === undefined
+      ? undefined
+      : Array.isArray(args.current)
+        ? args.current
+        : args.current.supplied
+          ? args.current.fingerprints
+          : undefined;
+  const evidenceLimit = args.limit ?? 1000;
+  const loaded = await listSpecEvidence({
+    harnessSlug: args.harness,
+    workspaceId,
+    planSlugs: [selection.planSlug],
+    workItemIds: args.workItemIds,
+    specIds: [selection.specId],
+    specRevision: selection.specRevision,
+    specFingerprint: selection.specFingerprint,
+    replaySnapshot: true,
+    ...(args.current !== undefined ? { currentProvenance: 'replayed-snapshot' as const } : {}),
+    evidenceRefs,
+    current,
+    includeRetracted: true,
+    auditAsOf,
+    limit: evidenceLimit,
+  });
+  if (loaded.length >= evidenceLimit) {
+    return { ok: false, error: 'historical_evidence_selection_hit_limit', count: loaded.length, limit: evidenceLimit };
+  }
+  const evidence = loaded.filter(
+    (row) =>
+      row.planSlug === selection.planSlug &&
+      row.specId === selection.specId &&
+      row.specRevision === selection.specRevision &&
+      row.specFingerprint === selection.specFingerprint &&
+      exactEvidence.has(JSON.stringify([row.evidenceKind, row.evidenceRef])),
+  );
+  if (evidence.length === 0) return { ok: false, error: 'historical_selection_empty', count: 0 };
+
+  const clauses = await listSpecClauses({
+    harnessSlug: args.harness,
+    workspaceId,
+    planSlug: selection.planSlug,
+    specIds: [selection.specId],
+    revision: selection.specRevision,
+    limit: 1,
+  });
+  const clause = clauses.find(
+    (candidate) =>
+      candidate.specId === selection.specId &&
+      candidate.revision === selection.specRevision &&
+      candidate.contentHash === selection.specFingerprint,
+  );
+  if (!clause || (args.includeDraft !== true && clause.lifecycleStatus !== 'active' && clause.lifecycleStatus !== 'accepted')) {
+    return { ok: false, error: 'historical_clause_snapshot_unavailable' };
+  }
+
+  const historicalEvidence = evidence.map((row) => ({
+    ...row,
+    currentness: {
+      ...row.currentness,
+      overall: 'unknown' as const,
+      provenance: 'replayed-snapshot' as const,
+      staleReasons: [],
+      unknownReasons: [...new Set([...row.currentness.unknownReasons, 'historical-audit-only'])],
+    },
+  }));
+  const evaluated = evaluateSpecTestAdequacy({
+    clause,
+    evidence: historicalEvidence,
+    classRef: args.classRef,
+    harness: args.harness,
+    current,
+    rerunSelection: {
+      workItemIds: args.workItemIds,
+      evidenceRefs,
+      planItemIds: args.planItemIds,
+    },
+    now: auditAsOf,
+  });
+  const recordedEvaluatorBuild = args.evaluatorBuild;
+  const liveEvaluatorBuild = getBuildInfo();
+  const evaluatorBuildDrift =
+    recordedEvaluatorBuild && evaluatorBuildDiff(recordedEvaluatorBuild, liveEvaluatorBuild)
+      ? { recorded: recordedEvaluatorBuild, live: liveEvaluatorBuild }
+      : undefined;
+
+  return {
+    ok: true,
+    evaluatorBuild: liveEvaluatorBuild,
+    ...(evaluatorBuildDrift ? { evaluatorBuildDrift } : {}),
+    rows: [summaryRow(evaluated)],
+    count: 1,
+    historicalAuditOnly: {
+      provenance: 'historical-audit-only',
+      asOf: auditAsOf.toISOString(),
+      freshness: 'audit-only',
+      bindings: evidence.map((row) => ({
+        id: row.id,
+        evidenceKind: row.evidenceKind,
+        evidenceRef: row.evidenceRef,
+        createdAt: row.createdAt,
+        withdrawal: row.withdrawal ?? null,
+      })),
+    },
+  };
+}
+
 export default defineTool({
   name: 'plans:evaluate-spec-test-adequacy',
   description:
-    'Grade each affected current spec revision as one row against the reusable spec-test-adequacy rubric. Resolves exact P-005 evidence bindings and returns a per-clause verdict table with every would-block reason; detail:"full" adds criterion evidence and scorecards:emit-compatible drafts. Read-only; it never files a verdict. evidenceRefs selects the exact immutable evidence identities to grade, so a replay can exclude superseded run-specific refs without rewriting history. When replaySnapshot is true, include both specRevision and specFingerprint from the same immutable clause revision. Always check ok and rows.length before indexing rows[0].',
+    'Grade each affected current spec revision as one row against the reusable spec-test-adequacy rubric. Resolves exact P-005 evidence bindings and returns a per-clause verdict table with every would-block reason; detail:"full" adds criterion evidence and scorecards:emit-compatible drafts. Read-only; it never files a verdict. evidenceRefs selects immutable evidence references; bindingIds pins a replay to the exact persisted binding rows, including when references repeat. When replaySnapshot is true, include both specRevision and specFingerprint from the same immutable clause revision. Always check ok and rows.length before indexing rows[0].',
   guidance: {
     returns:
       'On success { ok, rows, count, verdicts, wouldBlock, includeDraft, excludedDraftCount, excludedDraftSpecIds, excludedClauses } with ok:true. Every successful result reports the lifecycle-filtered clauses and an explicit draft-exclusion count, including zero, so row counts do not imply that excluded drafts were evaluated. No call succeeds vacuously: when the plan has clauses but none is eligible — selector or not — the reply is ok:false with error:"selection_empty" rather than ok:true with zero rows. On evidence_selection_hit_limit the reply is ok:false with error, count, limit and remedy and NO rows field at all. The default detail:"summary" rows carry specId, specRevision, specFingerprint, verdict, wouldBlock and ratings[criterion].rating, plus a top-level fullBody ref (the exact re-call with detail:"full"); rows[].scorecardDraft and criterion evidence text exist only under detail:"full".',
@@ -205,6 +356,7 @@ export default defineTool({
         : {}),
       evidenceRefs: args.evidenceRefs,
       current,
+      bindingIds: args.bindingIds,
       limit: evidenceLimit,
     });
     if (allEvidence.length >= evidenceLimit) {
@@ -216,7 +368,7 @@ export default defineTool({
           ...(evaluatorBuildDrift ? { evaluatorBuildDrift } : {}),
           count: allEvidence.length,
           limit: evidenceLimit,
-          remedy: 'Narrow workItemIds/specIds/evidenceRefs or raise limit; a capped evidence set cannot produce an adequacy verdict.',
+          remedy: 'Narrow workItemIds/specIds/evidenceRefs/bindingIds or raise limit; a capped evidence set cannot produce an adequacy verdict.',
         },
       };
     }
@@ -224,8 +376,10 @@ export default defineTool({
       args.specIds !== undefined ||
       args.workItemIds !== undefined ||
       args.evidenceRefs !== undefined ||
+      args.bindingIds !== undefined ||
       args.planItemIds !== undefined;
-    const bindingSelection = args.workItemIds !== undefined || args.evidenceRefs !== undefined;
+    const bindingSelection =
+      args.workItemIds !== undefined || args.evidenceRefs !== undefined || args.bindingIds !== undefined;
     if (bindingSelection && allEvidence.length === 0) {
       return {
         data: {
@@ -244,12 +398,15 @@ export default defineTool({
             specIds: args.specIds ?? null,
             workItemIds: args.workItemIds ?? null,
             evidenceRefs: args.evidenceRefs ?? null,
+            bindingIds: args.bindingIds ?? null,
             planItemIds: args.planItemIds ?? null,
           },
           remedy:
-            args.evidenceRefs !== undefined
-              ? 'No current evidence binding matches the selected workItemIds/evidenceRefs. The binding may be absent, retracted, or superseded, or the selectors may not identify a bound proof. Check the target evidence history before changing them; pass specIds without a binding selector to evaluate intended uncovered clauses.'
-              : 'No current evidence edge exists for the selected work item(s). The work item may lack a binding, or its proof may have been retracted or superseded. Check the target history; pass specIds to evaluate intended uncovered clauses.',
+            args.bindingIds !== undefined
+              ? 'No current evidence binding matches the selected bindingIds. The row may be absent, retracted, or outside the pinned clause; inspect the target history before changing the selector.'
+              : args.evidenceRefs !== undefined
+                ? 'No current evidence binding matches the selected workItemIds/evidenceRefs. The binding may be absent, retracted, or superseded, or the selectors may not identify a bound proof. Check the target evidence history before changing them; pass specIds without a binding selector to evaluate intended uncovered clauses.'
+                : 'No current evidence edge exists for the selected work item(s). The work item may lack a binding, or its proof may have been retracted or superseded. Check the target history; pass specIds to evaluate intended uncovered clauses.',
         },
       };
     }
@@ -302,13 +459,14 @@ export default defineTool({
             specIds: args.specIds ?? null,
             workItemIds: args.workItemIds ?? null,
             evidenceRefs: args.evidenceRefs ?? null,
+            bindingIds: args.bindingIds ?? null,
             planItemIds: args.planItemIds ?? null,
           },
           excludedClauses,
           remedy:
             clauses.length > 0 && args.includeDraft !== true
               ? `${explicitSelection ? 'The selection matched' : 'This plan has'} ${clauses.length} clause(s), but none is eligible — pass includeDraft:true to evaluate draft clauses, or select active/accepted clauses. Nothing was graded, so this is NOT a clean adequacy result.`
-              : 'Verify the exact slug and specIds/workItemIds/evidenceRefs/planItemIds selection; no eligible clause matched. Nothing was graded, so this is NOT a clean adequacy result.',
+              : 'Verify the exact slug and specIds/workItemIds/evidenceRefs/bindingIds/planItemIds selection; no eligible clause matched. Nothing was graded, so this is NOT a clean adequacy result.',
         },
       };
     }
@@ -340,13 +498,14 @@ export default defineTool({
         rerunSelection: {
           workItemIds: args.workItemIds,
           evidenceRefs: args.evidenceRefs,
+          bindingIds: args.bindingIds,
           planItemIds: args.planItemIds,
         },
         now,
       }),
     );
     // acceptance-machinery-seam-fixes-2026-09-16 P-001 (R-1): a read whose EVIDENCE COHORT is
-    // pinned (workItemIds / evidenceRefs) is a DIAGNOSTIC, not the ship verdict — the ship gate
+    // pinned (workItemIds / evidenceRefs / bindingIds) is a DIAGNOSTIC, not the ship verdict — the ship gate
     // (acceptance-bar-contract-snapshot) grades every binding of a clause unscoped, so a pinned
     // pass 7/0/0 and an unscoped gate 1/7 are BOTH correct readings of different questions.
     // Measured 2026-09-16 on green-gate-zero-wait-convergence-2026-09-08 (WI-10001661 ledger 2).
@@ -354,7 +513,7 @@ export default defineTool({
     const governing = !bindingSelection;
     const governingNote = governing
       ? null
-      : 'DIAGNOSTIC READ — the evidence cohort is PINNED (workItemIds/evidenceRefs). The ship gate evaluates every binding of each clause UNSCOPED, so a pass here is not the ship verdict; read plans:get { slug, shipReadiness:true } for the governing per-bar state.';
+      : 'DIAGNOSTIC READ — the evidence cohort is PINNED (workItemIds/evidenceRefs/bindingIds). The ship gate evaluates every binding of each clause UNSCOPED, so a pass here is not the ship verdict; read plans:get { slug, shipReadiness:true } for the governing per-bar state.';
     const evaluatorBuildDriftNote = evaluatorBuildDrift
       ? 'EVALUATOR BUILD DRIFT — request recorded evaluator ' +
         String(evaluatorBuildDrift.recorded.sha ?? 'unknown') +

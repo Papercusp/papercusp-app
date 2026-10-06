@@ -1,5 +1,5 @@
 -- Cupboard migration 033 — add `uses_tools`, the CONSUMPTION half of the tool axis.
--- Work-item: WI-10001747. Owner ruling (owner, 2026-09-17): "Add a uses_tools field."
+-- Work-item: WI-10001747. Owner ruling (Avi, 2026-09-17): "Add a uses_tools field."
 --
 -- `provides_tools` (migration 006) means PROVISION: the MCP tools a unit
 -- REGISTERS when installed. The tool→provider resolver (pack-catalog /

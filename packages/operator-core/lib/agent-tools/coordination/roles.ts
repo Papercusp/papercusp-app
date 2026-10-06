@@ -132,6 +132,18 @@ export const QUEEN_PLACEMENT_ROLES = COORD_ROLES.filter(
 );
 
 /**
+ * Roles that may own and drive their OWN virtual desktops
+ * (agent-multi-desktops-grid-2026-10-06 D-013): the placement roles plus the generic
+ * worker `cup`, which is the role that actually does GUI work. Still excluded: the
+ * read-mostly papercup / papercup-deep / kettle (AUTH INVARIANT in roles.test.ts).
+ *
+ * This gates the computer:*_desktop tools as a whole. Equipping a whole POT with a
+ * shared desktop stays a placement act: those handlers re-check QUEEN_PLACEMENT_ROLES
+ * on the `pot` path, so a cup can start desktops for itself but not for its pot.
+ */
+export const DESKTOP_AGENT_ROLES = [...QUEEN_PLACEMENT_ROLES, 'cup' as const];
+
+/**
  * pot-rename D-007 map (old role id → canonical new id) — the same mapping
  * migration 519 (`519-pot-rename-slice2-role-contract.sql`) backfilled into
  * every DB column (spawned_agents.child_role, agent_usage_samples.role, …)

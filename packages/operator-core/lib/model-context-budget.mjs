@@ -46,7 +46,7 @@ function codexPolicyBaseId(model) {
  */
 // Pin effort as well as the model: an omitted launch must not inherit the
 // native client's medium effort (or a cached model selection).
-export const CODEX_SAFE_DEFAULT_MODEL = 'gpt-5.6-sol:xhigh';
+export const CODEX_SAFE_DEFAULT_MODEL = 'gpt-6.1-sol:xhigh';
 // Alias retained for callers that describe this as the launch default.
 export const CODEX_DEFAULT_MODEL = CODEX_SAFE_DEFAULT_MODEL;
 export const CODEX_DENIED_MODEL_IDS = Object.freeze(['gpt-5.3-codex-spark']);
@@ -119,6 +119,103 @@ export function resolveCodexModelSelection(model, { source = 'explicit' } = {}) 
     return { model: CODEX_SAFE_DEFAULT_MODEL, source };
   }
   return { model: resolveCodexModel(raw), source };
+}
+
+const CLAUDE_OPUS_5_MODEL_ID_RE = /^(?:opus|claude-opus-5(?:[-.]\d+)*)(?:\[1m\])?$/i;
+
+/**
+ * Claude Code's Opus 5 family rejects `xhigh` and advertises `max` instead.
+ * The bare `opus` alias currently resolves into that family. Keep this
+ * normalization at Claude launch boundaries: OMP and Codex have independent
+ * effort contracts and must preserve their requested `xhigh` values.
+ * @param {string} spec
+ * @returns {string}
+ */
+export function normalizeClaudeModelEffortSpec(spec) {
+  const match = /^(.+):xhigh$/i.exec(spec);
+  if (!match || !CLAUDE_OPUS_5_MODEL_ID_RE.test(match[1])) return spec;
+  return `${match[1]}:max`;
+}
+
+const CLAUDE_EFFORT_SUFFIX_RE = /:(?:low|medium|high|xhigh|max)$/i;
+
+/**
+ * The `--effort` a Claude launch must pass when its argv names no effort of its own (WI-10005900).
+ * Without one, Claude Code falls back to the effective settings.json `effortLevel`, a key it writes
+ * itself on an /effort or /model change. A session whose settings were written while Opus 5 offered
+ * `xhigh` therefore resumes with `xhigh` and gets a 400 on its first request. The inference gateway
+ * clamps that on the `auto` and pinned routes, but the `default` route skips the gateway, so the
+ * launch boundary applies the same `normalizeClaudeModelEffortSpec` rule to the inherited value.
+ *
+ * `model` is the argv model (empty when the launch passes none); `settings` carries the effective
+ * `effortLevel` and the fallback `model` the CLI would use. Returns the level to pass as `--effort`,
+ * or null when the inherited effort is absent, already supported, or the argv names its own effort.
+ * @param {{ model?: string | null, settings?: { model?: unknown, effortLevel?: unknown } | null }} [input]
+ * @returns {string | null}
+ */
+export function claudeInheritedEffortOverride({ model, settings } = {}) {
+  const effort = typeof settings?.effortLevel === 'string' ? settings.effortLevel.trim() : '';
+  if (!effort) return null;
+  const argvModel = typeof model === 'string' ? model.trim() : '';
+  if (CLAUDE_EFFORT_SUFFIX_RE.test(argvModel)) return null;
+  const effectiveModel =
+    argvModel || (typeof settings?.model === 'string' ? settings.model.trim() : '');
+  if (!effectiveModel) return null;
+  const spec = `${effectiveModel}:${effort}`;
+  const normalized = normalizeClaudeModelEffortSpec(spec);
+  if (normalized === spec) return null;
+  return normalized.slice(normalized.lastIndexOf(':') + 1);
+}
+
+/**
+ * The settings a claude child falls back to for its model and effort
+ * (readClaudeLaunchSettings); null when unknown.
+ * @typedef {{ model?: unknown, effortLevel?: unknown } | null} ClaudeLaunchSettings
+ */
+
+/**
+ * The settings.json a claude launch will actually read: the per-session isolated
+ * CLAUDE_CONFIG_DIR when one is set (EI-155), else the shared user-level dir.
+ * @param {Record<string, string | undefined>} env
+ * @param {string} [home]
+ * @returns {string}
+ */
+export function effectiveClaudeSettingsPath(env, home = homedir()) {
+  const dir = String(env?.CLAUDE_CONFIG_DIR ?? '').trim();
+  return join(dir || join(home, '.claude'), 'settings.json');
+}
+
+/**
+ * The `{ model, effortLevel }` a claude child falls back to when its argv names
+ * no effort: the effective settings.json (the per-session isolated
+ * CLAUDE_CONFIG_DIR when set, else ~/.claude), with `ANTHROPIC_MODEL` taking
+ * precedence over settings.model as it does in the CLI. Pass the env the CHILD
+ * will run with, not the parent's. Fail-open to null — a missing or unreadable
+ * file must never fail a launch or a wake. `readFile` for tests. Shared by the
+ * psu launcher and the wake executor's resume leg (WI-10005900).
+ * @param {Record<string, string | undefined>} [env]
+ * @param {{ home?: string, readFile?: (p: string) => string }} [options]
+ * @returns {ClaudeLaunchSettings}
+ */
+export function readClaudeLaunchSettings(
+  env = process.env,
+  { home = homedir(), readFile = (p) => readFileSync(p, 'utf8') } = {},
+) {
+  let cfg;
+  try {
+    cfg = JSON.parse(readFile(effectiveClaudeSettingsPath(env, home)));
+  } catch (error) {
+    // An absent/unreadable/malformed file is "no settings"; a programming error
+    // (a missing import) must not masquerade as one.
+    if (error instanceof ReferenceError) throw error;
+    return null;
+  }
+  if (!cfg || typeof cfg !== 'object') return null;
+  const envModel = String(env?.ANTHROPIC_MODEL ?? '').trim();
+  return {
+    model: envModel || cfg.model,
+    effortLevel: cfg.effortLevel,
+  };
 }
 
 /** Alias with an assertion-oriented name for request-boundary callers. */
@@ -244,6 +341,7 @@ function recordWindow(record) {
  * unrecognised extended-window models.
  */
 export const CODEX_EXTENDED_WINDOW_FALLBACK = Object.freeze({
+  'gpt-6.1-sol': 1_000_000,
   'gpt-6-sol': 1_000_000,
   'gpt-6-luna': 1_000_000,
   'gpt-5.6-sol': 1_000_000,
@@ -256,7 +354,7 @@ export const CODEX_EXTENDED_WINDOW_FALLBACK = Object.freeze({
   'gpt-6-astra': 1_000_000,
 });
 
-const CODEX_REGISTRY_FIRST_EXTENDED_IDS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
+const CODEX_REGISTRY_FIRST_EXTENDED_IDS = new Set(['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna']);
 
 /** Ceiling on the window we will DECLARE to the Codex CLI (plan D-002). */
 export const CODEX_MAX_CONFIGURED_WINDOW = 1_000_000;

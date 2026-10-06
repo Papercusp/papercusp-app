@@ -349,6 +349,18 @@ export interface LaunchArtifactInput {
   renderStack?: boolean;
   /** Exact already-produced component receipts from the existing identity binder. */
   producerBindings?: readonly { identityId: string; artifact: CompiledAgentSpecification }[];
+  /** Layers the rendered prompt always carries without an explicit selection, as
+   *  `slot:id` refs, or `'su-static'` for the interactive su's static layers (the
+   *  same `SU_STATIC_LAYERS` its persona render composes). Recorded in the artifact
+   *  for each slot the source and `stack` leave empty; never added to the returned
+   *  `stack`, which stays the explicit selection (WI-10004747). */
+  impliedStack?: readonly string[] | 'su-static';
+}
+
+async function impliedStackRefs(implied: LaunchArtifactInput['impliedStack']): Promise<string[]> {
+  if (implied !== 'su-static') return [...(implied ?? [])];
+  const { SU_STATIC_LAYERS } = await import('@papercusp/orchestrator/blueprint');
+  return SU_STATIC_LAYERS.map((layer) => `${layer.slot}:${layer.id}`);
 }
 
 export interface LaunchArtifactResult {
@@ -500,10 +512,11 @@ async function selectedLaunchCompositionSource(
   cwd: string,
   producerBindings: readonly { identityId: string; artifact: CompiledAgentSpecification }[] = [],
   compositionRootId?: string | null,
+  implied: readonly string[] = [],
 ) : Promise<EffectiveLaunchSource> {
   const [{ BlueprintSourceDocumentSchema, layerSourceDocument, mergeByRules, replayAgentSpecification,
     resolveBlueprint, resolveBlueprintSource, slotSpec, stackBindingFromRefs },
-    { getIdentitySource, localDirs, resolveNamedIdentityCompositionSelection }, { operatorResolveExtends }] =
+    { getIdentitySource, identityRefusal, localDirs, resolveNamedIdentityCompositionSelection }, { operatorResolveExtends }] =
     await Promise.all([
       import('@papercusp/orchestrator/blueprint'),
       import('./agent-identities/source'),
@@ -516,7 +529,18 @@ async function selectedLaunchCompositionSource(
     providerInputs: [],
     contributionOmissions: [],
   });
-  if (stack.length === 0) return original();
+  // WI-10004747: the rendered prompt can carry identity layers the launch never
+  // selected explicitly (the interactive su always composes SU_STATIC_LAYERS). Record
+  // each one whose slot neither the launch source nor the explicit stack holds, so
+  // the artifact's slotted layers match what the agent was actually given.
+  const explicitLayers = stackBindingFromRefs(stack).layers;
+  const heldSlots = new Set<string>([
+    ...explicitLayers.map((layer) => layer.slot),
+    ...(source.loaded?.layers.flatMap((layer) => layer.slots) ?? []),
+  ]);
+  const impliedLayers = stackBindingFromRefs(implied).layers.filter((layer) => !heldSlots.has(layer.slot));
+  const compositionStack = [...stack, ...impliedLayers.map((layer) => `${layer.slot}:${layer.id}`)];
+  if (compositionStack.length === 0) return original();
   const selectedRoot = compositionRootId
     ? await resolveNamedIdentityCompositionSelection(compositionRootId, cwd) : null;
   if (selectedRoot && JSON.stringify(selectedRoot.stack) !== JSON.stringify(stack)) {
@@ -533,10 +557,20 @@ async function selectedLaunchCompositionSource(
   const providerInputs: ResolvedAgentInput[] = [];
   const contributionOmissions: EffectiveLaunchSource['contributionOmissions'] = [];
   const usedBindings = new Set<string>();
-  for (const [index, layer] of stackBindingFromRefs(stack).layers.entries()) {
+  const impliedRefs = new Set(impliedLayers.map((layer) => `${layer.slot}:${layer.id}`));
+  for (const [index, layer] of stackBindingFromRefs(compositionStack).layers.entries()) {
     const identity = await getIdentitySource(layer.id, { repoDir: cwd });
     if (!identity.ok || !identity.sourcePath ||
         !identity.identity.slots.some((entry) => entry.slot === layer.slot)) {
+      // WI-10004896: an IMPLIED layer is a record of what the persona render already
+      // composed, never a selection, so it must not be able to fail a launch. On a
+      // vm-release host every first-party identity is an unattested installed-tier copy
+      // that getIdentitySource refuses (attestation-missing); failing here would have
+      // broken every SU launch there. The recording gap is tracked as a trust follow-up.
+      if (impliedRefs.has(`${layer.slot}:${layer.id}`)) {
+        console.warn(`[role-launch-spec] implied ${layer.slot}:${layer.id} not recorded: ${identityRefusal(identity)}`);
+        continue;
+      }
       throw new Error(`launch stack identity ${JSON.stringify(layer.id)} is unavailable for ${layer.slot} composition`);
     }
     // Fixed and provider-rendered prompt/turn contributions are bound by their
@@ -609,7 +643,9 @@ async function selectedLaunchCompositionSource(
         path: path.join(path.dirname(identity.sourcePath), 'prompts', `${fileName}.md`) });
     }
     const alias = `__launch_identity_${index}__`;
-    if (!selectedRoot) {
+    // A named root composes its own selected stack; an implied layer is never part
+    // of that root, so it always joins as a peer parent.
+    if (!selectedRoot || index >= explicitLayers.length) {
       paths.set(alias, identity.sourcePath);
       parents.push(alias);
     }
@@ -705,7 +741,7 @@ function identityModelDefault(configuration: EffectiveLaunchSource['configuratio
  * selection. This provisions no resources and writes no launch artifacts.
  * Final compilation checks the default again to refuse a source-change race. */
 export async function resolveLaunchIdentityModelDefault(
-  input: Pick<LaunchArtifactInput, 'cwd' | 'harnessSlug' | 'role' | 'stack' | 'producerBindings'>,
+  input: Pick<LaunchArtifactInput, 'cwd' | 'harnessSlug' | 'role' | 'stack' | 'producerBindings' | 'impliedStack'>,
 ): Promise<string | null> {
   const source = await launchCompositionSource(input);
   let stack = input.stack == null
@@ -718,7 +754,7 @@ export async function resolveLaunchIdentityModelDefault(
     stack = (await resolveNamedIdentityCompositionSelection(compositionRootId, input.cwd)).stack;
   }
   const composition = await selectedLaunchCompositionSource(source, stack, input.cwd,
-    input.producerBindings, compositionRootId);
+    input.producerBindings, compositionRootId, await impliedStackRefs(input.impliedStack));
   return identityModelDefault(composition.configuration, input.role);
 }
 
@@ -734,7 +770,7 @@ export async function compileLaunchSpecificationArtifact(input: LaunchArtifactIn
     await import('@papercusp/orchestrator/blueprint');
   const resourceArtifacts: CompiledAgentSpecification[] = [];
   const composition = await selectedLaunchCompositionSource(source, stack, input.cwd,
-    input.producerBindings, input.compositionRootId);
+    input.producerBindings, input.compositionRootId, await impliedStackRefs(input.impliedStack));
   if (input.expectedModelDefault !== undefined &&
       input.expectedModelDefault !== identityModelDefault(composition.configuration, input.role)) {
     throw new Error('selected identity model default changed after launch preflight');
@@ -764,7 +800,7 @@ export async function compileLaunchSpecificationArtifact(input: LaunchArtifactIn
     }
     const { compileBlueprintWithPackages } = await import('./blueprint/compile-packages');
     specificationArtifact = await compileBlueprintWithPackages(composition.source, {
-      workspaceId: input.workspaceId, harnessSlug: input.harnessSlug,
+      workspaceId: input.workspaceId, harnessSlug: input.harnessSlug, role: input.role,
       ...(composition.resolve ? { resolve: composition.resolve } : {}), input: compileInput,
     });
     resourceArtifacts.push(specificationArtifact);
@@ -926,7 +962,7 @@ export async function buildRoleLaunchSpec(input: BuildRoleLaunchSpecInput): Prom
   // above before the caller materializes the file.  The ledger write is
   // fail-soft by contract; the envelope still prevents a clean prompt from
   // falling through to the owner-interactive residual at ingest.
-  promptText = tagTurnForInjection({ sid, origin: 'role-prompt', text: promptText }).taggedText;
+  promptText = (await tagTurnForInjection({ sid, origin: 'role-prompt', text: promptText })).taggedText;
   const compiled = await compileLaunchSpecificationArtifact({
     promptText,
     promptFile,
@@ -959,6 +995,10 @@ export async function buildRoleLaunchSpec(input: BuildRoleLaunchSpecInput): Prom
     entry.contentHash === acceptedOperation.identity.contentHash)) {
     throw new Error('accepted blueprint worker identity changed during launch composition');
   }
+  // agent-economy-flywheel P-016 (D-011): a priced Cupboard identity release
+  // activates only with funds behind it. Refuses with IdentityActivationRefusedError.
+  const { assertIdentityActivationFunded } = await import('./cupboard/identity-activation-gate-io');
+  await assertIdentityActivationFunded({ stack: compiled.stack, repoDir: cwd, workspaceId: input.workspaceId });
   if (compiled.resourceArtifacts.length > 0) {
     const { getOrgPg } = await import('@papercusp/db-org');
     await provisionLaunchIdentityResources(compiled, getOrgPg().sql, { ownerId: sid });
@@ -1225,9 +1265,19 @@ export async function buildLaunchSpec(input: BuildLaunchSpecInput): Promise<Laun
 }
 
 export class SuInstancePromptDriftError extends Error {
-  constructor(message: string) {
+  /** Why the check refused. Only `'differs'` carries a readable, non-empty `source`
+   *  and is therefore the only reason `reconcilePapercuspSuInstanceOverride` may heal. */
+  readonly reason: 'source-unavailable' | 'differs' | 'reseed-failed';
+  /** The canonical source text, present only for `reason: 'differs'`. */
+  readonly source: string | null;
+  constructor(
+    message: string,
+    details: { reason?: 'source-unavailable' | 'differs' | 'reseed-failed'; source?: string | null } = {},
+  ) {
     super(message);
     this.name = 'SuInstancePromptDriftError';
+    this.reason = details.reason ?? 'source-unavailable';
+    this.source = details.source ?? null;
   }
 }
 
@@ -1258,7 +1308,59 @@ export function verifyPapercuspSuInstanceOverride(input: {
   if (input.storedOverride !== source) {
     throw new SuInstancePromptDriftError(
       `Papercusp su override differs from ${sourcePath}; re-seed promptOverride.su for papercusp before launching an su session`,
+      { reason: 'differs', source },
     );
+  }
+}
+
+/**
+ * Launch-time reconcile for the Papercusp su instance override (WI-10005774).
+ *
+ * The version-controlled source (`papercup-pot.su.md`) is canonical; the stored
+ * `promptOverride.su` is a cache of it. `verifyPapercuspSuInstanceOverride` stays strict
+ * (the launch must never read a persona that differs from the source), but REFUSING is the
+ * wrong response to a cache that is merely behind: the only edit-time re-seed is a
+ * Claude-only PostToolUse hook, so any other way the file changes (a Codex/OMP edit, a
+ * `sed`, a git merge, another machine) left every fresh su launch refused until someone
+ * re-seeded by hand (WI-10004556, again 2026-10-03 ~01:33Z). This is the one chokepoint
+ * every launch passes, so it is the layer-independent place to restore the invariant.
+ *
+ * Heals ONLY `reason: 'differs'` with a non-blank source: an unreadable source, a blank
+ * source (never clear the override implicitly) or a failed re-seed all still fail closed.
+ * Returns the override text the launch must use.
+ */
+export async function reconcilePapercuspSuInstanceOverride(input: {
+  workspaceId: string;
+  potSlug: string;
+  promptsDirectory: string | undefined;
+  storedOverride: string | null;
+  reseed: (source: string) => Promise<void>;
+  onHeal?: (detail: string) => void;
+}): Promise<string | null> {
+  try {
+    verifyPapercuspSuInstanceOverride(input);
+    return input.storedOverride;
+  } catch (error) {
+    if (
+      !(error instanceof SuInstancePromptDriftError) ||
+      error.reason !== 'differs' ||
+      error.source === null ||
+      error.source.trim().length === 0
+    ) {
+      throw error;
+    }
+    try {
+      await input.reseed(error.source);
+    } catch (reseedError) {
+      throw new SuInstancePromptDriftError(
+        `${error.message} (launch-time self-heal re-seed FAILED: ${reseedError instanceof Error ? reseedError.message : String(reseedError)})`,
+        { reason: 'reseed-failed' },
+      );
+    }
+    input.onHeal?.(
+      `stored promptOverride.su was stale vs its source (${input.storedOverride?.length ?? 0} -> ${error.source.length} chars); re-seeded at launch`,
+    );
+    return error.source;
   }
 }
 
@@ -1418,16 +1520,23 @@ async function buildSuLaunchSpec(input: BuildSuLaunchSpecInput): Promise<LaunchS
             });
           }
           if (modeCatalog) {
+            // WI-10004896: read each mode document from the source the catalog SELECTED.
+            // Re-resolving the id here (installed tier first) picked a vm-release host's
+            // plain installed copy, which the catalog had treated as the built-in, and
+            // refused it for a missing attestation: every AUTO launch died at boot.
+            const { readSelectedModeDocument } = await import('./agent-identities/source');
             for (const layer of derived.layers) {
-              if (!modeCatalog.entries.some((entry) => entry.sourceId === layer.id && entry.slot === layer.slot)) continue;
-              const identity = await getIdentitySource(layer.id);
-              if (!identity.ok || !identity.sourcePath) {
-                throw new Error(`selected mode identity ${layer.id} is no longer available`);
+              const entry = modeCatalog.entries.find((candidate) =>
+                candidate.sourceId === layer.id && candidate.slot === layer.slot);
+              if (!entry) continue;
+              let document: { text: string; sourcePath: string };
+              try {
+                document = await readSelectedModeDocument(entry);
+              } catch (e) {
+                throw new Error(`selected mode identity ${layer.id} is no longer available: ${e instanceof Error ? e.message : String(e)}`);
               }
-              const sourcePath = path.join(path.dirname(identity.sourcePath), 'prompts', `${layer.slot}.md`);
               selectedLayerDocs.set(`${layer.slot}:${layer.id}`, {
-                id: layer.id, layer: 'modes', slot: layer.slot,
-                text: await fs.readFile(sourcePath, 'utf8'), sourcePath,
+                id: layer.id, layer: 'modes', slot: layer.slot, ...document,
               });
             }
           }
@@ -1524,15 +1633,19 @@ async function buildSuLaunchSpec(input: BuildSuLaunchSpecInput): Promise<LaunchS
   if (suBaseSource && harnessSlug) {
     try {
       const { potHomeSlugForHarness } = await import('./hive-federation');
-      const { getHiveInstancePromptOverride } = await import('./hive-settings-store');
+      const { getHiveInstancePromptOverride, setHiveInstancePromptOverride } = await import('./hive-settings-store');
       const potSlug = await potHomeSlugForHarness(input.workspaceId, harnessSlug);
       if (potSlug) {
-        const inst = await getHiveInstancePromptOverride(input.workspaceId, potSlug, 'su');
-        verifyPapercuspSuInstanceOverride({
+        const stored = await getHiveInstancePromptOverride(input.workspaceId, potSlug, 'su');
+        // Self-heals a store that is merely behind the canonical source (WI-10005774);
+        // still throws SuInstancePromptDriftError (fail-closed) when it cannot.
+        const inst = await reconcilePapercuspSuInstanceOverride({
           workspaceId: input.workspaceId,
           potSlug,
           promptsDirectory: suOverlayDir,
-          storedOverride: inst,
+          storedOverride: stored,
+          reseed: (source) => setHiveInstancePromptOverride(input.workspaceId, potSlug, 'su', source),
+          onHeal: (detail) => console.warn(`[role-launch-spec] su-instance-override self-heal: ${detail}`),
         });
         if (inst) suPersonaText = `${suPersonaText.replace(/\n+$/, '')}\n\n${inst}`;
       }
@@ -1557,6 +1670,7 @@ async function buildSuLaunchSpec(input: BuildSuLaunchSpecInput): Promise<LaunchS
     planTitle: input.planTitle ?? null,
     planNow: input.planNow ?? null,
     profile: launchProfile,
+    fleetRole: input.fleetRole ?? null,
   });
   // gateway-cache-plane-shared-prefix-ttl-2026-07-19 P-004: mark the seam between the STABLE
   // playbook (byte-identical across a cohort — renderSuPlaybook is deterministic) and the

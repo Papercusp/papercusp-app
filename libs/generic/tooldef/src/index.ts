@@ -140,6 +140,7 @@ export type {
 export {
   defineTool,
   toArgsJsonSchema,
+  prepareToolArgsForSchema,
   // The effect oracle — for static scanners that cannot execute defineTool (WI-6464).
   inferCapabilityEffect,
   WRITE_CAPABILITIES,
@@ -337,6 +338,11 @@ export {
   setCapabilityTierResolver,
   defaultTierResolver,
   type CapabilityTierResolver,
+  setLateCompletionReadClassifier,
+  defaultLateCompletionReadClassifier,
+  isLateCompletionSafeRead,
+  type LateCompletionReadClassifier,
+  type LateCompletionToolFacts,
 } from './capability-tiers';
 
 /* ─── Entity-reference args (referential integrity at dispatch) ───────── */
@@ -396,6 +402,7 @@ export {
   lookupByHttpPath,
   listAllProjectedTools,
   projectedToolSourceFile,
+  projectedToolBundledDefinitionSite,
   listDeclaredToolShapers,
   recordToolShapers,
   PROJECTED_TOOL_REGISTRY_SOURCE,
@@ -571,3 +578,13 @@ export {
   toolOperationName,
   type OpenApiDocumentOptions,
 } from './openapi-assemble';
+
+/* ─── Bundled definition sites (P-002 / EI-25176539351759672) ─────────── */
+export {
+  indexBundleModuleMarkers,
+  bundleModuleAtLine,
+  definingModuleOfBundledSite,
+  type BundledDefinitionSite,
+  type BundleModuleMarkers,
+  type BundledDefiningModule,
+} from './bundle-definition-site';

@@ -57,6 +57,7 @@ import {
 } from "./workspace-host-credential-namespace";
 import {
   NodeWorkspaceHostCredentialDeliveryFilesystem,
+  ensureSharedWorkspaceDirectory,
   recordWorkspaceHostCredentialRevocation,
   withWorkspaceHostCredentialFilesystemLock,
   workspaceHostCredentialFamilyLockPath,
@@ -190,6 +191,13 @@ export interface WorkspaceHostSystem
     WorkspaceHostCredentialDeliveryFilesystem,
     WorkspaceHostAgentHomeFilesystem {
   run(input: WorkspaceHostCommandInput): Promise<WorkspaceHostCommandResult>;
+  /**
+   * Create a directory under the ACL'd workspace root, mode `0770`, never following a symlink.
+   * Distinct from `ensureDirectory` (the PRIVATE `0700` credential/home form) on purpose: under
+   * the root's default ACL a `0700` mode sets `mask::---` and locks the service and agent
+   * accounts out of the customer's workspace (WI-10004594).
+   */
+  ensureWorkspaceDirectory(path: string): Promise<void>;
   pathExists(path: string): Promise<boolean>;
   removePath(path: string): Promise<void>;
   /** Optional only so hermetic systems need not model Unix ownership. Production always provides it. */
@@ -268,6 +276,10 @@ export class NodeWorkspaceHostSystem implements WorkspaceHostSystem {
     await this.deliveryFilesystem.ensureDirectory(path);
   }
 
+  async ensureWorkspaceDirectory(path: string): Promise<void> {
+    await ensureSharedWorkspaceDirectory(path);
+  }
+
   async pathExists(path: string): Promise<boolean> {
     try {
       await stat(path);
@@ -314,10 +326,13 @@ export class NodeWorkspaceHostSystem implements WorkspaceHostSystem {
   ): Promise<void> {
     // Resolve names through the platform command rather than carrying uid/gid assumptions across
     // provider images. Account names are validated by the adapter before reaching this seam.
+    // WI-10004607: workspace directories live under a customer-writable root. The final path can
+    // be replaced with a symlink after its component walk, so non-recursive chown must change the
+    // link itself instead of following it to a root-owned target.
     await new Promise<void>((resolve, reject) => {
       execFile(
         "chown",
-        [...(recursive ? ["-R"] : []), `${owner}:${group}`, path],
+        [...(recursive ? ["-R"] : ["-h"]), `${owner}:${group}`, path],
         (error) => (error ? reject(error) : resolve()),
       );
     });
@@ -843,7 +858,9 @@ export class ProductionWorkspaceHostRemoteInitializerHost implements WorkspaceHo
       input.workspaceId,
       "workspaceId",
     );
-    await this.system.ensureDirectory(directory);
+    // The workspace form, not the private `ensureDirectory`: this directory lives under the ACL'd
+    // workspace root and must stay reachable by the service and agent accounts (WI-10004594).
+    await this.system.ensureWorkspaceDirectory(directory);
     await this.system.setOwnership?.(
       directory,
       this.workspaceUser,

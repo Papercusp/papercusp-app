@@ -32,6 +32,14 @@ import {
   type PotProviderBinding,
 } from '../blueprint/package-provider-binding-resources';
 import {
+  EVENT_KEY_RESOURCE_KIND,
+  packageEventKeyDriver,
+  planEventKeyResource,
+  prepareEventKeyResource,
+  type BundledEventKey,
+} from '../blueprint/package-event-key-resources';
+import { preparePackageResource } from '../blueprint/package-resource-receipts';
+import {
   BlueprintLifecycleError,
   type BlueprintJournalAttempt,
   type BlueprintJournalReport,
@@ -46,7 +54,9 @@ export interface InstallProviderBinding {
 }
 
 export type BlueprintJournalPlan =
-  | { operation: 'install'; potSlug: string; bindings: readonly InstallProviderBinding[] }
+  | { operation: 'install'; potSlug: string; bindings: readonly InstallProviderBinding[];
+      /** D-042: the release's bundled event keys, claimed for the workspace. */
+      eventKeys?: readonly BundledEventKey[] }
   | { operation: 'rollback' }
   | { operation: 'uninstall' };
 
@@ -86,6 +96,8 @@ function bindingLine(binding: PotProviderBinding): string {
 interface PlannedPotInstall {
   potSlug: string;
   bindings: PotProviderBinding[];
+  /** Claimed through the full driver on install; a rollback re-depends on the live key only. */
+  eventKeys: Array<{ key: BundledEventKey } | { address: PackageResourceAddress }>;
   expected: Map<string, string>;
 }
 
@@ -163,6 +175,10 @@ export function blueprintInstallJournal(
           specificationRevision: contentHash, stateRevision: state, expectedResources: install.expected });
         enrolled.push(dependentId);
         for (const binding of install.bindings) await prepareProviderBindingResource(sql, { workspaceId, binding, dependentId });
+        for (const entry of install.eventKeys) {
+          if ('key' in entry) await prepareEventKeyResource(sql, { workspaceId, blueprintId, key: entry.key, dependentId });
+          else await preparePackageResource(sql, entry.address, dependentId, packageEventKeyDriver(sql, entry.address, null));
+        }
         prepared.push({ ...install, dependentId });
       }
     } catch (error) {
@@ -207,8 +223,13 @@ export function blueprintInstallJournal(
     };
   }
 
-  async function prepareInstall(contentHash: string, potSlug: string, input: readonly InstallProviderBinding[]) {
+  async function prepareInstall(contentHash: string, potSlug: string, input: readonly InstallProviderBinding[],
+    keys: readonly BundledEventKey[]) {
     const expected = new Map<string, string>();
+    for (const key of keys) {
+      const planned = planEventKeyResource(workspaceId, blueprintId, key);
+      expected.set(planned.resourceKey, planned.address.installedHash);
+    }
     const bindings: PotProviderBinding[] = [];
     for (const entry of input) {
       const planned = planProviderBindingResource(workspaceId, { potSlug, ...entry });
@@ -219,9 +240,13 @@ export function blueprintInstallJournal(
       if (!prior) bindings.push(planned.binding);
       expected.set(planned.resourceKey, planned.address.installedHash);
     }
-    const prepared = await prepareAttempts(contentHash, [{ potSlug, bindings, expected }], (error) =>
-      new BlueprintLifecycleError('capability provider binding failed before blueprint install: ' + message(error),
-        409, 'capability_provider_binding_failed'));
+    const eventKeys = keys.map((key) => ({ key }));
+    const prepared = await prepareAttempts(contentHash, [{ potSlug, bindings, eventKeys, expected }], (error) =>
+      message(error).includes('event-key-held:')
+        ? new BlueprintLifecycleError('bundled event key could not be claimed before blueprint install: ' + message(error),
+          409, 'event_key_held')
+        : new BlueprintLifecycleError('capability provider binding failed before blueprint install: ' + message(error),
+          409, 'capability_provider_binding_failed'));
     return attemptFor(prepared, []);
   }
 
@@ -255,14 +280,21 @@ export function blueprintInstallJournal(
             resource_kind, item_key, installed_hash
           FROM harness_shared.blueprint_package_resources
          WHERE workspace_id = ${workspaceId} AND resource_key IN ${sql(keys)}` : [];
-      if (rows.length !== keys.length || rows.some((row) => row.resource_kind !== PROVIDER_BINDING_RESOURCE_KIND)) {
+      const known = [PROVIDER_BINDING_RESOURCE_KIND, EVENT_KEY_RESOURCE_KIND];
+      if (rows.length !== keys.length || rows.some((row) => !known.includes(row.resource_kind))) {
         throw new BlueprintLifecycleError(`blueprint ${blueprintId} install receipt in pot ${potSlug} is incomplete`, 409, 'rollback_binding_conflict');
       }
-      const bindings = rows.map((row) => providerBindingFromAddress({ workspaceId, memoryScope: row.memory_scope,
+      const addresses = rows.map((row) => ({ workspaceId, memoryScope: row.memory_scope,
         packageKind: row.package_kind, packageRef: row.package_ref, packageVersion: row.package_version,
         packageHash: row.package_hash, resourceKind: row.resource_kind, itemKey: row.item_key,
         installedHash: row.installed_hash } satisfies PackageResourceAddress));
-      installs.push({ potSlug, bindings, expected: new Map(Object.entries(receipt.expected_resources)) });
+      const bindings = addresses.filter((address) => address.resourceKind === PROVIDER_BINDING_RESOURCE_KIND)
+        .map(providerBindingFromAddress);
+      // A key the rollback target claimed is re-depended on while it is live; one
+      // already released cannot be re-claimed from its address and refuses below.
+      const eventKeys = addresses.filter((address) => address.resourceKind === EVENT_KEY_RESOURCE_KIND)
+        .map((address) => ({ address }));
+      installs.push({ potSlug, bindings, eventKeys, expected: new Map(Object.entries(receipt.expected_resources)) });
     }
     const prepared = await prepareAttempts(contentHash, installs, (error) =>
       new BlueprintLifecycleError(`blueprint ${blueprintId} rollback would restore a binding a later owner changed: ${message(error)}`,
@@ -337,7 +369,7 @@ export function blueprintInstallJournal(
     async prepare(contentHash) {
       if (plan.operation === 'uninstall' || contentHash === null) return uninstallAttempt();
       if (plan.operation === 'rollback') return prepareRollback(contentHash);
-      return prepareInstall(contentHash, plan.potSlug, plan.bindings);
+      return prepareInstall(contentHash, plan.potSlug, plan.bindings, plan.eventKeys ?? []);
     },
   };
 }

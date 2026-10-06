@@ -19,6 +19,7 @@ import { exportedTypeNames } from '../lib/tsc-baseline-gate.mjs';
 import {
   TSC_SERVICE_MAX_CHECKED_FILES,
   checkedSetFor,
+  refreshProjectRootFiles,
   renderDiagnostics,
   tscServiceSocketPath,
 } from '../lib/tsc-service.mjs';
@@ -111,22 +112,10 @@ async function refresh(projects) {
     ...(toClose.length > 0 ? { closeProjects: toClose } : {}),
     ...(previous ? { fileChanges: { invalidateAll: true } } : {}),
   });
-  // invalidateAll re-reads every file and re-resolves imports, but does NOT re-evaluate a
-  // tsconfig's include globs (measured 2026-09-27): a root file created since the project loaded
-  // stays invisible until it is named in `created`. parseConfigFile re-globs, so diff against it.
-  const created = [];
-  for (const config of projects) {
-    const project = snapshot.getProject(config);
-    if (!project) continue;
-    const known = new Set(project.rootFiles);
-    const parsed = await state.api.parseConfigFile(config);
-    for (const file of parsed.fileNames ?? []) if (!known.has(file)) created.push(file);
-  }
-  if (created.length > 0) {
-    const next = await state.api.updateSnapshot({ fileChanges: { created } });
-    snapshot.dispose();
-    snapshot = next;
-  }
+  // invalidateAll does not re-evaluate a tsconfig's include globs. Re-parse each config and tell
+  // the API about both added and removed roots; otherwise deleted roots remain in the loaded program
+  // and tsc reports TS6053 for a path that no longer exists.
+  snapshot = await refreshProjectRootFiles({ api: state.api, snapshot, projects });
   previous?.dispose();
   state.snapshot = snapshot;
   state.snapshotAt = Date.now();

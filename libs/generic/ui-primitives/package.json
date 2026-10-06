@@ -28,6 +28,7 @@
     }
   },
   "peerDependencies": {
+    "@papercusp/module-singleton": "*",
     "@radix-ui/react-dialog": "^1.1.0",
     "anser": "*",
     "lucide-react": "*",

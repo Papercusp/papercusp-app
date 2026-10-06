@@ -13,10 +13,12 @@ import {
   COORD_EXECUTABLE_KINDS,
   type CoordKind,
 } from "@papercusp/coordination/core";
-import { resolveAgentIdentity } from "../identity";
+import { resolveAgentIdentity, senderMatchesFilter, verifiedSpawnSessionAlias } from "../identity";
 import { resolveActorIdentity, actorMailboxKeys } from "../actor-identity";
 import {
   readInbox,
+  readDirectedInbox,
+  mergeInboxEntries,
   drainAndDeliverUserMailbox,
   getSupersededMap,
   getRemoteOriginMsgIds,
@@ -63,6 +65,8 @@ import {
   CONTEXT_GAUGE_CRITICAL_PCT,
   CONTEXT_GAUGE_LOUD_PCT,
   CONTEXT_GAUGE_QUIET_PCT,
+  contextGaugeReadingSource,
+  type ContextGaugeReadingSource,
 } from "./inbox-context-usage";
 import { readFleetWindDownLoopEndAuthorization } from "./continuation-gate";
 import { readPriorRespawnOutcome, lostRespawnAmbientLine } from "../../../carry-respawn-outcome";
@@ -614,7 +618,9 @@ export function filterInboxBySender<T extends { from?: unknown }>(
   from: string | undefined | null,
 ): readonly T[] {
   if (!from) return entries;
-  return entries.filter((e) => e.from === from);
+  // WI-10005678: a verified spawn session (an acceptance judge) sends as
+  // `system:<role>/<id>`, so a filter naming its bare `<id>` must still match.
+  return entries.filter((e) => senderMatchesFilter(e.from, from));
 }
 
 /**
@@ -897,7 +903,7 @@ export default defineTool({
       .max(500)
       .optional()
       .describe(
-        `Max entries returned (most-recent kept). Default ${DEFAULT_INBOX_LIMIT}.`,
+        `Max entries in the priority-ranked window; newest-first overall is not guaranteed. Default ${DEFAULT_INBOX_LIMIT}.`,
       ),
     include_ambient: z
       .boolean()
@@ -994,6 +1000,7 @@ export default defineTool({
         known ? [...known] : [],
       ));
     }
+    const boundedInbox = !resolvedFrom && !unansweredOnly && !directedOnly;
     // Offline-member mailbox (shared-hive-collaboration P-016): before the read,
     // deliver any `@user:`-parked assignment waiting for THIS member into their
     // live inbox, so a returning member sees it in this very response. The drain
@@ -1016,7 +1023,7 @@ export default defineTool({
     // The watermark is read concurrently too — the P-010 re-bootstrap flag rides
     // it (snapshot_rebootstrap_pending), so the common no-flag path adds only one
     // cheap PK read and no extra latency.
-    const [, all, wm] = await Promise.all([
+    const [, ownInbox, wm] = await Promise.all([
       inboxHeartbeatThrottle.shouldBeat(identity.ownerId)
         ? heartbeatPresence(identity).catch(() => {})
         : Promise.resolve(),
@@ -1031,14 +1038,16 @@ export default defineTool({
             owner: identity.ownerId,
             since_ts: deliveryFloorTs ?? null,
             kinds: args.kinds ?? null,
-            // WI-6939: the derive is now WINDOWED, so how much it reads depends on
-            // `limit` and on whether the narrowing filters force the full read.
-            // These MUST be in the key — without them a cached 15-entry window
-            // would be served to a caller asking for 500.
-            limit,
-            bounded: !resolvedFrom && !unansweredOnly && !directedOnly,
-            ambient: includeAmbient,
-            intents: !!args.include_intents,
+            bounded: boundedInbox,
+            // Windowed reads depend on the stopping rule. Full reads depend only
+            // on owner/floor/kinds: display limits and visibility filters run below.
+            // Share that raw graph across selective callers rather than retaining
+            // another decoded full inbox for each post-read option combination.
+            ...(boundedInbox ? {
+              limit,
+              ambient: includeAmbient,
+              intents: !!args.include_intents,
+            } : {}),
           },
           tags: ["coord_event_log"],
           softTtlMs: COORD_INBOX_SOFT_TTL_MS,
@@ -1086,7 +1095,7 @@ export default defineTool({
           readInbox(
             identity.ownerId,
             { since_ts: deliveryFloorTs, kinds: args.kinds },
-            !resolvedFrom && !unansweredOnly && !directedOnly
+            boundedInbox
               ? {
                   enough: (entries) => {
                     const afterAmbient = includeAmbient
@@ -1109,6 +1118,29 @@ export default defineTool({
       ),
       readWatermark(identity.ownerId).catch(() => emptyWatermark()),
     ]);
+    // WI-10005678: a verified spawn session (an acceptance judge) reads as
+    // `system:<role>/<id>`, but peers, its inbox-wake and the ship recruiter all
+    // address the bare `<id>`. Fold in what was sent to that bare id. Directed rows
+    // only: the broadcasts already arrived through the caller's own read.
+    const sessionAlias = verifiedSpawnSessionAlias(
+      ctx as Parameters<typeof verifiedSpawnSessionAlias>[0],
+      identity.ownerId,
+    );
+    const all = sessionAlias
+      ? mergeInboxEntries(
+          ownInbox,
+          await readDirectedInbox(sessionAlias, { since_ts: deliveryFloorTs, kinds: args.kinds }).catch(
+            (e: unknown) => {
+              console.warn(
+                `[coord:inbox] session-alias read for ${sessionAlias} failed (own inbox still served): ${
+                  e instanceof Error ? e.message : String(e)
+                }`,
+              );
+              return [];
+            },
+          ),
+        )
+      : ownInbox;
 
     const ambientExcluded = includeAmbient
       ? 0
@@ -1474,6 +1506,7 @@ export default defineTool({
       // same sessions it was the only source for before).
       const live = await currentContextTokensForOwner(identity.ownerId);
       const tokens = live ?? pres?.contextTokens;
+      const readingSource: ContextGaugeReadingSource = contextGaugeReadingSource(live);
       // WI-2143463: the watchdog mirrors the gateway's route-bound lowest
       // observed prompt into the existing hot cache. It is evidence about the
       // fixed-prefix ceiling / conservative usable runway, never a replacement
@@ -1508,6 +1541,7 @@ export default defineTool({
         selfCompactionAvailable,
         fleetWindDownLoopEndAuthorized,
         cachedUsage?.observedPromptFloor ?? null,
+        readingSource,
       );
       // flush-to-proceed-stretch-discipline-2026-07-04 P-002: near a compaction boundary,
       // surface any work-item claim whose checkpoint is stale (unflushed state) and NAME the
@@ -1522,6 +1556,7 @@ export default defineTool({
           selfCompactionAvailable,
           fleetWindDownLoopEndAuthorized,
           cachedUsage?.observedPromptFloor ?? null,
+          readingSource,
         );
       }
       if (pct != null && pct >= FLUSH_GATE_PCT) {

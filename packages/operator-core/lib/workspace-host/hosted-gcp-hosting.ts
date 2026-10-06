@@ -81,6 +81,8 @@ export const PAPERCUSP_HOSTED_HOST_PERMISSIONS = [
   'compute.instances.setLabels',
   'compute.instances.setMetadata',
   'compute.instances.setTags',
+  // Checked on a spot insert (scheduling block), WI-10005210.
+  'compute.instances.setScheduling',
   'compute.instances.osLogin',
   'compute.instances.osAdminLogin',
   'compute.snapshots.create',

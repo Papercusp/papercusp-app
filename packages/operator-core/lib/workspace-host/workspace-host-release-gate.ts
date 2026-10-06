@@ -8,6 +8,7 @@ import {
   validateWorkspaceHostImageArtifact,
   verifyWorkspaceHostBuildManifest,
   workspaceHostImageModel,
+  workspaceHostBootcPinnedImageRef,
   type WorkspaceHostBuildManifestVerification,
   type WorkspaceHostBuilderKind,
   type WorkspaceHostBuilderTemplateShape,
@@ -21,6 +22,7 @@ import {
 import type { ArtifactTrustReport } from './artifact-trust';
 import {
   validateWorkspaceHostBootcBakeManifest,
+  workspaceHostBootcBakeReleaseMismatch,
   workspaceHostReleaseSubjectSha256,
   type WorkspaceHostBootcBakeManifest,
 } from './bootc-bake-manifest';
@@ -186,6 +188,10 @@ export function evaluateWorkspaceHostReleaseGate(
       ) {
         bakeErrors.push('bootcBakeManifest is not bound to artifact.bootc.imageDigest');
       }
+      // WI-10005761: the bootstrap requires the release tree IN the image, so the release this
+      // artifact names must be the one the bake proved it carries.
+      const releaseMismatch = workspaceHostBootcBakeReleaseMismatch(manifest, input.artifact.release.version);
+      if (releaseMismatch) bakeErrors.push(releaseMismatch);
     }
   } else if (input.bootcBakeManifest) {
     bakeErrors.push('bootcBakeManifest is valid only for hostModel bootc-image');
@@ -265,7 +271,7 @@ export function evaluateWorkspaceHostReleaseGate(
         cleanRoomErrors.push('artifact bootc image identity is missing');
       } else if (
         cleanRoom.attestation.release.version !== input.artifact.release.version ||
-        cleanRoom.attestation.release.source !== bootc.image ||
+        cleanRoom.attestation.release.source !== workspaceHostBootcPinnedImageRef(bootc) ||
         cleanRoom.attestation.release.imageDigest !== bootc.imageDigest ||
         cleanRoom.attestation.release.signaturePolicyPath !== bootc.signaturePolicyPath ||
         cleanRoom.attestation.bootcBaseImage !== bootc.baseImage

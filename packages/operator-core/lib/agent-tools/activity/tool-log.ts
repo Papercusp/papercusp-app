@@ -139,7 +139,7 @@ export default defineTool({
     // of `session_id`, so the divergence is genuinely hard to predict from either side.
     argRedirects: {
       limit:
-        'max_lines — this tool budgets ITEMIZED LINES rather than rows (default 40, 5-200), and older successes decay out first, so it is a display budget and not a row count. RENAME the key rather than dropping it, or you silently get the default 40 lines. `limit` is the spelling used by the sibling raw-row read, activity:recent. Use `top_k` to size the touched-set on the decay line.',
+        'max_lines — this tool budgets ITEMIZED LINES rather than rows (default 40, 5-200), and older successes decay out first, so it is a display budget and not a row count. RENAME the key rather than dropping it, or you silently get the default 40 lines. `limit` is the spelling used by the sibling raw-row read, activity:recent. Use `top_k` (default 8, integer 1-25) to size the touched-set on the decay line.',
       // EI-21149038705756492 — filed alongside `limit` by the SAME rejection: a cold-wake
       // monitor arrived with the remembered `ownerId` + `limit` pair and got one bare
       // unrecognized-key list naming neither remedy. `limit` above was repaired and this
@@ -176,8 +176,14 @@ export default defineTool({
     until: isoBoundary.optional(),
     /** Itemized-line budget; older successes decay first (default 40). */
     max_lines: z.number().int().min(5).max(200).optional(),
-    /** Touched-set size on the decay line (default 8). */
-    top_k: z.number().int().min(1).max(25).optional(),
+    /** Touched-set size on the decay line (default 8, integer 1-25). */
+    top_k: z
+      .number()
+      .int()
+      .min(1)
+      .max(25)
+      .optional()
+      .describe('Touched-set size on the decay line (default 8; maximum 25).'),
   }),
   async handler(args, ctx) {
     const identity = args.owner ? resolveAgentIdentity(ctx) : null;

@@ -24,7 +24,7 @@
  */
 import { readlinkSync, statSync } from 'node:fs';
 
-import { registerSystemAction, type SystemActionCtx } from './system-actions';
+import { createSubPassHealth, registerSystemAction, type SystemActionCtx } from './system-actions';
 import { sendMessage } from '../../agent-tools/coordination/messages';
 import type { AgentIdentity } from '../../agent-tools/coordination/identity';
 import { REPO_ROOT } from '../../agent-tools/docs/_repo-paths';
@@ -168,6 +168,14 @@ let lastReaperAtMs: number | null = null;
  */
 const FAILED_UNIT_SWEEP_INTERVAL_MS = 5 * 60_000;
 let lastFailedUnitSweepAtMs: number | null = null;
+/**
+ * WI-10005164: the fail-soft sub-passes below catch their own errors so the
+ * kernel reconcile always runs. This tracker returns any still-failing one as
+ * the routine's `softError` (its `last_error`) on every tick until that
+ * sub-pass next succeeds. The lifecycle sweep threw 42703 on every hourly pass
+ * for a day while this routine read healthy (WI-10005157).
+ */
+const subPassHealth = createSubPassHealth();
 let failedUnitSweepCursor = 0;
 
 /** Re-notify throttle for the enforcement alarm (P-006). Shorter than the
@@ -217,10 +225,12 @@ registerSystemAction('task-reconcile', async (ctx: SystemActionCtx) => {
         if (collected.errors > 0 || collected.refused > 0 || collected.resetFailed > 0) console.warn(summary);
         else console.info(summary);
       }
+      subPassHealth.record('failed-task-unit-collector', null);
     } catch (err) {
       // This maintenance pass may preserve a failed unit for the next attempt;
       // it must never suppress the kernel/ledger reconcile that carries it.
       console.warn('[failed-task-unit-collector] sweep failed', err);
+      subPassHealth.record('failed-task-unit-collector', err);
     }
   }
 
@@ -261,9 +271,11 @@ registerSystemAction('task-reconcile', async (ctx: SystemActionCtx) => {
             `${outcome.detail ? ` — ${outcome.detail}` : ''}`,
         );
       }
+      subPassHealth.record('task-lifecycle', null);
     } catch (err) {
       // This judgement layer must never break the kernel reconcile/reaper pass.
       console.warn('[task-lifecycle] sweep failed', err);
+      subPassHealth.record('task-lifecycle', err);
     }
   }
 
@@ -311,11 +323,15 @@ registerSystemAction('task-reconcile', async (ctx: SystemActionCtx) => {
     // never reach an agent session, a fleet member, or the owner's desktop.
     try {
       sweepHost((io) => sweepA11yBuses(io));
+      subPassHealth.record('a11y-bus-sweep', null);
     } catch (err) {
       // A sweep failure must never fail the reconcile tick that carries it.
       console.warn('[a11y-bus-sweep] sweep failed', err);
+      subPassHealth.record('a11y-bus-sweep', err);
     }
   }
+
+  return subPassHealth.result();
 });
 
 /**

@@ -37,6 +37,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, join } from 'node:path';
@@ -629,6 +630,14 @@ export interface RunAgentChatOptions {
    * `claude-code` have their own internal limits.
    */
   maxTokens?: number;
+  /** Refuse unsupported backends and validate the final Anthropic HTTP body
+   * against this exact output bound before each send. Not a dollar cap. */
+  requireOutputTokenLimit?: boolean;
+  /** Trusted host policy at EACH final Anthropic HTTP send, including retries.
+   * The host owns authenticated grant issuance, durable reservation and pricing;
+   * this hook alone is not a monetary or provider-invoice cap. Unsupported
+   * backends refuse rather than ignore it. */
+  authorizeStatelessRequest?: StatelessRequestAuthorizer;
   /**
    * Sampling temperature (0–1). `anthropic-direct` honors when the model
    * accepts it (skipped for `opus*` per the Anthropic API constraint).
@@ -691,6 +700,10 @@ export interface RunAgentChatOptions {
    * is the safe boundary for a caller's generation timer. Fires per successful retry attempt.
    */
   onResponseStart?: () => void;
+  /** Observe each actual SDK HTTP send, including SDK-internal retries, before
+   * it can fail. Only sanitized origins and allowlisted response metadata are
+   * supplied; this callback never receives credentials, prompts or bodies. */
+  onTransportDiagnostic?: (diagnostic: StatelessTransportDiagnostic) => void;
   /**
    * Priority/role LABEL for the inference-gateway admission tier
    * (gateway-priority-tiers-2026-06-22). For the in-process `anthropic-direct`
@@ -748,6 +761,11 @@ export type ChatEvent =
       type: 'error';
       message: string;
       stderr?: string;
+      /** Reported/priced usage retained before failure. Absent means unknown,
+          including an unpriced backend; an explicit zero remains measured zero. */
+      costUsd?: number;
+      /** Incomplete usage evidence, preserved even when some spend was reported. */
+      unreportedFrames?: number;
       /**
        * RB-006: the classified turn error, when known. Lets a consumer (e.g. the gym's
        * `llmCall` → `runAbEvaluation`) distinguish a `rate_limited` failure (pause + resume)
@@ -899,6 +917,237 @@ export interface StatelessTransport {
   token: string;
   headers: Record<string, string>;
   label: 'anthropic-direct' | 'gateway-pool';
+}
+
+export interface StatelessTransportDiagnostic {
+  /** Local correlation only; not an admission/idempotency key. */
+  callId: string;
+  attempt: number;
+  phase: 'request' | 'response' | 'transport-error' | 'stream-progress' | 'stream-complete' | 'stream-error';
+  observedAt: string;
+  label: StatelessTransport['label'];
+  endpointOrigin: string | null;
+  loopback: boolean | null;
+  governorMode: 'unobserved' | 'disabled' | 'request-local' | 'shared-provider';
+  requestedAccount: string | null;
+  servedAccount: string | null;
+  providerRequestId: string | null;
+  status: number | null;
+  /** Parsed SDK message events, not raw bytes or evidence of a completed response. */
+  streamEventCount?: number;
+  textChars?: number;
+  firstStreamEventAt?: string | null;
+  lastStreamEventAt?: string | null;
+  callerAborted?: boolean | null;
+  callerAbortReason?: 'TimeoutError' | 'AbortError' | 'other' | null;
+}
+
+/** Private policy input, never telemetry. The body and credential digest bind
+ * authorization to the actual SDK request; raw credentials are not exposed.
+ * A gateway may select a different provider account after this local boundary. */
+export interface StatelessRequestAttempt {
+  readonly attemptId: string;
+  readonly callId: string;
+  readonly attempt: number;
+  readonly method: string;
+  readonly url: string;
+  readonly body: string;
+  readonly bodySha256: string;
+  /** SHA256 of JSON { authorization: string|null, apiKey: string|null }. */
+  readonly credentialSha256: string;
+  readonly signal: AbortSignal;
+}
+
+/** Return a synchronous final grant check, or null to refuse. The final check
+ * must not await or mutate a reservation: it verifies the host's copied receipt
+ * (identity, expiry, revocation and admitted bounds) immediately before send.
+ * As with the gateway's controller hook, the policy is trusted host code, not a
+ * caller-selected reservation id or an authorization header. */
+export type StatelessRequestAuthorizer = (
+  attempt: StatelessRequestAttempt,
+) => Promise<(() => void) | null>;
+
+/** Observe the SDK's fetch boundary so its own retry ladder cannot hide HTTP
+ * attempts. Preserve the exact request, response and exception; do not stamp
+ * gateway admission headers or read the response body. */
+export function createStatelessDiagnosticFetch(
+  transport: StatelessTransport,
+  observe: (diagnostic: StatelessTransportDiagnostic) => void,
+  send: typeof fetch = globalThis.fetch,
+  state: { callId: string; attempt: number; sent?: number } = { callId: randomUUID(), attempt: 0, sent: 0 },
+  governorMode: StatelessTransportDiagnostic['governorMode'] = 'unobserved',
+  outputTokenLimit?: number,
+  authorizeRequest?: StatelessRequestAuthorizer,
+): typeof fetch {
+  if (outputTokenLimit !== undefined && (!Number.isSafeInteger(outputTokenLimit) || outputTokenLimit <= 0)) {
+    throw Object.assign(new RangeError('Required output token limit needs a positive integer maxTokens'), { costUsd: 0 });
+  }
+  if (authorizeRequest !== undefined && typeof authorizeRequest !== 'function') {
+    throw Object.assign(new TypeError('Stateless request authorizer must be a function'), { costUsd: 0 });
+  }
+  const refusal = (message: string) => Object.assign(new Error(message),
+    (state.sent ?? 0) === 0 ? { costUsd: 0 } : { costUsdMeasurementMissing: true });
+  return async (input, init) => {
+    // Snapshot before reading asynchronously, then send THIS request. Checking
+    // init.body and sending the caller's mutable init later would reopen the bound.
+    let request: Request | undefined;
+    let requestBody: string | undefined;
+    if (outputTokenLimit !== undefined || authorizeRequest !== undefined) {
+      try {
+        request = new Request(input, init);
+        // Native fetch follows redirects internally, beyond this authorizer.
+        // A governed send must not acquire an unapproved second destination.
+        if (authorizeRequest) request = new Request(request, { redirect: 'error' });
+        requestBody = await request.clone().text();
+        if (outputTokenLimit !== undefined) {
+          const body: unknown = JSON.parse(requestBody);
+          if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            (body as { max_tokens?: unknown }).max_tokens !== outputTokenLimit) {
+            throw new Error('Required output token limit differs from the final Anthropic request');
+          }
+        }
+        input = request;
+        init = undefined;
+      } catch {
+        throw refusal(outputTokenLimit !== undefined
+          ? 'Required output token limit could not be verified on the final Anthropic request'
+          : 'Stateless request authorization refused');
+      }
+    }
+    const attempt = ++state.attempt;
+    let validateAuthorization: (() => void) | null = null;
+    if (authorizeRequest) {
+      try {
+        if (request!.signal.aborted) throw new Error('aborted');
+        validateAuthorization = await authorizeRequest(Object.freeze({
+          attemptId: randomUUID(), callId: state.callId, attempt, method: request!.method,
+          url: request!.url, body: requestBody!,
+          bodySha256: createHash('sha256').update(requestBody!).digest('hex'),
+          credentialSha256: createHash('sha256').update(JSON.stringify({
+            authorization: request!.headers.get('authorization'), apiKey: request!.headers.get('x-api-key'),
+          })).digest('hex'), signal: request!.signal,
+        }));
+        if (typeof validateAuthorization !== 'function') throw new Error('missing authorization');
+      } catch { throw refusal('Stateless request authorization refused'); }
+    }
+    let endpointOrigin: string | null = null;
+    try {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+      // origin omits userinfo, path, query and fragment, any of which can carry secrets.
+      endpointOrigin = url.origin === 'null' ? null : url.origin;
+    } catch { /* An invalid URL remains unknown; fetch owns the actual refusal. */ }
+    const base = {
+      callId: state.callId, attempt, label: transport.label, endpointOrigin, governorMode,
+      loopback: endpointOrigin === null ? null : isLocalhostUrl(endpointOrigin),
+      requestedAccount: transport.headers[ROUTE_ACCOUNT_HEADER]?.trim() || null,
+    };
+    const emit = (phase: StatelessTransportDiagnostic['phase'], response?: Response) => {
+      try {
+        const headers = headersToRecord(response?.headers);
+        observe({ ...base, phase, observedAt: new Date().toISOString(),
+          servedAccount: servedAccountFromHeaders(headers) ?? null,
+          providerRequestId: (headers?.['request-id'] ?? headers?.['x-request-id'])?.trim() || null,
+          status: response?.status ?? null });
+      } catch { /* Diagnostic bookkeeping must never change a turn's outcome. */ }
+    };
+    emit('request');
+    try {
+      if (authorizeRequest) {
+        try {
+          // No await or diagnostic callback between the final receipt check and
+          // fetch. The exact Request above is the only object sent downstream.
+          if (request!.signal.aborted) throw new Error('aborted');
+          const validation: unknown = validateAuthorization!();
+          if (validation !== undefined) {
+            // Accidentally async host checks must neither authorize a send nor
+            // leave a rejected validation promise unhandled.
+            void Promise.resolve(validation).catch(() => {});
+            throw new Error('final authorization must be synchronous');
+          }
+          if (request!.signal.aborted) throw new Error('aborted');
+        } catch { throw refusal('Stateless request authorization refused'); }
+      }
+      state.sent = (state.sent ?? 0) + 1;
+      const response = await send(input, init);
+      emit('response', response);
+      return response;
+    } catch (err) {
+      emit('transport-error');
+      throw err;
+    }
+  };
+}
+
+/** Observe parsed message progress without reading/teeing the HTTP body or retaining
+ * text. Header arrival alone cannot distinguish a stalled body from generation
+ * exceeding a caller deadline (WI-10005973). Both retry paths use this observer. */
+async function finalStatelessMessage(
+  // The SDK is loaded lazily; keep this structural seam independent of its runtime import.
+  stream: {
+    on(event: 'streamEvent', listener: (event: unknown) => void): unknown;
+    off(event: 'streamEvent', listener: (event: unknown) => void): unknown;
+    response?: Response | null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    finalMessage(): Promise<any>;
+  },
+  opts: RunAgentChatOptions,
+  transport: StatelessTransport,
+  state: { callId: string; attempt: number },
+  governorMode: StatelessTransportDiagnostic['governorMode'],
+) {
+  if (!opts.onTransportDiagnostic) return stream.finalMessage();
+  let streamEventCount = 0, textChars = 0;
+  let firstStreamEventAt: string | null = null, lastStreamEventAt: string | null = null;
+  let lastEmittedAt = 0;
+  let endpointOrigin: string | null = null;
+  try { endpointOrigin = new URL(transport.baseURL).origin; } catch { /* unknown */ }
+  const emit = (phase: 'stream-progress' | 'stream-complete' | 'stream-error') => {
+    try {
+      const headers = headersToRecord(stream.response?.headers);
+      const reason = opts.signal?.aborted ? opts.signal.reason : undefined;
+      // Never serialize the reason: callers may put credentials or prompt text in it.
+      const reasonName = reason && typeof reason === 'object' ? reason.name : undefined;
+      opts.onTransportDiagnostic!({ callId: state.callId, attempt: state.attempt,
+        phase, observedAt: new Date().toISOString(), label: transport.label, endpointOrigin,
+        loopback: endpointOrigin === null ? null : isLocalhostUrl(endpointOrigin), governorMode,
+        requestedAccount: transport.headers[ROUTE_ACCOUNT_HEADER]?.trim() || null,
+        servedAccount: servedAccountFromHeaders(headers) ?? null,
+        providerRequestId: (headers?.['request-id'] ?? headers?.['x-request-id'])?.trim() || null,
+        status: stream.response?.status ?? null,
+        streamEventCount, textChars, firstStreamEventAt, lastStreamEventAt,
+        callerAborted: opts.signal?.aborted ?? null,
+        callerAbortReason: reason === undefined ? null
+          : reasonName === 'TimeoutError' || reasonName === 'AbortError' ? reasonName : 'other',
+      });
+    } catch { /* Diagnostics must not change the original result or exception. */ }
+  };
+  const onEvent = (event: unknown) => {
+    const now = Date.now();
+    lastStreamEventAt = new Date(now).toISOString();
+    firstStreamEventAt ??= lastStreamEventAt;
+    streamEventCount++;
+    if (event && typeof event === 'object') {
+      const value = event as { type?: unknown; delta?: { type?: unknown; text?: unknown } };
+      if (value.type === 'content_block_delta' && value.delta?.type === 'text_delta'
+        && typeof value.delta.text === 'string') textChars += value.delta.text.length;
+    }
+    // First parsed event, then at most one progress record per five seconds.
+    // Always emit a terminal snapshot, including a stream with no parsed events.
+    if (streamEventCount === 1 || now - lastEmittedAt >= 5000) {
+      lastEmittedAt = now; emit('stream-progress');
+    }
+  };
+  stream.on('streamEvent', onEvent);
+  try {
+    const result = await stream.finalMessage();
+    emit('stream-complete');
+    return result;
+  } catch (error) {
+    emit('stream-error');
+    throw error;
+  } finally {
+    stream.off('streamEvent', onEvent);
+  }
 }
 
 /**
@@ -1538,12 +1787,21 @@ async function* statelessAgentChat(
   // the gateway via gatewayLlmEnv but never identified itself as `scout`).
   const tierHeaders = priorityTierHeaders(opts.priority);
   const callerHeaders = ownerHeaders(opts.ownerId);
+  const governed = process.env.PAPERCUSP_AGENT_GOVERNOR === '1';
+  // One local identity across SDK retries and credential-refresh client replacements.
+  const diagnosticState = { callId: randomUUID() as string, attempt: 0, sent: 0 };
   const mkClient = (t: StatelessTransport) =>
     new Anthropic({
       baseURL: t.baseURL,
       authToken: t.token,
       defaultHeaders: { ...t.headers, ...tierHeaders, ...callerHeaders },
       maxRetries: 2,
+      ...(opts.onTransportDiagnostic || opts.requireOutputTokenLimit || opts.authorizeStatelessRequest ? { fetch: createStatelessDiagnosticFetch(
+        t, opts.onTransportDiagnostic ?? (() => {}), globalThis.fetch, diagnosticState,
+        governed ? (isLocalhostUrl(t.baseURL) ? 'request-local' : 'shared-provider') : 'disabled',
+        opts.requireOutputTokenLimit ? opts.maxTokens : undefined,
+        opts.authorizeStatelessRequest,
+      ) } : {}),
     });
   let client = mkClient(transport);
 
@@ -1573,8 +1831,8 @@ async function* statelessAgentChat(
   // limit and a 429 honors the server's retry-after instead of a blind backoff. OFF by
   // default → the proven retry loop below runs unchanged (zero behavior change for the
   // live fleet until validated).
-  if (process.env.PAPERCUSP_AGENT_GOVERNOR === '1') {
-    yield* governedStatelessChat(client, params, opts, { transport, mkClient });
+  if (governed) {
+    yield* governedStatelessChat(client, params, opts, { transport, mkClient, diagnosticState });
     return;
   }
 
@@ -1610,7 +1868,7 @@ async function* statelessAgentChat(
           /* a caller's bookkeeping must never break the turn */
         }
       });
-      const resp = await stream.finalMessage();
+      const resp = await finalStatelessMessage(stream, opts, transport, diagnosticState, 'disabled');
       let finalText = '';
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       for (const block of (resp.content ?? []) as Array<any>) {
@@ -1818,6 +2076,7 @@ async function* governedStatelessChat(
   // becomes the default.
   auth?: {
     transport: StatelessTransport;
+    diagnosticState: { callId: string; attempt: number };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mkClient: (t: StatelessTransport) => any;
   },
@@ -1952,7 +2211,10 @@ async function* governedStatelessChat(
               /* a caller's bookkeeping must never break the turn */
             }
           });
-          const resp = await stream.finalMessage();
+          const resp = auth
+            ? await finalStatelessMessage(stream, opts, auth.transport, auth.diagnosticState,
+              isLocalhostUrl(auth.transport.baseURL) ? 'request-local' : 'shared-provider')
+            : await stream.finalMessage();
           let finalText = '';
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           for (const block of (resp.content ?? []) as Array<any>) {
@@ -2021,6 +2283,18 @@ async function* governedStatelessChat(
 export async function* runAgentChat(
   opts: RunAgentChatOptions,
 ): AsyncGenerator<ChatEvent, void, void> {
+  if (opts.requireOutputTokenLimit || opts.authorizeStatelessRequest !== undefined) {
+    opts = { ...opts, ...(opts.messages ? { messages: opts.messages.map(message => ({ ...message })) } : {}) };
+    if (opts.requireOutputTokenLimit && (!Number.isSafeInteger(opts.maxTokens) || opts.maxTokens! <= 0)) {
+      throw Object.assign(new RangeError('Required output token limit needs a positive integer maxTokens'), { costUsd: 0 });
+    }
+    if (resolveBackend(opts) !== 'anthropic-direct') {
+      throw Object.assign(new Error('Required stateless request policy is not implemented for this backend'), { costUsd: 0 });
+    }
+    if (opts.authorizeStatelessRequest !== undefined && typeof opts.authorizeStatelessRequest !== 'function') {
+      throw Object.assign(new TypeError('Stateless request authorizer must be a function'), { costUsd: 0 });
+    }
+  }
   maybeBootstrap();
   const backend: AgentBackend = resolveBackend(opts);
   if (backend === 'anthropic-direct') {
@@ -2630,6 +2904,7 @@ export async function* runAgentChat(
   let stdoutLineBuf = '';
   let finalText = '';
   let costUsd = 0;
+  let costReported = false;
   let tokensIn = 0;
   let tokensOut = 0;
   let unreportedFrames = 0;
@@ -2702,7 +2977,10 @@ export async function* runAgentChat(
       if (u.tokensOut !== undefined) tokensOut = u.tokensOut;
       if (u.cacheReadTokens !== undefined) cacheReadTokens = u.cacheReadTokens;
       if (u.cacheCreationTokens !== undefined) cacheCreationTokens = u.cacheCreationTokens;
-      if (u.costUsd !== undefined) costUsd = u.costUsd;
+      if (u.costUsd !== undefined) {
+        costUsd = u.costUsd;
+        costReported = u.costUsd >= 0;
+      }
       if (u.unreportedFrames !== undefined) unreportedFrames = Math.max(unreportedFrames, u.unreportedFrames);
       if (u.numTurns !== undefined) numTurns = u.numTurns;
       // Sometimes the terminal `result.result` is the most complete
@@ -2768,7 +3046,10 @@ export async function* runAgentChat(
     tokensIn = (hasFiniteNumber(input) ? input : 0) + cacheRead + cacheWrite;
     tokensOut = hasFiniteNumber(output) ? output : tokensOut;
     const reportedCost = u?.costUsd ?? u?.cost ?? u?.totalCost;
-    if (hasFiniteNumber(reportedCost)) costUsd = reportedCost;
+    if (hasFiniteNumber(reportedCost)) {
+      costUsd = reportedCost;
+      costReported = reportedCost >= 0;
+    }
     ompUsageComplete = hasFiniteNumber(input) && hasFiniteNumber(output) && hasFiniteNumber(reportedCost);
   };
 
@@ -2889,6 +3170,7 @@ export async function* runAgentChat(
       const cachedInput = hasFiniteNumber(u.cached_input_tokens) ? u.cached_input_tokens : 0;
       const estimate = estimateCodexUsageCost(opts.model, tokensIn, tokensOut, cachedInput);
       costUsd = estimate.usd;
+      costReported = codexUsageComplete && estimate.priced && Number.isFinite(costUsd) && costUsd >= 0;
       if (!estimate.priced) unreportedFrames = Math.max(unreportedFrames, 1);
       return;
     }
@@ -3071,6 +3353,13 @@ export async function* runAgentChat(
     }
   }
 
+  if (
+    (backend === 'claude-code' && !claudeTerminalUsageSeen) ||
+    (backend === 'omp' && (!ompUsageSeen || !ompUsageComplete)) ||
+    (backend === 'codex' && (!codexUsageSeen || !codexUsageComplete))
+  ) {
+    unreportedFrames = Math.max(unreportedFrames, 1);
+  }
   if (exitCode !== 0) {
     yield {
       type: 'error',
@@ -3080,16 +3369,11 @@ export async function* runAgentChat(
       // (WI-10003188) so a surface that renders only `message` can say WHY.
       message: spawnErrMsg ?? agentExitErrorMessage(backend, exitCode, failureLine),
       stderr: stderrBuf.slice(-800),
+      ...(costReported ? { costUsd } : {}),
+      ...(!costReported || unreportedFrames > 0 ? { unreportedFrames: Math.max(unreportedFrames, 1) } : {}),
       ...(cliTurn ? { turn: cliTurn } : {}),
     };
   } else {
-    if (
-      (backend === 'claude-code' && !claudeTerminalUsageSeen) ||
-      (backend === 'omp' && (!ompUsageSeen || !ompUsageComplete)) ||
-      (backend === 'codex' && (!codexUsageSeen || !codexUsageComplete))
-    ) {
-      unreportedFrames = Math.max(unreportedFrames, 1);
-    }
     yield {
       type: 'result',
       costUsd,

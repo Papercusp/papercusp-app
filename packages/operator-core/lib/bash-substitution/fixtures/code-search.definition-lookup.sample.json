@@ -1,128 +1,128 @@
 {
-  "evidenceRef": "WI-6445 / pair code-search.definition-lookup (re-baselined for bash-substitution-reachable-ceiling-2026-08-01 P-002: corrected quote/heredoc-aware atomizer, D-047)",
-  "extractedAt": "2026-07-26T13:34:00Z",
-  "totalAtoms": 44,
-  "totalSessions": 29,
+  "evidenceRef": "gitnexus-deterministic-integration-2026-10-05 P-002 / D-010(c) (WI-10006282): FRESH sample re-extracted from the advisory's own fires — 837 grep commands the previous code-search.definition-lookup pattern fired on (substitution row 206, 2026-08-12..2026-10-06, 305 sessions), atomized, then filtered by the RETARGETED pattern (location-only, one root inside one tsconfig project). Not the 2026-07-26 sample. Regenerate: buildFixture({ jsonlPath: <fires jsonl>, pattern: lspDefinitionLookup.bashPattern, size: 24, evidenceRef, extractedAt })",
+  "extractedAt": "2026-10-06T04:50:00Z",
+  "totalAtoms": 283,
+  "totalSessions": 157,
   "sample": [
     {
-      "sid": "su-effd3151-c12a-4fb3-8643-252d19652ef6",
-      "ts": "2026-07-20T05:56:47.052Z",
-      "atom": "grep -rln \"export function foldHandoffs\" packages/coordination/src/ 2>/dev/null"
+      "sid": "su-7b48e3bf-c482-4727-868b-574c0484e7d8",
+      "ts": "2026-08-26T22:47:53.637632-04:00",
+      "atom": "grep -rl \"export function decideColdWake\" --include=*.ts packages/operator-core/lib"
     },
     {
-      "sid": "su-6ffd5ea8-6af3-4616-a0c6-b2a57ea4da57",
-      "ts": "2026-07-21T02:39:56.986Z",
-      "atom": "grep -rln \"function projectDirForSlug\" packages/operator-core/lib --include=\"*.ts\""
+      "sid": "su-07b72cf6-b471-4dfa-b1e5-069cde1f8a23",
+      "ts": "2026-09-23T23:35:40.814095-04:00",
+      "atom": "grep -rln \"export function buildAgentLaunchCommand\" packages/operator-core/lib"
     },
     {
-      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
-      "ts": "2026-07-26T01:09:08.578Z",
-      "atom": "grep -rn \"class PgLinkStore\" -A 5 packages/operator-core/lib/**/*.ts 2>/dev/null"
+      "sid": "su-f3a304c6-7a1c-41c9-b207-4fa84b5e5098",
+      "ts": "2026-09-10T22:50:13.364482-04:00",
+      "atom": "grep -rln 'export async function listSpecEvidence' --include=*.ts packages/operator-core/lib"
     },
     {
-      "sid": "su-c12c22d8-2503-489d-8649-bdfcb3d68910",
-      "ts": "2026-07-26T07:30:23.414Z",
-      "atom": "grep -rn \"class PgTaggableStore\" -A 40 packages/coordination/src/capabilities/*.ts"
+      "sid": "su-f08bc8c5-d836-4e9c-bea6-f7ddaac4d186",
+      "ts": "2026-09-30T13:11:29.314155-04:00",
+      "atom": "grep -rn \"class PuiPane\" packages/operator-core/lib/pui-e2e/"
     },
     {
-      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
-      "ts": "2026-07-26T13:52:47.964Z",
-      "atom": "grep -rn \"export async function advanceHiveEpoch\" -A 25 packages/operator-core/lib/sync/hyperbee/ 2>/dev/null"
+      "sid": "su-fcbb3fed-83b5-4c34-9dab-72e191d76491",
+      "ts": "2026-09-28T04:12:12.905328-04:00",
+      "atom": "grep -rn \"export async function findConditionObjects\" packages/operator-core/lib"
     },
     {
-      "sid": "su-9d726f46-c7bc-4986-8700-62340b58689d",
-      "ts": "2026-07-26T01:08:57.322Z",
-      "atom": "grep -rn \"export async function linkWorkItem\" packages/operator-core/lib/*.ts packages/operator-core/lib/**/*.ts 2>/dev/null"
+      "sid": "su-7157b3a0-f04a-46c2-9adb-f658e7c30824",
+      "ts": "2026-08-24T00:04:45.235367-04:00",
+      "atom": "grep -rn \"export async function listScorecards\" packages/operator-core/lib/"
     },
     {
-      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
-      "ts": "2026-07-25T20:33:49.318Z",
-      "atom": "grep -rn \"export async function openConversationCore\" -A 110 packages/operator-core/lib/agent-tools/coordination/conversations-core.ts 2>/dev/null"
+      "sid": "su-4f968faa-adbb-4de7-97e7-b3314e842678",
+      "ts": "2026-10-02T07:05:54.464713-04:00",
+      "atom": "grep -rn \"export async function recordWithheld\" packages/operator-core/lib"
     },
     {
-      "sid": "su-1acf5890-4740-4a79-a5c0-440b62a880bb",
-      "ts": "2026-07-26T00:40:05.634Z",
-      "atom": "grep -rn \"export async function potHomeSlugForHarness\" -A 30 packages/operator-core/lib/ 2>/dev/null"
+      "sid": "su-e8708a1c-a5a4-4a8b-9acb-8bcceab2a91c",
+      "ts": "2026-10-02T07:19:16.920385-04:00",
+      "atom": "grep -rn \"export async function searchWorkItems\" packages/operator-core/lib --include=*.ts"
     },
     {
-      "sid": "su-055aef7f-b4be-41a4-bbdb-1068c9fc79e3",
-      "ts": "2026-07-26T13:54:20.434Z",
-      "atom": "grep -rn \"export async function reconcileOwnedHiveEpochKeys\" -A 55 packages/operator-core/lib/sync/hyperbee/hive-epoch-boundary-wiring.ts"
+      "sid": "su-7273d7a5-ed8f-4ca4-ac4d-d31fc4e8c396",
+      "ts": "2026-09-22T21:31:05.999505-04:00",
+      "atom": "grep -rn \"export function assertWorkspaceHostSecretIsolation\" libs/generic/deployment-driver/src"
     },
     {
-      "sid": "su-a8557b00-55fb-4438-a7bd-f269a7a3bf6c",
-      "ts": "2026-07-26T04:03:32.496Z",
-      "atom": "grep -rn \"export async function setIssueState\" -A 80 packages/operator-core/lib/"
+      "sid": "su-94c177ea-9870-435d-acea-c8d4e8687020",
+      "ts": "2026-08-28T22:44:15.839924-04:00",
+      "atom": "grep -rn \"export function createLogger\" --include=*.ts libs/papercusp/packages/orchestrator/src/"
     },
     {
-      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
-      "ts": "2026-07-26T00:24:45.955Z",
-      "atom": "grep -rn \"export function classifyAgentPane\" -A 40 packages/agent-mcp/src/*.ts 2>/dev/null"
+      "sid": "su-38e71009-f36b-4ca7-8a14-e617921fd7cd",
+      "ts": "2026-09-23T03:31:07.192996-04:00",
+      "atom": "grep -rn \"export function getHarnessAdminUrl\" --include=*.ts packages/operator-core/lib"
     },
     {
-      "sid": "su-ea8d3491-fd1c-441b-bef7-ffb820450f53",
-      "ts": "2026-07-26T06:27:13.881Z",
-      "atom": "grep -rn \"export function defineTool\" packages/agent-mcp/src/*.ts 2>/dev/null"
+      "sid": "su-4f968faa-adbb-4de7-97e7-b3314e842678",
+      "ts": "2026-10-02T13:05:36.251777-04:00",
+      "atom": "grep -rn \"export function holderCountsAsAlive\" packages/operator-core/lib"
     },
     {
-      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
-      "ts": "2026-07-26T17:34:17.668Z",
-      "atom": "grep -rn \"export function format\" packages/operator-core/lib/format/*.ts apps/operator/lib/format*.ts 2>/dev/null"
+      "sid": "su-eeace879-d1de-42fe-ae0e-1eb561ff189f",
+      "ts": "2026-10-01T10:25:02.876416-04:00",
+      "atom": "grep -rn \"export function journalVerdictFor\" --include=*.ts packages/operator-core/lib"
     },
     {
-      "sid": "su-88c3bf51-e38b-47a4-b357-4c547d0e65be",
-      "ts": "2026-07-25T22:01:31.873Z",
-      "atom": "grep -rn \"export function schemaRequiresArgs\" -A 20 packages/operator-core/lib packages/agent-mcp/src 2>/dev/null"
+      "sid": "su-ff997420-7140-498d-ac91-413f03431aab",
+      "ts": "2026-09-25T22:36:07.171251-04:00",
+      "atom": "grep -rn \"export function pinModuleState\" libs/generic/module-singleton/src/index.ts 2>/dev/null"
     },
     {
-      "sid": "su-709bb0d6-12de-465e-bb82-0f4bb282c87a",
-      "ts": "2026-07-25T23:42:20.713Z",
-      "atom": "grep -rn \"export interface LaunchOpts\" -A 60 packages/operator-core/lib/*.ts 2>/dev/null"
+      "sid": "su-da584eff-1ba0-4420-856f-ec5290ad740a",
+      "ts": "2026-10-03T04:28:54.121964-04:00",
+      "atom": "grep -rn \"export function sanitizeInheritedWakeEnv\" packages/operator-core/lib"
     },
     {
-      "sid": "su-e3b21216-e294-4a92-b8f8-5a73a244ff09",
-      "ts": "2026-07-26T00:36:39.561Z",
-      "atom": "grep -rn \"function classifyClaimFailure\" -A 25 --include=*.ts packages/operator-core/lib/"
+      "sid": "su-b5bfd66d-53cb-458b-9e32-cc219cea230f",
+      "ts": "2026-10-01T06:02:54.976542-04:00",
+      "atom": "grep -rn \"export function workScopeSqlTerms\" --include=*.ts packages/operator-core/lib"
     },
     {
-      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
-      "ts": "2026-07-26T05:31:02.109Z",
-      "atom": "grep -rn \"function looksLikePolicyGate\" packages/operator-core/lib/"
+      "sid": "su-07b72cf6-b471-4dfa-b1e5-069cde1f8a23",
+      "ts": "2026-09-25T11:16:17.217245-04:00",
+      "atom": "grep -rn \"function buildVerifyBindingAdapter\" --include=*.ts packages/operator-core/lib"
     },
     {
-      "sid": "su-cd450e2a-a441-442a-afe6-f112522cbde8",
-      "ts": "2026-07-20T18:41:13.850Z",
-      "atom": "grep -rn \"function provisionGymDatabase\" packages/operator-core/lib/gym/*.ts"
+      "sid": "su-b9f9d7a7-de66-452a-84cf-f69a799c59ec",
+      "ts": "2026-08-30T12:00:29.88154-04:00",
+      "atom": "grep -rn \"function formatInvalidArgs\" packages/agent-mcp/src/*.ts 2>/dev/null"
     },
     {
-      "sid": "su-63f9b336-5b17-461a-b12e-a8421de9a09b",
-      "ts": "2026-07-26T05:37:47.146Z",
-      "atom": "grep -rn \"interface AccountEgress\" packages/operator-core/lib/"
+      "sid": "su-f14e191f-7ec7-457e-91f9-af24e6e978d6",
+      "ts": "2026-08-12T13:03:37.873382-04:00",
+      "atom": "grep -rn \"function orchestratorStdoutTag\" packages/operator-core/lib/"
     },
     {
-      "sid": "su-143b12bd-edcc-4af5-b983-3ec8f258b992",
-      "ts": "2026-07-20T05:10:04.899Z",
-      "atom": "grep -rn \"interface DevDeployState\" packages/operator-core/lib --include=\"*.ts\" -I"
+      "sid": "su-0632cdb8-3f46-4aad-a910-66bf9a3fd965",
+      "ts": "2026-08-30T07:57:52.71803-04:00",
+      "atom": "grep -rn \"function setupCellSchema\" packages/operator-core/lib/shared-pot-loop/ 2>&1"
     },
     {
-      "sid": "su-ea8d3491-fd1c-441b-bef7-ffb820450f53",
-      "ts": "2026-07-26T02:18:14.739Z",
-      "atom": "grep -rn \"interface PlanIndexRow\" packages/operator-core/lib/"
+      "sid": "su-4342525e-2b14-4780-bf1b-3b413480030d",
+      "ts": "2026-09-03T12:25:02.066572-04:00",
+      "atom": "grep -rn \"interface CellSpec\" --include=*.ts packages/operator-core/lib"
     },
     {
-      "sid": "su-d93ac1bf-d48f-420d-8136-dea6de467e7f",
-      "ts": "2026-07-20T18:05:34.089Z",
-      "atom": "grep -rn \"interface ProvenanceContext\" packages/operator-core/lib/sync/hyperbee/projection.ts"
+      "sid": "su-091ad703-d98f-4ccb-a20f-ea02d02e9f75",
+      "ts": "2026-09-23T10:07:12.326947-04:00",
+      "atom": "grep -rn 'class PuiPane' packages/operator-core/lib/pui-e2e/*.ts"
     },
     {
-      "sid": "su-92bacd98-b714-4f44-a4fc-08e73ea7ca39",
-      "ts": "2026-07-25T21:07:34.782Z",
-      "atom": "grep -rn \"interface SystemActionCtx\" -A 15 --include=\"*.ts\" packages/operator-core/lib/harness/routines/system-actions.ts"
+      "sid": "su-e8708a1c-a5a4-4a8b-9acb-8bcceab2a91c",
+      "ts": "2026-09-30T02:19:25.006846-04:00",
+      "atom": "grep -rn 'export function proseProfilePredicateSql' packages/operator-core/lib"
     },
     {
-      "sid": "su-e044d888-c238-4311-8eb0-aef7896b3e92",
-      "ts": "2026-07-19T21:48:17.748Z",
-      "atom": "grep -rn 'export function intFromEnv' packages/operator-core/lib --include='*.ts'"
+      "sid": "su-78ce0b48-e314-42b2-9d7e-3b7c72245148",
+      "ts": "2026-09-10T22:53:06.766559-04:00",
+      "atom": "grep -rn 'function persistSuSessionDescriptor' packages/operator-core/lib --include=*.ts"
     }
   ]
 }

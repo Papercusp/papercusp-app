@@ -37,6 +37,7 @@ import { machineFingerprint } from '../../identity/device-keychain-id';
 import { canonicalHiveHomeSlug } from '../../hive-federation';
 import { nodeActiveRoutines, nodeRunsCadenceLoops } from '../../cadence-runner-capability';
 import type { SharedPresenceRow } from './projections/presence';
+import type { SessionPresenceEntry } from './presence-gossip';
 import {
   registerPresenceGossipTopic,
   broadcastPresencePut,
@@ -406,6 +407,7 @@ const announcerState = pinModuleState('@papercusp/operator-core.wire-presence.an
 export function __resetSessionAnnouncersForTests(): void {
   for (const a of announcerState.sessionsByTopic.values()) a.stop();
   announcerState.sessionsByTopic.clear();
+  sessionRosterMemo.byWorkspace.clear();
 }
 
 function acquireSessionAnnouncer(
@@ -448,46 +450,22 @@ function startSessionAnnouncer(
         // workspace+owner+machine); take it from a live member so it stays stable.
         const labelHandle = members.values().next().value as PresenceWireHandle | undefined;
         if (!labelHandle) return;
-        // Dynamic import (the EI-279 layering idiom): the local roster lives in
-        // agent-tools/coordination; sync/hyperbee must not import it statically.
-        const { listPresence } = await import('../../agent-tools/coordination/presence');
-        const records = await listPresence({ workspaceId });
         const nowMs = (opts.now ?? Date.now)();
-        const sessions = (records ?? [])
-          .filter((r) => typeof r?.ownerId === 'string' && r.ownerId.length > 0)
-          .slice(0, 128)
-          .map((r) => ({
-            owner_id: r.ownerId,
-            kind: r.ownerId.startsWith('su-') ? 'su' : r.ownerId.startsWith('s-') ? 'cup' : 'agent',
-            intent: r.intent ?? null,
-            plan_slug: (r as { currentPlanSlug?: string | null }).currentPlanSlug ?? null,
-            harness_slug: labelHandle.harnessSlug,
-            last_active_ms: nowMs,
-            fleet_slug: null as string | null,
-            fleet_role: null as string | null,
-          }));
-        // P-301: stamp each announced session's named-fleet membership so a fleet
-        // spanning machines resolves `@fleet:<slug>` to its cross-machine members +
-        // leader. ONE batch read keyed by the announced ownerIds (constant, not N) —
-        // best-effort: a lookup error just leaves membership null (wire unchanged).
-        try {
-          const { fetchPresenceFleet } = await import(
-            '../../agent-tools/coordination/presence-fleet'
-          );
-          const fleetOf = await fetchPresenceFleet(sessions.map((s) => s.owner_id));
-          for (const s of sessions) {
-            const m = fleetOf.get(s.owner_id);
-            if (m?.fleetSlug) {
-              s.fleet_slug = m.fleetSlug;
-              s.fleet_role = m.fleetRole ?? null;
-            }
-          }
-        } catch {
-          /* membership enrichment is best-effort — never fails an announce */
-        }
-        const hash = JSON.stringify(
-          sessions.map((s) => [s.owner_id, s.intent, s.plan_slug, s.fleet_slug, s.fleet_role]),
-        );
+        // WI-10005271: the roster is workspace-wide, so every topic's announcer
+        // reads ONE shared snapshot instead of its own listPresence + fleet read.
+        const roster = await readSessionRosterSnapshot(workspaceId, nowMs);
+        // Fresh objects per topic: the snapshot is shared and must stay unmutated.
+        const sessions: SessionPresenceEntry[] = roster.entries.map((s) => ({
+          owner_id: s.owner_id,
+          kind: s.kind,
+          intent: s.intent,
+          plan_slug: s.plan_slug,
+          harness_slug: labelHandle.harnessSlug,
+          last_active_ms: nowMs,
+          fleet_slug: s.fleet_slug,
+          fleet_role: s.fleet_role,
+        }));
+        const hash = roster.hash;
         if (hash === lastHash && nowMs - lastSentMs < SESSION_ANNOUNCE_REFRESH_MS) return;
         const { broadcastSessions } = await import('./presence-gossip-wiring');
         if (await broadcastSessions(gossipTopicHex, sessions)) {
@@ -523,6 +501,93 @@ function startSessionAnnouncer(
 const SESSION_ANNOUNCE_TICK_MS = Number(process.env.PAPERCUSP_SESSION_ANNOUNCE_TICK_MS) || 10_000;
 const SESSION_ANNOUNCE_REFRESH_MS =
   Number(process.env.PAPERCUSP_SESSION_ANNOUNCE_REFRESH_MS) || 30_000;
+
+/** How long one workspace roster read serves every topic's announcer (WI-10005271).
+ *  Half a tick: ~2 reads per tick per workspace whatever the topic count, and a
+ *  roster change reaches the wire at most half a tick later than before. */
+const SESSION_ROSTER_SNAPSHOT_TTL_MS = Math.floor(SESSION_ANNOUNCE_TICK_MS / 2);
+
+/** The topic-independent part of an announced session (harness_slug and the
+ *  liveness beat are stamped per topic, per tick). */
+type SessionRosterEntry = Omit<SessionPresenceEntry, 'harness_slug' | 'last_active_ms'> & {
+  fleet_slug: string | null;
+  fleet_role: string | null;
+};
+
+interface SessionRosterSnapshot {
+  entries: readonly SessionRosterEntry[];
+  /** Change-detection key: owner, intent, plan and fleet per session. */
+  hash: string;
+}
+
+/** WI-10005271: one in-flight/recent roster read per workspace, shared by every
+ *  topic's sessions announcer. bg-host wires ~47 gossip topics for one workspace,
+ *  and each announcer read the full roster itself every tick (listPresence ~4.9/s
+ *  measured 2026-10-02 — a coord_presence scan plus enrichment per call). Pinned so
+ *  a split module record still shares one memo. */
+const sessionRosterMemo = pinModuleState('@papercusp/operator-core.wire-presence.roster-memo', () => ({
+  byWorkspace: new Map<string, { atMs: number; snapshot: Promise<SessionRosterSnapshot> }>(),
+}));
+
+/** Test-only: forget every cached roster snapshot. */
+export function __resetSessionRosterMemoForTests(): void {
+  sessionRosterMemo.byWorkspace.clear();
+}
+
+function readSessionRosterSnapshot(workspaceId: string, nowMs: number): Promise<SessionRosterSnapshot> {
+  const cached = sessionRosterMemo.byWorkspace.get(workspaceId);
+  const ageMs = cached ? nowMs - cached.atMs : Number.NaN;
+  // A negative age (clock stepped back) refreshes rather than pinning a stale read.
+  if (cached && ageMs >= 0 && ageMs < SESSION_ROSTER_SNAPSHOT_TTL_MS) return cached.snapshot;
+  const entry = { atMs: nowMs, snapshot: buildSessionRosterSnapshot(workspaceId) };
+  sessionRosterMemo.byWorkspace.set(workspaceId, entry);
+  // A failed read is never served from the memo: the next tick retries.
+  entry.snapshot.catch(() => {
+    if (sessionRosterMemo.byWorkspace.get(workspaceId) === entry) {
+      sessionRosterMemo.byWorkspace.delete(workspaceId);
+    }
+  });
+  return entry.snapshot;
+}
+
+async function buildSessionRosterSnapshot(workspaceId: string): Promise<SessionRosterSnapshot> {
+  // Dynamic import (the EI-279 layering idiom): the local roster lives in
+  // agent-tools/coordination; sync/hyperbee must not import it statically.
+  const { listPresence } = await import('../../agent-tools/coordination/presence');
+  const records = await listPresence({ workspaceId });
+  const entries: SessionRosterEntry[] = (records ?? [])
+    .filter((r) => typeof r?.ownerId === 'string' && r.ownerId.length > 0)
+    .slice(0, 128)
+    .map((r) => ({
+      owner_id: r.ownerId,
+      kind: r.ownerId.startsWith('su-') ? 'su' : r.ownerId.startsWith('s-') ? 'cup' : 'agent',
+      intent: r.intent ?? null,
+      plan_slug: (r as { currentPlanSlug?: string | null }).currentPlanSlug ?? null,
+      fleet_slug: null,
+      fleet_role: null,
+    }));
+  // P-301: stamp each announced session's named-fleet membership so a fleet
+  // spanning machines resolves `@fleet:<slug>` to its cross-machine members +
+  // leader. ONE batch read keyed by the announced ownerIds (constant, not N) —
+  // best-effort: a lookup error just leaves membership null (wire unchanged).
+  try {
+    const { fetchPresenceFleet } = await import('../../agent-tools/coordination/presence-fleet');
+    const fleetOf = await fetchPresenceFleet(entries.map((s) => s.owner_id));
+    for (const s of entries) {
+      const m = fleetOf.get(s.owner_id);
+      if (m?.fleetSlug) {
+        s.fleet_slug = m.fleetSlug;
+        s.fleet_role = m.fleetRole ?? null;
+      }
+    }
+  } catch {
+    /* membership enrichment is best-effort — never fails an announce */
+  }
+  const hash = JSON.stringify(
+    entries.map((s) => [s.owner_id, s.intent, s.plan_slug, s.fleet_slug, s.fleet_role]),
+  );
+  return { entries, hash };
+}
 
 /** Build the gossip WRITER half for this booted handle (P-004): the device
  *  signer + this machine's current-row provider (the hello snapshot + each

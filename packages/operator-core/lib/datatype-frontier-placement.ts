@@ -1,41 +1,38 @@
 /**
- * datatype-frontier-placement — the opt-in that lets a generic-kind datatype's work-items
- * enter the autonomous PLACEMENT frontier (reflexive-platform-extensibility-datatypes
- * P-001 follow-up; the design decision the visibility filter deferred).
+ * datatype-frontier-placement — which feature-family work-items enter the autonomous
+ * PLACEMENT frontier (claimFloorsWhereSql / survey.fetchFrontierRows /
+ * survey.countPlaceableFrontier / wake-frontier-guard). They all AND in this ONE clause, so
+ * an item that is claimable is also surveyed and wake-counted (no skew).
  *
- * VISIBILITY ≠ PLACEMENT. `featureFamilyKindClause` (work-items.ts) makes every registered
- * generic-kind datatype's items VISIBLE in list/count/search. But whether such an item also
- * gets a bee AUTO-PLACED on it (the Queen's claim/survey/wake frontier) is a heavier,
- * separate decision — a datatype is a data SHAPE, and auto-spawning a worker per instance
- * must be deliberate. So placement is OPT-IN: a datatype declares the {@link HIVE_PLACEMENT_TAG}
- * tag to enrol its kind in the frontier. Default (no tag) ⇒ tracked + visible, never
- * auto-placed.
+ * enterprise-data-sources-2026-10-01 P-009 / D-022: placement is decided by the row's
+ * NATURE and AUDIENCE (stamped at mint from datatype_registry, D-018) through the single work
+ * predicate `harness_shared.work_item_is_agent_work` — not by a per-row datatype_registry
+ * subquery for an opt-in tag. The old `hive-placement` tag gate is retired as a decider: a
+ * registered generic-kind datatype whose kind is nature `work`, audience `agent` is placeable
+ * like `feature`; a `record`/`document`/`event` kind, or a `work` kind addressed to a HUMAN
+ * (e.g. `email-draft-proposal`), never is.
  *
- * Tag-based (not a new column) on purpose: it needs no migration, so it can't collide on the
- * shared migration-number space. The frontier consumers (claimFloorsWhereSql /
- * survey.fetchFrontierRows / survey.countPlaceableFrontier / wake-frontier-guard) all AND in
- * the SAME clause so an item that is claimable is also surveyed + wake-counted (no skew).
+ * The issue-family kinds are routed to the issue claim path instead; that ROUTE is spelled
+ * once, in {@link issueFamilyRouteSql}. `chunk` needs no case: work_items:create rejects it
+ * and every chunk row is terminal, so the status floors already exclude it (D-022 point 2).
  *
- * Server-only (PG fragment).
+ * Valid only composed into a SELECT over `harness_shared.harness_features_consolidated`
+ * (columns referenced UNQUALIFIED). Server-only (PG fragment).
  */
 import type postgres from 'postgres';
+import { agentWorkConsolidatedWhereSql, issueFamilyRouteSql } from './work-nature/agent-work-predicate';
 
-/** A generic-kind datatype carries this tag to opt its work-items into the placement frontier. */
+/**
+ * The retired opt-in tag. Kept exported only so tests can prove a tagged datatype gains
+ * nothing from it: placement follows nature/audience whether or not the tag is present.
+ */
 export const HIVE_PLACEMENT_TAG = 'hive-placement';
 
 /**
- * The frontier kind filter: the active built-in feature kind, PLUS any
- * generic-kind datatype kinds that opted into placement (the {@link HIVE_PLACEMENT_TAG}).
- * DARK until a datatype opts in — the subquery is empty otherwise, so the live frontier is
- * byte-identical to before this clause existed. Mirrors `featureFamilyKindClause` but adds
- * the opt-in tag gate (the visibility filter has no such gate).
+ * The frontier filter: every feature-family row (not issue-routed) that is agent work.
+ * `workspaceId` is unused since D-022 (the predicate reads row columns only, D-008); every
+ * caller already filters `workspace_id` itself.
  */
-export function frontierPlacementKindClause(sql: postgres.Sql, workspaceId: string) {
-  return sql`(item_kind = 'feature'
-       OR item_kind IN (
-         SELECT work_item_kind FROM harness_shared.datatype_registry
-          WHERE workspace_id = ${workspaceId} AND tier = 'generic-kind' AND status = 'active'
-            AND work_item_kind IS NOT NULL
-            AND ${HIVE_PLACEMENT_TAG} = ANY(tags)
-       ))`;
+export function frontierPlacementKindClause(sql: postgres.Sql, _workspaceId?: string) {
+  return sql`(NOT (${issueFamilyRouteSql(sql, null)}) AND ${agentWorkConsolidatedWhereSql(sql, null)})`;
 }

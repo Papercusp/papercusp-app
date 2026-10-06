@@ -217,6 +217,95 @@ export function compareLegs(
  * the pooled number is uninterpretable and must be reported as such rather
  * than quoted as the answer.
  */
+/** Source targets are the resampling unit for independent relevance. Join
+ * co-relevant sources before averaging, so repeated questions and multi-source
+ * answers cannot masquerade as independent observations. Query CIs remain a
+ * secondary diagnostic. The adoption margin is fixed, including for nulls. */
+export function compareSourceGroupedLegs(
+  baseline: string, baselineRows: readonly PerQueryRow[], candidate: string, candidateRows: readonly PerQueryRow[],
+  entries: readonly { key: string; metadata?: Record<string, unknown> }[],
+  queries: readonly { id: string; class: string; group: string; expected: string[] }[],
+) {
+  const index = (rows: readonly PerQueryRow[]) => {
+    if (new Set(rows.map((r) => r.id)).size !== rows.length || rows.length !== queries.length
+      || rows.some((r) => !Number.isFinite(r.reciprocalRank) || r.reciprocalRank < 0 || r.reciprocalRank > 1)) {
+      throw new Error('source comparison has duplicate/incomplete/invalid outcomes');
+    }
+    return new Map(rows.map((r) => [r.id, r]));
+  };
+  if (new Set(queries.map((q) => q.id)).size !== queries.length) throw new Error('duplicate source comparison query');
+  const a = index(baselineRows), b = index(candidateRows);
+  const sources = new Map(entries.map((e) => [e.key, String(e.metadata?.cluster ?? '')]));
+  const parent = new Map<string, string>();
+  const root = (s: string): string => {
+    const p = parent.get(s); if (!p) { parent.set(s, s); return s; }
+    if (p === s) return s;
+    const r = root(p); parent.set(s, r); return r;
+  };
+  for (const q of queries) {
+    if (a.get(q.id)?.class !== q.class || b.get(q.id)?.class !== q.class) throw new Error('source comparison query identity mismatch');
+    if (q.class === 'hard-negative') continue;
+    if (!ANSWERABLE_CLASSES.includes(q.class as typeof ANSWERABLE_CLASSES[number]) || !q.group || !q.expected.length) {
+      throw new Error('invalid positive source comparison query');
+    }
+    for (const key of q.expected) {
+      const s = sources.get(key); if (!s) throw new Error('source comparison answer absent/unattributed');
+      const x = root(q.group), y = root(s);
+      parent.set(x < y ? y : x, x < y ? x : y);
+    }
+  }
+  const margin = DECISION_RELEVANT_DELTA_MRR;
+  const byClass = Object.fromEntries([...ANSWERABLE_CLASSES, ALL_ANSWERABLE].map((cls) => {
+    const grouped = new Map<string, { queryIds: string[]; a: number[]; b: number[] }>();
+    for (const q of queries) {
+      if (q.class === 'hard-negative' || (cls !== ALL_ANSWERABLE && q.class !== cls)) continue;
+      const group = root(q.group), row = grouped.get(group) ?? { queryIds: [], a: [], b: [] };
+      row.queryIds.push(q.id); row.a.push(a.get(q.id)!.reciprocalRank); row.b.push(b.get(q.id)!.reciprocalRank); grouped.set(group, row);
+    }
+    if (!grouped.size) throw new Error(`missing positive source class ${cls}`);
+    const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
+    const groups = [...grouped].sort(([x], [y]) => x.localeCompare(y)).map(([source, r]) => ({
+      source, queryIds: r.queryIds, baselineMrr: mean(r.a), candidateMrr: mean(r.b),
+    }));
+    const comparison = pairedBootstrapCI(groups.map((g) => g.baselineMrr), groups.map((g) => g.candidateMrr), { seed: 10004537, iterations: 20000 });
+    const { lower, upper } = comparison.delta;
+    const marginDecision = groups.length < 2 ? 'unresolved' : lower > margin ? 'improvement-above-margin'
+      : upper < -margin ? 'loss-above-margin' : lower >= -margin && upper <= margin ? 'inside-margin' : 'unresolved';
+    return [cls, { sourceTargets: groups.length, queryCount: groups.reduce((n, g) => n + g.queryIds.length, 0),
+      groups, comparison, marginDecision, marginResolved: marginDecision !== 'unresolved' }];
+  }));
+  return { baseline, candidate, unit: 'source-target-component', decisionMargin: margin, byClass };
+}
+
+/** Planning only: extrapolate the existing bootstrap-derived MDE under stable
+ * paired variance and independent future components. Accessible source counts
+ * are an upper bound: co-relevance unions and label exclusions reduce them.
+ * Neither projection resolves a margin or changes the observed verdict. */
+export function planSourcePower(comparison: ReturnType<typeof compareSourceGroupedLegs>, accessibleTestSources: number) {
+  if (!Number.isSafeInteger(accessibleTestSources) || accessibleTestSources < 1
+    || comparison.unit !== 'source-target-component' || comparison.decisionMargin !== DECISION_RELEVANT_DELTA_MRR) throw new Error('invalid source power population/contract');
+  return Object.fromEntries(Object.entries(comparison.byClass).map(([cls, row]) => {
+    const { n, mde80, delta } = row.comparison;
+    if (n !== row.sourceTargets || n !== row.groups.length || n > accessibleTestSources
+      || !Number.isSafeInteger(n) || n < 1 || !Number.isFinite(mde80) || mde80 < 0
+      || !Number.isFinite(delta.point) || Math.abs(delta.point) > 1) throw new Error('invalid source power comparison');
+    const margin = comparison.decisionMargin, distance = Math.abs(Math.abs(delta.point) - margin);
+    const status = n < 2 ? 'insufficient-components' : mde80 === 0 ? 'zero-observed-variance-no-extrapolation' : 'conditional-variance-projection';
+    const project = (effect: number): number | null => {
+      if (status !== 'conditional-variance-projection' || effect === 0) return null;
+      const target = Math.ceil(n * (mde80 / effect) ** 2);
+      return Number.isSafeInteger(target) ? Math.max(n, target) : null;
+    };
+    return [cls, { sourceComponents: n, observedMde80: mde80, observedDelta: delta.point,
+      observedMarginDecision: row.marginDecision, decisionMargin: margin, marginBoundaryDistance: distance,
+      accessibleTestSourcesUpperBound: accessibleTestSources, status,
+      projectedComponentsForEffect03VsZero: project(margin),
+      projectedComponentsForObservedMarginDistance: project(distance),
+      projectedMde80AtSourceUpperBound: status === 'conditional-variance-projection' ? mde80 * Math.sqrt(n / accessibleTestSources) : null,
+      acceptanceEstablishedByProjection: false }];
+  }));
+}
+
 export function classesDisagree(cmp: LegComparison): boolean {
   const signs = new Set<string>();
   for (const [cls, row] of Object.entries(cmp.byClass)) {

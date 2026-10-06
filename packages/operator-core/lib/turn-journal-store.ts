@@ -126,7 +126,7 @@ export async function recentTurnJournal(filter: {
       ${filter.ownerId ? sql`AND owner_id = ${filter.ownerId}` : sql``}
       ${filter.sessionId ? sql`AND session_id = ${filter.sessionId}` : sql``}
       ${filter.tripwiredOnly ? sql`AND tripwire IS NOT NULL` : sql``}
-    ORDER BY created_at DESC
+    ORDER BY session_turn_journal.created_at DESC
     LIMIT ${limit}
   `;
   return rows;

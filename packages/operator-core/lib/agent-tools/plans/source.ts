@@ -1526,8 +1526,10 @@ function escapeLike(token: string): string {
  * slug-only match (searching a plan's own slug, whose hyphenated tokens never
  * appear verbatim in its title/body) needs the explicit plan_slug arm or the
  * plan is lossily excluded (F-FIX-028/029). A plan with zero token hits in
- * either can never score and is lossless to exclude. `limit` caps the candidate
- * set; `truncated` reports when the cap bit (no silent caps).
+ * either can never score and is lossless to exclude. Before applying `limit`,
+ * candidates rank by the number of distinct query tokens matched so common,
+ * low-signal matches do not crowd out plans with stronger lexical evidence.
+ * `truncated` reports when the cap bit (no silent caps).
  */
 export async function listPlanRowsMatchingAnyToken(
   tokens: string[],
@@ -1536,7 +1538,7 @@ export async function listPlanRowsMatchingAnyToken(
   if (tokens.length === 0) return { rows: [], truncated: false };
   const { workspaceId, harnessSlug } = await resolvePlanScope(opts);
   const limit = opts.limit && opts.limit > 0 ? opts.limit : 200;
-  const patterns = tokens.map((t) => `%${escapeLike(t)}%`);
+  const patterns = [...new Set(tokens.map((t) => `%${escapeLike(t)}%`))];
   try {
     const rows = await withWorkspace(workspaceId, async (tx) => {
       const archivedFilter = opts.includeArchived ? tx`` : tx`AND archived = false`;
@@ -1551,7 +1553,11 @@ export async function listPlanRowsMatchingAnyToken(
          WHERE workspace_id = ${workspaceId} AND harness_slug = ${harnessSlug}
          ${archivedFilter}
            AND (content ILIKE ANY(${patterns}::text[]) OR plan_slug ILIKE ANY(${patterns}::text[]))
-         ORDER BY plan_slug ASC
+         ORDER BY (
+           SELECT COUNT(DISTINCT query_term.pattern)
+             FROM unnest(${patterns}::text[]) AS query_term(pattern)
+            WHERE content ILIKE query_term.pattern OR plan_slug ILIKE query_term.pattern
+         ) DESC, plan_slug ASC
          LIMIT ${limit + 1}
       `;
     });
@@ -1574,7 +1580,11 @@ export async function listPlanRowsMatchingAnyToken(
            WHERE workspace_id = ${workspaceId} AND harness_slug = ${harnessSlug}
            ${archivedFilter}
              AND (content ILIKE ANY(${patterns}::text[]) OR plan_slug ILIKE ANY(${patterns}::text[]))
-           ORDER BY plan_slug ASC
+           ORDER BY (
+             SELECT COUNT(DISTINCT query_term.pattern)
+               FROM unnest(${patterns}::text[]) AS query_term(pattern)
+              WHERE content ILIKE query_term.pattern OR plan_slug ILIKE query_term.pattern
+           ) DESC, plan_slug ASC
            LIMIT ${limit + 1}
         `;
       });

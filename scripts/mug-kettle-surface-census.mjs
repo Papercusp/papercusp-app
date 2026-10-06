@@ -544,7 +544,15 @@ for (const abs of codeFiles) {
 /* ── D4: tool registrations owned by the tier ──────────────────────────────────────
    Shape: name: 'pot:start' inside a tooldef.                                          */
 const D4_RE = /name\s*:\s*["'`]((?:pot|cup|kettle|overwatch|mug):[a-z0-9_-]+)["'`]/gi;
+// This canonical disposition registry stores verb names as data, not tooldefs. The
+// executable registrations live in the individual agent-tools modules; counting these
+// rows as registrations duplicated each one and incorrectly surfaced gated, excluded,
+// and deleted verbs as NEW UNGATED tools.
+const D4_NON_REGISTRATION_DATA = new Set([
+  path.join(REPO_ROOT, 'packages/operator-core/lib/agent-tools/_mug-kettle-gate-population.ts'),
+]);
 for (const abs of codeFiles) {
+  if (D4_NON_REGISTRATION_DATA.has(abs)) continue;
   const src = code(abs);
   for (const m of src.matchAll(D4_RE)) {
     const toolName = m[1];

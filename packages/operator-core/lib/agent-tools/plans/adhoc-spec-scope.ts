@@ -28,6 +28,7 @@
  * the existing keys already make.
  */
 
+import { hashPlanContent } from '@papercusp/plan-parser/content-hash';
 import type postgres from 'postgres';
 
 /**
@@ -134,10 +135,30 @@ export async function resolveSpecScopeSlug(
 ): Promise<string> {
   const named = planSlug?.trim();
   if (named) return named;
-  await tx`
-    INSERT INTO harness_shared.harness_plans (workspace_id, harness_slug, plan_slug, content)
-    VALUES (${workspaceId}, ${harnessSlug}, ${ADHOC_WORK_ITEM_SPEC_SCOPE}, ${ADHOC_SCOPE_CONTENT})
-    ON CONFLICT (workspace_id, harness_slug, plan_slug) DO NOTHING`;
+  // content_hash is written with the body: the column defaults to '' and the plan-parts
+  // reconcile joins plan_revisions on it, so a body left at the default hash never
+  // matches its own revision (WI-10006321, measured on the live adhoc-work-item-specs row).
+  const contentHash = hashPlanContent(ADHOC_SCOPE_CONTENT);
+  const materialised = await tx<Array<{ plan_slug: string }>>`
+    INSERT INTO harness_shared.harness_plans (workspace_id, harness_slug, plan_slug, content, content_hash)
+    VALUES (${workspaceId}, ${harnessSlug}, ${ADHOC_WORK_ITEM_SPEC_SCOPE}, ${ADHOC_SCOPE_CONTENT}, ${contentHash})
+    ON CONFLICT (workspace_id, harness_slug, plan_slug) DO NOTHING
+    RETURNING plan_slug`;
+  if (materialised.length > 0) {
+    // WI-10006321: a raw content write outside withPlanLock records its own revision in the
+    // caller's transaction, so every live plan body has one. Lazy: this module is a leaf
+    // the spec stores import, and revisions.ts reaches back into the plan-source graph.
+    const { recordSystemPlanRevisionInTransaction, ADHOC_SPEC_SCOPE_REVISION_AUTHOR } = await import('./revisions');
+    await recordSystemPlanRevisionInTransaction(tx, {
+      workspaceId,
+      harnessSlug,
+      planSlug: ADHOC_WORK_ITEM_SPEC_SCOPE,
+      content: ADHOC_SCOPE_CONTENT,
+      contentHash,
+      rationale: 'ad-hoc spec scope materialised on first use',
+      authorId: ADHOC_SPEC_SCOPE_REVISION_AUTHOR,
+    });
+  }
   const itemId = planItemId?.trim();
   // Refuse to materialise an item the revisions CHECK would later reject. Creating the row
   // anyway would trade a clear `plan_item_not_found` for a raw 23514 constraint violation

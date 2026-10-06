@@ -42,7 +42,7 @@
             "https://www.googleapis.com/auth/contacts.readonly"
           ]
         },
-        "description": "OAuth credential for Gmail drafting plus Calendar/Contacts context. Never copied into a snapshot and never shared with a forker. Note the absence of any gmail.send scope: this pack cannot send mail even if instructed to."
+        "description": "OAuth credential for Gmail drafting plus Calendar/Contacts context. Never copied into a snapshot and never shared with a forker. This pack only drafts: the host refuses a send from a triggered run while the owner-authority flag papercusp-gmail-auto-send is OFF (gmail.compose alone would permit sending, so the scope list is not the guard)."
       }
     }
   },
@@ -135,7 +135,7 @@
             "trigger": {
               "type": "object",
               "additionalProperties": true,
-              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey"],
               "properties": {
                 "key": { "const": "ext:gmail:message.received" },
                 "source": { "const": "gmail" },
@@ -203,7 +203,7 @@
             "trigger": {
               "type": "object",
               "additionalProperties": true,
-              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey"],
               "properties": {
                 "key": { "const": "ext:gcal:event-upcoming" },
                 "source": { "const": "gcal" },
@@ -243,7 +243,7 @@
             "trigger": {
               "type": "object",
               "additionalProperties": true,
-              "required": ["payload"],
+              "required": [],
               "properties": {
                 "payload": {
                   "type": "object",

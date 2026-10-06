@@ -13,6 +13,7 @@ import { basename, join } from 'node:path';
 import {
   assertNeverSuSession,
   type OpenCardSnapshot,
+  type SuApprovalsMode,
   type SuSessionCapabilities,
   type SuSessionCommand,
   type SuSessionDescriptor,
@@ -36,6 +37,7 @@ import {
 } from './launch-agent';
 import { nativeSessionHandleForAdvSession, type OmpNativeSessionHandle } from './native-session-handles';
 import { bindSuSessionToAdvSession, persistSuSessionDescriptor } from './su-session-persistence';
+import { SuOwnerTurnReceiptMatcher, type SuOwnerTurnReceiptRef } from './su-session-commands';
 import { findOmpSessionPath, ompAgentHomeForSessionKey } from './session-transcript-resolvers';
 import { createOmpTimelineParser, type TimelineLineParser } from './session-timeline-parsers';
 import { gatewayServedAccountForOwner } from './compaction-usage';
@@ -66,7 +68,8 @@ export type OmpNativeCommandVerdict =
   | { ok: false; code: string; message: string; retryable: boolean };
 
 export interface OmpSuSessionControls {
-  ownerTurn(input: { ownerId: string; turnId: string; content: string }): Promise<OmpNativeCommandVerdict>;
+  /** `model` (P-026): a `model[:effort]` spec to apply before this turn; omitted keeps the current one. */
+  ownerTurn(input: { ownerId: string; turnId: string; content: string; model?: string; approvals?: SuApprovalsMode }): Promise<OmpNativeCommandVerdict>;
   interrupt(input: { ownerId: string; reason?: string }): Promise<OmpNativeCommandVerdict>;
   resume(input: {
     ownerId: string;
@@ -93,6 +96,9 @@ export interface CreateOmpSuSessionAdapterOptions extends OmpSuSessionDescriptor
   ready?: boolean;
   runtimeReady?: () => boolean;
   register?: boolean;
+  /** Saved owner turns for this session (production: loadSuOwnerTurnReceipts).
+   * A replayed prompt takes the turn id its command was saved under (WI-10004254). */
+  ownerTurnReceipts?: (identity: SuSessionDescriptor<'omp'>['identity']) => Promise<readonly SuOwnerTurnReceiptRef[]>;
 }
 
 export interface OpenOmpSuSessionOptions extends CreateOmpSuSessionAdapterOptions {
@@ -359,11 +365,19 @@ function recordIndicatesCompaction(record: Record<string, unknown>): boolean {
   return type.includes('compact') || subtype.includes('compact') || record.isCompaction === true;
 }
 
+/** OMP stops an assistant message to run its tool calls and then continues
+ *  the same turn, so `toolUse` is a pause, not a turn end. Treating it as one
+ *  reported `waiting-for-owner` mid-turn on every tool call: PUI closed the
+ *  turn ("Worked for 3s" above the tool row) and could send a queued draft
+ *  into a turn still running (pui-chat-first-ux P-025). */
+const OMP_TOOL_USE_STOPS = new Set(['tooluse', 'tool_use', 'tool_calls']);
+
 function recordEndsTurn(record: Record<string, unknown>): boolean {
   const type = String(record.type ?? '').toLowerCase();
   if (type === 'turn_end' || type === 'message_end') return true;
   const message = asRecord(record.message);
-  return type === 'message' && message?.role === 'assistant' && message?.stopReason != null;
+  if (type !== 'message' || message?.role !== 'assistant' || message?.stopReason == null) return false;
+  return !OMP_TOOL_USE_STOPS.has(String(message.stopReason).toLowerCase());
 }
 
 export class OmpSuSessionAdapter {
@@ -378,6 +392,8 @@ export class OmpSuSessionAdapter {
   private readonly unregister: (() => void) | null;
   private lastErrorKey: string | null = null;
   private readonly servedAccountReader: SuSessionServedAccountReader;
+  private readonly receiptMatcher = new SuOwnerTurnReceiptMatcher();
+  private readonly ownerTurnReceipts: CreateOmpSuSessionAdapterOptions['ownerTurnReceipts'] | null;
   /**
    * Set once a `model_change` record has named the resolved model. OMP stamps
    * assistant messages with a BARE id (`stealth/ox-alpha`) while `model_change`
@@ -395,6 +411,7 @@ export class OmpSuSessionAdapter {
   ) {
     this.runtimeValue = runtime;
     this.servedAccountReader = options.servedAccountReader ?? gatewayServedAccountForOwner;
+    this.ownerTurnReceipts = options.ownerTurnReceipts ?? null;
     this.controls = { ...defaultControls(), ...(options.controls ?? {}) };
     const hostOptions = {
       descriptor: descriptorFor(binding, runtime, options),
@@ -450,6 +467,13 @@ export class OmpSuSessionAdapter {
     return this.currentTurnId;
   }
 
+  /** A replayed prompt shows under the turn id its owner command was saved with,
+   * so the transcript and the su_command receipt name the same turn; a prompt
+   * with no saved receipt (typed natively) keeps its own omp: id (WI-10004254). */
+  private replayTurnId(content: string, recordId: string | null): string {
+    return this.receiptMatcher.take(content) ?? this.nextTurnId(recordId);
+  }
+
   private emitTranscript(input: { turnId: string; role: 'owner' | 'assistant' | 'system'; channel: 'text' | 'reasoning'; content: string }): void {
     this.host.emit({ type: 'transcript', phase: 'started', turnId: input.turnId, role: input.role, channel: input.channel } as SuSessionEventInput<'omp'>);
     if (input.content) this.host.emit({ type: 'transcript', phase: 'delta', turnId: input.turnId, role: input.role, channel: input.channel, content: input.content } as SuSessionEventInput<'omp'>);
@@ -496,7 +520,7 @@ export class OmpSuSessionAdapter {
 
     for (const entry of this.parser.parseLine(line)) {
       const turnId = entry.kind === 'prompt'
-        ? (this.currentTurnId = this.nextTurnId(recordId))
+        ? (this.currentTurnId = replay ? this.replayTurnId(entry.text ?? '', recordId) : this.nextTurnId(recordId))
         : this.ensureTurn(recordId);
       if (entry.kind === 'prompt') {
         if (!preserveLifecycle) this.host.transition('running', 'OMP owner turn persisted');
@@ -555,6 +579,11 @@ export class OmpSuSessionAdapter {
 
   async consumeTranscriptSnapshot({ preserveLifecycle = false }: { preserveLifecycle?: boolean } = {}): Promise<void> {
     if (!this.runtimeValue.transcriptPath) throw new Error('OMP runtime has no resolved transcript path');
+    // Best-effort: without the saved receipts a restored prompt still gets its
+    // own (fresh) turn id, so a failed read degrades the id, never the replay.
+    if (this.ownerTurnReceipts) {
+      this.receiptMatcher.load(await this.ownerTurnReceipts(this.host.descriptor().identity).catch(() => []));
+    }
     for await (const line of readOmpTranscriptSnapshotLines(this.runtimeValue.transcriptPath)) this.ingestNativeLine(line, { preserveLifecycle, replay: true });
   }
 
@@ -580,8 +609,14 @@ export class OmpSuSessionAdapter {
     let verdict: OmpNativeCommandVerdict;
     switch (command.type) {
       case 'owner_turn':
+        // Shown live under this id already; a later replay must not take it.
+        this.receiptMatcher.markUsed(command.turnId);
         context.transition('running', 'owner turn accepted');
-        verdict = await this.controls.ownerTurn({ ownerId, turnId: command.turnId, content: command.content });
+        verdict = await this.controls.ownerTurn({
+          ownerId, turnId: command.turnId, content: command.content,
+          ...(command.model ? { model: command.model } : {}),
+          ...(command.approvals ? { approvals: command.approvals } : {}),
+        });
         if (!verdict.ok) context.transition('waiting-for-owner', verdict.message);
         break;
       case 'interrupt':

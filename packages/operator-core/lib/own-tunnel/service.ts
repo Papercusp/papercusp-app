@@ -613,7 +613,9 @@ export function startOwnTunnelReconciler(deps?: OwnTunnelDeps): void {
     async () => {
       await reconcileOwnTunnel(deps);
     },
-    { category: 'watchdog' },
+    // must-sample: the row has no cross-process change feed, and operator-port and connector
+    // liveness emit no events.
+    { category: 'watchdog', classification: 'must-sample' },
   );
 }
 

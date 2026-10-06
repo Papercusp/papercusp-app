@@ -206,6 +206,9 @@ const TRANSIENT_EXEC_WORKLOAD_RE =
   /\b(?:type[\s_-]?check|lint(?:ing)?|build|test[\s_-]+(?:run|suite|command)|vitest|jest|pytest|playwright|tsc|shell|command)\b/i;
 const NUMERIC_EXEC_HANDLE_RE =
   /\b(?:session|process)(?:\s*[/]\s*(?:session|process))?(?:[\s_-]+(?:id|handle))?\s*(?:is|:|=|#)?\s*`?\d+`?(?=\W|$)/i;
+const NUMERIC_EXEC_HANDLE_LIST_RE =
+  /\bexec(?:\s+command)?\s+handles?\s*(?:ids?\s*)?(?:is|are|:|=)?\s*`?\d+(?:\s*[\/,]\s*`?\d+)*(?=\W|$)/i;
+const DEVICE_AUTH_WORKLOAD_RE = /--device-auth\b|\bdevice[\s_-]+auth(?:entication)?\b/i;
 
 /**
  * A numeric exec/write_stdin handle is process-local, unlike a native agent-session id.
@@ -218,8 +221,18 @@ const NUMERIC_EXEC_HANDLE_RE =
  * warm carry-respawns cannot hand a successor a stale write_stdin id silently.
  */
 export function transientExecHandleWarning(note: string): string | null {
-  if (!NUMERIC_EXEC_HANDLE_RE.test(note)) return null;
+  if (!NUMERIC_EXEC_HANDLE_RE.test(note) && !NUMERIC_EXEC_HANDLE_LIST_RE.test(note)) return null;
   if (!TRANSIENT_EXEC_TOOL_RE.test(note) && !TRANSIENT_EXEC_WORKLOAD_RE.test(note)) return null;
+  if (DEVICE_AUTH_WORKLOAD_RE.test(note)) {
+    return (
+      '⚠ CARRIED DEVICE-AUTH EXEC HANDLE: a predecessor-local handle is not evidence the login ' +
+      'process is still alive or has exited. Do NOT call `write_stdin` with the carried id or ' +
+      'start another device login until you verify the current process/task state and the prior ' +
+      'device code has expired. For future logins that must survive a carry, use the durable ' +
+      '`capability:bash` tracked-task flow, persist its `task_id` and log pointer, and resume via ' +
+      '`capability:bash_output { task_id }`.'
+    );
+  }
   return (
     '⚠ CARRIED TRANSIENT EXEC HANDLE: this note names a numeric session/process handle for ' +
     '`exec_command`, `write_stdin`, unified exec, or a command-like workload. It is process-local and cannot be assumed ' +

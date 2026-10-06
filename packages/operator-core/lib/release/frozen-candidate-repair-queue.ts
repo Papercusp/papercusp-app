@@ -428,6 +428,8 @@ export interface FrozenRepairAdmissionPrecheck {
   runnerPid?: number;
   /** Boot id + /proc start ticks, so a recycled PID cannot masquerade as the runner. */
   runnerPidIdentity?: string;
+  /** WI-10006003: task-manager identity for a runner that outlives its serving host process. */
+  runnerTaskId?: string;
   startedAtMs: number;
   updatedAtMs: number;
   expiresAtMs: number;
@@ -1431,6 +1433,7 @@ function parseAdmissionPrecheck(value: unknown): FrozenRepairAdmissionPrecheck |
     !nonBlank(row.actor) ||
     (row.runnerPid !== undefined && (!Number.isInteger(row.runnerPid) || (row.runnerPid as number) <= 0)) ||
     (row.runnerPidIdentity !== undefined && (!nonBlank(row.runnerPidIdentity) || row.runnerPid === undefined)) ||
+    (row.runnerTaskId !== undefined && !nonBlank(row.runnerTaskId)) ||
     !files ||
     !files.every(nonBlank) ||
     !validTimestamp(row.startedAtMs) ||
@@ -1481,6 +1484,7 @@ function parseAdmissionPrecheck(value: unknown): FrozenRepairAdmissionPrecheck |
     actor: row.actor as string,
     ...(typeof row.runnerPid === 'number' ? { runnerPid: row.runnerPid } : {}),
     ...(typeof row.runnerPidIdentity === 'string' ? { runnerPidIdentity: row.runnerPidIdentity } : {}),
+    ...(typeof row.runnerTaskId === 'string' ? { runnerTaskId: row.runnerTaskId } : {}),
     startedAtMs: row.startedAtMs as number,
     updatedAtMs: row.updatedAtMs as number,
     expiresAtMs: row.expiresAtMs as number,

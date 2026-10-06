@@ -107,6 +107,57 @@
         }
       }
     },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Integration provider descriptor (generalized-integrations D-006). The plugin's adapter implements describe/syncPage/invoke; the host owns connections, credentials, cursors and grants, and providers reach the network only through host.fetch within egressHosts.",
+      "required": ["id", "contractVersion", "datatypes", "capabilities", "egressHosts"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$" },
+        "contractVersion": { "type": "integer", "minimum": 1 },
+        "displayName": { "type": "string" },
+        "datatypes": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "oauth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authorizeUrl", "tokenUrl", "scopes"],
+          "properties": {
+            "authorizeUrl": { "type": "string" },
+            "tokenUrl": { "type": "string" },
+            "scopes": { "type": "array", "items": { "type": "string" } },
+            "pkce": { "type": "boolean" },
+            "clientRegistrationRef": { "type": "string" },
+            "credentialGroup": { "type": "string" },
+            "identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url", "idField"],
+              "properties": {
+                "url": { "type": "string" },
+                "idField": { "type": "string" },
+                "displayNameField": { "type": "string" }
+              }
+            }
+          }
+        },
+        "egressHosts": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "serviceCredentials": {
+          "type": "array",
+          "description": "Host-held service credentials the provider needs by reference (D-018), e.g. a Pub/Sub service account. Each ref is resolved by the host and injected by host.fetch only for its listed hosts, which must also be in egressHosts.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref", "hosts"],
+            "properties": {
+              "ref": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$" },
+              "hosts": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+            }
+          }
+        },
+        "configSchema": { "type": "object" }
+      }
+    },
     "triggerPack": {
       "type": "object",
       "additionalProperties": false,
@@ -173,10 +224,21 @@
                   {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["kind", "sourceKind"],
+                    "required": ["kind"],
+                    "description": "Provider-pinned (sourceKind, pattern ext:<sourceKind>:…) or portable (datatype + capabilities, pattern ext:*:…; bound at install to an installer-chosen local source whose provider produces the datatype).",
+                    "oneOf": [
+                      { "required": ["sourceKind"], "not": { "required": ["datatype"] } },
+                      { "required": ["datatype"], "not": { "required": ["sourceKind"] } }
+                    ],
                     "properties": {
                       "kind": { "const": "external" },
                       "sourceKind": { "type": "string", "pattern": "^[a-z][a-z0-9._-]*$" },
+                      "datatype": { "type": "string", "pattern": "^[a-z][a-z0-9._-]*$" },
+                      "capabilities": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "uniqueItems": true
+                      },
                       "oauthField": { "type": "string", "minLength": 1 }
                     }
                   },

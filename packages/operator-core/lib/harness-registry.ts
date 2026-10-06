@@ -558,7 +558,7 @@ export async function saveHarnessRegistry(
   if (next.length !== prevCount) {
     await auditRegistryWrite(ws, prevCount, next.length);
   }
-  notifyRegistryChanged();
+  await notifyRegistryChanged();
 }
 
 /**
@@ -566,22 +566,28 @@ export async function saveHarnessRegistry(
  * mutation, so open harness lists live-update without a remount (EI-206).
  * The notify rides pg_notify, so writes from OTHER operator processes
  * (e.g. an MCP-side harness:create) reach this process's SSE subscribers
- * too. Fire-and-forget — a notify failure never blocks the write.
+ * too — and every cluster worker's operator-state cache drops its registry
+ * entry on it (startOperatorStateCacheCoherence, WI-10004071).
+ *
+ * AWAITED, and UN-DEDUPED (WI-10004071): the NOTIFY is published before the
+ * write returns, so a caller that writes and then hands off to a request on a
+ * sibling worker never races it; and `dedupeWindowMs: 0` because the bus's
+ * default 90 s source dedupe keys on name|args|data, which is identical for
+ * every registry write — a second back-to-back write (harness:create then
+ * pot:add-member) was silently dropped. Registry writes are rare, so there is
+ * no storm to dedupe. A notify failure still never fails the write.
  */
-function notifyRegistryChanged(): void {
-  void (async () => {
-    try {
-      const [{ bustProjectsLiteCache }, { notifySyncInvalidate }] = await Promise.all([
-        import('./harness/projects-lite'),
-        import('./sync-sse'),
-      ]);
-      bustProjectsLiteCache();
-      await notifySyncInvalidate('harnessProjects.lite', {});
-    } catch (err) {
-       
-      console.warn('[harness-registry] sync invalidate failed:', err);
-    }
-  })();
+async function notifyRegistryChanged(): Promise<void> {
+  try {
+    const [{ bustProjectsLiteCache }, { notifySyncInvalidate }] = await Promise.all([
+      import('./harness/projects-lite'),
+      import('./sync-sse'),
+    ]);
+    bustProjectsLiteCache();
+    await notifySyncInvalidate('harnessProjects.lite', {}, undefined, { dedupeWindowMs: 0 });
+  } catch (err) {
+    console.warn('[harness-registry] sync invalidate failed:', err);
+  }
 }
 
 /**
@@ -642,7 +648,7 @@ export async function mutateHarnessRegistry(
   if (nextCount !== prevCount) {
     await auditRegistryWrite(ws, prevCount, nextCount);
   }
-  notifyRegistryChanged();
+  await notifyRegistryChanged();
   return next;
 }
 

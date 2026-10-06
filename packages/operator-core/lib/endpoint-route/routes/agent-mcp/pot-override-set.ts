@@ -118,7 +118,23 @@ export default defineTool({
             const dropped = submittedKeys.filter(
               (k) => !(SCOUT_CONFIG_KEYS as readonly string[]).includes(k) || !(k in accepted),
             );
-            extra = { accepted, resolved: resolveScoutConfig(accepted), dropped };
+            const resolved = resolveScoutConfig(accepted);
+            extra = { accepted, resolved, dropped };
+            // WI-10004526: llmCall refuses a Codex model with no usage price, so an
+            // unpriced Scout model fails every cycle (the WI-10004502 outage). Say so
+            // at WRITE time; the value is still stored (feedback, not a gate — D-005).
+            const { unpricedCodexModel } = await import('../../../llm-testing/codex-model-pricing');
+            const unpricedModels = Object.entries(resolved.models)
+              .map(([phase, spec]) => ({ phase, model: unpricedCodexModel(spec) }))
+              .filter((row): row is { phase: string; model: string } => row.model !== null);
+            if (unpricedModels.length > 0) {
+              const warning =
+                `scout models with no usage price will fail every call: ` +
+                unpricedModels.map((r) => `${r.phase}=${r.model}`).join(', ') +
+                ' — add a price to libs/generic/model-pricing/src/index.ts or choose a priced model';
+              extra = { ...extra, unpricedModels, warning };
+              console.warn(`[pot-override-set] ${potSlug}/${name}: ${warning}`);
+            }
           }
           await store.setHiveLocalBlueprintConfig(ws, potSlug, name, v);
         }

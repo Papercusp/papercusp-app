@@ -216,7 +216,13 @@ export const GOOGLE_WORKSPACE_ALLOWED_SCOPES = [
   GOOGLE_YOUTUBE_FORCE_SSL_SCOPE,
 ] as const;
 
-export const GOOGLE_OAUTH_CLIENT_PATH = join(homedir(), '.config', 'papercusp', 'google-oauth-client.json');
+/**
+ * The well-known Google Desktop-client JSON path, resolved when it is read
+ * rather than at import, so it follows the process's current home directory.
+ */
+export function googleOAuthClientPath(): string {
+  return join(homedir(), '.config', 'papercusp', 'google-oauth-client.json');
+}
 
 export interface GoogleDesktopClientConfig {
   clientId: string;
@@ -349,7 +355,7 @@ export function googleOAuthRedirectUri(): string {
  * loudly so the operator does not silently expose an unknown provider.
  */
 export async function loadGoogleProviderFromDesktopClientFile(
-  path = GOOGLE_OAUTH_CLIENT_PATH,
+  path = googleOAuthClientPath(),
   redirectUri = googleOAuthRedirectUri(),
 ): Promise<OAuthProvider | null> {
   let raw: string;
@@ -766,7 +772,7 @@ async function readClientSecret(entry: OAuthAppsFile[string]): Promise<string> {
  */
 export async function loadAndRegisterProvidersFromDisk(
   rootDir?: string,
-  googleClientPath: string | null = GOOGLE_OAUTH_CLIENT_PATH,
+  googleClientPath: string | null = googleOAuthClientPath(),
 ): Promise<string[]> {
   const { papercuspRoot } = await import('../papercusp-root');
   const root = rootDir ?? papercuspRoot();

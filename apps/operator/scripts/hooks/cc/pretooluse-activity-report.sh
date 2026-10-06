@@ -98,6 +98,18 @@ if [ -n "$REWRITE_OUTPUT" ]; then
   printf '%s\n' "$REWRITE_OUTPUT"
 fi
 
+# WI-10004945: a claude/codex NESTED inside another agent (run from an su's Bash tool,
+# or under a capability:bash job) inherited that su's PAPERCUSP_SID, so its tool calls
+# would be reported AS the su: activity rows the su never made, claim renewals, and a
+# false "live and working" while the su itself sits parked. The ToolSearch spelling
+# repair above is harmless and still applies; only the report is skipped. This hook
+# fires on EVERY tool call, so it reads the verdict cached per CLI process
+# (pc_nested_cli.sh) instead of paying pc_nested_cli.py's python start each time. A
+# missing helper or any failure leaves the condition false: the hook reports as before.
+if . "$(dirname "$0")/pc_nested_cli.sh" 2>/dev/null && pc_nested_cli_cached; then
+  exit 0
+fi
+
 report() {
   python3 - "$OPERATOR_URL" "$TOKEN_PATH" "$PAPERCUSP_SID" "$AGENT" "${PAPERCUSP_HARNESS_SLUG:-}" "$(dirname "$0")" 3<<<"$INPUT" <<'PYEOF'
 import hashlib, json, os, re, sys, time, urllib.request, urllib.parse
@@ -105,7 +117,7 @@ urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHa
 
 operator_url, token_path, owner, agent, harness_slug, hook_dir = sys.argv[1:7]
 sys.path.insert(0, hook_dir)
-from mcp_response import read_hook_payload, read_token_file  # noqa: E402
+from mcp_response import read_hook_payload, read_token_file, with_native_session  # noqa: E402
 raw = read_hook_payload()
 token = read_token_file(token_path)
 HTTP_TIMEOUT = 3
@@ -224,8 +236,11 @@ body = json.dumps({
     'params': {'name': 'activity:report', 'arguments': args},
 }).encode()
 req = urllib.request.Request(
-    operator_url.rstrip('/') + '/api/mcp?superuser=1&origin=hook&client='
-    + urllib.parse.quote(owner, safe=''),
+    with_native_session(
+        operator_url.rstrip('/') + '/api/mcp?superuser=1&origin=hook&client='
+        + urllib.parse.quote(owner, safe=''),
+        session_id or os.environ.get('PAPERCUSP_NATIVE_SESSION_ID') or '',
+    ),
     data=body,
     headers={
         'Authorization': 'Bearer ' + token,

@@ -29,7 +29,15 @@ import type { Principal } from '@papercusp/agent-mcp';
 import { notifyAttentionOnce } from '../attention-notify';
 import { onAppKeyUsed } from './alerts';
 import { isAppKeyShaped } from './key';
-import { recordAppKeyUse, verifyAppKey, type AccessTokenGrant, type AppKeyRefusal, type AppKeyRow } from './store';
+import { grantedToolCapabilities, type AppScopeTool } from './scope-policy';
+import {
+  projectedToolScopeCatalog,
+  recordAppKeyUse,
+  verifyAppKey,
+  type AccessTokenGrant,
+  type AppKeyRefusal,
+  type AppKeyRow,
+} from './store';
 
 export const APP_PRINCIPAL_SLUG_PREFIX = 'app:';
 
@@ -56,7 +64,11 @@ export function presentsAppKey(headers: Headers): boolean {
  * working after its creator leaves the organization (P-015, D-007), so no downstream check may be
  * able to tie the principal back to that person.
  */
-export function principalForAppKey(app: AppKeyRow, accessToken?: AccessTokenGrant): Principal {
+export function principalForAppKey(
+  app: AppKeyRow,
+  accessToken?: AccessTokenGrant,
+  catalog: () => Iterable<AppScopeTool> = () => projectedToolScopeCatalog().values(),
+): Principal {
   return {
     kind: 'service',
     // A client-credentials access token (P-016) is the parent key acting through one token:
@@ -66,7 +78,10 @@ export function principalForAppKey(app: AppKeyRow, accessToken?: AccessTokenGran
     workspaceId: app.workspace_id,
     authMethod: 'bearer-token',
     trust: 'verified',
-    capabilities: new Set((accessToken?.scopes ?? app.scopes)?.capabilities ?? []),
+    // The granted tools' declared capabilities join the explicit ones (WI-10004317): the key's
+    // tool allowlist is its grant, and without them tools/list and the dispatch capability gate
+    // refuse every real tool a "Connect an app" key names.
+    capabilities: grantedToolCapabilities(accessToken?.scopes ?? app.scopes, catalog()),
     label: app.label ?? `${app.kind === 'service' ? 'service key' : 'app'} ${app.id}`,
   };
 }

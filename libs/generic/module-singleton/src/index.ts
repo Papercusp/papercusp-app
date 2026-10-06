@@ -120,6 +120,11 @@ export function pinModuleState<T>(key: string, init: () => T): T {
   return value;
 }
 
+/** Read an existing pin without initializing it or counting a module evaluation. */
+export function readPinnedModuleState<T>(key: string): T | undefined {
+  return slots().get(key)?.value as T | undefined;
+}
+
 /**
  * How many times `pinModuleState` ran for `key` in this realm.
  *

@@ -34,11 +34,11 @@
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 
 export const CONFORMANCE_BATTERY_SCHEMA_VERSION = 'capless-gateway-conformance-battery-v1' as const;
 
-const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
 
 // ── Matrix dimensions ────────────────────────────────────────────────────────
 

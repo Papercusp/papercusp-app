@@ -42,6 +42,7 @@
 import {
   UNFINISHED_ITEM_STATUSES,
   getPlanItemStatuses,
+  resolvePlanItemHomeHarness,
   type PlanItemStatus,
 } from '../../plan-audits';
 import type { ForcedPastRecord } from './forced-past-stamp';
@@ -112,12 +113,17 @@ export interface SupersedeItemGateResult {
  * contract forbids reading empty as "no items" — so an empty list can never
  * produce a refusal here. That is the correct direction for a blocking write:
  * an infra blip must not wedge a deprecate.
+ *
+ * `opts.harnessSlug` is only a CANDIDATE (WI-10005174): the item read is scoped to the
+ * harness `resolvePlanItemHomeHarness` confirms owns the plan, so a same-slug plan in
+ * another harness can neither add its unfinished items nor be the one that is read.
  */
 export async function evaluateSupersedeItemGate(
   planSlug: string,
-  opts: { force?: { reason: string } } = {},
+  opts: { force?: { reason: string }; harnessSlug?: string | null } = {},
 ): Promise<SupersedeItemGateResult> {
-  const items = await getPlanItemStatuses(planSlug);
+  const homeHarness = await resolvePlanItemHomeHarness(planSlug, opts.harnessSlug);
+  const items = await getPlanItemStatuses(planSlug, { harnessSlug: homeHarness });
   const unfinished = unfinishedPlanItems(items);
   if (unfinished.length === 0) return { satisfied: true };
 

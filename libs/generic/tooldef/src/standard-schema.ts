@@ -389,13 +389,15 @@ export function issueLeaves(
         typeof seg === 'object' && seg !== null ? (seg as { key: PropertyKey }).key : (seg as PropertyKey),
       ),
     ];
-    // An `invalid_union` issue's real diagnosis lives in its per-branch sub-issues
-    // (see `bestUnionBranch`) — surface the branch that located an actual field
-    // instead of the union's own generic "Invalid input". Bounded recursion so a
-    // union of unions cannot spin.
+    // An `invalid_union` issue's real diagnosis usually lives in its per-branch
+    // sub-issues (see `bestUnionBranch`) — surface the branch that located an actual
+    // field instead of the union's generic "Invalid input". A schema can also set
+    // an intentional union-level error message; keep that message, because the
+    // branch diagnostic would erase the contract-specific guidance. Bounded
+    // recursion so a union of unions cannot spin.
     if (depth < 4) {
       const branch = bestUnionBranch(issue);
-      if (branch) {
+      if (branch && issue.message === 'Invalid input') {
         for (const sub of branch) walk(sub, segs, depth + 1);
         return;
       }

@@ -21,10 +21,15 @@ include what you tried, what you observed, and the decision the answer informs.
 
 Not for live state (query it directly), for an agent you can already name, for a
 decision that is the owner's, for handing work off, or for anything code, docs
-or search already answer. Don't open duplicates or repeat an unchanged question
-after
+or search already answer. Continue an existing consult thread for follow-ups;
+don't open duplicates or repeat an unchanged question after
 `no_available_responder`. Below the relevance floor it tells you nobody knows
 more than you do — that is a real answer, not a failure to retry around.
+
+The archive can answer without a model launch. A fresh consult dispatches an
+isolated answer session from the expert transcript; it does not wake the
+expert's live session. The ranked model walk skips walled backends automatically,
+so do not retry manually.
 
 ### `*_list` → `*_get` chaining
 

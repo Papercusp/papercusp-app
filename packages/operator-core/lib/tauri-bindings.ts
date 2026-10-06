@@ -115,21 +115,12 @@ export const commands = {
 	wslImport: () => typedError<null, string>(__TAURI_INVOKE("wsl_import")),
 	wslBootstrap: () => typedError<string, string>(__TAURI_INVOKE("wsl_bootstrap")),
 	/**
-	 *  Restart the desktop app after WSL onboarding completes. The
-	 *  sidecar spawn in setup() short-circuits while WSL state isn't
-	 *  Ready, so a clean restart picks up the now-Ready state and routes
-	 *  the sidecar through `wsl.exe`. Frontend calls this immediately
-	 *  after `wsl_bootstrap` succeeds and a follow-up `wsl_status` returns
-	 *  Ready.
-	 * 
-	 *  Windows: do NOT use `app.restart()` directly — when the app was
-	 *  launched inside a job object (the NSIS installer's "run app" checkbox,
-	 *  Task Scheduler, some corporate launchers), the job kills the relaunched
-	 *  child the moment this process exits, leaving the user on a dead app
-	 *  (found live 2026-06-11, runs 11/13: onboarding completed but the
-	 *  restarted instance vanished). Spawn the new instance with
-	 *  CREATE_BREAKAWAY_FROM_JOB first; fall back to a plain spawn, then to
-	 *  app.restart().
+	 *  Finalize the GUI's WSL onboarding transition. `gui_setup` already waits
+	 *  for WSL Ready and attaches the existing window to the Server in-process.
+	 *  The GUI must not relaunch here: its parent still owns the single-instance
+	 *  lock, so a child launched before `app.exit` is rejected as a duplicate
+	 *  (WI-10003674). Keep the legacy restart path for an explicit Server caller;
+	 *  the normal Server deferred-boot watcher now spawns the sidecar in-process.
 	 */
 	wslFinalizeReady: () => typedError<null, string>(__TAURI_INVOKE("wsl_finalize_ready")),
 	wslUninstall: () => typedError<null, string>(__TAURI_INVOKE("wsl_uninstall")),
@@ -356,6 +347,10 @@ export type ExternalConsoleSpec = {
  *  liveness by hand.
  */
 export type IpcStatus = {
+	// Unix milliseconds when Rust began this snapshot, excluding command dispatch.
+	snapshotStartedAtUnixMs: number,
+	// Monotonic milliseconds spent resolving and assembling this snapshot.
+	snapshotDurationMs: number,
 	// Live re-resolution performed at status time (a pure filesystem read).
 	resolvedPath: string | null,
 	resolutionDetail: string,

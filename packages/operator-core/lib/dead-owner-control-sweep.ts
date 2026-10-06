@@ -71,6 +71,10 @@ export async function sweepDeadOwnerControlState(
              updated_ts = ${Date.now()}
         FROM dead_owner d
        WHERE w.payload->>'held_open_by' = d.owner_id
+         -- WI-10005173: dead_owner is derived from THIS node's presence; a peer-written
+         -- row (origin='remote') holds a lease this node cannot judge — same rule as
+         -- reclaimStaleHoldOpens.
+         AND w.origin IS DISTINCT FROM 'remote'
          AND COALESCE(
                ${sql.unsafe(HELD_AT_EXPR)} < now() - make_interval(secs => ${holdGraceSec}),
                true)

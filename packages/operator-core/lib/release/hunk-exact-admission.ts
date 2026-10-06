@@ -33,6 +33,7 @@ import { join } from 'node:path';
 import {
   ADMISSION_GIT_DATE,
   ADMISSION_GIT_IDENTITY,
+  findGitlinkAncestor,
   normalizeAdmissionPath,
   realAdmissionGit,
   type AdmissionGitResult,
@@ -66,6 +67,7 @@ export type HunkExactRefusalCode =
   | 'hunk-conflict'
   | 'oversize'
   | 'not-a-blob'
+  | 'path-under-gitlink'
   | 'invalid-patch-source'
   | 'patch-conflict'
   | 'git-failed';
@@ -170,6 +172,27 @@ export function buildHunkExactSource(input: BuildHunkExactSourceInput): HunkExac
 
     const perPath: HunkExactPathReport[] = [];
     for (const path of paths) {
+      // A file inside a submodule has no entry in the superproject tree, so without this check
+      // its hunks replay onto an empty base and refuse as a misleading `hunk-conflict`
+      // (WI-10005976). The superproject can only admit the submodule POINTER, whole.
+      for (const commit of [repairHead, input.candidate]) {
+        const enclosing = findGitlinkAncestor(run, commit, path);
+        if (!enclosing.ok) return gitFailed(enclosing.step, enclosing.result);
+        if (enclosing.entry) {
+          const gitlink = enclosing.entry.path;
+          return {
+            ok: false,
+            code: 'path-under-gitlink',
+            path,
+            detail:
+              `${path} is inside the submodule gitlink ${gitlink} (${(enclosing.entry.sha ?? '?').slice(0, 12)} at ${commit.slice(0, 12)}); ` +
+              'hunks cannot be replayed into a submodule from the superproject. Admit the submodule pointer itself.',
+            exits: [
+              `release:repair-queue { op:'admit', paths:['${gitlink}'], wholeBlob:true, reason:'<why the staging pin of ${gitlink} is safe to admit whole>' } — moves the gitlink to staging's pin, carrying every submodule commit between the two pins`,
+            ],
+          };
+        }
+      }
       const rows = input.ledger.filter((r) => r.path === path);
       const mine = rows.filter((r) => accepted.has(r.agent));
       const foreign = rows.filter((r) => !accepted.has(r.agent));

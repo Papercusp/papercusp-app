@@ -20,7 +20,9 @@
 set -euo pipefail
 
 OUT_DIR="${PAPERCUSP_PERF_BASELINES_DIR:-$HOME/.papercusp/perf-baselines}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# PAPERCUSP_PERF_SIGNALS_DIR: set by the systemd unit, which runs this script from a
+# /tmp snapshot where BASH_SOURCE no longer sits beside capture-signals.py.
+SCRIPT_DIR="${PAPERCUSP_PERF_SIGNALS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 KEEP=15  # newest N scheduled captures to retain (~30 min of history at the 2-min cadence)
 
 python3 "$SCRIPT_DIR/capture-signals.py" --label scheduled --out "$OUT_DIR" >/dev/null

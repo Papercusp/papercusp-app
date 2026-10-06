@@ -15,9 +15,11 @@ same data.
 What the feed returns:
 
 * Every `tool_invocations` row scoped to one harness, last 24h by default
-* A `depth` per row (parent\_spawn\_id chain) — depth 0 is a top-level tool call,
-  depth 1 is a child agent's call, depth 2 is a grandchild's, … Indent by
-  `depth` to render the lineage (the PG query below does `repeat('  ', depth)`).
+* A `depth` per row (parent\_spawn\_id chain). **Today every row is `depth = 0`;**
+  Phase 9's spawn-of-spawn work has not shipped, so child-agent tool calls do not
+  yet appear at depth greater than 0. When it ships, depth 1 can represent a
+  child agent's call, depth 2 a grandchild's, and so on. Indent by `depth` to
+  render the lineage (the PG query below does `repeat('  ', depth)`).
 * Per-row: when, tool, role, status, duration, output size + ref, feature/chunk
   attribution, spawnId
 * An optional `status` filter — note these are **tool-invocation** statuses
@@ -25,8 +27,10 @@ What the feed returns:
   different set from the `spawned_agents` lifecycle statuses
   (`running` / `restarting` / `done` / `failed` / `cancelled` / `reaped`).
 
-The feed is built from `harness_shared.tool_invocations_spawn_tree`, so depth>0
-rows appear automatically when a spawned child agent makes its own tool calls.
+The feed is built from `harness_shared.tool_invocations_spawn_tree_filtered`
+(Migration 460). Its result includes `depth` and `root_spawn_id` for future
+lineage, but today the feed's rows are depth 0. A child's own tool calls will
+appear as deeper rows only after Phase 9's spawn-of-spawn work ships.
 
 ## PG queries
 

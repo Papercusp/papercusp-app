@@ -51,14 +51,15 @@ export const JEV_EGRESS_NOTICE =
 
 /**
  * The measured result, shown next to the mode control whatever the mode, so the
- * choice is made against evidence (plan jev-decision-model-integration-2026-09-29,
- * D-013, which superseded D-012's "not recommended"). It describes exactly one
- * operating point (JEV_MEMORY_ENCODING / JEV_MEMORY_ADMIT_THRESHOLD in
- * jev-memory-gate.ts) on one model version: change either, or bump the model,
- * and this text is stale until P-004 and P-005 are re-run.
+ * choice is made against evidence (plan jev-performance-improvements-2026-09-30,
+ * D-004, which replaced the v1 question D-013 adopted). It describes exactly one
+ * operating point (JEV_MEMORY_VARIANT / JEV_MEMORY_ENCODING /
+ * JEV_MEMORY_ADMIT_THRESHOLD in jev-memory-gate.ts) on one model version: change
+ * any of them, or bump the model, and this text is stale until the admission and
+ * robustness benches are re-run.
  */
 export const JEV_MEASURED_VERDICT =
-  'Measured 2026-09-30 on jev-1.13.0: with On, off-topic test questions received an irrelevant memory 0 to 1 times in 30, against 8 in 30 with the current system, and relevant memories were kept as often as before. The test set is small, so the improvement is real but borderline. Off stays the default.';
+  'Measured 2026-09-30 on jev-1.13.0 with the v2-content question at 0.35: with On, 7 of 90 off-topic test questions received an irrelevant memory, against 52 of 90 with the current system. Memories that only claim to be important got through 1.8% of the time, against 31% with the first version of the question. Relevant memories were kept as often as before. Off stays the default.';
 
 /**
  * P-009 / D-016: a saved key also makes Jev the contradiction checker for new
@@ -87,7 +88,11 @@ export function jevView(env: JevSettingsEnvelopeView): JevView {
       ? `Jev's decision (${env.model}). The current system is used whenever Jev can't answer.`
       : env.effective === 'shadow'
         ? `The current system. Jev (${env.model}) is asked alongside it and its answers are only logged.`
-        : 'The current system. Jev makes no calls.';
+        : env.keyPresent
+          ? // WI-10004278: a saved key still makes Jev the contradiction checker in
+            // every mode (JEV_KEY_CONFLICT_USE), so "no calls" would be false here.
+            "The current system. Jev isn't asked during memory lookups; the saved key is still used for contradiction checks (below)."
+          : 'The current system. Jev makes no calls.';
 
   const missingKeyWarning =
     env.mode !== 'off' && env.effective === 'off'

@@ -75,6 +75,12 @@ export interface AnthropicCacheStats {
   /** P-004: the stable/volatile system-block split happened this request (set by the buffer
    *  wrapper, not applyAnthropicCachePolicy — the split runs one layer up). */
   boundarySplit?: boolean;
+  /** WI-10005042 (D-078): the per-owner system tail was relocated into the first user turn.
+   *  Present only when the relocation pass was requested (absent ≠ ran and declined). */
+  tailRelocated?: boolean;
+  /** What the relocation pass did about the shared-block breakpoint: `added`, `existing`
+   *  (the client already marked that block), or a `skipped-*` reason. */
+  tailBreakpoint?: 'added' | 'existing' | 'skipped-budget' | 'skipped-ttl-order';
   /** Per-tool `defer_loading` pass (agent-launch-context-cost-2026-09-18 P-002). Present only
    *  when `deferLargeTools` was requested; absent means the pass did not run, which is NOT the
    *  same as a pass that ran and deferred nothing. */
@@ -458,6 +464,9 @@ export interface SplitBoundaryResult {
   system: unknown[] | null;
   /** True when a block was split at the sentinel. */
   split: boolean;
+  /** Index in `system` of the volatile tail block the split created (absent when the sentinel
+   *  carried no tail, or nothing split). The relocation pass keys off it. */
+  tailIndex?: number;
 }
 
 /**
@@ -515,10 +524,121 @@ export function splitSystemAtBoundary(
     const tailBlock: Record<string, unknown> = { ...block, text: after };
     delete tailBlock.cache_control; // the tail is small per-session content — not worth caching
     out.splice(idx, 1, stableBlock, tailBlock);
-  } else {
-    out.splice(idx, 1, stableBlock);
+    return { system: out, split: true, tailIndex: idx + 1 };
   }
+  out.splice(idx, 1, stableBlock);
   return { system: out, split: true };
+}
+
+/**
+ * WI-10005042 / plan cache-efficiency-and-accounting-2026-09-23 D-078+D-079 — relocate the
+ * per-owner system TAIL (launch brief, mode text, instruction-precedence, carry document) out of
+ * the system prefix and into the first user turn, right after message 0's FIRST block.
+ *
+ * WHY. Provider prefix order is tools → system → messages. The per-owner tail sits in system, so
+ * it precedes message 0 and every byte after it — including message 0's 138 KB first block, which
+ * MEASURED byte-identical across 22/24 owners — can only ever be written inside an owner-unique
+ * prefix. Moving the tail behind that shared block makes the shared prefix
+ * `tools + system[stable] + msg0.block0` and lets a breakpoint on block 0 turn a per-owner WRITE
+ * (~35-40K tokens) into a READ for every same-form, same-tools startup after the first.
+ *
+ * SEMANTICS (D-079). The relocated text is wrapped in a `<system-reminder>` that states it
+ * carries the system prompt's authority. Authority is COMPUTED and enforced at the dispatch seat,
+ * never taken from where this text sits (kernel: "Identity text is never an input to authority"),
+ * so the move changes no enforced permission; whether the MODEL weights it the same is a QUALITY
+ * question this pure function cannot answer — hence DEFAULT OFF ({@link relocateSystemTailEnabled})
+ * until a D-073-gated bounded experiment measures it.
+ *
+ * STATELESS BY DESIGN (R1). Whether the tail moves depends ONLY on the shape of this request
+ * body — never on turn number or on the 4-breakpoint budget. If it depended on either, turn 1 and
+ * turn 2 of one conversation would lay the prefix out differently and the whole conversation
+ * cache would be rewritten at the transition. Only the breakpoint ADD is budget-dependent.
+ *
+ * FAILS TOWARD NO-OP. Anything it cannot do safely returns `{ relocated:false }` without touching
+ * the body: tail not the LAST system block, message 0 not a user turn with an array content,
+ * a non-text tail/anchor block, an empty tail.
+ */
+export const RELOCATED_TAIL_OPEN =
+  '<system-reminder>\nOperator launch context — relocated here from the system prompt so the shared ' +
+  'prefix above it can be prompt-cached. It carries the SAME authority as the system prompt.\n\n';
+export const RELOCATED_TAIL_CLOSE = '\n</system-reminder>';
+
+/** Default OFF: a quality-unproven authority-semantics change gated on a bounded experiment.
+ *  `PAPERCUSP_GATEWAY_RELOCATE_SYSTEM_TAIL=1` arms it. One read shared by the gateway and the
+ *  cache-proxy (both call `rewriteAnthropicCacheBody`), so the two planes cannot disagree. */
+export function relocateSystemTailEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PAPERCUSP_GATEWAY_RELOCATE_SYSTEM_TAIL === '1';
+}
+
+export interface RelocateTailResult {
+  relocated: boolean;
+  /** Why nothing moved (set only when `relocated` is false). */
+  reason?: string;
+  breakpoint?: 'added' | 'existing' | 'skipped-budget' | 'skipped-ttl-order';
+}
+
+/** Relocate `body.system[tailIndex]` into `body.messages[0]`. Mutates `body` ONLY on success. */
+export function relocateSystemTailToFirstUserTurn(
+  body: Record<string, unknown>,
+  tailIndex: number,
+  ttl: string = ANTHROPIC_EXTENDED_TTL,
+): RelocateTailResult {
+  const no = (reason: string): RelocateTailResult => ({ relocated: false, reason });
+  const system = body.system;
+  if (!Array.isArray(system)) return no('system-not-array');
+  if (tailIndex !== system.length - 1) return no('tail-not-last-system-block');
+  const tail = system[tailIndex];
+  if (!isRecord(tail) || tail.type !== 'text' || typeof tail.text !== 'string') return no('tail-not-text');
+  if (tail.text.trim().length === 0) return no('tail-empty');
+  if (isRecord(tail.cache_control)) return no('tail-carries-marker');
+  const messages = body.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return no('no-messages');
+  const first = messages[0];
+  if (!isRecord(first) || first.role !== 'user' || !Array.isArray(first.content) || first.content.length === 0) {
+    return no('first-message-not-user-array');
+  }
+  const anchor = first.content[0];
+  if (!isRecord(anchor) || anchor.type !== 'text' || typeof anchor.text !== 'string') return no('anchor-not-text');
+
+  const wrapped = { type: 'text', text: RELOCATED_TAIL_OPEN + tail.text + RELOCATED_TAIL_CLOSE };
+  const newAnchor: Record<string, unknown> = { ...anchor };
+  const newContent = [newAnchor, wrapped, ...first.content.slice(1)];
+  const newMessages = [{ ...first, content: newContent }, ...messages.slice(1)];
+
+  // Breakpoint on the shared anchor block. Render order: tools → system(without the tail) →
+  // messages, so "before the anchor" is tools + system + nothing in messages.
+  let breakpoint: NonNullable<RelocateTailResult['breakpoint']>;
+  if (ephemeralMarker(newAnchor)) {
+    breakpoint = 'existing';
+  } else {
+    const trial: Record<string, unknown> = {
+      ...body,
+      system: system.slice(0, tailIndex),
+      messages: newMessages,
+    };
+    const blocks = cacheableBlocks(trial);
+    const markers = blocks.filter((b) => isRecord(b.cache_control)).length + (isRecord(body.cache_control) ? 1 : 0);
+    if (markers >= ANTHROPIC_MAX_BREAKPOINTS) {
+      breakpoint = 'skipped-budget';
+    } else {
+      const anchorAt = blocks.indexOf(newAnchor);
+      const priorShort = blocks.slice(0, anchorAt).some((b) => ephemeralMarker(b)?.ttl === '5m');
+      const anchorTtl = priorShort && ttl === '1h' ? '5m' : ttl;
+      const laterLong =
+        blocks.slice(anchorAt + 1).some((b) => ephemeralMarker(b)?.ttl === '1h') ||
+        ephemeralMarker(body)?.ttl === '1h';
+      if (anchorTtl === '5m' && laterLong) {
+        breakpoint = 'skipped-ttl-order'; // a short marker may not precede a long one
+      } else {
+        newAnchor.cache_control = { type: 'ephemeral', ttl: anchorTtl };
+        breakpoint = 'added';
+      }
+    }
+  }
+
+  body.system = system.slice(0, tailIndex);
+  body.messages = newMessages;
+  return { relocated: true, breakpoint };
 }
 
 /** Buffer-level wrapper: parse → policy → re-serialize. Returns the ORIGINAL buffer untouched
@@ -530,6 +650,9 @@ export function rewriteAnthropicCacheBody(
     ttl?: string;
     injectToolsBreakpoint?: boolean;
     splitBoundary?: boolean;
+    /** WI-10005042: relocate the per-owner system tail behind message 0's shared first block.
+     *  Undefined → {@link relocateSystemTailEnabled} (default OFF). Needs `splitBoundary`. */
+    relocateSystemTail?: boolean;
     deferLargeTools?: boolean;
     deferMinToolBytes?: number;
   } = {},
@@ -541,6 +664,7 @@ export function rewriteAnthropicCacheBody(
     // P-004 split runs BEFORE the ttl/breakpoint policy so the stable half it creates gets the
     // ttl upgrade too. A no-op split leaves the body for the policy alone.
     let splitDone = false;
+    let tailReloc: RelocateTailResult | null = null;
     if (opts.splitBoundary) {
       const tools = Array.isArray(parsed.tools) ? parsed.tools.filter(isRecord) : [];
       const outside = cacheableBlocks({ tools: parsed.tools, messages: parsed.messages })
@@ -559,10 +683,18 @@ export function rewriteAnthropicCacheBody(
       if (r.system) {
         parsed.system = r.system;
         splitDone = r.split;
+        // D-078/D-079: chained AFTER the split — it relocates the tail block the split created.
+        if (r.tailIndex !== undefined && (opts.relocateSystemTail ?? relocateSystemTailEnabled())) {
+          tailReloc = relocateSystemTailToFirstUserTurn(parsed, r.tailIndex, requestedTtl);
+        }
       }
     }
     const stats = applyAnthropicCachePolicy(parsed, opts);
     if (stats) stats.boundarySplit = splitDone;
+    if (stats && tailReloc) {
+      stats.tailRelocated = tailReloc.relocated;
+      if (tailReloc.breakpoint) stats.tailBreakpoint = tailReloc.breakpoint;
+    }
     if (!stats.changed && !splitDone) return { body: bodyBuf, stats };
     return { body: Buffer.from(JSON.stringify(parsed), 'utf8'), stats };
   } catch {

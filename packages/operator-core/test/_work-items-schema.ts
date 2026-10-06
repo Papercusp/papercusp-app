@@ -72,6 +72,16 @@ export const HARNESS_FEATURES_CONSOLIDATED_DDL = `
   );
   CREATE SEQUENCE IF NOT EXISTS harness_shared.work_item_seq;
   CREATE OR REPLACE FUNCTION harness_shared.next_work_item_id() RETURNS text LANGUAGE sql VOLATILE AS $wiid$ SELECT 'WI-' || nextval('harness_shared.work_item_seq')::text $wiid$;
+  -- migration 1325 (P-009 / D-022): the one work predicate. Body copied from
+  -- 1325-work-item-is-agent-work.sql; work-predicate-lint.test.ts pins the two equal.
+  CREATE OR REPLACE FUNCTION harness_shared.work_item_is_agent_work(
+    p_nature text, p_audience text, p_lane text, p_needs_owner_action boolean
+  ) RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $wiaw$
+    SELECT p_nature = 'work'
+       AND p_audience = 'agent'
+       AND p_lane IS DISTINCT FROM 'observation'
+       AND p_needs_owner_action IS NOT TRUE
+  $wiaw$;
   CREATE TABLE IF NOT EXISTS harness_shared.work_item_release_cooldowns (
     workspace_id text NOT NULL,
     harness_slug text NOT NULL,
@@ -210,6 +220,15 @@ export const HARNESS_FEATURES_CONSOLIDATED_DDL = `
     -- JSONB ->> predicates for both boolean true and a legacy string "true".
     claim_hold boolean GENERATED ALWAYS AS ((payload ->> '_claimHold') = 'true') STORED,
     needs_owner_action boolean GENERATED ALWAYS AS ((payload ->> 'needsOwnerAction') = 'true') STORED,
+    -- migration 1308 (P-013, WI-10004929): issue severity materialized so the Work Items
+    -- list/summary (sync-resolver/work-items-list-query.ts) reads wi.severity_projection
+    -- for every in-scope row without detoasting payload. Same expression as production.
+    severity_projection text GENERATED ALWAYS AS (
+      CASE WHEN item_kind = ANY (ARRAY['bug'::text, 'change'::text, 'task'::text])
+           THEN COALESCE(payload -> '_ei' ->> 'severity', 'minor')
+           ELSE NULL
+      END
+    ) STORED,
     -- condition-singleton identity (migration 741 family): the stop-the-line floor
     -- (P-013/D-012, work-items-admission.ts stopTheLineExclusionSql) reads
     -- wi.condition_key on EVERY claim path — a fixture without this column fails the
@@ -223,6 +242,11 @@ export const HARNESS_FEATURES_CONSOLIDATED_DDL = `
     embedding vector(768),
     embedding_mode text,
     embedding_profile text,
+    -- migration 1322 (P-010 / D-018): nature + audience. Production stamps them with a
+    -- trigger from datatype_registry; this fixture has no registry, so rows default to
+    -- agent work, which is what every built-in kind resolves to.
+    nature text NOT NULL DEFAULT 'work',
+    audience text DEFAULT 'agent',
     _search tsvector GENERATED ALWAYS AS (
       setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
       setweight(to_tsvector('english', coalesce(summary, '')), 'B') ||
@@ -371,7 +395,10 @@ export const HARNESS_FEATURES_CONSOLIDATED_DDL = `
       -- view and read directly by issueAdmissibleWhereSql. Keep them last to mirror the
       -- append-only CREATE OR REPLACE VIEW migration contract.
       claim_hold,
-      needs_owner_action
+      needs_owner_action,
+      -- migration 1323 (P-010): nature and audience, appended last like 1110.
+      nature,
+      audience
     FROM harness_shared.work_items WHERE item_kind IN ('bug', 'change', 'task');
   CREATE OR REPLACE FUNCTION harness_shared.engineer_issues_view_dml() RETURNS trigger LANGUAGE plpgsql AS $ei_dml$
   DECLARE v_slug text; v_ei jsonb; v_payload jsonb; v_updated int;
@@ -701,7 +728,47 @@ export const ADV_SESSIONS_CLAIM_MIN_DDL = `
     started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     ended_at timestamptz,
     ended_by text
-  )`;
+  );
+  -- WI-10005130: the lapse/takeover reads (shutdownAcceptedOwnerIds,
+  -- listRecordedLiveSessions) select these; ADD COLUMN IF NOT EXISTS so a fixture that
+  -- hand-built a narrower adv_sessions first is filled in too.
+  ALTER TABLE harness_shared.adv_sessions
+    ADD COLUMN IF NOT EXISTS plan_slug text,
+    ADD COLUMN IF NOT EXISTS shutdown_accepted_at timestamptz,
+    -- listRecordedLiveSessions selects these too. Without them it logs
+    -- 'column "agent" does not exist' (console.warn fails the file under
+    -- vitest-fail-on-console). Types match the live table.
+    ADD COLUMN IF NOT EXISTS agent text,
+    ADD COLUMN IF NOT EXISTS feature text,
+    ADD COLUMN IF NOT EXISTS mode text,
+    ADD COLUMN IF NOT EXISTS terminal_bin text,
+    ADD COLUMN IF NOT EXISTS pid integer,
+    ADD COLUMN IF NOT EXISTS window_id text,
+    ADD COLUMN IF NOT EXISTS omp_thread_id text,
+    ADD COLUMN IF NOT EXISTS label text,
+    ADD COLUMN IF NOT EXISTS cwd text,
+    ADD COLUMN IF NOT EXISTS session_id text,
+    ADD COLUMN IF NOT EXISTS exit_code integer,
+    ADD COLUMN IF NOT EXISTS ended_signal text`;
+
+/**
+ * `fleet_membership_events` — the append-only fleet membership fact the claim path's
+ * fleet-scope admission reads (WI-10005130). Columns from the live table; the projection
+ * trigger and GRANTs are omitted (no fixture asserts the coord_presence projection here).
+ */
+export const FLEET_MEMBERSHIP_EVENTS_MIN_DDL = `
+  CREATE TABLE IF NOT EXISTS harness_shared.fleet_membership_events (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workspace_id text NOT NULL DEFAULT 'default',
+    owner_id text NOT NULL,
+    owner_label text,
+    fleet_slug text,
+    fleet_role text,
+    event text NOT NULL DEFAULT 'join',
+    at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS fleet_membership_events_owner_idx
+    ON harness_shared.fleet_membership_events (workspace_id, owner_id, id DESC)`;
 
 /**
  * `user_trust_list` DDL — the owner's trusted github user ids (migration 276,
@@ -726,6 +793,31 @@ export const USER_TRUST_LIST_DDL = `
     created_ts              bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, trusted_github_user_id)
   )`;
+
+/** Minimal migration 1337 work_admissions relation for work_items:update tests.
+ * The update handler checks source-owned fields before writing; these focused
+ * fixtures only need the column-complete empty ledger read, not admission writes. */
+export const WORK_ADMISSIONS_MIN_DDL = `
+  CREATE TABLE IF NOT EXISTS harness_shared.work_admissions (
+    workspace_id    text        NOT NULL,
+    id              uuid        NOT NULL,
+    work_item_id    text        NOT NULL,
+    harness_slug    text        NOT NULL,
+    data_source_id  uuid,
+    source_kind     text        NOT NULL,
+    source_key      text        NOT NULL,
+    source_ref      jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    field_authority jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    admitted_via    text        NOT NULL,
+    admitted_by     text        NOT NULL,
+    rule_id         uuid,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (workspace_id, id),
+    UNIQUE (workspace_id, source_kind, source_key)
+  );
+  CREATE INDEX IF NOT EXISTS work_admissions_work_item_idx
+    ON harness_shared.work_admissions (workspace_id, work_item_id);
+`;
 
 /**
  * Minimal `work_item_deps` table (migration 367) for the claim path. claimNextWorkItem's
@@ -1064,3 +1156,293 @@ export const COORD_REF_HOLDERS_DDL = `
     PRIMARY KEY (workspace_id, thread_id));
   CREATE UNIQUE INDEX IF NOT EXISTS coord_threads_parent_uq ON harness_shared.coord_threads
     (workspace_id, parent_kind, parent_ref);`;
+
+/**
+ * The four event-await relations, taken from a live `pg_dump --schema-only` of the
+ * fully-migrated schema (2026-10-02, WI-10005130) rather than replayed from the ~13
+ * migrations that built them (163, 183, 533, 550, 569, 572, 599, 632, 710, 1214-1216,
+ * 1274). A claim door emits awaited events (`emitAwaitedEvent`, lib/events/await), and
+ * that fire path reads `event_awaits`, upserts the `event_key_fires` latch, enqueues
+ * `event_wake_deliveries` and, for composed awaits, walks `event_await_nodes`. The same
+ * fire then runs the identity reactions (lib/events/identity-reaction.ts), which read
+ * `coord_entity_subscriptions` and write `event_reactions`. Without these tables the
+ * fire logs "key-fire latch record failed ... relation ... does not exist", which
+ * vitest-fail-on-console turns into a red test (measured on work-items-admission,
+ * 2026-10-02: first event_awaits, then coord_entity_subscriptions).
+ *
+ * `predicate_watches` (541, 871, 1250) rides here too: settling a work-item retires its
+ * lifecycle-bound watches in BOTH event_awaits and predicate_watches in one statement
+ * (`retireLifecycleBoundWatches`, lib/events/await/store.ts), so resolving an issue
+ * blocker errored "predicate_watches does not exist" (work-items-claim-readiness,
+ * work-items-claim-issue-scope-reread, 2026-10-02).
+ *
+ * Columns are the full live set. CHECK constraints are omitted, as elsewhere in this
+ * file. The three partial UNIQUE indexes on event_awaits are kept on purpose: they are
+ * ON CONFLICT targets of the await writers, and without them those INSERTs error.
+ */
+export const EVENT_AWAITS_MIN_DDL = `
+  CREATE TABLE IF NOT EXISTS harness_shared.event_await_nodes (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workspace_id text NOT NULL DEFAULT 'default',
+    root_id bigint NOT NULL,
+    parent_id bigint REFERENCES harness_shared.event_await_nodes(id) ON DELETE CASCADE,
+    subscriber_id text NOT NULL,
+    required_count integer NOT NULL,
+    fired_count integer NOT NULL DEFAULT 0,
+    fired_at timestamptz,
+    spec jsonb,
+    wake_handle jsonb,
+    note text,
+    expires_ts timestamptz,
+    timeout_behavior text NOT NULL DEFAULT 'expire',
+    cancelled_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now());
+  CREATE TABLE IF NOT EXISTS harness_shared.event_awaits (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workspace_id text NOT NULL DEFAULT 'default',
+    subscriber_id text NOT NULL,
+    event_key text NOT NULL,
+    policy text NOT NULL DEFAULT 'wake',
+    note text,
+    wake_handle jsonb,
+    timeout_behavior text NOT NULL DEFAULT 'expire',
+    expires_ts timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    fired_at timestamptz,
+    fired_reason text,
+    cancelled_at timestamptz,
+    once boolean NOT NULL DEFAULT true,
+    min_sleep_sec integer,
+    urgency boolean NOT NULL DEFAULT false,
+    payload_filter jsonb,
+    scope_kind text,
+    scope_ref text,
+    node_id bigint,
+    root_id bigint,
+    member_fired_at timestamptz,
+    member_payload jsonb,
+    causal_generation bigint,
+    expected_condition jsonb,
+    superseded_at timestamptz,
+    fired_by text,
+    fired_payload jsonb,
+    producer_health jsonb,
+    timeout_verification jsonb,
+    verification_claimed_at timestamptz,
+    bound_to jsonb,
+    cancel_reason text,
+    logical_gate_key text,
+    fired_delivery_intent_at timestamptz);
+  CREATE UNIQUE INDEX IF NOT EXISTS event_awaits_announce_generation_unique
+    ON harness_shared.event_awaits (workspace_id, event_key, causal_generation)
+    WHERE policy = 'announce' AND causal_generation IS NOT NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS event_awaits_exact_one_shot_one_per_subscriber_key
+    ON harness_shared.event_awaits (workspace_id, subscriber_id, event_key)
+    WHERE policy <> 'announce' AND once = true AND root_id IS NULL AND payload_filter IS NULL
+      AND (note IS NULL OR note NOT LIKE '[fleet:bench] %')
+      AND event_key NOT LIKE '%*%' AND event_key NOT LIKE '@%'
+      AND fired_at IS NULL AND cancelled_at IS NULL AND superseded_at IS NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS event_awaits_inbox_wake_one_per_agent
+    ON harness_shared.event_awaits (workspace_id, subscriber_id, event_key)
+    WHERE policy = 'wake' AND once = false AND cancelled_at IS NULL
+      AND event_key LIKE 'coord:inbox-wake:%';
+  CREATE TABLE IF NOT EXISTS harness_shared.event_key_fires (
+    workspace_id text NOT NULL DEFAULT 'default',
+    event_key text NOT NULL,
+    first_fired_at timestamptz NOT NULL DEFAULT now(),
+    last_fired_at timestamptz NOT NULL DEFAULT now(),
+    last_fired_by text,
+    last_payload jsonb,
+    fire_count bigint NOT NULL DEFAULT 1,
+    PRIMARY KEY (workspace_id, event_key));
+  CREATE TABLE IF NOT EXISTS harness_shared.event_wake_deliveries (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workspace_id text NOT NULL DEFAULT 'default',
+    await_id bigint NOT NULL,
+    subscriber_id text NOT NULL,
+    event_key text NOT NULL,
+    payload jsonb,
+    summary text,
+    status text NOT NULL DEFAULT 'pending',
+    channel text,
+    attempts integer NOT NULL DEFAULT 0,
+    last_error text,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    delivered_at timestamptz,
+    urgent boolean NOT NULL DEFAULT false,
+    min_sleep_sec integer,
+    coalesced_count integer NOT NULL DEFAULT 1,
+    source text);
+  CREATE TABLE IF NOT EXISTS harness_shared.coord_entity_subscriptions (
+    id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    workspace_id text NOT NULL DEFAULT 'default',
+    subscriber_id text NOT NULL,
+    target_kind text NOT NULL,
+    target_ref text NOT NULL,
+    delivery_mode text NOT NULL DEFAULT 'full',
+    expires_ts timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    cancelled_at timestamptz,
+    follow_blockers boolean NOT NULL DEFAULT false,
+    derived_from_kind text,
+    derived_from_ref text);
+  CREATE UNIQUE INDEX IF NOT EXISTS coord_entity_subscriptions_active_uq
+    ON harness_shared.coord_entity_subscriptions (workspace_id, subscriber_id, target_kind, target_ref)
+    WHERE cancelled_at IS NULL;
+  CREATE TABLE IF NOT EXISTS harness_shared.event_reactions (
+    dedup_id text PRIMARY KEY,
+    workspace_id text NOT NULL,
+    rule_id text NOT NULL,
+    fire text NOT NULL,
+    trigger_tool text,
+    cause_root_run_id text,
+    depth integer NOT NULL DEFAULT 0,
+    status text NOT NULL DEFAULT 'fired',
+    error_message text,
+    fired_at timestamptz NOT NULL DEFAULT now(),
+    contributor text);
+  CREATE TABLE IF NOT EXISTS harness_shared.predicate_watches (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workspace_id text NOT NULL DEFAULT 'default',
+    owner_id text NOT NULL,
+    role text NOT NULL DEFAULT 'su',
+    harness_slug text,
+    event_key text NOT NULL,
+    tool text NOT NULL,
+    args jsonb NOT NULL DEFAULT '{}'::jsonb,
+    path text NOT NULL,
+    op text NOT NULL,
+    value jsonb,
+    interval_sec integer NOT NULL DEFAULT 60,
+    once boolean NOT NULL DEFAULT true,
+    last_eval boolean,
+    last_value jsonb,
+    last_polled_at timestamptz,
+    last_error text,
+    consecutive_errors integer NOT NULL DEFAULT 0,
+    active boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    bound_to jsonb,
+    evaluator_baselines jsonb NOT NULL DEFAULT '{}'::jsonb);`;
+
+/**
+ * The Scout idea ledger, read by the agent-review claim door (`readLedgerGrade` in
+ * harness/improvements/agent-review.ts) when it claims a pending agent-review item.
+ * Columns from the live table (pg_dump 2026-10-02); the RLS policy, the change-notify
+ * trigger and the secondary indexes are omitted because no claim door depends on them.
+ */
+export const SCOUT_ROUTED_IDEAS_MIN_DDL = `
+  CREATE TABLE IF NOT EXISTS harness_shared.scout_routed_ideas (
+    idea_id text PRIMARY KEY,
+    workspace_id text NOT NULL,
+    harness_slug text NOT NULL,
+    cycle_id text,
+    lens text NOT NULL,
+    rail text NOT NULL,
+    routed_ref text NOT NULL,
+    title text,
+    addresses_pattern_refs jsonb,
+    routed_at bigint NOT NULL,
+    outcome text,
+    outcome_checked_at bigint,
+    human_grade smallint CHECK (human_grade >= 1 AND human_grade <= 5),
+    human_feedback text,
+    graded_by text,
+    graded_at timestamptz,
+    source_hive text,
+    target_hive text,
+    origin text NOT NULL DEFAULT 'scout',
+    created_by text,
+    model_spec text,
+    model_config jsonb);
+  CREATE INDEX IF NOT EXISTS scout_routed_ideas_routed_ref_idx
+    ON harness_shared.scout_routed_ideas (routed_ref);`;
+
+/**
+ * Every relation a claim door reads or writes BEYOND the base work-item tables
+ * (HARNESS_FEATURES_CONSOLIDATED_DDL or the test's own base schema), in apply order:
+ * the trust-admission LEFT JOIN, the dependency-readiness clause, the operation-worker
+ * claim binding (`adv_sessions`, fail-CLOSED when absent), the event fire, and the
+ * Scout idea ledger the agent-review door grades against.
+ *
+ * WI-10005130: each of these was added to the claim path at a different time, and each
+ * time every hand-built claim-path fixture that lacked the new table went red, without
+ * anything in the gate radius noticing (integration files are outside it). Applying ONE
+ * list means the next claim-path read dependency is added here once.
+ * `claim-path-bootstrap-guard.test.ts` fails a fixture-built claim-path test that does
+ * not call `applyClaimPathReadDeps`.
+ */
+/**
+ * Read shape used by listFleetAssignments when an ordinary claimant has no
+ * append-only fleet membership. Bare claim fixtures have no assignment rows;
+ * the real reader must observe that empty inventory rather than a missing view.
+ * IF NOT EXISTS preserves a fixture that installs the production view itself.
+ */
+export const FLEET_ASSIGNMENT_CLAIM_MIN_DDL = `
+  CREATE TABLE IF NOT EXISTS harness_shared.fleet_assignment (
+    source text,
+    workspace_id text NOT NULL,
+    agent_id text,
+    agent_name text,
+    harness_slug text,
+    plan_slug text,
+    item_id text,
+    work_item_id text,
+    fleet_slug text,
+    fleet_role text,
+    claim_active boolean,
+    holder_heartbeat_at timestamptz
+  )`;
+
+/** Current claim recall writer shape (migrations 240, 583, 703–771). */
+export const MEMORY_RECALL_CLAIM_MIN_DDL = `
+  CREATE TABLE IF NOT EXISTS harness_shared.memory_recall_stats (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    surface text NOT NULL,
+    hit_count integer NOT NULL,
+    top_score double precision,
+    scores jsonb NOT NULL DEFAULT '[]'::jsonb,
+    fragment_count integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    pools jsonb,
+    workspace_id text,
+    pot_slug text,
+    score_scale text,
+    query_chars integer,
+    query_sha256 text,
+    query_origin text,
+    session_id text,
+    legs jsonb,
+    admission jsonb,
+    client text,
+    top_cosine_score double precision,
+    cosine_scores jsonb
+  );
+  CREATE TABLE IF NOT EXISTS harness_shared.memory_recall_query_text (
+    stats_id bigint PRIMARY KEY REFERENCES harness_shared.memory_recall_stats(id) ON DELETE CASCADE,
+    query_text text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`;
+
+export const CLAIM_PATH_READ_DEPS_DDL: readonly string[] = [
+  USER_TRUST_LIST_DDL,
+  WORK_ITEM_DEPS_DDL,
+  ADV_SESSIONS_CLAIM_MIN_DDL,
+  FLEET_MEMBERSHIP_EVENTS_MIN_DDL,
+  FLEET_ASSIGNMENT_CLAIM_MIN_DDL,
+  MEMORY_RECALL_CLAIM_MIN_DDL,
+  EVENT_AWAITS_MIN_DDL,
+  SCOUT_ROUTED_IDEAS_MIN_DDL,
+];
+
+/**
+ * Apply {@link CLAIM_PATH_READ_DEPS_DDL}. `exec` must run a multi-statement string:
+ * postgres.js `(ddl) => sql.unsafe(ddl).simple()`, or node-pg `(ddl) => pool.query(ddl)`.
+ * Every statement is IF NOT EXISTS, so calling it after a test's own schema is safe.
+ */
+export async function applyClaimPathReadDeps(
+  exec: (ddl: string) => PromiseLike<unknown>,
+): Promise<void> {
+  for (const ddl of CLAIM_PATH_READ_DEPS_DDL) await exec(ddl);
+}

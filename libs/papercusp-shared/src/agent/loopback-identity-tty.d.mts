@@ -44,6 +44,9 @@ export interface AgentIdentitySpec {
   /** Extra exact env names that may cross (credential-shaped names never do). */
   readonly envAllow?: readonly string[];
   readonly envAllowPrefixes?: readonly string[];
+  /** Operator-set env the agent always gets, over anything allowlisted (D-031 heavy-job admission).
+   *  HOME, PATH and credential-shaped names are refused. */
+  readonly fixedEnv?: Readonly<Record<string, string>>;
   readonly homeLinks?: readonly AgentIdentityHomeLink[];
   /** Files holding operator secrets that must never cross (checked in argv, env, shipped files). */
   readonly forbiddenSecretFiles?: readonly string[];

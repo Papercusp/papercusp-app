@@ -21,7 +21,7 @@ import {
 
 export const HEALTH_ANALYSIS_SCHEMA_VERSION = 'resource-governor-health-analysis-v1' as const;
 
-export type HealthResource = 'cpu' | 'memory' | 'database' | 'service' | 'provider' | 'queue' | 'governor';
+export type HealthResource = 'cpu' | 'io' | 'memory' | 'database' | 'service' | 'provider' | 'queue' | 'governor';
 export type HealthVerdictState = 'warming' | 'healthy' | 'degraded' | 'unknown';
 export type HealthSeverity = 'none' | 'warning' | 'critical';
 export type EvidenceQuality = 'actionable' | 'low-confidence' | 'warming' | 'stale' | 'unknown';
@@ -40,6 +40,8 @@ export const NON_CAUSAL_CAPACITY_SIGNALS = Object.freeze([
   'disk.freeBytes',
   'disk.readBytesPerSec',
   'disk.writeBytesPerSec',
+  'io.processReadBytesPerSec',
+  'io.processWriteBytesPerSec',
   'network.rxBytesPerSec',
   'network.txBytesPerSec',
   'queue.oldestAgeMs',
@@ -412,6 +414,20 @@ const CAUSAL_RULES: readonly CausalRule[] = Object.freeze([
     minimumAbsoluteIncrease: 1,
   },
   {
+    resource: 'io',
+    causeSignal: 'io.psiSomePct',
+    outcomes: PROGRESS_OUTCOMES,
+    warningRatio: 3,
+    minimumAbsoluteIncrease: 1,
+  },
+  {
+    resource: 'io',
+    causeSignal: 'io.psiFullPct',
+    outcomes: PROGRESS_OUTCOMES,
+    warningRatio: 3,
+    minimumAbsoluteIncrease: 0.5,
+  },
+  {
     resource: 'memory',
     causeSignal: 'memory.psiSomePct',
     outcomes: PROGRESS_OUTCOMES,
@@ -492,6 +508,8 @@ const CAUSAL_RULES: readonly CausalRule[] = Object.freeze([
 /** Corroborators keep their own units; a swap byte-rate delta cannot be reused for PSI. */
 const PRESSURE_THRESHOLDS = Object.freeze({
   'cpu.psiSomePct': { warningRatio: 3, minimumAbsoluteIncrease: 1 },
+  'io.psiSomePct': { warningRatio: 3, minimumAbsoluteIncrease: 1 },
+  'io.psiFullPct': { warningRatio: 3, minimumAbsoluteIncrease: 0.5 },
   'memory.psiSomePct': { warningRatio: 3, minimumAbsoluteIncrease: 1 },
   'memory.psiFullPct': { warningRatio: 3, minimumAbsoluteIncrease: 0.5 },
   'memory.workingSetGrowthBytesPerSec': { warningRatio: 3, minimumAbsoluteIncrease: 1024 * 1024 },

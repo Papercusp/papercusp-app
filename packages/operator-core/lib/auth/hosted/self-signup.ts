@@ -183,7 +183,7 @@ export class PostgresHostedSelfSignupAdmission implements HostedSelfSignupAdmiss
    *
    * Runs in its OWN transaction and never throws for a refusal, so a
    * `rate_limited` row it writes is committed and counts against the next
-   * attempt. A returning user whose provider identity is already linked is not
+   * attempt. A returning user whose provider identity has a membership is not
    * an abuse signal — the route turns their `duplicate_identity` into a sign-in —
    * so they are exempt from the count AND write no ledger row: their click is a
    * sign-in, not an admission attempt, and a row committed here would sit in
@@ -200,8 +200,12 @@ export class PostgresHostedSelfSignupAdmission implements HostedSelfSignupAdmiss
 
     const linked = await sql<Array<{ hosted_user_id: string }>>`
       SELECT hosted_user_id::text AS hosted_user_id
-        FROM papercusp_auth.external_identities
+        FROM papercusp_auth.external_identities AS identity
        WHERE provider = ${providerId} AND subject = ${subject}
+         AND EXISTS (
+           SELECT 1 FROM papercusp_auth.organization_memberships AS membership
+            WHERE membership.user_id = identity.hosted_user_id
+         )
        LIMIT 1
     `;
     if (linked[0]) return 'proceed';
@@ -298,36 +302,66 @@ export class PostgresHostedSelfSignupAdmission implements HostedSelfSignupAdmiss
     await sql`
       SELECT pg_advisory_xact_lock(hashtextextended(${verifiedEmail}, 0))
     `;
+    if (providerId === 'workos') {
+      // Same key as PostgresWorkosLifecycleProjectionStore.applyInTransaction:
+      // serialize even when neither writer has inserted the identity row yet.
+      await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`workos:workos:user:${subject}`}, 0))`;
+    }
 
-    const existingIdentity = await sql<Array<{ hosted_user_id: string }>>`
-      SELECT hosted_user_id::text AS hosted_user_id
-        FROM papercusp_auth.external_identities
-       WHERE provider = ${providerId} AND subject = ${subject}
+    // A WorkOS user.created projection can arrive before the signup callback.
+    // It establishes identity existence, never Papercusp membership. Explicit
+    // signup may complete that admission only for the exact active identity and
+    // verified email, with no prior membership (including revoked membership).
+    // Lock both rows before checking membership so concurrent signup attempts
+    // cannot each create an owner tenant for the same projected user.
+    const existingIdentity = await sql<Array<{
+      hosted_user_id: string; identity_status: string; user_status: string; primary_email: string | null;
+    }>>`
+      SELECT identity.hosted_user_id::text AS hosted_user_id,
+             identity.status AS identity_status, user_row.status AS user_status,
+             lower(user_row.primary_email) AS primary_email
+        FROM papercusp_auth.external_identities AS identity
+        JOIN papercusp_auth.hosted_users AS user_row ON user_row.id = identity.hosted_user_id
+       WHERE identity.provider = ${providerId} AND identity.subject = ${subject}
        LIMIT 1
+       FOR UPDATE OF identity, user_row
     `;
-    if (existingIdentity[0]) throw new HostedSelfSignupError('duplicate_identity');
+    const linked = existingIdentity[0];
+    if (linked) {
+      if (linked.identity_status !== 'active' || linked.user_status !== 'active' || linked.primary_email !== verifiedEmail) {
+        throw new HostedSelfSignupError('duplicate_identity');
+      }
+      const memberships = await sql<Array<{ id: string }>>`
+        SELECT id::text FROM papercusp_auth.organization_memberships
+         WHERE user_id = ${linked.hosted_user_id}::uuid LIMIT 1
+      `;
+      if (memberships[0]) throw new HostedSelfSignupError('duplicate_identity');
+    }
 
     const existingEmail = await sql<Array<{ id: string }>>`
       SELECT id::text AS id
         FROM papercusp_auth.hosted_users
        WHERE lower(primary_email) = ${verifiedEmail} AND status = 'active'
+         AND (${linked?.hosted_user_id ?? null}::uuid IS NULL OR id <> ${linked?.hosted_user_id ?? null}::uuid)
        LIMIT 1
     `;
     if (existingEmail[0]) throw new HostedSelfSignupError('duplicate_identity');
 
-    const users = await sql<Array<{ id: string }>>`
-      INSERT INTO papercusp_auth.hosted_users (primary_email, display_name)
-      VALUES (${verifiedEmail}, ${text(input.identity.displayName, 512)})
-      RETURNING id::text AS id
-    `;
-    const userId = users[0]?.id;
-    if (!userId) throw new HostedSelfSignupError('unavailable');
-
-    await sql`
-      INSERT INTO papercusp_auth.external_identities
-        (hosted_user_id, provider, subject, provider_email, profile)
-      VALUES (${userId}::uuid, ${providerId}, ${subject}, ${verifiedEmail}, '{}'::jsonb)
-    `;
+    let userId = linked?.hosted_user_id;
+    if (!userId) {
+      const users = await sql<Array<{ id: string }>>`
+        INSERT INTO papercusp_auth.hosted_users (primary_email, display_name)
+        VALUES (${verifiedEmail}, ${text(input.identity.displayName, 512)})
+        RETURNING id::text AS id
+      `;
+      userId = users[0]?.id;
+      if (!userId) throw new HostedSelfSignupError('unavailable');
+      await sql`
+        INSERT INTO papercusp_auth.external_identities
+          (hosted_user_id, provider, subject, provider_email, profile)
+        VALUES (${userId}::uuid, ${providerId}, ${subject}, ${verifiedEmail}, '{}'::jsonb)
+      `;
+    }
     const organizations = await sql<Array<{ id: string }>>`
       INSERT INTO papercusp_auth.organizations
         (identity_provider, external_organization_id, display_name)

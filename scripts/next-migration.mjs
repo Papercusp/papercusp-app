@@ -18,6 +18,7 @@
  * Usage:
  *   node scripts/next-migration.mjs --name add-foo-index [--intent "what it does"] [--by label] [--dry-run]
  *   npm run db:next-migration -- --name add-foo-index --intent "..."
+ *   npx tsx scripts/next-migration.mjs --arm <path.sql.DRAFT>
  *
  * On success prints the reserved number + a DRAFT path to write the file at:
  *   libs/papercusp/libs/db/sql/<NNN>-<slug>.sql.DRAFT   (NOT the gitignored sidecar mirror)
@@ -29,9 +30,9 @@
  * 727). This closes the window where editing an unapplied migration on disk
  * (including a deliberate temporary both-ways guard-test mutation) races the
  * operator's boot-time auto-apply and can execute half-finished SQL against
- * the live DB. Write + iterate at the `.DRAFT` path; ARM it only once ready by
- * stripping the suffix (`mv <path>.DRAFT <path>`) — the printed `note` gives
- * the exact command.
+ * the live DB. Write + iterate at the .DRAFT path; arm it with the printed
+ * command, which runs the shared pre-apply checks and publishes the linted SQL
+ * atomically without overwriting an existing migration.
  *
  * Exits non-zero (without reserving) when PG is unreachable — a number handed out
  * without a ledger row would re-introduce the very race this prevents.
@@ -50,7 +51,10 @@
  * single dir scan that computes the allocation max.
  */
 import { fileURLToPath } from 'node:url';
-import { resolve as resolvePath } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { lstat, open, link, unlink } from 'node:fs/promises';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
+import { isCliEntry } from '@papercusp/operator-core/lib/util/cli-entry';
 import { resolveScriptPgUrl } from './lib/pg-url.mjs';
 import { ALLOC_ADVISORY_KEY, scanMigrationDirs } from './lib/migration-allocation.mjs';
 import {
@@ -69,9 +73,11 @@ export { ALLOC_ADVISORY_KEY };
 // canonical dir.
 const CANONICAL_DIR = 'libs/papercusp/libs/db/sql';
 const SCAN_DIRS = [CANONICAL_DIR, 'papercusp-desktop/src-tauri/sidecar/db-sql'];
+const REPO_ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), '..');
+const ARM_SQL_DIR = resolvePath(REPO_ROOT, CANONICAL_DIR);
 
 function parseArgs(argv) {
-  const args = { dryRun: false };
+  const args = { dryRun: false, armRequested: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') args.dryRun = true;
@@ -79,9 +85,27 @@ function parseArgs(argv) {
     else if (a === '--name') args.name = argv[++i];
     else if (a === '--intent') args.intent = argv[++i];
     else if (a === '--by') args.by = argv[++i];
+    else if (a === '--arm') {
+      args.armRequested = true;
+      args.armPath = argv[++i];
+    }
     else if (a === '--help' || a === '-h') args.help = true;
   }
   return args;
+}
+
+function quotePosixArgument(value) {
+  return "'" + String(value).replaceAll("'", "'\"'\"'") + "'";
+}
+
+/**
+ * Build the shell-safe command for the shared linted CLI arm executor.
+ *
+ * @param {string} draftPath Repository-relative or absolute .sql.DRAFT path.
+ * @returns {string}
+ */
+export function armCommandFor(draftPath) {
+  return 'npx tsx scripts/next-migration.mjs --arm ' + quotePosixArgument(draftPath);
 }
 
 function slugify(name) {
@@ -95,11 +119,130 @@ function slugify(name) {
 }
 
 /**
- * Pure — builds the JSON payload printed on success. Exported (and unit
- * tested, no DB required) so the `.DRAFT`-suffix contract (EI-19366138707071397)
- * can't silently regress: `path` must be the DRAFT write-target, `arm_path`
- * the eventual armed `.sql` name, and `arm_command` the exact rename between
- * them — see the module-level docstring for why the suffix matters.
+ * Lint a DRAFT with the same per-file pre-apply gate used by boot and db:migrate,
+ * then atomically publish a separate, no-clobber .sql copy.
+ *
+ * @param {object} args
+ * @param {string} args.draftPath Repository-relative or absolute .sql.DRAFT path.
+ * @param {string} [args.sqlDir] SQL directory (default: canonical migrations; tests may use a temp dir).
+ * @returns {Promise<{ok: boolean, draft_path: string, arm_path: string, draft_removed: boolean, warning?: string}>}
+ */
+export async function armMigration({ draftPath, sqlDir = ARM_SQL_DIR }) {
+  if (typeof draftPath !== 'string' || draftPath.trim() === '') {
+    throw new Error('A .sql.DRAFT path is required.');
+  }
+
+  const resolvedSqlDir = resolvePath(REPO_ROOT, sqlDir);
+  const resolvedDraft = resolvePath(REPO_ROOT, draftPath);
+  if (dirname(resolvedDraft) !== resolvedSqlDir) {
+    throw new Error('Refusing to arm a draft outside its SQL directory: ' + resolvedDraft);
+  }
+  const draftName = basename(resolvedDraft);
+  if (!draftName.endsWith('.sql.DRAFT')) {
+    throw new Error('Refusing to arm a file that does not end in .sql.DRAFT: ' + draftName);
+  }
+  const filename = draftName.slice(0, -'.DRAFT'.length);
+  if (!/^\d{3,}-[a-z0-9]+(?:-[a-z0-9]+)*\.sql$/.test(filename)) {
+    throw new Error('Refusing to arm a migration with an invalid filename: ' + draftName);
+  }
+
+  const armPath = join(resolvedSqlDir, filename);
+  const originalStat = await lstat(resolvedDraft);
+  if (!originalStat.isFile() || originalStat.isSymbolicLink()) {
+    throw new Error('Refusing to arm a draft that is not a regular file: ' + resolvedDraft);
+  }
+  const source = await open(resolvedDraft, 'r');
+  let contents;
+  try {
+    const openedStat = await source.stat();
+    if (openedStat.dev !== originalStat.dev || openedStat.ino !== originalStat.ino) {
+      throw new Error('The draft path changed before it could be read; retry arming.');
+    }
+    contents = await source.readFile();
+    const readEndStat = await source.stat();
+    if (openedStat.size !== readEndStat.size || openedStat.mtimeMs !== readEndStat.mtimeMs) {
+      throw new Error('The draft changed while it was being read; retry arming.');
+    }
+  } finally {
+    await source.close();
+  }
+
+  const sqlText = contents.toString('utf8');
+  if (!Buffer.from(sqlText, 'utf8').equals(contents)) {
+    throw new Error('Refusing to arm a draft that is not valid UTF-8 SQL.');
+  }
+  const { assertMigrationPassesPreApplyLints } =
+    await import('../packages/operator-core/lib/migration-preapply-lint.ts');
+  assertMigrationPassesPreApplyLints({ filename, sqlText, sqlDir: resolvedSqlDir });
+
+  const tempPath =
+    join(resolvedSqlDir, '.' + filename + '.arm-' + process.pid + '-' + randomBytes(8).toString('hex') + '.tmp');
+  try {
+    const temporary = await open(tempPath, 'wx', originalStat.mode & 0o777);
+    try {
+      await temporary.writeFile(contents);
+      await temporary.sync();
+    } finally {
+      await temporary.close();
+    }
+    try {
+      await link(tempPath, armPath);
+    } catch (error) {
+      if (error?.code === 'EEXIST') {
+        throw new Error('Refusing to arm ' + filename + ': target already exists; the draft was left unchanged.');
+      }
+      throw error;
+    }
+  } finally {
+    await unlink(tempPath).catch((error) => {
+      if (error?.code !== 'ENOENT') throw error;
+    });
+  }
+
+  let draftRemoved = false;
+  let warning;
+  try {
+    const currentStat = await lstat(resolvedDraft);
+    if (
+      currentStat.isFile() &&
+      !currentStat.isSymbolicLink() &&
+      currentStat.dev === originalStat.dev &&
+      currentStat.ino === originalStat.ino
+    ) {
+      const current = await open(resolvedDraft, 'r');
+      let currentContents;
+      try {
+        currentContents = await current.readFile();
+      } finally {
+        await current.close();
+      }
+      if (currentContents.equals(contents)) {
+        await unlink(resolvedDraft);
+        draftRemoved = true;
+      } else {
+        warning = 'The draft changed during arming; the linted snapshot was armed and the newer draft was preserved.';
+      }
+    } else {
+      warning = 'The draft path changed during arming; the linted snapshot was armed and the newer draft was preserved.';
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') draftRemoved = true;
+    else warning = 'The arm target was created, but the draft could not be removed: ' + error.message;
+  }
+
+  return {
+    ok: true,
+    draft_path: resolvedDraft,
+    arm_path: armPath,
+    draft_removed: draftRemoved,
+    ...(warning ? { warning } : {}),
+  };
+}
+
+/**
+ * Pure — builds the JSON payload printed on success. Exported and unit tested
+ * without a DB so the DRAFT write-target, eventual armed SQL path, and linted
+ * no-clobber arm command cannot silently diverge.
  *
  * @param {object} args
  * @param {number} args.next          The reserved migration number.
@@ -121,6 +264,7 @@ export function buildAllocationResult({
 }) {
   const armPath = `${canonicalDir}/${filename}`;
   const draftPath = `${armPath}.DRAFT`;
+  const armCommand = armCommandFor(draftPath);
   return {
     ok: true,
     number: next,
@@ -128,7 +272,7 @@ export function buildAllocationResult({
     filename,
     path: draftPath,
     arm_path: armPath,
-    arm_command: `mv ${draftPath} ${armPath}`,
+    arm_command: armCommand,
     reserved_by: reservedBy,
     ...(redundancyWarning ? { redundancy_warning: redundancyWarning } : {}),
     // Authoring-time reminder for the forward-compat guard (EI-19462877357083817).
@@ -151,7 +295,7 @@ export function buildAllocationResult({
       'later migration. Check with: npm run lint:migration-forward-compat',
     note: dryRun
       ? 'DRY RUN — nothing reserved. Re-run without --dry-run to claim this number.'
-      : `Reserved. Write + iterate the migration at ${draftPath} (a ".DRAFT" suffix — NOT the sidecar mirror). The runner only ever applies files matching *.sql, so this draft is INVISIBLE to boot auto-apply / db:migrate / the green-checkpoint preflight while you edit it (including any deliberate temporary both-ways guard-test mutation). Once it's ready and tested, ARM it for auto-apply with: mv ${draftPath} ${armPath}`,
+      : 'Reserved. Write + iterate the migration at ' + draftPath + ' (a ".DRAFT" suffix — NOT the sidecar mirror). The runner only ever applies files matching *.sql, so this draft is INVISIBLE to boot auto-apply / db:migrate / the green-checkpoint preflight while you edit it (including any deliberate temporary both-ways guard-test mutation). Once it is ready and tested, arm it for auto-apply with: ' + armCommand,
   };
 }
 
@@ -160,9 +304,20 @@ async function main() {
   if (args.help) {
     console.log(
       'Usage: node scripts/next-migration.mjs --name <slug> [--intent "..."] [--by <label>] [--dry-run] [--force]\n' +
+        '       npx tsx scripts/next-migration.mjs --arm <path.sql.DRAFT>\n' +
         '  --force   reserve even when a near-identical migration was just reserved or already applied (WI-38353).',
     );
     process.exit(0);
+  }
+  if (args.armRequested) {
+    try {
+      const result = await armMigration({ draftPath: args.armPath });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (e) {
+      console.error('db:next-migration ARM FAILED — ' + (e?.message ?? e));
+      process.exitCode = 1;
+    }
+    return;
   }
   const slug = slugify(args.name);
   if (!slug) {
@@ -266,6 +421,20 @@ async function main() {
 
 // Guard the CLI entry so a test can `import { buildAllocationResult } from
 // './next-migration.mjs'` without triggering a live PG connection + argv
-// parse as a side effect of the import.
-const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === resolvePath(process.argv[1]);
-if (isMainModule) await main();
+// parse as a side effect of the import. isCliEntry (not a hand-rolled argv
+// comparison) because agent-tools/db/next_migration.ts imports armCommandFor
+// from here, which puts this file in the bundled operator host graph; isCliEntry
+// is always false inside the bundle, so main() never runs at host boot.
+//
+// NO top-level await here. Because the host bundle imports this file, a
+// top-level `await` makes esbuild compile it, and every module that imports
+// it, into an async lazy init (`__esm({ async ... })`). When that chain
+// crosses an import cycle the init promises wait on each other: the host sits
+// idle forever before it listens (2026-10-01: :3170 and every
+// verify-tauri-headless rig hung at boot, WI-10004497).
+if (isCliEntry(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e?.stack ?? e);
+    process.exitCode = 1;
+  });
+}

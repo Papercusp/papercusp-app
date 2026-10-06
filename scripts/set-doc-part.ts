@@ -45,6 +45,11 @@ import {
 import { SLOT_IDS, SU_STATIC_LAYERS } from "@papercusp/orchestrator/blueprint";
 import { harnessRoot } from "@papercusp/harness/paths";
 import {
+  compareProseBudget,
+  launchProseHeadroom,
+  surfaceDeltasFromFileDeltas,
+} from "../packages/operator-core/lib/launch-prose-budget";
+import {
   applyEditInMemory,
   evictionDelta,
   identityProblemDelta,
@@ -296,6 +301,68 @@ function budgetFor(proj: ProjectorModule): number {
   // exactly the drift this indirection exists to survive: the dry-run's "projection impact"
   // block is only trustworthy while it is computed from the projector's own budget.
   return proj.projectionBudget();
+}
+
+/**
+ * WI-10004682 — the edit-time launch-prose signal.
+ *
+ * The "projection impact" block above reports headroom against the projection CUT SET
+ * (≈160,000 chars), which is a DIFFERENT budget from the lint ceilings on the written files
+ * (`scripts/launch-prose-budget-baseline.json`, ≈116,600 B for the guide, tighter still for
+ * the su-playbook renders that embed CLAUDE.md verbatim). The guide re-breached those
+ * ceilings three times in three days, each found hours later at the gate, because nothing
+ * here said so. This projects the edit's per-client byte delta onto the lint's OWN
+ * measurement + ceilings (no second measurement) and prints the headroom per surface.
+ *
+ * A NOTICE, not a gate: the write that matters is project-doc-parts' (which gates and rolls
+ * back). Never throws — a measurement that cannot run says so ("NOT checked"), because a
+ * silent omission reads as "within budget".
+ */
+const LAUNCH_PROSE_NOTICE_TIMEOUT_MS = 40_000; // < the 60 s idle_in_transaction_session_timeout this runs under
+
+async function launchProseNotice(
+  proj: ProjectorModule,
+  docId: string,
+  beforeRows: ProjectionRow[],
+  afterRows: ProjectionRow[],
+): Promise<string> {
+  const heading = "\n  launch-prose (lint ceiling, projected after this edit):";
+  try {
+    const bytes = (s: string): number => Buffer.byteLength(s, "utf8");
+    const budget = budgetFor(proj);
+    const fileDeltaBytes: Record<string, number> = {};
+    for (const spec of proj.CLIENTS) {
+      const opts = { ...spec, docId, budget };
+      fileDeltaBytes[spec.file] =
+        bytes(proj.projectClient(afterRows, opts).text) -
+        bytes(proj.projectClient(beforeRows, opts).text);
+    }
+    // Dynamic, like loadProjector: the lint script is an ESM-shaped CLI (import.meta.url),
+    // and this file compiles to CJS — a static import would run its module scope at startup.
+    const lint = await import("./check-launch-prose-budget");
+    let timer: NodeJS.Timeout | undefined;
+    const report = await Promise.race([
+      (async () => compareProseBudget(await lint.measureLaunchProseSurfaces(), await lint.readBaseline()))(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`measurement exceeded ${LAUNCH_PROSE_NOTICE_TIMEOUT_MS / 1000}s`)),
+          LAUNCH_PROSE_NOTICE_TIMEOUT_MS,
+        );
+      }),
+    ]).finally(() => clearTimeout(timer));
+    const headroom = launchProseHeadroom(report, {
+      surfaceDeltaBytes: surfaceDeltasFromFileDeltas(fileDeltaBytes),
+    });
+    if (headroom.rows.length === 0) {
+      return `${heading}\n  launch-prose headroom UNAVAILABLE: no projection-governed surface was measured — NOT checked.`;
+    }
+    const verdict = headroom.over.length
+      ? `\n  ⚠ ${headroom.over.length} surface(s) would be OVER their lint ceiling — \`project-doc-parts --write\` will REFUSE (and roll back) unless you trim prose, raise the ceiling in scripts/launch-prose-budget-baseline.json WITH a note, or pass --allow-over.`
+      : "";
+    return `${heading}\n${headroom.lines.join("\n")}${verdict}`;
+  } catch (e) {
+    return `${heading}\n  launch-prose headroom UNAVAILABLE: ${e instanceof Error ? e.message : String(e)} — NOT checked.`;
+  }
 }
 
 async function main(): Promise<void> {
@@ -644,6 +711,7 @@ async function main(): Promise<void> {
       partKey,
     });
     console.log(renderImpact(impacts, partKey));
+    console.log(await launchProseNotice(proj, docId, beforeRows, afterRows));
 
     // A NEW part that projects nowhere is the create-side of the same blind spot: the
     // row is written, `✓ written` is printed, and the text reaches no agent — which is

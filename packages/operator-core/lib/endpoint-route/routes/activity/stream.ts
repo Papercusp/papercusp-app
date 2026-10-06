@@ -17,13 +17,14 @@
  * `auth: 'public'` mirrors the sibling /api/tui/* + /api/coord/* routes —
  * loopback-protected by the host bind.
  */
+import type { Sql } from 'postgres';
 import { sseResponse } from '@papercusp/sse';
 import { getOrgPg } from '@papercusp/db-org';
 import { isLoopbackRequest } from '../../../superuser-token';
 import { onAgentActivity } from '../../../agent-activity-bus';
 import { defineTool } from '@papercusp/agent-mcp';
 
-interface Row {
+export interface Row {
   id: string;
   owner_id: string;
   agent: string | null;
@@ -43,6 +44,29 @@ interface Row {
 type Events = { activity: Row };
 
 const DRAIN_LIMIT = 200;
+
+/**
+ * One drain page: rows after `cursor`, oldest first, at most `limit`. The caller
+ * advances its cursor to the largest id on the page, so the page must be the
+ * NUMERICALLY smallest ids after the cursor.
+ */
+export function queryActivitySince(
+  sql: Sql,
+  opts: { cursor: number; owner: string | null; harness: string | null; limit: number },
+): Promise<Row[]> {
+  return sql<Row[]>`
+    SELECT id::text AS id, owner_id, agent, session_id, harness_slug, kind, tool_name,
+           phase, tool_use_id, summary, status, detail, cwd, created_at
+    FROM harness_shared.agent_activity
+    WHERE id > ${opts.cursor}
+      AND (${opts.owner}::text IS NULL OR owner_id = ${opts.owner})
+      AND (${opts.harness}::text IS NULL OR harness_slug = ${opts.harness})
+    -- id::bigint, never a bare ORDER BY id: that binds to the "id::text AS id" output
+    -- alias and sorts as text ('10' < '8'), so the page-max cursor skipped rows (WI-10004608).
+    ORDER BY id::bigint ASC
+    LIMIT ${opts.limit}
+  `;
+}
 
 export default defineTool({
   method: 'GET',
@@ -71,17 +95,8 @@ export default defineTool({
         let dirty = false;
         let unsubscribe: (() => void) | null = null;
 
-        const queryNew = async (): Promise<Row[]> =>
-          sql<Row[]>`
-            SELECT id::text AS id, owner_id, agent, session_id, harness_slug, kind, tool_name,
-                   phase, tool_use_id, summary, status, detail, cwd, created_at
-            FROM harness_shared.agent_activity
-            WHERE id > ${cursor}
-              AND (${owner}::text IS NULL OR owner_id = ${owner})
-              AND (${harness}::text IS NULL OR harness_slug = ${harness})
-            ORDER BY id ASC
-            LIMIT ${DRAIN_LIMIT}
-          `;
+        const queryNew = (): Promise<Row[]> =>
+          queryActivitySince(sql, { cursor, owner, harness, limit: DRAIN_LIMIT });
 
         const drain = async (): Promise<void> => {
           if (sink.closed) return;

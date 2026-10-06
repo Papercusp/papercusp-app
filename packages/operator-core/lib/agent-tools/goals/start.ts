@@ -1,10 +1,10 @@
 /**
- * goals:start — open a goal AND spawn the GOAL-mode agent that owns it, in one
- * call (goals-tab-improvement-2026-08-09 P-015, D-008).
+ * goals:start — persist a goal, stamp its pre-pinned GOAL holder, then spawn it
+ * as one ordered operation (goals-tab-improvement-2026-08-09 P-015, D-008).
  *
  * WHY THIS EXISTS AS ONE TOOL. The owner's "+ Start a goal" composer needs
- * three writes to land together: the goal row, a spawned agent, and the
- * `agent_modes` stamp that JOINS them. Done client-side that is three
+ * three effects to happen in order: the goal row, the `agent_modes` stamp that
+ * JOINS it to a pre-pinned owner id, and a spawned agent. Done client-side that is three
  * independent calls with two failure gaps, and the gaps are not hypothetical —
  * the workspace this shipped into had TWO goals, ONE goal-mode session, and
  * ZERO rows joining any of them (EI-20015592992797890). A goal whose agent
@@ -12,8 +12,8 @@
  * somebody believes is being pursued.
  *
  * ORDER IS LOAD-BEARING — row, then mode, then spawn:
- *   1. INSERT the goal (cheap, rollback-able).
- *   2. Stamp `agent_modes` for the PRE-PINNED owner id (cheap, rollback-able).
+ *   1. INSERT and commit the goal row.
+ *   2. Stamp `agent_modes` for the PRE-PINNED owner id.
  *   3. Spawn the agent (expensive, and the only irreversible step).
  * The stamp must precede the spawn because it is what the agent reads on its
  * very first orient; writing it afterwards is a race against the agent's own
@@ -21,8 +21,11 @@
  * which goal it owns. Pre-pinning the identity (`psu --owner-id=`) is what
  * makes writing-before-existing possible at all.
  *
- * If the spawn fails, both writes are compensated and the tool reports the
- * failure — never a goal with no agent.
+ * Database writes use the short autocommit handle; a child process must never
+ * outlive an ambient transaction that could roll its goal row back. If launch
+ * preparation or spawn reports failure, the handler compensates the database
+ * and mode writes. A caller timeout after spawn leaves the committed goal row
+ * visible to the holder and to a retry guard.
  *
  * WHY NOT IN agent-mcp beside goals:create: the spawn needs operator-core's
  * console-launcher, and agent-mcp deliberately does not depend on
@@ -30,15 +33,19 @@
  * `@papercusp/agent-mcp/goals` so the two writers cannot drift.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { TripwireSchema, deleteGoalRow, goalId, insertGoalRow } from '@papercusp/agent-mcp/goals';
+import type { GoalSqlTag } from '@papercusp/agent-mcp/goals';
+import { getOrgPg } from '@papercusp/db-org';
 import { validatePropertySchemaDeclaration } from '../../typed-properties-db';
 import { withCanonicalWorklistDeclaration } from '../../goals/package-property-datatypes';
 import { applyGoalBlockedBy, readGoalReadiness, replaceGoalBlockedBy } from '@papercusp/agent-mcp/goal-deps';
+import { clearWorkItemGoalAtStart, stampWorkItemGoalAtStart } from '../../work-items';
 import { STANDING_GOAL_KILL_POLARITY, killCriterionProblem } from '../../goals/kill-criterion';
+import { unmeasuredTripwireAdvisories } from '../../goals/tripwire-refresh';
 import { evaluateGoalStartInputs } from '../../goals/goal-io-validation';
 import { isCompilableSchema } from '../../json-schema-validation';
 import { buildConsoleEnvelope } from '../../console-launcher';
@@ -47,7 +54,14 @@ import { activeWorkspaceId } from '../../workspace-registry';
 import { assertGoalWriteAuthorityForCaller } from '../../goals/write-authority';
 import { papercuspPathForWorkspace } from '../../papercusp-root';
 import { resolveSpawnHostOperatorBaseUrl } from '../../mcp-base-url';
-import { buildAgentLaunchCommand, injectFleetArg, injectLaunchedByArg } from '../../agent-launch-core';
+import {
+  buildAgentLaunchCommand,
+  claimAgentLaunch,
+  injectFleetArg,
+  injectLaunchedByArg,
+  recordAgentLaunchResult,
+  releaseAgentLaunchClaim,
+} from '../../agent-launch-core';
 import { drainFleetAutoMintEnabled, mintDrainFleetForGoal, registerGoalDrainFleetLeader, teardownDrainFleetMint } from '../../goals/drain-fleet-mint';
 import {
   goalArmWithholdsBrief,
@@ -55,6 +69,7 @@ import {
   type GoalBehaviorArm,
   goalLaunchSettingsSchema,
   goalHolderPolicyProblem,
+  drainFleetTopologyProblem,
   goalHolderPolicySchema,
   launchProfileSchema,
   renderGoalPortfolioBrief,
@@ -124,6 +139,28 @@ function describeWindow(sec: number): string {
     }
   }
   return `${sec}s`;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const fields = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`);
+    return `{${fields.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function goalStartRequestFingerprint(args: object, workspaceId: string, installSlug: string): string {
+  const requestArgs = Object.fromEntries(
+    Object.entries(args).filter(([key]) => key !== 'requestKey' && key !== 'harness'),
+  );
+  return createHash('sha256')
+    .update(canonicalJson({ workspaceId, installSlug, args: requestArgs }))
+    .digest('hex');
 }
 
 export function buildGoalKickoffBrief(opts: {
@@ -391,17 +428,17 @@ function buildStartLaunchSettings(args: {
 
 export default defineTool({
   name: 'goals:start',
-  needsWorkspaceTx: true,
   description:
-    'Open a GOAL and spawn the GOAL-mode agent that owns it, atomically — the goal row, the agent, and the agent_modes stamp joining them, or none of them. ' +
-    "{ title, killCriterion, budgetCents, body?, tripwires?, parentId?, agent?, model?, account?, headless? }. Returns the goal id AND the new agent's ownerId. " +
+    'Open a GOAL and spawn the GOAL-mode agent that owns it. The goal row and agent_modes stamp are committed before spawn; handled launch failures are compensated. ' +
+    "{ requestKey?, title, killCriterion, budgetCents, body?, tripwires?, parentId?, agent?, model?, account?, headless? }. Returns the goal id AND the new agent's ownerId. " +
+    'For retry-safe calls, reuse requestKey for the same arguments and scope; use a new key when they change. ' +
     'Kill criterion and ceiling are REQUIRED: GOAL mode mandates both at creation, and this is the surface that enforces it.',
   guidance: {
     when: 'Starting a NEW outcome that needs an agent to own it end-to-end — the "+ Start a goal" path. One call: goal + its agent + the join between them.',
     notWhen:
       'Recording a goal with NO agent (a goal you or an existing session will own): goals:create. Proposing one for the owner to confirm: goals:propose. Launching an agent for a non-goal task: capability:launch-agent.',
     chaining:
-      'goals:start → the spawned agent orients in GOAL mode with the goal as its subject and works the portfolio itself. Watch it on the Goals board, or coord:presence by the returned ownerId.',
+      'goals:start → the spawned agent orients in GOAL mode with the goal as its subject and works the portfolio itself. For a goal explicitly resolving one existing work item, pass its exact id as sourceWorkItemId; prose in title/body is not used to infer a target. Watch it on the Goals board, or coord:presence by the returned ownerId.',
     seeAlso: ['goals:create (the goal row alone, no agent)', 'capability:launch-agent (an agent alone, no goal)'],
   },
   // Same gate as goals:create, deliberately, and NOT capability:terminal. The
@@ -413,6 +450,13 @@ export default defineTool({
   requirePrincipal: false,
   agentRoles: [...SU_ROLES],
   args: z.object({
+    requestKey: z
+      .string()
+      .trim()
+      .min(1)
+      .max(120)
+      .optional()
+      .describe('Stable caller-generated key for retry-safe starts. Reuse it for the same normalized request; change it when the request changes.'),
     title: z
       .string()
       .min(1)
@@ -472,18 +516,23 @@ export default defineTool({
     holder: goalHolderPolicySchema
       .optional()
       .describe(
-        'REQUIRED unless you opt out: does this goal need a LIVE holder to count as active, and what happens when it loses one. ' +
-          "{ requireLive: true } for a goal a session owns — the case this tool creates, since it spawns that session — so it stops reading 'active' when nobody holds it. " +
-          "{ requireLive: false } for a goal driven by routines rather than a held session. onLoss defaults to 'deactivate'; 'respawn' is opt-in per goal. " +
-          'Omitting this entirely is refused: the goal would inherit the live-holder requirement without anyone having chosen it.',
+        "REQUIRED policy: requireLive:true for session-owned goals (inactive without a holder); false for routine-driven goals. onLoss defaults to 'deactivate'; 'respawn' is opt-in. Omitting holder is refused; choose explicitly.",
       ),
     body: z.string().max(20000).optional().describe('the full statement: what winning looks like, scope, constraints'),
     tripwires: z
       .array(TripwireSchema)
       .max(12)
       .optional()
-      .describe('structured form of the kill criterion — renders as live bars instead of prose nobody re-checks'),
+      .describe('structured kill criterion; renders as live bars, not prose'),
     parentId: z.string().min(1).optional().describe('parent goal id, for a sub-goal'),
+    sourceWorkItemId: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe(
+        'OPTIONAL — exact id of an existing same-harness work item this goal explicitly resolves. It is attributed to this goal before the goal-drain lane is minted; missing, cross-harness, or already-attributed items refuse the start. Do not infer this from title/body prose.',
+      ),
     blockedBy: z
       .array(z.string().min(1).max(200))
       .max(20)
@@ -592,7 +641,11 @@ export default defineTool({
     if (!installSlug) {
       return err('No harness in scope — goals are filed against an install_slug. Pass `harness`.');
     }
-    await assertGoalWriteAuthorityForCaller(ctx, workspaceId, ctx.tx as never);
+    // Each statement commits independently before any awaited process spawn.
+    // Do not opt into the dispatcher's ambient workspace transaction here:
+    // caller cancellation must not roll back a goal after its holder exists.
+    const sql = getOrgPg().sql as unknown as GoalSqlTag;
+    await assertGoalWriteAuthorityForCaller(ctx, workspaceId, sql);
 
     // EI-20049757392342975: the SAME refusal `goals:propose`, `goals:update` and
     // `goals:create` apply. This door was the one that mattered most and the one
@@ -661,11 +714,25 @@ export default defineTool({
     const launchSettings = launchSettingsResult.settings;
     const holderProblem = goalHolderPolicyProblem(launchSettings);
     if (holderProblem) return err(holderProblem);
+    // Decided ONCE, before anything is created: the same decision gates the
+    // ceiling floor below and the mint at step 2.5, so the two cannot disagree.
+    const mintsDrainFleet = !soleMemberGoal && (await drainFleetAutoMintEnabled());
+    if (mintsDrainFleet) {
+      // EI-24556293106348130: the drain worker launches LAST, so a ceiling below
+      // the drain topology refuses exactly the agent that claims work.
+      const topologyProblem = drainFleetTopologyProblem(launchSettings);
+      if (topologyProblem) {
+        return err(
+          `${topologyProblem} To run the goal agent alone with no drain fleet, declare the sole-member ` +
+            `contract instead: an inputSchema that requires allowedMembers with const 1, and inputs.allowedMembers: 1.`,
+        );
+      }
+    }
     // ── P-023: typed property DECLARATIONS — validated-on-declare (datatype
     // refs must resolve in datatype_registry; defaults must satisfy their
     // datatype's payload_schema), same placement as the IO-schema gates above.
     if (args.propertySchema) {
-      const propCheck = await validatePropertySchemaDeclaration(ctx.tx as never, workspaceId, args.propertySchema);
+      const propCheck = await validatePropertySchemaDeclaration(sql, workspaceId, args.propertySchema);
       if (!propCheck.ok) return err(`propertySchema refused: ${propCheck.issues.join('; ')}`);
     }
 
@@ -675,6 +742,64 @@ export default defineTool({
     } catch {
       callerOwnerId = null;
     }
+
+    const requestKey = args.requestKey?.trim();
+    const idempotencyKey = requestKey ? `goals:start:${requestKey}` : null;
+    const requestFingerprint = idempotencyKey
+      ? goalStartRequestFingerprint(args, workspaceId, installSlug)
+      : null;
+    if (idempotencyKey && requestFingerprint) {
+      let claim;
+      try {
+        claim = await claimAgentLaunch({
+          workspaceId,
+          idempotencyKey,
+          launchedBy: callerOwnerId,
+          initialSummary: {
+            requestKind: 'goals:start',
+            requestFingerprint,
+            phase: 'claimed',
+          },
+          failClosed: true,
+        });
+      } catch (e) {
+        return err(
+          `Could not safely register this goal start request (${(e as Error)?.message ?? e}); no goal was opened. Retry with the same requestKey.`,
+        );
+      }
+      if (!claim.won) {
+        const prior = claim.priorSummary;
+        if (
+          prior?.requestKind === 'goals:start' &&
+          typeof prior.requestFingerprint === 'string' &&
+          prior.requestFingerprint !== requestFingerprint
+        ) {
+          return err(
+            'This requestKey was already used with different goal arguments or scope. Use a new requestKey for the changed request.',
+          );
+        }
+        const replay = prior?.result && typeof prior.result === 'object' && !Array.isArray(prior.result)
+          ? prior.result as Record<string, unknown>
+          : null;
+        if (
+          prior?.requestKind === 'goals:start' &&
+          prior.requestFingerprint === requestFingerprint &&
+          (prior.phase === 'primary-started' || prior.phase === 'complete') &&
+          replay &&
+          typeof replay.id === 'string' &&
+          typeof replay.agent_owner_id === 'string'
+        ) {
+          return { data: replay };
+        }
+        return err(
+          'A goals:start request with this requestKey is already in progress. Retry with the same key to retrieve its result; do not start it with a new key.',
+        );
+      }
+    }
+    const releaseRequestClaim = async () => {
+      if (!idempotencyKey) return;
+      await releaseAgentLaunchClaim({ workspaceId, idempotencyKey });
+    };
 
     const id = goalId(args.title);
     // PRE-PIN the agent's coord identity so the mode stamp below can name it
@@ -690,7 +815,7 @@ export default defineTool({
 
     // ── 1. the goal row ───────────────────────────────────────────────────
     try {
-      await insertGoalRow(ctx.tx, {
+      await insertGoalRow(sql, {
         id,
         installSlug,
         workspaceId,
@@ -711,6 +836,7 @@ export default defineTool({
         propertySchema: args.propertySchema ?? null,
       });
     } catch (e) {
+      await releaseRequestClaim();
       return err(`Could not open the goal: ${(e as Error)?.message ?? e}`);
     }
 
@@ -722,14 +848,15 @@ export default defineTool({
     // prerequisites the caller declared would start an agent on a premise the
     // caller did not state.
     if (args.blockedBy?.length) {
-      const applied = await applyGoalBlockedBy(ctx.tx, {
+      const applied = await applyGoalBlockedBy(sql, {
         workspaceId,
         goalId: id,
         refs: args.blockedBy,
         createdBy: callerOwnerId ?? null,
       });
       if (!applied.ok) {
-        await deleteGoalRow(ctx.tx, { id, workspaceId }).catch(() => {});
+        await deleteGoalRow(sql, { id, workspaceId }).catch(() => {});
+        await releaseRequestClaim();
         return err(`blockedBy refused (nothing spawned, goal rolled back): ${applied.problem}`);
       }
     }
@@ -744,15 +871,16 @@ export default defineTool({
     // moments ago, so the edges just applied are the only edges it can have.
     let startBlockedOverride: string | null = null;
     if (args.blockedBy?.length) {
-      const readiness = await readGoalReadiness(ctx.tx, workspaceId, id);
+      const readiness = await readGoalReadiness(sql, workspaceId, id);
       if (!readiness.actionable) {
         const unsatisfied = readiness.blockers
           .filter((b) => b.verdict !== 'satisfied')
           .map((b) => `${b.ref} (${b.kind}/${b.status ?? 'absent'}/${b.verdict})`)
           .join(', ');
         if (!args.startBlocked) {
-          await replaceGoalBlockedBy(ctx.tx, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
-          await deleteGoalRow(ctx.tx, { id, workspaceId }).catch(() => {});
+          await replaceGoalBlockedBy(sql, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
+          await deleteGoalRow(sql, { id, workspaceId }).catch(() => {});
+          await releaseRequestClaim();
           return err(
             `Refusing to start: unsatisfied blocker(s) ${unsatisfied}. Nothing was spawned and the goal was rolled back. ` +
               'Either file it as a STUB and arm it when its prerequisites clear — goals:create { blockedBy } ' +
@@ -762,6 +890,52 @@ export default defineTool({
         }
         startBlockedOverride =
           args.startBlockedReason?.trim() || `started despite unsatisfied blocker(s): ${unsatisfied}`;
+      }
+    }
+
+    // A goal-fenced drain fleet cannot claim the item this goal was started to
+    // resolve unless the relationship is explicit on the source row. Never
+    // extract an id from free-form title/body text: callers must name the exact
+    // source item, and the shared writer verifies same-harness + unowned.
+    let sourceWorkItemStampAttempted = false;
+    const clearSourceWorkItemStamp = async () => {
+      if (!args.sourceWorkItemId || !sourceWorkItemStampAttempted) return;
+      await clearWorkItemGoalAtStart(sql, {
+        id: args.sourceWorkItemId,
+        workspaceId,
+        harness: installSlug,
+        goalId: id,
+      }).catch(() => false);
+    };
+    if (args.sourceWorkItemId) {
+      sourceWorkItemStampAttempted = true;
+      let sourceStamp: Awaited<ReturnType<typeof stampWorkItemGoalAtStart>>;
+      try {
+        sourceStamp = await stampWorkItemGoalAtStart(sql, {
+          id: args.sourceWorkItemId,
+          workspaceId,
+          harness: installSlug,
+          goalId: id,
+        });
+      } catch (e) {
+        await clearSourceWorkItemStamp();
+        await replaceGoalBlockedBy(sql, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
+        await deleteGoalRow(sql, { id, workspaceId }).catch(() => {});
+        await releaseRequestClaim();
+        return err(
+          `sourceWorkItemId ${args.sourceWorkItemId} could not be attributed (${(e as Error)?.message ?? e}); ` +
+            'nothing was spawned and the goal was rolled back.',
+        );
+      }
+      if (!sourceStamp.ok) {
+        await clearSourceWorkItemStamp();
+        await replaceGoalBlockedBy(sql, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
+        await deleteGoalRow(sql, { id, workspaceId }).catch(() => {});
+        await releaseRequestClaim();
+        return err(
+          `sourceWorkItemId ${args.sourceWorkItemId} refused (${sourceStamp.reason}); ` +
+            'nothing was spawned and the goal was rolled back.',
+        );
       }
     }
 
@@ -780,11 +954,13 @@ export default defineTool({
       subject: id,
     });
     if (!modeRes.ok) {
+      await clearSourceWorkItemStamp();
       // Edges before the row — same rule as the main rollback below: a deleted
       // goal must not leave dangling blocked-by edges (P-004 closes the gap
       // P-002 left on this early-failure path).
-      await replaceGoalBlockedBy(ctx.tx, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
-      await deleteGoalRow(ctx.tx, { id, workspaceId }).catch(() => {});
+      await replaceGoalBlockedBy(sql, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
+      await deleteGoalRow(sql, { id, workspaceId }).catch(() => {});
+      await releaseRequestClaim();
       return err(
         `Could not put the new agent in GOAL mode (${modeRes.error ?? 'unknown error'}), so nothing was spawned and the goal was rolled back. ` +
           'A GOAL-mode agent that does not know its goal is the failure this tool exists to prevent.',
@@ -803,14 +979,15 @@ export default defineTool({
     const drainWarnings: string[] = [];
     // The goal agent is already the one actor for an explicitly typed
     // `allowedMembers: 1` contract. Do not mint a second actor's lane for it.
-    if (!soleMemberGoal && (await drainFleetAutoMintEnabled())) {
+    if (mintsDrainFleet) {
       try {
         const minted = await mintDrainFleetForGoal({
           workspaceId,
+          harnessSlug: installSlug,
           goalId: id,
           goalTitle: args.title,
           agentOwnerId: ownerId,
-          goalTx: ctx.tx,
+          goalTx: sql,
         });
         drainFleet = { slug: minted.fleetSlug, specRevision: minted.specRevision };
       } catch (e) {
@@ -822,6 +999,10 @@ export default defineTool({
 
     // ── 3. the agent ──────────────────────────────────────────────────────
     const rollback = async () => {
+      // The source item must not retain a goal_id for a goal rolled back after
+      // launch preparation. The helper uses a compare-and-set so it cannot
+      // clear a later attribution written by another actor.
+      await clearSourceWorkItemStamp();
       // P-001: the drain-fleet mint is compensable rows (registry + claim spec) —
       // tear them down with the goal, or the fleet strands as a registry row whose
       // goal no longer exists. The metadata.drainFleet stamp dies with the goal row.
@@ -846,8 +1027,9 @@ export default defineTool({
       // Edges before the row: a deleted goal must not leave dangling blocked-by
       // edges (they would be invisible absent-blocker no-ops, but they pollute
       // the workspace edge read every consumer folds).
-      await replaceGoalBlockedBy(ctx.tx, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
-      await deleteGoalRow(ctx.tx, { id, workspaceId }).catch(() => {});
+      await replaceGoalBlockedBy(sql, { workspaceId, goalId: id, blockers: [] }).catch(() => {});
+      await deleteGoalRow(sql, { id, workspaceId }).catch(() => {});
+      await releaseRequestClaim();
     };
 
     let base;
@@ -879,7 +1061,7 @@ export default defineTool({
       goalId: id,
       goalRole: 'goal',
       requested: launchSettingsResult.requested,
-      sql: ctx.tx as never,
+      sql,
     });
     if (goalLaunch.refusal) {
       await rollback();
@@ -971,6 +1153,45 @@ export default defineTool({
       );
     }
 
+    const tripwireAdvisories = unmeasuredTripwireAdvisories(args.tripwires, {
+      budgetWindowSec: args.budgetWindowSec ?? null,
+    });
+    const primaryResult = {
+      id,
+      title: args.title,
+      status: 'active',
+      kill_criterion: args.killCriterion,
+      budget_cents: args.budgetCents,
+      parent_id: args.parentId ?? null,
+      tripwires: args.tripwires ?? null,
+      ...(tripwireAdvisories.length ? { tripwire_advisories: tripwireAdvisories } : {}),
+      workspace_id: workspaceId,
+      install_slug: installSlug,
+      agent_owner_id: ownerId,
+      agent_terminal: spawned.terminal,
+      agent_pid: spawned.pid ?? null,
+      headless: !!args.headless,
+      drain_fleet: drainFleet?.slug ?? null,
+      drain_leader_owner_id: null,
+      drain_leader_pid: null,
+      drain_leader_coupled: false,
+      drain_member_pid: null,
+      ...(startBlockedOverride ? { start_blocked_override: startBlockedOverride } : {}),
+      ...(drainWarnings.length ? { warning: drainWarnings.join('\n') } : {}),
+    };
+    if (idempotencyKey && requestFingerprint) {
+      await recordAgentLaunchResult({
+        workspaceId,
+        idempotencyKey,
+        summary: {
+          requestKind: 'goals:start',
+          requestFingerprint,
+          phase: 'primary-started',
+          result: primaryResult,
+        },
+      });
+    }
+
     await recordGoalLaunchIdentityBinding({
       goalId: id, ownerId, workspaceId, kickoff, portfolio: portfolioText, modeState: modeRes, behaviorArm,
     }, ctx.metadata);
@@ -995,7 +1216,7 @@ export default defineTool({
           fleetSlug: drainFleet.slug,
           launcherOwnerId: ownerId,
           requested: {},
-          sql: ctx.tx as never,
+          sql,
         });
         if (leaderLaunch.refusal) throw new Error(`leader launch policy refused: ${leaderLaunch.refusal.message}`);
         const leaderOwnerId = `su-${randomUUID()}`;
@@ -1056,7 +1277,7 @@ export default defineTool({
 
         const memberLaunch = await resolveGoalLaunchForGoal({
           workspaceId, goalId: id, goalRole: 'drain-fleet-member', fleetSlug: drainFleet.slug,
-          launcherOwnerId: ownerId, requested: {}, sql: ctx.tx as never,
+          launcherOwnerId: ownerId, requested: {}, sql,
         });
         if (memberLaunch.refusal) throw new Error(`member launch policy refused: ${memberLaunch.refusal.message}`);
         let memberCmd = buildAgentLaunchCommand({
@@ -1095,8 +1316,7 @@ export default defineTool({
       }
     }
 
-    return {
-      data: {
+    const resultData = {
         id,
         title: args.title,
         status: 'active',
@@ -1104,6 +1324,7 @@ export default defineTool({
         budget_cents: args.budgetCents,
         parent_id: args.parentId ?? null,
         tripwires: args.tripwires ?? null,
+        ...(tripwireAdvisories.length ? { tripwire_advisories: tripwireAdvisories } : {}),
         workspace_id: workspaceId,
         install_slug: installSlug,
         // The agent that owns it, and the handle to open its chat, poll
@@ -1132,7 +1353,19 @@ export default defineTool({
         // the audit trail that this goal started with unsatisfied prerequisites.
         ...(startBlockedOverride ? { start_blocked_override: startBlockedOverride } : {}),
         ...(drainWarnings.length ? { warning: drainWarnings.join('\n') } : {}),
-      },
     };
+    if (idempotencyKey && requestFingerprint) {
+      await recordAgentLaunchResult({
+        workspaceId,
+        idempotencyKey,
+        summary: {
+          requestKind: 'goals:start',
+          requestFingerprint,
+          phase: 'complete',
+          result: resultData,
+        },
+      });
+    }
+    return { data: resultData };
   },
 });

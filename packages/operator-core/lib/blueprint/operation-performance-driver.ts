@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import type { Sql } from 'postgres';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
 import type { BlueprintOperationHandle } from './operation-service';
-import type { PhaseMarks } from '../../test/_paired-operation-benchmark';
+import { distribution, type PhaseMarks, type Trial } from '../../test/_paired-operation-benchmark';
 
 export const P013_WORKSPACE = 'p013-benchmark';
 export const P013_HARNESS = 'p013-benchmark-fixture';
@@ -24,7 +24,77 @@ export type P013Sample = {
   arm: P013Arm; phasesMs: number[]; eventLagMs: number; marks: PhaseMarks;
   /** How the terminal business event was observed; see waitForTerminalEvent. */
   eventRecovery: P013EventRecovery;
+  /**
+   * Attribution only (plan D-047): durations of the serial steps between the
+   * `accepted` and `dispatched` marks, in order. Each step's end is the next step's
+   * start, so for a sample they sum to `dispatched - accepted`. The marks are
+   * computed exactly as before, so these timestamps change no graded number.
+   * Candidate: eventsRead, pinRead, launchInserts, admissionSettle, claim.
+   * Control: admissionSettle, claim.
+   */
+  dispatchStepsMs: Partial<Record<P013DispatchStep, number>>;
 };
+export const P013_DISPATCH_STEPS = ['eventsRead', 'pinRead', 'launchInserts', 'admissionSettle', 'claim'] as const;
+export type P013DispatchStep = typeof P013_DISPATCH_STEPS[number];
+export type WarmDispatchStepRow = { arm: P013Arm; steps: P013Sample['dispatchStepsMs'] };
+export type DispatchStepAttribution = {
+  arm: P013Arm; concurrency: 1 | 8; repetition: number; samples: number;
+  /** Per step: p50/p95/p99 across the trial's samples (ms). Steps an arm never runs are absent. */
+  stepsMs: Partial<Record<P013DispatchStep, { p50: number; p95: number; p99: number }>>;
+};
+
+/**
+ * Split warm-sample step rows (D-047) into the warm trials they belong to.
+ * runPairedBenchmark measures one BLOCK per (concurrency, repetition, mode) at a
+ * time and awaits it before the next; since D-050 the block's samples alternate
+ * between the arms in ABBA chunks, and both arms' trials are pushed adjacently
+ * once the block ends. So the rows, in completion order, split into consecutive
+ * BLOCKS of the block's total warm samples, and within a block each arm's rows
+ * are exactly that arm's samples (D-050 broke the older per-trial contiguity this
+ * function once assumed; the a7 matrix failed on it, 2026-10-01). The pre-D-050
+ * sequential order is the special case of one chunk per arm. Any mismatch (a row
+ * from an arm with no trial in the block, rows left over or missing) throws: a
+ * misaligned attribution would credit one arm's steps to the other.
+ */
+export function attributeDispatchSteps(trials: readonly Trial[], rows: readonly WarmDispatchStepRow[]): DispatchStepAttribution[] {
+  let cursor = 0;
+  const round = (value: number) => +value.toFixed(2);
+  const warm = trials.filter((trial) => trial.mode === 'warm');
+  const blockRows = new Map<Trial, readonly WarmDispatchStepRow[]>();
+  for (let start = 0; start < warm.length;) {
+    let end = start + 1;
+    while (end < warm.length && warm[end]!.concurrency === warm[start]!.concurrency
+      && warm[end]!.repetition === warm[start]!.repetition) end++;
+    const size = warm.slice(start, end).reduce((sum, trial) => sum + trial.samples, 0);
+    const block = rows.slice(cursor, cursor + size);
+    cursor += size;
+    for (const trial of warm.slice(start, end)) blockRows.set(trial, block);
+    start = end;
+  }
+  const out = warm.map((trial) => {
+    const chunk = blockRows.get(trial)!.filter((row) => row.arm === trial.arm);
+    if (chunk.length !== trial.samples) {
+      throw new Error(`P-013 dispatch-step rows do not align with the ${trial.arm} warm trial ` +
+        `c${trial.concurrency} rep ${trial.repetition} (${chunk.length}/${trial.samples} rows)`);
+    }
+    const stepsMs: DispatchStepAttribution['stepsMs'] = {};
+    for (const step of P013_DISPATCH_STEPS) {
+      const values = chunk.map((row) => row.steps[step]).filter((value): value is number => value !== undefined);
+      if (values.length === 0) continue;
+      if (values.length !== chunk.length) {
+        throw new Error(`P-013 dispatch step ${step} missing from some ${trial.arm} samples`);
+      }
+      const { p50, p95, p99 } = distribution(values);
+      stepsMs[step] = { p50: round(p50), p95: round(p95), p99: round(p99) };
+    }
+    return { arm: trial.arm, concurrency: trial.concurrency, repetition: trial.repetition,
+      samples: trial.samples, stepsMs };
+  });
+  if (cursor !== rows.length) {
+    throw new Error(`P-013 dispatch-step rows: ${rows.length - cursor} row(s) belong to no warm trial`);
+  }
+  return out;
+}
 
 async function timed<T>(run: () => Promise<T>): Promise<{
   value: T; ms: number; startedAt: number; endedAt: number;
@@ -152,9 +222,20 @@ export async function runP013WorkloadA(
     phasesMs.push(submitted.ms);
     ingress = submitted.startedAt;
     accepted = submitted.endedAt;
+  }
+  // D-047 attribution: absolute stamps on the same clock as the marks
+  // (performance.timeOrigin + performance.now()), so the steps tile accepted→dispatched.
+  const dispatchStepsMs: P013Sample['dispatchStepsMs'] = {};
+  let stepStartedAt = accepted;
+  const endStep = (step: P013DispatchStep, endedAt = performance.timeOrigin + performance.now()) => {
+    dispatchStepsMs[step] = endedAt - stepStartedAt;
+    stepStartedAt = endedAt;
+  };
+  if (candidate) {
     const events = await operationEventsTool.handler({ handle: candidate } as never, caller as never);
     assert.ok((events as { data: { events: Array<{ kind: string; state: string }> } }).data.events
       .some((event) => event.kind === 'work-item' && event.state === 'open'));
+    endStep('eventsRead');
   }
   const worker = `su-p013-${arm}-worker-${sequence}`;
   if (candidate) {
@@ -162,6 +243,7 @@ export async function runP013WorkloadA(
       SELECT payload->'blueprintOperation' AS pin FROM harness_shared.work_items
        WHERE workspace_id = ${P013_WORKSPACE} AND harness_slug = ${P013_HARNESS} AND feature_id = ${id}
     `;
+    endStep('pinRead');
     const launchRevision = { specificationRevision: 'a'.repeat(64), stateRevision: 'p013-applied' };
     await sql`
       INSERT INTO harness_shared.adv_sessions
@@ -185,6 +267,7 @@ export async function runP013WorkloadA(
         desired: launchRevision, prepared: null, applied: launchRevision, status: 'applied',
       } } as never)})
     `;
+    endStep('launchInserts');
   }
   // The isolated fixture settles the shared duplicate-screening gate identically.
   await sql`
@@ -195,6 +278,10 @@ export async function runP013WorkloadA(
   const claimed = await timed(() => claimWorkItemTool.handler({
     id, harness: P013_HARNESS, assignee: worker,
   } as never, { ...caller, uiClientId: worker } as never));
+  // Close the attribution on the claim's own stamps, so the last step ends exactly at
+  // the `dispatched` mark.
+  endStep('admissionSettle', claimed.startedAt);
+  endStep('claim', claimed.endedAt);
   const claim = (claimed.value as { data?: { results?: Array<{ ok: boolean; error?: string }> } })
     .data?.results?.[0];
   assert.equal(claim?.ok, true, claim?.error);
@@ -250,5 +337,5 @@ export async function runP013WorkloadA(
   };
   assert.equal(phasesMs.length, 4);
   assert.ok(phasesMs.every((duration) => Number.isFinite(duration) && duration >= 0));
-  return { arm, phasesMs, eventLagMs, marks, eventRecovery: eventMark.recovery };
+  return { arm, phasesMs, eventLagMs, marks, eventRecovery: eventMark.recovery, dispatchStepsMs };
 }

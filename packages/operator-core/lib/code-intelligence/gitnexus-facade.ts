@@ -249,6 +249,20 @@ export interface GitnexusFacadeArgs {
   direction?: 'upstream' | 'downstream' | 'both';
   /** Repository name in the GitNexus index. */
   repo?: string;
+  /**
+   * `symbol`/`callers`/`callees`: repo-relative path of the file that DEFINES the
+   * symbol. Disambiguates a name that several indexed files define (a helper
+   * mirrored in a test fixture, a same-named export) — without it GitNexus answers
+   * `ambiguous` and the facade refuses to guess. A path that matches no candidate
+   * is `not_found`, never a silent fall-back to a different definition.
+   */
+  file_path?: string;
+  /**
+   * `symbol`/`callers`/`callees`: exact GitNexus uid (`Function:<path>:<name>`),
+   * as listed in an ambiguity error's candidates. Takes precedence over `name`
+   * upstream; `name` is still required here so the answer carries a query label.
+   */
+  uid?: string;
   /** Cap on returned sites. Clamped to MAX_SITES_PER_ANSWER. */
   limit?: number;
 }
@@ -806,6 +820,12 @@ export async function gitnexusFacade(
     const raw = await activeDispatch('context', {
       name: query,
       ...(args.kind ? { kind: args.kind } : {}),
+      // Disambiguators the caller already knows (e.g. the selective assist's
+      // `change` intent carries the defining file). Forwarded verbatim; an
+      // absent one is OMITTED, not sent empty, so the by-name call shape that
+      // every existing caller and recorded fixture relies on is unchanged.
+      ...(args.file_path ? { file_path: args.file_path } : {}),
+      ...(args.uid ? { uid: args.uid } : {}),
       repo,
     });
     const { json, text, truncated } = parseEnvelope(raw);
@@ -839,7 +859,7 @@ export async function gitnexusFacade(
       const missing = status === 'not_found' || status === 'not-found';
       const ambiguous = status === 'ambiguous';
       const reason = ambiguous
-        ? `gitnexus symbol is ambiguous${ambiguity ? `: ${ambiguity}` : ''}. Resolve the production symbol with gitnexus.context { uid or file_path } and corroborate current source.`
+        ? `gitnexus symbol is ambiguous${ambiguity ? `: ${ambiguity}` : ''}. Retry with \`file_path\` (the defining file) or \`uid\` (from the candidates above) to select the production symbol, and corroborate current source.`
         : missing
           ? 'gitnexus did not find this symbol in its index; source existence is unverified. Check scoped rg or official LSP, including source at indexedCommit, before concluding absence.'
           : `gitnexus context failed or returned an unrecognized status (${status ?? 'missing'}): ${typeof json.error === 'string' ? json.error : 'no valid found/not_found/ambiguous status'}. Use scoped rg or official LSP.`;

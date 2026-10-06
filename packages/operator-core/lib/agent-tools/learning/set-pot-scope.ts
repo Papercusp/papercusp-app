@@ -66,6 +66,21 @@ export default defineTool({
     enabled: z
       .boolean()
       .describe('false = no learning lane may run for these pots, whatever its own arming says. true = release the gate (each lane resumes at its own prior arming).'),
+    reason: z
+      .string()
+      .min(1)
+      .max(1000)
+      .optional()
+      .describe('WHY learning is being switched OFF — a real citation (owner directive id/date, work-item), not a label. Recorded as structured pause provenance so a quiet pot reads as deliberate, not broken. Ignored when enabled:true (enabling clears the record).'),
+    ownerDirected: z
+      .boolean()
+      .optional()
+      .describe("true = this pause is the OWNER's standing decision. Requires `reason` (cite the directive). Set it ONLY from a literal owner directive you can point to — it tells every producer-silence detector to treat the silence as deliberate."),
+    reviewBy: z
+      .string()
+      .datetime()
+      .optional()
+      .describe('ISO-8601 instant when this pause should be re-examined. Omit for an open-ended pause.'),
     dryRun: z.boolean().optional(),
   }),
   async handler(args, ctx) {
@@ -119,6 +134,9 @@ export default defineTool({
             potSlugs: pots,
             enabled: args.enabled,
             setBy,
+            pauseReason: args.reason ?? null,
+            ownerDirected: args.ownerDirected === true,
+            reviewBy: args.reviewBy ? new Date(args.reviewBy) : null,
           });
           return readPrior();
         },
@@ -127,19 +145,21 @@ export default defineTool({
           // pots that had none get their row REMOVED, so a revert cannot leave
           // a set_by stamp naming an actor who never set it.
           const hadNoRow = pots.filter((p) => prev[p] === null);
-          const wasEnabled = pots.filter((p) => prev[p]?.enabled === true);
-          const wasDisabled = pots.filter((p) => prev[p]?.enabled === false);
           if (hadNoRow.length > 0) await clearPotLearningScope(sql, { workspaceId, potSlugs: hadNoRow });
-          for (const [slugs, enabled] of [
-            [wasEnabled, true],
-            [wasDisabled, false],
-          ] as const) {
-            if (slugs.length === 0) continue;
+          // Restore each pot's OWN prior row, pause record included — a revert
+          // must put back the provenance that was there, not silently drop it,
+          // and pots that shared a write can have had different prior pauses.
+          for (const p of pots) {
+            const before = prev[p];
+            if (!before) continue;
             await setPotLearningScope(sql, {
               workspaceId,
-              potSlugs: slugs,
-              enabled,
-              setBy: prev[slugs[0]]?.setBy ?? null,
+              potSlugs: [p],
+              enabled: before.enabled,
+              setBy: before.setBy ?? null,
+              pauseReason: before.pauseReason,
+              ownerDirected: before.ownerDirected,
+              reviewBy: before.reviewBy,
             });
           }
         },

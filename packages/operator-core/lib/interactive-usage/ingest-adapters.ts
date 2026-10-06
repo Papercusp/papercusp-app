@@ -50,6 +50,25 @@ function completeLines(chunk: string): { text: string; bytes: number } {
 
 export const UNKNOWN_CODEX_MODEL = 'unknown-openai';
 
+const CODEX_CARRY_LINEAGE_RE = /⟦codex-carry-lineage predecessor:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})⟧/i;
+
+/** Read the lineage marker from the native Codex user-message content shape. */
+function codexCarryLineagePredecessor(payload: {
+  type?: string;
+  role?: string;
+  content?: unknown;
+} | undefined): string | undefined {
+  if (payload?.type !== 'message' || payload.role !== 'user' || !Array.isArray(payload.content)) return undefined;
+  for (const part of payload.content) {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
+    const block = part as { type?: unknown; text?: unknown };
+    if (block.type !== 'input_text' || typeof block.text !== 'string') continue;
+    const match = CODEX_CARRY_LINEAGE_RE.exec(block.text);
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
 /** Parse a codex rollout chunk. Exported for unit tests. */
 export function parseCodexChunk(chunk: string, priorState: TranscriptParserState = {}): ParsedChunk {
   const perModel = new Map<string, TranscriptDelta>();
@@ -77,6 +96,8 @@ export function parseCodexChunk(chunk: string, priorState: TranscriptParserState
         model?: string;
         turn_id?: string;
         forked_from_id?: string;
+        role?: string;
+        content?: unknown;
         info?: {
           total_token_usage?: Record<string, number> | null;
           last_token_usage?: {
@@ -95,6 +116,15 @@ export function parseCodexChunk(chunk: string, priorState: TranscriptParserState
       parserState.requestOrdinal ??= 0;
       if (typeof evt.payload?.forked_from_id === 'string' && evt.payload.forked_from_id) {
         parserState.predecessorSessionId = evt.payload.forked_from_id;
+      }
+    }
+    if (evt?.type === 'response_item') {
+      // Managed fresh carries are new Codex threads, so session_meta has no
+      // forked_from_id. Preserve native fork metadata when it exists; otherwise
+      // recover the predecessor from Papercusp's marker in the first user turn.
+      const predecessor = codexCarryLineagePredecessor(evt.payload);
+      if (predecessor && !parserState.predecessorSessionId) {
+        parserState.predecessorSessionId = predecessor;
       }
     }
     if (evt?.type === 'compacted' || evt.payload?.type === 'context_compacted') {

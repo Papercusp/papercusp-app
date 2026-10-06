@@ -74,6 +74,9 @@ export interface BenchmarkProtocol {
    * arm order still alternates across the five repetitions and each trial row
    * carries its true repetition number. */
   repetitionOffset?: number;
+  /** Chunks per arm per trial (D-050); defaults to P013_INTERLEAVE_CHUNKS. 1 = the
+   * pre-D-050 whole-block order, kept only so runner tests can pin it. */
+  interleaveChunks?: number;
 }
 
 export type WorkloadClass = 'A' | 'B' | 'C' | 'D';
@@ -124,10 +127,20 @@ function phaseDurations(marks: PhaseMarks) {
   };
 }
 
-async function runTrial(
-  arm: ArmName, fixture: BenchmarkArm, mode: StartMode, concurrency: 1 | 8,
-  repetition: number, samples: number,
-): Promise<Trial> {
+/** D-050: each arm's trial is measured in this many chunks, alternating arms chunk by chunk
+ * (ABBA), so a host burst lasting seconds lands on both arms instead of one arm's block. */
+export const P013_INTERLEAVE_CHUNKS = 5;
+
+/** Near-equal split of `samples` into at most `chunks` nonempty parts. */
+export function chunkSizes(samples: number, chunks: number): number[] {
+  const parts = Math.max(1, Math.min(chunks, samples));
+  return Array.from({ length: parts }, (_, i) =>
+    Math.floor(samples / parts) + (i < samples % parts ? 1 : 0));
+}
+
+async function runChunk(
+  fixture: BenchmarkArm, mode: StartMode, concurrency: 1 | 8, samples: number,
+): Promise<{ measurements: PhaseMarks[]; wallMs: number }> {
   const measurements: PhaseMarks[] = new Array(samples);
   let next = 0;
   const start = performance.now();
@@ -154,7 +167,18 @@ async function runTrial(
       }
     }
   }));
-  const wallMs = performance.now() - start;
+  return { measurements, wallMs: performance.now() - start };
+}
+
+/** One arm's trial, assembled from its chunks: the same sample count, and throughput over
+ * the arm's own measured wall time (the sum of its chunks, never the other arm's). */
+function assembleTrial(
+  arm: ArmName, mode: StartMode, concurrency: 1 | 8, repetition: number,
+  chunks: Array<{ measurements: PhaseMarks[]; wallMs: number }>,
+): Trial {
+  const measurements = chunks.flatMap((chunk) => chunk.measurements);
+  const samples = measurements.length;
+  const wallMs = chunks.reduce((sum, chunk) => sum + chunk.wallMs, 0);
   const phases = measurements.map(phaseDurations);
   const sumKnown = (key: 'dbRoundTrips' | 'dbBytes' | 'durableSteps'): number | null =>
     measurements.every((row) => row[key] !== undefined)
@@ -200,9 +224,18 @@ export async function runPairedBenchmark(
     for (let repetition = offset; repetition < offset + protocol.repetitions; repetition++) {
       for (const mode of modes) {
         const order: ArmName[] = repetition % 2 === 0 ? ['control', 'candidate'] : ['candidate', 'control'];
+        const sizes = chunkSizes(mode === 'warm' ? protocol.warmSamples : protocol.coldSamples,
+          protocol.interleaveChunks ?? P013_INTERLEAVE_CHUNKS);
+        const chunks: Record<ArmName, Array<{ measurements: PhaseMarks[]; wallMs: number }>> =
+          { control: [], candidate: [] };
+        for (const [k, size] of sizes.entries()) {
+          // ABBA: the repetition's leading arm opens even chunks, the other arm opens odd ones.
+          for (const arm of k % 2 === 0 ? order : [...order].reverse()) {
+            chunks[arm].push(await runChunk(arms[arm], mode, concurrency, size));
+          }
+        }
         for (const arm of order) {
-          trials.push(await runTrial(arm, arms[arm], mode, concurrency, repetition,
-            mode === 'warm' ? protocol.warmSamples : protocol.coldSamples));
+          trials.push(assembleTrial(arm, mode, concurrency, repetition, chunks[arm]));
         }
       }
     }

@@ -229,7 +229,7 @@ export { _resetStateChannelForTests } from '@papercusp/tooldef';
 export { tierFor, setCapabilityTierResolver } from '@papercusp/tooldef';
 // Papercusp's capability→tier policy (plan P-012) — the host impl registered
 // as tooldef's tier resolver (see capability-tiers-papercusp.ts).
-export { papercuspTierFor, setCapabilityTierOverride, type CapabilityTierOverride } from './capability-tiers-papercusp';
+export { papercuspTierFor, papercuspLateCompletionRead, setCapabilityTierOverride, type CapabilityTierOverride } from './capability-tiers-papercusp';
 
 // The goal TRANSITION seam (EI-20013729460455061 stop, WI-37615 resume). operator-core
 // installs the executor at module load; without it `goals:update { status:'paused' }` is a

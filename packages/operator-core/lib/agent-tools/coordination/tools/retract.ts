@@ -39,6 +39,7 @@ import { getPresence } from '../presence';
 import { fetchPresenceFleet } from '../presence-fleet';
 import { hostAudienceResolvers } from '../audience-host';
 import { wakeRecipients } from '../inbox-wake';
+import { readWatermark, pickUnreadCursor } from '../watermarks';
 import { coordLog, coordSql, coordWorkspaceId, coordHasPgFastPath } from '../log';
 import { COORD_ROLES } from '../roles';
 import {
@@ -65,6 +66,49 @@ function clampSummary(s: string | undefined, max = 140): string {
   if (!s) return '(no summary)';
   const one = s.replace(/\s+/g, ' ').trim();
   return one.length <= max ? one : `${one.slice(0, max - 1)}…`;
+}
+
+/** An audience entry naming ONE session — not '*', 'human', or an @selector. */
+function isConcreteRecipient(t: string): boolean {
+  return t !== '*' && t !== 'human' && !t.startsWith('@');
+}
+
+/**
+ * Split the audience by whether each recipient could have SEEN the original
+ * (WI-10004819). A concrete recipient whose read cursor (the shared
+ * `pickUnreadCursor` rule) sits strictly BEFORE the original's ts was never
+ * shown it, so a notice quoting it would be the only way that recipient learns
+ * the subject — and "RETRACTED: <an action>" then reads as "the action was
+ * undone" (the 2026-10-01 incident: a goal holder told the owner a worklist
+ * edit had been reverted when only the message about it was withdrawn).
+ *
+ * Everyone else stays on the quoting notice: the sender, a cursor at/after the
+ * original, no receipt on record, a failed read, or a non-concrete target. A
+ * recipient who DID act on a wrong message must recognise which one to
+ * disregard, so uncertainty resolves toward quoting.
+ */
+async function partitionAudienceBySeen(
+  audience: string[],
+  originalTs: string | undefined,
+  senderOwnerId: string,
+): Promise<{ seen: string[]; unseen: string[] }> {
+  if (!originalTs) return { seen: audience, unseen: [] };
+  const neverShown = await Promise.all(
+    audience.map(async (t) => {
+      if (!isConcreteRecipient(t) || t === senderOwnerId) return false;
+      try {
+        const wm = await readWatermark(t);
+        const cursor = pickUnreadCursor(wm?.messages_since_ts, wm?.messages_shown_ts);
+        return cursor !== null && cursor < originalTs;
+      } catch {
+        return false;
+      }
+    }),
+  );
+  return {
+    seen: audience.filter((_, i) => !neverShown[i]),
+    unseen: audience.filter((_, i) => neverShown[i]),
+  };
 }
 
 /**
@@ -192,26 +236,55 @@ export default defineTool({
 
     // The notice: to the ORIGINALLY-DELIVERED audience, from the system
     // principal, carrying the marker fields. related_msg_id threads it to the
-    // original (coord:thread shows both).
+    // original (coord:thread shows both). Recipients never shown the original
+    // get a content-free notice instead (partitionAudienceBySeen).
     const audience = Array.isArray(original.to) && original.to.length ? original.to : [senderOwnerId];
-    const notice = await sendMessage(RETRACT_IDENTITY, {
-      to: audience,
-      summary: `⛔ RETRACTED: "${clampSummary(original.summary)}" (${args.msg_id})${args.reason ? ` — ${args.reason}` : ''}`,
-      body:
-        `The message ${args.msg_id} from ${senderOwnerId}${original.ts ? ` (sent ${original.ts})` : ''} has been ` +
-        `RETRACTED — disregard it${args.reason ? `: ${args.reason}` : '.'} ` +
-        'It is suppressed from inbox/feed/catch-up reads from now on; the original text remains visible only in the ' +
-        'forensic thread view (coord:thread).',
-      plan_slug: typeof original.plan_slug === 'string' ? original.plan_slug : undefined,
-      related_msg_id: args.msg_id,
-      extra: { [RETRACTS_FIELD]: args.msg_id },
-    });
+    const { seen, unseen } = await partitionAudienceBySeen(audience, original.ts, senderOwnerId);
+    const sentAt = original.ts ? ` (sent ${original.ts})` : '';
+    const planSlug = typeof original.plan_slug === 'string' ? original.plan_slug : undefined;
+    const notices: Array<{ msg_id: string; to: string[]; quoted: boolean }> = [];
+    if (seen.length) {
+      const n = await sendMessage(RETRACT_IDENTITY, {
+        to: seen,
+        summary:
+          `⛔ RETRACTED message ${args.msg_id} (withdraws the message, not any action it reported): ` +
+          `"${clampSummary(original.summary)}"${args.reason ? ` — ${args.reason}` : ''}`,
+        body:
+          `The message ${args.msg_id} from ${senderOwnerId}${sentAt} has been ` +
+          `RETRACTED — disregard it${args.reason ? `: ${args.reason}` : '.'} ` +
+          'Retracting withdraws the MESSAGE only: an edit, decision or dispatch it reported still stands unless this ' +
+          'notice says otherwise. It is suppressed from inbox/feed/catch-up reads from now on; the original text ' +
+          'remains visible only in the forensic thread view (coord:thread).',
+        plan_slug: planSlug,
+        related_msg_id: args.msg_id,
+        extra: { [RETRACTS_FIELD]: args.msg_id },
+      });
+      notices.push({ msg_id: n.msg_id, to: seen, quoted: true });
+    }
+    if (unseen.length) {
+      // Neither the original's summary nor the reason: either would be the
+      // only way these recipients learn the subject.
+      const n = await sendMessage(RETRACT_IDENTITY, {
+        to: unseen,
+        summary: `⛔ RETRACTED message ${args.msg_id} from ${senderOwnerId}, withdrawn before you read it — nothing to disregard or do`,
+        body:
+          `A message addressed to you (${args.msg_id} from ${senderOwnerId}${sentAt}) was withdrawn before it was ` +
+          'shown to you. Its content and the reason are deliberately not repeated here. There is nothing to ' +
+          'disregard and nothing to do.',
+        plan_slug: planSlug,
+        related_msg_id: args.msg_id,
+        extra: { [RETRACTS_FIELD]: args.msg_id },
+      });
+      notices.push({ msg_id: n.msg_id, to: unseen, quoted: false });
+    }
 
     // Optional wake: concrete ownerIds only — '*'/'human'/selectors are not
-    // wakeable targets; the inbox delivery already covers them. Fail-soft.
+    // wakeable targets; the inbox delivery already covers them. A recipient
+    // never shown the original has nothing to act on, so it is not woken.
+    // Fail-soft.
     let woken: number | undefined;
     if (args.wake) {
-      const concrete = audience.filter((t) => t !== '*' && t !== 'human' && !t.startsWith('@'));
+      const concrete = seen.filter(isConcreteRecipient);
       if (concrete.length) {
         try {
           const r = await wakeRecipients(concrete, {
@@ -233,8 +306,10 @@ export default defineTool({
       msg_id: args.msg_id,
       retracted: true,
       invokedAs,
-      notice_msg_id: notice.msg_id,
+      notice_msg_id: notices[0]?.msg_id,
+      notices,
       audience,
+      ...(unseen.length ? { unseenRecipients: unseen } : {}),
       ...(woken !== undefined ? { woken } : {}),
     });
   },

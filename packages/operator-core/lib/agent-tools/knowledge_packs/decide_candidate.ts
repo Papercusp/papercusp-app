@@ -55,10 +55,10 @@ export default defineTool({
   name: 'knowledge_packs:decide_candidate',
   capability: 'memory:write',
   description:
-    'Decide one OR many pending knowledge-pack candidates: adopt (write it into the fleet-lessons pack — version bumps so hives see updateAvailable; optionally edit title/text first) or dismiss (terminal — the signature never re-stages). Most candidates are auto-decided by a scheduled review sweep; this tool is the manual OVERRIDE. Single: { id, action, note?, title?, text? }. Many same action: { ids:[…], action }. Many heterogeneous: items:[{ id, action, note?, title?, text? }]. Returns { ok, results:[{ ok, id, action?, … | error }], counts } — correlate by id, not by position; one bad candidate never fails the rest.',
+    'Propose your memory as a reviewed identity lesson with { action:"propose", memoryId, identityId, packId? }. Only its writer may propose to an identity worn at write time; visibility stays unchanged. Adopt/dismiss candidates with { id, action, note?, title?, text? }, ids[] or items[]. Identity adoption writes a local vendored pack and bumps its patch; installed packs refuse and point upstream. Fleet candidates retain automated review. Decisions return keyed results/counts; proposal returns staged/id or a refusal.',
   guidance: {
     when:
-      'The owner asks you to adopt/dismiss a candidate now, overriding the automated review sweep. Decide several at once via ids:[…]+action or items:[…].',
+      'Explicitly propose a lesson you authored while wearing an identity, or review its pending candidates with adopt/dismiss. For fleet candidates, override the automated sweep. Decide several at once via ids:[…]+action or items:[…].',
     notWhen:
       'Routine unattended candidates — the automated sweep already decides those. To seed a lesson into a hive pool directly (adoption only updates the PACK; hives adopt via knowledge_packs:install/upgrade).',
     chaining:
@@ -72,7 +72,10 @@ export default defineTool({
   args: z
     .object({
       id: z.string().min(1).max(80).optional().describe('single-decide shorthand: the candidate id'),
-      action: ACTION.optional().describe('applies to the inline id / every id in `ids`'),
+      action: z.enum(['adopt', 'dismiss', 'propose']).optional().describe('adopt/dismiss a candidate, or explicitly propose your memory to a worn identity'),
+      memoryId: z.string().uuid().optional().describe('For propose: memory authored by this session while wearing identityId.'),
+      identityId: z.string().min(1).max(120).optional(),
+      packId: z.string().min(1).max(120).optional().describe('For propose: choose a declared pack when the identity bundles several.'),
       note: softText(LIMITS.ANNOTATION).optional().describe('decision note for the inline id / every id in `ids`. Auto-truncated to 2000 chars if longer.'),
       title: hardText(LIMITS.SHORT_TITLE).optional().describe('Owner-edited title for the inline id (adopt only).'),
       text: hardText(8000).optional().describe('Owner-edited lesson body for the inline id (adopt only).'),
@@ -81,7 +84,9 @@ export default defineTool({
       workspace: z.string().max(120).optional(),
     })
     .refine(
-      (a) => (a.items?.length ?? 0) > 0 || (Boolean(a.action) && ((a.ids?.length ?? 0) > 0 || Boolean(a.id))),
+      (a) => a.action === 'propose'
+        ? Boolean(a.memoryId && a.identityId && !a.id && !a.ids && !a.items)
+        : (a.items?.length ?? 0) > 0 || (Boolean(a.action) && ((a.ids?.length ?? 0) > 0 || Boolean(a.id))),
       {
         message: 'pass { id, action } for one, { ids:[…], action } for many of the same action, or items:[{ id, action }] for many',
       },
@@ -89,6 +94,13 @@ export default defineTool({
   async handler(args, ctx) {
     if (!(await knowledgePacksEnabled())) return text(FLAG_OFF);
     const workspaceId = resolveConcreteWorkspaceId(args.workspace, ctx.principal?.workspaceId);
+    if (args.action === 'propose') {
+      const { proposeIdentityMemory } = await import('../../knowledge-packs/identity-learning');
+      return text(await proposeIdentityMemory({
+        memoryId: args.memoryId!, identityId: args.identityId!, packId: args.packId,
+        ownerId: ctx.uiClientId ?? '', workspaceId,
+      }));
+    }
     const by = (await getSessionUserOrDefault()).id;
     const { decideKnowledgePackCandidate } = await import('../../knowledge-packs/candidates');
 
@@ -116,7 +128,7 @@ export default defineTool({
         // Spread the core result FIRST, then pin the bulk key fields so they win.
         return {
           ...result,
-          ...(result.action === 'adopt' ? { hint: ADOPT_HINT } : {}),
+          ...(result.action === 'adopt' ? { hint: result.packId === 'fleet-lessons' ? ADOPT_HINT : 'Adopted into the locally authored identity pack. Publish the next identity release to share the reviewed lesson.' } : {}),
           ok: true as const,
           id: it.id,
         };

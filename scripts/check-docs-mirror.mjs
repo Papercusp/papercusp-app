@@ -23,7 +23,8 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -146,11 +147,23 @@ export function scanDocsMirror({ sourceRoot = DEFAULT_SOURCE_ROOT, mirrorRoot = 
   };
 }
 
+/** Measure page names AND bytes; mtimes and git commits can move during a build. */
+export function fingerprintDocsSource(sourceRoot = DEFAULT_SOURCE_ROOT) {
+  const hash = createHash('sha256');
+  for (const path of listVisibleFiles(sourceRoot, [...SOURCE_EXTENSIONS])) {
+    const bytes = readFileSync(join(sourceRoot, path));
+    hash.update(JSON.stringify([path, bytes.length]));
+    hash.update(bytes);
+  }
+  return hash.digest('hex');
+}
+
 function parseArgs(argv) {
   const options = {};
   for (const arg of argv) {
     if (arg.startsWith('--source-root=')) options.sourceRoot = resolve(arg.slice('--source-root='.length));
     else if (arg.startsWith('--mirror-root=')) options.mirrorRoot = resolve(arg.slice('--mirror-root='.length));
+    else if (arg === '--source-fingerprint') options.sourceFingerprint = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`unknown argument: ${arg}`);
   }
@@ -301,13 +314,17 @@ export function formatStaleMirror(verdict) {
 }
 
 export function printUsage() {
-  console.log('Usage: node scripts/check-docs-mirror.mjs [--source-root=DIR] [--mirror-root=DIR]');
+  console.log('Usage: node scripts/check-docs-mirror.mjs [--source-root=DIR] [--mirror-root=DIR] [--source-fingerprint]');
 }
 
 export function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.help) {
     printUsage();
+    return 0;
+  }
+  if (options.sourceFingerprint) {
+    console.log(fingerprintDocsSource(options.sourceRoot));
     return 0;
   }
 

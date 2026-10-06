@@ -6,15 +6,43 @@
  * `first-workspace-dependencies.ts` uses: the organization is always the one the verified token
  * carries, never a request field.
  */
+import { createHash } from 'node:crypto';
 import type { Sql } from 'postgres';
 import type { HostedServiceContextRunner } from '../../../auth/hosted/workos-lifecycle-postgres';
 
 export type HostedCliGrantDecision = 'approved' | 'denied';
 
+/**
+ * What a device grant is for (migration 1268, EAA D-031): `cli` is psu sign-in and is exchanged
+ * for a CLI token; `relay-link` links a local install to the portal relay and is exchanged for a
+ * connector enrollment. Each exchange refuses the other purpose's grants.
+ */
+export type HostedDeviceGrantPurpose = 'cli' | 'relay-link';
+
 export interface HostedCliPendingGrant {
   readonly userCode: string;
   readonly clientLabel: string;
   readonly expiresAt: Date;
+  readonly purpose: HostedDeviceGrantPurpose;
+  /** relay-link only: the install id the linking machine generated for itself. */
+  readonly installId: string | null;
+}
+
+export type HostedRelayLinkExchangeResult =
+  | { readonly status: 'pending' | 'slow_down' | 'denied' | 'expired' | 'invalid' }
+  | {
+      readonly status: 'approved';
+      readonly userId: string;
+      readonly organizationId: string;
+      readonly installId: string;
+      readonly clientLabel: string;
+    };
+
+/** A relay-linked install as the portal knows it: a customer workspace of kind 'linked'. */
+export interface HostedLinkedWorkspace {
+  readonly customerWorkspaceId: string;
+  readonly hostId: string;
+  readonly routeLabel: string;
 }
 
 export interface HostedCliToken {
@@ -50,6 +78,9 @@ export interface HostedCliStore {
     clientLabel: string;
     createdAt: Date;
     expiresAt: Date;
+    /** Defaults to 'cli'. A 'relay-link' grant requires `installId`. */
+    purpose?: HostedDeviceGrantPurpose;
+    installId?: string;
   }): Promise<boolean>;
   findPendingGrant(userCode: string, now: Date): Promise<HostedCliPendingGrant | null>;
   decideGrant(input: {
@@ -66,8 +97,31 @@ export interface HostedCliStore {
     minPollIntervalMs: number;
     token: { id: string; tokenHash: string; expiresAt: Date };
   }): Promise<HostedCliExchangeResult>;
+  /**
+   * One transaction, relay-link grants only: a pending grant records the poll; an approved one is
+   * consumed and its approver returned. Never issues a CLI token.
+   */
+  exchangeRelayLinkGrant(input: {
+    deviceCodeHash: string;
+    now: Date;
+    minPollIntervalMs: number;
+  }): Promise<HostedRelayLinkExchangeResult>;
+  /**
+   * Create, or bring back, the linked customer workspace for (organization, install). The id is
+   * derived from both, so a re-link by the same install into the same organization reuses it.
+   */
+  upsertLinkedWorkspace(input: {
+    organizationId: string;
+    installId: string;
+    displayName: string;
+    userId: string;
+    at: Date;
+  }): Promise<HostedLinkedWorkspace>;
+  /** Mark a linked workspace deleted (idempotent). Returns false for an unknown or hosted workspace. */
+  unlinkLinkedWorkspace(input: { organizationId: string; customerWorkspaceId: string; at: Date }): Promise<boolean>;
   resolveToken(tokenHash: string, now: Date): Promise<HostedCliToken | null>;
   revokeToken(tokenId: string, reason: string, at: Date): Promise<boolean>;
+  /** The organization's Papercusp-hosted workspaces. Linked installs serve no terminal and are not listed. */
   listWorkspaces(organizationId: string): Promise<readonly HostedCliWorkspace[]>;
   /** The organization's display name, so a CLI holding several sign-ins can label each; null when unknown. */
   organizationName(organizationId: string): Promise<string | null>;
@@ -94,6 +148,25 @@ interface TokenRow {
 
 const date = (value: Date | string): Date => (value instanceof Date ? value : new Date(value));
 
+/** A relay install id: what the machine generated for itself (migration 1268 CHECK). */
+export const RELAY_INSTALL_ID_RE = /^[a-z0-9][a-z0-9-]{7,63}$/;
+
+/**
+ * The portal identity of a relay-linked install (D-031). Derived from (organization, install)
+ * so a re-link lands on the same row, and two organizations linking one machine never collide.
+ * The workspace id doubles as the connector's route label (lower-case, DNS-label safe), and the
+ * host id is synthetic: a linked install has no workspace_hosts row.
+ */
+export function linkedWorkspaceIdentity(organizationId: string, installId: string): {
+  customerWorkspaceId: string;
+  hostId: string;
+  routeLabel: string;
+} {
+  const digest = createHash('sha256').update(`${organizationId}\u0000${installId}`, 'utf8').digest('hex').slice(0, 24);
+  const customerWorkspaceId = `lw-${digest}`;
+  return { customerWorkspaceId, hostId: `linked-${customerWorkspaceId}`, routeLabel: customerWorkspaceId };
+}
+
 function tokenFromRow(row: TokenRow): HostedCliToken {
   return {
     id: row.id,
@@ -117,9 +190,11 @@ export class PostgresHostedCliStore implements HostedCliStore {
       await s`DELETE FROM papercusp_auth.hosted_cli_device_grants WHERE expires_at < ${input.createdAt}`;
       const rows = await s`
         INSERT INTO papercusp_auth.hosted_cli_device_grants
-          (device_code_hash, user_code, control_workspace_id, client_label, state, created_at, expires_at)
+          (device_code_hash, user_code, control_workspace_id, client_label, state, created_at, expires_at,
+           purpose, install_id)
         VALUES (${input.deviceCodeHash}, ${input.userCode}, ${this.controlPlaneWorkspaceId},
-                ${input.clientLabel}, 'pending', ${input.createdAt}, ${input.expiresAt})
+                ${input.clientLabel}, 'pending', ${input.createdAt}, ${input.expiresAt},
+                ${input.purpose ?? 'cli'}, ${input.purpose === 'relay-link' ? (input.installId ?? null) : null})
         ON CONFLICT DO NOTHING
         RETURNING 1`;
       return rows.length === 1;
@@ -128,15 +203,26 @@ export class PostgresHostedCliStore implements HostedCliStore {
 
   findPendingGrant(userCode: string, now: Date): Promise<HostedCliPendingGrant | null> {
     return this.runService(async (sql) => {
-      const rows = await sql<{ user_code: string; client_label: string; expires_at: Date | string }[]>`
-        SELECT user_code, client_label, expires_at
+      const rows = await sql<{
+        user_code: string; client_label: string; expires_at: Date | string;
+        purpose: HostedDeviceGrantPurpose; install_id: string | null;
+      }[]>`
+        SELECT user_code, client_label, expires_at, purpose, install_id
           FROM papercusp_auth.hosted_cli_device_grants
          WHERE user_code = ${userCode}
            AND control_workspace_id = ${this.controlPlaneWorkspaceId}
            AND state = 'pending'
            AND expires_at > ${now}`;
       const row = rows[0];
-      return row ? { userCode: row.user_code, clientLabel: row.client_label, expiresAt: date(row.expires_at) } : null;
+      return row
+        ? {
+            userCode: row.user_code,
+            clientLabel: row.client_label,
+            expiresAt: date(row.expires_at),
+            purpose: row.purpose,
+            installId: row.install_id,
+          }
+        : null;
     });
   }
 
@@ -165,8 +251,10 @@ export class PostgresHostedCliStore implements HostedCliStore {
           FROM papercusp_auth.hosted_cli_device_grants
          WHERE device_code_hash = ${input.deviceCodeHash}
            AND control_workspace_id = ${this.controlPlaneWorkspaceId}
+           AND purpose = 'cli'
          FOR UPDATE`;
       const grant = rows[0];
+      // A relay-link grant is absent here on purpose: it must never become a CLI token.
       if (!grant || grant.state === 'consumed') return { status: 'invalid' };
       if (date(grant.expires_at) <= input.now) return { status: 'expired' };
       if (grant.state === 'denied') return { status: 'denied' };
@@ -189,6 +277,81 @@ export class PostgresHostedCliStore implements HostedCliStore {
                 ${grant.user_id}, ${grant.organization_id}, ${grant.client_label}, ${input.now}, ${input.token.expiresAt})
         RETURNING id, user_id, organization_id, client_label, expires_at`;
       return { status: 'issued', token: tokenFromRow(inserted[0]) };
+    });
+  }
+
+  exchangeRelayLinkGrant(input: Parameters<HostedCliStore['exchangeRelayLinkGrant']>[0]): Promise<HostedRelayLinkExchangeResult> {
+    return this.runService(async (s) => {
+      const rows = await s<(GrantRow & { install_id: string | null })[]>`
+        SELECT state, user_id, organization_id, client_label, expires_at, last_polled_at, install_id
+          FROM papercusp_auth.hosted_cli_device_grants
+         WHERE device_code_hash = ${input.deviceCodeHash}
+           AND control_workspace_id = ${this.controlPlaneWorkspaceId}
+           AND purpose = 'relay-link'
+         FOR UPDATE`;
+      const grant = rows[0];
+      if (!grant || grant.state === 'consumed') return { status: 'invalid' };
+      if (date(grant.expires_at) <= input.now) return { status: 'expired' };
+      if (grant.state === 'denied') return { status: 'denied' };
+      if (grant.state === 'pending') {
+        const last = grant.last_polled_at ? date(grant.last_polled_at).getTime() : null;
+        await s`
+          UPDATE papercusp_auth.hosted_cli_device_grants SET last_polled_at = ${input.now}
+           WHERE device_code_hash = ${input.deviceCodeHash}`;
+        return {
+          status: last !== null && input.now.getTime() - last < input.minPollIntervalMs ? 'slow_down' : 'pending',
+        };
+      }
+      if (!grant.user_id || !grant.organization_id || !grant.install_id) return { status: 'invalid' };
+      await s`
+        UPDATE papercusp_auth.hosted_cli_device_grants SET state = 'consumed', last_polled_at = ${input.now}
+         WHERE device_code_hash = ${input.deviceCodeHash}`;
+      return {
+        status: 'approved',
+        userId: grant.user_id,
+        organizationId: grant.organization_id,
+        installId: grant.install_id,
+        clientLabel: grant.client_label,
+      };
+    });
+  }
+
+  upsertLinkedWorkspace(input: Parameters<HostedCliStore['upsertLinkedWorkspace']>[0]): Promise<HostedLinkedWorkspace> {
+    const linked = linkedWorkspaceIdentity(input.organizationId, input.installId);
+    return this.runControlPlane(async (sql) => {
+      // A deleted row (an earlier unlink) still holds the identity, so re-linking revives it.
+      const rows = await sql<{ id: string; workspace_host_id: string; kind: string }[]>`
+        INSERT INTO harness_shared.customer_workspaces (
+          workspace_id, id, organization_id, workspace_host_id, display_name, state,
+          created_by_principal_kind, created_by_principal_id, kind, linked_install_id
+        ) VALUES (
+          ${this.controlPlaneWorkspaceId}, ${linked.customerWorkspaceId}, ${input.organizationId},
+          ${linked.hostId}, ${input.displayName}, 'active', 'user', ${input.userId}, 'linked', ${input.installId}
+        )
+        ON CONFLICT (workspace_id, id) DO UPDATE
+          SET state = 'active', deleted_at = NULL, display_name = EXCLUDED.display_name, updated_at = ${input.at}
+          WHERE harness_shared.customer_workspaces.kind = 'linked'
+            AND harness_shared.customer_workspaces.organization_id = EXCLUDED.organization_id
+        RETURNING id, workspace_host_id, kind`;
+      const row = rows[0];
+      if (!row || row.kind !== 'linked') throw new Error('linked_workspace_identity_conflict');
+      return { customerWorkspaceId: row.id, hostId: row.workspace_host_id, routeLabel: linked.routeLabel };
+    });
+  }
+
+  unlinkLinkedWorkspace(input: Parameters<HostedCliStore['unlinkLinkedWorkspace']>[0]): Promise<boolean> {
+    return this.runControlPlane(async (sql) => {
+      // Idempotent for a linked row: a retry after a failed connector revoke still answers true,
+      // so the caller revokes again instead of leaving a live connector on a deleted workspace.
+      const rows = await sql`
+        UPDATE harness_shared.customer_workspaces
+           SET state = 'deleted', deleted_at = COALESCE(deleted_at, ${input.at}), updated_at = ${input.at}
+         WHERE workspace_id = ${this.controlPlaneWorkspaceId}
+           AND organization_id = ${input.organizationId}
+           AND id = ${input.customerWorkspaceId}
+           AND kind = 'linked'
+        RETURNING 1`;
+      return rows.length === 1;
     });
   }
 
@@ -234,6 +397,7 @@ export class PostgresHostedCliStore implements HostedCliStore {
        WHERE workspace_id = ${this.controlPlaneWorkspaceId}
          AND organization_id = ${organizationId}
          AND state <> 'deleted'
+         AND kind = 'hosted'
        ORDER BY created_at`);
     const connectors = await this.runService((sql) => sql<{
       customer_workspace_id: string; host_id: string; route_label: string; state: 'pending' | 'active' | 'revoked';

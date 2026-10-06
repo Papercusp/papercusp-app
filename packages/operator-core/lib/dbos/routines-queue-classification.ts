@@ -76,10 +76,10 @@ export const FLEET_CONTROL_ACTIONS = new Set<string>(['fleet-headcount-governor'
  * the lane exists to prevent.
  */
 export const TRIGGER_POLL_ACTIONS = new Set<string>([
-  'google-gmail-poll',
-  'google-calendar-poll',
   'pr-poll',
   'facebook-personal-vault-poll',
+  'slack-org-sync',
+  'connector-sync',
 ]);
 
 /**
@@ -90,8 +90,19 @@ export const TRIGGER_POLL_ACTIONS = new Set<string>([
  * admission window as short housekeeping routines, which is the starvation shape
  * this classification layer exists to prevent. Keep this exact allow-list narrow:
  * a new action belongs here only after its runtime and resource profile are known.
+ *
+ * `work-item-admission-bulk-dedup` is LLM-bound rather than CPU-bound, but its wall
+ * clock is the same shape: a census fire measured 17m and a bulk stage over a
+ * 65,091-member corpus ran 2h+ (2026-10-01). On the shared queue one stage held a
+ * slot for 1h53m while pool pressure shrank the window to 3, and 117 cron routines
+ * went overdue (plan work-queue-bulk-cleanup-remediation-2026-10-01 D-005). The
+ * lane is serial, so a stage and a reindex can delay each other; both are
+ * background work, which is the accepted trade-off.
  */
-export const HEAVY_ROUTINE_ACTIONS = new Set<string>(['gitnexus-reindex']);
+export const HEAVY_ROUTINE_ACTIONS = new Set<string>([
+  'gitnexus-reindex',
+  'work-item-admission-bulk-dedup',
+]);
 
 /**
  * The DEPLOY LAUNCHER → its own bounded serial lane.

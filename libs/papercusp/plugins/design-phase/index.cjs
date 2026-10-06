@@ -24,8 +24,8 @@ const os = require('node:os');
 
 // ─── PG URL resolution (audit P-076) ────────────────────────────────
 // env → embedded-pg discovery file → native-:5432 dev fallback — the same
-// order as operator-core's getHarnessAdminUrl and the sibling TS plugins
-// (jira-sync/linear-sync/postgres-manager readDiscoveryUrl). Without the
+// order as operator-core's getHarnessAdminUrl and the sibling TS plugin
+// postgres-manager's readDiscoveryUrl. Without the
 // discovery tier, a desktop run (embedded PG on a random port) silently
 // pointed this plugin at a wrong/absent native :5432.
 //

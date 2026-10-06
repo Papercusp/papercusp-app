@@ -71,15 +71,31 @@
 #   TESTVM_REAPER_VMCTL_TIMEOUT  hard bound in seconds on the `vmctl down`
 #                                attempt before falling back to a direct kill
 #                                (default: 90)
+#   PAPERCUSP_REPO_ROOT          checkout holding papercusp-desktop/.../vmctl
+#                                (default: this script's parent directory)
 
 set -uo pipefail
 
 MAX_AGE_SECS="${TESTVM_REAPER_MAX_AGE_SECS:-21600}"
+# KEEP LEASE (WI-10006429): a deliberate long run (e.g. a multi-hour restore
+# rehearsal on an HDD) would otherwise be reaped at MAX_AGE_SECS mid-run. Write
+# the epoch-seconds "keep until" time into $KEEP_DIR/<instance> and the reaper
+# skips that ONE instance until then. A lease further out than MAX_KEEP_SECS is
+# IGNORED (logged), so a typo or a forgotten far-future lease cannot pin a VM
+# forever; an expired lease is simply ignored. Example (12h):
+#   mkdir -p ~/.local/state/papercusp/testvm-keep
+#   echo $(( $(date +%s) + 43200 )) > ~/.local/state/papercusp/testvm-keep/<instance>
+KEEP_DIR="${TESTVM_REAPER_KEEP_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/papercusp/testvm-keep}"
+MAX_KEEP_SECS="${TESTVM_REAPER_MAX_KEEP_SECS:-172800}"
 DRY_RUN="${TESTVM_REAPER_DRY_RUN:-0}"
 VMCTL_TIMEOUT="${TESTVM_REAPER_VMCTL_TIMEOUT:-90}"
 
+# The systemd unit runs this from a papercusp-script-snapshot.sh copy under
+# $TMPDIR, where a path climbed from BASH_SOURCE points nowhere, so the unit pins
+# PAPERCUSP_REPO_ROOT; the self-located default serves a direct run (WI-10006358).
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VMCTL="$SELF_DIR/../papercusp-desktop/scripts/linux-test-vm/vmctl"
+REPO_ROOT="${PAPERCUSP_REPO_ROOT:-$(cd "$SELF_DIR/.." && pwd)}"
+VMCTL="$REPO_ROOT/papercusp-desktop/scripts/linux-test-vm/vmctl"
 
 # Keep the strings that the census looks for in data variables rather than in
 # the command text of a process-substitution/pipeline.  A shell launched to
@@ -117,19 +133,28 @@ proc_etimes() {
     echo $(( uptime_secs - starttime_secs ))
 }
 
-proc_cmdline() {
-    local pid="$1"
-    local f="/proc/$pid/cmdline"
+# Set PROC_CMDLINE to <pid>'s space-joined argv in the CALLER's shell; return 1
+# when the process is gone or unreadable.  Both /proc censuses below call this
+# once per host process, so it must not fork: `cmd=$(proc_cmdline "$pid")`
+# forked a subshell per entry — ~10k forks per scan, ~57s CPU per run, mostly
+# kernel time (WI-10006397).  Spawning `tr` per entry was the same cost in an
+# earlier form.  reap-stale-testvms.test.ts counts subshells to hold this.
+PROC_CMDLINE=''
+proc_read_cmdline() {
+    local f="/proc/$1/cmdline" arg
+    PROC_CMDLINE=''
     [ -f "$f" ] || return 1
-    local arg out=''
-    # Bash can read NUL-delimited argv entries directly.  Spawning `tr` once
-    # per /proc entry made the host-level census fork-heavy enough to look
-    # stalled under fleet load.
+    # 2>/dev/null precedes the input redirection so a process that exits after
+    # the -f test fails quietly instead of printing "No such file".
     while IFS= read -r -d '' arg; do
-        [ -n "$out" ] && out+=" "
-        out+="$arg"
-    done < "$f"
-    printf '%s\n' "$out"
+        PROC_CMDLINE+="${PROC_CMDLINE:+ }$arg"
+    done 2>/dev/null < "$f" || return 1
+}
+
+# Print form for callers outside the scan loops (selftests, ad-hoc use).
+proc_cmdline() {
+    proc_read_cmdline "$1" || return 1
+    printf '%s\n' "$PROC_CMDLINE"
 }
 
 # Read a process's real parent from /proc/<pid>/stat.  The comm field is
@@ -199,7 +224,8 @@ any_orchestrator_alive() {
         # The invoking shell (and any bash -c wrapper above it) is inspection
         # context, not evidence of a live federation run.
         proc_is_self_or_ancestor "$opid" && continue
-        cmd=$(proc_cmdline "$opid" 2>/dev/null) || continue
+        proc_read_cmdline "$opid" || continue
+        cmd=$PROC_CMDLINE
         local marker
         for marker in "${ORCHESTRATOR_MARKERS[@]}"; do
             case "$cmd" in
@@ -239,7 +265,8 @@ candidate_vm_pids() {
         [ -r "$cmdline_file" ] || continue
         pid="${cmdline_file%/cmdline}"; pid="${pid#/proc/}"
         proc_is_self_or_ancestor "$pid" && continue
-        cmd=$(proc_cmdline "$pid" 2>/dev/null) || continue
+        proc_read_cmdline "$pid" || continue
+        cmd=$PROC_CMDLINE
         is_qemu_testvm_cmdline "$cmd" || continue
         echo "$pid"
     done
@@ -273,20 +300,39 @@ do_reap() {
 # ── main ─────────────────────────────────────────────────────────────────
 # Wrapped so this file can be `source`d (functions only, no sweep) by a
 # selftest — see reap-stale-testvms.selftest.sh.
+# keep_lease_state <instance> [now-epoch]
+#   prints the lease's until-epoch and returns 0 when a valid lease holds the VM;
+#   returns 1 when there is no usable lease (missing / unreadable / expired);
+#   returns 2 when a lease exists but is IGNORED (beyond MAX_KEEP_SECS, or the
+#   instance name is not a plain file name).
+keep_lease_state() {
+    local name="$1" now="${2:-$(date +%s)}" f lease_until
+    case "$name" in ''|*/*|.*) return 2 ;; esac
+    f="$KEEP_DIR/$name"
+    [ -f "$f" ] && [ -r "$f" ] || return 1
+    lease_until=$(head -c 64 "$f" | tr -dc '0-9' | head -c 12)
+    [ -n "$lease_until" ] || return 2
+    [ "$lease_until" -gt "$now" ] || return 1
+    [ $(( lease_until - now )) -le "$MAX_KEEP_SECS" ] || { echo "$lease_until"; return 2; }
+    echo "$lease_until"
+    return 0
+}
+
 main() {
     if any_orchestrator_alive; then
         log "a federation orchestrator script is live — skipping this sweep entirely (may legitimately hold VMs past the age threshold)"
         return 0
     fi
 
-    local checked=0 reaped=0 skipped_young=0
+    local checked=0 reaped=0 skipped_young=0 skipped_kept=0
 
     while IFS= read -r pid; do
         [ -z "$pid" ] && continue
         checked=$(( checked + 1 ))
 
         local cmd name et
-        cmd=$(proc_cmdline "$pid" 2>/dev/null) || continue
+        proc_read_cmdline "$pid" || continue
+        cmd=$PROC_CMDLINE
         name=$(vm_name_from_cmdline "$cmd") || { log "SKIP pid=$pid — could not parse instance name from cmdline"; continue; }
 
         et=$(proc_etimes "$pid" 2>/dev/null) || continue
@@ -295,12 +341,22 @@ main() {
             continue
         fi
 
+        local lease_until lrc
+        lease_until=$(keep_lease_state "$name"); lrc=$?
+        if [ "$lrc" -eq 0 ]; then
+            log "SKIP $name (pid=$pid, running=${et}s) — keep lease until $(date -d "@$lease_until" -Iseconds) ($KEEP_DIR/$name)"
+            skipped_kept=$(( skipped_kept + 1 ))
+            continue
+        elif [ "$lrc" -eq 2 ]; then
+            log "IGNORED keep lease for $name ($KEEP_DIR/$name): unreadable or beyond max ${MAX_KEEP_SECS}s"
+        fi
+
         log "REAP candidate: $name (pid=$pid, running=${et}s >= ${MAX_AGE_SECS}s, no live orchestrator)"
         do_reap "$pid" "$name"
         reaped=$(( reaped + 1 ))
     done < <(candidate_vm_pids)
 
-    log "Summary: checked=$checked reaped=$reaped skipped_young=$skipped_young max_age_secs=$MAX_AGE_SECS"
+    log "Summary: checked=$checked reaped=$reaped skipped_young=$skipped_young skipped_kept=$skipped_kept max_age_secs=$MAX_AGE_SECS"
 }
 
 # Only run the sweep when EXECUTED directly — a selftest sources this file to

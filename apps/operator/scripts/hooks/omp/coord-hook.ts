@@ -526,6 +526,20 @@ export function resolveHookWorkspace(): string {
   return '';
 }
 
+let _nativeSessionId = '';
+
+function withNativeSessionQuery(url: string, nativeSessionId: string): string {
+  const value = nativeSessionId.trim();
+  if (!value) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set('native_session', value);
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 export async function callMcpTool(
   toolName: string,
   args: Record<string, unknown>,
@@ -533,6 +547,7 @@ export async function callMcpTool(
     mcpUrl?: string;
     bearer?: string;
     sessionId?: string;
+    nativeSessionId?: string;
     workspace?: string;
     timeoutMs?: number;
     /** Preserve a structured error for callers that can distinguish a
@@ -551,7 +566,7 @@ export async function callMcpTool(
   const clientParam = `client=${encodeURIComponent(hookOwnerId())}`;
   const withClient = (base: string): string =>
     base.includes('?') ? `${base}&${clientParam}` : `${base}?${clientParam}`;
-  const mcpUrl =
+  const baseMcpUrl =
     env.mcpUrl ??
     (process.env.PAPERCUSP_BUNDLE_URL
       ? withClient(
@@ -565,7 +580,13 @@ export async function callMcpTool(
           ).toString(),
         )
       : null);
-  if (!mcpUrl) return null;
+  if (!baseMcpUrl) return null;
+  const nativeSessionId =
+    env.nativeSessionId ?? (_nativeSessionId || process.env.PAPERCUSP_NATIVE_SESSION_ID || '');
+  const mcpUrl =
+    toolName === 'activity:report' && nativeSessionId
+      ? withNativeSessionQuery(baseMcpUrl, nativeSessionId)
+      : baseMcpUrl;
   let bearer =
     env.bearer ??
     process.env.PAPERCUSP_BUNDLE_ACCESS_TOKEN ??
@@ -746,6 +767,15 @@ interface HookSessionLinkContext {
   };
 }
 
+function nativeSessionIdFromContext(ctx: unknown): string {
+  try {
+    const sessionId = (ctx as HookSessionLinkContext | undefined)?.sessionManager?.getSessionId?.();
+    return typeof sessionId === 'string' ? sessionId.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 function contextCwd(ctx: unknown): string | undefined {
   const c = ctx as HookSessionLinkContext | undefined;
   const cwd = c?.cwd ?? c?.sessionManager?.getCwd?.();
@@ -764,7 +794,7 @@ function currentSessionLinkFromContext(ctx: unknown): {
   if (!Number.isFinite(advSessionId) || advSessionId <= 0) return null;
 
   const c = ctx as HookSessionLinkContext | undefined;
-  const sessionId = c?.sessionManager?.getSessionId?.()?.trim();
+  const sessionId = nativeSessionIdFromContext(ctx);
   if (!sessionId) return null;
 
   const filePath = c?.sessionManager?.getSessionFile?.();
@@ -845,6 +875,10 @@ export async function withDeadline(p: Promise<unknown>, ms: number): Promise<voi
  *  detached). Bounded by SESSION_START_DEADLINE_MS so a slow operator can never
  *  drive the handler past pi's 30s framework cap (WI-3147). */
 export async function onSessionStart(ctx?: unknown): Promise<void> {
+  // activity:report is identity-preflighted from the MCP request URL. Cache the
+  // native OMP session id supplied by the session_start context so pre-tool,
+  // post-tool, and lifecycle reports all carry verified request context.
+  _nativeSessionId = nativeSessionIdFromContext(ctx) || process.env.PAPERCUSP_NATIVE_SESSION_ID?.trim() || '';
   // Mint the per-process coordination owner id up front (file-locking
   // #2). Every subsequent callMcpTool carries it via `?client=`, so a
   // lock or coordination message authored by this process is always
@@ -888,6 +922,7 @@ export async function onSessionShutdown(): Promise<void> {
   // Activity bridge: a "worker left" lifecycle marker, then the lock backstop.
   await reportLifecycle('shutdown');
   await callMcpTool('locks:release', { all_mine: true });
+  _nativeSessionId = '';
 }
 
 /**
@@ -2743,6 +2778,10 @@ export function _resetActivityReportDedupeForTests(): void {
   activityReportDedupe.clear();
   pendingActivityCalls.clear();
   _hookBundleGeneration = null;
+}
+
+export function _resetNativeSessionIdForTests(): void {
+  _nativeSessionId = '';
 }
 
 /** Stage the input-bearing half of an OMP tool event. The matching tool_result

@@ -50,7 +50,7 @@ export interface ResolvedListingCoords {
    *  `pinned_tree_digest`). Undefined ⇒ the row carries none (pre-028, or a code
    *  kind), so an install can only place the branch tip UNVERIFIED. Present ⇒ the
    *  installer must fetch exactly this commit and verify the digest (P-002). */
-  pin?: { commitSha: string; treeDigest: string };
+  pin?: { commitSha: string; treeDigest: string; releaseContentHash?: string };
 }
 
 export type ResolveListingResult = ResolvedListingCoords | { error: string; status: number };
@@ -91,6 +91,10 @@ function coordsFromRow(row: Record<string, unknown>): ResolvedListingCoords | nu
           pin: {
             commitSha: str(row.pinned_commit_sha) as string,
             treeDigest: str(row.pinned_tree_digest) as string,
+            // P-011: the origin copy's Merkle root, when the publisher shipped one.
+            ...(str(row.release_content_hash)
+              ? { releaseContentHash: str(row.release_content_hash) as string }
+              : {}),
           },
         }
       : {}),

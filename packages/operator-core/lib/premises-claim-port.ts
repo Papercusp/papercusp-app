@@ -540,6 +540,14 @@ const HYPOTHETICAL_FRAME =
   /(?:^|\n)\s*(?:[-*+]\s*)?(?:\*\*)?\s*(?:falsifi(?:ed|es|able)|disprove[dn]?|refuted|invalidated)\b[^\n]{0,20}\bif\b/i;
 
 /**
+ * An absence phrase directly introduced as an `if`/`when`/`unless` condition is
+ * not itself an assertion that the absent thing is missing. Keep this prefix
+ * check tight: a separate main-clause claim such as "If X happens, there is no
+ * reader" still reaches the advisory.
+ */
+const DIRECT_CONDITIONAL_ABSENCE_PREFIX = /\b(?:if|when|unless)\s*$/i;
+
+/**
  * Derive absence premises from an artifact's own text. PURE and exported for
  * tests — the measurement above is only meaningful if the thing measured is the
  * thing that ships.
@@ -592,6 +600,7 @@ export function detectAbsencePremises(text: string, source: PremiseSource): Deri
       // stated hypothesis, not a claim. Scoped to the hit's OWN line: a wider lookback let
       // one falsifier label silence genuine claims in the bullets that followed it.
       const hitAt = m.index ?? 0;
+      if (DIRECT_CONDITIONAL_ABSENCE_PREFIX.test(prose.slice(bounds.start, hitAt))) continue;
       const lineStart = prose.lastIndexOf('\n', Math.max(0, hitAt - 1)) + 1;
       if (HYPOTHETICAL_FRAME.test(`\n${prose.slice(lineStart, hitAt)}`)) continue;
       const key = claim.toLowerCase();

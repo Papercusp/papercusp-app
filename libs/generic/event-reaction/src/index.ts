@@ -20,6 +20,7 @@ export { guardReaction, MAX_REACTION_DEPTH, type GuardDecision } from './loop-gu
 export {
   runReactions,
   scheduleReaction,
+  reactionContributor,
   type FireInProcess,
   type FireResult,
   type DurableSeam,

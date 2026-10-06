@@ -91,9 +91,158 @@ fn str_arg<'a>(input: Option<&'a Value>, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// The files an OMP hashline edit touches (P-025). OMP's `edit` has no path
+/// argument: its `input` patch, and the result it returns, name each file in a
+/// `[calc.js#5ED7]` header line. In order of first appearance, without repeats.
+fn hashline_files(text: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let Some(inner) = line
+            .trim()
+            .strip_prefix('[')
+            .and_then(|l| l.strip_suffix(']'))
+        else {
+            continue;
+        };
+        let Some((path, hash)) = inner.rsplit_once('#') else {
+            continue;
+        };
+        let path = path.trim();
+        let hash_ok =
+            (1..=16).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_alphanumeric());
+        if !path.is_empty() && hash_ok && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// `calc.js`, or `2 files`, for a call that names its files in a list.
+fn files_target(files: &[&str], cwd: Option<&str>) -> Option<String> {
+    match files {
+        [] => None,
+        [one] => Some(clip(&display_path(one, cwd), TARGET_CHARS)),
+        many => Some(format!("{} files", many.len())),
+    }
+}
+
+/// A Codex `mcpToolCall` item: `(server, tool, arguments)`.
+fn codex_mcp(input: Option<&Value>) -> Option<(&str, &str, Option<&Value>)> {
+    let item = input?;
+    if item.get("type")?.as_str()? != "mcpToolCall" {
+        return None;
+    }
+    let server = str_arg(Some(item), "server")?;
+    let tool = str_arg(Some(item), "tool")?;
+    Some((server, tool, item.get("arguments")))
+}
+
+/// Codex runs every command through a login shell and reports the whole line
+/// (`/bin/bash -lc 'rg --files'`); the row shows the command the model wrote.
+fn strip_shell_wrapper(command: &str) -> &str {
+    let trimmed = command.trim();
+    let Some((shell, rest)) = trimmed.split_once(' ') else {
+        return trimmed;
+    };
+    let shell_name = shell.rsplit('/').next().unwrap_or(shell);
+    if !matches!(shell_name, "bash" | "sh" | "zsh") {
+        return trimmed;
+    }
+    let Some(script) = ["-lc ", "-c "]
+        .iter()
+        .find_map(|flag| rest.trim_start().strip_prefix(flag))
+    else {
+        return trimmed;
+    };
+    let script = script.trim();
+    for quote in ['\'', '"'] {
+        if let Some(inner) = script
+            .strip_prefix(quote)
+            .and_then(|s| s.strip_suffix(quote))
+        {
+            return inner;
+        }
+    }
+    script
+}
+
+/// Claude's Read output numbers each line (`    12\tconst …`, shown with the
+/// tab already widened to spaces, or `12→const …` in older builds).
+fn is_numbered_line(line: &str) -> bool {
+    let rest = line.trim_start();
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    digits > 0
+        && rest[digits..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_whitespace() || c == '→')
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// The single line a finished call collapses to (pui-chat-first-ux P-025), the
+/// way Claude Code prints `⎿ Read 40 lines` and Codex `└ …`: what came back, in
+/// words, for reads and searches; otherwise the output's first line and how
+/// many more there are. `width` bounds the line in characters.
+pub(crate) fn result_summary(
+    name: &str,
+    input: Option<&Value>,
+    text: &str,
+    width: usize,
+) -> String {
+    let (name, input) = effective(name, input);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let n = lines.len();
+    let summary = match name {
+        "Read" | "NotebookRead" | "read" => {
+            let numbered = lines.iter().filter(|l| is_numbered_line(l)).count();
+            Some(format!(
+                "Read {}",
+                count(if numbered > 0 { numbered } else { n }, "line", "lines")
+            ))
+        }
+        "Glob" | "glob" | "find" | "ls" => Some(format!("Found {}", count(n, "file", "files"))),
+        "Grep" | "grep" => Some(match str_arg(input, "output_mode") {
+            Some("content") => format!("Found {}", count(n, "line", "lines")),
+            Some("count") => format!("Found matches in {}", count(n, "file", "files")),
+            _ => format!("Found {}", count(n, "file", "files")),
+        }),
+        // An OMP hashline edit returns the changed region under its
+        // `[calc.js#FB74]` header; say which file changed, not the header.
+        "Edit" | "MultiEdit" | "edit" => {
+            files_target(&hashline_files(text), None).map(|t| format!("Updated {t}"))
+        }
+        _ => None,
+    };
+    if let Some(summary) = summary {
+        return clip(&summary, width.max(1));
+    }
+    let first = lines.first().map(|l| l.trim()).unwrap_or("");
+    if n <= 1 {
+        return clip(first, width.max(1));
+    }
+    let more = format!(" … +{}", count(n - 1, "line", "lines"));
+    let room = width.saturating_sub(more.chars().count()).max(8);
+    format!("{}{more}", clip(first, room))
+}
+
 /// Label one tool call. `cwd` is the chat's launch directory, used to shorten
 /// file paths; `None` shows them in full.
 pub(crate) fn tool_display(name: &str, input: Option<&Value>, cwd: Option<&str>) -> ToolDisplay {
+    // P-025: a Codex MCP call arrives named by its bare tool (`plans_get`) with
+    // the server and arguments inside the item; label it like Claude's MCP row.
+    if let Some((server, tool, arguments)) = codex_mcp(input) {
+        return ToolDisplay {
+            title: format!("{server} · {} (MCP)", words(tool)),
+            summary: arguments.and_then(|a| human_args(a, usize::MAX)),
+        };
+    }
     let (name, input) = effective(name, input);
     let path = || {
         str_arg(input, "file_path")
@@ -109,13 +258,48 @@ pub(crate) fn tool_display(name: &str, input: Option<&Value>, cwd: Option<&str>)
         summary: None,
     };
     match name {
-        "Read" | "NotebookRead" => target("Read", path()),
-        "Edit" | "MultiEdit" | "NotebookEdit" => target("Update", path()),
-        "Write" => target("Write", path()),
-        "Bash" | "shell" | "exec_command" | "local_shell" => {
+        // OMP names its built-in tools in lower case (`read`, `edit`, `bash`).
+        "Read" | "NotebookRead" | "read" => target("Read", path()),
+        "Edit" | "MultiEdit" | "NotebookEdit" | "edit" => target(
+            "Update",
+            path().or_else(|| {
+                files_target(&hashline_files(str_arg(input, "input").unwrap_or("")), cwd)
+            }),
+        ),
+        "Write" | "write" => target("Write", path()),
+        "ls" => target("List", path()),
+        // P-025: Codex reports its edits as one `fileChange` item.
+        "fileChange" => {
+            let changes = input
+                .and_then(|i| i.get("changes"))
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            match changes {
+                [one] => {
+                    let verb = match one.pointer("/kind/type").and_then(Value::as_str) {
+                        Some("add") => "Write",
+                        Some("delete") => "Delete",
+                        _ => "Update",
+                    };
+                    target(
+                        verb,
+                        str_arg(Some(one), "path")
+                            .map(|p| clip(&display_path(p, cwd), TARGET_CHARS)),
+                    )
+                }
+                [] => target("Update files", None),
+                many => target("Update", Some(format!("{} files", many.len()))),
+            }
+        }
+        "webSearch" => target(
+            "Web Search",
+            str_arg(input, "query").map(|q| clip(q, TARGET_CHARS)),
+        ),
+        "Bash" | "bash" | "shell" | "exec_command" | "local_shell" | "commandExecution" => {
             let command = str_arg(input, "command")
                 .or_else(|| str_arg(input, "cmd"))
-                .map(|c| clip(c, TARGET_CHARS))
+                .map(|c| clip(strip_shell_wrapper(c), TARGET_CHARS))
                 .or_else(|| {
                     input
                         .and_then(|i| i.get("command"))
@@ -133,7 +317,7 @@ pub(crate) fn tool_display(name: &str, input: Option<&Value>, cwd: Option<&str>)
                 summary: str_arg(input, "description").map(|d| clip(d, 120)),
             }
         }
-        "Glob" | "Grep" => {
+        "Glob" | "Grep" | "glob" | "grep" | "find" => {
             let pattern = str_arg(input, "pattern").map(|p| clip(p, TARGET_CHARS));
             ToolDisplay {
                 title: match pattern {
@@ -313,5 +497,108 @@ mod tests {
         assert!(!multi.contains('\n'), "{multi}");
         let uni = human_args(&json!({"s": "café☕".repeat(50)}), 12).unwrap();
         assert!(uni.chars().count() <= 12, "{uni}");
+    }
+
+    /// P-025: Codex and OMP calls get the same `verb(target)` rows as Claude's.
+    #[test]
+    fn codex_and_omp_tool_calls_get_claude_style_rows() {
+        let cwd = Some("/w");
+        let title = |name: &str, input: Value| tool_display(name, Some(&input), cwd).title;
+        // OMP's lower-case built-ins.
+        assert_eq!(
+            title("read", json!({"path": "/w/calc.js"})),
+            "Read(calc.js)"
+        );
+        assert_eq!(
+            title("edit", json!({"path": "/w/calc.js"})),
+            "Update(calc.js)"
+        );
+        // OMP's hashline edit names its file only in the patch header (the
+        // shape a real OMP session wrote, 2026-10-06).
+        let hashline = json!({"i": "add c", "input": "\n[calc.js#5ED7]\nPUT 1.=3:\n+x\n"});
+        assert_eq!(title("edit", hashline), "Update(calc.js)");
+        let two = json!({"input": "[a.js#AB12]\n+x\n[b.js#CD34]\n+y\n[a.js#EF56]\n+z\n"});
+        assert_eq!(title("edit", two), "Update(2 files)");
+        assert_eq!(title("edit", json!({"input": "[not a header]"})), "Update");
+        assert_eq!(
+            title("write", json!({"path": "/w/new.js"})),
+            "Write(new.js)"
+        );
+        assert_eq!(
+            title("bash", json!({"command": "npm test"})),
+            "Bash(npm test)"
+        );
+        assert_eq!(title("grep", json!({"pattern": "TODO"})), "Search(TODO)");
+        // Codex items: the login-shell wrapper is not the command.
+        let command = json!({"type": "commandExecution", "command": "/bin/bash -lc 'rg --files'"});
+        assert_eq!(title("commandExecution", command), "Bash(rg --files)");
+        let plain = json!({"type": "commandExecution", "command": "ls -la"});
+        assert_eq!(title("commandExecution", plain), "Bash(ls -la)");
+        let one = json!({"type": "fileChange", "changes": [
+            {"path": "/w/calc.js", "kind": {"type": "update", "move_path": null}, "diff": ""}
+        ]});
+        assert_eq!(title("fileChange", one), "Update(calc.js)");
+        let added = json!({"type": "fileChange", "changes": [
+            {"path": "/w/new.js", "kind": {"type": "add"}, "diff": "x"}
+        ]});
+        assert_eq!(title("fileChange", added), "Write(new.js)");
+        let two = json!({"type": "fileChange", "changes": [
+            {"path": "/w/a.js", "kind": {"type": "update"}, "diff": ""},
+            {"path": "/w/b.js", "kind": {"type": "update"}, "diff": ""}
+        ]});
+        assert_eq!(title("fileChange", two), "Update(2 files)");
+        let mcp = json!({"type": "mcpToolCall", "server": "papercusp-su", "tool": "plans_get",
+            "arguments": {"slug": "p"}});
+        let shown = tool_display("plans_get", Some(&mcp), cwd);
+        assert_eq!(shown.title, "papercusp-su · plans get (MCP)");
+        assert_eq!(shown.summary.as_deref(), Some("slug: p"));
+    }
+
+    /// P-025: the one line a finished call collapses to.
+    #[test]
+    fn result_summary_says_what_came_back_in_one_line() {
+        let read =
+            "     1  const a = 1;\n     2  const b = 2;\n\n<system-reminder>x</system-reminder>";
+        assert_eq!(result_summary("Read", None, read, 80), "Read 2 lines");
+        assert_eq!(result_summary("Read", None, "only\n", 80), "Read 1 line");
+        assert_eq!(
+            result_summary("Glob", None, "a.rs\nb.rs", 80),
+            "Found 2 files"
+        );
+        assert_eq!(
+            result_summary(
+                "Grep",
+                Some(&json!({"output_mode": "content"})),
+                "a:1:x",
+                80
+            ),
+            "Found 1 line"
+        );
+        assert_eq!(result_summary("Bash", None, "ok", 80), "ok");
+        // OMP's edit result leads with the raw `[file#hash]` header.
+        assert_eq!(
+            result_summary("edit", None, "[calc.js#FB74]\n1:function add(a, b, c = 0) {", 80),
+            "Updated calc.js"
+        );
+        // Claude's Edit result has no header: its first line stays.
+        assert_eq!(
+            result_summary("Edit", None, "The file /p/calc.js has been updated.", 80),
+            "The file /p/calc.js has been updated."
+        );
+        assert_eq!(
+            result_summary("Bash", None, "\n\nfirst\nsecond\nthird", 80),
+            "first … +2 lines"
+        );
+        let long = result_summary("Bash", None, &format!("{}\nmore", "x".repeat(200)), 30);
+        assert!(
+            long.ends_with(" … +1 line") && long.chars().count() <= 30,
+            "{long}"
+        );
+        // A wrapped tools:invoke call is summarised as the tool it ran.
+        let wrapped = json!({"name": "Read", "args": {}});
+        assert_eq!(
+            result_summary("tools:invoke", Some(&wrapped), "  1  x", 80),
+            "Read 1 line"
+        );
     }
 }

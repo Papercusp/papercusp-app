@@ -6,10 +6,12 @@ import type { Sql } from 'postgres';
 import type { AdmissionRecoveryDeps } from '../../work-item-admission-recovery';
 import { captureImprovement } from '../improvements/capture-core';
 import { notifySyncInvalidate } from '../../sync-sse';
+import { reapStrandedAdmissionRuns, type ReapedAdmissionRun } from '../../admission-runs-reaper';
 import {
   DEFAULT_PROMOTER_BATCH_SIZE,
   DEFAULT_PROMOTER_LIVENESS_MINUTES,
   DEFAULT_PROMOTER_TICK_MINUTES,
+  readPromoterLiveness,
   runWorkItemAdmissionFailOpen,
   runWorkItemAdmissionPromoter,
   normalizeAdmissionTargetIds,
@@ -83,13 +85,14 @@ async function productionPromoter(ctx: SystemActionCtx): Promise<PromoterRunResu
  */
 export async function runAdmissionPromoterWithRecovery(
   options: ReturnType<typeof admissionPromoterOptions>,
-  deps: Pick<AdmissionRecoveryDeps, 'authorize' | 'dispatch'> & { sql: Sql; llmCall: PromoterLlmCall },
+  deps: Pick<AdmissionRecoveryDeps, 'authorize' | 'dispatch' | 'lockSql'> & { sql: Sql; llmCall: PromoterLlmCall },
 ): Promise<PromoterRunResult> {
   const { runAdmissionRecoveries } = await import('../../work-item-admission-recovery');
   const recoveryRuns: PromoterRunResult[] = [];
   const recovered = await runAdmissionRecoveries(options, {
     authorize: deps.authorize,
     dispatch: deps.dispatch,
+    lockSql: deps.lockSql,
     screen: async (scope, beforePersist) => {
       const result = await runWorkItemAdmissionPromoter({
         ...options,
@@ -188,9 +191,61 @@ export function makeWorkItemAdmissionPromoterAction(overrides: Partial<Admission
 
 export interface AdmissionFailOpenActionDeps {
   run: (ctx: SystemActionCtx) => Promise<FailOpenRunResult>;
+  /**
+   * The promoter's deterministic path, run here while the model promoter is stale or paused
+   * (WI-10004725, plan work-queue-bulk-cleanup-remediation-2026-10-01 P-007). Pausing the
+   * promoter routine for LLM spend (2026-09-15) also stopped the promotions that never needed a
+   * model, so for 15 days every filing aged into fail-open as `unreviewed` debt. The fail-open
+   * tick is the one admission action that is never paused for spend, so the model-free
+   * promotions live here too. Returns null when the model promoter is live (it runs this path
+   * itself) and the result of the pass otherwise.
+   */
+  noModelPromote: (ctx: SystemActionCtx) => Promise<PromoterRunResult | null>;
+  /**
+   * Settle stranded admission_runs rows (WI-10004726, plan
+   * work-queue-bulk-cleanup-remediation-2026-10-01 P-008). It runs here because the
+   * fail-open tick is the one admission action that fires every tick, workspace-wide,
+   * independent of model spend. The bulk-stage lease reaper fires only when a stage
+   * starts, and none started between 2026-09-05 and 2026-10-01.
+   */
+  reap: (ctx: SystemActionCtx, reaperRunId: string) => Promise<ReapedAdmissionRun[]>;
   alarm: (ctx: SystemActionCtx, result: FailOpenRunResult) => Promise<void>;
   invalidate: () => Promise<void>;
   log: (message: string) => void;
+}
+
+async function productionReap(ctx: SystemActionCtx, reaperRunId: string): Promise<ReapedAdmissionRun[]> {
+  return reapStrandedAdmissionRuns(getOrgPg().sql, {
+    workspaceId: ctx.workspaceId,
+    reaperRunId,
+    nowMs: Date.now(),
+  });
+}
+
+async function productionNoModelPromote(ctx: SystemActionCtx): Promise<PromoterRunResult | null> {
+  // The promoter kill switch covers its model-free path too.
+  if (process.env.PAPERCUSP_WORK_ITEM_ADMISSION_PROMOTER === 'off') return null;
+  const payload = ctx.payloadTemplate ?? {};
+  const sql = getOrgPg().sql;
+  const liveness = await readPromoterLiveness(
+    sql,
+    ctx.workspaceId,
+    ctx.installSlug,
+    Date.now(),
+    positiveInteger(payload.staleMinutes, DEFAULT_PROMOTER_LIVENESS_MINUTES),
+  );
+  if (!liveness.stale) return null;
+  return runWorkItemAdmissionPromoter({
+    workspaceId: ctx.workspaceId,
+    harnessSlug: ctx.installSlug,
+    sql,
+    runId: `${runId(WORK_ITEM_ADMISSION_FAIL_OPEN)}:no-model`,
+    batchSize: positiveInteger(payload.noModelBatchSize, DEFAULT_PROMOTER_BATCH_SIZE),
+    noModel: true,
+    llmCall: async () => {
+      throw new Error('the no-model admission pass must never call a model');
+    },
+  });
 }
 
 async function productionFailOpen(ctx: SystemActionCtx): Promise<FailOpenRunResult> {
@@ -228,13 +283,40 @@ async function productionLivenessAlarm(ctx: SystemActionCtx, result: FailOpenRun
 export function makeWorkItemAdmissionFailOpenAction(overrides: Partial<AdmissionFailOpenActionDeps> = {}) {
   const deps: AdmissionFailOpenActionDeps = {
     run: productionFailOpen,
+    noModelPromote: productionNoModelPromote,
+    reap: productionReap,
     alarm: productionLivenessAlarm,
     invalidate: invalidateAdmissionRuns,
     log: (message) => console.log(`[${WORK_ITEM_ADMISSION_FAIL_OPEN}] ${message}`),
     ...overrides,
   };
   return async (ctx: SystemActionCtx): Promise<void> => {
+    // BEFORE the sweep: a clean row promoted here is admitted reviewed instead of aging into
+    // `unreviewed` debt. A failure here must never cost the tick its admissions, and it is
+    // always logged, so a silent no-model pass is distinguishable from a skipped one.
+    let noModelSummary: string;
+    try {
+      const pass = await deps.noModelPromote(ctx);
+      noModelSummary = pass === null
+        ? 'no-model=skipped(promoter live)'
+        : `no-model run=${pass.runId} promoted=${pass.promoted} merged=${pass.merged} ` +
+          `deferred-to-model=${pass.deferredToModel ?? 0}`;
+    } catch (error) {
+      noModelSummary = `no-model=ERROR (${error instanceof Error ? error.message : String(error)})`;
+    }
     const result = await deps.run(ctx);
+    // A reaper failure must never cost the fail-open its admissions, and a silent reaper is
+    // how the stranded rows were missed for weeks. So it runs after the admission work, and
+    // its outcome is always logged, including a failure.
+    let reapedSummary: string;
+    try {
+      const reaped = await deps.reap(ctx, result.runId);
+      reapedSummary = reaped.length === 0
+        ? 'reaped-stranded=0'
+        : `reaped-stranded=${reaped.length} [${reaped.map((row) => `${row.runKind}:${row.id}`).join(',')}]`;
+    } catch (error) {
+      reapedSummary = `reaped-stranded=ERROR (${error instanceof Error ? error.message : String(error)})`;
+    }
     await deps.invalidate();
     if (result.liveness.stale) await deps.alarm(ctx, result);
     const byHarness = Object.entries(result.autoPromotedByHarness)
@@ -254,7 +336,10 @@ export function makeWorkItemAdmissionFailOpenAction(overrides: Partial<Admission
       `${ctx.installSlug}: run=${result.runId} scope=${result.scope} ` +
         `auto-promoted=${result.autoPromoted.length}${byHarness ? ` [${byHarness}]` : ''} ` +
         `held-by-scope=${heldTotal}${heldByScope ? ` [${heldByScope}]` : ''} ` +
-        `liveness=${result.liveness.stale ? 'STALE' : 'healthy'} (${result.liveness.reason})`,
+        `liveness=${result.liveness.stale ? 'STALE' : 'healthy'} (${result.liveness.reason}) ` +
+        `review-moot=${result.reviewMoot?.closed ?? 0} ` +
+        `${noModelSummary} ` +
+        reapedSummary,
     );
   };
 }

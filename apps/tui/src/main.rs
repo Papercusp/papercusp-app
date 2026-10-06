@@ -46,6 +46,7 @@ mod mux;
 mod network;
 mod notify;
 mod operator_voice_bus;
+mod paste_chips;
 mod plans_board;
 mod reap;
 mod remote_connect;
@@ -90,7 +91,10 @@ use mux::{Multiplexer, MuxAction, Zellij};
 const CLI_HELP: &str = "pui — Papercusp terminal agent
 
 Usage:
-  pui [OPTIONS]              Chat with an agent in the current directory
+  pui [OPTIONS]              Chat with an agent in the current directory, with the
+                             HUD, wake, network and work panes beside it
+                             (Alt+z hides or shows them)
+  pui --solo [OPTIONS]       The chat alone, with no side panes
   pui [OPTIONS] [SUBCOMMAND]
 
 Subcommands:
@@ -113,7 +117,11 @@ Subcommands:
 Options:
   --fleet=<slug>             Join fresh PUI SU sessions to an existing fleet
   --seat=<ref>               Consume that fleet's delegated seat (requires --fleet)
-  -h, --help                 Print this help text
+  --solo                     Open only the chat (no zellij, no side panes)
+  --model=<spec>             Model a new conversation starts on, e.g. opus or gpt-5.5:high
+                             (switch a running one with /model)
+  --account=<route>          Account a new conversation runs on: auto, default, or an account name
+  -h, --help                Print this help text
   -V, --version              Print version information
 
 Remote hosts (the same saved connections psu uses):
@@ -125,6 +133,11 @@ Remote hosts (the same saved connections psu uses):
 
 const PUI_FLEET_ENV: &str = "PUI_FLEET";
 const PUI_SEAT_ENV: &str = "PUI_SEAT";
+/// `pui --model` / `--account` (P-026, D-023): the model and account route a
+/// NEW conversation starts on. Exported like the fleet so the workbench's chat
+/// pane, a child `pui --solo`, starts on the same choice.
+const PUI_MODEL_ENV: &str = "PUI_MODEL";
+const PUI_ACCOUNT_ENV: &str = "PUI_ACCOUNT";
 
 /// Process-wide launch context. The top-level workbench exports it before
 /// zellij starts, so every child `pui hud`/dock pane carries the same fleet and
@@ -134,6 +147,16 @@ struct CliInvocation {
     positionals: Vec<String>,
     fleet: Option<String>,
     seat: Option<String>,
+    /// `--solo`: the chat alone, with no workbench panes around it (P-030).
+    solo: bool,
+    /// [`layout::CHAT_WORKBENCH_PANE_FLAG`]: this process is the chat pane of
+    /// the chat workbench its launcher started (P-030). Undocumented.
+    workbench_pane: bool,
+    /// `--model <spec>`: model[:effort] a new conversation starts on (P-026).
+    model: Option<String>,
+    /// `--account <auto|default|name>`: the account route a new conversation
+    /// starts on (D-023).
+    account: Option<String>,
 }
 
 impl CliInvocation {
@@ -179,6 +202,10 @@ impl CliInvocation {
         let mut positionals = Vec::new();
         let mut fleet = None;
         let mut seat = None;
+        let mut solo = false;
+        let mut workbench_pane = false;
+        let mut model = None;
+        let mut account = None;
         let mut pending: Option<&'static str> = None;
 
         for arg in args {
@@ -189,18 +216,30 @@ impl CliInvocation {
                 match name {
                     "--fleet" => set_cli_value(&mut fleet, name, &arg)?,
                     "--seat" => set_cli_value(&mut seat, name, &arg)?,
-                    _ => unreachable!("only fleet/seat can be pending"),
+                    "--model" => set_cli_value(&mut model, name, &arg)?,
+                    "--account" => set_cli_value(&mut account, name, &arg)?,
+                    _ => unreachable!("only value flags can be pending"),
                 }
                 continue;
             }
             match arg.as_str() {
                 "--fleet" => pending = Some("--fleet"),
                 "--seat" => pending = Some("--seat"),
+                "--model" => pending = Some("--model"),
+                "--account" => pending = Some("--account"),
+                "--solo" => solo = true,
+                layout::CHAT_WORKBENCH_PANE_FLAG => workbench_pane = true,
                 _ if arg.starts_with("--fleet=") => {
                     set_cli_value(&mut fleet, "--fleet", &arg["--fleet=".len()..])?
                 }
                 _ if arg.starts_with("--seat=") => {
                     set_cli_value(&mut seat, "--seat", &arg["--seat=".len()..])?
+                }
+                _ if arg.starts_with("--model=") => {
+                    set_cli_value(&mut model, "--model", &arg["--model=".len()..])?
+                }
+                _ if arg.starts_with("--account=") => {
+                    set_cli_value(&mut account, "--account", &arg["--account=".len()..])?
                 }
                 _ => positionals.push(arg),
             }
@@ -220,7 +259,26 @@ impl CliInvocation {
             positionals,
             fleet,
             seat,
+            solo,
+            workbench_pane,
+            model,
+            account,
         })
+    }
+
+    /// Fill `--model` / `--account` from the launching pui's exported choice.
+    /// An explicit flag wins: unlike a fleet, these are per-launch defaults,
+    /// not an identity two processes could disagree about.
+    fn inherit_chat_launch(mut self, model: Option<&str>, account: Option<&str>) -> Self {
+        let inherited = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        self.model = self.model.or_else(|| inherited(model));
+        self.account = self.account.or_else(|| inherited(account));
+        self
     }
 
     fn positional(&self, index: usize) -> Option<&str> {
@@ -233,6 +291,12 @@ impl CliInvocation {
         }
         if let Some(seat) = &self.seat {
             std::env::set_var(PUI_SEAT_ENV, seat);
+        }
+        if let Some(model) = &self.model {
+            std::env::set_var(PUI_MODEL_ENV, model);
+        }
+        if let Some(account) = &self.account {
+            std::env::set_var(PUI_ACCOUNT_ENV, account);
         }
     }
 }
@@ -264,20 +328,25 @@ fn print_cli_version(subcommand: Option<&str>, subcommand_arg: Option<&str>) -> 
 /// `pui workbench` materializes its primary full TUI as `pui hud`, so `hud` is a
 /// launch-capable mode even though it is spelled as a subcommand. The pinned data
 /// boards remain non-reactive; otherwise every board races to open the same pane.
-/// Bare `pui` is chat-first (P-001): one conversation with no multiplexer, so
-/// it has nowhere to open a pane and must never claim a pending launch.
+/// The chat surface (`pui --solo`, which is also what the chat workbench's main
+/// pane runs — P-030) is never reactive: its workbench `pui hud` pane owns
+/// pending launches, and a solo chat has no multiplexer to open a pane in.
 fn reactive_launch_mode(subcommand: Option<&str>) -> bool {
     matches!(subcommand, Some("hud") | Some("dock-driver"))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Subcommand dispatch — bare `pui` is ONE full-screen chat in the current
-    // directory, the way `claude` and `codex` start (pui-chat-first-ux P-001):
-    //   pui           → chat-first: no zellij, tab strip, fleet rail or boards
-    //   pui workbench → the zellij workbench with every board (D-001)
-    //   pui hud       → just the full HUD (what the workbench's own HUD pane runs;
-    //                   the workbench never launches bare `pui`, so it cannot nest).
+    // Subcommand dispatch (pui-chat-first-ux P-001, reshaped by P-030 / D-020):
+    //   pui           → the chat workbench: the chat is the main, focused zellij
+    //                   pane and the HUD, wake, network and work panes sit beside
+    //                   it (Alt+z hides/shows them). Falls back to the solo chat
+    //                   where zellij cannot run (see `bare_launch`).
+    //   pui --solo    → the chat alone, full screen, no zellij — the way `claude`
+    //                   and `codex` start. The workbench's chat pane runs this.
+    //   pui workbench → the HUD-primary zellij workbench (D-001)
+    //   pui hud       → just the full HUD (what the workbenches' HUD pane runs;
+    //                   no layout launches bare `pui`, so nothing can nest).
     // `pui --connect…` runs pui on a remote host through psu's saved
     // connections (P-017 / D-025). Checked before any other parsing: psu owns
     // every `--connect*` cell, which PUI's own parser would misread as a
@@ -296,7 +365,11 @@ async fn main() -> Result<()> {
         raw_args,
         inherited_fleet.as_deref(),
         inherited_seat.as_deref(),
-    )?;
+    )?
+    .inherit_chat_launch(
+        std::env::var(PUI_MODEL_ENV).ok().as_deref(),
+        std::env::var(PUI_ACCOUNT_ENV).ok().as_deref(),
+    );
     cli.export_launch_env();
     let subcommand = cli.positional(0).map(str::to_string);
     let subcommand_arg = cli.positional(1).map(str::to_string);
@@ -311,6 +384,24 @@ async fn main() -> Result<()> {
     }
     if print_cli_version(subcommand.as_deref(), subcommand_arg.as_deref()) {
         return Ok(());
+    }
+    if subcommand.is_none() {
+        let launch = bare_launch(BareLaunchInputs {
+            solo: cli.solo,
+            in_multiplexer_pane: std::env::var_os("ZELLIJ").is_some_and(|v| !v.is_empty()),
+            interactive: {
+                use std::io::IsTerminal;
+                std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+            },
+            zellij_available: zellij_on_path(),
+        });
+        if launch == BareLaunch::ChatWorkbench {
+            if let Some(code) = run_chat_workbench().await? {
+                std::process::exit(code);
+            }
+            // No backend identity to hand the panes: the solo chat below owns
+            // first-run setup and the plain "what to do" errors (P-031).
+        }
     }
     match subcommand.as_deref() {
         Some("workbench") => return run_workbench().await,
@@ -476,6 +567,21 @@ async fn main() -> Result<()> {
         // rather than painting the workbench's opaque dashboard panels.
         crate::theme::Theme::set_transparent_surfaces(true);
     }
+    // P-030: the chat pane of a chat workbench owns that session's lifetime.
+    let chat_workbench = if chat_first {
+        own_chat_workbench(cli.workbench_pane)
+    } else {
+        None
+    };
+    if chat_workbench.is_some()
+        && std::env::var(layout::CHAT_WORKBENCH_ZOOM_ENV).as_deref() == Ok("1")
+    {
+        // Launched narrower than CHAT_WORKBENCH_MIN_SIDE_COLS: start with the
+        // side panes collapsed (the chat zoomed to the whole window), so 80x24
+        // still gets a usable chat. Alt+z brings them back. The chat pane is
+        // the session's focused pane, so the zoom lands on it.
+        zoom_own_pane_when_ready();
+    }
 
     enable_raw_mode()?;
     let mut out = stdout();
@@ -495,6 +601,17 @@ async fn main() -> Result<()> {
         crossterm::event::EnableBracketedPaste,
         crossterm::event::EnableFocusChange
     )?;
+    // pui-chat-first-ux P-018: on the alternate screen, with no mouse
+    // reporting, terminals turn the wheel into Up/Down keys, and in the
+    // message box those cycle your sent messages instead of scrolling the
+    // conversation. The chat-first surface therefore takes the mouse: the
+    // wheel scrolls the transcript and a drag selects and copies
+    // (App::on_mouse). Shift+drag still gets the terminal's own selection. The
+    // workbench and the docked panes run inside zellij, which owns the mouse
+    // there, so they leave it alone. Released again on teardown below.
+    if chat_first {
+        execute!(out, crossterm::event::EnableMouseCapture)?;
+    }
     // Voice hold-to-talk (voice-mode-tui-port-2026-06-05 D-007): request key
     // RELEASE events when the terminal speaks the kitty keyboard protocol, so
     // holding `v` can drive PTT. Without support no release events arrive and
@@ -556,6 +673,14 @@ async fn main() -> Result<()> {
         );
     }
     disable_raw_mode().ok();
+    // Left armed, mouse reporting would outlive pui and type escape sequences
+    // into the shell on every click and wheel notch.
+    if chat_first {
+        let _ = execute!(
+            terminal.backend_mut(),
+            crossterm::event::DisableMouseCapture
+        );
+    }
     // Paired with the EnableBracketedPaste / EnableFocusChange above: leaving
     // either armed would outlive the TUI — corrupting pastes in the user's shell
     // after pui exits, and spraying focus escape sequences into it.
@@ -572,6 +697,19 @@ async fn main() -> Result<()> {
     // the error return a closed terminal causes, and before anything is
     // printed: a write to a hung-up terminal must not be able to skip it.
     let exit_note = finish_su_session_on_exit().await;
+    // P-030: in the chat workbench the pane's own screen dies with the session,
+    // so the conversation, the exit note and any error go to the launcher,
+    // which prints them into the real terminal after zellij is gone. Then the
+    // session stops: exiting the chat exits `pui`, as in the solo chat.
+    if let Some(session) = &chat_workbench {
+        finish_chat_workbench_pane(
+            session,
+            EXIT_TRANSCRIPT.get().map(String::as_str),
+            exit_note.as_deref(),
+            result.as_ref().err(),
+        );
+        return result;
+    }
     // pui-chat-first-ux P-004 "clean scrollback": now that the alternate screen
     // is gone, print the conversation to the normal screen so it stays in the
     // terminal's own scrollback (set by `run` for the chat-first surface only).
@@ -706,6 +844,25 @@ async fn terminate_signal_listener(tx: UnboundedSender<Event>) {
 #[cfg(not(unix))]
 async fn terminate_signal_listener(_tx: UnboundedSender<Event>) {}
 
+/// WI-10004322: a checkout install can sit weeks behind its source with nothing
+/// at launch saying so. Off the UI thread (git must never delay the first
+/// frame), compare this build with the checkout its manifest names and raise one
+/// warning notification when pui's own sources have moved on. Silent when the
+/// answer is unknown, for release installs, and for binaries that are not the
+/// installed one.
+fn spawn_checkout_drift_notice(tx: UnboundedSender<Event>) {
+    std::thread::spawn(move || {
+        if let Some(message) = install::launch_drift_notice() {
+            let _ = tx.send(Event::Notify(models::Notif {
+                level: "warn".into(),
+                message,
+                harness: None,
+                ts: None,
+            }));
+        }
+    });
+}
+
 #[cfg(test)]
 mod su_session_exit_tests {
     use super::su_session_exit_note;
@@ -731,7 +888,10 @@ static EXIT_TRANSCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new()
 
 #[cfg(test)]
 mod cli_help_tests {
-    use super::{print_cli_help, print_cli_version, CliInvocation, CLI_HELP};
+    use super::{
+        bare_launch, chat_workbench_exit_text, own_chat_workbench_from, print_cli_help,
+        print_cli_version, BareLaunch, BareLaunchInputs, CliInvocation, CLI_HELP,
+    };
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
@@ -838,6 +998,135 @@ mod cli_help_tests {
         assert!(CLI_HELP.contains("--connect[=<name>[/<workspace>]]"));
         assert!(CLI_HELP.contains("--connect-login"));
         assert!(CLI_HELP.contains("requires --fleet"));
+    }
+
+    /// P-030: `--solo` and the chat pane's owner flag are flags, not
+    /// subcommands, so bare `pui --solo` still reaches the chat surface.
+    #[test]
+    fn solo_and_workbench_pane_flags_leave_no_subcommand() {
+        let solo = CliInvocation::parse(args(&["--solo"]), None, None).unwrap();
+        assert!(solo.solo && !solo.workbench_pane);
+        assert!(solo.positionals.is_empty());
+
+        let pane = CliInvocation::parse(
+            args(&["--solo", crate::layout::CHAT_WORKBENCH_PANE_FLAG]),
+            Some("fed-drill"),
+            None,
+        )
+        .unwrap();
+        assert!(pane.solo && pane.workbench_pane);
+        assert!(pane.positionals.is_empty());
+        assert_eq!(pane.fleet.as_deref(), Some("fed-drill"));
+
+        let bare = CliInvocation::parse(args(&[]), None, None).unwrap();
+        assert!(!bare.solo && !bare.workbench_pane);
+    }
+
+    /// P-026 / D-023: `--model` and `--account` take a value in either form,
+    /// leave no subcommand, and an explicit flag beats the inherited choice.
+    #[test]
+    fn model_and_account_flags_parse_and_beat_the_inherited_choice() {
+        let split = CliInvocation::parse(args(&["--model", "opus:high", "--account", "auto"]), None, None)
+            .unwrap();
+        assert_eq!(split.model.as_deref(), Some("opus:high"));
+        assert_eq!(split.account.as_deref(), Some("auto"));
+        assert!(split.positionals.is_empty());
+
+        let equals = CliInvocation::parse(args(&["--solo", "--model=haiku", "--account=work"]), None, None)
+            .unwrap();
+        assert!(equals.solo);
+        assert_eq!(equals.model.as_deref(), Some("haiku"));
+        assert_eq!(equals.account.as_deref(), Some("work"));
+
+        assert!(CliInvocation::parse(args(&["--model"]), None, None).is_err());
+        assert!(CliInvocation::parse(args(&["--model", "--solo"]), None, None).is_err());
+        assert!(CliInvocation::parse(args(&["--model=a", "--model=b"]), None, None).is_err());
+        assert!(CliInvocation::parse(args(&["--account="]), None, None).is_err());
+
+        let explicit = equals.clone().inherit_chat_launch(Some("sonnet"), Some("default"));
+        assert_eq!(explicit.model.as_deref(), Some("haiku"));
+        assert_eq!(explicit.account.as_deref(), Some("work"));
+        let pane = CliInvocation::parse(args(&["--solo"]), None, None)
+            .unwrap()
+            .inherit_chat_launch(Some(" sonnet "), Some(""));
+        assert_eq!(pane.model.as_deref(), Some("sonnet"));
+        assert_eq!(pane.account, None, "an empty inherited value is no choice");
+    }
+
+    fn inputs() -> BareLaunchInputs {
+        BareLaunchInputs {
+            solo: false,
+            in_multiplexer_pane: false,
+            interactive: true,
+            zellij_available: true,
+        }
+    }
+
+    /// P-030: bare `pui` opens the chat workbench; `--solo`, an enclosing
+    /// zellij pane (no nesting), a non-terminal launch and a missing zellij all
+    /// open the chat alone instead of failing.
+    #[test]
+    fn bare_pui_opens_the_chat_workbench_unless_it_cannot() {
+        assert_eq!(bare_launch(inputs()), BareLaunch::ChatWorkbench);
+        for solo_case in [
+            BareLaunchInputs { solo: true, ..inputs() },
+            BareLaunchInputs { in_multiplexer_pane: true, ..inputs() },
+            BareLaunchInputs { interactive: false, ..inputs() },
+            BareLaunchInputs { zellij_available: false, ..inputs() },
+        ] {
+            assert_eq!(bare_launch(solo_case), BareLaunch::Solo, "{solo_case:?}");
+        }
+    }
+
+    /// Only the chat pane the launcher started — flag AND matching session —
+    /// owns the session. A `pui --solo` typed into the work shell inherits the
+    /// session env but not the flag, so exiting it must not stop the session.
+    #[test]
+    fn only_the_flagged_chat_pane_owns_its_chat_workbench() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let inside: &'static [(&str, &str)] = &[
+            (crate::layout::CHAT_WORKBENCH_SESSION_ENV, "pui-chat-7"),
+            ("ZELLIJ_SESSION_NAME", "pui-chat-7"),
+        ];
+        assert_eq!(
+            own_chat_workbench_from(true, env(inside)).as_deref(),
+            Some("pui-chat-7")
+        );
+        assert_eq!(own_chat_workbench_from(false, env(inside)), None);
+        let elsewhere: &'static [(&str, &str)] = &[
+            (crate::layout::CHAT_WORKBENCH_SESSION_ENV, "pui-chat-7"),
+            ("ZELLIJ_SESSION_NAME", "my-own-session"),
+        ];
+        assert_eq!(own_chat_workbench_from(true, env(elsewhere)), None);
+        assert_eq!(own_chat_workbench_from(true, env(&[])), None);
+    }
+
+    /// The launcher prints the conversation, the exit note and the error that
+    /// ended the chat — the solo chat's scrollback and plain-error behaviour.
+    #[test]
+    fn chat_workbench_exit_text_keeps_transcript_note_and_error() {
+        let err = anyhow::anyhow!("operator unreachable");
+        let text =
+            chat_workbench_exit_text(Some("you: hi\nclaude: hello\n"), Some("Session kept."), Some(&err));
+        assert_eq!(
+            text,
+            "you: hi\nclaude: hello\nSession kept.\npui: operator unreachable\n"
+        );
+        assert_eq!(chat_workbench_exit_text(None, Some("  "), None), "");
+    }
+
+    #[test]
+    fn help_documents_the_chat_workbench_and_solo() {
+        assert!(CLI_HELP.contains("pui --solo"));
+        assert!(CLI_HELP.contains(crate::layout::CHAT_WORKBENCH_TOGGLE_HINT));
+        assert!(!CLI_HELP.contains(crate::layout::CHAT_WORKBENCH_PANE_FLAG));
     }
 }
 
@@ -1099,6 +1388,15 @@ async fn run_doctor() -> Result<()> {
                 &check.companion_sha256[..12]
             );
             println!("manifest:       {}", check.manifest_path.display());
+            if let Some(root) = check.manifest.source_root.as_deref() {
+                match install::checkout_drift(root, install::BUILD_SHA) {
+                    Some(drift) => match drift.notice() {
+                        Some(notice) => println!("checkout:       {notice}"),
+                        None => println!("checkout:       current with {root}"),
+                    },
+                    None => println!("checkout:       unknown (could not compare with {root})"),
+                }
+            }
             for warning in &check.warnings {
                 println!("warning:        {warning}");
             }
@@ -1269,6 +1567,231 @@ fn require_interactive_terminal(command: &str) -> Result<()> {
     )
 }
 
+/// What bare `pui` opens (pui-chat-first-ux P-030 / D-020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BareLaunch {
+    /// The chat workbench: the chat as the main pane, workbench panes beside it.
+    ChatWorkbench,
+    /// The chat alone, full screen, in this terminal.
+    Solo,
+}
+
+/// The facts [`bare_launch`] decides from — gathered by the caller so the
+/// decision is a pure function the tests can drive.
+#[derive(Debug, Clone, Copy)]
+struct BareLaunchInputs {
+    /// `--solo` was passed.
+    solo: bool,
+    /// Already inside a zellij pane: a workbench there would nest zellij (and
+    /// the chat workbench's own chat pane runs `--solo` for the same reason).
+    in_multiplexer_pane: bool,
+    /// stdin and stdout are a terminal. zellij needs one; without it the
+    /// launch would leave a half-built session behind (EI-22373168217321170).
+    interactive: bool,
+    /// A `zellij` executable is reachable (the bundled one first, see
+    /// `install::prefer_bundled_tools`).
+    zellij_available: bool,
+}
+
+/// Bare `pui` opens the chat workbench unless `--solo` asks for the chat alone
+/// or zellij cannot run here; in every such case the solo chat still works, so
+/// `pui` never fails to start for lack of a multiplexer.
+fn bare_launch(inputs: BareLaunchInputs) -> BareLaunch {
+    if inputs.solo
+        || inputs.in_multiplexer_pane
+        || !inputs.interactive
+        || !inputs.zellij_available
+    {
+        BareLaunch::Solo
+    } else {
+        BareLaunch::ChatWorkbench
+    }
+}
+
+/// Is a `zellij` executable on PATH?
+fn zellij_on_path() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            std::fs::metadata(dir.join("zellij"))
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+    })
+}
+
+/// The chat workbench session THIS process is the chat pane of, if any: it
+/// was started with [`layout::CHAT_WORKBENCH_PANE_FLAG`] inside the session
+/// its launcher named.
+fn own_chat_workbench(workbench_pane: bool) -> Option<String> {
+    own_chat_workbench_from(workbench_pane, |k| std::env::var(k).ok())
+}
+
+fn own_chat_workbench_from(
+    workbench_pane: bool,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if !workbench_pane {
+        return None;
+    }
+    let mine = env(layout::CHAT_WORKBENCH_SESSION_ENV).filter(|s| !s.is_empty())?;
+    let current = env("ZELLIJ_SESSION_NAME")?;
+    (mine == current).then_some(mine)
+}
+
+/// The text the chat workbench's launcher prints after zellij exits: the
+/// conversation, the engine exit note, and the error that ended the chat.
+fn chat_workbench_exit_text(
+    transcript: Option<&str>,
+    note: Option<&str>,
+    error: Option<&anyhow::Error>,
+) -> String {
+    let mut text = String::new();
+    for part in [
+        transcript.map(str::to_string),
+        note.map(str::to_string),
+        error.map(|e| format!("pui: {e:#}")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|p| !p.trim().is_empty())
+    {
+        text.push_str(part.trim_end());
+        text.push('\n');
+    }
+    text
+}
+
+/// The chat pane of a chat workbench is exiting: leave the exit text for the
+/// launcher, then stop the session (this process included — call it last).
+fn finish_chat_workbench_pane(
+    session: &str,
+    transcript: Option<&str>,
+    note: Option<&str>,
+    error: Option<&anyhow::Error>,
+) {
+    let text = chat_workbench_exit_text(transcript, note, error);
+    if let Ok(path) = std::env::var(layout::CHAT_WORKBENCH_TRANSCRIPT_ENV) {
+        if !path.is_empty() && !text.is_empty() {
+            let _ = std::fs::write(path, text);
+        }
+    }
+    let _ = std::process::Command::new("zellij")
+        .args(["kill-session", session])
+        .output();
+}
+
+/// Bare `pui` (P-030): start this launch's own `pui-chat-<pid>` zellij session
+/// with the chat as the focused main pane, wait for it, then print the
+/// conversation into this terminal's scrollback.
+///
+/// `Ok(None)` = no backend identity resolves. The caller then falls through to
+/// the solo chat, which owns first-run setup and the plain-sentence errors.
+async fn run_chat_workbench() -> Result<Option<i32>> {
+    let Ok((_client, backend)) = selected_backend_identity().await else {
+        return Ok(None);
+    };
+    let session = layout::chat_workbench_session_name(std::process::id());
+    // Never attach to anything. A live session already carrying our name can
+    // only be a leftover from a recycled pid — it is not ours.
+    if reap::live_session_exists(&session) {
+        reap::kill_and_delete(&session);
+    }
+    reap::reap_stale(&session);
+    identity::inherit(&backend);
+    let narrow = crossterm::terminal::size()
+        .map(|(cols, _)| cols < layout::CHAT_WORKBENCH_MIN_SIDE_COLS)
+        .unwrap_or(false);
+    let transcript = chat_workbench_transcript_path(&session)?;
+    let _ = std::fs::remove_file(&transcript);
+    // Exported before zellij starts, so the new session's panes inherit them.
+    std::env::set_var(layout::CHAT_WORKBENCH_SESSION_ENV, &session);
+    std::env::set_var(layout::CHAT_WORKBENCH_TRANSCRIPT_ENV, &transcript);
+    if narrow {
+        std::env::set_var(layout::CHAT_WORKBENCH_ZOOM_ENV, "1");
+    } else {
+        std::env::remove_var(layout::CHAT_WORKBENCH_ZOOM_ENV);
+    }
+    let path = layout::materialize_chat_workbench()?;
+    let argv = layout::launch_argv(&path.to_string_lossy(), &session);
+    let status = zellij_session_command(&argv).status()?;
+    reap::kill_and_delete(&session);
+    if let Ok(text) = std::fs::read_to_string(&transcript) {
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), "{text}");
+        let _ = std::fs::remove_file(&transcript);
+    }
+    Ok(Some(status.code().unwrap_or(0)))
+}
+
+/// The zellij process for an app-managed session `argv` (from
+/// [`layout::launch_argv`] or [`layout::attach_argv`]), with this build's
+/// directory first on its `PATH` so the layout's `command "pui"` panes run
+/// the same build as this launcher ([`layout::session_path_env`]).
+fn zellij_session_command(argv: &[String]) -> std::process::Command {
+    let (prog, rest) = argv.split_first().expect("launch argv is never empty");
+    let mut command = std::process::Command::new(prog);
+    command.args(rest);
+    let inherited = std::env::var_os("PATH");
+    if let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| layout::session_path_env(&exe, inherited.as_deref()))
+    {
+        command.env("PATH", path);
+    }
+    // No zellij config of the user's own: give the session pui's, so zellij's
+    // first-run wizard never opens over (and takes focus from) the panes.
+    if let Some(dir) = layout::session_config_dir() {
+        command.env("ZELLIJ_CONFIG_DIR", dir);
+    }
+    command
+}
+
+/// Zoom THIS pane to the whole window (the chat workbench opened narrower
+/// than [`layout::CHAT_WORKBENCH_MIN_SIDE_COLS`]). zellij silently drops a
+/// `toggle-fullscreen` sent in the first ~0.5s of a new session (measured
+/// 2026-10-06, zellij 0.44.3: dropped at 0-0.5s, applied at 1.5s), and this
+/// runs as the chat starts, so: toggle, read the pane's own state back from
+/// `list-panes --json`, and re-send only while it is still not fullscreen.
+/// Runs on its own thread so the chat never waits on it. Bounded; a zellij
+/// that never reports the pane gives up silently (the chat still works, and
+/// Alt+z still zooms).
+fn zoom_own_pane_when_ready() {
+    let Some(pane_id) = std::env::var("ZELLIJ_PANE_ID")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let zellij = |args: &[&str]| std::process::Command::new("zellij").args(args).output();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            let listed = zellij(&["action", "list-panes", "--json", "--state"]);
+            let state = listed
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| layout::pane_fullscreen(&out.stdout, pane_id));
+            if state == Some(true) {
+                return;
+            }
+            if state == Some(false) {
+                let _ = zellij(&["action", "toggle-fullscreen"]);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+}
+
+/// Where the chat pane of `session` leaves its exit text for the launcher.
+fn chat_workbench_transcript_path(session: &str) -> Result<std::path::PathBuf> {
+    let dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("no home directory"))?
+        .join(".papercusp")
+        .join("pui-chat");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("{session}.exit.txt")))
+}
+
 async fn run_workbench() -> Result<()> {
     require_interactive_terminal("workbench")?;
     let session = layout::session_name("wb");
@@ -1294,8 +1817,7 @@ async fn run_workbench() -> Result<()> {
         let path = layout::materialize()?;
         layout::launch_argv(&path.to_string_lossy(), &session)
     };
-    let (prog, rest) = argv.split_first().expect("launch argv is never empty");
-    let status = std::process::Command::new(prog).args(rest).status()?;
+    let status = zellij_session_command(&argv).status()?;
     reap::kill_and_delete(&session);
     identity::clear(&session);
     std::process::exit(status.code().unwrap_or(0));
@@ -1339,8 +1861,7 @@ async fn run_chat_dock() -> Result<()> {
         reap::reap_stale(&session);
         layout::launch_argv(&path.to_string_lossy(), &session)
     };
-    let (prog, rest) = argv.split_first().expect("launch argv is never empty");
-    let status = std::process::Command::new(prog).args(rest).status()?;
+    let status = zellij_session_command(&argv).status()?;
     reap::kill_and_delete(&session);
     identity::clear(&session);
     std::process::exit(status.code().unwrap_or(0));
@@ -1374,6 +1895,12 @@ async fn run<B: Backend>(
     app.require_session_setup = true;
     app.su_launch_fleet = launch_fleet;
     app.su_launch_seat = launch_seat;
+    // P-026 / D-023: `pui --model` / `--account`, exported before zellij starts,
+    // so the chat pane's first conversation starts on them.
+    app.apply_chat_launch_choice(
+        std::env::var(PUI_MODEL_ENV).ok().as_deref(),
+        std::env::var(PUI_ACCOUNT_ENV).ok().as_deref(),
+    );
     // Resolve the same canonical record `pui doctor` prints. This is an
     // independent process inside zellij, but both endpoint variables were
     // normalized/inherited by the session launcher above.
@@ -1442,6 +1969,7 @@ async fn run<B: Backend>(
     }
     spawn_input_listener(tx.clone());
     tokio::spawn(terminate_signal_listener(tx.clone()));
+    spawn_checkout_drift_notice(tx.clone());
     let sync_pane = PaneFetchScope {
         pinned,
         selected: Arc::new(Mutex::new(app.tab)),
@@ -1589,7 +2117,7 @@ async fn run<B: Backend>(
             *selected = app.tab;
         }
         if app.tab != prior_tab && app.tab == app::Tab::Overview {
-            let _ = sync_refetch.send(RefetchSignal::SkipPlanReads);
+            let _ = sync_refetch.send(RefetchSignal::GENERAL);
         }
         // A saved Network view bypasses the normal tab-entry action.
         if restoring_view && app.tab == app::Tab::Network && app.pinned.is_none() {
@@ -1727,14 +2255,11 @@ async fn run<B: Backend>(
                         .and_then(|()| out.flush())
                         .is_err()
                     {
-                        app.toast = Some(models::Notif {
-                            level: "error".to_string(),
-                            message:
-                                "Clipboard write failed — the terminal did not accept the copy"
-                                    .to_string(),
-                            harness: None,
-                            ts: None,
-                        });
+                        app.chat_toast(
+                            "error",
+                            "Clipboard write failed — the terminal did not accept the copy"
+                                .to_string(),
+                        );
                     }
                     terminal.draw(|f| ui::draw(f, &app))?;
                 }
@@ -2416,6 +2941,10 @@ async fn run<B: Backend>(
                         load_token,
                         tx.clone(),
                     ));
+                    terminal.draw(|f| ui::draw(f, &app))?;
+                }
+                Action::RefreshAgentChatList { harness } => {
+                    tokio::spawn(agent_chat_list_refresh(harness, tx.clone()));
                     terminal.draw(|f| ui::draw(f, &app))?;
                 }
                 Action::CancelChat => {
@@ -5394,6 +5923,7 @@ fn turn_to_message(t: models::TurnDto) -> Option<models::ChatMessage> {
         provenance: None,
         tools,
         streaming: false,
+        worked_for: None,
     })
 }
 
@@ -5426,6 +5956,7 @@ fn native_turn_to_message(t: agent_chats::AgentChatTranscriptTurn) -> Option<mod
             .map(|tool| models::ChatToolCall::plain(tool.name))
             .collect(),
         streaming: false,
+        worked_for: None,
     })
 }
 
@@ -5499,6 +6030,48 @@ fn default_operator_chat<'a>(
         .map(|(_, chat)| chat)
 }
 
+/// Keep archived chats in the inventory so an ended SU session remains
+/// selectable for transcript inspection after a restart. The default operator
+/// selection still excludes archived rows.
+fn agent_chat_list_options() -> agent_chats::AgentChatListOptions {
+    agent_chats::AgentChatListOptions {
+        include_archived: true,
+        limit: Some(100),
+        ..Default::default()
+    }
+}
+
+/// Refresh only the /resume conversation list (P-027 G-12). Unlike
+/// `agent_chat_load` this never selects or loads a conversation, so a retry
+/// cannot replace the one the owner is in.
+async fn agent_chat_list_refresh(harness: String, tx: UnboundedSender<Event>) {
+    let listed = async {
+        let client = OperatorClient::from_discovery().await?;
+        let summaries = client
+            .list_agent_chats(&harness, &agent_chat_list_options())
+            .await?;
+        let inventory = probe_su_session_inventory(&client, &harness, &summaries).await;
+        anyhow::Ok((summaries, inventory))
+    }
+    .await;
+    match listed {
+        Ok((summaries, inventory)) => {
+            let _ = tx.send(Event::SuSessionInventory {
+                harness: harness.clone(),
+                selected_chat_id: None,
+                entries: inventory,
+            });
+            let _ = tx.send(Event::AgentChatListLoaded { harness, summaries });
+        }
+        Err(error) => {
+            let _ = tx.send(Event::AgentChatListFailed {
+                harness,
+                message: format!("{error:#}"),
+            });
+        }
+    }
+}
+
 async fn agent_chat_load(
     harness: String,
     selected_chat_id: Option<String>,
@@ -5508,22 +6081,23 @@ async fn agent_chat_load(
     let client = match OperatorClient::from_discovery().await {
         Ok(client) => client,
         Err(error) => {
-            let _ = tx.send(Event::Error(format!("native agent chat: {error}")));
+            let _ = tx.send(Event::AgentChatListFailed {
+                harness,
+                message: format!("{error:#}"),
+            });
             return;
         }
     };
-    let options = agent_chats::AgentChatListOptions {
-        // Keep archived chats in the inventory so an ended SU session remains
-        // selectable for transcript inspection after a restart.  The default
-        // operator selection below still excludes archived rows.
-        include_archived: true,
-        limit: Some(100),
-        ..Default::default()
-    };
+    let options = agent_chat_list_options();
     let summaries = match client.list_agent_chats(&harness, &options).await {
         Ok(chats) => chats,
         Err(error) => {
-            let _ = tx.send(Event::Error(format!("native agent chat: {error}")));
+            // P-027 G-12: a failed list used to surface only as a generic error,
+            // so /resume showed "Loading earlier conversations…" forever.
+            let _ = tx.send(Event::AgentChatListFailed {
+                harness,
+                message: format!("{error:#}"),
+            });
             return;
         }
     };
@@ -6276,6 +6850,70 @@ async fn recover_detached_runtime(
 const SU_TURN_ACCEPT_ATTEMPT: Duration = Duration::from_secs(30);
 const SU_TURN_ACCEPT_ATTEMPTS: u32 = 4;
 
+/// pui-chat-first-ux P-024: how long a send may wait on each part of the path
+/// before PUI says so in plain words. The HTTP client bounds only the connect,
+/// so without `operator` a hung operator would leave the owner looking at a
+/// spinner forever.
+#[derive(Clone, Copy, Debug)]
+struct SuSendBudgets {
+    /// One readiness read from the operator.
+    operator: Duration,
+    /// A message typed while the engine is still starting waits this long for it.
+    ready: Duration,
+    /// Gap between readiness reads while the engine starts.
+    poll: Duration,
+}
+
+impl SuSendBudgets {
+    const LIVE: Self = Self {
+        // The plan allows 5s from Enter to the plain sentence; 4s leaves room
+        // to draw it on a loaded box (the agent-chat-pty P-024 case times it).
+        operator: Duration::from_secs(4),
+        ready: Duration::from_secs(60),
+        poll: Duration::from_millis(250),
+    };
+}
+
+/// P-024: a message sent while the engine is still starting waits for it (the
+/// working line shows that it is starting) instead of being refused, which is
+/// what made "hi" fail with "Claude stopped before it was ready" (P-023). Every
+/// way this can fail ends in a plain error within a bounded time, never silence.
+async fn await_su_send_readiness<F, Fut>(
+    mut read: F,
+    budgets: SuSendBudgets,
+) -> std::result::Result<crate::su_session::SuSessionSnapshot, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<crate::su_session::SuSessionSnapshot>>,
+{
+    let started = tokio::time::Instant::now();
+    loop {
+        let snapshot = match tokio::time::timeout(budgets.operator, read()).await {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(error)) => return Err(format!("Cannot read session readiness: {error}")),
+            Err(_) => {
+                return Err(format!(
+                    "The operator did not answer within {}s. Draft retained.",
+                    budgets.operator.as_secs().max(1)
+                ))
+            }
+        };
+        if snapshot.terminal {
+            return Err("Session has ended. Draft retained; reconnect to retry.".into());
+        }
+        if snapshot.executor_attached && snapshot.stream_ready {
+            return Ok(snapshot);
+        }
+        if started.elapsed() >= budgets.ready {
+            return Err(format!(
+                "Session did not become ready within {}s. Draft retained.",
+                budgets.ready.as_secs().max(1)
+            ));
+        }
+        tokio::time::sleep(budgets.poll).await;
+    }
+}
+
 async fn send_su_turn_with_client(
     client: &OperatorClient,
     harness: &str,
@@ -6294,22 +6932,20 @@ async fn send_su_turn_with_client(
     let command = if let Some(command) = pending.command.clone() {
         command // Retry the exact committed payload, including its original timestamp.
     } else {
-        let snapshot = match client.su_session_snapshot(harness, chat_id).await {
+        // A connected engine remains usable while waiting for its next owner
+        // turn or after interruption; readiness is separate from that lifecycle.
+        let snapshot = match await_su_send_readiness(
+            || client.su_session_snapshot(harness, chat_id),
+            SuSendBudgets::LIVE,
+        )
+        .await
+        {
             Ok(snapshot) => snapshot,
-            Err(error) => {
-                fail(format!("Cannot read session readiness: {error}"), false);
+            Err(message) => {
+                fail(message, false);
                 return;
             }
         };
-        // A connected engine remains usable while waiting for its next owner
-        // turn or after interruption; readiness is separate from that lifecycle.
-        if !snapshot.executor_attached || !snapshot.stream_ready || snapshot.terminal {
-            fail(
-                "Session is not ready. Draft retained; reconnect to retry.".into(),
-                false,
-            );
-            return;
-        }
         let identity = snapshot.descriptor.identity;
         if !su_turn_target_matches(binding, &identity, harness, chat_id) {
             fail(
@@ -6318,7 +6954,7 @@ async fn send_su_turn_with_client(
             );
             return;
         }
-        serde_json::json!({
+        let mut command = serde_json::json!({
             "schema": crate::su_session::SU_SESSION_SCHEMA,
             "protocolVersion": crate::su_session::SU_SESSION_PROTOCOL_VERSION,
             "type": "owner_turn",
@@ -6327,7 +6963,17 @@ async fn send_su_turn_with_client(
             "target": identity,
             "turnId": format!("pui-turn-{}", pending.command_id),
             "content": pending.content,
-        })
+        });
+        // pui-chat-first-ux P-026 / D-025: the /model pick rides on this turn;
+        // omitted keeps the model the session already runs on.
+        // D-026: the /approvals or Shift+Tab pick rides on this turn too.
+        if let Some(approvals) = pending.approvals.as_deref() {
+            command["approvals"] = serde_json::Value::String(approvals.to_string());
+        }
+        if let Some(model) = pending.model.as_deref() {
+            command["model"] = serde_json::Value::String(model.to_string());
+        }
+        command
     };
     let identity: crate::su_session::SuSessionIdentity =
         match serde_json::from_value(command["target"].clone()) {
@@ -6855,9 +7501,9 @@ fn spawn_sync(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RefetchSignal {
-    IncludePlanReads,
-    SkipPlanReads,
+struct RefetchSignal {
+    include_plan_reads: bool,
+    include_account_reads: bool,
 }
 
 /// Keep background reads aligned with the pane the workbench currently shows.
@@ -6884,19 +7530,23 @@ impl PaneFetchScope {
 }
 
 impl RefetchSignal {
-    fn include_plan_reads(self) -> bool {
-        matches!(self, RefetchSignal::IncludePlanReads)
-    }
-}
+    const FULL: Self = Self {
+        include_plan_reads: true,
+        include_account_reads: true,
+    };
+    const GENERAL: Self = Self {
+        include_plan_reads: false,
+        include_account_reads: false,
+    };
 
-fn sync_payload_fetches_plans(data: &str) -> bool {
-    let Ok(payload) = serde_json::from_str::<serde_json::Value>(data) else {
-        return true;
-    };
-    let Some(name) = payload.get("name").and_then(|v| v.as_str()) else {
-        return true;
-    };
-    sync_name_fetches_plans(name)
+    fn include_plan_reads(self) -> bool {
+        self.include_plan_reads
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.include_plan_reads |= other.include_plan_reads;
+        self.include_account_reads |= other.include_account_reads;
+    }
 }
 
 fn sync_name_fetches_plans(name: &str) -> bool {
@@ -6908,10 +7558,17 @@ fn sync_name_fetches_plans(name: &str) -> bool {
 }
 
 fn refetch_signal_for_frame_data(data: &str) -> RefetchSignal {
-    if sync_payload_fetches_plans(data) {
-        RefetchSignal::IncludePlanReads
-    } else {
-        RefetchSignal::SkipPlanReads
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(data) else {
+        return RefetchSignal::FULL;
+    };
+    let Some(name) = payload.get("name").and_then(|v| v.as_str()) else {
+        return RefetchSignal::FULL;
+    };
+    RefetchSignal {
+        include_plan_reads: sync_name_fetches_plans(name),
+        include_account_reads: name.starts_with("accounts.")
+            || name == "harness_shared.operator_account_pool.changed"
+            || name == "harness_shared.operator_account_override.changed",
     }
 }
 
@@ -7090,7 +7747,7 @@ async fn refetch_loop(
         &active_doc,
         &active_plan,
         &pane,
-        true,
+        RefetchSignal::FULL,
     )
     .await;
     if let Some(key) = &network_focus {
@@ -7134,9 +7791,9 @@ async fn refetch_loop(
                 };
                 // Debounce a burst of invalidations into one refetch.
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                let mut include_plan_reads = first_sig.include_plan_reads();
+                let mut signal = first_sig;
                 while let Ok(next_sig) = sig_rx.try_recv() {
-                    include_plan_reads |= next_sig.include_plan_reads();
+                    signal.merge(next_sig);
                 }
                 refetch_all(
                     &client,
@@ -7145,7 +7802,7 @@ async fn refetch_loop(
                     &active_doc,
                     &active_plan,
                     &pane,
-                    include_plan_reads,
+                    signal,
                 )
                 .await;
         if let Some(key) = &network_focus {
@@ -7161,7 +7818,7 @@ async fn refetch_loop(
                     &active_doc,
                     &active_plan,
                     &pane,
-                    true,
+                    RefetchSignal::FULL,
                 )
                 .await;
         if let Some(key) = &network_focus {
@@ -7510,9 +8167,9 @@ fn spawn_first_paint_work_items<S: FirstPaintWorkItems>(
 /// Fetch every panel's data and forward as `Event`s. Errors per-query become
 /// `Event::Error` so one failing endpoint doesn't sink the rest. `pinned`
 /// scopes the fat plans/attention reads to panes that actually render them
-/// (see `pane_fetches_plans` / `pane_fetches_attention`). `include_plan_reads`
-/// is false for non-plan SSE invalidations; the 60s safety tick still includes
-/// them, so a missed/unknown plan signal self-heals without a tight poll.
+/// (see `pane_fetches_plans` / `pane_fetches_attention`). `signal` skips plan
+/// and account reads on unrelated SSE invalidations. Startup and the 60s safety
+/// tick include both, so missed signals self-heal without a tight poll.
 async fn refetch_all(
     client: &OperatorClient,
     tx: &UnboundedSender<Event>,
@@ -7520,8 +8177,9 @@ async fn refetch_all(
     active_doc: &Arc<Mutex<Option<String>>>,
     active_plan: &Arc<Mutex<Option<(String, String)>>>,
     pane: &PaneFetchScope,
-    include_plan_reads: bool,
+    signal: RefetchSignal,
 ) {
+    let include_plan_reads = signal.include_plan_reads();
     let pinned = pane.pinned;
     if let Some(pinned) = pinned {
         match pinned_hydration_plan(Some(pinned)) {
@@ -7717,13 +8375,15 @@ async fn refetch_all(
     }
     // Agent Chat account-route picker. The generic run-tool bridge returns
     // live pool rows; an empty pool still leaves the Auto row available.
-    match client.accounts_status().await {
-        Ok(status) => {
-            let _ = tx.send(Event::AccountRows(status.accounts));
-            let _ = tx.send(Event::AccountPoolVerdicts(status.pool_verdict));
-        }
-        Err(e) => {
-            let _ = tx.send(Event::Error(format!("accounts-status: {e}")));
+    if signal.include_account_reads {
+        match client.accounts_status().await {
+            Ok(status) => {
+                let _ = tx.send(Event::AccountRows(status.accounts));
+                let _ = tx.send(Event::AccountPoolVerdicts(status.pool_verdict));
+            }
+            Err(e) => {
+                let _ = tx.send(Event::Error(format!("accounts-status: {e}")));
+            }
         }
     }
     // Plan-item assignment/claim/liveness for the SELECTED plan (P-005a). A per-plan
@@ -8002,6 +8662,114 @@ mod tests {
 
     #[test]
     fn initial_turn_snapshot_requires_a_ready_matching_native_runtime() {
+        initial_turn_snapshot_requires_a_ready_matching_native_runtime_body();
+    }
+
+    /// P-024 fixture: a snapshot in the given readiness state.
+    fn readiness_snapshot(
+        attached: bool,
+        ready: bool,
+        terminal: bool,
+    ) -> crate::su_session::SuSessionSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "descriptor": {
+                "identity": {
+                    "agentChatId":"chat-1", "advSessionId":7, "backend":"claude",
+                    "nativeSessionId":"native-1", "ownerId":"su-1", "workspaceId":"ws-1",
+                    "harnessSlug":"papercup"
+                },
+                "lifecycle": if attached { "ready" } else { "starting" },
+                "runtimeGeneration": 0,
+                "role": "su",
+                "carry": "warm",
+                "modes": [],
+                "capabilities": {"commands": {}, "features": {}},
+                "backendExtension": {"backend": "claude", "configDir": null, "configDirSource": null}
+            },
+            "floorSequence": 1,
+            "lastSequence": 1,
+            "terminal": terminal,
+            "executorAttached": attached,
+            "streamReady": ready
+        }))
+        .unwrap()
+    }
+
+    const FAST: SuSendBudgets = SuSendBudgets {
+        operator: Duration::from_millis(60),
+        ready: Duration::from_millis(200),
+        poll: Duration::from_millis(10),
+    };
+
+    /// P-023 / P-024: "hi" typed while Claude is still starting must wait for
+    /// it, not be refused with "Session is not ready".
+    #[tokio::test]
+    async fn a_send_waits_for_a_starting_engine_then_goes() {
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = reads.clone();
+        let outcome = await_su_send_readiness(
+            move || {
+                let n = counter.get() + 1;
+                counter.set(n);
+                async move { Ok(readiness_snapshot(n >= 3, true, false)) }
+            },
+            FAST,
+        )
+        .await;
+        assert!(outcome.is_ok_and(|s| s.executor_attached));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_hung_operator_is_reported_within_its_budget() {
+        let started = std::time::Instant::now();
+        let outcome = await_su_send_readiness(
+            || std::future::pending::<Result<crate::su_session::SuSessionSnapshot>>(),
+            FAST,
+        )
+        .await;
+        let message = outcome.expect_err("a hung operator must not be waited on");
+        assert!(message.contains("operator did not answer within"), "{message}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_never_gets_ready_ends_in_a_plain_error() {
+        let message = await_su_send_readiness(
+            || async { Ok(readiness_snapshot(false, true, false)) },
+            FAST,
+        )
+        .await
+        .expect_err("readiness is bounded");
+        assert!(message.contains("did not become ready within"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_or_an_operator_error_is_not_retried() {
+        let reads = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = reads.clone();
+        let ended = await_su_send_readiness(
+            move || {
+                counter.set(counter.get() + 1);
+                async { Ok(readiness_snapshot(false, false, true)) }
+            },
+            FAST,
+        )
+        .await
+        .expect_err("an ended session cannot take a turn");
+        assert!(ended.contains("Session has ended"), "{ended}");
+        assert_eq!(reads.get(), 1);
+        let refused = await_su_send_readiness(
+            || async { Err(anyhow::anyhow!("connection refused")) },
+            FAST,
+        )
+        .await
+        .expect_err("an unreachable operator fails at once");
+        assert!(refused.contains("Cannot read session readiness: connection refused"), "{refused}");
+    }
+
+    fn initial_turn_snapshot_requires_a_ready_matching_native_runtime_body() {
         let mut binding: crate::su_session::SuSessionBinding =
             serde_json::from_value(serde_json::json!({
                 "operation":"created", "backend":"claude", "advSessionId":7,
@@ -8446,9 +9214,9 @@ mod tests {
             "harness_shared.plan_runs.changed",
         ] {
             assert!(sync_name_fetches_plans(name), "{name} should refresh plans");
-            assert_eq!(
-                refetch_signal_for_frame_data(&format!(r#"{{"name":"{name}"}}"#)),
-                RefetchSignal::IncludePlanReads
+            assert!(
+                refetch_signal_for_frame_data(&format!(r#"{{"name":"{name}"}}"#))
+                    .include_plan_reads()
             );
         }
 
@@ -8462,7 +9230,7 @@ mod tests {
             assert!(!sync_name_fetches_plans(name), "{name} should skip plans");
             assert_eq!(
                 refetch_signal_for_frame_data(&format!(r#"{{"name":"{name}"}}"#)),
-                RefetchSignal::SkipPlanReads
+                RefetchSignal::GENERAL
             );
         }
 
@@ -8470,12 +9238,166 @@ mod tests {
         // rather than risking a stale Create/Plans pane.
         assert_eq!(
             refetch_signal_for_frame_data("not json"),
-            RefetchSignal::IncludePlanReads
+            RefetchSignal::FULL
         );
         assert_eq!(
             refetch_signal_for_frame_data(r#"{"args":{"x":1}}"#),
-            RefetchSignal::IncludePlanReads
+            RefetchSignal::FULL
         );
+    }
+
+    #[test]
+    fn sync_refetch_signal_keeps_both_scopes_when_debouncing() {
+        let plan = refetch_signal_for_frame_data(r#"{"name":"plans.list"}"#);
+        let account = refetch_signal_for_frame_data(r#"{"name":"accounts.pool"}"#);
+        let unrelated = refetch_signal_for_frame_data(r#"{"name":"activity.recent"}"#);
+        assert!(!plan.include_account_reads);
+        assert!(!account.include_plan_reads);
+        assert!(account.include_account_reads);
+        for signals in [
+            [plan, account, unrelated],
+            [account, unrelated, plan],
+            [unrelated, plan, account],
+        ] {
+            let mut merged = RefetchSignal::GENERAL;
+            for signal in signals {
+                merged.merge(signal);
+            }
+            assert_eq!(merged, RefetchSignal::FULL);
+        }
+    }
+
+    /// Exercise the real refetch fan-out and run-tool wire, not just the
+    /// signal predicate. Unrelated SSE frames must not re-read the account
+    /// pool; startup, account updates, unknown payloads and safety refresh do.
+    #[tokio::test]
+    async fn account_refetch_reads_only_for_account_updates_and_full_refresh() {
+        use crate::framing::{encode_frame, FrameType};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("account-refetch.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let recorded_reads = reads.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = stream.into_split();
+            loop {
+                let mut header = [0; 5];
+                if reader.read_exact(&mut header).await.is_err() {
+                    break;
+                }
+                assert_eq!(header[4], FrameType::Request as u8);
+                let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+                let mut payload = vec![0; len];
+                reader.read_exact(&mut payload).await.unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                let id = request["id"].as_u64().unwrap();
+                let tool_body = request["input"]["body"]
+                    .as_str()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok());
+                let is_accounts = request["input"]["path"] == "/api/agent-mcp/run-tool"
+                    && tool_body.as_ref().and_then(|body| body["name"].as_str())
+                        == Some("accounts:status");
+                let response = if is_accounts {
+                    recorded_reads.fetch_add(1, Ordering::SeqCst);
+                    serde_json::json!({"ok":true,"result":{"content":[{
+                        "type":"text", "text":r#"{"accounts":[],"poolVerdict":[]}"#
+                    }]}})
+                } else {
+                    // Other panels are outside this assertion. Their parse
+                    // failures are normal per-query events and never sink it.
+                    serde_json::json!({})
+                };
+                let head = serde_json::json!({
+                    "id":id,"name":"head","data":{"status":200,"headers":{}}
+                });
+                writer
+                    .write_all(
+                        &encode_frame(FrameType::EventJson, head.to_string().as_bytes()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let mut body = Vec::from(id.to_be_bytes());
+                body.extend_from_slice(&4u32.to_be_bytes());
+                body.extend_from_slice(b"body");
+                body.extend_from_slice(response.to_string().as_bytes());
+                writer
+                    .write_all(&encode_frame(FrameType::EventBin, &body).unwrap())
+                    .await
+                    .unwrap();
+                let done = serde_json::json!({"id":id,"result":{"content":[]}});
+                writer
+                    .write_all(&encode_frame(FrameType::Done, done.to_string().as_bytes()).unwrap())
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = OperatorClient::new(Arc::new(ipc::IpcClient::connect(&socket).await.unwrap()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let active_harness = Arc::new(Mutex::new("fixture".into()));
+        let active_doc = Arc::new(Mutex::new(None));
+        let active_plan = Arc::new(Mutex::new(None));
+        let pane = PaneFetchScope {
+            pinned: None,
+            selected: Arc::new(Mutex::new(app::Tab::Operator)),
+        };
+        for (frame, expected_reads) in [
+            (None, 1), // startup
+            (Some(r#"{"name":"activity.recent"}"#), 1),
+            (Some(r#"{"name":"coord.inbox"}"#), 1),
+            (Some(r#"{"name":"plans.list"}"#), 1),
+            (
+                Some(r#"{"name":"harness_shared.tool_invocations.changed"}"#),
+                1,
+            ),
+            (Some(r#"{"name":"accounts.pool"}"#), 2),
+            (
+                Some(r#"{"name":"harness_shared.operator_account_override.changed"}"#),
+                3,
+            ),
+            (Some(r#"{"name":"activity.recent"}"#), 3),
+            (
+                Some(r#"{"name":"harness_shared.operator_account_pool.changed"}"#),
+                4,
+            ),
+            (Some(r#"{"name":"accounts.sessionOverride"}"#), 5),
+            (Some("not json"), 6),
+            (Some(r#"{"args":{"x":1}}"#), 7),
+            (None, 8), // the same full refresh used by the 60s safety tick
+        ] {
+            let previous_reads = reads.load(Ordering::SeqCst);
+            let signal = frame
+                .map(refetch_signal_for_frame_data)
+                .unwrap_or(RefetchSignal::FULL);
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                refetch_all(
+                    &client,
+                    &tx,
+                    &active_harness,
+                    &active_doc,
+                    &active_plan,
+                    &pane,
+                    signal,
+                ),
+            )
+            .await
+            .expect("fixture refetch completed");
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                expected_reads,
+                "frame={frame:?}"
+            );
+            let account_events = std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|event| matches!(event, Event::AccountRows(_)))
+                .count();
+            assert_eq!(account_events, expected_reads - previous_reads);
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[test]

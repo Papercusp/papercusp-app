@@ -123,6 +123,13 @@ export interface LoopbackIdentitySpawnOptions {
    * EACCES instead of a named error (plan byoc D-423).
    */
   readonly remotePath?: readonly string[];
+  /**
+   * Operator-set env the target identity ALWAYS gets, overriding anything forwarded from the
+   * request (plan agent-capacity-and-cost-gcp-2026-09-30 D-031: the heavy-job admission preload's
+   * NODE_OPTIONS plus its pc-heavy profile). Not customer-controlled. HOME and PATH stay owned by
+   * remoteHome/remotePath and are refused here.
+   */
+  readonly fixedEnv?: Readonly<Record<string, string>>;
   readonly homeLinks?: readonly LoopbackIdentityHomeLink[];
   /**
    * Secrets that must never reach the target identity. If any appears in the
@@ -254,6 +261,12 @@ export function buildLoopbackIdentitySpawn(options: LoopbackIdentitySpawnOptions
       if (value === undefined || key === 'PATH') continue;
       if (options.baseEnv[key] === value) continue;
       env[key] = mapValue(value);
+    }
+    for (const [key, value] of Object.entries(options.fixedEnv ?? {})) {
+      if (key === 'HOME' || key === 'PATH') {
+        throw new AgentSpawnRefusedError('agent_spawn_fixed_env_invalid', `fixedEnv may not set ${key}; use remoteHome/remotePath`);
+      }
+      env[key] = value;
     }
     if (env.HOME === undefined) env.HOME = options.remoteHome;
     if (options.remotePath) {

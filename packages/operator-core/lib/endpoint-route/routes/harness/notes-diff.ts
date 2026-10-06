@@ -128,7 +128,11 @@ const getDiffWorking = defineTool({
 
     let status = '';
     try {
-      const r = await execFileP('git', ['status', '--porcelain'], { cwd: project.path, maxBuffer: 1024 * 1024 });
+      const r = await execFileP('git', ['status', '--porcelain'], {
+        cwd: project.path,
+        maxBuffer: 1024 * 1024,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      });
       status = r.stdout;
     } catch { /* status best-effort */ }
 

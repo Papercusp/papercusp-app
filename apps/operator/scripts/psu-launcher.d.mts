@@ -209,6 +209,7 @@ export function parseArgs(argv: any): {
     account: null;
     fleet: null;
     fleetRole: null;
+    fleetRoleRequested: null;
     fleetName: null;
     fleetScheme: null;
     auto: null;
@@ -303,7 +304,36 @@ export function ompResponsesCompatibilityEnv(agent: any, model: any, env?: NodeJ
 } | {
     PI_OPENROUTER_RESPONSES: string;
 };
-export function modelArgsFor(agent: any, model: any): any[];
+/**
+ * A visible fresh launch inherits the user's native model configuration before
+ * bootstrap. That choice is not the operator's compiled configured default:
+ * preserving its provenance lets a newer launcher use an older operator
+ * without rejecting or replacing the user's configured model.
+ * Explicit choices and unattended missing-model checks remain authoritative.
+ * Read the machine's native home, not a parent agent's isolated CODEX_HOME.
+ * @param {string} agent
+ * @param {any} args
+ * @param {{ home?: string, readConfig?: (path: string, encoding: string) => string }} [options]
+ * @returns {any}
+ */
+export function inheritFreshCodexConfiguredModel(agent: string, args: any, { home, readConfig }?: {
+    home?: string;
+    readConfig?: (path: string, encoding: string) => string;
+}): any;
+/**
+ * @typedef {import("../../../packages/operator-core/lib/model-context-budget.mjs").ClaudeLaunchSettings} ClaudeLaunchSettings
+ */
+/**
+ * `--effort <level>` for a claude argv that names no effort of its own, when the
+ * settings the CLI will fall back to carry an effortLevel the model rejects
+ * (WI-10005900; see claudeInheritedEffortOverride). `[]` without settings, so
+ * every caller that passes none stays byte-identical. Pure — exported for tests.
+ * @param {string | null | undefined} model
+ * @param {ClaudeLaunchSettings | undefined} claudeSettings
+ * @returns {string[]}
+ */
+export function claudeInheritedEffortArgs(model: string | null | undefined, claudeSettings: ClaudeLaunchSettings | undefined): string[];
+export function modelArgsFor(agent: any, model: any, { claudeSettings }?: {}): any[];
 /**
  * Extra args to pass THROUGH a `*-su` wrapper to the underlying CLI (the
  * wrappers all end with `"$@"`). Maps a model fuzzy-match + a resume-by-id
@@ -313,7 +343,7 @@ export function modelArgsFor(agent: any, model: any): any[];
  * `buildEngineerOmpLaunchCommand` (P-032): omp `--model`/`-r`, claude
  * `--model`/`--resume`, codex `-m`/`resume`.
  */
-export function suWrapperExtraArgs(agent: any, { model, resumeSession }?: {}): any[];
+export function suWrapperExtraArgs(agent: any, { model, resumeSession, claudeSettings }?: {}): any[];
 /**
  * Map psu's repeated `--add-dir <dir>` onto each backend's native flag. claude
  * AND codex both expose `--add-dir` (extra tool-accessible directories); omp has
@@ -429,7 +459,7 @@ export function subagentGatewayRiskNotice(agent: any, allowSubagents: any, envel
  * @returns {string[]}
  */
 export function ompLspArgs(allowNativeLsp?: boolean): string[];
-export function roleLaunchArgs(backend: any, { promptFile, mcpJsonPath, coordExtPath, injectHookPath, nativeSessionId, allowSubagents, model, allowNativeLsp, }?: {}): {
+export function roleLaunchArgs(backend: any, { promptFile, mcpJsonPath, coordExtPath, injectHookPath, nativeSessionId, allowSubagents, model, allowNativeLsp, claudeSettings, }?: {}): {
     bin: string;
     args: any[];
 };
@@ -496,7 +526,8 @@ export function kickoffPositionalArgs(res: any, args: any): any[];
  * buildConsoleOneliner and breaks the shell (the gnome-terminal exit-2 the
  * docs-agent hit), whereas an env value is exported via a correctly-escaped
  * `export K=…` in the oneliner prelude and arrives intact (multiline / embedded
- * quotes included). Pure — exported for tests.
+ * quotes included). Large free-form prompts use a private, single-use file;
+ * consume its environment pointer before launching the backend. Exported for tests.
  */
 export function resolveKickoffText(args: any, env?: NodeJS.ProcessEnv): any;
 /**
@@ -609,7 +640,7 @@ export function resolveOmpInjectHookPath(agent: any, home?: string): string | un
  * @param {any} session
  * @param {{ coordExtPath?: string, injectHookPath?: string, fork?: boolean, forkSessionId?: string | null, addDir?: string[], allowSubagents?: boolean, model?: string | null, personaFile?: string | null, env?: NodeJS.ProcessEnv }} [opts]
  */
-export function resumeArgsFor(session: any, { coordExtPath, injectHookPath, fork, forkSessionId, addDir, allowSubagents, model, personaFile, env, }?: {
+export function resumeArgsFor(session: any, { coordExtPath, injectHookPath, fork, forkSessionId, addDir, allowSubagents, model, personaFile, env, claudeSettings, }?: {
     coordExtPath?: string;
     injectHookPath?: string;
     fork?: boolean;
@@ -678,6 +709,17 @@ export function resolveTrackedResumeSession(sessions: any, id: any, { home }?: {
     home?: string | undefined;
 }): any;
 /**
+ * Resolve a direct resume before searching raw native stores. Numeric adv ids
+ * can fall outside the recent list; ask the existing exact-row surface rather
+ * than interpreting the missing id as an OMP thread name. Native ids keep the
+ * existing store/owner recovery path, and a missing exact row stays untracked.
+ * Read errors propagate so an unavailable operator cannot bless a raw source.
+ */
+export function resolveDirectTrackedResumeSession(sessions: any, id: any, { apiImpl, home }?: {
+    apiImpl?: typeof api | undefined;
+    home?: string | undefined;
+}): Promise<any>;
+/**
  * Find a session the user did NOT launch via psu, by searching each agent's
  * OWN session store for the id — NOT a filesystem crawl: claude keeps every
  * session under `~/.claude/projects/<dir>/<id>.jsonl`, codex under
@@ -706,7 +748,7 @@ export function findUntrackedSession(id: any, { home, cwd }?: {
     sessionId: any;
     cwd: any;
     untracked: boolean;
-    configDir: string;
+    configDir: any;
     psuTracked: boolean;
     id?: undefined;
     codexHome?: undefined;
@@ -953,6 +995,45 @@ export function mintRecycleArgs(args?: string[], { mintId, agent, personaFile, m
     nativeId: string;
 };
 /**
+ * psu-process-free-parking-2026-10-06 P-015: the argv that brings a PARKED
+ * Claude child back as the SAME conversation.
+ *
+ * A park SIGKILLs an idle CLI to free its memory (~215 MB per agent, D-018/D-025
+ * of agent-capacity-and-cost-gcp-2026-09-30) while the psu host, its socket and
+ * its terminal stay up. Unparking must resume the transcript the killed process
+ * was writing, NOT open a fresh one, so this is the inverse of mintRecycleArgs:
+ *
+ *   - the LIVE child's `--session-id X` / `--resume X` becomes `--resume X`
+ *     (one id, the one the killed child was writing — the input is the live
+ *     child's argv, not the launch argv, so it is still right after a recycle
+ *     rotated the id);
+ *   - `--continue` / `--fork-session` are dropped (a fork would mint a new id
+ *     and the next park would then resume the wrong conversation);
+ *   - a trailing kickoff positional is stripped (stripKickoffPositional): the
+ *     resumed child must not re-run the launch prompt as a new turn;
+ *   - EVERYTHING ELSE IS COPIED VERBATIM, the `--system-prompt-file` included.
+ *     Re-rendering the persona here would change the system prompt and miss the
+ *     1h prompt cache that makes a park cost no extra tokens (D-018).
+ *
+ * Claude only (D-025: an idle Codex CLI is ~17 MB, not worth parking). Returns
+ * null — "this child cannot be parked" — for any other agent or when the argv
+ * carries no session id to resume. `nativeId` overrides the argv's id: the host
+ * passes the id of the session's newest transcript when it differs, because an
+ * in-TUI `/clear` starts a new conversation the argv never learns about.
+ * Pure; exported for tests.
+ *
+ * @param {string[]} [liveArgs]
+ * @param {{ agent?: string | null, nativeId?: string | null }} [opts]
+ * @returns {{ args: string[], nativeId: string } | null}
+ */
+export function mintParkResumeArgs(liveArgs?: string[], { agent, nativeId: overrideId }?: {
+    agent?: string | null;
+    nativeId?: string | null;
+}): {
+    args: string[];
+    nativeId: string;
+} | null;
+/**
  * @param {string[]} [args]
  * @param {{ systemPromptAddendum?: string, ownerId?: string | null, mintId?: () => string,
  *          home?: string, agent?: string | null, personaFile?: string | null,
@@ -1058,17 +1139,28 @@ export function sessionTranscriptFile(session: any, { home }?: {
  * call tools:find. Unknown/removed tool names are harmlessly ignored by the
  * server's allowlist filter and remain eligible for the poison detector.
  */
-export function addClaudeResumeToolReferencesToEnv(session: any, env: any, { home }?: {
+export function addClaudeResumeToolReferencesToEnv(session: any, env: any, { home, neutralizeNative }?: {
     home?: string | undefined;
+    neutralizeNative?: boolean | undefined;
 }): {
+    transcriptPath: null;
+    restored: number;
+    toolReferences: never[];
+    nativeNeutralized?: undefined;
+} | {
     transcriptPath: any;
     restored: number;
     toolReferences: string[];
+    nativeNeutralized: {
+        rewritten: number;
+        toolNames: string[];
+    };
 };
 /**
  * The model that was LAST ACTIVE in a session, read from its own transcript
- * (WI-3758: `psu --resume` shows it and offers to keep it). Tail-reads the
- * final ~256KB and scans lines newest-first:
+ * (WI-3758: `psu --resume` shows it and offers to keep it). Scans backward in
+ * blocks to the latest valid model record, retaining split JSONL bytes until
+ * the complete line is available (including split UTF-8 code points):
  *   - claude: `{"type":"assistant","message":{"model":"…"}}` — the model that
  *     actually answered; `<synthetic>` (error/system events) is skipped.
  *   - codex: `{"type":"turn_context","payload":{"model":"…","effort":"…"}}`
@@ -1077,9 +1169,14 @@ export function addClaudeResumeToolReferencesToEnv(session: any, env: any, { hom
  *     carry or exact resume cannot silently reset the owner's reasoning level.
  *   - omp / no transcript / unreadable → null (callers degrade to "unknown").
  * Pure-ish (reads FS); `home` injectable for tests; exported for tests.
+ * `notBeforeMs` limits Codex carry observations to this launcher's lifetime:
+ * an older resumed turn must not override its newly selected model.
+ * @param {any} session
+ * @param {{ home?: string, notBeforeMs?: number | null }} [opts]
  */
-export function lastActiveModelFor(session: any, { home }?: {
-    home?: string | undefined;
+export function lastActiveModelFor(session: any, { home, notBeforeMs }?: {
+    home?: string;
+    notBeforeMs?: number | null;
 }): string | null;
 /**
  * Split a model spec into the parts that mean different things across a
@@ -1146,12 +1243,13 @@ export function modelSpecFromRecycleArgv(args?: any[]): string | null;
  * @param {{ ownerId?: string | null, agent?: string | null, home?: string,
  *          configDir?: string | null, codexHome?: string | null,
  *          advSessionId?: string | number | null, modelSource?: string | null,
+ *          includeInherited?: boolean, notBeforeMs?: number | null,
  *          readLatestCodexRollout?: (root: string) => {id: string} | null,
  *          readLastActiveModel?: (session: { agent: string, sessionId: string, coordOwnerId?: string | null, configDir?: string },
- *                                 opts?: { home?: string }) => string | null }} [opts]
+ *                                 opts?: { home?: string, notBeforeMs?: number | null }) => string | null }} [opts]
  * @returns {string | null}
  */
-export function detectRespawnModelSpec(args?: string[], { ownerId, agent, home, configDir, codexHome, advSessionId, modelSource, readLatestCodexRollout, readLastActiveModel, }?: {
+export function detectRespawnModelSpec(args?: string[], { ownerId, agent, home, configDir, codexHome, advSessionId, modelSource, includeInherited, notBeforeMs, readLatestCodexRollout, readLastActiveModel, }?: {
     ownerId?: string | null;
     agent?: string | null;
     home?: string;
@@ -1159,6 +1257,8 @@ export function detectRespawnModelSpec(args?: string[], { ownerId, agent, home, 
     codexHome?: string | null;
     advSessionId?: string | number | null;
     modelSource?: string | null;
+    includeInherited?: boolean;
+    notBeforeMs?: number | null;
     readLatestCodexRollout?: (root: string) => {
         id: string;
     } | null;
@@ -1169,8 +1269,53 @@ export function detectRespawnModelSpec(args?: string[], { ownerId, agent, home, 
         configDir?: string;
     }, opts?: {
         home?: string;
+        notBeforeMs?: number | null;
     }) => string | null;
 }): string | null;
+/**
+ * WI-10006049 (owner Avi 2026-10-05 #1369 "if the default is 1m that sounds good", #1371 "make
+ * sure this works for all claude models too not just opus"): keep a model-less Claude session on
+ * the 1M window across its respawns, whatever its `/model` menu saved.
+ *
+ * A session launched WITHOUT `--model` takes its model from the `model` key of its isolated
+ * CLAUDE_CONFIG_DIR/settings.json, and a carry-respawn reuses that dir without re-materializing it
+ * (mintRecycleArgs never ADDS a --model flag — see its WI-2141859 note). So a `/model` menu save
+ * persists for the session's whole life. On Claude Code 2.1.289 the bare menu saves the 200k pick
+ * (`opus`, not `opus[1m]`): su-56e2f83b's dir still read `"model": "opus"` hours after one menu
+ * use, and every respawn came back at 200k with a 158k limit under a ~140k prompt floor.
+ *
+ * This keeps the FAMILY the owner picked and only adds the window marker (`opus` → `opus[1m]`,
+ * `sonnet` → `sonnet[1m]`, `fable` → `fable[1m]`, `opusplan` → `opusplan[1m]`); haiku and pinned 4.x
+ * ids are left exactly as they are. A missing key (the menu's "Default") is restored to what
+ * materialize writes — the global settings model, normalized the same way. Atomic write; every
+ * failure is a no-op. Returns `{ from, to }` when it changed the file, else null.
+ *
+ * @param {string | null | undefined} configDir
+ * @param {{ home?: string }} [opts]
+ * @returns {{ from: string | null, to: string } | null}
+ */
+export function normalizeSessionSettingsModel(configDir: string | null | undefined, { home }?: {
+    home?: string;
+}): {
+    from: string | null;
+    to: string;
+} | null;
+/**
+ * The launch-site half of normalizeSessionSettingsModel: only a Claude argv with NO --model reads
+ * its model from settings (an explicit flag wins and is already normalized at the flag).
+ *
+ * @param {string[]} args
+ * @param {{ agent?: string | null, configDir?: string | null, home?: string }} [opts]
+ * @returns {{ from: string | null, to: string } | null}
+ */
+export function normalizeSessionSettingsModelForLaunch(args: string[], { agent, configDir, home }?: {
+    agent?: string | null;
+    configDir?: string | null;
+    home?: string;
+}): {
+    from: string | null;
+    to: string;
+} | null;
 /** Map a plan picker value to the bootstrap-su `plan_slug` (NO_PLAN → null). Pure. */
 export function planValue(picked: any): any;
 /**
@@ -2137,7 +2282,7 @@ export function storeClaudeOAuthToken(token: any, { home }?: {
  * Deps are injected for tests (psu-launcher.test.ts) — `fetchImpl`/`sleep`/`now`
  * make the retry timing deterministic without real timers or sockets.
  */
-export function fetchWithResilience(url: any, init?: {}, { fetchImpl, sleep, now, onNotice, timeoutMs, connectBudgetMs, timeoutRetries, retryBootstrapFailures, bootstrapReplayMaxAttempts, bootstrapReplayBudgetMs, label, target, resolveFallback, onFailover, healthProbeTimeoutMs, }?: {
+export function fetchWithResilience(url: any, init?: {}, { fetchImpl, sleep, now, onNotice, timeoutMs, connectBudgetMs, timeoutRetries, retryBootstrapFailures, bootstrapReplayMaxAttempts, bootstrapReplayBudgetMs, label, target, resolveFallback, onFailover, healthProbeTimeoutMs, slowRequestNotice, slowNoticeAfterMs, }?: {
     fetchImpl?: typeof fetch | undefined;
     sleep?: ((ms: any) => Promise<any>) | undefined;
     now?: (() => number) | undefined;
@@ -2157,6 +2302,8 @@ export function fetchWithResilience(url: any, init?: {}, { fetchImpl, sleep, now
     resolveFallback?: typeof resolveFallbackOperatorTargets | undefined;
     onFailover?: typeof adoptOperatorTarget | undefined;
     healthProbeTimeoutMs?: number | undefined;
+    slowRequestNotice?: typeof slowRequestNoticeOncePerLaunch | undefined;
+    slowNoticeAfterMs?: number | undefined;
 }): Promise<Response>;
 /** Turn a structured operator/proxy failure into an actionable launcher error.
  * Keep the stable error code, but retain the server's detail and retry hint so
@@ -2390,6 +2537,32 @@ export function hexToRgb(hex: any): number[] | null;
  *  text for a fleet with no bound color. `color` is the `{ bg, fg, cursor }` the
  *  /options endpoint resolves per fleet (fleet-color-schemes). Pure — for tests. */
 export function colorSwatch(color: any): string;
+/**
+ * named-su-agent-fleets P-006: pick a named fleet to run this session in, create a
+ * new one, or stay unfleeted (default). Mirrors pickAccount — the FIRST row keeps
+ * today's behavior (no fleet, no name). Picking an existing persisted fleet JOINS it
+ * as a member; entering a NEW name makes this agent the LEADER of a freshly-created
+ * fleet (D-002). Returns `{ slug, role, name }`: slug+role null for "no fleet";
+ * `name` is set only for a freshly-entered new fleet (its title — threaded to the
+ * server, which creates the agent_fleets row + re-derives the slug authoritatively).
+ * Exported for tests.
+ */
+export function pickFleet(workspace: any): Promise<{
+    slug: null;
+    role: null;
+    name: null;
+    scheme: null;
+} | {
+    slug: string;
+    role: string;
+    name: string;
+    scheme: any;
+} | {
+    slug: any;
+    role: string;
+    name: null;
+    scheme: null;
+}>;
 /** A scheme's name rendered in its own cursor accent (ANSI truecolor fg), or plain
  *  when the colour is unparseable. Pure — for the fleet colour-picker rows; for tests. */
 export function schemeNameInAccent(scheme: any): any;
@@ -2902,14 +3075,45 @@ export function reportSessionRespawned(advSessionId: any, sessionId: any, { coor
     timeoutMs?: number | undefined;
 }): Promise<boolean>;
 /**
+ * {@link reportSessionRespawned} that keeps retrying in the background until the
+ * operator accepts it (WI-10004917). A single 2s attempt was the only chance the
+ * successor got: one that landed while the operator was restarting left the adv row
+ * naming the predecessor, and no applied identity span ever named the live native id,
+ * so owner-by-native-session oracles read its turns as foreign. Resolves with the
+ * FIRST attempt's verdict without holding up the successor. `onConfirmed` also
+ * notifies a carry announcer when a background retry succeeds; returning the first
+ * failure alone loses that wake. A newer respawn supersedes reports and callbacks.
+ */
+export function reportSessionRespawnedDurably(advSessionId: any, sessionId: any, { coordOwnerId, reportImpl, retryDelaysMs, sleepImpl, onConfirmed, }?: {
+    coordOwnerId?: null | undefined;
+    reportImpl?: typeof reportSessionRespawned | undefined;
+    retryDelaysMs?: number[] | undefined;
+    sleepImpl?: ((ms: any) => Promise<any>) | undefined;
+    onConfirmed?: ((_nativeId: any) => void) | undefined;
+}): Promise<boolean>;
+/**
  * Complete a stale-host carry adoption's lifecycle report before announcing
  * `session:compacted`. The detached event wakes members that may immediately
  * claim work, so it is only safe after the operator has re-anchored the
  * successor and cleared the predecessor's context estimate. Exported for a
  * deterministic ordering regression test; both operations remain fail-soft.
  */
+/**
+ * EI-23076695727837648: the first turn a host-code-adopting predecessor owed its
+ * successor. The in-process respawn injects it after spawn; an adopting host exits
+ * first, so it travels in the handoff as `firstTurnText`. Returns null when absent,
+ * so a handoff written by an older host keeps the old behaviour (no kickoff).
+ */
+export function handoffFirstTurnText(handoff: any): string | null;
+/**
+ * Keep carry adoption explicit even when Codex has not assigned its native id
+ * yet. The successor pty host resolves that late id from exact kickoff proof.
+ */
+export function adoptedCarryRespawnFromHandoff(handoff: any): {
+    nativeId: any;
+} | null;
 export function announceAdoptedCarryRespawn(ownerId: any, advSessionId: any, nativeId: any, { reportImpl, emitImpl, }?: {
-    reportImpl?: typeof reportSessionRespawned | undefined;
+    reportImpl?: typeof reportSessionRespawnedDurably | undefined;
     emitImpl?: typeof fireSessionCompactedEvent | undefined;
 }): Promise<boolean>;
 /**
@@ -2998,6 +3202,14 @@ export function reportSessionPortLaunchFailure(prepared: any, failure: any, { fe
  * only the credential source selected for this child. */
 export function sanitizeInheritedEnv(env: any): NodeJS.ProcessEnv;
 export function applyCodexDiagnosticEnv(env: any, agent: any): any;
+/**
+ * A headless Codex TUI must never publish an OAuth URL into the owner's desktop
+ * browser. If model or optional plugin auth is unexpectedly unavailable, Codex
+ * can fail visibly in its managed PTY/log, but it cannot open an outward-facing
+ * browser that nobody launched interactively. Applied in runWrapper so fresh,
+ * resume, carry-respawn and host-handoff paths share the same invariant.
+ */
+export function applyHeadlessCodexBrowserPolicy(env: any): any;
 /**
  * coord-delivery-residual-gaps-2026-07-11 P-002 — launch-time CC hook
  * enrollment guard, GENERALIZED (WI-4394) to any settings.json-wired CC hook,
@@ -3159,9 +3371,10 @@ export function findFlockWriteHolderPid(procLocksText: any, { major, minor, inod
 }): number | null;
 /** `<CODEX_HOME>/thread-writer-locks/<uuid>.lock`. Pure — exported for tests. */
 export function codexThreadWriterLockPath(codexHome: any, sessionId: any): string | null;
+export function codexThreadWriterStatErrorCode(error: any): any;
 /**
  * Is a codex thread currently open by a live writer?
- * `{ held, pid, lockPath, sessionId, reason }` — fail-open on every error path.
+ * `{ held, pid, lockPath, sessionId, reason, statErrorCodes? }` — fail-open on every error path.
  *
  * `sessionId` null ⇒ scan the whole home. psu resumes a tracked row with no
  * recorded native id as `resume --last`, which lands on the home's most recent
@@ -3171,22 +3384,29 @@ export function codexThreadWriterLockPath(codexHome: any, sessionId: any): strin
  * carry-respawn mints a new uuid, and adv row #18052 still recorded 01a036a4-…
  * while 01a038ff-… was the live thread.
  * Pure apart from the injected readers — exported for tests.
+ * @param {string | null | undefined} codexHome
+ * @param {string | null} sessionId
+ * @param {{readProcLocks?: () => string, statFile?: typeof statSync,
+ * listDir?: typeof safeReaddir, holderPid?: number | null}} [options]
  */
-export function codexThreadWriterHolder(codexHome: any, sessionId: any, { readProcLocks, statFile, listDir, }?: {
-    readProcLocks?: (() => string) | undefined;
-    statFile?: import("fs").StatSyncFn | undefined;
-    listDir?: typeof safeReaddir | undefined;
+export function codexThreadWriterHolder(codexHome: string | null | undefined, sessionId: string | null, { readProcLocks, statFile, listDir, holderPid, }?: {
+    readProcLocks?: () => string;
+    statFile?: typeof statSync;
+    listDir?: typeof safeReaddir;
+    holderPid?: number | null;
 }): {
+    statErrorCodes?: any[] | undefined;
     held: boolean;
     pid: null;
     lockPath: null;
     sessionId: null;
     reason: any;
 } | {
+    statErrorCodes?: any[] | undefined;
     held: boolean;
     pid: number;
     lockPath: string | null;
-    sessionId: any;
+    sessionId: string;
     reason: string;
 };
 /**
@@ -3237,6 +3457,16 @@ export function procAncestorPids(startPid: any, { readStat, maxDepth }?: {
     readStat?: ((pid: any) => string) | undefined;
     maxDepth?: number | undefined;
 }): Set<any>;
+/** The startup native id of THIS PTY, never a sibling/nested writer in its home.
+ * Reuses Codex's writer-lock oracle and the existing native-process reader.
+ * @param {string | undefined} codexHome
+ * @param {number} ptyPid
+ * @param {{readHolder?: typeof codexThreadWriterHolder, readStartupPid?: typeof resolveLinuxCodexStartupPid}} [options]
+ */
+export function codexNativeIdForPty(codexHome: string | undefined, ptyPid: number, { readHolder, readStartupPid, }?: {
+    readHolder?: typeof codexThreadWriterHolder;
+    readStartupPid?: typeof resolveLinuxCodexStartupPid;
+}): string | null;
 /**
  * Is any live process (outside the caller's own ancestor chain) carrying this
  * native session id in its argv?
@@ -3244,8 +3474,10 @@ export function procAncestorPids(startPid: any, { readStat, maxDepth }?: {
  * BACKEND-NEUTRAL by construction, and used by two of them: the caller supplies
  * whichever id its resume actually puts on the command line — claude's
  * `--resume <session_id>` or omp's `-r <omp_thread_id>` (resumeArgsFor). It asks
- * only "is this string in a live argv", so nothing here knows or cares which
- * backend it is serving.
+ * only "is this an exact identity argument in a live argv", so nothing here
+ * knows or cares which backend it is serving. Embedded request/prompt text is
+ * not an identity argument: a remote ptool caller is outside this launcher's
+ * ancestor chain, but its shell command can still contain the resume JSON.
  * `{ held, pid, cmdline, reason }` — fail-CLOSED: `held` is false ONLY on a
  * complete, successful scan that found nothing.
  *
@@ -3260,6 +3492,7 @@ export function sessionProcessHolder(sessionId: any, { listProcPids, readCmdline
     readStat?: ((pid: any) => string) | undefined;
     selfPid?: number | undefined;
 }): {
+    error?: any;
     held: boolean;
     pid: null;
     cmdline: null;
@@ -3270,6 +3503,20 @@ export function sessionProcessHolder(sessionId: any, { listProcPids, readCmdline
     cmdline: string;
     reason: string;
 };
+/**
+ * Numeric pid entries under `/proc`, by NAME only. Never `withFileTypes`: Node
+ * then lstat()s entries, and a pid that exits between getdents() and that
+ * lstat() throws ENOENT for the WHOLE listing (measured 2026-09-30: 9 of 5,740
+ * scans at load ~90). Resume scans right after an engine exits, when that race
+ * is likeliest, so it surfaced as `probe=no-proc` refusals of a recoverable
+ * session (EI-24661719545676832). Throws, with the errno, when the listing
+ * itself fails. Exported for tests.
+ * @param {{ readdir?: (path: string) => string[] }} [options]
+ * @returns {number[]}
+ */
+export function listProcPids({ readdir }?: {
+    readdir?: (path: string) => string[];
+}): number[];
 /** Normalize a wire value to one canonical local-liveness witness. */
 export function normalizeResumeLocalLivenessEvidence(value: any): any;
 /**
@@ -3352,12 +3599,15 @@ export function codexActiveWriterMessage(session: any, holder: any): string;
  * MUST run in that same cwd). agent is claude here because tracked forks need a
  * forced native id, and Codex exposes native fork but not caller-chosen fork ids.
  */
-export function forkBootstrapBody(session: any, account?: null, launchMode?: null, ownerId?: null): {
+export function forkBootstrapBody(session: any, account?: null, launchMode?: null, ownerId?: null, launchArgs?: null): {
     mode_owner_directed?: boolean | undefined;
     mode_instructions?: any;
     mode_subject?: any;
     mode?: any;
     account?: undefined;
+    headless?: boolean | undefined;
+    launched_by?: any;
+    launch_argv?: string[] | undefined;
     owner_id?: undefined;
     agent: string;
     workspace: any;
@@ -3419,9 +3669,10 @@ export function assertFleetJoined(requestedFleet: any, res: any): void;
 export function psuLaunchArgvRecord(selections: any, args: any, { brain }?: {
     brain?: boolean | undefined;
 }): string[];
-export function freshSuBootstrapBody(selections: any, args: any, { brain, bootstrapIdempotencyKey }?: {
+export function freshSuBootstrapBody(selections: any, args: any, { brain, bootstrapIdempotencyKey, mcpBaseUrl, }?: {
     brain?: boolean | undefined;
     bootstrapIdempotencyKey?: null | undefined;
+    mcpBaseUrl?: any;
 }): {
     session_port_protocol?: any;
     session_port_transform_version?: any;
@@ -3456,12 +3707,13 @@ export function freshSuBootstrapBody(selections: any, args: any, { brain, bootst
     headless?: boolean | undefined;
     launch_argv: string[];
     bootstrap_idempotency_key?: undefined;
+    mcp_base_url?: any;
     agent: any;
     workspace: any;
     harness_slug: any;
     plan_slug: any;
 };
-export function roleBootstrapBody({ role, agent, ownerId, workspace, harness, feature, plan, account, model, modelSource, headless, fleet, fleetRole, fleetName, fleetScheme, stack, }?: {
+export function roleBootstrapBody({ role, agent, ownerId, launchedBy, bootstrapIdempotencyKey, workspace, harness, feature, plan, account, model, modelSource, headless, fleet, fleetRole, fleetName, fleetScheme, stack, }?: {
     headless?: boolean | undefined;
 }): {
     stack?: any[] | undefined;
@@ -3473,6 +3725,8 @@ export function roleBootstrapBody({ role, agent, ownerId, workspace, harness, fe
     model_source?: import("../../../packages/operator-core/lib/model-context-budget.mjs").CodexModelSource | undefined;
     model?: any;
     account?: any;
+    bootstrap_idempotency_key?: any;
+    launched_by?: any;
     owner_id?: any;
     role: any;
     agent: any;
@@ -3605,6 +3859,10 @@ export function resumeTargetSelectionFromLastActive(session: any, args: {} | und
 export function sessionPortTargetAccount(account: any): any;
 export function sessionPortRequestBody(source: any, target: any, account: any, args?: {}): {
     consultEvidenceSpan?: any;
+    contextSize: any;
+    launchContext: any;
+    currentInstruction: any;
+    targetOwnerId?: any;
     protocolVersion: number;
     transformVersion: number;
     workspace: any;
@@ -3612,9 +3870,6 @@ export function sessionPortRequestBody(source: any, target: any, account: any, a
     targetBackend: any;
     targetModel: any;
     targetAccount: any;
-    contextSize: any;
-    launchContext: any;
-    currentInstruction: any;
 };
 export function formatSessionPortInspection(result: any): any[];
 /** WI-3859 F4: the archive-at-death lifecycle DELETES an ended session's
@@ -3754,11 +4009,12 @@ export function isCodexHomeLaunchReady(codexHome: string | null | undefined, exp
  * @param {string | null} owner
  * @param {string | null} codexHome
  * @param {string | number | null} advSessionId
- * @param {{requireGatewayProvider?: boolean, model?: string | null, routeMode?: string | null, accountId?: string | null, priority?: string | null, fetchImpl?: (...args: any[]) => Promise<any>, operatorUrl?: string, env?: NodeJS.ProcessEnv, probe?: typeof probeOmpOperatorMcp, onRecovery?: Function, token?: string | null, timeoutMs?: number}} options
+ * @param {{requireGatewayProvider?: boolean, model?: string | null, headless?: boolean, routeMode?: string | null, accountId?: string | null, priority?: string | null, fetchImpl?: (...args: any[]) => Promise<any>, operatorUrl?: string, env?: NodeJS.ProcessEnv, probe?: typeof probeOmpOperatorMcp, onRecovery?: Function, token?: string | null, timeoutMs?: number}} options
  */
-export function ensureCodexHomeViaOperator(owner: string | null, codexHome: string | null, advSessionId: string | number | null, { requireGatewayProvider, model, routeMode, accountId, priority, fetchImpl, operatorUrl, env, probe, onRecovery, token, timeoutMs, }?: {
+export function ensureCodexHomeViaOperator(owner: string | null, codexHome: string | null, advSessionId: string | number | null, { requireGatewayProvider, model, headless, routeMode, accountId, priority, fetchImpl, operatorUrl, env, probe, onRecovery, token, timeoutMs, }?: {
     requireGatewayProvider?: boolean;
     model?: string | null;
+    headless?: boolean;
     routeMode?: string | null;
     accountId?: string | null;
     priority?: string | null;
@@ -3814,6 +4070,17 @@ export function detectBackendBin(agent: any): {
     onPath: boolean;
 } | null;
 /**
+ * Ensure the chosen backend CLI is installed before we launch it. Returns true when
+ * it's usable (already present, or installed here + made resolvable), false when the
+ * user declined or it didn't land — the caller then aborts the launch. Non-interactive
+ * (scripted / non-TTY) launches never prompt; they fail with guidance instead.
+ * Exported for tests; `detect` is injectable so a test can stage a missing backend.
+ */
+export function ensureBackendInstalled(agent: any, { interactive, detect }?: {
+    interactive?: boolean | undefined;
+    detect?: typeof detectBackendBin | undefined;
+}): Promise<boolean>;
+/**
  * The pre-TUI "your setup isn't finished" nudge (owner batch #5). PURE: given the
  * concierge setup STAGE name, return the reminder lines to print, or null when there
  * is nothing to nudge — setup is complete (stage 'done') or the stage is unknown
@@ -3831,6 +4098,7 @@ export function setupReminderLines(stage: any): string[] | null;
  * preflight refusal into an exception so launchSessionPort can finalize the
  * already-prepared row before the process exits. */
 export function sessionPortLaunchAbortError(args: any, failure: any, stage: any): Error | null;
+export { readClaudeLaunchSettings };
 export const AGENTS: string[];
 /** The caller/origin marker used when PUI invokes the real PSU picker. */
 export const PUI_TUI_ORIGIN: "pui";
@@ -3841,7 +4109,7 @@ export const PUI_TUI_ORIGIN: "pui";
  * discoverable place to document it. The `--` escape hatch remains available
  * for backend-native flags that psu intentionally does not own.
  */
-export const PSU_HELP_TEXT: "Usage: psu [options]\n\nLaunch an interactive Papercusp superuser session, or use --no-picker for a\nscripted launch.\n\nSession selection:\n  -h, --help                         Show this help and exit\n  -V, --version                      Show the psu build version and exit\n  --resume[=<id>] [id]               Resume a tracked or native session\n  --fork, --fork-session             Fork the selected session (with --resume)\n  --brain                            Show the retired brain-session message\n\nLaunch context:\n  --agent=<claude|omp|codex>         Backend to launch\n  --tui=<pui>                       Caller origin (PUI hides recursive PUI choice)\n  --role=<role>                      Launch a role-scoped session\n  --stack=<slot:id|composition:id>   Select an identity component or named composition\n  --identity-revision=<sha256>       Require the selected stack source revision\n  --workspace=<slug>                 Workspace context\n  --harness=<slug>                   Harness context\n  --feature=<id>                     Feature context\n  --plan=<slug>                      Plan context\n  --no-plan                          Launch without a plan\n  --model=<model[:effort]>           Model and optional effort\n  --model-source=<source>            Codex provenance: explicit|inherited|configured-default\n  --profile=<engineer|power>         SU prompt profile\n  --context-size=trimmed|steward     Initial tool seed (steward = core + steward verb families, WI-2140338; legacy full normalizes to trimmed)\n  --compaction-limit=<tokens>        Requested compaction limit\n  --launch-context=<path>            Additional launch brief\n  --kickoff=<text>                   Seed the first user turn\n  --no-kickoff                       Do not seed a scripted first turn\n  --label=<text>                     Label the tracked session\n\nFleet and execution:\n  --fleet=<slug>                     Join an existing fleet\n  --seat=<ref>                       Consume a delegated fleet seat\n  --headless                         Launch without a desktop window\n  --auto, --no-auto                  Set AUTO mode explicitly\n  --mode=drain|grade|test            Start in a named mode (launches autonomously)\n  --mode-subject=<text>              DRAIN subject\n  --mode-instructions=<text>         DRAIN instructions\n  --mode-owner-directed              Mark the DRAIN mode owner-directed\n  --goal-bootstrap-subject=<id>      Require exact GOAL subject and implied modes before turn one\n  --carry=<warm|cold>                Fleet carry mode\n  --account=<id|auto|default>        Account routing\n\nLauncher controls:\n  --no-picker                        Skip interactive prompts\n  --add-dir=<dir>                    Add a backend working directory (repeatable)\n  --allow-subagents, --no-subagents Allow or deny Claude subagent tools\n  --yes, -y                          Skip untracked-resume confirmation\n  --force                            Override launch preflight guards\n  --set-claude-token[=<token>]       Store the default Claude OAuth token\n  --clear-claude-token               Clear the stored Claude OAuth token\n  --recovery-authorize               Locally authorize one exact diagnostic argv\n  --recovery-reason=<text>           Required authorization reason\n  --recovery-ttl=<seconds>           Grant lifetime (default 300, max 900)\n  --recovery-max-runtime=<seconds>   Command deadline (default 60, max 300)\n  --recovery-grant=<uuid>            Consume a signed one-use recovery grant\n  --                                 Forward remaining arguments to the backend\n\nRemote hosts (run psu on another machine; every other option is forwarded to it):\n  --connect[=<name>[/<workspace>]]   Run on a saved remote host (picker when omitted)\n  --connect-list                     List saved remote hosts and cloud workspaces\n  --connect-login[=<portal>]         Sign in to Papercusp cloud (default https://app.papercusp.com)\n  --connect-logout[=<name>]          Sign out of Papercusp cloud on this computer\n  --connect-session=<key>            Reattach a specific cloud workspace shell\n  --connect-add-gcp-iap=<name>       Save your own GCP VM, reached over IAP SSH, with\n                                     --connect-project, --connect-zone,\n                                     --connect-instance and --connect-user\n  --connect-remove=<name>            Forget a saved remote host\n\nValues may use either --name=value or (where supported) --name value form.\n";
+export const PSU_HELP_TEXT: "Usage: psu [options]\n\nLaunch an interactive Papercusp superuser session, or use --no-picker for a\nscripted launch.\n\nSession selection:\n  -h, --help                         Show this help and exit\n  -V, --version                      Show the psu build version and exit\n  --resume[=<id>] [id]               Resume a tracked or native session\n  --fork, --fork-session             Fork the selected session (with --resume)\n  --brain                            Show the retired brain-session message\n\nLaunch context:\n  --agent=<claude|omp|codex>         Backend to launch\n  --tui=<pui>                       Caller origin (PUI hides recursive PUI choice)\n  --role=<role>                      Launch a role-scoped session\n  --stack=<slot:id|composition:id>   Select an identity component or named composition\n  --identity-revision=<sha256>       Require the selected stack source revision\n  --workspace=<slug>                 Workspace context\n  --harness=<slug>                   Harness context\n  --feature=<id>                     Feature context\n  --plan=<slug>                      Plan context\n  --no-plan                          Launch without a plan\n  --model=<model[:effort]>           Model and optional effort\n  --model-source=<source>            Codex provenance: explicit|inherited|configured-default\n  --profile=<engineer|power>         SU prompt profile\n  --context-size=trimmed|steward     Initial tool seed (steward = core + steward verb families, WI-2140338; legacy full normalizes to trimmed)\n  --compaction-limit=<tokens>        Requested compaction limit\n  --launch-context=<path>            Additional launch brief\n  --kickoff=<text>                   Seed the first user turn\n  --no-kickoff                       Do not seed a scripted first turn\n  --label=<text>                     Label the tracked session\n\nFleet and execution:\n  --fleet=<slug>                     Join an existing fleet\n  --fleet-role=leader|member         Role in that fleet (default member)\n  --seat=<ref>                       Consume a delegated fleet seat\n  --headless                         Launch without a desktop window\n  --auto, --no-auto                  Set AUTO mode explicitly\n  --mode=drain|grade|test            Start in a named mode (launches autonomously)\n  --mode-subject=<text>              DRAIN subject\n  --mode-instructions=<text>         DRAIN instructions\n  --mode-owner-directed              Mark the DRAIN mode owner-directed\n  --goal-bootstrap-subject=<id>      Require exact GOAL subject and implied modes before turn one\n  --carry=<warm|cold>                Fleet carry mode\n  --account=<id|auto|default>        Account routing\n\nLauncher controls:\n  --no-picker                        Skip interactive prompts\n  --add-dir=<dir>                    Add a backend working directory (repeatable)\n  --allow-subagents, --no-subagents Allow or deny Claude subagent tools\n  --yes, -y                          Skip untracked-resume confirmation\n  --force                            Override launch preflight guards\n  --set-claude-token[=<token>]       Store the default Claude OAuth token\n  --clear-claude-token               Clear the stored Claude OAuth token\n  --recovery-authorize               Locally authorize one exact diagnostic argv\n  --recovery-reason=<text>           Required authorization reason\n  --recovery-ttl=<seconds>           Grant lifetime (default 300, max 900)\n  --recovery-max-runtime=<seconds>   Command deadline (default 60, max 300)\n  --recovery-grant=<uuid>            Consume a signed one-use recovery grant\n  --                                 Forward remaining arguments to the backend\n\nRemote hosts (run psu on another machine; every other option is forwarded to it):\n  --connect[=<name>[/<workspace>]]   Run on a saved remote host (picker when omitted)\n  --connect-list                     List saved remote hosts and cloud workspaces\n  --connect-login[=<portal>]         Sign in to Papercusp cloud (default https://app.papercusp.com)\n  --connect-logout[=<name>]          Sign out of Papercusp cloud on this computer\n  --connect-session=<key>            Reattach a specific cloud workspace shell\n  --connect-add-gcp-iap=<name>       Save your own GCP VM, reached over IAP SSH, with\n                                     --connect-project, --connect-zone,\n                                     --connect-instance and --connect-user\n  --connect-add-aws-ssm=<name>       Save your own EC2 instance, reached over SSM\n                                     Session Manager SSH, with --connect-region,\n                                     --connect-instance (i-\u2026), --connect-user and\n                                     optionally --connect-aws-profile\n  --connect-remove=<name>            Forget a saved remote host\n\nValues may use either --name=value or (where supported) --name value form.\n";
 /** Sentinel value for the "NO PLAN" picker row. Uses non-slug chars
  *  (`<`/`>`) so it can never collide with a real plan slug. */
 export const NO_PLAN: "<no-plan>";
@@ -4392,6 +4660,7 @@ export namespace AGENT_LABELS {
     let codex: string;
     let omp: string;
 }
+export type ClaudeLaunchSettings = import("../../../packages/operator-core/lib/model-context-budget.mjs").ClaudeLaunchSettings;
 export type SessionEndReportOptions = {
     fetchImpl?: ((input: any, init?: any) => Promise<any>) | undefined;
     operatorUrl?: string | undefined;
@@ -4554,12 +4823,16 @@ export type RunWrapperOptions = {
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 declare function api(path: any, opts?: {}): Promise<any>;
+declare function slowRequestNoticeOncePerLaunch({ url }: {
+    url: any;
+}): Promise<string | null>;
 import { fireSessionCompactedEvent } from "./psu-pty-host.mjs";
+import { statSync } from "node:fs";
 declare function safeReaddir(dir: any): import("fs").Dirent<string>[];
-/** Numeric pid entries under `/proc`. Exported for tests via the injectable. */
+import { resolveLinuxCodexStartupPid } from "./psu-pty-host.mjs";
 declare function defaultListProcPids(): number[];
 declare function sessionPortApi(path: any, opts: any): Promise<any>;
 declare function launchFreshSu(selections: any, args: any, { brain }?: {
     brain?: boolean | undefined;
 }): Promise<void>;
-export {};
+import { readClaudeLaunchSettings } from "../../../packages/operator-core/lib/model-context-budget.mjs";

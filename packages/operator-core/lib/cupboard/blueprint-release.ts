@@ -179,16 +179,10 @@ export interface BlueprintJournalReport {
   residue: Array<{ dependentId: string; error: string }>;
 }
 
-export class BlueprintLifecycleError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly code?: string,
-  ) {
-    super(message);
-    this.name = 'BlueprintLifecycleError';
-  }
-}
+// The error class and the release signer live in a leaf so the self-describing kinds can
+// sign without compiling this file's lifecycle graph (WI-10004876).
+import { BlueprintLifecycleError, defaultReleaseSigner, type BlueprintReleaseSigner } from './blueprint-release-signer';
+export { BlueprintLifecycleError, defaultReleaseSigner, type BlueprintReleaseSigner } from './blueprint-release-signer';
 
 /** Run `switchRelease` between the journal's prepare and apply; compensate on failure. */
 async function journaledSwitch(
@@ -223,13 +217,6 @@ export interface BlueprintReleaseSourceSnapshot {
   grants: { requires: string[]; optional: string[] };
   contributions: BlueprintSourceDocument['contributions'];
   archive: BlueprintReleaseArchive;
-}
-
-export interface BlueprintReleaseSigner {
-  githubUserId: number;
-  githubLogin: string;
-  devicePubkey: string;
-  sign(bytes: Buffer): Promise<Buffer>;
 }
 
 export interface PreparedBlueprintPublicRelease {
@@ -458,24 +445,6 @@ export async function snapshotBlueprintReleaseSource(input: {
   };
 }
 
-async function defaultReleaseSigner(): Promise<BlueprintReleaseSigner> {
-  const { resolveLocalGithubIdentity } = await import('../identity/resolve-local-github-identity');
-  const identity = await resolveLocalGithubIdentity();
-  if (identity.kind !== 'ok')
-    throw new BlueprintLifecycleError('GitHub authentication is required to sign a blueprint release', 401);
-  const { resolveDeviceKeychainId } = await import('../identity/device-keychain-id');
-  const keychainId = resolveDeviceKeychainId(identity.githubUserId);
-  const { loadOrGenerateDeviceKeypair } = await import('../identity/attest');
-  const keypair = await loadOrGenerateDeviceKeypair(keychainId);
-  const { signWithDeviceKey } = await import('../identity/sign-with-device-key');
-  return {
-    githubUserId: identity.githubUserId,
-    githubLogin: identity.githubLogin,
-    devicePubkey: keypair.pubkeyBase64,
-    sign: (bytes) => signWithDeviceKey(keychainId, bytes),
-  };
-}
-
 /** Build and sign the public distribution manifest whose content address covers
  * the complete P-006 closure. `publishListingToCupboard` re-validates it through
  * the shared release gate before sending only its immutable pins to the worker. */
@@ -654,7 +623,7 @@ export async function resolveInstalledReleasePackage(
   return null;
 }
 
-function promptMap(archive: BlueprintReleaseArchive | null): Map<string, { hash: string; text: string }> {
+function promptMap(archive: Pick<BlueprintReleaseArchive, 'pins'> | null): Map<string, { hash: string; text: string }> {
   const out = new Map<string, { hash: string; text: string }>();
   for (const pin of archive?.pins ?? []) {
     if (pin.packageKind !== 'blueprint') continue;
@@ -699,7 +668,15 @@ function promptPatch(path: string, before: string, after: string): string {
   return [`--- a/${path}`, `+++ b/${path}`, '@@ prompt text @@', removed, added].filter(Boolean).join('\n');
 }
 
-function releaseBurnKnobs(archive: BlueprintReleaseArchive | null): Map<string, unknown> {
+/**
+ * What sets a release's spend, keyed by path: root knobs, knobs of inherited
+ * blueprint layers (qualified `<ref>:`), model/effort/cadence declarations in
+ * roles and triggers, and the exact prompt bytes. One derivation, two readers:
+ * diffBlueprintReleases compares it between releases, and an identity listing
+ * declares it (identity-listing-surface.ts, agent-economy-flywheel P-015), so
+ * the storefront shows the same values the upgrade diff compares.
+ */
+export function releaseBurnKnobs(archive: Pick<BlueprintReleaseArchive, 'root' | 'pins'> | null): Map<string, unknown> {
   const out = new Map<string, unknown>();
   for (const pin of archive?.pins ?? []) {
     if (pin.packageKind !== 'blueprint') continue;

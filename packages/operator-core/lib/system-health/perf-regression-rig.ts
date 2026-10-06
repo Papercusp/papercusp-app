@@ -42,6 +42,7 @@ import { getFlag } from '@papercusp/flags/server';
 import { currentLoopLag, startEventLoopLagMonitor } from '../event-loop-lag-monitor';
 import { pgHealth } from '../dev-data';
 import { PERF_BUDGETS } from './perf-budgets';
+import { readSidecarReadLatency } from '../fleet/sidecar-read-only-git';
 import type { CollectorResult, WatchdogSignal } from '../harness/improvements/watchdog';
 import type { ImprovementDispatchRow, DispatchOutcome } from '../harness/improvements/dispatch-ledger';
 import { isLaneBreakageOrphan } from '../harness/improvements/orphaned-dispatch';
@@ -77,6 +78,18 @@ export interface PerfRegressionBudgets {
   dispatchOrphanMinSample: number;
   /** dispatch-orphan recent window (hours). Default 24. */
   dispatchOrphanWindowHours: number;
+  /**
+   * Sidecar read-only git p50 (ms) over the client-side window
+   * (sidecar-read-only-git.ts): warn at/above this. Bare git is ~5ms and a private
+   * idle sidecar ~80ms; the live shared host measured 0.5-3.5s per read BEFORE the
+   * lazy-receipt fix (WI-10004674). 250ms sits above the idle-sidecar figure and
+   * far below the regressed one, so it fires on the class, not on noise.
+   */
+  sidecarGitReadP50WarnMs: number;
+  /** Sidecar read-only git p50 (ms): critical at/above this. */
+  sidecarGitReadP50CritMs: number;
+  /** Fewer reads than this in the window is NOT MEASURED (no verdict), never "healthy". */
+  sidecarGitReadMinSample: number;
 }
 
 export const PERF_REGRESSION_BUDGETS: PerfRegressionBudgets = {
@@ -92,6 +105,9 @@ export const PERF_REGRESSION_BUDGETS: PerfRegressionBudgets = {
   coordOpenEscalationsCrit: 8000,
   dispatchOrphanMinSample: 20,
   dispatchOrphanWindowHours: 24,
+  sidecarGitReadP50WarnMs: 250,
+  sidecarGitReadP50CritMs: 1000,
+  sidecarGitReadMinSample: 30,
 };
 
 // ── the metric bundle (the pure core's input) ────────────────────────────────
@@ -112,6 +128,14 @@ export interface PerfRegressionMetrics {
   dispatchSample: number;
   /** coord open-escalation backlog, or null when the table is absent. */
   coordOpenEscalations: number | null;
+  /**
+   * p50 (ms) of this process's sidecar read-only git reads over the window, or null
+   * when fewer than `sidecarGitReadMinSample` were observed. Optional so older
+   * callers/fixtures that build this shape keep compiling; absent = not measured.
+   */
+  sidecarGitReadP50Ms?: number | null;
+  /** Reads behind `sidecarGitReadP50Ms` (0 when none were recorded). */
+  sidecarGitReadSample?: number;
 }
 
 /** One budget breach (also the JSONB shape persisted in `breached`). */
@@ -120,7 +144,8 @@ export interface PerfRegressionBreach {
     | 'loop-lag-p95'
     | 'conn-saturation'
     | 'dispatch-orphan-rate'
-    | 'coord-open-escalations';
+    | 'coord-open-escalations'
+    | 'sidecar-git-read-p50';
   /** The measured value that breached. */
   value: number;
   /** The budget threshold it crossed. */
@@ -153,6 +178,12 @@ function remediationFor(metric: PerfRegressionBreach['metric']): string {
     case 'coord-open-escalations':
       return 'The coord escalation backlog is unbounded — escalations are being filed faster than ' +
         'they are resolved. Drain the inbox (coord:escalations) or check for a stuck escalation source.';
+    case 'sidecar-git-read-p50':
+      return 'Sidecar-governed read-only git reads are slow again (bare git is ~5ms). WI-10004674 found ' +
+        'per-read admission-receipt bookkeeping on the exec critical path (0.5-3.5s p50 on the shared host); ' +
+        'the fix defers the receipt for read-only git (sidecar-exec-process.ts, SIDECAR_LAZY_RECEIPT_DELAY_MS). ' +
+        'Check that fix is still in place and serving (dev:pipeline_position), then the sidecar host load and ' +
+        'the git-sync lag alerts — the same seam backs git-sync, dev:pipeline_position and the test runners.';
   }
 }
 
@@ -239,6 +270,22 @@ export function evaluatePerfRegression(
       `orphaned (worker died without resolving), at or past the ${tier} budget of ${Math.round(budget * 100)}% — ` +
       `the regression class this rig exists to catch (it reached 91% once, silently).`,
   );
+  // Below the minimum sample the p50 is NOT MEASURED, not healthy: a thin window
+  // would let one slow `ls-remote` read as a regression and one fast probe read as
+  // a clean bill. Null suppresses both.
+  const sidecarReads = metrics.sidecarGitReadSample ?? 0;
+  consider(
+    'sidecar-git-read-p50',
+    sidecarReads >= budgets.sidecarGitReadMinSample ? (metrics.sidecarGitReadP50Ms ?? null) : null,
+    budgets.sidecarGitReadP50WarnMs,
+    budgets.sidecarGitReadP50CritMs,
+    'sidecar-git-read-p50',
+    'Sidecar read-only git p50 regressed past its SLO budget',
+    (v, budget, tier) =>
+      `sidecar-governed read-only git reads have a p50 of ${Math.round(v)}ms over the last ${sidecarReads} reads, ` +
+      `at or past the ${tier} budget of ${budget}ms (bare git is ~5ms) — per-read bookkeeping is back on the ` +
+      `exec critical path, or the sidecar host is saturated.`,
+  );
   consider(
     'coord-open-escalations',
     metrics.coordOpenEscalations,
@@ -305,6 +352,12 @@ export interface PerfRegressionDeps {
   readLoopLagP95Ms: () => number | null;
   /** PG server-wide saturation %, or null on failure. Default `pgHealth().saturationPct`. */
   readConnSaturationPct: () => Promise<number | null>;
+  /**
+   * This process's sidecar read-only git latency window. Optional: the default
+   * reads the pinned in-process window (sidecar-read-only-git.ts); a test injects
+   * its own so the rig never depends on real git traffic.
+   */
+  readSidecarReadLatency?: () => { sample: number; p50Ms: number | null };
 }
 
 /**
@@ -424,7 +477,7 @@ export async function readCoordOpenEscalations(
  *  POINT-SAMPLE of an inherently spiky in-memory gauge; the other metrics are
  *  aggregates over larger windows and already carry their own noise guards
  *  (e.g. dispatch-orphan-rate's min-sample gate). */
-export const HYSTERESIS_SIGNAL_KEYS: ReadonlySet<string> = new Set(['loop-lag-p95']);
+export const HYSTERESIS_SIGNAL_KEYS: ReadonlySet<string> = new Set(['loop-lag-p95', 'sidecar-git-read-p50']);
 
 /**
  * Read the set of metric keys that breached on the IMMEDIATELY-PRIOR snapshot (from
@@ -506,12 +559,27 @@ export async function collectPerfRegressionSnapshot(
   if (typeof backlog === 'object') notes.push(backlog.dormant);
   else coordOpenEscalations = backlog;
 
+  const sidecarLatency = (deps.readSidecarReadLatency ?? readSidecarReadLatency)();
+  const sidecarGitReadP50Ms = sidecarLatency.sample >= budgets.sidecarGitReadMinSample ? sidecarLatency.p50Ms : null;
+  // Same convention as dispatch-orphan above: note a THIN window (some reads, too few
+  // to grade) but stay quiet at zero — a process that issued no sidecar git reads has
+  // nothing to report, and a note on every such tick would break "a healthy tick
+  // emits no note". Zero reads is still NOT a verdict: the p50 stays null.
+  if (sidecarGitReadP50Ms === null && sidecarLatency.sample > 0) {
+    notes.push(
+      `sidecar-git-read-p50: not measured (${sidecarLatency.sample} read-only git reads in this process's window, ` +
+        `min ${budgets.sidecarGitReadMinSample})`,
+    );
+  }
+
   const metrics: PerfRegressionMetrics = {
     loopLagP95Ms,
     connSaturationPct,
     dispatchOrphanRate,
     dispatchSample,
     coordOpenEscalations,
+    sidecarGitReadP50Ms,
+    sidecarGitReadSample: sidecarLatency.sample,
   };
 
   const { signals, breaches } = evaluatePerfRegression(metrics, budgets);

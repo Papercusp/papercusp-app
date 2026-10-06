@@ -74,6 +74,40 @@ export const CENSUS_TEST_REL =
 export const OPERATOR_CORE_REL = 'packages/operator-core';
 
 /** Strip ANSI so output matching does not depend on vitest's colour mode. */
+/**
+ * The gate's pass-reuse skip-list channel. Local literal (not imported) so this
+ * script stays dependency-light for pull-schema.mjs; pinned equal to
+ * libs/test-config's PC_TEST_REUSE_SKIP_LIST_ENV by identity-keyed-classification-gate.test.ts.
+ */
+export const TEST_REUSE_SKIP_LIST_ENV = 'PC_TEST_REUSE_SKIP_LIST';
+
+/**
+ * The lane selector the gate exports per operator-core lane leg (PC_TEST_LANE=pure|stateful);
+ * libs/test-config/src/vitest-config.ts turns it into a lane-split `exclude`. Local literal for
+ * the same reason as above, pinned by identity-keyed-classification-gate.test.ts.
+ */
+export const TEST_LANE_ENV = 'PC_TEST_LANE';
+
+/**
+ * The gate's file-selection list (scripts/affected-tests.mjs --related writes it;
+ * libs/test-config/src/vitest-config.ts narrows `include` to the files it lists). Local
+ * literal for the same reason as above, pinned by identity-keyed-classification-gate.test.ts.
+ */
+export const TEST_FILTER_LIST_ENV = 'PC_TEST_FILTER_LIST';
+
+/**
+ * Every channel through which a parent runner narrows which files a vitest invocation
+ * selects. The nested census run targets exactly one file and must always run it, so the
+ * child never inherits any of them. identity-keyed-classification-gate.test.ts pins this
+ * set equal to the `PC_TEST_*_ENV` constants exported anywhere in libs/test-config/src, so
+ * a new selection channel there fails that test until it is listed here.
+ */
+export const TEST_SELECTION_ENVS = Object.freeze([
+  TEST_REUSE_SKIP_LIST_ENV,
+  TEST_LANE_ENV,
+  TEST_FILTER_LIST_ENV,
+]);
+
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 /**
@@ -113,6 +147,13 @@ const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
  */
 export function buildCensusChildEnv(base, schemaAbs) {
   const env = { ...base, NO_COLOR: '1', FORCE_COLOR: '0' };
+  // WI-10004340: the gate's selection channels are meant for the gate's OWN vitest
+  // invocation. Inherited here, each one can drop the census file from the nested run,
+  // which then exits "No test files found" and BOTH branches report a false verdict.
+  // It leaked one channel at a time: the pass-reuse skip list (verify 1b0ba635), the
+  // lane selector (verify 05c11967), then the related-files filter list (verify
+  // 4988081a, repairHead d740fc38). So the whole set is scrubbed, not one name.
+  for (const name of TEST_SELECTION_ENVS) delete env[name];
   if (schemaAbs) {
     env.IDENTITY_KEYED_SCHEMA_PATH = schemaAbs;
     env.PAPERCUSP_MUTATION_PROBE = '1';
@@ -189,6 +230,20 @@ export function checkIdentityKeyedClassification(opts = {}) {
       message:
         'the census test reported success but no test file was measured — ' +
         'treating as UNVERIFIED rather than green (zero-work false green).',
+      output,
+    };
+  }
+
+  // The non-zero dual: when selection dropped the census file, vitest exits 1 with
+  // "No test files found". Nothing was measured, so that is not an `unclassified`
+  // verdict either (WI-10004340: three gate reds read as unclassified this way).
+  if (run.status !== 0 && /No test files found/.test(output)) {
+    return {
+      ok: false,
+      code: 'check-unavailable',
+      message:
+        'the census run selected no test file (an inherited selection channel ' +
+        'excluded it), so classification was not measured.',
       output,
     };
   }

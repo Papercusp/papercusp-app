@@ -1,4 +1,5 @@
 import { continuityProbeShapeSchema, type ContinuityProbe } from '../../continuity-probes';
+import { CONTINUITY_PROBE_MAX_PER_WAKE } from '../../agent-tools/limits';
 import { leadingScaleLabel } from '../../rubric-rating-vocabulary';
 
 /**
@@ -293,6 +294,8 @@ export interface SpecTestAdequacyRerunRecipe {
     workItemIds?: string[];
     /** Preserve exact immutable evidence identities so superseded runs stay excluded. */
     evidenceRefs?: string[];
+    /** Preserve exact immutable binding rows so later rows reusing a ref cannot widen replay. */
+    bindingIds?: number[];
     /** Preserve an explicit plan-item selector instead of widening the replay. */
     planItemIds?: string[];
     /** Bound the evidence page for pressure-safe judge replays. */
@@ -311,6 +314,7 @@ export interface SpecTestAdequacyRerunRecipe {
     specId: string;
     specRevision: number;
     specFingerprint: string;
+    bindingIds?: number[];
     evidence: Array<{ evidenceKind: string; evidenceRef: string }>;
   };
   current: {
@@ -526,7 +530,19 @@ export interface ScorecardTestsCheckRun {
  * unknown/error results refuse the emit rather than becoming an unjudgeable
  * scorecard.
  */
-export interface ScorecardProbeCheckRun {
+export type ScorecardProbeCheckRun = ScorecardSingleProbeCheckRun | ScorecardAllProbeCheckRun;
+
+export interface ScorecardAllProbeCheckRun {
+  kind: 'probe';
+  /** Complete independently executed child records; never a boolean-only attestation. */
+  all: ScorecardSingleProbeCheckRun[];
+  verdict: 'pass' | 'fail';
+  status: 'fresh' | 'stale';
+  executed: true;
+  measuredAt: string;
+}
+
+export interface ScorecardSingleProbeCheckRun {
   kind: 'probe';
   /** The schema-versioned probe that was executed. */
   probe: ContinuityProbe;
@@ -866,6 +882,9 @@ export class ObservationEvidenceError extends Error {
   }
 }
 
+const OBSERVATION_EVIDENCE_TRUNCATION_MARKER =
+  /(?:\[TRUNCATED\s+\+\s*(?:\d+|N)\s+chars\b[^\]]*\]|_projection\.cursor\b)/i;
+
 /**
  * Enforce D-002's "MANDATORY evidence per rated criterion": every rating in a
  * structured observation MUST carry non-empty `rating` + `evidence`, and a
@@ -898,6 +917,11 @@ export function validateObservationRatings(obs: StructuredObservation | undefine
       throw new ObservationEvidenceError(
         `observation.ratings['${criterion}'] is missing required evidence — a rubric rating must cite ` +
           'concrete evidence (a metric, a query result, a reference)',
+      );
+    }
+    if (OBSERVATION_EVIDENCE_TRUNCATION_MARKER.test(String(entry.evidence))) {
+      throw new ObservationEvidenceError(
+        `observation.ratings['${criterion}'].evidence contains a projection/truncation marker; recover the full tool result before citing it`,
       );
     }
   }
@@ -1434,6 +1458,23 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
     // drops the recipe instead of silently widening its replay.
     const workItemIds = optionalSelector(rawArgs?.workItemIds, 500, 200);
     const evidenceRefs = optionalSelector(rawArgs?.evidenceRefs, 500, 2000);
+    const optionalBindingIds = (value: unknown): number[] | null | undefined => {
+      if (value === undefined) return undefined;
+      if (
+        !Array.isArray(value) ||
+        value.length > 500 ||
+        value.some((id) => typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)
+      )
+        return null;
+      return [...new Set(value as number[])].sort((a, b) => a - b);
+    };
+    const argsBindingIds = optionalBindingIds(rawArgs?.bindingIds);
+    const selectionBindingIds = optionalBindingIds(selection?.bindingIds);
+    const bindingIds = selectionBindingIds ?? argsBindingIds;
+    const bindingIdsMismatch =
+      argsBindingIds !== undefined &&
+      selectionBindingIds !== undefined &&
+      JSON.stringify(argsBindingIds) !== JSON.stringify(selectionBindingIds);
     const planItemIds = optionalSelector(rawArgs?.planItemIds, 200, 200, /^P-\d{3,}$/);
     const specRevision =
       rawArgs?.specRevision === undefined
@@ -1485,6 +1526,9 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
       fingerprints.every((entry): entry is SpecTestAdequacyCurrentFingerprint => entry !== null) &&
       workItemIds !== null &&
       evidenceRefs !== null &&
+      argsBindingIds !== null &&
+      selectionBindingIds !== null &&
+      !bindingIdsMismatch &&
       planItemIds !== null &&
       specRevision !== null &&
       specFingerprint !== null &&
@@ -1510,6 +1554,7 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
           specIds: [selection.specId],
           ...(workItemIds ? { workItemIds } : {}),
           ...(evidenceRefs ? { evidenceRefs } : {}),
+          ...(bindingIds !== undefined && bindingIds !== null ? { bindingIds } : {}),
           ...(planItemIds ? { planItemIds } : {}),
           ...(specRevision !== undefined ? { specRevision } : {}),
           ...(specFingerprint !== undefined ? { specFingerprint } : {}),
@@ -1522,6 +1567,7 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
           specId: selection.specId,
           specRevision: Number(selection.specRevision),
           specFingerprint: selection.specFingerprint,
+          ...(bindingIds !== undefined && bindingIds !== null ? { bindingIds } : {}),
           evidence,
         },
         current: { supplied: current.supplied, fingerprints },
@@ -1573,7 +1619,11 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
   if (o.gradingAudit && typeof o.gradingAudit === 'object' && !Array.isArray(o.gradingAudit)) {
     const g = o.gradingAudit as Record<string, unknown>;
     if (
-      (g.state === 'pending' || g.state === 'passed' || g.state === 'failed' || g.state === 'cancelled') &&
+      (g.state === 'pending' ||
+        g.state === 'awaiting-reemit' ||
+        g.state === 'passed' ||
+        g.state === 'failed' ||
+        g.state === 'cancelled') &&
       typeof g.metaRubricRef === 'string' &&
       g.metaRubricRef.trim() &&
       typeof g.stampedAt === 'string' &&
@@ -1586,6 +1636,22 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
       const reservationKey = typeof dispatchReservation?.key === 'string' ? dispatchReservation.key : undefined;
       const reservationTimestamp =
         typeof dispatchReservation?.reservedAt === 'string' ? dispatchReservation.reservedAt : undefined;
+      const rawReemitRequired =
+        g.reemitRequired && typeof g.reemitRequired === 'object' && !Array.isArray(g.reemitRequired)
+          ? (g.reemitRequired as Record<string, unknown>)
+          : undefined;
+      const reemitRequired =
+        rawReemitRequired?.code === 'grading_audit_evaluator_changed' &&
+        typeof rawReemitRequired.at === 'string' &&
+        rawReemitRequired.at.trim() &&
+        typeof rawReemitRequired.reason === 'string' &&
+        rawReemitRequired.reason.trim()
+          ? {
+              code: 'grading_audit_evaluator_changed' as const,
+              at: rawReemitRequired.at,
+              reason: rawReemitRequired.reason,
+            }
+          : undefined;
       out.gradingAudit = {
         state: g.state,
         metaRubricRef: g.metaRubricRef,
@@ -1596,6 +1662,7 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
         ...(typeof g.criteriaHash === 'string' && g.criteriaHash.trim()
           ? { criteriaHash: g.criteriaHash }
           : {}),
+        ...(reemitRequired ? { reemitRequired } : {}),
         ...(reservationKey &&
         reservationKey.trim() &&
         reservationTimestamp &&
@@ -1697,6 +1764,22 @@ export function asStructuredObservation(v: unknown): StructuredObservation | und
         // live contract changes, so the READ path checks only the durable probe
         // shape (not its current registry revision). A malformed shape is
         // discarded rather than silently surfacing as executable evidence.
+        if (r.all !== undefined) {
+          if (r.probe !== undefined || !Array.isArray(r.all) || r.all.length === 0 || r.all.length > CONTINUITY_PROBE_MAX_PER_WAKE) continue;
+          const all: ScorecardSingleProbeCheckRun[] = [];
+          for (const child of r.all) {
+            // Reuse the historical single-probe reader, forbidding nested groups.
+            if (!child || typeof child !== 'object' || Array.isArray(child) || 'all' in child) break;
+            const normalized = asStructuredObservation({ checkRuns: { child } })?.checkRuns?.child;
+            if (!normalized || normalized.kind !== 'probe' || !('probe' in normalized)) break;
+            all.push(normalized);
+          }
+          if (all.length !== r.all.length) continue;
+          const pass = all.every(child => child.verdict === 'pass');
+          if (r.verdict !== (pass ? 'pass' : 'fail') || r.status !== (pass ? 'fresh' : 'stale')) continue;
+          runs[key] = { kind: 'probe', all, verdict: r.verdict, status: r.status, executed: true, measuredAt: r.measuredAt };
+          continue;
+        }
         const probe = continuityProbeShapeSchema.safeParse(r.probe);
         if (!probe.success) continue;
         // `observed` is intentionally scalar: runContinuityProbeBatch redacts

@@ -50,14 +50,24 @@ export interface PgReachabilityResult {
  * transient startup/recovery race (see RETRYABLE_MSG). Any other failure
  * (auth, "no such database", …) returns immediately — that is a genuine
  * staleness/config signal, not something a retry can ride out.
+ *
+ * `opts.signal` ends the retry loop early (before the next attempt and during
+ * the backoff sleep). A caller that owns the server process aborts it when that
+ * process exits, so a server that died at startup is reported at once instead
+ * of after the whole budget (WI-10004469).
  */
 export async function probePgReachable(
   dsn: string,
   budgetMs = 15_000,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<PgReachabilityResult> {
   const startedAt = Date.now();
   let lastError: string | undefined;
+  const { signal } = opts;
   for (let attempt = 1; ; attempt++) {
+    if (signal?.aborted) {
+      return { ok: false, elapsedMs: Date.now() - startedAt, lastError: lastError ?? 'aborted before the first attempt' };
+    }
     const probe = postgres(dsn, {
       max: 1,
       onnotice: () => {},
@@ -72,18 +82,33 @@ export async function probePgReachable(
       if (!RETRYABLE_MSG.test(lastError) || elapsedMs >= budgetMs) {
         return { ok: false, elapsedMs, lastError };
       }
-      await new Promise((r) => setTimeout(r, Math.min(attempt * 500, 3000)));
+      await abortableDelay(Math.min(attempt * 500, 3000), signal);
     } finally {
       await probe.end({ timeout: 5 }).catch(() => {});
     }
   }
 }
 
+/** Resolve after `ms`, or as soon as `signal` aborts (never rejects). */
+function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return new Promise((r) => setTimeout(r, ms));
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
+}
+
 /**
- * `probePgReachable` + throw an ACTIONABLE error naming this as a known
- * local-environment class (EI-2627) rather than surfacing postgres's raw,
- * cryptic error ("no such database: papercusp_it") deep inside a later query.
- * For fixtures that need reachability confirmed before proceeding.
+ * `probePgReachable` and throw class-specific actionable guidance. Retryable
+ * startup/recovery failures retain the EI-2627 local-container diagnosis;
+ * non-retryable connection/setup errors (such as authentication or a missing
+ * database) fail fast with DSN guidance instead of being labeled container churn.
  */
 export async function assertPgReachable(
   dsn: string,
@@ -92,11 +117,19 @@ export async function assertPgReachable(
 ): Promise<void> {
   const result = await probePgReachable(dsn, budgetMs);
   if (result.ok) return;
+  const lastError = result.lastError ?? 'unknown Postgres connection error';
+  if (RETRYABLE_MSG.test(lastError)) {
+    throw new Error(
+      `${label}: the integration baseline Postgres is unreachable after ${result.elapsedMs}ms of startup retry ` +
+        `(${lastError}). This is very likely EI-2627 — local box/testcontainer churn reaped or ` +
+        `recycled the shared baseline-schema container (pgvector/pgvector:pg18, db "papercusp_it") — NOT a ` +
+        `code regression. Check \`docker ps\` for a live papercusp_it container and re-run; CI is unaffected.`,
+    );
+  }
   throw new Error(
-    `${label}: the integration baseline Postgres is unreachable after ${result.elapsedMs}ms of retry ` +
-      `(${result.lastError}). This is very likely EI-2627 — local box/testcontainer churn reaped or ` +
-      `recycled the shared baseline-schema container (pgvector/pgvector:pg18, db "papercusp_it") — NOT a ` +
-      `code regression. Check \`docker ps\` for a live papercusp_it container and re-run; CI is unaffected.`,
+    `${label}: the integration baseline Postgres probe failed fast on a non-retryable error ` +
+      `(${lastError}). This failure is not retried. ` +
+      `Verify the injected DSN credentials/database and confirm it points at the container selected by global setup.`,
   );
 }
 

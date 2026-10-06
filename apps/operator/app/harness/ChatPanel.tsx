@@ -26,6 +26,7 @@ import { beginInteraction, endInteraction, PERF_INTERACTIONS } from '@/app/_comp
 import { OperatorChat } from '@/app/_components/OperatorChat';
 import type { ChatMessage } from '@/app/_components/chat/chat-types';
 import type { ConversationContextProjection } from '@papercusp/operator-core/lib/conversation-context-projection';
+import { projectChatFailureTranscriptTurn } from '@papercusp/operator-core/lib/chat-model-failure';
 import {
   ConversationContextProjectionView,
   mergeConversationProjectionMessages,
@@ -423,12 +424,15 @@ export default function ChatPanel({ slug, chatId, mode, context, initialMessage,
   const costUsd = useMemo(() => (chat?.total_cost_usd_cents ?? 0) / 100, [chat?.total_cost_usd_cents]);
   const tokensTotal = (chat?.total_input_tokens ?? 0) + (chat?.total_output_tokens ?? 0);
   const liveProjectionTail = useMemo<ChatMessage[]>(() => {
-    const messages: ChatMessage[] = (chat?.transcript ?? []).map((turn, index) => ({
-      id: `agent-chat-live:${index}`,
-      role: turn.role,
-      content: turn.content,
-      ts: turn.ts,
-    }));
+    const messages: ChatMessage[] = (chat?.transcript ?? []).map((turn, index) => {
+      const projectedTurn = projectChatFailureTranscriptTurn(turn);
+      return {
+        id: `agent-chat-live:${index}`,
+        role: projectedTurn.role,
+        content: projectedTurn.content,
+        ts: projectedTurn.ts,
+      };
+    });
     if (sendState.kind === 'streaming') {
       messages.push({
         id: 'agent-chat-live:streaming',
@@ -544,14 +548,17 @@ export default function ChatPanel({ slug, chatId, mode, context, initialMessage,
                 Start the conversation. The agent has the same context the autonomous {chat.role} would{chat.feature_id ? ` for feature ${chat.feature_id}` : ''}.
               </div>
             )}
-            {chat.transcript.map((t, i) => (
-              <div key={i} className={`chat-turn chat-turn--${t.role}${t.error ? ' chat-turn--error' : ''}`}>
-                <div className="chat-turn__role">
-                  {t.error && <AlertTriangle size={11} />}{t.role}{t.error ? ' · failed' : ''}
+            {chat.transcript.map((t, i) => {
+              const projectedTurn = projectChatFailureTranscriptTurn(t);
+              return (
+                <div key={i} className={`chat-turn chat-turn--${t.role}${t.error ? ' chat-turn--error' : ''}`}>
+                  <div className="chat-turn__role">
+                    {t.error && <AlertTriangle size={11} />}{t.role}{t.error ? ' · failed' : ''}
+                  </div>
+                  <div className="chat-turn__body">{projectedTurn.content}</div>
                 </div>
-                <div className="chat-turn__body">{t.content}</div>
-              </div>
-            ))}
+              );
+            })}
             {sendState.kind === 'streaming' && (
               <div className="chat-turn chat-turn--assistant chat-turn--streaming">
                 <div className="chat-turn__role">

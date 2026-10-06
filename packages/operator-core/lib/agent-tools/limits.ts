@@ -31,6 +31,9 @@
  */
 import { z } from 'zod';
 
+/** Shared by continuity execution and rubric authoring; never accept a check the runner must truncate. */
+export const CONTINUITY_PROBE_MAX_PER_WAKE = 8;
+
 export const LIMITS = {
   /** ids, keys, exact event keys, short handles. */
   IDENT: 200,

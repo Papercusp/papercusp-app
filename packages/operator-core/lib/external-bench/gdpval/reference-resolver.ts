@@ -24,7 +24,7 @@ const OFFICE_EXTS = new Set(['xlsx', 'xls', 'xlsm', 'docx', 'doc', 'pptx', 'ppt'
 // Binary types a TEXT autograder cannot meaningfully read → excluded (surfaced, not scored as a loss).
 const EXCLUDED_EXTS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'tif', 'webp', 'svg', 'psd', 'ai', 'eps', 'fig',
-  'mp4', 'mov', 'owner', 'mkv', 'webm', 'mp3', 'wav', 'flac', 'm4a',
+  'mp4', 'mov', 'avi', 'mkv', 'webm', 'mp3', 'wav', 'flac', 'm4a',
   'zip', 'tar', 'gz', 'rar', '7z',
   'dwg', 'dxf', 'step', 'stp', 'stl', 'iges', 'igs', 'sldprt', 'sldasm', 'cad', '3ds', 'obj', 'blend',
 ]);

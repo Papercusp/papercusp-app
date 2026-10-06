@@ -87,11 +87,67 @@ export function findBundledCliEntryGuards({ metafilePath, baseDir }) {
   return findings;
 }
 
+const SCRIPT_SOURCE_RE = /\.(?:[cm]?[jt]sx?)$/;
+
+function loaderFor(file) {
+  if (file.endsWith('.tsx')) return 'tsx';
+  if (file.endsWith('.jsx')) return 'jsx';
+  return /\.[cm]?ts$/.test(file) ? 'ts' : 'js';
+}
+
+/**
+ * WI-10004497 recurrence guard. A top-level `await` in a repo-owned bundled
+ * input makes esbuild compile that module, and every module that imports it,
+ * into an async lazy init (`__esm({ async ... })`). When that chain crosses an
+ * import cycle the init promises wait on each other: the host prints nothing,
+ * opens no socket and never listens. No error, no exit. That is how
+ * scripts/next-migration.mjs (`if (isCliEntry(import.meta.url)) await main();`)
+ * took down :3170 and every verify-tauri-headless rig boot on 2026-10-01.
+ *
+ * esbuild refuses top-level await for CommonJS output, so a cjs transform of
+ * each input reports exactly the constructs that would make it async. Zero is
+ * the contract (measured 2026-10-01: 0 of 5,786 repo-owned bundled inputs).
+ * Third-party inputs under node_modules are out of scope.
+ */
+export async function findBundledTopLevelAwaits({ metafilePath, baseDir }) {
+  const { transform } = await import('esbuild');
+  const files = bundledInputPaths(metafilePath, baseDir).filter(
+    (file) => SCRIPT_SOURCE_RE.test(file) && !/[\\/]node_modules[\\/]/.test(file),
+  );
+  const findings = [];
+  const BATCH = 64;
+  for (let i = 0; i < files.length; i += BATCH) {
+    await Promise.all(
+      files.slice(i, i + BATCH).map(async (file) => {
+        let source;
+        try {
+          source = readFileSync(file, 'utf8');
+        } catch {
+          return;
+        }
+        if (!source.includes('await')) return;
+        try {
+          await transform(source, { loader: loaderFor(file), format: 'cjs', logLevel: 'silent' });
+        } catch (error) {
+          const hit = (error?.errors ?? []).find((e) => /Top-level await/.test(String(e?.text)));
+          if (!hit && !/Top-level await/.test(String(error?.message))) return;
+          findings.push({
+            file: relative(REPO_ROOT, file).replaceAll('\\', '/'),
+            line: hit?.location?.line ?? 0,
+            kind: 'top-level-await',
+          });
+        }
+      }),
+    );
+  }
+  return findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+}
+
 function isDirectCliInvocation(entryPath = process.argv[1]) {
   return typeof entryPath === 'string' && /(?:^|[\\/])check-bundled-cli-entry-guards\.mjs$/.test(entryPath);
 }
 
-function main() {
+async function main() {
   const metafilePath = arg('--metafile');
   const baseDir = arg('--base-dir');
   if (!metafilePath || !baseDir) {
@@ -123,7 +179,27 @@ function main() {
     return;
   }
   console.log('✓ bundled CLI-entry guard check passed: no repo-owned raw ESM self-exec guard reached the bundle graph.');
+
+  const awaits = await findBundledTopLevelAwaits({ metafilePath, baseDir: resolve(baseDir) });
+  if (awaits.length > 0) {
+    console.error(`✖ bundled top-level-await check failed: ${awaits.length} repo-owned input(s) use top-level await.`);
+    for (const finding of awaits) console.error(`  ${finding.file}:${finding.line}  ${finding.kind}`);
+    console.error(
+      '\nA top-level await makes esbuild compile the module and all its importers into async inits; ' +
+        'across an import cycle they deadlock and the host never listens (WI-10004497). ' +
+        'Replace it, e.g. `if (isCliEntry(import.meta.url)) main().catch(...)`.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  console.log('✓ bundled top-level-await check passed: no repo-owned bundled input uses top-level await.');
 }
 
-if (isDirectCliInvocation()) main();
+// No top-level await here either (WI-10004497).
+if (isDirectCliInvocation()) {
+  main().catch((error) => {
+    console.error(error?.stack ?? error);
+    process.exitCode = 2;
+  });
+}
 

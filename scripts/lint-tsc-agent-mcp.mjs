@@ -19,9 +19,13 @@ const baselineFile = resolve(ROOT, 'packages/agent-mcp/.tsc-baseline.json');
 
 // A fresh compiler run is required: a warm tsbuildinfo can under-report errors and silently
 // ratchet a baseline down (EI-487).
+// --allowImportingTsExtensions matches operator-core's own tsconfig: the operator-core files this
+// graph follows are judged against operator-core's baseline, so they must compile under its
+// import rules (mutation-probe-closure.ts imports `.ts` because its worker is forked under raw
+// Node). It is legal here only because of --noEmit; tsconfig.build.json is unaffected.
 /** @type {string} */
 export const TSC_COMMAND =
-  'npx tsc -p packages/agent-mcp/tsconfig.json --noEmit --incremental false';
+  'npx tsc -p packages/agent-mcp/tsconfig.json --noEmit --incremental false --allowImportingTsExtensions';
 
 /** @type {{prefix:string, baselineFile:string, label:string}[]} */
 export const FOREIGN_BASELINES = [

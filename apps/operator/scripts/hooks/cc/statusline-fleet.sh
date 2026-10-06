@@ -58,6 +58,14 @@ if [ -z "${PAPERCUSP_STATUSLINE_FIXTURE:-}" ]; then
   fi
 fi
 
+# WI-10004953: a claude NESTED inside another agent inherited that su's PAPERCUSP_SID and
+# PAPERCUSP_TTY. Its statusline would call coord:glance AS the su and write the su's title
+# to the su's own terminal with the nested CLI's model. Print nothing (Claude falls back to
+# its default). Cached per CLI process (pc_nested_cli.sh); any failure runs the render.
+if [ -n "${PAPERCUSP_SID:-}" ] && . "$(dirname "$0")/pc_nested_cli.sh" 2>/dev/null && pc_nested_cli_cached; then
+  exit 0
+fi
+
 python3 - "$OPERATOR_URL" "$TOKEN_PATH" "${PAPERCUSP_SID:-fixture}" "${PAPERCUSP_STATUSLINE_FIXTURE:-}" "$(dirname "$0")" 3<<<"$INPUT" <<'PYEOF' 2>/dev/null || exit 0
 import datetime, hashlib, json, os, re, sys, tempfile, textwrap, time, urllib.request, urllib.parse
 urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))  # localhost operator: never via egress http(s)_proxy (502s the local call -> false fail-open)

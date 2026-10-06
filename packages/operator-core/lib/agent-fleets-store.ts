@@ -231,6 +231,10 @@ export interface AgentFleetRecord {
   /** The CURRENT leader's coord owner-id (D-002). Null when unset (e.g. the
    *  fleet persists but no agent currently leads it). */
   leaderOwnerId: string | null;
+  /** Epoch-ms of the first complete liveness observation that the current
+   *  registered leader is absent. It is independent of updatedAt, which also
+   *  changes for ordinary fleet metadata. */
+  leaderMissingSinceMs: number | null;
   /** The fleet's permanently-bound color-scheme NAME (console-color-schemes).
    *  Null on legacy rows created before the binding existed — resolveFleetScheme
    *  falls back to a deterministic slug hash for those. */
@@ -288,7 +292,12 @@ export interface CreateFleetInput {
 
 /** Validated launch recipe persisted for the headcount governor. */
 export interface FleetHeadcountConfig {
-  plan: string;
+  /** The launching plan, kept as provenance (governor labels + the terminal-plan
+   * disarm). Absent for a pure claim-spec (claimKinds) drain fleet: its members
+   * pull by the fleet claim spec, which is persisted in the claim-spec store and
+   * is what governor top-ups use anyway (they launch plan-less). R-8 of
+   * feature-drain-delivery-readiness-and-outcome-accounting-2026-10-01. */
+  plan?: string;
   harness: string;
   agent: 'claude' | 'omp' | 'codex';
   model?: string;
@@ -314,6 +323,12 @@ export interface FleetHeadcountConfig {
   compactionLimit?: number;
   carry?: 'warm' | 'cold';
   extraArgs?: string[];
+  /** P-005 / D-030 (unified-bug-pipeline-and-honest-queue-2026-10-05): the one
+   * structured form of "do not top this fleet up". Before it, the rule lived in
+   * plan prose, so a successor leader inherited it silently and a fleet ran with
+   * zero workers while its leader recorded quiet wakes. Every rule is attributed
+   * and EXPIRES; see resolveFleetTopUpRule. */
+  topUpRule?: FleetTopUpRule;
 }
 
 export interface FleetHeadcountTarget {
@@ -337,25 +352,19 @@ export type FleetHeadcountBasisKind =
   | 'legacy-live-roster-fallback'
   | 'unknown';
 
-/**
- * How far back an agent-origin tool call still attests that a live member seat
- * is productive (WI-2034624 / P-007).
- *
- * Deliberately WIDER than the 30-minute wedge-detection window
- * `agentOriginToolCallOwnersSince` defaults to, because the two windows answer
- * opposite questions and pay opposite costs. Wedge detection wants to notice
- * silence FAST; capacity sizing wants to avoid mistaking a legitimately parked
- * member for a missing one. A member parked on the standard 1800s
- * `events:await` makes no call for a full 30 minutes while productively holding
- * its seat, so a 30-minute sizing window would read it as absent and the
- * governor would spawn a replacement for a seat that is already filled — the
- * exact churn this constant exists to stop. Over-counting costs a fleet that
- * runs slightly light for up to an hour; under-counting costs perpetual
- * relaunch churn that re-burns quota on every boot and worsens the real
- * constraint. Detection of a genuinely wedged member is NOT this signal's job:
- * `fleet:leader-brief`'s WI-583276 alert owns it, on its own tighter window.
- */
-export const FLEET_HEADCOUNT_EXECUTION_WINDOW_MS = 60 * 60_000;
+// How far back a call still attests that a live member seat is productive. The
+// rule that applies it (a pending non-keepalive await also counts) and why it
+// replaced the old 60-minute window live beside the constant.
+import { FLEET_MEMBER_SILENCE_THRESHOLD_MS } from './fleet/member-silence-threshold';
+import {
+  parseFleetTopUpRule,
+  resolveFleetHeadcountHeld,
+  type FleetHeadcountGovernance,
+  type FleetHeadcountNotHeldReason,
+  type FleetTopUpRule,
+  type ResolvedFleetTopUpRule,
+} from './fleet/top-up-rule';
+export { FLEET_MEMBER_SILENCE_THRESHOLD_MS };
 
 /** The exact population behind `FleetHeadcountState.current`.
  *
@@ -488,6 +497,13 @@ export interface FleetHeadcountState {
   shortfall: number | null;
   underStrength: boolean | null;
   verdict: FleetHeadcountVerdict;
+  /** P-005 / D-030: will the governor actually restore this fleet? `target` and
+   * `verdict` describe a number; only this says whether anyone is acting on it.
+   * null when the governance facts were not supplied or could not be read. */
+  held: boolean | null;
+  notHeldBecause: FleetHeadcountNotHeldReason | null;
+  /** The fleet's no-top-up rule, resolved against the current leader and clock. */
+  topUpRule: ResolvedFleetTopUpRule | null;
   basis: FleetHeadcountBasis;
   countEvidence: {
     productive: CountEvidence | null;
@@ -500,6 +516,8 @@ export interface FleetHeadcountState {
 export interface FleetHeadcountObservation {
   measuredAt?: string;
   scope?: Record<string, CountContractDimension>;
+  /** P-005 / D-030: supply to resolve `held` / `notHeldBecause` / `topUpRule`. */
+  governance?: FleetHeadcountGovernance;
 }
 
 function buildFleetHeadcountCountEvidence(
@@ -582,43 +600,44 @@ function buildFleetHeadcountCountEvidence(
     metricDefinition: 'the population used to size productive fleet capacity',
     populationId:
       basis.kind === 'agent-origin-execution-attested'
-        ? 'live-roster-recent-execution-intersection'
+        ? 'live-roster-non-silent-intersection'
         : 'legacy-live-roster-fallback',
     populationSelector:
       basis.kind === 'agent-origin-execution-attested'
         ? {
             liveSource: 'liveFleetMemberIds(mode=launch)',
             executionSources: ['harness_shared.tool_invocations(call_origin=agent)', 'harness_shared.agent_activity'],
+            waitSource: 'harness_shared.event_awaits(pending, unexpired, excluding coord:inbox-wake keepalive)',
           }
         : { source: 'liveFleetMemberIds', mode: 'launch', legacyFallback: true },
     populationDefinition:
       basis.kind === 'agent-origin-execution-attested'
-        ? 'live non-leader fleet members with recent execution in either authoritative tool ledger'
+        ? 'live non-leader fleet members that are not silent: a call in either tool ledger within the threshold, or parked on a declared await; in a paused fleet every live member'
         : 'legacy fleet live roster used only when no worker-attestation contract exists',
     cutoff:
       basis.kind === 'agent-origin-execution-attested'
         ? {
             kind: 'rolling-window',
             field: 'agent-origin-or-native-tool-activity',
-            durationMs: FLEET_HEADCOUNT_EXECUTION_WINDOW_MS,
+            durationMs: FLEET_MEMBER_SILENCE_THRESHOLD_MS,
             end: 'measuredAt',
           }
         : { kind: 'none' },
     statusId:
       basis.kind === 'agent-origin-execution-attested'
-        ? 'recently-executing-live-member'
+        ? 'non-silent-live-member'
         : 'legacy-live-roster-member',
     statusDefinition:
       basis.kind === 'agent-origin-execution-attested'
-        ? 'member is live and appears in either execution ledger during the rolling window'
+        ? 'member is live and either appears in an execution ledger during the window or holds a pending declared await; heartbeats alone never qualify'
         : 'member is live in a legacy fleet with no modern worker contract',
     writerId:
       basis.kind === 'agent-origin-execution-attested'
-        ? 'executingOwnersSince+measureFleetProductiveHeadcount'
+        ? 'readFleetMemberSilence+measureFleetProductiveHeadcount'
         : 'measureFleetProductiveHeadcount/legacy-live-roster-fallback',
     zeroMeaning:
       basis.kind === 'agent-origin-execution-attested'
-        ? 'no live members emitted observable execution during the rolling window; this is not a transaction-ready count'
+        ? 'every live member was silent for the threshold (heartbeats only, no declared await); this is not a transaction-ready count'
         : 'the legacy live roster contains no members',
     axis: 'productive',
   });
@@ -649,6 +668,7 @@ export function projectFleetHeadcountState(
     transaction,
     observation,
   );
+  const governed = resolveFleetHeadcountHeld(profile, observation?.governance);
   if (profile === undefined) {
     return {
       enabled: null,
@@ -657,6 +677,7 @@ export function projectFleetHeadcountState(
       shortfall: null,
       underStrength: null,
       verdict: 'unknown',
+      ...governed,
       basis,
       countEvidence,
     };
@@ -669,6 +690,7 @@ export function projectFleetHeadcountState(
       shortfall: null,
       underStrength: null,
       verdict: 'disabled',
+      ...governed,
       basis,
       countEvidence,
     };
@@ -681,6 +703,7 @@ export function projectFleetHeadcountState(
       shortfall: null,
       underStrength: null,
       verdict: 'unknown',
+      ...governed,
       basis,
       countEvidence,
     };
@@ -693,6 +716,7 @@ export function projectFleetHeadcountState(
     shortfall,
     underStrength: shortfall > 0,
     verdict: shortfall > 0 ? 'under-strength' : 'at-target',
+    ...governed,
     basis,
     countEvidence,
   };
@@ -723,6 +747,7 @@ interface FleetRow {
   description: string | null;
   owner: string | null;
   leader_owner_id: string | null;
+  leader_missing_since_ms?: string | number | null;
   color_scheme: string | null;
   fleet_type: string | null;
   control_state: string | null;
@@ -749,6 +774,7 @@ function rowToRecord(r: FleetRow): AgentFleetRecord {
     description: r.description,
     owner: r.owner,
     leaderOwnerId: r.leader_owner_id,
+    leaderMissingSinceMs: r.leader_missing_since_ms == null ? null : Number(r.leader_missing_since_ms),
     colorScheme: r.color_scheme,
     // Defensive: only the one non-default state is honored; anything else
     // (legacy null, a hand-forged value) reads back 'active'.
@@ -798,7 +824,7 @@ function refreshDirectoryCard(
 // fleet_type is APPENDED (not slotted in beside color_scheme) so the positional
 // $N binds in createFleetIfAbsent's VALUES stay stable — the insert reads in
 // this exact order.
-const COLS = `workspace_id, fleet_slug, title, description, owner, leader_owner_id, color_scheme, control_state, control_reason, control_by, control_at, created_at, updated_at, fleet_type, control_resume_gate, control_expires_at, control_no_resume_path`;
+const COLS = `workspace_id, fleet_slug, title, description, owner, leader_owner_id, color_scheme, control_state, control_reason, control_by, control_at, created_at, updated_at, fleet_type, control_resume_gate, control_expires_at, control_no_resume_path, leader_missing_since_ms`;
 
 /**
  * Derive a stable fleet_slug from a user-entered fleet NAME. The original name
@@ -941,7 +967,7 @@ export async function createFleetIfAbsent(
     input.colorScheme ?? (await allocateSchemeForWorkspace(input.workspaceId, sql));
   const inserted = (await s.unsafe(
     `INSERT INTO harness_shared.agent_fleets (${COLS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NULL, NULL, NULL, $8, $8, $9, NULL, NULL, false)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', NULL, NULL, NULL, $8, $8, $9, NULL, NULL, false, NULL)
      ON CONFLICT (workspace_id, fleet_slug) DO NOTHING
      RETURNING ${COLS}`,
     [
@@ -986,13 +1012,127 @@ export async function setFleetLeader(
   const s = pg(sql);
   const rows = (await s.unsafe(
     `UPDATE harness_shared.agent_fleets
-        SET leader_owner_id = $3, updated_at = $4
+        SET leader_owner_id = $3, leader_missing_since_ms = NULL, updated_at = $4
       WHERE workspace_id = $1 AND fleet_slug = $2
         AND ($5::boolean = false OR leader_owner_id IS NOT DISTINCT FROM $6::text)
       RETURNING ${COLS}`,
     [workspaceId, fleetSlug, leaderOwnerId, Date.now(), expectedLeaderOwnerId !== undefined, expectedLeaderOwnerId ?? null],
   )) as unknown as FleetRow[];
   if (rows[0]) refreshDirectoryCard(workspaceId, fleetSlug, { sql });
+  return rows[0] ? rowToRecord(rows[0]) : null;
+}
+
+export interface MarkFleetLeaderMissingSinceInput {
+  workspaceId: string;
+  fleetSlug: string;
+  /** Registry value observed before the complete presence read. */
+  expectedLeaderOwnerId: string | null;
+  /** Registry version observed before the complete presence read. */
+  expectedUpdatedAtMs: number;
+  /** Epoch-ms from the first complete observation of this absence episode. */
+  observedAtMs: number;
+}
+
+/**
+ * Start a leader-absence grace period from a complete liveness observation.
+ * The caller must not invoke this for a partial/degraded roster. The expected
+ * leader, unchanged observation version, and empty absence clock are checked
+ * together, so an obsolete roster result cannot start a new absence episode.
+ */
+export async function markFleetLeaderMissingSince(
+  input: MarkFleetLeaderMissingSinceInput,
+  sql?: Sql,
+): Promise<AgentFleetRecord | null> {
+  if (!Number.isSafeInteger(input.expectedUpdatedAtMs) || !Number.isSafeInteger(input.observedAtMs)) {
+    throw new RangeError('fleet leader-missing timestamps must be safe integer epoch milliseconds');
+  }
+  const rows = (await pg(sql).unsafe(
+    `UPDATE harness_shared.agent_fleets
+        SET leader_missing_since_ms = $5, updated_at = GREATEST(updated_at, $5)
+      WHERE workspace_id = $1 AND fleet_slug = $2
+        AND leader_owner_id IS NOT DISTINCT FROM $3::text
+        AND updated_at = $4::bigint
+        AND leader_missing_since_ms IS NULL
+      RETURNING ${COLS}`,
+    [input.workspaceId, input.fleetSlug, input.expectedLeaderOwnerId, input.expectedUpdatedAtMs, input.observedAtMs],
+  )) as unknown as FleetRow[];
+  return rows[0] ? rowToRecord(rows[0]) : null;
+}
+
+export interface ClearFleetLeaderMissingSinceInput {
+  workspaceId: string;
+  fleetSlug: string;
+  expectedLeaderOwnerId: string | null;
+  expectedLeaderMissingSinceMs: number;
+  expectedUpdatedAtMs: number;
+  observedAtMs: number;
+}
+
+/** Clear an absence episode only when the leader, clock, and row version still
+ * match the values seen by the caller's complete liveness read. */
+export async function clearFleetLeaderMissingSince(
+  input: ClearFleetLeaderMissingSinceInput,
+  sql?: Sql,
+): Promise<AgentFleetRecord | null> {
+  if (!Number.isSafeInteger(input.expectedLeaderMissingSinceMs) ||
+      !Number.isSafeInteger(input.expectedUpdatedAtMs) ||
+      !Number.isSafeInteger(input.observedAtMs)) {
+    throw new RangeError('fleet leader-missing timestamps must be safe integer epoch milliseconds');
+  }
+  const rows = (await pg(sql).unsafe(
+    `UPDATE harness_shared.agent_fleets
+        SET leader_missing_since_ms = NULL, updated_at = GREATEST(updated_at, $5)
+      WHERE workspace_id = $1 AND fleet_slug = $2
+        AND leader_owner_id IS NOT DISTINCT FROM $3::text
+        AND leader_missing_since_ms = $4::bigint
+        AND updated_at = $6::bigint
+      RETURNING ${COLS}`,
+    [input.workspaceId, input.fleetSlug, input.expectedLeaderOwnerId,
+      input.expectedLeaderMissingSinceMs, input.observedAtMs, input.expectedUpdatedAtMs],
+  )) as unknown as FleetRow[];
+  return rows[0] ? rowToRecord(rows[0]) : null;
+}
+
+export interface PromoteFleetLeaderIfMissingInput {
+  workspaceId: string;
+  fleetSlug: string;
+  expectedLeaderOwnerId: string | null;
+  expectedLeaderMissingSinceMs: number;
+  expectedUpdatedAtMs: number;
+  replacementLeaderOwnerId: string;
+  nowMs: number;
+  graceMs: number;
+}
+
+/**
+ * Promote a live successor only after the stored first-seen absence clock has
+ * aged past the grace period. Leader identity, first-seen timestamp, and the
+ * grace threshold are a single PostgreSQL compare-and-swap predicate.
+ */
+export async function promoteFleetLeaderIfMissing(
+  input: PromoteFleetLeaderIfMissingInput,
+  sql?: Sql,
+): Promise<AgentFleetRecord | null> {
+  if (!Number.isSafeInteger(input.expectedLeaderMissingSinceMs) ||
+      !Number.isSafeInteger(input.expectedUpdatedAtMs) ||
+      !Number.isSafeInteger(input.nowMs) ||
+      !Number.isSafeInteger(input.graceMs) || input.graceMs < 0) {
+    throw new RangeError('fleet leader succession requires safe epoch milliseconds and a non-negative grace period');
+  }
+  const rows = (await pg(sql).unsafe(
+    `UPDATE harness_shared.agent_fleets
+        SET leader_owner_id = $4, leader_missing_since_ms = NULL, updated_at = $5
+      WHERE workspace_id = $1 AND fleet_slug = $2
+        AND leader_owner_id IS NOT DISTINCT FROM $3::text
+        AND leader_missing_since_ms = $6::bigint
+        AND leader_missing_since_ms <= $5::bigint - $7::bigint
+        AND updated_at = $8::bigint
+      RETURNING ${COLS}`,
+    [input.workspaceId, input.fleetSlug, input.expectedLeaderOwnerId,
+      input.replacementLeaderOwnerId, input.nowMs, input.expectedLeaderMissingSinceMs, input.graceMs,
+      input.expectedUpdatedAtMs],
+  )) as unknown as FleetRow[];
+  if (rows[0]) refreshDirectoryCard(input.workspaceId, input.fleetSlug, { sql });
   return rows[0] ? rowToRecord(rows[0]) : null;
 }
 
@@ -1391,29 +1531,140 @@ export async function setFleetHeadcountTarget(opts: {
   fleetSlug: string;
   target: number | null;
   config?: FleetHeadcountConfig;
+  /** P-005 / D-030: the no-top-up rule this write ratifies. A write WITHOUT one
+   * clears any stored rule: re-arming ends a rule, and a system disarm (terminal
+   * plan) must never leave a rule whose lapse would re-arm a finished fleet. */
+  topUpRule?: FleetTopUpRule;
   sql?: Sql;
 }): Promise<void> {
   const s = pg(opts.sql);
   if (opts.target == null) {
+    // The rule rides the PRESERVED recipe: a disabled row keeps headcount_config
+    // for takeover/respawn, so `||` merges into it and `-` strips from it. A row
+    // with no recipe has nothing a rule could ever restore, so it stays NULL.
+    // Only an OBJECT recipe is edited: on a jsonb scalar `-` throws and `||`
+    // wraps both sides into an array, so any other shape is left as it was.
+    // `$4::text::jsonb` (not `$4::jsonb`): see the non-null branch below.
     await s.unsafe(
       `UPDATE harness_shared.agent_fleets
           SET headcount_target = NULL,
+              headcount_config = CASE
+                WHEN headcount_config IS NULL OR jsonb_typeof(headcount_config) <> 'object' THEN headcount_config
+                WHEN $4::text IS NULL THEN headcount_config - 'topUpRule'
+                ELSE headcount_config || jsonb_build_object('topUpRule', $4::text::jsonb)
+              END,
               headcount_next_attempt_at = NULL, headcount_backoff_ms = 0,
               headcount_last_error = NULL, updated_at = $3
         WHERE workspace_id = $1 AND fleet_slug = $2`,
-      [opts.workspaceId, opts.fleetSlug, Date.now()],
+      [opts.workspaceId, opts.fleetSlug, Date.now(), opts.topUpRule ? JSON.stringify(opts.topUpRule) : null],
     );
     return;
   }
   if (!opts.config) throw new Error('headcount target requires a launch configuration');
+  const { topUpRule: _staleRule, ...rest } = normalizeFleetHeadcountConfig(opts.config);
+  const config: FleetHeadcountConfig = opts.topUpRule ? { ...rest, topUpRule: opts.topUpRule } : rest;
+  // `$4::text::jsonb`, never `$4::jsonb`: a client that learns the parameter's
+  // type (the test fixture's does) JSON-encodes the already-stringified recipe a
+  // second time, storing a jsonb STRING scalar that every jsonb operator above
+  // then misreads. Typed as text, every client sends the raw string and the
+  // server parses it into an object.
   await s.unsafe(
     `UPDATE harness_shared.agent_fleets
-        SET headcount_target = $3, headcount_config = $4::jsonb,
+        SET headcount_target = $3, headcount_config = $4::text::jsonb,
             headcount_next_attempt_at = NULL, headcount_backoff_ms = 0,
             headcount_last_error = NULL, updated_at = $5
       WHERE workspace_id = $1 AND fleet_slug = $2`,
-    [opts.workspaceId, opts.fleetSlug, opts.target, JSON.stringify(normalizeFleetHeadcountConfig(opts.config)), Date.now()],
+    [opts.workspaceId, opts.fleetSlug, opts.target, JSON.stringify(config), Date.now()],
   );
+}
+
+/** One fleet whose no-top-up rule has passed its `until`. */
+export interface ExpiredFleetTopUpRule {
+  workspaceId: string;
+  fleetSlug: string;
+  rule: FleetTopUpRule;
+  config: FleetHeadcountConfig;
+}
+
+/**
+ * P-005 / D-030: rules past their `until` on fleets that are not winding down.
+ * A malformed rule is not listed (it cannot be trusted to restore anything); the
+ * read surfaces already report it as an expired, malformed rule.
+ */
+export async function listExpiredFleetTopUpRules(
+  workspaceId: string,
+  now: number,
+  sql?: Sql,
+): Promise<ExpiredFleetTopUpRule[]> {
+  const s = pg(sql);
+  const rows = (await s.unsafe(
+    `SELECT workspace_id, fleet_slug, headcount_config
+       FROM harness_shared.agent_fleets
+      WHERE workspace_id = $1
+        AND headcount_config ? 'topUpRule'
+        AND control_state IS DISTINCT FROM 'winding-down'
+        AND jsonb_typeof(headcount_config->'topUpRule'->'until') = 'number'
+        AND (headcount_config->'topUpRule'->>'until')::numeric <= $2
+      ORDER BY updated_at ASC`,
+    [workspaceId, now],
+  )) as unknown as Array<{ workspace_id: string; fleet_slug: string; headcount_config: unknown }>;
+  const out: ExpiredFleetTopUpRule[] = [];
+  for (const row of rows) {
+    const raw = typeof row.headcount_config === 'string' ? JSON.parse(row.headcount_config) : row.headcount_config;
+    const rule = parseFleetTopUpRule((raw as { topUpRule?: unknown } | null)?.topUpRule);
+    if (!rule) continue;
+    out.push({
+      workspaceId: row.workspace_id,
+      fleetSlug: row.fleet_slug,
+      rule,
+      config: normalizeFleetHeadcountConfig(raw as Record<string, unknown>),
+    });
+  }
+  return out;
+}
+
+/**
+ * P-005 / D-030: end one expired rule. `restore:true` puts back what the rule
+ * suspended (the target for 'target-disabled', the supervise grant for either
+ * kind) so the governor holds the fleet again; `restore:false` only clears the
+ * rule (used when the fleet's plan is terminal). Compare-and-set on the rule's
+ * `until`: a re-ratification that lands first wins and this write is a no-op.
+ * Returns whether this call ended the rule.
+ */
+export async function lapseFleetTopUpRule(opts: {
+  workspaceId: string;
+  fleetSlug: string;
+  expectedUntil: number;
+  restore: boolean;
+  now?: number;
+  sql?: Sql;
+}): Promise<boolean> {
+  const s = pg(opts.sql);
+  const rows = (await s.unsafe(
+    `UPDATE harness_shared.agent_fleets
+        SET headcount_target = CASE
+              WHEN $4::boolean
+               AND headcount_config->'topUpRule'->>'kind' = 'target-disabled'
+               AND jsonb_typeof(headcount_config->'topUpRule'->'suspendedTarget') = 'number'
+                THEN (headcount_config->'topUpRule'->>'suspendedTarget')::int
+              ELSE headcount_target
+            END,
+            headcount_config = (headcount_config - 'topUpRule') || CASE
+              WHEN $4::boolean
+               AND jsonb_typeof(headcount_config->'topUpRule'->'suspendedSupervise') = 'boolean'
+                THEN jsonb_build_object('supervise', headcount_config->'topUpRule'->'suspendedSupervise')
+              ELSE '{}'::jsonb
+            END,
+            headcount_next_attempt_at = NULL, headcount_backoff_ms = 0,
+            headcount_last_error = NULL, updated_at = $5
+      WHERE workspace_id = $1 AND fleet_slug = $2
+        AND control_state IS DISTINCT FROM 'winding-down'
+        AND jsonb_typeof(headcount_config->'topUpRule'->'until') = 'number'
+        AND (headcount_config->'topUpRule'->>'until')::numeric = $3
+      RETURNING fleet_slug`,
+    [opts.workspaceId, opts.fleetSlug, opts.expectedUntil, opts.restore, opts.now ?? Date.now()],
+  )) as unknown as Array<{ fleet_slug: string }>;
+  return rows.length > 0;
 }
 
 function headcountRowToTarget(r: {

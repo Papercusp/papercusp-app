@@ -8,6 +8,8 @@
  * exact contract.
  */
 
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
+
 export type DelegatedSeatTrustMode = 'trusted-host-agent' | 'untrusted-public';
 export type DelegatedCredentialRoute = 'default' | 'auto' | 'pinned';
 
@@ -103,7 +105,17 @@ export type DelegatedSeatPolicyEvaluation =
         stopControl: 'resource:delegate remove + fleet stop';
       };
     }
-  | { ok: false; code: string; detail: string };
+  | {
+      ok: false;
+      code: string;
+      detail: string;
+      /**
+       * WI-10005197: what would LIFT this refusal. Present on the allowlist refusals — the ones
+       * a host operator can lift by editing PAPERCUSP_DELEGATED_SEAT_POLICY. The caps and shape
+       * errors lift on the request side and carry no host lever, so they stay un-contracted.
+       */
+      refusal?: RefusalContract;
+    };
 
 export function evaluateDelegatedSeatPolicy(input: {
   policy: DelegatedSeatPolicy;
@@ -126,17 +138,72 @@ export function evaluateDelegatedSeatPolicy(input: {
     };
   }
   if (policy.allowedWorkspaceIds && !policy.allowedWorkspaceIds.includes(input.workspaceId)) {
-    return { ok: false, code: 'workspace_not_allowed', detail: `workspace '${input.workspaceId}' is outside the host delegated-seat allowlist` };
+    return {
+      ok: false,
+      code: 'workspace_not_allowed',
+      detail: `workspace '${input.workspaceId}' is outside the host delegated-seat allowlist`,
+      refusal: {
+        observed: { workspaceId: input.workspaceId, allowlistSize: String(policy.allowedWorkspaceIds.length) },
+        liftsWhen:
+          'the requesting workspace is in this host\'s allowedWorkspaceIds, or the allowlist is cleared. ' +
+          'Retrying the same request cannot lift it: the HOST operator edits PAPERCUSP_DELEGATED_SEAT_POLICY ' +
+          'and restarts the operator, or the requester delegates from an already-allowed workspace',
+        whoCanMakeItTrue: ['host', 'owner'],
+      },
+    };
   }
   if (policy.allowedRepoIds) {
     if (!input.repoId) return { ok: false, code: 'repo_scope_unavailable', detail: 'the host policy requires a repository identity, but this delegated request carries none' };
-    if (!policy.allowedRepoIds.includes(input.repoId)) return { ok: false, code: 'repo_not_allowed', detail: `repository '${input.repoId}' is outside the host delegated-seat allowlist` };
+    if (!policy.allowedRepoIds.includes(input.repoId)) {
+      return {
+        ok: false,
+        code: 'repo_not_allowed',
+        detail: `repository '${input.repoId}' is outside the host delegated-seat allowlist`,
+        refusal: {
+          observed: { repoId: input.repoId, allowlistSize: String(policy.allowedRepoIds.length) },
+          liftsWhen:
+            'the delegated request\'s repository is in this host\'s allowedRepoIds, or the allowlist is cleared. ' +
+            'Retrying cannot lift it: the HOST operator edits PAPERCUSP_DELEGATED_SEAT_POLICY and restarts ' +
+            'the operator, or the requester delegates work on an already-allowed repository',
+          whoCanMakeItTrue: ['host', 'owner'],
+        },
+      };
+    }
   }
   if (policy.allowedTools && (input.requestedTools == null || input.requestedTools.some((tool) => !policy.allowedTools!.includes(tool)))) {
-    return { ok: false, code: 'tools_not_allowed', detail: 'the host policy requires an allowed tool set, but the delegated request does not prove it' };
+    const outside = (input.requestedTools ?? []).filter((tool) => !policy.allowedTools!.includes(tool));
+    return {
+      ok: false,
+      code: 'tools_not_allowed',
+      detail: 'the host policy requires an allowed tool set, but the delegated request does not prove it',
+      refusal: {
+        observed: {
+          requestedTools: input.requestedTools == null ? null : String(input.requestedTools.length),
+          toolsOutsideAllowlist: input.requestedTools == null ? null : outside.join(','),
+          allowlistSize: String(policy.allowedTools.length),
+        },
+        liftsWhen:
+          'the request declares its tool set AND every declared tool is in this host\'s allowedTools. ' +
+          'A request that declares no tool set is refused under an allowlist: the requester re-sends with an ' +
+          'explicit requestedTools subset, or the HOST operator widens allowedTools in PAPERCUSP_DELEGATED_SEAT_POLICY',
+        whoCanMakeItTrue: ['another-agent', 'host', 'owner'],
+      },
+    };
   }
   if (!policy.allowedCredentialRoutes.includes(input.credentialRoute)) {
-    return { ok: false, code: 'credential_route_not_allowed', detail: `credential route '${input.credentialRoute}' is not allowed by the host delegated-seat policy` };
+    return {
+      ok: false,
+      code: 'credential_route_not_allowed',
+      detail: `credential route '${input.credentialRoute}' is not allowed by the host delegated-seat policy`,
+      refusal: {
+        observed: { credentialRoute: input.credentialRoute, allowedRoutes: policy.allowedCredentialRoutes.join(',') },
+        liftsWhen:
+          'the request\'s credential route (default, auto or pinned) is among this host\'s ' +
+          'allowedCredentialRoutes. Retrying cannot lift it: the requester re-launches on an allowed route, ' +
+          'or the HOST operator adds the route in PAPERCUSP_DELEGATED_SEAT_POLICY',
+        whoCanMakeItTrue: ['another-agent', 'host', 'owner'],
+      },
+    };
   }
   if (!Number.isSafeInteger(input.requestedSeats) || input.requestedSeats < 1) {
     return { ok: false, code: 'invalid_seat_count', detail: 'requested delegated seat count must be a positive integer' };

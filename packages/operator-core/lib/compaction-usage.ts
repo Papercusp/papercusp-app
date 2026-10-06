@@ -14,6 +14,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pinModuleState } from '@papercusp/module-singleton';
 import { findSessionTranscript, papercuspSessionClaudeBase, newestTranscriptUnderOwner } from './claude-sessions';
 import { findCodexRolloutPath, findCodexRolloutPathByUuid } from './session-transcript-resolvers';
 import { codexHomeForSessionKey } from '@papercusp/orchestrator/session-launch-dirs';
@@ -64,19 +65,77 @@ export interface CodexContextSnapshot {
  * last_token_usage; cumulative total_token_usage is deliberately ignored. */
 const CODEX_TOKEN_TAIL_BYTES = 1024 * 1024;
 
-export function codexContextSnapshotFromRollout(pathStr: string): CodexContextSnapshot | null {
+/**
+ * WI-10005305: the compaction-compliance sweep asks for the same rollout twice
+ * (tokens, then window) and again every sweep, while most rollouts have not
+ * changed since the previous read. It used to re-read the 1 MiB tail
+ * synchronously each time (~2.25 reads/s, ~2.5% of bg-host's main thread,
+ * measured under P-017). The last parsed snapshot is kept per path and reused
+ * while (size, mtimeMs, ino) is unchanged: Codex only appends to a rollout, so
+ * any new token_count event changes `size`, and a file replaced by rename
+ * changes `ino`. Only completed reads are remembered; an error is never cached.
+ */
+const CODEX_SNAPSHOT_MEMO_MAX = 512;
+interface CodexSnapshotMemoEntry {
+  size: number;
+  mtimeMs: number;
+  ino: number;
+  snapshot: CodexContextSnapshot | null;
+}
+const codexSnapshotMemo = pinModuleState<{ byPath: Map<string, CodexSnapshotMemoEntry> }>(
+  '@papercusp/operator-core.compaction-usage.codexSnapshotMemo',
+  () => ({ byPath: new Map() }),
+);
+
+function rememberCodexSnapshot(pathStr: string, entry: CodexSnapshotMemoEntry): void {
+  const byPath = codexSnapshotMemo.byPath;
+  byPath.delete(pathStr); // re-insert at the newest position (Map keeps insertion order)
+  byPath.set(pathStr, entry);
+  while (byPath.size > CODEX_SNAPSHOT_MEMO_MAX) {
+    const oldest = byPath.keys().next().value;
+    if (oldest === undefined) break;
+    byPath.delete(oldest);
+  }
+}
+
+export async function codexContextSnapshotFromRollout(
+  pathStr: string,
+  fileOps: Pick<typeof fs.promises, 'stat' | 'open'> = fs.promises,
+): Promise<CodexContextSnapshot | null> {
   try {
-    const size = fs.statSync(pathStr).size;
-    const start = Math.max(0, size - CODEX_TOKEN_TAIL_BYTES);
-    const fd = fs.openSync(pathStr, 'r');
-    let text: string;
-    try {
-      const buf = Buffer.alloc(size - start);
-      fs.readSync(fd, buf, 0, buf.length, start);
-      text = buf.toString('utf8');
-    } finally {
-      fs.closeSync(fd);
+    const st = await fileOps.stat(pathStr);
+    const memo = codexSnapshotMemo.byPath.get(pathStr);
+    if (memo && memo.size === st.size && memo.mtimeMs === st.mtimeMs && memo.ino === st.ino) {
+      rememberCodexSnapshot(pathStr, memo);
+      return memo.snapshot;
     }
+    const start = Math.max(0, st.size - CODEX_TOKEN_TAIL_BYTES);
+    const fh = await fileOps.open(pathStr, 'r');
+    let text: string;
+    let complete: boolean;
+    try {
+      const buf = Buffer.alloc(st.size - start);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, start);
+      complete = bytesRead === buf.length;
+      text = buf.toString('utf8', 0, bytesRead);
+    } finally {
+      await fh.close();
+    }
+    const snapshot = codexContextSnapshotFromText(text);
+    // A short read means the file shrank after the stat; the result does not
+    // describe the stat'ed contents, so it is returned but not remembered.
+    if (complete) {
+      rememberCodexSnapshot(pathStr, { size: st.size, mtimeMs: st.mtimeMs, ino: st.ino, snapshot });
+    }
+    return snapshot;
+  } catch {
+    return null;
+  }
+}
+
+/** Newest valid token_count snapshot in a rollout tail (pure; the tail may begin mid-line). */
+export function codexContextSnapshotFromText(text: string): CodexContextSnapshot | null {
+  try {
     const lines = text.split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i]?.trim();
@@ -325,7 +384,7 @@ async function codexSnapshotForRef(
   if (ref.agent !== 'codex' || ref.sessionKey == null) return null;
   try {
     const rollout = await resolveCodexRolloutPathForRef(ref, ownerId, deps);
-    return rollout ? codexContextSnapshotFromRollout(rollout) : null;
+    return rollout ? await codexContextSnapshotFromRollout(rollout) : null;
   } catch {
     return null;
   }
@@ -468,15 +527,18 @@ function toolUseResultExcessIn(visible: string, skip?: (i: number) => boolean): 
  * stat-only; larger ones scan a bounded tail for the last compaction-summary
  * entry and count from there.
  */
-export function tokensFromFileSize(pathStr: string): number | null {
+export async function tokensFromFileSize(
+  pathStr: string,
+  fileOps: Pick<typeof fs.promises, 'stat' | 'open'> = fs.promises,
+): Promise<number | null> {
   try {
-    const size = fs.statSync(pathStr).size;
+    const size = (await fileOps.stat(pathStr)).size;
     if (size < BOUNDARY_SCAN_MIN) return Math.floor(size / 4);
     const start = Math.max(0, size - BOUNDARY_SCAN_CAP);
-    const fd = fs.openSync(pathStr, 'r');
+    const fd = await fileOps.open(pathStr, 'r');
     try {
       const buf = Buffer.alloc(size - start);
-      fs.readSync(fd, buf, 0, buf.length, start);
+      await fd.read(buf, 0, buf.length, start);
       const idx = buf.lastIndexOf(COMPACT_BOUNDARY_MARKER);
       // EI-10434: idx===-1 means "no marker in the SCANNED window [start, size)",
       // not "no marker in the whole file" — for a file bigger than
@@ -518,7 +580,7 @@ export function tokensFromFileSize(pathStr: string): number | null {
         Math.floor((sinceBytes - imageExcess - tureExcess - snapshotExcess) / 4),
       );
     } finally {
-      fs.closeSync(fd);
+      await fd.close();
     }
   } catch {
     return null;
@@ -829,10 +891,29 @@ async function servedRouteBoundToRef(
 }
 
 /** The hard window of a served route: 1M when the beta was forwarded, else the 200k default.
- *  Null when the route is unknown or its gateway predates the `context1m` field (never guess). */
+ *  Null when the route is unknown or its gateway predates the `context1m` field (never guess).
+ *
+ *  WI-10006049: OBSERVED USAGE OUTRANKS THE FLAG. A request whose real input (exact
+ *  `inputTotal`, or the prompt floor) exceeded 200k was by construction served by a window
+ *  larger than 200k — whatever the `context1m` flag of the latest request says. Without this,
+ *  one 200k-flagged request (a bare `/model` menu pick on Claude Code 2.1.289, or a CLI
+ *  rate-limit fallback) re-seeded a session that was already holding >200k at 158k, below its
+ *  own fixed-prompt floor, and the watchdog respawned it on every turn (8 respawns in an hour,
+ *  2026-10-05). Usage can only RAISE the window, never lower it.
+ *
+ *  Only a reading taken ON THE REQUEST THE FLAG DESCRIBES counts (`usage.at >= route.at`: the
+ *  gateway stamps the route on response headers and the usage on that response's
+ *  `message_start`). A reading carried over from an EARLIER request proves nothing about the
+ *  current one: the da701a71 death (2026-09-02) was a 248,703-token session whose CLI fell back
+ *  to a bare 200k model, so the window really was 200k and every later request failed — that
+ *  session must still read 200k so the watchdog rescues it. */
 export function servedWindowForRoute(route: GatewayServedRoute | null | undefined): number | null {
   if (!route?.model || route.context1m == null) return null;
-  return route.context1m ? MODEL_WINDOW_1M : MODEL_WINDOW_DEFAULT;
+  if (route.context1m) return MODEL_WINDOW_1M;
+  const usage = route.usage;
+  const sameRequest = usage != null && route.at != null && usage.at >= route.at;
+  const observed = sameRequest ? usage.inputTotal : 0;
+  return Number.isFinite(observed) && observed > MODEL_WINDOW_DEFAULT ? MODEL_WINDOW_1M : MODEL_WINDOW_DEFAULT;
 }
 
 /**
@@ -900,8 +981,11 @@ export async function resolveSessionRefReconciled(
             return nativeId ? { nativeId, atMs: null } : null;
           })()
         : await (async () => {
-            const { latestRespawnNativeSession } = await import('./events/await/psu-pty-discovery');
-            return latestRespawnNativeSession(ownerId, undefined, { allowWithoutHost: !ref });
+            // ASYNC on purpose (WI-10005220): this runs per owner on bg-host's sweeps, and the
+            // sync form's stat/read in the shared psu-pty dir froze the event loop 0.6-2.0 s
+            // per call whenever the ext4 journal stalled.
+            const { latestRespawnNativeSessionAsync } = await import('./events/await/psu-pty-discovery');
+            return latestRespawnNativeSessionAsync(ownerId, undefined, { allowWithoutHost: !ref });
           })();
     const respawnNewerThanRef =
       hostRespawn?.atMs == null ||
@@ -1543,15 +1627,15 @@ async function readLiveClaudeTranscriptTail(ownerId: string, bytes: number): Pro
       owner: ref.transcriptOwner === undefined ? ownerId : ref.transcriptOwner,
     });
     if (!p) return null;
-    const size = fs.statSync(p).size;
+    const size = (await fs.promises.stat(p)).size;
     const start = Math.max(0, size - bytes);
-    const fd = fs.openSync(p, 'r');
+    const fd = await fs.promises.open(p, 'r');
     try {
       const buf = Buffer.alloc(size - start);
-      fs.readSync(fd, buf, 0, buf.length, start);
+      await fd.read(buf, 0, buf.length, start);
       return buf.toString('utf8');
     } finally {
-      fs.closeSync(fd);
+      await fd.close();
     }
   } catch {
     return null;

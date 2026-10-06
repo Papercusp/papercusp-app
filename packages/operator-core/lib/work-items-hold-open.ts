@@ -164,6 +164,14 @@ export async function reclaimStaleHoldOpens(
         FROM harness_shared.work_items w
        WHERE w.payload->>'held_open_by' IS NOT NULL
          AND w.payload->>'held_open_by' <> ''
+         -- WI-10005173: (a)/(b) judge the holder from THIS node's presence, which knows
+         -- only this node's agents. A row whose latest write came from a federation peer
+         -- (origin='remote') carries a lease stamped by an agent this node can never see,
+         -- so lifting it here revokes a possibly-live peer lease and federates the
+         -- revocation back as a newer write (measured 2026-10-03: the Mac VM lifted a
+         -- LIVE tower agent's lease at exactly +2h). Only the node that last wrote the
+         -- row may judge its holder.
+         AND w.origin IS DISTINCT FROM 'remote'
          -- (a) no fresh heartbeat on any alias (the shared mig-225 liveness rule)
          AND NOT EXISTS (SELECT 1 FROM live_holder h WHERE h.alias = w.payload->>'held_open_by')
          -- (b) not a briefly-parked/resumable session (WI-2689 churn guard)
@@ -226,9 +234,21 @@ export async function isHoldOpenExpired(
   sql: Db,
   holder: string,
   heldOpenAt: string | null,
-  opts: { graceMs?: number; parkedGraceMs?: number; holdOpenGraceMs?: number } = {},
+  opts: {
+    graceMs?: number;
+    parkedGraceMs?: number;
+    holdOpenGraceMs?: number;
+    /** The held row's `origin`. 'remote' (last written by a federation peer) is never judged here. */
+    origin?: string | null;
+  } = {},
 ): Promise<boolean> {
   if (!holder.trim()) return false;
+  // WI-10005916 — the same rule as reclaimStaleHoldOpens (WI-10005173): this node's presence
+  // knows only this node's agents, so the holder of a PEER-WRITTEN row cannot be judged dead
+  // here. Report the hold as live (it stays enforced); the node that wrote the row judges its
+  // own holder, and that node's lift federates here. Otherwise a non-holder's terminal
+  // transition on this node would lift a live peer lease and federate the revocation back.
+  if (opts.origin === 'remote') return false;
   const graceSec = Math.max(1, Math.round((opts.graceMs ?? STALE_CLAIM_GRACE_MS) / 1000));
   const parkedGraceSec = Math.max(
     graceSec,

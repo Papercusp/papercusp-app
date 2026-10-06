@@ -33,6 +33,7 @@ import { resolveCtxHarnessSlug } from './_ctx-opts';
 import { resolvePlanScope } from './source';
 import { getPlanRevisionById } from './revisions';
 import { readPlanRunTranscript } from './runs';
+import { resolveAgentIdentity } from '../coordination/identity';
 import {
   isIndexedAgentSessionKind,
   readAgentSessionTranscript,
@@ -176,7 +177,17 @@ export default defineTool({
             revision.sessionKind as 'claude' | 'omp' | 'codex',
             revision.sessionId!,
             transcriptOpts,
+            // D-006: the caller sees its own restricted turns, nobody else's.
+            // An unresolvable caller owns nothing (fail closed), it is not an error.
+            [(() => {
+              try {
+                return resolveAgentIdentity(ctx as Parameters<typeof resolveAgentIdentity>[0]).ownerId;
+              } catch {
+                return null;
+              }
+            })()],
           );
+      const withheld = 'withheld' in page ? page.withheld : undefined;
       ctxAny.metadata?.({
         revisionId: revision.id,
         available: true,
@@ -192,6 +203,7 @@ export default defineTool({
               query: args.query ?? null,
               turns: page.turns,
               nextCursor: page.nextCursor,
+              ...(withheld ? { withheld } : {}),
             }),
           },
         ],

@@ -146,6 +146,8 @@ source "$HERE/lib/inno-spanned-server.sh"
 # producer is run directly or as a release-local child.
 # shellcheck source=lib/release-artifacts.sh
 source "$HERE/lib/release-artifacts.sh"
+# shellcheck source=lib/cargo-target-root.sh
+source "$HERE/lib/cargo-target-root.sh"
 # EI-20962889392870069: use the same bounded cooperative writer acquisition as
 # build-desktop-sidecar.sh. A long-lived tauri-guarded dev reader otherwise
 # pins this release staging block forever at a bare `flock 9`.
@@ -213,9 +215,7 @@ fi
 # release-local.sh uses. The disk preflight below reserves against THIS dir, which
 # is where the build writes — so the reservation lands on the same mount the Node
 # cargo admission gate (scripts/lib/cargo-result.mjs diskProbePathFor) reads.
-CARGO_TARGET_ROOT="$(cd "$SRC_TAURI" && cargo metadata --no-deps --format-version 1 2>/dev/null \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
-[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$SRC_TAURI/target"
+CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$SRC_TAURI")" || exit $?
 CROSS_EXE="$CARGO_TARGET_ROOT/$TARGET/release/papercusp-desktop.exe"
 
 # DISK PREFLIGHT (EI-20090527288494606) — a cross-compile plus Inno packing writes
@@ -729,7 +729,7 @@ exclusive — see the _WIN_CRT_STATIC comment above)."
   _audit_rc=$?
   set -e
   if [[ $_audit_rc -eq 2 ]]; then
-    fail "[$role] identity audit COULD NOT CHECK — it did NOT find a leak. Almost always: no owner-name literal resolved, because git user.name is unset or belongs to an automation. Export PAPERCUSP_RELEASE_OWNER_NAME (and PAPERCUSP_RELEASE_OWNER_EMAIL; both take a comma-separated list) and re-run. Read at run time — never write either into a file."
+    fail "[$role] identity audit COULD NOT CHECK — it did NOT find a leak. Inspect the preceding coverage error (missing tool, unreadable archive, or empty/missing scan target), fix it, and re-run."
   elif [[ $_audit_rc -ne 0 ]]; then
     fail "[$role] assembled Windows payload carries sensitive identity (see scan above) — refusing to package a leaky installer"
   fi
@@ -815,9 +815,12 @@ for _finished_installer in "${_FINISHED_INSTALLERS[@]}"; do
   if [[ "$(basename "$_finished_installer")" == "Papercusp Server_${VERSION}_x64-setup.exe" ]]; then
     _runtime_scan_args+=(--require-windows-server-runtime)
   fi
+  # --licenses (WI-10003906 / plan open-source-release-2026-09-29 D-002): license
+  # verdict over the same expanded installer tree. REPORT-ONLY by owner ruling —
+  # it prints LICENSE_GATE findings but never changes this exit code.
   set +e
   PAPERCUSP_INNOEXTRACT="$PAPERCUSP_INNOEXTRACT" \
-    python3 "$HERE/audit-release-bundle.py" --scan-artifact "${_runtime_scan_args[@]}" "$_finished_installer"
+    python3 "$HERE/audit-release-bundle.py" --scan-artifact --licenses "${_runtime_scan_args[@]}" "$_finished_installer"
   _artifact_rc=$?
   set -e
   if [[ $_artifact_rc -eq 2 ]]; then

@@ -49,7 +49,7 @@ import { pgLoopSessionStore } from '../../../agent-loop/session-store';
 import type { LoopTool } from '../../../agent-loop/loop';
 import { MODEL_EFFORT_LEVELS, SURFACE_KEYS, type SurfaceKey } from '../../../agent-config-constants';
 import { listPendingLoopApprovals, resolveLoopApproval } from '../../../agent-loop/approval-store';
-import { chatModelFailureFields } from '../../../chat-model-failure';
+import { chatModelFailureFields, safeChatFailureTranscriptFields } from '../../../chat-model-failure';
 import { taskOpsRoute } from './task-ops';
 import { suSessionRoutes } from './su-session';
 import externalTurnRoutes from './external-turns';
@@ -799,7 +799,7 @@ const messagesRoute = defineTool({
             // lane: a reload / second viewer must not see a silent gap.
             const failureTurn: TranscriptTurn = {
               role: 'assistant',
-              content: terminalError,
+              ...safeChatFailureTranscriptFields(terminalError),
               ts: new Date().toISOString(),
               engine: 'loop',
               model: effectiveModel,
@@ -808,7 +808,6 @@ const messagesRoute = defineTool({
               tokens_out: result.tokensOut,
               cost_cents: Math.round(result.costUsd * 100),
               ...(result.servedAccount ? { account_served: result.servedAccount } : {}),
-              error: true,
             };
             try {
               await harnessQuery(slug, (sql) =>
@@ -1042,12 +1041,11 @@ const messagesRoute = defineTool({
         if (failureMessage) {
           const failureTurn: TranscriptTurn = {
             role: 'assistant',
-            content: failureMessage,
+            ...safeChatFailureTranscriptFields(failureMessage),
             ts: new Date().toISOString(),
             tokens_in: 0,
             tokens_out: 0,
             cost_cents: 0,
-            error: true,
           };
           try {
             await harnessQuery(slug, (sql) =>

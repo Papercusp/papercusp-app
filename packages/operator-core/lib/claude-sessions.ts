@@ -16,7 +16,7 @@
  */
 
 import { promises as fs, readdirSync, statSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, relative, isAbsolute, sep } from 'node:path';
 import { homedir } from 'node:os';
 
 export function defaultClaudeProjectsRoot(): string {
@@ -372,6 +372,29 @@ export function extractCwdFromHead(head: string): string | null {
   }
 }
 
+/**
+ * The coord owner whose isolated CLAUDE_CONFIG_DIR holds `filePath`
+ * (<isolationBase>/<owner>/projects/<dir>/<session>.jsonl), or null for a file
+ * anywhere else (the global ~/.claude/projects root, an arbitrary path).
+ */
+export function transcriptOwnerFromPath(
+  filePath: string,
+  isolationBase: string = papercuspSessionClaudeBase(),
+): string | null {
+  const rel = relative(isolationBase, filePath);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
+  const parts = rel.split(sep);
+  if (parts.length < 3 || parts[1] !== 'projects' || !parts[0]) return null;
+  return parts[0];
+}
+
+/** The first record `timestamp` in a transcript's head, or null when none is readable. */
+export async function readTranscriptFirstTs(filePath: string): Promise<string | null> {
+  const head = await readHead(filePath).catch(() => '');
+  const m = /"timestamp"\s*:\s*"([^"\\]+)"/.exec(head);
+  return m ? m[1] : null;
+}
+
 interface TranscriptRecord {
   type?: string;
   cwd?: string;
@@ -549,6 +572,12 @@ export async function searchClaudeSessions(opts: {
   limit?: number;
   maxFilesScanned?: number;
   perFileMaxBytes?: number;
+  /**
+   * Narrows the scanned files BEFORE any content is read, so a session it
+   * drops can neither match nor shape the result (D-006: a decision that
+   * must not depend on the query). Called once with the bounded candidate set.
+   */
+  admit?: (candidates: ClaudeSessionMeta[]) => Promise<ClaudeSessionMeta[]>;
 }): Promise<{
   matches: ClaudeSessionMatch[];
   filesScanned: number;
@@ -565,7 +594,8 @@ export async function searchClaudeSessions(opts: {
   if (!query) return { matches: [], filesScanned: 0, filesTotal: 0, truncated: false, filesByteCapped: [] };
 
   const all = await allClaudeSessionMetas({ ...(opts.root ? { root: opts.root } : {}), ...(opts.roots ? { roots: opts.roots } : {}), ...(opts.cwd ? { cwd: opts.cwd } : {}) });
-  const candidates = all.slice(0, maxFiles); // newest-first, so a scan cap keeps the most-relevant
+  const bounded = all.slice(0, maxFiles); // newest-first, so a scan cap keeps the most-relevant
+  const candidates = opts.admit ? await opts.admit(bounded) : bounded;
   const q = query.toLowerCase();
   const matches: ClaudeSessionMatch[] = [];
   const filesByteCapped: string[] = [];

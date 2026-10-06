@@ -38,7 +38,8 @@ contributions:
     refresh: turn
     inputKind: setting
     ref: mode
-    producerRef: modes/store:agent_modes
+    producerRef: papercusp.mode-state@1
+    verb: read
 mode:
   id: drain
   policyRef: drain

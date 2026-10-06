@@ -111,6 +111,8 @@ Why this order: an amendment re-revisions the clauses it touches. Proof, adequac
 
 The gate follows this order. The acceptance gate's `NEXT REPAIR` line ranks contract-text codes first, then `bar_snapshot_vetting_missing` / `bar_snapshot_vetting_stale`, then proof, adequacy and grading codes (`ACCEPTANCE_BAR_REPAIR_ORDER`). `plans:bind-spec-evidence` still writes BAR proof bound to an unvetted revision, but its result carries an `acceptance_rubric_unvetted_before_proof` advisory. Treat that advisory as the cue to stop binding and vet first. Binding early stays legal; it is just the expensive order.
 
+**Re-binding proof after a clause or source change.** For test or mutation proof, bind the clean ledger row with `items:[{ fromTestRun, canonicalTestPath, sourcePaths }]`. Use a probe row with `worktree_dirty=false`, ideally run in an as-committed clone. Then retract the stale row with `retract:[{ bindingId, reason }]`. Operational proof cannot use `fromTestRun`, which derives only test, mutation and counterexample rows. Record the run with `testing:record-run` from a committed `docs/evidence/…json` (`schemaVersion:1`, kind `operational-test-evidence`). Then bind it with the single `binding` form: `testRunId`, `evidenceRef`, a top-level `measurement:{ schemaVersion:1, kind:'repo-files', sourcePaths }`, and `details.adequacy` with `collected`, `executed`, `skipped` and `outcome`. Pass `supersedeAtRevision:true` too. An operational binding without `testRunId` or those adequacy fields is still bound, but it does not supersede the old row.
+
 ## 4. Independent grading, then the implementer's verdict
 
 A non-implementer grades every criterion with concrete evidence:

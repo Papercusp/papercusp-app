@@ -156,6 +156,9 @@ export async function ensureLaunchedWakeAuto(
   const { fleetRole, launchedByAgent } = opts;
   if (fleetRole === 'leader') return null;
   if (fleetRole !== 'member' && !launchedByAgent) return null;
+  // Owner-set per-agent manual mode is stronger than launch immunity. Preserve
+  // that explicit pause; only an inherited global manual default is overridden.
+  if ((await getWakeModeOverride(ownerId)) === 'manual') return null;
   await setWakeMode(
     ownerId,
     'auto',
@@ -172,18 +175,31 @@ export async function resolveWakeMode(ownerId: string): Promise<WakeMode> {
 }
 
 /**
- * ALL per-agent overrides in one read, keyed by ownerId — for the roster, where
- * resolveWakeMode per agent would be N round-trips (P-008 badge). Agents without a
- * row fall back to the global default (resolve in-memory with getDefaultWakeMode).
+ * The per-agent overrides for exactly `ownerIds`, in ONE read, keyed by ownerId —
+ * for the roster / presence / fleet surfaces, where resolveWakeMode per agent would
+ * be N round-trips (P-008 badge). Agents without a row fall back to the global
+ * default (resolve in-memory with getDefaultWakeMode).
+ *
+ * Owner-scoped on purpose (WI-10005228). This used to be an unscoped
+ * `getAllWakeModeOverrides()` (`WHERE key LIKE 'wake_mode:agent:%'`): every override
+ * ever written is retained (one per launched agent — 10,342 rows against 95 live
+ * agents on 2026-10-02), so each roster build decoded the whole history, ~15-19 times
+ * a minute. `key = ANY(...)` is a probe on operator_settings' primary key, so the cost
+ * now tracks the roster, not the history. Every caller only ever looks up the owners
+ * it is rendering, so the result for those owners is identical.
  */
-export async function getAllWakeModeOverrides(): Promise<Map<string, WakeMode>> {
+export async function getWakeModeOverridesFor(
+  ownerIds: readonly string[],
+): Promise<Map<string, WakeMode>> {
+  const out = new Map<string, WakeMode>();
+  const keys = [...new Set(ownerIds.filter((id) => id))].map(agentKey);
+  if (keys.length === 0) return out;
   const { sql } = getOrgPg();
   const rows = await sql`
     SELECT key, value FROM harness_shared.operator_settings
-    WHERE key LIKE 'wake_mode:agent:%'
+    WHERE key = ANY(${keys}::text[])
   `;
-  const out = new Map<string, WakeMode>();
-  const prefix = 'wake_mode:agent:';
+  const prefix = agentKey('');
   for (const r of rows as unknown as Array<{ key: string; value: string }>) {
     const ownerId = r.key.slice(prefix.length);
     const mode = coerceWakeMode(r.value);

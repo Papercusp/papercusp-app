@@ -1,0 +1,31 @@
+-- 1292-sweep-claude-transcript-usage-copies.sql
+--
+-- WI-10004637 follow-up to 1287: run its idempotent collapse once more.
+--
+-- 1287 collapsed agent_usage_samples rows that repeated one provider message once per
+-- transcript copy, and rekeyed each survivor to the file-independent key that the fixed
+-- ingester writes. On the dev box it applied at 2026-10-01 06:49:43Z, but the interactive-usage
+-- ingester there runs in papercup-bg-host, which kept executing the PRE-FIX code until it
+-- restarted at 07:31:31Z. In that window the pre-fix ingester wrote 26,802 more `message:` rows
+-- under the old file-scoped key (first 06:50:35Z, last 07:21:28Z; none since). Its copies did
+-- not conflict with the rekeyed survivors, so the duplication grew back.
+--
+-- Census just before this migration (2026-10-01 ~08:45Z, read-only):
+--   17,391 (workspace, model, message) groups held more than one row: 25,482 surplus rows,
+--   about $3,481 of double-counted cost. Every surplus row carried the same token vector and
+--   cost as its group's first row, so the collapse may delete all of them.
+--   1,299 single rows still carried the old key (messages only the pre-fix ingester saw).
+--   No group had diverging numbers.
+--
+-- The function keeps the first inserted row of each group (the original session's read),
+-- deletes the identical later copies, and rekeys every remaining single row. A copy whose
+-- numbers differ is never deleted.
+--
+-- Elsewhere this is expected to be a no-op: an install that takes 1287 starts the fixed
+-- ingester only after its migrations have run, so no pre-fix writer exists after 1287 there.
+-- Re-running the function on collapsed data changes nothing.
+--
+-- Not destructive DDL: this only deletes duplicate rows and updates usage_event_key. No table,
+-- column, index or constraint is touched.
+
+SELECT * FROM harness_shared.collapse_transcript_usage_copies();

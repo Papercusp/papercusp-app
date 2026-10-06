@@ -54,6 +54,10 @@ import { formatIdleAge } from '../format/relative-time';
  * advised set cannot drift apart.
  */
 export const RECORDED_INCONCLUSIVE_STATUSES = [
+  // WI-10004108: some installations have no integration branch and therefore no checkpoint
+  // verdict to render. Persist the explicit not-applicable result without presenting it as a
+  // transient failure or a condition an operator must clear.
+  'not-applicable',
   'migrations-pending',
   // EI-22642378999251872: a measured standing preflight breach now counts as a no-verdict
   // and is recorded, so repeated hourly aborts cannot masquerade as harmless skipped work.
@@ -101,9 +105,10 @@ export function isRecordedInconclusiveStatus(status: string): status is Recorded
  *  - `unknown`            — an unclassified status. Advice falls back to the conservative
  *                           generic wording; see `gateAbortRefireClause`.
  */
-export type GateAbortKind = 'standing-condition' | 'transient' | 'peer-owned' | 'unknown';
+export type GateAbortKind = 'standing-condition' | 'transient' | 'peer-owned' | 'not-applicable' | 'unknown';
 
 const KIND_BY_STATUS: Record<RecordedInconclusiveStatus, Exclude<GateAbortKind, 'unknown'>> = {
+  'not-applicable': 'not-applicable',
   // The dev PG is behind the candidate: a real, standing precondition.
   'migrations-pending': 'standing-condition',
   // The post-GC re-sample still breached the write floor: re-firing before reclamation repeats it.
@@ -190,6 +195,8 @@ export function classifyGateAbort(status: string): GateAbortKind {
  */
 export function gateAbortRefireClause(status: string): string {
   switch (classifyGateAbort(status)) {
+    case 'not-applicable':
+      return ' — this installation has no configured integration branch, so no checkpoint verdict applies.';
     case 'standing-condition':
       return ' and firing another run will abort the same way until that condition clears.';
     case 'transient':
@@ -218,6 +225,12 @@ export function gateAbortRefireClause(status: string): string {
  */
 export function gateAbortLever(status: string): string {
   switch (classifyGateAbort(status)) {
+    case 'not-applicable':
+      return (
+        `green-checkpoint is not applicable because this installation has no configured integration ` +
+        `branch; no action is needed unless this install should participate in release gating, in which ` +
+        `case configure its integration branch`
+      );
     case 'transient':
       return (
         `the last run was stopped before it recorded a verdict (${status}) — nothing is blocking a re-fire, ` +

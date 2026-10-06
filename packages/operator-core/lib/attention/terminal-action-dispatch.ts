@@ -13,6 +13,7 @@
 
 import { isNavigateAction } from './types';
 import { ACKNOWLEDGEMENT_ACTION_IDS, isAcknowledgementKind } from './terminal-coverage';
+import { INTAKE_APPLY_ACTION_ID, type BulkIntakeDecision } from './bulk-dispositions';
 
 export interface TerminalAttentionItem {
   id: string;
@@ -87,6 +88,30 @@ export interface TerminalActionDependencies {
    *  same transition the watcher/hook performs when the ask clears. */
   closeSessionGate(input: { sessionId: string; client: string; refId: string }): Promise<void>;
   /**
+   * P-006 (observation-candidate-acceptance-promotion D-013) — execute a recorded
+   * intake decision against its source item. Server-only (the bulk resolver injects
+   * it); a caller without it cannot apply intake decisions. Resolves `terminal:true`
+   * when the decision took effect; refusals THROW with the actionable reason, so a
+   * refused promotion is recorded as a failure, never as a resolved item.
+   */
+  executeIntakeDecision?(input: {
+    sourceId: string;
+    harnessSlug: string | null;
+    decision: BulkIntakeDecision;
+    runId: string;
+    itemId: string;
+  }): Promise<{ terminal: boolean }>;
+  /**
+   * P-009 (R-31, D-019) — the application-time recheck for an intake decision.
+   * The bulk tool checks the kill switch once at entry, BEFORE it takes the run
+   * row lock, so an owner flipping the switch (or stopping the run) between that
+   * read and the write would otherwise not stop the effect. This runs inside the
+   * run-row authority window, immediately before the executor. Required for
+   * intake: a caller that supplies an executor without it cannot apply intake
+   * (fail closed), and `allowed:false` throws so the item is recorded as failed.
+   */
+  recheckIntakeApply?(input: { runId: string; itemId: string }): Promise<{ allowed: boolean; reason?: string }>;
+  /**
    * Best-effort owner-authoritative reply delivery for named escalation picks.
    * The browser injects its admin-only route.  The bulk resolver injects the
    * same underlying server helper, but only from its run-authority-guarded tool.
@@ -124,9 +149,27 @@ export async function dispatchAttentionTerminalAction(input: {
   /** P-003 — the owner's (or resolver's drafted) free text, when the terminal
    *  effect can carry one. Today: the accepted answer on a conversation close. */
   answerText?: string;
+  /** P-006 — the recorded intake decision being applied (with `apply-intake`). */
+  intake?: { decision: BulkIntakeDecision; runId: string };
 }): Promise<TerminalActionResult> {
   const { item, actionId, deps, rationale, answerText } = input;
   if (isNavigateAction(actionId)) return { resolved: false };
+
+  if (item.ref.kind === 'improvement' && actionId === INTAKE_APPLY_ACTION_ID) {
+    if (!input.intake || !deps.executeIntakeDecision || !deps.recheckIntakeApply) return { resolved: false };
+    const recheck = await deps.recheckIntakeApply({ runId: input.intake.runId, itemId: item.id });
+    if (!recheck.allowed) {
+      throw new Error(`intake apply refused at application time: ${recheck.reason ?? 'recheck refused'}`);
+    }
+    const executed = await deps.executeIntakeDecision({
+      sourceId: refString(item, 'issueId'),
+      harnessSlug: item.harnessSlug ?? null,
+      decision: input.intake.decision,
+      runId: input.intake.runId,
+      itemId: item.id,
+    });
+    return { resolved: executed.terminal };
+  }
 
   if (item.ref.kind === 'coord-escalation') {
     const named = escalationOptions(item).find((option) => option.id === actionId);

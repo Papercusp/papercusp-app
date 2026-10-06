@@ -30,8 +30,14 @@
 import { getOrgPg } from '@papercusp/db-org';
 import { runHybridSearch, type SearchHit, type SearchLegs } from '@papercusp/search';
 import { SEARCH_SOURCES } from '../agent-tools/search/sources';
-import { buildQueryEmbedder } from '../agent-tools/search/embedder';
+import {
+  buildQueryEmbedder,
+  embedderModeOf,
+  embedderProfileIdOf,
+} from '../agent-tools/search/embedder';
+import { stampEmbedderMode } from '../search/embedder-mode-registry';
 import { rerankRows } from '../agent-tools/search/rerank';
+import { createMemoryWorkDeadline, MemoryTimeoutError } from './op-deadline';
 import {
   CORPUS_BUDGET_CHARS,
   CORPUS_MAX_ITEMS,
@@ -169,6 +175,8 @@ export function corpusRerankTimeoutMs(): number {
 }
 
 export interface CorpusRecallInput {
+  /** Parent prompt lifetime, shared with memory retrieval and preparation. */
+  signal?: AbortSignal;
   /** The retrieval query — the same effective text the mem0 leg searched with. */
   queryText: string;
   workspaceId: string;
@@ -343,7 +351,7 @@ const empty = (outcome: CorpusRecallOutcome): CorpusRecallResult => ({
   rerank: 'nothing-to-reorder',
 });
 
-type QueryEmbedder = (text: string) => Promise<number[]>;
+type QueryEmbedder = (text: string, signal?: AbortSignal) => Promise<number[]>;
 
 export interface CorpusEmbedderWarmupOptions {
   /** Override the short request acquisition budget for boot/background work. */
@@ -411,25 +419,6 @@ export function warmCorpusEmbedder(opts: CorpusEmbedderWarmupOptions = {}): Prom
 export function resetCorpusEmbedderWarmup(): void {
   warmEmbedder = null;
   warmupInFlight = null;
-}
-
-/** Bound a promise without touching the shared memory-degradation latch. */
-async function withBound<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
-  if (!Number.isFinite(ms)) return await p;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      p,
-      new Promise<T>((resolve) => {
-        timer = setTimeout(() => resolve(fallback), ms);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    // A losing search still settles; swallow it so it can never surface as an
-    // unhandled rejection after we've already returned the fallback.
-    void p.catch(() => {});
-  }
 }
 
 /** Is the corpus leg enabled? Default ON — a finished, tested retrieval leg
@@ -544,7 +533,17 @@ async function rerankStage1(
  * failure — PG down, embedder missing, search throwing, flag read failing —
  * returns an empty result and the caller's prompt is unaffected. Never throws.
  */
-export async function recallCorpusContext(
+export async function recallCorpusContext(input: CorpusRecallInput): Promise<CorpusRecallResult> {
+  const deadline = createMemoryWorkDeadline(corpusRecallTimeoutMs(), input.signal);
+  try {
+    return await deadline.run(() => recallCorpusContextInner({ ...input, signal: deadline.signal }), 'corpus recall');
+  } catch (error) {
+    if (deadline.signal.aborted || error instanceof MemoryTimeoutError) return empty('timed-out');
+    throw error;
+  } finally { deadline.close(); }
+}
+
+async function recallCorpusContextInner(
   input: CorpusRecallInput,
 ): Promise<CorpusRecallResult> {
   const rawText = input.queryText?.trim() ?? '';
@@ -560,6 +559,7 @@ export async function recallCorpusContext(
   const queryText = corpusQueryText(rawText);
   if (!queryText) return empty('no-query');
   if (!input.skipFlagCheck && !(await corpusRecallEnabled())) return empty('disabled');
+  input.signal?.throwIfAborted();
 
   const maxItems = input.maxItems ?? CORPUS_MAX_ITEMS;
   const gradedMaxTerms = input.gradedMaxTerms ?? CORPUS_GRADED_QUERY_MAX_TERMS;
@@ -626,8 +626,24 @@ export async function recallCorpusContext(
       // reuses the first stage's embedding instead of paying for it again.
       let embedP: Promise<number[]> | null = null;
       const embedder = built
-        ? (t: string) => (embedP ??= built(t))
+        ? (t: string, signal?: AbortSignal) => (embedP ??= built(t, signal))
         : built;
+      if (built && embedder) {
+        const mode = embedderModeOf(built);
+        const profileId = embedderProfileIdOf(built);
+        if (mode) stampEmbedderMode(embedder, mode, profileId);
+        // Search's storage-space filter and score policy key off the exact
+        // embedder function object. Memoizing it above creates a new function,
+        // so preserve that identity before handing the wrapper to the engine.
+        // Otherwise the semantic SQL fails closed with zero candidates while
+        // the call still reports that both semantic sources ran.
+        if (
+          embedderModeOf(embedder) !== mode ||
+          embedderProfileIdOf(embedder) !== profileId
+        ) {
+          throw new Error('corpus recall memo wrapper lost embedder profile provenance');
+        }
+      }
 
       // Stage 2's query is derived SEPARATELY from stage 1's — see
       // CORPUS_GRADED_QUERY_MAX_TERMS. Stage 1 ANDs, so two terms is a
@@ -636,8 +652,10 @@ export async function recallCorpusContext(
       // stage-1 text if the wider derivation yields nothing.
       const gradedQuery = corpusQueryText(rawText, gradedMaxTerms) || effectiveQuery;
 
-      const search = (lexicalMode: 'and' | 'coverage-graded', queryFor: string) =>
-        runHybridSearch(sources, {
+      const search = (lexicalMode: 'and' | 'coverage-graded', queryFor: string) => {
+        input.signal?.throwIfAborted();
+        return runHybridSearch(sources, {
+          signal: input.signal,
           caller: 'midturn:related-context',
           sql,
           query: queryFor,
@@ -702,6 +720,7 @@ export async function recallCorpusContext(
             ? {}
             : { lexicalAnchorDfBudget: input.anchorDfBudget }),
         });
+      };
 
       // Which of these hits' sessions belong to the CALLER (EI-19460887729945170)?
       //
@@ -717,6 +736,7 @@ export async function recallCorpusContext(
       // broken leg.
       const ownSession = new Map<string, boolean>();
       const ownSessionIdsAmong = async (hits: readonly CorpusHit[]): Promise<Set<string>> => {
+        input.signal?.throwIfAborted();
         const owner = input.excludeOwnerId?.trim();
         const mine = new Set<string>();
         if (!owner) return mine;
@@ -779,6 +799,7 @@ export async function recallCorpusContext(
 
       // ── Stage 1: today's AND query, unchanged. ──
       const andFused = await search('and', effectiveQuery);
+      input.signal?.throwIfAborted();
       const stage1Rerank = await rerankStage1(
         toCorpusHits(andFused),
         effectiveQuery,
@@ -788,6 +809,7 @@ export async function recallCorpusContext(
       rerankOutcome = stage1Rerank.outcome;
       const known = input.knownRefs ?? new Set<string>();
       const stage1 = await select(andHits, effectiveQuery, { maxItems, budgetChars, knownRefs: known });
+      input.signal?.throwIfAborted();
 
       // ── Stage 2 (P-017 / D-062 R2): relax ONLY when stage 1 under-fills. ──
       //
@@ -812,6 +834,7 @@ export async function recallCorpusContext(
 
       const spent = stage1.lines.reduce((n, l) => n + l.line.length, 0);
       const gradedFused = await search('coverage-graded', gradedQuery);
+      input.signal?.throwIfAborted();
       const seen = new Set(andHits.map((h) => `${h.source}:${h.sourceId}`));
       const gradedOnly = toCorpusHits(gradedFused).filter(
         (h) => !seen.has(`${h.source}:${h.sourceId}`),
@@ -830,7 +853,7 @@ export async function recallCorpusContext(
       };
     })();
 
-    const out = await withBound(run, corpusRecallTimeoutMs(), null);
+    const out = await run;
     // The bound expired. This is NOT "the corpus had nothing" — say so, so a
     // caller (and any benchmark) can tell the two apart (EI-19460902984682209).
     if (!out) return { ...empty('timed-out'), rerank: rerankOutcome };
@@ -850,6 +873,7 @@ export async function recallCorpusContext(
       retrievalDepth,
     };
   } catch (err) {
+    if (input.signal?.aborted) throw err;
     if (process.env.NODE_ENV !== 'test') {
       console.warn('[memory-corpus-recall] failed:', (err as Error).message);
     }

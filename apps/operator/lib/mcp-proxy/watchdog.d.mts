@@ -94,6 +94,7 @@ export interface MpcProxyHotPathShellResult {
 
 export interface MpcProxyHotPathShellOptions {
   cwd?: string;
+  env?: NodeJS.ProcessEnv;
   maxBuffer?: number;
   stdin?: string;
   timeout?: number;

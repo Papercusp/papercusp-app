@@ -239,6 +239,8 @@ export interface ListFleetAssignmentsOpts {
   activeOnly?: boolean;
   /** Restrict to these plan-item refs (`<plan>#<P-NNN>`). */
   planItemRefs?: readonly string[];
+  /** Include every direct claim in this plan alongside linked work-item ids. */
+  planItemPlan?: string;
   /** Restrict to these linked work-item ids. */
   workItemIds?: readonly string[];
 }
@@ -304,8 +306,12 @@ export async function listFleetAssignments(
       AND ${opts.fleet ? sql`fleet_slug = ${opts.fleet}` : sql`TRUE`}
       AND ${activeOnly ? sql`(claim_active IS DISTINCT FROM false)` : sql`TRUE`}
       AND ${
-        opts.planItemRefs !== undefined || opts.workItemIds !== undefined
+        opts.planItemRefs !== undefined || opts.planItemPlan !== undefined || opts.workItemIds !== undefined
           ? sql`(
+              ${opts.planItemPlan !== undefined
+                ? sql`(source = 'plan_item_claim' AND plan_slug = ${opts.planItemPlan})`
+                : sql`FALSE`}
+              OR
               ${opts.planItemRefs !== undefined
                 ? opts.planItemRefs.length > 0
                   ? sql`(plan_slug || '#' || item_id) = ANY(${opts.planItemRefs}::text[])`

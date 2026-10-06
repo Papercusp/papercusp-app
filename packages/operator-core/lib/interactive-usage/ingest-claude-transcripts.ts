@@ -24,8 +24,9 @@
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { costFromTokens } from '@papercusp/model-pricing';
+import { PRICE_TABLE_VERSION } from '@papercusp/model-pricing';
 import { getOrgPg } from '@papercusp/db-org';
+import { priceStoredUsageSample } from './reprice-usage-samples';
 import { activeWorkspaceId } from '../workspace-registry';
 import type { TranscriptAdapter } from './ingest-adapters';
 import type { Sql } from 'postgres';
@@ -167,6 +168,24 @@ export interface TranscriptUsageEvent {
   /** Unique usage observations since an observed native session header; absent for partial sources. */
   requestOrdinal?: number;
   cacheReadKnown?: boolean;
+}
+
+/**
+ * Identity of one persisted usage observation (agent_usage_samples.usage_event_key).
+ *
+ * A provider-native message id (`message:<id>`) names ONE billed API request no matter which
+ * file it is read from. A carried or resumed session's transcript is copied into each
+ * successor's isolated config dir (~/.papercusp/session-claude/<owner>/), so the same request
+ * is read from many files; keying it by file counted it once per copy (WI-10004637, up to 31
+ * copies). It is therefore keyed by model + message id only, and a later copy max-merges into
+ * the existing row as a no-op. Id-less observations (`line:`/`aggregate:`) have no identity
+ * beyond their position, so they stay scoped to the file and its truncation generation.
+ */
+export function transcriptUsageEventKey(input: { file: string; fileGeneration: number; model: string; sourceId: string }): string {
+  const identity = input.sourceId.startsWith('message:')
+    ? ['provider-message', input.model, input.sourceId]
+    : [input.file, input.fileGeneration, input.model, input.sourceId];
+  return createHash('sha256').update(JSON.stringify(identity)).digest('hex');
 }
 
 export function transcriptEventTime(value: unknown): number | null {
@@ -697,7 +716,7 @@ export async function ingestInteractiveUsage(opts: IngestOptions = {}): Promise<
           for (const [eventIndex, event] of observations.entries()) {
             const { model } = event;
             const sourceId = event.sourceId.startsWith('line:') ? `line:${offset + event.relativeOffset}` : event.sourceId;
-            const eventKey = createHash('sha256').update(JSON.stringify([file, fileState.fileGeneration ?? 0, model, sourceId])).digest('hex');
+            const eventKey = transcriptUsageEventKey({ file, fileGeneration: fileState.fileGeneration ?? 0, model, sourceId });
             const [previous] = await tx<Array<{
               input_tokens: string | null; output_tokens: string | null; cache_read_tokens: string | null;
               cache_creation_tokens: string | null; cache_creation_5m_tokens: string | null;
@@ -730,8 +749,18 @@ export async function ingestInteractiveUsage(opts: IngestOptions = {}): Promise<
               (previous.event_ts !== null || event.eventTime === null)) continue;
             const modelClass = modelClassForModel(model);
             const provider = providerForModel(model);
-            const est = costFromTokens(model, { ...d, requestInputTokens: events
-              ? d.inputTokens + d.cacheReadTokens + d.cacheCreationTokens : undefined });
+            // Price the row from exactly the values stored below, through the same function the
+            // repricer uses, so a stored estimate is always re-derivable (WI-10004517 / D-018).
+            const stored = {
+              source: 'interactive', provider, model: model === 'unknown-openai' ? null : model,
+              input_tokens: inputKnown ? d.inputTokens : null, output_tokens: d.outputTokens,
+              cache_read_tokens: d.cacheReadTokens,
+              cache_creation_tokens: d.cacheCreationUnreported ? null : d.cacheCreationTokens,
+              cache_creation_5m_tokens: d.cacheCreationTierUnknown ? null : d.cacheCreation5mTokens ?? null,
+              cache_creation_1h_tokens: d.cacheCreationTierUnknown ? null : d.cacheCreation1hTokens ?? null,
+              grain: events ? 'request' : 'file-model-delta',
+            };
+            const price = priceStoredUsageSample(stored);
             const ingestedAt = Date.now();
             const eventTime = previous?.event_ts != null ? Number(previous.event_ts) : event.eventTime;
             const provenance = { parserVersion: 2, adapter: adapter.name, sourceFile: file, fileGeneration: fileState.fileGeneration ?? 0,
@@ -740,6 +769,9 @@ export async function ingestInteractiveUsage(opts: IngestOptions = {}): Promise<
               parserStateSource: fileState.bootstrapSource ?? 'incremental',
               turnId: event.turnId ?? null,
               cacheWriteSource: d.cacheCreationUnreported ? 'unreported' : 'reported',
+              // 'lower' = cache writes with no TTL split, priced at the 5-minute floor; always
+              // written (null included) so the ON CONFLICT `||` merge cannot keep a stale bound.
+              costBound: price.costBound,
               uncachedInputSource: inputKnown ? 'reported-or-reconciled' : 'unknown-decomposition',
               inputTotalTokens: event.inputTotalTokens ?? null,
               accountSource: 'unavailable', triggerSource: 'unavailable',
@@ -767,25 +799,26 @@ export async function ingestInteractiveUsage(opts: IngestOptions = {}): Promise<
                  input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd,
                  model, cost_source, harness_slug, run_id, role, session_id, goal_id,
                  cache_creation_5m_tokens, cache_creation_1h_tokens, turn_count,
-                 usage_event_key, event_ts, ingested_at, usage_provenance)
+                 usage_event_key, event_ts, ingested_at, usage_provenance, price_table_version)
               VALUES (
                 ${ws}, ${eventTime ?? ingestedAt}, ${`${provider}:${modelClass}`}, ${provider}, ${modelClass}, ${'interactive'},
-                ${inputKnown ? d.inputTokens : null}, ${d.outputTokens}, ${d.cacheReadTokens}, ${d.cacheCreationUnreported ? null : d.cacheCreationTokens},
-                ${est.priced ? est.usd : null}, ${model === 'unknown-openai' ? null : model}, ${est.priced ? 'estimated' : null},
+                ${stored.input_tokens}, ${stored.output_tokens}, ${stored.cache_read_tokens}, ${stored.cache_creation_tokens},
+                ${price.costUsd}, ${stored.model}, ${price.costSource},
                 (SELECT harness_shared.harness_slug_for_usage_attribution(
                    ${ws}, ${adapter.ownerId ?? null}, ${sessionId}, ${adapter.advSessionId ?? null})),
                 ${sessionId}, ${'interactive'}, ${sessionId},
                 (SELECT harness_shared.goal_id_for_usage_session(
                    ${ws}, ${sessionId}, ${adapter.advSessionId ?? null})),
-                ${d.cacheCreationTierUnknown ? null : d.cacheCreation5mTokens ?? null},
-                ${d.cacheCreationTierUnknown ? null : d.cacheCreation1hTokens ?? null}, ${d.turns},
-                ${eventKey}, ${eventTime}, ${ingestedAt}, ${JSON.stringify(provenance)}::jsonb
+                ${stored.cache_creation_5m_tokens},
+                ${stored.cache_creation_1h_tokens}, ${d.turns},
+                ${eventKey}, ${eventTime}, ${ingestedAt}, ${JSON.stringify(provenance)}::jsonb, ${PRICE_TABLE_VERSION}
               )
               ON CONFLICT (workspace_id, usage_event_key) WHERE usage_event_key IS NOT NULL
               DO UPDATE SET input_tokens = EXCLUDED.input_tokens, output_tokens = EXCLUDED.output_tokens,
                 cache_read_tokens = EXCLUDED.cache_read_tokens, cache_creation_tokens = EXCLUDED.cache_creation_tokens,
                 cache_creation_5m_tokens = EXCLUDED.cache_creation_5m_tokens, cache_creation_1h_tokens = EXCLUDED.cache_creation_1h_tokens,
-                cost_usd = EXCLUDED.cost_usd, cost_source = EXCLUDED.cost_source, turn_count = EXCLUDED.turn_count,
+                cost_usd = EXCLUDED.cost_usd, cost_source = EXCLUDED.cost_source,
+                price_table_version = EXCLUDED.price_table_version, turn_count = EXCLUDED.turn_count,
                 event_ts = EXCLUDED.event_ts, ts = COALESCE(EXCLUDED.event_ts, agent_usage_samples.ts),
                 ingested_at = EXCLUDED.ingested_at,
                 usage_provenance = COALESCE(agent_usage_samples.usage_provenance, '{}'::jsonb) || EXCLUDED.usage_provenance

@@ -36,6 +36,9 @@ import {
   type DesktopTarget,
 } from './desktop-driver';
 import { hiveDesktop } from './desktop-lease';
+import type { DesktopCallerCtx } from './desktop-ownership';
+import { DesktopTargetError, prepareDesktopForDrive, resolveAgentDesktop } from './desktop-target';
+import type { DesktopSessionRecord } from '../../desktop/desktop-session-registry';
 import { activeWorkspaceId } from '../../workspace-registry';
 import {
   DEFAULT_CAPTURE_GEOMETRY,
@@ -119,11 +122,38 @@ export function __resetComputerExec(): void {
   execImpl = realExec;
 }
 
-/** The per-caller identity the resolver needs (a slice of the MCP ToolContext). */
-export interface ComputerCtx {
+/**
+ * The per-caller identity the resolver needs (a slice of the MCP ToolContext). The
+ * identity fields (DesktopCallerCtx) decide which agent desktops are the caller's (P-003).
+ */
+export type ComputerCtx = DesktopCallerCtx & {
   signal?: AbortSignal;
   /** The caller's harness slug == the hive home-harness slug for a fleet bee. */
   harnessSlug?: string | null;
+};
+
+/** Which desktop a computer verb targets — every verb's optional `desktop` arg (P-003, D-005). */
+export interface DesktopSelector {
+  desktop?: string;
+}
+
+/** The `desktop` arg, shared by every computer verb so its wording cannot drift between them. */
+export const desktopArg = z
+  .string()
+  .min(1)
+  .max(64)
+  .optional()
+  .describe(
+    "Which of your desktops to drive: a desktopSessionId or your own desktop's name (computer:list_desktops). Omit to use your only/most recently used desktop, else your pot's.",
+  );
+
+function targetFromSession(session: DesktopSessionRecord): DesktopTarget {
+  return {
+    display: session.display,
+    width: session.displayGeometry.width,
+    height: session.displayGeometry.height,
+    capture: { width: session.captureGeometry.width, height: session.captureGeometry.height },
+  };
 }
 
 /**
@@ -144,7 +174,24 @@ export interface ComputerCtx {
  *      (`acquireAgentDisplay`). BOTH are deliberate capability markers — never raw
  *      `DISPLAY`, which can leak a dev box's own `:0` session.
  */
-export async function resolveBoundDisplay(ctx: ComputerCtx): Promise<DesktopTarget> {
+export async function resolveBoundDisplay(ctx: ComputerCtx, selector: DesktopSelector = {}): Promise<DesktopTarget> {
+  // 0. P-003 / D-005: an explicit `desktop`, else the caller's own agent desktops (one →
+  //    it, several → the most recently used). An explicit desktop that is missing or not
+  //    the caller's to drive is refused HERE, before any input is sent. Without an
+  //    explicit desktop a registry read failure must not take the verb down: it falls
+  //    through to the pot/env chain below, exactly the pre-P-003 behaviour.
+  let agentDesktop: Awaited<ReturnType<typeof resolveAgentDesktop>> = null;
+  try {
+    agentDesktop = await resolveAgentDesktop(ctx, selector.desktop);
+  } catch (err) {
+    if (err instanceof DesktopTargetError || selector.desktop?.trim()) throw err;
+  }
+  if (agentDesktop) {
+    assertSandboxDisplay(agentDesktop.session.display); // never :0, whatever the row says
+    await prepareDesktopForDrive(agentDesktop.session);
+    return targetFromSession(agentDesktop.session);
+  }
+
   // 1. The caller's hive lease (operator-process Map). Route the ctx slug through
   //    the fail-loud resolver (workspace-data-isolation-leaks P-004) so the
   //    operator/superuser `'*'` auto-default (and an unset ctx) resolve to "no
@@ -356,6 +403,7 @@ const computerArgs = z.object({
     .describe(
       'How you want to SEE the result of this action. auto (default) = the accessibility tree when this desktop exposes one, else a screenshot. image = always a screenshot (~1049 tokens). tree = the tree or a loud refusal, never a silent screenshot. none = the one-line result only. The `screenshot` action always returns pixels regardless.',
     ),
+  desktop: desktopArg,
 });
 
 export type ComputerArgs = z.infer<typeof computerArgs>;
@@ -457,7 +505,8 @@ async function noteFrame(
  * directly (with an injected exec seam) without the dispatch layer or a live X.
  */
 export async function runComputerAction(args: ComputerArgs, ctx: ComputerCtx = {}): Promise<ComputerToolResult> {
-  const target = await resolveBoundDisplay(ctx); // throws loudly if no lease / refuses :0
+  // throws loudly if no lease / refuses :0 / desktop_not_owned
+  const target = await resolveBoundDisplay(ctx, { desktop: args.desktop });
   const signal = ctx.signal;
   const input = args as ComputerActionInput;
   const plan = planAction(input, target);
@@ -549,7 +598,7 @@ export default defineTool({
     notWhen:
       "Anything scriptable (create files, run a program, hit an API) → capability:bash. A web page → a browser tool (DOM automation is more reliable + cheaper than pixel-clicking). Never use this to operate the host machine — it only drives the agent's leased sandbox desktop.",
     chaining:
-      'screenshot once to orient → then act, reading the tree that comes back with each action → screenshot again only when the tree cannot answer (a canvas, a video, a plain X11 client like xterm, or anything about pixels/layout/colour). Set `observe` per action: "image" when you must see pixels, "none" when you do not need to check the effect.',
+      'screenshot once to orient → then act, reading the tree that comes back with each action → screenshot again only when the tree cannot answer (a canvas, a video, a plain X11 client like xterm, or anything about pixels/layout/colour). Set `observe` per action: "image" when you must see pixels, "none" when you do not need to check the effect. Several desktops? Pass `desktop` (id or name); another agent\'s refuses desktop_not_owned.',
     returns:
       "A one-line result (`#7 left_click (412,388) ok · tree`) plus, by default, this desktop's compressed accessibility tree. The line is the action ledger: one line per step, never re-emitted, so your transcript accumulates the trajectory for free. `observe` picks what follows it — auto (tree when the desktop exposes one, else a screenshot), image (~1049 tokens at 1024x768), tree (the tree or a loud refusal, never a silent image), none (the line only). The tree costs ~89 tokens on the same screen — 11.79x cheaper, measured — and every observation stays in your context for the rest of the task, so a 40-step job is roughly 4k tokens of trees against 42k of screenshots. The `screenshot` action always returns pixels regardless of `observe`. A trailing `· refs-only` tag means this toolkit reports unusable screen coordinates: activate via computer:click_element by #ref, not by pixel.",
     seeAlso: [

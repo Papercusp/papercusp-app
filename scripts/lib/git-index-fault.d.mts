@@ -67,6 +67,20 @@ export function runGuardWithIndexFaultGuard<T>(main: () => T | Promise<T>, { gua
     guard?: string;
 }): T | Promise<T>;
 export { EXIT_NOT_CHECKED };
+/**
+ * The work-item that owns the still-UNDIAGNOSED torn-index writer (three recurrences:
+ * 2026-09-08 ×2, 2026-10-01; the earlier items closed without a cause). The banner names it so
+ * the agent who hits the NEXT recurrence posts evidence there instead of filing a fourth orphan.
+ */
+export const INDEX_FAULT_TRACKING_ITEM: "WI-10004911";
+/**
+ * Reads the auditd watch (key `papercusp-gitindex`, /etc/audit/rules.d/60-papercusp-gitindex.rules)
+ * that records every process writing `.git/index` / `index.lock`. `--start recent` is the last 10
+ * minutes — the banner fires while the index is torn, so the write that tore it is in that window.
+ * Do NOT swap in an explicit `--start 'MM/DD/YYYY HH:MM:SS'`: on this box that form returned 0
+ * records for a window the raw log proved held thousands (measured 2026-10-01).
+ */
+export const INDEX_FAULT_CAPTURE_COMMAND: "sudo -n ausearch -k papercusp-gitindex -i --start recent | grep -E '^type=(SYSCALL|PATH|PROCTITLE)'";
 /** Thrown when the index is still unreadable after every retry. */
 export class RepositoryIndexFaultError extends Error {
     constructor(message: any, { attempts, cause }?: {});

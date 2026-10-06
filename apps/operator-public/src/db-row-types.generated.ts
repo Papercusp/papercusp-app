@@ -2,12 +2,12 @@
  * GENERATED FILE — do not edit by hand.
  *
  * Source: apps/operator-public/migrations/*.sql applied in filename order
- * Migration digest: cbd35dbf58fb628f50c1530d3d5b7183d65b6a3d0df6e68d5bd305a53d3ce065
+ * Migration digest: 1f109d1564f4c946f8ab897af0f5ab5c44f1aabb1697a0b731f04ea1cca3673a
  * Regenerate with: npm run db:types:generate --workspace @papercusp/cupboard-worker
  */
 
 export const GENERATED_MIGRATION_DIGEST =
-  "cbd35dbf58fb628f50c1530d3d5b7183d65b6a3d0df6e68d5bd305a53d3ce065";
+  "1f109d1564f4c946f8ab897af0f5ab5c44f1aabb1697a0b731f04ea1cca3673a";
 export const GENERATED_TABLES = [
   "audit",
   "banned_publisher_pubkeys",
@@ -23,6 +23,7 @@ export const GENERATED_TABLES = [
   "creator_drafts",
   "harnesses",
   "indexer_runs",
+  "ledger_chain_links",
   "payment_channels",
   "prepaid_credit_balances",
   "prepaid_credit_events",
@@ -31,7 +32,12 @@ export const GENERATED_TABLES = [
   "reports",
   "settlement_batch_vouchers",
   "settlement_batches",
+  "transparency_attestations",
+  "transparency_live",
+  "transparency_statements",
+  "treasury_safe_deployment_records",
   "treasury_safe_deployments",
+  "treasury_transfer_gate",
   "treasury_transfers",
   "usage_receipts",
   "wallet_binding_challenges",
@@ -254,6 +260,13 @@ export interface HarnessesRow {
   release_manifest: string | null;
   uses_tools: string | null;
   identity_surface: string | null;
+  approved_commit_sha: string | null;
+  approved_tree_digest: string | null;
+  approved_at: number | null;
+  drift: number;
+  authority_unresolved: number | null;
+  authority_unresolved_cause: string | null;
+  verified_by: string;
 }
 
 export interface IndexerRunsRow {
@@ -264,6 +277,16 @@ export interface IndexerRunsRow {
   harnesses_updated: number;
   errors_count: number;
   error_summary: string | null;
+}
+
+export interface LedgerChainLinksRow {
+  stream_id: string;
+  seq: number;
+  source_id: string;
+  entry_digest: string;
+  prev_hash: string;
+  entry_hash: string;
+  recorded_at_ms: number;
 }
 
 export interface PaymentChannelsRow {
@@ -380,6 +403,52 @@ export interface SettlementBatchesRow {
   finalized_at_ms: number | null;
 }
 
+export interface TransparencyAttestationsRow {
+  workspace_id: string;
+  month: string;
+  document_sha256: string;
+  statement_digest: string;
+  record_json: string;
+  proof_json: string | null;
+  recorded_at_ms: number;
+  proof_at_ms: number | null;
+}
+
+export interface TransparencyLiveRow {
+  workspace_id: string;
+  month: string;
+  report_json: string;
+  statement_status_json: string;
+  generated_at_ms: number;
+  received_at_ms: number;
+}
+
+export interface TransparencyStatementsRow {
+  workspace_id: string;
+  month: string;
+  digest: string;
+  signature: string;
+  signer: string;
+  signed_json: string;
+  published_at_ms: number;
+}
+
+export interface TreasurySafeDeploymentRecordsRow {
+  record_id: string;
+  chain_id: number;
+  safe_address: string;
+  roles_module_address: string;
+  roles_version: string;
+  deployment_tx_hash: string;
+  network: string;
+  owners: string;
+  threshold: number;
+  automation_signer: string;
+  deployed_at_ms: number;
+  recorded_at_ms: number;
+  recorded_by: string;
+}
+
 export interface TreasurySafeDeploymentsRow {
   chain_id: number;
   safe_address: string;
@@ -393,6 +462,16 @@ export interface TreasurySafeDeploymentsRow {
   deployed_at_ms: number;
   recorded_at_ms: number;
   recorded_by: string;
+}
+
+export interface TreasuryTransferGateRow {
+  workspace_id: string;
+  open: number;
+  treasury_reconciled: number;
+  reasons_json: string;
+  run_id: string;
+  at_ms: number;
+  received_at_ms: number;
 }
 
 export interface TreasuryTransfersRow {

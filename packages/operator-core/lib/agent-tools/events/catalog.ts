@@ -57,18 +57,31 @@ function keyTemplateMatchesQuery(keyTemplate: string, query: string): boolean {
   return new RegExp('^' + pattern + '$', 'i').test(query);
 }
 
+/**
+ * WI-10005981: free-text `q` used to match only as ONE contiguous substring, so a
+ * multi-word query ("resource released") missed the very family it names
+ * (`resource-released`), and the empty answer was read as proof the event does
+ * not exist — two false "no release event" filings came from exactly that. A
+ * query now matches when it appears verbatim in some field (unchanged), OR when
+ * every whitespace-separated word appears in some field (words may land in
+ * different fields). `query` arrives already trimmed + lower-cased.
+ */
+export function fieldsMatchQuery(values: readonly unknown[], query: string): boolean {
+  const haystacks = values
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.toLowerCase());
+  if (haystacks.some((haystack) => haystack.includes(query))) return true;
+  const words = query.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return false;
+  return words.every((word) => haystacks.some((haystack) => haystack.includes(word)));
+}
+
 function catalogRowMatches(row: CatalogRow, query: string): boolean {
-  const matchesField = [
-    row.family,
-    row.key,
-    row.await_example,
-    row.describe,
-    row.emitter,
-    row.provenance,
-    row.replaces_poll,
-    row.sugar,
-  ].some((value) => typeof value === 'string' && value.toLowerCase().includes(query));
- return matchesField || keyTemplateMatchesQuery(row.key, query);
+  const matchesField = fieldsMatchQuery(
+    [row.family, row.key, row.await_example, row.describe, row.emitter, row.provenance, row.replaces_poll, row.sugar],
+    query,
+  );
+  return matchesField || keyTemplateMatchesQuery(row.key, query);
 }
 
 export default defineTool({
@@ -316,8 +329,9 @@ export default defineTool({
           const scopeVisible = anns.filter((a) => announcementVisibleTo(a, reader));
           const queryVisible = scopeVisible.filter((a) => {
             if (!query) return true;
-            return [a.eventKey, a.logicalGateKey, a.note, a.scopeKind, a.scopeRef, a.subscriberId].some(
-              (value) => typeof value === 'string' && value.toLowerCase().includes(query),
+            return fieldsMatchQuery(
+              [a.eventKey, a.logicalGateKey, a.note, a.scopeKind, a.scopeRef, a.subscriberId],
+              query,
             );
           });
           const visible = queryVisible.slice(0, 25);
@@ -450,6 +464,13 @@ export default defineTool({
             // A REFUSED family declaration is reported, never swallowed — otherwise a
             // pack author debugs a family that "just doesn't appear" with no signal.
             ...(collisions.length > 0 ? { collisions } : {}),
+            // WI-10005981: a free-text miss is a SEARCH result, not an absence verdict.
+            ...(query && rowsOut.length === 0
+              ? {
+                  query_miss:
+                    'No family matched every word of q. This is NOT proof the event does not exist: retry with fewer or different words (e.g. the noun alone), or omit q to list every family.',
+                }
+              : {}),
             note:
               `A gate MISSING from \`announced\` is not proof it was never declared — read \`announced_visibility\`: gates scoped to a fleet/plan you are not recorded on are withheld here, while events:await on the exact key still resolves them. Awaiting beats polling: pick a family, events:await its key (or its sugar verb), then END YOUR TURN — you are re-invoked when it fires. awaitable_now:false = the emitter is being wired (Phase 2); the key shape is stable. live_awaiters:0 means nobody is currently registered on that key — a events:emit against it would reach no one. An announced gate carrying \`stale_owner:true\` is STRANDED: its declarer's session ended and no live role/fleet-leadership successor holds the binding, so it will never fire — do NOT events:await it; \`live_successor_ids\` (when present) names who COULD declare a fresh gate instead. \`provenance\` says whether a family is a platform guarantee (builtin) or an installed unit's promise (installed:<unit>) — the two carry different trust and lifetime. \`subject_scope\` says whether you can park on a key WITHOUT already knowing the subject: \`id\` families are unusable unless you already hold that exact id, so matching a family BY NAME and concluding "this already exists for my case" is the specific mistake this field exists to stop — filter with \`subjectScope:["global","scope"]\` to see only what you can actually reach, and read \`subject_scope_census\` for how many were withheld. ${CATALOG_SCOPE_NOTE}`,
             families: rowsOut,

@@ -43,6 +43,7 @@ import {
   type WorkItemDesignStatus,
 } from './work-items';
 import { upsertConditionWorkItem } from './coord/condition-upsert';
+import { resolvePlanPromotionGoal, stampPromotedGoal } from './goals/provenance-stamp';
 import { PLAN_ITEM_KIND, planItemRef } from './issue-blocks-merge';
 import {
   findConvertedWorkItemByStamp,
@@ -52,7 +53,11 @@ import {
   type PlanItemStamp,
 } from './plan-items/convert';
 import { getFeatureBlockers, syncFeatureBlockEdges } from './dbos/feature-blockers-edges';
-import { syncLinkedWorkItemsToPlanLane, type PlanLaneSyncStatus } from './plan-items/reconcile-linked-work-items';
+import {
+  syncLinkedWorkItemsToPlanLane,
+  type PlanLaneSyncFailure,
+  type PlanLaneSyncStatus,
+} from './plan-items/reconcile-linked-work-items';
 import { planItemTextHash } from './plan-items/text-drift';
 import { computePromotions, type OpenPlanItem } from './plan-workitem-promotion';
 import { phaseRequiresTwoMachineRig } from './plan-phase-rig';
@@ -77,6 +82,25 @@ export interface PromotePlanResult {
   promoted: number;
   /** open items already covered by a work-item (idempotent skips) */
   skipped: number;
+  /**
+   * Fail-soft inline plan-lane sync errors, correlated to the minted work-item. Stage
+   * `sync-rejection` is minted HERE (the reconciler call itself threw), so it widens this
+   * field rather than the reconciler's own PlanLaneSyncFailure union, which never emits it.
+   */
+  laneGateFailures?: Array<
+    Omit<PlanLaneSyncFailure, 'stage'> & {
+      stage: PlanLaneSyncFailure['stage'] | 'sync-rejection';
+      itemId: string;
+      workItemId: string;
+    }
+  >;
+  /**
+   * WI-10005696: the goal this promotion attributed its lanes to (`goalId`), how many rows
+   * actually gained a `work_items.goal_id` (`stamped` — a never-clobber re-run stamps 0), and
+   * any per-row stamp failures (`errors`, fail-soft but never silent). Omitted when the
+   * promotion served no goal and nothing failed — the common non-goal case.
+   */
+  goalStamp?: { goalId: string | null; stamped: number; errors: string[] };
   /** true when the flag is OFF — promotion was a no-op */
   flagOff?: boolean;
   /**
@@ -118,6 +142,13 @@ export interface PromotePlanResult {
   specQualityBlocked?: true;
   /** Report-only or enforced exact specSetHash verdict evaluated before minting. */
   specQuality?: PlanSpecQualityGateVerdict;
+  /** WI-10004234: the plan could not be read, so nothing was evaluated or minted. */
+  planUnreadable?: true;
+  /**
+   * The plan row's `template` is not executable (spec-triad-policy SPEC_TRIAD_EXCLUDED_TEMPLATES,
+   * e.g. an acceptance rubric): nothing was promoted and no gate ran or filed (WI-10005441).
+   */
+  templateExcluded?: string;
   /** P-003: the shared BAR contract was not ready for promotion. */
   acceptanceBarBlocked?: true;
   acceptanceBarLifecycle?: AcceptanceBarLifecycleVerdict;
@@ -382,6 +413,7 @@ async function evaluateSpecTriadForPromotion(
         content: row.content,
         created: row.created,
         itemCount: Array.isArray(row.items) ? row.items.length : undefined,
+        template: row.template,
       },
       { flagEnabled: true, epoch: specTriadEpoch() },
     );
@@ -445,13 +477,34 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
     harnessSlug: opts.harnessSlug,
     workspaceId: opts.workspaceId,
   });
-  if (!read) return { promoted: 0, skipped: 0, ...NO_EDGES };
+  if (!read) return { promoted: 0, skipped: 0, ...NO_EDGES, planUnreadable: true };
+
+  // WI-10005441: a rubric row is a grading bar, not a plan with work. Refuse it before any
+  // gate, so no gate can file against it (the spec-triad gate filed 25 on 2026-10-02) and no
+  // criterion is ever minted as a work-item. Promotion is reached from several callers
+  // (plans:start, scout/autostart, routines), so the refusal belongs here, not in one of them.
+  const { isSpecTriadExcludedTemplate } = await import('./agent-tools/plans/spec-triad-policy');
+  if (isSpecTriadExcludedTemplate(read.row.template)) {
+    return {
+      promoted: 0,
+      skipped: readRawPlanItems(read).filter((item) => isOpenStatus(item.status)).length,
+      ...NO_EDGES,
+      templateExcluded: read.row.template!,
+    };
+  }
 
   // P-003: promotion is independently callable (scout/autostart and routine
   // paths invoke this function directly), so plans:start cannot be its sole
   // authority. The shared snapshot is a no-op for legacy plans and fail-closed
   // for post-epoch contracts before any work-item is minted.
-  const acceptanceBarLifecycle = await readAndEvaluateAcceptanceBarLifecycle(opts.planSlug, 'pre-start');
+  // Scope to the canonical storage harness of the plan row just read: readPlanBySlug resolves
+  // member/install aliases to their plan-storage home, but the acceptance snapshot reader uses
+  // the supplied slug verbatim. Passing opts.harnessSlug here can therefore miss this same row
+  // on a run-instance promotion and report a missing plan/BAR. A plan slug is unique only per
+  // harness, so keep the exact resolved scope rather than widening to an ambiguous unscoped read.
+  const acceptanceBarLifecycle = await readAndEvaluateAcceptanceBarLifecycle(opts.planSlug, 'pre-start', {
+    harnessSlug: read.row.harnessSlug,
+  });
   if (!acceptanceBarLifecycle.satisfied) {
     return {
       promoted: 0,
@@ -655,6 +708,33 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
   };
   let promoted = 0;
   /**
+   * WI-10005696: stamp every minted OR adopted lane with the goal this promotion serves, so a
+   * goal-fenced drain claim spec (`goal` matches positively — a NULL row is invisible) sees the
+   * work its own plan just created. Resolved lazily ONCE per call (plan goal, else the
+   * promoter's session goal — see `resolvePlanPromotionGoal`), and fail-soft per row: a
+   * promotion that succeeded must not be failed for lack of provenance, but the failure is
+   * RECORDED on the result (`goalStamp.errors`) instead of swallowed (EI-20075667133396690 —
+   * an empty catch made a stamp that THREW indistinguishable from one that declined).
+   */
+  const goalStamp = { goalId: null as string | null, stamped: 0, errors: [] as string[] };
+  let goalIdPending: Promise<string | null> | undefined;
+  const stampPromotedLaneGoal = async (workItemId: string, harness: string | null | undefined): Promise<void> => {
+    try {
+      goalIdPending ??= resolvePlanPromotionGoal({
+        workspaceId: opts.workspaceId,
+        harnessSlug: opts.harnessSlug,
+        planSlug: opts.planSlug,
+        ownerId: opts.createdBy,
+      });
+      const goalId = await goalIdPending;
+      goalStamp.goalId = goalId;
+      if (await stampPromotedGoal({ id: workItemId, harness }, opts.workspaceId, goalId)) goalStamp.stamped++;
+    } catch (err) {
+      goalStamp.errors.push(`${workItemId}:${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  const laneGateFailures: NonNullable<PromotePlanResult['laneGateFailures']> = [];
+  /**
    * P-006 PASS 1 — mint every item first, recording `planItemId → workItemId`.
    *
    * The two-pass split is the whole point: a plan item's `blockedBy` names a PLAN-item id
@@ -719,6 +799,12 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
         // NO assignee — placeable, UNCLAIMED; the Queen places it.
       },
     );
+    // WI-10004234: a lost claim race whose stand-down failed even after retries left a
+    // second OPEN lane for this plan item. Fail the promotion loudly instead of reporting
+    // success over a duplicate.
+    if (minted.duplicateLeftOpen) {
+      throw new Error(`plan_promotion_duplicate_left_open:${opts.planSlug}#${itemId}:${minted.duplicateLeftOpen}`);
+    }
     if (!minted.id) {
       // The winner settled/vanished between the claim settlement and the holder read — a
       // narrow re-race. Never link against a null id; the next promotion run re-resolves.
@@ -733,6 +819,7 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
     // the created row's own `wi.harness` for exactly that reason.
     const wi = (await getWorkItem(minted.id, spec.harness)) ?? (await getWorkItem(minted.id));
     const winnerHarness = wi?.harness ?? spec.harness;
+    await stampPromotedLaneGoal(minted.id, winnerHarness);
     await linkWorkItem(minted.id, { kind: PLAN_ITEM_KIND, ref: planItemRef(opts.planSlug, itemId) }, IMPLEMENTS_REL, {
       harness: winnerHarness ?? undefined,
       by: opts.createdBy,
@@ -762,14 +849,31 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
     const laneStatus: PlanLaneSyncStatus | null =
       effective?.effectiveStatus === 'blocked' ? 'blocked' : effective?.needsHuman ? 'needs-human' : null;
     if (laneStatus) {
-      await syncLinkedWorkItemsToPlanLane(
-        { planSlug: opts.planSlug, itemId, harnessSlug: opts.harnessSlug },
-        laneStatus,
-      ).catch(() => {
-        // Best-effort — never let a gating hiccup break the mint itself; the
-        // periodic sweep (system:plan-item-orphan-reconcile, every 15min) is the
-        // backstop that eventually parks it if this inline gate fails.
-      });
+      try {
+        const laneSync = await syncLinkedWorkItemsToPlanLane(
+          { planSlug: opts.planSlug, itemId, harnessSlug: opts.harnessSlug },
+          laneStatus,
+        );
+        for (const failure of laneSync.failures ?? []) {
+          laneGateFailures.push({
+            itemId,
+            workItemId: minted.id,
+            stage: failure.stage,
+            message: failure.message,
+          });
+        }
+      } catch (error) {
+        // The reconciler is fail-soft internally; keep minting if its contract
+        // regresses, but make the exceptional rejection visible to the caller.
+        const failure = {
+          itemId,
+          workItemId: minted.id,
+          stage: 'sync-rejection' as const,
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
+        };
+        laneGateFailures.push(failure);
+        console.warn(`[plan-promotion] mint-time lane sync failure ${JSON.stringify(failure)}`);
+      }
     }
     mintedByPlanItem.set(itemId, minted.id);
     if (minted.created) {
@@ -829,6 +933,9 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
         createdBy: opts.createdBy,
       },
     );
+    if (adopted.duplicateLeftOpen) {
+      throw new Error(`plan_promotion_duplicate_left_open:${opts.planSlug}#${item.id}:${adopted.duplicateLeftOpen}`);
+    }
     if (!adopted.id) continue;
     workItemByPlanItem.set(item.id, adopted.id);
     if (adopted.created) {
@@ -836,7 +943,8 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
       newlyPromotedPlanItemIds.add(item.id);
     }
     const wi = (await getWorkItem(adopted.id, spec.harness)) ?? (await getWorkItem(adopted.id));
-    await linkWorkItem(adopted.id, { kind: PLAN_ITEM_KIND, ref: planItemRef(opts.planSlug, item.id) }, IMPLEMENTS_REL, {
+    await stampPromotedLaneGoal(adopted.id, wi?.harness ?? spec.harness);
+    await linkWorkItem(adopted.id,{ kind: PLAN_ITEM_KIND, ref: planItemRef(opts.planSlug, item.id) }, IMPLEMENTS_REL, {
       harness: wi?.harness ?? spec.harness,
       by: opts.createdBy,
     });
@@ -880,7 +988,16 @@ export async function promotePlanItems(opts: PromotePlanItemsOptions): Promise<P
     failOnTransientEdgeFailure: true,
   });
 
-  return { promoted, skipped: openItems.length - promoted, ...edgeCounts, workItems, specQuality, reservationsRebound };
+  return {
+    promoted,
+    skipped: openItems.length - promoted,
+    ...edgeCounts,
+    workItems,
+    specQuality,
+    reservationsRebound,
+    ...(laneGateFailures.length > 0 ? { laneGateFailures } : {}),
+    ...(goalStamp.goalId || goalStamp.errors.length > 0 ? { goalStamp } : {}),
+  };
 }
 
 /**

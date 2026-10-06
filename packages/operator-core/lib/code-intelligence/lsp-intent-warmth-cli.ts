@@ -33,14 +33,14 @@
  *   npx tsx packages/operator-core/lib/code-intelligence/lsp-intent-warmth-cli.ts
  */
 import { performance } from 'node:perf_hooks';
-import { resolve } from 'node:path';
+import { moduleRepoRoot } from '../module-repo-root';
 
 import { lspQuery, shutdownAllLspClients } from './lsp-adapter.ts';
 import { BENCH_PROBES, resolveProbeCursor } from './code-intel-bench.ts';
 import type { CodeIntelIntent } from './contracts.ts';
 
 /** packages/operator-core/lib/code-intelligence → repo root. */
-const REPO_ROOT = resolve(import.meta.dirname, '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
 
 interface Step {
   readonly intent: CodeIntelIntent;

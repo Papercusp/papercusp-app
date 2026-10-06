@@ -285,7 +285,7 @@ export interface SidecarFirstRerankerOpts {
   /** In-process dtype, used only when no sidecar is configured. */
   dtype?: string;
   /** Sidecar base URL; defaults to resolveRerankSidecarUrl(). null/absent ⇒
-   *  pure in-process. */
+   *  pure in-process, unless `ensure` is set (see there). */
   url?: string | null;
   /** Explicit TOTAL sidecar cap per call across every attempt. When omitted,
    * the caller's absolute deadline owns the budget; 15s is the fallback only
@@ -306,6 +306,52 @@ export interface SidecarFirstRerankerOpts {
    *  correctly refusing a bad request — distinct from 'down' so the log never
    *  claims unavailability when the sidecar is fine. */
   onTransition?: (state: 'down' | 'up' | 'rejected', detail: string) => void;
+  /** Re-establish the sidecar before each attempt. A sidecar this process
+   *  spawned may have exited after an idle period, and this hook re-launches
+   *  it on demand. It should be cheap when the sidecar is already running.
+   *  It runs inside the call's deadline. If the deadline passes first, the
+   *  ensure keeps running, so a later call finds the sidecar warming or ready.
+   *  Leave unset for a sidecar another process owns.
+   *  With `url` null, the ensure hook is the ONLY source of the address (a
+   *  sidecar this process is configured to spawn that is not up yet). The
+   *  client stays sidecar-only until an ensure reports a URL and never loads
+   *  the cross-encoder in-process (WI-10005932). */
+  ensure?: () => Promise<unknown>;
+}
+
+/** WI-10005932: admission-lane key for a spawned sidecar whose address is not known yet. */
+const PENDING_SPAWNED_SIDECAR_KEY = 'spawned-sidecar:pending';
+
+/** Settle `work` within `ms`, or reject. A late settle is ignored, and because
+ *  `Promise.race` subscribes to `work`, a late rejection is never unhandled.
+ *  (The embedder client in @papercusp/memory has the same helper. This
+ *  library does not depend on that one, so it keeps its own copy.) */
+/** P-530: an ensure hook may resolve to the sidecar's CURRENT base URL (a
+ *  sidecar spawned on an ephemeral port comes back on a different port after
+ *  an idle exit). Anything that is not a non-empty string keeps `current`.
+ *  Same rule as nextSidecarUrl in @papercusp/memory; kept local for the same
+ *  reason as the settle helper below. */
+export function nextRerankSidecarUrl(current: string, ensured: unknown): string;
+export function nextRerankSidecarUrl(current: string | null, ensured: unknown): string | null;
+export function nextRerankSidecarUrl(current: string | null, ensured: unknown): string | null {
+  return typeof ensured === 'string' && ensured.trim() ? ensured.trim().replace(/\/$/, '') : current;
+}
+
+async function settleEnsureWithin<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`sidecar_ensure_timeout: sidecar not ready within ${Math.max(0, Math.round(ms))}ms`)),
+          Math.max(0, ms),
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -326,7 +372,7 @@ export function buildSidecarFirstReranker(opts: SidecarFirstRerankerOpts = {}): 
     ((state: 'down' | 'up' | 'rejected', detail: string) =>
       console.warn(`[sidecar-reranker] ${model} sidecar ${state}: ${detail}`));
 
-  if (!url) {
+  if (!url && !opts.ensure) {
     // No sidecar configured: the in-process engine is the sole engine.
     //
     // `dtype` is forwarded ONLY when the caller actually set one. Defaulting it
@@ -353,8 +399,13 @@ export function buildSidecarFirstReranker(opts: SidecarFirstRerankerOpts = {}): 
   }
 
   const fetchFn = opts.fetchFn ?? fetch;
-  const admission = sidecarAdmissionGateFor(url, model, fetchFn, now);
+  const admission = sidecarAdmissionGateFor(url || PENDING_SPAWNED_SIDECAR_KEY, model, fetchFn, now);
   let wasDown = false;
+  // P-530: an ensure hook may report a new address (a sidecar re-launched on a
+  // fresh ephemeral port after an idle exit). Shared across calls so later
+  // calls start there. The admission gate stays keyed by the first URL: it
+  // still guards the same logical sidecar for this process.
+  let currentUrl: string | null = url || null;
 
   return async (query: string, texts: string[], callOpts?: RerankScoreCallOpts): Promise<number[]> => {
     if (texts.length === 0) return [];
@@ -376,11 +427,18 @@ export function buildSidecarFirstReranker(opts: SidecarFirstRerankerOpts = {}): 
         const remaining = deadline - now();
         if (remaining <= 0) throw new RerankDeadlineError('Rerank deadline elapsed before a sidecar attempt');
         try {
-          const res = await sidecarRerankBatch(url, {
+          let left = remaining;
+          if (opts.ensure) {
+            currentUrl = nextRerankSidecarUrl(currentUrl, await settleEnsureWithin(opts.ensure(), remaining));
+            left = deadline - now();
+            if (left <= 0) throw new RerankDeadlineError('Rerank deadline elapsed while re-establishing the sidecar');
+          }
+          if (currentUrl === null) throw new Error('sidecar_not_ready: no sidecar address reported yet');
+          const res = await sidecarRerankBatch(currentUrl, {
             model,
             query,
             texts,
-            timeoutMs: remaining,
+            timeoutMs: left,
             fetchFn,
           });
           if (wasDown) {
@@ -424,12 +482,12 @@ export function buildSidecarFirstReranker(opts: SidecarFirstRerankerOpts = {}): 
       throw isNonRetryableSidecarError(lastErr)
         ? new Error(
             `sidecar_rejected_request: ${lastErr instanceof Error ? lastErr.message : String(lastErr)} ` +
-              `(${url}, ${model}) — the sidecar rejected this request (non-retryable); ` +
+              `(${currentUrl}, ${model}) — the sidecar rejected this request (non-retryable); ` +
               'check payload shape/size — this is not a downtime issue',
           )
         : new Error(
             `sidecar_required_unavailable: ${lastErr instanceof Error ? lastErr.message : String(lastErr)} ` +
-              `(${url}, ${model}, budget ${timeoutMs}ms) — reranking requires the sidecar; ` +
+              `(${currentUrl}, ${model}, budget ${timeoutMs}ms) — reranking requires the sidecar; ` +
               'search degrades to retrieval order while it is down',
           );
     });

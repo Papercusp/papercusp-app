@@ -22,7 +22,6 @@ import {
 } from '@papercusp/agent-mcp';
 import { sseResponse } from '@papercusp/sse';
 import { dispatchPluginApiRoute } from '../../../plugin-api-mount';
-import { allowedMethodsFor } from '../../method-not-allowed';
 import { pluginSpawnImpl, secretImpl, makeSecretResolver } from '../../../plugin-spawn-impl';
 import { resolveHarnessPaths } from '../../../resolve-harness-paths';
 import { isLoopbackRequest, isValidSuperuserBearer } from '../../../superuser-token';
@@ -131,6 +130,10 @@ async function dispatchHttp(req: Request): Promise<Response> {
   // so a genuinely unknown /plugins/* path stays 404.
   if (result.status === 404) {
     const rel = url.pathname.replace(/^\/api/, '') || '/';
+    // The resolver reads ALL_ROUTES. Loading it during route declaration
+    // creates catchall -> resolver -> registry -> catchall and captures this
+    // module's unfinished export when the catch-all is imported first.
+    const { allowedMethodsFor } = await import('../../method-not-allowed');
     const allowed = allowedMethodsFor(rel);
     const eff = req.method === 'HEAD' ? 'GET' : req.method;
     if (allowed.length > 0 && !allowed.includes(eff)) {

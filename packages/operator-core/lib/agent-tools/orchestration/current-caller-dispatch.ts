@@ -51,6 +51,7 @@ const rebindCurrentCallerDispatch: WrapDispatch = async (tool, _toolName, args, 
     contextTier: undefined,
     transportCapExempt: true,
     codeMode: true,
+    indirectDispatch: true,
   };
 
   if (tool.crossWorkspace === true) {

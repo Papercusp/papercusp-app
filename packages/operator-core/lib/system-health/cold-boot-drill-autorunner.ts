@@ -53,7 +53,7 @@ import {
   type GradeColdBootDrillResult,
 } from '../cold-boot-drill-live';
 import {
-  listLiveHosts,
+  listLiveHostsAsync,
   hostSupports,
   sessionClassForHost,
   type PsuPtyHost,
@@ -81,7 +81,8 @@ export const MAX_DRILLS_BEFORE_GIVEUP = 3;
 export interface ColdBootDrillAutorunDeps {
   readLedger: () => Promise<ColdBootDrillLedgerEvent[]>;
   report: () => Promise<ColdBootDrillReport>;
-  listHosts: () => PsuPtyHost[];
+  /** Production uses the async scan (WI-10004559); a sync array is accepted for fixtures. */
+  listHosts: () => PsuPtyHost[] | Promise<PsuPtyHost[]>;
   startDrill: (input: {
     ownerId: string;
     ownerLabel: string;
@@ -89,8 +90,26 @@ export interface ColdBootDrillAutorunDeps {
     sessionClass?: string;
   }) => Promise<StartColdBootDrillResult>;
   gradeDrill: (ownerId: string, drillId: string) => Promise<GradeColdBootDrillResult>;
+  /**
+   * Owners a drill must never cut. A GOAL holder is the goal's one sovereign, and a
+   * drill's carry-respawn ends its session row: the goal-holder respawner reads that
+   * end as a lost holder and launches a replacement (WI-10005559, 2026-10-02 16:49Z:
+   * one drill on goal 60d3a8's holder started five re-elections in ten minutes).
+   * Any goal-mode row counts, stood-down rows included — over-protecting costs one
+   * drill candidate, under-protecting costs a goal its holder.
+   */
+  listProtectedOwners: () => Promise<ReadonlySet<string>>;
   flagEnabled: () => Promise<boolean>;
   now: () => number;
+}
+
+async function defaultListProtectedOwners(): Promise<ReadonlySet<string>> {
+  const [{ getOrgPg }, { readGoalHolderRows }] = await Promise.all([
+    import('@papercusp/db-org'),
+    import('../goals/holder'),
+  ]);
+  const rows = await readGoalHolderRows(getOrgPg().sql);
+  return new Set(rows.map((r) => r.ownerId));
 }
 
 async function defaultFlagEnabled(): Promise<boolean> {
@@ -110,7 +129,7 @@ function autorunDeps(overrides: Partial<ColdBootDrillAutorunDeps>): ColdBootDril
   return {
     readLedger: readColdBootDrillLedger,
     report: () => reportColdBootDrills(),
-    listHosts: () => listLiveHosts(),
+    listHosts: () => listLiveHostsAsync(),
     startDrill: (input) =>
       // NO explicit sessionClass ⇒ startColdBootDrill defaults it from
       // sessionClassForHost(host) — the A1 class-vocabulary fix.
@@ -121,6 +140,7 @@ function autorunDeps(overrides: Partial<ColdBootDrillAutorunDeps>): ColdBootDril
         sessionClass: input.sessionClass,
       }),
     gradeDrill: (ownerId, drillId) => gradeColdBootDrill(ownerId, drillId),
+    listProtectedOwners: defaultListProtectedOwners,
     flagEnabled: defaultFlagEnabled,
     now: Date.now,
     ...overrides,
@@ -197,10 +217,15 @@ export function gradedDrillCountForClass(
 /** Pick a headless, carry-respawn-capable live host for `sessionClass`, preferring
  *  the most-idle (oldest lastActivityAt) to minimise disruption — though the host
  *  busy-gate defers the cut to a clean boundary regardless. null ⇒ none eligible. */
-export function pickEligibleHost(hosts: readonly PsuPtyHost[], sessionClass: string): PsuPtyHost | null {
+export function pickEligibleHost(
+  hosts: readonly PsuPtyHost[],
+  sessionClass: string,
+  protectedOwners: ReadonlySet<string> = new Set<string>(),
+): PsuPtyHost | null {
   const eligible = hosts.filter(
     (h) =>
       h.bridgeTty === false && // headless only (D-005) — never auto-cut a human session
+      !protectedOwners.has(h.ownerId) && // never cut a goal holder (WI-10005559)
       sessionClassForHost(h) === sessionClass &&
       hostSupports(h, 'carry-respawn'),
   );
@@ -264,7 +289,18 @@ export async function runColdBootDrillAutorunOnce(
       skippedClasses.push({ sessionClass, reason: 'gave-up-carry-insufficient' });
       continue;
     }
-    const host = pickEligibleHost(deps.listHosts(), sessionClass);
+    let protectedOwners: ReadonlySet<string>;
+    try {
+      protectedOwners = await deps.listProtectedOwners();
+    } catch (e) {
+      // Fail CLOSED: without the protected set a drill could cut a goal holder.
+      skippedClasses.push({
+        sessionClass,
+        reason: `protected-owner-read-failed:${e instanceof Error ? e.message : String(e)}`,
+      });
+      continue;
+    }
+    const host = pickEligibleHost(await deps.listHosts(), sessionClass, protectedOwners);
     if (!host) {
       skippedClasses.push({ sessionClass, reason: 'no-eligible-headless-host' });
       continue;

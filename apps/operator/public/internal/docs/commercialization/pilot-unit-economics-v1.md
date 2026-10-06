@@ -1,0 +1,46 @@
+# Pilot unit economics v1 — calculation and measurement requirements
+URL: /internal/docs/commercialization/pilot-unit-economics-v1
+
+Exact hosted-billing quote arithmetic, explicit cost provenance, provisional offer and numeric pilot thresholds; real workload, merchant and support measurements remain acceptance gates.
+
+# Pilot unit economics v1
+
+Status: a proposed price sheet and implemented calculator under WI-10005829/P-003. No quote has been issued and no commercial price has been enabled. The remaining P-003 measurement gate is open.
+
+## Calculator and reuse
+
+`auth/hosted/billing/unit-economics.ts` extends the existing hosted-billing surface and imports micro-USD conversion from the existing money journal. It creates no second billing service, payment stack, table or scheduled routine. All input amounts, quantities and billing blocks are safe integers; multiplication/division uses exact BigInt intermediates and rejects unsafe final amounts.
+
+The input is versioned data: workload quantities, units, provider/labor rate and evidence references/timestamps, cost payer, merchant processing fees, finite allowance, overage choice and separate platform/consumption margin targets. A nonzero unpriced cost stays unknown. Omitted storage, IP, provider inference fees or other required cost categories block quote certification. Explicit observed zero exposure may cost zero. Catalog/estimated rates, modeled usage, stale/future evidence and unknown merchant fees cannot certify an observed quote. `quoteAllowed` is a calculation over supplied provenance, not an authorization to charge or independent verification of an evidence reference.
+
+Compute/storage/IP/egress and inference costs are separate from support/platform overhead. OpenRouter charges incurred on the customer's own key stay customer-direct and visible; they do not become Papercusp consumption revenue. An explicit provider-fee line is required in addition to input/output/cache costs. Provider-native totals must not be counted again as token-derived costs. The invoice fee is rounded once to whole cents; its variable part is allocated exactly across revenue axes and the fixed transaction fee belongs to platform. Cost rates round up only to a micro-USD. Provider billing minimums/increments apply before pricing. Margins are profit divided by revenue, not markup divided by cost. Zero revenue and incomplete costs have no numeric margin.
+
+## Current external references and measured evidence
+
+Current public references were read on 2026-10-03. They are catalog/rule observations, not completed-job cost receipts:
+
+* Google Compute pricing: [https://cloud.google.com/products/compute/pricing](https://cloud.google.com/products/compute/pricing) — compute has a one-minute minimum and subsequent per-second billing; running idle instances still incur compute cost.
+* Google disks: [https://cloud.google.com/compute/disks-image-pricing](https://cloud.google.com/compute/disks-image-pricing) — provisioned capacity is charged until relinquished. Iowa balanced disk catalog rate observed at $0.000136986/GiB-hour; snapshots are separate exposure.
+* Google VPC: [https://cloud.google.com/vpc/network-pricing](https://cloud.google.com/vpc/network-pricing) — in-use standard IPv4 catalog rate observed at $0.005/hour and unused reserved IPv4 at $0.01/hour. A static address associated with a stopped VM remains in use; an ephemeral address is released on stop. Region, tier, destination and account-level allowances must be captured for egress.
+* Stripe: [https://stripe.com/pricing](https://stripe.com/pricing) — headline card pricing does not establish this merchant's complete subscription/payment/refund/FX/tax fee schedule. Capture the actual applicable schedule before quoting; leave unknown fees unknown.
+* OpenRouter: [https://openrouter.ai/support](https://openrouter.ai/support) — provider token pricing passes through, credit purchases incur a fee, and provider-key BYOK fees depend on a list-price-cost allowance and plan. Do not use the retired request-count allowance or assume BYOK is free. A customer's OpenRouter account/key and an upstream provider key supplied to OpenRouter are different arrangements.
+
+Existing real workload evidence is reused rather than replaced: `agent-capacity-and-cost-gcp-2026-09-30#D-020` records real replay ramps, achieved concurrency, unit-of-work rates and caveats; its state explicitly says the cheap spot figures are lab-only while workspace hosts remain on-demand. Do not price the current hosted product from those spot figures. `docs/evidence/byoc-r5-customer-tasks-r62b6-2026-10-02.json` records real customer-account CLI tasks, but these are tiny non-OpenRouter smoke jobs and do not validate the recurring maintenance offer or its support distribution.
+
+## Reproducible workload cases
+
+The canonical Vitest suite exercises idle, normal, heavy and burst arithmetic controls, plus fee-inclusive price floors, separate margins, cache categories, BYOK separation, omitted/unpriced/old inputs, finite allowances, units/minimums/rounding and overflow. The first four controls total $4/$11/$33/$72 using synthetic $1/unit costs. Those numbers are test oracles, not provider quotes. Real versions of these four cases must be saved with observed host/resource time, disk/snapshot/IP occupancy, byte-tier/destination egress, OpenRouter billed usage/cache/fees, completed maintenance outcome/rework and staff time. Include idle retained-resource cost and interrupted/burst work. Public rates cannot fill missing observations.
+
+## Concrete proposed offer and thresholds
+
+Interview/quote hypothesis v1: $1,000 platform/service fee for one organization/repository and 30 days, four weekly maintenance deliveries, one setup session capped at one staff hour, and up to two additional support hours. A separate $50 funded infrastructure allowance is a hypothesis; its final rates and maximum admitted exposure must be measured and accepted first. The customer pays its own OpenRouter account directly. No automatic renewal, automatic top-up or unapproved overage. Exhaustion stops new admission and safely checkpoints/drains current work. These figures are proposals, not Stripe live prices or a ready purchase order.
+
+Numeric experiment thresholds (not validated): platform margin at least 70%, consumption margin at least 20% after the applicable processing fees; setup at most 60 minutes; support median at most 120 minutes over the 30-day pilot; at least 50% of recruited organizations voluntarily repeat the workflow; at least 95% of agreed verification runs complete; rework on at most 25% of deliveries. Recruit three unrelated paying organizations only after the real launch/payment gates pass. P-011 records a dated continue/reprice/narrow/stop decision from actual receipts and outcomes. Accepted-task count and raw agent-hours are learning metrics, not v1 invoice units.
+
+## Billing and cancellation policy
+
+Amounts settle in USD cents through the existing money/Stripe rails; usage is aggregated in micro-USD with explicitly retained rounding residue. Units and provider minimum/increment rules belong to the versioned sheet. Credits are finite money allowances, not unlimited agent capacity. Overage requires affirmative opt-in to a bounded revised allowance; a higher ceiling alone is not a paid feature. Canceling future work does not authorize data deletion: distinguish incurred charges, undelivered service-fee treatment, exports, retained disks/IP/snapshots and their final disposition before payment.
+
+## Remaining acceptance
+
+Populate the four cases from the actual on-demand execution route and representative OpenRouter maintenance jobs; obtain observed staff time and complete applicable merchant fees; reconcile provider billing; run the calculator on those pinned inputs; update the proposed quote if either margin misses its target. Resolve merchant/payout/tax/support details and the assembled security/customer journey separately. Do not close P-003 or certify this proposal from arithmetic fixtures or this draft.

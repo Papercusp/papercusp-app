@@ -12,7 +12,12 @@ import { defineTool } from '@papercusp/agent-mcp';
 import { COORD_ROLES } from '../coordination/roles';
 import { resolveConcreteWorkspaceId } from '../../workspace-registry';
 import { resolvePotHomeSlug } from '../../pot/wake';
-import { getOwnerSteering, steeringLooksInconsistent, steeringModelSpecDrift } from '../../owner-steering';
+import {
+  getOwnerSteering,
+  steeringLooksInconsistent,
+  steeringModelSpecDrift,
+  steeringUnpricedModelSpecs,
+} from '../../owner-steering';
 import { MUG_KETTLE_RETIRED_ERROR } from '../_mug-kettle-gate';
 import { mugKettleSystemEnabled } from '../../pot/started';
 import { DEFAULT_MODEL_TIERS, type ModelTier } from '../../agent-config-constants';
@@ -110,6 +115,10 @@ export default defineTool({
       // tier menu — non-empty ⇒ reconcile via pot:set-steering { modelTiers:null,
       // modelOverrides:null } (inherit the fixed workspace default). Advisory only.
       modelSpecDrift: steeringModelSpecDrift(steering, committedTiers),
+      // WI-10004526: pinned Codex specs with no @papercusp/model-pricing entry —
+      // usage records unpriced and llmCall refuses them (the WI-10004502 Scout
+      // outage). Non-empty ⇒ add the price or re-pin. Advisory only.
+      modelSpecUnpriced: steeringUnpricedModelSpecs(steering),
     });
   },
 });

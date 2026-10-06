@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { genericFsAdapter, getDocs, harnessFsAdapter, withPreamble, type DocSource } from '@papercusp/docs-engine';
 import { loadHarnessRegistry, resolveHarnessContentPath } from '../../harness-registry';
-import { resolveDocsRoot } from '../../endpoint-route/routes/harness/project-docs';
+import { resolveDocsRoot, resolveDocsSources } from '../../endpoint-route/routes/harness/project-docs';
 import { engineeringAdapter as engineeringBase, engineeringAdapterForSlugs } from './_engineering-adapter';
 import {
   HARNESS_REQUIRED_DETAIL,
@@ -92,6 +92,25 @@ export async function resolveAdapter(
     };
   }
   const projectRoot = resolveHarnessContentPath(reg, harnessSlug) ?? project.path;
+  const sources = await resolveDocsSources(projectRoot);
+  const requestedNamespace = opts.slugs?.[0]?.split('/')[0];
+  if (requestedNamespace && Object.hasOwn(sources, requestedNamespace) &&
+      opts.slugs?.every((slug) => slug.startsWith(`${requestedNamespace}/`))) {
+    const base = genericFsAdapter(sources[requestedNamespace], { name: `harness:${harnessSlug}:${requestedNamespace}` });
+    const adaptPage = (page: import('@papercusp/docs-engine').DocPage) => ({
+      ...page, slug: `${requestedNamespace}/${page.slug}`, slugs: [requestedNamespace, ...page.slugs],
+    });
+    return { surface: 'harness', adapter: wrapWithPreamble({
+      name: base.name,
+      listPages: async () => (await base.listPages()).map(adaptPage),
+      getPage: async (slug) => {
+        const page = await base.getPage(slug.slice(requestedNamespace.length + 1));
+        return page ? adaptPage(page) : null;
+      },
+      getContent: (page) => base.getContent({ ...page, slug: page.slug.slice(requestedNamespace.length + 1) }),
+      getSource: (page) => base.getSource!({ ...page, slug: page.slug.slice(requestedNamespace.length + 1) }),
+    }) };
+  }
   return {
     adapter: wrapWithPreamble(
       harnessFsAdapter(projectRoot, {
@@ -168,6 +187,10 @@ const argsSchema = z.preprocess(
       message:
         'source and heading are mutually exclusive — a heading slice is not the document. Drop `heading` to read the whole source, or drop `source` to read that section rendered.',
       path: ['source'],
+    })
+    .meta({
+      'x-papercusp-call-constraint':
+        'source and heading are mutually exclusive; source reads the entire canonical document, while heading returns a rendered section slice',
     }),
 );
 
@@ -196,7 +219,12 @@ export default defineTool({
   // the same pool slot they are needlessly retaining. Match docs:search and release
   // that slot before the handler starts its own lazy reads.
   skipWorkspaceTx: true,
-  agentRoles: [...SU_ROLES, 'papercup-deep', 'release-fixer'],
+  // EI-24903256825782248: `judge` is here because an acceptance rubric's method
+  // can MANDATE a runbook read (e.g. a criterion whose drift markers live in a
+  // grading runbook). Without it a judge must rate unknown, and the ship gate
+  // then refuses for want of a pass-equivalent independent rating. Read-only;
+  // paired with the judge's `docs:read` principal cap.
+  agentRoles: [...SU_ROLES, 'papercup-deep', 'release-fixer', 'judge'],
   modality: ['text'],
   rolesQuota: {
     worker: { perChunk: 10 },

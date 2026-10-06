@@ -252,6 +252,36 @@ async function startDbosOnce(): Promise<void> {
       armPgLaunchRetry();
       return;
     }
+    // WI-10004954 — if this executor's previous process shut down GRACEFULLY (it left a
+    // marker at SIGTERM/SIGINT), give each of its in-flight workflows back the recovery
+    // attempt that the re-dequeue after DBOS.launch() is about to charge. Runs on this
+    // probe connection, against the exact database DBOS recovers from, before launch.
+    // Crashes leave no marker and still count. Best-effort: a failure leaves the attempt
+    // counted (the pre-fix behaviour) and never blocks the launch.
+    try {
+      const [{ consumeGracefulShutdownCredit }, { DBOS: DbosForCredit }] = await Promise.all([
+        import('./graceful-shutdown-recovery-credit'),
+        import('@dbos-inc/dbos-sdk'),
+      ]);
+      const credit = await consumeGracefulShutdownCredit({
+        sql: probe,
+        executorId: DbosForCredit.executorID,
+      });
+      if (credit.outcome === 'credited') {
+        console.log(
+          `[dbos-graceful-credit] previous ${credit.marker.signal} was graceful: credited ` +
+            `${credit.ids.length} in-flight workflow(s) on executor ${credit.marker.executorId}` +
+            `${credit.ids.length > 0 ? `: ${credit.ids.slice(0, 10).join(', ')}` : ''}`,
+        );
+      } else if (credit.outcome !== 'no-marker') {
+        console.warn(`[dbos-graceful-credit] marker not credited: ${JSON.stringify(credit)}`);
+      }
+    } catch (e) {
+      console.warn(
+        '[dbos-graceful-credit] boot credit failed (non-fatal), the restart counts as a recovery attempt:',
+        e instanceof Error ? e.message : e,
+      );
+    }
     await probe.end({ timeout: 2 }).catch(() => {});
   }
 
@@ -271,8 +301,7 @@ async function startDbosOnce(): Promise<void> {
   // BYOC P-046 / D-100: every workspace-host provision enters this host-scoped
   // dedup workflow. It is always registered because the route is flag-ON and a
   // recovered in-flight host operation must bind even before a new request arrives.
-  const { registerWorkspaceHostProviderFactory } = await import('@papercusp/deployment-driver');
-  const { createConfiguredGcpWorkspaceHostProvider } = await import('../workspace-host/gcp-provider');
+  const { registerWorkspaceHostProviderFactories } = await import('../workspace-host/provider-factories');
   const { resolveHostedGcpAuth } = await import('../workspace-host/hosted-gcp-auth');
   // WI-10001672: bind the teardown-obligation ledger's PRODUCING half here. Without this the
   // sweep in periodic-workflows runs over a table nothing writes to and reports "no outstanding
@@ -286,13 +315,14 @@ async function startDbosOnce(): Promise<void> {
     import('../workspace-host/cloud-resource-obligations'),
     import('@papercusp/db-org'),
   ]);
-  registerWorkspaceHostProviderFactory('gcp', (connection) => {
-    // The CONSUMING half. Bound at the same composition root as its producing twin below:
-    // without it `closeCloudResourceObligation` has zero production callers, every row stays
-    // teardown_owed forever, and the sweep escalates on phantoms — which makes a REAL leak
-    // indistinguishable from a torn-down one (EI-23459044188861686).
+  // The CONSUMING half. Bound at the same composition root as its producing twin: without it
+  // `closeCloudResourceObligation` has zero production callers, every row stays teardown_owed
+  // forever, and the sweep escalates on phantoms — which makes a REAL leak indistinguishable from
+  // a torn-down one (EI-23459044188861686). Shared by every cloud provider factory below.
+  const obligationObservers = (provider: 'gcp' | 'aws') => {
     const closeObligation = createCloudResourceObligationCloseObserver({
       sql: getOrgPg().sql,
+      provider,
       onUnmatched: (event) => {
         // Loud on purpose: a confirmed destroy that matched no open obligation means the
         // create-side kind and the delete-side kind have drifted apart, and a silent
@@ -308,22 +338,28 @@ async function startDbosOnce(): Promise<void> {
         );
       },
     });
-    return createConfiguredGcpWorkspaceHostProvider(connection, {
-      resolveHostedAuth: resolveHostedGcpAuth,
-      onResourceCreated: createCloudResourceObligationObserver({ sql: getOrgPg().sql }),
+    return {
+      onResourceCreated: createCloudResourceObligationObserver({ sql: getOrgPg().sql, provider }),
       // Adapted to the provider's fire-and-forget observer contract: the close observer returns
       // { closed } so callers and tests can assert on it, while the provider deliberately does
       // not consume a result from an observer.
-      onResourceDestroyed: async (event) => {
+      onResourceDestroyed: async (event: Parameters<typeof closeObligation>[0]) => {
         await closeObligation(event);
       },
-    });
-  });
+    };
+  };
+  // aws-byoc-gcp-parity-2026-10-01 P-003: 'gcp' and 'aws' register through ONE exported function
+  // with the same obligation observers, so an EC2 instance or EBS volume is tracked from creation
+  // to provider-confirmed absence exactly like a GCP disk, and the registration is unit-testable.
+  registerWorkspaceHostProviderFactories({ resolveHostedGcpAuth, obligationObservers });
   await import('./workspace-host-provision-workflow');
   // D-391: the day-long workspace-host soak runs on its OWN queue (the provisioning queue's
   // host-scoped dedup would lock lifecycle actions out for the whole soak). Registered before
   // launch so a controller restart mid-soak recovers it instead of orphaning a day of samples.
   await import('./workspace-host-soak-workflow');
+  // WI-10004950: standing health for every live hosted host this controller holds authority for
+  // (15-minute schedule). Ungated: a process that controls no host lists nothing and probes nothing.
+  await import('./workspace-host-health-workflow');
   // The director-cadence autoloop workflow is RETIRED (autoloop-pot-operator-
   // rebuild-2026-06-05 P-010 / D-009): it read `.papercusp/director-config.json`,
   // an enablement surface nothing wrote. Scheduled decider fires are the routines
@@ -430,10 +466,24 @@ async function startDbosOnce(): Promise<void> {
   // recovery resumes an interrupted run; nothing executes until a caller admits a durable run.
   await import('./durable-orchestration-workflow');
 
+  // agent-economy-flywheel-2026-08-30 P-041 (D-024): hourly anchoring of the hash-chained
+  // ledgers. Registered ungated before launch; a pass publishes only when an anchor key is
+  // configured (otherwise it checks cadence and files one missed-hour alert per workspace),
+  // and PAPERCUSP_LEDGER_ANCHOR_BACKEND=none turns it off.
+  await import('./ledger-anchor-workflow');
+
+  // agent-economy-flywheel-2026-08-30 P-043 (D-025): hourly money reconciliation, plus the
+  // month-close final run. Registered ungated: with no rails configured every source reads
+  // not-configured and no gate is pushed, so the Worker keeps DAO transfers paused.
+  await import('./reconciliation-workflow');
+
   // EI-20196041413229589: register the release:checkpoint-run eligibility waiter before
   // DBOS.launch, then install its request-side enqueue seam only after the runtime is live.
   // This keeps waitForEligibility transport-safe without making DBOS a request-handler import.
   const { wireCheckpointEligibilityWait } = await import('./checkpoint-eligibility-workflow');
+  // D-131 (p2p-public-release-endgame): debounced auto-verify after a persisted repair admit.
+  // Same split: register before launch, wire the enqueue seam after.
+  const { wireRepairAutoVerify } = await import('./repair-auto-verify-workflow');
 
   try {
     await DBOS.launch();
@@ -465,6 +515,7 @@ async function startDbosOnce(): Promise<void> {
   }
   G.__papercuspDbosStarted = true;
   wireCheckpointEligibilityWait();
+  wireRepairAutoVerify();
   console.log(`[dbos] launched (schema=dbos, source=${source}, appVersion=${PINNED_APP_VERSION})`);
 
   // WI-10001739 link 3b — the hosted-lifecycle reconciler runs as `harness_app` and must read
@@ -520,6 +571,25 @@ async function startDbosOnce(): Promise<void> {
     );
   } catch (e) {
     console.warn('[dbos-executor-reaper] failed to start (non-fatal):', e instanceof Error ? e.message : e);
+  }
+
+  // WI-10004954 — a graceful restart must not spend an in-flight workflow's DBOS recovery
+  // budget (every dequeue charges one; boot recovery re-dequeues). On SIGTERM/SIGINT this
+  // writes a marker SYNCHRONOUSLY, ahead of the host's own drain (which may SIGKILL itself
+  // within a second); the next boot credits the attempt back before DBOS.launch(). The
+  // first version credited over PG inside the handler and was killed mid-flight
+  // (2026-10-01 18:14:25Z). Crashes still count. Best-effort: a failure leaves the
+  // pre-fix behaviour.
+  try {
+    const [{ armGracefulShutdownMarker }, { DBOS: DbosForCredit }] = await Promise.all([
+      import('./graceful-shutdown-recovery-credit'),
+      import('@dbos-inc/dbos-sdk'),
+    ]);
+    const executorId = DbosForCredit.executorID;
+    armGracefulShutdownMarker({ executorId });
+    console.log(`[dbos-graceful-credit] shutdown marker armed for executor ${executorId}`);
+  } catch (e) {
+    console.warn('[dbos-graceful-credit] failed to arm (non-fatal):', e instanceof Error ? e.message : e);
   }
 
   // EI-455 bug #2 — start the green-checkpoint silent-stall watchdog: a process-
@@ -683,6 +753,13 @@ async function startDbosOnce(): Promise<void> {
     // is fail-closed and a refusal would otherwise render as clean.
     const { startInstalledHookDriftWatchdog } = await import('../system-health/installed-hook-drift-watchdog');
     startInstalledHookDriftWatchdog();
+    // WI-10006236 (#1309 prevention): Claude Code updates itself, and 2.1.289 silently
+    // made 1M-default sessions run at 200k (WI-10006049). Once per new active build, and
+    // once per boot, run that build headlessly through the gateway and escalate if a
+    // 1M-default family is not served at 1M, or if the probe could not measure. Host
+    // singleton only: each probe is a real model request.
+    const { startClaudeUpdateCanary } = await import('../system-health/claude-update-canary');
+    startClaudeUpdateCanary();
     // WI-10002060: alarm when a live session's identity activation cannot be
     // reconciled with its launch record, which makes the kernel refuse EVERY
     // tool. The denial is SELF-SEALING — a wedged session cannot file its own
@@ -870,4 +947,28 @@ export function startDbos(): Promise<void> {
     });
   }
   return dbosStartInFlight;
+}
+
+/**
+ * WI-10004957: `/api/health` is pure liveness and answers while DBOS is still launching, so a
+ * request that arrives in the first seconds after a bg-host restart found `dbosStarted()` false
+ * and was refused 503 "provisioning workflow is unavailable" even though DBOS was a moment
+ * away. A route may instead wait, bounded, for a launch that is ALREADY IN FLIGHT here. When no
+ * launch is in flight (a request-only host, DBOS disabled, or a launch that already failed and
+ * is waiting on its retry timer) this returns at once, so it never delays a host that will not
+ * launch DBOS in the next few seconds. Never throws; resolves to the final `dbosStarted()`.
+ */
+export const DBOS_LAUNCH_IN_FLIGHT_WAIT_MS = 15_000;
+
+export async function awaitDbosLaunchInFlight(timeoutMs: number = DBOS_LAUNCH_IN_FLIGHT_WAIT_MS): Promise<boolean> {
+  if (dbosStarted()) return true;
+  const inFlight = dbosStartInFlight;
+  if (!inFlight || timeoutMs <= 0) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    inFlight.catch(() => undefined),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return dbosStarted();
 }

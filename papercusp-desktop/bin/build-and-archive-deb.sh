@@ -37,6 +37,12 @@
 #                    removed. Pass the printed path explicitly to a drill, e.g.
 #                    bin/hive-git-drill.sh <path>. Never publish one.
 set -euo pipefail
+
+# ── Self-read guard (WI-3306 idiom; WI-10005998): parse the whole script before
+# executing, so a peer's mid-run edit to this shared-tree file can't shift the
+# running shell's read offset into changed bytes (the tauri bundle step runs for
+# tens of minutes). Matching exit 0 + } at EOF.
+{
 LIVE_DESKTOP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE_REPO_DIR="${PAPERCUSP_REPO_DIR:-/home/builduser/papercupai-workspace/papercusp}"
 DESKTOP_DIR="$LIVE_DESKTOP_DIR"
@@ -1036,3 +1042,6 @@ if [[ "$TEST_ARTIFACT" == "1" ]]; then
 else
   echo "    live artifact: $DEB_PATH"
 fi
+exit 0
+
+}  # ── end self-read guard (WI-3306) ──

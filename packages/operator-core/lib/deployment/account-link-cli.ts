@@ -326,7 +326,7 @@ export async function startCliLink(input: StartCliLinkInput, deps: StartCliLinkD
     label: input.label?.trim() || undefined,
     provider,
     configDir,
-    reaper: setTimeout(() => cleanup(linkId), LINK_TTL_MS),
+    reaper: setTimeout(() => { void expireCliLink(linkId); }, LINK_TTL_MS),
   };
   links.set(linkId, entry);
   // ONE persistent listener owns appending to entry.buf; every readUntil below only OBSERVES
@@ -334,6 +334,16 @@ export async function startCliLink(input: StartCliLinkInput, deps: StartCliLinkD
   pty.onData((d) => {
     entry.buf += d;
   });
+  // Codex writes auth.json and exits after browser approval. Install that login
+  // immediately: requiring a later "complete" call leaves a successful login in
+  // the temporary home, where the pending-link reaper can delete it.
+  if (provider === 'codex') {
+    pty.onExit(({ exitCode }) => {
+      if (exitCode === 0 && links.get(linkId) === entry) {
+        void finalizeCodexCliLink(linkId, entry, {}, { notify: defaultNotify });
+      }
+    });
+  }
   const noAppend = () => {};
 
   const startTimeoutMs = deps.startTimeoutMs ?? START_TIMEOUT_MS;
@@ -409,6 +419,14 @@ async function completeCodexCliLink(
   } catch {
     return { ok: false, error: 'Codex login is not complete yet — enter the device code in the browser, then complete the link' };
   }
+  try {
+    const auth = JSON.parse(raw) as { auth_mode?: string; tokens?: { access_token?: string } };
+    if (auth.auth_mode !== 'chatgpt' || !auth.tokens?.access_token?.trim()) {
+      return { ok: false, error: 'Codex login did not produce a usable ChatGPT credential' };
+    }
+  } catch {
+    return { ok: false, error: 'Codex login produced an invalid credential file' };
+  }
   const durableHome = papercuspPath('deploy-credentials', `${l.accountId}.codex-cli`);
   const durableAuthPath = `${durableHome}/auth.json`;
   try {
@@ -438,8 +456,6 @@ async function completeCodexCliLink(
   } catch (e) {
     return { ok: false, error: `failed to persist the Codex CLI credential: ${(e as Error).message}` };
   }
-  cleanup(linkId);
-  deps.notify?.();
   const account = (await accountStatus()).find((a) => a.id === l.accountId) ?? null;
   return {
     ok: true,
@@ -447,18 +463,63 @@ async function completeCodexCliLink(
   };
 }
 
+/** One finalizer for automatic device approval, explicit completion and expiry. */
+function finalizeCodexCliLink(
+  linkId: string,
+  l: PendingCliLink,
+  input: Partial<CompleteCliLinkInput>,
+  deps: CompleteCliLinkDeps,
+): Promise<CompleteCliLinkResult> {
+  if (l.done?.ok) return Promise.resolve(l.done);
+  l.done = undefined;
+  if (l.finalizing) return l.finalizing;
+  const attempt = completeCodexCliLink(linkId, l, { linkId, ...input }, deps)
+    .then((result) => {
+      if (!result.ok) return result;
+      l.done = result;
+      clearTimeout(l.reaper);
+      try { l.pty.kill(); } catch { /* already exited */ }
+      void rm(l.configDir, { recursive: true, force: true }).catch(() => {});
+      l.reaper = setTimeout(() => links.delete(linkId), DONE_GRACE_MS);
+      (deps.notify ?? defaultNotify)();
+      return result;
+    })
+    .catch((): CompleteCliLinkResult => ({ ok: false, error: 'failed to finalize the Codex login' }))
+    .finally(() => { if (l.finalizing === attempt) l.finalizing = undefined; });
+  l.finalizing = attempt;
+  return attempt;
+}
+
+/** A completed credential must be installed before its temporary home is removed. */
+async function expireCliLink(linkId: string): Promise<void> {
+  const l = links.get(linkId);
+  if (!l) return;
+  if (l.provider === 'codex') {
+    const result = await finalizeCodexCliLink(linkId, l, {}, {});
+    if (result.ok) return;
+    // An unapproved flow has no auth.json and can be discarded. Preserve a
+    // completed login when registration failed so a later completion can retry.
+    try {
+      await readFile(`${l.configDir}/auth.json`, 'utf8');
+      l.done = result;
+      return;
+    } catch { /* no completed login to preserve */ }
+  }
+  cleanup(linkId);
+}
+
 /** Feed the pasted code into the held CLI when needed, capture the credential, write + register it. */
 export async function completeCliLink(input: CompleteCliLinkInput, deps: CompleteCliLinkDeps = {}): Promise<CompleteCliLinkResult> {
   const l = links.get(input.linkId);
   if (!l) return { ok: false, error: 'link expired or unknown — restart the add-account flow' };
-  if (l.done) {
+  if (l.done && (l.done.ok || l.provider !== 'codex')) {
     // The ≥2.1.200 auto-callback already finalized this link (no code ever shown to the owner).
     const done = l.done;
     clearTimeout(l.reaper);
     links.delete(input.linkId);
     return done;
   }
-  if (l.provider === 'codex') return completeCodexCliLink(input.linkId, l, input, deps);
+  if (l.provider === 'codex') return finalizeCodexCliLink(input.linkId, l, input, deps);
   const code = input.code?.trim();
   if (!code) {
     return {

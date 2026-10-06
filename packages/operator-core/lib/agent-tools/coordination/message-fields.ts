@@ -531,14 +531,14 @@ const tooManyEntriesMessage = (field: string, max: number, got: number) =>
  * deliberately avoids a union whose string/unknown-array catch-alls would advertise
  * invalid alternatives to callers.
  */
-function shapeTaughtArray<E>(
+function shapeTaughtArray<E extends z.ZodTypeAny>(
   field: string,
-  entry: z.ZodType<E>,
+  entry: E,
   message: string,
   max = 20,
   min = 0,
   forwardMemberIssues = false,
-): z.ZodType<E[]> {
+): z.ZodType<Array<z.output<E>>, Array<z.input<E>>> {
   const guard = z
     .unknown()
     .superRefine((value, ctx) => {
@@ -571,9 +571,12 @@ function shapeTaughtArray<E>(
 
   // `.pipe()` is intentional. A trailing `.transform()` makes the output impossible to
   // represent in JSON Schema, while this pipeline publishes the strict array/member shape
-  // and still preserves the guard's custom refusal for malformed runtime values.
+  // and still preserves the guard's custom refusal for malformed runtime values. The cast
+  // narrows the declared input to the only accepted shape without changing that runtime
+  // guard; otherwise the unknown() stage leaks through Zod's input type and callable clients
+  // see every taught array (including `body`) as `unknown`.
   const array = min > 0 ? z.array(entry).min(min) : z.array(entry);
-  return guard.pipe(array.max(max));
+  return guard.pipe(array.max(max)) as z.ZodType<Array<z.output<E>>, Array<z.input<E>>>;
 }
 
 const youMayNotKnowEntrySchema = z.object({

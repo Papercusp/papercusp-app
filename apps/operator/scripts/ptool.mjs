@@ -78,6 +78,7 @@ import { discoverOperatorUrl, rebaseUrl, resolveOperatorBase } from './operator-
  *   description?: string,
  *   inputSchema?: Record<string, unknown>,
  *   outputSchema?: Record<string, unknown>,
+ *   _meta?: Record<string, unknown> & {'papercusp/servingGeneration'?: string},
  *   annotations?: {readOnlyHint?: boolean},
  * }} ToolCatalogEntry
  */
@@ -137,8 +138,17 @@ export function resolvePtoolOperatorCandidates(env = process.env, explicitUrl = 
  * callers can then explicitly pin that host with --url for a subsequent call.
  */
 export function resolvePtoolInvocationCandidates(args = {}, env = process.env) {
-  const candidates = resolvePtoolOperatorCandidates(env, args.url);
-  return args.tool ? candidates.slice(0, 1) : candidates;
+  // Keep the implicit self-host fallback available for named calls too. A
+  // candidate is only selected when the initial MCP handshake cannot reach
+  // the primary route; main() then requires readOnlyHint before dispatching a
+  // call on a different operator. Explicit --url remains a single pinned
+  // candidate.
+  return resolvePtoolOperatorCandidates(env, args.url);
+}
+
+/** A changed operator is safe for dispatch only when the catalog marks the tool read-only. */
+export function canDispatchOnFallbackOperator(tool, fallbackUsed) {
+  return !fallbackUsed || tool?.annotations?.readOnlyHint === true;
 }
 
 const OPERATOR_URL = resolvePtoolOperatorBase(process.env);
@@ -166,13 +176,30 @@ export function shouldRediscoverOperatorUrl(args = {}, env = process.env) {
 
 /**
  * Pinned operator URLs are caller-selected endpoints, not managed launcher
- * routes. A dead pin must report its connection failure promptly instead of
- * spending the managed route's 120s recovery budget retrying an endpoint that
- * cannot be rediscovered or rebased. Managed/discoverable routes retain their
- * bounded retry loop for operator restarts.
+ * routes. Keep the selected host authoritative: a retry may reconnect to that
+ * same local direct operator, but must never rediscover or move to a fallback.
+ * Remote pins and local proxy pins keep one initialize attempt; a direct local
+ * operator gets a short retry window for brief listener restarts, separate
+ * from the managed route's 120s recovery budget.
  */
 export function ptoolConnectionRetryOptions(args = {}, env = process.env) {
-  return shouldRediscoverOperatorUrl(args, env) ? {} : { maxAttempts: 1 };
+  if (shouldRediscoverOperatorUrl(args, env)) return {};
+
+  let pinnedUrl = '';
+  try {
+    pinnedUrl = typeof args.url === 'string' && args.url.trim()
+      ? args.url.trim()
+      : resolvePtoolOperatorBase(env);
+    if (ptoolConnectAttemptTimeoutMs(pinnedUrl, env) < PTOOL_CONNECT_TIMEOUT_MS) {
+      return {
+        maxAttempts: PTOOL_PINNED_LOCAL_CONNECT_MAX_ATTEMPTS,
+        totalTimeoutMs: PTOOL_PINNED_LOCAL_CONNECT_TOTAL_TIMEOUT_MS,
+      };
+    }
+  } catch {
+    // Preserve fast failure for malformed pins; connect() owns the diagnostic.
+  }
+  return { maxAttempts: 1 };
 }
 
 /* ─── arg parsing (pure — exported for tests) ─────────────────────────── */
@@ -458,19 +485,40 @@ export function escapeJsonStringControls(text) {
  * An empty stdin stream is equivalent to omitting JSON args, which lets callers
  * use the standard quoting-safe `--json -` shape for zero-argument tools. Files
  * and inline payloads remain strict so an accidentally empty payload still
- * fails loudly. Pure.
+ * fails loudly. MCP tool arguments must decode to an object; refusing JSON
+ * scalars here prevents a double-serialized object from reaching the server as
+ * a string and producing a misleading tool-schema error. Pure.
  */
+class JsonArgsShapeError extends TypeError {
+  constructor(value) {
+    const received = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+    const doubleEncodingHint = typeof value === 'string'
+      ? ' If this is an object encoded as a JSON string, remove the extra JSON.stringify/quoting layer.'
+      : '';
+    super(`tool arguments must decode to a JSON object; received ${received}.${doubleEncodingHint}`);
+    this.name = 'JsonArgsShapeError';
+  }
+}
+
 export function parseJsonInput(text, { emptyAsObject = false } = {}) {
   if (emptyAsObject && String(text).trim() === '') return {};
-  return JSON.parse(escapeJsonStringControls(text));
+  const parsed = JSON.parse(escapeJsonStringControls(text));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new JsonArgsShapeError(parsed);
+  }
+  return parsed;
 }
 
 export function formatJsonInputError(jsonKind, error) {
   const message = error instanceof Error ? error.message : String(error);
+  const source = `--json${jsonKind === 'inline' ? '' : ` (${jsonKind})`}`;
+  if (error instanceof JsonArgsShapeError) {
+    return `ptool: ${source} must contain an object of tool arguments: ${message}`;
+  }
   const hint = /bad escaped character/i.test(message)
     ? ' Hint: JSON strings must escape literal backslashes by doubling each one; JSON.stringify can build the payload safely.'
     : '';
-  return `ptool: --json${jsonKind === 'inline' ? '' : ` (${jsonKind})`} is not valid JSON: ${message}${hint}`;
+  return `ptool: ${source} is not valid JSON: ${message}${hint}`;
 }
 
 /**
@@ -1171,9 +1219,9 @@ function readToken({ tokenFile = null, env = process.env, home = homedir() } = {
  *  so ptool still emits a lossless scripting payload.
  *  @param {string} toolName
  *  @param {any} callArgs
- *  @param {{outputSchema?: {type?: string}, idempotencyKey?: string}} [options]
+ *  @param {{outputSchema?: {type?: string}, idempotencyKey?: string, servingGeneration?: string}} [options]
  */
-export function buildCallToolParams(toolName, callArgs, { outputSchema, idempotencyKey } = {}) {
+export function buildCallToolParams(toolName, callArgs, { outputSchema, idempotencyKey, servingGeneration } = {}) {
   const projected = Boolean(
     callArgs &&
     typeof callArgs === 'object' &&
@@ -1183,6 +1231,9 @@ export function buildCallToolParams(toolName, callArgs, { outputSchema, idempote
   const objectRooted = outputSchema?.type === 'object' && !projected;
   const meta = objectRooted ? { structured: true } : { format: 'json' };
   if (idempotencyKey) meta.idempotencyKey = idempotencyKey;
+  if (typeof servingGeneration === 'string' && servingGeneration.trim()) {
+    meta['papercusp/servingGeneration'] = servingGeneration;
+  }
   // EI-21669966698063758: tools:invoke is a second JSON boundary. Keep its
   // target args as one JSON string so shell-heavy code:run payloads survive
   // the host/MCP serialization path exactly once. Direct calls must retain
@@ -1266,6 +1317,20 @@ export function ptoolConnectAttemptTimeoutMs(operatorUrl, env = process.env) {
 export const PTOOL_CONNECT_RETRY_DELAY_MS = 1_000;
 export const PTOOL_CONNECT_MAX_ATTEMPTS = Math.ceil(
   PTOOL_CONNECT_TIMEOUT_MS / PTOOL_CONNECT_RETRY_DELAY_MS,
+) + 1;
+
+// Explicit/local direct URLs remain pinned, but a hard operator restart can
+// briefly refuse connections. Give those pins one short recovery window: one
+// direct-handshake timeout plus five paced retry intervals (20s with the
+// current budgets), bounded independently from the managed/proxy 120s window.
+// Proxy pins keep their longer initialize contract and are excluded above by
+// ptoolConnectAttemptTimeoutMs.
+export const PTOOL_PINNED_LOCAL_CONNECT_TOTAL_TIMEOUT_MS = Math.min(
+  PTOOL_CONNECT_TIMEOUT_MS,
+  PTOOL_DIRECT_CONNECT_ATTEMPT_TIMEOUT_MS + (5 * PTOOL_CONNECT_RETRY_DELAY_MS),
+);
+export const PTOOL_PINNED_LOCAL_CONNECT_MAX_ATTEMPTS = Math.ceil(
+  PTOOL_PINNED_LOCAL_CONNECT_TOTAL_TIMEOUT_MS / PTOOL_CONNECT_RETRY_DELAY_MS,
 ) + 1;
 
 // A proxy-generated handshake 502 already represents the proxy exhausting its
@@ -1653,6 +1718,12 @@ const PTOOL_LONG_RUNNING_TIMEOUTS_MS = new Map([
   // search result (or its structured server-side failure) wins over an
   // ambiguous -32001 outcome.
   ['sessions:search', PTOOL_FOREGROUND_TOOL_TIMEOUT_MS],
+  // EI-24857804837312348: the bounded historical sessions:list census can
+  // legitimately outlive ptool's 30s default while its indexed SQL completes.
+  // The tool does not declare a shorter server timeout, so the MCP transport
+  // owns the ~55s bound; keep the client outside it to observe the result or
+  // the server's typed timeout instead of returning outcome-unknown at 30s.
+  ['sessions:list', PTOOL_FOREGROUND_TOOL_TIMEOUT_MS],
   // EI-21386877660531420: release:deploy status fans out through the release
   // pipeline and has a 20s server-side status bound. The dispatch queue and
   // projection overhead can consume the ordinary 30s client budget when it
@@ -1841,6 +1912,128 @@ function errorDetail(error) {
     return serialized === undefined ? String(error) : serialized;
   } catch {
     return String(error);
+  }
+}
+
+/** A serving-generation mismatch is a server-side pre-dispatch rejection. */
+export function isStaleToolContractFailure(error) {
+  const seen = new Set();
+  let current = error;
+  while (current && (typeof current === 'object' || typeof current === 'function')) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (String(current.code ?? '').toLowerCase() === 'stale_tool_contract') return true;
+    if (/\bstale_tool_contract\b/i.test(String(current.message ?? ''))) return true;
+    current = current.cause;
+  }
+  return /\bstale_tool_contract\b/i.test(errorDetail(error));
+}
+
+/**
+ * Whether a connection was rejected because this bearer is invalid for the
+ * selected operator. Only this typed refusal may advance to another implicit
+ * token file; explicit token overrides remain authoritative.
+ */
+export function isInvalidSuperuserBearerFailure(error) {
+  const seen = new Set();
+  let current = error;
+  while (current && (typeof current === 'object' || typeof current === 'function')) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (/\bsuperuser_invalid_bearer\b/i.test(errorDetail(current))) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * The superuser gate rejects a bad bearer as an error CallToolResult only
+ * after the MCP session has initialized. This exact body proves tools/call
+ * was refused before the target handler ran; other tool-shaped errors are not
+ * safe credentials to retry.
+ */
+function isInvalidSuperuserBearerResult(result) {
+  return result?.isError === true &&
+    Array.isArray(result.content) &&
+    result.content.some((block) =>
+      block?.type === 'text' && block.text === 'request_rejected: superuser_invalid_bearer');
+}
+
+function isMissingSuperuserTokenFileFailure(error) {
+  return /^no superuser token at .+ — is the operator installed\?/.test(errorDetail(error));
+}
+
+/** Retry connection setup with the next bearer only after a typed invalid-bearer rejection. */
+export async function connectWithTokenFallback(connectOnce, tokenCandidates) {
+  const candidates = Array.isArray(tokenCandidates)
+    ? tokenCandidates.filter((token) => typeof token === 'string' && token.length > 0)
+    : [];
+  if (candidates.length === 0) throw new Error('ptool: no superuser token candidates were resolved');
+
+  let lastError;
+  for (let index = 0; index < candidates.length; index += 1) {
+    try {
+      return await connectOnce(candidates[index]);
+    } catch (error) {
+      lastError = error;
+      if (index === candidates.length - 1 || !isInvalidSuperuserBearerFailure(error)) throw error;
+    }
+  }
+  throw lastError;
+}
+
+const ptoolTokenPathByClient = new WeakMap();
+
+/**
+ * Retry read-only tools/list discovery with the next implicit token file when
+ * the selected operator rejects its bearer. Some operators authenticate the
+ * first request after MCP initialize, so connect-time fallback alone is not
+ * enough. Keep this before any tools/call.
+ */
+export async function listToolsWithTokenFallback(
+  initialClient,
+  tokenPaths,
+  initialTokenPath,
+  reconnectWithTokenPath,
+  listTools,
+) {
+  let client = initialClient;
+  let tokenIndex = Array.isArray(tokenPaths) ? tokenPaths.indexOf(initialTokenPath) : -1;
+  let lastError;
+
+  while (true) {
+    try {
+      return { client, tools: await listTools(client), error: null };
+    } catch (error) {
+      lastError = error;
+      if (
+        !isInvalidSuperuserBearerFailure(error) ||
+        tokenIndex < 0 ||
+        tokenIndex + 1 >= tokenPaths.length
+      ) {
+        return { client, tools: null, error };
+      }
+
+      let nextClient;
+      let nextIndex = tokenIndex + 1;
+      while (nextIndex < tokenPaths.length) {
+        try {
+          nextClient = await reconnectWithTokenPath(tokenPaths[nextIndex]);
+          break;
+        } catch (connectError) {
+          lastError = connectError;
+          if (!isInvalidSuperuserBearerFailure(connectError)) {
+            return { client, tools: null, error: connectError };
+          }
+          nextIndex += 1;
+        }
+      }
+      if (!nextClient) return { client, tools: null, error: lastError };
+
+      await closeClientQuietly(client);
+      client = nextClient;
+      tokenIndex = nextIndex;
+    }
   }
 }
 
@@ -2163,6 +2356,11 @@ export function formatOperatorConnectFailure(operatorUrl, error) {
  * immediate retry can overlap the original handler before its receipt exists.
  */
 export const PTOOL_POST_CONNECT_RETRIES = 0;
+// A raw ECONNREFUSED proves the tools/call never reached the operator. Allow
+// one reconnect through the bounded local connect-recovery path, then retry the
+// exact request once. This is separate from POST_CONNECT_RETRIES: socket closes
+// and timeouts after connect remain outcome-unknown and must not be replayed.
+export const PTOOL_PRE_CONNECT_CALL_RETRIES = 1;
 
 async function closeClientQuietly(client) {
   try {
@@ -2182,7 +2380,7 @@ async function closeClientQuietly(client) {
  * session. A failed replay client is closed before the error is surfaced.
  * @param {any} client
  * @param {any} params
- * @param {{reconnect?: () => Promise<any>, maxAttempts?: number, timeoutMs?: number, replayProof?: unknown}} [options]
+ * @param {{reconnect?: () => Promise<any>, maxAttempts?: number, timeoutMs?: number, replayProof?: unknown, onStaleToolContract?: (context: {client: any, params: any, error: unknown}) => Promise<any>}} [options]
  */
 export async function callToolWithReplayRecovery(
   client,
@@ -2192,10 +2390,13 @@ export async function callToolWithReplayRecovery(
     maxAttempts = PTOOL_POST_CONNECT_RETRIES,
     timeoutMs = PTOOL_CALL_TOOL_TIMEOUT_MS,
     replayProof,
+    onStaleToolContract,
   } = {},
 ) {
   let activeClient = client;
+  let activeParams = params;
   let retriesUsed = 0;
+  let staleContractRefreshUsed = false;
   const requestedRetries = Number.isFinite(maxAttempts) ? Math.max(0, Math.floor(maxAttempts)) : 0;
   // No automatic replay exists. A caller must explicitly supply a valid,
   // server-owned proof for this exact code:run body, and even then only one
@@ -2203,11 +2404,51 @@ export async function callToolWithReplayRecovery(
   const retryBudget = isCodeRunReplayAuthorized(params, replayProof)
     ? Math.min(requestedRetries, 1)
     : 0;
+  let preConnectRetriesUsed = 0;
   while (true) {
     try {
-      const result = await callToolWithPressureRetry(activeClient, params, { timeoutMs });
+      const result = await callToolWithPressureRetry(activeClient, activeParams, { timeoutMs });
       return { client: activeClient, result };
     } catch (error) {
+      if (
+        isStaleToolContractFailure(error) &&
+        !staleContractRefreshUsed &&
+        typeof onStaleToolContract === 'function'
+      ) {
+        staleContractRefreshUsed = true;
+        try {
+          const refreshedParams = await onStaleToolContract({
+            client: activeClient,
+            params: activeParams,
+            error,
+          });
+          if (
+            !refreshedParams ||
+            refreshedParams.name !== activeParams.name ||
+            canonicalJson(refreshedParams.arguments) !== canonicalJson(activeParams.arguments) ||
+            refreshedParams._meta?.idempotencyKey !== activeParams._meta?.idempotencyKey
+          ) {
+            throw new Error(
+              'ptool: stale tool-contract refresh must preserve the original tool name, arguments, and idempotency key',
+            );
+          }
+          activeParams = refreshedParams;
+          continue;
+        } catch (refreshError) {
+          if (activeClient !== client) await closeClientQuietly(activeClient);
+          throw refreshError;
+        }
+      }
+      if (
+        isPreConnectConnectionRefused(error) &&
+        preConnectRetriesUsed < PTOOL_PRE_CONNECT_CALL_RETRIES &&
+        typeof reconnect === 'function'
+      ) {
+        preConnectRetriesUsed += 1;
+        await closeClientQuietly(activeClient);
+        activeClient = await reconnect();
+        continue;
+      }
       if (
         !isTransportFailure(error) ||
         retriesUsed >= retryBudget ||
@@ -2289,6 +2530,74 @@ export async function dispatchScriptedToolWithoutCatalog(
 }
 
 /**
+ * Dispatch a catalog-bypass call and advance through only the remaining
+ * implicit token files when the operator returns its exact pre-dispatch
+ * invalid-bearer CallToolResult. Rebuild every attempt with the same key so
+ * the logical invocation identity remains stable. Explicit token overrides
+ * resolve to one path and therefore cannot fall through.
+ * @param {any} client
+ * @param {string} toolName
+ * @param {any} callArgs
+ * @param {{idempotencyKey?: string, tokenPaths?: string[], initialTokenPath?: string|null,
+ * reconnectWithTokenPath?: (tokenFile: string) => Promise<any>, timeoutMs?: number}} [options]
+ */
+export async function dispatchScriptedToolWithoutCatalogWithTokenFallback(
+  client,
+  toolName,
+  callArgs,
+  {
+    idempotencyKey,
+    tokenPaths = [],
+    initialTokenPath = ptoolTokenPathByClient.get(client) ?? null,
+    reconnectWithTokenPath,
+    timeoutMs,
+  } = {},
+) {
+  let attempt = await dispatchScriptedToolWithoutCatalog(client, toolName, callArgs, {
+    idempotencyKey,
+    timeoutMs,
+  });
+  if (!isInvalidSuperuserBearerResult(attempt.result)) return attempt;
+
+  const paths = Array.isArray(tokenPaths)
+    ? tokenPaths.filter((tokenPath) => typeof tokenPath === 'string' && tokenPath.length > 0)
+    : [];
+  let tokenIndex = paths.indexOf(initialTokenPath);
+  if (tokenIndex < 0 || typeof reconnectWithTokenPath !== 'function') return attempt;
+
+  let activeClient = attempt.client;
+  while (tokenIndex + 1 < paths.length) {
+    tokenIndex += 1;
+    let nextClient;
+    try {
+      nextClient = await reconnectWithTokenPath(paths[tokenIndex]);
+    } catch (error) {
+      // An alternate file can be present but stale too. Only its own typed
+      // bearer refusal permits advancing again; transport/config errors stay
+      // terminal and must remain visible to the caller.
+      if (isInvalidSuperuserBearerFailure(error) || isMissingSuperuserTokenFileFailure(error)) continue;
+      throw error;
+    }
+
+    await closeClientQuietly(activeClient);
+    activeClient = nextClient;
+    try {
+      attempt = await dispatchScriptedToolWithoutCatalog(activeClient, toolName, callArgs, {
+        idempotencyKey,
+        timeoutMs,
+      });
+      activeClient = attempt.client;
+    } catch (error) {
+      await closeClientQuietly(activeClient);
+      throw error;
+    }
+    if (!isInvalidSuperuserBearerResult(attempt.result)) return attempt;
+  }
+
+  return attempt;
+}
+
+/**
  * A local operator restart can make the initial MCP handshake race the brief
  * socket-down window. Retrying the connection is safe because no tool has been
  * dispatched yet; never extend this to a tools/call transport failure, whose
@@ -2365,6 +2674,8 @@ export async function connectWithLocalRetry(
         : null;
       if (
         !local ||
+        failureKind === 'uds-endpoint-unavailable' ||
+        error?.code === 'PTOOL_CONNECTION_BOOTSTRAP_NOT_PREPARED' ||
         (isExplicitHttpConnectFailure(error) && !isRetryableLocalHttpConnectFailure(error)) ||
         (failureKind === 'proxy-upstream-502' &&
           proxyUpstreamErrorAttempts >= PTOOL_PROXY_UPSTREAM_ERROR_MAX_ATTEMPTS) ||
@@ -2411,14 +2722,15 @@ export async function connectWithLocalRetry(
 
 /**
  * Connect to the first reachable operator candidate. Later candidates are
- * used only for pre-dispatch transport failures, so authentication and HTTP
- * failures do not silently route a caller to another operator.
+ * used only for pre-dispatch transport failures, plus an opted-in HTTP 404
+ * from an implicit endpoint route; authenticated and other HTTP failures do
+ * not silently route a caller to another operator.
  *
  * @template T
- * @param {(url: string, scope: object, options?: {timeoutMs: number}) => Promise<T>} connectOnce
+ * @param {(url: string, scope: object, options?: {timeoutMs: number}, connectionContext?: unknown) => Promise<T>} connectOnce
  * @param {string[]} operatorUrls
  * @param {object} scope
- * @param {Record<string, any> & {primaryAttemptOptions?: object, onFallback?: ((url: string, error: unknown) => void) | null}} [options]
+ * @param {Record<string, any> & {primaryAttemptOptions?: object, onFallback?: ((url: string, error: unknown) => void) | null, prepareConnection?: (scope: object) => Promise<unknown> | unknown}} [options]
  * @returns {Promise<{client: T, operatorUrl: string}>}
  */
 export async function connectWithOperatorCandidates(
@@ -2428,6 +2740,8 @@ export async function connectWithOperatorCandidates(
   {
     primaryAttemptOptions = {},
     onFallback = null,
+    allowHttpNotFoundFallback = false,
+    prepareConnection = null,
     ...retryOptions
   } = {},
 ) {
@@ -2437,13 +2751,21 @@ export async function connectWithOperatorCandidates(
   )];
   if (candidates.length === 0) throw new Error('ptool: no operator URL candidates were resolved');
 
+  // This phase may wait behind install:safe while importing the MCP SDK. Keep
+  // it outside every candidate's connection deadline and reuse the loaded
+  // modules for retries/fallbacks.
+  const connectionContext = prepareConnection ? await prepareConnection(scope) : undefined;
+  const connectAttempt = prepareConnection
+    ? (url, connectScope, options) => connectOnce(url, connectScope, options, connectionContext)
+    : connectOnce;
+
   let lastError;
   for (let index = 0; index < candidates.length; index += 1) {
     const operatorUrl = candidates[index];
     let liveOperatorUrl = operatorUrl;
     const onRebase = retryOptions.onRebase;
     try {
-      const client = await connectWithLocalRetry(connectOnce, operatorUrl, scope, {
+      const client = await connectWithLocalRetry(connectAttempt, operatorUrl, scope, {
         ...retryOptions,
         ...(index < candidates.length - 1 ? primaryAttemptOptions : {}),
         onRebase: (freshBase) => {
@@ -2467,8 +2789,15 @@ export async function connectWithOperatorCandidates(
       lastError = error;
       const explicitHttpFailure = isExplicitHttpConnectFailure(error)
         && !isRetryableLocalHttpConnectFailure(error);
+      const isHttpNotFound = connectHttpStatusOf(error) === 404;
       const timedOutLocalAttempt = /^local operator connection attempt timed out/.test(errorDetail(error));
-      if (index === candidates.length - 1 || explicitHttpFailure || (!isTransportFailure(error) && !timedOutLocalAttempt)) {
+      const unavailableUdsEndpoint = isUdsEndpointUnavailable(error);
+      const permittedNotFoundFallback = allowHttpNotFoundFallback && isHttpNotFound;
+      if (
+        index === candidates.length - 1 ||
+        (explicitHttpFailure && !permittedNotFoundFallback) ||
+        (!explicitHttpFailure && !isTransportFailure(error) && !timedOutLocalAttempt && !unavailableUdsEndpoint)
+      ) {
         throw error;
       }
     }
@@ -2497,6 +2826,7 @@ function connectHttpStatusOf(error) {
  * focused diagnostics tests.
  */
 export function classifyConnectFailure(error) {
+  if (isUdsEndpointUnavailable(error)) return 'uds-endpoint-unavailable';
   if (/^local operator connection attempt timed out/.test(errorDetail(error))) return 'attempt-timeout';
   if (isRetryableLocalHttpConnectFailure(error)) {
     const status = connectHttpStatusOf(error);
@@ -2506,6 +2836,11 @@ export function classifyConnectFailure(error) {
   if (isExplicitHttpConnectFailure(error)) return `http-${connectHttpStatusOf(error) ?? 'unknown'}`;
   if (isTransportFailure(error)) return 'transport';
   return 'other';
+}
+
+/** Explicit UDS discovery has no retryable handshake when the endpoint is absent. */
+function isUdsEndpointUnavailable(error) {
+  return /^uds_endpoint_unavailable(?:\s|$)/.test(errorDetail(error));
 }
 
 /**
@@ -2608,13 +2943,14 @@ export async function listToolsWithLocalRetry(
  * Accept either an operator base URL or an already-qualified `/api/mcp`
  * endpoint; explicit endpoint URLs must not receive a second MCP path.
  * @param {string} operatorUrl
- * @param {{workspace?: string, harness?: string, client?: string, contextTier?: string}} [options]
+ * @param {{workspace?: string, harness?: string, client?: string, contextTier?: string, env?: EnvironmentMap}} [options]
  */
 export function buildMcpUrl(operatorUrl, {
   workspace,
   harness,
   client,
   contextTier = 'trimmed',
+  env = process.env,
 } = {}) {
   const url = new URL(operatorUrl);
   const pathWithoutTrailingSlash = url.pathname.replace(/\/+$/, '');
@@ -2627,83 +2963,118 @@ export function buildMcpUrl(operatorUrl, {
   if (workspace) url.searchParams.set('workspace', workspace);
   if (harness) url.searchParams.set('harness', harness);
   if (client) url.searchParams.set('client', client);
+  // A retained owner can have several native incarnations. Carry the current
+  // Codex session through this fallback just as the native MCP config does;
+  // the server verifies that binding before selecting its launch record.
+  // An explicit endpoint binding wins, and another client's identity must
+  // never inherit this process's native session.
+  const nativeSession = String(env.CODEX_SESSION_ID ?? '').trim();
+  if (!url.searchParams.has('native_session') && nativeSession &&
+      client && client === String(env.PAPERCUSP_SID ?? '').trim()) {
+    url.searchParams.set('native_session', nativeSession);
+  }
   if (contextTier) url.searchParams.set('ctx_tier', contextTier);
   return url;
 }
 
-const SDK_IMPORT_RETRY_TOTAL_MS = 150_000;
-const SDK_IMPORT_RETRY_INTERVAL_MS = 1_500;
-
-function isModuleNotFoundError(error) {
-  const code = error && typeof error === 'object' ? error.code : undefined;
-  return code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND';
-}
+const SDK_IMPORT_MUTEX_TIMEOUT_MS = 10 * 60_000;
 
 /**
- * EI-21860372620642128 — `npm run install:safe` rewrites shared node_modules
- * IN PLACE while holding a repo-keyed fs mutex (scripts/lib/fs-mutex.mjs), so
- * a ptool invocation launched during that window can hit a transiently
- * missing `@modelcontextprotocol/sdk` deep import and fail outright, even
- * though the identical import succeeds moments later once the install
- * finishes (reproduced 2026-08-30: five ptool calls retried ~78-81 times over
- * ~120s, then failed `Cannot find module`).
+ * EI-21860372620642128 — install:safe reifies shared node_modules in place
+ * while holding a repo-keyed fs mutex. A ptool import can race that rewrite;
+ * the 2026-10-01 reproduction kept the SDK entrypoint unavailable across a
+ * 330-second ptool wait.
  *
- * ptool itself must never be wrapped in install:safe's own reader guard
- * (EI-21267836337650976 / EI-21250765620092599 — that swallowed a completed
- * write into a near-silent no-op), so this coordinates IN-PROCESS instead:
- * on a MODULE_NOT_FOUND for one of these deep SDK imports, confirm — via the
- * mutex's own non-blocking `peekFsMutexSync` diagnostic peek, never a
- * blocking reader marker, which would reintroduce that exact class of hang —
- * that an install:safe write is ACTUALLY in flight for this repo before
- * retrying. A MODULE_NOT_FOUND with no install in flight is a genuine
- * missing dependency and is rethrown immediately, unretried.
+ * Hold the same mutex's reader lease only while loading the SDK module graph.
+ * This makes an import wait for an active install and makes a later install
+ * wait until Node has cached the loaded modules. Release the lease before
+ * tools/call: wrapping all of ptool would deadlock a tool handler that starts
+ * install:safe (EI-21267836337650976 / EI-21250765620092599).
+ *
+ * A child launched by install:safe --exec-under-lock already holds that
+ * reader lease and inherits PAPERCUSP_INSTALL_MUTEX_HELD; do not nest another
+ * lease, since a queued installer could otherwise wait on the outer reader.
+ * The finite 10-minute wait covers the observed rewrite duration while still
+ * surfacing a stuck installer as an error.
  */
 export async function importSdkModuleWithInstallAwareness(
   specifier,
   {
     doImport = (spec) => import(spec),
-    sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
     loadInstallMutex = () =>
       Promise.all([
         import('../../../scripts/lib/fs-mutex.mjs'),
         import('../../../scripts/npm-install-safe.mjs'),
       ]),
-    totalMs = SDK_IMPORT_RETRY_TOTAL_MS,
-    intervalMs = SDK_IMPORT_RETRY_INTERVAL_MS,
   } = {},
 ) {
-  const startedAt = Date.now();
-  let warned = false;
-  for (;;) {
-    try {
-      return await doImport(specifier);
-    } catch (error) {
-      if (!isModuleNotFoundError(error)) throw error;
+  let modules;
+  try {
+    modules = await loadInstallMutex();
+  } catch {
+    // Keep ptool usable when the optional coordination helper cannot load.
+    // If the SDK import also fails, preserve that more useful import error.
+    return doImport(specifier);
+  }
 
-      let peek;
-      try {
-        const [{ peekFsMutexSync }, { repoLockName }] = await loadInstallMutex();
-        peek = peekFsMutexSync(repoLockName());
-      } catch {
-        // Best-effort diagnostic only — an unloadable helper (or a repo that
-        // predates this mutex) must never mask the real missing-module error.
-        throw error;
-      }
-      if (!peek.held) throw error;
+  const [{ withFsMutexRead }, { repoLockName, installMutexIsHeld }] = modules;
+  const lockName = repoLockName();
+  if (installMutexIsHeld?.(lockName, process.env)) {
+    return doImport(specifier);
+  }
+  return withFsMutexRead(lockName, () => doImport(specifier), {
+    timeoutMs: SDK_IMPORT_MUTEX_TIMEOUT_MS,
+    onWaiting: ({ owner, elapsedMs }) => {
+      console.error(
+        'ptool: waiting for install:safe to finish before importing ' +
+          specifier +
+          ' (' +
+          Math.round(elapsedMs / 1000) +
+          's so far); holder: ' +
+          owner.trim(),
+      );
+    },
+  });
+}
 
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= totalMs) throw error;
-      if (!warned) {
-        warned = true;
-        const owner = peek.owner ?? {};
-        const ownerDetail = owner.pid ? ` (pid ${owner.pid}${owner.host ? `@${owner.host}` : ''})` : '';
-        console.error(
-          `ptool: ${specifier} is transiently missing while npm run install:safe rewrites shared ` +
-            `node_modules${ownerDetail} — waiting for it to finish instead of failing (EI-21860372620642128).`,
-        );
-      }
-      await sleep(Math.min(intervalMs, Math.max(0, totalMs - elapsed)));
-    }
+/**
+ * Load the transport implementation before starting the network handshake
+ * retry budget. SDK imports can wait for install:safe's repo reader lease for
+ * up to ten minutes; that wait is bootstrap time, not operator network time.
+ *
+ * @param {{transport?: string}} [scope]
+ * @param {{importSdkModule?: (specifier: string) => Promise<object>}} [options]
+ */
+export async function preparePtoolConnectionModules(
+  { transport: requestedTransport } = {},
+  { importSdkModule = importSdkModuleWithInstallAwareness } = {},
+) {
+  const mode = requestedTransport || process.env.PAPERCUSP_MCP_TRANSPORT || 'http';
+  if (!['http', 'uds', 'auto'].includes(mode)) {
+    throw new Error('Invalid MCP transport; expected http, uds or auto');
+  }
+  if (mode !== 'http') return { mode };
+
+  try {
+    const [clientModule, transportModule] = await Promise.all([
+      importSdkModule('@modelcontextprotocol/sdk/client/index.js'),
+      importSdkModule('@modelcontextprotocol/sdk/client/streamableHttp.js'),
+    ]);
+    return {
+      mode,
+      Client: clientModule.Client,
+      StreamableHTTPClientTransport: transportModule.StreamableHTTPClientTransport,
+    };
+  } catch (error) {
+    const detail = errorDetail(error);
+    const timedOutWaitingForInstall = /timed out after \d+ms waiting for fs-mutex writer/i.test(detail);
+    const reason = timedOutWaitingForInstall
+      ? 'timed out waiting for install:safe'
+      : 'failed';
+    throw new Error(
+      `ptool: SDK bootstrap ${reason} before operator connection: ${detail}`,
+      { cause: error },
+    );
   }
 }
 
@@ -2717,12 +3088,18 @@ export async function importSdkModuleWithInstallAwareness(
  *  it works regardless of whether the host also honors a per-call `workspace`
  *  arg (the newer EI-30 path). The flags are ALSO merged into the args object
  *  (mergeConvenienceArgs) for tools that take `workspace` as a genuine filter. */
-async function connect(operatorUrl, { workspace, harness, tokenFile, transport: requestedTransport } = {}, { timeoutMs } = {}) {
-  const { Client } = await importSdkModuleWithInstallAwareness('@modelcontextprotocol/sdk/client/index.js');
-  const { StreamableHTTPClientTransport } = await importSdkModuleWithInstallAwareness('@modelcontextprotocol/sdk/client/streamableHttp.js');
+async function connect(
+  operatorUrl,
+  { workspace, harness, tokenFile, transport: requestedTransport } = {},
+  { timeoutMs } = {},
+  preparedConnection,
+) {
   const tokenPaths = resolveTokenPaths({ tokenFile });
-  const token = readToken({ tokenFile });
-  if (!token) {
+  const tokenCandidates = tokenPaths
+    .map((path) => ({ path, token: readToken({ tokenFile: path }) }))
+    .filter((candidate) => candidate.token.length > 0);
+  const tokens = tokenCandidates.map((candidate) => candidate.token);
+  if (tokens.length === 0) {
     throw new Error(`no superuser token at ${tokenPaths.join(' or ')} — is the operator installed? (run apps/operator/scripts/install-standalone-mcp.sh)`);
   }
   const url = buildMcpUrl(operatorUrl, {
@@ -2733,25 +3110,44 @@ async function connect(operatorUrl, { workspace, harness, tokenFile, transport: 
   });
   const mode = requestedTransport || process.env.PAPERCUSP_MCP_TRANSPORT || 'http';
   if (!['http', 'uds', 'auto'].includes(mode)) throw new Error('Invalid MCP transport; expected http, uds or auto');
-  if (mode !== 'http') {
-    // Package-built plain JS: do not import a TS-only workspace package from
-    // the installed Node CLI or copy its wire implementation into this file.
-    const { default: native } = await import('../../../packages/omp-plugin/dist/native-client.cjs');
-    const connected = await native.connectAgentMcp({
-      url: url.href, headers: { Authorization: `Bearer ${token}` }, mode,
-      name: 'ptool', timeoutMs, home: process.env.PAPERCUSP_OPERATOR_HOME,
+  let selectedTokenPath = tokenCandidates[0].path;
+  const client = await connectWithTokenFallback(async (token) => {
+    if (mode !== 'http') {
+      // Package-built plain JS: do not import a TS-only workspace package from
+      // the installed Node CLI or copy its wire implementation into this file.
+      const { default: native } = await import('../../../packages/omp-plugin/dist/native-client.cjs');
+      const connected = await native.connectAgentMcp({
+        url: url.href, headers: { Authorization: `Bearer ${token}` }, mode,
+        name: 'ptool', timeoutMs, home: process.env.PAPERCUSP_OPERATOR_HOME,
+      });
+      selectedTokenPath = tokenCandidates.find((candidate) => candidate.token === token)?.path ?? selectedTokenPath;
+      return connected.client;
+    }
+    if (
+      preparedConnection?.mode !== mode ||
+      !preparedConnection.Client ||
+      !preparedConnection.StreamableHTTPClientTransport
+    ) {
+      throw Object.assign(
+        new Error('ptool SDK bootstrap was not prepared before the operator connection retry budget started'),
+        { code: 'PTOOL_CONNECTION_BOOTSTRAP_NOT_PREPARED' },
+      );
+    }
+    const { Client, StreamableHTTPClientTransport } = preparedConnection;
+    const transport = new StreamableHTTPClientTransport(url, {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
     });
-    return connected.client;
-  }
-  const transport = new StreamableHTTPClientTransport(url, {
-    requestInit: { headers: { Authorization: `Bearer ${token}` } },
-  });
-  const client = new Client({ name: 'ptool', version: '0.1.0' }, { capabilities: {} });
-  try {
-    await client.connect(transport, timeoutMs > 0 ? { timeout: timeoutMs } : undefined);
-  } catch (e) {
-    throw new Error(formatOperatorConnectFailure(operatorUrl, e), { cause: e });
-  }
+    const client = new Client({ name: 'ptool', version: '0.1.0' }, { capabilities: {} });
+    try {
+      await client.connect(transport, timeoutMs > 0 ? { timeout: timeoutMs } : undefined);
+    } catch (e) {
+      await closeClientQuietly(client);
+      throw new Error(formatOperatorConnectFailure(operatorUrl, e), { cause: e });
+    }
+    selectedTokenPath = tokenCandidates.find((candidate) => candidate.token === token)?.path ?? selectedTokenPath;
+    return client;
+  }, tokens);
+  ptoolTokenPathByClient.set(client, selectedTokenPath);
   return client;
 }
 
@@ -2803,6 +3199,62 @@ export async function listAllTools(
     cursor = page.nextCursor;
   } while (cursor);
   return all;
+}
+
+/**
+ * Refresh a stale call's catalog entry and prepare one exact retry. A changed
+ * or missing input schema is surfaced for an explicit caller retry instead of
+ * dispatching arguments against a contract the user did not see.
+ * @param {{client: any, toolName: string, previousTool: any, callArgs: any, idempotencyKey: string, listTools?: (client: any) => Promise<any[]>, error?: unknown}} options
+ * @returns {Promise<{tool: any, params: any}>}
+ */
+export async function refreshToolCallAfterStaleContract({
+  client,
+  toolName,
+  previousTool,
+  callArgs,
+  idempotencyKey,
+  listTools = (targetClient) => listAllTools(targetClient),
+  error,
+} = {}) {
+  const refusal = (detail) => new Error(
+    'ptool: ' + toolName + ' was rejected before dispatch because the serving-generation contract was stale. ' +
+      detail + ' The original call was not retried.',
+    { cause: error },
+  );
+
+  let refreshedTools;
+  try {
+    refreshedTools = await listTools(client);
+  } catch (refreshError) {
+    throw refusal('Refreshing tools/list failed: ' + errorDetail(refreshError) + '.');
+  }
+  const currentTool = Array.isArray(refreshedTools)
+    ? refreshedTools.find((entry) => entry?.name === toolName)
+    : null;
+  if (!currentTool) {
+    throw refusal('The tool is no longer present in the refreshed catalog.');
+  }
+  if (
+    !previousTool?.inputSchema ||
+    !currentTool.inputSchema ||
+    canonicalJson(previousTool.inputSchema) !== canonicalJson(currentTool.inputSchema)
+  ) {
+    throw refusal('The input schema changed; inspect the current schema before retrying.');
+  }
+  const servingGeneration = currentTool._meta?.['papercusp/servingGeneration'];
+  if (typeof servingGeneration !== 'string' || !servingGeneration.trim()) {
+    throw refusal('The refreshed catalog did not provide a serving generation.');
+  }
+
+  return {
+    tool: currentTool,
+    params: buildCallToolParams(toolName, callArgs, {
+      outputSchema: currentTool.outputSchema,
+      servingGeneration,
+      idempotencyKey,
+    }),
+  };
 }
 
 /** Collect arg values for a tool by prompting per its inputSchema. Returns
@@ -3005,8 +3457,8 @@ terminates early). For code:run, prefer --script-file or --script - for source
 that contains nested shell commands or quoted strings.
 
 Flags:
-  --json <json> / --args <json>   args object for a direct (non-interactive) call;
-                                   '-' reads the JSON from stdin instead
+  --json <json> / --args <json>   JSON object of args for a direct call;
+                                   '-' reads stdin; JSON strings/arrays are rejected
   --json-file <path>              read the args JSON from a file (quoting-free)
   --projection <json>             dispatch-level result projection (quote-free JSON)
   --script <source>               direct code:run JavaScript source; '-' reads stdin
@@ -3111,6 +3563,9 @@ async function main() {
 
   let operatorUrl = args.url || OPERATOR_URL;
   let operatorCandidates = resolvePtoolInvocationCandidates(args, process.env);
+  const initiallySelectedOperatorUrl = operatorCandidates[0];
+  let operatorFallbackUsed = false;
+  let operatorFallbackUrl = null;
   const workspace = resolveWorkspaceScope({ workspace: args.workspace, allWorkspaces: args.allWorkspaces });
   const harness = resolveHarnessScope({
     harness: args.harness,
@@ -3118,17 +3573,22 @@ async function main() {
     toolName: args.tool,
   });
   const scope = { workspace, harness, tokenFile: args.tokenFile, transport: args.transport };
+  const tokenPaths = resolveTokenPaths({ tokenFile: args.tokenFile });
+  let activeTokenFile = null;
   const retryOptions = ptoolConnectionRetryOptions(args, process.env);
   const rediscover = !args.tool && Object.keys(retryOptions).length === 0 ? discoverOperatorUrl : null;
-  const connectOperator = async ({ preferredIndex = 0 } = {}) => {
+  const connectOperator = async ({ preferredIndex = 0, tokenFile = activeTokenFile } = {}) => {
     const candidates = preferredIndex > 0
       ? [
         ...operatorCandidates.slice(preferredIndex),
         ...operatorCandidates.slice(0, preferredIndex),
       ]
       : operatorCandidates;
-    const connected = await connectWithOperatorCandidates(connect, candidates, scope, {
+    const connectionScope = tokenFile ? { ...scope, tokenFile } : scope;
+    const connected = await connectWithOperatorCandidates(connect, candidates, connectionScope, {
       ...retryOptions,
+      prepareConnection: preparePtoolConnectionModules,
+      allowHttpNotFoundFallback: !args.url && candidates.length > 1,
       rediscover,
       primaryAttemptOptions: candidates.length > 1 ? { maxAttempts: 1 } : {},
       onRebase: (freshBase) => {
@@ -3142,12 +3602,17 @@ async function main() {
       },
     });
     operatorUrl = connected.operatorUrl;
+    if (connected.operatorUrl !== initiallySelectedOperatorUrl) {
+      operatorFallbackUsed = true;
+      operatorFallbackUrl = connected.operatorUrl;
+    }
     // A reconnect should prefer the last known-good route instead of spending
     // another direct attempt on the same stale self-port.
     operatorCandidates = [
       connected.operatorUrl,
       ...operatorCandidates.filter((candidate) => candidate !== connected.operatorUrl),
     ];
+    activeTokenFile = ptoolTokenPathByClient.get(connected.client) ?? tokenFile ?? activeTokenFile;
     return connected.client;
   };
   let client = await connectOperator();
@@ -3164,18 +3629,40 @@ async function main() {
 
     let tools;
     try {
-      tools = await listAllTools(client, { retryLocalErrors: isLocalOperatorUrl(operatorUrl) });
+      const discovery = await listToolsWithTokenFallback(
+        client,
+        tokenPaths,
+        ptoolTokenPathByClient.get(client),
+        (tokenFile) => connectOperator({ tokenFile }),
+        (targetClient) => listAllTools(targetClient, { retryLocalErrors: isLocalOperatorUrl(operatorUrl) }),
+      );
+      client = discovery.client;
+      if (discovery.error) throw discovery.error;
+      tools = discovery.tools;
     } catch (error) {
       if (canDispatchWithoutCatalog(args.tool, inputKind)) {
+        if (operatorFallbackUsed) {
+          console.error(
+            `ptool: refusing to dispatch ${args.tool} on fallback operator ${operatorFallbackUrl} ` +
+              'because its read-only metadata could not be verified. Pass --url=<intended operator> to pin the call.',
+          );
+          process.exitCode = 1;
+          return;
+        }
         const callArgs = mergeDispatchProjection(inputArgs, projection);
         const idempotencyKey = args.idempotencyKey || randomUUID();
         console.error(formatToolCatalogBypass(args.tool, error));
         try {
-          const recovered = await dispatchScriptedToolWithoutCatalog(
+          const recovered = await dispatchScriptedToolWithoutCatalogWithTokenFallback(
             client,
             args.tool,
             callArgs,
-            { idempotencyKey, reconnect: connectOperator },
+            {
+              idempotencyKey,
+              tokenPaths,
+              initialTokenPath: ptoolTokenPathByClient.get(client),
+              reconnectWithTokenPath: (tokenFile) => connectOperator({ tokenFile }),
+            },
           );
           client = recovered.client;
           const code = await printResult(recovered.result, {
@@ -3211,10 +3698,22 @@ async function main() {
       console.error(`ptool: no tool named "${toolName}". Try \`ptool --list ${serviceOf(toolName)}\`.`);
       process.exit(1);
     }
+    if (!canDispatchOnFallbackOperator(tool, operatorFallbackUsed)) {
+      console.error(
+        `ptool: refusing to dispatch ${toolName} on fallback operator ${operatorFallbackUrl} ` +
+          `because the call began at ${initiallySelectedOperatorUrl} and this tool is not marked read-only. ` +
+          'Pass --url=<intended operator> to pin the call.',
+      );
+      process.exitCode = 1;
+      return;
+    }
     if (scriptKind != null && toolName !== 'code:run') {
       console.error('ptool: --script/--script-file can only be used with code:run');
       process.exit(1);
     }
+
+    // Echo the generation attached by tools/list. If the host rejects this
+    // baseline before dispatch, refresh and revalidate the same call once.
 
     // Assemble args from the input parsed before connect, or prompt
     // interactively when no scripted source was provided.
@@ -3240,18 +3739,36 @@ async function main() {
     // Keep the receipt outside the try so a transport failure can surface the
     // exact key needed to replay the completed server result.
     const idempotencyKey = args.idempotencyKey || randomUUID();
+    let currentTool = tool;
+    const onStaleToolContract = async ({ client: callClient, error }) => {
+      console.error('ptool: serving generation changed before dispatch; refreshing tools/list.');
+      const refreshed = await refreshToolCallAfterStaleContract({
+        client: callClient,
+        toolName,
+        previousTool: currentTool,
+        callArgs,
+        idempotencyKey,
+        error,
+        listTools: (targetClient) => listAllTools(targetClient, {
+          retryLocalErrors: isLocalOperatorUrl(operatorUrl),
+        }),
+      });
+      currentTool = refreshed.tool;
+      return refreshed.params;
+    };
+    const currentCallParams = () => buildCallToolParams(toolName, callArgs, {
+      outputSchema: currentTool.outputSchema,
+      servingGeneration: currentTool._meta?.['papercusp/servingGeneration'],
+      idempotencyKey,
+    });
     try {
       let recovered = await callToolWithReplayRecovery(
         client,
-        buildCallToolParams(toolName, callArgs, {
-          outputSchema: tool.outputSchema,
-          // One key belongs to this logical CLI invocation. Reconnect recovery
-          // deliberately reuses these params so the server can deduplicate it.
-          idempotencyKey,
-        }),
+        currentCallParams(),
         {
           timeoutMs: timeoutForTool(toolName, callArgs),
           reconnect: () => connectOperator(),
+          onStaleToolContract,
         },
       );
       if (isRecoverableAuthorityDenial(recovered.result) && !args.url && operatorCandidates.length > 1) {
@@ -3262,13 +3779,11 @@ async function main() {
         await closeClientQuietly(recovered.client);
         recovered = await callToolWithReplayRecovery(
           await connectOperator({ preferredIndex: 1 }),
-          buildCallToolParams(toolName, callArgs, {
-            outputSchema: tool.outputSchema,
-            idempotencyKey,
-          }),
+          currentCallParams(),
           {
             timeoutMs: timeoutForTool(toolName, callArgs),
             reconnect: () => connectOperator(),
+            onStaleToolContract,
           },
         );
       }

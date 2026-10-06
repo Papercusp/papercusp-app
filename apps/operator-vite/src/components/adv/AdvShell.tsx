@@ -725,7 +725,9 @@ export function useAdvScopeShortcuts({
           ? slugs[0]
           : slugs[slugs.length - 1]
         : slugs[(idx + dir + slugs.length) % slugs.length];
-    if (!next || next === activeSlug) return;
+    // All Pots retains the last slug. A one-pot list must still leave that
+    // scope even when the shortcut selects the same retained slug.
+    if (!next || (!allMode && next === activeSlug)) return;
     if (allMode) await setScopeMode('expanded');
     await setActiveSlug(next);
     await setActiveHarness(null);

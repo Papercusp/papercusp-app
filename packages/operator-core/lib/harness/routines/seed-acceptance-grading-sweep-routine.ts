@@ -71,7 +71,7 @@ async function main(): Promise<void> {
     `[seed-acceptance-grading-sweep-routine] seeded "${NAME}" for "${SLUG}" (ws=${ws}, active=${active}, ` +
       `tier=ephemeral, interval=${DEFAULT_INTERVAL_SEC}s) — acceptance-grading stall sweep cadence. ` +
       (active
-        ? 'Cadence seeded ACTIVE — restart papercup-bg-host to live-arm on a host that was already up.'
+        ? 'Cadence seeded ACTIVE — restart papercusp-bg-host to live-arm on a host that was already up.'
         : 'Inactive — enable via the routines admin or re-run without --inactive.'),
   );
 }

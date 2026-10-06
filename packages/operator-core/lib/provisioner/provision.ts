@@ -170,6 +170,11 @@ export async function planProvision(opts: PlanProvisionOptions = {}): Promise<Pr
               flashAttn: entry.serve.flashAttn,
               jinja: entry.serve.jinja,
               reasoningBudget: entry.serve.reasoningBudget,
+              // The GPU-offload flags the drift guard compares: a wizard-written unit that omitted
+              // them would be reported as drifted by the very next cold-start audit (WI-10006354).
+              gpuLayers: entry.serve.gpuLayers,
+              fit: entry.serve.fit,
+              fitTargetMiB: entry.serve.fitTargetMiB,
               logPath,
               binPath: opts.binPath,
             })
@@ -451,7 +456,8 @@ export async function ensureLocalBackendRunning(
       drift: [],
       envIssues: [],
       binary: null,
-      summary: `unit audit could not run: ${err instanceof Error ? err.message : String(err)}`,
+      model: null,
+      summary: `unit audit could not run:${err instanceof Error ? err.message : String(err)}`,
     };
   }
   try {

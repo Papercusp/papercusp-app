@@ -75,6 +75,24 @@ export interface MemoryHost {
   buildEmbedderForMode: (mode: 'openai' | 'local' | 'gemma' | 'harrier') => Promise<EmbedFn>;
 
   /**
+   * Optional, BENCHMARK-ONLY: let one isolated schema's physical vector tables
+   * accept a candidate embedding profile instead of the production profile.
+   *
+   * A candidate model (e.g. mDenseOn) has no production `EmbedderMode`, so the
+   * complete production memory path (mem0 client, entity linking, canonical
+   * vector/lexical search, decay) would refuse to bind it. This seam REPLACES a
+   * mode's accepted profile ids — never widens — and is honored ONLY when the
+   * active `schema` equals `schema` here and is not a shared/default schema
+   * (`harness_shared` / `public`). Any other combination fails closed in
+   * `resolveMemoryVectorBinding`, so candidate vectors can never enter a
+   * production vector space. Production hosts never set it.
+   */
+  candidateStorage?: {
+    schema: string;
+    acceptedProfileIds: Partial<Record<'openai' | 'local' | 'gemma' | 'harrier', readonly string[]>>;
+  };
+
+  /**
    * Optional: adaptive extraction instructions fed to mem0's
    * `customInstructions`. The operator's learning loop supplies these;
    * the package treats it as a black box. Default: none.
@@ -108,10 +126,17 @@ export interface MemoryHost {
   defaultDbName?: string;
 
   /**
-   * Directory for mem0's local SQLite event-history file. Default the OS
-   * tmpdir. The operator passes its state directory so the log survives
-   * across restarts. Set to `null` to force the in-memory (`:memory:`)
-   * history.
+   * Directory for mem0's local SQLite event-history file. OPT-IN: unset,
+   * `null`, or a blank string keeps the history in memory (`:memory:`), which
+   * is the default and what the operator uses.
+   *
+   * Persisting is opt-in because the file is written with better-sqlite3, which
+   * is SYNCHRONOUS: every memory add runs an INSERT on the caller's main thread.
+   * A file shared by several processes (the operator's request workers, its
+   * background host, staging, test workers) puts each write behind the others'
+   * file locks and fsyncs. A live :3070 request worker was blocked 32.8 s inside
+   * one such INSERT (WI-10003284). Only name a directory for a single-process
+   * host that genuinely reads the history back.
    *
    * A function is resolved each time a client is built, not when this host is
    * installed. A host whose state directory is chosen by its environment needs
@@ -146,13 +171,14 @@ export function memorySchema(): string {
 }
 
 /**
- * The mem0 history directory in force right now: `null` forces in-memory
- * history, `undefined` means the default (the OS tmpdir). A function-valued
+ * The mem0 history directory in force right now, or `null` for in-memory
+ * history (the default — see `MemoryHost.localStoreDir`). A function-valued
  * `localStoreDir` is called here, on every read.
  */
-export function memoryLocalStoreDir(): string | null | undefined {
+export function memoryLocalStoreDir(): string | null {
   const configured = memoryHost().localStoreDir;
-  return typeof configured === 'function' ? configured() : configured;
+  const dir = typeof configured === 'function' ? configured() : configured;
+  return typeof dir === 'string' && dir.trim() !== '' ? dir : null;
 }
 
 // The host is stored on a process-global slot, NOT a module-level `let`.

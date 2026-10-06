@@ -612,8 +612,6 @@ The orchestrator emits `DONE` when every feature in `harness_features` has statu
    | Plugin | Event subscriptions |
    |---|---|
    | `@papercupai/cloudflare-pages` | `mission-done` → publishes to Cloudflare Pages |
-   | `@papercupai/jira-sync` | `feature-passed`, `feature-failed`, `proposal-accepted`, `mission-done` |
-   | `@papercupai/linear-sync` | same four as jira-sync |
    | `@papercupai/notion-export` | `mission-done` (action: `exportMission`) |
    | `@papercupai/slack-notifier` | `mission-done`, `action-failed` |
    | `starlight`, `pi-coding`, `postgres-manager`, `vscode-server` | none — UI tabs / manual actions only (the docs-tab plugin is `starlight`, at `libs/papercusp/plugins/starlight`; there is no `fumadocs` plugin) |

@@ -33,6 +33,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { nestedCliCached } from './pc_nested_cli.mjs';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 590_000;
@@ -208,6 +209,21 @@ export function inheritedContextDecision(forkedFromId) {
   };
 }
 
+/**
+ * WI-10004953: a codex NESTED inside another agent (run from an su's Bash tool, or under a
+ * capability:bash job) inherits that su's CODEX_HOME, PAPERCUSP_SID and PAPERCUSP_MCP_URL.
+ * Bridging its auto-compaction would ask session:request-compaction on the SU's route and
+ * queue a carry-respawn of the live su. A nested CLI has no managed carry of its own, so
+ * it compacts natively.
+ */
+export function nestedCliDecision() {
+  return {
+    continue: true,
+    systemMessage:
+      'This codex is nested inside another agent and inherited its session identity, so it has no managed carry of its own; it compacts natively.',
+  };
+}
+
 function readSuperuserToken(env) {
   if (env.PAPERCUSP_MCP_AUTH !== 'superuser-token') return '';
   const path = env.PAPERCUSP_SUPERUSER_TOKEN_PATH ||
@@ -227,11 +243,15 @@ function readSuperuserToken(env) {
  *   fetchImpl?: typeof globalThis.fetch,
  *   readToken?: (env: Record<string, string | undefined>) => string,
  *   inspectTranscript?: (transcriptPath: unknown) => { readable: boolean, forkedFromId: string | null, sampled: boolean | null },
+ *   isNested?: () => boolean,
  * }} [options]
  */
 export async function runManagedPreCompact(payload, options = {}) {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const isNested = options.isNested ?? nestedCliCached;
+  // Before anything that could refuse or bridge: the managed boundary is not this CLI's.
+  if (isNested()) return nestedCliDecision();
   const input = objectOrNull(payload);
   if (!input || input.hook_event_name !== 'PreCompact' || input.trigger !== 'auto') {
     return preCompactDecision({

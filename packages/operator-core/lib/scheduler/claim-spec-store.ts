@@ -12,13 +12,14 @@
  * and the id the Queen addresses a bee by). The store fns take an optional `sql` (dependency-injected
  * for tests); production passes getOrgPg().sql.
  */
-import { getOrgPg } from '@papercusp/db-org';
+import { DbCallDeadlineError, getOrgPg } from '@papercusp/db-org';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
 import { DEFAULT_CLAIM_SPEC, validateClaimSpec, isIdOnlySelector, type ClaimSpec } from './claim-spec';
 import { buildP2pLaneFence } from './p2p-lane-fence';
 import { getNextWorkItem, type GetNextResult } from './get-next';
 import { releaseWorkItem, type OrgSql, type WorkItem } from '../work-items';
 import { planItemLaneBlockReason, type PlanItemLaneBlock } from './plan-item-lane-guard';
+import { acceptanceReadinessHold } from './acceptance-readiness-hold';
 import { maybeEmitFleetIdleDrain } from './fleet-idle-drain';
 import { matchesWorkItemClaimSpec } from './claim-spec-match';
 import { resolveClaimSpecWorkspace } from './claim-spec-workspace';
@@ -26,6 +27,7 @@ import { recordClaimAttempt } from '../orchestrator/claim-audit';
 import { getLongLivedAdminPool } from '../long-lived-admin-pool';
 import { ALL_TERMINAL_STATUSES } from '../work-item-blocking';
 import { RESOURCE_GOVERNOR_PARK_OWNER } from '../resource-governor/queue';
+import { boundedOrgTxn, OrgTxnTimeoutError } from '../pg-bounded-txn';
 export { resolveClaimSpecWorkspace } from './claim-spec-workspace';
 
 /**
@@ -127,6 +129,15 @@ export async function countActiveClaimsForBee(
  * Exported so no consumer re-spells `?? 1` and silently drifts from the others.
  */
 export const DEFAULT_MAX_CONCURRENT_CLAIMS = 1;
+
+/**
+ * EI-23227815561098131: the scheduler-only pool setup must finish well inside the
+ * public get_next watchdog. These reads used to run directly on the max:2 pool, so
+ * a queued connection acquisition could survive the outer timeout. This is a
+ * confirmed source gap; whether it caused the reported live timeouts still requires
+ * phase evidence from a failing request.
+ */
+export const SCHEDULER_CLAIM_SETUP_BUDGET_MS = 5_000;
 
 /** The verdict {@link evaluateClaimConcurrency} returns — what every surface must report FROM. */
 export type ClaimConcurrencyVerdict = {
@@ -594,17 +605,90 @@ export async function getNextForBee(args: {
    * path, so it is called defensively.
    */
   onPlanLaneBlocked?: (block: PlanItemLaneBlock & { workItemId: string }) => void;
-}): Promise<(GetNextResult & { specSource: ClaimSpecRecord['source'] }) | null> {
+  /** Exact last entered claim phase, for timeout attribution. Observability only. */
+  onClaimStep?: (step: string) => void;
+}): Promise<
+  | (GetNextResult & {
+      specSource: ClaimSpecRecord['source'];
+      /** P-007 Phase B (D-027): set only when a verifier-lane spec served verification work. */
+      verificationKind?: 'agent-review' | 'verification-task';
+    })
+  | null
+> {
+  const claimStep = (step: string): void => {
+    try {
+      args.onClaimStep?.(step);
+    } catch {
+      // A diagnostic observer must not affect admission or an already committed claim.
+    }
+  };
   const claimSql = args.useDedicatedClaimPool
     ? (getLongLivedAdminPool('scheduler-claim', { max: 2, prepare: false }) as unknown as OrgSql)
     : undefined;
-  // EI-8579: resolve via getClaimSpecRecord (not the bare getClaimSpec) so the caller can
-  // tell WHICH row answered — a bee with neither a per-bee nor an inherited fleet spec
-  // (source:'default') is silently drawing plain oldest-first ordering, which can hand it
-  // owner-deferred work (e.g. a paused/de-scoped category) a curated spec would exclude.
-  // scheduler:get_next surfaces this as an advisory `warning` so a self-pulling agent with
-  // no spec learns to set one, instead of claimHold-parking deferred rows one at a time.
-  const resolvedRecord = await getClaimSpecRecord({ cupId: args.cupId, workspaceId: args.workspaceId }, claimSql);
+  const readClaimSetup = async (sqlOverride?: OrgSql) => {
+    // EI-8579: resolve via getClaimSpecRecord (not the bare getClaimSpec) so the caller can
+    // tell WHICH row answered — a bee with neither a per-bee nor an inherited fleet spec
+    // (source:'default') is silently drawing plain oldest-first ordering, which can hand it
+    // owner-deferred work (e.g. a paused/de-scoped category) a curated spec would exclude.
+    // scheduler:get_next surfaces this as an advisory `warning` so a self-pulling agent with
+    // no spec learns to set one, instead of claimHold-parking deferred rows one at a time.
+    claimStep('claim-spec-read');
+    const resolvedRecord = await getClaimSpecRecord({ cupId: args.cupId, workspaceId: args.workspaceId }, sqlOverride);
+    const transitionBlocked = resolvedRecord.source === 'default' && Boolean(resolvedRecord.fleetSlug);
+    const resolvedPullRecord: ClaimSpecRecord = args.ignoreStoredSpec
+      ? { source: 'default', spec: DEFAULT_CLAIM_SPEC, revision: null, updatedBy: null, updatedAt: null }
+      : resolvedRecord;
+    const record = effectiveClaimSpecRecord(resolvedPullRecord);
+    if (!transitionBlocked) claimStep('claim-concurrency-read');
+    const concurrency = transitionBlocked
+      ? null
+      : await readClaimConcurrency(
+          {
+            cupId: args.cupId,
+            workspaceId: args.workspaceId,
+            maxConcurrentClaims: record.spec.limits?.maxConcurrentClaims,
+          },
+          sqlOverride,
+        );
+    return { resolvedRecord, record, concurrency };
+  };
+
+  // EI-23227815561098131: the dedicated max:2 pool is an isolation boundary only if its
+  // acquisition + setup reads are bounded and cancellation-aware too. Previously the
+  // claim UPDATE was bounded, but getClaimSpecRecord/readClaimConcurrency ran directly on
+  // the pool before it. A timed-out Promise.race therefore returned to the caller while the
+  // setup read could continue after the response. Bound this exposed path without assuming
+  // it caused the live outage: onClaimStep makes a future timeout distinguish setup from
+  // candidate resolution and post-claim checks.
+  let setup: Awaited<ReturnType<typeof readClaimSetup>>;
+  if (claimSql) {
+    try {
+      claimStep('claim-setup-acquisition');
+      setup = await boundedOrgTxn((tx) => readClaimSetup(tx), {
+        client: claimSql,
+        signal: args.signal,
+        acquireTimeoutMs: SCHEDULER_CLAIM_SETUP_BUDGET_MS,
+        statementTimeoutMs: SCHEDULER_CLAIM_SETUP_BUDGET_MS,
+        lockTimeoutMs: SCHEDULER_CLAIM_SETUP_BUDGET_MS,
+      });
+    } catch (error) {
+      // Acquisition has no PostgreSQL SQLSTATE, but it is still the scheduler's own
+      // bounded setup budget rather than evidence that PostgreSQL timed out. Preserve that
+      // distinction in the same typed result get_next already renders for caller budgets.
+      if (error instanceof DbCallDeadlineError) {
+        throw new OrgTxnTimeoutError(
+          '57014',
+          error,
+          `scheduler:get_next claim setup could not acquire the dedicated scheduler-claim pool within ${SCHEDULER_CLAIM_SETUP_BUDGET_MS}ms; no claim was attempted`,
+          'caller-budget',
+        );
+      }
+      throw error;
+    }
+  } else {
+    setup = await readClaimSetup();
+  }
+  const { resolvedRecord, record, concurrency } = setup;
   // WI-4770: membership changes are not an authorization to widen into the
   // default backlog. A fleet/leader transition can briefly have no valid
   // inherited sentinel while the leader rebinds the intended lane. Keep that
@@ -631,16 +715,6 @@ export async function getNextForBee(args: {
     });
     return null;
   }
-  const resolvedPullRecord: ClaimSpecRecord = args.ignoreStoredSpec
-    ? { source: 'default', spec: DEFAULT_CLAIM_SPEC, revision: null, updatedBy: null, updatedAt: null }
-    : resolvedRecord;
-
-  // EI-20185650623647293: a missing spec used to send every self-puller through the
-  // unbounded default backlog, whose deterministic oldest-first head was often another
-  // fleet's p2p/federation work. Apply the shared fence only to the default-source
-  // effective pull; an explicitly authored bee/fleet spec remains authoritative.
-  const record = effectiveClaimSpecRecord(resolvedPullRecord);
-
   // EI-11796: one active/held lane is the fail-closed default. The limit is
   // intentionally read from the resolved spec, not from prompt compliance:
   // parked claims remain assigned, and a fresh get_next must not hand the same
@@ -649,15 +723,25 @@ export async function getNextForBee(args: {
   // get_next.ts's miss diagnosis, and nowhere else — the two other surfaces that report
   // on claims (fleet:leader-brief, work_items:claim) never applied it. All four now share
   // evaluateClaimConcurrency so they cannot answer differently.
-  const concurrency = await readClaimConcurrency(
-    {
-      cupId: args.cupId,
-      workspaceId: args.workspaceId,
-      maxConcurrentClaims: record.spec.limits?.maxConcurrentClaims,
-    },
-    claimSql,
-  );
-  if (concurrency.blocked) return null;
+  if (concurrency?.blocked) return null;
+
+  // P-007 Phase B (D-027): a verifier-lane spec never pulls implementation work. It is served
+  // pending agent reviews, then verification tasks, both through the conflict-checked writers.
+  if (record.spec.lane === 'verification') {
+    claimStep('verification-lane');
+    const { claimNextVerificationWork } = await import('../harness/improvements/agent-review');
+    const served = await claimNextVerificationWork({ verifier: args.cupId, harnessSlug: args.harness });
+    if (!served) {
+      if (args.checkIdleDrainOnMiss) maybeEmitFleetIdleDrain(args.cupId, args.workspaceId);
+      return null;
+    }
+    return {
+      workItem: served.workItem,
+      claimedUnder: { specId: record.spec.specId, revision: record.spec.revision },
+      specSource: record.source,
+      verificationKind: served.kind,
+    };
+  }
 
   // WI-3667: the global floors (claimFloorsWhereSql) enforce EXPLICIT `blocks` dep
   // edges + the coarse plan-WIDE reserved-lane floor, but nothing checks a linked
@@ -686,6 +770,7 @@ export async function getNextForBee(args: {
   // authoritative backstop for surfacing why nothing was eligible.
   const MAX_PLAN_LANE_ATTEMPTS = 5;
   for (let attempt = 0; attempt < MAX_PLAN_LANE_ATTEMPTS; attempt += 1) {
+    claimStep('candidate-resolution');
     const result = await getNextWorkItem(
       record.spec,
       {
@@ -709,6 +794,7 @@ export async function getNextForBee(args: {
         ...(args.rigAvailable ? { rigAvailable: true } : {}),
         ...('fleetSlug' in record && record.fleetSlug ? { fleetSlug: record.fleetSlug } : {}),
         signal: args.signal,
+        onResolutionStep: claimStep,
       },
     );
     if (!result) {
@@ -737,6 +823,7 @@ export async function getNextForBee(args: {
       // claimed and quarantine-released here every ~3-4min by different fleet members
       // whose spec excludes p2p work, broadcasting to all 7 live awaiters each time.
       // `claim:released:<id>` (the targeted, id-scoped key) still always fires.
+      claimStep('claim-release');
       await releaseWorkItem(result.workItem.id, {
         harness: args.harness,
         expectedAssignee: args.cupId,
@@ -744,8 +831,20 @@ export async function getNextForBee(args: {
       });
       continue;
     }
-    const blocked = await planItemLaneBlockReason(result.workItem);
+    claimStep('plan-lane-check');
+    const laneBlock = await planItemLaneBlockReason(result.workItem);
+    // P-002(b) (feature-drain-delivery-readiness…-2026-10-01, D-008 §5 / D-011): the SECOND
+    // post-claim verdict — an item bound to an incomplete acceptance requirement (draft
+    // clause, no METHOD, no check) is not handed out. The hold routes it behind the plan's
+    // repair task via a `blocks` edge, so the claim floor excludes it from then on; the
+    // bounce → audit → release below is shared, and `reason` tells the two holds apart.
+    if (!laneBlock) claimStep('acceptance-readiness-check');
+    const acceptanceHold = laneBlock
+      ? null
+      : await acceptanceReadinessHold(result.workItem, { by: args.cupId, workspaceId: args.workspaceId });
+    const blocked = laneBlock ?? acceptanceHold;
     if (!blocked) {
+      claimStep('claim-audit');
       await auditClaimAttempt({
         workspaceId: args.workspaceId,
         harnessSlug: args.harness,
@@ -803,6 +902,24 @@ export async function getNextForBee(args: {
     // (the audit + release below MUST still run), so a throw here is swallowed exactly like
     // every other observability call in this function.
     notifyPlanLaneBlocked(args.onPlanLaneBlocked, blocked, result.workItem.id);
+    const releaseBounced = () =>
+      releaseWorkItem(result.workItem.id, {
+        harness: args.harness,
+        expectedAssignee: args.cupId,
+        announceClaimable: false,
+      });
+    // P-002(b): an acceptance hold routes the item behind the plan's repair task with a
+    // `blocks` edge, and the dependency store REFUSES a new unresolved blocker behind an
+    // ACTIVE (still-claimed) dependant — so release FIRST, then route, then audit the routing
+    // outcome. The lane-block path keeps its audit-then-release order.
+    let acceptanceRouting: string | undefined;
+    if (acceptanceHold) {
+      claimStep('claim-release');
+      await releaseBounced();
+      claimStep('acceptance-repair-route');
+      acceptanceRouting = await acceptanceHold.routeAfterRelease();
+    }
+    claimStep('claim-audit');
     await auditClaimAttempt({
       workspaceId: args.workspaceId,
       harnessSlug: args.harness,
@@ -811,7 +928,7 @@ export async function getNextForBee(args: {
       outcome: 'lost',
       detail: {
         source: record.source,
-        reason: 'plan-lane-blocked',
+        reason: acceptanceHold ? 'acceptance-readiness-held' : 'plan-lane-blocked',
         // The lane guard's own verdict — which plan item held the row, and why. Without
         // this the count says churn happened but not which of the guard's three distinct
         // jobs (blocked-by graph, terminal-lane residue, owner-gate prose) produced it,
@@ -820,14 +937,14 @@ export async function getNextForBee(args: {
         itemId: blocked.itemId,
         effectiveStatus: blocked.effectiveStatus,
         laneReason: blocked.reason,
+        ...(acceptanceRouting !== undefined ? { acceptanceRouting } : {}),
         family: result.workItem.family,
       },
     });
-    await releaseWorkItem(result.workItem.id, {
-      harness: args.harness,
-      expectedAssignee: args.cupId,
-      announceClaimable: false,
-    });
+    if (!acceptanceHold) {
+      claimStep('claim-release');
+      await releaseBounced();
+    }
   }
   return null;
 }

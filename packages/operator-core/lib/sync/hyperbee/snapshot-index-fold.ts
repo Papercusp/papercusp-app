@@ -272,6 +272,8 @@ export class SnapshotIndexFolder {
     schema_version: number;
     maxChunkBytes?: number;
     excludeTables?: readonly string[];
+    /** WI-10005425 — see `SnapshotPayload.ownPrefix`. */
+    ownPrefix?: boolean;
   }): { blocks: Uint8Array[]; rowCount: number } {
     if (this.pending > 0) {
       throw new Error(`snapshot index fold: finish with ${this.pending} winner(s) not materialized`);
@@ -313,6 +315,7 @@ export class SnapshotIndexFolder {
           ts: args.ts,
           schema_version: args.schema_version,
           ...(args.excludeTables ? { excludeTables: args.excludeTables } : {}),
+          ...(args.ownPrefix ? { ownPrefix: true } : {}),
         }),
       );
       const at = shell.indexOf(ROWS_SENTINEL_JSON);

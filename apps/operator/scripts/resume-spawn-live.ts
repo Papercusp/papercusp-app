@@ -86,8 +86,8 @@ function jsonlLines(file: string): number {
 }
 
 /** Enroll the exact prompt bytes before handing them to a real CLI. */
-function tagSmokeTurn(sid: string, text: string, dir: string): string | null {
-  const tagged = tagTurnForInjection({ sid, origin: 'resume-smoke', text, dir });
+async function tagSmokeTurn(sid: string, text: string, dir: string): Promise<string | null> {
+  const tagged = await tagTurnForInjection({ sid, origin: 'resume-smoke', text, dir });
   return tagged.ledgerWritten ? tagged.taggedText : null;
 }
 
@@ -128,13 +128,13 @@ function onPath(bin: string): boolean {
 }
 
 // ── claude leg ────────────────────────────────────────────────────────────
-function claudeLeg(): Leg {
+async function claudeLeg(): Promise<Leg> {
   if (!onPath('claude')) return { agent: 'claude', status: 'skip', detail: 'claude not on PATH' };
   if (!isClaudeAuthed()) return { agent: 'claude', status: 'skip', detail: 'no ~/.claude/.credentials.json' };
 
   const sid = `smoke-${randomUUID()}`;
   const sessionId = randomUUID(); // forced native session id (claude --session-id)
-  const { configDir } = writeInteractiveClaudeConfig({ sid }); // the real EI-155 dir
+  const { configDir } = await writeInteractiveClaudeConfig({ sid }); // the real EI-155 dir
   const cwd = mkdtempSync(join(tmpdir(), 'resume-smoke-claude-'));
   const provenanceDir = mkdtempSync(join(tmpdir(), 'resume-smoke-provenance-'));
   const env = {
@@ -147,7 +147,7 @@ function claudeLeg(): Leg {
     // 1. Fresh launch: force --session-id so resume can target it EXACTLY (the
     //    same flag the launcher's suLaunchArgs forces, plus headless -p).
     log('  claude: launching a fresh session (forced --session-id)…');
-    const launchText = tagSmokeTurn(sid, 'Reply with the single word READY.', provenanceDir);
+    const launchText = await tagSmokeTurn(sid, 'Reply with the single word READY.', provenanceDir);
     if (!launchText) {
       return { agent: 'claude', status: 'fail', detail: 'turn-provenance ledger write failed before fresh launch' };
     }
@@ -179,7 +179,7 @@ function claudeLeg(): Leg {
       summary: 'coord:send wake-rung ping — read your inbox',
       payload: null,
     } as DeliveryWork) + ' Reply with the single word AGAIN.';
-    const wakeText = tagSmokeTurn(sid, wakePayload, provenanceDir);
+    const wakeText = await tagSmokeTurn(sid, wakePayload, provenanceDir);
     if (!wakeText) {
       return { agent: 'claude', status: 'fail', detail: 'turn-provenance ledger write failed before resume' };
     }
@@ -218,7 +218,7 @@ function claudeLeg(): Leg {
 }
 
 // ── OMP leg ───────────────────────────────────────────────────────────────
-function ompLeg(): Leg {
+async function ompLeg(): Promise<Leg> {
   if (!onPath('omp')) return { agent: 'omp', status: 'skip', detail: 'omp not on PATH' };
 
   const sid = `smoke-${randomUUID()}`;
@@ -236,7 +236,7 @@ function ompLeg(): Leg {
 
   try {
     log('  omp: launching a fresh print-mode session…');
-    const launchText = tagSmokeTurn(sid, 'Reply with the single word READY.', provenanceDir);
+    const launchText = await tagSmokeTurn(sid, 'Reply with the single word READY.', provenanceDir);
     if (!launchText) {
       return { agent: 'omp', status: 'fail', detail: 'turn-provenance ledger write failed before fresh launch' };
     }
@@ -264,7 +264,7 @@ function ompLeg(): Leg {
     const threadId = match[1];
     const before = jsonlLines(transcript);
 
-    const resumeText = tagSmokeTurn(sid, 'Reply with the single word AGAIN.', provenanceDir);
+    const resumeText = await tagSmokeTurn(sid, 'Reply with the single word AGAIN.', provenanceDir);
     if (!resumeText) {
       return { agent: 'omp', status: 'fail', detail: 'turn-provenance ledger write failed before resume' };
     }
@@ -291,7 +291,7 @@ function ompLeg(): Leg {
 }
 
 // ── codex leg ─────────────────────────────────────────────────────────────
-function codexLeg(): Leg {
+async function codexLeg(): Promise<Leg> {
   if (!onPath('codex')) return { agent: 'codex', status: 'skip', detail: 'codex not on PATH' };
   if (!isCodexAuthed()) return { agent: 'codex', status: 'skip', detail: 'no ~/.codex/auth.json' };
 
@@ -324,7 +324,7 @@ function codexLeg(): Leg {
   try {
     // 1. Fresh headless session.
     log('  codex: launching a fresh exec session…');
-    const launchText = tagSmokeTurn(sid, 'Reply with the single word READY.', provenanceDir);
+    const launchText = await tagSmokeTurn(sid, 'Reply with the single word READY.', provenanceDir);
     if (!launchText) {
       return { agent: 'codex', status: 'fail', detail: 'turn-provenance ledger write failed before fresh launch' };
     }
@@ -347,7 +347,7 @@ function codexLeg(): Leg {
     const before = rolloutLines();
 
     // 2. Resume via the REAL wake-executor builder (`codex exec … resume <uuid>`).
-    const resumeText = tagSmokeTurn(sid, 'Reply with the single word AGAIN.', provenanceDir);
+    const resumeText = await tagSmokeTurn(sid, 'Reply with the single word AGAIN.', provenanceDir);
     if (!resumeText) {
       return { agent: 'codex', status: 'fail', detail: 'turn-provenance ledger write failed before resume' };
     }
@@ -387,9 +387,9 @@ async function main() {
     "resume-spawn-live — real claude/omp/codex resume rung (EI-153 live-smoke)\n",
   );
   const legs: Leg[] = [];
-  if (!only || only === 'claude') legs.push(claudeLeg());
-  if (!only || only === "omp") legs.push(ompLeg());
-  if (!only || only === 'codex') legs.push(codexLeg());
+  if (!only || only === 'claude') legs.push(await claudeLeg());
+  if (!only || only === "omp") legs.push(await ompLeg());
+  if (!only || only === 'codex') legs.push(await codexLeg());
 
   log('');
   for (const l of legs) {

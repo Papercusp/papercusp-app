@@ -22,7 +22,7 @@ export type LifecycleState =
   | "repairing"
   | "destroying"
   | "absent";
-export type LifecycleAction = "start" | "stop" | "repair" | "snapshot" | "destroy";
+export type LifecycleAction = "start" | "stop" | "repair" | "snapshot" | "restore" | "destroy";
 export type DestroyDisposition = "snapshot" | "backup" | "discard";
 
 /** The three guided-rail steps, in rail order. */
@@ -67,6 +67,9 @@ export interface WorkspaceHostConnectionRow {
   provider?: {
     projectId?: string;
     serviceAccountEmail?: string;
+    vpcId?: string;
+    securityGroupIds?: string[];
+    launchTemplateId?: string;
   };
   scopes: CatalogOption[];
   regions: RegionOption[];
@@ -417,6 +420,7 @@ const ACTION_LABELS: Record<LifecycleAction, string> = {
   stop: "Stop machine",
   repair: "Repair",
   snapshot: "Snapshot",
+  restore: "Restore snapshot",
   destroy: "Destroy",
 };
 
@@ -456,7 +460,7 @@ export function lifecycleActionPlan(
 
   return {
     primary,
-    overflow: (["repair", "snapshot", "destroy"] as const).map((action) =>
+    overflow: (["repair", "snapshot", "restore", "destroy"] as const).map((action) =>
       spec(action, caps),
     ),
   };
@@ -521,9 +525,15 @@ export function readinessChecks(
     {
       id: "provider-supported",
       label: "Provider is supported",
-      ok: !connection || connection.target === "gcp",
-      fix: "choose a supported Google Cloud connection",
+      ok: !connection || connection.target === "gcp" || connection.target === "aws",
+      fix: "choose a supported Google Cloud or AWS connection",
     },
+    ...(connection?.target === "aws" ? [{
+      id: "aws-launch-resources",
+      label: "AWS launch resources configured",
+      ok: Boolean(connection.provider?.vpcId && connection.provider?.launchTemplateId && connection.provider?.securityGroupIds?.length),
+      fix: "reconnect AWS with a VPC, security groups, and launch template",
+    }] : []),
     {
       id: "connection-validated",
       label: "Provider connection validated",

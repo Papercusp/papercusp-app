@@ -65,7 +65,7 @@ A direct child of the workspace root whose `.git` is a **directory**.
 
 Two behaviours worth recognizing before you file a bug about them:
 
-* **Siblings that symlink OUT of the workspace still resolve.** `owner-central-server` and `owner-Libs` point outside the workspace root, and the containment check is a lexical `path.resolve` test (no realpath), so citations into them reach the real file. That is intended — those are owner-placed workspace members. The guard exists to stop `..` in caller-authored citation strings, not to sandbox the owner's own layout.
+* **Siblings that symlink OUT of the workspace still resolve.** `<owner>-central-server` and `<owner>-Libs` point outside the workspace root, and the containment check is a lexical `path.resolve` test (no realpath), so citations into them reach the real file. That is intended — those are owner-placed workspace members. The guard exists to stop `..` in caller-authored citation strings, not to sandbox the owner's own layout.
 * **Admission is by name and is re-evaluated per audit** — drop a new clone into the workspace and its citations start resolving with no code change.
 
 ## If you genuinely must ship past the gate

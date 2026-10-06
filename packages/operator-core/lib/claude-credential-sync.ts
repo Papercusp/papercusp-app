@@ -49,23 +49,17 @@
  * Keychain (best-effort) so the owner's direct `claude` — which reads the Keychain —
  * stays on the live token: one logical credential across Keychain + file + forks.
  */
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  watch,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, watch } from 'node:fs';
+import { lstat, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
 import chokidar, { type FSWatcher as ChokidarFSWatcher } from 'chokidar';
 import { managedSetInterval } from '@papercusp/scheduled-registry';
 import { pinModuleState } from '@papercusp/module-singleton';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import { sessionClaudeRoot } from '@papercusp/orchestrator/session-launch-dirs';
-import { readClaudeKeychainOAuthBundle, writeClaudeKeychainOAuthBundle } from './agent-auth-detect';
+// The ASYNC Keychain helpers: this reconcile runs on the operator main thread (boot, every watch
+// kick, every 5 min), where a spawnSync of `security` blocks the whole host (WI-10005231).
+import { readClaudeKeychainOAuthBundleAsync, writeClaudeKeychainOAuthBundleAsync } from './agent-auth-detect';
 import { subscriptionRelayAllowed } from './anthropic-auth-policy';
 
 /** Upper bound on a plausible interactive-OAuth `expiresAt` distance: real
@@ -117,6 +111,9 @@ export interface ReconcileOptions {
   platform?: NodeJS.Platform;
   /** Keychain account for write-back (testability); defaults to the login user (`$USER`). */
   keychainAccount?: string;
+  /** Test-only: awaited after the scan, immediately before each target's write, so a
+   *  test can simulate a fork refreshing between the scan read and the write. */
+  _beforeWriteForTests?: (path: string) => void | Promise<void>;
 }
 
 function globalCredentialsPath(home: string): string {
@@ -136,10 +133,10 @@ function parseBundle(json: Record<string, unknown>, now: number): ClaudeAiOauth 
 
 /** Read a REAL credentials file (caller has excluded symlinks). Unreadable /
  *  unparseable content yields `json: {}` — a later merge-write heals it. */
-function readCandidate(path: string, isGlobal: boolean, now: number): Candidate {
+async function readCandidate(path: string, isGlobal: boolean, now: number): Promise<Candidate> {
   let json: Record<string, unknown> = {};
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    const parsed = JSON.parse(await readFile(path, 'utf8'));
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) json = parsed;
   } catch {
     /* corrupt or vanished mid-read — treat as empty base */
@@ -149,31 +146,91 @@ function readCandidate(path: string, isGlobal: boolean, now: number): Candidate 
 
 /** True when the path exists and is NOT a symlink (a fork worth reconciling).
  *  Symlinks resolve to the global file and are reconciled through it. */
-function isRealFile(path: string): boolean {
+async function isRealFile(path: string): Promise<boolean> {
   try {
-    return lstatSync(path).isFile();
+    return (await lstat(path)).isFile();
   } catch {
     return false;
   }
 }
 
-function writeBundle(target: Candidate, bundle: ClaudeAiOauth): void {
-  const merged = { ...target.json, claudeAiOauth: bundle };
+/** True when ANYTHING is at `path`, following symlinks (a dangling link reads absent). */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Atomic merge-write of `bundle` into `target` — same-dir temp + rename, 0600.
+ *
+ * Compare-before-swap: the target is RE-READ immediately before the write, and the
+ * write is skipped when the target now holds a bundle at least as new as `bundle`.
+ * The scan read can be long stale by the time the write runs (the pass is async and
+ * a claude session may refresh its fork in between); overwriting a freshly rotated
+ * bundle with an older one would hand that session a consumed refresh token. The
+ * fresh read is also the merge base, so sibling keys (`mcpOAuth`) written since the
+ * scan survive. Returns false when skipped.
+ */
+async function writeBundle(target: Candidate, bundle: ClaudeAiOauth, now: number): Promise<boolean> {
+  let base = target.json;
+  if (await isRealFile(target.path)) {
+    const fresh = await readCandidate(target.path, target.isGlobal, now);
+    if (fresh.bundle && fresh.bundle.expiresAt >= bundle.expiresAt) return false;
+    base = fresh.json;
+  }
+  const merged = { ...base, claudeAiOauth: bundle };
   const tmp = join(
     dirname(target.path),
     `.credentials.json.credsync-${process.pid}-${Math.floor(Math.random() * 1e9)}`,
   );
-  writeFileSync(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
-  renameSync(tmp, target.path);
+  try {
+    await writeFile(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
+    await rename(tmp, target.path);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});
+    throw e;
+  }
+  return true;
 }
 
+// Passes run one at a time per process. The periodic/watch pass and the launch path
+// (writeInteractiveClaudeConfig) can now overlap in time; two overlapping passes would
+// double the I/O on every fork. Each caller still gets its OWN full pass (a pass that
+// started before a fork refreshed must not stand in for one that starts after it).
+const reconcileQueue = pinModuleState('@papercusp/operator-core.claude-credential-sync.queue', () => ({
+  tail: Promise.resolve() as Promise<unknown>,
+}));
+
 /**
- * One reconcile pass. Synchronous on purpose: the interactive launcher
- * (`writeInteractiveClaudeConfig`) calls it inline before mirroring so a new
- * session seeds from the newest bundle, and the watcher calls it on debounce.
- * Scans ≲ a few hundred small files — milliseconds.
+ * One reconcile pass, fully asynchronous (node:fs/promises).
+ *
+ * WI-10005186: this used to be synchronous. It runs on the operator MAIN THREAD
+ * (the background pass below, and `writeInteractiveClaudeConfig` on the
+ * bootstrap/resume request paths), and a pass that propagates a refreshed bundle
+ * does one temp-write + rename per real-file fork — 76 on the dev box. Under ext4
+ * journal pressure each rename can wait seconds in `wait_transaction_locked`, so
+ * one pass froze the event loop (observed: STALLED D, syscall rename, path
+ * `<owner>/.credentials.json.credsync-*`, :3170 2026-10-02 02:00:07Z). Async I/O
+ * moves that wait onto a libuv worker. Forks are processed SEQUENTIALLY on purpose:
+ * one worker at a time, so a journal stall cannot also saturate the threadpool.
+ *
+ * ⚠ Keep this module free of synchronous fs on the pass path — guarded by a
+ * code-shape test in claude-credential-sync.test.ts.
  */
-export function reconcileClaudeCredentials(opts: ReconcileOptions = {}): ReconcileResult {
+export function reconcileClaudeCredentials(opts: ReconcileOptions = {}): Promise<ReconcileResult> {
+  const run = reconcileQueue.tail.then(
+    () => reconcileOnce(opts),
+    () => reconcileOnce(opts),
+  );
+  reconcileQueue.tail = run.catch(() => {});
+  return run;
+}
+
+async function reconcileOnce(opts: ReconcileOptions): Promise<ReconcileResult> {
   const home = opts.home ?? homedir();
   const sessionRoot = opts.sessionRoot ?? sessionClaudeRoot();
   const now = opts.now ?? Date.now();
@@ -181,17 +238,17 @@ export function reconcileClaudeCredentials(opts: ReconcileOptions = {}): Reconci
 
   const candidates: Candidate[] = [];
   const globalPath = globalCredentialsPath(home);
-  if (isRealFile(globalPath)) candidates.push(readCandidate(globalPath, true, now));
+  if (await isRealFile(globalPath)) candidates.push(await readCandidate(globalPath, true, now));
 
   let sessionDirs: string[] = [];
   try {
-    sessionDirs = readdirSync(sessionRoot);
+    sessionDirs = await readdir(sessionRoot);
   } catch {
     /* no session root yet */
   }
   for (const dir of sessionDirs) {
     const p = join(sessionRoot, dir, '.credentials.json');
-    if (isRealFile(p)) candidates.push(readCandidate(p, false, now));
+    if (await isRealFile(p)) candidates.push(await readCandidate(p, false, now));
   }
 
   // macOS Keychain bridge (REQ B): Claude Code keeps the OAuth bundle in the login Keychain,
@@ -201,7 +258,7 @@ export function reconcileClaudeCredentials(opts: ReconcileOptions = {}): Reconci
   // read returns null and this is a no-op, leaving the pure-file behaviour byte-identical.
   let keychainCandidate: Candidate | null = null;
   if (platform === 'darwin') {
-    const kc = readClaudeKeychainOAuthBundle(platform);
+    const kc = await readClaudeKeychainOAuthBundleAsync(platform);
     if (kc) {
       const json = kc.bundle as Record<string, unknown>;
       keychainCandidate = {
@@ -238,7 +295,11 @@ export function reconcileClaudeCredentials(opts: ReconcileOptions = {}): Reconci
   // Restore a missing global file from the freshest fork (the documented
   // recovery for "global broke for every headless spawn") — but only when
   // ~/.claude exists; never materialize a .claude dir on a box without one.
-  if (!isRealFile(globalPath) && !existsSync(globalPath) && existsSync(dirname(globalPath))) {
+  if (
+    !(await isRealFile(globalPath)) &&
+    !(await pathExists(globalPath)) &&
+    (await pathExists(dirname(globalPath)))
+  ) {
     candidates.push({ path: globalPath, json: {}, bundle: null, isGlobal: true });
   }
 
@@ -247,8 +308,8 @@ export function reconcileClaudeCredentials(opts: ReconcileOptions = {}): Reconci
     if (c.readOnly) continue; // the Keychain source is written back separately (below), not via writeBundle
     if (c.bundle && c.bundle.expiresAt >= winningBundle.expiresAt) continue;
     try {
-      writeBundle(c, winningBundle);
-      updated.push(c.path);
+      await opts._beforeWriteForTests?.(c.path);
+      if (await writeBundle(c, winningBundle, now)) updated.push(c.path);
     } catch (e) {
       console.warn(
         `[claude-cred-sync]   ! ${c.path}: ${(e as Error)?.message ?? e}`,
@@ -271,7 +332,7 @@ export function reconcileClaudeCredentials(opts: ReconcileOptions = {}): Reconci
     try {
       const account = opts.keychainAccount ?? userInfo().username;
       const merged = { ...keychainCandidate.json, claudeAiOauth: winningBundle };
-      const ok = writeClaudeKeychainOAuthBundle(
+      const ok = await writeClaudeKeychainOAuthBundleAsync(
         keychainCandidate.keychainService!,
         account,
         JSON.stringify(merged),
@@ -344,7 +405,7 @@ export function startClaudeCredentialSync(opts: {
       // OAuth bundles on a user's behalf unless they opt in for their own accounts.
       if (!subscriptionRelayAllowed('credential-sync')) return;
       if (!(await isEnabled())) return;
-      const r = reconcileClaudeCredentials({ home, sessionRoot });
+      const r = await reconcileClaudeCredentials({ home, sessionRoot });
       if (r.updated.length > 0 && r.winner) {
         console.log(
           `[claude-cred-sync] ${trigger}: winner=${r.winner.path} ` +

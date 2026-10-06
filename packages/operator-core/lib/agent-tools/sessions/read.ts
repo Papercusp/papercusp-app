@@ -20,6 +20,9 @@ import {
   parseTurnRef,
   refreshTargetSessionBeforeRead,
 } from './_shared';
+import { SESSION_TURN_TEXT_CAP } from '../../search/session-ingest';
+import { DisclosureRefused, disclosureRefusalData } from '../../personal-vault/disclosure-ledger';
+import { emptyTally, withheldReceipt, withholdRestrictedTurns } from '../../personal-vault/transcript-exclusion';
 
 const ALL_ROLES = [...SU_ROLES, 'papercup', 'kettle'] as const;
 const SESSION_TURN_TEXT_CHUNK_CAP = 1_500;
@@ -64,7 +67,7 @@ const readArgsSchema = z
       .min(1)
       .max(SESSION_TURN_TEXT_CHUNK_MAX)
       .optional()
-      .describe(`Maximum characters per returned turn text chunk (default ${SESSION_TURN_TEXT_CHUNK_CAP}); clipped turns include a readMore continuation.`),
+      .describe(`Maximum ${SESSION_TURN_TEXT_CHUNK_MAX} characters per returned turn text chunk (default ${SESSION_TURN_TEXT_CHUNK_CAP}); clipped turns include a readMore continuation.`),
     tail: z
       .number()
       .int()
@@ -114,8 +117,8 @@ export default defineTool({
   crossWorkspace: true,
   capability: 'search:read',
   description:
-    "Read a bounded window of turns from one indexed session transcript — pass a canonical `session_turn:…` ref directly, coordinates around a turn, a from/to range, or the tail. `tail:N` already means `order:'desc', limit:N`; do not combine `tail` with `order` or `limit`. session:'self' reads YOUR OWN current session (pre-compaction turns included). Search-only `query` and `mode` arguments belong to sessions:search and are rejected here. " +
-    `Turn text is returned in ${SESSION_TURN_TEXT_CHUNK_CAP}-character chunks by default; clipped turns carry text_truncated, text_full_chars, and a readMore continuation (text_offset/text_limit). ` +
+    "Read indexed session turns. `tail:N` already means `order:'desc', limit:N`; do not combine `tail` with `order` or `limit`. `session:'self'` spans YOUR OWN respawn chain, including predecessor turns. If that window includes multiple native sessions, `session_id` is null, `session_ids` lists them, and each turn's `ref` identifies its source. Pass a `session_turn:…` ref, coordinates, from/to range, or tail. `query` and `mode` belong to sessions:search. " +
+    `Turn text is returned in ${SESSION_TURN_TEXT_CHUNK_CAP}-character chunks by default; clipped turns carry text_truncated, text_full_chars, and a readMore continuation (text_offset/text_limit). A turn at the index cap also reports source_completeness (see returns). ` +
     "NOTE ON `turn_count` (EI-9970): this is the number of rows in THIS response's window (bounded by `limit`, default 40) — NOT the session's total turn count. It is a DIFFERENT quantity from sessions:list's `turns` field (that session's full indexed-text-turn total) despite the similar name; do not compare them. For the session total, use sessions:list.",
   guidance: {
     when:
@@ -127,7 +130,7 @@ export default defineTool({
     // but return shapes were not, so the only way to learn the shape was to call
     // once and introspect — one guaranteed wasted round-trip per tool, per agent.
     returns:
-      '{ ok, session_id, turn_count (SIZE OF THIS WINDOW, not the session total), turns: [{ ref, turn_idx, speaker, owner?, ts, text, text_truncated?, text_full_chars?, text_offset?, readMore? }] } — clipped text carries a directly runnable readMore pointer for the next character chunk; each ref is reusable with sessions:read. Turns are ALWAYS returned oldest→newest.',
+      '{ ok, session_id (null when a self window spans multiple native sessions), session_ids? (sessions represented in a self window), note?, turn_count (SIZE OF THIS WINDOW, not the session total), turns: [{ ref, turn_idx, speaker, owner?, ts, text, text_truncated?, text_full_chars?, source_completeness?, text_offset?, readMore? }] } — each turn ref identifies its source session; clipped text carries a directly runnable readMore pointer for the next character chunk. Capped index rows report source_completeness as complete after archive recovery or unknown when recovery is unavailable/untrusted. Turns are ALWAYS returned oldest→newest.',
     seeAlso: ['sessions:search', 'sessions:list', 'sessions:digest'],
   },
   requirePrincipal: false,
@@ -160,6 +163,7 @@ export default defineTool({
         text: z.string(),
         text_truncated: z.boolean().optional(),
         text_full_chars: z.number().int().nonnegative().optional(),
+        source_completeness: z.enum(['complete', 'unknown']).optional(),
         text_offset: z.number().int().nonnegative().optional(),
         readMore: z.object({
           tool: z.string(),
@@ -272,11 +276,15 @@ export default defineTool({
       speaker: string;
       owner: string | null;
       ts: string | null;
+      /** When the turn was recorded, for the D-006 window test: ts, else ingest time. */
+      stamp_at?: string | null;
       text: string;
       text_full_chars: number;
-      text_offset: number;
+      text_offset?: number;
+      source_completeness?: 'complete' | 'unknown';
     }>>`
       SELECT source_kind, session_id, turn_idx, speaker, owner, ts::text AS ts,
+             COALESCE(ts, ingested_at)::text AS stamp_at,
              length(text)::int AS text_full_chars,
              ${textOffset}::int AS text_offset,
              substring(text FROM ${textOffset + 1}::int FOR ${textLimit}::int) AS text
@@ -303,6 +311,67 @@ export default defineTool({
     // chronological. An asc (head) fetch is already chronological.
     if (!asc) rows.reverse();
 
+    // A session_turns row at the parser cap cannot tell us whether the source
+    // ended there. Recover only these exact turns from the byte-faithful
+    // archive; the archive reader retains its decompression bounds and parser
+    // redaction. A failed, partial, or mismatched archive leaves completeness
+    // explicitly unknown while preserving the index chunk and its pagination.
+    const cappedRows = rows.filter((row) => row.text_full_chars >= SESSION_TURN_TEXT_CAP);
+    for (const row of cappedRows) row.source_completeness = 'unknown';
+    const archiveBackedRows = cappedRows.filter((row) =>
+      typeof row.session_id === 'string' && row.session_id.length > 0 &&
+      (row.source_kind === 'claude' || row.source_kind === 'codex' || row.source_kind === 'omp'),
+    );
+    if (archiveBackedRows.length) {
+      const groups = new Map<string, typeof archiveBackedRows>();
+      for (const row of archiveBackedRows) {
+        const key = `${row.source_kind}\u0000${row.session_id}`;
+        const group = groups.get(key) ?? [];
+        group.push(row);
+        groups.set(key, group);
+      }
+      let readArchive: typeof import('../../session-archive-read').readArchivedSessionTurns | null = null;
+      try {
+        readArchive = (await import('../../session-archive-read')).readArchivedSessionTurns;
+      } catch (error) {
+        console.warn(`[sessions:read] capped-turn archive reader unavailable: ${(error as Error)?.message ?? error}`);
+      }
+      if (readArchive) {
+        for (const group of groups.values()) {
+          const first = group[0]!;
+          let archived: Awaited<ReturnType<typeof readArchive>> = null;
+          try {
+            archived = await readArchive(
+              first.session_id,
+              first.source_kind as 'claude' | 'codex' | 'omp',
+              undefined,
+              { fullSource: true, turnIndices: group.map((row) => row.turn_idx) },
+            );
+          } catch (error) {
+            console.warn(`[sessions:read] capped-turn archive recovery failed: ${(error as Error)?.message ?? error}`);
+          }
+          const archiveTurns = new Map((archived?.errors.length === 0 ? archived.turns : []).map((turn) => [turn.turn_idx, turn]));
+          for (const row of group) {
+            const turn = archiveTurns.get(row.turn_idx);
+            const offset = row.text_offset ?? textOffset;
+            const sameTimestamp = row.ts == null && turn?.ts == null ||
+              row.ts != null && turn?.ts != null && Date.parse(row.ts) === Date.parse(turn.ts);
+            const indexedChunkMatches = turn != null &&
+              turn.speaker === row.speaker && sameTimestamp &&
+              turn.text.slice(offset, offset + row.text.length) === row.text;
+            if (turn && indexedChunkMatches) {
+              row.text = turn.text;
+              row.text_full_chars = turn.text.length;
+              row.text_offset = undefined;
+              row.source_completeness = 'complete';
+            } else {
+              row.source_completeness = 'unknown';
+            }
+          }
+        }
+      }
+    }
+
     // `session:'self'` is owner-chain scoped, so the window may contain turns
     // from both the predecessor and successor native transcripts. Never label
     // that mixed window with the newest transcript's id: it makes the envelope
@@ -328,7 +397,7 @@ export default defineTool({
     // Archive fall-through (session-db-archive-retire-dirs P-009): the index
     // prunes at 45d, but the session_archives blob store is permanent. A
     // session with NO index rows may still be readable — decompress, re-parse
-    // with the ingest parsers, re-apply the ingest cap+redaction, and window
+    // with the ingest parsers, recover full redacted source text, and window
     // in JS. sessions:search stays index-bounded by design (D-001).
     let archiveNote: string | undefined;
     if (!rows.length && !selfSession) {
@@ -344,7 +413,7 @@ export default defineTool({
           sourceKind === 'claude' || sourceKind === 'omp' || sourceKind === 'codex'
             ? sourceKind
             : undefined;
-        const arch = await readArchivedSessionTurns(sessionId, archiveSourceKind);
+        const arch = await readArchivedSessionTurns(sessionId, archiveSourceKind, undefined, { fullSource: true });
         if (arch) {
           let t = arch.turns;
           if (lo !== null || hi !== null) {
@@ -364,6 +433,7 @@ export default defineTool({
               ts: x.ts,
               text_full_chars: x.text.length,
               text_offset: textOffset,
+              source_completeness: arch.errors.length === 0 ? 'complete' as const : 'unknown' as const,
               text: x.text.slice(textOffset, textOffset + textLimit),
             })),
           );
@@ -372,6 +442,27 @@ export default defineTool({
       } catch (e) {
         console.warn(`[sessions:read] archive fall-through failed: ${(e as Error)?.message ?? e}`);
       }
+    }
+
+    // D-006 / P-013: turns another agent recorded inside its disclosure windows
+    // are withheld from this caller and counted, after BOTH the index and the
+    // archive paths so neither can serve them. A self read sees its own chain.
+    let withheld = emptyTally();
+    try {
+      const callerOwnerId = resolveAgentIdentity(ctx).ownerId ?? null;
+      const partitioned = await withholdRestrictedTurns(
+        tx,
+        { selfOwnerIds: [callerOwnerId, ...(ownerIds ?? [])] },
+        rows,
+        (row) => ({ owner: row.owner, at: row.stamp_at ?? row.ts }),
+      );
+      rows.splice(0, rows.length, ...partitioned.kept);
+      withheld = partitioned.withheld;
+    } catch (error) {
+      if (error instanceof DisclosureRefused) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify(disclosureRefusalData(error)) }], isError: true };
+      }
+      throw error;
     }
 
     return {
@@ -383,6 +474,7 @@ export default defineTool({
           ...(selfSession ? { session_ids: returnedSessions } : {}),
           ...(selfNote ? { note: selfNote } : {}),
           ...(archiveNote ? { note: archiveNote } : {}),
+          ...withheldReceipt(withheld),
           // EI-9970: this is the WINDOW size (rows returned here, capped by
           // `limit`), NOT the session's total turn count — see the tool
           // description. sessions:list's `turns` is the total; do not conflate.
@@ -397,6 +489,7 @@ export default defineTool({
             text: string;
             text_full_chars?: number;
             text_offset?: number;
+            source_completeness?: 'complete' | 'unknown';
           }) => {
             // The indexed query and archive path return a bounded chunk. A
             // test-shaped/future row without the explicit offset is treated as
@@ -417,6 +510,7 @@ export default defineTool({
               turn_idx: r.turn_idx, speaker: r.speaker,
               ...(r.owner ? { owner: r.owner } : {}), ...(r.ts ? { ts: r.ts } : {}),
               ...(offset > 0 ? { text_offset: offset } : {}),
+              ...(r.source_completeness ? { source_completeness: r.source_completeness } : {}),
               ...(textTruncated
                 ? {
                     text_truncated: true,

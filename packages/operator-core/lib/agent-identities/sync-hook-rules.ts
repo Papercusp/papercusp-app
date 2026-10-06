@@ -469,8 +469,9 @@ export async function appliedIdentityRulesAt(
     import('../agent-tools/coordination/control-anchor'),
     import('../capability-envelope/identity-grants-port'),
   ]);
+  // Narrowed to this pair's receipt (WI-10004801): the selection below reads nothing else.
   const artifact = appliedOrCurrentIdentityArtifact(
-    await readGateSelectedLaunchSpec(getOrgPg().sql, ownerId, workspaceId), revision);
+    await readGateSelectedLaunchSpec(getOrgPg().sql, ownerId, workspaceId, [revision]), revision);
   if (!artifact) {
     rememberWornRules(cacheKey, { unreadableUntil: Date.now() + WORN_RULES_UNREADABLE_TTL_MS });
     throw new Error('applied identity artifact unreadable');

@@ -102,12 +102,43 @@ export interface PlanDrainSweepApplied {
   reason: string;
 }
 
+/** Named result for every candidate the sweep deferred or attempted. */
+export type PlanDrainSweepOutcome =
+  | {
+      planSlug: string;
+      harnessSlug: string;
+      outcome: 'applied';
+      from: string;
+      to: string;
+      reason: string;
+    }
+  | {
+      planSlug: string;
+      harnessSlug: string;
+      outcome: 'skipped';
+      reason: PlanDrainTransitionSkip;
+    }
+  | {
+      planSlug: string;
+      harnessSlug: string;
+      outcome: 'deferred';
+      reason: 'cap_reached';
+    }
+  | {
+      planSlug: string;
+      harnessSlug: string;
+      outcome: 'scope_denied';
+      reason: 'out_of_scope';
+    };
+
 export interface PlanDrainSweepResult {
   /** Candidate rows enumerated (the stored-status superset). */
   scanned: number;
   /** Of those, how many the pre-derivation judged warranted. */
   warranted: number;
   applied: PlanDrainSweepApplied[];
+  /** Per-plan result for every scope refusal, cap deferral, or candidate attempt. */
+  outcomes: PlanDrainSweepOutcome[];
   /**
    * Warranted candidates left unattempted because the cap was reached. NOT a
    * failure — the next tick takes them. Reported so a permanently nonzero value
@@ -155,6 +186,7 @@ export async function sweepDrainedPlanStatuses(
     scanned: 0,
     warranted: 0,
     applied: [],
+    outcomes: [],
     deferredToNextTick: 0,
     skipped: {},
   };
@@ -180,6 +212,12 @@ export async function sweepDrainedPlanStatuses(
       // under `skipped.scope_denied` so the skip is visible. No policy ⇒ never skips.
       if (!isHarnessInScope(row.harnessSlug)) {
         result.skipped.scope_denied = (result.skipped.scope_denied ?? 0) + 1;
+        result.outcomes.push({
+          planSlug: row.planSlug,
+          harnessSlug: row.harnessSlug,
+          outcome: 'scope_denied',
+          reason: 'out_of_scope',
+        });
         continue;
       }
       // `{ ...row, content: '' }` is exactly a PlanRow — PlanIndexRow is
@@ -192,20 +230,43 @@ export async function sweepDrainedPlanStatuses(
   result.warranted = candidates.length;
   if (candidates.length > cap) result.deferredToNextTick = candidates.length - cap;
 
+  for (const row of candidates.slice(cap)) {
+    result.outcomes.push({
+      planSlug: row.planSlug,
+      harnessSlug: row.harnessSlug,
+      outcome: 'deferred',
+      reason: 'cap_reached',
+    });
+  }
+
   for (const row of candidates.slice(0, cap)) {
     const outcome = await applyPlanDrainTransition(row.planSlug, row.harnessSlug);
     if (outcome.applied) {
-      result.applied.push({
+      const applied = {
         planSlug: row.planSlug,
         harnessSlug: row.harnessSlug,
         from: outcome.from ?? row.status ?? '',
         to: outcome.to ?? '',
         reason: outcome.reason ?? '',
+      };
+      result.applied.push(applied);
+      result.outcomes.push({ ...applied, outcome: 'applied' });
+    } else {
+      const reason = outcome.skipped ?? 'no_transition_warranted';
+      result.skipped[reason] = (result.skipped[reason] ?? 0) + 1;
+      result.outcomes.push({
+        planSlug: row.planSlug,
+        harnessSlug: row.harnessSlug,
+        outcome: 'skipped',
+        reason,
       });
-    } else if (outcome.skipped) {
-      result.skipped[outcome.skipped] = (result.skipped[outcome.skipped] ?? 0) + 1;
     }
   }
 
+  result.outcomes.sort((a, b) =>
+    a.harnessSlug === b.harnessSlug
+      ? a.planSlug.localeCompare(b.planSlug)
+      : a.harnessSlug.localeCompare(b.harnessSlug),
+  );
   return result;
 }

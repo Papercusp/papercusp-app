@@ -7,6 +7,6 @@
   "requiresDeployedNote": "bulk-run-store.ts at the deployed commit admits dismissed and writes only pending, auto_resolved, recommended, skipped, failed, or dismissed outcomes",
   "rationale": "Migration 987 replaces attention_bulk_run_items_outcome_check with a strict superset that adds dismissed. The deployed writer does not name the constraint and every outcome it can persist remains admitted, so the constraint replacement does not break the running release while the next candidate is promoted.",
   "workItem": "WI-42375",
-  "reviewBy": "2026-10-01",
+  "reviewBy": "2027-01-01",
   "postDeploy": "renew-review"
 }

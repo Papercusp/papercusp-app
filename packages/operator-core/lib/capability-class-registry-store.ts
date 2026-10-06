@@ -15,6 +15,7 @@ import {
   type EmbeddingProfileId,
   type PgvectorIndexOperatorClass,
 } from '@papercusp/memory';
+import { createEmbeddingSpace, type EmbeddingSpace } from '@papercusp/search';
 import { canonicalJson } from './authority/authority-rpc-envelope';
 import type { IdentityRecipeClassConformanceReport } from './agent-identities/recipe-provider-conformance';
 
@@ -66,39 +67,28 @@ export const CAPABILITY_CLASS_VECTOR_STORAGE_PROFILE: CapabilityClassVectorStora
     indexName: 'capability_class_registry_embedding_hnsw_idx',
   });
 
+// Built lazily: a module-scope createEmbeddingSpace call breaks partial
+// vi.mock('@papercusp/search') factories in importers' tests (WI-10004518).
+let capabilityClassEmbeddingSpace: EmbeddingSpace | null = null;
+
+function getCapabilityClassEmbeddingSpace(): EmbeddingSpace {
+  return (capabilityClassEmbeddingSpace ??= createEmbeddingSpace({
+    storageLabel: `storage ${CAPABILITY_CLASS_VECTOR_STORAGE_PROFILE.table}.${CAPABILITY_CLASS_VECTOR_STORAGE_PROFILE.column}`,
+    storage: CAPABILITY_CLASS_VECTOR_STORAGE_PROFILE,
+    indexOperatorClassFor: (metric) => pgvectorMetricSpec(metric as EmbeddingDistanceMetric)?.indexOperatorClass,
+  }));
+}
+
+/** The stored-space rules live in @papercusp/search (shared-vector-search P-001,
+ * WI-10004433); this table only supplies its storage contract. */
 export function validateCapabilityClassVectorStorageCompatibility(
   profile: Pick<EmbedderProfileSpec, 'profileId' | 'targetDims' | 'distanceMetric'>,
 ): string[] {
-  const storage = CAPABILITY_CLASS_VECTOR_STORAGE_PROFILE;
-  const problems: string[] = [];
-  if (!storage.acceptedProfileIds.includes(profile.profileId)) {
-    problems.push(
-      `storage ${storage.table}.${storage.column} does not accept profile ${profile.profileId}; ` +
-        `accepted=${storage.acceptedProfileIds.join(',') || '(none)'}`,
-    );
-  }
-  if (storage.dimensions !== profile.targetDims) {
-    problems.push(
-      `storage ${storage.table}.${storage.column} has ${storage.dimensions} dimensions; ` +
-        `profile ${profile.profileId} emits ${profile.targetDims}`,
-    );
-  }
-  if (storage.distanceMetric !== profile.distanceMetric) {
-    problems.push(
-      `storage ${storage.table}.${storage.column} uses ${storage.distanceMetric}; ` +
-        `profile ${profile.profileId} requires ${profile.distanceMetric}`,
-    );
-  }
-  const metric = pgvectorMetricSpec(storage.distanceMetric);
-  if (!metric) {
-    problems.push(`storage ${storage.table}.${storage.column} has unsupported metric ${storage.distanceMetric}`);
-  } else if (metric.indexOperatorClass !== storage.indexOperatorClass) {
-    problems.push(
-      `storage ${storage.table}.${storage.column} index ${storage.indexName} uses ` +
-        `${storage.indexOperatorClass}; ${storage.distanceMetric} requires ${metric.indexOperatorClass}`,
-    );
-  }
-  return problems;
+  return getCapabilityClassEmbeddingSpace().validateCompatibility({
+    profileId: profile.profileId,
+    dimensions: profile.targetDims,
+    distanceMetric: profile.distanceMetric,
+  });
 }
 
 export function capabilityClassVectorStorageAcceptsProfile(

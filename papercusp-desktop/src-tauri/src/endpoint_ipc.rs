@@ -836,6 +836,10 @@ struct DialStats {
 #[derive(Debug, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct IpcStatus {
+    /// Unix milliseconds when Rust began this snapshot, excluding command dispatch.
+    pub snapshot_started_at_unix_ms: u64,
+    /// Monotonic milliseconds spent resolving and assembling this snapshot.
+    pub snapshot_duration_ms: f64,
     /// Live re-resolution performed at status time (a pure filesystem read).
     pub resolved_path: Option<String>,
     pub resolution_detail: String,
@@ -972,6 +976,8 @@ impl IpcClientHandle {
     /// connection lock — a hung dial must not make the diagnostic that would
     /// reveal it hang too.
     pub fn status(&self) -> IpcStatus {
+        let snapshot_started_at_unix_ms = now_ms();
+        let started = std::time::Instant::now();
         let resolution = self.resolve_now();
         let client = if self.disabled_reason.is_some() {
             "disabled"
@@ -993,7 +999,9 @@ impl IpcClientHandle {
                 Some(now.saturating_sub(v))
             }
         };
-        IpcStatus {
+        let mut snapshot = IpcStatus {
+            snapshot_started_at_unix_ms,
+            snapshot_duration_ms: 0.0,
             resolved_path: resolution.path.as_ref().map(|p| p.display().to_string()),
             resolution_detail: resolution.detail,
             client,
@@ -1008,7 +1016,9 @@ impl IpcClientHandle {
             last_error: self.last_error.lock().ok().and_then(|g| g.clone()),
             connected_path: self.connected_path.lock().ok().and_then(|g| g.clone()),
             owner_is_content_origin: resolution.owner_is_content_origin,
-        }
+        };
+        snapshot.snapshot_duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        snapshot
     }
 
     /// Return a live client, reconnecting if the current one is dead/absent.
@@ -1247,6 +1257,25 @@ pub fn parse_ipc_ready_line(line: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn status_times_the_resolver_without_waiting_for_the_connection_lock() {
+        let handle = IpcClientHandle::new(|| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            SocketResolution::missing("test resolver")
+        });
+        let _dial = handle.client.try_lock().unwrap();
+        let before = now_ms();
+        let snapshot = handle.status();
+        assert_eq!(snapshot.client, "dial-in-flight");
+        assert!(snapshot.snapshot_started_at_unix_ms >= before);
+        assert!(snapshot.snapshot_started_at_unix_ms <= now_ms());
+        assert!(snapshot.snapshot_duration_ms >= 5.0);
+        assert!(snapshot.snapshot_duration_ms.is_finite());
+        let wire = serde_json::to_value(snapshot).unwrap();
+        assert!(wire["snapshotStartedAtUnixMs"].as_u64().is_some());
+        assert!(wire["snapshotDurationMs"].as_f64().unwrap() >= 5.0);
+    }
 
     #[test]
     fn backpressure_forwards_under_cap() {

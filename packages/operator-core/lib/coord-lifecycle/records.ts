@@ -208,6 +208,9 @@ export interface ResidueRefOwnership {
   /** The item is in a settled state, so nothing is left to own. */
   settled: boolean;
   assignee: string | null;
+  /** An active, structured human-capability ask is routed to its resolution owner even though
+   *  the blocked agent claim was released from `assignee`. */
+  structuredHumanOwnerAction?: boolean;
   createdBy: string | null;
   /** Epoch ms; undefined when unknown. */
   createdAtMs?: number;
@@ -228,7 +231,7 @@ export function unownedResidueRefs(
   const byId = new Map(ownership.map((o) => [o.id.trim().toUpperCase(), o]));
   const unowned = (id: string) => {
     const o = byId.get(id);
-    return Boolean(o && !o.settled && !o.assignee?.trim());
+    return Boolean(o && !o.settled && !o.assignee?.trim() && !o.structuredHumanOwnerAction);
   };
   const filedByCloser = (id: string) => {
     const o = byId.get(id);
@@ -288,17 +291,21 @@ export type CompletionCoverage = z.infer<typeof CompletionCoverageSchema>;
 
 /** Caller-facing contract for the server-generated verification tree stamp. */
 export const COMPLETION_TREE_STAMP_CONTRACT =
-  'Server-stamped verification metadata: `work_items:complete` records `treeStamp` from the observed checkout when available; callers must omit `treeStamp`. When present in persisted evidence, `headSha` is a full lowercase 40- or 64-character commit SHA; short hashes are invalid.';
+  'Server-stamped verification metadata: `work_items:complete` records `treeStamp` from the observed checkout when available; callers must omit `treeStamp`. Per-path identities may include a best-effort `gitIgnoreStatus` of `ignored`, `not-ignored`, or `unknown` for working-tree files absent from HEAD.';
 
 /** Caller-facing contract for the server-generated settlement receipt. */
 export const COMPLETION_SETTLEMENT_MANIFEST_CONTRACT =
-  'Server-stamped settlement metadata: `work_items:complete` derives `settlementManifest` from the observed checkout; callers must omit `settlementManifest` (including `completion.verification.settlementManifest`). When present in persisted evidence, it contains version=1, a positive generation, a 64-hex evidenceHash, repositoryRoot, a full 40- or 64-character headSha, normalizedPaths, and contentIdentity[]. Do not send intuitive artifact fields such as schemaVersion, artifactPath, artifactSha256, head, or boolean contentIdentity.';
+  'Server-stamped settlement metadata: `work_items:complete` derives `settlementManifest` from the observed checkouts; callers must omit `settlementManifest` (including `completion.verification.settlementManifest`). When present in persisted evidence, it contains version=1, a positive generation, a 64-hex evidenceHash, repositoryRoot, a full 40- or 64-character headSha, normalizedPaths, and contentIdentity[]. Per-entry repositoryRoot/headSha identify sibling checkouts; normalizedPaths can repeat a relative path when distinct checkouts own it. Missing per-entry checkout fields fall back to the top-level root/head for legacy receipts. Do not send intuitive artifact fields such as schemaVersion, artifactPath, artifactSha256, head, or boolean contentIdentity.';
 
 /** Server-observed Git blob identities for each declared changed path. */
+export type CompletionGitIgnoreStatus = 'ignored' | 'not-ignored' | 'unknown';
+
 export type CompletionTreeContentIdentity = {
   path: string;
   workingTreeBlobSha: string | null;
   headBlobSha: string | null;
+  /** Best-effort Git status for working-tree files not present in HEAD. */
+  gitIgnoreStatus?: CompletionGitIgnoreStatus;
   /**
    * WI-42441: set ONLY when `headBlobSha` is null because the server could not READ
    * the HEAD side (an uninitialized submodule, an unreadable object store) — never
@@ -400,6 +407,8 @@ export const CompletionTreeStampSchema = z
           path: z.string().min(1),
           workingTreeBlobSha: completionBlobShaSlot,
           headBlobSha: completionBlobShaSlot,
+          /** WI-10004491: whether an uncommitted working-tree path can enter the ordinary Git sweep. */
+          gitIgnoreStatus: z.enum(['ignored', 'not-ignored', 'unknown']).optional(),
           /**
            * EI-22344624691081449: caller-declared intentional deletion. A
            * deletion is proven only when both blob identities are null, and
@@ -446,17 +455,41 @@ export const CompletionSettlementManifestSchema = z.object({
   evidenceHash: z.string().regex(/^[0-9a-f]{64}$/),
   repositoryRoot: z.string().min(1),
   headSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
+  /** Repeated relative paths are meaningful when different checkouts own them. */
   normalizedPaths: z.array(z.string().min(1)).min(1).max(60),
   contentIdentity: z.array(z.object({
     path: z.string().min(1),
     workingTreeBlobSha: completionBlobShaSlot,
     headBlobSha: completionBlobShaSlot,
+    /** Per-path owning checkout and close-time HEAD; absent on legacy single-checkout receipts. */
+    repositoryRoot: z.string().min(1).optional(),
+    headSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+    /** WI-10004491: close-time Git ignore status for a present path absent from HEAD. */
+    gitIgnoreStatus: z.enum(['ignored', 'not-ignored', 'unknown']).optional(),
     /** EI-22344624691081449: caller-declared intentional deletion. */
     deletion: z.literal(true).optional(),
   })).min(1).max(60),
   residualPaths: z.array(z.object({
     path: z.string().min(1),
-    reason: z.enum(['identity-unavailable', 'missing-from-commit', 'content-mismatch']),
+    /** Root/head scope keeps identical relative paths in sibling checkouts independent. */
+    repositoryRoot: z.string().min(1).optional(),
+    headSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+    /**
+     * WI-10004711: `superseded-before-commit` = the close-time blob is in neither the
+     * emitted tree nor any commit since the close, AND the working tree has moved off
+     * it, so no sweep can land it. Settles only on a re-sent close. A reason missing
+     * here would fail `safeParse` and turn every such row into an unreadable one.
+     */
+    reason: z.enum([
+      'identity-unavailable',
+      'missing-from-commit',
+      'content-mismatch',
+      'superseded-before-commit',
+      /** This sibling checkout has not yet had its own emitted-tree pass. */
+      'checkout-not-processed',
+      /** WI-10005343: absolute / `..`-escaping / pathspec-magic path; no commit can hold it. */
+      'not-a-repository-path',
+    ]),
   })).max(60).optional(),
 });
 export type CompletionSettlementManifest = z.infer<typeof CompletionSettlementManifestSchema>;
@@ -524,7 +557,7 @@ const FilesChangedSchema = z
   .array(z.string().min(1).refine(isPathShapedFilesChangedEntry, { message: FILES_CHANGED_NOT_PATH_SHAPED_MESSAGE }))
   .optional()
   .describe(
-    'Use repo-relative paths for files in managed checkouts. For an out-of-tree deliverable, use its absolute path; work_items:complete records it as outOfRepoArtifact and excludes it from Git blob and settlement checks. External contents are not hashed. Do not use a repo-relative alias for an out-of-tree file because it is indistinguishable from a missing checkout path.',
+    'Use repo-relative paths for files in managed checkouts. For an out-of-tree deliverable, use its absolute path; work_items:complete records it as outOfRepoArtifact and excludes it from Git blob and settlement checks. External contents are not hashed. Do not use a repo-relative alias for an out-of-tree file because it is indistinguishable from a missing checkout path. If NO files changed, pass [].',
   );
 
 /**
@@ -1105,6 +1138,22 @@ export const CompletionRecordSchema = z.object({
       `hypothesis!=alternativeHypothesis; ${ROOT_CAUSE_PREDICTED_OBSERVATIONS_CONSTRAINT}; ` +
       `distinguishingTest: ${ROOT_CAUSE_DISTINGUISHING_TEST_CONSTRAINT}`,
   }),
+  /**
+   * Required (and only meaningful) when closing a completion verification task — a row whose
+   * payload.verification has check 'completion' (P-007 Phase C, D-028). 'accept' releases the
+   * subject's dependents; 'reject' reopens the subject to its closer and needs a reason.
+   */
+  verificationVerdict: z
+    .object({
+      verdict: z.enum(['accept', 'reject']),
+      reason: z.string().min(1).optional(),
+    })
+    .strict()
+    .optional()
+    .meta({
+      'x-papercusp-call-constraint':
+        "closing a completion verification task (payload.verification.check='completion') => required; reject => reason required",
+    }),
   /** Top-level alias for the structured verification coverage record (WI-37960). */
   coverage: CompletionCoverageSchema.optional().meta({
     'x-papercusp-call-constraint': COMPLETION_COVERAGE_CALL_CONSTRAINT,

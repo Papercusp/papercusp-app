@@ -34,7 +34,7 @@ import { hardText, LIMITS } from '../../limits';
 export default defineTool({
   name: 'coord:ask',
   description:
-    'Ask ONE named agent a question, opening a `question` conversation addressed to them. `to` is REQUIRED — an unaddressed question reaches nobody and is refused. Backs the owner\'s "Ask an agent" UI; non-blocking (the answer lands in your inbox).',
+    'OWNER-UI ONLY. The owner\'s "Ask an agent" UI asks one named agent a question, opening a `question` conversation addressed to them. Agent sessions are denied; use `coord:send` or `coord:message-agent` for agent-to-agent questions.',
   guidance: {
     when:
       'You need a SPECIFIC named agent to answer something only they know (resolve ids via coord:presence). Normally reached from the owner\'s Ask-an-agent UI, not from agent code.',
@@ -54,7 +54,7 @@ export default defineTool({
       .array(z.string().min(1))
       .min(1, 'coord:ask requires at least one recipient in `to` — an unaddressed question reaches nobody.')
       .max(8)
-      .describe('REQUIRED. Agent ids to ask (coord:presence lists live agents). They are subscribed to the question, so it reaches them regardless of topics.'),
+      .describe('REQUIRED for the owner UI. Agent ids to ask (coord:presence lists live agents). Agent sessions cannot call this tool; use coord:send or coord:message-agent for agent-to-agent questions.'),
     topics: z.array(z.string().min(1)).max(8).optional().describe('Optional tags that also widen the audience additively. NOT an audience on their own — `to` is what guarantees delivery.'),
     harness: z.string().optional().describe('Tag the conversation harness-scoped.'),
   }),

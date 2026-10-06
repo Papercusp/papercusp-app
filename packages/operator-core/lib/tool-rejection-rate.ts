@@ -130,6 +130,13 @@ export interface ToolRejectionDayRow {
   calls: number;
   /** Calls rejected by the route's zod parse (`status='invalid-input'`). */
   rejects: number;
+  /**
+   * Of `calls`, the rows a dispatch wrapper (tools:invoke / code:run / recipes:run)
+   * stamped as its own overhead row. They stay IN this tool's per-verb rate and are
+   * subtracted only from the fleet aggregate (EI-24917731383616292, explained on
+   * {@link TOOL_REJECTION_RATE_DAILY_SQL}). Absent means 0.
+   */
+  wrapperCalls?: number;
   /** Distinct agents whose calls were rejected that day. */
   distinctOwners: number;
   /** Most recent rejection message that day, for the filed evidence. */
@@ -237,6 +244,7 @@ export function rollupToolRejections(
     toolName: string;
     calls: number;
     rejects: number;
+    wrapperCalls: number;
     breachDays: number;
     eligibleDays: number;
     peakDistinctOwners: number;
@@ -256,6 +264,7 @@ export function rollupToolRejections(
         toolName: r.toolName,
         calls: 0,
         rejects: 0,
+        wrapperCalls: 0,
         breachDays: 0,
         eligibleDays: 0,
         peakDistinctOwners: 0,
@@ -266,6 +275,7 @@ export function rollupToolRejections(
     }
     acc.calls += calls;
     acc.rejects += rejects;
+    acc.wrapperCalls += Math.min(calls, Math.max(0, Number(r.wrapperCalls) || 0));
     if (calls >= dayMinCalls) {
       acc.eligibleDays += 1;
       if ((100 * rejects) / calls >= pct) acc.breachDays += 1;
@@ -281,7 +291,9 @@ export function rollupToolRejections(
   let totalCalls = 0;
   let totalRejects = 0;
   for (const acc of byTool.values()) {
-    totalCalls += acc.calls;
+    // The aggregate stays a de-duplicated census: a wrapper's overhead row and the
+    // inner tool's own row are ONE logical call, so the wrapper row leaves the total.
+    totalCalls += acc.calls - acc.wrapperCalls;
     totalRejects += acc.rejects;
   }
 
@@ -326,6 +338,19 @@ export function rollupToolRejections(
  * `role-not-allowed` is excluded from both numerator and denominator; the denominator is
  * every call that actually reached the schema boundary.
  *
+ * ## Dispatch-wrapper rows stay IN the per-verb rate (EI-24917731383616292)
+ *
+ * A dispatch wrapper stamps `dispatchWrapper` on its row from INSIDE its handler, so only
+ * a call that got PAST the schema boundary is ever marked. A call rejected by the route's
+ * zod parse never reaches the handler and is never marked. Filtering marked rows out in
+ * `WHERE` (as this query did until 2026-10-05) therefore removed every successful
+ * tools:invoke call from the denominator while keeping every rejection in the numerator:
+ * the scorecard filed tools:invoke at 78.8% (305/387) when the ledger held ~211k calls,
+ * a real rate of ~0.16%. Marked rows are now counted in `calls` and reported separately
+ * as `wrapper_calls`, which the rollup subtracts from the fleet aggregate only, so the
+ * aggregate keeps its de-duplicated census meaning and each verb's numerator and
+ * denominator come from the same population.
+ *
  * ## Why this pass carries counts ONLY — and where it may therefore run
  *
  * Measured 2026-09-02: the 7-day window is **3,368,400 rows**. The serving index is
@@ -354,11 +379,12 @@ export const TOOL_REJECTION_RATE_DAILY_SQL = `
 SELECT tool_name,
        to_char((invoked_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day,
        count(*) FILTER (WHERE status IN ('ok','error','timeout','invalid-input')) AS calls,
-       count(*) FILTER (WHERE status = 'invalid-input')                           AS rejects
+       count(*) FILTER (WHERE status = 'invalid-input')                           AS rejects,
+       count(*) FILTER (WHERE status IN ('ok','error','timeout','invalid-input')
+                          AND NOT (${DISPATCH_WRAPPER_EXCLUSION_SQL}))            AS wrapper_calls
 FROM harness_shared.tool_invocations
 WHERE workspace_id = $1
   AND invoked_at > now() - (($2)::int || ' days')::interval
-  AND ${DISPATCH_WRAPPER_EXCLUSION_SQL}
 GROUP BY tool_name, (invoked_at AT TIME ZONE 'UTC')::date
 HAVING count(*) FILTER (WHERE status IN ('ok','error','timeout','invalid-input')) > 0
 `;
@@ -407,6 +433,7 @@ export async function readToolRejectionRate(
     day: string;
     calls: number | string;
     rejects: number | string;
+    wrapper_calls?: number | string | null;
   }>(TOOL_REJECTION_RATE_DAILY_SQL, [opts.workspaceId, windowDays]);
 
   const days: ToolRejectionDayRow[] = countRows.map((r) => ({
@@ -414,6 +441,7 @@ export async function readToolRejectionRate(
     day: r.day,
     calls: Number(r.calls) || 0,
     rejects: Number(r.rejects) || 0,
+    wrapperCalls: Number(r.wrapper_calls) || 0,
     distinctOwners: 0,
     lastErrorMessage: null,
   }));

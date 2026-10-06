@@ -28,7 +28,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import { createHash, randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import type { Sql } from 'postgres';
@@ -59,10 +59,13 @@ import { resolveGymAccountWorkspace } from './account-workspace';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { LEARNING_MODEL_SPEC } from '../learning/model-policy';
+import { withGymLlmNetworkRetry } from './proposer';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, '../../../..');
-const FAKE_AGENT = join(__dirname, 'fixtures/fake-agent.mjs');
+// Anchored on the checkout, not on this module's directory: this module is inlined into the
+// esbuild host bundle, where import.meta.url is the bundle's URL, so both a `..` climb and a
+// sibling `fixtures/` path resolved outside the checkout (P-016; see module-repo-root.ts).
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
+const FAKE_AGENT = join(REPO_ROOT, 'packages/operator-core/lib/gym/fixtures/fake-agent.mjs');
 
 // EI-18154750714519366: the gym-operator's default port used to be the FIXED 3976 — on a busy
 // box where a routine cycle (or a leftover process) already holds it, a concurrent manual
@@ -444,35 +447,20 @@ export async function runOneAutoloopCycle(
     // ("TypeError: fetch failed" — undici, no HTTP status) killed a whole
     // provisioned cycle 16s in (14:42:49, same window as other outbound flakiness
     // on this box). A provisioned cycle is EXPENSIVE (container + operator boot
-    // ~2.5min) — retry the bare-network failure class (never HTTP-status errors:
-    // the gateway already owns those semantics) 2× with short backoff.
-    const withNetRetry = <A extends unknown[], R>(fn: (...a: A) => Promise<R>) =>
-      async (...a: A): Promise<R> => {
-        let lastErr: unknown;
-        for (let attempt = 0; attempt <= 2; attempt++) {
-          try {
-            return await fn(...a);
-          } catch (e) {
-            lastErr = e;
-            const msg = e instanceof Error ? e.message : String(e);
-            if (!/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg)) throw e;
-            log(`llm call transient network failure (attempt ${attempt + 1}/3): ${msg.slice(0, 120)}`);
-            await new Promise((r) => setTimeout(r, 2_000 * (attempt + 1)));
-          }
-        }
-        throw lastErr;
-      };
+    // ~2.5min). Retry only bare-network failures with complete measured-zero
+    // spend; unknown/positive failed spend must reach reservation settlement
+    // without being replaced by a later receipt. The gateway owns HTTP retries.
     const rawGymLlm = FAKE ? null : await import('../llm-testing/llm-client');
     const judge: JudgeLlmCall = FAKE
       ? fakeJudge
-      : withNetRetry((opts: Parameters<JudgeLlmCall>[0]) =>
+      : withGymLlmNetworkRetry((opts: Parameters<JudgeLlmCall>[0]) =>
           rawGymLlm!.llmCall({ ...opts, priority: 'gym', harnessSlug: slug }),
-        );
+        { log });
     const proposer: GymLlmCall = FAKE
       ? fakeProposer
-      : (withNetRetry((opts: Parameters<GymLlmCall>[0]) =>
+      : (withGymLlmNetworkRetry((opts: Parameters<GymLlmCall>[0]) =>
           rawGymLlm!.llmCall({ ...(opts as object), priority: 'gym', harnessSlug: slug } as never),
-        ) as unknown as GymLlmCall);
+        { log }) as unknown as GymLlmCall);
 
     // 5. Ports + loop deps.
     const tokenPath = join(homedir(), '.papercusp', 'superuser-token');

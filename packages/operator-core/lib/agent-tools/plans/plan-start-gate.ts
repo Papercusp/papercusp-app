@@ -24,6 +24,7 @@
 import { getPlanRow, type PlanRow, type PlanSourceOpts } from './source';
 import { evaluatePlanStartReadiness, type PlanStartReadiness } from './plan-input-validation';
 import { readAndEvaluateAcceptanceBarLifecycle } from '../../acceptance-bar-lifecycle-evaluator';
+import { reconcileStaleAcceptanceBarSubjectPin } from '../../acceptance-bar-pin-reconcile';
 import { checkPlanAdmission, type PlanAdmissionRefusal } from './plan-admission-gate';
 import type { PlanAdmissionDoor } from './plan-admission-enforcement';
 
@@ -134,10 +135,22 @@ export async function checkPlanStartable(
   // this door: promotion and rubrics:propose share 'pre-start' and deliberately permit
   // METHOD-empty BARs (propose is how a METHOD gets added), and fleet top-ups/run-now/
   // scheduled doors act on plans that are already executing.
-  const lifecycle = await readAndEvaluateAcceptanceBarLifecycle(slug, 'pre-start', {
+  const readLifecycle = () => readAndEvaluateAcceptanceBarLifecycle(slug, 'pre-start', {
     harnessSlug: row.harnessSlug,
     requireCompleteContractBeforeProof: door === 'start',
   });
+  let lifecycle = await readLifecycle();
+  // EI-22752422043395332: a BAR-neutral plan write that predates the pin synchronizer
+  // strands the rubric's subjectPlanRevision, and nothing re-triggers it. Catch it up
+  // ONCE from the activation-audit witness, then re-judge. The reconciler defers to the
+  // synchronizer's own rules, so a Requirements/map change, a missing witness, or a busy
+  // lock changes nothing and the refusal below is byte-for-byte what it was before.
+  if (!lifecycle.satisfied && lifecycle.codes.includes('bar_snapshot_rubric_revision_mismatch')) {
+    const reconciled = await reconcileStaleAcceptanceBarSubjectPin({
+      workspaceId: row.workspaceId, harnessSlug: row.harnessSlug, planSlug: slug,
+    }).catch(() => null);
+    if (reconciled?.reconciled) lifecycle = await readLifecycle();
+  }
   if (!lifecycle.satisfied) {
     return {
       ok: false,

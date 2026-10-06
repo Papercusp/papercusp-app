@@ -43,7 +43,7 @@ import {
 import { openRun, closeRun, setToolState } from './state-channel';
 import type { CardResponse, CardSpec } from './types';
 import { validateSync, formatIssues, type StandardSchemaV1 } from './standard-schema';
-import { tierFor } from './capability-tiers';
+import { isLateCompletionSafeRead, tierFor } from './capability-tiers';
 import {
   collectEntityRefs,
   formatEntityRefViolations,
@@ -390,6 +390,19 @@ const capabilityCheckStep: DispatchStep = {
   name: 'capability-check',
   async run(exec) {
     const { tool, ctx, toolName, deps } = exec;
+    const allowedTools = ctx.principal?.allowedTools;
+    if (allowedTools !== undefined && !allowedTools.has(toolName)) {
+      return {
+        ok: false,
+        error: {
+          code: 'authorization_denied' as DispatchProjectedErrorCode,
+          message:
+            `Principal "${ctx.principal!.slug}" is not allowed to call tool "${toolName}" ` +
+            '(not in its exact MCP tool allowlist)',
+          meta: { tool: toolName, principal: ctx.principal!.slug, reason: 'tool_not_in_allowlist' },
+        },
+      };
+    }
     if (!ctx.principal || ctx.gateBypass?.capability || tool.capabilities.length === 0) return null;
     for (const cap of tool.capabilities) {
       if (
@@ -730,6 +743,7 @@ const ctxBindingsStep: DispatchStep = {
 
     exec.handlerCtx = applyWorkspaceTxContract(tool, toolName, {
       ...ctx,
+      dispatchCallId: exec.callId,
       signal: exec.abort.signal,
       emit: wrappedEmit,
       progress: wrappedProgress,
@@ -850,7 +864,12 @@ const invokeStep: DispatchStep = {
         // capability ⇒ treat as non-low (don't assume an ungated utility is a safe
         // read). `ProjectedTool` carries `capabilities`, not a precomputed `tier`.
         const caps = exec.tool.capabilities;
-        const isLowTierRead = caps.length > 0 && caps.every((c) => tierFor(c) === 'low');
+        // Host late-completion READ seam (WI-10004577): tier is a poor read signal (the host table
+        // falls back to 'medium' for ~160 `*:read` tools, and tier also drives auth/watchdog), so
+        // the host classifies safe-to-surface-late reads independently. Engine default: false.
+        const isLowTierRead =
+          (caps.length > 0 && caps.every((c) => tierFor(c) === 'low')) ||
+          isLateCompletionSafeRead({ name: toolName, capabilities: caps, effect: exec.tool.effect });
         // Idempotent-completion opt-in (backend-reliability-100pct-2026-07-03 W6/P-007): a
         // MUTATION the tool DECLARES idempotent whose handler RAN TO COMPLETION is safe to
         // surface past the deadline — the write committed (the handler returned a result),
@@ -1514,8 +1533,9 @@ function hasExplicitFailurePayload(result: Pick<ToolResult, 'content'>): boolean
  * absent/non-object do we parse the first JSON text item; a conflicting compact
  * text representation must never override the lossless structured result. The
  * match is intentionally narrow — exact top-level `ok === false` plus a nonblank
- * string `reason` — because a false positive becomes a clean, misleading health
- * signal while an unrecognized shape merely stays unclassified.
+ * string `reason`, or a WHOLLY-failed bulk envelope (see bulkEnvelopeFailureReason)
+ * — because a false positive becomes a clean, misleading health signal while an
+ * unrecognized shape merely stays unclassified.
  */
 export function extractSoftFailureOutcome(result: Pick<ToolResult, 'content' | 'structuredContent'>): SoftFailureOutcomeMetadata | null {
   let candidate = objectRecord(result.structuredContent);
@@ -1530,13 +1550,44 @@ export function extractSoftFailureOutcome(result: Pick<ToolResult, 'content' | '
       return null;
     }
   }
-  if (!candidate || candidate.ok !== false || typeof candidate.reason !== 'string') return null;
-  const reason = candidate.reason.trim();
+  if (!candidate || candidate.ok !== false) return null;
+  const reason = typeof candidate.reason === 'string'
+    ? candidate.reason.trim()
+    : bulkEnvelopeFailureReason(candidate);
   if (!reason) return null;
   return {
     resultOutcome: 'soft-failure',
     softFailureReason: reason.slice(0, SOFT_FAILURE_REASON_MAX),
   };
+}
+
+/**
+ * The house BULK envelope — `{ ok, results: [{ ok, id, error, … }], counts }`, used by
+ * work_items:claim / :get / :comment, processes:kill and every other "one failure never
+ * fails the rest" verb — carries its cause PER ITEM, never as a top-level `reason`. So a
+ * single-id `work_items:claim` refused `not_claimable` was written with no effect-level
+ * marker at all: `status='ok'` and no `resultOutcome`, byte-identical in the ledger to a
+ * claim that took (WI-10004868).
+ *
+ * Classified ONLY when the effect failed ENTIRELY — a non-empty `results` array in which
+ * EVERY item is `ok:false` with a nonblank string `error`. A partial batch (any item
+ * succeeded, or an item whose shape is not that) stays unclassified: reporting a
+ * half-successful batch as a failed effect is exactly the false-positive health signal the
+ * narrow match above exists to avoid. The reason is the item error codes, de-duplicated and
+ * sorted, so the watchdog's stable key does not depend on item order.
+ */
+function bulkEnvelopeFailureReason(candidate: Record<string, unknown>): string | null {
+  const results = candidate.results;
+  if (!Array.isArray(results) || results.length === 0) return null;
+  const codes = new Set<string>();
+  for (const item of results) {
+    const record = objectRecord(item);
+    if (!record || record.ok !== false || typeof record.error !== 'string') return null;
+    const code = record.error.trim();
+    if (!code) return null;
+    codes.add(code);
+  }
+  return [...codes].sort().join(',');
 }
 
 /**
@@ -1619,7 +1670,7 @@ async function recordTelemetry(
   const status =
     result.ok
       ? 'ok'
-      : code === 'role_not_allowed' || code === 'missing_capability' || code === 'capability_denied'
+      : code === 'role_not_allowed' || code === 'missing_capability' || code === 'capability_denied' || code === 'authorization_denied'
         ? 'role-not-allowed'
         : code === 'quota_exceeded'
           ? 'quota-exceeded'
@@ -1633,6 +1684,7 @@ async function recordTelemetry(
     (code === 'role_not_allowed' ||
       code === 'missing_capability' ||
       code === 'capability_denied' ||
+      code === 'authorization_denied' ||
       code === 'quota_exceeded');
   const isKernelDenial = kernelPreflight?.decision === 'deny' || kernelEnforcement?.decision === 'deny';
   if (!isGateDenial && !isKernelDenial && !windowKey) return;
@@ -1816,6 +1868,13 @@ export async function runDispatchStack(
   stack: ReadonlyArray<DispatchStep> = DEFAULT_DISPATCH_STACK,
 ): Promise<DispatchProjectedResult> {
   const exec = initExecution(tool, toolName, input, ctx, deps);
+  // P-007: a 1219ms plans:get invocation contained only a 53ms body read.
+  // Attribute the existing dispatch pipeline in its invocation metadata,
+  // including authority waits, rather than treating handler timing as total
+  // server time. These sequential wall-time intervals exclude the telemetry
+  // sink itself; nested handler read intervals must not be added to them.
+  const dispatchStarted = deps.recordInvocation ? performance.now() : null;
+  const dispatchSteps: Array<{ name: DispatchStepName; elapsedMs: number }> = [];
   // Notify the host before any gate or handler work begins. This is deliberately
   // best-effort: a liveness marker must not be able to change dispatch behavior,
   // and it must run before a long-lived handler becomes in-flight.
@@ -1835,7 +1894,17 @@ export async function runDispatchStack(
   let result: DispatchProjectedResult | null = null;
   try {
     for (const step of stack) {
-      result = await step.run(exec);
+      const stepStarted = dispatchStarted === null ? null : performance.now();
+      try {
+        result = await step.run(exec);
+      } finally {
+        if (stepStarted !== null) {
+          dispatchSteps.push({
+            name: step.name,
+            elapsedMs: Math.max(0, performance.now() - stepStarted),
+          });
+        }
+      }
       if (result) break;
     }
     if (!result) {
@@ -1855,6 +1924,18 @@ export async function runDispatchStack(
       ok: false,
       error: { code: 'handler_error' as const, message: 'no result' },
     };
+    if (dispatchStarted !== null) {
+      exec.metadataJson = {
+        ...(exec.metadataJson ?? {}),
+        dispatchStages: {
+          schemaVersion: 'dispatch-stages-v1',
+          unit: 'ms',
+          timing: 'wall-time-sequential-steps',
+          elapsedMs: Math.max(0, performance.now() - dispatchStarted),
+          steps: dispatchSteps,
+        },
+      };
+    }
     await recordTelemetry(exec, settled);
     // Event-reaction observation point (D-001). Fired AFTER telemetry, on every
     // path. Best-effort + non-blocking: the host's postInvoke matches rules and

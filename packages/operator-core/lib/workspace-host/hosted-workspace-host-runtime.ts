@@ -34,10 +34,12 @@ import {
   ensureHiveDesktop,
   hiveDesktopSessionId,
   leasedDesktopBySessionId,
-  leasedHiveDesktops,
-  reapDeadHiveDesktops,
+  leasedDesktopSessionIds,
+  reapDeadDesktops,
 } from '../agent-tools/computer/desktop-lease';
 import { hostedDesktopAuditRow, recordDesktopAudit } from '../desktop/desktop-audit';
+import { desktopThumbnailer } from '../desktop/desktop-thumbnail';
+import { getActiveClaimForOwner } from '../work-item-claims';
 import type { HostedConnectorBinding } from '../endpoint-route/hosted-workspace-connector';
 import { configureAgentSpawnTransform } from '@papercusp/papercusp-shared/agent';
 import { installHostedCustomerAgentIdentity } from './hosted-agent-identity';
@@ -82,10 +84,26 @@ export interface HostedWorkspaceHostRuntimeOptions {
    * must not cost the customer their connector.
    */
   onBinding?: (binding: HostedConnectorBinding) => void;
+  /**
+   * P-328 (D-030 #4): the portal's relay usage for this workspace, sent on each relayed app
+   * call. Defaults to {@link defaultRelayUsageReport}, which raises the relay-limit alert.
+   */
+  onRelayUsage?: (customerWorkspaceId: string, relayUsage: unknown) => void;
+  /**
+   * WI-10004257: the portal's report of this organization's removed members, already checked
+   * against the binding's organization. Defaults to {@link defaultMembershipReport}, which stores
+   * it for the connected-app creator-removed alert.
+   */
+  onMembershipReport?: (report: unknown) => void;
   /** Test seam — swap the transport. */
   createClient?: (options: ConstructorParameters<typeof HostedWorkspaceConnectorClient>[0]) => HostedWorkspaceConnectorClient;
   /** Test seam — swap the PTY factory every adapter this runtime builds uses. */
   createPty?: HostedWorkspaceHostOptions['createPty'];
+  /**
+   * The channel kinds every adapter this runtime builds serves. Absent on a Papercusp-hosted
+   * machine (all kinds); a relay-linked local install passes LOCAL_RELAY_CHANNEL_KINDS (D-031 #7).
+   */
+  allowedChannelKinds?: HostedWorkspaceHostOptions['allowedChannelKinds'];
 }
 
 export interface HostedWorkspaceHostRuntime {
@@ -117,6 +135,27 @@ export function defaultHostedAudit(event: HostedHostAuditEvent): void {
  * `desktop.start` coalesces onto `ensureHiveDesktop`'s existing lease.
  */
 export const HOSTED_WORKSPACE_DESKTOP_LEASE = 'hosted-workspace';
+
+/**
+ * The default relay-usage sink: the relay-limit alert on this operator's attention rail.
+ * Loaded lazily so the runtime's static graph does not pull in the org database client.
+ */
+export function defaultRelayUsageReport(customerWorkspaceId: string, relayUsage: unknown): void {
+  void import('../connected-apps/alert-sweep')
+    .then(({ onRelayUsageReported }) => onRelayUsageReported(customerWorkspaceId, relayUsage))
+    .catch((error) => console.warn('[hosted-workspace-host] relay usage report failed:', error));
+}
+
+/**
+ * The default membership-report sink: store the portal's removed-member set on this machine
+ * (WI-10004257), where the connected-app alert sweep reads it. Lazy for the same reason as
+ * {@link defaultRelayUsageReport}.
+ */
+export function defaultMembershipReport(report: unknown): void {
+  void import('../connected-apps/membership-report')
+    .then(({ onMembershipReported }) => onMembershipReported(report))
+    .catch((error) => console.warn('[hosted-workspace-host] membership report failed:', error));
+}
 
 /**
  * The desktop plane wired to this operator's real registry and lease map.
@@ -151,11 +190,20 @@ export function createDefaultDesktopBackend(
     reconcile: async () => {
       // A lease whose desktop died is not live, whatever the map still holds (WI-10004206):
       // release it first, which closes its row, so the roster stops offering it.
-      const dead = await reapDeadHiveDesktops();
-      const liveIds = leasedHiveDesktops()
-        .map(hiveDesktopSessionId)
-        .filter((id): id is string => Boolean(id));
+      // EVERY live lease vouches for its row — agent desktops included (D-012). Listing
+      // only the shared pot lease here made the sole-owner sweep below mark each
+      // agent-started desktop dead on the next reconcile while it was still running.
+      const dead = await reapDeadDesktops();
+      const liveIds = leasedDesktopSessionIds();
       return dead.length + (await reconcileLocalDesktopSessions({ workspaceId: scope(), liveIds, soleOwner: true })).reaped;
+    },
+    // P-005 / D-008: an agent-started desktop is absent from the bootstrap-time capture
+    // loop's display list, so its thumbnail is grabbed on demand by the grid read.
+    grabThumbnail: (display) => desktopThumbnailer().thumbnail(display),
+    // D-009: the tile's work-item label is the owner's live claim, read now.
+    activeClaimFor: async (owner) => {
+      const claim = await getActiveClaimForOwner(scope(), owner);
+      return claim ? { workItemId: claim.workItemId, intent: claim.intent || null } : null;
     },
     ...overrides,
   });
@@ -216,8 +264,11 @@ export function createHostedWorkspaceHostRuntime(
         },
         onAudit,
         onWarning: warn,
+        onRelayUsage: (relayUsage) => (options.onRelayUsage ?? defaultRelayUsageReport)(next.customerWorkspaceId, relayUsage),
+        onMembershipReport: options.onMembershipReport ?? defaultMembershipReport,
         ...(options.desktop ? { desktop: options.desktop } : {}),
         ...(options.createPty ? { createPty: options.createPty } : {}),
+        ...(options.allowedChannelKinds ? { allowedChannelKinds: options.allowedChannelKinds } : {}),
       });
       for (const handoff of parked) adapter.adopt(handoff);
       parked = [];

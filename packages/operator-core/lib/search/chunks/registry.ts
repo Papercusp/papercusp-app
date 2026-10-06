@@ -210,11 +210,27 @@ export const WORK_ITEMS_CHUNK_SURFACE: PapercuspChunkSurface = {
  * (get-feedback-core.ts) stays on the parent vector: it answers a new question
  * with a past answer in place of a live consult, which is a duplicate decision
  * (D-005), not a search.
+ *
+ * Population (D-048): only settled questions are chunked (eligibleSql), the same
+ * predicate the reader filters its slice with. Chunking every question indexed
+ * ~9x more chunks than the reader can return: on 2026-10-02, 2,966 chunks of
+ * which 332 belonged to settled questions. The ANN chunk leg then needed an
+ * in-scan membership filter, an iterative scan and a transaction, and missed
+ * its latency budget. A consult that later settles has no chunks yet, so the
+ * sync engine selects it; one that leaves the set is pruned.
  */
+export function consultSettledPredicate(alias: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/.test(alias)) {
+    throw new Error(`consultSettledPredicate: alias '${alias}' is not a plain identifier`);
+  }
+  return `${alias}.state = 'closed_answered' AND (${alias}.outcome->>'source' IS DISTINCT FROM 'archive')`;
+}
+
 export const CONSULT_QUESTIONS_CHUNK_SURFACE: PapercuspChunkSurface = {
   surface: 'consult_questions',
   parent: { table: 'harness_shared.consult_state', key: ['workspace_id', 'conversation_id'] },
   textSql: 'p.question',
+  eligibleSql: consultSettledPredicate('p'),
   versionSql: 'p.created_at',
   splitter: { kind: 'window', size: 1500, overlap: 250 },
   maxChunks: 8,

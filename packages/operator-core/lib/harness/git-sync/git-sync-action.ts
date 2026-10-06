@@ -52,20 +52,30 @@ import {
 } from '../../agent-tools/locks/su-lock-store';
 import { describeStaleHolderVerdict, reclaimDeadExclusiveHolders } from '../../agent-tools/locks/resource-acquire-wait';
 import { endedSessionOwners } from '../../agent-tools/locks/ended-session-owners';
-import { liveLockHoldingsStrict } from '../../agent-tools/locks/live-lock-paths';
+import type { liveLockHoldingsStrict } from '../../agent-tools/locks/live-lock-paths';
+// P-014: the commit-gate census is live locks ∪ restricted-disclosure holds.
+import { isRestrictedHoldIntent, readGitSyncCensusStrict } from '../../personal-vault/git-sync-hold';
 import { agentsForScopedFiles, type AttributionRosterEntry } from './git-sync-attribution';
 import { loadHarnessRegistry, type ProjectEntry } from '../../harness-registry';
 import { describeFetchError, loopbackFetch } from '../../loopback-fetch';
 import { resolveLaunchTargetForEvent } from '../../blueprint/launch-blueprint';
 import { sendMessage } from '../../agent-tools/coordination/messages';
 import type { AgentIdentity } from '../../agent-tools/coordination/identity';
-import { registerSystemAction, type SystemActionCtx } from '../routines/system-actions';
+import { registerSystemAction, type SystemActionCtx, type SystemActionResult } from '../routines/system-actions';
 import { getBuildInfo } from '../../build-info';
 import { stripNulBytesDeep } from '../../coord-lifecycle/records';
 import { requestOnlyHost } from '../../background-workers';
 import { runCheckpointedStep } from '../../dbos/checkpointed-step';
 import { gitSyncEligibility, type GitSyncEligibility } from './git-sync-eligibility';
 import { getPotGitMode, type PotGitMode } from './hive-git-mode';
+import {
+  applyIntegrationPushTarget,
+  integrationModeGovernsHarness,
+  readPotIntegrationMode,
+  resolveIntegrationPushRemote,
+  type IntegrationPushDecision,
+} from './pot-integration-mode';
+import { fileSyncBackConflict, makeSyncBackConflictFilingDeps } from './sync-back';
 import { parseGithubUrl } from '../clone-github';
 import { fetchRepoPushPermission } from '../github-repo-permissions';
 import {
@@ -80,12 +90,18 @@ import { formatIntegratorTickStatus } from '../../sync/pot-git/integrator';
 import { runWorktreeBridgeTick, WORKTREE_BRIDGE_RETRY_TTL_MS } from '../../sync/pot-git/worktree-bridge-tick';
 import { catchUpWorktreeToWatermark } from '../../sync/pot-git/worktree-bridge';
 import {
+  type DivergenceObservation,
+  type WorktreeDivergence,
+  describeDivergenceTransition,
+  nextWorktreeDivergence,
+  parseWorktreeDivergence,
+} from './worktree-divergence';
+import {
   HiveEffectAuthorityError,
   loadHiveEffectAuthority,
   nextHivePublicationTerm,
   requireHiveEffectAuthority,
 } from '../../sync/pot-git/hive-effect-authority';
-import { publishHandoffToken } from '../../sync/pot-git/handoff-token';
 import {
   runRefAnnouncePublishTick,
   runRefAnnounceReceiveTick,
@@ -111,6 +127,7 @@ import {
   formatReleaseConsistencyVerdict,
   judgeConvergence,
   judgeReleaseConsistency,
+  selectConvergenceCandidates,
   type AnnouncedSnapshot,
   type ConvergenceState,
   type ConvergenceVerdict,
@@ -197,7 +214,8 @@ import { Duplex } from 'node:stream';
 // OWNER-authored scope the pot_members projection writes under — reading it directly
 // returns an EMPTY roster. The *ForLocalPot wrapper resolves the federated scope first
 // (a no-op on an owner).
-import { listHiveMembersForLocalPot } from '../../federated-pot-scope';
+import { listHiveMembersForLocalPot, loadRevokedHivePubkeysForLocalPotCached } from '../../federated-pot-scope';
+import { loadRevokedPubkeysCached } from '../../sync/hyperbee/load-revoked-pubkeys';
 import { pickHiveGitActor, type HiveGitActor } from './hive-git-actor';
 import { loadCachedLocalAnnounceIdentity } from '../../sync/hyperbee/local-announce-identity';
 import { signWithDeviceKey } from '../../identity/sign-with-device-key';
@@ -214,7 +232,8 @@ import {
 import { deriveGenesisBaselineSha } from './genesis-baseline';
 import { appendPipelineEvent } from './pipeline-events';
 import { DEFAULT_CONTENT_DETECTORS } from '../../content-lint/registry';
-import { assertDirtyMigrationReservations } from '../../migration-reservation';
+import { contentSnapshotHash, detectorResultHash } from './content-guard';
+import { checkDirtyMigrationReservations } from '../../migration-reservation';
 import {
   runGitSync,
   runGitBounded,
@@ -708,6 +727,8 @@ export type GitSyncFireOutcome =
       reason: string;
       blockedOn?: string;
       holders?: GitSyncLockHolderSnapshot[];
+      /** WI-10004472: a DBOS recovery replay refused its locks and ended without diverging. */
+      replayAbandoned?: true;
     };
 
 /**
@@ -1471,7 +1492,17 @@ async function writeGitSyncContentEscalation(
   needsHuman: boolean,
 ): Promise<void> {
   const { sql } = getOrgPg();
-  const files = contentErrors.map((c) => ({ scope: c.scope, file: c.file, detector: c.detectorKey, error: c.error }));
+  const files = contentErrors.map((c) => ({
+    scope: c.scope,
+    file: c.file,
+    detector: c.detectorKey,
+    error: c.error,
+    // The detector scans dirty working-tree bytes, which may differ from HEAD.
+    // Preserve the exact snapshot and verdict identity so the human escalation
+    // remains reproducible after another edit or commit changes the file.
+    ...(c.contentHash ? { contentHash: c.contentHash } : {}),
+    ...(c.detectorResultHash ? { detectorResultHash: c.detectorResultHash } : {}),
+  }));
   const list = contentErrors.map((c) => `${c.scope}/${c.file} [${c.detectorKey}]`).join(', ');
   const body = JSON.stringify({
     kind: CONTENT_ERROR_KIND,
@@ -1821,6 +1852,11 @@ async function recordContentFixerDispatch(
   }
 }
 
+/** A quarantined importer is a dependency fence, not broken content a fixer can edit. */
+function contentFixerEligibleErrors(contentErrors: readonly ScopedContentError[]): ScopedContentError[] {
+  return contentErrors.filter((contentError) => contentError.detectorKey !== 'quarantined-importer');
+}
+
 /** Stable identity for one content-fixer job. Human detector messages are deliberately excluded.
  *  The separators are ASCII unit/record separators, never NUL: this value is persisted into
  *  routine metadata JSONB, which rejects \u0000, and a NUL here failed every outcome write
@@ -1840,7 +1876,17 @@ async function upsertGitSyncContentHumanWorkItem(
 ): Promise<void> {
   const signature = contentFixerSignature(contentErrors);
   const signatureHash = createHash('sha256').update(signature).digest('hex').slice(0, 24);
-  const files = contentErrors.map((c) => ({ scope: c.scope, file: c.file, detector: c.detectorKey, error: c.error }));
+  const files = contentErrors.map((c) => ({
+    scope: c.scope,
+    file: c.file,
+    detector: c.detectorKey,
+    error: c.error,
+    // The detector scans dirty working-tree bytes, which may differ from HEAD.
+    // Preserve the exact snapshot and verdict identity so the human escalation
+    // remains reproducible after another edit or commit changes the file.
+    ...(c.contentHash ? { contentHash: c.contentHash } : {}),
+    ...(c.detectorResultHash ? { detectorResultHash: c.detectorResultHash } : {}),
+  }));
   const fileList = files.map((f) => `${f.scope}/${f.file} [${f.detector}]: ${f.error}`).join('; ');
   const { upsertConditionWorkItem } = await import('../../coord/condition-upsert');
   await upsertConditionWorkItem(`git-sync-content:${slug}:${signatureHash}`, {
@@ -1922,11 +1968,14 @@ async function revalidateContentErrors(
   repoPath: string | null | undefined,
   contentErrors: readonly ScopedContentError[],
 ): Promise<ScopedContentError[]> {
-  if (!repoPath || contentErrors.length === 0) return [...contentErrors];
+  // Keep this temporary commit deferral in GitSyncOutcome, but never escalate or
+  // dispatch it: no edit to the importer can release a live lock on its dependency.
+  const fixerContentErrors = contentFixerEligibleErrors(contentErrors);
+  if (!repoPath || fixerContentErrors.length === 0) return [...fixerContentErrors];
   const detectors = new Map(DEFAULT_CONTENT_DETECTORS.map((detector) => [detector.key, detector]));
   const root = resolve(repoPath);
   const checked = await Promise.all(
-    contentErrors.map(async (contentError) => {
+    fixerContentErrors.map(async (contentError) => {
       const detector = detectors.get(contentError.detectorKey);
       if (!detector) return contentError;
       const repo = resolve(root, contentError.scope === 'superproject' ? '.' : contentError.scope);
@@ -1944,7 +1993,14 @@ async function revalidateContentErrors(
         const inScope = await detector.matches(contentError.file, { repoPath: repo });
         if (!inScope) return null;
         const error = await detector.detect(contentError.file, text, { repoPath: repo });
-        return error ? { ...contentError, error } : null;
+        return error
+          ? {
+              ...contentError,
+              error,
+              contentHash: contentSnapshotHash(text),
+              detectorResultHash: detectorResultHash(contentError.detectorKey, error),
+            }
+          : null;
       } catch {
         // The guard itself is fail-open during the commit path, but dispatch
         // revalidation fails closed so a detector failure cannot erase a real
@@ -2249,6 +2305,21 @@ type GitSyncSettlementProgress = {
   total: number;
   feature_id: string;
 };
+type GitSyncActivityMarker = {
+  active: boolean;
+  phase: GitSyncActivityPhase;
+  started_at: number;
+  updated_at: number;
+  completed_at: number | null;
+  outcome_status: GitSyncOutcome['status'] | null;
+  /** The per-fire lock owner ties this durable marker back to the live resource lease. */
+  owner: string;
+  owner_pid: number;
+  settlement_progress?: GitSyncSettlementProgress;
+  /** EI-24496143892913296: the post-legs leg that just started (e.g. 'git-sync:ref-announce'). */
+  leg?: string;
+};
+type GitSyncActivityFields = Omit<GitSyncActivityMarker, 'owner' | 'owner_pid'>;
 
 /**
  * Writer-backed liveness for the whole git-sync action, not just its local commit
@@ -2260,15 +2331,7 @@ type GitSyncSettlementProgress = {
 async function writeGitSyncActivity(
   slug: string,
   workspaceId: string,
-  activity: {
-    active: boolean;
-    phase: GitSyncActivityPhase;
-    started_at: number;
-    updated_at: number;
-    completed_at: number | null;
-    outcome_status: GitSyncOutcome['status'] | null;
-    settlement_progress?: GitSyncSettlementProgress;
-  },
+  activity: GitSyncActivityMarker,
 ): Promise<void> {
   await patchRoutineMetadata(slug, workspaceId, { git_sync_activity: activity });
 }
@@ -2307,6 +2370,10 @@ async function recordOutcome(
     outcome.bulkExcluded ?? outcome.oversized.filter((f) => f.exclusionReason === 'cumulative-limit')
   ).filter((f) => f.exclusionReason === 'cumulative-limit');
   const oversized = outcome.oversized.filter((f) => f.exclusionReason !== 'cumulative-limit');
+  // Keep every excluded path visible in the public outcome, but only count real
+  // content failures against the fixer budget. A quarantined importer is a
+  // temporary atomicity deferral that clears when its dependency can publish.
+  const fixerContentErrors = contentFixerEligibleErrors(outcome.contentErrors);
   // A local commit can still be valid while the content guard leaves dirty files
   // out of it.  Do not publish that partial success as plain `synced`: the routine
   // headline is the first health signal most callers read.  Keep the precise local
@@ -2379,10 +2446,10 @@ async function recordOutcome(
       consecutive_content_error_ticks: consecutiveContentErrorTicks,
       last_content_errors: outcome.contentErrors.map((c) => `${c.scope}/${c.file} [${c.detectorKey}]`),
       last_content_error_signature:
-        outcome.contentErrors.length > 0 ? contentFixerSignature(outcome.contentErrors) : null,
+        fixerContentErrors.length > 0 ? contentFixerSignature(fixerContentErrors) : null,
       // A measured-clean pass invalidates the prior dispatch identity. This is
       // intentionally in the same outcome write as the clean detector result.
-      ...(outcome.contentErrors.length === 0 ? { last_content_fixer: null } : {}),
+      ...(fixerContentErrors.length === 0 ? { last_content_fixer: null } : {}),
       // WI-1416: a COMPLETED fire resets the consecutive-reap counter the executor
       // reaper increments on each cancel+requeue — so `reaped_count` reads as "reaps
       // since the last completed fire" (the git-sync-stall-watchdog's persistent-reap
@@ -2798,12 +2865,21 @@ async function contentNoticeRecipients(
  * fire. The routine metadata + pipeline event retain the structured provenance
  * regardless of delivery.
  */
-async function notifySkippedLockedPaths(slug: string, outcome: GitSyncOutcome): Promise<void> {
+async function notifySkippedLockedPaths(
+  slug: string,
+  workspaceId: string,
+  outcome: GitSyncOutcome,
+): Promise<void> {
   const skippedPaths = outcome.skippedPaths ?? [];
   if (skippedPaths.length === 0) return;
 
-  const byHolder = new Map<string, GitSyncSkippedPath[]>();
+  const byHolder = new Map<string, Array<Extract<GitSyncSkippedPath, { owner: string }>>>();
   for (const skipped of skippedPaths) {
+    if (!('owner' in skipped)) continue;
+    // P-014: a restricted-disclosure hold is not an edit lock. Its holder cannot lift it
+    // with locks:release (only releasing the disclosure does), so telling them to on every
+    // tick is noise. The routine metadata still records the skipped path and its intent.
+    if (isRestrictedHoldIntent(skipped.intent)) continue;
     const holder = skipped.owner.trim();
     if (!holder) continue;
     const rows = byHolder.get(holder);
@@ -2846,6 +2922,88 @@ async function notifySkippedLockedPaths(slug: string, outcome: GitSyncOutcome): 
       body,
       category: 'git-sync',
     }).catch(() => {});
+  }
+
+  const migrationReservations = skippedPaths.filter(
+    (row): row is Extract<GitSyncSkippedPath, { reason: 'migration-reservation' }> =>
+      'reason' in row && row.reason === 'migration-reservation',
+  );
+  if (migrationReservations.length === 0) return;
+
+  let roster: AttributionRosterEntry[];
+  try {
+    roster = await loadAttributionRosterMerged(workspaceId);
+  } catch (error) {
+    console.warn(
+      `[git-sync] ${slug}: could not load attribution for migration-reservation refusals: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
+
+  let superRoot: string | undefined;
+  try {
+    const { projectDirForSlug } = await import('../../operator-notes');
+    superRoot = (await projectDirForSlug(slug, workspaceId)) ?? undefined;
+  } catch {
+    // Repo-relative edit-ledger entries still resolve without the checkout root.
+  }
+
+  const byAuthor = new Map<string, Array<Extract<GitSyncSkippedPath, { reason: 'migration-reservation' }>>>();
+  for (const skipped of migrationReservations) {
+    // agentsForScopedFiles resolves the right repo-relative map for each scope,
+    // including nested repo paths; keep its established first-declared-wins rule.
+    const [author] = agentsForScopedFiles(roster, [{ scope: skipped.scope, file: skipped.path }], superRoot);
+    if (!author) continue;
+    const rows = byAuthor.get(author) ?? [];
+    if (!rows.some((row) => row.scope === skipped.scope && row.path === skipped.path)) rows.push(skipped);
+    byAuthor.set(author, rows);
+  }
+
+  if (byAuthor.size === 0) {
+    console.warn(
+      `[git-sync] ${slug}: migration-reservation refusals had no matching file author in the attribution roster`,
+    );
+    return;
+  }
+
+  try {
+    const { upsertConditionWorkItem } = await import('../../coord/condition-upsert');
+    for (const [author, rows] of byAuthor) {
+      const signature = [...new Set(rows.map((row) => `${row.scope}\u001f${row.path}`))].sort().join('\u001e');
+      const signatureHash = createHash('sha256').update(signature).digest('hex').slice(0, 24);
+      const fileList = rows.map((row) => `${row.scope}/${row.path}`).join(', ');
+      const refusalDetails = rows.map((row) => `- ${row.scope}/${row.path}: ${row.detail}`).join('\n');
+      try {
+      await upsertConditionWorkItem(`git-sync-migration-reservation:${slug}:${author}:${signatureHash}`, {
+        kind: 'bug',
+        title: `git-sync migration reservation needs repair (${rows.length} migration(s), ${signatureHash})`,
+        summary:
+          `git-sync on ${slug} left these migrations out of the commit because their filenames do not match a reservation: ${fileList}\n` +
+          `${refusalDetails}\n\n` +
+          'To repair, run `npm run db:next-migration` to reserve the next number, rename the migration to the returned filename, and retry. Do not choose a number manually or reuse a number reserved for another migration.',
+        severity: 'major',
+        harness: slug,
+        workspaceId,
+        createdBy: GIT_SYNC_IDENTITY.ownerId,
+        assignee: author,
+        assignedBy: GIT_SYNC_IDENTITY.ownerId,
+        payload: {
+          source: 'git-sync-migration-reservation',
+          author,
+          signature: signatureHash,
+          migrations: rows.map(({ scope, path, detail }) => ({ scope, path, detail })),
+        },
+      });
+      } catch (error) {
+        console.warn(
+          `[git-sync] ${slug}: could not persist migration-reservation work item for ${author}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `[git-sync] ${slug}: could not load migration-reservation work-item upsert: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -3003,6 +3161,13 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
   // makes a persistent reap-loop a durable, queryable signal for the
   // git-sync-stall-watchdog. P-008 runtime gate: ineligible rows no-op (logged +
   // recorded), never escalate.
+  //
+  // WI-10004472: whether THIS execution ran the step body. DBOS replays a recorded
+  // step from its operation_output without calling the body, so `false` here means
+  // this is a recovery replay of a fire that had already passed eligibility. The lock
+  // phase below is deliberately NOT a step, so such a replay can be refused a lock the
+  // original held; see the abandon branch there.
+  let eligibilityRanLive = false;
   const gate = await runCheckpointedStep(
     'git-sync:eligibility',
     async (): Promise<
@@ -3010,8 +3175,11 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
         hiveGitMode?: PotGitMode;
         hiveGitIdentity?: { potHomeSlug: string; repoKey: string };
         repoPath?: string;
+        /** pot-review-integration-mode P-014: this tick's push target under hiveGit.integration. */
+        integration?: IntegrationPushDecision;
       }
     > => {
+      eligibilityRanLive = true;
       await patchRoutineMetadata(slug, workspaceId, { fire_started_at: Date.now() });
       const { gate: g, entry } = await gitSyncRuntimeGate(slug, workspaceId, repoPathOverride);
       if (!g.eligible) {
@@ -3031,13 +3199,38 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       const potHomeSlug = entry ? (entry.hive_slug ?? (entry.self_repo ? entry.slug : undefined)) : undefined;
       if (potHomeSlug && workspaceId) {
         const mode = await getPotGitMode(workspaceId, potHomeSlug);
+        // pot-review-integration-mode P-014 (D-005/D-006): hiveGit.integration is
+        // orthogonal to hiveGit.mode and re-read EVERY tick, so flipping a pot into
+        // working-copy mode stops main-repo pushes on the next tick. Unlike the git
+        // mode it fails CLOSED: an unreadable or malformed setting means commit-only.
+        const integrationRead = await readPotIntegrationMode(workspaceId, potHomeSlug);
+        // WI-10006333: a repo pot's HOME is the pot's own metadata repository, not the
+        // subject a working copy protects, once a member holds the fork. Only that case
+        // needs the full registry; a failed read stays governed (fail-closed).
+        let governed = true;
+        if (integrationRead.mode === 'review' && entry && !entry.hive_slug && !entry.fork_remote) {
+          try {
+            governed = integrationModeGovernsHarness(entry, (await loadHarnessRegistry(workspaceId)).projects);
+          } catch {
+            governed = true;
+          }
+        }
+        const integration: IntegrationPushDecision = governed
+          ? resolveIntegrationPushRemote({
+              read: integrationRead,
+              ...(entry?.fork_remote ? { forkRemote: entry.fork_remote } : {}),
+            })
+          : { kind: 'unchanged', reason: 'pot home repository — the working copy lives on a member (WI-10006333)' };
+        const withIntegration = integration.kind === 'unchanged' ? {} : { integration };
         if (mode !== 'legacy' && entry)
           return {
             ...g,
             hiveGitMode: mode,
             hiveGitIdentity: { potHomeSlug, repoKey: canonicalRepoKey(entry) },
             ...(entry.path ? { repoPath: entry.path } : {}),
+            ...withIntegration,
           };
+        return { ...g, ...(entry?.path ? { repoPath: entry.path } : {}), ...withIntegration };
       }
       return { ...g, ...(entry?.path ? { repoPath: entry.path } : {}) };
     },
@@ -3087,6 +3280,10 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       if (cfg.pushSubmoduleOrigins === undefined) cfg.pushSubmoduleOrigins = true;
     }
   }
+  // pot-review-integration-mode P-014 (D-006): a working-copy pot pushes its OWN
+  // fork, never the main repository. Applied after the hive-git-mode block — a
+  // bridged/p2p hive is already commit-only and its bridge leg honours fork_remote.
+  const integrationCommitOnly = cfg.push ? await applyIntegrationPushTarget(slug, cfg, gate.integration, repoPath) : null;
   // EI-18812945811758018: the EFFECTIVE push mode for this tick, recorded later as part
   // of recordOutcome's SINGLE metadata write (never its own patch — a skipped tick must
   // still write nothing, and the settle write is asserted as the only one).
@@ -3100,7 +3297,9 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
     ? 'push'
     : gate.hiveGitMode
       ? `commit-only:${gate.hiveGitMode}`
-      : 'commit-only:config';
+      : integrationCommitOnly
+        ? `commit-only:${integrationCommitOnly}`
+        : 'commit-only:config';
 
   // P-006/WI-229179: acquire the workspace-wide restart barrier shared first,
   // then the per-slug resource (auto-registered) and the routine's extras
@@ -3128,6 +3327,13 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
   });
   const acquired: GitSyncLockRequest[] = [];
   const lockOwner = newGitSyncLockOwner();
+  const withActivityOwner = (activity: GitSyncActivityFields): GitSyncActivityMarker => ({
+    ...activity,
+    owner: lockOwner,
+    owner_pid: process.pid,
+  });
+  const writeActivity = (activity: GitSyncActivityFields): Promise<void> =>
+    writeGitSyncActivity(slug, workspaceId, withActivityOwner(activity));
   const lock = await acquireLocks(cd, slug, resources, acquired, lockOwner);
   if (lock.state === 'held' || lock.state === 'contended') {
     const reason = lock.blockedReason ?? (lock.state === 'contended' ? 'lock_contended' : 'lock_held');
@@ -3143,6 +3349,37 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
         ? 'an in-flight git-sync auto-commit'
         : 'a peer';
       console.log(`[git-sync] ${slug}: ${holderDescription} holds ${lock.blockedOn} — skipping this tick`);
+    }
+    // WI-10004472: a REPLAYED eligibility step means DBOS is recovering a fire that
+    // already got this far. If that original run held these locks, it recorded its
+    // post-lock sub-steps (git-sync:submodules, :pointer-bump, …), and this skip
+    // branch cannot reproduce them: the routine engine's next step would land on a
+    // function id recorded under another name and DBOS would fail the whole workflow
+    // ("git-sync:pointer-bump was recorded when system:git-sync:settle was
+    // expected", observed 2026-10-01 00:52:32Z on four recovered fires after a
+    // bg-host restart). Re-acquiring live on replay is deliberate (see above), so the
+    // refusal itself is legitimate: end the replay WITHOUT any further DBOS operation
+    // and let the next scheduled tick redo the work. No lock-retry event either: it
+    // is fire-and-forget work started inside this workflow's context.
+    if (!eligibilityRanLive && ctx.workflowId) {
+      console.warn(
+        `[git-sync] ${slug}: recovery replay of ${ctx.workflowId} refused ${lock.blockedOn ?? 'its locks'} ` +
+          `(${reason}) — abandoning the replay instead of diverging from its recorded steps`,
+      );
+      await patchRoutineMetadata(slug, workspaceId, {
+        last_status: 'skipped',
+        local_sync_status: 'skipped',
+        last_skip_reason: `replay_abandoned:${reason}`,
+        last_skipped_at: Date.now(),
+        last_skipped_paths: [],
+      });
+      return {
+        status: 'skipped',
+        reason,
+        replayAbandoned: true,
+        ...(lock.blockedOn ? { blockedOn: lock.blockedOn } : {}),
+        ...(lock.holders ? { holders: lock.holders } : {}),
+      };
     }
     // A held_exclusive refusal means the peer's resource row is still live. The
     // release/grant cascade owns the truthful wake for that row; emitting here
@@ -3246,14 +3483,14 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       local_sync_status: 'error',
       last_error: error.message,
       last_errors: [`git-sync action timeout (${error.timeoutKind}) during ${error.phase}`],
-      git_sync_activity: {
+      git_sync_activity: withActivityOwner({
         active: false,
         phase: 'error',
         started_at: activityStartedAt,
         updated_at: failedAt,
         completed_at: failedAt,
         outcome_status: null,
-      },
+      }),
     }).catch((metadataError) => {
       console.warn(
         `[git-sync] ${slug}: could not record action timeout metadata: ${
@@ -3283,7 +3520,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       .catch(() => {})
       .then(async () => {
         if (liveness.timedOut) return;
-        await writeGitSyncActivity(slug, workspaceId, {
+        await writeActivity({
           active: true,
           phase: 'local-sync',
           started_at: activityStartedAt,
@@ -3312,7 +3549,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
   let prevHeadSha: string | null = null;
   try {
     await guarded('activity-start', () =>
-      writeGitSyncActivity(slug, workspaceId, {
+      writeActivity({
         active: true,
         phase: 'local-sync',
         started_at: activityStartedAt,
@@ -3358,6 +3595,21 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
     // whole-tree sweep from staging a peer's in-flight paths; the pure pipeline
     // maps these superproject-root-relative paths into each submodule before add.
     let liveLockHoldingRows: Awaited<ReturnType<typeof liveLockHoldingsStrict>>;
+    // WI-10005576 / R-10: the census also reads THIS tree, so a write made inside an
+    // active personal-disclosure window without a native edit tool is held too. An explicit
+    // null repoPath (manual fire) names no tree, so there is nothing for the window read to scan;
+    // the ledger-backed restricted holdings still apply.
+    const readCensus = () =>
+      readGitSyncCensusStrict(
+        repoPath
+          ? {
+              window: {
+                repoPath,
+                runGit: (args, cwd) => runGitBounded(args, cwd, gitTimeoutMsFor(args), { signal: liveness.signal }),
+              },
+            }
+          : {},
+      );
     try {
       // EI-21876778499591361: ride out a TRANSIENT pg contention timeout on this read instead of
       // skipping the tick. Failing CLOSED below is right for an UNREADABLE lock plane — staging a
@@ -3371,9 +3623,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       // (EI-1720); this read was simply never wrapped. The retry sits INSIDE `guarded` so it sees
       // the RAW error, before the liveness wrapper. Non-contention faults still fail closed on the
       // first attempt, unchanged. ~6s of backoff against a 600s (LOCK_TTL_SEC) idle deadline.
-      liveLockHoldingRows = await guarded('read-live-file-locks', () =>
-        acquireWithContentionRetry(() => liveLockHoldingsStrict()),
-      );
+      liveLockHoldingRows = await guarded('read-live-file-locks', () => acquireWithContentionRetry(readCensus));
     } catch (error) {
       if (liveness.timedOut) throw liveness.timeoutError;
       // This read is a safety gate: treating an unreadable lock plane as [] lets
@@ -3393,14 +3643,14 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
             last_lock_read_error: detail,
             last_error: `live lock read failed (fail-closed): ${detail}`,
             last_errors: [`live-lock-read: ${detail}`],
-            git_sync_activity: {
+            git_sync_activity: withActivityOwner({
               active: false,
               phase: 'error',
               started_at: activityStartedAt,
               updated_at: skippedAt,
               completed_at: skippedAt,
               outcome_status: null,
-            },
+            }),
           }),
         );
       } catch (metadataError) {
@@ -3448,6 +3698,14 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
     liveLockHoldingRows = await guarded('translate-live-file-locks', () =>
       toRepoLockCoordinates(liveLockHoldingRows, true),
     );
+
+    let mergedAttributionRosterForTick: Promise<AttributionRosterEntry[]> | undefined;
+    const loadAttributionRosterForTick = (): Promise<AttributionRosterEntry[]> => {
+      if (!mergedAttributionRosterForTick) {
+        mergedAttributionRosterForTick = loadAttributionRosterMerged(workspaceId);
+      }
+      return mergedAttributionRosterForTick;
+    };
 
     // 'acquired' (locked) or 'error' (unlocked best-effort) → run.
     outcome = await guarded('run-git-sync', () =>
@@ -3504,7 +3762,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
         // DB-independent in tests and callers that inject a different checker.
         migrationReservationChecker: async (dirtyPaths) => {
           const { sql } = getOrgPg();
-          await assertDirtyMigrationReservations(sql, dirtyPaths);
+          return await checkDirtyMigrationReservations(sql, dirtyPaths);
         },
         // Holdings may be released during setup. Do not also copy them into
         // explicit exclusions, which intentionally survive every refresh.
@@ -3512,11 +3770,15 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
         // Re-read the edit-lock plane at the final commit seam for every repo. The
         // initial census above protects setup, while this guarded callback closes
         // the longer submodule/guard window where a peer can acquire a lock.
-        refreshLiveLockHoldings: () =>
-          guarded('refresh-live-file-locks', () => acquireWithContentionRetry(() => liveLockHoldingsStrict())).then(
-            (rows) => toRepoLockCoordinates(rows, false),
-          ),
-        loadRoster: attributionOn ? () => loadAttributionRosterMerged(workspaceId) : undefined,
+        refreshLiveLockHoldings: async () => {
+          const rows = await guarded('refresh-live-file-locks', () => acquireWithContentionRetry(readCensus));
+          // Coordinate identity can perform Git reads too. Keep that await inside
+          // the same cancellation guard, with its own phase so a stalled identity
+          // lookup is not reported as a lock-census read.
+          return guarded('translate-refreshed-live-file-locks', () => toRepoLockCoordinates(rows, false));
+        },
+        loadRoster: attributionOn ? loadAttributionRosterForTick : undefined,
+        loadMigrationFenceRoster: loadAttributionRosterForTick,
         // WI-1416: checkpoint each pipeline phase (submodules → pointer-bump → push) as
         // a DBOS sub-step; a passthrough outside a workflow (fireGitSyncNow, tests).
         step: runCheckpointedStep,
@@ -3527,6 +3789,28 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
         signal: liveness.signal,
       }),
     );
+    // P-016 (pot-review-integration-mode): a working-copy pot's sync-back conflict
+    // becomes ONE fix-it work-item in the pot, deduped on the sha-free title prefix
+    // (watchdogKey) so a stuck merge never re-files on every upstream advance.
+    // Best-effort: a filing failure never fails the tick.
+    if (cfg.syncBack && outcome.syncBack?.status === 'conflict') {
+      const syncBackCfg = cfg.syncBack;
+      try {
+        const filing = await fileSyncBackConflict(
+          outcome.syncBack,
+          syncBackCfg,
+          makeSyncBackConflictFilingDeps({
+            slug,
+            workspaceId,
+            cfg: syncBackCfg,
+            conflictedFiles: outcome.syncBack.conflictedFiles,
+          }),
+        );
+        if (filing.action !== 'none') console.log(`[git-sync] ${slug}: sync-back conflict work-item ${filing.action}: ${filing.id}`);
+      } catch (err) {
+        console.warn(`[git-sync] ${slug}: could not file the sync-back conflict work-item: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     // Do not let a queued local-sync heartbeat land after the post-legs marker
     // and regress the durable phase back to local-sync.
     await guarded('flush-activity-heartbeat', () => activityHeartbeatWrite);
@@ -3537,7 +3821,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       // the guarded promise rejects before that callback's microtask runs.
       await recordTimeoutActivity(error);
     } else {
-      await writeGitSyncActivity(slug, workspaceId, {
+      await writeActivity({
         active: false,
         phase: 'error',
         started_at: activityStartedAt,
@@ -3577,13 +3861,22 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
   // after that lease is released so a fixer that repaired/committed the file
   // during the post-lock window does not become a new work item.
   const revalidatedContentErrors = await revalidateContentErrors(repoPath, outcome.contentErrors);
-  if (revalidatedContentErrors.length !== outcome.contentErrors.length) {
-    outcome = { ...outcome, contentErrors: revalidatedContentErrors };
+  let nextActionableError = 0;
+  const reportedContentErrors = outcome.contentErrors.flatMap((contentError) => {
+    if (contentError.detectorKey === 'quarantined-importer') return [contentError];
+    const current = revalidatedContentErrors[nextActionableError++];
+    return current ? [current] : [];
+  });
+  if (reportedContentErrors.length !== outcome.contentErrors.length) {
+    // Preserve importer deferrals for the partial-sync status and diagnostics;
+    // the separate content-fixer signature below excludes them.
+    outcome = { ...outcome, contentErrors: reportedContentErrors };
   }
   const errTicks = tickErrors.length > 0 ? prev.errTicks + 1 : 0;
   // EI-23989162263803651: the fixer budget belongs to the current offender signature,
   // not the routine-wide streak. A new file/detector set starts its own five-tick budget.
-  const contentSignature = outcome.contentErrors.length > 0 ? contentFixerSignature(outcome.contentErrors) : null;
+  const contentSignature =
+    revalidatedContentErrors.length > 0 ? contentFixerSignature(revalidatedContentErrors) : null;
   const sameContentSignature = contentSignature !== null && contentSignature === prev.contentSignature;
   const prevSignatureContentTicks = sameContentSignature ? prev.contentTicks : 0;
   const contentTicks = contentSignature === null ? 0 : prevSignatureContentTicks + 1;
@@ -3616,8 +3909,41 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       await activity;
     },
   });
+  // EI-24496143892913296: the activity marker was written once at 'post-legs' and after
+  // that only by the settlement's own progress callback, so once settlement ended (or hit
+  // its 90s budget) every later leg — bootstrap, own-head-publish, ref-announce,
+  // integrator, worktree-bridge — ran under a marker still reading
+  // phase:'completion-settlement' with a frozen N/200 and a frozen updated_at.
+  // routines:list then reported a healthy fire as "in flight, still recording progress"
+  // and, after three intervals, as stuck (observed 2026-09-28 and 2026-09-30).
+  // `postLegsMarker` tracks the last phase this action wrote (null until the explicit
+  // 'post-legs' write below); a leg boundary restamps it when the marker is not already
+  // a fresh 'post-legs' one. A full-object write also drops the stale settlement_progress.
+  let postLegsMarker: { phase: GitSyncActivityPhase; at: number } | null = null;
+  const stampPostLegsBoundary = async (leg: string): Promise<void> => {
+    if (postLegsMarker === null || postLegsLiveness.timedOut) return;
+    // The settlement leg owns the marker through its own progress callback.
+    if (leg === 'git-sync:completion-settlement') return;
+    const now = Date.now();
+    if (postLegsMarker.phase === 'post-legs' && now - postLegsMarker.at < GIT_SYNC_ACTIVITY_HEARTBEAT_INTERVAL_MS) {
+      return;
+    }
+    postLegsMarker = { phase: 'post-legs', at: now };
+    await writeActivity({
+      active: true,
+      phase: 'post-legs',
+      started_at: activityStartedAt,
+      updated_at: now,
+      completed_at: null,
+      outcome_status: outcome.status,
+      leg,
+    }).catch(() => {});
+  };
   const guardedPostLegs = <T>(phase: string, operation: () => Promise<T>): Promise<T> =>
-    postLegsLiveness.run(operation, phase);
+    postLegsLiveness.run(async () => {
+      await stampPostLegsBoundary(phase);
+      return operation();
+    }, phase);
 
   try {
     // STEP `git-sync:record` — outcome recording + the whole escalation/dispatch tail as
@@ -3653,7 +3979,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
     // `recordOutcome` writes the local stage's status before any GitHub bridge or
     // P2P post-leg runs. Keep that local result visible, but explicitly mark the
     // whole action non-terminal until every later leg has settled.
-    await writeGitSyncActivity(slug, workspaceId, {
+    await writeActivity({
       active: true,
       phase: 'post-legs',
       started_at: activityStartedAt,
@@ -3661,6 +3987,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       completed_at: null,
       outcome_status: outcome.status,
     });
+    postLegsMarker = { phase: 'post-legs', at: Date.now() };
 
     // event-await-… P-102: git-sync:committed[:<sha>] — wake anyone awaiting "is my
     // edit a local git commit yet". Remote origin/staging egress is a distinct,
@@ -3679,7 +4006,29 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       // selecting manifests so a Portal commit can settle Papercusp-owned rows.
       const repositoryRoot = repoPath ? await realpath(repoPath).catch(() => resolve(repoPath)) : null;
       if (!repositoryRoot) return undefined;
-      {
+      // The local-sync lock set is released before post-legs so network work does not
+      // hold a restart drain open. Completion settlement is a separate bounded DB pass;
+      // reacquire only the shared restart barrier around it so dev:restart cannot kill
+      // bg-host halfway through a close. The fresh owner gives this lease an independent
+      // lifetime from the already-cleaned-up local-sync owner.
+      const settlementLockOwner = newGitSyncLockOwner();
+      const settlementResources: GitSyncLockRequest[] = [
+        { resource: GIT_SYNC_RESTART_BARRIER_RESOURCE, mode: 'shared' },
+      ];
+      const settlementAcquired: GitSyncLockRequest[] = [];
+      const settlementLock = await acquireLocks(cd, slug, settlementResources, settlementAcquired, settlementLockOwner);
+      if (settlementLock.state !== 'acquired') {
+        const reason =
+          settlementLock.blockedReason ??
+          (settlementLock.state === 'contended' ? 'lock_contended' : 'lock_infra_unavailable');
+        console.warn(
+          `[git-sync] ${slug}: completion settlement skipped because the shared restart barrier was unavailable (${reason}); ` +
+            'remaining candidates will be retried on a later fire',
+        );
+        return undefined;
+      }
+      const stopSettlementLockHeartbeat = startLockHeartbeat(cd, slug, settlementAcquired, settlementLockOwner);
+      try {
         let lastSettlementProgressAt = 0;
         let settlementProgressWrite = Promise.resolve();
         let settlementTimeout: GitSyncActionTimeoutError | undefined;
@@ -3727,10 +4076,11 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
                         return settlementProgressWrite;
                       }
                       lastSettlementProgressAt = now;
+                      postLegsMarker = { phase: 'completion-settlement', at: now };
                       settlementProgressWrite = settlementProgressWrite
                         .catch(() => {})
                         .then(() =>
-                          writeGitSyncActivity(slug, workspaceId, {
+                          writeActivity({
                             active: true,
                             phase: 'completion-settlement',
                             started_at: activityStartedAt,
@@ -3770,8 +4120,15 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
         } finally {
           if (settlementBudgetTimer) clearTimeout(settlementBudgetTimer);
           postLegsLiveness.signal.removeEventListener('abort', abortSettlementOnActionTimeout);
+          // EI-24496143892913296: a progress write queued before the budget abort must land
+          // BEFORE the next leg restamps the marker, or it overwrites that restamp with a
+          // stale 'completion-settlement' N/total.
+          await settlementProgressWrite.catch(() => {});
         }
         return settlementTimeout;
+      } finally {
+        await stopSettlementLockHeartbeat();
+        await releaseAll(cd, settlementLockOwner, settlementAcquired);
       }
     };
 
@@ -3918,7 +4275,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
     if (error instanceof GitSyncActionTimeoutError) {
       await recordTimeoutActivity(error);
     } else {
-      await writeGitSyncActivity(slug, workspaceId, {
+      await writeActivity({
         active: false,
         phase: 'error',
         started_at: activityStartedAt,
@@ -3994,7 +4351,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
       dependencyPrebuildQueued = await enqueueDependencyPrebuild(dependencyPrebuildRequest);
     } catch (error) {
       const failedAt = Date.now();
-      await writeGitSyncActivity(slug, workspaceId, {
+      await writeActivity({
         active: false,
         phase: 'error',
         started_at: activityStartedAt,
@@ -4008,7 +4365,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
 
   const completedAt = Date.now();
   try {
-    await writeGitSyncActivity(slug, workspaceId, {
+    await writeActivity({
       active: false,
       phase: 'complete',
       started_at: activityStartedAt,
@@ -4022,7 +4379,7 @@ async function handleGitSync(ctx: SystemActionCtx, repoPathOverride?: string | n
     // flight. Record an explicit terminal error marker before rethrowing so the
     // routine engine retries the failed tick without a stale `post-legs` state.
     const failedAt = Date.now();
-    await writeGitSyncActivity(slug, workspaceId, {
+    await writeActivity({
       active: false,
       phase: 'error',
       started_at: activityStartedAt,
@@ -4160,6 +4517,41 @@ export async function refreshRemoteTrackingRefFromProvenTip(
   }
 }
 
+/** The persisted error cap (`github_bridge.errors` keeps the first 10). */
+const GITHUB_BRIDGE_PERSISTED_ERRORS = 10;
+
+/**
+ * WI-10006470: the journal line for a GitHub-bridge error TRANSITION, or null.
+ *
+ * `github_bridge.errors` holds only the latest tick, so a streak that clears leaves no
+ * cause behind (a 3-sweep "remote could not be contacted" fault on hello-world-3-pot,
+ * 2026-10-06, could not be diagnosed after it cleared). Returns a line when errors
+ * start or change, and when a previously failing bridge comes back clean; null for a
+ * clean tick after a clean tick and for an identical repeat (already journaled).
+ * `prevErrors` is the raw persisted value, so anything that is not a string array
+ * counts as "no previous errors".
+ */
+export function githubBridgeErrorTransitionLine(
+  slug: string,
+  prevErrors: unknown,
+  errors: readonly string[],
+  divergence: string,
+): string | null {
+  const prev = Array.isArray(prevErrors) ? prevErrors.filter((e): e is string => typeof e === 'string') : [];
+  const current = errors.slice(0, GITHUB_BRIDGE_PERSISTED_ERRORS);
+  const signature = (list: readonly string[]) => list.join('\n');
+  if (current.length > 0) {
+    if (signature(current) === signature(prev)) return null;
+    return `[github-bridge] ${slug}: tick errors (divergence=${divergence}): ${current.join(' | ').slice(0, 1500)}`;
+  }
+  if (prev.length > 0) {
+    return `[github-bridge] ${slug}: tick errors cleared (divergence=${divergence}; previous: ${prev
+      .join(' | ')
+      .slice(0, 500)})`;
+  }
+  return null;
+}
+
 export async function runGithubBridgeLeg(
   slug: string,
   workspaceId: string,
@@ -4197,16 +4589,20 @@ export async function runGithubBridgeLeg(
 
     // The admission watermark (P-005): the last ADMITTED github-origin head.
     const { sql } = getOrgPg();
-    const rows = await sql<{ la: string | null; wb_sha: string | null; prev_egress_head: string | null }[]>`
+    const rows = await sql<
+      { la: string | null; wb_sha: string | null; prev_egress_head: string | null; prev_errors?: unknown }[]
+    >`
       SELECT metadata->'github_bridge'->>'last_admitted' AS la,
              metadata->'worktree_bridge'->>'stagingSha' AS wb_sha,
-             metadata->'github_bridge'->>'egress_head' AS prev_egress_head
+             metadata->'github_bridge'->>'egress_head' AS prev_egress_head,
+             metadata->'github_bridge'->'errors' AS prev_errors
         FROM harness_shared.routines
        WHERE install_slug = ${slug} AND workspace_id = ${workspaceId} AND target_role = 'system:git-sync'
        LIMIT 1
     `;
     const lastAdmitted = rows[0]?.la ?? null;
     const prevEgressHead = rows[0]?.prev_egress_head ?? null;
+    const prevBridgeErrors = rows[0]?.prev_errors;
 
     // Catch-up pin (WI-3500): the bare-side canonical mirror (refs/hive/staging)
     // is maintained on staging-advance ACCEPTANCE (worktree-bridge step 3.5),
@@ -4313,6 +4709,17 @@ export async function runGithubBridgeLeg(
       // instead of silently reading `divergence: clear`.
       expectedCanonicalSha: wbSha,
     });
+
+    // WI-10006470: `github_bridge.errors` below is replaced wholesale every tick, so
+    // once an error streak clears its cause is gone from PG. Journal the streak's
+    // start/change and its clearing (never every repeat tick) so it stays recoverable.
+    const bridgeErrorLine = githubBridgeErrorTransitionLine(
+      slug,
+      prevBridgeErrors,
+      outcome.errors,
+      outcome.verdict.action,
+    );
+    if (bridgeErrorLine) console.warn(bridgeErrorLine);
 
     // EI-22754766601034346: P2P/local-path fetches intentionally do not update
     // the checkout's refs/remotes/*, so a fresh bridge egress can coexist with a
@@ -4954,6 +5361,32 @@ type ConvergenceProbeVerdict = ConvergenceVerdict & {
   releaseConsistency: ReleaseConsistencyVerdict;
 };
 
+/**
+ * The revoked device set git-sync's peer candidates are filtered by (WI-10006394): the
+ * same harness-scope ∪ Hive-scope UNION that admission seeds from (boot.ts
+ * `loadRevoked`), read through the same NOTIFY-invalidated caches. Each half fails
+ * toward JUDGING: a revocation read that fails leaves the pre-fix candidate set, so an
+ * outage can never silence a real NOT CONVERGED alarm.
+ */
+async function loadConvergenceRevokedSet(
+  workspaceId: string,
+  harnessSlug: string,
+  potHomeSlug: string,
+): Promise<Set<string>> {
+  const revoked = new Set<string>();
+  try {
+    for (const pk of await loadRevokedPubkeysCached({ workspaceId, harnessSlug })) revoked.add(pk);
+  } catch {
+    // harness-scope read failed: judge as before
+  }
+  try {
+    for (const pk of await loadRevokedHivePubkeysForLocalPotCached(workspaceId, potHomeSlug)) revoked.add(pk);
+  } catch {
+    // Hive-scope read failed: judge as before
+  }
+  return revoked;
+}
+
 async function runConvergenceProbe(input: {
   slug: string;
   workspaceId: string;
@@ -5137,6 +5570,9 @@ async function runConvergenceProbe(input: {
           `A completed fetch is NOT convergence: our mirror has not advanced while the pot announced newer ` +
           `snapshots on the (repoKey-independent) ref-announce plane. Treat any 'COLD JOIN COMPLETE' / ` +
           `bootstrap ok:true for this pot as UNSOUND until this clears. ` +
+          `If a device named here is gone for good (a deleted VM, a wiped machine), revoking it stops it ` +
+          `being judged (substrate:revoke_self_device reaches a device on a harness contributor row; one ` +
+          `listed only on the Hive member row has no single-device revoke yet, WI-10006415). ` +
           (await describeRefAnnounceReceiveFreshness(slug, workspaceId)),
       );
     }
@@ -5228,8 +5664,18 @@ export async function runBootstrapLeg(slug: string, workspaceId: string): Promis
     // wedged G-8 permanently when its one candidate was offline/stale (any
     // dead first candidate starved every later tick; live-caught on the P-303
     // reverse-leg drill 2026-07-17 with a live registered peer sitting unused).
-    const candidateDevicePubkeys = memberDevicePubkeysBase64.filter((d) => d !== selfDevicePubkey);
-    if (candidateDevicePubkeys.length === 0) return; // no member peer other than self yet — nothing to seed from
+    // ...except REVOKED ones (WI-10006394): a revoked device is never judged for
+    // convergence and never dialed as a seed. Read only when there is a non-self
+    // member to filter, so the common single-device case pays nothing.
+    const revokedDevicePubkeys = memberDevicePubkeysBase64.some((d) => d !== selfDevicePubkey)
+      ? await loadConvergenceRevokedSet(workspaceId, slug, potHomeSlug)
+      : new Set<string>();
+    const candidateDevicePubkeys = selectConvergenceCandidates({
+      memberDevicePubkeys: memberDevicePubkeysBase64,
+      selfDevicePubkey,
+      revokedDevicePubkeys,
+    });
+    if (candidateDevicePubkeys.length === 0) return; // no unrevoked member peer other than self yet — nothing to seed from
 
     // WI-6372 (fix D) — CRITICAL PLACEMENT: the convergence probe runs HERE,
     // ABOVE the warm gate, and its position is the whole point of the fix.
@@ -6532,32 +6978,10 @@ async function runIntegratorLeg(slug: string, workspaceId: string): Promise<void
            )
          WHERE install_slug = ${slug} AND workspace_id = ${workspaceId} AND target_role = 'system:git-sync'
       `;
-      // P-505 continuous will: refresh our handoff token to the state we just
-      // published, so a successor (crash OR graceful) adopts epoch+1 from it.
-      // Best-effort — a miss only degrades a future takeover to the crash path.
-      try {
-        await publishHandoffToken(
-          repoPath,
-          actor.devicePubkey,
-          {
-            epoch,
-            seq: outcome.announcement.seq,
-            stagingSha: outcome.announcement.staging_sha,
-            parked: (outcome.integration?.skippedConflicts ?? []).map((c) => ({
-              deviceHex: c.deviceHex,
-              sha: c.sha,
-            })),
-            nowMs: Date.now(),
-          },
-          actor.sign,
-        );
-      } catch (e) {
-        console.warn(
-          `[git-sync] ${slug}: handoff-token refresh failed (successor falls back to crash-path takeover): ${
-            e instanceof Error ? e.message : e
-          }`,
-        );
-      }
+      // WI-10005753 (p2p-git-live-activation-2026-07-09#D-055): no handoff
+      // token is published here. Under F6/D-022 successor epochs come from
+      // nextHivePublicationTerm (hive-effect-authority.ts), and nothing read
+      // the per-advance token after authority-epoch.ts was deleted.
     }
     const warning = formatIntegratorErrorWarning(slug, outcome.errors);
     if (warning) console.warn(warning);
@@ -6652,15 +7076,22 @@ async function runWorktreeBridgeLeg(slug: string, workspaceId: string): Promise<
         } | null;
         integrator: { epoch: number } | null;
         ref_announce: RefAnnounceRoutineState | null;
+        worktree_divergence: unknown;
       }[]
     >`
       SELECT metadata->'worktree_bridge' AS worktree_bridge, metadata->'integrator' AS integrator,
-             metadata->'ref_announce' AS ref_announce
+             metadata->'ref_announce' AS ref_announce, metadata->'worktree_divergence' AS worktree_divergence
         FROM harness_shared.routines
        WHERE install_slug = ${slug} AND workspace_id = ${workspaceId} AND target_role = 'system:git-sync'
        LIMIT 1
     `;
     const priorState = rows[0]?.worktree_bridge ?? null;
+    // WI-10006476 / D-055: the persisted member/hive conflict fork, if any.
+    const catchUpCtx = {
+      slug,
+      workspaceId,
+      priorDivergence: parseWorktreeDivergence(rows[0]?.worktree_divergence),
+    };
     const lastEventId = priorState?.lastEventId ?? 0;
     const priorWatermark = { epochSeq: priorState?.epochSeq ?? null, stagingSha: priorState?.stagingSha ?? null };
 
@@ -6693,7 +7124,7 @@ async function runWorktreeBridgeLeg(slug: string, workspaceId: string): Promise<
       // drained). Nothing re-announces that staging, so retry it here.
       const idleWorktreePath = priorWatermark.stagingSha ? await projectDirForSlug(slug, workspaceId) : null;
       if (idleWorktreePath && priorWatermark.stagingSha) {
-        await runWorktreeCatchUp(slug, repoPath, idleWorktreePath, priorWatermark.stagingSha);
+        await runWorktreeCatchUp(catchUpCtx, repoPath, idleWorktreePath, priorWatermark.stagingSha);
       }
       return;
     }
@@ -6858,7 +7289,7 @@ async function runWorktreeBridgeLeg(slug: string, workspaceId: string): Promise<
     // (stale / replayed / held) re-bridged nothing, so it is also the moment to
     // retry a worktree still trailing the accepted watermark.
     if (outcome.acceptedCount === 0 && outcome.watermark.stagingSha) {
-      await runWorktreeCatchUp(slug, repoPath, worktreePath, outcome.watermark.stagingSha);
+      await runWorktreeCatchUp(catchUpCtx, repoPath, worktreePath, outcome.watermark.stagingSha);
     }
   } catch (e) {
     console.warn(`[git-sync] ${slug}: worktree-bridge-tick failed: ${e instanceof Error ? e.message : e}`);
@@ -6873,16 +7304,36 @@ async function runWorktreeBridgeLeg(slug: string, workspaceId: string): Promise<
  * staging until some OTHER advance happens to arrive. `catchUpWorktreeToWatermark`
  * is fetch-free and cheap when the worktree already contains the watermark, and
  * ff-only / dirty-safe otherwise, so it is safe to run on every idle tick.
- * Only a real advance or an error is logged: deferred-dirty and diverged-manual
- * are expected, self-describing waiting states and would flood the log.
+ * Only a real advance or an error is logged per tick: deferred-dirty and a clean
+ * diverged-manual are expected, self-describing waiting states and would flood
+ * the log. A diverged-manual that CONFLICTS is different (WI-10006476 / plan
+ * agent-capacity-and-cost-gcp-2026-09-30 D-055): it never resolves on its own,
+ * so it is persisted in `metadata.worktree_divergence` and logged once when it
+ * starts, when its path set changes, and when it clears.
  */
 async function runWorktreeCatchUp(
-  slug: string,
+  ctx: { slug: string; workspaceId: string; priorDivergence: WorktreeDivergence | null },
   repoPath: string,
   worktreePath: string,
   stagingSha: string,
 ): Promise<void> {
+  const { slug } = ctx;
   const r = await catchUpWorktreeToWatermark(repoPath, worktreePath, stagingSha);
+  try {
+    const obs: DivergenceObservation =
+      r.outcome === 'current' || r.outcome === 'advanced' || r.outcome === 'noop'
+        ? { kind: 'contained' }
+        : r.outcome === 'diverged-manual' && r.from
+          ? { kind: 'diverged', localHead: r.from, hiveSha: stagingSha, paths: r.conflictPaths ?? null }
+          : { kind: 'unknown' };
+    const now = Date.now();
+    const t = nextWorktreeDivergence(ctx.priorDivergence, obs, now);
+    if (t.write) await patchRoutineMetadata(slug, ctx.workspaceId, { worktree_divergence: t.next });
+    const line = describeDivergenceTransition(slug, ctx.priorDivergence, t, now);
+    if (line) (t.log === 'cleared' ? console.log : console.warn)(line);
+  } catch (e) {
+    console.warn(`[git-sync] ${slug}: recording worktree divergence failed: ${e instanceof Error ? e.message : e}`);
+  }
   if (r.outcome === 'advanced') {
     console.log(
       `[git-sync] ${slug}: worktree-bridge catch-up advanced the worktree ${r.from?.slice(0, 12) ?? '(unborn)'} -> ` +
@@ -6967,7 +7418,7 @@ async function recordAndEscalateTick(a: {
     },
   });
 
-  await notifySkippedLockedPaths(slug, outcome);
+  await notifySkippedLockedPaths(slug, workspaceId, outcome);
 
   if (outcome.status === 'conflict') {
     // P-010/P-012: refresh the escalation (listing every conflicted scope) + dispatch
@@ -7066,7 +7517,10 @@ async function recordAndEscalateTick(a: {
     if (outcome.contentErrors.length > 0) {
       await patchRoutineMetadata(slug, workspaceId, {
         consecutive_content_error_ticks: 0,
-        last_content_errors: [],
+        last_content_errors: outcome.contentErrors.map((contentError) =>
+          `${contentError.scope}/${contentError.file} [${contentError.detectorKey}]`,
+        ),
+        last_content_error_signature: null,
         last_content_fixer: null,
       });
     }
@@ -7177,6 +7631,18 @@ export async function fireGitSyncNow(
   return handleGitSync({ installSlug, workspaceId, triggerConfig, payloadTemplate: null }, repoPath);
 }
 
+/**
+ * The scheduled (cron) entry point. The only engine-facing signal it forwards is
+ * WI-10004472's `replayAbandoned`: the routine engine must end an abandoned
+ * recovery replay without issuing its settle step.
+ */
+export async function gitSyncCronAction(ctx: SystemActionCtx): Promise<SystemActionResult | void> {
+  const outcome = await handleGitSync(ctx);
+  if (outcome.status === 'skipped' && 'replayAbandoned' in outcome && outcome.replayAbandoned) {
+    return { replayAbandoned: { reason: outcome.reason } };
+  }
+}
+
 // WI-1416: ownSteps — the handler checkpoints its OWN DBOS sub-steps, so the routine
 // engine must run it at the WORKFLOW layer (nested inside the engine's single step,
 // DBOS.runStep silently degrades to a plain call and nothing checkpoints).
@@ -7187,9 +7653,7 @@ export async function fireGitSyncNow(
 // result through the generic registry type.
 registerSystemAction(
   'git-sync',
-  async (ctx: SystemActionCtx): Promise<void> => {
-    await handleGitSync(ctx);
-  },
+  gitSyncCronAction,
   // `scheduling: 'on-demand'` (EI-18752496371939475): one row per HARNESS, ensured by
   // `git-sync-routine.ts` as harnesses are registered — not a standing workspace-wide row a
   // seed script creates. A workspace with no harnesses yet legitimately has zero rows.

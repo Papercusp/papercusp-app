@@ -422,6 +422,47 @@ export async function readActionableUngradedFilings(
 }
 
 /**
+ * Per-origin ARRIVAL counts for one scope: every filing routed at/after `sinceMs`,
+ * graded or not, decided or not — the inflow the grading rail has to keep pace with
+ * (WI-10004412). Same scope predicate as `readActionableUngradedFilings` (the harness
+ * partition plus the platform pot's workspace-global absorption, `shadow-variant`
+ * excluded, each origin floored at its own epoch), so "arrivals" and "the rows the
+ * sweep can name" describe one population. No origin is named here either.
+ *
+ * Inflow, not backlog, on purpose: a batch sized to the BACKLOG would name the whole
+ * 1,000-row history on every fire; a batch sized to ARRIVALS is the smallest one that
+ * stops the backlog growing when the recipient keeps up.
+ */
+export async function countRoutedByOriginSince(
+  sql: Sql,
+  args: { workspaceId: string; harnessSlug: string; policy: UngradedEpochPolicy; sinceMs: number },
+): Promise<Map<string, number>> {
+  const { workspaceId, harnessSlug, policy, sinceMs } = args;
+  const floors = JSON.stringify(policy.byOrigin);
+  const fallback = policy.fallbackMs;
+  const scope = workspaceGlobalScopeFor(workspaceId, harnessSlug);
+  const rows = await sql<{ origin: string; c: number | string | null }[]>`
+    WITH scoped AS (
+      SELECT origin, routed_at,
+             coalesce((${floors}::jsonb ->> origin)::bigint, ${fallback}::bigint) AS epoch_ms
+        FROM harness_shared.scout_routed_ideas
+       WHERE workspace_id = ${workspaceId}
+         AND (
+              harness_slug = ${harnessSlug}
+           OR (${scope.absorbsWorkspaceGlobal}
+               AND (harness_slug = ANY(${scope.labels}) OR harness_slug LIKE ${scope.likePattern}))
+         )
+         AND origin <> ${SHADOW_VARIANT_ORIGIN}
+         AND routed_at >= ${sinceMs}
+    )
+    SELECT origin, count(*)::int AS c
+      FROM scoped
+     WHERE routed_at >= epoch_ms
+     GROUP BY origin`;
+  return new Map(rows.map((r) => [r.origin, Math.max(0, Number(r.c ?? 0))]));
+}
+
+/**
  * Count actionable ungraded filings across a WORKSPACE that are already older than
  * `staleBeforeMs` — the nudge rail's coverage probe for "eligible backlog exists, but
  * no registered scope was evaluated". Workspace-wide on purpose: it exists precisely

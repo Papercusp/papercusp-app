@@ -9,8 +9,9 @@
  *   2. `governor.acquire(est)` — BLOCK until a slot frees (backpressure, D-004) rather than
  *      bursting; a wait longer than `maxQueueWaitMs` returns a synthetic 429 + `retry-after`
  *      (so a multi-hour capacity pause doesn't pin an HTTP socket open for hours);
- *   3. inject `Authorization: Bearer <bound-account-token>` + `anthropic-beta: oauth-…`
- *      (the bee sends UNAUTHENTICATED to 127.0.0.1) and forward to api.anthropic.com,
+ *   3. inject the bound account's credential per attempt — `Authorization: Bearer <token>` +
+ *      `anthropic-beta: oauth-…` for a subscription account, `x-api-key` (no OAuth beta) for a
+ *      Console API-key account (the bee sends UNAUTHENTICATED to 127.0.0.1) — and forward to api.anthropic.com,
  *      streaming SSE through untouched;
  *   4. feed every response's `anthropic-ratelimit-*` headers back into the governor
  *      (`recordResponse` → unified-utilization pace/pause, D-009) and `penalize()` on 429/529.
@@ -55,9 +56,17 @@ import {
   ProviderAdmissionLifecycle,
   type ProviderLaneId,
 } from './provider-admission-lifecycle';
-import { accountLoadKey, ACCOUNT_INFLIGHT_LOAD_WEIGHT, type AccountBurnAction } from './account-failover';
+import { accountLoadKey, ACCOUNT_INFLIGHT_LOAD_WEIGHT, FIVE_HOURS_MS, type AccountBurnAction } from './account-failover';
 import { selectAffectedOwners } from './affected-owners';
-import { CLAUDE_CONTEXT_1M_BETA, withOAuthBeta, scrubSecrets } from './credential-store';
+import { CLAUDE_CONTEXT_1M_BETA, withClientBetas, scrubSecrets } from './credential-store';
+import {
+  classifyClaudeCreditWallResponse,
+  CREDIT_WALL_DEFAULT_PAUSE_MS,
+  parseClaudeBillingState,
+  type ClaudeBillingStateKind,
+  type ClaudeCreditWall,
+  type ClaudeCreditWallCause,
+} from './anthropic-billing';
 import { classifyCredential401Streak, DEFAULT_CREDENTIAL_401_DEAD_THRESHOLD } from './credential-health';
 import { createCodexModelRefusalRegistry, type CodexModelRefusalEntry } from './codex-model-refusals';
 import { dbHealthSnapshot, type DbHealthSnapshot } from './db-health';
@@ -73,6 +82,7 @@ import {
   makeGatewayLaneRegistry,
   makeGatewayProviderAdapters,
   providerForGatewayRequest,
+  REQUIRE_OUTPUT_TOKEN_LIMIT_HEADER,
   type GatewayLaneDescriptor,
   type GatewayLegacyExecutorId,
 } from './provider-adapters';
@@ -167,6 +177,13 @@ import {
   type AnthropicCacheStats,
   type OpenAiCacheStats,
 } from './cache-policy';
+import {
+  chooseSupportedEffort,
+  createEffortClampCache,
+  parseUnsupportedEffortError,
+  readRequestEffort,
+  rewriteRequestEffort,
+} from './effort-clamp';
 import type { LocalBackend, LocalBackendPool } from './local-backend-pool';
 import {
   AdmitImmediatelyDriver,
@@ -351,7 +368,7 @@ const USAGE_LIMIT_DEFAULT_PAUSE_MS = 60 * 60 * 1000;
  *  account's Anthropic org disabled OAuth API access, or Claude Code for the subscription. The account
  *  is unusable until an admin re-enables it, so pause it OUT of rotation this long (re-probes after) +
  *  fail over — instead of forwarding the 403, which hard-fails the bee AND, when the account is
- *  active(), 403-blocks the WHOLE fleet (the owner-owner incident, 2026-06-18). */
+ *  active(), 403-blocks the WHOLE fleet (the avi-storewolf incident, 2026-06-18). */
 const ORG_DISALLOW_PAUSE_MS = 6 * 60 * 60 * 1000;
 /** Consecutive org-disallowed 403s from ONE account that trigger PERSISTENT deactivation (`onOrgDisallowed`).
  *  Default 1: org-disable is a DEFINITIVE Anthropic-side permission_error (not a transient throttle), AND the
@@ -684,6 +701,11 @@ export const PIN_YIELDED_HEADER = 'x-papercusp-pin-yielded';
  *  sonnet so the call succeeds instead of hard-failing. Makes the silent-substitution VISIBLE to the
  *  caller + observable in the journal. Value: `opus->sonnet`. Not forwarded upstream. */
 export const MODEL_DOWNGRADED_HEADER = 'x-papercusp-model-downgraded';
+/** WI-10005833: set on the response back to the client when the gateway rewrote the request's
+ *  `output_config.effort` because the model refuses that level (learned from an upstream 400 naming the
+ *  supported levels). Makes the substitution visible to the caller. Value: `<from>-><to>`, e.g.
+ *  `xhigh->max`. Not forwarded upstream. */
+export const EFFORT_CLAMPED_HEADER = 'x-papercusp-effort-clamped';
 /** Set on the response back to the client when the gateway's internal retry ladder for a 429/529
  *  (bounded transient-wait + absorb +, for opus, the last-resort downgrade) is fully EXHAUSTED and
  *  the terminal upstream status is being forwarded as the gateway's final answer. Value: the number
@@ -771,7 +793,39 @@ export function hasContext1mBeta(betaHeader: string | null | undefined): boolean
  *  downgrade target — a beta the model rejects is a 400, no better than the overflow it would prevent. */
 export function supportsContext1m(model: string, priorContext1mModel?: string | null): boolean {
   if (priorContext1mModel && model === priorContext1mModel) return true;
-  return Object.values(ONE_MILLION_MODEL_ALIASES).includes(model);
+  return Object.values(ONE_MILLION_MODEL_ALIASES).includes(model) || isDefaultContext1mModel(model);
+}
+
+/** WI-10006049: API model ids of the Claude families papercusp serves at 1M BY DEFAULT —
+ *  generation-5+ opus, sonnet and fable (the API-id side of agent-config-constants
+ *  DEFAULT_1M_FAMILY_RE, which covers launch SPECS like `opus`/`sonnet-5`). Measured against the
+ *  2.1.289 CLI: its 1M aliases are exactly opus/sonnet/fable/opusplan `[1m]`, and their API ids
+ *  are dated point releases (`claude-opus-5-5`, `claude-fable-5-1`, `claude-sonnet-5-5`) that the
+ *  ONE_MILLION_MODEL_ALIASES table (the bare `-5` ids) does not list. Deliberately NOT haiku and NOT
+ *  the 4.x generations: a 1M beta the model rejects is a 400. */
+export function isDefaultContext1mModel(model: string | null | undefined): boolean {
+  return /^claude-(?:opus|sonnet|fable)-(?:[5-9]|[1-9]\d+)(?:[-.][0-9a-z.-]*)?$/i.test(String(model ?? '').trim());
+}
+
+/** WI-10006049 (owner Avi 2026-10-05 #1369/#1371: "if the default is 1m that sounds good" ·
+ *  "make sure this works for all claude models too not just opus"): a papercusp-managed caller
+ *  (it carries the owner header) asking for a 1M-capable family WITHOUT the 1M beta is served at
+ *  1M anyway. This is what makes the default survive Claude Code's bare `/model` menu: on 2.1.289
+ *  the menu saves the 200k `opus`/`sonnet`/`fable` pick and the CLI then sends no beta, which
+ *  re-seeded sessions at a 158k limit below their own ~130-165k fixed prompt (a respawn storm).
+ *  Below 200k input tokens the beta changes nothing about price or limits; above it, it is the
+ *  difference between a served request and "Prompt is too long". Un-owned callers are untouched.
+ *  Pure; the request handler applies it. */
+export function shouldDefaultContext1m(args: {
+  owner: string | null | undefined;
+  url: string;
+  model: string;
+  context1m: boolean;
+  clientHas1m: boolean;
+}): boolean {
+  if (!args.owner || args.context1m || args.clientHas1m) return false;
+  if (!args.url.startsWith('/v1/messages')) return false;
+  return isDefaultContext1mModel(args.model);
 }
 
 /** Below this many (bytes/4-estimated) input tokens a 200k window is not in danger, so a caller that
@@ -865,11 +919,7 @@ function acceptedCodexModelAllows(
 }
 
 function forwardedClaudeEffort(bodyBuf: Buffer): string | null {
-  try {
-    const parsed = JSON.parse(bodyBuf.toString('utf8')) as { output_config?: { effort?: unknown } };
-    return typeof parsed.output_config?.effort === 'string' && parsed.output_config.effort.trim()
-      ? parsed.output_config.effort.trim().toLowerCase() : null;
-  } catch { return null; }
+  return readRequestEffort(bodyBuf);
 }
 
 /** Convert only an accepted Anthropic policy entry to an upstream API id.
@@ -909,6 +959,118 @@ export interface GatewayModelResolution {
   model: string;
   context1m: boolean;
 }
+
+/** Reasoning-effort ladder a fallback-lineup Codex model advertises (standard = low..xhigh, max adds max, ultra adds ultra). */
+export type CodexFallbackReasoningTier = 'standard' | 'max' | 'ultra';
+
+export interface CodexFallbackLineupEntry {
+  slug: string;
+  displayName: string;
+  description: string;
+  priority: number;
+  /** Advertised context window; absent = 272,000. */
+  contextWindow?: number;
+  /** Advertised max window; absent = `contextWindow` (a real "no extended window" state). */
+  maxContextWindow?: number;
+  /** Absent = 'standard'. */
+  reasoning?: CodexFallbackReasoningTier;
+}
+
+/**
+ * The Codex model lineup the gateway advertises on `GET /v1/models` when no live
+ * account catalog is available (`codexModelsResponse`). Data only: the response
+ * builder maps each row through its `model()` shape. Windows mirror the upstream
+ * registry (see that builder's note); keep them in sync alongside the lineup.
+ *
+ * Exported so `configured-models-priced.test.ts` derives its population from it
+ * (WI-10004506): every model the gateway offers must have a usage price, or
+ * llm-client's Codex path refuses it at call time (the WI-10004502 Scout outage).
+ */
+export const CODEX_GATEWAY_FALLBACK_LINEUP: readonly CodexFallbackLineupEntry[] = [
+  {
+    slug: 'gpt-6.1-sol',
+    displayName: 'GPT-6.1-Sol',
+    description: 'Latest Sol workhorse for coding and everyday tasks.',
+    priority: 17,
+    contextWindow: 272_000,
+    maxContextWindow: 1_000_000,
+    reasoning: 'max',
+  },
+  {
+    slug: 'gpt-6-astra',
+    displayName: 'GPT-6-Astra',
+    description: 'Our most capable model for complex, demanding work.',
+    priority: 16,
+    contextWindow: 272_000,
+    maxContextWindow: 872_000,
+    reasoning: 'ultra',
+  },
+  {
+    slug: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6-Sol',
+    description: 'Reliable agentic workhorse for everyday tasks.',
+    priority: 15,
+    contextWindow: 272_000,
+    maxContextWindow: 872_000,
+    reasoning: 'ultra',
+  },
+  {
+    slug: 'gpt-6-sol',
+    displayName: 'GPT-6-Sol',
+    description: 'GPT-6 Sol Codex model.',
+    priority: 15,
+    contextWindow: 272_000,
+    maxContextWindow: 872_000,
+    reasoning: 'ultra',
+  },
+  {
+    slug: 'gpt-6-luna',
+    displayName: 'GPT-6-Luna',
+    description: 'GPT-6 Luna Codex model.',
+    priority: 14,
+    contextWindow: 272_000,
+    maxContextWindow: 872_000,
+    reasoning: 'max',
+  },
+  {
+    slug: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6-Terra',
+    description: 'Balanced agentic coding model for everyday work.',
+    priority: 14,
+    contextWindow: 272_000,
+    maxContextWindow: 872_000,
+    reasoning: 'ultra',
+  },
+  {
+    slug: 'gpt-5.6-luna',
+    displayName: 'GPT-5.6-Luna',
+    description: 'Fast and affordable agentic coding model.',
+    priority: 13,
+    contextWindow: 272_000,
+    maxContextWindow: 872_000,
+    reasoning: 'max',
+  },
+  {
+    slug: 'gpt-5.5',
+    displayName: 'GPT-5.5',
+    description: 'Frontier model for complex coding, research, and real-world work.',
+    priority: 12,
+  },
+  {
+    slug: 'gpt-5.4',
+    displayName: 'GPT-5.4',
+    description: 'Strong model for everyday coding.',
+    priority: 11,
+    contextWindow: 272_000,
+    maxContextWindow: 1_000_000,
+  },
+  {
+    slug: 'gpt-5.4-mini',
+    displayName: 'GPT-5.4-Mini',
+    description: 'Small, fast, and cost-efficient model for simpler coding tasks.',
+    priority: 10,
+  },
+];
 
 /** Resolve a CLI model marker to the real upstream model id and its beta requirement. */
 export function resolveGatewayModel(model: string): GatewayModelResolution {
@@ -1002,6 +1164,7 @@ const STRIP_REQUEST = new Set([
   'x-papercusp-account',
   'x-papercusp-account-pin',
   'x-papercusp-owner',
+  REQUIRE_OUTPUT_TOKEN_LIMIT_HEADER,
   'content-length',
   'accept-encoding',
   'connection',
@@ -1020,8 +1183,9 @@ export interface GatewayCarryTrialAttempt {
   readonly attemptId: string;
   readonly manifestSha256: string;
   readonly armId: string;
-  readonly transport: 'oauth-http' | 'bearer-http';
+  readonly transport: 'oauth-http' | 'bearer-http' | 'anthropic-http';
   readonly accountId: string;
+  readonly credentialHeader: 'authorization' | 'x-api-key';
   readonly credentialSha256: string;
   readonly target: string;
   readonly body: string;
@@ -1033,6 +1197,9 @@ export interface GatewayCarryTrialAttempt {
 export interface GatewayCarryTrialBinding {
   readonly manifestSha256: string;
   readonly armId: string;
+  /** Explicit host-owned inference protocols. Omission retains the original
+   * OpenAI-only binding; an Anthropic arm cannot use unobserved alternate routes. */
+  readonly protocols?: readonly ('openai-responses' | 'anthropic-messages')[];
   /** SHA256 of a controller-issued high-entropy Bearer token for THIS arm.
    * This is a dedicated gateway binding, not a caller-selected owner/arm header. */
   readonly requestTokenSha256: string;
@@ -1042,6 +1209,63 @@ export interface GatewayCarryTrialBinding {
     readonly clockId: string;
     readonly validUntilMonotonicMs: number;
   } | null>;
+}
+
+export type GatewayGoalBudgetDecision =
+  | { readonly allowed: true }
+  | {
+      readonly allowed: false;
+      readonly status: 403 | 503;
+      readonly code: string;
+      readonly message: string;
+    };
+
+class GoalInferenceAdmissionRefusal extends Error {
+  constructor(
+    readonly status: 403 | 503,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'GoalInferenceAdmissionRefusal';
+  }
+}
+
+function respondGoalInferenceAdmissionRefusal(
+  error: unknown,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  writeJson: (
+    response: http.ServerResponse,
+    status: number,
+    body: unknown,
+    extra?: Record<string, string>,
+  ) => void,
+): boolean {
+  if (!(error instanceof GoalInferenceAdmissionRefusal)) return false;
+  req.resume();
+  const retryable = error.status === 503;
+  if (!res.headersSent) {
+    writeJson(
+      res,
+      error.status,
+      {
+        type: 'error',
+        error: {
+          type: retryable ? 'overloaded_error' : 'permission_error',
+          code: error.code,
+          message: error.message,
+        },
+        gateway: true,
+      },
+      retryable
+        ? { 'retry-after': String(LOADSHED_RETRY_AFTER_SEC), 'x-should-retry': 'true' }
+        : { 'x-should-retry': 'false' },
+    );
+  } else if (!res.destroyed) {
+    res.destroy();
+  }
+  return true;
 }
 
 export interface GatewayDeps {
@@ -1069,6 +1293,8 @@ export interface GatewayDeps {
   admissionGovernor?: GatewayAdmissionGovernor;
   /** Optional parent lineage when the gateway is itself running under a governed request. */
   admissionParent?: AdmissionContext | null;
+  /** Per-turn goal budget check; runs before body spool and durable admission. */
+  checkGoalInferenceAdmission?: (ownerId: string) => Promise<GatewayGoalBudgetDecision>;
   /** Single-account fallback: a fresh bearer for the bound account (the resolver's `current`).
    *  Superseded by `pool` when present. */
   token?(): Promise<string>;
@@ -1426,6 +1652,38 @@ export interface GatewayCacheCounts {
   coverage: { requests: number; readKnown: number; writeKnown: number; uncachedInputKnown: number; inputTotalKnown: number; tokenRateRequests: number };
 }
 
+/** How a served Claude request was billed (P-009): the flat-rate subscription allowance, subscription
+ *  usage credits (overage, per token at API rates), or API credits (an api-key account, per token). */
+export type GatewayBillingClass = 'included' | 'usage-credits' | 'api-credits';
+/** Requests served in one billing class and the token usage they reported. Only KNOWN counts are added:
+ *  `usageKnown` = requests whose input-side usage was read, `outputKnown` = requests whose final output
+ *  count was read (a stream cut before its closing `message_delta` reports no output count). */
+export interface GatewayBillingTally {
+  requests: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
+  usageKnown: number;
+  outputKnown: number;
+}
+/** One Claude account's billing view (P-009). `state` is its CURRENT billing state from the latest
+ *  upstream response (`api-credits` for an api-key account; `unknown` before any response); `stateUntil`
+ *  is the allowance reset that response named. `meteredNow` = billed per token right now. */
+export interface GatewayAccountBilling {
+  state: ClaudeBillingStateKind | 'api-credits' | 'unknown';
+  stateUntil?: number;
+  meteredNow: boolean;
+  authMode: 'oauth' | 'api-key';
+  meteredPolicy: 'overflow' | 'never';
+  classes: Partial<Record<GatewayBillingClass, GatewayBillingTally>>;
+  metered: GatewayBillingTally;
+  /** Present while the account sits behind a credit wall (D-004): WHY (402 billing_error →
+   *  `billing-error`, 429 enforced_spend_limit_reached → `spend-limit`, 400 API usage limits →
+   *  `api-usage-limit`) and the epoch-ms the wall's pause ends. Absent once it clears. */
+  wall?: { cause: ClaudeCreditWallCause | 'unknown'; until: number };
+}
+
 export interface GatewayStats {
   accountId: string;
   upstreamBase: string;
@@ -1536,6 +1794,15 @@ export interface GatewayStats {
    *  pool-wide (a hard 403 org-disallow / usage-cap / unified-window rejection it could not route or wait
    *  around). A non-zero value = the fleet is running critical work on sonnet because opus is exhausted. */
   opusToSonnetDowngrades: number;
+  /** WI-10005833: unsupported reasoning-effort clamp. `retries` = requests retried once after an upstream
+   *  400 named their `output_config.effort` unsupported; `rewrites` = requests rewritten from a learned
+   *  clamp before they were sent; `learned` = the live (model, from → to) substitutions. A non-zero
+   *  `retries` means some launch path is still sending a level its model refuses. */
+  effortClamps: {
+    retries: number;
+    rewrites: number;
+    learned: Array<{ model: string; from: string; to: string; learnedAt: number; applied: number }>;
+  };
   /** The admission backlog cap that triggers load-shedding (0 = unbounded). */
   maxQueued: number;
   /** The CONFIGURED admission-concurrency cap (the AIMD ceiling). `admission.maxConcurrent` is the LIVE
@@ -1703,6 +1970,13 @@ export interface GatewayStats {
     /** AUTO-ROUTE SESSION AFFINITY (WI-2140943): how unpinned requests were routed since boot. `nokey` is
      *  the population still on per-request round-robin (no owner header, no per-session metadata). */
     affinity: { hits: number; cold: number; nokey: number; yields: number; enabled: boolean; ttlMs: number };
+  };
+  /** METERED SPEND VISIBILITY (anthropic-credits-gateway-2026-09-30 P-009). One row per Claude pool
+   *  account: its CURRENT billing state and the requests + tokens it served per billing class since boot.
+   *  `metered` sums the per-token-billed classes (usage-credits + api-credits), per account and pool-wide. */
+  billing: {
+    byAccount: Record<string, GatewayAccountBilling>;
+    metered: GatewayBillingTally;
   };
   /** DURABLE-PATH health (EI-19303809952284205). The gateway's DB-touching side-paths (usage-window
    *  projection, pool reload, rate hints, scale observer) are all fire-and-forget by design, so when
@@ -2056,7 +2330,16 @@ export function accumulateGatewayRouteUsage(
 export function createInferenceGateway(deps: GatewayDeps) {
   // Snapshot the binding so a mutable dependency cannot change an arm or remove
   // its enforcement while the request is queued or waiting on authorization.
-  const carryTrial = deps.carryTrial ? Object.freeze({ ...deps.carryTrial }) : null;
+  const carryTrialProtocols = deps.carryTrial?.protocols === undefined
+    ? ['openai-responses'] : deps.carryTrial.protocols;
+  if (deps.carryTrial && (!Array.isArray(carryTrialProtocols) || carryTrialProtocols.length === 0 ||
+    carryTrialProtocols.length > 2 || new Set(carryTrialProtocols).size !== carryTrialProtocols.length ||
+    carryTrialProtocols.some(protocol => protocol !== 'openai-responses' && protocol !== 'anthropic-messages'))) {
+    throw new Error('inference-gateway: invalid carry trial protocols');
+  }
+  const carryTrial = deps.carryTrial ? Object.freeze({ ...deps.carryTrial,
+    protocols: Object.freeze([...carryTrialProtocols]),
+  }) : null;
   if (carryTrial && (!/^[a-f0-9]{64}$/.test(carryTrial.manifestSha256) ||
     !/^[a-f0-9]{64}$/.test(carryTrial.requestTokenSha256) || !carryTrial.armId.trim() ||
     typeof carryTrial.authorizeAttempt !== 'function')) {
@@ -2075,8 +2358,14 @@ export function createInferenceGateway(deps: GatewayDeps) {
   ): Promise<() => void> {
     if (!carryTrial) return () => {};
     if (!carryTrialRequests.has(req) || !accountId || !init.body || init.signal.aborted) throw trialRefusal();
-    const authorization = new Headers(init.headers).get('authorization');
-    if (!authorization) throw trialRefusal();
+    const headers = new Headers(init.headers);
+    const authorization = headers.get('authorization');
+    const apiKey = transport === 'anthropic-http' ? headers.get('x-api-key') : null;
+    // Hash the actual selected provider credential, not the incoming binding
+    // token. Ambiguous auth shapes cannot establish which credential pays.
+    if ((!authorization && !apiKey) || (authorization && apiKey)) throw trialRefusal();
+    const credentialHeader = authorization ? 'authorization' : 'x-api-key';
+    const credential = authorization ?? apiKey!;
     const body = Buffer.from(init.body).toString('utf8');
     const attemptId = randomUUID();
     let reservation: Awaited<ReturnType<GatewayCarryTrialBinding['authorizeAttempt']>>;
@@ -2085,7 +2374,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
         attemptId, manifestSha256: carryTrial.manifestSha256, armId: carryTrial.armId,
         transport, accountId, target, body,
         bodySha256: createHash('sha256').update(init.body).digest('hex'),
-        credentialSha256: createHash('sha256').update(authorization).digest('hex'),
+        credentialHeader, credentialSha256: createHash('sha256').update(credential).digest('hex'),
         clockId: processMonotonicClock.id, signal: init.signal,
       }));
     } catch { throw trialRefusal(); } // Do not expose private controller errors.
@@ -2116,7 +2405,12 @@ export function createInferenceGateway(deps: GatewayDeps) {
   // incarnations can never coin the same fallback key, while the sequence counters still keep
   // keys unique WITHIN one process's lifetime exactly as before.
   const gatewayProcessInstanceId = randomUUID();
-  const requestStageTelemetry = new GatewayRequestTelemetry();
+  // First request per owner is journaled as bounded startup-cache evidence (R-10): the 256-row
+  // in-process ring spans only minutes, so a ten-launch cohort rolls out before it can be assessed.
+  // `log` is initialised later in this closure but is only invoked at request-completion time.
+  const requestStageTelemetry = new GatewayRequestTelemetry({
+    onStartupEvidence: (line) => log('info', line),
+  });
   interface RequestTelemetryState {
     span: GatewayRequestSpan;
     finished: boolean;
@@ -3099,6 +3393,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
   let shedAllThrottled = 0; // fail-fast: 429s shed at admission because the whole pool was throttled (B-GW-1)
   let bareBurstRotateSuppressed = 0; // G1 (WI-649): bare-429 rotate-retries suppressed because ≥half the pool was out of rotation (fleet-wide storm)
   let opusToSonnetDowngrades = 0; // WI-1073: last-resort opus→sonnet downgrades (opus walled pool-wide → sonnet-vs-nothing)
+  // WI-10005833: unsupported reasoning-effort clamp. The cache is per gateway instance, learned from
+  // upstream 400s that list the model's supported levels.
+  const effortClampCache = createEffortClampCache();
+  let effortClampRetries = 0; // requests retried once after a 400 named their effort unsupported
+  let effortClampRewrites = 0; // requests rewritten from a learned clamp before they were sent
   let upstreamErrors = 0;
   let failovers = 0;
   let egressCircuitOpens = 0; // B-GW-EGRESS: per-account egress-proxy circuit opens (dead/flapping IP, transport-failure streak)
@@ -3235,8 +3534,106 @@ export function createInferenceGateway(deps: GatewayDeps) {
       /** When the store TOOK this reading (`utilizationAt`). The store↔pool reconciliation clears a
        *  park only on a reading NEWER than the park — an older reading says nothing about it. */
       readingAt?: number;
+      usageCreditsAvailable?: boolean;
     }
   >();
+  /** P-008 (anthropic-credits-gateway-2026-09-30): each Claude account's latest billing state, parsed
+   *  from the unified-limiter headers of its OWN upstream responses. `until` = the allowance reset the
+   *  same response named: a `usage-credits` reading stops applying there (the allowance is back). */
+  const claudeBillingByAccount = new Map<string, { state: ClaudeBillingStateKind; until?: number }>();
+  /** D-004 / D-008 E4: each account's latest credit wall — its cause and when the wall's pause ends.
+   *  Stats report it while `until` is in the future; a served (2xx) response from the account clears it. */
+  const claudeCreditWallByAccount = new Map<string, { cause: ClaudeCreditWallCause | 'unknown'; until: number }>();
+  const recordClaudeBilling =(account: ActiveAccount, headers: Record<string, string | undefined>): void => {
+    const billing = parseClaudeBillingState(headers);
+    if (!billing) return;
+    const secToMs = (v: string | undefined): number | undefined =>
+      v && /^\d+$/.test(v.trim()) ? Number(v.trim()) * 1000 : undefined;
+    const namedUntil =
+      secToMs(headers['anthropic-ratelimit-unified-reset']) ?? secToMs(headers['anthropic-ratelimit-unified-5h-reset']);
+    // A usage-credits reading that named no reset is bounded by the SAME horizon the pool parks for
+    // (FIVE_HOURS_MS, onExhausted's no-reset default). Unbounded, it stayed "metered" forever: a
+    // `metered: never` account then outlived its park and every route to it — auto or pinned — was
+    // refused with no response ever arriving to clear the reading (D-008 E1, never held indefinitely).
+    const until = namedUntil ?? (billing.state === 'usage-credits' ? Date.now() + FIVE_HOURS_MS : undefined);
+    claudeBillingByAccount.set(account.accountId, { state: billing.state, ...(until !== undefined ? { until } : {}) });
+    // `metered: never` makes usage-credit overage a WALL (D-003). Park the account in the pool until its
+    // allowance resets: every selection path (round-robin, failover walk, kernel rotation, internal retry)
+    // already skips a parked account, so no further request is billed per token. A hard pin bypasses the
+    // pool (select() ignores parks) and is refused before admission instead.
+    if (account.meteredPolicy === 'never' && inUsageCredits(account, Date.now())) {
+      pool.onExhausted(account.accountId, until ?? 0);
+    }
+  };
+  /** True while this subscription account is past its allowance and serving from usage credits. */
+  const inUsageCredits = (account: ActiveAccount, at: number): boolean => {
+    if (account.authMode === 'api-key') return false;
+    const h = accountRateHints.get(account.accountId);
+    if (h?.usageCreditsAvailable === true && [
+      { utilization: h.utilization, resetAt: h.windowResetAt },
+      { utilization: h.utilization7d, resetAt: h.windowResetAt7d },
+    ].some((window) => (window.utilization ?? 0) >= HINT_CAPACITY_FULL_AT &&
+      !(window.resetAt !== undefined && window.resetAt <= at))) return true;
+    const b = claudeBillingByAccount.get(account.accountId);
+    return b?.state === 'usage-credits' && !(b.until !== undefined && b.until <= at);
+  };
+  /** Billed per token right now: an api-key account, or a subscription serving from usage credits. */
+  const isMeteredNow = (account: ActiveAccount, at: number): boolean =>
+    account.authMode === 'api-key' || inUsageCredits(account, at);
+  /** P-009: the billing class a request served by `account` right now falls in. */
+  const billingClassOf = (account: ActiveAccount, at: number): GatewayBillingClass =>
+    account.authMode === 'api-key' ? 'api-credits' : inUsageCredits(account, at) ? 'usage-credits' : 'included';
+  const newBillingTally = (): GatewayBillingTally => ({
+    requests: 0, inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, outputTokens: 0, usageKnown: 0, outputKnown: 0,
+  });
+  /** P-009: per-account, per-billing-class served requests + token usage since boot. */
+  const billingTallyByAccount = new Map<string, Map<GatewayBillingClass, GatewayBillingTally>>();
+  const billingTally = (accountId: string, cls: GatewayBillingClass): GatewayBillingTally => {
+    let byClass = billingTallyByAccount.get(accountId);
+    if (!byClass) billingTallyByAccount.set(accountId, (byClass = new Map()));
+    let t = byClass.get(cls);
+    if (!t) byClass.set(cls, (t = newBillingTally()));
+    return t;
+  };
+  const addBillingTally = (into: GatewayBillingTally, t: GatewayBillingTally): void => {
+    into.requests += t.requests;
+    into.inputTokens += t.inputTokens;
+    into.cacheReadTokens += t.cacheReadTokens;
+    into.cacheCreationTokens += t.cacheCreationTokens;
+    into.outputTokens += t.outputTokens;
+    into.usageKnown += t.usageKnown;
+    into.outputKnown += t.outputKnown;
+  };
+  function billingSnapshot(): GatewayStats['billing'] {
+    const now = Date.now();
+    const byAccount: Record<string, GatewayAccountBilling> = {};
+    const poolMetered = newBillingTally();
+    const known = new Map<string, ActiveAccount>((pool.entries?.() ?? []).map((a) => [a.accountId, a]));
+    for (const id of new Set([...known.keys(), ...billingTallyByAccount.keys()])) {
+      const account = known.get(id);
+      const recorded = claudeBillingByAccount.get(id);
+      const classes: GatewayAccountBilling['classes'] = {};
+      const metered = newBillingTally();
+      for (const [cls, t] of billingTallyByAccount.get(id) ?? []) {
+        classes[cls] = { ...t };
+        if (cls !== 'included') addBillingTally(metered, t);
+      }
+      addBillingTally(poolMetered, metered);
+      const wall = claudeCreditWallByAccount.get(id);
+      byAccount[id] = {
+        ...(wall && wall.until > now ? { wall: { cause: wall.cause, until: wall.until } } : {}),
+        state: account?.authMode === 'api-key' ? 'api-credits' : (recorded?.state ?? 'unknown'),
+        ...(recorded?.until !== undefined && account?.authMode !== 'api-key' ? { stateUntil: recorded.until } : {}),
+        meteredNow: account ? isMeteredNow(account, now) : false,
+        authMode: account?.authMode ?? 'oauth',
+        meteredPolicy: account?.meteredPolicy ?? 'overflow',
+        classes,
+        metered,
+      };
+    }
+    return { byAccount, metered: poolMetered };
+  }
+
   /** The ONE gateway adaptation into accountLoadKey. Claude supplies its live per-account governor;
    *  Codex supplies the same durable capacity/burn hints plus shared transport state. Keeping the
    *  adaptation here prevents the provider handlers from growing subtly different health formulas. */
@@ -3249,22 +3646,30 @@ export function createInferenceGateway(deps: GatewayDeps) {
     const accountId = account.accountId;
     const h = accountRateHints.get(accountId);
     const unified = cgov?.snapshot().unified;
+    // P-008/D-003: usage credits carry an overage account past its allowance, so the allowance walls
+    // (a rejected/full unified window, the store's allowance readings and their park) do not stop it —
+    // it is scored as METERED instead, behind every serviceable included-allowance account.
+    const overage = inUsageCredits(account, at);
     const base = accountLoadKey({
       paused:
         (cgov?.state.pausedUntil ?? 0) > at ||
         (egressPauseUntil.get(accountId) ?? 0) > at ||
-        (h?.pausedUntil ?? 0) > at,
-      exhausted: !!unified?.rejected && !(unified.resetAt > 0 && unified.resetAt <= at),
+        ((!overage || h?.usageCreditsAvailable === true) && (h?.pausedUntil ?? 0) > at),
+      exhausted: !overage && !!unified?.rejected && !(unified.resetAt > 0 && unified.resetAt <= at),
       transportHealth: (egressFailStreak.get(accountId) ?? 0) > 0 ? 'degraded' : 'healthy',
       inFlight: cgov ? Math.max(0, cgov.state.inFlight + inFlightAdjustment) : undefined,
-      utilization: unified?.utilization,
-      capacityWindows: [
-        { utilization: unified?.utilization, resetAt: unified?.resetAt },
-        { utilization: h?.utilization, resetAt: h?.windowResetAt },
-        { utilization: h?.utilization7d, resetAt: h?.windowResetAt7d },
-      ],
+      utilization: overage ? undefined : unified?.utilization,
+      capacityWindows: overage
+        ? []
+        : [
+            { utilization: unified?.utilization, resetAt: unified?.resetAt },
+            { utilization: h?.utilization, resetAt: h?.windowResetAt },
+            { utilization: h?.utilization7d, resetAt: h?.windowResetAt7d },
+          ],
       now: at,
-      burnAction: h?.burnAction,
+      burnAction: overage ? undefined : h?.burnAction,
+      billing: account.authMode === 'api-key' || overage ? 'metered' : 'included',
+      meteredPolicy: account.meteredPolicy,
     });
     if (base === Infinity) return base;
     const poolEntries = effectiveEgressEntries(account);
@@ -3296,9 +3701,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
     };
     if (h) {
       consider(h.pausedUntil);
-      if ((h.utilization ?? 0) >= HINT_CAPACITY_FULL_AT) consider(h.windowResetAt);
-      if ((h.utilization7d ?? 0) >= HINT_CAPACITY_FULL_AT) consider(h.windowResetAt7d);
-      if (h.burnAction === 'shed') consider(h.windowResetAt7d);
+      if (h.usageCreditsAvailable !== true) {
+        if ((h.utilization ?? 0) >= HINT_CAPACITY_FULL_AT) consider(h.windowResetAt);
+        if ((h.utilization7d ?? 0) >= HINT_CAPACITY_FULL_AT) consider(h.windowResetAt7d);
+        if (h.burnAction === 'shed') consider(h.windowResetAt7d);
+      }
     }
     consider(egressPauseUntil.get(accountId));
     return recoverAt > 0 ? recoverAt : undefined;
@@ -3900,9 +4307,42 @@ export function createInferenceGateway(deps: GatewayDeps) {
     /** The route key (`affinityKey ?? wantOwner`) whose entry receives the exact usage reading. */
     routeKey?: string,
     stageSpan?: GatewayRequestSpan,
+    /** P-009: the billing class this request was served in — its usage is tallied under it. */
+    billedClass?: GatewayBillingClass,
   ): void {
     let buf = '';
     let done = false;
+    // P-009: output tokens are only known at the END of a stream (the closing `message_delta` carries the
+    // cumulative count), so after `message_start` a line-split watcher keeps reading — O(chunk) per chunk,
+    // never buffering the body — and the LAST count seen is tallied once when the stream ends.
+    let lineCarry = '';
+    let outputTokens: number | null = null;
+    let settled = false;
+    const onDelta = (chunk: Buffer | string) => {
+      const lines = (lineCarry + chunk.toString()).split('\n');
+      lineCarry = lines.pop() ?? '';
+      // A giant unterminated line is a content delta, never the small message_delta event.
+      if (lineCarry.length > 65_536) lineCarry = '';
+      for (const line of lines) {
+        if (!line.startsWith('data: {"type":"message_delta"')) continue;
+        try {
+          const n = observedCount((JSON.parse(line.slice(6)) as { usage?: { output_tokens?: number } }).usage?.output_tokens);
+          if (n !== null) outputTokens = n;
+        } catch {
+          /* malformed message_delta — ignore; never break the stream */
+        }
+      }
+    };
+    const settleOutput = () => {
+      if (settled || !billedClass) return;
+      settled = true;
+      stream.off('data', onDelta);
+      if (lineCarry) onDelta('\n');
+      if (outputTokens === null) return;
+      const t = billingTally(accountId, billedClass);
+      t.outputTokens += outputTokens;
+      t.outputKnown++;
+    };
     const onData = (chunk: Buffer) => {
       if (done) return;
       buf += chunk.toString('utf8');
@@ -3910,6 +4350,12 @@ export function createInferenceGateway(deps: GatewayDeps) {
       if (m) {
         done = true;
         stream.off('data', onData);
+        if (billedClass) {
+          stream.on('data', onDelta);
+          stream.once('end', settleOutput);
+          stream.once('close', settleOutput);
+          onDelta(buf.slice((m.index ?? 0) + m[0].length));
+        }
         try {
           const message = (
             JSON.parse(m[1]) as {
@@ -3931,6 +4377,13 @@ export function createInferenceGateway(deps: GatewayDeps) {
             const inputTotal = inputTokens !== null && cacheRead !== null && cacheCreate !== null
               ? inputTokens + cacheRead + cacheCreate : null;
             recordCacheUsage(accountId, inputTokens, cacheRead, cacheCreate, inputTotal, didFailover);
+            if (billedClass && inputTokens !== null) {
+              const t = billingTally(accountId, billedClass);
+              t.inputTokens += inputTokens;
+              t.cacheReadTokens += cacheRead ?? 0;
+              t.cacheCreationTokens += cacheCreate ?? 0;
+              t.usageKnown++;
+            }
             if (inputTokens !== null && cacheRead !== null) stageSpan?.recordCacheUsage(inputTokens, cacheRead, cacheCreate ?? undefined, message?.id);
             // Never lower the observed prompt floor using an incomplete total.
             if (inputTotal !== null && inputTokens !== null && cacheRead !== null && cacheCreate !== null) {
@@ -4172,6 +4625,13 @@ export function createInferenceGateway(deps: GatewayDeps) {
       shedAllThrottled,
       bareBurstRotateSuppressed,
       opusToSonnetDowngrades,
+      effortClamps: {
+        retries: effortClampRetries,
+        rewrites: effortClampRewrites,
+        learned: effortClampCache
+          .entries()
+          .map(({ model: m, from, to, learnedAt, applied }) => ({ model: m, from, to, learnedAt, applied })),
+      },
       clamp: {
         mode: clampMode,
         recommendation: Number.isFinite(lastServiceableRecommendation) ? lastServiceableRecommendation : null,
@@ -4245,6 +4705,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
       pausedUntil: snap.pausedUntil,
       pausedActuallyEnforced: snap.pausedUntil > now,
       cache: cacheSnapshot(),
+      billing: billingSnapshot(),
     };
   }
 
@@ -4796,72 +5257,35 @@ export function createInferenceGateway(deps: GatewayDeps) {
       supports_image_detail_original: true,
       context_window: contextWindow,
       max_context_window: maxContextWindow,
-      comp_hash: 'papercusp-gateway',
+      // NO comp_hash here, deliberately (WI-10005673). Codex compares each turn's comp_hash with
+      // the previous turn's and, when both are present and differ, compacts before the turn
+      // (CompactionReason::CompHashChanged). This used to say 'papercusp-gateway' while the live
+      // upstream catalog says e.g. '3000', so every thread that crossed between the two sources
+      // compacted on its next turn, and the managed PreCompact hook turned that into a
+      // carry-respawn that lost the history. The gateway does not know the compaction hash, so
+      // it must not claim one: Codex skips the check when either side is absent.
       effective_context_window_percent: 95,
       experimental_supported_tools: [],
       input_modalities: ['text', 'image'],
       supports_search_tool: true,
       use_responses_lite: false,
     });
-    const fallbackModels: CodexModel[] = [
+    const reasoningTiers: Record<CodexFallbackReasoningTier, ReasoningLevel[]> = {
+      standard: standardReasoningLevels,
+      max: maxReasoningLevels,
+      ultra: ultraReasoningLevels,
+    };
+    const fallbackModels: CodexModel[] = CODEX_GATEWAY_FALLBACK_LINEUP.map((entry) =>
       model(
-        'gpt-6-astra',
-        'GPT-6-Astra',
-        'Our most capable model for complex, demanding work.',
-        16,
-        272_000,
-        872_000,
-        ultraReasoningLevels,
+        entry.slug,
+        entry.displayName,
+        entry.description,
+        entry.priority,
+        entry.contextWindow,
+        entry.maxContextWindow,
+        reasoningTiers[entry.reasoning ?? 'standard'],
       ),
-      model(
-        'gpt-5.6-sol',
-        'GPT-5.6-Sol',
-        'Reliable agentic workhorse for everyday tasks.',
-        15,
-        272_000,
-        872_000,
-        ultraReasoningLevels,
-      ),
-      model(
-        'gpt-6-sol',
-        'GPT-6-Sol',
-        'GPT-6 Sol Codex model.',
-        15,
-        272_000,
-        872_000,
-        ultraReasoningLevels,
-      ),
-      model(
-        'gpt-6-luna',
-        'GPT-6-Luna',
-        'GPT-6 Luna Codex model.',
-        14,
-        272_000,
-        872_000,
-        maxReasoningLevels,
-      ),
-      model(
-        'gpt-5.6-terra',
-        'GPT-5.6-Terra',
-        'Balanced agentic coding model for everyday work.',
-        14,
-        272_000,
-        872_000,
-        ultraReasoningLevels,
-      ),
-      model(
-        'gpt-5.6-luna',
-        'GPT-5.6-Luna',
-        'Fast and affordable agentic coding model.',
-        13,
-        272_000,
-        872_000,
-        maxReasoningLevels,
-      ),
-      model('gpt-5.5', 'GPT-5.5', 'Frontier model for complex coding, research, and real-world work.', 12),
-      model('gpt-5.4', 'GPT-5.4', 'Strong model for everyday coding.', 11, 272_000, 1_000_000),
-      model('gpt-5.4-mini', 'GPT-5.4-Mini', 'Small, fast, and cost-efficient model for simpler coding tasks.', 10),
-    ];
+    );
     const validReasoningLevels = (value: unknown): ReasoningLevel[] =>
       Array.isArray(value)
         ? value.flatMap((level) => {
@@ -4916,7 +5340,14 @@ export function createInferenceGateway(deps: GatewayDeps) {
     const modelsBySlug = new Map(fallbackModels.map((entry) => [entry.slug, entry]));
     // Old pool-home cache first, then the freshly fetched account catalog. Later sources win
     // metadata while retaining any reasoning level the safer fallback knew about.
-    for (const source of [localModels, liveModels]) {
+    // comp_hash is taken ONLY from the live account catalog (WI-10005673). A pool-home cache can
+    // be arbitrarily stale, and serving its hash while live is unavailable reintroduces the
+    // cross-source flip that forces Codex into a pre-turn CompHashChanged compaction.
+    const withoutCompHash = (row: CodexModel): CodexModel => {
+      const { comp_hash: _staleCompHash, ...rest } = row;
+      return rest as CodexModel;
+    };
+    for (const source of [localModels.map(withoutCompHash), liveModels]) {
       for (const incoming of source) {
         const prior = modelsBySlug.get(incoming.slug);
         if (!prior) order.push(incoming.slug);
@@ -4988,6 +5419,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
     // WI-1073: at-most-once guard — we downgrade a walled OPUS request to sonnet only ONCE per request,
     // so a failed sonnet retry forwards (never opus→sonnet→sonnet looping).
     let opusDowngraded = false;
+    // WI-10005833: at-most-once guard for the unsupported-effort retry, plus what was substituted (for
+    // the response header). A second effort 400 after the retry is forwarded, never looped on.
+    let effortClampRetried = false;
+    let effortClampedFrom: string | null = null;
+    let effortClampedTo: string | null = null;
     let est = { inTok: 0, outTok: 1024 };
     // Streaming requests get the SHORT TTFB headers deadline (first byte in seconds); non-streaming the
     // generous one (headers only after the full generation). Default false → generous, so an unparseable
@@ -5115,6 +5551,23 @@ export function createInferenceGateway(deps: GatewayDeps) {
       const priorAccount = affinityPriorAccount(affinityKey, dynPin, wantAccount);
       if (priorAccount) affinityPinned = pool.select?.(priorAccount) ?? null;
       autoAffinityTally[affinityPinned ? 'hits' : 'cold']++;
+      // P-008/D-007: affinity is an IMPLICIT pin kept only for prompt-cache savings, so it never buys
+      // metered (per-token) spend while an included-allowance account can serve (D-003). Explicit header
+      // and hard pins are untouched.
+      if (affinityPinned) {
+        const at = Date.now();
+        if (isMeteredNow(affinityPinned, at)) {
+          const includedServes =
+            (pool.healthyCount?.((id) => {
+              const a = pool.select?.(id);
+              return !!a && !isMeteredNow(a, at) && accountHealthKey(a, at, governorForAccount(model, id)) < Infinity;
+            }) ?? 0) > 0;
+          if (includedServes) {
+            affinityPinned = null;
+            autoAffinityTally.yields++;
+          }
+        }
+      }
     } else if (headerPinned === null) {
       autoAffinityTally.nokey++;
     }
@@ -5132,6 +5585,20 @@ export function createInferenceGateway(deps: GatewayDeps) {
     // window in the beta header before it reaches us. The header is therefore
     // part of the effective request window even when body normalization did not
     // see the marker.
+    // WI-10006049: the 1M DEFAULT for papercusp-managed callers on a 1M-capable family — decided
+    // HERE, before the window is read, so account/model alternates are chosen for the window the
+    // request will actually be served at (see shouldDefaultContext1m).
+    if (
+      shouldDefaultContext1m({
+        owner: wantOwner,
+        url,
+        model,
+        context1m,
+        clientHas1m: hasContext1mBeta(req.headers['anthropic-beta'] as string | undefined),
+      })
+    ) {
+      context1m = true;
+    }
     const requestedWindow1m = context1m || hasContext1mBeta(req.headers['anthropic-beta'] as string | undefined);
     if (operationModelPolicy.status === 'bound' && pool.healthyCount) {
       const policy = operationModelPolicy.policy;
@@ -5401,6 +5868,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
         recordClaudeRoutingPick();
         totalRequests++;
         shedAllThrottled++;
+        markRequestShed(req);
         recordOwnerOutcome(wantOwner, 'shed', { detail: 'all-throttled fail-fast' }); // P-008 ledger
         // P-002: the whole pool is out of budget until `soonestPaused` — record a stall candidate so the
         // waker can wake this bee then (only if it identified itself + its CLI doesn't recover on its own).
@@ -5443,6 +5911,42 @@ export function createInferenceGateway(deps: GatewayDeps) {
       }
     }
 
+    // P-008 / D-003: `metered: never` turns usage-credit overage into a WALL. Selection already scores such
+    // an account Infinity, but when EVERY alternative is also unserviceable (or the request is hard-pinned)
+    // routing still lands on it. Refuse here instead of sending a request that would bill per token. This
+    // is exact on purpose: a governor pause would re-probe the account on its reprobe cap, and each probe
+    // would itself be a metered charge the owner opted out of.
+    if (active.meteredPolicy === 'never' && isMeteredNow(active, Date.now())) {
+      const at = Date.now();
+      recordClaudeRoutingPick();
+      totalRequests++;
+      markRequestShed(req);
+      recordOwnerOutcome(wantOwner, 'shed', { detail: 'metered-never wall' });
+      const wallUntil = claudeBillingByAccount.get(active.accountId)?.until;
+      const retryAfterSec = Math.min(
+        BEE_RETRY_AFTER_CAP_S,
+        Math.max(1, Math.ceil(((wallUntil ?? at + 60_000) - at) / 1000)),
+      );
+      log(
+        'warn',
+        `inference-gateway: '${active.accountId}' is metered now (policy never) and no included-allowance account can serve → 429 wall`,
+      );
+      sendJson(
+        res,
+        429,
+        {
+          type: 'error',
+          error: {
+            type: 'rate_limit_error',
+            message: `inference-gateway: no included-allowance account can serve and '${active.accountId}' has metered policy never; retry after ${retryAfterSec}s`,
+          },
+          gateway: true,
+        },
+        { 'retry-after': String(retryAfterSec), 'x-should-retry': 'false' },
+      );
+      return;
+    }
+
     totalRequests++;
     // A still-pinned request gets only a SHORT admission wait, then fails over to active() rather than
     // waiting the full maxQueueWaitMs and 429-looping the bee.
@@ -5465,6 +5969,9 @@ export function createInferenceGateway(deps: GatewayDeps) {
     if (!release) {
       recordClaudeRoutingPick();
       queued429++;
+      // This 429 originates before an upstream attempt. Preserve the same
+      // attribution in the request timeline as in the owner outcome ledger.
+      markRequestShed(req);
       recordOwnerOutcome(wantOwner, 'shed', { account: active.accountId, detail: 'admission timeout' }); // P-008 ledger
       const retryAfterSec = Math.min(
         BEE_RETRY_AFTER_CAP_S,
@@ -5580,11 +6087,13 @@ export function createInferenceGateway(deps: GatewayDeps) {
       },
     });
     try {
-      // Constant request headers (everything but the per-account Authorization/dispatcher, set per attempt).
-      // Every account is a Claude Max subscription OAuth credential → `Authorization: Bearer` + the
-      // required `oauth-2025-04-20` beta. There is NO x-api-key path: this deployment has no billed
-      // API key, and a raw key would 400 against the subscription-only beta (any x-api-key a bee
-      // sends is stripped above by STRIP_REQUEST). NOTE for raw-SDK callers routed through here on a
+      // Constant request headers (everything but the per-account credential/dispatcher, set per attempt).
+      // The credential SHAPE is per ATTEMPT (anthropic-credits-gateway-2026-09-30 P-006): a subscription
+      // OAuth account gets `Authorization: Bearer` + the `oauth-2025-04-20` beta; a Console API-key
+      // account gets `x-api-key` and must NOT carry that beta (the key 400s against it). So this base
+      // carries only the CLIENT's betas; `claudeAttemptHeaders` layers the auth + OAuth flag on for the
+      // account each attempt lands on (a caller's own authorization/x-api-key is stripped above by
+      // STRIP_REQUEST and again per attempt). NOTE for raw-SDK callers routed through here on a
       // Max token: the FIRST `system` block must be the Claude Code identifier or the request is
       // shunted to a far stricter bucket and 429s — the `claude` CLI bees already frame themselves.
       const baseHeaders: Record<string, string> = {};
@@ -5621,10 +6130,12 @@ export function createInferenceGateway(deps: GatewayDeps) {
           );
         }
       }
-      baseHeaders['anthropic-beta'] = withOAuthBeta(
+      const clientBetas = withClientBetas(
         baseHeaders['anthropic-beta'] ?? (req.headers['anthropic-beta'] as string | undefined),
         context1m,
       );
+      if (clientBetas) baseHeaders['anthropic-beta'] = clientBetas;
+      else delete baseHeaders['anthropic-beta'];
       /** What the route record and the compaction watchdog mean by "served at 1M": the beta is in the
        *  header that actually leaves this machine, whichever of the two paths put it there. */
       const servedContext1m = hasContext1mBeta(baseHeaders['anthropic-beta']);
@@ -5903,6 +6414,10 @@ export function createInferenceGateway(deps: GatewayDeps) {
       /** D-013: the Anthropic predicates stay HERE, where they already live; the
        *  adapter contributes only the peek, the replay and the branch. */
       const classifyClaudeResponse = (input: ClaudeClassifyInput): ClaudeResponseClassification => {
+        // Credit exhaustion is checked FIRST: a 429 enforced-spend-limit or a 400
+        // API-usage-limit would otherwise read as a rate 429 / a forwardable 400.
+        const creditWall = classifyClaudeCreditWallResponse(input);
+        if (creditWall) return creditWall;
         if (input.status === 529) return { kind: 'overload' };
         if (input.status === 429) {
           // A 429 may be a hard usage/session CAP, which ONLY the body names —
@@ -5938,7 +6453,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
       // rather than the error's identity so no error-normalisation can lose it.
       const INTERCEPT = new Error('claude gateway: caller intercepted before relay');
       type Intercept = {
-        action: 'wait' | 'absorb' | 'downgrade';
+        action: 'wait' | 'absorb' | 'downgrade' | 'effort-clamp';
         status: number;
         outHeaders: Record<string, string>;
         peeked: string;
@@ -5988,6 +6503,9 @@ export function createInferenceGateway(deps: GatewayDeps) {
           outHeaders[PIN_YIELDED_HEADER] = `${pinned.accountId}->${metadata.accountId}`;
         }
         if (opusDowngraded) outHeaders[MODEL_DOWNGRADED_HEADER] = 'opus->sonnet';
+        if (effortClampedFrom && effortClampedTo) {
+          outHeaders[EFFORT_CLAMPED_HEADER] = `${effortClampedFrom}->${effortClampedTo}`;
+        }
         return outHeaders;
       };
 
@@ -6022,6 +6540,37 @@ export function createInferenceGateway(deps: GatewayDeps) {
         }
       };
 
+      // WI-10005833: an accepted operation policy that pins an exact effort is enforced before any I/O
+      // (the 503 above). Substituting a different level would violate it, so the clamp stays off there
+      // and the upstream 400 is forwarded unchanged.
+      const effortPinnedByPolicy =
+        operationModelPolicy.status === 'bound' && Boolean(operationModelPolicy.policy.effort);
+      /** Rewrite this request's `output_config.effort` from `from` to `to`; false when the body carries none. */
+      const clampRequestEffort = (from: string, to: string): boolean => {
+        const rewritten = rewriteRequestEffort(bodyBuf, to);
+        if (!rewritten) return false;
+        bodyBuf = rewritten;
+        effortClampedFrom ??= from;
+        effortClampedTo = to;
+        return true;
+      };
+      /**
+       * The substitution an upstream 400 body calls for, or null. Non-null only when the body names an
+       * unsupported effort, that level is the one this request carries in `output_config.effort`, a
+       * supported level exists to move to, and the body can be rewritten — so an intercept taken on it
+       * always retries instead of falling through to a forward that skips the outcome records.
+       */
+      const effortClampFor = (peeked: string): { from: string; to: string; supported: string[] } | null => {
+        if (effortPinnedByPolicy || effortClampRetried) return null;
+        const unsupported = parseUnsupportedEffortError(peeked);
+        if (!unsupported) return null;
+        const from = readRequestEffort(bodyBuf);
+        if (!from || from !== unsupported.requested) return null;
+        const to = chooseSupportedEffort(from, unsupported.supported);
+        if (!to || !rewriteRequestEffort(bodyBuf, to)) return null;
+        return { from, to, supported: unsupported.supported };
+      };
+
       for (;;) {
         clearIntercept();
         // A caller-level wait/absorb logs its own retry line, so a line left pending
@@ -6030,6 +6579,17 @@ export function createInferenceGateway(deps: GatewayDeps) {
         shedRecorded = false;
         rotateSuppressRecorded = false;
         let attemptsThisPass = 0;
+
+        // WI-10005833: rewrite a level this model is already known to refuse BEFORE sending, so only
+        // the first request per (model, level) pays the 400 round trip. Checked on every pass because
+        // a pass may follow a model substitution (the WI-1073 downgrade), whose id has its own entry.
+        if (!effortPinnedByPolicy) {
+          const requestedEffort = readRequestEffort(bodyBuf);
+          const learned = requestedEffort ? effortClampCache.apply(model, requestedEffort) : null;
+          if (requestedEffort && learned && clampRequestEffort(requestedEffort, learned)) {
+            effortClampRewrites++;
+          }
+        }
 
         const kernelAdapter = createClaudeKernelAdapter({
           // D-010: `proxy` spent this request's one `pool.active()` across the ~500
@@ -6077,7 +6637,9 @@ export function createInferenceGateway(deps: GatewayDeps) {
           classifyResponse: classifyClaudeResponse,
           // The live peek set exactly: only these three statuses have a
           // body-derived branch, so nothing else pays for a peek.
-          shouldPeek: (status) => status === 429 || status === 529 || status === 403,
+          // 400 and 402 are peeked so a credit wall (400 API-usage-limit, 402
+          // billing_error) is recognized from its body instead of forwarded.
+          shouldPeek: (status) => status === 429 || status === 529 || status === 403 || status === 400 || status === 402,
           peekBytes: USAGE_LIMIT_PEEK_BYTES,
           // The peek reader is not wired to the attempt abort, so an
           // acknowledged-but-undelivered error body must not hold the slot.
@@ -6086,6 +6648,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
             const fetchInit: FetchInit = { method: init.method, headers: init.headers, signal: init.signal };
             if (init.body) fetchInit.body = init.body as unknown as BodyInit;
             if (init.dispatcher) fetchInit.dispatcher = init.dispatcher as UndiciDispatcher;
+            const check = await authorizeCarryTrialAttempt(req, 'anthropic-http', init.diagnosticAccountId, target, init);
+            if (carryTrial) fetchInit.redirect = 'error';
+            // Authorization sees the adapter's final body and selected provider
+            // account. Re-check its copied receipt synchronously at every send.
+            check();
             const upstream = await doFetch(target, fetchInit as RequestInit);
             return {
               status: upstream.status,
@@ -6194,6 +6761,21 @@ export function createInferenceGateway(deps: GatewayDeps) {
                 const egressKey = context.route.value.egress.key;
 
                 if (error) {
+                  // A controller refusal occurred before provider I/O. It is a
+                  // gateway policy outcome, not an account or egress failure.
+                  if (error.code === 'invalid-route') {
+                    lastTransportHadProxy = false;
+                    return;
+                  }
+                  const requestRef = `${gatewayProcessInstanceId}:${stageSpan?.requestId ?? 'unobserved'}`;
+                  // A client disconnect is not evidence that the upstream or its
+                  // egress proxy failed. Keep the kernel's typed cancellation
+                  // separate before touching either failure counter or cooldown.
+                  if (error.code === 'cancelled') {
+                    log('info', `downstream cancelled request=${requestRef} code=cancelled on '${account.accountId}': ${error.message}`);
+                    lastTransportHadProxy = false;
+                    return;
+                  }
                   upstreamErrors++;
                   // The adapter's STATUS discriminates a token failure (503) from a
                   // transport failure (502); a TTFB timeout surfaces as its own code
@@ -6216,10 +6798,10 @@ export function createInferenceGateway(deps: GatewayDeps) {
                     lastTransportHadProxy = false;
                     return;
                   }
-                  const stalled = error.code === 'ttfb-timeout' || error.code === 'cancelled';
+                  const stalled = error.code === 'ttfb-timeout';
                   log(
                     'error',
-                    `upstream fetch ${stalled ? 'STALLED (aborted)' : 'failed'} on '${account.accountId}': ${error.message}`,
+                    `upstream fetch ${stalled ? 'STALLED (aborted)' : 'failed'} request=${requestRef} code=${error.code} on '${account.accountId}': ${error.message}`,
                   );
                   // SCOPING: only an account WITH an http proxy can have a DEAD
                   // proxy. A no-proxy account that transport-fails is an
@@ -6254,6 +6836,10 @@ export function createInferenceGateway(deps: GatewayDeps) {
                 const status = response.status;
                 const accountGov = governorForAccount(model, account.accountId);
                 accountGov.recordResponse(hobj);
+                recordClaudeBilling(account, hobj as Record<string, string | undefined>);
+                // A served response proves the account is past its credit wall (e.g. an operator readmit
+                // after a top-up), so stats stop reporting a wall that no longer holds.
+                if (status >= 200 && status < 300) claudeCreditWallByAccount.delete(account.accountId);
                 deps.onResponse?.(hobj, status, model, account.accountId);
 
                 // Transport succeeded for THIS account — its egress proxy works, so
@@ -6273,7 +6859,24 @@ export function createInferenceGateway(deps: GatewayDeps) {
                 const peeked = response.metadata.peekedBody ?? '';
                 lastExhaustResetAt = 0;
 
-                if (status === 429 || status === 529) {
+                if (classification?.kind === 'credit-wall') {
+                  // Credit exhaustion (402 billing_error, 400 "specified API usage
+                  // limits", 429 enforced_spend_limit_reached) is a billing WALL on
+                  // THIS account, not a transient (plan anthropic-credits-gateway
+                  // D-004): pause it until its reset so the selector skips it, then
+                  // rotate. The cause is logged; the body and credential are not.
+                  const wallResetAt = classification.resetAt ?? Date.now() + CREDIT_WALL_DEFAULT_PAUSE_MS;
+                  accountGov.penalize({ resetAt: wallResetAt });
+                  lastExhaustResetAt = wallResetAt;
+                  const cause = (classification.detail as ClaudeCreditWall | undefined)?.cause ?? 'unknown';
+                  // D-008 E4: keep the cause where stats can read it, so a walled account shows WHY it is
+                  // out of rotation instead of only a bare pause deadline.
+                  claudeCreditWallByAccount.set(account.accountId, { cause, until: wallResetAt });
+                  log(
+                    'warn',
+                    `inference-gateway: account '${account.accountId}' hit a credit wall (${cause}, HTTP ${status}) → paused until ${new Date(wallResetAt).toISOString()}, failing over`,
+                  );
+                } else if (status === 429 || status === 529) {
                   upstream429++;
                   if (status === 429) recordRoutingUpstream429('claude', account.accountId);
                   throttled429AccountId = account.accountId;
@@ -6513,6 +7116,22 @@ export function createInferenceGateway(deps: GatewayDeps) {
                 const classification = metadata.classification;
                 const retryIntent = classification !== null && classification.kind !== 'forward';
 
+                // WI-10005833: a 400 refusing the request's reasoning effort names the supported levels
+                // itself, so retry once at a supported level instead of relaying a 400 that ends the
+                // caller's turn. Decided here, before anything is relayed; applied in the catch.
+                if (status === 400 && !res.headersSent && effortClampFor(metadata.peekedBody ?? '')) {
+                  interception.taken = {
+                    status,
+                    outHeaders,
+                    peeked: metadata.peekedBody ?? '',
+                    transient: false,
+                    action: 'effort-clamp',
+                    waitMs: 0,
+                    backoffMs: 0,
+                  };
+                  throw INTERCEPT;
+                }
+
                 if (retryIntent) {
                   const decision = decideThrottleRecovery({
                     status,
@@ -6581,7 +7200,15 @@ export function createInferenceGateway(deps: GatewayDeps) {
                   cacheProbe = new PassThrough();
                   cacheProbe.on('data', () => undefined);
                   cacheProbe.on('error', () => undefined);
-                  observeCacheUsage(cacheProbe, metadata.accountId, attemptsUsed > 1, affinityKey ?? wantOwner, stageSpan);
+                  // P-009: every served Claude request is counted in the billing class it was served in
+                  // (decided by this response's own billing headers, recorded just above); its usage is
+                  // added by the observer as the body streams.
+                  const servedAccount = (pool.entries?.() ?? []).find((a) => a.accountId === metadata.accountId);
+                  const servedClass: GatewayBillingClass = servedAccount
+                    ? billingClassOf(servedAccount, Date.now())
+                    : 'included';
+                  billingTally(metadata.accountId, servedClass).requests++;
+                  observeCacheUsage(cacheProbe, metadata.accountId, attemptsUsed > 1, affinityKey ?? wantOwner, stageSpan, servedClass);
                 } else if (status === 429 || status === 529) {
                   // The DOMINANT "nothing goes through" exit. Record a stall so the
                   // stall-waker re-wakes an IDENTIFIED bee when this account recovers
@@ -6678,6 +7305,21 @@ export function createInferenceGateway(deps: GatewayDeps) {
           // `null` at the pass reset, which would make every field access below TS2339.
           const taken = takeIntercept();
           if (taken) {
+            if (taken.action === 'effort-clamp') {
+              // WI-10005833: at most once per request. `effortClampFor` already proved the rewrite
+              // applies; it is re-derived from the same peeked body and the unchanged request body.
+              const clamp = effortClampFor(taken.peeked);
+              effortClampRetried = true;
+              if (clamp && clampRequestEffort(clamp.from, clamp.to)) {
+                effortClampCache.learn(model, clamp.from, clamp.to);
+                effortClampRetries++;
+                log(
+                  'warn',
+                  `inference-gateway: upstream 400 — ${model} does not support effort '${clamp.from}' (supported: ${clamp.supported.join(', ')}) → retrying once at '${clamp.to}' for '${wantOwner ?? 'unpinned'}' on '${active.accountId}'; later ${model} '${clamp.from}' requests are rewritten before sending (WI-10005833)`,
+                );
+                continue;
+              }
+            }
             if (taken.action === 'wait') {
               transientWaitedMs += taken.waitMs;
               log(
@@ -6738,7 +7380,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
                 // than letting the throw escape uncaught to the generic 500 handler.
                 let reCand = active;
                 try {
-                  reCand = pool.active();
+                  // `pool.active()` falls back to a PARKED account when every account is parked, so the
+                  // re-route can name a `metered: never` account serving from usage credits. That account
+                  // is a wall (D-003): re-holding the throttled account is the only correct move.
+                  const c = pool.active();
+                  if (!(c.meteredPolicy === 'never' && isMeteredNow(c, Date.now()))) reCand = c;
                 } catch {
                   /* pool empty / all-exhausted → keep the current account; the re-acquire still waits */
                 }
@@ -6918,6 +7564,13 @@ export function createInferenceGateway(deps: GatewayDeps) {
             } catch {
               /* already torn down */
             }
+            return;
+          }
+
+          if (failure.code === 'invalid-route') {
+            sendJson(res, failure.status ?? 403, { type: 'error', gateway: true,
+              error: { type: 'invalid_request_error', message: failure.message } },
+              { 'x-should-retry': 'false' });
             return;
           }
 
@@ -7449,6 +8102,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
             // The CLI home encapsulates its own credential — there is no token to
             // resolve — so the auth stage stays the zero-width seam it was.
             if (!error) return;
+            const requestRef = `${gatewayProcessInstanceId}:${stageSpan?.requestId ?? 'unobserved'}`;
+            if (error.code === 'cancelled') {
+              log('info', `inference-gateway: codex-cli downstream cancelled request=${requestRef} code=cancelled on '${account}': ${error.message}`);
+              return;
+            }
             lastFailureDetail = error.message;
             if (isCodexRateLimitFailure(error.message)) {
               codexUpstream429++;
@@ -7459,7 +8117,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
             } else {
               codexUpstreamErrors++;
               recordOwnerOutcome(routing.ownerId, 'upstream_error', { account, detail: 'cli-bridge' });
-              log('error', `inference-gateway: codex-cli bridge failed on '${account}': ${error.message}`);
+              log('error', `inference-gateway: codex-cli bridge failed request=${requestRef} code=${error.code} on '${account}': ${error.message}`);
             }
             // THE ONE HOOK THAT FIRES ON EVERY ATTEMPT. Credential death must park
             // the account even on the LAST attempt, when no retry remains and the
@@ -7865,6 +8523,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
           return best;
         },
         tokenTimeoutMs,
+        authQuarantineMs: CODEX_CLI_AUTH_QUARANTINE_MS,
         failoverBackoffMs: bare429FailoverBackoffMs,
         ipCooldownMaxMs: IP_COOLDOWN_MAX_MS,
         transportCooldownMs: IP_TRANSPORT_COOLDOWN_MS,
@@ -8001,19 +8660,46 @@ export function createInferenceGateway(deps: GatewayDeps) {
               if (account !== lastAccountId) codexFailovers++;
               lastAccountId = account;
               if (error) {
+                const requestRef = `${gatewayProcessInstanceId}:${stageSpan?.requestId ?? 'unobserved'}`;
+                if (error.code === 'cancelled') {
+                  log('info', `inference-gateway: codex OAuth downstream cancelled request=${requestRef} code=cancelled on '${account}': ${error.message}`);
+                  return;
+                }
+                const authRefresh =
+                  context.route.value.reason === 'refresh' ? kernelAdapter.noteRefreshFailure(context, error) : null;
                 // The STATUS discriminates the token-resolve throw (503) from the
-                // transport throw (502); a TTFB timeout, the request ceiling and a
-                // downstream abort all surfaced through the old transport catch, so
-                // they classify the same way here.
+                // transport throw (502). Cancellation was separated above; genuine
+                // deadlines retain their existing failure accounting.
                 const tokenResolve = error.status === 503;
                 codexUpstreamErrors++;
                 recordOwnerOutcome(routing.ownerId, 'upstream_error', {
                   account,
-                  detail: tokenResolve ? 'oauth-token-resolve' : 'oauth-transport',
+                  detail: tokenResolve
+                    ? 'oauth-token-resolve'
+                    : authRefresh?.authClass
+                      ? 'oauth-auth-refresh'
+                      : 'oauth-transport',
                 });
+                if (authRefresh?.authClass) {
+                  const disposition = authRefresh.parkedAccountId
+                    ? 'quarantined for ' +
+                      Math.round(CODEX_CLI_AUTH_QUARANTINE_MS / 1000) +
+                      's' +
+                      (authRefresh.nextAccountId ? ' and failing over to ' + authRefresh.nextAccountId : '')
+                    : routing.hardPin
+                      ? 'not quarantined because the request is hard-pinned'
+                      : 'not quarantined because no account pool is available';
+                  log(
+                    'warn',
+                    'inference-gateway: Codex OAuth account ' +
+                      account +
+                      ' rejected refresh credentials; ' +
+                      disposition,
+                  );
+                }
                 log(
                   'error',
-                  `inference-gateway: codex OAuth ${tokenResolve ? 'token resolve' : 'upstream'} failed on '${account}': ${error.message}`,
+                  `inference-gateway: codex OAuth ${tokenResolve ? 'token resolve' : 'upstream'} failed request=${requestRef} code=${error.code} on '${account}': ${error.message}`,
                 );
                 return;
               }
@@ -8461,6 +9147,19 @@ export function createInferenceGateway(deps: GatewayDeps) {
     let preBody: Buffer | undefined;
     let requestModel: string | null = null;
     let requestEffort: string | null = null;
+    const outputLimitHeader = req.headers[REQUIRE_OUTPUT_TOKEN_LIMIT_HEADER];
+    const requiresOutputTokenLimit = outputLimitHeader !== undefined;
+    const invalidOutputLimit = () => {
+      req.resume();
+      sendJson(res, 400, { type: 'error', gateway: true,
+        error: { type: 'invalid_request_error', code: 'output_token_limit_invalid',
+          message: 'Required output limit needs the header true and a positive integer max_output_tokens' } },
+        { 'x-should-retry': 'false' });
+    };
+    if (requiresOutputTokenLimit && outputLimitHeader !== 'true') {
+      invalidOutputLimit();
+      return;
+    }
     if (req.method === 'POST' && url.startsWith('/v1/responses')) {
       stageSpan?.beginStage('bodyRead');
       try {
@@ -8488,6 +9187,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
         stageSpan?.setNativeCorrelation(parsed);
         if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object')
           throw new Error('request body must be a JSON object');
+        if (requiresOutputTokenLimit && (!Number.isSafeInteger(parsed.max_output_tokens) ||
+            (parsed.max_output_tokens as number) <= 0)) {
+          invalidOutputLimit();
+          return;
+        }
         const modelSpec = typeof parsed.model === 'string' ? parsed.model : undefined;
         // Reuse the bridge parser as the one request-boundary policy seam. It
         // resolves omitted models, normalizes aliases/effort, and throws on the
@@ -8738,6 +9442,16 @@ export function createInferenceGateway(deps: GatewayDeps) {
         yieldedFrom: cliInitialPinYieldedFrom,
       });
       const transport = codexOAuthProxyEnabled ? 'oauth-http' : 'cli-exec';
+      // Subscription normalization removes max_output_tokens; cli-exec cannot
+      // enforce it either. Refuse before auth, normalization, or execution.
+      if (requiresOutputTokenLimit &&
+          adapter.lane.transports.find(t => t.id === transport)?.enforcesOutputTokenLimit !== true) {
+        sendJson(res, 422, { type: 'error', gateway: true,
+          error: { type: 'invalid_request_error', code: 'output_token_limit_unsupported',
+            message: `Selected Codex transport '${transport}' cannot enforce the required output token limit` } },
+          { 'x-should-retry': 'false' });
+        return;
+      }
       await executeCodexLegacyTransport(
         legacyExecutorForGatewayTransport(adapter.lane, transport),
         { req, res, cli, url, preBody, routing: { hardPin, pinned: cliPin, ownerId: wantOwner }, acceptedOperation },
@@ -9018,23 +9732,29 @@ export function createInferenceGateway(deps: GatewayDeps) {
               if (lastRouteKey !== null && lastRouteKey !== context.route.key) codexFailovers++;
               lastRouteKey = context.route.key;
               if (error) {
+                const requestRef = `${gatewayProcessInstanceId}:${stageSpan?.requestId ?? 'unobserved'}`;
+                if (error.code === 'cancelled') {
+                  log('info', `inference-gateway: Codex bearer downstream cancelled request=${requestRef} code=cancelled on '${account}': ${error.message}`);
+                  return;
+                }
                 // The STATUS is the only discriminator between the token-read throw
                 // (`prepareAttempt`, 503) and the transport throw (`executeAttempt`,
-                // 502); a TTFB timeout, the request ceiling and a downstream abort all
-                // surfaced through the old transport catch, so they classify the same
-                // way here. Do not "tidy" those statuses in the adapter.
+                // 502). Genuine deadlines retain their failure accounting; a
+                // downstream cancellation does not identify an upstream failure.
                 const tokenResolve = error.status === 503;
                 codexUpstreamErrors++;
                 recordOwnerOutcome(wantOwner, 'upstream_error', {
                   account,
                   detail: tokenResolve ? 'bearer-token-resolve' : 'bearer-transport',
                 });
-                if (tokenResolve) {
-                  log('error', `inference-gateway: Codex token read failed on '${account}': ${error.message}`);
-                }
+                log('error', `inference-gateway: Codex ${tokenResolve ? 'token read' : 'upstream'} failed request=${requestRef} code=${error.code} on '${account}': ${error.message}`);
                 return;
               }
               if (!response) return;
+              // Project every bearer attempt through the same rate-window observer as the
+              // OAuth lane; a 429 still carries authoritative credit and window headers.
+              const responseModel = parseCodexRequestShape(context.body).model ?? '';
+              deps.onResponse?.(response.metadata.headers, response.status, responseModel, account);
               if (response.status === 429) {
                 // Counted here even when the kernel goes on to rotate: the old path
                 // recorded the throttle against the account that emitted it.
@@ -9453,7 +10173,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
    * outlive its socket) from every lane. Measured at the split: two of the three entry sites
    * cross this governor, and for `localOpenAiChat` it is the ONLY real admission it has.
    *
-   * `async` because the spool must persist the body BEFORE the admission decision is taken.
+   * `async` because the spool must persist the body BEFORE the durable admission decision is taken.
    * Callers already treat the result as a promise, so this is not a contract change — the
    * bypass path below still returns without awaiting anything.
    */
@@ -9490,9 +10210,25 @@ export function createInferenceGateway(deps: GatewayDeps) {
     // happens to pass — is what implements the deliberate UNQUEUED path for codex
     // `/v1/models`, so metadata is never starved behind an Anthropic storm.
     if (gatewayAdmissionBypassKeyForRequest(opts.req.method, opts.req.url)) return execute();
-    // D-004: the body is persisted BEFORE the admission decision, so queue depth stops scaling
+    // D-004: after the goal-budget preflight, the body is persisted BEFORE durable admission,
+    // so queue depth stops scaling
     // resident memory and the receipt can be executed after this socket is gone. A client that
     // already spooled its own payload passes the ref explicitly and is left alone.
+    if (ownerId && deps.checkGoalInferenceAdmission) {
+      let decision: GatewayGoalBudgetDecision;
+      try {
+        decision = await deps.checkGoalInferenceAdmission(ownerId);
+      } catch {
+        throw new GoalInferenceAdmissionRefusal(
+          503,
+          'goal_budget_admission_unavailable',
+          'goal budget could not be verified; inference is refused before provider dispatch',
+        );
+      }
+      if (!decision.allowed) {
+        throw new GoalInferenceAdmissionRefusal(decision.status, decision.code, decision.message);
+      }
+    }
     const clientPayloadRef = (opts.req.headers['x-papercusp-payload-ref'] as string | undefined)?.trim() || undefined;
     let spooledPayloadRef = clientPayloadRef;
     if (!clientPayloadRef) {
@@ -9660,8 +10396,11 @@ export function createInferenceGateway(deps: GatewayDeps) {
       const token = /^Bearer ([^\s]+)$/.exec(requestHeader(req, 'authorization') ?? '')?.[1];
       const authenticated = token && timingSafeEqual(createHash('sha256').update(token).digest(),
         Buffer.from(carryTrial.requestTokenSha256, 'hex'));
-      const supported = (req.method === 'POST' && requestPath === '/v1/responses') ||
-        (req.method === 'GET' && requestPath === '/v1/models');
+      const openaiAllowed = carryTrial.protocols.includes('openai-responses');
+      const anthropicAllowed = carryTrial.protocols.includes('anthropic-messages');
+      const supported = (openaiAllowed && req.method === 'POST' && requestPath === '/v1/responses') ||
+        (openaiAllowed && req.method === 'GET' && requestPath === '/v1/models') ||
+        (anthropicAllowed && req.method === 'POST' && requestPath === '/v1/messages');
       if (!authenticated || !supported) {
         req.resume();
         sendJson(res, 403, { error: { message: 'carry trial request not authorized' } },
@@ -10352,6 +11091,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
         lane: gatewayLaneRegistry.localOpenAiChat,
         task: () => proxyLocal(req, res, localUrl),
       }).catch((e) => {
+        if (respondGoalInferenceAdmissionRefusal(e, req, res, sendJson)) return;
         markRequestGatewayError(req);
         log('error', `inference-gateway: local-backend handler crashed: ${(e as Error).message}`);
         if (!res.headersSent)
@@ -10383,6 +11123,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
         lane: providerAdapters.codex.lane,
         task: () => proxyOpenAi(req, res, url, passThroughLaneAdmission),
       }).catch((e) => {
+        if (respondGoalInferenceAdmissionRefusal(e, req, res, sendJson)) return;
         codexUpstreamErrors++;
         log('error', `codex models handler crashed: ${(e as Error).message}`);
         if (!res.headersSent)
@@ -10548,6 +11289,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
           ? proxyOpenAi(req, res, url, providerLaneAdmission)
           : proxy(req, res, url, providerLaneAdmission),
     }).catch((e) => {
+      if (respondGoalInferenceAdmissionRefusal(e, req, res, sendJson)) return;
       // D-003 permits a request to fail for invalid input or an inability to persist truthfully —
       // and for nothing else. These two branches are those cases; both happen BEFORE admission, so
       // no receipt exists and no upstream work has started.
@@ -10884,6 +11626,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
         burnAction?: AccountBurnAction;
         /** When the store took the reading (`utilizationAt`); gates the store↔pool park reconciliation. */
         readingAt?: number;
+        usageCreditsAvailable?: boolean;
       }>,
     ): void {
       accountRateHints.clear();
@@ -10897,6 +11640,7 @@ export function createInferenceGateway(deps: GatewayDeps) {
             windowResetAt7d: h.windowResetAt7d,
             burnAction: h.burnAction,
             readingAt: h.readingAt,
+            usageCreditsAvailable: h.usageCreditsAvailable,
           });
         }
       }

@@ -464,6 +464,10 @@ pub struct SuSessionDescriptor {
     pub role: String,
     #[serde(default)]
     pub model: Option<String>,
+    /// D-026: the approvals mode the engine runs in now (`ask`, `auto-edit`
+    /// or `read-only`). An engine without a switchable mode omits it.
+    #[serde(default)]
+    pub approvals: Option<String>,
     #[serde(default)]
     pub account_route: Option<String>,
     pub carry: String,

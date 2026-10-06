@@ -13,136 +13,29 @@ import { requireAllowedOriginOr403 } from '../../cors';
 import { gateApiRoute } from '../../../require-flag';
 import { operatorHomeHarnessSlug } from '../../../harness/operator-home-harness';
 import {
-  BulkRunAlreadyActiveError,
-  createRun,
-  failRunIfExecuting,
   getRun,
   restartRun,
   resumeReviewRun,
   setRunPhase,
   settleRunPhase,
 } from '../../../attention/bulk-run-store';
-import { notifyPlanCleanupRunChanged } from '../../../attention/bulk-run-sync';
 import {
   getRunFindings,
   markCleanupFindingAccepted,
   markCleanupFindingDismissed,
   reclassifyLegacyFindings,
 } from '../../../plan-cleanup/run-store';
-import { buildCleanupResolverBrief } from '../../../plan-cleanup/resolver-brief';
+import { scanCleanupRun } from '../../../plan-cleanup/deterministic-runner';
 import {
-  buildPlanCleanupSystemCall,
-  runDeterministicPlanCleanup,
-  scanCleanupRun,
-} from '../../../plan-cleanup/deterministic-runner';
-import {
-  buildResolverLaunchCommand,
-  preflightResolverLaunch,
-  resolvePersistedResolverLaunch,
-  resolverSpawnOutcome,
-} from './attention-bulk-resolve';
-import type { EffectiveBulkResolverLaunch } from '../../../agent-config-constants';
-import {
-  bulkAutomationSnapshot,
-  normalizeBulkAutomationPolicy,
-} from '../../../attention/bulk-dispositions';
+  invalidateCleanupRun,
+  launchCleanupResolver,
+  normalizePlanSlugs,
+  selectPlansLeastRecentlyScanned,
+  startPlanCleanupRun,
+} from '../../../plan-cleanup/start-run';
+import { preflightResolverLaunch, resolvePersistedResolverLaunch } from './attention-bulk-resolve';
+import { bulkAutomationSnapshot } from '../../../attention/bulk-dispositions';
 import { readStandingBulkAutomationPolicy } from '../../../attention/automation-policy';
-
-export const MAX_RUN_PLANS = 200;
-
-export function parsePlanSlugs(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const value of raw) {
-    const slug = typeof value === 'string' ? value.trim() : '';
-    if (!slug || seen.has(slug)) continue;
-    seen.add(slug);
-    out.push(slug);
-    if (out.length >= MAX_RUN_PLANS) break;
-  }
-  return out;
-}
-
-async function invalidateCleanupRun(): Promise<void> {
-  await notifyPlanCleanupRunChanged().catch(() => undefined);
-}
-
-async function launchCleanupResolver(
-  runId: string,
-  planSlugs: string[],
-  harness: string,
-  launch: EffectiveBulkResolverLaunch | null,
-  resolverOwner: string,
-): Promise<{ ok: boolean; sessionId?: string; error?: string }> {
-  try {
-    const [{ buildConsoleEnvelope }, { spawnHeadless }, { activeWorkspaceId }, { resolveSpawnHostOperatorBaseUrl }] =
-      await Promise.all([
-        import('../../../console-launcher'),
-        import('../../../console-spawn'),
-        import('../../../workspace-registry'),
-        import('../../../mcp-base-url'),
-      ]);
-    const workspaceId = activeWorkspaceId();
-    const envelope = await buildConsoleEnvelope({
-      workspaceId,
-      slug: harness,
-      operatorBaseUrl: await resolveSpawnHostOperatorBaseUrl(),
-      headless: true,
-      role: 'su',
-    } as Parameters<typeof buildConsoleEnvelope>[0]);
-    const result = await spawnHeadless({
-      envelope: {
-        ...envelope,
-        greetingCmd: buildResolverLaunchCommand({
-          workspaceId,
-          harness,
-          ownerId: resolverOwner,
-          launch,
-        }),
-        env: {
-          ...envelope.env,
-          PAPERCUSP_KICKOFF_PROMPT: buildCleanupResolverBrief(
-            runId,
-            planSlugs,
-            normalizeBulkAutomationPolicy({
-              mode: launch?.automationMode,
-              minConfidence: launch?.minConfidence,
-            }),
-          ),
-        },
-      },
-      label: `plan-cleanup-${runId.slice(0, 12)}`,
-      coordOwnerId: resolverOwner,
-      launchedBy: 'plan-cleanup',
-    });
-    const outcome = resolverSpawnOutcome(result, resolverOwner);
-    if (!outcome.ok) return outcome;
-
-    let exitHandled = false;
-    const failForExit = (detail: string): void => {
-      if (exitHandled) return;
-      exitHandled = true;
-      void failRunIfExecuting({
-        runId,
-        workspaceId,
-        resolverOwner,
-        error: `cleanup resolver process ended before settling the run: ${detail}`,
-      })
-        .then(async (failed) => {
-          if (failed) await invalidateCleanupRun();
-        })
-        .catch(() => undefined);
-    };
-    outcome.child.once('error', (error) => failForExit(error.message));
-    outcome.child.once('exit', (code, signal) =>
-      failForExit(signal ? `signal ${signal}` : `exit ${code ?? 'unknown'}`),
-    );
-    return { ok: true, sessionId: outcome.sessionId };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-}
 
 async function handleOwnerOp(op: string, body: Record<string, unknown>): Promise<Response> {
   const runId = typeof body.runId === 'string' ? body.runId.trim() : '';
@@ -452,8 +345,8 @@ export async function planCleanupHandler(req: Request, ctx: RouteContext): Promi
   }
   if (op !== 'start') return handleOwnerOp(op, body);
 
-  const planSlugs = parsePlanSlugs(body.planSlugs);
-  if (planSlugs.length === 0) {
+  const offered = normalizePlanSlugs(body.planSlugs);
+  if (offered.length === 0) {
     return Response.json(
       {
         error: {
@@ -483,119 +376,60 @@ export async function planCleanupHandler(req: Request, ctx: RouteContext): Promi
   };
 
   try {
-    const run = await createRun({
-      items: [],
-      runKind: 'plan-cleanup',
-      seedRefs: planSlugs,
-      filterSnapshot: filter,
-      launchSnapshot: launch,
+    // P-005 (plan-cleanup-system-repair-2026-10-01) — more plans than one run
+    // may carry are ordered least-recently-scanned first and cut at
+    // MAX_RUN_PLANS, and the cut is REPORTED ({requested, accepted, truncated})
+    // so the pane can say "first N of M" instead of silently dropping the tail.
+    const selection = await selectPlansLeastRecentlyScanned({ harnessSlug: harness, planSlugs: offered });
+    const coverage = {
+      requested: selection.requested,
+      accepted: selection.accepted,
+      truncated: selection.truncated,
+    };
+    // P-004 — the ONE start path, shared with the scheduled sweep routine.
+    const started = await startPlanCleanupRun({
+      planSlugs: selection.planSlugs,
+      harness,
+      filter,
+      launch,
       automationPolicy,
       requestedBy: 'owner',
-      harnessSlug: harness,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
     });
-    // P-008 — deterministic first. Scanner-authorized findings run through the
-    // SAME run-row authority + canonical plan/claim dispatcher as
-    // plans:cleanup-act. Re-scan to a fixed point before deciding whether any
-    // judgment work remains; only that residue earns an LLM process.
-    const deterministic = await runDeterministicPlanCleanup({
-      run,
-      call: buildPlanCleanupSystemCall({
-        workspaceId: run.workspaceId,
-        harnessSlug: harness,
-        runId: run.runId,
-        signal: ctx.signal,
-      }),
-    });
-    if (deterministic.fatalError) {
-      const failed = await setRunPhase({
-        runId: run.runId,
-        phase: 'failed',
-        error: deterministic.fatalError,
-      });
-      await invalidateCleanupRun();
-      return Response.json({
-        ok: true,
-        runId: run.runId,
-        phase: failed?.phase ?? 'failed',
-        totalPlans: run.totalItems,
-        launched: false,
-        resolverNeeded: false,
-        deterministic,
-        launchError: deterministic.fatalError,
-      });
+    if (started.kind === 'already-active') {
+      return Response.json(
+        {
+          error: {
+            code: started.error.code,
+            message: started.error.message,
+            runId: started.error.activeRunId,
+            phase: started.error.activePhase,
+          },
+        },
+        { status: 409 },
+      );
     }
-    if (deterministic.authorityRevoked) {
-      await invalidateCleanupRun();
+    if (started.kind === 'authority-revoked') {
       return Response.json(
         {
           error: {
             code: 'plan_cleanup_authority_revoked',
-            message: `plan clean-up run ${run.runId} stopped accepting deterministic writes (${deterministic.phase})`,
-            runId: run.runId,
-            phase: deterministic.phase,
-            refusal: deterministic.authorityRefusal?.reason ?? 'run_authority_revoked',
+            message: `plan clean-up run ${started.runId} stopped accepting deterministic writes (${started.phase})`,
+            runId: started.runId,
+            phase: started.phase,
+            refusal: started.refusal,
           },
-          deterministic,
+          deterministic: started.deterministic,
           launched: false,
           resolverNeeded: false,
+          ...coverage,
         },
         { status: 409 },
       );
     }
-    if (!deterministic.needsResolver) {
-      await invalidateCleanupRun();
-      return Response.json({
-        ok: true,
-        runId: run.runId,
-        phase: deterministic.phase,
-        totalPlans: run.totalItems,
-        launched: false,
-        resolverNeeded: false,
-        deterministic,
-      });
-    }
-
-    const resolverOwner = `su-${randomUUID()}`;
-    await setRunPhase({ runId: run.runId, phase: 'pending', resolverOwner });
-    const launched = await launchCleanupResolver(run.runId, planSlugs, harness, preflight.launch, resolverOwner);
-    if (launched.ok) {
-      await setRunPhase({
-        runId: run.runId,
-        phase: 'running',
-        resolverOwner,
-      });
-    } else {
-      await setRunPhase({
-        runId: run.runId,
-        phase: 'failed',
-        error: launched.error ?? 'launch failed',
-      });
-    }
-    await invalidateCleanupRun();
-    return Response.json({
-      ok: true,
-      runId: run.runId,
-      phase: launched.ok ? 'running' : 'failed',
-      totalPlans: run.totalItems,
-      launched: launched.ok,
-      resolverNeeded: true,
-      deterministic,
-      ...(launched.ok ? {} : { launchError: launched.error }),
-    });
+    const { kind: _kind, ...settled } = started;
+    return Response.json({ ok: true, ...settled, ...coverage });
   } catch (error) {
-    if (error instanceof BulkRunAlreadyActiveError) {
-      return Response.json(
-        {
-          error: {
-            code: error.code,
-            message: error.message,
-            runId: error.activeRunId,
-            phase: error.activePhase,
-          },
-        },
-        { status: 409 },
-      );
-    }
     return Response.json(
       { error: { code: 'plan_cleanup_start_failed', message: error instanceof Error ? error.message : String(error) } },
       { status: 500 },

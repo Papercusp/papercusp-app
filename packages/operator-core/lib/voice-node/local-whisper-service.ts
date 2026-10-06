@@ -385,6 +385,11 @@ async function spawnAndHealthGate(opts: {
   state.spawnTimes.push(now());
   let child: ChildProcess;
   try {
+    // The managed server can outlive a temporary test/release checkout. Its
+    // ffmpeg conversion writes relative files, so inheriting that checkout's
+    // cwd leaves a healthy-looking server unable to transcribe after cleanup.
+    const workingDirectory = join(opts.deps.home ?? homedir(), '.papercusp', 'runtime', 'whisper');
+    await mkdir(workingDirectory, { recursive: true });
     // ENROLLED, not raw (WI-39563). This server is health-gated and then PARKED in
     // module-scope `state.child` below — it is long-lived by design. A raw spawn puts
     // it in the operator's own cgroup, so a bg-host restart (KillMode=control-group)
@@ -413,7 +418,7 @@ async function spawnAndHealthGate(opts: {
         launchedBy: 'system:local-whisper-service',
         detail: { url },
       },
-      { spawnOptions: { stdio: 'ignore', detached: false }, spawnFn },
+      { spawnOptions: { cwd: workingDirectory, stdio: 'ignore', detached: false }, spawnFn },
     );
     child = managed.child;
     // Register the lifecycle hook on the SPAWN seam, not at one lucky host bootstrap call site.

@@ -36,6 +36,7 @@ import { trackDetached } from '../../detached-imports';
 import { enterAgentReview } from './agent-review';
 import {
   createImplementationReadiness,
+  implementationReadinessIsLegacyEquivalent,
   readImplementationReadiness,
   type ImplementationReadinessEvidence,
   type ImplementationReadinessState,
@@ -53,6 +54,8 @@ export interface ApplyTriageInput {
   id: string;
   decision: TriageDecision;
   reason: string;
+  /** D-005 routing target; owner-escalations must not enter harness agent review. */
+  target?: string;
   /** Who decided ('Queen', 'improvement-triage' for the scheduled pass, a human id). */
   by?: string;
   /** Write an audit comment on the issue (default true; the scheduled batch
@@ -64,6 +67,8 @@ export interface ApplyTriageResult {
   ok: boolean;
   id: string;
   decision?: TriageDecision;
+  /** Effective D-005 target, including the inferred infra-environment route. */
+  target?: string;
   lifecycle?: IdeaLifecyclePayload;
   /** True when decision='reject' closed the issue (it left the open queue). */
   closed?: boolean;
@@ -344,10 +349,15 @@ function lifecycleOf(issue: EngineerIssue): IdeaLifecyclePayload | null {
 function triageImplementationReadiness(input: {
   issue: EngineerIssue;
   decision: TriageDecision;
+  target?: string;
   citations?: EvidenceCitationInspection;
   deployment?: DeploymentStalenessScreen;
 }): ImplementationReadinessState {
-  const existing = readImplementationReadiness(input.issue.payload);
+  // A creation-enrollment `unknown` stamp is the absent-key legacy case under a
+  // recorded producer (P-005 D-011); triage treats it exactly as it treats absence.
+  const existing = implementationReadinessIsLegacyEquivalent(input.issue.payload)
+    ? null
+    : readImplementationReadiness(input.issue.payload);
   const evidence: ImplementationReadinessEvidence = {};
   if (input.deployment?.screened) {
     evidence.deployment = {
@@ -420,7 +430,12 @@ function triageImplementationReadiness(input: {
     return createImplementationReadiness({
       status: 'unknown',
       source: 'triage-freshness',
-      reason: input.decision === 'gate' ? 'awaiting-agent-review' : 'awaiting-validation',
+      reason:
+        input.decision === 'gate'
+          ? input.target === 'owner-escalation'
+            ? 'awaiting-owner-escalation'
+            : 'awaiting-agent-review'
+          : 'awaiting-validation',
       ...withEvidence,
     });
   }
@@ -548,6 +563,9 @@ export async function applyTriageDecision(
   // Full-fidelity classification (D-005): the candidate view carries paths +
   // watchdogKey + kind, which the taxonomy keys off — never a scope-only call.
   const ideaType = classifyIdeaType(issueToCandidate(issue)).type;
+  // Manual triage callers may omit a target; retain the taxonomy's owner route for
+  // infra/environment items instead of silently treating every gate as agent review.
+  const routeTarget = input.target ?? (ideaType === 'infra-environment' ? 'owner-escalation' : undefined);
   const lifecycle = updateIdeaLifecycle(current, 'triaged', {
     triageDecision: decision,
     triageReason: reason,
@@ -558,6 +576,7 @@ export async function applyTriageDecision(
   const implementationReadiness = triageImplementationReadiness({
     issue,
     decision,
+    target: routeTarget,
     citations: citationInspection,
     deployment: deploymentStaleness,
   });
@@ -578,10 +597,19 @@ export async function applyTriageDecision(
   if (decision === 'reject') patch.decidedReason = reason;
   await deps.mergeIssuePayload(input.id, patch);
 
-  // A triage gate is review work, not an owner-capability escalation. Enrollment is
-  // idempotent: an already-pending item stays in the same review round, while strict
-  // typed owner actions and remote-owned rows remain on their existing lanes.
-  if (decision === 'gate') {
+  // Generic gates enter harness-bound agent review. Owner escalations follow the
+  // coordinator's owner-action path and operator-scoped rows have no harness to review.
+  //
+  // A PLACE whose deployment screen could not answer is stamped
+  // unknown/'deployment-freshness-unknown', which keeps it out of ordinary self-select,
+  // and nothing ever re-screens it: 217 open bugs sat in that dead zone on 2026-10-05
+  // (P-002 / EI-25176539351759672). Until verification is a lane of its own (P-008),
+  // it enters agent review too, so the existing reviewer lane owns the open question.
+  const freshnessUnknownPlace =
+    decision === 'place' &&
+    implementationReadiness.status === 'unknown' &&
+    implementationReadiness.reason === 'deployment-freshness-unknown';
+  if ((decision === 'gate' && routeTarget !== 'owner-escalation') || freshnessUnknownPlace) {
     await deps.enterAgentReview({ id: input.id, submittedBy: by });
   }
 
@@ -619,6 +647,7 @@ export async function applyTriageDecision(
     ok: true,
     id: input.id,
     decision,
+    ...(routeTarget ? { target: routeTarget } : {}),
     lifecycle,
     closed,
     ...(evidenceDowngrade ? { evidenceDowngrade } : {}),

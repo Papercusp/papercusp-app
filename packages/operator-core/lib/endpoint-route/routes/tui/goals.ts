@@ -59,7 +59,8 @@ export interface TuiGoalDto {
   pots: Array<{ harnessSlug: string; role: string | null; servesGoals: number }>;
   openWorkItems: number;
   needsHuman: number;
-  spendUsd: number;
+  /** Goal-attributed spend (WI-1074208); null = unmeasured, never $0. */
+  spendUsd: number | null;
   budgetCents: number | null;
   lastActivityAt: string | null;
 }

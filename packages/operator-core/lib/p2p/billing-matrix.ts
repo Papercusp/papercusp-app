@@ -25,6 +25,8 @@
  * emits a P-004 refusal). It never imports FLAGS or a store.
  */
 
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
+
 export type BillingMode = 'host-pays' | 'pool-with-attribution' | 'provider-capped-key';
 export const BILLING_MODES: readonly BillingMode[] = ['host-pays', 'pool-with-attribution', 'provider-capped-key'] as const;
 
@@ -94,7 +96,13 @@ export interface BillingContext {
 
 export type ResolveBillingResult =
   | { ok: true; spec: BillingModeSpec }
-  | { ok: false; code: BillingRefusalCode; detail: string };
+  | {
+      ok: false;
+      code: BillingRefusalCode;
+      detail: string;
+      /** WI-10005197: what would LIFT this refusal. Present on `relay_forbidden_v1` (a policy, not a state). */
+      refusal?: RefusalContract;
+    };
 
 /**
  * Resolve the authoritative meter for a billing mode, enforcing D-009 (no v1
@@ -111,6 +119,14 @@ export function resolveBillingAuthority(mode: BillingMode, ctx: BillingContext =
       ok: false,
       code: 'relay_forbidden_v1',
       detail: `v1 forbids a streaming/proxy gateway relay (got '${ctx.gatewayLeg}'); the federated leg is a quota ledger only — inference bytes never route through the pool (D-009).`,
+      refusal: {
+        observed: { gatewayLeg: String(ctx.gatewayLeg), allowedLeg: V1_GATEWAY_LEG },
+        liftsWhen:
+          `the caller runs the '${V1_GATEWAY_LEG}' gateway leg (the v1 quota ledger). This is a POLICY (D-009), not ` +
+          'a state: retrying the same relay leg cannot lift it, and no operator action in v1 can either. The ' +
+          'requester re-plans onto the quota-ledger leg; a relay needs a new decision that supersedes D-009',
+        whoCanMakeItTrue: ['another-agent', 'owner'],
+      },
     };
   }
   const spec = X7_AUTHORITY_TABLE[mode];

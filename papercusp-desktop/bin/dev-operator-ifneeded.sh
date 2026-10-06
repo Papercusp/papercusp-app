@@ -110,6 +110,20 @@ for DEV_CALLER_KEY in PAPERCUSP_BIND_HOST PAPERCUSP_CUPBOARD_URL; do
     DEV_CALLER_OVERRIDES+="$DEV_CALLER_KEY=$DEV_CALLER_VALUE_Q "
   fi
 done
+# Background workers (routines tick, trigger-run dispatch, DBOS schedules)
+# stay OFF on the desktop dev operator: on the shared dev database the bg-host
+# on :3270 is their single writer (EI-126), and a second one here would race
+# it. An ISOLATED verifier (verify-tauri-headless.sh with its own throwaway
+# database, PAPERCUSP_VERIFY_TAURI_ISOLATED=1) has no bg-host at all, so
+# without workers nothing routine-driven can be verified there — a signed
+# webhook is accepted but its trigger run is never dispatched (WI-10004404).
+# Such a verifier opts in with PAPERCUSP_DEV_BACKGROUND_WORKERS=1; the opt-in
+# is ignored anywhere else, so it can never add a second writer to shared state.
+DEV_BACKGROUND_WORKERS=0
+if [ "${PAPERCUSP_VERIFY_TAURI_ISOLATED:-}" = 1 ] && [ "${PAPERCUSP_DEV_BACKGROUND_WORKERS:-}" = 1 ]; then
+  DEV_BACKGROUND_WORKERS=1
+  echo "[tauri] isolated verifier: background workers ON (PAPERCUSP_DEV_BACKGROUND_WORKERS=1)"
+fi
 # An isolated verifier supplies PAPERCUSP_DEV_SOURCE_ROOT. Resolve it exactly
 # (marker check, no walk-up) and fail closed if it is incomplete: the verifier
 # must never silently fall back to the mutable shared checkout. With no
@@ -165,6 +179,16 @@ if [ -n "$DEV_HOST_ENTRY" ]; then
   fi
   printf -v DEV_HOST_ENTRY_Q '%q' "$DEV_HOST_ENTRY"
   DEV_HOST_COMMAND="node $DEV_HOST_ENTRY_Q"
+  # A frozen verifier can stall during module evaluation, before host-level
+  # diagnostics are installed. Arm Node itself and retain its exact PID before
+  # exec, so the verifier can capture the stall without guessing a peer's PID.
+  if [ -n "${PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR:-}" ]; then
+    mkdir -p -- "$PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR"
+    printf -v DEV_HOST_DIAGNOSTIC_DIR_Q '%q' "$PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR"
+    DEV_HOST_RUN="echo \$\$ > $DEV_HOST_DIAGNOSTIC_DIR_Q/node.pid; exec node --report-on-signal --report-signal=SIGUSR2 --report-exclude-env --report-exclude-network --report-directory=$DEV_HOST_DIAGNOSTIC_DIR_Q $DEV_HOST_ENTRY_Q"
+    printf -v DEV_HOST_RUN_Q '%q' "$DEV_HOST_RUN"
+    DEV_HOST_COMMAND="bash -c $DEV_HOST_RUN_Q"
+  fi
   echo "[tauri] using frozen plain-node operator host: $DEV_HOST_ENTRY"
 fi
 printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
@@ -172,19 +196,25 @@ printf -v DEV_OPERATOR_DIR_Q '%q' "$DEV_OPERATOR_DIR"
 # their 40-malloc-arena.conf drop-ins (host-memory-reduction-2026-09-27 D-027:
 # this host held 1.8 GB in 64 MiB arenas without it). boot-malloc-arena.ts
 # re-execs an uncapped host as a backstop; setting it here skips that exec.
-DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=0 PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
+DEFAULT_DEV_CMD="cd $DEV_OPERATOR_DIR_Q && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && env ${DEV_CALLER_OVERRIDES}MALLOC_ARENA_MAX=2 PAPERCUSP_HONO_PORT=$PORT PAPERCUSP_PTY_WS_PORT=$PTY_PORT PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 PAPERCUSP_BACKGROUND_WORKERS=$DEV_BACKGROUND_WORKERS PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=1 PAPERCUSP_SYSTEM_HEALTH_SPAWN_SIDECAR=1 PAPERCUSP_DBOS_ENABLE=1 PAPERCUSP_DBOS_TIMERS=0 PAPERCUSP_DBOS_ROUTINES=1 PAPERCUSP_DBOS_AUTOLOOP=0 PAPERCUSP_DBOS_PLAN_RENDER=0 DBOS__VMID=desktop-dev-$PORT $DEV_HOST_COMMAND"
 # hono-host ASSUMES a reachable database (env URL, embedded-pg.json, or native
 # :5432 harness_admin), which every developer box has and a fresh clone does
-# not. With none reachable, boot bin/serve.ts instead: it starts its own
+# not. With no configured database and no reachable native fallback, boot
+# bin/serve.ts instead: it starts its own
 # embedded Postgres + migrations and serves the UI, as the public README says
 # (open-source-release-2026-09-29 R-18). A frozen verifier entry or an explicit
 # OPERATOR_DEV_CMD always wins; the probe only chooses the default.
 DEV_OPERATOR_MODE=external-pg
 if [ -z "$DEV_HOST_ENTRY" ] && [ -z "${OPERATOR_DEV_CMD:-}" ]; then
   PROBE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
-  if ! (cd "$DEV_OPERATOR_DIR" && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && node "$SCRIPT_DIR/dev-operator-pg-probe.mjs" --repo-root "${DEV_SOURCE_ROOT:-$PROBE_ROOT}"); then
-    DEV_OPERATOR_MODE=embedded-pg
-  fi
+  probe_status=0
+  (cd "$DEV_OPERATOR_DIR" && set -a && if [ -f .env.local ]; then . ./.env.local; fi && set +a && node "$SCRIPT_DIR/dev-operator-pg-probe.mjs" --repo-root "${DEV_SOURCE_ROOT:-$PROBE_ROOT}") || probe_status=$?
+  case "$probe_status" in
+    0) ;;
+    1) DEV_OPERATOR_MODE=embedded-pg ;;
+    2) echo "[tauri] configured developer database is unavailable — preserving it; the supervised operator will retry without switching databases" >&2 ;;
+    *) echo "[tauri] database probe failed (exit $probe_status) — refusing to choose a different database" >&2; exit "$probe_status" ;;
+  esac
 fi
 if [ "$DEV_OPERATOR_MODE" = embedded-pg ]; then
   echo "[tauri] no reachable developer database — booting bin/serve.ts with its own embedded Postgres"
@@ -228,7 +258,8 @@ if in_use; then
   # EI-13537: `in_use` only proves the PORT is bound — it does NOT prove the
   # bound process is actually the low-privilege, background-workers-OFF dev
   # operator this wrapper is supposed to guarantee (DEFAULT_DEV_CMD above
-  # pins PAPERCUSP_BACKGROUND_WORKERS=0). A process bound to :$PORT by some
+  # pins PAPERCUSP_BACKGROUND_WORKERS=0 except for an isolated verifier's
+  # DEV_BACKGROUND_WORKERS opt-in). A process bound to :$PORT by some
   # OTHER means (started directly, outside this wrapper, with background
   # workers ON) gets silently and PERMANENTLY adopted by every future
   # `npm run dev` via this exact reuse path — running redundant DBOS
@@ -259,8 +290,11 @@ if in_use; then
   squatter=0
   if command -v curl >/dev/null 2>&1; then
     health="$(curl -s --max-time 2 "http://127.0.0.1:$PORT/api/health/deep" 2>/dev/null || true)"
+    # An isolated verifier that opted into background workers (see
+    # DEV_BACKGROUND_WORKERS above) EXPECTS dbosEnabled=true from its own
+    # operator on its own throwaway database — that is not a squatter.
     case "$health" in
-      *'"dbosEnabled":true'*) squatter=1 ;;
+      *'"dbosEnabled":true'*) [ "$DEV_BACKGROUND_WORKERS" = 1 ] || squatter=1 ;;
     esac
   fi
   if [ "$squatter" = "1" ]; then

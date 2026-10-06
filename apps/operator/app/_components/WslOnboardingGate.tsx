@@ -22,13 +22,12 @@
  * transitions without needing the Rust side to push events.
  */
 
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useState } from 'react';
 import * as Collapsible from '@radix-ui/react-collapsible';
 import { toast } from 'sonner';
 import {
   isTauri,
   wslBootstrap,
-  wslFinalizeReady,
   wslImport,
   wslInstall,
   wslRelaunchElevated,
@@ -57,14 +56,6 @@ export default function WslOnboardingGate({ children }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const { askConfirm, confirmEl } = useConfirmDialog();
   const [logTail, setLogTail] = useState<string>('');
-  // Track the prior state-kind so we can detect the transition into
-  // Ready and trigger one app restart (so the Rust side spawns the
-  // sidecar through wsl.exe). Without this guard, the restart would
-  // also fire on the very first launch when the user already had a
-  // working WSL setup — unnecessary churn.
-  const priorKindRef = useRef<string | null>(null);
-  const finalizingRef = useRef(false);
-
   const refresh = useCallback(async () => {
     if (!isTauri()) {
       setStatus(null);
@@ -90,35 +81,6 @@ export default function WslOnboardingGate({ children }: Props) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-
-  // Restart the app on the PendingBootstrap → Ready transition so
-  // setup() can spawn the sidecar through wsl.exe. We only fire when
-  // the prior state was actually a non-Ready onboarding state — never
-  // on a fresh launch where the user was already Ready.
-  useEffect(() => {
-    if (!status || status === 'pending') return;
-    const kind = status.state.kind;
-    const prior = priorKindRef.current;
-    priorKindRef.current = kind;
-    if (
-      prior !== null
-      && prior !== 'Ready'
-      && prior !== 'NotSupported'
-      && kind === 'Ready'
-      && !finalizingRef.current
-    ) {
-      finalizingRef.current = true;
-      void wslFinalizeReady().catch((err) => {
-        // wslFinalizeReady triggers app.restart(); the only way control
-        // returns is if it failed to start. Surface for the user.
-        finalizingRef.current = false;
-        toast.error(`Could not restart Papercusp: ${err}`, {
-          description: 'Please quit and reopen.',
-          duration: Infinity,
-        });
-      });
-    }
-  }, [status]);
 
   // PendingBootstrap auto-runs the bootstrap; InstalledNoDistro
   // auto-runs the import. The user only sees explicit buttons for

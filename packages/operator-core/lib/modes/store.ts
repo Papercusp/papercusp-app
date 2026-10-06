@@ -268,13 +268,35 @@ export async function getModesForOwners(
 
 async function audit(
   sql: Sql,
-  o: { workspaceId: string; ownerId: string; axisKey: string; oldMode: string | null; newMode: string | null; reason: string; setBy: string; ownerDirected: boolean },
+  o: {
+    workspaceId: string;
+    ownerId: string;
+    axisKey: string;
+    oldMode: string | null;
+    newMode: string | null;
+    reason: string;
+    setBy: string;
+    ownerDirected: boolean;
+    /** Mode subject at this transition (the goal id for GOAL). */
+    subject?: string | null;
+    /**
+     * The epoch a GOAL holder election minted (WI-10005240). This row is the
+     * durable lease high-water: the election reads MAX over these rows as well
+     * as the live agent_modes rows, so an epoch is never re-issued after its
+     * holder's row is gone. Must be written in the election's transaction.
+     */
+    goalLeaseEpoch?: number | null;
+  },
 ): Promise<void> {
+  // New columns are appended LAST: positional readers of this VALUES list
+  // (store.test.ts's mock) keep their meaning.
   await sql`
     INSERT INTO harness_shared.agent_mode_changes
-      (workspace_id, owner_id, axis_key, old_mode, new_mode, reason, set_by, owner_directed)
+      (workspace_id, owner_id, axis_key, old_mode, new_mode, reason, set_by, owner_directed,
+       subject, goal_lease_epoch)
     VALUES (${o.workspaceId}, ${o.ownerId}, ${o.axisKey}, ${o.oldMode}, ${o.newMode},
-            ${o.reason}, ${o.setBy}, ${o.ownerDirected})`;
+            ${o.reason}, ${o.setBy}, ${o.ownerDirected},
+            ${o.subject ?? null}, ${o.goalLeaseEpoch ?? null}::bigint)`;
 }
 
 /**
@@ -616,13 +638,25 @@ async function writeModeRow(
         FROM input
         LEFT JOIN predecessor ON true
     ),
+    -- WI-10005240: the high-water is the MAX over LIVE rows AND the election
+    -- history. Live rows alone re-issue an exited holder's epoch to the next
+    -- elected owner, so the fencing token repeats. The history row for every
+    -- election is written in this same transaction (setModeCore's audit), under
+    -- the advisory lock taken above.
     next_epoch AS MATERIALIZED (
-      SELECT COALESCE(MAX(am.goal_lease_epoch), 0) + 1 AS epoch
-        FROM harness_shared.agent_modes am
-        CROSS JOIN input
-       WHERE am.workspace_id = input.workspace_id
-         AND am.mode = ${GOAL_MODE}
-         AND am.subject = input.subject
+      SELECT GREATEST(
+               COALESCE((SELECT MAX(am.goal_lease_epoch)
+                           FROM harness_shared.agent_modes am
+                          WHERE am.workspace_id = input.workspace_id
+                            AND am.mode = ${GOAL_MODE}
+                            AND am.subject = input.subject), 0),
+               COALESCE((SELECT MAX(c.goal_lease_epoch)
+                           FROM harness_shared.agent_mode_changes c
+                          WHERE c.workspace_id = input.workspace_id
+                            AND c.subject = input.subject
+                            AND c.goal_lease_epoch IS NOT NULL), 0)
+             ) + 1 AS epoch
+        FROM input
     ),
     inserted AS (
     INSERT INTO harness_shared.agent_modes
@@ -801,6 +835,10 @@ async function setModeCore(opts: SetModeOpts, control: { deferNotify?: boolean }
     await audit(sql, {
       workspaceId: opts.workspaceId, ownerId: opts.ownerId, axisKey,
       oldMode: incumbent.mode, newMode: null, reason: opts.reason, setBy: opts.setBy, ownerDirected,
+      // WI-10005573: the cleared row's subject. Without it a GOAL retire row cannot
+      // say WHICH goal its owner stopped holding, and former-holder selection by
+      // subject (holder-handoff.ts) silently misses every pre-subject holder.
+      subject: incumbent.subject,
     });
     // WI-6974: a mode CLEAR changes what this agent was told, so push the Orders
     // panel for this owner. Reached only past the `noop` guard above, so the push
@@ -882,6 +920,9 @@ async function setModeCore(opts: SetModeOpts, control: { deferNotify?: boolean }
   await audit(sql, {
     workspaceId: opts.workspaceId, ownerId: opts.ownerId, axisKey,
     oldMode: incumbent?.mode ?? null, newMode: def.id, reason: opts.reason, setBy: opts.setBy, ownerDirected,
+    subject: nextSubject ?? null,
+    // WI-10005240: the minted epoch becomes the durable lease high-water.
+    goalLeaseEpoch: goalWrite.election?.epoch ?? null,
   });
   // D-003: applied BEFORE the orders notify below, so the single push carries the
   // whole posture — the primary mode and everything it implied — rather than the

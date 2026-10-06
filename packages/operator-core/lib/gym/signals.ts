@@ -12,21 +12,49 @@ import type { PlantedBug } from './probe-generator';
 export interface TestResult {
   name: string;
   passed: boolean;
+  /** Reporter file identity disambiguates equal assertion names across files. */
+  file?: string;
+  /** Skipped/pending assertions owe coverage but did not produce a verdict. */
+  executed?: boolean;
+}
+
+export function testResultKey(result: TestResult): string {
+  return JSON.stringify([result.file ?? '', result.name]);
 }
 
 /**
  * Did the change break a PRE-EXISTING test? True iff some test present in BOTH the
  * pre and post runs flipped pass→fail. New failing tests and already-failing tests
  * do not count — only a genuine regression of the repo's own prior-green tests.
+ * Undefined means coverage is incomplete or ambiguous; it is never a pass.
  */
-export function regressionsFromTests(pre: readonly TestResult[], post: readonly TestResult[]): boolean {
-  const postByName = new Map(post.map((t) => [t.name, t.passed]));
+export function regressionsFromTests(pre: readonly TestResult[], post: readonly TestResult[]): boolean | undefined {
+  const index = (results: readonly TestResult[]) => {
+    const byKey = new Map<string, TestResult>();
+    const duplicates = new Set<string>();
+    for (const result of results) {
+      const key = testResultKey(result);
+      if (byKey.has(key)) duplicates.add(key);
+      byKey.set(key, result);
+    }
+    return { byKey, duplicates };
+  };
+  const before = index(pre);
+  const after = index(post);
+  let complete = pre.length > 0 && post.length > 0 && before.duplicates.size === 0 && after.duplicates.size === 0 &&
+    post.every((t) => t.name.trim().length > 0 && t.executed !== false);
   for (const t of pre) {
-    if (!t.passed) continue; // wasn't green before → not a regression
-    const after = postByName.get(t.name);
-    if (after === false) return true; // green before, red after → regression
+    const key = testResultKey(t);
+    const next = after.byKey.get(key);
+    if (!t.name.trim() || t.executed === false || !next || next.executed === false ||
+        before.duplicates.has(key) || after.duplicates.has(key)) {
+      complete = false;
+      continue;
+    }
+    // A witnessed failure stays decisive even if another assertion is missing.
+    if (t.passed && next.passed === false) return true;
   }
-  return false;
+  return complete ? false : undefined;
 }
 
 /** Distinctive identifier-ish tokens (len ≥ 4) from a planted-bug location. */

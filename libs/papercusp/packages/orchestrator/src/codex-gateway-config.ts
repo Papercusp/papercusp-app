@@ -67,7 +67,9 @@ export interface CodexGatewayConfigOpts {
  * Codex's native memory store; short-lived spawn homes preserve their existing
  * memory setting by passing `disableMemories: false`.
  */
-export function codexManagedFeaturesToml(opts: { disableMemories?: boolean } = {}): string[] {
+export function codexManagedFeaturesToml(
+  opts: { disableMemories?: boolean; headless?: boolean } = {},
+): string[] {
   return [
     '# Papercusp owns context carry/restart; Codex native compaction must not cut first.',
     '[features]',
@@ -77,6 +79,18 @@ export function codexManagedFeaturesToml(opts: { disableMemories?: boolean } = {
     // Without it, /model silently falls back to the shared/default-account cache even while
     // the gateway can serve newer model ids for inference.
     'api_key_model_discovery = true',
+    // A headless managed PTY has no human who can answer Codex's plugin/app
+    // authentication elicitation. Leaving plugins enabled makes a 401 from the
+    // remote ChatGPT plugin catalog start an OAuth browser flow for every fleet
+    // member, even when model inference uses an API key or custom provider and
+    // needs no ChatGPT login. Suppress that optional interactive surface only
+    // for headless sessions; visible sessions keep the ordinary plugin UX.
+    ...(opts.headless
+      ? [
+          'plugins = false',
+          'auth_elicitation = false',
+        ]
+      : []),
     '',
   ];
 }

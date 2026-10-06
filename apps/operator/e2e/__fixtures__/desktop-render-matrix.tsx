@@ -44,6 +44,7 @@ function Fixture() {
       startState="idle" startError={null} thumbnails={{}}
       selectedDesktop={selected} viewerState={viewerState}
       onSelectDesktop={setSelected} onViewerStateChange={setViewerState}
+      pinned={[]} onPinnedChange={() => {}} filter="" onFilterChange={() => {}}
     />
   </main>;
 }

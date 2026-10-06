@@ -47,10 +47,20 @@ registerSystemAction('plan-drain-sweep', async (ctx: SystemActionCtx) => {
           ? `: ${result.applied.map((a) => `${a.planSlug} ${a.from}→${a.to}`).join(', ')}`
           : ''),
     );
-    // The pure decision's evidence sentence, one line per flip. A status change on
-    // a historical plan must never be traceable only to "a sweep did it".
-    for (const a of result.applied) {
-      console.log(`[plan-drain-sweep]   ${a.harnessSlug}/${a.planSlug}: ${a.reason}`);
+    // Keep each candidate's outcome tied to its plan so aggregate counts cannot
+    // hide which plan applied, skipped, or waited for the next capped tick.
+    for (const outcome of result.outcomes) {
+      const planRef = outcome.harnessSlug + '/' + outcome.planSlug;
+      if (outcome.outcome === 'applied') {
+        console.log(
+          '[plan-drain-sweep]   ' + planRef + ': applied ' + outcome.from + '→' + outcome.to +
+            ' — ' + outcome.reason,
+        );
+      } else {
+        console.log(
+          '[plan-drain-sweep]   ' + planRef + ': ' + outcome.outcome + ' (' + outcome.reason + ')',
+        );
+      }
     }
   }
 });

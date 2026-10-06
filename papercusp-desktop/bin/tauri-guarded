@@ -255,6 +255,24 @@ if [[ "$__subcommand" == "build" || "$__subcommand" == "bundle" ]]; then
 fi
 
 if [[ "$__subcommand" == "dev" ]]; then
+  # WI-10005763 (D-012): `tauri dev` boots the app FROM the live shared tree with network —
+  # cargo build.rs, the operator sidecar, the host bundle. Code a session holding an active
+  # personal disclosure wrote into that tree must not run this way, so refuse before claiming a
+  # slot or starting anything. Keyed on the SUPERPROJECT, not on the gate file existing: inside
+  # the papercusp tree a missing gate makes node fail and this refuses, so deleting the gate is
+  # not a bypass. A standalone desktop checkout has no superproject tree to fence. The gate skips
+  # itself inside a test runner, the release gate, and GitHub Actions (restricted-hold-preflight.mjs).
+  # WI-10005802: the gate starts under the committed-source loader, so the gate and the preflight
+  # library it imports run their committed (HEAD) bytes: a held write to either cannot run here.
+  __pc_superproject="$(git -C "$__here" rev-parse --show-superproject-working-tree 2>/dev/null || true)"
+  if [[ -n "$__pc_superproject" ]]; then
+    if ! node --import "$__pc_superproject/scripts/lib/committed-source-loader.mjs" \
+        "$__pc_superproject/scripts/restricted-hold-tree-gate.mjs" --door tauri-dev "$__pc_superproject"; then
+      echo "FATAL: the restricted-write fence refused \`tauri dev\` (see the RESTRICTED_HOLD_REFUSED line above); nothing was booted." >&2
+      exit 1
+    fi
+  fi
+
   # Sourced, not executed: it exports CARGO_TARGET_DIR and holds a lock fd on the
   # claimed slot. A POSIX lock lives on the open file DESCRIPTION, so it survives
   # the `exec` below and is released when the tauri process dies — which is

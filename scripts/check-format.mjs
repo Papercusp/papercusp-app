@@ -203,7 +203,7 @@ function gitRepoRootForPath(absolutePath, fallbackRoot) {
   }
 }
 
-function isTracked(repoPath, repoRoot = REPO_ROOT) {
+export function isTracked(repoPath, repoRoot = REPO_ROOT) {
   const result = spawnSync(
     "git",
     ["ls-files", "--error-unmatch", "--", repoPath],
@@ -212,7 +212,22 @@ function isTracked(repoPath, repoRoot = REPO_ROOT) {
       encoding: "utf8",
     },
   );
-  return result.status === 0;
+  if (result.status === 0) return true;
+  // WI-10005009: a half-written .git/index (git-sync rewrites it every sweep) answers
+  // status 1 for a tracked path, byte-for-byte like an untracked one, which would turn
+  // a scoped range check into a whole-file one. HEAD's tree cannot be torn: ask it
+  // before believing the index's "no".
+  const head = spawnSync(
+    "git",
+    ["--literal-pathspecs", "ls-tree", "-z", "--name-only", "HEAD", "--", repoPath],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 30_000,
+      killSignal: "SIGKILL",
+    },
+  );
+  return head.status === 0 && typeof head.stdout === "string" && head.stdout.length > 0;
 }
 
 /**

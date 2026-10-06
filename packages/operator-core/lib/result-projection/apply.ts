@@ -11,6 +11,12 @@
  * A silent no-op would read exactly like "the tool returned everything", which
  * is precisely the misattribution D-042 forbids.
  *
+ * ONE deliberate exception to pass-through: a `pick` that matches NOTHING on a
+ * body larger than PICK_MISS_FAIL_OPEN_MAX_CHARS is REFUSED with a bounded key
+ * list rather than failing open into the full body (EI-23774219620725180) — the
+ * caller used `projection` to AVOID that cost, and the corrected path is what
+ * they need, not the body. Still loud, still never an empty `{}`.
+ *
  * Operator semantics track the coreutils they stand in for (uniq collapses only
  * ADJACENT runs; cut passes non-delimited lines through unless -s; grep emits
  * `--` between non-contiguous context groups) so that a rewrite of a real corpus
@@ -22,6 +28,7 @@
 import { describeProjection } from './parse';
 import { parseFormatRequest } from '@papercusp/result-encoding';
 import type { ProjectionReport, ProjectionSpec, ProjectionStage } from './types';
+import { COORD_SEND_RECEIPT_RECOVERY, isCoordSendDeliveryDiagnostic } from '../agent-tools/coordination/tools/inbox-content-bounds';
 
 /**
  * Choose the wire format for the intermediate body consumed by a projection.
@@ -85,6 +92,144 @@ export function describeBodyShape(body: unknown): string {
     return keys.length ? `an OBJECT with key(s): ${keyList(keys)}` : 'an empty OBJECT';
   }
   return `a bare ${body === null ? 'null' : typeof body} value`;
+}
+
+// ── pick-miss REFUSAL (EI-23774219620725180) ──────────────────────────────────
+//
+// A `pick` that matches NOTHING used to fail open into the FULL unprojected
+// body. That is loud, but it is the worst trade on exactly the bodies that make
+// a caller reach for `projection`: the caller asked for less BECAUSE the body
+// was large, the typo removed the protection while keeping the cost (measured:
+// events:catalog, 61,066 of 61,066 chars retained, 0% removed, then spilled to
+// scratch anyway — the full cost and still no complete result).
+//
+// Returning `{}` instead would be quiet-and-wrong (an empty result reads like a
+// filter that worked — the silent false-negative family). The third option is to
+// REFUSE: stay loud, stay bounded, and hand back the corrected path. The caller
+// does not need the body; they need the spelling. Everything below is computed
+// from the body the door already holds, so it adds no source read.
+//
+// Below the budget the whole body is returned unprojected as before: it costs
+// no more than the diagnostic would, and is strictly more informative.
+
+/** A body at or under this many chars still fails open unprojected (cheaper than the refusal). */
+export const PICK_MISS_FAIL_OPEN_MAX_CHARS = 3000;
+const PICK_MISS_HEAD_SAMPLE_CHARS = 600;
+const PICK_MISS_MAX_KEYS = 40;
+const PICK_MISS_MAX_NEAR_MISSES = 6;
+const PICK_MISS_MAX_ROWS_SCANNED = 25;
+
+function pickMissTypeTag(value: unknown): string {
+  if (Array.isArray(value)) return `array[${value.length}]`;
+  if (value === null) return 'null';
+  if (isPlainObject(value)) return 'object';
+  return typeof value;
+}
+
+/** `key (type)` hints for the union of keys over a set of nodes, first-seen order, bounded. */
+function pickMissKeyHints(nodes: readonly unknown[]): string[] {
+  const seen = new Map<string, string>();
+  for (const node of nodes) {
+    if (!isPlainObject(node)) continue;
+    for (const [key, value] of Object.entries(node)) {
+      if (!seen.has(key)) seen.set(key, pickMissTypeTag(value));
+    }
+  }
+  const hints = [...seen].map(([key, tag]) => `${key} (${tag})`);
+  return hints.length > PICK_MISS_MAX_KEYS
+    ? [...hints.slice(0, PICK_MISS_MAX_KEYS), `… +${hints.length - PICK_MISS_MAX_KEYS} more`]
+    : hints;
+}
+
+interface PickNearMiss {
+  path: string;
+  /** The longest leading part of the path that DID resolve against the body. */
+  matchedPrefix: string;
+  /** Keys available at that point (wildcards expand over the first rows). */
+  keysThere: string[];
+  /** Why the next segment failed, when that is knowable. */
+  hint?: string;
+}
+
+/**
+ * Walk a missed path as far as it resolves. Wildcard (`[]`) segments fan out over
+ * the first rows so the keys reported are the union a caller can really address,
+ * not the first row's accident. Returns null when not even the first segment
+ * resolved: the root key list already says everything there is to say.
+ */
+function describePickNearMiss(body: unknown, path: string): PickNearMiss | null {
+  const segs = parsePickPath(path);
+  let nodes: unknown[] = [body];
+  let prefix = '';
+  let hint: string | undefined;
+  for (const seg of segs) {
+    let next: unknown[];
+    let spelled: string;
+    if (seg.kind === 'key') {
+      next = nodes.filter((n) => isPlainObject(n) && seg.name in n).map((n) => (n as Record<string, unknown>)[seg.name]);
+      spelled = prefix ? `.${seg.name}` : seg.name;
+      if (next.length === 0 && nodes.length > 0 && nodes.every(Array.isArray)) {
+        hint = `\`${prefix}\` is an ARRAY — select its elements with \`${prefix}[].${seg.name}\``;
+      }
+    } else if (seg.kind === 'array') {
+      next = nodes.flatMap((n) => (Array.isArray(n) ? n.slice(0, PICK_MISS_MAX_ROWS_SCANNED) : []));
+      spelled = '[]';
+      if (nodes.length > 0 && next.length === 0 && !nodes.some(Array.isArray)) {
+        hint = `\`${prefix || '(root)'}\` is not an array, so \`[]\` selects nothing here`;
+      }
+    } else {
+      next = nodes.flatMap((n) => (Array.isArray(n) && seg.i < n.length ? [n[seg.i]] : []));
+      spelled = `[${seg.i}]`;
+    }
+    if (next.length === 0) break;
+    nodes = next;
+    prefix += spelled;
+  }
+  if (prefix === '') return null;
+  // An array node's addressable keys are its ELEMENTS' keys, via `[]`.
+  const arrayNodes = nodes.every(Array.isArray) && nodes.length > 0;
+  const rows = arrayNodes ? nodes.flatMap((n) => (n as unknown[]).slice(0, PICK_MISS_MAX_ROWS_SCANNED)) : nodes;
+  return {
+    path,
+    matchedPrefix: arrayNodes ? `${prefix}[]` : prefix,
+    keysThere: pickMissKeyHints(rows),
+    ...(hint ? { hint } : {}),
+  };
+}
+
+/** The bounded stand-in body returned INSTEAD of a large unprojected one. */
+export function buildPickMissRefusal(
+  body: unknown,
+  requested: readonly string[],
+  bodyChars: number,
+  retainedWriteOutcome?: unknown,
+): Record<string, unknown> {
+  const rootNodes = Array.isArray(body)
+    ? body.slice(0, PICK_MISS_MAX_ROWS_SCANNED)
+    : [body];
+  const nearMisses = requested
+    .map((path) => describePickNearMiss(body, path))
+    .filter((miss): miss is PickNearMiss => miss !== null)
+    .slice(0, PICK_MISS_MAX_NEAR_MISSES);
+  const sampleSource = Array.isArray(body) ? body[0] : body;
+  const sampleJson = JSON.stringify(sampleSource) ?? '';
+  const sampleTruncated = sampleJson.length > PICK_MISS_HEAD_SAMPLE_CHARS;
+  return {
+    projection_refused: 'pick_matched_nothing',
+    requested_pick: requested,
+    body_chars_withheld: bodyChars,
+    body_shape: describeBodyShape(body),
+    [Array.isArray(body) ? 'row_keys' : 'root_keys']: pickMissKeyHints(rootNodes),
+    ...(nearMisses.length > 0 ? { near_misses: nearMisses } : {}),
+    head_sample: sampleTruncated ? `${sampleJson.slice(0, PICK_MISS_HEAD_SAMPLE_CHARS)}…` : sampleJson,
+    ...(sampleTruncated ? { head_sample_truncated: true } : {}),
+    ...(retainedWriteOutcome !== undefined && isPlainObject(retainedWriteOutcome) && Object.keys(retainedWriteOutcome).length > 0
+      ? { write_outcome_retained: retainedWriteOutcome }
+      : {}),
+    next:
+      'Re-call with a pick spelled from root_keys / near_misses. To receive the whole body anyway, ' +
+      'omit `projection` (the result door then bounds it), or use `pipe` alone.',
+  };
 }
 
 /** How a materialized result body looks to the two projection domains. */
@@ -177,7 +322,7 @@ function truncationPath(path: string, key: string): string {
 }
 
 function isTruncationKey(key: string): boolean {
-  return key === 'truncated' || key === 'payloadTierForced' || TRUNCATION_KEY_REGEX.test(key) || TRUNCATED_BY_KEY_REGEX.test(key);
+  return key === '_partial' || key === 'truncated' || key === 'payloadTierForced' || TRUNCATION_KEY_REGEX.test(key) || TRUNCATED_BY_KEY_REGEX.test(key);
 }
 
 function hasNonEmptyPartialityValue(value: unknown): boolean {
@@ -203,7 +348,7 @@ function addBodyTruncationMarker(
 }
 
 /** Find the marker-shaped truncation contracts in a parsed result body. */
-function detectBodyTruncationMarkers(...sources: Array<{ value: unknown; text?: string }>): BodyTruncationMarker[] {
+function detectBodyTruncationMarkers(toolName: string | undefined, ...sources: Array<{ value: unknown; text?: string }>): BodyTruncationMarker[] {
   const markers: BodyTruncationMarker[] = [];
   const seen = new WeakSet<object>();
 
@@ -243,7 +388,7 @@ function detectBodyTruncationMarkers(...sources: Array<{ value: unknown; text?: 
       } else if ((key === '_projection' || key === 'projection' || key === 'payloadProjection') && childTruncated) {
         addBodyTruncationMarker(markers, `${childPath}.truncated`, 'truncated=true');
       } else if (
-        isTruncationKey(key) &&
+        isTruncationKey(key) && !isCoordSendDeliveryDiagnostic(toolName, key) &&
         (child === true || (markerObject && key !== 'truncated' && Object.keys(child).length > 0))
       ) {
         addBodyTruncationMarker(markers, childPath, key === 'truncated' ? 'truncated=true' : `${key} marker`);
@@ -792,6 +937,7 @@ export function applyResultProjection<T extends ProjectableResult>(
     const bodyTruncationMarkers = upstream?.truncated
       ? []
       : detectBodyTruncationMarkers(
+          opts.toolName,
           { value: json?.parsed, text: original },
           ...(result.structuredContent !== undefined ? [{ value: result.structuredContent }] : []),
         );
@@ -809,7 +955,9 @@ export function applyResultProjection<T extends ProjectableResult>(
             `or use capability:bash with rg for an exhaustive search before concluding a value is absent.`,
         );
       } else {
-        const recovery = hasSourcePageMarker
+        const recovery = opts.toolName === 'coord:send'
+          ? COORD_SEND_RECEIPT_RECOVERY
+          : hasSourcePageMarker
           ? `payloadTier:'full' changes response shaping but does not widen the source query; check ` +
             `the tool's count/total/truncation fields and use its documented page-widening/pagination argument ` +
             `(or a narrower exact lookup)`
@@ -916,11 +1064,28 @@ export function applyResultProjection<T extends ProjectableResult>(
         const { picked, unmatched } = pickRun;
         const implicitRetained = implicitWritePaths.filter((path) => !unmatched.includes(path));
         if (requestedUnmatched.length === effectivePick.length) {
-          note(
-            `pick matched NOTHING (${requestedUnmatched.join(', ')}) — body left unprojected rather than ` +
-              `returning an empty object. The body is ${describeBodyShape(json.parsed)}.` +
-              ambiguityHint,
-          );
+          if (working.length > PICK_MISS_FAIL_OPEN_MAX_CHARS) {
+            // EI-23774219620725180: REFUSE with the key list instead of dumping a
+            // body the caller asked to shrink. Still loud (degraded note, leads the
+            // content) and still never `{}` — see the pick-miss REFUSAL block above.
+            note(
+              `pick matched NOTHING (${requestedUnmatched.join(', ')}) — the ${working.length}-char body was ` +
+                `WITHHELD and replaced by its key list (a miss on a body this large would otherwise cost the ` +
+                `whole body and still need re-reducing). The body is ${describeBodyShape(json.parsed)}.` +
+                ambiguityHint,
+            );
+            working = JSON.stringify(
+              buildPickMissRefusal(json.parsed, requestedUnmatched, working.length, picked),
+              null,
+              2,
+            );
+          } else {
+            note(
+              `pick matched NOTHING (${requestedUnmatched.join(', ')}) — body left unprojected rather than ` +
+                `returning an empty object. The body is ${describeBodyShape(json.parsed)}.` +
+                ambiguityHint,
+            );
+          }
         } else {
           if (requestedUnmatched.length > 0) {
             // The PARTIAL miss is the dangerous one and the case P-015 names:
@@ -993,9 +1158,11 @@ export function applyResultProjection<T extends ProjectableResult>(
       const scope =
         `payload tier=${String(upstream.tier ?? 'unknown')}` +
         (omitted > 0 ? `, ${omitted.toLocaleString()} field(s)/row(s) omitted upstream` : '');
-      const reCall = opts.toolName
-        ? `re-call ${opts.toolName} with payloadTier:'full' (or narrower args)`
-        : `re-call the tool with payloadTier:'full' (or narrower args)`;
+      const reCall = opts.toolName === 'coord:send'
+        ? COORD_SEND_RECEIPT_RECOVERY
+        : opts.toolName
+          ? `re-call ${opts.toolName} with payloadTier:'full' (or narrower args)`
+          : `re-call the tool with payloadTier:'full' (or narrower args)`;
       note(
         linesOut === 0
           ? `ZERO lines survived this projection, and the corpus it searched was ALREADY TRUNCATED ` +

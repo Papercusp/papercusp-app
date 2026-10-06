@@ -15,6 +15,7 @@ import { readActiveOperationModelPolicy, type ActiveOperationAttestationContext 
 import { checkAgainstJsonSchema } from '../json-schema-validation';
 import { canonicalJson } from '../authority/authority-rpc-envelope';
 import { getWorkItem, type WorkItem } from '../work-items';
+import { workItemStorageSlug } from '../pot-membership';
 import { isSettledWorkItem } from '../work-items-events';
 import { ANY_FAMILY_TERMINAL_STATES } from '../work-item-dispatch-states';
 import { runWithWorkspace } from '../workspace-als';
@@ -22,7 +23,7 @@ import {
   acceptBlueprintDirectWorkItem,
   acceptBlueprintPlanRun,
 } from './operation-admission';
-import { readBlueprintHashFromPg, readBlueprintSpecificationSnapshot } from './project-to-pg';
+import { readOrProjectBlueprintHash, readBlueprintSpecificationSnapshot } from './project-to-pg';
 import { seedContentHash, type RubricSeedSource } from '../cupboard/rubric-store';
 import { BlueprintOperationRefusal } from './operation-refusal';
 
@@ -65,6 +66,8 @@ type InvocationRow = {
   specification_revision: string;
   target_kind: 'work-item' | 'plan';
   target_ref: string | null;
+  /** WI-10004562 / D-045: the work item's STORAGE slug; NULL = stored under harness_slug. */
+  target_harness_slug?: string | null;
 };
 
 type PlanRunRow = {
@@ -107,7 +110,9 @@ export function submitBlueprintOperation(
     `,
       internal?.expectedSpecificationRevision
         ? Promise.resolve(null)
-        : readBlueprintHashFromPg(sql, input.workspaceId, input.harnessSlug),
+        // WI-10004001: a harness created with operations is projected lazily, so the
+        // first submit projects its blueprint instead of refusing it.
+        : readOrProjectBlueprintHash(sql, input.workspaceId, input.harnessSlug),
     ]);
     if (internal?.expectedSpecificationRevision && previous[0]?.specification_revision &&
         internal.expectedSpecificationRevision !== previous[0].specification_revision) {
@@ -116,7 +121,10 @@ export function submitBlueprintOperation(
     const revision = previous[0]?.specification_revision ??
       internal?.expectedSpecificationRevision ??
       currentHash;
-    if (!revision) throw new Error('blueprint operation has no projected specification');
+    if (!revision) {
+      throw new BlueprintOperationRefusal('undeclared',
+        'harness declares no blueprint operations: no projected specification and no .papercusp/blueprint.yaml');
+    }
     const specification = await readBlueprintSpecificationSnapshot(sql, input.workspaceId, input.harnessSlug, revision);
     if (!specification) throw new Error('blueprint operation specification snapshot is missing');
     const { operation } = operationFromSpecification(specification, input.operationId);
@@ -288,7 +296,8 @@ async function readCanonicalOperation(sql: Sql, handle: BlueprintOperationHandle
 }> {
   const ref = OperationHandleSchema.parse(handle);
   const receipts = await sql<InvocationRow[]>`
-    SELECT id, caller_id, operation_id, specification_revision, target_kind, target_ref
+    SELECT id, caller_id, operation_id, specification_revision, target_kind, target_ref,
+           target_harness_slug
       FROM harness_shared.blueprint_operation_invocations
      WHERE id = ${ref.receiptId} AND workspace_id = ${ref.workspaceId}
        AND harness_slug = ${ref.harnessSlug}
@@ -302,8 +311,14 @@ async function readCanonicalOperation(sql: Sql, handle: BlueprintOperationHandle
   }
   const controls = await readOperationControls(sql, ref);
   if (ref.target.kind === 'work-item') {
-    const item = await getWorkItem(ref.target.id, ref.harnessSlug);
-    if (!item || item.harness !== ref.harnessSlug) throw new Error('blueprint operation work item is missing or outside its harness');
+    // WI-10004360: the accepted item is stored under the harness's pot home slug when the
+    // harness is a pot MEMBER, so address it (and bound it) by that storage slug.
+    // WI-10004562 / D-045: admission records that slug on the receipt row read above, so
+    // the per-read pot lookup runs only for a receipt written before migration 1282.
+    const storageHarness = receipt.target_harness_slug
+      ?? await workItemStorageSlug(ref.harnessSlug, ref.workspaceId);
+    const item = await getWorkItem(ref.target.id, storageHarness);
+    if (!item || item.harness !== storageHarness) throw new Error('blueprint operation work item is missing or outside its harness');
     const payload = item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
       ? item.payload as Record<string, unknown> : null;
     const pin = payload?.blueprintOperation && typeof payload.blueprintOperation === 'object' &&
@@ -349,6 +364,10 @@ export interface AcceptedProgramRootGuard {
   cancellationRequested: boolean;
   /** The root row's family, read from `work_items` in the handle's harness. */
   family: 'issue' | 'feature';
+  /** The `harness_slug` the root row is STORED under: the pot home slug for a pot member's
+   * root (WI-10004562 / D-045), else the operation harness. Row writes (settlement, cancel)
+   * address the root by this; receipt and pin comparisons keep `handle.harnessSlug`. */
+  storageHarnessSlug: string;
 }
 
 /** One-round-trip liveness guard for an accepted program's root work item
@@ -374,9 +393,9 @@ export async function readAcceptedProgramRootGuard(
   const ref = receiptCallerId === undefined ? null : OperationHandleSchema.parse(handle);
   const rows = await sql<Array<{
     status: string | null; item_kind: string | null; marked: boolean | null; cancel_requested: boolean;
-    receipt_ok: boolean | null;
+    receipt_ok: boolean | null; harness_slug: string | null;
   }>>`
-    SELECT wi.status, wi.item_kind,
+    SELECT wi.status, wi.item_kind, wi.harness_slug,
            ${ref ? sql`EXISTS(
              SELECT 1 FROM harness_shared.blueprint_operation_invocations AS r
               WHERE r.id = ${ref.receiptId} AND r.workspace_id = ${ref.workspaceId}
@@ -394,7 +413,14 @@ export async function readAcceptedProgramRootGuard(
            ) AS cancel_requested
       FROM (SELECT 1) AS one
       LEFT JOIN harness_shared.work_items AS wi
-        ON wi.workspace_id = ${handle.workspaceId} AND wi.harness_slug = ${handle.harnessSlug}
+        ON wi.workspace_id = ${handle.workspaceId}
+       -- WI-10004562 / D-045: a pot member's root is stored under the pot home slug the
+       -- receipt records; a pre-1282 receipt (NULL) keeps the operation harness slug.
+       AND wi.harness_slug = COALESCE((
+             SELECT r.target_harness_slug FROM harness_shared.blueprint_operation_invocations AS r
+              WHERE r.id = ${handle.receiptId} AND r.workspace_id = ${handle.workspaceId}
+                AND r.harness_slug = ${handle.harnessSlug}
+           ), ${handle.harnessSlug})
        AND wi.feature_id = ${handle.target.id}
   `;
   // The LEFT JOIN always yields one row, so the receipt verdict is independent
@@ -404,12 +430,15 @@ export async function readAcceptedProgramRootGuard(
   if (ref && row?.receipt_ok !== true) {
     throw new BlueprintOperationRefusal('handle_mismatch', 'blueprint operation handle does not match its durable receipt');
   }
-  if (!row || row.status === null) throw new Error('blueprint operation work item is missing or outside its harness');
+  if (!row || row.status === null || !row.harness_slug) {
+    throw new Error('blueprint operation work item is missing or outside its harness');
+  }
   const family = ISSUE_FAMILY_KINDS.has(row.item_kind ?? '') ? 'issue' : 'feature';
   return {
     terminal: isSettledWorkItem({ family, state: row.status } as Pick<WorkItem, 'family' | 'state'>),
     cancellationRequested: row.cancel_requested || row.marked === true,
     family,
+    storageHarnessSlug: row.harness_slug,
   };
 }
 
@@ -1074,7 +1103,13 @@ export async function prepareDirectOperationCompletion(
   acceptanceEvidenceRef?: string; acceptanceSubjectRef?: string; acceptanceAttemptStamp?: string }> {
   if (!item.harness) throw new Error('blueprint operation completion requires a harness');
   const { pin, operation, specification } = await readAcceptedBlueprintDirectWorkItem(sql, workspaceId, item);
-  if (pin.harnessSlug !== item.harness) throw new Error('blueprint operation completion harness differs from its pin');
+  // WI-10004562: a pot MEMBER harness's accepted item is stored under the pot home slug, so
+  // the item's harness is the pin harness's storage slug. The pot lookup runs only when the
+  // two differ, i.e. never for an ordinary (non-member) harness.
+  if (pin.harnessSlug !== item.harness &&
+      await workItemStorageSlug(pin.harnessSlug, workspaceId) !== item.harness) {
+    throw new Error('blueprint operation completion harness differs from its pin');
+  }
   if (outputPayload === undefined) throw new Error('blueprint operation completion requires outputPayload');
   const output = exactJsonValue(outputPayload, 'output');
   const valid = checkAgainstJsonSchema(operation.acceptance.resultSchema, output);

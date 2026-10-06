@@ -716,6 +716,27 @@ export class PgThreadStore implements ThreadableStore {
     }));
   }
 
+  async getPostById(postId: number): Promise<ThreadPostRow | null> {
+    if (!Number.isSafeInteger(postId) || postId < 1) return null;
+    await this.opts.ensureSchema();
+    const sql = this.opts.getSql();
+    const rows = await sql<{ id: string | number; thread_id: string; author_id: string | null; body: string; created_at: unknown }[]>`
+      SELECT id, thread_id, author_id, body, created_at
+        FROM harness_shared.coord_thread_posts
+       WHERE workspace_id = ${this.ws} AND id = ${postId}
+       LIMIT 1`;
+    const row = rows[0];
+    return row
+      ? {
+          id: Number(row.id),
+          thread_id: row.thread_id,
+          author_id: row.author_id,
+          body: row.body,
+          created_ts: tsToIso(row.created_at),
+        }
+      : null;
+  }
+
   /**
    * The LAST `limit` posts of a thread, plus the thread's TOTAL post count, in ONE query.
    *

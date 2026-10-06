@@ -24,6 +24,8 @@ import { ADMIN_COORD_UI_OWNER, resolveAgentIdentity } from '../coordination/iden
 import { emitPlanEventForCaller } from '../coordination/plan-events';
 import { isGoalHolderAuthorityError } from '../../modes/goal-context';
 import { assertGoalWriteAuthorityForCaller } from '../../goals/write-authority';
+import { CANONICAL_WORKLIST_PROPERTY } from '../../goals/package-property-datatypes';
+import { backfillWorklistGoalAttribution } from '../../goals/worklist-attribution-backfill';
 
 const text = (payload: Record<string, unknown>, isError = false) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
@@ -118,6 +120,28 @@ export default defineTool({
       return text({ error: code, goalId: args.goalId, ...detail }, true);
     }
 
+    // WI-10005246: a worklist edit is the moment plans JOIN the goal's ladder, so stamp the goal on
+    // rows of those plans that were created before the edit (NULL-only, never reparents, skips
+    // federation-owned rows). Best-effort in a savepoint: a stamping fault must not roll back or
+    // abort the owner's worklist write, but it is reported on the result, never swallowed.
+    let attributionBackfill: unknown = null;
+    if (args.property === CANONICAL_WORKLIST_PROPERTY) {
+      const tx = ctx.tx as unknown as postgres.TransactionSql;
+      const run = (sql: postgres.Sql | postgres.TransactionSql) =>
+        backfillWorklistGoalAttribution(sql, {
+          workspaceId,
+          goalId: args.goalId,
+          worklist: result.entry.value,
+        });
+      try {
+        attributionBackfill = typeof tx.savepoint === 'function'
+          ? await tx.savepoint((sp) => run(sp))
+          : await run(tx);
+      } catch (error) {
+        attributionBackfill = { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+
     const delta = renderPropertyDelta(args.property, result.priorValue, result.entry.value);
     // Best-effort observability (emitPlanEventForCaller swallows): the goal id
     // keys the ONE plan-events rail — the orient fold renders `detail` as-is.
@@ -136,6 +160,7 @@ export default defineTool({
       version: result.entry.version,
       provenance,
       delta,
+      ...(attributionBackfill ? { attributionBackfill } : {}),
     });
   },
 });

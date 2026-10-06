@@ -77,9 +77,13 @@ async function hasValidatedSuccess(item: WorkItem, input: WorkItemEventWaitInput
   // A shaped stored result can still violate its retained output schema or
   // model policy. Consume the same pinned result as the public operation API.
   const sql = getOrgPg().sql;
+  // WI-10004562 / D-045: the receipt is keyed by the OPERATION harness the pin records.
+  // input.harnessSlug is where the item is STORED, which for a pot member is the pot home.
+  const operationHarness = typeof accepted.harnessSlug === 'string' && accepted.harnessSlug.trim()
+    ? accepted.harnessSlug : input.harnessSlug;
   const receipts = await runWithWorkspace(input.workspaceId, () => sql<Array<{ id: string | number }>>`
     SELECT id FROM harness_shared.blueprint_operation_invocations
-     WHERE workspace_id = ${input.workspaceId} AND harness_slug = ${input.harnessSlug}
+     WHERE workspace_id = ${input.workspaceId} AND harness_slug = ${operationHarness}
        AND caller_id = ${accepted.callerId as string} AND operation_id = ${accepted.operationId as string}
        AND request_key = ${accepted.requestKey as string}
        AND specification_revision = ${accepted.specificationRevision as string}
@@ -88,7 +92,7 @@ async function hasValidatedSuccess(item: WorkItem, input: WorkItemEventWaitInput
   const receiptId = Number(receipts[0]?.id);
   if (!Number.isSafeInteger(receiptId) || receiptId <= 0) return false;
   const handle: BlueprintOperationHandle = {
-    workspaceId: input.workspaceId, harnessSlug: input.harnessSlug, receiptId,
+    workspaceId: input.workspaceId, harnessSlug: operationHarness, receiptId,
     operationId: accepted.operationId, specificationRevision: accepted.specificationRevision,
     target: { kind: 'work-item', id: item.id },
   };

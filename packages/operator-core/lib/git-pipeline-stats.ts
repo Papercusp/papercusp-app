@@ -887,18 +887,47 @@ export function gateFailingTestsMeasurement(input: {
     ? { failingTests, measured: true, provenance: 'measured' }
     : { failingTests: [], measured: null, provenance: 'unknown' };
 }
-function skippedPathArr(v: unknown): GitSyncSkippedPath[] {
+/**
+ * Parse git-sync's persisted `last_skipped_paths` back into its union type.
+ *
+ * WI-10006493: this used to accept ONLY the lock-holder shape (`owner` + `intent`), so every
+ * guard deferral — a migration whose reservation was refused, or a superproject path held by
+ * the migration dependency fence — was silently dropped here. dev:pipeline_position then saw
+ * no reason the path was stuck and told the caller to force `git-sync:run`, which defers the
+ * same path again on the next tick. Each variant is now validated on its own.
+ */
+export function skippedPathArr(v: unknown): GitSyncSkippedPath[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((x): x is GitSyncSkippedPath => {
-    if (!x || typeof x !== 'object') return false;
+  const strings = (u: unknown): string[] | undefined =>
+    Array.isArray(u) ? u.filter((s): s is string => typeof s === 'string') : undefined;
+  const out: GitSyncSkippedPath[] = [];
+  for (const x of v) {
+    if (!x || typeof x !== 'object') continue;
     const r = x as Record<string, unknown>;
-    return (
-      typeof r.scope === 'string' &&
-      typeof r.path === 'string' &&
-      typeof r.owner === 'string' &&
-      typeof r.intent === 'string'
-    );
-  });
+    if (typeof r.scope !== 'string' || typeof r.path !== 'string') continue;
+    if (typeof r.owner === 'string' && typeof r.intent === 'string') {
+      out.push({ scope: r.scope, path: r.path, owner: r.owner, intent: r.intent });
+      continue;
+    }
+    if (typeof r.detail !== 'string') continue;
+    if (r.reason === 'migration-reservation') {
+      out.push({ scope: r.scope, path: r.path, reason: 'migration-reservation', detail: r.detail });
+    } else if (r.reason === 'migration-dependency-fence') {
+      const blockingMigrations = strings(r.blockingMigrations);
+      const blockingAgents = strings(r.blockingAgents);
+      const blockingWorkItems = strings(r.blockingWorkItems);
+      out.push({
+        scope: r.scope,
+        path: r.path,
+        reason: 'migration-dependency-fence',
+        detail: r.detail,
+        ...(blockingMigrations ? { blockingMigrations } : {}),
+        ...(blockingAgents ? { blockingAgents } : {}),
+        ...(blockingWorkItems ? { blockingWorkItems } : {}),
+      });
+    }
+  }
+  return out;
 }
 function dateMs(v: unknown): number | null {
   if (v instanceof Date) return v.getTime();
@@ -1637,8 +1666,12 @@ export async function gitPipelineSnapshot(
         });
       }
       if (resolvedActiveRunRoot) {
-        const probe = opts.probeActiveRun ?? (await import('./release-checkpoint-launch')).checkActiveCheckpointRun;
-        activeRun = mapActiveRun(probe(resolvedActiveRunRoot));
+        // WI-10005268: the real probe runs off the event loop (checkActiveCheckpointRunAsync).
+        activeRun = mapActiveRun(
+          opts.probeActiveRun
+            ? opts.probeActiveRun(resolvedActiveRunRoot)
+            : await (await import('./release-checkpoint-launch')).checkActiveCheckpointRunAsync(resolvedActiveRunRoot),
+        );
         const authorityProbe =
           opts.probeProcessAuthority ??
           (opts.probeActiveRun

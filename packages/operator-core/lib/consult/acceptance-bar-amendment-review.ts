@@ -38,7 +38,7 @@ import type { AgentIdentity } from '../agent-tools/coordination/identity';
 import type { AcceptanceBarAmendmentPreview, AcceptanceBarApproverEligibilityCheck } from '../rubrics';
 import type { RouteResult } from './relevance-router';
 import type { ConsultReviewerModel } from './get-feedback-core';
-import { resolveExpertModelAllowlist } from './expert-model-allowlist';
+import { resolveExpertModelAllowlist, type AllowedExpertModel } from './expert-model-allowlist';
 import { ACCEPTANCE_BAR_AMENDMENT_REVIEW_POLICY } from './selection-policies';
 
 /** One candidate's verdict from the check-approver screen. */
@@ -127,6 +127,7 @@ export async function routeAcceptanceBarAmendmentReview(
       requesterId: applierId,
       question: input.brief,
       originTaskRef: rubricId,
+      subjectRef: rubricId,
       // The applier is also screened; excluding it up front keeps it out of
       // the router's own candidate accounting.
       excludeOwners: [applierId],
@@ -242,7 +243,7 @@ export function buildAmendmentReviewBrief(
       ? `Requested patch excerpt: all changed criteria and other patch fields are complete; ${shownPatch.omittedCriteria} unchanged criteria omitted. Read the full current criteria with rubrics:get and compare the changed BARs before judging. This excerpt is not a complete replacement patch and must not be submitted to rubrics:amend.`
       : answerOn
         ? 'Requested patch. Read the current criteria with rubrics:get and judge what the patch changes; the apply guard itself checks the approval JSON below against the live delta:'
-        : 'Requested patch. Reproduce the preview with rubrics:amend { rubricRef, dryRun:true, ...patch } and read the criteria with rubrics:get before judging:',
+        : 'Requested patch. Read the current criteria with rubrics:get and compare them with the supplied patch and approval JSON above. Do not call rubrics:amend or pass reviewPreviewPost; this review is already open and the apply guard rechecks the live delta before judging:',
     '```json',
     shownPatch.patch,
     '```',
@@ -251,11 +252,11 @@ export function buildAmendmentReviewBrief(
     JSON.stringify(input.preview.approval),
     '```',
     answerOn
-      ? `To approve, post exactly one line with ${commentCall}, body: approve ${input.previewPostRef}`
-      : `To approve, answer this consult with exactly one line: approve ${input.previewPostRef}`,
+      ? `To approve, use ${commentCall}, body: approve ${input.previewPostRef} on the first non-empty line. Add verification notes on later lines if useful; any later approval pointer must name the same preview.`
+      : `To approve, use consult:reply { conversation_id:'<this consult>', kind:'answer', body:'approve ${input.previewPostRef}', evidence:[...] }; the first non-empty body line must be exactly approve ${input.previewPostRef}. You may add verification notes on later lines, but any later approval pointer must name the same preview.`,
     answerOn
-      ? `That line is the signature: the apply guard takes its author and time from your post. If the change weakens a requirement or you cannot verify it, post the objection with that same ${commentCall} instead; any other text is not an approval. Post once, do not edit files or recruit anyone, then end your session.`
-      : 'That line is the signature: the apply guard takes its author and time from your post. If the change weakens a requirement or you cannot verify it, decline or answer with the objection; any other answer is not an approval.',
+      ? `That first non-empty line is the signature: the apply guard takes its author and time from your post. If the change weakens a requirement or you cannot verify it, post the objection with that same ${commentCall} instead. Post once, do not edit files or recruit anyone, then end your session.`
+      : `The first non-empty line is the signature: the apply guard takes its author and time from the post. Once the review is settled, call consult:close { conversation_id:'<this consult>', outcome:'answered', answer:'<concise review conclusion>', evidence:[...] }. consult:reply records the signed post; consult:close records the accepted answer. If the change weakens a requirement or you cannot verify it, reply with the evidence-backed objection and close it as answered; if you cannot answer here, consult:decline.`,
   ].join('\n');
 }
 
@@ -288,6 +289,54 @@ export interface FreshAmendmentReviewerInput extends AmendmentReviewBriefInput {
   /** The requesting tool call's context; overridden with the system principal. */
   launchCtx?: unknown;
   reviewerModel?: ConsultReviewerModel;
+}
+
+/** Choose the first permitted expert rank with a serviceable account, including
+ * unsteered pools. `account:'auto'` chooses an account, not a backend: leaving
+ * the backend implicit can strand review on Claude while Codex is available. */
+export function selectFreshReviewerModelForAccountSteer(args: {
+  forcedAccounts: readonly string[];
+  excludeAccounts: readonly string[];
+  accounts: readonly { id: string; provider?: string; available: boolean }[];
+  ranks: readonly AllowedExpertModel[];
+}): ConsultReviewerModel {
+  const forced = new Set(args.forcedAccounts);
+  const excluded = new Set(args.excludeAccounts);
+  const providers = new Set(args.accounts
+    .filter((account) => account.available
+      && (forced.size === 0 || forced.has(account.id))
+      && !excluded.has(account.id))
+    .map((account) => account.provider ?? 'claude'));
+  const rank = args.ranks.find((candidate) => providers.has(candidate.agent));
+  if (!rank) {
+    throw new Error('no expert model has an available account permitted by the workspace account steer');
+  }
+  return { agent: rank.agent, model: rank.model };
+}
+
+async function resolveFreshReviewerModelForAccountSteer(workspaceId: string): Promise<ConsultReviewerModel> {
+  const [{ getAccountOverride }, { loadAccountPool }, { accountProvider, isAvailable },
+    { readConsultExpertRoutingSettings, bindConsultExpertRoutingSettings }] = await Promise.all([
+    import('../deployment/account-session-override'),
+    import('../deployment/account-pool-store'),
+    import('../deployment/account-pool'),
+    import('./expert-routing-settings'),
+  ]);
+  const override = await getAccountOverride(workspaceId);
+  const [pool, settings] = await Promise.all([
+    loadAccountPool(workspaceId),
+    readConsultExpertRoutingSettings(workspaceId),
+  ]);
+  const ranks = await resolveExpertModelAllowlist(workspaceId, bindConsultExpertRoutingSettings(settings));
+  return selectFreshReviewerModelForAccountSteer({
+    ...override,
+    accounts: pool.accounts.map((account) => ({
+      id: account.id,
+      provider: accountProvider(account),
+      available: isAvailable(account, Date.now()),
+    })),
+    ranks,
+  });
 }
 
 /** The work-item whose thread carries the preview post, with its harness. */
@@ -349,6 +398,7 @@ export async function launchFreshAmendmentReviewer(
     resolveScreen?: (args: { rubricId: string; applierId: string }) => Promise<{ check: AmendmentReviewerScreen }>;
     launch?: LaunchHandler;
     assertAllowed?: typeof assertReviewerModelAllowed;
+    resolveSteeredModel?: typeof resolveFreshReviewerModelForAccountSteer;
   } = {},
 ): Promise<FreshAmendmentReviewerResult> {
   const previewPostRef = input.previewPostRef.trim();
@@ -364,6 +414,7 @@ export async function launchFreshAmendmentReviewer(
   }
   const rubricId = input.rubricRef.trim().replace(/^plan:/i, '').trim();
   if (input.reviewerModel) await (deps.assertAllowed ?? assertReviewerModelAllowed)(input.workspaceId, input.reviewerModel);
+  const reviewerModel = input.reviewerModel ?? await (deps.resolveSteeredModel ?? resolveFreshReviewerModelForAccountSteer)(input.workspaceId);
   const resolveScreen =
     deps.resolveScreen ?? (async (args) => (await import('../rubrics')).resolveAcceptanceBarApproverScreen(args));
   const screen = await resolveScreen({ rubricId, applierId: input.applierId });
@@ -376,7 +427,7 @@ export async function launchFreshAmendmentReviewer(
   }
   const identity = createHash('sha256')
     .update([input.workspaceId, rubricId, previewPostRef, JSON.stringify(input.preview.approval),
-      ...(input.reviewerModel ? [JSON.stringify(input.reviewerModel)] : [])].join('\0'))
+      ...(reviewerModel ? [JSON.stringify(reviewerModel)] : [])].join('\0'))
     .digest('hex');
   const idempotencyKey = `acceptance-bar-amendment-review:${identity.slice(0, 32)}`;
   const label = `bar-amendment-review:${identity.slice(0, 12)}`;
@@ -395,9 +446,9 @@ export async function launchFreshAmendmentReviewer(
       count: 1,
       // role:'judge' is harness-scoped; launch-agent refuses it without one
       // (EI-23414612968722239), so it rides only with a resolved harness.
-      ...(answerOn.harness || input.reviewerModel ? { members: [{
+      ...(answerOn.harness || reviewerModel ? { members: [{
         ...(answerOn.harness ? { role: 'judge' } : {}),
-        ...(input.reviewerModel ?? {}),
+        ...(reviewerModel ?? {}),
       }] } : {}),
       label,
       idempotencyKey,

@@ -20,7 +20,7 @@ import { augmentedSpawnPath, resolveBin } from './plugin-spawn-impl';
 import { getHarnessAdminUrl } from './embedded-pg-discovery';
 import { roleModelDefault } from '@papercusp/orchestrator/role-models';
 import { DEFAULT_BACKEND_CMDS, normalizeModelSpec, type AgentBackend } from './agent-config-constants';
-import { codexContextConfigArgs, normalizeCodexCliModel, resolveCodexModel } from './model-context-budget.mjs';
+import { codexContextConfigArgs, normalizeClaudeModelEffortSpec, normalizeCodexCliModel, resolveCodexModel } from './model-context-budget.mjs';
 import type { TurnBackend } from '@papercusp/papercusp-shared/agent';
 
 export { normalizeCodexCliModel } from './model-context-budget.mjs';
@@ -330,8 +330,9 @@ export function applyRoleModel(baseCmd: string, role: string, overrideSpec?: str
       return baseCmd;
     }
   }
-  const trimmed = isCodex ? resolveCodexModel(configuredSpec || undefined) : configuredSpec;
-  if (!trimmed) return baseCmd;
+  const rawSpec = isCodex ? resolveCodexModel(configuredSpec || undefined) : configuredSpec;
+  if (!rawSpec) return baseCmd;
+  const trimmed = isClaude ? normalizeClaudeModelEffortSpec(rawSpec) : rawSpec;
   // Split a trailing `:<effort>` ONLY when the suffix is a known effort level AND
   // the backend has a distinct effort channel to split it INTO (codex's config
   // override, claude's own --effort flag). EI-7138: this used to split

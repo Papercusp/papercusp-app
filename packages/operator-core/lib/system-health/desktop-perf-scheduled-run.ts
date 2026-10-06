@@ -40,6 +40,7 @@ import { REPO_ROOT } from '../agent-tools/docs/_repo-paths';
 import { collectChildOutput } from '../child-output.js';
 
 const WDIO_DIR = path.join(REPO_ROOT, 'tools', 'perf-test', 'wdio');
+const DESKTOP_DIR = path.join(REPO_ROOT, 'papercusp-desktop');
 
 /**
  * Bounded — a hung tauri-driver/webview session must not wedge this tick
@@ -48,6 +49,8 @@ const WDIO_DIR = path.join(REPO_ROOT, 'tools', 'perf-test', 'wdio');
  * full 3-spec suite in 00:01:38.
  */
 const RUN_TIMEOUT_MS = 10 * 60 * 1000;
+/** The warm package-build measurements can exceed 20 minutes; keep it bounded. */
+const BUILD_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Bound the tail kept for the warn log — this is a log excerpt, not a report. */
 const LOG_TAIL_CHARS = 4000;
@@ -58,6 +61,9 @@ export interface DesktopPerfScheduledRunResult {
   exitCode?: number | null;
   timedOut?: boolean;
   durationMs?: number;
+  buildExitCode?: number | null;
+  buildTimedOut?: boolean;
+  buildDurationMs?: number;
   /**
    * Did this run actually PERSIST a row? `false` means the producer produced
    * nothing, whatever the exit code said. `undefined` means the check could not
@@ -106,6 +112,69 @@ const defaultIO: DesktopPerfScheduledRunIO = {
   },
 };
 
+interface DesktopPerfBuildResult {
+  exitCode?: number | null;
+  timedOut?: boolean;
+  spawnError?: string;
+  durationMs: number;
+  stdoutTail: string;
+  stderrTail: string;
+}
+
+/** Build the checked-out release binary before WDIO resolves an artifact. */
+function buildReleaseBinary(
+  io: DesktopPerfScheduledRunIO,
+  env: NodeJS.ProcessEnv,
+): Promise<DesktopPerfBuildResult> {
+  const startedAt = Date.now();
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = io.spawnFn('npm', ['run', 'build'], {
+        cwd: DESKTOP_DIR,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      resolve({ spawnError: message, durationMs: Date.now() - startedAt, stdoutTail: '', stderrTail: '' });
+      return;
+    }
+
+    const { stdout, stderr } = collectChildOutput(child);
+    const tails = () => ({
+      stdoutTail: stdout.text().slice(-LOG_TAIL_CHARS),
+      stderrTail: stderr.text().slice(-LOG_TAIL_CHARS),
+    });
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      const output = tails();
+      console.warn(
+        `[desktop-perf-scheduled-run] release build timed out after ${BUILD_TIMEOUT_MS}ms — killed. ` +
+          `stdout tail:\n${output.stdoutTail}\nstderr tail:\n${output.stderrTail}`,
+      );
+      resolve({ timedOut: true, durationMs: Date.now() - startedAt, ...output });
+    }, BUILD_TIMEOUT_MS);
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const message = err instanceof Error ? err.message : String(err);
+      resolve({ spawnError: message, durationMs: Date.now() - startedAt, ...tails() });
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ exitCode: code, durationMs: Date.now() - startedAt, ...tails() });
+    });
+  });
+}
+
 /**
  * Run the packaged-binary desktop-perf suite once. Resolves — never rejects —
  * with a result describing what happened; DBOS retries an infra-level miss
@@ -120,6 +189,34 @@ export async function runDesktopPerfScheduledRun(
   }
 
   const startedAt = Date.now();
+  // The gate's identity check trusts build-provenance.json, never the runner's
+  // checkout HEAD. Let build-deb-repacked.sh resolve this checkout itself rather
+  // than inheriting a caller-supplied sha that could misattribute the binary.
+  const buildEnv = { ...process.env };
+  delete buildEnv.PAPERCUSP_BUILD_SHA;
+  const build = await buildReleaseBinary(io, buildEnv);
+  const buildFields = {
+    buildExitCode: build.exitCode,
+    buildTimedOut: build.timedOut ?? false,
+    buildDurationMs: build.durationMs,
+  };
+  if (build.spawnError || build.timedOut || build.exitCode !== 0) {
+    const failure = build.spawnError
+      ? `spawn error: ${build.spawnError}`
+      : build.timedOut
+        ? `timed out after ${build.durationMs}ms`
+        : `exited ${build.exitCode}`;
+    console.error(
+      `[desktop-perf-scheduled-run] release build ${failure}; skipping WDIO so an older packaged ` +
+        `binary cannot be measured as current. stdout tail:\n${build.stdoutTail}\nstderr tail:\n${build.stderrTail}`,
+    );
+    return {
+      ran: false,
+      skippedReason: `release build ${failure}; WDIO skipped`,
+      ...buildFields,
+    };
+  }
+
   // Watermark BEFORE the run, so "did this produce anything" is answerable after
   // it. See `settle` below for why this exists at all.
   const beforeTs = await io.readNewestRunTs();
@@ -209,7 +306,7 @@ export async function runDesktopPerfScheduledRun(
         `[desktop-perf-scheduled-run] timed out after ${RUN_TIMEOUT_MS}ms — killed. ` +
           `stdout tail:\n${stdout.text().slice(-LOG_TAIL_CHARS)}\nstderr tail:\n${stderr.text().slice(-LOG_TAIL_CHARS)}`,
       );
-      settle({ ran: true, timedOut: true, durationMs: Date.now() - startedAt });
+      settle({ ran: true, timedOut: true, durationMs: Date.now() - startedAt, ...buildFields });
     }, RUN_TIMEOUT_MS);
     child.on('error', (err) => {
       if (settled) return;
@@ -217,7 +314,7 @@ export async function runDesktopPerfScheduledRun(
       clearTimeout(timer);
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[desktop-perf-scheduled-run] failed to spawn: ${message}`);
-      resolve({ ran: false, skippedReason: `spawn error: ${message}` });
+      resolve({ ran: false, skippedReason: `spawn error: ${message}`, ...buildFields });
     });
     child.on('close', (code) => {
       if (settled) return;
@@ -234,7 +331,7 @@ export async function runDesktopPerfScheduledRun(
             `${stdout.text().slice(-LOG_TAIL_CHARS)}\n${stderr.text().slice(-LOG_TAIL_CHARS)}`,
         );
       }
-      settle({ ran: true, exitCode: code, durationMs });
+      settle({ ran: true, exitCode: code, durationMs, ...buildFields });
     });
   });
 }

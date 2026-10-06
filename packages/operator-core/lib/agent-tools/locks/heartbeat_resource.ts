@@ -12,7 +12,7 @@ import { readIdentity } from './identity';
 import { inWorkspaceTxn } from './in-workspace-txn';
 import { tryHeartbeatResource } from './su-lock-store';
 import { bulkContent, mergeIds, runBulk } from '../_bulk';
-import { candidateResourceLockDomains } from './coordination-domain';
+import { resourceLockIdDomains } from './resource-lock-id-domains';
 import { acquireWithContentionRetry } from './contention-retry';
 import { DEFAULT_LOCK_TTL_SEC as DEFAULT_TTL_SEC, MAX_LOCK_TTL_SEC as MAX_TTL_SEC } from './lock-config';
 
@@ -34,7 +34,9 @@ async function heartbeatAcrossDomains(
   lockId: string,
   ttlSec: number,
 ): Promise<Awaited<ReturnType<typeof tryHeartbeatResource>>> {
-  const domains = [callerDomain, ...candidateResourceLockDomains().filter((d) => d !== callerDomain)];
+  // WI-10004326: the lease's own recorded domain first (located by lock_id), then
+  // the caller's domain and the inferred special domains as before.
+  const domains = await resourceLockIdDomains(ownerId, lockId, callerDomain);
   let last: Awaited<ReturnType<typeof tryHeartbeatResource>> | null = null;
   for (const domain of domains) {
     // A heartbeat is a best-effort lease renewal, but a transient workspace

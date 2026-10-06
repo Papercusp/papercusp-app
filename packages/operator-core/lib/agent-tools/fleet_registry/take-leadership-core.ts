@@ -12,7 +12,11 @@
  * returns `notified` so the new leader knows the displaced leader was already told and does
  * NOT redundantly message them (owner spec 2026-06-30).
  */
-import { setFleetLeader, type AgentFleetRecord } from '../../agent-fleets-store';
+import {
+  promoteFleetLeaderIfMissing,
+  setFleetLeader,
+  type AgentFleetRecord,
+} from '../../agent-fleets-store';
 import { heartbeatPresence, setPresenceFleet, setCompactionLimit, getPresence } from '../coordination/presence';
 import { fetchPresenceFleet } from '../coordination/presence-fleet';
 import { sendMessage } from '../coordination/messages';
@@ -185,6 +189,14 @@ export async function takeFleetLeadership(
     planSlug?: string | null;
     carry?: 'warm' | 'cold';
     clearAutoArmSuppressions?: boolean;
+    /** Full registry snapshot guard for scheduler-driven missing-leader succession. */
+    succession?: {
+      expectedLeaderOwnerId: string | null;
+      expectedLeaderMissingSinceMs: number;
+      expectedUpdatedAtMs: number;
+      nowMs: number;
+      graceMs: number;
+    };
   },
 ): Promise<TakeLeadershipOutcome> {
   const slug = fleet.fleetSlug;
@@ -215,12 +227,41 @@ export async function takeFleetLeadership(
   await assertFleetLeadershipHarnessBinding(workspaceId, slug);
 
   // 1. Registry: the caller becomes the sole leader (single-leader invariant, D-002).
-  const installed = await setFleetLeader(workspaceId, slug, ownerId, undefined, previousLeader);
+  const installed = opts?.succession
+    ? await promoteFleetLeaderIfMissing({
+        workspaceId,
+        fleetSlug: slug,
+        expectedLeaderOwnerId: opts.succession.expectedLeaderOwnerId,
+        expectedLeaderMissingSinceMs: opts.succession.expectedLeaderMissingSinceMs,
+        expectedUpdatedAtMs: opts.succession.expectedUpdatedAtMs,
+        replacementLeaderOwnerId: ownerId,
+        nowMs: opts.succession.nowMs,
+        graceMs: opts.succession.graceMs,
+      })
+    : await setFleetLeader(workspaceId, slug, ownerId, undefined, previousLeader);
   if (!installed) {
     throw new Error(`fleet_leadership_superseded: '${slug}' leader changed after authorization; re-orient before retrying`);
   }
+  if (previousLeader !== ownerId) {
+    try {
+      const { emitAwaitedEvent } = await import('../../events/await/engine');
+      await emitAwaitedEvent({
+        key: `fleet:leader-changed:${slug}`,
+        summary: `Fleet '${slug}' leadership changed to ${ownerId}.`,
+        payload: { fleet: slug, previousLeader, leader: ownerId },
+        source: identity.ownerId,
+        workspaceId,
+      });
+    } catch {
+      // The registry CAS is authoritative; event delivery is a wake hint.
+    }
+  }
   // 2. The caller's presence → this fleet's leader.
-  await heartbeatPresence(identity); // guarantee a presence row to label
+  // Explicit take-leadership calls transfer to the caller and need a heartbeat
+  // to ensure there is a row to label. Scheduler succession can elect another
+  // positively-live roster member; do not refresh the requesting member's
+  // heartbeat as if it belonged to the elected successor.
+  if (identity.ownerId === ownerId) await heartbeatPresence(identity);
   await setPresenceFleet(workspaceId, ownerId, slug, 'leader');
 
   // An explicit events:cancel is sticky across ordinary leader-control repairs.

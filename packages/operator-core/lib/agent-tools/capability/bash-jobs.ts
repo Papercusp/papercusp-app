@@ -1570,6 +1570,10 @@ interface HeredocDeclaration {
  * output away from the capability log (EI-23104327379801926).
  */
 const COMMAND_LOCAL_REDIRECT_HELPERS = new Set(['cleanup', 'curl']);
+// These builtins can own a file redirect without writing any command output.
+// Treating their truncation as the background job's stdout target produces a
+// false empty-log advisory (for example `: > "$LOG"; command &`).
+const NO_OUTPUT_REDIRECT_COMMANDS = new Set([':', 'true', 'false']);
 const REDIRECT_COMMAND_KEYWORDS = new Set([
   'case',
   'coproc',
@@ -1679,8 +1683,9 @@ function skipHeredocBody(command: string, bodyStart: number, declaration: Heredo
  * command (not just the last stage — `for i in …; do echo … >> /tmp/x; done`
  * counts). Skips stderr-only redirects (`2>`), fd dups (`>&2`, `2>&1`), process
  * substitution (`>(…)`), anything inside quotes, and redirects owned by the
- * command-local curl/cleanup helpers. Returns the LAST owned redirect (the
- * conventional main one), or `null`. Deliberately pragmatic, like
+ * command-local curl/cleanup helpers, no-output builtins, and commandless shell
+ * redirects. Returns the LAST owned redirect (the conventional main one), or
+ * `null`. Deliberately pragmatic, like
  * `detectBufferingLastStage`: this feeds an advisory note, so a rare miss just
  * preserves today's behavior.
  */
@@ -1984,7 +1989,12 @@ export function detectSelfOutputRedirect(command: string): SelfOutputRedirect | 
   for (let i = candidates.length - 1; i >= 0; i--) {
     const candidate = candidates[i]!;
     const owner = commandNames.get(candidate.commandId);
-    if (candidate.helperScope || isCommandLocalHelperRedirect(owner, candidate.redirect)) {
+    if (
+      candidate.helperScope ||
+      owner == null ||
+      NO_OUTPUT_REDIRECT_COMMANDS.has(commandBasename(owner)) ||
+      isCommandLocalHelperRedirect(owner, candidate.redirect)
+    ) {
       continue;
     }
     return candidate.redirect;
@@ -2035,7 +2045,9 @@ export interface RunOptions {
   sandboxEnabled?: boolean;
   /** Confined profile: wrapper unavailability refuses before the command starts. */
   sandboxRequired?: boolean;
-  /** Internal deterministic test seam; never exposed as a tool argument. */
+  /** Server-owned wrapper overrides — never exposed as a tool argument. Tests use it
+   *  as a deterministic seam; capability:bash sets `{ denyAllEgress: true, srtBin: null }`
+   *  for a caller holding a personal disclosure (WI-10005589, BAR R-11). */
   sandboxBuildOpts?: Omit<BuildSandboxOpts, 'enabled' | 'required' | 'background'>;
   /** task-manager P-008 provenance — the agent id this job is FOR, and the
    *  work-item it is attributable to. Optional because a caller that does not know

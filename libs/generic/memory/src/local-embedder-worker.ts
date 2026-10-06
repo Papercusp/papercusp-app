@@ -31,6 +31,120 @@ import { applyWorkerDeviceReport, constructEmbedPipeline, currentEmbedDeviceDeci
 interface PendingRequest {
   resolve: (v: number[]) => void;
   reject: (err: Error) => void;
+  onInputTrace?: (trace: WorkerInputTrace) => void;
+  onInferenceTrace?: (trace: WorkerInferenceTrace) => void;
+  inferenceTraces?: WorkerInferenceTrace[];
+  onNativeInferenceTrace?: (trace: WorkerNativeInferenceTrace) => void;
+  nativeInferenceTraces?: WorkerNativeInferenceTrace[];
+  inputTraceCount?: number;
+  inputTraceError?: Error;
+}
+
+/** Explicit qualification evidence, emitted before the graph executes. */
+export interface WorkerInputTrace {
+  model: string; device: 'cpu' | 'cuda'; observedAt: string;
+  inputShape: number[]; inputIds: number[]; attentionMask: number[];
+  request?: WorkerRequestIdentity;
+}
+
+export interface WorkerRequestIdentity {
+  requestId: number; attempt: number; processId: number; workerThreadId: number;
+  /** Linux OS TID, distinct from Node's workerThreadId; unavailable elsewhere. */
+  nativeThreadId: number | null;
+}
+
+/** Graph-call boundaries, not proof that a CUDA kernel belongs to this request.
+ * node-hrtime must be calibrated to the profiler's clock before joining. */
+export interface WorkerInferenceTrace extends WorkerRequestIdentity {
+  model: string; device: 'cpu' | 'cuda'; observedAt: string;
+  clock: 'node-hrtime'; monotonicNs: string; phase: 'start' | 'end';
+  outcome?: 'success' | 'error';
+}
+
+/** Boundaries around the synchronous native addon call, after its JS queue.
+ * This still requires profiler clock calibration before attributing kernels. */
+export interface WorkerNativeInferenceTrace extends WorkerInferenceTrace {
+  runIndex: number; runTag: string;
+  rawClock?: WorkerRawClockSample;
+  clockProbeError?: string;
+  runtime?: WorkerNativeRuntimeSample;
+  runtimeProbeError?: string;
+}
+
+export interface WorkerNativeRuntimeSample {
+  platform: 'linux'; clock: 'node-hrtime'; beforeNs: string; afterNs: string;
+  /** Optional for historical observations. Required by complete loader closure
+   * qualification; these addresses come from this process's kernel auxv. */
+  loaderProcess?: { executablePath: string; interpreterPath: string; nodeModuleVersion?: string; programHeaderAddress: string;
+    programHeaderEntryBytes: number; programHeaderCount: number; entryAddress: string; interpreterBaseAddress: string;
+    vdso: { startAddress: string; endAddress: string; fileOffset: string; permissions: string;
+      bytes: number; sha256: string; origin: 'kernel-auxv-AT_SYSINFO_EHDR' } };
+  libraries: { path: string; bytes: number; sha256: string; mappedDevice: string; mappedInode: string;
+    /** All segments of the selected file, including non-executable ELF headers.
+     * Older saved observations lack these and cannot qualify address joins. */
+    mappedRanges?: { startAddress: string; endAddress: string; fileOffset: string; permissions: string }[] }[];
+  gpuMemory: { status: 'not-applicable' } | { status: 'unknown'; beforeNs: string; afterNs: string; error: string }
+    | { status: 'measured'; scope: 'all-nvidia-smi-devices'; beforeNs: string; afterNs: string;
+      executable: { path: string; bytes: number; sha256: string }; cudaVisibleDevices: string | null;
+      devices: { uuid: string; pciBusId: string; totalMiB: number; usedMiB: number; freeMiB: number }[] };
+}
+
+/** Validate the observation, separately from proving a complete library
+ * closure or binding one of the sampled GPUs to the model's actual device. */
+export function validNativeRuntimeSample(event: WorkerNativeInferenceTrace): boolean {
+  const sample = event.runtime, ns = (n: unknown): n is string => typeof n === 'string' && /^[1-9]\d*$/.test(n);
+  const fp = (f: { path: string; bytes: number; sha256: string }) => f && typeof f.path === 'string' && f.path.startsWith('/')
+    && Number.isSafeInteger(f.bytes) && f.bytes > 0 && typeof f.sha256 === 'string' && /^[a-f0-9]{64}$/.test(f.sha256);
+  if (!sample || event.runtimeProbeError !== undefined || sample.platform !== 'linux' || sample.clock !== 'node-hrtime'
+    || !ns(event.monotonicNs) || !ns(sample.beforeNs) || !ns(sample.afterNs) || BigInt(sample.beforeNs) > BigInt(sample.afterNs)
+    || (event.phase === 'start' && BigInt(sample.afterNs) > BigInt(event.monotonicNs))
+    || (event.phase === 'end' && BigInt(sample.beforeNs) < BigInt(event.monotonicNs))
+    || !Array.isArray(sample.libraries) || !sample.libraries.length
+    || sample.libraries.some(f=>!fp(f) || typeof f.mappedDevice !== 'string' || typeof f.mappedInode !== 'string'
+      || !/^[\da-f]+:[\da-f]+$/i.test(f.mappedDevice) || !/^[1-9]\d*$/.test(f.mappedInode))
+    || new Set(sample.libraries.map(f=>f.path)).size !== sample.libraries.length
+    ) return false;
+  for (const file of sample.libraries) {
+    if (file.mappedRanges === undefined) continue;
+    if (!Array.isArray(file.mappedRanges) || !file.mappedRanges.length) return false;
+    let previousEnd = 0n;
+    for (const range of file.mappedRanges) {
+      if (!range || ![range.startAddress, range.endAddress, range.fileOffset].every(value =>
+        typeof value === 'string' && /^[\da-f]+$/i.test(value))
+        || typeof range.permissions !== 'string' || !/^[r-][w-][x-][ps]$/.test(range.permissions)) return false;
+      const start = BigInt('0x'+range.startAddress), end = BigInt('0x'+range.endAddress);
+      if (start < previousEnd || start >= end) return false;
+      previousEnd = end;
+    }
+  }
+  const gpu = sample.gpuMemory;
+  if (event.device === 'cpu') return gpu?.status === 'not-applicable';
+  if (!gpu || !['measured','unknown'].includes(gpu.status) || gpu.status === 'not-applicable'
+    || !ns(gpu.beforeNs) || !ns(gpu.afterNs) || BigInt(gpu.beforeNs) < BigInt(sample.beforeNs)
+    || BigInt(gpu.beforeNs) > BigInt(gpu.afterNs) || BigInt(gpu.afterNs) > BigInt(sample.afterNs)) return false;
+  if (gpu.status === 'unknown') return typeof gpu.error === 'string' && !!gpu.error;
+  return gpu.scope === 'all-nvidia-smi-devices' && fp(gpu.executable)
+    && (gpu.cudaVisibleDevices === null || typeof gpu.cudaVisibleDevices === 'string')
+    && Array.isArray(gpu.devices) && gpu.devices.length > 0
+    && gpu.devices.every(d=>typeof d.uuid === 'string' && d.uuid.startsWith('GPU-') && typeof d.pciBusId === 'string'
+      && /^[\da-f]+:[\da-f]+:[\da-f]+\.[\da-f]+$/i.test(d.pciBusId)
+      && [d.totalMiB,d.usedMiB,d.freeMiB].every(Number.isFinite) && d.totalMiB > 0 && d.usedMiB >= 0 && d.freeMiB >= 0
+      && d.usedMiB <= d.totalMiB && d.freeMiB <= d.totalMiB)
+    && new Set(gpu.devices.map(d=>d.uuid)).size === gpu.devices.length;
+}
+
+export interface WorkerRawClockSample {
+  clock: 'linux-clock-monotonic-raw'; rawNs: string;
+  monotonicBeforeNs: string; monotonicAfterNs: string;
+  nodeBeforeNs: string; nodeAfterNs: string;
+  executable: { path: string; bytes: number; sha256: string }; pythonVersion: string;
+}
+
+function validRequestIdentity(value: WorkerRequestIdentity, id: number): boolean {
+  return value.requestId === id && Number.isSafeInteger(value.requestId) && value.requestId >= 0
+    && [value.attempt, value.processId, value.workerThreadId]
+    .every((n) => Number.isSafeInteger(n) && n > 0)
+    && (value.nativeThreadId === null || (Number.isSafeInteger(value.nativeThreadId) && value.nativeThreadId > 0));
 }
 
 interface WorkerState {
@@ -72,7 +186,24 @@ interface WorkerState {
   recycling: Promise<void> | null;
   /** Resolvers waiting for `pending` to empty (a recycle's drain). */
   drainWaiters: Array<() => void>;
+  /**
+   * Outcome of pinning the ONNX native binding in the spawning thread
+   * (`pinOnnxRuntimeBinding`, WI-10005090). Null until the first spawn tries it.
+   * Optional because a module record from an older build may have created this
+   * pinned state object before the field existed.
+   */
+  onnxBindingPin?: OnnxBindingPin | null;
+  /** The armed idle-unload timer (`armIdleUnload`, WI-10005070), if any. */
+  idleTimer?: ReturnType<typeof setTimeout> | null;
+  /** How many times the idle unload has released the worker in this process. */
+  idleUnloads?: number;
 }
+
+/** What `pinOnnxRuntimeBinding` achieved. Never thrown — reported. */
+export type OnnxBindingPin =
+  | { status: 'pinned'; path: string }
+  | { status: 'unavailable'; reason: string }
+  | { status: 'failed'; reason: string };
 
 // tsx can evaluate this module through both CJS and ESM in one process.
 // Shutdown and health reads must see the worker started through either loader.
@@ -80,7 +211,85 @@ const state = pinModuleState<WorkerState>('@papercusp/memory.local-embedder-work
   worker: null, workerReady: null, nextId: 0, pending: new Map(),
   workerDisabled: false, beforeExitHookInstalled: false, beforeExitListener: null,
   refd: false, lastFallbackWarnAt: 0, recycling: null, drainWaiters: [],
+  onnxBindingPin: null, idleTimer: null, idleUnloads: 0,
 }));
+
+/** Env override for the idle-unload window, in ms. `0` disables the unload. */
+export const EMBED_WORKER_IDLE_MS_ENV = 'PAPERCUSP_EMBED_WORKER_IDLE_MS';
+/**
+ * Default idle-unload window: 0, i.e. OFF. Measured net-NEGATIVE on a real Server
+ * (P-010 VM run, cap-p011, 2026-10-02, WI-10005070): terminating the worker
+ * returns only ~0.35 GiB of the model to the OS, and a Server re-embeds within
+ * ~15 min anyway, so the respawned worker allocates the model afresh. Three
+ * tenants with a 10 min window settled at 4.1-4.4 GiB main-process anon against
+ * 2.61 GiB for the never-unloaded control. A worker_thread shares the process
+ * heap, so freed model memory stays in the allocator. Getting the memory back
+ * needs the model in a separate PROCESS whose exit returns everything; until
+ * then, keep the worker loaded. Set the env to a positive window only to
+ * re-measure.
+ */
+export const DEFAULT_EMBED_WORKER_IDLE_MS = 0;
+
+/** The effective idle-unload window. A malformed or negative value keeps the default. */
+export function embedWorkerIdleMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env[EMBED_WORKER_IDLE_MS_ENV];
+  if (raw === undefined || raw.trim() === '') return DEFAULT_EMBED_WORKER_IDLE_MS;
+  const ms = Number(raw);
+  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_EMBED_WORKER_IDLE_MS;
+}
+
+function cancelIdleUnload(): void {
+  if (state.idleTimer) clearTimeout(state.idleTimer);
+  state.idleTimer = null;
+}
+
+/**
+ * Release the worker, and with it the model, once the host has embedded nothing
+ * for `embedWorkerIdleMs()` (WI-10005070). The next embed respawns a worker and
+ * reloads the model (~2 s for EmbeddingGemma on CPU).
+ *
+ * WHY: every Server loads the model at boot (the transcript-search warm-up) and
+ * an idle Papercusp Server held ~1 GB more anon with the embedder than without
+ * it (plan agent-capacity-and-cost-gcp-2026-09-30, D-022). A local probe saw
+ * 752 → 307 MB anon 5 s after terminate (WI-10005090), but on a real Server the
+ * unload/re-embed cycle is a net LOSS (see DEFAULT_EMBED_WORKER_IDLE_MS), so it
+ * is OFF by default and only arms when the env sets a positive window. An
+ * active host never reaches the window, because every settled embed re-arms it.
+ *
+ * Armed only when the ONNX binding is pinned: without the pin a terminated
+ * worker leaves the process unable to load the binding again (WI-10005090), so
+ * unloading would trade memory for broken embedding. Unref'd, so it never
+ * keeps a process alive. Goes through `recycleEmbedWorker`, so it waits for any
+ * request in flight and new embeds wait for it.
+ */
+function armIdleUnload(): void {
+  cancelIdleUnload();
+  if (state.pending.size > 0 || !state.worker) return;
+  if (state.onnxBindingPin?.status !== 'pinned') return;
+  const ms = embedWorkerIdleMs();
+  if (ms <= 0) return;
+  const timer = setTimeout(() => {
+    state.idleTimer = null;
+    if (state.pending.size > 0 || !state.worker || state.recycling) return;
+    state.idleUnloads = (state.idleUnloads ?? 0) + 1;
+    // The ONE observable trace of this lever on a deployed host: without it the
+    // only evidence an unload happened is an RSS drop (the P-010 VM run had to
+    // infer it that way). Greppable as "idle unload".
+    console.log(
+      `[embed-worker] idle unload #${state.idleUnloads}: no embed for ${Math.round(ms / 1000)}s, releasing the worker and its model`,
+    );
+    recycleEmbedWorker().catch(() => {
+      /* the next embed respawns regardless; nothing to report here */
+    });
+  }, ms);
+  timer.unref?.();
+  state.idleTimer = timer;
+}
+
+/** Idle-unload telemetry: the window, whether a timer is armed, and unloads so far. */
+export function getEmbedWorkerIdleStats(): { idleMs: number; armed: boolean; idleUnloads: number } {
+  return { idleMs: embedWorkerIdleMs(), armed: state.idleTimer != null, idleUnloads: state.idleUnloads ?? 0 };
+}
 
 /** Wake every drain waiter once nothing is in flight. Call after any `pending` removal. */
 function notifyIfDrained(): void {
@@ -265,15 +474,85 @@ function workerPath(): string {
   return resolveWorkerScriptPath();
 }
 
+/**
+ * Load the onnxruntime-node binding ONCE in the thread that spawns the worker,
+ * before any worker loads it, and keep it loaded for the life of the process.
+ *
+ * WHY (WI-10005090, measured 2026-10-01, onnxruntime-node 1.24.3 / node 25.9):
+ * the binding registers itself with Node only when its shared library is first
+ * mapped. Node keeps a per-process map so later threads reuse that registration,
+ * but drops the entry when the LAST thread holding the binding goes away, while
+ * the library itself stays mapped. So once the embed worker terminates (a crash
+ * respawn, or `recycleEmbedWorker()` on a device change), every later load in
+ * the process fails with "Module did not self-register": the respawned worker
+ * AND the embedders' main-thread fallback. Local embedding is then dead until
+ * the process restarts. Holding one reference here keeps the entry alive, so a
+ * respawned worker and the inline fallback both load normally. Probe:
+ * .papercusp/scratch/wi5090-inline-fallback-probe.mjs (logs
+ * ~/.cache/agent-capacity/wi5090/). The pin costs ~10 MB anon and holds no
+ * model, so terminating the worker still frees the model's memory.
+ *
+ * `fromPath` is the worker script: the binding is resolved from the
+ * transformers package that script imports, the same way transformers' own
+ * `import 'onnxruntime-node'` resolves, so the pinned file is the file the
+ * worker loads. Never throws: no transformers install is `unavailable`
+ * (embedding cannot work there anyway), and a load error is `failed`, recorded
+ * for `getOnnxBindingPin()`. Idempotent: the first outcome stands, because a
+ * binding cannot be un-pinned and a failed pin will not succeed on retry.
+ *
+ * The reranker worker (libs/generic/rerank/src/local-reranker-worker.ts) pins
+ * the same binding the same way; whichever spawns first holds it.
+ */
+export function pinOnnxRuntimeBinding(fromPath: string): OnnxBindingPin {
+  if (!state.onnxBindingPin) state.onnxBindingPin = loadOnnxBindingFrom(fromPath);
+  return state.onnxBindingPin;
+}
+
+function loadOnnxBindingFrom(fromPath: string): OnnxBindingPin {
+  let transformersEntry: string;
+  try {
+    transformersEntry = createRequire(fromPath).resolve(TRANSFORMERS_PACKAGE);
+  } catch {
+    return { status: 'unavailable', reason: `${TRANSFORMERS_PACKAGE} is not resolvable from ${fromPath}` };
+  }
+  try {
+    const fromTransformers = createRequire(transformersEntry);
+    const path = fromTransformers.resolve('onnxruntime-node');
+    fromTransformers('onnxruntime-node');
+    return { status: 'pinned', path };
+  } catch (err) {
+    return { status: 'failed', reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The pin outcome, or null when no worker has been spawned yet in this process. */
+export function getOnnxBindingPin(): OnnxBindingPin | null {
+  return state.onnxBindingPin ?? null;
+}
+
+/**
+ * Forget the recorded pin outcome so a test can observe a first-time pin. The
+ * binding itself stays loaded (Node's require cache holds it), so this cannot
+ * re-open the WI-10005090 hazard; it only clears the record.
+ */
+export function _resetOnnxBindingPinForTest(): void {
+  state.onnxBindingPin = null;
+}
+
 function ensureWorker(): Promise<void> {
   if (state.workerDisabled) return Promise.reject(new Error('worker disabled'));
   if (state.workerReady) return state.workerReady;
 
   state.workerReady = new Promise<void>((resolveReady, rejectReady) => {
     try {
-      state.worker = new Worker(workerPath(), {
-        // execArgv passthrough is fine — the script is plain JS,
-        // no ts-node loader needed.
+      const scriptPath = workerPath();
+      // WI-10005090: before the first worker can load the ONNX binding (and so
+      // before it can ever exit holding the last reference to it).
+      pinOnnxRuntimeBinding(scriptPath);
+      state.worker = new Worker(scriptPath, {
+        // The plain JS file needs no parent loader or entry-point flags.
+        // A stdin parent's --input-type is invalid for this file worker.
+        execArgv: [],
         //
         // The DEVICE is decided here, not in the worker (which is copied into
         // bundles as one file and cannot import embed-device.ts). A respawn
@@ -288,7 +567,8 @@ function ensureWorker(): Promise<void> {
     }
 
     let initialized = false;
-    state.worker.on('message', (msg: { kind: string; id?: number; vector?: number[]; error?: string }) => {
+    state.worker.on('message', (msg: { kind: string; id?: number; vector?: number[]; error?: string;
+      trace?: WorkerInputTrace; inference?: WorkerInferenceTrace | WorkerNativeInferenceTrace }) => {
       if (msg.kind === 'ready') {
         initialized = true;
         // EI-19464316359123796: a persistent, REF'd worker thread keeps the
@@ -321,16 +601,106 @@ function ensureWorker(): Promise<void> {
       if (typeof msg.id !== 'number') return;
       const p = state.pending.get(msg.id);
       if (!p) return;
+      if (msg.kind === 'embed_inference' || msg.kind === 'embed_native_inference') {
+        const native = msg.kind === 'embed_native_inference';
+        const callback = native ? p.onNativeInferenceTrace : p.onInferenceTrace;
+        if (callback) {
+          try {
+            const trace = msg.inference;
+            if (!trace || !validRequestIdentity(trace, msg.id) || !['cpu', 'cuda'].includes(trace.device)
+              || typeof trace.model !== 'string' || !Number.isFinite(Date.parse(trace.observedAt))
+              || trace.clock !== 'node-hrtime' || typeof trace.monotonicNs !== 'string'
+              || !/^[1-9]\d*$/.test(trace.monotonicNs)) throw new Error('invalid worker inference trace');
+            const traces = native ? (p.nativeInferenceTraces ??= []) : (p.inferenceTraces ??= []);
+            const prior = traces.at(-1);
+            const nativeTrace = trace as WorkerNativeInferenceTrace;
+            if (native && (!Number.isSafeInteger(nativeTrace.runIndex) || nativeTrace.runIndex < 1
+              || nativeTrace.runTag !== `pc-embed:${trace.processId}:${trace.workerThreadId}:${trace.requestId}:${trace.attempt}:${nativeTrace.runIndex}`)) {
+              throw new Error('invalid worker native inference identity');
+            }
+            if (native && nativeTrace.clockProbeError !== undefined) throw new Error(nativeTrace.clockProbeError);
+            if (native && nativeTrace.runtimeProbeError !== undefined) throw new Error(nativeTrace.runtimeProbeError);
+            if (native && nativeTrace.runtime !== undefined && !validNativeRuntimeSample(nativeTrace)) {
+              throw new Error('invalid worker native runtime evidence');
+            }
+            if (native && nativeTrace.rawClock !== undefined) {
+              const clock = nativeTrace.rawClock;
+              if (clock.clock !== 'linux-clock-monotonic-raw'
+                || [clock.rawNs, clock.monotonicBeforeNs, clock.monotonicAfterNs, clock.nodeBeforeNs, clock.nodeAfterNs]
+                  .some((n) => typeof n !== 'string' || !/^[1-9]\d*$/.test(n))
+                || BigInt(clock.nodeBeforeNs) > BigInt(clock.monotonicBeforeNs)
+                || BigInt(clock.monotonicBeforeNs) > BigInt(clock.monotonicAfterNs)
+                || BigInt(clock.monotonicAfterNs) > BigInt(clock.nodeAfterNs)
+                || !clock.executable || typeof clock.executable.path !== 'string' || !Number.isSafeInteger(clock.executable.bytes)
+                || clock.executable.bytes < 1 || !/^[a-f0-9]{64}$/.test(clock.executable.sha256)
+                || typeof clock.pythonVersion !== 'string' || !clock.pythonVersion) throw new Error('invalid worker native clock evidence');
+              if ((trace.phase === 'start' && BigInt(clock.nodeAfterNs) > BigInt(trace.monotonicNs))
+                || (trace.phase === 'end' && BigInt(clock.nodeBeforeNs) < BigInt(trace.monotonicNs))) {
+                throw new Error('invalid worker native clock order');
+              }
+            }
+            if (trace.phase === 'start') {
+              const nextAttempt = trace.attempt === (prior?.attempt ?? 0) + 1;
+              const nextNativeRun = native && prior && trace.attempt === prior.attempt
+                && nativeTrace.runIndex === (prior as WorkerNativeInferenceTrace).runIndex + 1;
+              if (trace.outcome !== undefined || (!nextAttempt && !nextNativeRun)
+                || (native && nextAttempt && nativeTrace.runIndex !== 1)
+                || (prior && (prior.phase !== 'end' || (nextAttempt && prior.outcome !== 'error')
+                  || BigInt(trace.monotonicNs) < BigInt(prior.monotonicNs)))) throw new Error('invalid worker inference trace order');
+            } else if (trace.phase !== 'end' || !['success', 'error'].includes(trace.outcome ?? '') || !prior
+              || prior.phase !== 'start' || ['requestId', 'attempt', 'processId', 'workerThreadId', 'nativeThreadId', 'model', 'device']
+                .some((key) => trace[key as keyof WorkerInferenceTrace] !== prior[key as keyof WorkerInferenceTrace])
+              || (native && (nativeTrace.runIndex !== (prior as WorkerNativeInferenceTrace).runIndex
+                || nativeTrace.runTag !== (prior as WorkerNativeInferenceTrace).runTag))
+              || BigInt(trace.monotonicNs) < BigInt(prior.monotonicNs)) throw new Error('invalid worker inference trace order');
+            if (native) {
+              p.nativeInferenceTraces!.push(nativeTrace);
+              p.onNativeInferenceTrace!(nativeTrace);
+            } else {
+              p.inferenceTraces!.push(trace);
+              p.onInferenceTrace!(trace);
+            }
+          } catch (error) { p.inputTraceError ??= error instanceof Error ? error : new Error(String(error)); }
+        }
+        return;
+      }
+      if (msg.kind === 'embed_input') {
+        if (p.onInputTrace) {
+          try {
+            const trace = msg.trace;
+            if (!trace || !['cpu', 'cuda'].includes(trace.device) || typeof trace.model !== 'string'
+              || !Number.isFinite(Date.parse(trace.observedAt)) || !Array.isArray(trace.inputIds) || !trace.inputIds.length
+              || trace.inputIds.some((n) => !Number.isSafeInteger(n) || n < 0)
+              || (trace.request !== undefined && !validRequestIdentity(trace.request, msg.id))
+              || JSON.stringify(trace.inputShape) !== JSON.stringify([1, trace.inputIds.length])
+              || !Array.isArray(trace.attentionMask) || trace.attentionMask.length !== trace.inputIds.length
+              || trace.attentionMask.some((n) => n !== 0 && n !== 1)) throw new Error('invalid worker input trace');
+            p.onInputTrace(trace);
+            p.inputTraceCount = (p.inputTraceCount ?? 0) + 1;
+          } catch (error) { p.inputTraceError ??= error instanceof Error ? error : new Error(String(error)); }
+        }
+        return;
+      }
       state.pending.delete(msg.id);
       // Release the loop as soon as the LAST request lands, so a one-off script
       // still exits on its own (WI-37683 — the other half of syncWorkerRef).
       syncWorkerRef();
       if (msg.kind === 'embed_ok' && Array.isArray(msg.vector)) {
-        p.resolve(msg.vector);
+        if (p.inputTraceError) p.reject(p.inputTraceError);
+        else if (p.onInputTrace && !p.inputTraceCount) p.reject(new Error('worker returned a vector without requested input evidence'));
+        else if (p.onInferenceTrace && p.inferenceTraces?.at(-1)?.outcome !== 'success') {
+          p.reject(new Error('worker returned a vector without complete requested inference evidence'));
+        }
+        else if (p.onNativeInferenceTrace && p.nativeInferenceTraces?.at(-1)?.outcome !== 'success') {
+          p.reject(new Error('worker returned a vector without complete requested native inference evidence'));
+        }
+        else p.resolve(msg.vector);
       } else {
         p.reject(new Error(msg.error ?? 'worker error'));
       }
       notifyIfDrained();
+      // WI-10005070: the last request landed, so start the idle window.
+      if (state.pending.size === 0) armIdleUnload();
     });
     state.worker.on('error', (err) => {
       // Reject every pending request — the worker crashed.
@@ -352,6 +722,7 @@ function ensureWorker(): Promise<void> {
       state.worker = null;
       state.workerReady = null;
       state.refd = false;
+      cancelIdleUnload();
       if (!initialized) rejectReady(err);
     });
     state.worker.on('exit', (code) => {
@@ -371,6 +742,7 @@ function ensureWorker(): Promise<void> {
       state.worker = null;
       state.workerReady = null;
       state.refd = false;
+      cancelIdleUnload();
     });
   });
 
@@ -404,6 +776,14 @@ export interface EmbedViaWorkerOpts {
   pooling?: 'mean' | 'cls' | 'none' | 'last_token';
   normalize?: boolean;
   output?: string;
+  /** Explicit candidate contract; the default retains the SDK tokenizer. */
+  tokenizerBackend?: 'rust';
+  /** Opt-in raw tensor evidence for private qualification; normal calls emit none. */
+  onInputTrace?: (trace: WorkerInputTrace) => void;
+  /** Opt-in request/attempt/thread identities and graph-call clock boundaries. */
+  onInferenceTrace?: (trace: WorkerInferenceTrace) => void;
+  /** Fresh-worker qualification only: synchronous native Run boundaries. */
+  onNativeInferenceTrace?: (trace: WorkerNativeInferenceTrace) => void;
 }
 
 /**
@@ -423,10 +803,13 @@ export async function embedViaWorker(text: string, opts: EmbedViaWorkerOpts = {}
   while (state.recycling) await state.recycling;
   await ensureWorker();
   if (!state.worker) throw new Error('worker not initialized');
+  // WI-10005070: a request is starting, so the host is not idle.
+  cancelIdleUnload();
 
   const id = state.nextId++;
   return new Promise<number[]>((resolveEmbed, rejectEmbed) => {
-    state.pending.set(id, { resolve: resolveEmbed, reject: rejectEmbed });
+    state.pending.set(id, { resolve: resolveEmbed, reject: rejectEmbed, onInputTrace: opts.onInputTrace,
+      onInferenceTrace: opts.onInferenceTrace, onNativeInferenceTrace: opts.onNativeInferenceTrace });
     // Ref BEFORE posting: between the post and the reply the caller is awaiting
     // a Promise, which is not loop work — an unref'd worker would leave the loop
     // looking idle and let `beforeExit` terminate this very request (WI-37683).
@@ -439,6 +822,10 @@ export async function embedViaWorker(text: string, opts: EmbedViaWorkerOpts = {}
       pooling: opts.pooling,
       normalize: opts.normalize,
       output: opts.output,
+      tokenizerBackend: opts.tokenizerBackend,
+      ...(opts.onInputTrace ? { traceInput: true } : {}),
+      ...(opts.onInferenceTrace ? { traceInference: true } : {}),
+      ...(opts.onNativeInferenceTrace ? { traceNativeInference: true } : {}),
     });
   });
 }
@@ -448,6 +835,7 @@ export async function embedViaWorker(text: string, opts: EmbedViaWorkerOpts = {}
  *  directly); {@link shutdownLocalEmbedder} is the same function under a
  *  discoverable public name — see its doc for why both exist. */
 export async function _resetWorker(): Promise<void> {
+  cancelIdleUnload();
   if (state.worker) {
     try { await state.worker.terminate(); } catch { /* noop */ }
   }

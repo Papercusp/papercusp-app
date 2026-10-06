@@ -22,12 +22,13 @@
 import { execFile } from 'node:child_process';
 
 import { getBuildInfo } from '../build-info';
+import { execFileViaSidecar } from '../fleet/git-via-sidecar';
 
 /** The named watermark: the running scout bg-host generation's start instant. */
 export const BG_HOST_RESTART_WATERMARK = 'bg-host-restart';
 
 /** The systemd user unit hosting the scout loop (the long-lived generation). */
-export const BG_HOST_UNIT = 'papercup-bg-host.service';
+export const BG_HOST_UNIT = 'papercusp-bg-host.service';
 
 /** Watermark refs this module can resolve (the vocabulary the tool arg documents). */
 export const KNOWN_WATERMARK_REFS: readonly string[] = [BG_HOST_RESTART_WATERMARK];
@@ -62,17 +63,48 @@ export function parseSystemdTimestamp(value: string | null | undefined): number 
  * deterministically regardless of the host's local zone.
  */
 export function readBgHostActiveEnterMs(unit: string = BG_HOST_UNIT): Promise<number | null> {
-  return new Promise((resolve) => {
-    execFile(
-      'systemctl',
-      ['--user', 'show', unit, '-p', 'ActiveEnterTimestamp', '--value'],
-      { env: { ...process.env, TZ: 'UTC' }, timeout: 5_000 },
-      (err, stdout) => {
-        if (err) return resolve(null);
-        resolve(parseSystemdTimestamp(stdout));
-      },
-    );
-  });
+  // EI-24748208098755918: this ran a LOCAL `systemctl` fork on every scorecard read
+  // that carried a generation stamp. The fork is synchronous on the caller's event
+  // loop and costs ~100-270 ms from a 1-4 GB operator worker; the 3 h saturation-
+  // profile aggregate (2026-10-01 22:5xZ) charged 6.3% of all busy main-thread time
+  // to this function. Two changes: the fork goes through the spawner sidecar (falls
+  // back locally, counted), and concurrent/back-to-back readers share one probe for
+  // BG_HOST_ACTIVE_ENTER_MEMO_MS. The value only changes when bg-host restarts, so
+  // a few seconds of reuse cannot turn a stale grading into a false `fresh` for
+  // longer than that window.
+  const now = Date.now();
+  const cached = activeEnterMemo.get(unit);
+  if (cached && now - cached.at < BG_HOST_ACTIVE_ENTER_MEMO_MS) return cached.value;
+  const value = execFileViaSidecar(
+    'systemctl',
+    ['--user', 'show', unit, '-p', 'ActiveEnterTimestamp', '--value'],
+    {
+      timeoutMs: 5_000,
+      subsystem: 'scout-generation-watermark',
+      sidecarVar: GENERATION_WATERMARK_SIDECAR_VAR,
+      // Full env: the local fallback REPLACES the child env, and `systemctl --user`
+      // needs XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS from it.
+      env: { ...process.env, TZ: 'UTC' },
+    },
+  ).then(
+    ({ stdout }) => parseSystemdTimestamp(stdout),
+    () => null,
+  );
+  activeEnterMemo.set(unit, { at: now, value });
+  return value;
+}
+
+/** How long one `ActiveEnterTimestamp` probe answers later readers (see above). */
+export const BG_HOST_ACTIVE_ENTER_MEMO_MS = 5_000;
+
+/** Per-site override for the probe's sidecar route (`0` forces a local fork). */
+export const GENERATION_WATERMARK_SIDECAR_VAR = 'PAPERCUSP_GENERATION_WATERMARK_SPAWN_SIDECAR';
+
+const activeEnterMemo = new Map<string, { at: number; value: Promise<number | null> }>();
+
+/** Test seam: forget memoized `ActiveEnterTimestamp` probes. */
+export function __resetBgHostActiveEnterMemo(): void {
+  activeEnterMemo.clear();
 }
 
 /**

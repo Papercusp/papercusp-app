@@ -45,10 +45,11 @@
  * machine-agnostic — they match a path SHAPE and a tag SHAPE, so they behave
  * identically on every contributor's checkout.
  */
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ContentDetectorContext } from './registry';
+import { detectPapercupRoot, hasPapercupMarkers } from '../harness/register-papercusp';
 
 interface OwnerLeak {
   line: number;
@@ -81,12 +82,18 @@ interface CachedIdentityPatterns {
  * The guard runs from the operator bundle, which may live in a release checkout
  * different from the working tree it is committing. Resolve the detector from
  * the guarded checkout at call time so its rules and its input cannot drift.
+ * Independent application repositories do not ship this framework asset; they
+ * use the operator's framework rules without requiring a copied matcher.
  */
 const IDENTITY_PATTERNS_RELATIVE = join('scripts', 'lib', 'identity-leak-patterns.mjs');
 const identityPatternsCache = new Map<string, CachedIdentityPatterns>();
 
 function identityPatternsPath(repoPath?: string): string {
-  return join(resolve(repoPath ?? process.cwd()), IDENTITY_PATTERNS_RELATIVE);
+  const guardedRoot = resolve(repoPath ?? process.cwd());
+  const guarded = join(guardedRoot, IDENTITY_PATTERNS_RELATIVE);
+  if (existsSync(guarded) || hasPapercupMarkers(guardedRoot)) return guarded;
+  const frameworkRoot = detectPapercupRoot();
+  return frameworkRoot ? join(frameworkRoot, IDENTITY_PATTERNS_RELATIVE) : guarded;
 }
 
 function identityPatternsFingerprint(file: string): string {

@@ -48,6 +48,7 @@ import {
   defaultRunGit,
   defaultRunGitStdin,
 } from './storage';
+import { createTimeSlice } from '../../event-loop-lag-monitor';
 import { type SecretFinding, scanForSecrets } from './secrets-guard';
 import { loadSecretsGuardPathExemptions, partitionExemptFindings } from './secrets-guard-exemptions';
 import { requireHiveEffectAuthority, type HiveEffectAuthority } from './hive-effect-authority';
@@ -401,6 +402,7 @@ export async function resolveSafeEgressSha(input: {
   const commits = revs.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
 
   const seen = new Set<string>();
+  const slice = createTimeSlice();
   for (const commit of commits) {
     if (res.scannedBlobs >= maxFiles && res.safeSha !== base) {
       // Budget spent AND we have something to show for it — ship the verified
@@ -419,7 +421,16 @@ export async function resolveSafeEgressSha(input: {
     // `scanForSecrets` applies the fixture-path exemption (isFixtureFile).
     // Calling `scanTextForSecrets` directly here froze origin/staging for
     // hours (P-402 / EI-13924, 2026-07-19).
-    const { blocking, exempted } = partitionExemptFindings(scanForSecrets(files), exemptions);
+    // Per file with a time-sliced yield: one commit can carry thousands of text
+    // blobs, and scanning them in one turn stalled bg-host's main thread for
+    // seconds (WI-10005476). scanForSecrets is a per-file map-concat, so the
+    // findings and their order are unchanged.
+    const found: SecretFinding[] = [];
+    for (const f of files) {
+      await slice.maybeYield();
+      found.push(...scanForSecrets([f]));
+    }
+    const { blocking, exempted } = partitionExemptFindings(found, exemptions);
     res.exempted.push(...exempted);
     if (blocking.length > 0) {
       res.blocked = { commit, findings: blocking };

@@ -2,10 +2,11 @@
   "name": "@papercupai/papercusp-monorepo",
   "private": true,
   "version": "0.0.1",
-  "packageManager": "npm@11.12.1",
+  "packageManager": "npm@11.19.0",
   "engines": {
     "//": "Pin the runtime to Node 25 (ABI 141 / NODE_MODULE_VERSION 141). The fleet runs linuxbrew node 25; native addons (better-sqlite3) built under any other major (e.g. nvm 22 = ABI 127) fail to load at runtime ('Module did not self-register'). See infra-fail-fast-build-integrity-2026-06-19 P-003 + .nvmrc. Advisory (no engine-strict) — declares the pin for nvm/CI/contributors; the deploy-gate native-addon preflight is the hard ABI enforcer.",
-    "node": ">=25"
+    "node": ">=25",
+    "npm": ">=11.19.0"
   },
   "workspaces": [
     "apps/*",
@@ -98,7 +99,9 @@
     "libs/generic/image-blankness",
     "libs/generic/overlap-clusters",
     "libs/generic/sequence-patterns",
-    "libs/generic/agent-roster"
+    "libs/generic/agent-roster",
+    "libs/generic/hash-chain",
+    "libs/generic/merkle-log"
   ],
   "scripts": {
     "preinstall": "node scripts/guard-shared-tree-install.mjs && npx --yes only-allow npm",
@@ -185,13 +188,14 @@
     "format:check:scoped": "node scripts/check-format.mjs",
     "format:write:scoped": "node scripts/check-format.mjs --write",
     "test": "PAPERCUSP_TEST_RUN_HARNESS=papercusp AFFECTED_TASK_VERDICT_RESUME=1 PC_HEAVY_KEY_ENV=AFFECTED_BASE,AFFECTED_RETRY_FAILED bash scripts/pc-heavy.sh node scripts/affected-tests.mjs",
-    "test:file": "PC_HEAVY_RETRY_PREEMPTIONS=3 PC_HEAVY_PREEMPT_AFTER_READY=1 PC_HEAVY_COALESCE=0 bash scripts/pc-heavy.sh node scripts/test-files.mjs",
+    "test:file": "PC_HEAVY_RETRY_PREEMPTIONS=3 PC_HEAVY_PREEMPT_AFTER_READY=1 PC_HEAVY_COALESCE=0 bash scripts/pc-heavy.sh node --import ./scripts/lib/committed-source-loader.mjs scripts/npm-install-safe.mjs --exec-under-lock -- node --import ./scripts/lib/committed-source-loader.mjs scripts/test-files.mjs",
     "ensure:playwright-browsers": "node scripts/ensure-playwright-browsers.mjs",
     "test:affected": "PAPERCUSP_TEST_RUN_HARNESS=papercusp AFFECTED_TASK_VERDICT_RESUME=1 PC_HEAVY_RETRY_PREEMPTIONS=3 PC_HEAVY_PREEMPT_AFTER_READY=1 PC_HEAVY_KEY_ENV=AFFECTED_BASE,AFFECTED_RETRY_FAILED bash scripts/pc-heavy.sh node scripts/affected-tests.mjs",
     "test:related": "PAPERCUSP_TEST_RUN_HARNESS=papercusp PC_HEAVY_KEY_ENV=AFFECTED_BASE,AFFECTED_RETRY_FAILED bash scripts/pc-heavy.sh node scripts/affected-tests.mjs --related",
     "test:affected:integration": "PAPERCUSP_TEST_RUN_HARNESS=papercusp AFFECTED_TASK_VERDICT_RESUME=1 PC_HEAVY_RETRY_PREEMPTIONS=3 PC_HEAVY_PREEMPT_AFTER_READY=1 PC_HEAVY_KEY_ENV=AFFECTED_BASE,AFFECTED_RETRY_FAILED bash scripts/pc-heavy.sh node scripts/affected-tests.mjs --integration",
     "test:all": "PAPERCUSP_TEST_RUN_HARNESS=papercusp PC_HEAVY_KEY_ENV=AFFECTED_BASE,AFFECTED_RETRY_FAILED bash scripts/pc-heavy.sh node scripts/affected-tests.mjs --all",
     "test:all:integration": "PAPERCUSP_TEST_RUN_HARNESS=papercusp PC_HEAVY_KEY_ENV=AFFECTED_BASE,AFFECTED_RETRY_FAILED bash scripts/pc-heavy.sh node scripts/affected-tests.mjs --all --integration",
+    "test:integration-only": "PAPERCUSP_TEST_RUN_HARNESS=papercusp PC_HEAVY_KEY_ENV=AFFECTED_BASE,AFFECTED_RETRY_FAILED bash scripts/pc-heavy.sh node scripts/affected-tests.mjs --all --integration-only",
     "coverage:merge": "tsx scripts/merge-coverage.ts",
     "gate:patch-coverage": "tsx scripts/patch-coverage.ts",
     "gate:cover-loop": "tsx scripts/cover-loop.ts",
@@ -223,6 +227,7 @@
     "lint:no-restart": "node scripts/check-no-restart-imports.mjs",
     "lint:no-tracked-node-modules": "node scripts/check-tracked-node-modules.mjs",
     "lint:no-tracked-src-entry-dist": "node scripts/check-tracked-src-entry-dist.mjs",
+    "lint:no-tracked-ignored": "node scripts/check-tracked-ignored.mjs",
     "lint:submodule-coverage-ignore": "node scripts/check-submodule-coverage-ignore.mjs",
     "lint:smart-quotes": "tsx scripts/check-smart-quotes.mjs",
     "lint:constant-conditional": "tsx scripts/check-constant-conditional.mjs",
@@ -251,6 +256,7 @@
     "scan:retirement-surface": "node scripts/scan-retirement-surface.mjs",
     "lint:no-raw-spawn": "node scripts/check-no-raw-agent-spawn.mjs",
     "lint:no-unenrolled-spawn": "node scripts/check-no-unenrolled-detached-spawn.mjs",
+    "lint:no-unenrolled-injector": "node scripts/check-no-unenrolled-injector.mjs",
     "lint:no-unbounded-inbox-read": "node scripts/check-unbounded-inbox-read.mjs",
     "lint:no-unenrolled-mjs-imports": "node scripts/check-unenrolled-mjs-imports.mjs",
     "lint:no-unenrolled-detached-import": "node scripts/check-no-unenrolled-detached-import.mjs",
@@ -268,6 +274,7 @@
     "lint:narrowing-gated-assertions:report": "node scripts/check-narrowing-gated-assertions.mjs --report",
     "lint:narrowing-gated-assertions:census": "node scripts/check-narrowing-gated-assertions.mjs --census",
     "lint:no-hand-rolled-module-pin": "node scripts/check-no-hand-rolled-module-pin.mjs",
+    "lint:refusal-contracts": "node scripts/check-refusal-contracts.mjs",
     "lint:no-new-result-door-optout": "node scripts/check-result-door-optouts.mjs",
     "lint:no-new-result-door-optout:census": "node scripts/check-result-door-optouts.mjs --list",
     "lint:no-capacity-maxima": "node scripts/check-no-capacity-maxima.mjs",
@@ -295,7 +302,7 @@
     "lint:derived-signal-firings": "node scripts/check-derived-signal-firings.mjs",
     "lint:plane-ratchet": "npx tsx scripts/check-plane-ratchet.ts",
     "lint:cell-matrix": "npx tsx scripts/check-cell-live-matrix.ts",
-    "lint:plane-guards": "node scripts/test-files.mjs packages/operator-core/lib/cell-assessment-reality.test.ts packages/operator-core/lib/no-bespoke-state-read-guard.test.ts packages/operator-core/lib/cell-registrations.test.ts packages/operator-core/lib/declared-consumed-sweep.test.ts packages/operator-core/lib/agent-tools/coordination/holder-context-parity.test.ts packages/operator-core/lib/derived-signal-firings-probe.test.ts packages/operator-core/lib/coord/derived-signal-census.test.ts",
+    "lint:plane-guards": "node --import ./scripts/lib/committed-source-loader.mjs scripts/test-files.mjs packages/operator-core/lib/cell-assessment-reality.test.ts packages/operator-core/lib/no-bespoke-state-read-guard.test.ts packages/operator-core/lib/cell-registrations.test.ts packages/operator-core/lib/declared-consumed-sweep.test.ts packages/operator-core/lib/agent-tools/coordination/holder-context-parity.test.ts packages/operator-core/lib/derived-signal-firings-probe.test.ts packages/operator-core/lib/coord/derived-signal-census.test.ts",
     "lint:timer-classification": "node scripts/check-timer-classification.mjs",
     "lint:test-timing-budgets": "node scripts/check-test-timing-budgets.mjs",
     "lint:test-timing-budgets:list": "node scripts/check-test-timing-budgets.mjs --list",
@@ -357,7 +364,7 @@
     "lint:scope-defaults:strict": "node scripts/check-scope-defaults.mjs --strict",
     "lint:no-workspace-default": "node scripts/check-workspace-default-sql.mjs",
     "lint:no-workspace-default:strict": "node scripts/check-workspace-default-sql.mjs --strict",
-    "lint:tool-prompts": "PC_HEAVY_COALESCE=0 bash scripts/pc-heavy.sh node scripts/test-files.mjs packages/operator-core/lib/__tests__/tools-md-sync.test.ts",
+    "lint:tool-prompts": "PC_HEAVY_COALESCE=0 bash scripts/pc-heavy.sh node --import ./scripts/lib/committed-source-loader.mjs scripts/test-files.mjs packages/operator-core/lib/__tests__/tools-md-sync.test.ts",
     "lint:launch-prose-budget": "tsx scripts/check-launch-prose-budget.ts",
     "lint:tsc": "node scripts/lint-tsc.mjs",
     "lint:tsc:operator-vite": "node scripts/lint-tsc-operator-vite.mjs",
@@ -375,7 +382,7 @@
     "lint:vite-eager": "node scripts/trace-vite-externalized.mjs --check",
     "lint:boundary-check": "node scripts/check-transitive-boundary.mjs",
     "lint:migrations": "node scripts/lint-migrations.mjs",
-    "lint:design-primitives": "node scripts/test-files.mjs apps/operator/app/_lints/design-primitives.test.ts apps/operator/app/_lints/css-tokens.test.ts apps/operator/app/_lints/contrast.test.ts",
+    "lint:design-primitives": "node --import ./scripts/lib/committed-source-loader.mjs scripts/test-files.mjs apps/operator/app/_lints/design-primitives.test.ts apps/operator/app/_lints/css-tokens.test.ts apps/operator/app/_lints/contrast.test.ts",
     "db:next-migration": "node scripts/next-migration.mjs",
     "mirror:check": "node scripts/templates-mirror-sync.mjs",
     "mirror:push": "node scripts/templates-mirror-sync.mjs --push",
@@ -479,6 +486,16 @@
     },
     "@ai-sdk/provider-utils": {
       "undici": "^6.28.1"
+    },
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "tsconfck": {
+      "typescript": "$typescript"
+    },
+    "@nx/jest": {
+      "@phenomnomnominal/tsquery": "^6.2.0"
+    },
+    "mem0ai": {
+      "@anthropic-ai/sdk": "^0.93.0"
     }
   },
   "devDependencies": {
@@ -498,6 +515,7 @@
     "@typescript/native": "npm:typescript@7.0.2",
     "@vitest/coverage-v8": "4.1.8",
     "@vitest/ui": "4.1.8",
+    "@vscode/v8-heap-parser": "0.1.0",
     "adm-zip": "^0.6.1",
     "concurrently": "^9.2.0",
     "drizzle-kit": "^0.31.10",

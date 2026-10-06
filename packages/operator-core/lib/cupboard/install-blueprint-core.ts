@@ -85,6 +85,8 @@ import type {
 import type { IdentityGrantFailure } from '../capability-envelope/blueprint-envelopes';
 import type { CupboardReleaseManifest } from './listing-manifest';
 import type { InstallProviderBinding } from './blueprint-install-journal';
+import { bundledEventKeys, type BundledEventKey } from '../blueprint/package-event-key-resources';
+import { wornRulePins } from '../agent-identities/sync-hook-rules';
 import {
   identityConsentSubjects,
   identityInstallConsentRefusal,
@@ -231,7 +233,15 @@ export interface InstallBlueprintCoreDeps {
   blueprintInstallJournal?: (input: {
     blueprintId: string;
     bindings: readonly InstallProviderBinding[];
+    /** D-042: the release's bundled event keys, claimed by the same journal. */
+    eventKeys: readonly BundledEventKey[];
   }) => BlueprintLifecycleJournal;
+  /** D-027 §1 / D-042: the destination's install check for each bundled async
+   * rule; `claimingKeys` are the bundled keys this install claims. Returns refusals. */
+  checkAsyncRules?: (input: {
+    rules: ReadonlyArray<{ id: string; on: string; fire: string }>;
+    claimingKeys: ReadonlySet<string>;
+  }) => Promise<Array<{ rule: string; error: string }>>;
   /** Consent-bound writer into the destination capability-class registry
    * (`importCupboardClassContracts`, scoped to the install's workspace). */
   importClassContracts?: (
@@ -707,6 +717,34 @@ export async function installBlueprintFromCupboardCore(
       }
     }
 
+    // D-042: a bundled event key is claimed by the pot's install journal, and a
+    // bundled async rule must be installable here (its key catalogued or claimed
+    // by this install, its fire a class verb) before anyone is asked to consent.
+    let eventKeys: BundledEventKey[];
+    try {
+      eventKeys = bundledEventKeys(releaseArchive.pins);
+    } catch (error) {
+      throw new InstallBlueprintError(`blueprint "${id}": ${error instanceof Error ? error.message : String(error)}`, 422);
+    }
+    if (eventKeys.length > 0 && !input.capabilityContext?.workspaceId) {
+      throw new InstallBlueprintError(`blueprint "${id}" bundles event keys; workspaceId and potSlug are required to claim them`,
+        409, 'event_keys_need_pot');
+    }
+    const asyncRules = wornRulePins({ inputs: releaseArchive.pins }).rules
+      .flatMap(({ rule }) => rule.delivery === 'async' ? [{ id: rule.id, on: rule.on, fire: rule.fire }] : []);
+    if (asyncRules.length > 0) {
+      if (!deps.checkAsyncRules) {
+        throw new InstallBlueprintError('async rule install check is not configured for this install path', 500,
+          'async_rule_checker_unavailable');
+      }
+      const refusals = await deps.checkAsyncRules({ rules: asyncRules,
+        claimingKeys: new Set(eventKeys.map((key) => key.eventKey)) });
+      if (refusals.length > 0) {
+        throw new InstallBlueprintError(`blueprint "${id}" async rule ${refusals[0]!.rule} cannot install here: ${refusals[0]!.error}`,
+          422, 'async_rule_not_installable', { refusals });
+      }
+    }
+
     // D-034: one consent to everything beyond package-private content, bound to
     // this artifact, before any provider package, binding or byte is written.
     const consent = identityConsentSubjects({
@@ -788,8 +826,9 @@ export async function installBlueprintFromCupboardCore(
     // update that no longer needs a binding fences the prior install's.
     let journal: BlueprintLifecycleJournal | undefined;
     if (input.capabilityContext && deps.blueprintInstallJournal) {
-      journal = deps.blueprintInstallJournal({ blueprintId: id, bindings: journaledProviderBindings(capabilityGrantResolution) });
-    } else if ((capabilityGrantResolution?.selected.length ?? 0) > 0) {
+      journal = deps.blueprintInstallJournal({ blueprintId: id, bindings: journaledProviderBindings(capabilityGrantResolution),
+        eventKeys });
+    } else if ((capabilityGrantResolution?.selected.length ?? 0) > 0 || eventKeys.length > 0) {
       throw new InstallBlueprintError(
         'capability provider choices resolved but this install path cannot persist pot bindings',
         500,

@@ -1,7 +1,6 @@
 /**
- * conversations:get — read one OR many conversations in full: the
- * question/discussion seed, its topic tags, the whole reply/answer thread
- * (oldest-first), the accepted answer (if resolved), and the follower count.
+ * conversations:get — read one OR many conversations in full, or resolve a
+ * `thread-post:<id>` citation to its workspace-scoped post row.
  *
  * Bulk by default (the house keyed-array contract,
  * bulk-endpoint-standardization-2026-06-21): pass `id` (or its
@@ -15,15 +14,17 @@ import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { COORD_READ_ROLES } from '../roles';
 import { resolveAgentIdentity, type AgentIdentity } from '../identity';
-import { getConversation, getConsultStates } from '../conversations';
+import { getConversation, getConsultStates, getThreadPost } from '../conversations';
 import { mergeIds, runBulk, bulkContent } from '../../_bulk';
+
+type ParsedRef = { kind: 'conversation' } | { kind: 'invalid-post' } | { kind: 'post'; postId: number };
 
 export default defineTool({
   name: 'conversations:get',
   description:
-    'Read one or many conversations in full: seed, topics, thread (oldest-first), accepted answer, follower count, and consult lifecycle when applicable. Pass `id` (or `conversation_id`) for one or `ids` for 1–100; `id` wins when both single-item keys are supplied. Returns { ok, results:[{ ok, id, conversation?, topics, posts, subscriber_count, consult? | error }], counts }; correlate by id, and a missing id fails only its item. A unique-prefix fallback for a truncated id returns `warning` with the real id; ambiguous or nonexistent prefixes return `not_found`. For consults, read `consult.state` — `conversation.state` may remain open after expiry, and empty posts do not prove a stall.',
+    'Read one or many conversations in full, or resolve a `thread-post:<positive-id>` citation to the post in the caller workspace. Conversation reads include seed, topics, thread, accepted answer, follower count, and consult lifecycle when applicable. Pass `id` (or `conversation_id`) for one or `ids` for 1–100; `id` wins when both single-item keys are supplied. Returns { ok, results:[{ ok, id, conversation? | post? | error }], counts }; correlate by id, and a missing id fails only its item. A unique-prefix fallback for a truncated conversation id returns `warning` with the real id; ambiguous or nonexistent ids return `not_found`. For consults, read `consult.state` — `conversation.state` may remain open after expiry, and empty posts do not prove a stall.',
   guidance: {
-    when: 'You have conversation ids and need the full thread. Use `id` or `conversation_id` for one, or `ids` for a batch.',
+    when: 'You have conversation ids and need the full thread, or a `thread-post:<id>` citation and need its post body.',
     notWhen: 'Browsing many → conversations:list.',
     chaining: 'conversations:get → conversations:answer / conversations:post / conversations:join / conversations:resolve.',
     seeAlso: [
@@ -63,10 +64,37 @@ export default defineTool({
     // per-id inside the bulk loop (up to 100 ids ⇒ up to 100 round-trips).
     // Fail-soft inside getConsultStates: on error this is an empty map and the
     // read degrades to its previous shape.
-    const consultStates = await getConsultStates(ids, identity);
+    const parsedRefs = new Map<string, ParsedRef>(
+      ids.map((id): [string, ParsedRef] => {
+        if (!id.startsWith('thread-post:')) return [id, { kind: 'conversation' }];
+        const match = /^thread-post:([1-9][0-9]*)$/.exec(id);
+        if (!match) return [id, { kind: 'invalid-post' }];
+        const postId = Number(match[1]);
+        return [id, Number.isSafeInteger(postId) ? { kind: 'post', postId } : { kind: 'invalid-post' }];
+      }),
+    );
+    const conversationIds = ids.filter((id) => parsedRefs.get(id)?.kind === 'conversation');
+    const consultStates = await getConsultStates(conversationIds, identity);
     const env = await runBulk(
       ids,
       async (id) => {
+        const ref = parsedRefs.get(id);
+        if (ref?.kind === 'invalid-post') return { ok: false as const, id, error: 'not_found' };
+        if (ref?.kind === 'post') {
+          const post = await getThreadPost(ref.postId, identity);
+          if (!post) return { ok: false as const, id, error: 'not_found' };
+          return {
+            ok: true as const,
+            id,
+            post: {
+              id: post.id,
+              thread_id: post.thread_id,
+              author_id: post.author_id,
+              body: post.body,
+              created_ts: post.created_ts,
+            },
+          };
+        }
         const detail = await getConversation(id, identity);
         if (!detail) return { ok: false as const, id, error: 'not_found' };
         const { conversation: c, topics, posts, subscriber_count, resolvedFromPrefix } = detail;

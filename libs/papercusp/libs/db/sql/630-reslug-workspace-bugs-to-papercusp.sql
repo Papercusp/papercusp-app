@@ -1,6 +1,6 @@
 -- 630-reslug-workspace-bugs-to-papercusp.sql
 --
--- Owner-directed 2026-07-19 [owner:owner]: re-associate mis-filed workspace-scoped
+-- Owner-directed 2026-07-19 [owner:Avi]: re-associate mis-filed workspace-scoped
 -- BUG rows to harness_slug='papercusp' so the papercusp fleet can drain them.
 --
 -- WHY THIS EXISTS

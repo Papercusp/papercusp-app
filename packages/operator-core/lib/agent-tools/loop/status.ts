@@ -11,12 +11,52 @@ import { describeStoreIdentityMismatch, storeIdentityViolation } from '@papercus
 import { COORD_ROLES } from '../coordination/roles';
 import { resolveAgentIdentity, resolveSelfLiteral } from '../coordination/identity';
 import { getLoopStatus } from '../../harness/routines/loop';
-import { readLatestLoopTransition } from '../../harness/routines/loop-transition-log';
+import {
+  readLatestLoopTransition,
+  type LatestLoopTransitionRead,
+} from '../../harness/routines/loop-transition-log';
 import { getLoopCarryNoteWithMeta, shortCarryHash } from '../../carry-note';
 import { probeWakeReachability, type WakeReachabilityVerdict } from '../../events/await/wake-reachability';
 import { listWakeAwaitsForSubscriber } from '../../events/await/store';
 import type { LivePushChannels } from './arm';
 import { classifyLoopNextWake } from './next-wake';
+
+/** WI-10004466: a currently-withheld loop wake, derived from the latest transition. */
+export interface ActiveAwaitSuppression {
+  suppressedUntil: string;
+  drivingEventKey: string | null;
+  summary: string;
+}
+
+/**
+ * WI-10004466: the loop's next wake is being WITHHELD by await suppression right now when
+ * the newest transition is loop-fire's `await-suppression` re-arm, its target is still in
+ * the future, and the loop's schedule is still the one that re-arm wrote (a later arm or
+ * re-arm supersedes it). Pure; null whenever any of that cannot be shown.
+ */
+export function deriveActiveAwaitSuppression(
+  lastTransition: LatestLoopTransitionRead | null,
+  nextFireAt: Date | string | null | undefined,
+  nowMs: number,
+): ActiveAwaitSuppression | null {
+  if (!lastTransition || lastTransition.status !== 'found') return null;
+  const t = lastTransition.transition;
+  if (t.actor !== 'await-suppression' || t.event !== 'rearmed' || !t.newNextFireAt) return null;
+  const untilMs = Date.parse(t.newNextFireAt);
+  if (!Number.isFinite(untilMs) || untilMs <= nowMs) return null;
+  const nextMs = nextFireAt instanceof Date ? nextFireAt.getTime() : nextFireAt ? Date.parse(nextFireAt) : NaN;
+  if (!Number.isFinite(nextMs) || Math.abs(nextMs - untilMs) > 1_000) return null;
+  const key = typeof t.detail?.drivingEventKey === 'string' ? t.detail.drivingEventKey : null;
+  const until = new Date(untilMs).toISOString();
+  return {
+    suppressedUntil: until,
+    drivingEventKey: key,
+    summary:
+      `Routine wakes are withheld until ${until} because you hold an active await` +
+      `${key ? ` (${key})` : ''}; the loop is not firing on its interval. If you have other ` +
+      'work, cancel that await (events:cancel) or set the waiting item blocked (work_items:set_blocker).',
+  };
+}
 
 export default defineTool({
   name: 'loop:status',
@@ -38,8 +78,8 @@ export default defineTool({
     when: "Check whether your loop is still armed + when it next fires, or inspect another agent's loop. Pass `ownerId` for another session; this owner-scoped read ignores `harness` if passed.",
     returns:
       '`cadenceDrift` (EI-21276782387845111) is true only when sustained slow-cadence evidence is corroborated by a scheduled fire several intervals overdue. It stays false for a parked turn (the configured interval begins after turn settlement), missing cadence history, or a fire that is not demonstrably late; combine it with the raw cadence fields rather than treating false as proof of normal cadence.\n\n' +
-      "ROOT ENVELOPE: `{ ok, ownerId, loop, lastTransition, carryNote, reachability, pendingAwaits, storeIdentityWarning? }` — the loop RECORD is NESTED under `loop`: `{ active, intervalSec, parked, nextFireAt, lastFiredAt, fireCount, firesSinceArm, cost-cap, … }`, or null when no loop exists for the owner. `lastTransition` is null when no loop exists; otherwise it is a tri-state diagnostic read (`found`/`none`/`unknown`). A found transition preserves the scheduling cause — for example `actor:'await-suppression'` plus `detail.drivingEventKey` explains why a 60s loop was deliberately re-armed to an await deadline instead of firing each minute. `carryNote` is the routine-scoped read-back `{ note, contentHash, updatedAtMs }`, or null when no loop exists; use its hash to reconcile an uncertain `loop:checkpoint` transport result. jq / code:run reducers must descend through `.loop`; assuming root-level active/interval fields iterates null (EI-21197839138727609).\n\n" +
-      "`rewake` (P-013, EI-24023838400909760) is `{ rewakeGuaranteed, reason }` — the SAME classifier loop:checkpoint's continuation gate uses. `rewakeGuaranteed:false` on an ACTIVE loop names why it will not re-wake you: `last-fire-parked` (the newest fire parked undelivered, e.g. a cold fire with no injectable psu host — the next fire on that path parks too), `fire-starved`, or an exhausted maxFires/maxDurationSec bound. Do not settle a turn on an active loop whose rewake is false. Null when no loop exists.\n\n" +
+      "ROOT ENVELOPE: `{ ok, ownerId, loop, lastTransition, carryNote, reachability, pendingAwaits, storeIdentityWarning? }` — the loop RECORD is NESTED under `loop`: `{ active, intervalSec, parked, nextFireAt, lastFiredAt, fireCount, firesSinceArm, cost-cap, … }`, or null when no loop exists for the owner. `lastTransition` is null when no loop exists; otherwise it is a tri-state diagnostic read (`found`/`none`/`unknown`). A found transition preserves the scheduling cause — for example `actor:'await-suppression'` plus `detail.drivingEventKey` explains why a 60s loop was deliberately re-armed to an await deadline instead of firing each minute. A found transition also carries `cycle`: `parked` means the member's own TURN is in flight (next_fire_at is infinity), NOT a re-arm delay — read `cycle.lastTurn.turnSec` (parked→rearmed) and `postSettleDelaySec` (rearmed→next parked, ~intervalSec + <=30s tick) separately, because `loop.cadenceRatio`/`effectiveIntervalSec` include the turn by construction. `carryNote` is the routine-scoped read-back `{ note, contentHash, updatedAtMs }`, or null when no loop exists; use its hash to reconcile an uncertain `loop:checkpoint` transport result. jq / code:run reducers must descend through `.loop`; assuming root-level active/interval fields iterates null (EI-21197839138727609).\n\n" +
+      "`rewake` is the SAME classifier loop:checkpoint's continuation gate uses. `rewakeGuaranteed:false` on an ACTIVE loop names why the next turn is not guaranteed: `last-fire-parked` (the newest fire parked undelivered), `last-fire-no-loop-turn` (the latest delivered fire has no loop-origin completion proof after `lastFiredAt`), `fire-starved`, or an exhausted maxFires/maxDurationSec bound. A later loop:arm does not clear that failure; a delayed loop turn clears it only when `lastFailedFireLoopTurnCompletedAt` is strictly later than `lastFiredAt`. Do not settle a turn on an active loop whose rewake is false; inspect and repair the delivery-to-turn path before settling. Null when no loop exists.\n\n" +
       "REACHABILITY SCOPE (EI-21452056705704146): `reachability` reports the standing owner wake path even when `loop:null`, including the host-registered inbox-wake waiter. `pendingAwaits.scope:'non-inbox-wake'` deliberately excludes that always-armed host channel and measures only caller-authored park awaits; its `status:'none'` is NEVER evidence that the owner is globally unreachable.\n\n" +
       "The loop record for the owner (active, intervalSec, parked, nextFireAt, lastFiredAt, fireCount, firesSinceArm, cost-cap), or null when no loop exists.\n\nFields that change what you should DO:\n• `firesSinceArm` vs `maxFires` (WI-36070) — the ONLY valid dead-man comparison. `fireCount` is a LIFETIME counter and a re-arm resets the budget, so `fireCount > maxFires` on an active loop is the EXPECTED reading, not a breached bound. Comparing those two reports a healthy loop as already-halted, and hides a loop one fire from going silently inert (EI-19899671638499010).\n• `turnsStalled` (EI-18712914572668391) — true when fires keep landing (fireCount climbing) but `lastTurnAt` (the most recent real turn-completion marker) isn't keeping pace, e.g. a wedged wake channel. This is the armed-but-not-PRODUCING case: `stalled` alone only catches a PARKED in-flight turn stuck past its dwell window, so a loop can be firing on schedule and doing nothing while `stalled` stays false.\n• `storeIdentityViolation` (EI-19384072467112035) — a `null` loop alongside this block means the process was reading from the WRONG database when it looked. Treat that null as UNKNOWN, NOT as \"no loop\", and do NOT re-arm on the strength of it alone: re-arming on a misread is how a live loop gets duplicated.\n• `pendingAwaits` (EI-19415169477907694) — your OWN live non-inbox-wake events:await registrations right now, so \"am I actually parked?\" is answerable after a call whose response you never trust (a dropped MCP transport, a backgrounded/failed events:await). `status:'found'` with a sample of keys means a registration IS live; `status:'none'` means NOTHING is registered — the loud signal that a believed-successful await never actually landed; `status:'unknown'` means the lookup itself failed and must NEVER be read as 'none'.\n• `monitor` / `monitorStanddown` (mode:'monitor' only) — `monitor.remainingNoDeltaBudget` is how many QUIET wakes this monitor has left before the engine stands it down; `monitorStanddown` explains an `active:false` monitor (`no_delta_budget_exhausted` or `authority_lost` + the admission code). Report a delta with `loop:checkpoint { monitorDelta: true }` to reset the budget.\n• Cadence (EI-20217869515819188) — compare `expectedFiresSinceArm` with `firesSinceArm` to see how many interval-sized opportunities elapsed versus attempted fires. `effectiveIntervalSec` and `cadenceRatio` expose a slow fire path (`cadenceRatio` > 1 means slower than configured; > 3 is a warning), and `longestObservedGapSec` reports the largest arm-scoped wake gap. A null cadence field means insufficient timestamps/history, never zero.",
     notWhen:
@@ -245,6 +285,12 @@ export default defineTool({
                 })()
               : null,
             lastTransition,
+            // WI-10004466: the withheld-wake state, stated at top level. `rewake` reads
+            // guaranteed during an await suppression (a wake IS scheduled, just late), and
+            // the cadence fields reflect the delay without naming it.
+            awaitSuppression: status
+              ? deriveActiveAwaitSuppression(lastTransition, status.nextFireAt, Date.now())
+              : null,
             carryNote,
             reachability: reachabilityOut,
             pendingAwaits: pendingAwaitsOut,

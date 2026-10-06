@@ -260,12 +260,14 @@ export function summarizeNestedToolOutcome(result: {
 
 export default defineTool({
   name: 'tools:invoke',
-  // The target runs through its own projected dispatcher and therefore owns
-  // the authoritative deadline. Keep this wrapper outside the longest agent-
-  // tool deadline (600s) so its default 60s watchdog cannot abort first and
-  // turn a successfully-completed target into the misleading
-  // "handler returned but signal had aborted" timeout (EI-9242).
-  timeoutSec: 660,
+  // The MCP host races nested dispatch against the target's effective MCP
+  // deadline; the projected dispatcher also owns the target's timeout signal.
+  // Keep this wrapper outside the longest known target MCP deadline. scorecards:emit
+  // declares 900s; the 60s margin lets its result settle before this watchdog can abort.
+  // This avoids turning a successfully-completed target
+  // into the misleading "handler returned but signal had aborted" timeout
+  // (EI-9242).
+  timeoutSec: 960,
   description:
     'Call ANY tool in the full ~550-tool catalog by name, even one not in your loaded tool list. ' +
     // ⚠ THIS SENTENCE IS DELIBERATELY A HARD RAIL, AND MUST STAY ONE (D-047).
@@ -276,7 +278,7 @@ export default defineTool({
     // display spelling (`work_items__list`; `sanitizeToolName` maps ':' → '__'),
     // reached no tool at all, and reported "no open work items found". Re-running
     // the same arm with this contract delivered produced ZERO such calls in 12 runs.
-    // Keep this rail under SUMMARY_LEAD_MAX_CHARS so it ships intact at the
+    // Keep this rail under the retained compact rail cap so it ships intact at the
     // compact tier where the wrong display spelling caused actual failures.
     '⚠ Use colon tool names (flags:set); NEVER underscored display names. Args go in `args`. The call is ' +
     'dispatched server-side and gated exactly as a direct call would be. Pair with tools:find: ' +

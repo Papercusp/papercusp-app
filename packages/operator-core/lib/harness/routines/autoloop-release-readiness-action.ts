@@ -151,4 +151,5 @@ registerSystemAction('autoloop-release-readiness-monitor', async (ctx: SystemAct
       );
     });
   }
-});
+  // WI-10005745: runs tsx <root>/apps/operator/lib/release/run-autoloop-release-profile.ts.
+}, { executesIntegrationTreeCode: true });

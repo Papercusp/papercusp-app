@@ -101,6 +101,8 @@ export interface GetFeedbackRequest {
   workspaceId: string;
   requesterId: string;
   question: string;
+  /** The production binding supplies its actual launch permission. */
+  allowDispatch?: boolean;
   tried?: string;
   observed?: string;
   decisionAtStake?: string;
@@ -108,6 +110,8 @@ export interface GetFeedbackRequest {
   /** Explicit origin task ref; undefined ⇒ default to the requester's most
    * recently progressed wip work-item (fail-soft: none ⇒ null). */
   originTaskRef?: string | null;
+  /** Optional exact durable subject whose transcript mentions must justify routing. */
+  subjectRef?: string | null;
   /** Exclude owners from candidacy — e.g. exhausted-menu decliners on a FRESH
    * re-route (the cascade itself is server-driven now, D-005/P-013: declines
    * and expiries advance the selected menu without a re-call). */
@@ -165,6 +169,8 @@ export interface GetFeedbackDeps {
     workspaceId: string;
     requesterId: string;
     question: string;
+    /** Exact durable subject (relevance-router `subjectRef`); forwarded from the request. */
+    subjectRef?: string | null;
     excludeOwners?: string[];
   }) => Promise<RouteResult>;
   /** Opens the kind='consult' conversation (bound to openConversation in prod). */
@@ -276,11 +282,11 @@ export interface GetFeedbackResult {
    * outcome; `state` reports the conversation's lifecycle, which on this path is
    * still genuinely "no responder attached" and is what the DB CHECK persists.
    */
-  verdict: 'routed' | 'no_qualified_responder' | 'served_from_archive' | 'relevance_unmeasured';
+  verdict: 'routed' | 'no_qualified_responder' | 'served_from_archive' | 'relevance_unmeasured' | 'retrieval_only';
   /** WHY, honestly (D-003: distinct causes must stay distinguishable).
    * `embed_unavailable` always accompanies verdict `relevance_unmeasured`; the
    * other two accompany `no_qualified_responder`. */
-  reason?: 'below_floor' | 'no_available_responder' | 'embed_unavailable';
+  reason?: 'below_floor' | 'no_available_responder' | 'embed_unavailable' | 'retrieval_only';
   conversation_id: string;
   thread_id: string;
   /** 'served_from_archive' is a TS-surface state only — the DB row reuses
@@ -582,6 +588,31 @@ export interface BriefCandidate {
   relevance: number;
   signals: { similarity: number };
   evidence: Array<{ session_id: string; turn_idx: number; sim: number; lexicalRank?: number }>;
+}
+
+/**
+ * EI-24833606853730057: tell "refused before any model was tried" apart from "every
+ * model was walled" using the consult's persisted dispatch walks. A walk that
+ * records `dispatched:false` with an EMPTY `attempts` list never reached the rank
+ * loop (source ownership, transcript availability, cool-down…), so no account reset
+ * will fix it, and the requester's hint must not claim one will.
+ */
+export function summarizePreLaunchRefusals(walks: unknown): { total: number; refused: number; details: string[] } {
+  const list = Array.isArray(walks) ? walks : [];
+  let total = 0;
+  let refused = 0;
+  const details: string[] = [];
+  for (const walk of list) {
+    if (!walk || typeof walk !== 'object') continue;
+    const w = walk as { dispatched?: unknown; attempts?: unknown; detail?: unknown };
+    if (w.dispatched !== false) continue;
+    total += 1;
+    if (!Array.isArray(w.attempts) || w.attempts.length > 0) continue;
+    refused += 1;
+    const detail = typeof w.detail === 'string' ? w.detail.trim() : '';
+    if (detail && !details.includes(detail) && details.length < 3) details.push(detail.slice(0, 240));
+  }
+  return { total, refused, details };
 }
 
 /** Compact why-you-were-chosen evidence for the wake body (D-008 §5) — refs
@@ -889,6 +920,7 @@ export async function getFeedbackCore(
     workspaceId: req.workspaceId,
     requesterId: req.requesterId,
     question: req.question,
+    subjectRef: req.subjectRef ?? null,
     ...(excludeOwners.length ? { excludeOwners } : {}),
   });
   // The production router applies these exclusions in SQL, but the core also
@@ -906,6 +938,7 @@ export async function getFeedbackCore(
     [...excludeOwners, req.requesterId].filter((owner) => !cycleCheckOwners.has(owner)),
   );
   route.qualified = route.qualified.filter((candidate) => !excludedFromCandidacy.has(candidate.ownerId));
+  route.snapshot.deliveryIntent = req.allowDispatch === false ? 'retrieval-only' : 'dispatch';
   route.snapshot.candidates = route.snapshot.candidates.filter(
     (candidate) => !excludedFromCandidacy.has(candidate.ownerId),
   );
@@ -1175,8 +1208,12 @@ export async function getFeedbackCore(
   // selectee's allowlist exhausted, and the honest terminal for that is
   // `no_available_responder` with NO responder named (see 7c). `chosen` itself
   // is non-null on this path, so the widening is the walk's, not the route's.
-  let finalChosen: RoutingCandidate | null = chosen;
-  let finalChosenVia: SelectionVia | null = chosenVia;
+  const retrievalOnly = req.allowDispatch === false;
+  // Retrieval preserves the ranked menu but never attaches an answering
+  // identity or enters the dispatch/cascade path. The persisted no-responder
+  // state is inert; deliveryIntent distinguishes it from failed dispatch.
+  let finalChosen: RoutingCandidate | null = retrievalOnly ? null : chosen;
+  let finalChosenVia: SelectionVia | null = retrievalOnly ? null : chosenVia;
   const provisionalState: GetFeedbackResult['state'] = finalChosen
     ? 'awaiting_responder'
     : 'no_qualified_responder';
@@ -1225,11 +1262,15 @@ export async function getFeedbackCore(
   // below_floor. The third case — an expert was selected but no allowed model
   // could be launched from their transcript — is only knowable AFTER the
   // dispatch walk, and is recorded there as `no_available_responder`.
-  let reason: GetFeedbackResult['reason'] = finalChosen
-    ? undefined
-    : route.snapshot.degraded === 'embed-unavailable'
-      ? 'embed_unavailable'
-      : 'below_floor';
+  // Set only on the exhausted-menu terminal (7c); drives the honest hint there.
+  let preLaunchRefusals: ReturnType<typeof summarizePreLaunchRefusals> | null = null;
+  let reason: GetFeedbackResult['reason'] = retrievalOnly
+    ? 'retrieval_only'
+    : finalChosen
+      ? undefined
+      : route.snapshot.degraded === 'embed-unavailable'
+        ? 'embed_unavailable'
+        : 'below_floor';
 
   // 4) Delivery gating is SELECTION only — the per-task wake budget is REMOVED
   //    (D-005: maxResponders is the only per-consult bound; residual spam guards
@@ -1292,9 +1333,9 @@ export async function getFeedbackCore(
       responder: finalChosen.ownerId,
       conversationId: opened.conversation_id,
       evidence: finalChosen.evidence,
-      // Stamp the answering identity the moment that session starts, not when
-      // the dispatcher returns: it can post during the verification wait, and
-      // the reply gate refuses an author the row does not name yet. The
+      // Stamp before a fork is launched: its first turn can reply while
+      // spawnHeadless is waiting for the kickoff receipt. Conversions retain
+      // their existing identity and stamp before verification; the
       // post-dispatch stamp below remains the backstop.
       onAnsweringOwner: (owner) =>
         stampAnsweringOwner(sql, req.workspaceId, opened.conversation_id, 0, owner),
@@ -1404,6 +1445,14 @@ export async function getFeedbackCore(
       // the hint all derive from this, and each is only honest once it is null.
       finalChosen = null;
       finalChosenVia = null;
+      try {
+        const walkRows = await sql<{ walks: unknown }[]>`
+          SELECT dispatch_attempts AS walks FROM harness_shared.consult_state
+           WHERE workspace_id = ${req.workspaceId} AND conversation_id = ${opened.conversation_id}`;
+        preLaunchRefusals = summarizePreLaunchRefusals(walkRows[0]?.walks);
+      } catch {
+        /* the hint falls back to the generic wording; the verdict is unaffected */
+      }
       await sql`
         UPDATE harness_shared.consult_state
            SET state = 'no_qualified_responder',
@@ -1454,8 +1503,13 @@ export async function getFeedbackCore(
     ? latency === 'hard-blocked'
       ? `Routed + ${wakeNote}. Park on events:await { event: '${parkKey}' } and end your turn — the reply wakes you (latched). Expires ${expiresAt}.${viaNote}${fallbackNote}${dispatchNote}${autoExcludedNoteText}`
       : `Routed + ${wakeNote}; the reply lands in conversation ${opened.conversation_id}. PROCEED on your own judgment meanwhile and reconcile when it arrives. Declines/expiries advance the cascade SERVER-side (the next expert is dispatched with the feedback so far, D-005) — no re-call needed unless the whole menu exhausts.${viaNote}${fallbackNote}${dispatchNote}${autoExcludedNoteText}`
+    : retrievalOnly
+      ? 'Retrieval-only: dispatch was disabled. No answering session was requested; do not park. Read remaining_candidates with sessions:read / sessions:search and decide from their transcript evidence.'
     : reason === 'embed_unavailable'
       ? `The embedder is unavailable on this host — similarity could NOT be measured, so there is no ranking to fill a minimum from (cannot-measure ≠ measured-nothing). Proceed on your own judgment; retry later if the answer matters.`
+      : reason === 'no_available_responder' && preLaunchRefusals && preLaunchRefusals.total > 0 &&
+          preLaunchRefusals.refused === preLaunchRefusals.total
+        ? `Matching experts were selected, but every dispatch walk (${preLaunchRefusals.total}) was refused BEFORE any model was tried, so no account wall is involved and retrying after a reset will not help: ${preLaunchRefusals.details.join(' | ')}. Nothing is coming, so do not park: remaining_candidates lists the experts; read their transcripts via sessions:read / sessions:search (retrieval fallback) and proceed.`
       : reason === 'no_available_responder'
         ? `Matching experts were selected, but NO allowed model could be launched from any of their transcripts — every ranked model was walled, unreachable for that backend, or failed to launch. Nothing is coming, so do not park: remaining_candidates lists the experts; read their transcripts via sessions:read / sessions:search (retrieval fallback) and proceed. Retrying once a walled account resets is reasonable.`
         : `No transcript cleared this question's relevance floor (and no minimum-fill applied — either min 0 was requested or nothing matched at all): there is no best-available reviewer to route to. Proceed on your own judgment (first-class honest verdict, not an error).`;
@@ -1465,11 +1519,13 @@ export async function getFeedbackCore(
     // Derived from `reason` rather than re-testing `snapshot.degraded`, so the
     // verdict and the reason can never drift into disagreeing about the same
     // route (EI-21485716602970457).
-    verdict: finalChosen
-      ? 'routed'
-      : reason === 'embed_unavailable'
-        ? 'relevance_unmeasured'
-        : 'no_qualified_responder',
+    verdict: retrievalOnly
+      ? 'retrieval_only'
+      : finalChosen
+        ? 'routed'
+        : reason === 'embed_unavailable'
+          ? 'relevance_unmeasured'
+          : 'no_qualified_responder',
     ...(reason ? { reason } : {}),
     conversation_id: opened.conversation_id,
     thread_id: opened.thread_id,
@@ -1477,7 +1533,7 @@ export async function getFeedbackCore(
     responder: finalChosen,
     responder_via: finalChosenVia,
     remaining_candidates: (finalSelected.length > 0
-      ? finalSelected.slice(1)
+      ? retrievalOnly ? finalSelected : finalSelected.slice(1)
       : route.qualified.map((c) => ({ candidate: c, via: 'floor' as SelectionVia }))
     ).map((s) => ({
       ownerId: s.candidate.ownerId,

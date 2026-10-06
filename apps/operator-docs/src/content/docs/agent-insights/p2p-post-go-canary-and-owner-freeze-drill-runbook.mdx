@@ -5,7 +5,7 @@
 # the next projection (it cannot tell your edit from corruption), so it blocks the
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
 title: "P2P post-GO canary (P-501) and owner-freeze drill (P-502): execution runbook"
-description: "Exact preconditions, commands, pass/fail predicates, evidence and abort rules for the 72h canary soak and the Leg G owner-freeze/recovery drill under endgame D-022, verified read-only on the tower 2026-09-23."
+description: "Exact preconditions, commands, pass/fail predicates, evidence and abort rules for the canary soak (72h default; no timed minimum and non-blocking for 0.0.28-alpha per D-132) and the Leg G owner-freeze/recovery drill under endgame D-022, verified read-only on the tower 2026-09-23."
 type: Insight
 discovered: 2026-09-23
 status: active
@@ -25,7 +25,9 @@ Command-level execution runbook for `p2p-public-release-endgame-2026-09-01` P-50
 - endgame D-016: the plan ships only after the canary, the chaos exercise, P-503 and closeout are terminal.
 - endgame D-022: single owning-hive authority. P-502 proves freeze and recovery; it does NOT test lease takeover or automatic failover. git-activation P-308's older "lease failover + epoch fence" wording is superseded.
 
-## P-501 — 72h canary soak
+## P-501 — canary soak (72h default; no timed minimum for 0.0.28-alpha, D-132)
+
+**Soak length (endgame D-132, superseding D-128).** The minimum is 72h by default. For `0.0.28-alpha` the owner removed the timed soak on 2026-10-01 (D-132: minimum 0, no 24h/72h fallback), and **no P-501 soak completion may hold 0.0.28-alpha publication**: the route is GO -> publish, and P-501 observation for that release is useful but NON-BLOCKING (it runs after or alongside publication, and its wait must not sit on P-502/P-503 or any publication dependency). Later releases return to 72h unless the owner rules again. T0 is unchanged (D-123): no earlier than the P-401 independent GO `approvedAt` AND the replacement artifact running on the canary. Canary time before the GO does not count. Wherever this page says 72h, read it as the minimum for the release being soaked.
 
 ### Preconditions (all must hold; record each as evidence)
 
@@ -98,6 +100,7 @@ SELECT created_at, title, importance, desktop_succeeded, mobile_succeeded
 
 Build `post-go-canary-input.json` (schema `hive-git-post-go-release-canary/v1`) as follows:
 
+- `releaseVersion` (required since D-128) names the shipping release, e.g. `0.0.28-alpha`. It selects the soak minimum: 0 for `0.0.28-alpha` (D-132; the duration check is skipped), 72h for any other release. The verifier rejects an input without it. The result echoes `releaseVersion`, `minimumDurationMs` and `minimumDurationDecisionRef`; check them in the evidence.
 - `independentGo` comes from the preconditions.
 - `canary` = `{ candidateSha, startedAt, finishedAt, hive: 'hello-world-3-pot', routineIntervalSec, observations, alarms, alarmRail }`.
 - `observations` is the samples file, verbatim.
@@ -112,7 +115,7 @@ npx tsx packages/operator-core/lib/sync/pot-git/physical-drill-producer.ts \
   post-go-canary-verify /path/to/post-go-canary-input.json
 ```
 
-Since WI-10002545 the verifier checks C1–C6 over the samples, on top of GO ordering, candidate identity, the actual 72h duration and the P-502 block. It also fails closed when `observations` is missing.
+Since WI-10002545 the verifier checks C1–C6 over the samples, on top of GO ordering, candidate identity, the actual soak duration (at least the release minimum: none for 0.0.28-alpha per D-132, otherwise 72h) and the P-502 block. It also fails closed when `observations` is missing.
 
 - **Coverage:** a sample at least hourly. The first comes within 1h of `startedAt` and the last within 1h of `finishedAt`, all on the one pinned hive.
 - **C4:** fails on a last fire older than 3x the routine interval, and on an `error`/`quarantined` status in two consecutive samples.

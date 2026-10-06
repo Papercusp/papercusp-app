@@ -3,6 +3,8 @@ URL: /internal/docs/agent-insights/acceptance-rubric-vetting
 
 The long-form method behind the acceptance-rubric ship gate's vetting step: how an author vets their rubric against meta-acceptance-rubric (a get_feedback critique consult opened with policy:'rubric-vetting' → improve → scorecards:emit meta-scorecard with vettingConsult), how the six meta-criteria are judged, revision currency (D-010), the gate's refusal/disable/flag mechanics (D-009), and three traps that make a correct vetting read as a failure — or a wrong binding read as a pass.
 
+The long-form method behind the acceptance-rubric ship gate's vetting step: how an author vets their rubric against meta-acceptance-rubric (a get\_feedback critique consult opened with policy:'rubric-vetting' → improve → scorecards:emit meta-scorecard with vettingConsult), how the six meta-criteria are judged, revision currency (D-010), the gate's refusal/disable/flag mechanics (D-009), and three traps that make a correct vetting read as a failure — or a wrong binding read as a pass.
+
 ## What this is
 
 Every plan ships with a graded acceptance rubric (CLAUDE.md § "Every plan ships with a graded acceptance rubric"). Before that rubric may satisfy the ship gate, its AUTHOR vets it against the meta-rubric `meta-acceptance-rubric` (the rubric-rubric). This runbook is the long-form method that rubric's `methodRef` points at: how to run the vetting step, how to judge each meta-criterion, and how the gate decides "vetted".
@@ -12,7 +14,7 @@ Plan of record: `consult-min-max-and-rubric-vetting-2026-08-17` (D-001, D-006, D
 ## The flow (author-side)
 
 1. **Author the acceptance rubric post-implementation** — `rubrics:propose { kind:'acceptance', subjectPlan, classRef, criteria }` (never at plan-creation time).
-2. **Open the critique consult** — `get_feedback` with the rubric's criteria + the plan goal in the question; pass **`policy:'rubric-vetting'` and NO responder count**. That key resolves min/max from `packages/operator-core/lib/consult/selection-policies.ts`, the only place the bound is written, so this runbook cannot instruct a menu wider than the selector enforces — which is exactly what the hand-typed cap it replaces ended up doing after the bound moved. The policy's minimum still guarantees at least one best-available LIVE reviewer even when nobody clears the relevance floor (D-003); a `responder_via:'minimum'` reply is a first-principles review, weigh it as such.
+2. **Open the critique consult** — `get_feedback` with the rubric's criteria + the plan goal in the question; pass **`policy:'rubric-vetting'` and NO responder count**. That key resolves min/max from `packages/operator-core/lib/consult/selection-policies.ts`, the only place the bound is written, so this runbook cannot instruct a menu wider than the selector enforces — which is exactly what the hand-typed cap it replaces ended up doing after the bound moved. When a selectable transcript candidate exists, the minimum fills from the best-ranked candidate even if nobody clears the relevance floor (`via:'minimum'`, D-003). Delivery forks or converts the selected transcript into a dedicated answering session (D-002), so the original expert session need not be live. A `responder_via:'minimum'` reply is a first-principles review; weigh it as such.
 3. **Improve the rubric from the critique** — `rubrics:get` → edit → `rubrics:propose` (whole-document re-propose; the rubric's version bumps).
 4. **Attest (the meta-scorecard)** — grade YOUR OWN rubric against the meta-rubric:
 
@@ -88,7 +90,7 @@ Refused before, refused after — so the natural conclusion is that the rule is 
 
 **You no longer have to find this here.** The refusal itself carries the same route as a structured `remedy` — `{ summary, steps[], doesNotWork[], docRef }` on the `grader_is_sole_vetting_critic` payload (`grader-eligibility.ts`), pointing back at this section. That matters because of WHEN the refusal arrives: it fires at the END of the ceremony, after the implementation, the audit and the rubric authoring are all paid for. A remedy discoverable only by reading `resolveAggregatedVettingCritics` in the source is a remedy discovered after the expensive work is done.
 
-## Three traps — two that make a correct vetting look broken, one that makes a bad binding look fine
+## Four traps — two that make a correct vetting look broken, one that makes a bad binding look fine, one that fails the attestation's own audit
 
 All three were hit in a single vetting run (plan `on-demand-local-inference-lifecycle-2026-08-17`, 2026-08-19). None is a defect; each is a place where the honest reading of what you see is the wrong one.
 
@@ -121,6 +123,19 @@ Two corollaries worth applying at bind time:
 
 * **Bind the file that tests the criterion's CORE claim, not its cheapest neighbour.** Where a criterion insists on database-level enforcement, the integration test IS the criterion; the unit test over the JS validator is the thing that criterion explicitly calls insufficient. Check the file actually runs cheaply before worrying (`testing:runs { filePath }` gives the last duration — a real-PG integration test at \~1s is a fine binding; a Docker-gated one that cannot start would refuse the emit).
 * **When a check covers only PART of a criterion, say so in the criterion's `method`.** A green run must not be allowed to imply the uncovered clause passed. Declare the partition explicitly — "the check covers clause 1; clause 2 has no automated coverage and must be graded on its own evidence" — so the grader inherits the boundary instead of the impression.
+
+### 4. The attestation card is itself audited — write it so an auditor can RE-RUN it
+
+Your `scorecards:emit` against `meta-acceptance-rubric` is a scorecard like any other: it receives an independent grading-integrity audit (the card's `gradingAudit` stamp, dispatched automatically), and vetting reads `vetted` only once that audit **passes**. A revision of the grading-integrity meta-rubric re-opens settled audits, so an attestation that passed under an old revision can fail on re-audit.
+
+Measured 2026-10-02 on `acceptance-work-on-everything-rubric-evidence-hardening-2026-09-20` rev 6: attestation EI-24711387607832509 FAILED rev-10 audit EI-24852491646605042 (instrument-split, terminal-re-rate, re-runnable-evidence). Its re-derived replacement EI-24854304791243030 PASSED (audit EI-24854415468269087). The differences:
+
+* **Re-derive, don't cite.** Open each rating with the immutable `rubrics:get { rubricRef, revision }` call it judges, and re-derive every count over the FULL revision. Citing a critic's consult post, or carrying a conclusion from an earlier revision's attestation, failed: an auditor cannot re-run a post.
+* **Pin tree evidence by blob at a commit** (`git rev-parse <sha>:<path>`), never a bare path. Evidence that pointed at a mutable table or an SQL fragment is what the re-runnable-evidence criterion rejected.
+* **Quote live probe outputs verbatim** (the call and what it returned) for any criterion that names a probe.
+* **A second attestation for the same rubric needs `acknowledgeExisting: true`.** Without it `scorecards:emit` refuses with `ok:false` inside the result body, while the invocation ledger still records the call as ok. Read the result, not the ledger.
+* **Run a long emit detached and read the file**: `node scripts/mcp-call.mjs scorecards:emit --json-file <args.json> --client <your-su-id> > <out> 2>&1 &`. A foreground `capability:bash` window that times out loses the result even though the emit may still land; check `scorecards:list` before re-emitting.
+* **Await the verdict instead of polling**: `events:await { event: "scorecard:grading-audit:<attestation id>" }` fires when the audit settles, with `state` and `auditIssueId` in the payload (EI-24852356444105284; live once :3070 deploys it). A stuck audit re-dispatches via `scorecards:repair { targetIds }`, which must run on a build that descends from the card's graded build (a lineage refusal records `dispatchBackoff` code `generation_incompatible` on the card).
 
 ### Budget note for a multi-check rubric
 

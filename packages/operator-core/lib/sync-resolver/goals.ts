@@ -37,7 +37,7 @@
 // the annotation fails to typecheck outright. Every other `sql.begin` in this
 // package leaves it inferred for the same reason.
 
-import { GOAL_SPEND_SNAPSHOT_SOURCE, GOAL_SPEND_TICK_SOURCE } from '@papercusp/db-org';
+import { GOAL_SPEND_SNAPSHOT_SOURCE } from '@papercusp/db-org';
 import { budgetSpendScope } from '../goal-launch-settings';
 // P-001 — goal-live-holder-guarantee-2026-08-18: ROW PRESENCE IS NOT LIVENESS.
 // A goal-mode row outlives the session that wrote it, so both surfaces below
@@ -170,22 +170,30 @@ export interface GoalSummaryRow {
   openWorkItems: number;
   /** Items parked on the owner. The rail's "waiting on you" count. */
   needsHuman: number;
-  spendUsd: number;
   /**
-   * Fleet spend inside the recent window — the RATE input, where `spendUsd` is
-   * the LEVEL (goals-tab-improvement-2026-08-09 P-003).
+   * Goal-attributed spend over the goal's lifetime: the priced samples whose
+   * `goal_id` was stamped at write time, from `created_at` on — the SAME stream
+   * `lineageSpendForGoal` measures for the launch gate and the breach check
+   * (WI-1074208, plan decisions D-011/D-012). Pot membership plays no part, so a
+   * goal with no pots still shows what it cost.
    *
-   * `spendUsd` alone cannot distinguish a goal that spent its ceiling over six
-   * weeks from one that spent it since Tuesday, and the ceiling is exactly the
-   * thing the owner needs advance warning of.
+   * NULL when no priced sample is attributed to the goal. That is "unmeasured",
+   * never "$0": the pot-based figure this replaced read 0 for a goal that had
+   * spent $1,613 through no pot at all.
    *
-   * Attributed exactly as `spendUsd` is — every sample for the goal's
-   * non-removed pots — so the two are the same measurement over different
-   * spans and a caller may divide one by the window to get a rate. It follows
-   * that this inherits D-021: it is per-goal and DOES NOT SUM across goals,
-   * because a shared pot's spend counts in full against each goal it serves.
+   * The LEVEL judged against the ceiling is `spentCents`, not this — the ceiling
+   * is per `budgetWindowSec`, and a lifetime figure judged against a weekly
+   * ceiling would flag a standing goal for spend it made months ago.
    */
-  spendRecentUsd: number;
+  spendUsd: number | null;
+  /**
+   * The same attributed stream inside the recent window — the RATE input
+   * (goals-tab-improvement-2026-08-09 P-003). NULL when nothing priced was
+   * attributed in the window, so the burn renders no rate rather than `$0/day`.
+   */
+  spendRecentUsd: number | null;
+  /** The rolling window `budgetCents` applies to, in seconds; null = the goal's lifetime. */
+  budgetWindowSec: number | null;
   /**
    * How wide that window is, in days.
    *
@@ -261,6 +269,11 @@ function num(v: unknown): number {
   return v == null ? 0 : Number(v);
 }
 
+/** `num` without the 0 fallback, for readings where absent means unmeasured. */
+function numOrNull(v: unknown): number | null {
+  return v == null ? null : Number(v);
+}
+
 /**
  * The sampled pot names, as `json_agg` hands them back (P-007/D-022).
  *
@@ -298,6 +311,7 @@ interface RawGoal {
   kill_criterion: string | null;
   tripwires: unknown;
   budget_cents: string | null;
+  budget_window_sec: number | string | null;
   metadata: Record<string, unknown> | null;
   created_at: string | Date | null;
   updated_at: string | Date | null;
@@ -348,12 +362,10 @@ function toSummary(
 ): GoalSummaryRowBase {
   const metadata = r.metadata ?? {};
   const spentCents =
-    // Either measured source: the agent-verified pots rollup (goals:update) or
-    // the P-005 platform tick (spend-rollup.ts) — a legacy hand-entered value
-    // carries neither marker and still reads null.
-    (metadata.spentCentsSource === GOAL_SPEND_SNAPSHOT_SOURCE ||
-      metadata.spentCentsSource === GOAL_SPEND_TICK_SOURCE) &&
-    typeof metadata.spentCents === 'number'
+    // Only the platform rollup's marker (spend-rollup.ts, D-011): a legacy
+    // hand-entered value, or a snapshot from the retired pot-authoritative
+    // rollup, carries a different marker and reads null until the next tick.
+    metadata.spentCentsSource === GOAL_SPEND_SNAPSHOT_SOURCE && typeof metadata.spentCents === 'number'
       ? (metadata.spentCents as number)
       : null;
   // Resolved through the SAME helper the kickoff brief uses, over the SAME
@@ -395,9 +407,10 @@ function toSummary(
     pots: parsePotChips(r.pots),
     openWorkItems: num(r.open_work_items),
     needsHuman: num(r.needs_human),
-    spendUsd: num(r.spend_usd),
-    spendRecentUsd: num(r.spend_recent_usd),
+    spendUsd: numOrNull(r.spend_usd),
+    spendRecentUsd: numOrNull(r.spend_recent_usd),
     spendRecentWindowDays: SPEND_RECENT_WINDOW_DAYS,
+    budgetWindowSec: numOrNull(r.budget_window_sec),
     goalPackage: goalPackageUpdateInfo(metadata as Record<string, unknown> | null, pkgLookup),
     launchSettingsRaw: r.launch_settings ?? null,
   };
@@ -526,7 +539,7 @@ export async function resolveGoalsList(args: {
     await tx.unsafe(`SELECT set_config('app.workspace_id', $1, true)`, [workspaceId]);
     const goalRows = (await tx`
       SELECT g.id, g.title, g.body, g.status, g.parent_id, g.kill_criterion, g.tripwires,
-             g.budget_cents, g.metadata, g.launch_settings, g.created_at, g.updated_at,
+             g.budget_cents, g.budget_window_sec, g.metadata, g.launch_settings, g.created_at, g.updated_at,
              (SELECT COUNT(*) FROM harness_shared.goal_pots gp
                WHERE gp.workspace_id = g.workspace_id AND gp.goal_id = g.id
                  AND gp.removed_at IS NULL) AS pot_count,
@@ -568,25 +581,24 @@ export async function resolveGoalsList(args: {
              (SELECT COUNT(*) FROM harness_shared.work_items wi
                WHERE wi.goal_id = g.id AND wi.closed_ts IS NULL
                  AND COALESCE((wi.payload->>'needsHuman')::boolean, false)) AS needs_human,
-             (SELECT COALESCE(SUM(s.cost_usd), 0)
+             -- Goal-attributed spend (WI-1074208, D-012): the lineage stream
+             -- lineageSpendForGoal measures — samples stamped with this goal at
+             -- write time, from the goal's creation on. No COALESCE: SUM over no
+             -- priced sample is NULL, which the row carries as "unmeasured".
+             -- s.ts is epoch MILLIS (bigint). Covered by
+             -- agent_usage_samples_ws_goal_ts_idx (workspace_id, goal_id, ts DESC).
+             (SELECT SUM(s.cost_usd)
                 FROM harness_shared.agent_usage_samples s
                WHERE s.workspace_id = g.workspace_id
-                 AND s.harness_slug IN (
-                   SELECT gp.harness_slug FROM harness_shared.goal_pots gp
-                    WHERE gp.workspace_id = g.workspace_id AND gp.goal_id = g.id
-                      AND gp.removed_at IS NULL)) AS spend_usd,
-             -- The same sum over the recent window. s.ts is epoch MILLIS
-             -- (bigint), not a timestamp, so this compares against a ms integer
-             -- rather than a now() - interval expression. Covered by
-             -- agent_usage_samples_harness_idx (workspace_id, harness_slug, ts DESC).
-             (SELECT COALESCE(SUM(s.cost_usd), 0)
+                 AND s.goal_id = g.id
+                 AND s.ts >= (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint) AS spend_usd,
+             -- The same stream over the recent window.
+             (SELECT SUM(s.cost_usd)
                 FROM harness_shared.agent_usage_samples s
                WHERE s.workspace_id = g.workspace_id
-                 AND s.ts >= ${recentSinceMs}
-                 AND s.harness_slug IN (
-                   SELECT gp.harness_slug FROM harness_shared.goal_pots gp
-                    WHERE gp.workspace_id = g.workspace_id AND gp.goal_id = g.id
-                      AND gp.removed_at IS NULL)) AS spend_recent_usd,
+                 AND s.goal_id = g.id
+                 AND s.ts >= GREATEST(${recentSinceMs}::bigint,
+                                      (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint)) AS spend_recent_usd,
              -- ACTIVITY, as distinct from the definition-edit time in
              -- g.updated_at (P-004). Deliberately spans CLOSED items too: a
              -- goal whose last act was finishing its work has still been
@@ -817,9 +829,21 @@ export async function resolveGoalDetail(args: {
 
     const [goalRow] = (await tx`
       SELECT g.id, g.title, g.body, g.status, g.parent_id, g.kill_criterion, g.tripwires,
-             g.budget_cents, g.metadata, g.launch_settings, g.created_at, g.updated_at,
+             g.budget_cents, g.budget_window_sec, g.metadata, g.launch_settings, g.created_at, g.updated_at,
              0 AS pot_count, '[]'::json AS pots, 0 AS open_work_items, 0 AS needs_human,
-             0 AS spend_usd, 0 AS spend_recent_usd
+             -- The goal-attributed stream, identical to the list query's, so the
+             -- popup and the card it opened from report one figure.
+             (SELECT SUM(s.cost_usd)
+                FROM harness_shared.agent_usage_samples s
+               WHERE s.workspace_id = g.workspace_id
+                 AND s.goal_id = g.id
+                 AND s.ts >= (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint) AS spend_usd,
+             (SELECT SUM(s.cost_usd)
+                FROM harness_shared.agent_usage_samples s
+               WHERE s.workspace_id = g.workspace_id
+                 AND s.goal_id = g.id
+                 AND s.ts >= GREATEST(${recentSinceMs}::bigint,
+                                      (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint)) AS spend_recent_usd
         FROM harness_shared.goals g
        WHERE g.workspace_id = ${workspaceId} AND g.id = ${goalId}
        LIMIT 1
@@ -838,16 +862,6 @@ export async function resolveGoalDetail(args: {
                 FROM harness_shared.agent_usage_samples s
                WHERE s.workspace_id = gp.workspace_id
                  AND s.harness_slug = gp.harness_slug) AS spend_usd,
-             -- The recent-window half, per pot, so the popup's burn rate is
-             -- the SAME measurement the card's is (P-003). Deliberately the
-             -- rolling ts predicate the list uses, NOT the calendar-day buckets
-             -- spend_by_day builds below: those are different windows, and
-             -- deriving the rate from them would make the two surfaces disagree.
-             (SELECT COALESCE(SUM(s.cost_usd), 0)
-                FROM harness_shared.agent_usage_samples s
-               WHERE s.workspace_id = gp.workspace_id
-                 AND s.ts >= ${recentSinceMs}
-                 AND s.harness_slug = gp.harness_slug) AS spend_recent_usd,
              (SELECT COUNT(*) FROM harness_shared.work_items wi
                WHERE wi.harness_slug = gp.harness_slug
                  AND wi.goal_id = gp.goal_id
@@ -999,18 +1013,20 @@ export async function resolveGoalDetail(args: {
        ORDER BY am.set_at DESC
     `) as unknown as Array<Record<string, unknown>>;
 
-    // Spend by day, stacked by pot — the shape the chart wants, computed
-    // once here rather than bucketed client-side over a raw sample list.
+    // Spend by day, stacked by harness — the shape the chart wants, computed
+    // once here rather than bucketed client-side over a raw sample list. The
+    // same goal-attributed stream as spend_usd above (WI-1074208), so the chart
+    // adds up to the figure beside it; harness_slug may be NULL on those rows.
     const spendByDay = (await tx`
       SELECT to_char(to_timestamp(s.ts / 1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
              s.harness_slug,
              COALESCE(SUM(s.cost_usd), 0) AS cost
         FROM harness_shared.agent_usage_samples s
+        JOIN harness_shared.goals g
+          ON g.id = s.goal_id AND g.workspace_id = s.workspace_id
        WHERE s.workspace_id = ${workspaceId}
-         AND s.harness_slug IN (
-           SELECT gp.harness_slug FROM harness_shared.goal_pots gp
-            WHERE gp.workspace_id = ${workspaceId} AND gp.goal_id = ${goalId}
-              AND gp.removed_at IS NULL)
+         AND s.goal_id = ${goalId}
+         AND s.ts >= (EXTRACT(EPOCH FROM g.created_at) * 1000)::bigint
        GROUP BY day, s.harness_slug
        ORDER BY day ASC
     `) as unknown as Array<Record<string, unknown>>;
@@ -1099,17 +1115,10 @@ export async function resolveGoalDetail(args: {
     // nothing disclosing the cap. Sourcing both from the same predicate makes the
     // two surfaces agree BY CONSTRUCTION rather than by coincidence.
     goal.needsHuman = num(waitingTotalRow?.total);
-    goal.spendUsd = pots
-      .filter((p) => !p.removedAt)
-      .reduce((acc, p) => acc + p.spendUsd, 0);
-    // Summed over the SAME pot set as spendUsd immediately above, so the
-    // level and the rate always describe one population. Read off the raw rows
-    // rather than the mapped ones: this is an input to the burn, not a field of
-    // the pot card, and widening the card's type for it would put an
-    // unrendered number on a public shape.
-    goal.spendRecentUsd = potRows
-      .filter((p) => p.removed_at == null)
-      .reduce((acc, p) => acc + num(p.spend_recent_usd), 0);
+    // spendUsd / spendRecentUsd stay as the goal row measured them (the
+    // goal-attributed stream). They are NOT re-summed from the pots below: a
+    // pot's spend is its harness's whole population, not this goal's, and a
+    // goal with no pots would sum to a $0 nothing measured (WI-1074208).
     goal.openWorkItems = pots.reduce((acc, p) => acc + p.openWorkItems, 0);
 
     /* SUBDIRECTIVES + the parent, for the popup's hierarchy section
@@ -1240,9 +1249,9 @@ export async function resolveGoalDetail(args: {
       // Repeated on the detail payload because this is the page most likely to
       // be screenshotted into a report, and a spend number without this caveat
       // invites the wrong comparison.
-      spendLabel: 'fleet spend',
+      spendLabel: 'goal-attributed spend',
       spendNote:
-        'Spawned-agent cost attributed to this goal’s pots. A pot shared with another goal counts here IN FULL, so goal spend figures do not sum.',
+        'Priced usage stamped with this goal when it was recorded — the figure the budget is enforced on. No attributed usage reads as unmeasured, not $0. Per-pot figures are each pot harness’s whole spend and are not part of this total.',
     };
   });
 

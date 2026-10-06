@@ -224,7 +224,7 @@ async function recentToolInvocations(ownerId: string, workspaceId: string): Prom
       FROM harness_shared.tool_invocations
      WHERE coord_owner_id = ${ownerId}
        AND workspace_id IN (${workspaceId}, '*')
-     ORDER BY invoked_at DESC
+     ORDER BY tool_invocations.invoked_at DESC
      LIMIT ${WORK_ITEM_FLIGHT_TOOL_LIMIT}
   `;
   return rows.map((row) => ({

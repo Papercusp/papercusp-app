@@ -43,6 +43,7 @@ import {
   decorateParkedOn,
   reconcileWakeability,
   RECONCILE_WAKEABILITY_PRODUCTION_OPTIONS,
+  type MonitorState,
 } from '../../agent-tools/fleet/assignments';
 import type { SessionState } from '../../agent-tools/coordination/presence-wakeability';
 import { fetchContextPressure, type ContextPressureBucket } from '../../agent-tools/coordination/context-pressure';
@@ -68,6 +69,7 @@ type ObservableAgent = AgentAssignment & {
   sessionState?: SessionState | null;
   confirmLiveness?: boolean | null;
   wakeable?: boolean | null;
+  monitorState?: MonitorState | null;
 };
 
 /**
@@ -193,6 +195,7 @@ export async function gatherFleetObservations(): Promise<FleetMemberObservation[
       sessionState: a.sessionState ?? null,
       contextPressure: pressure.get(a.agentId) ?? null,
       wakeable: a.wakeable ?? null,
+      loopMonitorState: loopStateKnown ? a.monitorState ?? null : null,
       claimCount: a.claims.length,
       claimKeys: a.claims.map((claim) => JSON.stringify([
         claim.type, claim.harnessSlug, claim.planSlug, claim.id,
@@ -214,7 +217,13 @@ async function gatherCurrentFleetMemberObservation(
 ): Promise<
   Pick<
     FleetMemberObservation,
-    'sessionState' | 'wakeable' | 'claimCount' | 'isRegisteredLeader' | 'hasProgressingClaim' | 'stalled'
+    | 'sessionState'
+    | 'wakeable'
+    | 'claimCount'
+    | 'isRegisteredLeader'
+    | 'hasProgressingClaim'
+    | 'stalled'
+    | 'loopMonitorState'
   > | null
 > {
   const agents = groupByAgent(await listFleetAssignments({ fleet: fleetSlug, agent: agentId }));
@@ -233,6 +242,7 @@ async function gatherCurrentFleetMemberObservation(
   return {
     sessionState: reconciled?.sessionState ?? null,
     wakeable: reconciled?.wakeable ?? null,
+    loopMonitorState: reconciled?.monitorState ?? null,
     claimCount: reconciled?.claims.length ?? 0,
     isRegisteredLeader: reconciled?.fleetRole === 'leader',
     hasProgressingClaim: reconciled?.claims.some((claim) => claim.activity === 'progressing') ?? false,

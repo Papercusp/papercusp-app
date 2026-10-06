@@ -1070,15 +1070,35 @@ export interface BlockedSessionInput {
   sessionId: string;
   client: string;
   refId: string;
-  gateKind: 'ask' | 'permission_wait';
+  gateKind: 'ask' | 'permission_wait' | 'suppressed_ask';
   question?: string | null;
   ownerAgentId?: string | null;
   harnessSlug?: string | null;
   waitingHours?: number | null;
+  /** `suppressed_ask` only (WI-10005039): the deadline the agent declared, ISO-8601. */
+  decideBy?: string | null;
+  /** `suppressed_ask` only: what the agent WILL do if the owner never answers. Stored as jsonb —
+   *  usually the plain string the ingest tool wrote, but rendered defensively. */
+  defaultIfUnanswered?: unknown;
   /** The same shared liveness verdict used by coord:walls. Missing data is
    *  unknown and therefore must not become a human decision by default. */
   actionability?: ReadActionability;
   livenessState?: SessionState | null;
+}
+
+/** "Default if unanswered: X (decide by T)" — empty parts are omitted, never rendered as "undefined". */
+function suppressedAskDisclosure(defaultIfUnanswered: unknown, decideBy: string | null | undefined): string {
+  const def =
+    defaultIfUnanswered == null
+      ? null
+      : typeof defaultIfUnanswered === 'string'
+        ? defaultIfUnanswered.trim()
+        : JSON.stringify(defaultIfUnanswered);
+  const parts = [
+    def ? `Default if unanswered: ${def}` : 'No default declared',
+    decideBy ? `decide by ${decideBy}` : null,
+  ].filter((p): p is string => p != null);
+  return `\n\n${parts[0]}${parts[1] ? ` (${parts[1]})` : ''}.`;
 }
 
 /**
@@ -1093,13 +1113,22 @@ export interface BlockedSessionInput {
  */
 export function blockedSessionToAttention(g: BlockedSessionInput): AttentionItem {
   const actionability = g.actionability ?? classifyReadActionability(g.livenessState);
-  const projectedStatus = ownerGateStatus(actionability, g.livenessState, 'unknown');
-  const tier: AttentionTier = actionability === 'actionable' ? 'decision' : 'alert';
-  const label = g.gateKind === 'permission_wait' ? 'permission prompt' : 'question';
+  // A suppressed ask is a decision the OWNER owes by construction — the declaring session is
+  // typically already gone, so its liveness says nothing about whether the owner must act. Forcing
+  // the tier AND the status here is what stops an `ended`/`unknown` asker demoting it to a mere
+  // alert stamped "STRANDED … needs a respawn" (the agent died by design; the decision stands).
+  const suppressed = g.gateKind === 'suppressed_ask';
+  const projectedStatus = suppressed ? 'waiting' : ownerGateStatus(actionability, g.livenessState, 'unknown');
+  const tier: AttentionTier = suppressed || actionability === 'actionable' ? 'decision' : 'alert';
+  const label =
+    g.gateKind === 'permission_wait' ? 'permission prompt' : suppressed ? 'suppressed question' : 'question';
   const hours = g.waitingHours ?? 0;
-  const body =
+  const base =
     (g.question ?? '').trim() ||
     `A ${g.client} session (${g.sessionId}) is sitting on an unanswered ${label} — its client hook could not mirror this as a structured ask (D-002 capability matrix).`;
+  // The default + deadline ARE the card for a suppressed ask: they let the owner see what happens
+  // if they do nothing, and by when (the reaper applies it at decideBy).
+  const body = suppressed ? `${base}${suppressedAskDisclosure(g.defaultIfUnanswered, g.decideBy)}` : base;
   return {
     id: `blocked-session:${g.client}:${g.sessionId}:${g.refId}`,
     kind: 'blocked-session',

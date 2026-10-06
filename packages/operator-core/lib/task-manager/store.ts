@@ -16,6 +16,7 @@
 
 import { getOrgPg } from '@papercusp/db-org';
 import type { Sql } from 'postgres';
+import { lstat, unlink } from 'node:fs/promises';
 import { activeWorkspaceId } from '../workspace-registry';
 import { redactSensitiveText } from '../sensitive-text';
 import { readSuperuserToken } from '../superuser-token';
@@ -496,7 +497,7 @@ export async function closeTask(
         : false,
     );
   }
-  (effects.emitTerminal ?? emitTaskTerminalEvent)({
+  await (effects.emitTerminal ?? emitTaskTerminalEvent)({
     taskId: closed.task_id,
     workspaceId: closed.workspace_id,
     harnessSlug: closed.harness_slug,
@@ -1638,6 +1639,7 @@ export async function upsertUnaccounted(
     scopeUnit: string | null;
     pids: number[];
     sampleCmdline: string;
+    metrics?: TaskMetrics;
   }[],
   opts: { workspaceId?: string } = {},
   inject?: Sql,
@@ -1649,6 +1651,16 @@ export async function upsertUnaccounted(
   const localBearer = readSuperuserToken();
   const diagnosticSecrets = localBearer ? [localBearer] : [];
   for (const g of groups) {
+    // A residue with its own exact `pc-<taskId>` unit is still positively
+    // cgroup-confined even though the live owner row disappeared. The group
+    // came from the kernel census, so require its observed path to end at that
+    // unit under our slice before recording confinement.
+    const hasOwnedTaskScope = Boolean(
+      g.scopeUnit &&
+      taskIdFromScopeUnit(g.scopeUnit) === g.taskId &&
+      g.cgroupPath.includes('/papercusp.slice/') &&
+      g.cgroupPath.endsWith(`/${g.scopeUnit}`),
+    );
     // Residue samples originate in `/proc/<pid>/cmdline` and are persisted so the
     // reconciler can retain history. Redact before the durable boundary, and before
     // capping, so a credential-shaped assignment cannot survive in the ledger.
@@ -1656,21 +1668,36 @@ export async function upsertUnaccounted(
     await sql`
       INSERT INTO harness_shared.task_ledger (
         task_id, workspace_id, root_task_id, class, title, argv,
-        launched_by, scope_unit, cgroup_path, pid, confined, state, detail
+        launched_by, scope_unit, cgroup_path, pid, confined, state, detail,
+        last_memory_bytes, peak_memory_bytes, cpu_usec, pids_current
       ) VALUES (
         ${g.taskId}, ${ws}, ${g.taskId}, 'other',
         ${title},
-        '[]'::jsonb, 'unknown', ${g.scopeUnit}, ${g.cgroupPath}, ${g.pids[0] ?? null}, false, 'unaccounted',
-        ${JSON.stringify({ pids: g.pids, scopeUnit: g.scopeUnit })}::text::jsonb
+        '[]'::jsonb, 'unknown', ${g.scopeUnit}, ${g.cgroupPath}, ${g.pids[0] ?? null}, ${hasOwnedTaskScope}, 'unaccounted',
+        ${JSON.stringify({ pids: g.pids, scopeUnit: g.scopeUnit })}::text::jsonb,
+        ${g.metrics?.lastMemoryBytes ?? null}, ${g.metrics?.peakMemoryBytes ?? null},
+        ${g.metrics?.cpuUsec ?? null}, ${g.metrics?.pidsCurrent ?? null}
       )
       ON CONFLICT (task_id) DO UPDATE
         SET title = EXCLUDED.title,
+            confined = harness_shared.task_ledger.confined OR EXCLUDED.confined,
             scope_unit = COALESCE(EXCLUDED.scope_unit, harness_shared.task_ledger.scope_unit),
             last_seen_at = now(),
             updated_at = now(),
+            last_memory_bytes = EXCLUDED.last_memory_bytes,
+            peak_memory_bytes = EXCLUDED.peak_memory_bytes,
+            cpu_usec = EXCLUDED.cpu_usec,
+            pids_current = EXCLUDED.pids_current,
             state = CASE WHEN harness_shared.task_ledger.ended_at IS NULL
                          THEN 'unaccounted' ELSE harness_shared.task_ledger.state END,
-            detail = ${JSON.stringify({ pids: g.pids, scopeUnit: g.scopeUnit })}::text::jsonb
+            -- A lifecycle probe is written independently between reconcile
+            -- ticks; refresh residue facts without erasing that restart-safe
+            -- activity clock (or any other ledger detail).
+            detail = (CASE
+                        WHEN jsonb_typeof(harness_shared.task_ledger.detail) = 'object'
+                          THEN harness_shared.task_ledger.detail
+                        ELSE '{}'::jsonb
+                      END) || EXCLUDED.detail
     `;
     seen.push(g.taskId);
   }
@@ -1735,8 +1762,42 @@ export async function gcTerminalTasks(
        AND ended_at IS NOT NULL
        AND ended_at < now() - make_interval(hours => ${olderThanHours}::int)
        AND NOT (detail ? 'release')
-    RETURNING task_id
+    RETURNING task_id, log_path
   `;
+
+  // The task ledger is the ownership receipt for its spill log. Keep the file
+  // available while a terminal row is retained so capability:bash_output can
+  // reattach by task id after its worker-local registry is gone. Only paths
+  // returned by the completed DELETE are eligible here; after deleting the
+  // rows, preserve any path that another surviving row still references.
+  const logPaths = [...new Set(
+    rows
+      .map((row: { log_path?: unknown }) => (typeof row.log_path === 'string' ? row.log_path : null))
+      .filter((path: string | null): path is string => Boolean(path?.trim())),
+  )];
+  if (logPaths.length > 0) {
+    const remaining = await sql<{ log_path: string }[]>`
+      SELECT DISTINCT log_path
+        FROM harness_shared.task_ledger
+       WHERE log_path = ANY(${sql.array(logPaths)})
+    `;
+    const stillReferenced = new Set(remaining.map((row) => row.log_path));
+    await Promise.all(
+      logPaths
+        .filter((logPath) => !stillReferenced.has(logPath))
+        .map(async (logPath) => {
+          try {
+            const stat = await lstat(logPath);
+            // `unlink` removes a symlink itself without following it. Never
+            // recurse into a directory if a malformed ledger row names one.
+            if (stat.isFile() || stat.isSymbolicLink()) await unlink(logPath);
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+          }
+        }),
+    );
+  }
   return rows.length;
 }
 

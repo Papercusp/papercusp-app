@@ -176,8 +176,8 @@ export function engineDeathSignal(
 
 /**
  * The drill leg's sandbox collector: runs the REAL detector over the planted
- * synthetic snapshot (drill payload), emitting an origin='drill' signal scoped
- * to the sandbox. The snapshot — not live rows — is deliberate: planting
+ * synthetic snapshot (drill payload), emitting an origin='drill' signal captured
+ * under the workspace platform Pot. The snapshot — not live rows — is deliberate: planting
  * active rows in harness_shared.routines would be FIRED by the live engine.
  */
 export function engineDeathDrillCollector(snapshot: RoutineLivenessRow[], nowMs?: number): WatchdogCollector {
@@ -300,6 +300,7 @@ export async function runEngineDeathSentinelPass(
   shedExplained?: boolean;
   schedulerLivenessProven?: boolean;
 }> {
+  let observedSchedulerLiveness: RoutineEngineLiveness | undefined;
   try {
     if (!(await deps.isArmed())) return { checked: false };
     const rows = await deps.readRows();
@@ -327,6 +328,7 @@ export async function runEngineDeathSentinelPass(
     if (deps.readRoutineEngineLiveness) {
       try {
         const liveness = await deps.readRoutineEngineLiveness();
+        observedSchedulerLiveness = liveness;
         if (liveness.unknown) {
           deps.log('DBOS routinesTick liveness is UNKNOWN (UNKNOWN does not suppress the engine-death capture).');
         } else if (!liveness.stale) {
@@ -358,10 +360,24 @@ export async function runEngineDeathSentinelPass(
       }
     }
     const signal = engineDeathSignal(verdict, { key: 'engine:live' });
+    const livenessState = observedSchedulerLiveness
+      ? observedSchedulerLiveness.unknown
+        ? 'UNKNOWN'
+        : observedSchedulerLiveness.stale
+          ? 'STALE'
+          : 'FRESH'
+      : deps.readRoutineEngineLiveness
+        ? 'ERROR'
+        : 'NOT_CHECKED';
+    const captureEvidence =
+      `Capture provenance: sentinelPid=${process.pid}; uptimeSec=${Math.floor(process.uptime())}; ` +
+      `dbPool=getOrgPg; routinesTick=${livenessState}; ` +
+      `lastTickMs=${observedSchedulerLiveness?.lastTickMs ?? 'null'}; ` +
+      `staleMs=${observedSchedulerLiveness?.staleMs ?? 'null'}.`;
     const res = await deps.capture({
       title: signal.title,
       kind: 'bug',
-      body: signal.body,
+      body: `${signal.body}\n\n${captureEvidence}`,
       severity: signal.severity,
       paths: signal.paths,
       scope: 'operator',
@@ -374,7 +390,9 @@ export async function runEngineDeathSentinelPass(
       // The live sentinel is an availability monitor — a dead engine is an
       // ORGANIC signal (no origin override), unlike the sandbox drill leg.
     });
-    deps.log(`ENGINE DEATH detected (${verdict.reason}) — capture ${res.created ? `filed ${res.issue?.id}` : `declined (${res.reason})`}`);
+    deps.log(
+      `ENGINE DEATH detected (${verdict.reason}) — capture ${res.created ? `filed ${res.issue?.id}` : `declined (${res.reason})`}; ${captureEvidence}`,
+    );
     return { checked: true, verdict, captured: res.created };
   } catch (e) {
     deps.log(`sentinel pass failed (next interval retries): ${e instanceof Error ? e.message : e}`);

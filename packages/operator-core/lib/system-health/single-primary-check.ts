@@ -125,7 +125,13 @@
 import { execFileSync } from 'node:child_process';
 import { getOrgPg } from '@papercusp/db-org';
 import { managedSetInterval } from '@papercusp/scheduled-registry';
-import { defaultIsUnitActive, readCutStatus } from '../release-cut-launch';
+import {
+  defaultIsUnitActive,
+  defaultIsUnitActiveAsync,
+  readCutStatus,
+  readCutStatusAsync,
+  readUnitActiveStateAsync,
+} from '../release-cut-launch';
 import {
   openEscalation,
   resolveEscalation,
@@ -137,6 +143,7 @@ import { activeWorkspaceId } from '../workspace-registry';
 import { notifyAttention } from '../attention-notify';
 import { broadcastSevereEvent, broadcastSevereEventResolvedMany } from '../severe-event-broadcast';
 import { readActiveAnnouncedQuiesce, type AnnouncedQuiesceEvidence } from './announced-quiesce';
+import { execFileViaSidecar } from '../fleet/git-via-sidecar';
 
 /** The `announced-quiesce` subject this guard reads — see announced-quiesce.ts. Any agent
  *  registers under this exact subject via `supervision:announce-quiesce { subject: 'bg-host' }`. */
@@ -251,6 +258,58 @@ export function defaultIsCutQuiescing(unit: string): boolean {
     const stdout = (err as { stdout?: unknown } | null)?.stdout;
     const out = typeof stdout === 'string' ? stdout.trim() : '';
     return out === 'deactivating';
+  }
+}
+
+/** Async {@link defaultIsCutQuiescing}: same states, no event-loop block. */
+export async function defaultIsCutQuiescingAsync(unit: string): Promise<boolean> {
+  const state = await readUnitActiveStateAsync(unit);
+  return state === 'active' || state === 'activating' || state === 'deactivating';
+}
+
+export interface D026QuiescenceAsyncReaderDeps {
+  readCutStatusAsync?: typeof readCutStatusAsync;
+  /** Strict probe for the restore leg (active/activating only). */
+  isUnitActiveAsync?: (unit: string) => Promise<boolean>;
+  /** Probe for the CUT unit; also counts `deactivating`. */
+  isCutActiveAsync?: (unit: string) => Promise<boolean>;
+}
+
+/**
+ * {@link readD026QuiescenceEvidence} without execFileSync
+ * (jev-memory-timeouts-to-zero-2026-10-01). The sync reader froze the calling
+ * worker's event loop for 107 ms p50 / 237 ms p95 per call on this host (three
+ * systemctl children, each waited on synchronously), and the liveness alarm ran
+ * it on every tick. The cut and restore probes now run concurrently in child
+ * processes while the loop keeps serving.
+ */
+export async function readD026QuiescenceEvidenceAsync(
+  deps: D026QuiescenceAsyncReaderDeps = {},
+): Promise<D026QuiescenceEvidence> {
+  const active = deps.isUnitActiveAsync ?? defaultIsUnitActiveAsync;
+  const isCutActiveAsync = deps.isCutActiveAsync ?? defaultIsCutQuiescingAsync;
+  const [cut, restoreActive] = await Promise.all([
+    (deps.readCutStatusAsync ?? readCutStatusAsync)({ isUnitActiveAsync: isCutActiveAsync }),
+    active(D026_RESTORE_UNIT),
+  ]);
+  return { cutActive: cut.running, restoreActive };
+}
+
+/** Async {@link readBackgroundPrimaryLoadState}. */
+export async function readBackgroundPrimaryLoadStateAsync(
+  unit = process.env.PAPERCUSP_BACKGROUND_SYSTEMD_UNIT ?? 'papercusp-bg-host.service',
+): Promise<string | null> {
+  if (!unit.trim()) return null;
+  try {
+    const { stdout } = await execFileViaSidecar(
+      'systemctl',
+      ['--user', 'show', unit, '-p', 'LoadState', '--value'],
+      { timeoutMs: 5000, subsystem: 'single-primary-check' },
+    );
+    return stdout.trim() || null;
+  } catch (err) {
+    const stdout = (err as { stdout?: unknown } | null)?.stdout;
+    return typeof stdout === 'string' ? stdout.trim() || null : null;
   }
 }
 
@@ -1030,9 +1089,9 @@ export function startSinglePrimaryGuard(opts: { intervalMs?: number } = {}): { s
       void runSinglePrimaryCheck(undefined, {
         page: defaultPage,
         pageResolved: defaultPageResolved,
-        d026Quiescence: readD026QuiescenceEvidence,
+        d026Quiescence: () => readD026QuiescenceEvidenceAsync(),
         announcedQuiescence: () => readActiveAnnouncedQuiesce(ANNOUNCED_QUIESCE_SUBJECT, Date.now()),
-        backgroundUnitLoadState: readBackgroundPrimaryLoadState,
+        backgroundUnitLoadState: () => readBackgroundPrimaryLoadStateAsync(),
       }).catch(() => {});
     },
     { category: 'watchdog' },

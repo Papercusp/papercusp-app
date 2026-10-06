@@ -12,6 +12,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { defineTool, AGENT_ROLES } from '@papercusp/agent-mcp';
 import { fileLockedResult, guardFileLock } from '../locks/file-lock-guard';
+import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
 import { resolveCapabilityBaseDir } from './base-dir';
 
 const GLOB_METACHARS = new Set(['*', '?', '[', ']']);
@@ -124,6 +125,10 @@ export default defineTool({
     }
     const baseDir = resolveCapabilityBaseDir(ctx);
     const abs = isAbsolute(args.file_path) ? args.file_path : resolve(baseDir, args.file_path);
+    // WI-10005589 / D-012 (BAR R-11): a restricted session may not write a file the
+    // agent CLI executes (hooks, settings, MCP config, git hooks).
+    const runtimeRefusal = await refuseRestrictedRuntimeWrite(ctx, abs);
+    if (runtimeRefusal) return runtimeRefusal;
 
     // Lock the path we are ACTUALLY going to write (`abs`), never the raw argument —
     // handing the guard a relative path makes it re-resolve against its own base, and
@@ -198,6 +203,24 @@ function displayFormattedRefused(abs: string) {
           'allow_display_formatted_content: true.',
       }),
     }],
+    isError: true,
+  };
+}
+
+/** Shared by capability:write and capability:edit: the R-11 runtime-file refusal, or null. */
+export async function refuseRestrictedRuntimeWrite(ctx: unknown, abs: string) {
+  const { isAgentRuntimePath, restrictedRuntimeWriteRefusal } = await import('../../personal-vault/binding-enforcement');
+  if (!isAgentRuntimePath(abs)) return null;
+  let ownerId: string | null = null;
+  try {
+    ownerId = resolveAgentIdentity(ctx as ResolveIdentityCtx).ownerId;
+  } catch {
+    ownerId = null;
+  }
+  const refusal = await restrictedRuntimeWriteRefusal(ownerId, abs);
+  if (!refusal) return null;
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, reason: refusal.code, path: abs, message: refusal.message }) }],
     isError: true,
   };
 }

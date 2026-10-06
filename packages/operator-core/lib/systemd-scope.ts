@@ -45,7 +45,7 @@ export const SYSTEMD_TRANSIENT_UNIT_COLLECTION_ARGS = [
  * the operator as a SYSTEM service with no login session, so there is no user
  * manager and no user bus; `systemd-run --user` then exits 1 with
  * "Failed to connect to bus: No medium found" before the payload ever execs
- * (WI-10003189: every New Session on owner-test r50 died at boot this way).
+ * (WI-10003189: every New Session on avi-test r50 died at boot this way).
  *
  * This mirrors systemd's own user-bus address resolution rather than guessing:
  * the client tries `$XDG_RUNTIME_DIR/systemd/private`, then the session bus from
@@ -271,6 +271,26 @@ export const CHECKPOINT_FORKS_BY_MODE = { shared: 2, reserved: 8 } as const;
 export function checkpointScopeMemoryMaxG(env: NodeJS.ProcessEnv = process.env): number {
   const mode = env.PAPERCUSP_GREEN_CHECKPOINT_CAPACITY_MODE === 'reserved' ? 'reserved' : 'shared';
   return CHECKPOINT_SCOPE_OVERHEAD_G + CHECKPOINT_FORKS_BY_MODE[mode] * CHECKPOINT_FORK_HEAP_G;
+}
+
+/** A green command that runs the Papercusp Vitest fork runner (the suite the fork heaps model). */
+const VITEST_FORK_SUITE_RE = /\btest:affected\b|\bvitest\b/;
+
+/**
+ * Memory cap (GiB) for one install's green-checkpoint scope, sized by the suite it runs
+ * (WI-10006274). The fork-derived cap models the Papercusp Vitest affected runner; an install
+ * whose green command runs anything else (a foreign pot's `npm test` running node:test, a build)
+ * has no Vitest fork heaps, so it requests the scope overhead alone. `greenCmd` is the routing
+ * overlay's command; null/undefined means the install runs the operator-home default suite.
+ */
+export function checkpointScopeMemoryMaxGForGreenCmd(
+  greenCmd: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  if (greenCmd == null || greenCmd.trim() === '' || VITEST_FORK_SUITE_RE.test(greenCmd)) {
+    return checkpointScopeMemoryMaxG(env);
+  }
+  return CHECKPOINT_SCOPE_OVERHEAD_G;
 }
 
 /**

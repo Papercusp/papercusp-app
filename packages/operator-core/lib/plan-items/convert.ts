@@ -32,12 +32,8 @@
  * lifecycle back onto the plan item. One mechanism, inspectable in events:graph.
  */
 import { getOrgPg } from '@papercusp/db-org';
-import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
-// The OTHER half of the split implements-link plane (see listConvertedPlanItemRefs): the
-// dynamic coord scope issues-engineer.ts writes issue-family links under.
-import { coordScopeWorkspace } from '../agent-tools/coordination/log';
 import { readPlanBySlug } from '../agent-tools/plans/source';
-import { PLAN_ITEM_KIND, planItemRef } from '../issue-blocks-merge';
+import { PLAN_ITEM_KIND, planItemRef, implementsLinkScopes } from '../issue-blocks-merge';
 import {
   createWorkItem,
   claimWorkItem,
@@ -215,19 +211,9 @@ export async function assessExecutionRecordTakeover(
   }
 }
 
-/**
- * Shared workspace-scope resolver for the implements/relates link plane — see
- * listConvertedPlanItemRefs below for the full explanation of why every reader here
- * must UNION both tenants rather than pin one: the plane is split by FAMILY
- * (feature-family under DEFAULT_COORD_WORKSPACE, issue-family under
- * coordScopeWorkspace()), so a single-tenant read is blind to a whole family.
- * `workspaceIds` exists only to pin the set in tests.
- */
-function implementsLinkScopes(workspaceIds?: readonly string[]): string[] {
-  return workspaceIds?.length
-    ? [...new Set(workspaceIds)]
-    : [...new Set([DEFAULT_COORD_WORKSPACE, coordScopeWorkspace()])];
-}
+// The workspace-scope resolver for the implements/relates link plane now lives in
+// issue-blocks-merge.ts (implementsLinkScopes) beside PLAN_ITEM_KIND/planItemRef, so the
+// reconciler and work-items.ts share it without importing this module (WI-10004553).
 
 /** Resolve the work_item that `implements` a plan item (or null). Reads the
  *  coord_links edge written at conversion; src is an issue-family id or a

@@ -57,7 +57,41 @@ set -euo pipefail
 # a restart afterwards silently runs the STALE bundle
 # (internal-docs/agent-insights/bg-host-runs-stale-routine-code.md again).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# >>> operator-dir resolution (WI-10006398; executed verbatim by systemd-script-snapshot.test.ts)
+# systemd runs this script through papercusp-script-snapshot.sh, which executes a COPY from a
+# private temp directory so an edit landing mid-build cannot change the program bash is reading.
+# From that copy SCRIPT_DIR is the temp directory, so the checkout comes from
+# BUNDLE_HOST_OPERATOR_DIR, which the unit pins with Environment=.
+# The override is honoured ONLY from a snapshot. bg-host's Environment= reaches every process it
+# spawns, including deploy-cli, which runs papercup-release's copy of this script IN PLACE; an
+# in-place run that honoured an inherited value would bundle the staging tree into a release.
+# So an in-place run drops the value and locates itself, exactly as before the override existed.
+if [[ -n "${PAPERCUSP_SCRIPT_SNAPSHOT_ROOT:-}" && "$SCRIPT_DIR/" == "$PAPERCUSP_SCRIPT_SNAPSHOT_ROOT"/* ]]; then
+  if [[ -z "${BUNDLE_HOST_OPERATOR_DIR:-}" ]]; then
+    echo "bundle-host.sh: running from a script snapshot ($SCRIPT_DIR) without BUNDLE_HOST_OPERATOR_DIR — pin it with Environment= in the unit" >&2
+    exit 78
+  fi
+else
+  unset BUNDLE_HOST_OPERATOR_DIR
+fi
+OPERATOR_DIR="$(cd "${BUNDLE_HOST_OPERATOR_DIR:-$SCRIPT_DIR/..}" && pwd)" || {
+  echo "bundle-host.sh: operator directory does not exist: ${BUNDLE_HOST_OPERATOR_DIR:-$SCRIPT_DIR/..}" >&2
+  exit 78
+}
+# <<< operator-dir resolution
+REPO_ROOT="$(cd "$OPERATOR_DIR/../.." && pwd)"
+# Node helpers run from the CHECKOUT, never from a snapshot: they import through node_modules and
+# ../../../scripts, which do not resolve from a temp directory. That costs no protection — each
+# runs under the committed-source loader, which reads its whole module before executing, unlike
+# bash. The sourced bundle-host-common.sh stays beside this script, frozen with it.
+HELPER_DIR="$OPERATOR_DIR/bin"
+
+# WI-10005802 (D-012): every node helper this script runs BEFORE the restricted-hold gate judges
+# the build (the install-mutex re-entry, the freshness proof, the probe-window gate, the bundle
+# checks) and the gate itself start under the committed-source loader, so each runs its committed
+# (HEAD) bytes: a held restricted write to a helper cannot run here with the network. A missing
+# loader makes node fail, which refuses the build (fail closed), never an unjudged run.
+COMMITTED_NODE=(node --import "$REPO_ROOT/scripts/lib/committed-source-loader.mjs")
 
 # EI-21252421327077269: install:safe serializes WRITERS, but a systemd restart
 # could still run this dependency reader while npm was replacing node_modules.
@@ -65,19 +99,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # host crash-loop on missing rocksdb-native. Re-enter the script through the
 # existing repo-keyed install mutex before sourcing bundle inputs or invoking
 # esbuild. The wrapper marks its child so this branch runs exactly once.
-if [[ "${PAPERCUSP_INSTALL_MUTEX_HELD:-0}" != "1" ]]; then
-  exec node "$REPO_ROOT/scripts/npm-install-safe.mjs" \
+if ! "${COMMITTED_NODE[@]}" --input-type=module -e \
+  'const { installLockNameForRoot, installMutexIsHeld } = await import(process.argv[1]); process.exit(installMutexIsHeld(installLockNameForRoot(process.argv[2])) ? 0 : 1);' \
+  "file://$REPO_ROOT/scripts/lib/install-lock-name.mjs" "$REPO_ROOT"; then
+  exec "${COMMITTED_NODE[@]}" "$REPO_ROOT/scripts/npm-install-safe.mjs" \
     --repo-root "$REPO_ROOT" --exec-under-lock -- "$SCRIPT_DIR/bundle-host.sh" "$@"
 fi
 
-cd "$SCRIPT_DIR/.."
+cd "$OPERATOR_DIR"
 
 ENTRY="${1:-bin/hono-host.ts}"
 OUTFILE="${2:-dist-host/hono-host.mjs}"
 OUTDIR="$(dirname "$OUTFILE")"
 STALE_MARKER="$OUTDIR/.bundle-stale.json"
 FRESH_MARKER="$OUTDIR/.bundle-fresh.json"
-FRESHNESS_HELPER="$SCRIPT_DIR/bundle-host-freshness.mjs"
+FRESHNESS_HELPER="$HELPER_DIR/bundle-host-freshness.mjs"
 
 # EI-22636310973765418: staging-sync builds the expensive host bundle while the
 # old :3170 process is still serving. Its subsequent systemd ExecStartPre may
@@ -85,11 +121,11 @@ FRESHNESS_HELPER="$SCRIPT_DIR/bundle-host-freshness.mjs"
 # the complete dist-host runtime tree are unchanged. The opt-in is staging-only:
 # shared-tree/bg-host restarts retain the original rebuild-on-every-start rule.
 if [[ "${PAPERCUSP_BUNDLE_REUSE_FRESH:-0}" == "1" ]]; then
-  if [[ ! -f "$STALE_MARKER" ]] && node "$FRESHNESS_HELPER" check \
+  if [[ ! -f "$STALE_MARKER" ]] && "${COMMITTED_NODE[@]}" "$FRESHNESS_HELPER" check \
       --repo-root "$REPO_ROOT" \
-      --entry "$PWD/$ENTRY" \
-      --outfile "$PWD/$OUTFILE" \
-      --manifest "$PWD/$FRESH_MARKER" >/dev/null; then
+      --entry "$ENTRY" \
+      --outfile "$OUTFILE" \
+      --manifest "$FRESH_MARKER" >/dev/null; then
     echo "✓ reusing proof-bound fresh host bundle for $(git -C "$REPO_ROOT" rev-parse --short HEAD) — ExecStartPre has no build work"
     exit 0
   fi
@@ -163,6 +199,23 @@ HOST_EXTERNALS+=(
   --external:testcontainers
   --external:dockerode
   --external:esbuild
+  # These runtime packages already resolve to JavaScript beside the host in
+  # staging and release. Keep their SDK/parser source out of each host copy;
+  # the desktop sidecar still bundles its own dependencies for distribution.
+  --external:undici
+  --external:@dbos-inc/dbos-sdk
+  --external:mingo
+  --external:acorn
+  --external:fast-check
+  --external:@mcp-ui/server
+  # WI-10006409: EC2 contributes 2.31 MB and SSM 0.45 MB of generated SDK
+  # source to each host. Both resolve compiled JS in staging and release;
+  # retain their plain-Node runtime boundary instead of inlining the SDKs.
+  --external:@aws-sdk/client-ec2
+  --external:@aws-sdk/client-ssm
+  --external:viem
+  --external:iconv-lite
+  --external:@smithy/core
 )
 
 # self-exec guards would all fire at boot. isCliEntry()
@@ -198,6 +251,7 @@ mkdir -p "$(dirname "$OUTFILE")"
 LOCKFILE="$OUTFILE.build.lock"
 TMPFILE="$OUTFILE.tmp.$$"
 METAFILE="$TMPFILE.meta.json"
+PROBE_STAMP="$TMPFILE.probe-window.json"
 # EI-18119538868734274: the blueprints/ and sql/ asset directories below are
 # published with the SAME tmp-then-atomic-swap discipline as $TMPFILE here —
 # see the two "publish" comments further down for why (a live process's
@@ -206,7 +260,77 @@ METAFILE="$TMPFILE.meta.json"
 NEW_BLUEPRINTS_DIR=""
 NEW_SQL_DIR=""
 SYSTEMD_ENV_RUNNER_TMP=""
-trap 'rm -f "$TMPFILE" "$METAFILE"; [[ -n "$NEW_BLUEPRINTS_DIR" ]] && rm -rf "$NEW_BLUEPRINTS_DIR"; [[ -n "$NEW_SQL_DIR" ]] && rm -rf "$NEW_SQL_DIR"; [[ -n "$SYSTEMD_ENV_RUNNER_TMP" ]] && rm -f "$SYSTEMD_ENV_RUNNER_TMP"' EXIT
+# Restricted-hold gate (WI-10005745 — D-012 residue of WI-10005724). bg-host runs THIS tree's
+# bundle with the network, so a write left by a session holding an active personal disclosure must
+# never stand in it. Before the build the gate hardlink-snapshots every artifact the build may
+# replace; after it, ONE census intersects the held restricted writes with the build's EXACT inputs
+# (esbuild metafiles + verbatim-copied files/dirs) and restores the snapshot on anything but an
+# admit. It runs on the normal path below AND from the EXIT trap, so every exit after a fresh
+# publish (including the worker/spawner stale-start exits) is gated. bundle-restricted-hold-gate.mjs.
+GATE_HELPER="$HELPER_DIR/bundle-restricted-hold-gate.mjs"
+GATE_SNAPSHOT_DIR="$OUTDIR/.restricted-lkg.$$"
+BUNDLE_HOST_GATE_META_DIR="$OUTDIR/.restricted-gate-meta.$$"
+GATE_LOG="$OUTFILE.restricted-hold-gate.log"
+GATE_PENDING=0
+FALLBACK_RC=1
+restricted_hold_gate() { # 0 = admitted · 1 = refused (the snapshot was restored)
+  GATE_PENDING=0
+  local -a args=(gate --root "$REPO_ROOT" --base-dir "$PWD" --outdir "$OUTDIR" --snapshot-dir "$GATE_SNAPSHOT_DIR"
+    --metafile "$BUNDLE_HOST_GATE_META_DIR/${OUTFILE##*/}.meta.json" --metafile-dir "$BUNDLE_HOST_GATE_META_DIR"
+    --path "${PAPERCUSP_HARNESS_BLUEPRINTS_DIR:-../../libs/papercusp/packages/harness/blueprints}"
+    --path "${PAPERCUSP_LOCKS_SQL_DIR:-../../libs/papercusp/packages/locks/src/sql}")
+  local src gate_rc=0
+  for src in "${HOST_RUNTIME_SIBLING_SOURCES[@]}"; do args+=(--path "$REPO_ROOT/$src"); done
+  if [[ -f "$BUNDLE_HOST_GATE_META_DIR/copied-sources.txt" ]]; then
+    args+=(--list-file "$BUNDLE_HOST_GATE_META_DIR/copied-sources.txt")
+  fi
+  if [[ -f "$OUTDIR/spawner-sidecar.mjs.meta.json" ]]; then
+    args+=(--metafile "$OUTDIR/spawner-sidecar.mjs.meta.json")
+  fi
+  "${COMMITTED_NODE[@]}" "$GATE_HELPER" "${args[@]}" >"$GATE_LOG" 2>&1 || gate_rc=$?
+  cat "$GATE_LOG"
+  [[ $gate_rc -eq 0 ]]
+}
+restricted_hold_fallback() { # <log> — sets FALLBACK_RC; the caller exits with it
+  local log="$1"
+  rm -f "$FRESH_MARKER"
+  if [[ ! -s "$OUTFILE" ]]; then
+    echo "🚨 ERROR: the restricted-hold gate refused this build and there is NO last-known-good $OUTFILE."
+    echo "🚨   Refusing to start rather than exec a missing entrypoint."
+    FALLBACK_RC=1
+    return
+  fi
+  "${COMMITTED_NODE[@]}" "$HELPER_DIR/write-bundle-stale-marker.mjs" "$STALE_MARKER" "$ENTRY" "$OUTFILE" "$log" || true
+  echo "🚨 dist-host/ is the LAST-KNOWN-GOOD bundle, NOT the current tree: the restricted-hold gate"
+  echo "🚨   refused this build (D-012, WI-10005745). /api/health reports bundleStale."
+  echo "🚨   Marker: $STALE_MARKER — restart the host after the disclosure is released."
+  if [[ "${PAPERCUSP_BUNDLE_ALLOW_STALE_START:-0}" == "1" ]]; then
+    echo "🚨 The service STARTS on that bundle, by request (PAPERCUSP_BUNDLE_ALLOW_STALE_START=1)."
+    FALLBACK_RC=0
+    return
+  fi
+  echo "🚨 The CALLER FAILS (exit 1): stale bytes must not be reported as a release."
+  FALLBACK_RC=1
+}
+bundle_host_on_exit() {
+  local rc=$?
+  rm -f "$TMPFILE" "$METAFILE" "$PROBE_STAMP"
+  [[ -n "$NEW_BLUEPRINTS_DIR" ]] && rm -rf "$NEW_BLUEPRINTS_DIR"
+  [[ -n "$NEW_SQL_DIR" ]] && rm -rf "$NEW_SQL_DIR"
+  [[ -n "$SYSTEMD_ENV_RUNNER_TMP" ]] && rm -f "$SYSTEMD_ENV_RUNNER_TMP"
+  if [[ "$GATE_PENDING" == "1" ]] && ! restricted_hold_gate; then
+    if [[ $rc -eq 0 ]]; then
+      restricted_hold_fallback "$GATE_LOG"
+      rc=$FALLBACK_RC
+    else
+      rm -f "$FRESH_MARKER"
+      "${COMMITTED_NODE[@]}" "$HELPER_DIR/write-bundle-stale-marker.mjs" "$STALE_MARKER" "$ENTRY" "$OUTFILE" "$GATE_LOG" || true
+    fi
+  fi
+  rm -rf "$GATE_SNAPSHOT_DIR" "$BUNDLE_HOST_GATE_META_DIR"
+  exit "$rc"
+}
+trap bundle_host_on_exit EXIT
 
 # EI-20093985382484201: A BUNDLE FAILURE MUST NOT TAKE THE SERVICE DOWN.
 # ExecStartPre runs this on EVERY restart against the LIVE shared tree, which
@@ -237,12 +361,52 @@ trap 'rm -f "$TMPFILE" "$METAFILE"; [[ -n "$NEW_BLUEPRINTS_DIR" ]] && rm -rf "$N
 # strictly better than a down one; an INVISIBLY-stale one is worse than both.
 BUILD_LOG="$OUTFILE.build-error.log"
 
+# WI-10005113: name HOW the bundle step failed. Every failure path INSIDE the
+# subshell below prints its own error before exiting (the lock timeout, esbuild,
+# the guard checks), so an EMPTY log plus a signal status means the subshell was
+# killed from OUTSIDE (or its redirect failed), not that the build was wrong.
+# Measured 2026-10-01 22:03:10-22:03:20Z: the first staging generation bundle
+# died 10s in with an empty log and the old `bundle_rc=1`, so the cause was
+# unrecoverable once the candidate checkout was pruned, and :3170 stayed down.
+report_bundle_step_failure() {
+  local rc="$1" log="$2"
+  if (( rc > 128 )); then
+    local sig=$((rc - 128))
+    echo "🚨 the bundle step was KILLED by signal $sig (SIG$(kill -l "$sig" 2>/dev/null || echo '?'), exit status $rc): an external kill, not a build error."
+  else
+    echo "bundle step exit status: $rc"
+  fi
+  if [[ ! -s "$log" ]]; then
+    echo "🚨 the build log is EMPTY: no step inside the bundle subshell reached its own error path."
+    echo "🚨   Suspect an external kill of the subshell or a failed redirect of $log or $LOCKFILE,"
+    echo "🚨   not esbuild or the guard checks (each prints its error before it exits)."
+  fi
+}
+
+# WI-10005745: snapshot the last-known-good artifacts BEFORE anything is rebuilt over them.
+gate_snapshot_args=()
+for gate_artifact in "${OUTFILE##*/}" spawner-sidecar.mjs spawner-sidecar.mjs.meta.json \
+    "${HOST_WORKER_OUTPUTS[@]}" "${HOST_RUNTIME_SIBLING_OUTPUTS[@]}" blueprints sql; do
+  gate_snapshot_args+=(--artifact "$gate_artifact")
+done
+mkdir -p "$BUNDLE_HOST_GATE_META_DIR"
+if ! "${COMMITTED_NODE[@]}" "$GATE_HELPER" snapshot --outdir "$OUTDIR" --snapshot-dir "$GATE_SNAPSHOT_DIR" \
+    "${gate_snapshot_args[@]}" >"$GATE_LOG" 2>&1; then
+  cat "$GATE_LOG"
+  echo "🚨 ERROR: could not snapshot the last-known-good bundle for the restricted-hold gate; not building over it." | tee -a "$GATE_LOG"
+  restricted_hold_fallback "$GATE_LOG"
+  exit "$FALLBACK_RC"
+fi
+cat "$GATE_LOG"
+
 echo "→ esbuild-bundling $ENTRY → $OUTFILE (plain-node host entry, no tsx loader)"
 bundle_rc=0
-# `if ! ( … )` rather than a bare call: `set -e` would otherwise kill the script
-# at precisely the failure this block exists to survive. Output is captured to a
-# file so it can be BOTH echoed to the journal and parsed into the marker.
-if ! (
+# `( … ) || bundle_rc=$?` rather than a bare call: `set -e` would otherwise kill
+# the script at precisely the failure this block exists to survive. Output is
+# captured to a file so it can be BOTH echoed to the journal and parsed into the
+# marker. WI-10005113: `|| bundle_rc=$?`, not `if ! ( … ); then bundle_rc=1`, so
+# the subshell's REAL status survives and a signal death (128+N) is reported as one.
+(
   flock -w 120 9 || { echo "ERROR: timed out waiting for bundle lock $LOCKFILE (another build stuck?)"; exit 1; }
   # WI-55467: the SAME errexit hole the checker comment below describes applies to
   # esbuild itself, and it was left unplugged. A failed/killed esbuild wrote no
@@ -251,39 +415,79 @@ if ! (
   # esbuild error under a Node stack — while the fallback banner below still claimed
   # "the esbuild error is above". Abort here so the real error is the last thing in
   # $BUILD_LOG and the checker only ever runs on a metafile that exists.
-  if ! npx --yes esbuild@0.25.0 "$ENTRY" \
-    --bundle --platform=node --format=esm --target=node22 \
-    --outfile="$TMPFILE" \
-    --metafile="$METAFILE" \
-    --banner:js="$HOST_BANNER" \
-    --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
-    "${BUNDLED_SOURCE_SHA_DEFINE[@]}" \
-    --log-limit=20 \
-    "${HOST_EXTERNALS[@]}"; then
-    echo "ERROR: esbuild failed to bundle $ENTRY (see the esbuild diagnostics above)."
-    exit 1
-  fi
-  # This subshell is the condition of `if ! (...)`; Bash disables errexit inside such a tested
-  # compound command. An unwrapped checker failure therefore fell through to ascii-escape + mv,
+  #
+  # WI-10005321: never bundle a tree an in-tree mutation probe has deliberately broken.
+  # This bundler reads the LIVE shared tree, and a probe holds a file mutated for the
+  # length of a guard run; the probe's verified restore cannot reach a bundle that
+  # already captured the mutant (2026-10-02: bg-host ran with its tool-ceiling denial
+  # disabled for ~8 min). `wait` blocks (bounded) while a window is open in this
+  # checkout or any submodule; `verify` re-checks after esbuild, and a window that
+  # opened mid-build costs one rebuild. Still blocked → exit 1, so the fallback below
+  # boots the last-known-good bundle, marked stale, instead of a mutant. No --timeout-sec:
+  # the gate resolves PAPERCUSP_BUNDLE_PROBE_WAIT_SEC, then the PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC
+  # umbrella, then 90 s (WI-10006268).
+  probe_attempt=1
+  while :; do
+    "${COMMITTED_NODE[@]}" "$REPO_ROOT/scripts/mutation-probe-window-gate.mjs" wait --root "$REPO_ROOT" \
+      --stamp-file "$PROBE_STAMP" || exit 1
+    if ! npx --yes esbuild@0.25.0 "$ENTRY" \
+      --bundle --platform=node --format=esm --target=node22 \
+      --outfile="$TMPFILE" \
+      --metafile="$METAFILE" \
+      --banner:js="$HOST_BANNER" \
+      "${HOST_BANNER_DEFINES[@]}" \
+      --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
+      "${BUNDLED_SOURCE_SHA_DEFINE[@]}" \
+      --log-limit=20 \
+      "${HOST_EXTERNALS[@]}"; then
+      echo "ERROR: esbuild failed to bundle $ENTRY (see the esbuild diagnostics above)."
+      exit 1
+    fi
+    if "${COMMITTED_NODE[@]}" "$REPO_ROOT/scripts/mutation-probe-window-gate.mjs" verify --root "$REPO_ROOT" \
+      --stamp-file "$PROBE_STAMP"; then
+      break
+    fi
+    if (( probe_attempt >= 2 )); then
+      echo "ERROR: a mutation probe opened a window during both bundle attempts; refusing to publish a bundle that may hold a mutant (WI-10005321)."
+      exit 1
+    fi
+    probe_attempt=$((probe_attempt + 1))
+    echo "→ a mutation-probe window opened during the bundle; rebuilding once (WI-10005321)"
+  done
+  # This subshell is the left side of `|| bundle_rc=$?`; Bash disables errexit inside such a
+  # tested compound command. An unwrapped checker failure therefore fell through to ascii-escape + mv,
   # publishing the rejected bundle and returning success. Fail explicitly before the atomic swap.
-  if ! node "$REPO_ROOT/scripts/check-bundled-cli-entry-guards.mjs" \
-    --metafile "$METAFILE" --base-dir "$SCRIPT_DIR/.."; then
+  if ! "${COMMITTED_NODE[@]}" "$REPO_ROOT/scripts/check-bundled-cli-entry-guards.mjs" \
+    --metafile "$METAFILE" --base-dir "$OPERATOR_DIR"; then
     exit 1
   fi
+  # WI-10005745: the restricted-hold gate reads these exact inputs after every step has published.
+  cp -f "$METAFILE" "$BUNDLE_HOST_GATE_META_DIR/${OUTFILE##*/}.meta.json" || exit 1
   # WI-38221: widen-avoidance pass. Runs on $TMPFILE, BEFORE the atomic rename
   # below, so the swap stays atomic and a failure here leaves the last-known-good
   # $OUTFILE untouched. The helper never exits non-zero — a bundle that skipped
   # the escape is correct, just fatter, and is not worth failing a boot over.
-  node "$SCRIPT_DIR/ascii-escape-bundle.mjs" "$TMPFILE"
+  "${COMMITTED_NODE[@]}" "$HELPER_DIR/ascii-escape-bundle.mjs" "$TMPFILE"
+  # WI-10005299: syntax-gate the FINAL bytes before the swap. ascii-escape's own check only
+  # judges its rewrite, and on failure it keeps the input on the assumption that escaping
+  # broke it. When the INPUT was already invalid (a banner/module `__dirname` redeclaration),
+  # that shipped a bundle that died with a SyntaxError on every start. stdin + input-type keeps
+  # the ESM grammar for a temp path that has no .mjs extension. Failing here keeps the
+  # last-known-good $OUTFILE.
+  if ! node --input-type=module --check < "$TMPFILE"; then
+    echo "ERROR: the bundled $OUTFILE fails \`node --check\` (it would throw a SyntaxError at load); keeping the last-known-good bundle."
+    exit 1
+  fi
   mv -f "$TMPFILE" "$OUTFILE"
-) 9>"$LOCKFILE" >"$BUILD_LOG" 2>&1; then
-  bundle_rc=1
-fi
+) 9>"$LOCKFILE" >"$BUILD_LOG" 2>&1 || bundle_rc=$?
 cat "$BUILD_LOG"
+if [[ $bundle_rc -ne 0 ]]; then
+  report_bundle_step_failure "$bundle_rc" "$BUILD_LOG"
+fi
 
 if [[ $bundle_rc -ne 0 ]]; then
   if [[ -f "$OUTFILE" ]]; then
-    node "$SCRIPT_DIR/write-bundle-stale-marker.mjs" \
+    "${COMMITTED_NODE[@]}" "$HELPER_DIR/write-bundle-stale-marker.mjs" \
       "$STALE_MARKER" "$ENTRY" "$OUTFILE" "$BUILD_LOG" || true
     # WI-55467: this used to assert "the esbuild error is above" unconditionally. The
     # bundle step is esbuild + the CLI-entry guard check + ascii-escape + the atomic
@@ -353,6 +557,10 @@ if [[ $bundle_rc -ne 0 ]]; then
   echo "       to fall back to. Refusing to start rather than exec a missing entrypoint."
   exit 1
 fi
+
+# A fresh bundle is now published: from here every exit runs the restricted-hold gate
+# (normally below, before the freshness stamp; otherwise from the EXIT trap).
+GATE_PENDING=1
 
 # Success: the running code matches the tree again, so retract any stale claim.
 rm -f "$STALE_MARKER"
@@ -494,18 +702,99 @@ rm -rf "$OUTDIR/sql.old.$$" 2>/dev/null || true
 echo "    ✓ bundled @papercusp/locks DDL matches the tree (highest migration $_locks_sql_max, $_locks_sql_count files)"
 
 # Required workers are shared with packaged desktop and current-build rig.
-bundle_host_workers "$REPO_ROOT" "$OUTDIR" "${PAPERCUSP_EMBED_WORKER_SCRIPT:-}" || exit 1
+#
+# WI-10005087: a worker failure gets the SAME two-caller contract as the entry
+# above. Measured 2026-10-01 21:01-21:10Z: the entry built, then esbuild could
+# not bundle snapshot-fold.worker.ts, and this line's bare `|| exit 1` failed
+# ExecStartPre with a good previous snapshot-fold.worker.mjs on disk — bg-host
+# crash-looped for ~9 min (routines, git-sync and DBOS down fleet-wide) even
+# though its drop-in sets PAPERCUSP_BUNDLE_ALLOW_STALE_START=1. The entry's
+# fallback did not cover the workers, so one bad worker edit was an outage.
+#
+# Same rules as the entry: every worker publish is tmp-then-rename, so a failed
+# worker leaves its previous output intact; the marker is written whenever we
+# fall back (staleness is a fact about disk, not about the caller); a supervisor
+# that opted in starts, every other caller fails; and nothing starts when a
+# worker has no previous output to fall back to.
+#
+# ⚠ The fallback leaves a MIXED dist-host: a fresh entry beside an older worker.
+# That is deliberately reported, not refused. The worker message protocols
+# (snapshot-fold-protocol.ts, the sentinel's) carry no version handshake, so a
+# protocol change plus a stale worker is a real skew — but refusing here would
+# not prevent it (the entry's own fallback already yields the opposite mix:
+# measured live at 21:12Z, a 21:08Z entry beside a 20:25Z snapshot-fold worker)
+# and would restore the outage. The marker names the worker, so /api/health
+# reports bundleStale and the skew is one read away rather than invisible.
+WORKER_BUILD_LOG="$OUTDIR/runtime-workers.build-error.log"
+worker_rc=0
+bundle_host_workers "$REPO_ROOT" "$OUTDIR" "${PAPERCUSP_EMBED_WORKER_SCRIPT:-}" >"$WORKER_BUILD_LOG" 2>&1 || worker_rc=$?
+cat "$WORKER_BUILD_LOG"
+if [[ $worker_rc -ne 0 ]]; then
+  failed_worker="${BUNDLE_HOST_WORKER_FAILED_SOURCE:-(runtime workers)}"
+  missing_workers=()
+  for worker_output in "${HOST_WORKER_OUTPUTS[@]}"; do
+    [[ -s "$OUTDIR/$worker_output" ]] || missing_workers+=("$worker_output")
+  done
+  if [[ ${#missing_workers[@]} -ne 0 ]]; then
+    echo "ERROR: bundling runtime worker $failed_worker failed and there is NO previous"
+    echo "       output to fall back to (missing: ${missing_workers[*]})."
+    echo "       Refusing to start rather than spawn a missing worker."
+    exit 1
+  fi
+  worker_outfile="$OUTDIR/${BUNDLE_HOST_WORKER_FAILED_OUTPUT:-${HOST_WORKER_OUTPUTS[0]}}"
+  "${COMMITTED_NODE[@]}" "$HELPER_DIR/write-bundle-stale-marker.mjs" \
+    "$STALE_MARKER" "$failed_worker" "$worker_outfile" "$WORKER_BUILD_LOG" || true
+  echo "🚨 ERROR: bundling runtime worker $failed_worker FAILED — output above; full log: $WORKER_BUILD_LOG"
+  echo "🚨 FALLING BACK to the last-known-good worker already on disk:"
+  echo "🚨   $worker_outfile (built $(date -r "$worker_outfile" -Iseconds 2>/dev/null || echo unknown))"
+  echo "🚨 dist-host/ is STALE CODE: a fresh $ENTRY beside an OLDER worker, NOT the"
+  echo "🚨   current tree. /api/health reports bundleStale. Marker: $STALE_MARKER"
+  if [[ "${PAPERCUSP_BUNDLE_ALLOW_STALE_START:-0}" == "1" ]]; then
+    echo "🚨 The service STARTS on that stale worker, by request"
+    echo "🚨   (PAPERCUSP_BUNDLE_ALLOW_STALE_START=1 — availability over freshness)."
+    exit 0
+  fi
+  echo "🚨 The CALLER FAILS (exit 1): stale bytes must not be reported as a release."
+  exit 1
+fi
+
+# Build the maintained spawner beside real host entries. Custom fixture/worker
+# builds retain their own output set. Older installations lack this sibling and
+# the spawn resolver falls back to the full host divert.
+case "${ENTRY##*/}" in
+  hono-host.ts|serve.ts)
+    SPAWNER_BUILD_LOG="$OUTDIR/spawner-sidecar.mjs.build-error.log"
+    if ! bundle_host_spawner "$REPO_ROOT" "$OUTDIR" "${BUNDLED_SOURCE_SHA_DEFINE[@]}" "${HOST_EXTERNALS[@]}" >"$SPAWNER_BUILD_LOG" 2>&1; then
+      cat "$SPAWNER_BUILD_LOG"
+      "${COMMITTED_NODE[@]}" "$HELPER_DIR/write-bundle-stale-marker.mjs" \
+        "$STALE_MARKER" "bin/spawner-sidecar.ts" "$OUTDIR/spawner-sidecar.mjs" "$SPAWNER_BUILD_LOG" || true
+      echo "ERROR: standalone spawner build failed; prior sibling remains unchanged, or the resolver uses the full host when absent."
+      if [[ "${PAPERCUSP_BUNDLE_ALLOW_STALE_START:-0}" == "1" && -s "$OUTFILE" ]]; then
+        echo "WARNING: supervisor starts with the existing spawner route; this is not a fresh release."
+        exit 0
+      fi
+      exit 1
+    fi
+    cat "$SPAWNER_BUILD_LOG"
+    ;;
+esac
+
+# WI-10005745: every artifact has published — gate them all before anything stamps them fresh.
+if [[ "$GATE_PENDING" == "1" ]] && ! restricted_hold_gate; then
+  restricted_hold_fallback "$GATE_LOG"
+  exit "$FALLBACK_RC"
+fi
 
 # Stamp only after the bundle AND every runtime sibling/asset has published.
 # The helper refuses a dirty tree, a changed HEAD, a missing output, or an
 # incoherent dist-host tree. A stamp failure never makes an otherwise-good
 # build fail; it merely forces ExecStartPre to rebuild normally.
 if [[ "${PAPERCUSP_BUNDLE_REUSE_FRESH:-0}" == "1" ]]; then
-  if fresh_head="$(node "$FRESHNESS_HELPER" stamp \
+  if fresh_head="$("${COMMITTED_NODE[@]}" "$FRESHNESS_HELPER" stamp \
       --repo-root "$REPO_ROOT" \
-      --entry "$PWD/$ENTRY" \
-      --outfile "$PWD/$OUTFILE" \
-      --manifest "$PWD/$FRESH_MARKER")"; then
+      --entry "$ENTRY" \
+      --outfile "$OUTFILE" \
+      --manifest "$FRESH_MARKER")"; then
     echo "✓ stamped proof-bound host bundle freshness at ${fresh_head:0:10}"
   else
     rm -f "$FRESH_MARKER"

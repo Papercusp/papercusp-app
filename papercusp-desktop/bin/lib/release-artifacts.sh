@@ -41,6 +41,21 @@ release_artifacts_cut_start_path() {
   printf '/tmp/papercusp-cut-start-%s.txt\n' "$1"
 }
 
+# release_artifacts_has_linux_version_artifact <bundle-dir> <version>
+# A primary package must exist before a platform leg may skip the Linux build;
+# a detached signature by itself is not a reusable Linux artifact.
+release_artifacts_has_linux_version_artifact() {
+  local bundle="${1:-}" version="${2:-}" artifact
+  [[ -n "$bundle" && -n "$version" ]] || {
+    echo "release-artifacts: Linux reuse check requires a bundle directory and version." >&2
+    return 2
+  }
+  for artifact in "$bundle"/deb/*_"$version"_*.deb "$bundle"/appimage/*_"$version"_*.AppImage; do
+    [[ -f "$artifact" ]] && return 0
+  done
+  return 1
+}
+
 release_artifacts_cut_start_now_ns() {
   local now
   now="$(date -u +%s%N 2>/dev/null || true)"
@@ -1032,12 +1047,30 @@ release_artifacts_run_platform_smoke() {
 # group. This is the invocation counterpart to release_artifacts_assert_smoke_receipts;
 # keeping both classifiers in one helper prevents a new extension from being
 # accepted by one path and skipped by the other.
+release_artifacts_smoke_outcome_message() {
+  local platform="${1:-}" outcome="${2:-}"
+  case "$outcome" in
+    verified)
+      printf '==> platform smoke gate: %s verifier passed and its receipt is content-bound\n' "$platform"
+      ;;
+    overridden)
+      printf '==> platform smoke gate: OVERRIDDEN (no verification) - reason: %s\n' "${PAPERCUSP_SKIP_PLATFORM_SMOKE_REASON:-unspecified}"
+      ;;
+    *)
+      echo "release-artifacts: cannot report unknown platform smoke outcome '${outcome:-<empty>}'" >&2
+      return 2
+      ;;
+  esac
+}
+
 release_artifacts_run_smoke_receipts() {
   local tag="${1:-}" version="${2:-}" f name classified=0
+  RELEASE_ARTIFACTS_SMOKE_OUTCOME=failed
   shift 2 2>/dev/null || return 2
   if [[ "${PAPERCUSP_SKIP_PLATFORM_SMOKE:-0}" == "1" ]]; then
-    release_artifacts_assert_smoke_receipts "$tag" "$version" "$@"
-    return $?
+    release_artifacts_assert_smoke_receipts "$tag" "$version" "$@" || return $?
+    RELEASE_ARTIFACTS_SMOKE_OUTCOME=overridden
+    return 0
   fi
   local -a linux_artifacts=() windows_artifacts=() mac_artifacts=()
   for f in "$@"; do
@@ -1056,6 +1089,7 @@ release_artifacts_run_smoke_receipts() {
   [[ ${#linux_artifacts[@]} -eq 0 ]] || release_artifacts_run_platform_smoke "$tag" "$version" linux "${linux_artifacts[@]}" || return $?
   [[ ${#windows_artifacts[@]} -eq 0 ]] || release_artifacts_run_platform_smoke "$tag" "$version" windows "${windows_artifacts[@]}" || return $?
   [[ ${#mac_artifacts[@]} -eq 0 ]] || release_artifacts_run_platform_smoke "$tag" "$version" mac "${mac_artifacts[@]}" || return $?
+  RELEASE_ARTIFACTS_SMOKE_OUTCOME=verified
 }
 
 # ── Durable release retention ────────────────────────────────────────────────

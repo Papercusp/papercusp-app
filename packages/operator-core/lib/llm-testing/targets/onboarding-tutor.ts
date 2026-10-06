@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../../module-repo-root';
 
 import { renderTutorTemplate } from '../../onboarding/launch-context';
 import { loadTutorialPack, packIndexMarkdown, resolvePackRoot } from '../../onboarding/tutorial-pack';
@@ -116,7 +117,7 @@ export function resolveTutorSourcePath(): string {
  * finished-setup fixture. Exported for the target's unit test.
  */
 export function loadTutorPrompt(mode: 'first-run' | 'tutorial' = 'first-run'): string {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', '..');
+  const repoRoot = moduleRepoRoot(import.meta.url); // bundle-safe, unlike a fixed climb (P-016)
   const packRoot = resolvePackRoot(join(repoRoot, 'apps', 'operator'));
   return renderTutorTemplate(readFileSync(resolveTutorSourcePath(), 'utf8'), {
     os: 'linux',

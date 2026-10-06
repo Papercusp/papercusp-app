@@ -99,7 +99,30 @@ export type SpecTriadScopeReason =
   | 'required-declared'
   | 'created-after-epoch'
   | 'created-before-epoch'
-  | 'created-unknown';
+  | 'created-unknown'
+  | 'template-excluded';
+
+/**
+ * Plan-store TEMPLATES that are never subject to the spec triad (WI-10004229, WI-10005441).
+ *
+ * An acceptance rubric (`template: rubric`) is stored in the plan store, but it
+ * is a grading BAR, not a plan with work to promote: it carries no P-NNN items
+ * and no `## Requirements` / `## Design` by design. A "write the spec triad"
+ * filing against one has no correct resolution. An agent that followed it
+ * would rewrite the rubric's content under an in-flight vetting attestation or
+ * independent grade. Measured 2026-09-30: 335 rubric rows in
+ * papercusp-workspace, and at least 8 open filings against them.
+ *
+ * It lives HERE, in the shared scope verdict, so every filer agrees. Until
+ * WI-10005441 only the daily sweep applied it; the promotion runner's own gate
+ * did not, and kept filing against rubric rows (25 on 2026-10-02 alone).
+ */
+export const SPEC_TRIAD_EXCLUDED_TEMPLATES: readonly string[] = ['rubric'];
+
+/** True when a plan row's `template` puts it outside the triad (and outside promotion). */
+export function isSpecTriadExcludedTemplate(template: string | null | undefined): boolean {
+  return typeof template === 'string' && SPEC_TRIAD_EXCLUDED_TEMPLATES.includes(template);
+}
 
 export interface SpecTriadScope {
   inScope: boolean;
@@ -113,6 +136,8 @@ export interface SpecTriadPlanInput {
   created: string | null;
   /** Task count from the PG-canonical item index, when the caller has it. */
   itemCount?: number;
+  /** `harness_plans.template`, when the caller has it; an excluded template is never in scope. */
+  template?: string | null;
 }
 
 export interface SpecTriadOptions {
@@ -130,6 +155,8 @@ export function planInSpecTriadScope(
   opts: SpecTriadOptions,
 ): SpecTriadScope {
   if (!opts.flagEnabled) return { inScope: false, reason: 'flag-off' };
+  // Before the declaration: a rubric row is not a plan, whatever its body says.
+  if (isSpecTriadExcludedTemplate(plan.template)) return { inScope: false, reason: 'template-excluded' };
 
   const declared = readSpecTriadDeclaration(plan.content);
   if (declared === 'exempt') return { inScope: false, reason: 'exempt-declared' };

@@ -20,10 +20,13 @@
  * if any test failed, pass if all passed).
  */
 
-import type { Reporter, TestCase, TestResult } from '@playwright/test/reporter';
+import type { FullConfig, Reporter, TestCase, TestResult } from '@playwright/test/reporter';
 import { resolveGitContext } from '@papercusp/operator-core/lib/testing-branch-resolve';
 import { resolveAgentWorkspaceRoot } from '@papercusp/operator-core/lib/agent-tools/capability/base-dir';
+import { captureWorktreeSnapshot, computeWorktreeDirty, type WorktreeGitSnapshot } from '@papercusp/operator-core/lib/testing-worktree';
 import { resolveTestRunSource } from '@papercusp/operator-core/lib/testing-run-source';
+import { describeWorktreeDirt, resolveTestRunHarnessSlug, resolveTestRunWorkspaceId } from '@papercusp/test-config/admin-test-runs-reporter';
+import type { TestRunExecutionDetails } from '@papercusp/test-config/execution-details';
 import { posix, relative } from 'node:path';
 
 interface TestRunRow {
@@ -33,6 +36,10 @@ interface TestRunRow {
   startedAt: Date;
   finishedAt: Date;
   outputTail: string | null;
+  passed: number;
+  failed: number;
+  skipped: number;
+  worktreeDirty: boolean;
 }
 
 function captureReporterSaturationSnapshot(): { loopLagP95Ms: number | null; rssMb: number | null } {
@@ -49,13 +56,13 @@ function captureReporterSaturationSnapshot(): { loopLagP95Ms: number | null; rss
   return { loopLagP95Ms: null, rssMb };
 }
 
-function toWorkspaceRel(absPath: string): string {
-  const rel = relative(resolveAgentWorkspaceRoot({}), absPath);
+function toWorkspaceRel(absPath: string, root: string): string {
+  const rel = relative(root, absPath);
   return rel.split(/[/\\]/).join(posix.sep);
 }
 
 async function tryGetPg(): Promise<{
-  sql: (strings: TemplateStringsArray, ...vals: unknown[]) => Promise<unknown[]>;
+  sql: ((strings: TemplateStringsArray, ...vals: unknown[]) => Promise<unknown[]>) & { json: (value: unknown) => unknown };
 } | null> {
   try {
     const pg = (await import('postgres')).default;
@@ -71,20 +78,18 @@ async function tryGetPg(): Promise<{
       onnotice: () => {},
     });
     return { sql } as unknown as {
-      sql: (strings: TemplateStringsArray, ...vals: unknown[]) => Promise<unknown[]>;
+      sql: ((strings: TemplateStringsArray, ...vals: unknown[]) => Promise<unknown[]>) & { json: (value: unknown) => unknown };
     };
   } catch {
     return null;
   }
 }
 
-async function insertRow(row: TestRunRow): Promise<void> {
+async function insertRow(row: TestRunRow, root: string, worktreeAfter: WorktreeGitSnapshot): Promise<void> {
   let branch: string | null = null;
-  let commit: string | null = null;
+  const commit = worktreeAfter.commit;
   try {
-    const ctx = await resolveGitContext();
-    branch = ctx.branch;
-    commit = ctx.commit;
+    if (root === resolveAgentWorkspaceRoot({})) branch = (await resolveGitContext()).branch;
   } catch { /* fail-soft */ }
 
   const pg = await tryGetPg();
@@ -93,15 +98,37 @@ async function insertRow(row: TestRunRow): Promise<void> {
   const source = resolveTestRunSource();
   const runGroupId = process.env.PAPERCUSP_TEST_RUN_GROUP ?? null;
   const { loopLagP95Ms, rssMb } = captureReporterSaturationSnapshot();
+  // Use the same runtime scope precedence as the shared Vitest writer. Without
+  // these columns a real passing run is invisible to scoped evidence binding.
+  // CI deliberately strips the scope variables and keeps its rows unscoped.
+  const harnessSlug = resolveTestRunHarnessSlug();
+  const workspaceId = resolveTestRunWorkspaceId();
+  const executionDetails: TestRunExecutionDetails = {
+    schemaVersion: 1,
+    root,
+    filePath: row.filePath,
+    runGroupId,
+    workspaceId,
+    harnessSlug,
+    testNamePattern: null,
+    testLayer: 'e2e',
+    passed: row.passed,
+    failed: row.failed,
+    skipped: row.skipped,
+    collectionFailed: false,
+    mutationPhase: null,
+    commitSha: commit,
+    worktreeDirty: row.worktreeDirty,
+  };
 
   try {
     await Promise.race([
       pg.sql`
         INSERT INTO harness_shared.test_runs
-          (file_path, framework, status, duration_ms, started_at, finished_at, output_tail, run_group_id, source, branch, commit_sha, loop_lag_p95_ms, rss_mb)
+          (file_path, framework, status, duration_ms, started_at, finished_at, output_tail, run_group_id, source, branch, commit_sha, loop_lag_p95_ms, rss_mb, harness_slug, workspace_id, worktree_dirty, execution_details)
         VALUES
           (${row.filePath}, 'playwright', ${row.status}, ${row.durationMs}, ${row.startedAt},
-           ${row.finishedAt}, ${row.outputTail}, ${runGroupId}, ${source}, ${branch}, ${commit}, ${loopLagP95Ms}, ${rssMb})
+           ${row.finishedAt}, ${row.outputTail}, ${runGroupId}, ${source}, ${branch}, ${commit}, ${loopLagP95Ms}, ${rssMb}, ${harnessSlug}, ${workspaceId}, ${row.worktreeDirty}, ${pg.sql.json(executionDetails)})
       `,
       new Promise((_, reject) => setTimeout(() => reject(new Error('pg_insert_timeout')), 1000)),
     ]).catch(() => {
@@ -119,13 +146,20 @@ interface PerFile {
   anyPass: boolean;
   allSkipped: boolean;
   errors: string[];
+  passed: number;
+  failed: number;
+  skipped: number;
 }
 
 export default class AdminTestRunsPlaywrightReporter implements Reporter {
   private byFile = new Map<string, PerFile>();
   private pending: Promise<void>[] = [];
+  private runRoot = resolveAgentWorkspaceRoot({});
+  private worktreeBefore: WorktreeGitSnapshot | null = null;
 
-  onBegin(): void {
+  onBegin(config?: Pick<FullConfig, 'rootDir'>): void {
+    this.runRoot = resolveAgentWorkspaceRoot(config?.rootDir ? { projectDir: config.rootDir } : {});
+    this.worktreeBefore = captureWorktreeSnapshot(this.runRoot);
   }
 
   onTestEnd(test: TestCase, result: TestResult): void {
@@ -141,6 +175,9 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
         anyPass: false,
         allSkipped: true,
         errors: [],
+        passed: 0,
+        failed: 0,
+        skipped: 0,
       };
 
       const endMs = (result.startTime?.getTime() ?? Date.now()) + result.duration;
@@ -149,12 +186,14 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
 
       switch (result.status) {
         case 'passed':
+          existing.passed += 1;
           existing.anyPass = true;
           existing.allSkipped = false;
           break;
         case 'failed':
         case 'timedOut':
         case 'interrupted':
+          existing.failed += 1;
           existing.anyFail = true;
           existing.allSkipped = false;
           for (const e of result.errors ?? []) {
@@ -162,6 +201,7 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
           }
           break;
         case 'skipped':
+          existing.skipped += 1;
           // keep allSkipped flag until something else lands
           break;
       }
@@ -174,16 +214,21 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
 
   onEnd(): void {
     try {
+      const worktreeAfter = captureWorktreeSnapshot(this.runRoot);
+      const worktreeDirty = computeWorktreeDirty(this.worktreeBefore ?? { commit: null, porcelain: null }, worktreeAfter);
+      const dirtReason = describeWorktreeDirt(this.worktreeBefore ?? { commit: null, porcelain: null }, worktreeAfter)?.slice(0, 500);
       for (const [file, agg] of this.byFile) {
         try {
-          const filePath = toWorkspaceRel(file);
+          const filePath = toWorkspaceRel(file, this.runRoot);
           const status: TestRunRow['status'] = agg.anyFail
             ? 'fail'
             : agg.allSkipped
             ? 'skip'
             : 'pass';
           const durationMs = Math.max(0, agg.finishedAt - agg.startedAt);
-          const outputTail = agg.errors.length > 0 ? agg.errors.join('\n').slice(-4000) : null;
+          // output_tail is readable by existing strict execution_details readers.
+          const output = [...agg.errors, ...(dirtReason ? [`[worktree provenance] ${dirtReason}`] : [])].join('\n');
+          const outputTail = output ? output.slice(-4000) : null;
           this.pending.push(
             insertRow({
               filePath,
@@ -192,7 +237,11 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
               startedAt: new Date(agg.startedAt),
               finishedAt: new Date(agg.finishedAt),
               outputTail,
-            }),
+              passed: agg.passed,
+              failed: agg.failed,
+              skipped: agg.skipped,
+              worktreeDirty,
+            }, this.runRoot, worktreeAfter),
           );
         } catch {
           /* swallow per-file */

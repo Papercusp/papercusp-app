@@ -38,6 +38,7 @@ import {
   type DesktopSessionRecord,
 } from '../../desktop/desktop-session-registry';
 import { freezeTask, thawTask, killTask, type ControlOutcome } from '../../task-manager/control';
+import { resolveSessionStates } from '../../agent-tools/coordination/liveness-oracle';
 
 /** Sessions acted on per run. A cap exists for the same reason gc-verify-instances
  *  has one: if a bug (or a genuinely bad day) makes everything look reapable, the
@@ -66,6 +67,17 @@ export interface GcDesktopSessionsDeps {
   markIdle: (id: string) => Promise<boolean>;
   markFrozen: (id: string) => Promise<boolean>;
   close: (id: string) => Promise<boolean>;
+  /** P-004 / D-007: the ONE liveness oracle's sessionState per agent owner, so an
+   *  agent-scoped desktop is reaped once its owning session has ended. */
+  ownerSessionStates: (ownerIds: readonly string[]) => Promise<Map<string, string | null>>;
+}
+
+async function defaultOwnerSessionStates(ownerIds: readonly string[]): Promise<Map<string, string | null>> {
+  const verdicts = await resolveSessionStates(
+    ownerIds.map((ownerId) => ({ ownerId })),
+    { hydratePerId: true },
+  );
+  return new Map([...verdicts].map(([id, v]) => [id, v.sessionState ?? null]));
 }
 
 function defaultDeps(): GcDesktopSessionsDeps {
@@ -86,6 +98,7 @@ function defaultDeps(): GcDesktopSessionsDeps {
     markIdle: (id) => markDesktopIdle(id),
     markFrozen: (id) => markDesktopFrozen(id),
     close: (id) => closeDesktopSession(id, 'released').then((ok) => ok),
+    ownerSessionStates: defaultOwnerSessionStates,
   };
 }
 
@@ -180,8 +193,28 @@ export async function gcDesktopSessions(
   let failed = 0;
   let acted = 0;
 
+  // Only agent-scoped desktops die with their owner; ask the oracle only when there
+  // are some, and an unreadable oracle leaves the ladder to decide as before.
+  const agentOwners = [...new Set(sessions.filter((s) => s.scope === 'agent').map((s) => s.scopeRef))];
+  let ownerStates = new Map<string, string | null>();
+  if (agentOwners.length > 0) {
+    try {
+      ownerStates = await d.ownerSessionStates(agentOwners);
+    } catch {
+      ownerStates = new Map();
+    }
+  }
+
   for (const session of sessions) {
-    const verdict: DesktopVerdict = classifyDesktopSession(session, nowMs);
+    let verdict: DesktopVerdict = classifyDesktopSession(session, nowMs);
+    if (
+      session.scope === 'agent' &&
+      !verdict.refused &&
+      verdict.action !== 'reap' &&
+      ownerStates.get(session.scopeRef) === 'ended'
+    ) {
+      verdict = { ...verdict, action: 'reap', reason: `owning agent session ${session.scopeRef} has ended` };
+    }
     const base: GovernedDesktop = {
       id: session.id,
       kind: session.kind,

@@ -1125,8 +1125,56 @@ export function shapeWorkItemsGet(data: unknown, tier: WorkItemsGetTier): unknow
           ? { all: true as const }
           : { ids: stubCompletionEvidenceIds };
 
+    // `read` is written by the source handler before this shaper runs. Preserve
+    // its requested/availability counts, then add how many available rows this
+    // tier leaves detailed versus id-only. Each id-only stub retains its own ID
+    // as the reread handle; the later result-door must preserve those IDs ahead
+    // of these aggregate counts.
+    const readInfo =
+      d.read && typeof d.read === "object" && !Array.isArray(d.read)
+        ? (d.read as Row)
+        : null;
+    const availableRows = rows.flatMap((sourceRow, index) => {
+      const shapedRow = projected[index];
+      return sourceRow.ok === true && sourceRow.availability === "available" && shapedRow
+        ? [{ sourceRow, shapedRow }]
+        : [];
+    });
+    const detailRows = availableRows.filter(({ shapedRow }) => {
+      const w = shapedRow.workItem;
+      return shapedRow._stub !== true && w !== null && typeof w === "object";
+    }).length;
+    const existingStubRows = rows.filter((r) => r._stub === true).length;
+    const availableCount =
+      typeof readInfo?.available === "number"
+        ? readInfo.available
+        : availableRows.length + existingStubRows;
+    const stubbedRows = Math.max(existingStubRows, availableCount - detailRows);
+
+    // A clipped prior-attempt brief has a different recovery route from other
+    // tier-relative clips. Its work_items:get contract exposes the full source
+    // through priorAttemptRefs using the record's rawRef.
+    const clippedPriorAttemptText = [...dropped].some(
+      (field) => field.startsWith("priorAttempts.") && field.endsWith("(text clipped)"),
+    );
+    const otherDropsNeedFullTier = [...dropped].some(
+      (field) => !(field.startsWith("priorAttempts.") && field.endsWith("(text clipped)")),
+    );
+    const tierRecoveryGuidance = otherDropsNeedFullTier
+      ? `Fields were dropped or clipped for the '${tier}' tier. Re-read with payloadTier:'full' — it is FRAMEWORK-RESERVED and absent from this tool's published schema, so route it through your host's raw-args dispatch path (papercusp: tools:invoke { name:'work_items:get', args:{ …, payloadTier:'full' } }).`
+      : "";
+
     out = {
       ...d,
+      ...(readInfo
+        ? {
+            read: {
+              ...readInfo,
+              detailRows,
+              stubbedRows,
+            },
+          }
+        : {}),
       results: projected,
       ...(dropped.size > 0
         ? {
@@ -1174,7 +1222,11 @@ export function shapeWorkItemsGet(data: unknown, tier: WorkItemsGetTier): unknow
                   )
                   ? "⚠ COMPLETION EVIDENCE EXISTS but its body was clipped or reduced at this tier; `hasCompletionEvidence` (or `_shapeNote.stubbed.completionEvidence` for stub rows) remains authoritative. Re-read with payloadTier:'full' before treating the item as evidence-free. "
                   : ""
-              }Fields were dropped or clipped for the '${tier}' tier. Re-read with payloadTier:'full' — it is FRAMEWORK-RESERVED and absent from this tool's published schema, so route it through your host's raw-args dispatch path (papercusp: tools:invoke { name:'work_items:get', args:{ …, payloadTier:'full' } }).`,
+              }${
+                clippedPriorAttemptText
+                  ? "Prior-attempt record text marked `textTruncated` has a field-specific drill-down. Re-read it with its `rawRef` in `priorAttemptRefs`; a `payloadTier:'full'` retry alone does not retrieve that record's full source text. "
+                  : ""
+              }${tierRecoveryGuidance}`,
             },
           }
         : {}),

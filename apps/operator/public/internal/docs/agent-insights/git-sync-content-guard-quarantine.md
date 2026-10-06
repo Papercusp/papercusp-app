@@ -1,7 +1,7 @@
 # git-sync quarantines a broken doc/code file instead of committing it
 URL: /internal/docs/agent-insights/git-sync-content-guard-quarantine
 
-Runbook for diagnosing dirty files quarantined by git-sync's registered content detectors, including the commit-time secrets detector and its low-entropy stand-in remedy.
+Runbook for diagnosing dirty files quarantined by git-sync's registered content detectors, including commit-time secrets and suspicious root-level shell-output filenames.
 
 ## Symptom
 
@@ -24,6 +24,7 @@ The source of truth is `packages/operator-core/lib/content-lint/registry.ts`, sp
 * **`conflict-markers`** — a committed git conflict marker at the start of a line in any tracked file; this is a language-agnostic build breaker.
 * **`constant-conditional`** — a literal `if (true ...)`/`if (false ...)` in tracked `.ts`/`.tsx`, usually a temporary source disable that an auto-commit can publish mid-experiment. Gate temporary behavior with a named constant or flag instead.
 * **`focused-test`** — `.only` in a tracked test/spec file. Vitest can exit 0 while silently skipping the rest of the file, forging a false green; remove `.only` or use a test-name filter instead.
+* **`root-redirect-artifact`** — an extensionless superproject-root filename containing both a colon and whitespace, which resembles command output redirected into a filename. Delete accidental output or move it to ignored scratch; intentional root files should use a descriptive extension.
 
 The registry order matters when a file trips multiple detectors. `secrets` is first because its failure mode is a history/egress freeze, not merely a broken build; the specific SQL-comment and smart-quote messages likewise precede their generic parse failures. When this list disagrees with the registry, the registry wins and the doc needs updating in the same change that adds or reorders a detector.
 

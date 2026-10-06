@@ -22,13 +22,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, mkdtemp, readdir, readFile, writeFile, stat, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, relative } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  sealBytes,
-  openBytes,
+  sealFile,
+  openFile,
   SEED_CIPHER,
   type SeedProvider,
   type SeedStoreEntry,
@@ -130,7 +130,7 @@ async function hashDir(root: string): Promise<string> {
   const rels = (await walkFiles(root)).sort();
   for (const rel of rels) {
     h.update(rel + '\0');
-    h.update(await readFile(join(root, rel)));
+    for await (const chunk of createReadStream(join(root, rel))) h.update(chunk as Buffer);
   }
   return h.digest('hex');
 }
@@ -269,7 +269,7 @@ export function createGitSeedProvider(): SeedProvider {
       if (encryption) {
         for (const rel of bundleRels) {
           const p = join(stagingDir, rel);
-          await writeFile(p, sealBytes(encryption.key, await readFile(p)));
+          await sealFile(encryption.key, p, p);
         }
       }
 
@@ -330,10 +330,9 @@ export function createGitSeedProvider(): SeedProvider {
       const materialize = async (bundleRel: string): Promise<string> => {
         const sealedPath = join(seedPath, bundleRel);
         if (!decryptDir) return sealedPath;
-        const plain = openBytes(decryptionKey!, await readFile(sealedPath));
         const outPath = join(decryptDir, bundleRel);
         await mkdir(dirname(outPath), { recursive: true });
-        await writeFile(outPath, plain);
+        await openFile(decryptionKey!, sealedPath, outPath);
         return outPath;
       };
 

@@ -12,6 +12,8 @@
  */
 
 export { SayStreamProjector, projectSayText } from './say-stream.js';
+import { parseGoalOwnerReportRef, type GoalOwnerReportRefV1 } from './goal-owner-report.js';
+export * from './goal-owner-report.js';
 
 /** Tool-call history may retain the original JSON-string representation.
  * Decode the array here; consumers still validate the option fields they use. */
@@ -75,6 +77,14 @@ export interface CardPresentation {
   voiceAnswerable?: boolean;
 }
 
+/** A tool-approval card's parts: the call's row title (e.g. `Update(calc.js)`),
+ * the question asked about it, and the change itself, shown once. */
+export interface CardApproval {
+  title: string;
+  question: string;
+  body: string[];
+}
+
 /** What the model asks for via `ask_choice` / `present_card`. */
 export interface CardSpec {
   prompt: string;
@@ -92,6 +102,12 @@ export interface CardSpec {
    * prompt. Optional; a renderer without a toggle may ignore it.
    */
   details?: string;
+  /**
+   * Present on a tool-approval card: its parts, so a renderer can draw a
+   * coding CLI's approval block (title row, the change once, the question).
+   * `prompt` still carries the same text for renderers that ignore this.
+   */
+  approval?: CardApproval;
   /** Allow the user to dismiss without answering. */
   allowDecline?: boolean;
   /** Auto-cancel after this many ms (server resolves as `cancel`). */
@@ -160,8 +176,9 @@ export interface ReportPlan {
 export interface ReportBlock {
   /** Optional overall heading for the block. */
   title?: string;
-  /** The plan blocks (≥1 — a block with no valid plan is dropped to null). */
+  /** Plan blocks; may be empty when an exact GOAL report reference is present. */
   plans: ReportPlan[];
+  goalReport?: GoalOwnerReportRefV1;
 }
 
 /** Trim + drop empties: a non-blank string, or undefined. */
@@ -183,11 +200,15 @@ function reportStr(v: unknown): string | undefined {
  */
 export function parseReportBlock(value: unknown): ReportBlock | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const goalValue = (value as Record<string, unknown>).goalReport;
+  const goalReport = goalValue === undefined ? undefined : parseGoalOwnerReportRef(goalValue);
+  if (goalValue !== undefined && !goalReport) return null;
   const rawPlans = (value as { plans?: unknown }).plans;
-  if (!Array.isArray(rawPlans)) return null;
+  if (rawPlans !== undefined && !Array.isArray(rawPlans)) return null;
+  if (rawPlans === undefined && !goalReport) return null;
 
   const plans: ReportPlan[] = [];
-  for (const p of rawPlans) {
+  for (const p of (rawPlans ?? []) as unknown[]) {
     if (!p || typeof p !== 'object') continue;
     const rec = p as Record<string, unknown>;
     const slug = reportStr(rec.slug);
@@ -215,8 +236,9 @@ export function parseReportBlock(value: unknown): ReportBlock | null {
     });
   }
 
-  if (plans.length === 0) return null;
+  if (plans.length === 0 && !goalReport) return null;
   const out: ReportBlock = { plans };
+  if (goalReport) out.goalReport = goalReport;
   const topTitle = reportStr((value as Record<string, unknown>).title);
   if (topTitle) out.title = topTitle;
   return out;

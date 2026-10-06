@@ -203,6 +203,11 @@ export async function reflectOrphanedPlanItems(
      WHERE p.status = 'todo'
        AND w.payload->'plan_item' IS NOT NULL
      GROUP BY p.workspace_id, p.plan_slug, p.item_id, p.harness_slug
+     -- WI-10004586 (same class as the orphan-reconcile sweep): rotate the window so a
+     -- saturated population is eventually fully visited instead of the planner
+     -- returning the same arbitrary first cap groups every tick. Latent here —
+     -- measured 291 groups vs the 500 cap on 2026-10-01.
+     ORDER BY random()
      LIMIT ${cap}`;
 
   out.candidatePlanItems = rows.length;

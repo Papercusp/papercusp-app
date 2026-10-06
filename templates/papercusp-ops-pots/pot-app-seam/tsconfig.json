@@ -1,0 +1,18 @@
+{
+  "$comment": "Self-contained — zero runtime deps (the host injects every adapter), so this lib is borrowable standalone. Mirrors the sibling libs/generic/* tsconfig so the seam and its tests are typechecked (EI-25211961775959631).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*"]
+}

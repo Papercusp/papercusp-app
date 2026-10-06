@@ -76,11 +76,24 @@ import {
   type AlreadyDecidedRecall,
 } from './digest';
 import { initializeIdeaLifecycle } from './lifecycle';
-import { createImplementationReadiness, type ImplementationReadinessState } from './agent-review-policy';
+import {
+  createImplementationReadiness,
+  implementationReadinessIsLegacyEquivalent,
+  type ImplementationReadinessState,
+} from './agent-review-policy';
+import {
+  BUG_REPRODUCTION_SCHEMA_VERSION,
+  readBornVerifiedReproduction,
+  readStoredBugReproduction,
+  verifyBugReproductionReceipt,
+  type StoredBugReproduction,
+} from '../../attention/bug-reproduction';
 import { extractCitedIds } from './triage';
 import { DEFAULT_SIGNAL_ORIGIN, effectiveOrigin, type SignalOrigin } from './provenance';
 import { ANY_FAMILY_TERMINAL_STATES } from '../../work-item-dispatch-states';
 import { canonicalPotSlug, PLATFORM_POT_SLUG } from '../../platform-pot-slug';
+import { isWorkspaceGlobalLabel } from '../../workspace-global-labels';
+import { isEngineeringDocsSentinel } from '../../agent-tools/_harness-scope';
 import { isFlakeKey } from '../../calibration/types';
 import {
   decideIssueAdmissionCircuit,
@@ -95,6 +108,37 @@ import {
 
 /** The fileable improvement kinds (companion D-001). */
 export type ImprovementKind = 'bug' | 'change' | 'feature';
+
+export type CaptureWatchdogIdentityConflictReason = 'no_compatible_winner' | 'winner_lookup_failed';
+
+/** A watchdog-key INSERT lost its unique-index race, but no safe row was available to coalesce. */
+export class CaptureWatchdogIdentityConflictError extends Error {
+  readonly code = 'watchdog_identity_conflict' as const;
+  readonly retryable: boolean;
+  readonly watchdogKey: string;
+  readonly relatedIds: string[];
+  readonly reason: CaptureWatchdogIdentityConflictReason;
+  readonly lookupError?: unknown;
+
+  constructor(options: {
+    watchdogKey: string;
+    relatedIds: string[];
+    reason: CaptureWatchdogIdentityConflictReason;
+    lookupError?: unknown;
+  }) {
+    super(
+      options.reason === 'winner_lookup_failed'
+        ? 'A watchdog identity conflict could not be inspected. No improvement was captured; retry after the database read recovers.'
+        : 'A watchdog identity conflict could not be safely coalesced. No improvement was captured.',
+    );
+    this.name = 'CaptureWatchdogIdentityConflictError';
+    this.watchdogKey = options.watchdogKey;
+    this.relatedIds = [...new Set(options.relatedIds)];
+    this.reason = options.reason;
+    this.retryable = options.reason === 'winner_lookup_failed';
+    this.lookupError = options.lookupError;
+  }
+}
 
 // Re-export the shared threshold for existing capture-core callers while keeping
 // the value owned by the lightweight digest policy module.
@@ -606,6 +650,9 @@ export interface CaptureDeps {
     canonicalId: string;
     canonicalHarness?: string | null;
   }) => Promise<IssueAdmissionPressure | null>;
+  /** Resolve a capture source harness to its storage Pot. Optional/injectable so
+   * invocation-friction scope mapping stays unit-testable without the org DB. */
+  resolvePotScope?: (input: { rawSlug: string | null; workspaceId: string }) => Promise<string | null>;
   /**
    * Lifecycle seam for the pre-enrollment review park. Kept injectable so the core's
    * PG-free tests can prove ordering without importing the large work-items module.
@@ -613,6 +660,20 @@ export interface CaptureDeps {
   setWorkItemStateWithAliasInfo?: CaptureLifecycleStateWriter;
   /** Release the submitter claim when the review lifecycle cannot complete. */
   releaseIssue?: (id: string, opts?: { expectedAssignee?: string }) => Promise<EngineerIssue | null>;
+  /**
+   * EI-25176539351759672: enrol a promoted, peer-corroborated tool failure in agent
+   * review so the reviewer lane (which selects agentReview.status = pending) can see
+   * it. Without it the row carried an awaiting-review readiness stamp nobody cleared.
+   * Deliberately NOT defaulted at the call site: production goes through
+   * `defaultDeps` (lazy-loaded below); a caller that injects its own deps and omits
+   * this seam keeps the PG-free promotion it asked for.
+   */
+  enterAgentReview?: (input: {
+    id: string;
+    submittedBy: string;
+    harnessSlug?: string;
+    workspaceId?: string;
+  }) => Promise<{ entered: boolean; state?: { status?: string } | null; reason?: string }>;
   /** Resolve a probation observation after migration-865 promotion reconciliation. */
   setIssueState?: (
     id: string,
@@ -681,6 +742,12 @@ const defaultDeps: CaptureDeps = {
     return getWorkItem(id, harness);
   },
   setWorkItemStateWithAliasInfo: defaultSetWorkItemStateWithAliasInfo,
+  // Lazy for the same reason as linkIssues: agent-review.ts reaches the org pool,
+  // the routed-idea ledger and the coordination modules.
+  enterAgentReview: async (input) => {
+    const { enterAgentReview } = await import('./agent-review');
+    return enterAgentReview(input);
+  },
   // Lazy for the same reason as linkIssues: the stamp reaches the org pool and
   // the mode store, and this core is imported by pure/vitest paths.
   stampGoalProvenance: async (item, workspaceId, ownerId) => {
@@ -795,17 +862,25 @@ function sameWatchdogIdentity(
   );
 }
 
-/** Exact stable class identity check after the broad class-key lookup. */
+/** Class-key matches cross messages only when both reports have complete dimensions. */
 function sameToolFailureClassIdentity(
   issue: EngineerIssue,
-  classKey: string,
-  input: Pick<CaptureImprovementInput, 'origin' | 'scope'>,
+  incoming: ToolFailureProbationPayload,
+  input: Pick<CaptureImprovementInput, 'origin' | 'scope' | 'watchdogKey'>,
   origin: string,
 ): boolean {
   const payload = (issue.payload as Record<string, unknown> | null) ?? {};
   const probation = toolFailureProbationOf(payload);
+  const exactWatchdogIdentity = sameExactToolFailureWatchdogIdentity(
+    probation,
+    incoming,
+    input.watchdogKey,
+  );
   return (
-    probation?.classKey === classKey &&
+    probation?.classKey === incoming.classKey &&
+    (exactWatchdogIdentity ||
+      (hasCompleteToolFailureClassReport(probation?.report) &&
+        hasCompleteToolFailureClassReport(incoming.report))) &&
     isWatchdogNonTerminal(issue) &&
     effectiveOrigin(issue.signalOrigin) === origin &&
     issueScopeMatchesCapture(issue, input.scope)
@@ -867,8 +942,9 @@ function captureOccurrenceEvidence(
   };
 }
 
-/** Record the report before returning its admission verdict. The ledger is
- * diagnostic evidence, so an unavailable recorder never changes admission. */
+/** Record the report and expose whether the ledger retained it. Most coalesces
+ * also persist the incoming content on the canonical row; occurrence-only paths
+ * must fall through to a fresh row when this append fails. */
 async function appendCaptureOccurrence(
   deps: CaptureDeps,
   input: CaptureImprovementInput,
@@ -879,8 +955,8 @@ async function appendCaptureOccurrence(
   dedupCoverage: DedupCoverage,
   canonicalHarness: string | null = harnessFromScope(input.scope),
   queueAdmission?: IssueAdmissionPressure,
-): Promise<void> {
-  await (deps.recordIssueOccurrence ?? recordIssueOccurrence)({
+): Promise<boolean> {
+  const recorded = await (deps.recordIssueOccurrence ?? recordIssueOccurrence)({
     canonicalId,
     ...(canonicalHarness ? { canonicalHarness } : {}),
     reporter: input.createdBy ?? null,
@@ -890,6 +966,7 @@ async function appendCaptureOccurrence(
     evidence: captureOccurrenceEvidence(input, possibleDuplicates, dedupCoverage, queueAdmission),
     admissionIdentity: identity,
   }).catch(() => null);
+  return recorded != null;
 }
 
 /**
@@ -977,6 +1054,7 @@ interface ToolFailureProbationPayload {
   deployedRevision?: string;
   correlationFingerprint?: string;
   intendedKind?: 'bug' | 'change';
+  report?: Partial<SuspectedToolFailure>;
   [key: string]: unknown;
 }
 
@@ -987,6 +1065,49 @@ function toolFailureProbationOf(
   return candidate && typeof candidate === 'object' && !Array.isArray(candidate)
     ? (candidate as ToolFailureProbationPayload)
     : null;
+}
+
+/** Missing-dimension sentinels describe uncertainty, not a shared failure class. */
+function hasCompleteToolFailureClassReport(
+  report: ToolFailureProbationPayload['report'] | undefined,
+): boolean {
+  if (!report || typeof report !== 'object' || Array.isArray(report)) return false;
+  const required: Array<[keyof NonNullable<ToolFailureProbationPayload['report']>, string]> = [
+    ['errorCode', 'error-code-unknown'],
+    ['schemaRevision', 'schema-unknown'],
+    ['fieldPath', 'field-unknown'],
+    ['runtimeVersion', 'runtime-unknown'],
+  ];
+  return required.every(([field, sentinel]) => {
+    const value = report[field];
+    return typeof value === 'string' && value.trim() !== '' && value.trim().toLowerCase() !== sentinel;
+  });
+}
+
+/** Resolve the exact message identity even for legacy rows whose top-level key is a signature. */
+function exactToolFailureWatchdogKey(
+  probation: ToolFailureProbationPayload | null | undefined,
+): string | null {
+  const report = probation?.report;
+  if (report && typeof report === 'object' && !Array.isArray(report) &&
+      typeof report.toolName === 'string' && report.toolName.trim() &&
+      typeof report.message === 'string' && report.message.trim()) {
+    return normalizeSuspectedToolFailure(report as SuspectedToolFailure).watchdogKey;
+  }
+  const recordedKey = probation?.watchdogKey;
+  return typeof recordedKey === 'string' && recordedKey.startsWith('repeated-tool-error:')
+    ? recordedKey
+    : null;
+}
+
+function sameExactToolFailureWatchdogIdentity(
+  prior: ToolFailureProbationPayload | null | undefined,
+  incoming: ToolFailureProbationPayload | null | undefined,
+  expectedKey?: string,
+): boolean {
+  const priorKey = exactToolFailureWatchdogKey(prior);
+  const incomingKey = exactToolFailureWatchdogKey(incoming);
+  return priorKey !== null && priorKey === incomingKey && (!expectedKey || expectedKey === incomingKey);
 }
 
 /**
@@ -1007,7 +1128,11 @@ function compatibleToolFailureClassIdentity(
   const incomingClassKey = incoming?.classKey;
   const priorKnown = typeof priorClassKey === 'string' && priorClassKey.length > 0;
   const incomingKnown = typeof incomingClassKey === 'string' && incomingClassKey.length > 0;
-  return !priorKnown || !incomingKnown || priorClassKey === incomingClassKey;
+  if (priorKnown && incomingKnown && priorClassKey !== incomingClassKey) return false;
+  if (!priorKnown || !incomingKnown) return true;
+  return sameExactToolFailureWatchdogIdentity(prior, incoming) ||
+    (hasCompleteToolFailureClassReport(prior?.report) &&
+      hasCompleteToolFailureClassReport(incoming?.report));
 }
 
 function initialImplementationReadiness(reviewRequired: boolean): ImplementationReadinessState {
@@ -1026,6 +1151,9 @@ function initialImplementationReadiness(reviewRequired: boolean): Implementation
   );
 }
 
+/** The readiness reason a promoted tool failure carries while it awaits a reviewer. */
+export const TOOL_FAILURE_AWAITING_REVIEW_REASON = 'corroborated-tool-failure-awaiting-review';
+
 function promotedProbationReadiness(
   input: CaptureImprovementInput,
   probation: ToolFailureProbationPayload,
@@ -1034,19 +1162,104 @@ function promotedProbationReadiness(
     probation.directEvidence === true ||
     input.sourceRole === 'system' ||
     input.createdBy?.startsWith('system:') === true;
-  return createImplementationReadiness(
-    trustedPromotion
-      ? {
-          status: 'ready',
-          source: 'capture-policy',
-          reason: 'trusted-tool-failure-promotion',
-        }
-      : {
-          status: 'unknown',
-          source: 'capture-policy',
-          reason: 'corroborated-tool-failure-awaiting-review',
-        },
+  if (trustedPromotion) {
+    return createImplementationReadiness({
+      status: 'ready',
+      source: 'capture-policy',
+      reason: 'trusted-tool-failure-promotion',
+    });
+  }
+  // D-024 / plan unified-bug-pipeline D-011: the promoting report carries the failing
+  // call itself (a ledger-resolved or attested encounter receipt). That is direct
+  // evidence of the failure, so the bug is born verified. The receipt's verdict is
+  // computed server-side (capture.ts / captureToolInvocationFriction) and a
+  // caller-classified failure is stamped not-eligible there, so it never lands here.
+  if (readBornVerifiedReproduction(input.payloadExtra)) {
+    return createImplementationReadiness({
+      status: 'ready',
+      source: 'capture-policy',
+      reason: 'born-verified-tool-failure-promotion',
+    });
+  }
+  return createImplementationReadiness({
+    status: 'unknown',
+    source: 'capture-policy',
+    reason: TOOL_FAILURE_AWAITING_REVIEW_REASON,
+  });
+}
+
+/** The receipt a promotion persists, when the incoming filing carried a valid one. */
+function promotionReproductionPatch(input: CaptureImprovementInput): { reproduction?: StoredBugReproduction } {
+  const stored = readStoredBugReproduction(input.payloadExtra);
+  return stored ? { reproduction: stored } : {};
+}
+
+/** The readiness reason triage stamps when its deployment screen could not answer. */
+export const DEPLOYMENT_FRESHNESS_UNKNOWN_REASON = 'deployment-freshness-unknown';
+
+/**
+ * The two `unknown` readiness reasons that wait on a verifier no lane was ever handed
+ * (EI-25176539351759672): a corroborated tool-failure promotion, and a triage place
+ * whose deployment screen could not answer. Both are held out of self-select by the
+ * claim floor; neither carried an agentReview record before P-002.
+ */
+export const STRANDED_REVIEW_REASONS: readonly string[] = [
+  TOOL_FAILURE_AWAITING_REVIEW_REASON,
+  DEPLOYMENT_FRESHNESS_UNKNOWN_REASON,
+];
+
+/**
+ * EI-25176539351759672: a row whose readiness says it awaits review but which has no
+ * agentReview record is invisible to every lane — the claim floor holds it as
+ * in-review and the reviewer lane selects only agentReview.status = pending.
+ */
+export function isStrandedToolFailureReview(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const value = payload as Record<string, unknown>;
+  const readiness = value.implementationReadiness as Record<string, unknown> | null | undefined;
+  return (
+    readiness?.status === 'unknown' &&
+    typeof readiness.reason === 'string' &&
+    STRANDED_REVIEW_REASONS.includes(readiness.reason) &&
+    (value.agentReview === undefined || value.agentReview === null)
   );
+}
+
+/**
+ * Enrol a promoted, awaiting-review tool failure in agent review (plan
+ * unified-bug-pipeline-and-honest-queue P-002; replaced by the one verification stage
+ * at P-008). Fail-open for the PROMOTION — losing enrolment must not lose the
+ * corroborated report — but never silent: a failure is stamped on the row with the
+ * same `agentReviewFailure` shape the capture review path uses, so the P-003 sweep
+ * and leader triage can see and retry it.
+ */
+export async function enrolPromotedToolFailureReview(
+  issue: EngineerIssue,
+  opts: { submittedBy: string; workspaceId?: string; fallbackScope?: string },
+  deps: CaptureDeps,
+): Promise<{ enrolled: boolean; failure?: AgentReviewFailure }> {
+  if (!deps.enterAgentReview || !isStrandedToolFailureReview(issue.payload)) return { enrolled: false };
+  const harnessSlug = harnessFromScope(issue.scope) ?? harnessFromScope(opts.fallbackScope) ?? undefined;
+  try {
+    const result = await deps.enterAgentReview({
+      id: issue.id,
+      submittedBy: opts.submittedBy,
+      ...(harnessSlug ? { harnessSlug } : {}),
+      ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+    });
+    if (result.entered || result.state?.status === 'pending' || result.reason === 'already-approved') {
+      return { enrolled: true };
+    }
+    throw new Error(`agent-review enrollment was not entered${result.reason ? `: ${result.reason}` : ''}`);
+  } catch (error) {
+    const failure: AgentReviewFailure = {
+      phase: 'enrollment',
+      message: reviewFailureMessage(error),
+      at: new Date().toISOString(),
+    };
+    await recordCaptureReviewFailure(issue.id, failure, {}, deps).catch(() => undefined);
+    return { enrolled: false, failure };
+  }
 }
 
 const PROMOTION_RECONCILIATION_OWNER = 'improvement-promotion-reconciler';
@@ -1128,9 +1341,12 @@ async function reconcileToolFailurePromotionCollision(
       promotionReconciledFrom: prior.id,
       promotionReconciledAt: reconciledAt,
     },
-    ...(canonicalPayload.implementationReadiness
-      ? {}
-      : { implementationReadiness: promotedProbationReadiness(input, incomingProbation) }),
+    // A creation-enrollment `unknown` stamp is the absent-key legacy case under a
+    // recorded producer (P-005 D-011), so the promotion verdict replaces it too.
+    ...(!canonicalPayload.implementationReadiness || implementationReadinessIsLegacyEquivalent(canonicalPayload)
+      ? { implementationReadiness: promotedProbationReadiness(input, incomingProbation) }
+      : {}),
+    ...promotionReproductionPatch(input),
     promotionReconciledFrom: prior.id,
     promotionReconciledAt: reconciledAt,
   }).catch(() => null);
@@ -1154,7 +1370,7 @@ async function reconcileToolFailurePromotionCollision(
 
   await (deps.tagIssue ?? tagIssue)(canonical.id, IMPROVEMENT_TOPIC, input.createdBy).catch(() => {});
   await (deps.untagIssue ?? untagIssue)(prior.id, OBSERVATION_TOPIC).catch(() => {});
-  return merged;
+  return withPromotionReviewEnrolment(merged, input, deps);
 }
 
 /** Promote one exact-key probation row in place, preserving its history/id. */
@@ -1219,6 +1435,7 @@ async function promoteToolFailureProbation(
         promotedBy: input.createdBy ?? 'system:improvement-watchdog',
       },
       implementationReadiness: promotedProbationReadiness(input, incomingProbation),
+      ...promotionReproductionPatch(input),
       ideaLifecycle: initializeIdeaLifecycle(),
     },
     { unset: ['lane'] },
@@ -1239,7 +1456,28 @@ async function promoteToolFailureProbation(
   if (!merged) return null;
   await (deps.tagIssue ?? tagIssue)(prior.id, IMPROVEMENT_TOPIC, input.createdBy).catch(() => {});
   await (deps.untagIssue ?? untagIssue)(prior.id, OBSERVATION_TOPIC).catch(() => {});
-  return merged;
+  return withPromotionReviewEnrolment(merged, input, deps);
+}
+
+/** Enrol a just-promoted row when it awaits review; return the freshest row we can read. */
+async function withPromotionReviewEnrolment(
+  promoted: EngineerIssue,
+  input: CaptureImprovementInput,
+  deps: CaptureDeps,
+): Promise<EngineerIssue> {
+  const enrolment = await enrolPromotedToolFailureReview(
+    promoted,
+    {
+      submittedBy: input.createdBy ?? 'system:improvement-watchdog',
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      fallbackScope: input.scope,
+    },
+    deps,
+  );
+  if (!enrolment.enrolled && !enrolment.failure) return promoted;
+  // enterAgentReview / the failure stamp wrote the payload after `promoted` was read.
+  const reread = deps.getIssue ? await deps.getIssue(promoted.id).catch(() => null) : null;
+  return reread ?? promoted;
 }
 
 /**
@@ -1581,6 +1819,36 @@ export interface ToolInvocationFriction {
   ownerId: string;
   invokedAt: string;
   failure: Pick<SuspectedToolFailure, 'toolName' | 'errorCode' | 'status' | 'message' | 'schemaRevision' | 'fieldPath' | 'runtimeVersion'>;
+  /** The `harness_shared.tool_invocations` row this report was read from (D-011). */
+  invocationId?: string;
+  /** That row's `serving_build_sha`: the build the failing call actually ran on. */
+  servingBuildSha?: string | null;
+}
+
+/**
+ * Plan unified-bug-pipeline D-011 (extends D-024): a watchdog report that carries the
+ * failing tool_invocations row is a reproduction on the build that served it. The
+ * receipt is verified against the row already in hand (no second read), through the
+ * same verifier a filed encounter uses. Bug-class failures only: caller and
+ * rate-limit classes file as `change` and never skip review (D-024 §4).
+ */
+export async function frictionReproduction(
+  invocation: ToolInvocationFriction,
+  kind: 'bug' | 'change',
+): Promise<StoredBugReproduction | null> {
+  const { invocationId, servingBuildSha, failure, ownerId } = invocation;
+  if (kind !== 'bug' || !invocationId || !servingBuildSha || !/^[0-9a-f]{7,40}$/i.test(servingBuildSha)) return null;
+  const receipt = {
+    kind: 'encounter' as const,
+    ref: `tool_invocations:${invocationId}`,
+    buildSha: servingBuildSha.toLowerCase(),
+  };
+  const verification = await verifyBugReproductionReceipt(receipt, {
+    readToolInvocation: async () => ({ status: failure.status ?? null, servingBuildSha }),
+    readTestRun: async () => null,
+    now: () => new Date(),
+  });
+  return { schemaVersion: BUG_REPRODUCTION_SCHEMA_VERSION, receipt, filedBy: ownerId, verification };
 }
 
 /** R-7: reuse the ordinary probation door without agent-authored incident fields. */
@@ -1600,22 +1868,40 @@ export async function captureToolInvocationFriction(
   };
   const normalized = normalizeSuspectedToolFailure(report);
   const kind = normalized.class === 'caller' || normalized.class === 'rate-limit' ? 'change' : 'bug';
-  // D-010 (review-system-rework-reduction-2026-09-23): migration 865's arbiter
-  // keys watchdogKey, so the ROW identity is the build-independent signature.
-  // The contract/build class stays the CORROBORATION identity: it is the row's
-  // probation classKey and is tallied per class below, so a report on another
-  // build counts onto the row but can neither corroborate nor rewrite it.
+  // D-010 (review-system-rework-reduction-2026-09-23): use the build-independent
+  // signature as row identity only when all class dimensions were measured.
+  // Unknown sentinels cannot merge unrelated reports, so incomplete metadata
+  // falls back to the exact message-shaped watchdog key.
   const signatureKey = toolFailureSignatureKey(report, normalized.class);
+  const rowKey = hasCompleteToolFailureClassReport(report) ? signatureKey : normalized.watchdogKey;
   // WI-10003605: a workspace-spanning invocation records its harness as the wildcard
   // '*'. The work-item scope guard (work-item-scope.ts) refuses `harness:*`, so every
   // such friction report threw and console.warned once per invocation (failing every
   // fail-on-console real-engine PUI test). A wildcard names no harness: file operator-scoped.
   const concreteHarness = typeof harnessSlug === 'string' && harnessSlug.trim() && harnessSlug.trim() !== '*'
     ? harnessSlug.trim() : null;
-  const scope = concreteHarness ? `harness:${concreteHarness}` : 'operator';
+  // Invocation telemetry identifies the SOURCE harness, but work-item scope is
+  // a Pot home. Resolve through the same membership resolver as createIssue so
+  // member harnesses land at their home Pot. The `engineering` docs sentinel is
+  // not a concrete harness, so resolve it as workspace-global; retain the raw
+  // source value in `toolInvocation` below for attribution.
+  const sourceIsWorkspaceScope = !concreteHarness ||
+    isWorkspaceGlobalLabel(concreteHarness, workspaceId) ||
+    isEngineeringDocsSentinel(concreteHarness);
+  const resolvePotScope = deps.resolvePotScope ?? (async (args: { rawSlug: string | null; workspaceId: string }) => {
+    const { resolveWorkItemPot } = await import('../../pot-membership');
+    return resolveWorkItemPot(args);
+  });
+  const resolvedPotScope = concreteHarness
+    ? await resolvePotScope({ rawSlug: sourceIsWorkspaceScope ? null : concreteHarness, workspaceId })
+    : null;
+  const scope = resolvedPotScope
+    ? `harness:${resolvedPotScope}`
+    : sourceIsWorkspaceScope ? 'operator' : `harness:${concreteHarness}`;
   const toolInvocation = { workspaceId, harnessSlug, ownerId, invokedAt };
+  const reproduction = await frictionReproduction(invocation, kind);
   const incomingProbation = {
-    ...normalized, watchdogKey: signatureKey, signatureKey, state: 'probation' as const, intendedKind: kind,
+    ...normalized, watchdogKey: rowKey, signatureKey, state: 'probation' as const, intendedKind: kind,
     reporters: [ownerId], firstSeenAt: invokedAt, lastSeenAt: invokedAt, report,
   };
   const base: CaptureImprovementInput = {
@@ -1623,16 +1909,19 @@ export async function captureToolInvocationFriction(
     body: `Invocation telemetry observed ${failure.toolName} at ${invokedAt}.\n\n${failure.message}`,
     kind, severity: 'nit', lane: 'observation', scope,
     workspaceId, createdBy: ownerId, evidenceAt: invokedAt,
-    watchdogKey: signatureKey,
+    watchdogKey: rowKey,
     // Do not set sourceRole:'system': an automated report is still this
     // caller's evidence, not a trusted watchdog promotion or review waiver.
   };
   // Fail open like every other capture lookup: an unreadable index mints, and
   // migration 865's arbiter still refuses a second open row for the signature.
-  const signatureHits = await (deps.findIssuesByWatchdogKeys ?? findIssuesByWatchdogKeys)([signatureKey])
+  const signatureHits = await (deps.findIssuesByWatchdogKeys ?? findIssuesByWatchdogKeys)([rowKey])
     .catch(() => [] as EngineerIssue[]);
   const signatureRow = signatureHits.find((issue) =>
-    (issue.payload as Record<string, unknown> | null)?.watchdogKey === signatureKey &&
+    // Incomplete class metadata deliberately falls back to the exact message
+    // watchdog key; look up the identity selected above, not the broader
+    // signature key that this report was not allowed to use.
+    (issue.payload as Record<string, unknown> | null)?.watchdogKey === rowKey &&
     isWatchdogNonTerminal(issue) &&
     effectiveOrigin(issue.signalOrigin) === DEFAULT_SIGNAL_ORIGIN &&
     issueScopeMatchesCapture(issue, scope));
@@ -1642,17 +1931,24 @@ export async function captureToolInvocationFriction(
     classKey: normalized.classKey, ownerId, at: invokedAt,
     contractFingerprint: normalized.contractFingerprint, deployedRevision: normalized.deployedRevision,
   };
-  const tally = tallyToolFailureClass(toolFailureSignatureOf(priorPayload), signatureKey, occurrence,
+  const tally = tallyToolFailureClass(toolFailureSignatureOf(priorPayload), rowKey, occurrence,
     rowProbation?.classKey);
-  if (!signatureRow || rowProbation?.classKey === normalized.classKey) {
+  const sameCompleteClass = rowProbation?.classKey === normalized.classKey &&
+    hasCompleteToolFailureClassReport(report) && hasCompleteToolFailureClassReport(rowProbation.report);
+  const sameExactReportClass = rowProbation?.classKey === normalized.classKey &&
+    rowKey === normalized.watchdogKey && priorPayload.watchdogKey === rowKey;
+  if (!signatureRow || sameCompleteClass || sameExactReportClass) {
     // A new signature, or the row's own class: the ordinary class-key route
     // mints, coalesces or corroborates exactly as it did before D-010.
     return captureImprovement({
       ...base,
-      payloadExtra: { toolFailureProbation: incomingProbation, toolFailureSignature: tally, toolInvocation },
+      payloadExtra: {
+        toolFailureProbation: incomingProbation, toolFailureSignature: tally, toolInvocation,
+        ...(reproduction ? { reproduction } : {}),
+      },
     }, deps);
   }
-  const identity = admissionIdentity(base.title, signatureKey);
+  const identity = admissionIdentity(base.title, rowKey);
   const coverage: DedupCoverage = { lexical: 'skipped', semantic: 'skipped', degraded: false };
   const harness = harnessFromScope(signatureRow.scope);
   const repeatCount = (typeof priorPayload.repeatCount === 'number' ? priorPayload.repeatCount : 1) + 1;
@@ -1661,12 +1957,16 @@ export async function captureToolInvocationFriction(
   // corroborated class and is promoted; the uncorroborated first class never
   // promotes it, and a single new-build report never rewrites it.
   const earlierReporters = toolFailureSignatureOf(priorPayload)?.classes[normalized.classKey]?.reporters ?? [];
-  if (issueWatchdogLane(signatureRow) === 'observation' && rowProbation?.state === 'probation' &&
+  if (hasCompleteToolFailureClassReport(report) && issueWatchdogLane(signatureRow) === 'observation' &&
+      rowProbation?.state === 'probation' &&
       earlierReporters.length > 0 && !earlierReporters.includes(ownerId)) {
     const classView: EngineerIssue = { ...signatureRow, payload: { ...priorPayload,
-      toolFailureProbation: { ...rowProbation, ...normalized, watchdogKey: signatureKey, signatureKey,
+      toolFailureProbation: { ...rowProbation, ...normalized, watchdogKey: rowKey, signatureKey,
         reporters: earlierReporters } } };
-    const input = { ...base, payloadExtra: { toolFailureProbation: incomingProbation, toolInvocation } };
+    const input = {
+      ...base,
+      payloadExtra: { toolFailureProbation: incomingProbation, toolInvocation, ...(reproduction ? { reproduction } : {}) },
+    };
     const promoted = await promoteToolFailureProbation(classView, input, deps, signatureHits, true);
     if (promoted) {
       const merged = await (deps.mergeIssuePayload ?? mergeIssuePayload)(promoted.id,
@@ -1901,7 +2201,7 @@ export async function captureImprovement(
       return [] as EngineerIssue[];
     });
     const classPrior = classKeyIssues.find((issue) =>
-      sameToolFailureClassIdentity(issue, incomingProbation.classKey!, input, origin),
+      sameToolFailureClassIdentity(issue, incomingProbation, input, origin),
     );
     if (!checkOnly && isObservation && classPrior && issueWatchdogLane(classPrior) !== 'observation') {
       // A later retry is evidence on the accountable existing issue. Preserve
@@ -2378,13 +2678,19 @@ export async function captureImprovement(
   // Key-aware title net (watchdog-audit P-004 / D-001): a candidate carrying a
   // DIFFERENT watchdogKey is a different signal — nested-path red-test titles
   // token-subset each other and used to false-classify. A candidate WITHOUT a key
-  // stays in the net (legacy items + agent captures).
+  // stays in the net for ordinary captures (legacy items + agent captures).
   const candidateById = new Map(candidates.map((i) => [i.id, i]));
   const candidateKeyOf = (id: string): string | null => {
     const p = candidateById.get(id)?.payload;
     const k = p && typeof p === 'object' ? (p as Record<string, unknown>).watchdogKey : undefined;
     return typeof k === 'string' ? k : null;
   };
+  // A directly-evidenced tool failure already carries an exact watchdog identity.
+  // A keyless legacy candidate is not evidence of that failure, so it may remain
+  // advisory in possibleDuplicates but cannot block or burst-coalesce this report.
+  // Exact-key lookup/coalescing ran above and continues to own repeated failures.
+  const directEvidenceToolFailure =
+    incomingProbation?.state === 'promoted' && incomingProbation.directEvidence === true;
 
   // ─── P-004: keyless non-observation titleKey fold ─────────────────────────────
   // A recurring non-observation capture that supplies no watchdogKey has NO
@@ -2501,12 +2807,14 @@ export async function captureImprovement(
     // neither carve-out applies to it.
     (d) => d.exactKey === true || ((softMayBlock || d.semantic !== 'soft') && d.lexical !== 'containment'),
   );
-  const compatible = input.watchdogKey
-    ? blockEligible.filter((d) => {
-        const ck = candidateKeyOf(d.id);
-        return ck == null || ck === input.watchdogKey;
-      })
-    : blockEligible;
+  const compatible = directEvidenceToolFailure
+    ? blockEligible.filter((d) => candidateKeyOf(d.id) === input.watchdogKey)
+    : input.watchdogKey
+      ? blockEligible.filter((d) => {
+          const ck = candidateKeyOf(d.id);
+          return ck == null || ck === input.watchdogKey;
+        })
+      : blockEligible;
 
   let blockingDuplicates: PossibleDuplicate[];
   let declineReason: 'likely-duplicate' | 'stale-evidence' = 'likely-duplicate';
@@ -2553,6 +2861,7 @@ export async function captureImprovement(
   let queueAdmission: IssueAdmissionPressure | undefined;
   const burstCandidates = possibleDuplicates.filter((candidate) => {
     if (candidate.semantic !== 'soft' || candidate.state !== 'open') return false;
+    if (directEvidenceToolFailure) return candidateKeyOf(candidate.id) === input.watchdogKey;
     if (!input.watchdogKey) return true;
     const candidateKey = candidateKeyOf(candidate.id);
     return candidateKey == null || candidateKey === input.watchdogKey;
@@ -2589,7 +2898,7 @@ export async function captureImprovement(
       });
       if (decision.action === 'coalesce' && decision.canonical) {
         const canonicalIssue = candidateById.get(decision.canonical.id);
-        await appendCaptureOccurrence(
+        const occurrenceRecorded = await appendCaptureOccurrence(
           deps,
           input,
           identity,
@@ -2600,22 +2909,26 @@ export async function captureImprovement(
           harnessFromScope(canonicalIssue?.scope),
           queueAdmission,
         );
-        return {
-          ok: true,
-          created: false,
-          reason: 'coalesced',
-          kind: canonicalIssue?.kind as 'bug' | 'change' | undefined,
-          improvementKind: input.kind,
-          ...(canonicalIssue ? { issue: canonicalIssue } : {}),
-          possibleDuplicates,
-          dedupCoverage,
-          admissionIdentity: identity,
-          queueAdmission,
-          ...(alreadyDecided.length ? { alreadyDecided } : {}),
-          hint:
-            `Low-diversity admission burst: preserved this report as an occurrence on ${decision.canonical.id}; ` +
-            'no new scheduler row was created.',
-        };
+        if (occurrenceRecorded) {
+          return {
+            ok: true,
+            created: false,
+            reason: 'coalesced',
+            kind: canonicalIssue?.kind as 'bug' | 'change' | undefined,
+            improvementKind: input.kind,
+            ...(canonicalIssue ? { issue: canonicalIssue } : {}),
+            possibleDuplicates,
+            dedupCoverage,
+            admissionIdentity: identity,
+            queueAdmission,
+            ...(alreadyDecided.length ? { alreadyDecided } : {}),
+            hint:
+              `Low-diversity admission burst: preserved this report as an occurrence on ${decision.canonical.id}; ` +
+              'no new scheduler row was created.',
+          };
+        }
+        // The occurrence is the only copy of this report on the coalesced path.
+        // If it did not persist, fall through and mint the canonical row below.
       }
     }
   }
@@ -2830,7 +3143,7 @@ export async function captureImprovement(
         // so the reading is APPENDED (the occurrence below carries the full
         // title/body) and the survivor's own text is left alone. One wrong guess
         // must not be able to erase another agent's account of a problem.
-        await appendCaptureOccurrence(
+        const occurrenceRecorded = await appendCaptureOccurrence(
           deps,
           input,
           identity,
@@ -2840,31 +3153,32 @@ export async function captureImprovement(
           dedupCoverage,
           harnessFromScope(merged.scope),
         );
-        return {
-          ok: true,
-          created: false,
-          reason: 'coalesced',
-          coalescedOnto: buildCoalesceEffect({
-            finalIssue: merged,
-            prior,
-            input,
-            repeatCount,
-            bodyPersisted: false,
-            textDisposition: 'append-only',
-            fold: derived.fold,
-          }),
-          kind: merged.kind as 'bug' | 'change',
-          improvementKind: input.kind,
-          issue: merged,
-          topics,
-          possibleDuplicates,
-          dedupCoverage,
-          ...(alreadyDecided.length ? { alreadyDecided } : {}),
-        };
+        if (occurrenceRecorded) {
+          return {
+            ok: true,
+            created: false,
+            reason: 'coalesced',
+            coalescedOnto: buildCoalesceEffect({
+              finalIssue: merged,
+              prior,
+              input,
+              repeatCount,
+              bodyPersisted: false,
+              textDisposition: 'append-only',
+              fold: derived.fold,
+            }),
+            kind: merged.kind as 'bug' | 'change',
+            improvementKind: input.kind,
+            issue: merged,
+            topics,
+            possibleDuplicates,
+            dedupCoverage,
+            ...(alreadyDecided.length ? { alreadyDecided } : {}),
+          };
+        }
       }
-      // The merge failed. Fall THROUGH to the mint below rather than returning an
-      // error: a fold is an optimization, and losing the filing to protect it
-      // would be exactly the silencing D-042 forbids.
+      // A failed merge or occurrence append leaves the incoming title/body without
+      // a durable home. Fall through and mint the observation below.
     } else if (derived?.fold.verdict === 'soft' && derived.prior) {
       // Recorded now, applied after the row exists — the link needs both ids.
       softFold = { fold: derived.fold, prior: derived.prior };
@@ -3040,16 +3354,33 @@ export async function captureImprovement(
     // different 23505 (or a winner from another lane/Pot/origin) must remain a
     // visible failure rather than being silently turned into a duplicate merge.
     if (input.watchdogKey && isWatchdogIdentityConflict(error)) {
-      const raced = await (deps.findIssuesByWatchdogKeys ?? findIssuesByWatchdogKeys)([input.watchdogKey]).catch(() => {
-        throw error;
-      });
+      let raced: EngineerIssue[] = [];
+      let lookupError: unknown;
+      try {
+        raced = await (deps.findIssuesByWatchdogKeys ?? findIssuesByWatchdogKeys)([input.watchdogKey]);
+      } catch (readError) {
+        lookupError = readError;
+      }
       const winner = raced.find(
         (candidate) =>
           isWatchdogNonTerminal(candidate) &&
           sameWatchdogIdentity(candidate, input, origin) &&
           compatibleToolFailureClassIdentity(candidate, incomingProbation),
       );
-      if (!winner) throw error;
+      if (!winner) {
+        const relatedIds = raced
+          .filter((candidate) => {
+            const payload = (candidate.payload as Record<string, unknown> | null) ?? {};
+            return isWatchdogNonTerminal(candidate) && payload.watchdogKey === input.watchdogKey;
+          })
+          .map((candidate) => candidate.id);
+        throw new CaptureWatchdogIdentityConflictError({
+          watchdogKey: input.watchdogKey,
+          relatedIds,
+          reason: lookupError === undefined ? 'no_compatible_winner' : 'winner_lookup_failed',
+          ...(lookupError === undefined ? {} : { lookupError }),
+        });
+      }
       return coalesceWatchdogWinner({
         prior: winner,
         input,

@@ -54,6 +54,15 @@ function isTypePosition(node: ts.Node): boolean {
   return false;
 }
 
+/** A runtime `typeof loader` check reads the binding; it does not invoke or export the loader. */
+function isRuntimeTypeofProbe(node: ts.Identifier): boolean {
+  let expression: ts.Expression = node;
+  while (expression.parent && ts.isParenthesizedExpression(expression.parent)
+    && expression.parent.expression === expression) expression = expression.parent;
+  return !!expression.parent && ts.isTypeOfExpression(expression.parent)
+    && expression.parent.expression === expression;
+}
+
 const ASSIGNMENT_OPERATORS = new Set([
   ts.SyntaxKind.EqualsToken, ts.SyntaxKind.QuestionQuestionEqualsToken, ts.SyntaxKind.BarBarEqualsToken,
 ]);
@@ -137,6 +146,38 @@ export function createRequireSpecifiers(fileName: string, text: string): CreateR
   const loaderBindings = new Set<string>();
   const wrappersChecked = new Set<string>();
 
+  const factoryCall = (node: ts.Node): node is ts.CallExpression => {
+    if (!ts.isCallExpression(node)) return false;
+    const callee = unwrap(node.expression);
+    return (ts.isIdentifier(callee) && factories.has(callee.text))
+      || (ts.isPropertyAccessExpression(callee) && callee.name.text === 'createRequire');
+  };
+
+  /** The guarded branch is the only branch that can produce a loader; the other must be empty. */
+  const typeofFunctionBranch = (condition: ts.Expression): 'true' | 'false' | null => {
+    const test = unwrap(condition);
+    if (!ts.isBinaryExpression(test)) return null;
+    const op = test.operatorToken.kind;
+    const equals = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.EqualsEqualsEqualsToken;
+    const notEquals = op === ts.SyntaxKind.ExclamationEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+    if (!equals && !notEquals) return null;
+    const left = unwrap(test.left);
+    const right = unwrap(test.right);
+    const typeOf = ts.isTypeOfExpression(left) && ts.isStringLiteral(right) && right.text === 'function' ? left
+      : ts.isTypeOfExpression(right) && ts.isStringLiteral(left) && left.text === 'function' ? right
+        : null;
+    if (!typeOf) return null;
+    const operand = unwrap(typeOf.expression);
+    if (!ts.isIdentifier(operand) || !factories.has(operand.text)) return null;
+    return equals ? 'true' : 'false';
+  };
+
+  const isEmptyFallback = (node: ts.Expression): boolean => {
+    const expression = unwrap(node);
+    return (ts.isIdentifier(expression) && expression.text === 'undefined')
+      || expression.kind === ts.SyntaxKind.NullKeyword;
+  };
+
   const handleArgument = (call: ts.CallExpression): void => {
     const arg = call.arguments[0] ? unwrap(call.arguments[0]) : undefined;
     if (isLiteral(arg)) { specifiers.add(arg.text); return; }
@@ -180,6 +221,15 @@ export function createRequireSpecifiers(fileName: string, text: string): CreateR
       const parent = node.parent;
       if (!parent) { fail(node, 'createRequire loader escapes'); return; }
       if (isTransparent(parent)) { node = parent; continue; }
+      if (ts.isConditionalExpression(parent) && (parent.whenTrue === node || parent.whenFalse === node)) {
+        const selectedBranch = parent.whenTrue === node ? 'true' : 'false';
+        const guardedBranch = typeofFunctionBranch(parent.condition);
+        const fallback = selectedBranch === 'true' ? parent.whenFalse : parent.whenTrue;
+        if (factoryCall(node) && guardedBranch === selectedBranch && isEmptyFallback(fallback)) {
+          node = parent;
+          continue;
+        }
+      }
       if (ts.isBinaryExpression(parent) && parent.right === node && ASSIGNMENT_OPERATORS.has(parent.operatorToken.kind)
         && ts.isIdentifier(parent.left)) {
         loaderBindings.add(parent.left.text);
@@ -207,7 +257,8 @@ export function createRequireSpecifiers(fileName: string, text: string): CreateR
     const isFactoryRef = factories.has(id.text)
       || (id.text === 'createRequire' && ts.isPropertyAccessExpression(id.parent) && id.parent.name === id);
     if (!isFactoryRef) continue;
-    if (ts.isImportSpecifier(id.parent) || isTypePosition(id)) continue;
+      if (ts.isImportSpecifier(id.parent) || isTypePosition(id)) continue;
+      if (isRuntimeTypeofProbe(id)) continue;
     // `module.createRequire` / `createRequire`, possibly as `(0, createRequire)`.
     let callee: ts.Node = ts.isPropertyAccessExpression(id.parent) && id.parent.name === id ? id.parent : id;
     while (callee.parent && (isTransparent(callee.parent)
@@ -230,6 +281,9 @@ export function createRequireSpecifiers(fileName: string, text: string): CreateR
         fail(parent, `loader binding ${name} is reassigned`);
         continue;
       }
+      // Node exposes its loaded-module cache on the loader function. Reading it does not load a
+      // module and therefore adds no import-closure edge.
+      if (ts.isPropertyAccessExpression(parent) && parent.expression === ref && parent.name.text === 'cache') continue;
       // A read of the binding (`req(x)`, `req.resolve(x)`, or `r ??= …` evaluated) is a loader use.
       followLoader(ref);
     }

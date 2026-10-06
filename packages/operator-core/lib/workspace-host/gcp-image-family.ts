@@ -1,5 +1,6 @@
 import {
   WORKSPACE_HOST_BOOTC_BUILDER_KIND,
+  workspaceHostBootcPinnedImageRef,
   type WorkspaceHostBootstrapAttestation,
   type WorkspaceHostBuilderKind,
   type WorkspaceHostImageArtifact,
@@ -19,17 +20,24 @@ import {
 
 export const GCP_IMAGE_FAMILY_RELEASE_CONTRACT_VERSION = 'papercusp-gcp-image-family-release-v1';
 
-/** Guest capabilities that must survive the provider-specific image build. */
+/**
+ * Guest capabilities that must survive the provider-specific image build, named by the RPM
+ * the CentOS Stream 10 bootc image (infra/images/bootc/workspace-host.Containerfile)
+ * installs. The GCE disk is rendered from that same image (bake-cloud-images.sh), so each
+ * name must be checkable with `rpm -q` against it. The Ubuntu-era names never existed
+ * there: ufw maps to nftables and unattended-upgrades to dnf-automatic (RPM-EQUIVALENCE.md;
+ * WI-10005618, the GCP twin of WI-10005605).
+ */
 export const GCP_IMAGE_FAMILY_REQUIRED_GUEST_TOOLS = [
   'acl',
   'ca-certificates',
   'curl',
+  'dnf-automatic',
   'google-guest-agent',
   'jq',
   'minisign',
+  'nftables',
   'openssh-server',
-  'ufw',
-  'unattended-upgrades',
 ] as const;
 
 export interface GcpImmutableImageCoordinates {
@@ -214,6 +222,13 @@ export interface GcpImageFamilyReleaseRequest {
     serviceAccountEmail: string;
     subnetwork: string;
   };
+  /**
+   * WI-10006408: the required guest-tool versions, derived by the request composer from the
+   * bake's syft SBOM (installed-rpm rows; `bootc-image-release-request-cli --emit
+   * guest-tool-versions --provider gcp`). The image provenance is pinned to exactly these; an
+   * operator `--guest-tool-versions-file` may only restate them (resolveSbomGuestToolVersions).
+   */
+  guestToolVersions?: Readonly<Record<string, string>>;
 }
 
 export type GcpImageFamilyReleaseResumePhase = 'scan' | 'publish';
@@ -504,7 +519,7 @@ function validateCleanBootProof(
     if (
       artifact.hostModel !== 'bootc-image' ||
       proof.attestation.bootcBaseImage !== artifact.bootc.baseImage ||
-      proof.attestation.release.source !== artifact.bootc.image ||
+      proof.attestation.release.source !== workspaceHostBootcPinnedImageRef(artifact.bootc) ||
       proof.attestation.release.imageDigest !== artifact.bootc.imageDigest ||
       proof.attestation.release.signaturePolicyPath !== artifact.bootc.signaturePolicyPath
     ) {

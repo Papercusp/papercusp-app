@@ -96,7 +96,7 @@ export interface ResolvedWorkspaceHostAgentCredentialSlot {
    * refresh token of BOTH members for EVERY source kind (D-311, WI-10001691), so nothing on the
    * host can mint a new access token: at this instant the agent on the host starts failing with
    * 401. It used to be invisible — a delivery read as a durable login and died ~13h later with no
-   * prior signal (measured on owner-test 2026-09-26..27).
+   * prior signal (measured on avi-test 2026-09-26..27).
    */
   readonly accessExpiresAt: string | null;
 }

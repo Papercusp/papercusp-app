@@ -21,7 +21,7 @@
  * writer that actually provisions a claude config dir is `writeSpawnClaudeConfig`
  * (spawn-mcp.ts); it takes a `persistentDir` computed here.
  */
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -86,4 +86,26 @@ export function codexHomesRoot(): string {
  *  (the adv-session row id for tracked sessions). */
 export function codexHomeForSessionKey(sessionKey: string | number): string {
   return join(codexHomesRoot(), `session-${sessionKey}`);
+}
+
+/**
+ * Root for Codex's high-write SQLite state. Keep this separate from
+ * {@link codexHomesRoot}: the latter is the durable prompt/rollout home, while
+ * Codex 0.159 can spend longer than its 30-second SQLx acquisition deadline
+ * creating SQLite pools on a busy persistent home filesystem. The temp root is
+ * still session-keyed and lifecycle-managed by the existing session-dir GC.
+ *
+ * Hosts that have a dedicated fast state volume may override the root without
+ * moving CODEX_HOME (and therefore without invalidating rollout/resume paths).
+ */
+export function codexSqliteHomesRoot(): string {
+  return (
+    process.env.PAPERCUSP_CODEX_SQLITE_HOMES_DIR ||
+    join(tmpdir(), 'papercusp-codex-sqlite-homes')
+  );
+}
+
+/** Stable SQLite state directory for one tracked Codex session. */
+export function codexSqliteHomeForSessionKey(sessionKey: string | number): string {
+  return join(codexSqliteHomesRoot(), `session-${sessionKey}`);
 }

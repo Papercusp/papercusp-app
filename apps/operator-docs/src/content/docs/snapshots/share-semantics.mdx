@@ -4,15 +4,18 @@
 # Edit the doc with docs:author { overwrite: true } — a hand-edit here is REFUSED by
 # the next projection (it cannot tell your edit from corruption), so it blocks the
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
-title: Per-field share semantics
-description: Plugins flag each configSchema field as secret (credential, stripped on snapshot by default), shareable:false (publisher-specific identifier, stripped), or default (config that travels with the snapshot). Schema evolution covered via aliases for renames + removals.
+title: "Per-field share semantics"
+description: "Plugins flag each configSchema field as secret (credential, stripped on snapshot by default), shareable:false (publisher-specific identifier, stripped), or default (config that travels with the snapshot). Schema evolution covered via aliases for renames + removals."
+type: Insight
+discovered: 2026-10-06
+status: active
+plans:
+  - "retire-snapshots-instance-spec-2026-06-09"
+  - "harness-blueprint-distribution-2026-06-03"
+  - "operator-vite-migration-2026-05-20"
+  - "revive-cupboard-distribution-2026-06-04"
 sidebar:
   order: 4
-plans:
-  - retire-snapshots-instance-spec-2026-06-09
-  - harness-blueprint-distribution-2026-06-03
-  - operator-vite-migration-2026-05-20
-  - revive-cupboard-distribution-2026-06-04
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -293,7 +296,7 @@ point at their retired locations; do not expect to find them live under
 
 ## Migration story
 
-Existing plugins (cloudflare-pages, github-repo, jira-sync, linear-sync, etc.)
+Existing plugins (cloudflare-pages, github-repo, etc.)
 keep working without changes — fields without flags fall through the
 pattern-based redactor as today. Plugin authors *opt in* to explicit flags
 when they update their schemas.
@@ -309,10 +312,6 @@ that introduces share-semantics:
 | cloudflare-pages | `accountId` | leaks | `shareable: false` |
 | cloudflare-pages | `projectName` | leaks | `shareable: false` |
 | cloudflare-pages | `branch` | leaks | (default — shareable) |
-| linear-sync | `LINEAR_API_KEY` | redacted (matches `/key/`) | `secret: true, oauth: {provider: linear, scopes: [...]}` (when OAuth ships) |
-| linear-sync | `defaultTeamKey` | leaks | `shareable: false` |
-| jira-sync | `JIRA_API_TOKEN` | redacted | `secret: true` |
-| jira-sync | `JIRA_BASE_URL` | leaks | `shareable: false` (the publisher's atlassian.net is theirs) |
 | slack-notifier | `SLACK_WEBHOOK_URL` | leaks | `secret: true` (webhook URL contains the secret token) |
 
 ## Schema evolution

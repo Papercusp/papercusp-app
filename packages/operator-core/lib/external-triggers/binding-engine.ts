@@ -59,6 +59,23 @@ const DEFAULT_STORM_WINDOW_SECONDS = 60;
  * expressible.
  */
 const DEFAULT_STORM_MAX_RUNS = 12;
+/**
+ * EVERY binding also gets a dispatch-time validity window (WI-10004920). The storm
+ * cap above is applied at ENQUEUE time, so it cannot see a backlog that piled up
+ * while the drain was down: on 2026-09-15 the dispatcher routine was paused for two
+ * weeks while ingestion kept queuing (122 runs), and nothing stopped a re-arm from
+ * firing every armed binding's backlog at batch speed — e.g. launching plans for
+ * calendar events that had already happened.
+ *
+ * A run that was NEVER attempted and is older than `maxAgeSeconds` (measured from
+ * `triggered_at`) is closed `skipped` with `external_trigger_stale` at claim time
+ * instead of dispatched, so the drop stays visible in the run ledger. Runs that
+ * already began dispatch keep their own retry policy: their intent was acted on in
+ * time, and what remains is finishing it. Same shape as the storm cap: absent means
+ * the bounded default, and unbounded is deliberately not expressible.
+ */
+const DEFAULT_MAX_RUN_AGE_SECONDS = 24 * 60 * 60;
+const MAX_RUN_AGE_CEILING_SECONDS = 31 * 24 * 60 * 60;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_BATCH_SIZE = 25;
 const DEFAULT_STALE_AFTER_SECONDS = 60;
@@ -121,7 +138,14 @@ interface BindingRow {
   action: Record<string, unknown>;
   armed: boolean;
   stormPolicy: Record<string, unknown>;
+  /** Portable binding datatype (P-012, D-013 §2); NULL matches any datatype. */
+  datatypeId: string | null;
 }
+
+/** The internal source that stitches trigger-pack edges (P-012, D-013 §5). */
+export const TRIGGER_PACK_EDGE_SOURCE_KIND = 'trigger-pack-edge';
+export const TRIGGER_PACK_EDGE_EVENT = 'binding-run-completed';
+export const TRIGGER_RUN_COMPLETION_DATATYPE = 'trigger-run-completion';
 
 interface ClaimedTriggerRun {
   id: string;
@@ -151,6 +175,11 @@ export interface StormPolicy {
    */
   maxRuns: number;
   windowSeconds: number;
+  /**
+   * Dispatch-time validity window for a never-attempted run, in seconds.
+   * Always bounded — see `DEFAULT_MAX_RUN_AGE_SECONDS`.
+   */
+  maxAgeSeconds: number;
 }
 
 export interface BindingEnqueueResult {
@@ -330,6 +359,14 @@ function positiveInteger(value: unknown, field: string): number {
 export function parseStormPolicy(raw: Record<string, unknown>): StormPolicy {
   const maxRaw = raw.maxRuns ?? raw.max_runs;
   const windowRaw = raw.windowSeconds ?? raw.window_seconds;
+  const maxAgeRaw = raw.maxAgeSeconds ?? raw.max_age_seconds;
+  const maxAgeSeconds =
+    maxAgeRaw === undefined || maxAgeRaw === null
+      ? DEFAULT_MAX_RUN_AGE_SECONDS
+      : positiveInteger(maxAgeRaw, 'storm_max_age_seconds');
+  if (maxAgeSeconds > MAX_RUN_AGE_CEILING_SECONDS) {
+    throw new Error('external_trigger_invalid_storm_max_age_seconds');
+  }
   return {
     maxRuns:
       maxRaw === undefined || maxRaw === null ? DEFAULT_STORM_MAX_RUNS : positiveInteger(maxRaw, 'storm_max_runs'),
@@ -337,6 +374,7 @@ export function parseStormPolicy(raw: Record<string, unknown>): StormPolicy {
       windowRaw === undefined || windowRaw === null
         ? DEFAULT_STORM_WINDOW_SECONDS
         : positiveInteger(windowRaw, 'storm_window_seconds'),
+    maxAgeSeconds,
   };
 }
 
@@ -516,7 +554,8 @@ async function loadBindingForUpdate(tx: Db, workspaceId: string, id: string): Pr
            event_filter AS "eventFilter",
            action,
            armed,
-           storm_policy AS "stormPolicy"
+           storm_policy AS "stormPolicy",
+           datatype_id AS "datatypeId"
       FROM harness_shared.trigger_bindings
      WHERE workspace_id = ${workspaceId} AND id = ${id}
        AND detached_at IS NULL
@@ -564,6 +603,9 @@ async function queueOneBinding(
     const binding = await loadBindingForUpdate(tx, event.workspaceId, bindingId);
     if (!binding?.armed) return null;
     if (!keyMatchesPattern(binding.eventPattern, event.key)) return null;
+    // A portable pack binding is bound to a datatype, not a provider event
+    // name: a source emitting several datatypes queues only the declared one.
+    if (binding.datatypeId && binding.datatypeId !== event.datatypeId) return null;
     if (!payloadMatchesFilter(binding.eventFilter, event.payload)) return null;
 
     if (!SUPPORTED_TRIGGER_ACTIONS.has(actionType(binding.action))) {
@@ -685,9 +727,35 @@ async function claimPendingTriggerRuns(
   batchSize: number,
   staleAfterSeconds: number,
 ): Promise<ClaimedTriggerRun[]> {
-  return sql.begin(
-    async (tx) => tx<ClaimedTriggerRun[]>`
-    WITH cancelled_disarmed AS (
+  return sql.begin(async (tx) => {
+    // WI-10004920: a never-attempted run older than its binding's validity window.
+    // Written once and used twice — the expiring CTE and the candidates CTE MUST stay
+    // disjoint, because two data-modifying CTEs touching the same row in one statement
+    // is undefined in Postgres. A malformed stored value falls back to the default
+    // rather than aborting the whole claim transaction on a bad cast.
+    const stale = tx`(
+      tr.status = 'pending'
+      AND tr.attempts = 0
+      AND tr.triggered_at < now() - (
+        CASE WHEN binding.storm_policy->>'maxAgeSeconds' ~ '^[0-9]{1,9}$'
+             THEN GREATEST(1, LEAST((binding.storm_policy->>'maxAgeSeconds')::int, ${MAX_RUN_AGE_CEILING_SECONDS}))
+             ELSE ${DEFAULT_MAX_RUN_AGE_SECONDS}
+        END * interval '1 second'))`;
+    return tx<ClaimedTriggerRun[]>`
+    WITH expired_stale AS (
+      UPDATE harness_shared.trigger_runs tr
+         SET status = 'skipped',
+             completed_at = now(),
+             updated_at = now(),
+             error = 'external_trigger_stale: never dispatched within the binding maxAgeSeconds'
+        FROM harness_shared.trigger_bindings binding
+       WHERE binding.workspace_id = tr.workspace_id
+         AND binding.id = tr.binding_id
+         AND binding.detached_at IS NULL
+         AND binding.armed = TRUE
+         AND ${stale}
+      RETURNING tr.workspace_id, tr.id
+    ), cancelled_disarmed AS (
       UPDATE harness_shared.trigger_runs tr
          SET status = 'cancelled',
              completed_at = now(),
@@ -714,6 +782,7 @@ async function claimPendingTriggerRuns(
          AND binding.detached_at IS NULL
          AND binding.armed = TRUE
        WHERE tr.next_attempt_at <= now()
+         AND NOT ${stale}
          AND (
            (tr.attempts < ${DEFAULT_MAX_ATTEMPTS}
             AND (
@@ -768,8 +837,8 @@ async function claimPendingTriggerRuns(
         ON b.workspace_id = c.workspace_id
        AND b.id = c.binding_id
        AND b.detached_at IS NULL
-     ORDER BY c.triggered_at, c.id`,
-  );
+     ORDER BY c.triggered_at, c.id`;
+  });
 }
 
 async function resolvePlanRunId(
@@ -834,6 +903,83 @@ async function announceRunWork(sql: postgres.Sql, workspaceId: string, runId: nu
   }
 }
 
+/**
+ * Stitch trigger-pack edges (P-012, D-013 §5). When an upstream run succeeds
+ * and some binding on the workspace's internal `trigger-pack-edge` source
+ * filters on it, ingest one `ext:trigger-pack-edge:binding-run-completed`
+ * event through the ordinary ingestion seam. Downstream bindings therefore get
+ * the same outbox, storm cap, max-age and retry as any external event; there is
+ * no second dispatcher. Dedupe is per upstream run, and correlation is
+ * inherited, so a chain reads as one workflow. A failure is recorded on the
+ * upstream run's outcome rather than failing a run whose own target succeeded.
+ */
+async function emitTriggerPackEdge(
+  sql: postgres.Sql,
+  row: ClaimedTriggerRun,
+  details: { actionType: string; planRunId?: number | null; instancePlanSlug?: string | null },
+): Promise<void> {
+  const edgeSources = await sql<Array<{ sourceId: string }>>`
+    SELECT DISTINCT b.source_id::text AS "sourceId"
+      FROM harness_shared.trigger_bindings b
+      JOIN harness_shared.data_sources s
+        ON s.workspace_id = b.workspace_id AND s.id = b.source_id
+     WHERE b.workspace_id = ${row.workspaceId}
+       AND s.kind = ${TRIGGER_PACK_EDGE_SOURCE_KIND}
+       AND b.detached_at IS NULL
+       AND b.event_filter ->> 'upstreamBindingId' = ${row.bindingId}`;
+  if (edgeSources.length === 0) return;
+  const upstreamPayload = record(row.args?.trigger?.payload);
+  const correlationId =
+    typeof upstreamPayload.correlationId === 'string' && upstreamPayload.correlationId
+      ? upstreamPayload.correlationId
+      : row.id;
+  const packInstallation = await sql<Array<{ id: string | null }>>`
+    SELECT pack_installation_id::text AS id FROM harness_shared.trigger_bindings
+     WHERE workspace_id = ${row.workspaceId} AND id = ${row.bindingId}`;
+  const payload: Record<string, unknown> = {
+    upstreamBindingId: row.bindingId,
+    upstreamTriggerRunId: row.id,
+    correlationId,
+    actionType: details.actionType,
+    planRunId: details.planRunId ?? null,
+    instancePlanSlug: details.instancePlanSlug ?? null,
+    completedAt: new Date().toISOString(),
+    ...(packInstallation[0]?.id ? { packInstallationId: packInstallation[0].id } : {}),
+  };
+  const errors: string[] = [];
+  const { ingestExternalTriggerEvent } = await import('./ingestion');
+  for (const { sourceId } of edgeSources) {
+    try {
+      const ingested = await ingestExternalTriggerEvent(sql, {
+        workspaceId: row.workspaceId,
+        sourceId,
+        source: TRIGGER_PACK_EDGE_SOURCE_KIND,
+        event: TRIGGER_PACK_EDGE_EVENT,
+        externalId: row.id,
+        datatypeId: TRIGGER_RUN_COMPLETION_DATATYPE,
+        adapterPayload: payload,
+        normalize: (value) => value as Record<string, unknown>,
+        dedupeKey: `${TRIGGER_PACK_EDGE_SOURCE_KIND}:${row.id}`,
+      });
+      if (!ingested.ok) {
+        errors.push(
+          ingested.validationErrors?.join('; ') ??
+            ingested.deliveries.filter((d) => d.outcome === 'failed').map((d) => d.error).join('; '),
+        );
+      }
+    } catch (cause) {
+      errors.push(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  if (errors.length > 0) {
+    await sql`
+      UPDATE harness_shared.trigger_runs
+         SET outcome = outcome || ${JSON.stringify({ triggerPackEdgeError: errors.join(' | ').slice(0, 500) })}::text::jsonb,
+             updated_at = now()
+       WHERE workspace_id = ${row.workspaceId} AND id = ${row.id}`;
+  }
+}
+
 /** Claim and execute a bounded batch from the durable trigger_runs outbox. */
 export async function dispatchPendingTriggerRuns(
   sql: postgres.Sql,
@@ -894,6 +1040,7 @@ export async function dispatchPendingTriggerRuns(
            WHERE workspace_id = ${row.workspaceId} AND id = ${row.id}`;
         result.succeeded += 1;
         await resolveRetryEscalationIfRecovered(sql, row, resolveEscalationFn).catch(() => undefined);
+        await emitTriggerPackEdge(sql, row, { actionType: 'blueprint-operation' }).catch(() => undefined);
         continue;
       }
 
@@ -929,6 +1076,7 @@ export async function dispatchPendingTriggerRuns(
            WHERE workspace_id = ${row.workspaceId} AND id = ${row.id}`;
         result.succeeded += 1;
         await resolveRetryEscalationIfRecovered(sql, row, resolveEscalationFn).catch(() => undefined);
+        await emitTriggerPackEdge(sql, row, { actionType: 'create-work-item' }).catch(() => undefined);
         continue;
       }
 
@@ -956,6 +1104,7 @@ export async function dispatchPendingTriggerRuns(
              WHERE workspace_id = ${row.workspaceId} AND id = ${row.id}`;
           result.succeeded += 1;
           await resolveRetryEscalationIfRecovered(sql, row, resolveEscalationFn).catch(() => undefined);
+          await emitTriggerPackEdge(sql, row, { actionType: 'start-goal' }).catch(() => undefined);
         } else if (started.reason === 'holder-unknown' || started.reason === 'not-ready') {
           // Heal-able refusals: liveness evidence recovers, prerequisites
           // complete. Throw → 'failed' → the outbox retries under attempts.
@@ -989,7 +1138,10 @@ export async function dispatchPendingTriggerRuns(
         // `row.args` keeps the owner's private ingest and stays in trigger_runs
         // (local); only the routing envelope crosses (WI-2143575). The agent
         // pulls the payload back with `triggers:read-payload` by planRunId.
-        inputs: redactTriggerArgsForPlanInputs(row.args),
+        // The authored literal overlay (a pack's installer inputs, D-013 §5) is
+        // configuration, never provider payload — the same overlay the
+        // blueprint-operation path applies.
+        inputs: { ...redactTriggerArgsForPlanInputs(row.args), ...record(row.action.input) },
         ...(execution ? { execution } : {}),
       });
       if (launched.started === false) {
@@ -1063,6 +1215,11 @@ export async function dispatchPendingTriggerRuns(
          WHERE workspace_id = ${row.workspaceId} AND id = ${row.id}`;
       result.succeeded += 1;
       await resolveRetryEscalationIfRecovered(sql, row, resolveEscalationFn).catch(() => undefined);
+      await emitTriggerPackEdge(sql, row, {
+        actionType: 'launch-plan',
+        planRunId,
+        instancePlanSlug: launched.instanceSlug,
+      }).catch(() => undefined);
     } catch (cause) {
       const error = cause instanceof Error ? cause.message : String(cause);
       const dispatchFailure = persistedDispatchFailure(cause);

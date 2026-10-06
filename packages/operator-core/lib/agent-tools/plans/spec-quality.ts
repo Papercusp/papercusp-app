@@ -44,6 +44,7 @@ export interface PlanSpecQualityResult {
     uncoveredPlanItemIds: string[];
     invalidExemptionSpecIds: string[];
     draftSpecIds: string[];
+    atomicityClauseDiagnostics: SpecQualityAtomicityClauseDiagnostic[];
   };
   scorecardDraft: {
     rubricRef: typeof SPEC_QUALITY_RUBRIC_REF;
@@ -55,6 +56,32 @@ export interface PlanSpecQualityResult {
   };
 }
 
+export type SpecQualityAtomicityClauseDiagnostic =
+  | {
+      specId: string;
+      planItemId: string;
+      behavior: string;
+      disposition: 'evaluated';
+      rating: 'pass';
+      reason: null;
+    }
+  | {
+      specId: string;
+      planItemId: string;
+      behavior: string;
+      disposition: 'evaluated';
+      rating: 'fail';
+      reason: string;
+    }
+  | {
+      specId: string;
+      planItemId: string;
+      behavior: string;
+      disposition: 'excluded';
+      rating: 'not-applicable';
+      reason: string;
+    };
+
 const CONTRACT_STATUSES = new Set(['active', 'accepted']);
 const CURRENT_SET_STATUSES = new Set(['draft', 'active', 'accepted', 'exempt']);
 
@@ -64,33 +91,6 @@ function pass(evidence: string): SpecQualityRatingEntry {
 
 function fail(evidence: string, suggestion: string): SpecQualityRatingEntry {
   return { rating: 'fail', evidence, suggestion };
-}
-
-function clauseReference(clause: SpecClauseRevision): string {
-  const source = clause.sourceBar;
-  return source
-    ? `${clause.specId} (AUTO-BAR projection from rubric ${source.rubricSlug}, BAR ${source.barKey}, criterion.model)`
-    : clause.specId;
-}
-
-function projectedRepairSuggestion(clauses: readonly SpecClauseRevision[], fallback: string): string {
-  const projected = clauses.filter((clause) => clause.sourceBar || clause.specId.startsWith('AUTO-BAR-'));
-  if (projected.length === 0) return fallback;
-  const sources = [
-    ...new Set(
-      projected.map((clause) =>
-        clause.sourceBar
-          ? `${clause.sourceBar.rubricSlug} BAR ${clause.sourceBar.barKey}`
-          : `${clause.specId} (source pin unavailable; inspect plans:get-specs)`,
-      ),
-    ),
-  ];
-  return (
-    `These AUTO-BAR clauses are projections from ${sources.join(', ')}. ` +
-    'Amend the canonical criterion.model/acceptance condition with rubrics:amend; do not repair ' +
-    'projected behavior through plans:set-specs, because a later BAR re-projection may replace it. ' +
-    fallback
-  );
 }
 
 function unknown(evidence: string): SpecQualityRatingEntry {
@@ -194,6 +194,20 @@ export function specQualitySubjectRef(planSlug: string, classRef: PlanClassRubri
 }
 
 /**
+ * The plan items that owe a spec contract: every item except a deliberately
+ * dropped one. A dropped item is a recorded departure (`plans:set-status
+ * { status:'dropped', note }`), so demanding a clause or exemption for it forced
+ * authors to file fake exemptions just to start a plan (WI-10006208). Every
+ * caller that feeds `planItemIds` to the spec-quality evaluator or gate builds
+ * the list through this one function so the rule cannot drift between them.
+ */
+export function specQualityPlanItemIds(
+  items: ReadonlyArray<{ id: string; storedStatus?: string | null }>,
+): string[] {
+  return items.filter((item) => item.storedStatus !== 'dropped').map((item) => item.id);
+}
+
+/**
  * Grade one exact current set. Every plan item must either own an active behavior
  * clause or an explicit non-automated exemption; absence is never inferred as
  * non-behavioral.
@@ -264,105 +278,154 @@ export function evaluatePlanSpecQuality(input: {
     group.push(clause);
     behaviorGroups.set(key, group);
   }
-  // EI-24372921924901236: BAR projection deliberately repeats the canonical
-  // behavior for every mapped item. It supplements, but cannot replace, unique
-  // item contracts. Keep ordinary copies and mismatched source pins uncertain.
-  const independentContractItems = new Set(
-    [...behaviorGroups.values()]
-      .filter((group) => new Set(group.map((clause) => clause.planItemId)).size === 1)
-      .flatMap((group) =>
-        group
-          .filter((clause) => !clause.sourceBar && !clause.specId.startsWith('AUTO-BAR-'))
-          .map((clause) => clause.planItemId),
-      ),
-  );
-  const corroboratedSharedBar = (group: SpecClauseRevision[]): boolean => {
-    const pin = group[0]?.sourceBar;
-    if (!pin) return false;
-    return group.every((clause) => {
-      const source = clause.sourceBar;
-      return (
-        source != null &&
-        source.rubricSlug === pin.rubricSlug &&
-        source.rubricRevision === pin.rubricRevision &&
-        source.barKey === pin.barKey &&
-        source.barHash === pin.barHash &&
-        source.barSetHash === pin.barSetHash &&
-        source.evidencePlane === pin.evidencePlane &&
-        independentContractItems.has(clause.planItemId)
-      );
-    });
-  };
-  const duplicateBehaviorReuse = [...behaviorGroups.values()]
+  // A sourceBar pin makes this clause a projection of the canonical acceptance
+  // BAR, repeated once for each mapped plan item. It is not an independently
+  // authored item contract. Require item coverage and grade behavior quality on
+  // unpinned clauses; the canonical rubric remains the source of BAR meaning.
+  const isProjectedBar = (clause: SpecClauseRevision) => clause.sourceBar != null;
+  const isUnpinnedAutoBar = (clause: SpecClauseRevision) =>
+    !clause.sourceBar && clause.specId.startsWith('AUTO-BAR-');
+  const itemBehavioral = behavioral.filter((clause) => !isProjectedBar(clause));
+  const independentItemBehavioral = itemBehavioral.filter((clause) => !isUnpinnedAutoBar(clause));
+  const barPinMismatches = [...behaviorGroups.values()]
     .filter((group) => new Set(group.map((clause) => clause.planItemId)).size > 1)
-    .filter((group) => !corroboratedSharedBar(group))
+    .filter((group) => group.some((clause) => isProjectedBar(clause) || isUnpinnedAutoBar(clause)))
+    .filter((group) => {
+      const pin = group[0]?.sourceBar;
+      return !pin || group.some((clause) => {
+        const source = clause.sourceBar;
+        return (
+          source == null ||
+          source.rubricSlug !== pin.rubricSlug ||
+          source.barKey !== pin.barKey ||
+          source.barHash !== pin.barHash ||
+          source.barSetHash !== pin.barSetHash ||
+          source.evidencePlane !== pin.evidencePlane
+        );
+      });
+    })
+    .map((group) => {
+      const specIds = [...new Set(group.map((clause) => clause.specId))].sort();
+      return 'projected specs ' + specIds.join(', ') + ' do not share one identical source BAR pin';
+    });
+  const itemBehaviorGroups = new Map<string, SpecClauseRevision[]>();
+  for (const clause of itemBehavioral) {
+    const key = normalizeSpecSemanticText(clause.behavior);
+    const group = itemBehaviorGroups.get(key) ?? [];
+    group.push(clause);
+    itemBehaviorGroups.set(key, group);
+  }
+  const duplicateBehaviorReuse = [...itemBehaviorGroups.values()]
+    .filter((group) => new Set(group.map((clause) => clause.planItemId)).size > 1)
     .map((group) => {
       const specIds = [...new Set(group.map((clause) => clause.specId))].sort();
       const itemIds = [...new Set(group.map((clause) => clause.planItemId))].sort();
       return 'specs ' + specIds.join(', ') + ' reuse the same behavior text across plan items ' + itemIds.join(', ');
     });
-  const coveredItems = new Set([...behavioral, ...validExemptions].map((clause) => clause.planItemId));
+  const unpinnedAutoBarIds = itemBehavioral.filter(isUnpinnedAutoBar).map((clause) => clause.specId).sort();
+  const coveredItems = new Set([...independentItemBehavioral, ...validExemptions].map((clause) => clause.planItemId));
   const uncoveredPlanItemIds = planItemIds.filter((itemId) => !coveredItems.has(itemId));
+  const projectionEvidence = behavioral.some((clause) => clause.sourceBar)
+    ? ` ${behavioral.filter((clause) => clause.sourceBar).length} sourceBar-pinned projection(s) remain linked to their canonical acceptance BAR and do not substitute for item contracts.`
+    : '';
   ratings['item-contract-coverage'] = uncoveredPlanItemIds.length
     ? fail(
         `Plan item(s) lack an active clause or valid explicit exemption: ${uncoveredPlanItemIds.join(', ')}.`,
         'Add at least one active behavioral clause per item, or an explicit non-automated exemption with justification and provenance.',
       )
-    : duplicateBehaviorReuse.length
+    : barPinMismatches.length || duplicateBehaviorReuse.length || unpinnedAutoBarIds.length
       ? unknown(
-          'Potential contract coverage issue: ' +
-            duplicateBehaviorReuse.join('; ') +
+        'Potential contract coverage issue: ' +
+            [
+              ...barPinMismatches,
+              ...(unpinnedAutoBarIds.length
+                ? ['AUTO-BAR specs lack a trusted source BAR pin: ' + unpinnedAutoBarIds.join(', ')]
+                : []),
+              ...duplicateBehaviorReuse,
+            ].join('; ') +
             '. Review whether these clauses represent independent item contracts.',
         )
-      : pass(`All ${planItemIds.length} plan item(s) are covered by active clauses or explicit exemptions.`);
+      : pass(`All ${planItemIds.length} plan item(s) are covered by active item clauses or explicit exemptions.${projectionEvidence}`);
 
-  const atomicityFailures = behavioral
-    .map((clause) => ({ clause, reason: specBehaviorNonAtomicReason(clause.behavior) }))
-    .filter((entry): entry is { clause: SpecClauseRevision; reason: string } => Boolean(entry.reason));
+  const atomicityEvaluation = behavioral.map((clause) => {
+    let diagnostic: SpecQualityAtomicityClauseDiagnostic;
+    if (isProjectedBar(clause)) {
+      diagnostic = {
+        specId: clause.specId,
+        planItemId: clause.planItemId,
+        behavior: clause.behavior,
+        disposition: 'excluded',
+        rating: 'not-applicable',
+        reason: 'sourceBar-pinned BAR projection is not an independent item behavior clause.',
+      };
+    } else {
+      const reason = specBehaviorNonAtomicReason(clause.behavior);
+      diagnostic = reason === null
+        ? {
+            specId: clause.specId,
+            planItemId: clause.planItemId,
+            behavior: clause.behavior,
+            disposition: 'evaluated',
+            rating: 'pass',
+            reason: null,
+          }
+        : {
+            specId: clause.specId,
+            planItemId: clause.planItemId,
+            behavior: clause.behavior,
+            disposition: 'evaluated',
+            rating: 'fail',
+            reason,
+          };
+    }
+    return { clause, diagnostic };
+  });
+  const atomicityClauseDiagnostics = atomicityEvaluation.map(({ diagnostic }) => diagnostic);
+  const atomicityFailures = atomicityEvaluation.flatMap(({ clause, diagnostic }) => {
+    if (diagnostic.disposition !== 'evaluated' || diagnostic.rating !== 'fail') return [];
+    return [{ clause, reason: diagnostic.reason }];
+  });
   ratings['atomic-observable-behavior'] =
     behavioral.length === 0
       ? notApplicable('0 behavioral clause(s) are available for structural atomicity evaluation.')
+      : itemBehavioral.length === 0
+        ? notApplicable('Only AUTO-BAR projections are present; they are not independent item contracts.')
       : atomicityFailures.length
         ? fail(
-            atomicityFailures.map(({ clause, reason }) => `${clauseReference(clause)}:${reason}`).join('; '),
-            projectedRepairSuggestion(
-              atomicityFailures.map(({ clause }) => clause),
-              'Split compound outcomes into atomic clauses with one observable behavior each.',
-            ),
+            atomicityFailures.map(({ clause, reason }) => `${clause.specId}:${reason}`).join('; '),
+            'Split compound outcomes into atomic clauses with one observable behavior each.',
           )
-        : pass(`${behavioral.length} behavioral clause(s) are structurally atomic.`);
+        : pass(`${itemBehavioral.length} independent item behavior clause(s) are structurally atomic.${projectionEvidence}`);
 
-  const falsifiabilityFailures = behavioral
+  const falsifiabilityFailures = itemBehavioral
     .map((clause) => ({ clause, reason: specBehaviorNonFalsifiableReason(clause.behavior) }))
     .filter((entry): entry is { clause: SpecClauseRevision; reason: string } => Boolean(entry.reason));
   ratings.falsifiability =
     behavioral.length === 0
       ? notApplicable('0 behavioral clause(s) are available for falsifiability evaluation.')
+      : itemBehavioral.length === 0
+        ? notApplicable('Only AUTO-BAR projections are present; they are not independent item contracts.')
       : falsifiabilityFailures.length
         ? fail(
-            falsifiabilityFailures.map(({ clause, reason }) => `${clauseReference(clause)}:${reason}`).join('; '),
-            projectedRepairSuggestion(
-              falsifiabilityFailures.map(({ clause }) => clause),
-              'Rewrite vague or discretionary text as a concrete outcome that can be shown false.',
-            ),
+            falsifiabilityFailures.map(({ clause, reason }) => `${clause.specId}:${reason}`).join('; '),
+            'Rewrite vague or discretionary text as a concrete outcome that can be shown false.',
           )
-        : pass(`${behavioral.length} behavioral clause(s) state falsifiable outcomes.`);
+        : pass(`${itemBehavioral.length} independent item behavior clause(s) state falsifiable outcomes.${projectionEvidence}`);
 
-  const couplingFailures = behavioral
+  const couplingFailures = itemBehavioral
     .map((clause) => ({ clause, reason: implementationCouplingReason(clause.behavior) }))
     .filter((entry): entry is { clause: SpecClauseRevision; reason: string } => Boolean(entry.reason));
   ratings['implementation-independence'] =
     behavioral.length === 0
       ? notApplicable('0 behavioral clause(s) are available for implementation-independence evaluation.')
+      : itemBehavioral.length === 0
+        ? notApplicable('Only AUTO-BAR projections are present; they are not independent item contracts.')
       : couplingFailures.length
         ? fail(
-            couplingFailures.map(({ clause, reason }) => `${clauseReference(clause)}:${reason}`).join('; '),
-            projectedRepairSuggestion(
-              couplingFailures.map(({ clause }) => clause),
-              'Describe externally observable behavior instead of filenames or internal constructs.',
-            ),
+            couplingFailures.map(({ clause, reason }) => `${clause.specId}:${reason}`).join('; '),
+            'Describe externally observable behavior instead of filenames or internal constructs.',
           )
-        : pass('No active clause is coupled to an obvious implementation filename or construct.');
+        : pass(`No independent item clause is coupled to an obvious implementation filename or construct.${projectionEvidence}`);
 
   const invalidExemptionSpecIds = exemptions
     .filter((clause) => !validExplicitExemption(clause))
@@ -376,7 +439,7 @@ export function evaluatePlanSpecQuality(input: {
       ? pass(`${exemptions.length} non-behavioral exemption(s) carry explicit justification and provenance.`)
       : { rating: 'not-applicable', evidence: 'No clause claims a non-behavioral exemption.' };
 
-  const classFit = planClassFit(input.classRef, behavioral);
+  const classFit = planClassFit(input.classRef, itemBehavioral);
   const everyItemExplicitlyExempt =
     planItemIds.length > 0 &&
     planItemIds.every((itemId) => validExemptions.some((clause) => clause.planItemId === itemId));
@@ -439,7 +502,12 @@ export function evaluatePlanSpecQuality(input: {
     ratings,
     verdict,
     wouldBlock,
-    details: { uncoveredPlanItemIds, invalidExemptionSpecIds, draftSpecIds },
+    details: {
+      uncoveredPlanItemIds,
+      invalidExemptionSpecIds,
+      draftSpecIds,
+      atomicityClauseDiagnostics,
+    },
     scorecardDraft: {
       rubricRef: SPEC_QUALITY_RUBRIC_REF,
       subject: { kind: 'plan', ref: subjectRef },

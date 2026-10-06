@@ -99,6 +99,7 @@ import { audienceIdentityDocument, resolveSuIdentityDocument } from '@papercusp/
 import { renderResultDoorSection } from './result-door-prompt';
 import { renderWorkspaceMapSection } from './desktop-install/workspace-map';
 import { renderPromotionModelSection } from './desktop-install/promotion-model';
+import { describeServingGeneration, type ServingGeneration } from './serving-generation';
 import {
   AUTO_MODE_MARKER,
   CLIENT_TOOLING_OVERLAY_MARKER,
@@ -306,6 +307,8 @@ export interface AssembleOptions {
   projectGuideTruncated?: boolean;
   /** Hermetic override for the pui-loop tools catalog. */
   toolCatalogText?: string;
+  /** Generation sampled by the async prompt boundary that is delivering this catalog. */
+  servingGeneration?: ServingGeneration;
 }
 
 /* ─── Role documents through the prompt chain (cached unless PAPERCUSP_RELOAD_PROMPTS=1) ── */
@@ -559,8 +562,9 @@ export function renderToolsCatalog(
    * model (it sanitizes the colon out of `harness:status` → `harness_status`),
    * instead of colon names the model can't match (voice-persona P-005). Default
    * identity — every other role's catalog is byte-identical.
-   */
+  */
   displayTransform?: (mcpName: string) => string,
+  servingGeneration?: ServingGeneration,
 ): string {
   if (toolNames.length === 0) return '';
 
@@ -573,6 +577,7 @@ export function renderToolsCatalog(
     '## Available tools',
     '',
     `Executable contract: ${PROJECTED_TOOL_REGISTRY_SOURCE} · ${projectedToolRegistryRevision()}`,
+    `Serving generation: ${servingGeneration ? describeServingGeneration(servingGeneration) : 'unknown (not sampled)'}`,
     '',
   ];
   const sorted = [...new Set(toolNames)].sort();
@@ -909,7 +914,7 @@ function assemblePuiLoopPrompt(opts: AssembleOptions): AssembledPrompt {
     sections.push({ name: 'project-guide', chars: projectGuide.length });
   }
 
-  const catalog = opts.toolCatalogText ?? renderToolsCatalog(opts.role, opts.toolNames);
+  const catalog = opts.toolCatalogText ?? renderToolsCatalog(opts.role, opts.toolNames, 'text', undefined, opts.servingGeneration);
   if (catalog) {
     parts.push(catalog);
     sections.push({ name: 'tools-catalog', chars: catalog.length });
@@ -963,7 +968,7 @@ export function assembleRolePrompt(opts: AssembleOptions): AssembledPrompt {
   parts.push(persona);
   sections.push({ name: 'persona', chars: persona.length });
 
-  const catalog = renderToolsCatalog(opts.role, opts.toolNames);
+  const catalog = renderToolsCatalog(opts.role, opts.toolNames, 'text', undefined, opts.servingGeneration);
   if (catalog) {
     parts.push(catalog);
     sections.push({ name: 'tools-catalog', chars: catalog.length });

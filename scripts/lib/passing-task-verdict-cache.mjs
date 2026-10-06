@@ -12,7 +12,7 @@ import { staticImportClosure } from "./related-tests.mjs";
 
 export const PASSING_TASK_VERDICT_CACHE_VERSION = 2;
 export const PASSING_TASK_VERDICT_IMPLEMENTATION_VERSION =
-  "affected-passing-task-verdict-v6";
+  "affected-passing-task-verdict-v7";
 export const PASSING_TASK_VERDICT_CACHE_MAX_GROUPS = 32;
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -77,6 +77,8 @@ export const PC_HEAVY_VOLATILE_IDENTITY_ENV = Object.freeze([
   // WI-1024071 live Run C -> D: conditionally present for focused/preempt paths. Its value
   // selects wrapper scheduling only; it never changes the admitted task's command or inputs.
   "PC_HEAVY_PREEMPT_EXCLUSIVE",
+  // Memory-reservation scratch path, `$_mem_reserve_dir/anon.$_id` — unique per admission.
+  "PC_HEAVY_RESERVE_ANON_FILE",
 ]);
 
 /**
@@ -1048,13 +1050,31 @@ export function shouldStorePassingTaskVerdict({
 export function buildPassingTaskVerdictIdentity({
   taskKey,
   command,
+  commandRoot = null,
   environment,
   gateConfig,
   dependencyHash,
   implementationVersion = PASSING_TASK_VERDICT_IMPLEMENTATION_VERSION,
 }) {
+  // Explicit immutable clones relocate the same command to fresh checkout paths.
+  // Normalize only whole absolute path operands inside that checkout; external
+  // tools, embedded options, script text and selection digests remain exact.
+  const commandPath = (value) => {
+    if (!commandRoot || typeof value !== "string" || !isAbsolute(value)) return value;
+    const back = relative(resolve(commandRoot), resolve(value));
+    if (back === ".." || back.startsWith(`..${sep}`) || isAbsolute(back)) return value;
+    return back ? `<checkout>/${back.split(sep).join("/")}` : "<checkout>";
+  };
+  const identityCommand = commandRoot && command && typeof command === "object"
+    ? {
+        ...command,
+        cmd: commandPath(command.cmd),
+        cwd: commandPath(command.cwd),
+        ...(Array.isArray(command.argv) ? { argv: command.argv.map(commandPath) } : {}),
+      }
+    : command;
   const components = {
-    command: sha256(stableJson(command)),
+    command: sha256(stableJson(identityCommand)),
     environment: sha256(stableJson(environment)),
     gateConfig: sha256(stableJson(gateConfig)),
     implementation: sha256(String(implementationVersion)),

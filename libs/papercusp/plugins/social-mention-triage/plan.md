@@ -15,7 +15,7 @@ status: draft
 ## Background
 
 Each inbound mention creates one isolated trigger run. The run carries the canonical `social-post`
-payload under `payload.plan_run.inputs.trigger.payload`, already normalized by the platform adapter
+payload under the event `payload` returned by `triggers:read-payload { planRunId: payload.plan_run.runId }`, already normalized by the platform adapter
 and validated against the registered datatype schema, so the plan reads one shape whichever platform
 the mention arrived from.
 
@@ -32,7 +32,7 @@ stored post. That is defence in depth under the decision below, never a substitu
 
 ## Phase 1 — Triage
 
-- **P-001** `todo` Read the mention from `payload.plan_run.inputs.trigger.payload` — `text` is the mention body, `author` the handle that sent it, and `url` (when present) the public permalink. Read the platform from `payload.plan_run.inputs.trigger.source`, and treat it as the audience the draft is written for: a Bluesky mention is public, a Mastodon one inherits the parent status's visibility.
+- **P-001** `todo` Read the mention from the event `payload` returned by `triggers:read-payload { planRunId: payload.plan_run.runId }` — `text` is the mention body, `author` the handle that sent it, and `url` (when present) the public permalink. Read the platform from `payload.plan_run.inputs.trigger.source`, and treat it as the audience the draft is written for: a Bluesky mention is public, a Mastodon one inherits the parent status's visibility.
 - **P-002** `todo` Classify the mention against `payload.plan_run.inputs.escalationGuidance`. Record one of `needs-human`, `reply-suggested`, or `no-action`, with the sentence from the mention that decided it. A mention classified `needs-human` stops here with the reason stated; do not also draft a reply for it, because a draft sitting beside an escalation invites someone to send it.
 - **P-003** `todo` For a `reply-suggested` mention only, draft the reply following `payload.plan_run.inputs.replyGuidance`. To give the owner an id they can act on, locate the mention with `social:search` (narrow with `platforms` and a `{ from, to }` window around the mention's `occurredAt`) and take the hit's `postId` VERBATIM — a `postId` is an opaque token and both `social:read` and `social:reply` refuse one the caller assembled from a platform and an id. Record the draft, that postId, and the classification as this plan's output. Do not call `social:reply`, `social:post`, or any other publishing verb — the owner sends it, or does not.
 

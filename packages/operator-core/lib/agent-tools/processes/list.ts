@@ -85,7 +85,7 @@ function pruneCpuSamples(nowMs: number): void {
 }
 
 function currentCpuBusyPercent(taskId: string, cpuUsec: number | null | undefined, sampledAtMs: number): number | null {
-  if (cpuUsec == null) return null;
+  if (cpuUsec == null || !Number.isFinite(sampledAtMs) || sampledAtMs <= 0) return null;
   const next = { cpuUsecTotal: cpuUsec, sampledAtMs };
   const previous = cpuSamples.get(taskId);
   cpuSamples.set(taskId, next);
@@ -132,7 +132,7 @@ const taskResultSchema = z.object({
         confined: z.boolean(),
         cgroupPath: z.string().nullable(),
         scopeUnit: z.string().nullable(),
-        source: z.enum(['derived-from-scope-unit', 'not-derivable', 'recorded-at-spawn']),
+        source: z.enum(['derived-from-scope-unit', 'not-derivable', 'recorded-at-spawn', 'observed-at-reconcile']),
         insideOperatorCgroup: z.boolean().optional(),
         reason: z.string().optional(),
       }),
@@ -179,7 +179,7 @@ export default defineTool({
     chaining:
       'Pass `taskId`, `scopeUnit`, or `invocationId` to inspect one exact ledger identity before the result limit is applied. Then act with `processes:kill { taskId }` (kills the whole cgroup subtree). For an unaccounted live group, read its `scopeUnit` from `live.unaccountedGroups` and pass `processes:kill { scopeUnit }`; `processes:freeze` pauses a ledger task without losing work, and `processes:limit` retunes its budget live.',
     returns:
-      '{ ok, counts:{ byState, byClass }, tasks:[{ taskId, class, title, state, launchedBy, workItemId, planSlug, ageSec, rssMb, peakRssMb, cpuSec, cpuBusyPercent, pids, confined, scopeUnit, confinement, deadlineAt, logPath }], live? } — `confinement` answers "what confines this task, and therefore what can kill it": `{ confined, cgroupPath, scopeUnit, source, insideOperatorCgroup?, reason? }`. Read `source` before the path. `derived-from-scope-unit` is the trustworthy case — the path is DERIVED, because the stored `cgroup_path` column holds the SPAWNER cgroup on ~1300 historical rows and would answer "would restarting the operator kill this agent?" with the pre-EI-9748 YES (D-111). `insideOperatorCgroup` IS that answer, and is absent — never false — when unknown. `not-derivable` means confined but no scope unit was recorded: that is UNKNOWN, not unconfined, so `confined` stays true. `recorded-at-spawn` is the unconfined case, where the /proc read is correct. To find your OWN row pass `coordOwnerId` (your coord owner id) — `launchedBy` is whoever spawned you, and `pgrep -f <ownerId>` self-matches your own command line. `cpuSec` is cumulative CPU time; `cpuBusyPercent` is derived from two cumulative samples (100% = one saturated core) and is null until a second valid sample exists. Unfiltered `live:true` reads include `live.verifierGroups` and other reconciler groups; a task-filtered live read keeps the compact reconciliation summary but omits unrelated global group samples. `confined:false` means the task is ledgered but NOT cgroup-isolated, so a kill falls back to a pid signal and freeze is unavailable.',
+      '{ ok, counts:{ byState, byClass }, tasks:[{ taskId, class, title, state, launchedBy, workItemId, planSlug, ageSec, rssMb, peakRssMb, cpuSec, cpuBusyPercent, pids, confined, scopeUnit, confinement, deadlineAt, logPath }], live? } — `confinement` answers "what confines this task, and therefore what can kill it": `{ confined, cgroupPath, scopeUnit, source, insideOperatorCgroup?, reason? }`. Read `source` before the path. `derived-from-scope-unit` is the trustworthy case — the path is DERIVED, because the stored `cgroup_path` column holds the SPAWNER cgroup on ~1300 historical rows and would answer "would restarting the operator kill this agent?" with the pre-EI-9748 YES (D-111). `insideOperatorCgroup` IS that answer, and is absent — never false — when unknown. `not-derivable` means confined but no scope unit was recorded: that is UNKNOWN, not unconfined, so `confined` stays true. `recorded-at-spawn` is the unconfined case, where the /proc read is correct. `observed-at-reconcile` means an unaccounted residue had an exact `pc-<taskId>` scope and matching kernel-scanned path; it uses that observed path because its original task class is unknown. To find your OWN row pass `coordOwnerId` (your coord owner id) — `launchedBy` is whoever spawned you, and `pgrep -f <ownerId>` self-matches your own command line. `cpuSec` is cumulative CPU time; `cpuBusyPercent` is derived from two cumulative samples (100% = one saturated core) and is null until a second valid sample exists. Unfiltered `live:true` reads include `live.verifierGroups` and other reconciler groups; a task-filtered live read keeps the compact reconciliation summary but omits unrelated global group samples. `confined:false` means the task is ledgered but NOT cgroup-isolated, so a kill falls back to a pid signal and freeze is unavailable.',
   },
   requirePrincipal: false,
   // Release-fixer must inspect the managed task ledger when classifying a
@@ -275,10 +275,31 @@ export default defineTool({
         scanOptions: { foreignSignature: defaultForeignSignature(REPO_ROOT) },
       });
       liveTick = tick;
+      // Keep scalar totals distinct from the group arrays below. Unsuffixed
+      // names such as `unaccounted` are easy for consumers to treat as lists,
+      // then silently turn into [] through an Array.isArray fallback.
+      const summary = tick.summary;
       const liveSummary = {
-        ...tick.summary,
+        aliveCount: summary.alive,
+        strandedCount: summary.stranded,
+        endedUnobservedCount: summary.endedUnobserved,
+        unaccountedCount: summary.unaccounted,
+        unaccountedPidCount: summary.unaccountedPids,
+        abandonedWindowCount: summary.abandonedWindow,
+        abandonedWindowPidCount: summary.abandonedWindowPids,
+        consoleWindowCount: summary.consoleWindow,
+        consoleWindowPidCount: summary.consoleWindowPids,
+        verifierScopeCount: summary.verifierScope,
+        verifierScopePidCount: summary.verifierScopePids,
+        foreignCount: summary.foreign,
+        overdueCount: summary.overdue,
+        tooYoungCount: summary.tooYoung,
         degraded: tick.degraded,
         degradedReason: tick.degradedReason,
+        // Keep scan bounds visible on filtered reads too; an exact group list can
+        // still come from a census whose owned or foreign pass hit its cap.
+        ownedTruncated: tick.scan.ownedTruncated,
+        foreignTruncated: tick.scan.foreignTruncated,
       };
       const mapLiveGroup = (group: {
         cgroupPath: string;
@@ -371,7 +392,9 @@ export default defineTool({
               ok: true,
               counts: { total: displayRows.length, byState, byClass },
               ...(live ? { live } : {}),
-              tasks: displayRows.map((r) => ({
+              tasks: displayRows.map((r) => {
+                const confinement = resolveTaskConfinement(r);
+                return {
                 taskId: r.taskId,
                 class: r.class,
                 title: safeDiagnosticText(r.title, undefined, diagnosticSecrets),
@@ -385,7 +408,11 @@ export default defineTool({
                 rssMb: mb(r.lastMemoryBytes),
                 peakRssMb: mb(r.peakMemoryBytes),
                 cpuSec: r.cpuUsec == null ? null : Math.round(r.cpuUsec / 1_000_000),
-                cpuBusyPercent: currentCpuBusyPercent(r.taskId, r.cpuUsec, sampledAtMs),
+                // cpuUsec is the last persisted cgroup sample. Using the request time
+                // here makes repeated reads of that same snapshot look like a new idle
+                // interval, producing a confident 0. lastSeenAt is written alongside
+                // the metric refresh, so identical snapshots share the same sample time.
+                cpuBusyPercent: currentCpuBusyPercent(r.taskId, r.cpuUsec, Date.parse(r.lastSeenAt)),
                 pids: r.state === 'unaccounted' && args.live
                   ? unaccountedPids.get(r.taskId)?.length ?? null
                   : r.pidsCurrent,
@@ -394,12 +421,12 @@ export default defineTool({
                 livePids: r.state === 'unaccounted' && args.live
                   ? unaccountedPids.get(r.taskId) ?? null
                   : null,
-                confined: r.confined,
+                confined: confinement.confined,
                 scopeUnit: r.scopeUnit,
                 // P-023: "what confines this, and therefore what can kill it" — DERIVED
                 // from scope_unit, never the stored cgroup_path, which holds the spawner's
                 // cgroup on ~1300 historical rows (D-111).
-                confinement: resolveTaskConfinement(r),
+                confinement,
                 memoryMaxMb: mb(r.memoryMaxBytes),
                 deadlineAt: r.deadlineAt,
                 exitCode: r.exitCode,
@@ -419,7 +446,8 @@ export default defineTool({
                     }
                   : null,
                 logPath: r.logPath == null ? r.logPath : safeDiagnosticText(r.logPath, undefined, diagnosticSecrets),
-              })),
+                };
+              }),
             },
             null,
             2,

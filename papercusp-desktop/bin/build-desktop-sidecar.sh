@@ -19,6 +19,13 @@
 
 set -euo pipefail
 
+# ── Self-read guard (WI-3306 idiom; WI-10005998): parse the whole script before
+# executing, so a peer's mid-run edit to this shared-tree file can't shift the
+# running shell's read offset into changed bytes. A ~45-min bake died this way on
+# 2026-10-03 ('line 5012: VM_RELEASE_TRUST_OUTPUT_DIR: unbound variable' after a
+# 6-line insertion upstream of the running offset). Matching exit 0 + } at EOF.
+{
+
 # Multi-repo layout (post phase-c split). The desktop bundle pulls from
 # two sibling clones:
 #
@@ -68,33 +75,10 @@ REPO_ROOT="$(papercusp_repo_root "$ROOT")"
 PAPERCUSP_ROOT="${PAPERCUSP_ROOT:-$REPO_ROOT/libs/papercusp}"
 WEB_DIR="$REPO_ROOT/apps/operator"
 
-# EI-20971912793028056: the final assembled-sidecar identity audit deliberately
-# refuses to certify unless the owner's NAME is asserted at run time. Git cannot
-# supply it: release builders use automation identities, and accepting those would
-# turn a clean verdict into false evidence. This used to fail only after the entire
-# sidecar had been assembled. Mirror audit-release-bundle.py's exact non-empty rule
-# here (comma/semicolon-separated values, surrounding whitespace ignored) so a
-# release-audited build fails before the first toolchain or dependency operation.
-# Keep the value runtime-only — writing it into tracked source would create the
-# identity leak this gate exists to prevent.
-#
-# ORDERING (must stay above the source-provenance capture below): this is a pure
-# environment check with no I/O, while the capture shells out to git through
-# REPO_ROOT and FAILS CLOSED to gitDirty=true when that root is absent or
-# unreadable. Sitting after it, the clean-source-tree guard exited 1 on a missing
-# REPO_ROOT before this rejection could ever be reached — contradicting the
-# "fails before the first toolchain or dependency operation" contract above and
-# breaking `rejects a missing owner name before toolchain work`, which asserts
-# exit 2. A missing owner name is knowable from the environment alone, so it is
-# decided here, before anything touches the filesystem.
-_release_owner_name="${PAPERCUSP_RELEASE_OWNER_NAME:-}"
-if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" == "1" \
-   && -z "${_release_owner_name//[[:space:],;]/}" ]]; then
-  echo "ERROR: PAPERCUSP_RELEASE_AUDIT=1 requires a non-empty PAPERCUSP_RELEASE_OWNER_NAME before building." >&2
-  echo "       Export it at run time (never write it into a tracked file), then re-run." >&2
-  echo "       Refusing now because the final identity audit cannot certify without it." >&2
-  exit 2
-elif [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
+# D-112 makes the final release identity audit machine-only. Owner name/email are
+# legitimate release content (especially inside the required full-history seed), so
+# PAPERCUSP_RELEASE_AUDIT=1 must not depend on either owner-identity variable.
+if [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
   # EI-22084619262074810: this fail-late gap cost a full ~35min sidecar bake before
   # build-mac-cross.sh's downstream [sidecar-freshness:darwin] gate discovered the
   # missing attestation (build-mac-cross.sh:sidecar-freshness.js:release-audit-unattested).
@@ -104,10 +88,8 @@ elif [[ "${PAPERCUSP_RELEASE_AUDIT:-0}" != "1" ]]; then
   echo "      This sidecar will be REFUSED by build-mac-cross.sh's sidecar-freshness gate" >&2
   echo "      and by release cuts, which both require a releaseIdentityAudit attestation." >&2
   echo "      If this build feeds a cross-build or release cut, stop now and re-run with:" >&2
-  echo "        PAPERCUSP_RELEASE_AUDIT=1 PAPERCUSP_RELEASE_OWNER_NAME=<name>" >&2
-  echo "      (canonical supply: source ~/.papercusp/release-identity.env, set -a, at runtime)." >&2
+  echo "        PAPERCUSP_RELEASE_AUDIT=1" >&2
 fi
-unset _release_owner_name
 
 # D-043 / P-052: dogfood remains the historical source-rich developer bundle.
 # vm-release is a separate fail-closed build profile whose final sidecar is
@@ -1268,6 +1250,7 @@ MINIFY_ARGS=(--minify-whitespace --minify-syntax)
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/serve.mjs" \
   --banner:js="$HOST_BANNER" \
+  ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"} \
   --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
   --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
   --define:process.env.PAPERCUP_DOGFOOD_POT_PUBKEY="\"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}\"" \
@@ -1314,6 +1297,17 @@ echo "    ✓ staged systemd-scope-env-runner.mjs next to serve.mjs"
 
 # Required workers are shared with the host and current-build rig.
 bundle_host_workers "$REPO_ROOT" "$SIDECAR_DIR" || exit 1
+if declare -F bundle_host_spawner >/dev/null 2>&1; then
+bundle_host_spawner "$REPO_ROOT" "$SIDECAR_DIR" "${MINIFY_ARGS[@]}" "${VERSION_DEFINE_ARGS[@]}" \
+  --define:process.env.PAPERCUP_DOGFOOD_REPO_REF="\"${PAPERCUP_DOGFOOD_REPO_REF:-}\"" \
+  --define:process.env.PAPERCUP_DOGFOOD_POT_PUBKEY="\"${PAPERCUP_DOGFOOD_POT_PUBKEY:-${PAPERCUP_DOGFOOD_HIVE_PUBKEY:-}}\"" \
+  --define:process.env.PAPERCUP_DOGFOOD_POT_INVITE_SECRET="\"${PAPERCUP_DOGFOOD_POT_INVITE_SECRET:-${PAPERCUP_DOGFOOD_HIVE_INVITE_SECRET:-}}\"" \
+  "${HOST_EXTERNALS[@]}" || exit 1
+else
+  # Exact-source cuts may use an older TARGET helper. Its resolver still uses
+  # the full-host divert; do not borrow a newer entry from the orchestrator.
+  echo "    target helper predates standalone spawner; keeping its full-host route"
+fi
 
 # opusscript_native_wasm.wasm (EI-501) — the SAME dirname(import.meta.url)
 # gotcha as git-ext-bridge.mjs above, one layer deeper: esbuild INLINES
@@ -1350,7 +1344,8 @@ echo "→ esbuild-bundling packaged MCP proxy → $SIDECAR_DIR/mcp-proxy.mjs"
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/mcp-proxy.mjs" \
-  --banner:js="$HOST_BANNER")
+  --banner:js="$HOST_BANNER" \
+  ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"})
 if [[ ! -f "$SIDECAR_DIR/mcp-proxy.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/mcp-proxy.mjs"
   exit 1
@@ -1397,6 +1392,7 @@ for _psu_cli in psu:psu-launcher ptool:ptool onboard:onboard-launcher tutorial-r
     "${MINIFY_ARGS[@]}" \
     --outfile="$SIDECAR_DIR/scripts/$_psu_out.mjs" \
     --banner:js="$HOST_BANNER" \
+    ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"} \
     "--external:@lydell/*")
   if [[ ! -f "$SIDECAR_DIR/scripts/$_psu_out.mjs" ]]; then
     echo "ERROR: esbuild did not produce $SIDECAR_DIR/scripts/$_psu_out.mjs"
@@ -1435,7 +1431,8 @@ fi
   --bundle --platform=node --format=esm --target=node22 \
   "${MINIFY_ARGS[@]}" \
   --outfile="$SIDECAR_DIR/scripts/project-history.mjs" \
-  --banner:js="$HOST_BANNER")
+  --banner:js="$HOST_BANNER" \
+  ${HOST_BANNER_DEFINES[@]+"${HOST_BANNER_DEFINES[@]}"})
 if [[ ! -f "$SIDECAR_DIR/scripts/project-history.mjs" ]]; then
   echo "ERROR: esbuild did not produce $SIDECAR_DIR/scripts/project-history.mjs"
   exit 1
@@ -1529,6 +1526,58 @@ fetch_cross_npm_pkg() {
 opt_dep_version() {
   local pkg_json="$1" dep="$2"
   node -e "try{const d=require('$pkg_json').optionalDependencies||{};process.stdout.write(String(d['$dep']||''))}catch(e){}" 2>/dev/null
+}
+# WI-10004350: a nested runtime package bundled into the sidecar installs from
+# its COMMITTED lock. A lockless `npm install` resolves the newest in-range
+# versions at build time: two 0.0.26 cuts of one source shipped pg 8.23.0 and
+# 8.23.1, while the lock the tree tests pins pg 8.20.0. This copies
+# <src>/package-lock.json beside the package.json the caller already copied,
+# runs `npm ci` (which refuses a lock/package.json mismatch), then proves the
+# installed tree is lock-exact. npm flags follow the three positional args.
+install_locked_runtime_deps() {
+  local src="$1" dst="$2" label="$3"; shift 3
+  if [[ ! -f "$src/package-lock.json" ]]; then
+    echo "ERROR: WI-10004350: $label has no committed package-lock.json at $src; refusing a lockless npm install (it would ship whatever versions are newest at build time)"
+    return 1
+  fi
+  cp "$src/package-lock.json" "$dst/package-lock.json" || return 1
+  ( cd "$dst" && npm ci "$@" ) || { echo "ERROR: npm ci failed for $label runtime deps"; return 1; }
+  assert_lock_exact_install "$dst" "$label"
+}
+# Every lock entry that is installed must carry its locked version, and a
+# non-optional, non-dev, non-peer entry that is missing is a failure too.
+# Optional platform packages for other hosts are legitimately absent. A check
+# that matched zero installed packages is refused rather than passed.
+assert_lock_exact_install() {
+  local dir="$1" label="$2"
+  node - "$dir" "$label" <<'NODE'
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const [dir, label] = process.argv.slice(2);
+  const lock = JSON.parse(fs.readFileSync(path.join(dir, 'package-lock.json'), 'utf8'));
+  const problems = [];
+  let checked = 0;
+  for (const [key, entry] of Object.entries(lock.packages || {})) {
+    if (!key.startsWith('node_modules/') || !entry || !entry.version || entry.link) continue;
+    const manifest = path.join(dir, key, 'package.json');
+    if (!fs.existsSync(manifest)) {
+      if (!(entry.optional || entry.dev || entry.devOptional || entry.peer)) {
+        problems.push(`${key}: locked ${entry.version} but not installed`);
+      }
+      continue;
+    }
+    checked += 1;
+    const installed = JSON.parse(fs.readFileSync(manifest, 'utf8')).version;
+    if (installed !== entry.version) problems.push(`${key}: installed ${installed} != locked ${entry.version}`);
+  }
+  if (checked === 0) problems.push('zero locked packages are installed; refusing a vacuous pass');
+  if (problems.length > 0) {
+    console.error(`ERROR: WI-10004350: ${label} runtime deps are not lock-exact:`);
+    for (const problem of problems) console.error(`  ${problem}`);
+    process.exit(1);
+  }
+  console.log(`    ✓ ${label} runtime deps are lock-exact (${checked} installed packages match package-lock.json)`);
+NODE
 }
 prune_foreign_prebuilds() {
   local pkg_dir="$1"
@@ -2502,6 +2551,7 @@ _audit_py="$HERE/audit-release-bundle.py"
 if [[ -f "$_audit_py" ]]; then
   echo "→ pruning internal-build-infra docs from sidecar (release-privacy, WI-4419)"
   python3 "$_audit_py" --prune-docs \
+    "$SIDECAR_DIR" \
     "$SIDECAR_DIR/internal-docs" \
     "$SIDECAR_DIR/apps/operator-docs/src/content/docs" \
     "$SIDECAR_DIR/spa/docs"
@@ -2517,6 +2567,12 @@ if [[ -f "$_audit_py" ]]; then
     "$SIDECAR_DIR/apps/operator-docs/src/content/docs" \
     "$SIDECAR_DIR/serve.mjs" \
     "$SIDECAR_DIR/spa"
+  # D166: the doc source, rendered docs and SPA are already independent shipping
+  # copies. Preserve their normal-privacy projection privately, mint a NEW UUID
+  # output copy, and independently rederive each manifest before publishing it.
+  # Census context survives release-local's one-use row-plan clearing.
+  source "$HERE/lib/seed-reuse-age.sh"
+  seed_uuid_project_sidecar_documents "$HERE/lib/print-gitleaks-findings.py" "$SIDECAR_DIR" || exit 1
   # WI-37620: a build-box path baked into a COMPILED addon (.rodata assert string)
   # is reachable by neither of the gate's other remedies — `strip` leaves it and the
   # file is needed at runtime — so scrub it. Must run BEFORE the scan below.
@@ -2978,15 +3034,19 @@ chmod +x "$EMBEDDED_PG_DST/bin/embedded-postgres-server.mjs"
 # binaries (~60-150MB per arch) — npm picks the right @embedded-postgres/<plat>
 # package automatically based on the build host's platform. For
 # cross-platform releases, run this script once per target platform.
-echo "→ installing embedded-postgres-server runtime deps into the bundle (~60-150MB binary download)"
-( cd "$EMBEDDED_PG_DST" && npm install --omit=dev --no-workspaces --legacy-peer-deps --silent ) || {
+# WI-10004350: from the package's COMMITTED lock (npm ci), never a lockless
+# npm install; the helper also proves the result is lock-exact.
+echo "→ installing embedded-postgres-server runtime deps into the bundle from its committed lock (~60-150MB binary download)"
+install_locked_runtime_deps "$EMBEDDED_PG_SRC" "$EMBEDDED_PG_DST" embedded-postgres-server \
+  --omit=dev --no-workspaces --legacy-peer-deps --silent || {
   echo "ERROR: failed to install embedded-postgres-server runtime deps"
   exit 1
 }
 # WI-5651: cross-swap the embedded-postgres binary pkg for a darwin build. npm
 # resolved @embedded-postgres/<HOST> above (e.g. linux-x64 — it keys the optional
 # binary pkg on the build host); for a cross darwin bundle that is dead weight AND
-# wrong. Drop it and fetch the target's binary pkg at the SAME resolved version.
+# wrong. Drop it and fetch the target's binary pkg at the version the COMMITTED
+# lock pins for it (WI-10004350: never a host-derived or newest version).
 # The published @embedded-postgres/darwin-<arch> tarball SHIPS native/bin/{initdb,
 # postgres,pg_ctl} as real Mach-O UNIVERSAL (fat x86_64+arm64) directly — no
 # postinstall — so npm-pack+extract yields runnable binaries the assertion below
@@ -2995,8 +3055,8 @@ if [[ "$CROSS_BUILD" == "1" && "$TARGET_OS" == "darwin" ]]; then
   _epg_root="$EMBEDDED_PG_DST/node_modules/@embedded-postgres"
   _epg_host="$(ls "$_epg_root" 2>/dev/null | sed -n 1p)"
   [[ -n "$_epg_host" ]] || { echo "ERROR: no @embedded-postgres/<host> pkg after npm install — cannot derive the cross version"; exit 1; }
-  _epg_ver="$(node -e "console.log(require('$_epg_root/$_epg_host/package.json').version)" 2>/dev/null)"
-  [[ -n "$_epg_ver" ]] || { echo "ERROR: could not read installed @embedded-postgres/$_epg_host version"; exit 1; }
+  _epg_ver="$(node -e "const l=require('$EMBEDDED_PG_DST/package-lock.json');process.stdout.write(String((l.packages['node_modules/@embedded-postgres/darwin-${TARGET_ARCH}']||{}).version||''))" 2>/dev/null)"
+  [[ -n "$_epg_ver" ]] || { echo "ERROR: WI-10004350: package-lock.json pins no @embedded-postgres/darwin-${TARGET_ARCH} version; cannot cross-swap lock-exactly"; exit 1; }
   echo "→ WI-5651 cross-swapping embedded-postgres binary pkg: drop $_epg_host, fetch darwin-${TARGET_ARCH}@${_epg_ver}"
   rm -rf "${_epg_root:?}"/*
   fetch_cross_npm_pkg "@embedded-postgres/darwin-${TARGET_ARCH}@${_epg_ver}" "$EMBEDDED_PG_DST/node_modules" || exit 1
@@ -3987,7 +4047,7 @@ cp "$PAPERCUSP_ROOT/libs/db/sql/"*.sql "$SIDECAR_DIR/db-sql/"
 
 # WI-4419 D-004 (copy-point identity scrub): db-sql/ is a SECOND path (besides
 # source.tar.zst) by which must-ship canonical source leaves the tree VERBATIM —
-# the migration SQL is copied byte-for-byte, so an [owner:owner] provenance header
+# the migration SQL is copied byte-for-byte, so an [owner:Avi] provenance header
 # (e.g. migrations 630/631) survives to disk and is caught by this build's own
 # release-privacy --scan-dir audit below (and the AppImage AppDir scan). Unlike
 # the compiled .ts source (esbuild strips comments), these .sql comments ship as-
@@ -4484,7 +4544,7 @@ if [[ "$_cross_darwin" == "1" ]]; then
   # `git instaweb` web-UI helper. Papercusp never invokes it, but the helper is
   # a 22 KiB shell script containing MIME-table text that trips the mandatory
   # assembled-bundle identity scan (the 0.0.18-alpha macOS leg failed on its
-  # `.owner` entries). Do not weaken or exclude the scan: prune this non-runtime
+  # `.avi` entries). Do not weaken or exclude the scan: prune this non-runtime
   # helper from the shipping copy immediately after the verbatim keg copy and
   # before Mach-O rewrite/signing walks the vendor tree.
   rm -f "$SIDECAR_DIR/bin/.git-vendor/libexec/git-core/git-instaweb"
@@ -5301,3 +5361,6 @@ __pc_release_sidecar_publish_lock
 # Compute size
 total_size=$(du -sh "$SIDECAR_DIR" 2>/dev/null | awk '{print $1}')
 echo "✓ sidecar built at $SIDECAR_DIR ($total_size)"
+exit 0
+
+}  # ── end self-read guard (WI-3306) ──

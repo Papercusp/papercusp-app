@@ -25,6 +25,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
@@ -46,6 +47,24 @@ const DEFAULT_RETRY_MS = 250;
  * already share, so the two sides cannot silently drift onto different locks.
  */
 export const PACKAGE_CACHE_MUTEX_NAME = "package-manager-cache";
+
+/**
+ * Default wait budget for both lease kinds. PAPERCUSP_FS_MUTEX_TIMEOUT_MS wins;
+ * otherwise PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC (EI-24961470606265468), the one
+ * knob an unattended desktop build sets so this wait (like the sidecar and vite
+ * build locks) can queue behind a peer instead of failing after 180 s.
+ */
+export function resolveFsMutexTimeoutMs(env = process.env) {
+  const explicit = Number(env.PAPERCUSP_FS_MUTEX_TIMEOUT_MS);
+  if (env.PAPERCUSP_FS_MUTEX_TIMEOUT_MS && Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+  const unattendedSec = Number(env.PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC);
+  if (env.PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC && Number.isFinite(unattendedSec) && unattendedSec > 0) {
+    return unattendedSec * 1000;
+  }
+  return DEFAULT_TIMEOUT_MS;
+}
 
 function intEnv(name, fallback) {
   const raw = process.env[name];
@@ -379,7 +398,11 @@ async function waitForReaders(
  *
  * @template T
  * @param {string} name
- * @param {() => Promise<T>} fn
+ * The callback may check for live queued writers and voluntarily return early.
+ * The check uses the same ticket reclamation as acquisition; it never releases
+ * the lock itself. Reader-mode and explicitly disabled locks have no check.
+ *
+ * @param {(context?: { hasWaiters: () => Promise<boolean> }) => Promise<T>} fn
  * @param {{ mode?: 'read' | 'reader' | 'write', timeoutMs?: number, staleMs?: number, retryMs?: number, onWaiting?: (info: { owner: string, elapsedMs: number }) => void, waitingNoticeIntervalMs?: number, onAcquired?: (info: { waitedMs: number }) => void, intent?: Record<string, string | number | boolean> }} [opts]
  * @returns {Promise<T>}
  */
@@ -393,9 +416,7 @@ export async function withFsMutex(name, fn, opts = {}) {
   const root = lockRoot();
   const lockDir = join(root, `${safeName(name)}.lock`);
   const readersDir = readerRoot(root, name);
-  const timeoutMs =
-    opts.timeoutMs ??
-    intEnv("PAPERCUSP_FS_MUTEX_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
+  const timeoutMs = opts.timeoutMs ?? resolveFsMutexTimeoutMs();
   const staleMs =
     opts.staleMs ?? intEnv("PAPERCUSP_FS_MUTEX_STALE_MS", DEFAULT_STALE_MS);
   const retryMs =
@@ -425,6 +446,7 @@ export async function withFsMutex(name, fn, opts = {}) {
   const ticketsDir = queueRoot(root, name);
   const myTicketDir = join(ticketsDir, `${ticketId(startedAt)}.ticket`);
   let ticketRegistered = false;
+  let writerOwner;
   try {
     await mkdir(ticketsDir, { recursive: true });
     await mkdir(myTicketDir);
@@ -488,9 +510,10 @@ export async function withFsMutex(name, fn, opts = {}) {
         // produced a wrong, confidently-reported measurement during this very investigation.
         // The mkdir above IS the grant, so stamp the grant instant here and make it
         // answerable instead of inviting the same misreading again.
+        writerOwner = { ...owner, acquiredAt: new Date().toISOString(), phase: "draining-readers" };
         await writeFile(
           join(lockDir, "owner.json"),
-          `${JSON.stringify({ ...owner, acquiredAt: new Date().toISOString() }, null, 2)}\n`,
+          `${JSON.stringify(writerOwner, null, 2)}\n`,
         );
         break;
       } catch (error) {
@@ -543,7 +566,16 @@ export async function withFsMutex(name, fn, opts = {}) {
     // `timeoutMs` restarts from zero, so an N-shard run's real worst case is N × timeoutMs.
     // Fires inside the try so a throwing callback still releases the lock.
     if (opts.onAcquired) opts.onAcquired({ waitedMs: Date.now() - startedAt });
-    return await fn();
+    // A reserved writer can spend its entire wait draining existing readers.
+    // Publish the callback phase only after that drain, atomically so a peek
+    // cannot mistake a partially rewritten owner record for an absent lock.
+    const runningOwner = { ...writerOwner, phase: "running", runningAt: new Date().toISOString() };
+    const nextOwnerPath = join(lockDir, "owner.next.json");
+    await writeFile(nextOwnerPath, `${JSON.stringify(runningOwner, null, 2)}\n`);
+    await rename(nextOwnerPath, join(lockDir, "owner.json"));
+    return await fn({
+      hasWaiters: async () => (await oldestTicketDir(ticketsDir, staleMs)) != null,
+    });
   } finally {
     await rm(lockDir, { recursive: true, force: true });
   }
@@ -559,7 +591,7 @@ export async function withFsMutex(name, fn, opts = {}) {
  * @template T
  * @param {string} name
  * @param {() => Promise<T>} fn
- * @param {{ mode?: 'read' | 'reader', timeoutMs?: number, staleMs?: number, retryMs?: number, onWaiting?: (info: { owner: string, elapsedMs: number }) => void }} [opts]
+ * @param {{ mode?: 'read' | 'reader', timeoutMs?: number, staleMs?: number, retryMs?: number, onWaiting?: (info: { owner: string, elapsedMs: number }) => void, waitingNoticeIntervalMs?: number, onAcquired?: (info: { waitedMs: number }) => void }} [opts]
  * @returns {Promise<T>}
  */
 export async function withFsMutexRead(name, fn, opts = {}) {
@@ -568,9 +600,7 @@ export async function withFsMutexRead(name, fn, opts = {}) {
   const root = lockRoot();
   const writerDir = join(root, `${safeName(name)}.lock`);
   const readersDir = readerRoot(root, name);
-  const timeoutMs =
-    opts.timeoutMs ??
-    intEnv("PAPERCUSP_FS_MUTEX_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
+  const timeoutMs = opts.timeoutMs ?? resolveFsMutexTimeoutMs();
   const staleMs =
     opts.staleMs ?? intEnv("PAPERCUSP_FS_MUTEX_STALE_MS", DEFAULT_STALE_MS);
   const retryMs =
@@ -592,6 +622,14 @@ export async function withFsMutexRead(name, fn, opts = {}) {
   await mkdir(readersDir, { recursive: true });
 
   let announcedWaiting = false;
+  let lastWaitingNoticeMs = 0;
+  // Shared readers need the same opt-in observations as writer waiters. Read
+  // the owner again at each notice: consecutive installs can change the holder
+  // during one admission wait (EI-25192113925430292).
+  const waitingNoticeIntervalMs =
+    Number(opts.waitingNoticeIntervalMs) > 0
+      ? Number(opts.waitingNoticeIntervalMs)
+      : 0;
   for (;;) {
     let markerCreated = false;
     let ready = false;
@@ -615,8 +653,14 @@ export async function withFsMutexRead(name, fn, opts = {}) {
     if (markerCreated) await rm(readerDir, { recursive: true, force: true });
 
     const elapsed = Date.now() - startedAt;
-    if (!announcedWaiting && opts.onWaiting) {
+    if (
+      opts.onWaiting &&
+      (!announcedWaiting ||
+        (waitingNoticeIntervalMs > 0 &&
+          elapsed - lastWaitingNoticeMs >= waitingNoticeIntervalMs))
+    ) {
       announcedWaiting = true;
+      lastWaitingNoticeMs = elapsed;
       opts.onWaiting({ owner: await readOwner(writerDir), elapsedMs: elapsed });
     }
     if (elapsed > timeoutMs) {
@@ -629,6 +673,10 @@ export async function withFsMutexRead(name, fn, opts = {}) {
   }
 
   try {
+    // WI-10006385: same admission report as the writer's onAcquired, so a reader that
+    // queued behind an install can say how long it waited. Inside the try so a throwing
+    // callback still removes the reader marker.
+    if (opts.onAcquired) opts.onAcquired({ waitedMs: Date.now() - startedAt });
     return await fn();
   } finally {
     await rm(readerDir, { recursive: true, force: true });
@@ -648,7 +696,7 @@ export async function withFsMutexRead(name, fn, opts = {}) {
  * fail-open error handling).
  *
  * @param {string} name
- * @returns {{ held: boolean, owner?: { pid?: number, host?: string, startedAt?: string, name?: string, intent?: Record<string, string | number | boolean> }, lockDir: string }}
+ * @returns {{ held: boolean, owner?: { pid?: number, host?: string, startedAt?: string, acquiredAt?: string, runningAt?: string, phase?: 'draining-readers' | 'running', name?: string, intent?: Record<string, string | number | boolean> }, lockDir: string }}
  */
 export function peekFsMutexSync(name) {
   const lockDir = join(lockRoot(), `${safeName(name)}.lock`);

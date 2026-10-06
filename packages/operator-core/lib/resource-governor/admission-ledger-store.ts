@@ -22,6 +22,7 @@ import {
   type SqlClient,
   type StoredAdmissionRecord,
   RESOURCE_GOVERNOR_LIVENESS_READ_DEADLINE_MS,
+  EndedLeaseOwnerScanCoalescer,
   selectEndedLeaseOwners,
   readGovernorQueuePopulation,
 } from './queue';
@@ -127,6 +128,12 @@ export interface PgAdmissionLedgerQueueStoreOptions {
   readonly resolveSessionStatesFn?: ResolveSessionStates;
   /** Bounded pre-cutover work-item adapter. Omitted for the ledger-only store. */
   readonly legacyAdapter?: AdmissionLedgerLegacyAdapter;
+  /**
+   * Reuse a settled ended-lease-owner scan on the lease hot path for this many ms
+   * (see EndedLeaseOwnerScanCoalescer). Default 0: concurrent callers still share
+   * an in-flight scan, but sequential callers each read fresh state.
+   */
+  readonly endedLeaseOwnerReuseMs?: number;
 }
 
 /**
@@ -145,8 +152,10 @@ export class PgAdmissionLedgerQueueStore implements DurableAdmissionQueueStore {
   private readonly abandonAfterMs: number;
   private readonly resolveSessionStatesFn: ResolveSessionStates | undefined;
   private readonly legacyAdapter: AdmissionLedgerLegacyAdapter | undefined;
+  private readonly endedOwnerScans: EndedLeaseOwnerScanCoalescer;
 
   constructor(options: PgAdmissionLedgerQueueStoreOptions = {}) {
+    this.endedOwnerScans = new EndedLeaseOwnerScanCoalescer(options.endedLeaseOwnerReuseMs);
     this.sql = options.sql ?? getOrgPg().sql;
     this.workspaceId = options.workspaceId?.trim() || activeWorkspaceId();
     this.abandonAfterMs =
@@ -373,6 +382,11 @@ export class PgAdmissionLedgerQueueStore implements DurableAdmissionQueueStore {
     });
   }
 
+  /** Lease hot path: concurrent callers share one scan (WI-10004631). */
+  private hotPathEndedLeaseOwners(namespace: string | null, nowMs: number): Promise<QueueLeaseOwnerObservation[]> {
+    return this.endedOwnerScans.scan(namespace, nowMs, () => this.endedLeaseOwners(namespace, nowMs));
+  }
+
   private async endedLeaseOwners(namespace: string | null, nowMs = Date.now()): Promise<QueueLeaseOwnerObservation[]> {
     let active: QueueLeaseOwnerObservation[];
     try {
@@ -390,7 +404,9 @@ export class PgAdmissionLedgerQueueStore implements DurableAdmissionQueueStore {
     try {
       const verdicts = await resolve(
         owners.map((ownerId) => ({ ownerId })),
-        { hydratePerId: true, nowMs },
+        // One owner-filtered presence read for the whole roster (WI-10004631);
+        // per-id hydration issued one point read per active lease owner.
+        { hydrateBatch: true, nowMs },
       );
       return selectEndedLeaseOwners(active, verdicts);
     } catch (error) {
@@ -533,7 +549,7 @@ export class PgAdmissionLedgerQueueStore implements DurableAdmissionQueueStore {
     nowMs: number,
     selection?: QueueLeaseSelection,
   ): Promise<QueueMutationResult | null> {
-    const endedLeaseOwners = await this.endedLeaseOwners(namespace, nowMs);
+    const endedLeaseOwners = await this.hotPathEndedLeaseOwners(namespace, nowMs);
     return this.transaction(async (tx) => {
       await this.reconcileExpiredRows(tx, namespace, nowMs, endedLeaseOwners);
       let rows: LedgerDbRow[];
@@ -655,7 +671,7 @@ export class PgAdmissionLedgerQueueStore implements DurableAdmissionQueueStore {
     ttlMs: number,
     nowMs: number,
   ): Promise<QueueMutationResult | null> {
-    const endedLeaseOwners = await this.endedLeaseOwners(namespace, nowMs);
+    const endedLeaseOwners = await this.hotPathEndedLeaseOwners(namespace, nowMs);
     return this.transaction(async (tx) => {
       await this.reconcileExpiredRows(tx, namespace, nowMs, endedLeaseOwners);
       const row = await this.findReceiptRow(tx, receiptId, true);

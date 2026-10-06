@@ -12,6 +12,7 @@
 import type postgres from 'postgres';
 import { postSlackThreadMessage, resolveSlackSocketCredentials } from '../external-triggers/slack';
 import { fsTokenStorage } from '../oauth/storage-fs';
+import { assertDisclosurePermits } from '../personal-vault/disclosure-ledger';
 import { assertTrustedAddressee, type AddresseeProvenance } from './addressing';
 import { resolveCanonicalDocument, resolveOutboundContext, string, type CanonicalDocument } from './resolve';
 
@@ -57,7 +58,17 @@ export function resolveChatReplyCoordinates(doc: CanonicalDocument): ChatReplyCo
 /** `chat:reply` — caller supplies TEXT ONLY; destination is server-resolved. */
 export async function replyToCanonicalChat(
   sql: postgres.Sql,
-  params: { workspaceId: string; userId: string; messageId: string; text: string },
+  params: {
+    workspaceId: string;
+    userId: string;
+    messageId: string;
+    text: string;
+    /**
+     * Reader-set labels: see `sendNewMail` in ./mail. A channel's readers cannot
+     * be enumerated as mailboxes, so any active disclosure refuses the post.
+     */
+    agentOwnerId: string | null;
+  },
   deps: ChatDeps = {},
 ): Promise<ChatReplyResult> {
   const text = params.text.trim();
@@ -70,6 +81,13 @@ export async function replyToCanonicalChat(
     externalId: params.messageId,
   });
   const coordinates = resolveChatReplyCoordinates(doc);
+  await assertDisclosurePermits(sql, {
+    workspaceId: params.workspaceId,
+    userId: params.userId,
+    agentOwnerId: params.agentOwnerId,
+    recipients: null,
+    sink: `slack:${coordinates.channelId}`,
+  });
   const ctx = await resolveOutboundContext(sql, {
     workspaceId: params.workspaceId,
     userId: params.userId,
@@ -101,6 +119,8 @@ export async function postToChatChannel(
     threadId?: string | null;
     text: string;
     provenance: AddresseeProvenance;
+    /** See `replyToCanonicalChat`. */
+    agentOwnerId: string | null;
   },
   deps: ChatDeps = {},
 ): Promise<ChatReplyResult> {
@@ -114,6 +134,13 @@ export async function postToChatChannel(
     userId: params.userId,
     address: channelId,
     provenance: params.provenance,
+  });
+  await assertDisclosurePermits(sql, {
+    workspaceId: params.workspaceId,
+    userId: params.userId,
+    agentOwnerId: params.agentOwnerId,
+    recipients: null,
+    sink: `slack:${channelId}`,
   });
 
   const ctx = await resolveOutboundContext(sql, {

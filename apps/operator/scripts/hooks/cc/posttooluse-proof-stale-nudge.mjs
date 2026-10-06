@@ -12,7 +12,8 @@
 // twice and P-004 four times (D-006; EI-24053039097767980).
 //
 // What it does, after a successful edit of a file inside a repository:
-//   1. asks the operator `plans:evidence-measuring-paths { paths:[<repo-relative path>] }`
+//   1. asks the operator `plans:evidence-measuring-paths { harness, paths:[<repo-relative path>] }`
+//      (harness = the session's PAPERCUSP_HARNESS_SLUG; skipped silently when unset)
 //      which clauses on unshipped plans hold current-revision repo-files proof measuring it;
 //   2. prints an advisory naming those clauses and BARs, their holders and the one
 //      re-measure call — once per edit burst on that path, not on every keystroke-sized Edit;
@@ -114,6 +115,20 @@ export function repoLocation(filePath, cwd = process.cwd(), git = execFileSync) 
   }
 }
 
+/**
+ * The harness the lookup is scoped to: the session's `PAPERCUSP_HARNESS_SLUG`, the same env
+ * var the plans-read, activity-report and work-item-verify hooks read. `plans:evidence-
+ * measuring-paths` REQUIRES a `harness` on an operator-scope (superuser, no session harness)
+ * call and refuses `harness_required` without one — measured 2026-10-01 (WI-10004549):
+ * 608 such refusals / 72h from ~39 owners, every one a hook-origin tool-call-failure row.
+ * Null when unset or malformed: the caller then skips WITHOUT calling the operator, so a
+ * session with no harness costs no failed call and trips no circuit breaker.
+ */
+export function harnessFromEnv(env = process.env) {
+  const slug = typeof env.PAPERCUSP_HARNESS_SLUG === 'string' ? env.PAPERCUSP_HARNESS_SLUG.trim() : '';
+  return SESSION_ID_PATTERN.test(slug) ? slug : null;
+}
+
 /** Editor identity, in the same precedence the lock and frozen-candidate hooks use. */
 export function editorIdentity(payload, env = process.env) {
   if (typeof env.PAPERCUSP_LOCK_SID === 'string' && env.PAPERCUSP_LOCK_SID) return env.PAPERCUSP_LOCK_SID;
@@ -184,10 +199,17 @@ export async function callTool({ baseUrl, token, owner, name, args, fetchImpl = 
 }
 
 /** Primary operator first; the staging operator carries a newly shipped tool sooner. */
-export async function lookupMeasuringClauses({ urls, token, owner, path, fetchImpl = fetch }) {
+export async function lookupMeasuringClauses({ urls, token, owner, harness, path, fetchImpl = fetch }) {
   let last = { ok: false, detail: 'no operator url' };
   for (const baseUrl of urls) {
-    const r = await callTool({ baseUrl, token, owner, name: 'plans:evidence-measuring-paths', args: { paths: [path] }, fetchImpl });
+    const r = await callTool({
+      baseUrl,
+      token,
+      owner,
+      name: 'plans:evidence-measuring-paths',
+      args: { harness, paths: [path] },
+      fetchImpl,
+    });
     if (r.ok && Array.isArray(r.data?.clauses)) {
       return {
         ok: true,
@@ -334,6 +356,8 @@ export async function run(payload, { env = process.env, nowMs = Date.now(), fetc
   if (toolCallFailed(payload)) return null;
   const editor = editorIdentity(payload, env);
   if (!editor || !SESSION_ID_PATTERN.test(editor)) return null; // no session-owned state, no attribution
+  const harness = harnessFromEnv(env);
+  if (!harness) return null; // the tool refuses harness_required without one — don't make the doomed call
   let token = '';
   try {
     token = readFileSync(join(homedir(), '.papercusp', 'superuser-token'), 'utf8').trim();
@@ -361,7 +385,7 @@ export async function run(payload, { env = process.env, nowMs = Date.now(), fetc
       ({ clauses, totalClauses, holders } = cached);
     } else {
       if (typeof state.breakerAtMs === 'number' && nowMs - state.breakerAtMs < BREAKER_MS) continue;
-      const found = await lookupMeasuringClauses({ urls, token, owner: editor, path: loc.rel, fetchImpl });
+      const found = await lookupMeasuringClauses({ urls, token, owner: editor, harness, path: loc.rel, fetchImpl });
       if (!found.ok) {
         writeJson(statePath, { ...state, breakerAtMs: nowMs });
         continue;

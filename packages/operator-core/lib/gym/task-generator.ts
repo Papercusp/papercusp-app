@@ -18,7 +18,8 @@ export interface GymLlmCall {
     thinkingBudgetTokens?: number;
     maxTokens?: number;
     priority?: string;
-  }): Promise<{ text: string; json?: unknown; costUsd: number; inputTokens: number; outputTokens: number }>;
+  }): Promise<{ text: string; json?: unknown; costUsd: number; inputTokens: number; outputTokens: number;
+    costUsdMeasurementMissing?: boolean; unreportedFrames?: number }>;
 }
 
 export type GymTaskPool = 'train' | 'dev-anchor' | 'monitor' | 'probe' | 'real-anchor';

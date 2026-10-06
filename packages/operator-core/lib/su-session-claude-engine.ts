@@ -10,6 +10,7 @@ import { PassThrough } from 'node:stream';
 import { query, type Options, type Query, type SDKMessage, type SDKUserMessage, type Settings } from '@anthropic-ai/claude-agent-sdk';
 import { applyDefaultClaudeAuthSettingsArgs, applyDefaultClaudeOAuthToken, applyGithubTokenEnv, assertLaunchPersona, enforceDefaultClaudeAccount, healContextTrimmingEnv, persistDefaultClaudeAuthSettings, recordSessionOwner, sanitizeInheritedEnv, startSupervisorBeat, suLaunchArgs } from '../../../apps/operator/scripts/psu-launcher.mjs';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
+import type { SuApprovalsMode } from '@papercusp/chat-protocol';
 import { splitModelSpec } from './agent-config-constants';
 import { resolveSpawnHostOperatorBaseUrl } from './mcp-base-url';
 import type { BootstrapSuResult } from './endpoint-route/routes/agent-mcp/bootstrap-su';
@@ -24,7 +25,35 @@ import { SuSessionStartupTimeoutError, type SuSessionHost, type SuSessionEventIn
 import { SuNativeCards } from './su-session-native-cards';
 import { loadSuOwnerTurnReceipts } from './su-session-commands';
 
-export type ClaudeEngineQuery = AsyncIterable<SDKMessage> & Pick<Query, 'initializationResult' | 'mcpServerStatus' | 'interrupt' | 'close'>;
+export type ClaudeEngineQuery = AsyncIterable<SDKMessage> & Pick<Query, 'initializationResult' | 'mcpServerStatus' | 'interrupt' | 'close'>
+  // P-026: the streaming-input model switch. Optional so a peer without it
+  // still runs; asking that peer to switch refuses the turn instead.
+  & Partial<Pick<Query, 'setModel' | 'applyFlagSettings' | 'setPermissionMode'>>;
+
+/** D-026: the Claude permission mode for one engine-neutral approvals mode.
+ * There is no full-access mode: PUI never launches with
+ * allowDangerouslySkipPermissions. */
+export function claudePermissionMode(mode: SuApprovalsMode): 'default' | 'acceptEdits' | 'plan' {
+  switch (mode) {
+    case 'ask': return 'default';
+    case 'auto-edit': return 'acceptEdits';
+    case 'read-only': return 'plan';
+  }
+}
+
+/** P-026: the SDK calls that move a running Claude session onto `spec`
+ * (`model[:effort]`) before the next owner turn. Effort is applied through the
+ * flag-settings layer, which is what `query({ effort })` sets at launch. */
+export async function applyClaudeModelSwitch(sdk: ClaudeEngineQuery, spec: string): Promise<void> {
+  const next = splitModelSpec(spec);
+  if (!next.model) throw new Error(`"${spec}" names no model`);
+  if (!sdk.setModel) throw new Error('This Claude connection cannot change model mid-session');
+  await sdk.setModel(next.model);
+  if (next.effort) {
+    if (!sdk.applyFlagSettings) throw new Error('This Claude connection cannot change effort mid-session');
+    await sdk.applyFlagSettings({ effortLevel: next.effort as NonNullable<Settings['effortLevel']> });
+  }
+}
 /** Who the engine is (plan pui-chat-first-ux-2026-09-28 D-004). `su` is the
  * workspace superuser: the su playbook as a custom prompt, the psu hook set and
  * the papercusp-su tools. `coding-assistant` is Claude Code's own session for a
@@ -208,6 +237,10 @@ export function startClaudeSuEngine(
   let activeTurnSawAssistant = false;
   let finishActiveTurn: (() => void) | undefined;
   const pending = new Map<string, ReturnType<typeof deferred<ClaudeNativeCommandVerdict>>>();
+  // P-026: the spec the session runs on, so a turn naming it again is no switch.
+  let currentModel = options.model ?? null;
+  // D-026: a prompted launch runs in permissionMode 'default', which is `ask`.
+  let currentApprovals: SuApprovalsMode | undefined = options.toolApproval === 'prompt' ? 'ask' : undefined;
   const deliveryTimeoutMs = options.deliveryTimeoutMs ?? 30_000;
   // A turn that never ENDS emits no result frame, and BOTH existing detectors —
   // claude_turn_failed and claude_empty_turn — are nested under one, so neither
@@ -219,6 +252,10 @@ export function startClaudeSuEngine(
   let lastFrameAt = Date.now();
   let stallWatch: ManagedHandle | undefined;
   let stallReported = false;
+  // Permission requests whose approval card is open. While one is open the turn
+  // is waiting on the owner, not stalled: Claude sends no frames until it gets
+  // an answer (P-028 probe 13 reported a false 114s stall under an open card).
+  let awaitingOwnerAnswers = 0;
   function armStallWatch() {
     lastFrameAt = Date.now();
     stallReported = false;
@@ -230,7 +267,7 @@ export function startClaudeSuEngine(
     // "turn went quiet" event to subscribe to: silence is the signal.
     stallWatch ??= managedSetInterval('su-session-claude-turn-stall',
       Math.max(50, Math.round(turnStallTimeoutMs / 3)), () => {
-        if (closed || stallReported || !activeInputUuid) return;
+        if (closed || stallReported || !activeInputUuid || awaitingOwnerAnswers > 0) return;
         const idleMs = Date.now() - lastFrameAt;
         if (idleMs < turnStallTimeoutMs) return;
         stallReported = true;
@@ -246,9 +283,11 @@ export function startClaudeSuEngine(
   });
   const adapter = createClaudeSuSessionAdapter(binding, runtime, {
     ...options, ready: false, runtimeReady: () => ready && !closed, ownerTurnCorrelation: 'transport', cardSource: 'transport',
+    resultErrorSource: 'transport',
+    ...(currentApprovals ? { approvals: currentApprovals } : {}),
     ownerTurnReceipts: (identity) => loadSuOwnerTurnReceipts(identity),
     controls: {
-      async ownerTurn({ content, turnId }) {
+      async ownerTurn({ content, turnId, model: nextModel, approvals: nextApprovals }) {
         if (!ready || closed) return unavailable('The structured Claude connection is not ready');
         const uuid = randomUUID();
         const receipt = deferred<ClaudeNativeCommandVerdict>();
@@ -256,6 +295,34 @@ export function startClaudeSuEngine(
         let timer: ReturnType<typeof setTimeout> | undefined;
         inputTail = inputTail.then(async () => {
           if (closed) { receipt.resolve(unavailable('Claude closed before this saved turn was sent')); return; }
+          // P-026: switch in the input order, after any earlier queued turn has
+          // finished (so it never changes the model under that turn) and before
+          // this one is written (so a refused switch refuses this turn instead
+          // of running it on a model the owner did not pick).
+          if (nextModel && nextModel !== currentModel) {
+            try {
+              await applyClaudeModelSwitch(sdk, nextModel);
+            } catch (error) {
+              receipt.resolve({ ok: false, code: 'model_switch_refused', retryable: false,
+                message: `Could not switch to ${nextModel}: ${error instanceof Error ? error.message : String(error)}` });
+              return;
+            }
+            currentModel = nextModel;
+            adapter.host.updateModel(nextModel);
+          }
+          // D-026: the approvals switch follows the same order and refusal rule.
+          if (nextApprovals && nextApprovals !== currentApprovals) {
+            try {
+              if (!sdk.setPermissionMode) throw new Error('This Claude connection cannot change permission mode mid-session');
+              await sdk.setPermissionMode(claudePermissionMode(nextApprovals));
+            } catch (error) {
+              receipt.resolve({ ok: false, code: 'approvals_switch_refused', retryable: false,
+                message: `Could not switch approvals to ${nextApprovals}: ${error instanceof Error ? error.message : String(error)}` });
+              return;
+            }
+            currentApprovals = nextApprovals;
+            adapter.host.updateApprovals(nextApprovals);
+          }
           const finished = deferred<void>();
           finishActiveTurn = () => finished.resolve();
           adapter.correlateOwnerTurn(turnId);
@@ -290,7 +357,12 @@ export function startClaudeSuEngine(
     if (event.type === 'card' && !closed && !adapter.host.snapshot().terminal) {
       adapter.host.transition(event.phase === 'opened' ? 'waiting-for-owner' : 'running', 'Claude native question');
     }
-  }, boot.cwd);
+  }, {
+    cwd: boot.cwd,
+    // D-028: option 2 on an edit switched Claude to accept-edits for the
+    // session, which is the auto-edit approvals mode (D-026).
+    approvalsChanged: (mode) => { currentApprovals = mode; adapter.host.updateApprovals(mode); },
+  });
   const model = splitModelSpec(options.model);
   const launch = suLaunchArgs('claude', { promptFile: boot.promptFile, nativeSessionId: nativeId });
   const su = (options.identity ?? 'su') === 'su';
@@ -351,7 +423,12 @@ export function startClaudeSuEngine(
         && !permission.matchedAskRule) {
         return Promise.resolve({ behavior: 'allow', updatedInput: input });
       }
-      return cards.handleClaude(toolName, input, activeOwnerTurnId, permission);
+      // The stall clock restarts once the owner answers.
+      awaitingOwnerAnswers += 1;
+      return cards.handleClaude(toolName, input, activeOwnerTurnId, permission).finally(() => {
+        awaitingOwnerAnswers -= 1;
+        lastFrameAt = Date.now();
+      });
     },
     disallowedTools,
     ...(model.model ? { model: model.model } : {}),

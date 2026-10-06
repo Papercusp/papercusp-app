@@ -35,6 +35,12 @@ import { deriveIndexFromContent } from '../../../agent-tools/plans/derive-index'
 import { writePlanIndexRows } from '../../../agent-tools/plans/plan-index-rows';
 import { withPlanDependencyAdmissionTransaction } from '../../../agent-tools/plans/plan-dependency-admission-transaction';
 import {
+  FEDERATED_BOOTSTRAP_REVISION_AUTHOR,
+  FEDERATED_WHOLE_BLOB_REVISION_AUTHOR,
+  recordSystemPlanRevisionInTransaction,
+  type PlanRevisionSql,
+} from '../../../agent-tools/plans/revisions';
+import {
   decideContentWriteAuthority,
   resolveContentWriteMode,
   type ContentWriteMode,
@@ -380,17 +386,24 @@ async function writeToPg(
       // stored contract before the upsert. Per-part bootstrap inserts have no
       // existing row to overwrite and remain no-clobber.
       let templateDataForWrite = row.template_data;
-      if (!partFederationOn && row.template_data !== undefined) {
-        const currentRows = await tx<Array<{ template_data: unknown }>>`
-          SELECT template_data
+      // WI-10006313: the flag-OFF upsert below rewrites content, so read whether the
+      // prior row exists and whether its bytes differ. The admission transaction
+      // already holds this plan's advisory lock, so no writer can move it between
+      // this read and the upsert. `null` = no prior row (the upsert inserts).
+      let prior: { content_differs: boolean } | null = null;
+      if (!partFederationOn) {
+        const currentRows = await tx<Array<{ template_data: unknown; content_differs: boolean }>>`
+          SELECT template_data,
+                 content IS DISTINCT FROM ${row.content} AS content_differs
             FROM harness_shared.harness_plans
            WHERE workspace_id = ${opts.workspaceId}
              AND harness_slug = ${row.harness_slug}
              AND plan_slug = ${row.plan_slug}
            LIMIT 1
         `;
+        prior = currentRows[0] ? { content_differs: currentRows[0].content_differs } : null;
         const currentTemplateData = currentRows[0]?.template_data;
-        if (currentTemplateData !== undefined && currentTemplateData !== null) {
+        if (row.template_data !== undefined && currentTemplateData !== undefined && currentTemplateData !== null) {
           const guarded = guardAcceptanceBarTemplateDataWrite({
             slug: row.plan_slug,
             storedTemplateData: currentTemplateData,
@@ -433,7 +446,22 @@ async function writeToPg(
             { workspaceId: opts.workspaceId, harnessSlug: row.harness_slug, planSlug: row.plan_slug },
             deriveIndexFromContent(row.content),
           );
-          if (origin === 'remote') await reseedAcceptanceBarsAfterRemoteApply(tx, opts.workspaceId, row, templateDataForWrite);
+          if (origin === 'remote') {
+            // WI-10006275: a remote bootstrap creates this node's copy of the plan
+            // outside withPlanLock; record its first revision in the same tx so the
+            // live bytes always have a revision row (plans:audit / plans:revisions).
+            await recordSystemPlanRevisionInTransaction(tx as unknown as PlanRevisionSql, {
+              workspaceId: opts.workspaceId,
+              harnessSlug: row.harness_slug,
+              planSlug: row.plan_slug,
+              content: row.content,
+              rationale:
+                `federated whole-blob bootstrap (writer=${provenance?.authorPubkey || 'unknown'}, ` +
+                `fed_ts=${provenance?.ts ?? 'none'})`,
+              authorId: FEDERATED_BOOTSTRAP_REVISION_AUTHOR,
+            });
+            await reseedAcceptanceBarsAfterRemoteApply(tx, opts.workspaceId, row, templateDataForWrite);
+          }
         }
         return;
       }
@@ -496,6 +524,25 @@ async function writeToPg(
           { workspaceId: opts.workspaceId, harnessSlug: row.harness_slug, planSlug: row.plan_slug },
           deriveIndexFromContent(row.content),
         );
+        // WI-10006313: this upsert writes harness_plans.content outside withPlanLock,
+        // so when it changes the bytes it records the revision in the same tx (bytes
+        // and revision commit together). An UPDATE records only when the content
+        // actually differs: the local echo of an own write, or a replay of equal
+        // bytes, already has its revision. An INSERT records only for a remote
+        // origin, matching the flag-ON bootstrap above.
+        const recordRevision = prior ? prior.content_differs : origin === 'remote';
+        if (recordRevision) {
+          await recordSystemPlanRevisionInTransaction(tx as unknown as PlanRevisionSql, {
+            workspaceId: opts.workspaceId,
+            harnessSlug: row.harness_slug,
+            planSlug: row.plan_slug,
+            content: row.content,
+            rationale:
+              `federated whole-blob ${prior ? 'apply' : 'bootstrap'} (origin=${origin}, ` +
+              `writer=${provenance?.authorPubkey || 'unknown'}, fed_ts=${provenance?.ts ?? 'none'})`,
+            authorId: prior ? FEDERATED_WHOLE_BLOB_REVISION_AUTHOR : FEDERATED_BOOTSTRAP_REVISION_AUTHOR,
+          });
+        }
         if (origin === 'remote') await reseedAcceptanceBarsAfterRemoteApply(tx, opts.workspaceId, row, templateDataForWrite);
       }
     },

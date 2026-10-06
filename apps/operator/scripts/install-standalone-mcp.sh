@@ -1428,10 +1428,13 @@ except json.JSONDecodeError:
     cfg = {}
 
 cfg.setdefault('mcpServers', {})
-# Per-session identity + scope: Claude Code expands ${VAR}/${VAR:-default}
-# in the mcp url at launch. psu exports PAPERCUSP_SID / PAPERCUSP_WORKSPACE
-# / PAPERCUSP_PROFILE per launch, so each shell gets a DISTINCT ?client=
-# (distinct coord/lock owner) AND a workspace-scoped MCP ctx — the psu
+# Per-session identity + native-session proof + scope: Claude Code expands
+# ${VAR}/${VAR:-default} in the MCP URL at launch. psu exports PAPERCUSP_SID /
+# PAPERCUSP_WORKSPACE / PAPERCUSP_PROFILE per launch, while Claude supplies
+# CLAUDE_CODE_SESSION_ID for the native CLI incarnation. The operator checks
+# that this native session is still bound to the claimed coord owner, so a
+# nested CLI cannot act as its parent just by inheriting PAPERCUSP_SID.
+# Each shell gets a DISTINCT ?client= (coord/lock owner) and a scoped MCP ctx — the psu
 # picker's workspace finally reaching tool dispatch (the recurring
 # "no workspace transaction" failure). Plain `claude` (no env) falls back
 # to the static machine id / the SID→adv-row server fallback then '*' /
@@ -1451,6 +1454,7 @@ cfg['mcpServers']['papercusp-su'] = {
     'type': 'http',
     'url': ('${PAPERCUSP_OPERATOR_URL:-' + operator_url + '}' + '/api/mcp?superuser=1'
             + '&client=${PAPERCUSP_SID:-' + agent_id + '}'
+            + '&native_session=${CLAUDE_CODE_SESSION_ID:-}'
             + '&workspace=${PAPERCUSP_WORKSPACE:-}'
             + '&profile=${PAPERCUSP_PROFILE:-' + profile_default + '}'
             + '&tools=${PAPERCUSP_TOOLS:-}'

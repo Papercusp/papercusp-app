@@ -20,7 +20,8 @@
  * whole substrate.
  */
 import { issueToWorkItem, ISSUE_FAMILY_KINDS, type WorkItem } from '../../work-items';
-import { listIssues } from '../../issues-engineer';
+import { listIssues, issuesScopeWorkspace } from '../../issues-engineer';
+import { ownNodeAuthoredRemoteIds } from '../../work-items-admission';
 import { matchesWorkItemClaimSpec } from '../../scheduler/claim-spec-match';
 import { getClaimSpec, fleetSpecBeeKey } from '../../scheduler/claim-spec-store';
 
@@ -40,6 +41,10 @@ export interface UnownedCriticalCandidate {
    *  authoring peer resolving it (or federation delivering that resolution)
    *  clears a 'remote' row — see `partitionUnownedCriticalsByOrigin` below. */
   origin: string | null;
+  /** WI-10006515: an origin='remote' row authored by one of THIS node's keys (origin records how
+   *  a row ARRIVED, not who wrote it — WI-10003565). The claim gate admits it and the write paths
+   *  heal it, so it is actionable here, not federated. Absent ⇒ unknown ⇒ treated as false. */
+  ownNode?: boolean;
   /** Hours since the item was filed, rounded to 1 decimal. */
   ageHours: number;
   createdAt: string;
@@ -130,7 +135,7 @@ export function partitionUnownedCriticalsByOrigin(
   const actionable: UnownedCriticalCandidate[] = [];
   const federatedUnresolvable: UnownedCriticalCandidate[] = [];
   for (const c of candidates) {
-    if (c.origin === 'remote') federatedUnresolvable.push(c);
+    if (c.origin === 'remote' && c.ownNode !== true) federatedUnresolvable.push(c);
     else actionable.push(c);
   }
   return { actionable, federatedUnresolvable };
@@ -165,7 +170,13 @@ export async function readUnownedCriticalsForFleet(args: {
       getClaimSpec({ cupId: fleetSpecBeeKey(args.fleet), workspaceId: args.workspaceId }),
     ]);
     const items: WorkItem[] = issues.map(issueToWorkItem);
-    return unownedCriticalsMatchingFleetSpec(items, spec, { ageHours: args.ageHours });
+    const candidates = unownedCriticalsMatchingFleetSpec(items, spec, { ageHours: args.ageHours });
+    // WI-10006515: mark own-node rows stranded at origin='remote' so the partition does not
+    // report this node's own work as a peer's. One batch read, only when a remote row exists.
+    const remoteIds = candidates.filter((c) => c.origin === 'remote').map((c) => c.id);
+    if (remoteIds.length === 0) return candidates;
+    const own = await ownNodeAuthoredRemoteIds(args.workspaceId ?? issuesScopeWorkspace(), remoteIds);
+    return candidates.map((c) => (own.has(c.id) ? { ...c, ownNode: true } : c));
   } catch {
     return [];
   }

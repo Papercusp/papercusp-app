@@ -110,6 +110,28 @@ export function allocateNextDecisionId(body: string): string {
 }
 
 /**
+ * WI-10004529 — decision ids the plan's LATEST recorded revision carries that the LIVE body
+ * does not. An append-only decision write (`plans:add-decision`) must never build on a base
+ * that is missing governing decisions: a live row silently reverted below its own revision
+ * head (the EI-117/EI-207 stale-replay class, which records no revision) hands the mutator
+ * that stale body, so the new decision is allocated a DUPLICATE id and the append overwrites
+ * the real ones — `ok:true`, no warning. Comparing against the revision spine under the plan
+ * lock turns that silent data loss into a loud, repairable refusal.
+ *
+ * One-directional on purpose: a live body with MORE decisions than its latest revision is the
+ * ordinary "spine lags the bytes" state and is not refused; only a LOSS is. Ids are compared
+ * as parsed D-NNN tokens, order-insensitive.
+ */
+export function decisionIdsMissingFromLiveBody(latestRevisionBody: string, liveBody: string): string[] {
+  const live = new Set(parsePlan(liveBody).decisions.map((d) => d.id));
+  const missing: string[] = [];
+  for (const d of parsePlan(latestRevisionBody).decisions) {
+    if (!live.has(d.id) && !missing.includes(d.id)) missing.push(d.id);
+  }
+  return missing;
+}
+
+/**
  * Normalise an `affects` slug list: drop the home plan's own slug (a
  * decision can't cross-reference its own home) and de-duplicate so a
  * caller passing the same slug twice doesn't propagate twice.

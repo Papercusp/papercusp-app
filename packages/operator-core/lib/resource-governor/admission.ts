@@ -291,7 +291,8 @@ export function normalizeAdmissionRequest(input: AdmissionRequest): NormalizedAd
 }
 
 /** Stable serialized identity used by durable drivers to reject conflicting replay. */
-export function admissionRequestFingerprint(request: NormalizedAdmissionRequest): string {
+export function admissionRequestFingerprint(request: NormalizedAdmissionRequest,
+  options: { includeGoalAdmissionSnapshot?: boolean } = {}): string {
   return JSON.stringify({
     idempotencyKey: request.idempotencyKey,
     admissionClass: request.admissionClass,
@@ -302,7 +303,12 @@ export function admissionRequestFingerprint(request: NormalizedAdmissionRequest)
     coalesceKey: request.coalesceKey,
     parentRequestId: request.parent?.requestId ?? null,
     bypassKey: request.bypassKey,
-    metadata: request.metadata,
+    // Agent goalAdmission is the resolver's observation, not launch intent.
+    // Keep goalId, fleetSlug, targetOwnerId and every other pin in the identity.
+    // The option is only for comparing receipts written before this separation.
+    metadata: request.admissionClass === 'agent' && !options.includeGoalAdmissionSnapshot
+      ? Object.fromEntries(Object.entries(request.metadata).filter(([key]) => key !== 'goalAdmission'))
+      : request.metadata,
   });
 }
 

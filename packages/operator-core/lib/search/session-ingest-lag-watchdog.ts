@@ -33,6 +33,10 @@ import { getOrgPg } from '@papercusp/db-org';
 import { recentWatchdogFires, recordFire } from '../pot/watchdog';
 import { openEscalation } from '../agent-tools/coordination/escalations';
 import type { AgentIdentity } from '../agent-tools/coordination/identity';
+import {
+  readInteractiveUsageFreshness,
+  type InteractiveUsageFreshness,
+} from '../interactive-usage/freshness';
 
 /** How long an adapter may sit on unconsumed on-disk bytes before this
  *  watchdog alerts. Default 1 h — comfortably longer than the 2-min ingest
@@ -186,6 +190,7 @@ export interface IngestLagSweepResult {
 
 export interface IngestLagSweepDeps {
   observe?: () => Promise<AdapterLagObservation[]>;
+  observeInteractiveUsageFreshness?: (workspaceId: string, nowMs?: number) => Promise<InteractiveUsageFreshness>;
   recentWatchdogFires?: typeof recentWatchdogFires;
   recordFire?: typeof recordFire;
   openEscalation?: typeof openEscalation;
@@ -344,6 +349,45 @@ export async function sessionIngestLagSweep(
           sourceKind: obs.sourceKind, outcome: 'error', reason: e instanceof Error ? e.message : String(e),
         });
       }
+    }
+    try {
+      const freshness = await (deps.observeInteractiveUsageFreshness ?? (async (ws, nowMs) => {
+        const { sql } = getOrgPg();
+        return readInteractiveUsageFreshness(sql, { workspaceId: ws, nowMs });
+      }))(workspaceId, deps.now);
+      if (freshness.status === 'fresh') {
+        results.push({ sourceKind: 'interactive-usage', outcome: 'healthy', reason: freshness.reason });
+      } else if (freshness.status === 'unavailable') {
+        results.push({ sourceKind: 'interactive-usage', outcome: 'error', reason: freshness.reason });
+      } else {
+        const windowHours = Math.max(1, Math.round(thresholdSec / 3_600));
+        const firedRecently =
+          (await (deps.recentWatchdogFires ?? recentWatchdogFires)(
+            workspaceId, installSlug, windowHours, 'interactive-usage-freshness', 'interactive',
+          )) > 0;
+        if (firedRecently) {
+          results.push({ sourceKind: 'interactive-usage', outcome: 'debounced', reason: 'fires-ledger debounce' });
+        } else {
+          const reason =
+            `${freshness.reason}. Goal spend is unmeasured until a recent ingestion timestamp is available; ` +
+            `this freshness signal does not establish why samples were not written.`;
+          console.warn(`[session-ingest-lag] ALERT: ${reason}`);
+          await (deps.recordFire ?? recordFire)({
+            workspaceId, installSlug, source: 'interactive-usage-freshness', reason, wakeAt: null,
+          });
+          await (deps.openEscalation ?? openEscalation)(INGEST_LAG_IDENTITY, {
+            severity: 'advisory',
+            summary: 'Interactive usage ingestion freshness is stale',
+            body: reason,
+          });
+          results.push({ sourceKind: 'interactive-usage', outcome: 'alerted', reason });
+        }
+      }
+    } catch (error) {
+      results.push({
+        sourceKind: 'interactive-usage', outcome: 'error',
+        reason: error instanceof Error ? error.message : String(error),
+      });
     }
   } catch (e) {
     results.push({ sourceKind: '*', outcome: 'error', reason: e instanceof Error ? e.message : String(e) });
@@ -569,9 +613,9 @@ export async function sessionPartsWriterSweep(
             `${verdict.reason}\n\n` +
             `MOST LIKELY CAUSE, from the incident that motivated this guard (D-008): a long-lived host ` +
             `is running a module-cached build older than the tree it loads from. The session ingest runs ` +
-            `on papercup-bg-host, whose WorkingDirectory is the STAGING tree and which executes tsx from ` +
+            `on papercusp-bg-host, whose WorkingDirectory is the STAGING tree and which executes tsx from ` +
             `it — NOT from papercup-release. So a DEPLOY DOES NOT FIX THIS. Check ` +
-            `\`systemctl --user show papercup-bg-host.service -p ExecMainStartTimestamp\` against the ` +
+            `\`systemctl --user show papercusp-bg-host.service -p ExecMainStartTimestamp\` against the ` +
             `commit time of session-ingest.ts; if the host is older, restart it: ` +
             `dev:restart { target: 'bg-host', confirm: true, authorize: true }.\n\n` +
             `Other candidates: the parts INSERT failing every tick (it is best-effort by contract and ` +

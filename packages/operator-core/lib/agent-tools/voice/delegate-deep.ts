@@ -50,6 +50,9 @@ export default defineTool({
   description:
     'Delegate a HARD-THINKING question (analysis/research/deep comparison) to the deep brain (the live papercup-deep session; ephemeral agent fallback). With wait:true (the chat surfaces) the call blocks until the deep brain answers and returns `answer` in this same turn — present it. Without wait, the answer comes back later as `[deep-answer WI-NNN] …` pane input. Capped at 2 in flight.',
   capability: 'operator:read',
+  // WI-10004577: mints a durable `deep-delegation` work_item and wakes/spawns an agent, yet shares the
+  // `operator:read` capability with genuine readers — declare the write effect explicitly (see voice:say).
+  effect: 'write',
   guidance: {
     when: `The user asked something that needs REAL investigation (minutes of reading code/state/docs) and expects an ANSWER back in conversation. In a CHAT turn (converse — desktop or portal): call it with wait:true and present the returned \`answer\` in the same reply (lead with the speakable core, then the detail); if it comes back pending, say the dive is in flight — never invent the answer. In the PANE: delegate without wait, voice:say a short ack ("digging into that — I'll come back to you"), and present the [deep-answer WI-NNN] message when it arrives.`,
     notWhen: `Trivia you can answer now (just answer). Buildable WORK ("build X", "fix Y") — that's a Mug handoff, not a deep dive. More than 2 in flight — the tool refuses; tell the user one is already cooking.`,

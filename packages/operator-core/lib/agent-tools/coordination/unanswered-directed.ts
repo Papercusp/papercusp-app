@@ -424,6 +424,8 @@ export async function fetchUnansweredDirected(
     nowMs?: number;
     lookbackMs?: number;
     perRecipientCap?: number;
+    /** Explicit workspace for background sweeps that scan multiple coord partitions. */
+    workspaceId?: string;
     /** DI seam (unit tests): override the positive death-evidence read used for
      *  the EI-20085805220385722 live/stale split. */
     endedSendersFn?: EndedSendersFn;
@@ -435,7 +437,7 @@ export async function fetchUnansweredDirected(
   const cap = opts.perRecipientCap ?? UNANSWERED_NEWEST_CAP;
   const senderCap = UNANSWERED_SENDER_CAP;
   const sql = coordSql();
-  const workspaceId = coordWorkspaceId();
+  const workspaceId = opts.workspaceId ?? coordWorkspaceId();
   // P-013: an expectEffect directive is answered by the named side effect itself,
   // even when the recipient never sends a reply. Resolve these through the same
   // actuation reader used by fleet:leader-brief, then exclude only proven-satisfied
@@ -443,6 +445,7 @@ export async function fetchUnansweredDirected(
   const satisfiedEffectMsgIds = await fetchSatisfiedDirectiveMessageIds(recipientIds, {
     nowMs,
     lookbackMs: opts.lookbackMs,
+    workspaceId,
   });
   const rows = await sql<UnansweredDirectedRow[]>`
     -- WI-6853 / P-017 + WI-6875 — ONE scan of coord_event_log feeds every correlated lookup

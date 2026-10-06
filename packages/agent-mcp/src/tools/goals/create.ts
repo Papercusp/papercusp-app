@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { defineTool } from '@papercusp/tooldef';
 import type { PapercuspUnifiedToolContext } from '@papercusp/operator-core/lib/agent-tools/_tool-context';
 import { killCriterionProblem } from '@papercusp/operator-core/lib/goals/kill-criterion';
+import { unmeasuredTripwireAdvisories } from '@papercusp/operator-core/lib/goals/tripwire-refresh';
 import {
   goalHolderPolicyProblem,
   goalHolderPolicySchema,
@@ -68,7 +69,7 @@ export default defineTool({
       'Do not use this as the mode-entry path for a new GOAL-mode agent — use goals:start, which creates the goal, enters GOAL mode, and spawns atomically. For a concrete unit of work use work_items:create; for a project use pot:create; for the plan of attack use plans:new. A goal is the INTENT those serve — if it has an obvious done-when-this-PR-merges, it is not a goal.',
     chaining: 'goals:start for a new GOAL-mode owner, or goals:create → mode:set { mode:"goal", subject:"<id>" } for an existing session → pot:create / plans:new per project → goals:update to record actuals, or status:"killed" when the kill criterion trips.',
     returns:
-      'On success: { id, title, status, kill_criterion, budget_cents, tripwires, workspace_id, mode_subject_stamped, mode_subject_advisory?, kickoff_consult? }. ' +
+      'On success: { id, title, status, kill_criterion, budget_cents, tripwires, tripwire_advisories? (tripwires no resolver will measure), workspace_id, mode_subject_stamped, mode_subject_advisory?, kickoff_consult? }. ' +
       'For a caller with an ACTIVE GOAL-mode row, the goal-kickoff CHECKPOINT consult (min:1) runs first: the goal outline (outcome + kill criterion) is routed through the relevance router, and any selectable live peer refuses ONCE with data { error: "consult_available", candidates, selection, hint } — the goal is NOT created; re-call with consulted: true/false + consult_reason (a nudge, never a gate; any infra fault proceeds). ' +
       'Non-GOAL-mode callers (owner UI confirm cards, scripts) are never consulted. `kickoff_consult` records the disposition (override reason, all_responders_paused, or routed_paused_context + transcript excerpts).',
   },
@@ -142,6 +143,7 @@ export default defineTool({
       kill_criterion: z.unknown().optional(),
       budget_cents: z.unknown().optional(),
       tripwires: z.unknown().optional(),
+      tripwire_advisories: z.unknown().optional(),
       workspace_id: z.unknown().optional(),
       mode_subject_stamped: z.unknown().optional(),
       mode_subject_advisory: z.unknown().optional(),
@@ -513,6 +515,12 @@ export default defineTool({
         }
       : undefined;
 
+    // WI-10004424: a tripwire named like a platform metric that nothing will
+    // measure. The goal is written either way; the author learns now instead of
+    // from a bar that never moves. goals:create sets no budget window, so the
+    // goal starts on a lifetime window.
+    const tripwireAdvisories = unmeasuredTripwireAdvisories(args.tripwires, { budgetWindowSec: null });
+
     return {
       data: {
         id,
@@ -523,6 +531,7 @@ export default defineTool({
         budget_cents: args.budgetCents ?? null,
         kill_criterion: args.killCriterion ?? null,
         tripwires: args.tripwires ?? null,
+        ...(tripwireAdvisories.length ? { tripwire_advisories: tripwireAdvisories } : {}),
         workspace_id: workspaceId,
         install_slug: installSlug,
         // Told plainly so the agent knows whether later creations will carry

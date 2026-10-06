@@ -60,7 +60,7 @@ import { readOwnerPresence } from '../../../power-user-sessions';
 import { countActiveAwaitsByPrefixes, listActiveAnnouncements } from '../../../events/await/store';
 import { announcementVisibleTo } from '../../../events/await/announce-key';
 import { resolveAnnouncementOwnership, type AnnouncementOwnership } from '../../events/status';
-import { buildAnnouncedGateWarning } from '../../../turn-start-orientation';
+import { buildAnnouncedGateWarning, splitObligationsRead } from '../../../turn-start-orientation';
 import { activeWorkspaceId, resolveConcreteWorkspaceId } from '../../../workspace-registry';
 import { getModes } from '../../../modes/store';
 import { modeById } from '../../../modes/registry';
@@ -695,8 +695,13 @@ export interface OrientResult {
    *  obligation agenda for a resolved GOAL holder. The embedded turn-start
    *  projection remains bounded, while `primary` and `evaluations` are the
    *  complete recovery payload promised by its detailRef. Absent for a
-   *  non-GOAL caller; null means the canonical read degraded. */
+   *  non-GOAL caller; null means the canonical read degraded — or, when
+   *  `obligationsWithheldBy` is present, that an experiment arm withheld it. */
   obligations?: import('../../../agent-obligation-reader').AgentObligationBrief | null;
+  /** R-4 / D-032 / D-047: the goal's 'baseline' or 'brief-only' arm withheld the
+   *  agenda. Same contract as the turn-start orientation: recovery through
+   *  orient must not hand back what the per-turn surface withholds. */
+  obligationsWithheldBy?: 'experiment-arm';
   /** EI-18731216945970087 / EI-20201050911711528: present ONLY when composeOrient
    *  caught a presence/registry leadership DRIFT — the caller's presence projection
    *  showed no fleet or a non-leader role, but `agent_fleets.leader_owner_id` says
@@ -826,7 +831,9 @@ export type OrientFleetSummariesFold = (
 
 export type OrientGoalPortfolioFold = () => Promise<import('../../../goal-launch-settings').GoalPortfolioBrief | null>;
 export type OrientObligationsFold = () => Promise<
-  import('../../../agent-obligation-reader').AgentObligationBrief | null
+  | import('../../../agent-obligation-reader').AgentObligationBrief
+  | import('../../../turn-start-orientation').ObligationsWithheldByArm
+  | null
 >;
 
 /**
@@ -1487,7 +1494,9 @@ export async function composeOrient(
       timeoutMs: ORIENT_CORE_LEG_TIMEOUT_MS,
       label: 'orient:obligations',
     });
-    result.obligations = obligations.value;
+    const split = splitObligationsRead(obligations.value);
+    result.obligations = split.obligations;
+    if (split.obligationsWithheldBy) result.obligationsWithheldBy = split.obligationsWithheldBy;
   }
   // EI-21589715378243224: preserve the core assignment/backlog/inbox snapshot
   // before the optional folds below can consume the aggregate budget.
@@ -3279,6 +3288,10 @@ export default defineTool({
       fleet: z.unknown().optional(),
       leaderBrief: z.unknown().optional(),
       recovery: z.unknown().optional(),
+      // The GOAL recovery recipes read this best-effort fold. Passthrough accepts
+      // it at runtime but recipe preflight needs an explicit optional declaration.
+      obligations: z.unknown().optional(),
+      obligationsWithheldBy: z.literal('experiment-arm').optional(),
       warning: z.string().optional(),
     })
     .passthrough(),
@@ -3632,6 +3645,10 @@ export default defineTool({
       goalSubject && ownerId
         ? (async () => {
             try {
+              // R-4 / D-047: an experiment arm that withholds the per-turn agenda
+              // withholds it here too, or a full orient re-delivers the treatment.
+              const { goalWithholdsTurnStartReminders } = await import('../../../goal-launch-settings');
+              if (await goalWithholdsTurnStartReminders(goalSubject)) return { withheldBy: 'experiment-arm' } as const;
               const { readAgentObligationAgenda, projectAgentTurnStartObligationBrief } = await import(
                 '../../../agent-obligation-reader'
               );
@@ -4036,16 +4053,19 @@ export default defineTool({
       try {
         const session = await (await import('../../../adv-sessions')).latestAdvSessionByCoordOwner(ownerId);
         if (session?.agent === 'codex') {
-          const [{ readCodexHomeDiagnostics }, { readCodexLockRuntimeVerdict }] = await Promise.all([
+          const [{ readCodexHomeDiagnostics }, { readCodexLockRuntimeVerdictAsync }] = await Promise.all([
             import('../../../role-codex-home'),
             import('../../../codex-lock-runtime'),
           ]);
-          const home = readCodexHomeDiagnostics(session.id);
+          // Async for the same reason as the marker read below (WI-10005188).
+          const home = await readCodexHomeDiagnostics(session.id);
           const hooksConfigured =
             home.hooksExists &&
             home.diagnostics?.lockEnforcement === 'hooks-configured' &&
             (!home.diagnostics.lockOwnerSid || home.diagnostics.lockOwnerSid === ownerId);
-          codexLocks = readCodexLockRuntimeVerdict({ ownerId, hooksConfigured });
+          // Async: the markers sit in the contended locks-cache directory, and a
+          // sync read there parked the operator main thread for 10s (WI-10004754).
+          codexLocks = await readCodexLockRuntimeVerdictAsync({ ownerId, hooksConfigured });
         }
       } catch {
         /* fail-soft: prompt snapshot remains conservative/manual */

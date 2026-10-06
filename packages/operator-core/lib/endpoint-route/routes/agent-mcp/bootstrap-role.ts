@@ -36,6 +36,11 @@ import {
 } from '../../../adv-sessions';
 import { resolveSessionStates } from '../../../agent-tools/coordination/liveness-oracle';
 import {
+  claimAgentLaunch,
+  recordAgentLaunchResult,
+  releaseAgentLaunchClaim,
+} from '../../../agent-launch-core';
+import {
   classifyPrePinnedOwnerRows,
   describePrePinnedConflicts,
   mapPrePinnedOwnerSessionState,
@@ -182,6 +187,10 @@ const post = defineTool({
       agent?: string;
       /** Coordination identity reserved by the canonical launcher. Does not change role authority. */
       owner_id?: string | null;
+      /** Attribution for safe managed-host recovery; does not change role authority. */
+      launched_by?: string | null;
+      /** Stable psu request key for safe same-launch retries after an upstream timeout. */
+      bootstrap_idempotency_key?: unknown;
       workspace?: string | null;
       harness_slug?: string | null;
       feature?: string | null;
@@ -216,6 +225,14 @@ const post = defineTool({
       if (text.trim()) body = JSON.parse(text);
     } catch {
       return jsonRes({ status: 'error', error: 'invalid JSON body' }, 400);
+    }
+
+    if (body.launched_by != null && typeof body.launched_by !== 'string') {
+      return jsonRes({ status: 'error', error: 'launched_by must be a string' }, 400);
+    }
+    const launchedBy = body.launched_by?.trim() || null;
+    if (launchedBy && !/^[A-Za-z0-9._:-]{1,120}$/.test(launchedBy)) {
+      return jsonRes({ status: 'error', error: 'launched_by must be an owner id' }, 400);
     }
 
     const role = body.role?.trim() || '';
@@ -310,23 +327,52 @@ const post = defineTool({
         : null;
     } catch (error) {
       return jsonRes({ status: 'error', code: 'operation_worker_denied',
-        error: error instanceof Error ? error.message : String(error) }, 400);
+        error: error instanceof Error ? error.message : String(error),
+        refusal: {
+          observed: { harness: harnessSlug, feature, role },
+          liftsWhen:
+            'the launch matches an accepted blueprint operation: the work-item (`feature`) exists in this ' +
+            'harness, `role` is a worker role that operation authorizes, and its pinned worker identity ' +
+            'resolves unchanged (`error` names which check failed). Retrying the identical request cannot ' +
+            'lift it: relaunch with a feature/role the accepted operation authorizes, or have the owner ' +
+            're-accept the operation or repin its worker identity',
+          whoCanMakeItTrue: ['self', 'owner'],
+        } }, 400);
     }
     let identityModelDefault: string | null;
+    const identityStack = acceptedOperation?.stack ?? body.stack;
     try {
       identityModelDefault = await resolveLaunchIdentityModelDefault({
         cwd: harnessSlug ? await resolveProjectDir(harnessSlug, workspace) ?? '' : papercuspPathForWorkspace(workspace),
-        harnessSlug, role, stack: acceptedOperation?.stack ?? body.stack,
+        harnessSlug, role, stack: identityStack,
       });
     } catch (error: any) {
-      return jsonRes({ status: 'error', code: 'identity_model_default_denied', error: error?.message ?? String(error) }, 400);
+      return jsonRes({ status: 'error', code: 'identity_model_default_denied', error: error?.message ?? String(error),
+        refusal: {
+          observed: { harness: harnessSlug, role, stack: identityStack?.join(',') ?? null },
+          liftsWhen:
+            'the selected launch identity stack resolves against this harness\'s blueprint source: every ' +
+            'stack ref (and a `composition:` root) exists and loads, so its model default can be read ' +
+            '(`error` names the failing ref). Retrying the identical request cannot lift it: correct the ' +
+            'stack ref or repair the identity definition',
+          whoCanMakeItTrue: ['self', 'owner'],
+        } }, 400);
     }
     let modelSelection;
     try {
       modelSelection = selectAcceptedOperationWorkerModel(acceptedOperation, requestedModel, agent);
     } catch (error) {
       return jsonRes({ status: 'error', code: 'operation_model_denied',
-        error: error instanceof Error ? error.message : String(error) }, 409);
+        error: error instanceof Error ? error.message : String(error),
+        refusal: {
+          observed: { role, agent, requestedModel, policyMode: acceptedOperation?.modelPolicy?.mode ?? null },
+          liftsWhen:
+            'the requested model is one the accepted operation\'s model policy admits on this backend: omit ' +
+            '`model` to take the policy\'s first accepted model, or request a listed model at the policy\'s ' +
+            'reasoning effort. An OMP backend is never admissible for a policy-bound worker: launch on claude ' +
+            'or codex. Retrying the identical request cannot lift it; widening the policy needs the owner',
+          whoCanMakeItTrue: ['self', 'owner'],
+        } }, 409);
     }
     let model = modelSelection?.model ?? requestedModel ?? identityModelDefault ?? suppliedModel;
     let modelSource: 'explicit' | 'inherited' | 'configured-default' | null = null;
@@ -343,6 +389,56 @@ const post = defineTool({
         return jsonRes({ status: 'error', code: error?.code ?? 'codex_model_denied', error: error?.message ?? String(error) }, 400);
       }
     }
+    const rawBootstrapIdempotencyKey = body.bootstrap_idempotency_key;
+    const bootstrapIdempotencyKey =
+      typeof rawBootstrapIdempotencyKey === 'string'
+        ? rawBootstrapIdempotencyKey.trim()
+        : null;
+    if (
+      rawBootstrapIdempotencyKey != null &&
+      (typeof rawBootstrapIdempotencyKey !== 'string' ||
+        !bootstrapIdempotencyKey ||
+        bootstrapIdempotencyKey.length > 200)
+    ) {
+      return jsonRes(
+        {
+          status: 'error',
+          error: 'bootstrap_idempotency_key must be a non-empty string of at most 200 characters',
+        },
+        400,
+      );
+    }
+    const bootstrapLedgerKey = bootstrapIdempotencyKey
+      ? `bootstrap-role:${bootstrapIdempotencyKey}`
+      : null;
+    let bootstrapClaimWon = false;
+    let bootstrapCompleted = false;
+    let incompleteBootstrapSessionId: number | null = null;
+    if (bootstrapLedgerKey) {
+      const claim = await claimAgentLaunch({
+        workspaceId: workspace,
+        idempotencyKey: bootstrapLedgerKey,
+        launchedBy: launchedBy ?? (typeof body.owner_id === 'string' ? body.owner_id.trim() || null : null),
+      });
+      if (!claim.won) {
+        const prior = claim.priorSummary;
+        if (prior?.status === 'ok') {
+          return jsonRes({ ...(prior as unknown as BootstrapRoleResult), bootstrapDeduped: true });
+        }
+        return jsonRes(
+          {
+            status: 'error',
+            error: 'bootstrap_in_progress',
+            detail: 'the first request still owns this bootstrap idempotency key; retry with the same key',
+            retryAfterSec: 1,
+          },
+          409,
+        );
+      }
+      bootstrapClaimWon = true;
+    }
+
+    try {
     // Honor the same pre-pinned identity contract as bootstrap-su. A role
     // launch must not detach the actual worker from its canonical receipt.
     if (body.owner_id != null && typeof body.owner_id !== 'string') {
@@ -569,6 +665,7 @@ const post = defineTool({
       account: body.account?.trim() || null,
       fleet: body.fleet?.trim() || body.fleet_name?.trim() || null,
     });
+    if (launchedBy) launchArgv.push(`--launched-by=${launchedBy}`);
 
     // Complete the canonical launcher's precursor rather than introducing a
     // second roster row. A lost adoption race must not create a duplicate.
@@ -607,6 +704,7 @@ const post = defineTool({
         ...(nativeSessionId ? { sessionId: nativeSessionId } : {}),
       });
     }
+    incompleteBootstrapSessionId = sessionId;
 
     // A grant-bearing role identity must reach the same database-owned kernel
     // receipt as an SU identity. Merely compiling its prompt/artifact leaves
@@ -700,6 +798,7 @@ const post = defineTool({
           // the gateway auto-selects). False whenever a pin resolved or routing is off.
           codexGatewayAuto: accountPin.provider === 'codex' && !!accountPin.gatewayAuto,
           codexGatewayPriority: accountPin.provider === 'codex' ? role : null,
+          headless,
           // Seed launch-dir trust so a fresh CODEX_HOME doesn't block at codex's
           // "Do you trust this directory?" boot prompt (role sessions are trusted).
           trustDir: spec.cwd,
@@ -747,7 +846,7 @@ const post = defineTool({
     let claudeConfigDir: string | null = null;
     if (agent === 'claude') {
       try {
-        claudeConfigDir = writeInteractiveClaudeConfig({
+        claudeConfigDir = (await writeInteractiveClaudeConfig({
           sid,
           // WI-3280: park the role prompt so the SessionStart recovery hook can
           // re-deliver it if claude's self-re-exec drops the launch argv.
@@ -756,7 +855,7 @@ const post = defineTool({
           // directory can't wedge a headless role spawn forever on an
           // external-CLAUDE.md-imports / trust-dialog TTY prompt.
           cwd: spec.cwd,
-        }).configDir;
+        })).configDir;
       } catch (e: any) {
         process.stderr.write(`[bootstrap-role] claude config-dir materialize failed (non-fatal): ${e?.message}\n`);
       }
@@ -847,6 +946,7 @@ const post = defineTool({
         // session's calls + hooks share one owner and concurrent sessions
         // don't collide. Same value recorded as adv_sessions.coord_owner_id.
         PAPERCUSP_SID: sid,
+        ...(launchedBy ? { PAPERCUSP_LAUNCHED_BY: launchedBy } : {}),
         // P-021/D-013 — see the ompNativeLsp resolution above. Set-when-true, so
         // ABSENT is the safe reading: the launcher strips omp's native `lsp`
         // builtin unless this explicitly says it may keep it.
@@ -866,7 +966,42 @@ const post = defineTool({
         ...(nativeSessionId ? { PAPERCUSP_NATIVE_SESSION_ID: nativeSessionId } : {}),
       },
     };
+    if (bootstrapLedgerKey) {
+      await recordAgentLaunchResult({
+        workspaceId: workspace,
+        idempotencyKey: bootstrapLedgerKey,
+        summary: result as unknown as Record<string, unknown>,
+      });
+    }
+    bootstrapCompleted = true;
+    incompleteBootstrapSessionId = null;
     return jsonRes(result);
+    } finally {
+      // If any later artifact/identity write fails, close the exact row before
+      // releasing the claim. A same-key retry must not race a PID-less session.
+      if (bootstrapClaimWon && !bootstrapCompleted) {
+        let partialRowTerminal = true;
+        if (incompleteBootstrapSessionId != null) {
+          try {
+            await markAdvSessionEnded(incompleteBootstrapSessionId, null, 'reconciler', {
+              throwOnError: true,
+            });
+          } catch (error) {
+            partialRowTerminal = false;
+            console.warn(
+              `[bootstrap-role] incomplete session ${incompleteBootstrapSessionId} could not be terminalized; ` +
+              `retaining bootstrap idempotency claim: ${(error as Error)?.message ?? error}`,
+            );
+          }
+        }
+        if (partialRowTerminal) {
+          await releaseAgentLaunchClaim({
+            workspaceId: workspace,
+            idempotencyKey: bootstrapLedgerKey,
+          });
+        }
+      }
+    }
   },
 });
 

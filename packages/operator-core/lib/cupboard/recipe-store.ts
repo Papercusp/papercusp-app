@@ -26,7 +26,9 @@ import {
   selfDescribingRoots,
   enumerateSelfDescribingDirs,
 } from './self-describing-store';
-import type { ExportedRecipeManifest, RecipeExport } from './recipe-export';
+// The leaf, not './recipe-export': a type-only import still compiles the file, and
+// recipe-export reaches the agent-tools graph through recipe-authority (WI-10004876).
+import type { ExportedRecipeManifest, RecipeExport } from './recipe-manifest';
 import { assertIdentityClean } from './identity-scrub';
 
 /** The manifest file that MAKES a subdir a recipe. */

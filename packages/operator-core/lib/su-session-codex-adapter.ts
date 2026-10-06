@@ -13,6 +13,7 @@ import { createInterface } from 'node:readline';
 
 import {
   assertNeverSuSession,
+  type SuApprovalsMode,
   type SuSessionCapabilities,
   type SuSessionCommand,
   type SuSessionDescriptor,
@@ -36,6 +37,7 @@ import {
 } from './launch-agent';
 import { nativeSessionHandleForAdvSession, type CodexNativeSessionHandle } from './native-session-handles';
 import { bindSuSessionToAdvSession, persistSuSessionDescriptor } from './su-session-persistence';
+import { SuOwnerTurnReceiptMatcher, type SuOwnerTurnReceiptRef } from './su-session-commands';
 import {
   findCodexLiveThreadId,
   findCodexRolloutPath,
@@ -68,7 +70,8 @@ export interface CodexSuRuntimeBinding {
 export type CodexNativeCommandVerdict = { ok: true } | { ok: false; code: string; message: string; retryable: boolean };
 
 export interface CodexSuSessionControls {
-  ownerTurn(input: { ownerId: string; turnId: string; content: string }): Promise<CodexNativeCommandVerdict>;
+  /** `model` (P-026): a `model[:effort]` spec to apply before this turn; omitted keeps the current one. */
+  ownerTurn(input: { ownerId: string; turnId: string; content: string; model?: string; approvals?: SuApprovalsMode }): Promise<CodexNativeCommandVerdict>;
   interrupt(input: { ownerId: string; reason?: string }): Promise<CodexNativeCommandVerdict>;
   resume(input: {
     ownerId: string;
@@ -82,6 +85,8 @@ export interface CodexSuSessionControls {
 export interface CodexSuSessionDescriptorOptions {
   agentChatId: string;
   model?: string | null;
+  /** D-026: the approvals mode the engine launched in, when it has one. */
+  approvals?: SuApprovalsMode;
   accountRoute?: string | null;
   servedAccountReader?: SuSessionServedAccountReader;
   carry?: 'warm' | 'cold';
@@ -97,6 +102,9 @@ export interface CreateCodexSuSessionAdapterOptions extends CodexSuSessionDescri
   /** Registration exposes the host through the existing agent-chat SU-session
    * routes. Tests may disable it when exercising an isolated host. */
   register?: boolean;
+  /** Saved owner turns for this session (production: loadSuOwnerTurnReceipts).
+   * A replayed prompt takes the turn id its command was saved under (WI-10004254). */
+  ownerTurnReceipts?: (identity: SuSessionDescriptor<'codex'>['identity']) => Promise<readonly SuOwnerTurnReceiptRef[]>;
 }
 
 export interface OpenCodexSuSessionOptions extends CreateCodexSuSessionAdapterOptions {
@@ -409,6 +417,7 @@ function descriptorFor(
     runtimeGeneration: options.runtimeGeneration ?? 0,
     role: 'su',
     model: options.model ?? null,
+    ...(options.approvals ? { approvals: options.approvals } : {}),
     accountServed: null,
     accountRoute: options.accountRoute ?? null,
     carry: options.carry ?? 'warm',
@@ -433,6 +442,8 @@ export class CodexSuSessionAdapter {
   private readonly unregister: (() => void) | null;
   private lastNativeErrorKey: string | null = null;
   private readonly servedAccountReader: SuSessionServedAccountReader;
+  private readonly receiptMatcher = new SuOwnerTurnReceiptMatcher();
+  private readonly ownerTurnReceipts: CreateCodexSuSessionAdapterOptions['ownerTurnReceipts'] | null;
 
   constructor(
     readonly binding: PuiSuSessionBinding & { backend: 'codex' },
@@ -441,6 +452,7 @@ export class CodexSuSessionAdapter {
   ) {
     this.runtimeValue = runtime;
     this.servedAccountReader = options.servedAccountReader ?? gatewayServedAccountForOwner;
+    this.ownerTurnReceipts = options.ownerTurnReceipts ?? null;
     this.controls = { ...defaultControls(), ...(options.controls ?? {}) };
     const hostOptions = {
       descriptor: descriptorFor(binding, runtime, options),
@@ -503,6 +515,13 @@ export class CodexSuSessionAdapter {
   private ensureTurn(hint?: string | null): string {
     if (!this.currentTurnId) this.currentTurnId = this.nextTurnId(hint);
     return this.currentTurnId;
+  }
+
+  /** A replayed prompt shows under the turn id its owner command was saved with,
+   * so the transcript and the su_command receipt name the same turn; a prompt
+   * with no saved receipt (typed natively) keeps its own codex: id (WI-10004254). */
+  private replayTurnId(content: string, hint: string | null): string {
+    return this.receiptMatcher.take(content) ?? this.nextTurnId(hint);
   }
 
   private emitTranscript(input: {
@@ -614,7 +633,9 @@ export class CodexSuSessionAdapter {
 
     for (const entry of this.parser.parseLine(line)) {
       if (entry.kind === 'prompt') {
-        this.currentTurnId = this.nextTurnId(nativeTurnHint);
+        this.currentTurnId = replay
+          ? this.replayTurnId(entry.text ?? '', nativeTurnHint)
+          : this.nextTurnId(nativeTurnHint);
         if (!preserveLifecycle) this.host.transition('running', 'Codex owner turn persisted');
         this.emitTranscript({
           turnId: this.currentTurnId,
@@ -694,6 +715,11 @@ export class CodexSuSessionAdapter {
     if (!this.runtimeValue.rolloutPath) {
       throw new Error('Codex runtime has no resolved rollout path');
     }
+    // Best-effort: without the saved receipts a restored prompt still gets its
+    // own (fresh) turn id, so a failed read degrades the id, never the replay.
+    if (this.ownerTurnReceipts) {
+      this.receiptMatcher.load(await this.ownerTurnReceipts(this.host.descriptor().identity).catch(() => []));
+    }
     for await (const line of readCodexRolloutSnapshotLines(this.runtimeValue.rolloutPath)) this.ingestNativeLine(line, { preserveLifecycle, replay: true });
   }
 
@@ -734,11 +760,15 @@ export class CodexSuSessionAdapter {
     let verdict: CodexNativeCommandVerdict;
     switch (command.type) {
       case 'owner_turn':
+        // Shown live under this id already; a later replay must not take it.
+        this.receiptMatcher.markUsed(command.turnId);
         context.transition('running', 'owner turn accepted');
         verdict = await this.controls.ownerTurn({
           ownerId,
           turnId: command.turnId,
           content: command.content,
+          ...(command.model ? { model: command.model } : {}),
+          ...(command.approvals ? { approvals: command.approvals } : {}),
         });
         if (!verdict.ok) context.transition('waiting-for-owner', verdict.message);
         break;

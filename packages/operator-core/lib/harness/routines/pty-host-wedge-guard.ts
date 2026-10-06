@@ -68,9 +68,9 @@
  * allowed to drive anything.
  */
 import {
-  listLiveHosts,
-  readHostEventTail,
-  hostStartedAt,
+  listLiveHostsAsync,
+  readHostEventTailAsync,
+  hostStartedAtAsync,
   PSU_PTY_DIR,
   type PsuPtyHost,
   type PtyHostEvent,
@@ -668,11 +668,11 @@ export interface PtyHostWedgeSweepResult {
 
 export interface PtyHostWedgeSweepDeps {
   /** Injectable for tests; defaults to the real live-host census. */
-  listHosts?: (dir?: string) => PsuPtyHost[];
+  listHosts?: (dir?: string) => PsuPtyHost[] | Promise<PsuPtyHost[]>;
   /** Injectable for tests; defaults to the real bounded-tail ledger read. */
-  readEvents?: (ownerId: string, dir?: string, maxBytes?: number) => PtyHostEvent[];
+  readEvents?: (ownerId: string, dir?: string, maxBytes?: number) => PtyHostEvent[] | Promise<PtyHostEvent[]>;
   /** Injectable for tests; defaults to the real discovery-file start-time read. */
-  readStartedAt?: (ownerId: string, dir?: string) => number | null;
+  readStartedAt?: (ownerId: string, dir?: string) => number | null | Promise<number | null>;
   /** Injectable for tests; defaults to the real fleet-wide broadcast. */
   broadcast?: typeof broadcastSevereEvent;
   /**
@@ -742,17 +742,22 @@ export async function sweepWedgedPtyHosts(
     busyGateMaxQuietFraction = DEFAULT_BUSY_GATE_MAX_QUIET_FRACTION,
   } = opts;
   const now = deps.now ?? Date.now();
-  const listHosts = deps.listHosts ?? ((d?: string) => listLiveHosts(d ?? dir));
+  // Async default (WI-10004587): a sync psu-pty directory scan blocks the main thread.
+  const listHosts = deps.listHosts ?? ((d?: string) => listLiveHostsAsync(d ?? dir));
+  // Per-host reads are async too (WI-10006344): the sync forms ran once per live host
+  // (~thousands of ledger files) on the main thread, and under host IO pressure a single
+  // readSync of a 1.5 kB ledger was measured parked for 1.7 s — long enough to stall the
+  // event loop and starve the stall profiler's own Profiler.enable request.
   const readEvents =
-    deps.readEvents ?? ((o: string, d?: string, m?: number) => readHostEventTail(o, d ?? dir, m));
-  const readStartedAt = deps.readStartedAt ?? ((o: string, d?: string) => hostStartedAt(o, d ?? dir));
+    deps.readEvents ?? ((o: string, d?: string, m?: number) => readHostEventTailAsync(o, d ?? dir, m));
+  const readStartedAt = deps.readStartedAt ?? ((o: string, d?: string) => hostStartedAtAsync(o, d ?? dir));
 
-  const hosts = listHosts(dir);
+  const hosts = await listHosts(dir);
   const wedged: WedgedHostReport[] = [];
   const unreadable: string[] = [];
 
   for (const host of hosts) {
-    const events = readEvents(host.ownerId, dir, WEDGE_SCAN_TAIL_BYTES);
+    const events = await readEvents(host.ownerId, dir, WEDGE_SCAN_TAIL_BYTES);
     if (events.length === 0) {
       unreadable.push(host.ownerId);
       continue;
@@ -760,7 +765,7 @@ export async function sweepWedgedPtyHosts(
     // Prefer the discovery file's own startedAt; fall back to the host record we already
     // hold. Without a boundary we cannot tell this host's incidents from its
     // predecessor's, so refusing is the only honest option.
-    const startedAtMs = readStartedAt(host.ownerId, dir) ?? host.startedAt;
+    const startedAtMs = (await readStartedAt(host.ownerId, dir)) ?? host.startedAt;
     if (typeof startedAtMs !== 'number' || !Number.isFinite(startedAtMs)) {
       unreadable.push(host.ownerId);
       continue;

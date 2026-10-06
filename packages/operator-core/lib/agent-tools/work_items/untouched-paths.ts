@@ -72,6 +72,12 @@
  * PURE via injected probes, so every branch above is unit-testable without a real tree.
  */
 import { spawn } from 'node:child_process';
+import {
+  gitSidecarEnabled,
+  isSidecarInfrastructureFault,
+  noteSidecarFallback,
+  runGitViaSpawnerSidecar,
+} from '../../fleet/git-via-sidecar';
 import { existsSync, readFileSync } from 'node:fs';
 import nodePath from 'node:path';
 
@@ -189,6 +195,14 @@ export interface GitSpawnOptions {
   timeoutMs?: number;
   /** Cancel a running child when its owning operation has exceeded its liveness budget. */
   signal?: AbortSignal;
+  /**
+   * Run git in the spawner sidecar when this host has one, so a hot repeating read
+   * does not fork from the big host process (~40 ms of frozen event loop per GB of
+   * its RSS; see fleet/git-via-sidecar). ONLY for reads with SMALL, BOUNDED output:
+   * the sidecar buffers stdout, so an `onField` early stop no longer kills git.
+   * Falls back to the local streaming spawn when the sidecar cannot run it.
+   */
+  preferSidecar?: boolean;
 }
 
 export type GitStreamOutcome = 'complete' | 'failed' | 'timeout';
@@ -201,10 +215,59 @@ export type GitStreamOutcome = 'complete' | 'failed' | 'timeout';
  * or an early stop, `'failed'` on a spawn error or non-zero exit, `'timeout'` past the
  * deadline. Never rejects.
  */
-export function streamGitFields(
+export async function streamGitFields(
   args: readonly string[],
   onField: (field: string) => boolean | void,
   opts: GitSpawnOptions = {},
+): Promise<GitStreamOutcome> {
+  if (opts.preferSidecar && !opts.gitBinary && gitSidecarEnabled()) {
+    const outcome = await streamGitFieldsViaSidecar(args, onField, opts);
+    if (outcome !== 'fallback') return outcome;
+  }
+  return streamGitFieldsLocal(args, onField, opts);
+}
+
+/**
+ * The sidecar half of {@link streamGitFields}: same field sequence
+ * (`stdout.split('\0')`), same outcomes. `'fallback'` means the sidecar could
+ * not run the command, so the caller forks locally; it is counted through
+ * noteSidecarFallback so a sidecar outage shows up as a rate, not silence.
+ */
+async function streamGitFieldsViaSidecar(
+  args: readonly string[],
+  onField: (field: string) => boolean | void,
+  opts: GitSpawnOptions,
+): Promise<GitStreamOutcome | 'fallback'> {
+  if (opts.signal?.aborted) return 'failed';
+  const timeoutMs = opts.timeoutMs ?? GIT_PROBE_TIMEOUT_MS;
+  const startedAt = Date.now();
+  let res: Awaited<ReturnType<typeof runGitViaSpawnerSidecar>>;
+  try {
+    res = await runGitViaSpawnerSidecar([...args], process.cwd(), timeoutMs,
+      { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, {
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+  } catch (error) {
+    noteSidecarFallback('completion-freshness', error);
+    return 'fallback';
+  }
+  if (isSidecarInfrastructureFault(res)) {
+    noteSidecarFallback('completion-freshness', new Error(res.stderr));
+    return 'fallback';
+  }
+  if (opts.signal?.aborted) return 'failed';
+  if (res.code !== 0) return Date.now() - startedAt >= timeoutMs ? 'timeout' : 'failed';
+  for (const field of res.stdout.split('\0')) {
+    if (onField(field) === true) break;
+  }
+  return 'complete';
+}
+
+/** Local streaming spawn: the default path, and the fallback when the sidecar cannot run git. */
+function streamGitFieldsLocal(
+  args: readonly string[],
+  onField: (field: string) => boolean | void,
+  opts: GitSpawnOptions,
 ): Promise<GitStreamOutcome> {
   return new Promise<GitStreamOutcome>((resolve) => {
     let settled = false;
@@ -225,7 +288,12 @@ export function streamGitFields(
       return;
     }
     try {
-      child = spawn(opts.gitBinary ?? 'git', [...args], { stdio: ['ignore', 'pipe', 'ignore'] });
+      child = spawn(opts.gitBinary ?? 'git', [...args], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        // This helper serves read-only status/path probes; do not let Git's optional
+        // index refresh create .git/index.lock in the shared checkout.
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+      });
     } catch {
       resolve('failed');
       return;

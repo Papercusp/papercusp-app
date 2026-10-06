@@ -22,8 +22,30 @@
  */
 import { createHash } from 'node:crypto';
 import { getOrgPg } from '@papercusp/db-org';
+import { GATE_REUSE_AUDIT_INSTRUMENT_KEY, measureGateReuseAuditWindow } from './release/gate-fire-ledger';
 import { acquireWithContentionRetry } from './agent-tools/locks/contention-retry';
 import {
+  collectGoalHolderBehaviorMetrics,
+  HOLDER_BEHAVIOR_INSTRUMENT_KEYS,
+  holderBehaviorCriterionForInstrument,
+  rateGoalHolderBehavior,
+  resolveHolderGoalForWindow,
+  type GoalHolderBehaviorMetrics,
+} from './goal-holder-behavior-metrics';
+
+/** Default holder-behavior measurement: resolve the stewarded goal, then read the ledgers. */
+async function defaultHolderMetrics(input: {
+  holderOwnerId: string;
+  windowStart: string;
+  windowEnd: string;
+}): Promise<GoalHolderBehaviorMetrics | null> {
+  const { sql } = getOrgPg();
+  const goal = await resolveHolderGoalForWindow(input, { sql });
+  if (!goal) return null;
+  return collectGoalHolderBehaviorMetrics({ ...input, ...goal }, { sql });
+}
+import {
+  OBSERVATION_UNKNOWN_REASONS,
   asStructuredObservation,
   normalizeScorecardRatings,
   scorecardAdmissionExclusion,
@@ -55,6 +77,7 @@ import { boundedPgReadTxn } from './pg-read-query';
 import {
   classifyRubricEvidenceCurrentness,
   getRubric,
+  getRubricWithoutSeeding,
   rubricInstrumentContract,
   type Rubric,
   type RubricStatus,
@@ -71,6 +94,8 @@ import { trackDetached } from './detached-imports';
 /** The owner-mandated built-in rubric whose prompt/backstop contract is fixed. */
 export const HIVE_COORDINATION_HEALTH_RUBRIC = 'pot-coordination-health';
 export const WORK_ON_EVERYTHING_STEWARDSHIP_RUBRIC = 'work-on-everything-stewardship-health';
+/** The per-run GOAL behavior-grading rubric (goal-agent-behavior-feedback-2026-09-06). */
+export const GOAL_BEHAVIOR_GRADING_RUBRIC = 'goal-mode-e2e';
 
 export type ScorecardRollup = NonNullable<StructuredObservation['rollup']>;
 
@@ -138,6 +163,40 @@ export function computeWorkOnEverythingRollup(
     criticalUnknowns,
     coverage,
   };
+}
+
+/**
+ * The rubric-specific rating contracts that the generic shape checks cannot express.
+ * Both the evaluate preflight and the emit door run this one entry point, so a rubric
+ * that gains a contract is enforced at both without touching either caller.
+ */
+export function validateRubricRatingContracts(rubricRef: string, ratings: ObservationRatings): void {
+  validateWorkOnEverythingEvidenceEnvelope(rubricRef, ratings);
+  validateGoalBehaviorUnknownDisclosure(rubricRef, ratings);
+}
+
+/**
+ * AUTO-BAR-R-3 (goal-agent-behavior-feedback-2026-09-06): a criterion whose opportunity
+ * never arose, or was never observed, is rated unknown/idle AND says why. The reason must
+ * be the structured `unknownReason`, not prose in `evidence`: the live R-3 census
+ * (behavior-grading-r3-no-opportunity.live.test.ts) reads only that field, and measured
+ * 2026-10-02 two cards (one from the automated judge) that explained 20 unknowns in prose
+ * alone because nothing at emit required the field.
+ */
+export function validateGoalBehaviorUnknownDisclosure(rubricRef: string, ratings: ObservationRatings): void {
+  if (rubricRef !== GOAL_BEHAVIOR_GRADING_RUBRIC) return;
+  const undisclosed = Object.entries(ratings)
+    .filter(([, entry]) => {
+      const rating = entry.rating.trim().toLowerCase();
+      return (rating === 'unknown' || rating === 'idle') && !entry.unknownReason?.trim();
+    })
+    .map(([key]) => key);
+  if (undisclosed.length > 0) {
+    throw new Error(
+      `${GOAL_BEHAVIOR_GRADING_RUBRIC} unknown/idle rating(s) ${undisclosed.map((k) => `'${k}'`).join(', ')} ` +
+        `require unknownReason (${OBSERVATION_UNKNOWN_REASONS.join(' | ')}); prose in evidence does not count`,
+    );
+  }
 }
 
 /**
@@ -269,6 +328,13 @@ export async function resolveScorecardInstrumentSnapshots(
     list?: typeof listScorecardPage;
     rubric?: typeof getRubric;
     now?: () => number;
+    gateReuseAudit?: typeof measureGateReuseAuditWindow;
+    /** Holder-behavior metrics for the subject window; null when no goal was stewarded. */
+    holderMetrics?: (input: {
+      holderOwnerId: string;
+      windowStart: string;
+      windowEnd: string;
+    }) => Promise<GoalHolderBehaviorMetrics | null>;
   } = {},
 ): Promise<Record<string, ScorecardInstrumentSnapshot> | undefined> {
   const snapshots: Record<string, ScorecardInstrumentSnapshot> = Object.fromEntries(
@@ -277,7 +343,31 @@ export async function resolveScorecardInstrumentSnapshots(
       value.provenance === 'platform-computed' ? { ...value, provenance: 'self-reported' as const } : { ...value },
     ]),
   );
-  const registered = new Set(['woe.goal-mode-base-scorecard']);
+  const registered = new Set(['woe.goal-mode-base-scorecard', GATE_REUSE_AUDIT_INSTRUMENT_KEY,
+    ...Object.values(HOLDER_BEHAVIOR_INSTRUMENT_KEYS)]);
+  // P-013 (goal-holder-plans-ideation-truthful-reports-2026-10-03): the holder-behavior
+  // criteria are measured once per call from the canonical ledgers, so a grader's claimed
+  // pass is refused (verdictMismatches) when the measurement says fail.
+  let holderRatings: Promise<
+    | { ratings: ReturnType<typeof rateGoalHolderBehavior>; metrics: GoalHolderBehaviorMetrics }
+    | { error: string }
+  > | null = null;
+  const measureHolder = (subject: ObservationSubject) => {
+    holderRatings ??= (async () => {
+      try {
+        const metrics = await (deps.holderMetrics ?? defaultHolderMetrics)({
+          holderOwnerId: subject.ref,
+          windowStart: subject.windowStart as string,
+          windowEnd: subject.windowEnd as string,
+        });
+        if (!metrics) return { error: 'No goal stewarded by this holder in the window.' };
+        return { ratings: rateGoalHolderBehavior(metrics), metrics };
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    })();
+    return holderRatings;
+  };
   const keys = new Set(input.rubric.criteria.map((criterion) =>
     criterion.check?.kind === 'instrument' ? criterion.check.instrumentKey : criterion.instrumentKey,
   ));
@@ -293,7 +383,7 @@ export async function resolveScorecardInstrumentSnapshots(
       measuredAt,
       provenance: 'platform-computed',
       window,
-      value: { resolver: key, resolverVersion: 1, reason },
+      value: { resolver: key, resolverVersion: 2, reason },
       evidenceRef: 'scorecards:list:goal-mode-e2e',
     });
     if (!subject?.ref || !subject.windowStart || !subject.windowEnd) {
@@ -304,6 +394,65 @@ export async function resolveScorecardInstrumentSnapshots(
     const end = Date.parse(subject.windowEnd);
     if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) {
       snapshots[key] = unknown('The subject window is invalid.');
+      continue;
+    }
+    if (key === GATE_REUSE_AUDIT_INSTRUMENT_KEY) {
+      const evidenceRef = 'harness_shared.pipeline_events:gate-reuse-audit-window';
+      const scopedWindow = { ...window, workspaceId: input.rubric.workspaceId,
+        installSlug: input.rubric.subjectHarnessSlug };
+      if (!input.rubric.workspaceId || !input.rubric.subjectHarnessSlug ||
+          input.rubric.subjectPlan !== subject.ref || start >= end || end > Date.parse(measuredAt)) {
+        snapshots[key] = { ...unknown('An exact completed plan window and canonical workspace/install scope are required.'),
+          evidenceRef, window: scopedWindow };
+        continue;
+      }
+      try {
+        const measurement = await (deps.gateReuseAudit ?? measureGateReuseAuditWindow)({
+          workspaceId: input.rubric.workspaceId, installSlug: input.rubric.subjectHarnessSlug,
+          windowStartMs: start, windowEndMs: end,
+        });
+        snapshots[key] = { verdict: measurement.verdict, measuredAt, provenance: 'platform-computed',
+          window: scopedWindow, evidenceRef,
+          value: { resolver: key, resolverVersion: 1, ...measurement } };
+      } catch (error) {
+        snapshots[key] = { ...unknown(`Archive instrument unavailable: ${error instanceof Error ? error.message : String(error)}`),
+          evidenceRef, window: scopedWindow };
+      }
+      continue;
+    }
+    const holderCriterion = holderBehaviorCriterionForInstrument(key);
+    if (holderCriterion) {
+      const measured = await measureHolder(subject);
+      if ('error' in measured) {
+        snapshots[key] = {
+          ...unknown(`Holder-behavior instrument unavailable: ${measured.error}`),
+          evidenceRef: 'goal-holder-behavior-metrics',
+          value: { resolver: key, resolverVersion: 1, reason: measured.error },
+        };
+        continue;
+      }
+      const rating = measured.ratings[holderCriterion];
+      snapshots[key] = {
+        verdict: rating.verdict,
+        measuredAt,
+        provenance: 'platform-computed',
+        window,
+        evidenceRef: 'goal-holder-behavior-metrics',
+        value: {
+          resolver: key,
+          resolverVersion: 1,
+          criterion: holderCriterion,
+          reason: rating.reason,
+          goalId: measured.metrics.window.goalId,
+          metrics: {
+            planAuthorship: measured.metrics.planAuthorship,
+            ideation: measured.metrics.ideation,
+            ownerReports: measured.metrics.ownerReports,
+            loop: measured.metrics.loop,
+            nudges: measured.metrics.nudges,
+          },
+        },
+      };
       continue;
     }
     try {
@@ -333,11 +482,21 @@ export async function resolveScorecardInstrumentSnapshots(
         );
         continue;
       }
-      const verdicts = Object.values(card.ratings).map((entry) => entry.rating.toLowerCase());
-      // Partial/unknown base behavior cannot establish a passing foundation.
-      const verdict = verdicts.some((rating) => ['fail', 'severe', 'broken'].includes(rating))
+      const entries = Object.values(card.ratings);
+      const isPassLike = (rating: string) => ['pass', 'exemplary', 'healthy'].includes(rating.toLowerCase());
+      // v2 (EI-24770558745369103): an unknown whose STRUCTURED unknownReason says the
+      // behavior did not occur in the window (idle / not-exercised) hides no evidence, so it
+      // does not block a passing foundation. v1 required all ~37 base ratings to be pass,
+      // which no real window reaches because most criteria are not exercised in a given
+      // window. A partial, a reasonless (legacy) unknown, or any other unknown reason still
+      // cannot establish a passing foundation, and at least one exercised pass is required.
+      const absentBehavior = (entry: (typeof entries)[number]) =>
+        entry.rating.toLowerCase() === 'unknown' &&
+        (entry.unknownReason === 'not-exercised' || entry.unknownReason === 'idle');
+      const verdict = entries.some((entry) => ['fail', 'severe', 'broken'].includes(entry.rating.toLowerCase()))
         ? 'fail'
-        : verdicts.length > 0 && verdicts.every((rating) => ['pass', 'exemplary', 'healthy'].includes(rating))
+        : entries.some((entry) => isPassLike(entry.rating)) &&
+            entries.every((entry) => isPassLike(entry.rating) || absentBehavior(entry))
           ? 'pass'
           : 'unknown';
       snapshots[key] = {
@@ -348,7 +507,7 @@ export async function resolveScorecardInstrumentSnapshots(
         evidenceRef: card.issueId,
         value: {
           resolver: key,
-          resolverVersion: 1,
+          resolverVersion: 2,
           baseCard: card.issueId,
           rubricRevision: card.rubricRevision,
           criteriaHash: card.criteriaHash,
@@ -673,7 +832,15 @@ export function evaluateScorecardInstrumentContract(input: {
       }
     }
     const expected = expectedInstrumentVerdict(input.ratings[criterion.key]?.rating ?? '');
-    if (expected && expected !== snapshot.verdict) verdictMismatches.push(instrumentKey);
+    // WI-10005422: an instrument that could not decide ('unknown') cannot CONTRADICT a
+    // negative claim. A rubric may fail a criterion on grounds the instrument cannot see
+    // (WOE goal-mode-foundation fails a critical unknown left unowned, which the base-card
+    // resolver reads as 'unknown'), so that fail is unconfirmed, not contradicted. A claimed
+    // PASS over an unknown snapshot stays a mismatch: a positive needs the measurement.
+    const unconfirmedNegative = expected === 'fail' && snapshot.verdict === 'unknown';
+    if (expected && expected !== snapshot.verdict && !unconfirmedNegative) {
+      verdictMismatches.push(instrumentKey);
+    }
   }
 
   return {
@@ -1028,7 +1195,7 @@ export async function readScorecardEvidence(issueId: string): Promise<ScorecardE
   });
   if (!observation?.rubricRef || !observation.ratings) return { kind: 'not_scorecard' };
 
-  const rubric = await getRubric(observation.rubricRef);
+  const rubric = await getRubricWithoutSeeding(observation.rubricRef);
   const criteriaKeys = rubric
     ? rubric.criteria.map((criterion) => criterion.key)
     : builtInCriterionKeysForRubric(observation.rubricRef);
@@ -1061,7 +1228,7 @@ export async function readScorecardEvidence(issueId: string): Promise<ScorecardE
     const subjectRef = observation.subject.ref;
     const liveSubjectRubric = subjectRef === observation.rubricRef
       ? rubric
-      : await getRubric(subjectRef).catch(() => null);
+      : await getRubricWithoutSeeding(subjectRef).catch(() => null);
     subjectRubricCurrentness = classifySubjectRubricCurrentness(
       subjectRef,
       observation.subjectRubricIdentity,
@@ -1123,7 +1290,7 @@ export type { ScorecardGradingAuditCurrentness };
 
 export interface ScorecardSubjectRubricCurrentness {
   state: 'current' | 'stale' | 'unknown';
-  reason: 'current' | 'subject-rubric-mismatch' | 'recorded-identity-missing' | 'live-identity-missing' |
+  reason: 'current' | 'meaning-unchanged' | 'subject-rubric-mismatch' | 'recorded-identity-missing' | 'live-identity-missing' |
     'revision-mismatch' | 'meaning-revision-mismatch' | 'criteria-hash-mismatch';
   recordedRevision: number | null;
   currentRevision: number | null;
@@ -1146,11 +1313,26 @@ export function classifySubjectRubricCurrentness(
   if (recorded?.rubricRef && recorded.rubricRef !== subjectRef) {
     return { state: 'unknown', reason: 'subject-rubric-mismatch', ...base };
   }
+  const recordedMeaningRevision = recorded?.meaningRevision;
+  const currentMeaningRevision = live.barContract?.meaningRevision;
+  const meaningRevisionMatches =
+    typeof recordedMeaningRevision === 'number' &&
+    Number.isInteger(recordedMeaningRevision) &&
+    recordedMeaningRevision > 0 &&
+    typeof currentMeaningRevision === 'number' &&
+    Number.isInteger(currentMeaningRevision) &&
+    currentMeaningRevision > 0 &&
+    recordedMeaningRevision === currentMeaningRevision;
+  const criteriaHashChanged = (recorded?.criteriaHash?.trim() || null) !== (live.criteriaHash?.trim() || null);
+  const currentness = classifyRubricEvidenceCurrentness(
+    recorded ?? {},
+    { revision: live.revision, criteriaHash: live.criteriaHash, meaningRevision: currentMeaningRevision },
+  );
   return {
-    ...classifyRubricEvidenceCurrentness(
-      recorded ?? {},
-      { revision: live.revision, criteriaHash: live.criteriaHash, meaningRevision: live.barContract?.meaningRevision },
-    ),
+    ...currentness,
+    ...(currentness.state === 'current' && meaningRevisionMatches && criteriaHashChanged
+      ? { reason: 'meaning-unchanged' as const }
+      : {}),
     ...base,
   };
 }
@@ -2115,6 +2297,13 @@ export interface ListScorecardsFilter {
    * scorecards can only be listed in bulk and told apart by reading prose.
    */
   subjectRef?: string;
+  /**
+   * Restrict to scorecards grading ANY of these subjects. The batched form of
+   * `subjectRef`: one scan of the rubric's cards instead of one scan per subject.
+   * The newest-first limit applies to the union, so a caller that needs a
+   * per-subject window must group the rows and treat a full page as truncated.
+   */
+  subjectRefs?: readonly string[];
   /** Select exact scorecard issue IDs before applying the newest-first limit. */
   issueIds?: readonly string[];
   /** Only scorecards filed at/after this ISO timestamp (the time-window). */
@@ -2262,6 +2451,11 @@ async function listScorecardsAtLimit(filter: ListScorecardsFilter, limit: number
        AND ${filter.rubricRef ? tx`scorecard.payload -> 'observation' ->> 'rubricRef' = ${filter.rubricRef}` : tx`TRUE`}
        AND ${filter.sourceHive ? tx`scorecard.payload -> 'observation' ->> 'sourceHive' = ${filter.sourceHive}` : tx`TRUE`}
        AND ${filter.subjectRef ? tx`scorecard.payload -> 'observation' -> 'subject' ->> 'ref' = ${filter.subjectRef}` : tx`TRUE`}
+       AND ${
+         filter.subjectRefs
+           ? tx`scorecard.payload -> 'observation' -> 'subject' ->> 'ref' = ANY(${[...filter.subjectRefs]}::text[])`
+           : tx`TRUE`
+       }
        AND ${filter.issueIds ? tx`scorecard.issue_id = ANY(${[...filter.issueIds]}::text[])` : tx`TRUE`}
        AND ${filter.since ? tx`scorecard.created_at >= ${filter.since}` : tx`TRUE`}
        AND ${
@@ -2354,7 +2548,7 @@ async function listScorecardsAtLimit(filter: ListScorecardsFilter, limit: number
     // payload yields no structured view) so a bad row degrades, never throws.
     if (!observation?.rubricRef || !observation.ratings) continue;
     if (!rubricMeta.has(observation.rubricRef)) {
-      const rubric = await getRubric(observation.rubricRef);
+      const rubric = await getRubricWithoutSeeding(observation.rubricRef);
       rubricMeta.set(observation.rubricRef, {
         keys: rubric ? rubric.criteria.map((c) => c.key) : builtInCriterionKeysForRubric(observation.rubricRef),
         overrides: scoreOverridesForScale(rubric?.ratingScale),
@@ -2381,13 +2575,13 @@ async function listScorecardsAtLimit(filter: ListScorecardsFilter, limit: number
       : undefined;
     if (gradingAudit && !gradingAuditRubricRead) {
       gradingAuditRubricRead = true;
-      gradingAuditRubric = await getRubric(GRADING_INTEGRITY_RUBRIC_REF).catch(() => null);
+      gradingAuditRubric = await getRubricWithoutSeeding(GRADING_INTEGRITY_RUBRIC_REF).catch(() => null);
     }
     let subjectRubricCurrentness: ScorecardSubjectRubricCurrentness | undefined;
     if (observation.subject?.kind === 'rubric') {
       const subjectRef = observation.subject.ref;
       if (!subjectRubrics.has(subjectRef)) {
-        subjectRubrics.set(subjectRef, await getRubric(subjectRef).catch(() => null));
+        subjectRubrics.set(subjectRef, await getRubricWithoutSeeding(subjectRef).catch(() => null));
       }
       subjectRubricCurrentness = classifySubjectRubricCurrentness(
         subjectRef,
@@ -2784,6 +2978,28 @@ export function computeRubricStaleness(
   };
 }
 
+/** Observation age of the bounded, retained trend cohort; independent of rubric drift. */
+export interface RubricObservationAge {
+  status: 'fresh' | 'stale' | 'mixed' | 'unknown';
+  /** Only present when the caller supplied a finite positive horizon. */
+  horizonSec?: number;
+  /** Clock used for the assessment, absent only for an invalid injected clock. */
+  asOf?: string;
+  coverage: {
+    population: 'retained-scorecards';
+    total: number;
+    timed: number;
+    missing: number;
+    invalid: number;
+    future: number;
+  };
+  /** Ages/counts cover trustworthy timestamps only; coverage may still be partial. */
+  ageSec?: { min: number; max: number };
+  freshCount?: number;
+  staleCount?: number;
+  reason: string;
+}
+
 /** A rubric's qualitative health trend — per-criterion rating time-series + direction. */
 export interface RubricTrend {
   rubricRef: string;
@@ -2807,6 +3023,8 @@ export interface RubricTrend {
   /** Filing time remains separate from the subject observation window. */
   filingWindow?: { from: string; to: string };
   observationWindow?: { from: string; to: string };
+  /** Caller-horizon observation age, never inferred from filing time or criterion staleness. */
+  observationAge: RubricObservationAge;
   filingLagMs?: { min: number; max: number; mean: number; measured: number };
   /** Exact identities behind the aggregate, opt-in alongside the rating series. */
   scorecardIdentities?: Array<Pick<ScorecardRow,
@@ -2884,6 +3102,10 @@ export interface ScorecardTrendFilter {
   since?: string;
   /** Max scorecards to aggregate (newest-first read; default 500). */
   limit?: number;
+  /** Max observation age in seconds; omitted/invalid means no age verdict. */
+  observationMaxAgeSec?: number;
+  /** Hermetic clock seam for source-build tests; the public tool uses Date.now(). */
+  nowMs?: number;
   /**
    * Include each criterion's chronological series as RLE runs (WI-2943). Default
    * FALSE: the raw per-scorecard series dominated the payload (~84% at 200
@@ -2896,6 +3118,56 @@ export interface ScorecardTrendFilter {
    * replication drills can be long, and most trend consumers need only aggregates.
    */
   includeDefinition?: boolean;
+}
+
+function computeTrendObservationAge(
+  cards: readonly ScorecardRow[],
+  maxAgeSec: number | undefined,
+  nowMs: number,
+): RubricObservationAge {
+  const horizonSec = maxAgeSec != null && Number.isFinite(maxAgeSec) && maxAgeSec > 0 ? maxAgeSec : undefined;
+  const validClock = Number.isFinite(nowMs) && Number.isFinite(new Date(nowMs).getTime());
+  const coverage: RubricObservationAge['coverage'] = {
+    population: 'retained-scorecards', total: cards.length, timed: 0, missing: 0, invalid: 0, future: 0,
+  };
+  const ages: number[] = [];
+  for (const card of cards) {
+    const subject = card.subject;
+    if (!subject?.windowEnd) {
+      coverage.missing += 1;
+      continue;
+    }
+    const end = Date.parse(subject.windowEnd);
+    const start = subject.windowStart ? Date.parse(subject.windowStart) : undefined;
+    if (!Number.isFinite(end) || (start !== undefined && (!Number.isFinite(start) || start > end))) {
+      coverage.invalid += 1;
+    } else if (validClock && end > nowMs) {
+      coverage.future += 1;
+    } else {
+      coverage.timed += 1;
+      if (validClock) ages.push((nowMs - end) / 1000);
+    }
+  }
+  const freshCount = horizonSec === undefined ? undefined : ages.filter((age) => age <= horizonSec).length;
+  const staleCount = freshCount === undefined ? undefined : ages.length - freshCount;
+  const evidence = {
+    ...(horizonSec !== undefined ? { horizonSec } : {}),
+    ...(validClock ? { asOf: new Date(nowMs).toISOString() } : {}),
+    coverage,
+    ...(ages.length ? { ageSec: { min: Math.min(...ages), max: Math.max(...ages) } } : {}),
+    ...(horizonSec !== undefined && validClock ? { freshCount, staleCount } : {}),
+  };
+  if (!validClock) return { ...evidence, status: 'unknown', reason: 'Observation age requires a valid assessment clock.' };
+  if (horizonSec === undefined) return { ...evidence, status: 'unknown', reason: 'Supply a finite positive observationMaxAgeSec to judge observation age.' };
+  if (!cards.length) return { ...evidence, status: 'unknown', reason: 'No scorecards remain in the retained trend cohort.' };
+  if (coverage.timed !== coverage.total) {
+    return { ...evidence, status: 'unknown', reason: 'Retained timestamp coverage is incomplete: missing, invalid or future observation bounds cannot certify cohort age.' };
+  }
+  const status = freshCount === cards.length ? 'fresh' : freshCount === 0 ? 'stale' : 'mixed';
+  return {
+    ...evidence, status,
+    reason: `${freshCount}/${cards.length} retained observations end within the caller's ${horizonSec}s horizon; ${staleCount} end before it.`,
+  };
 }
 
 /**
@@ -3075,6 +3347,7 @@ export async function scorecardTrend(filter: ScorecardTrendFilter): Promise<Rubr
     ...(filter.sourceHive ? { sourceHive: filter.sourceHive } : {}),
     ...(filter.includeDefinition && trendRubric ? { definition: trendRubric } : {}),
     scorecardCount: finalCards.length,
+    observationAge: computeTrendObservationAge(finalCards, filter.observationMaxAgeSec, filter.nowMs ?? Date.now()),
     sample: { limit: sampleLimit, inputCount: rows.length },
     supersededExcluded,
     preContractResetExcluded,

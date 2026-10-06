@@ -45,7 +45,10 @@ ROOT="$(cd "$HERE/.." && pwd)"                  # papercusp-desktop
 # of this box's own linux-native tree, so the shipped node_modules matches the
 # bundled darwin node instead of breaking at runtime).
 MONO="$(cd "${PAPERCUSP_STAGE_SOURCE_ROOT:-$ROOT/..}" && pwd)"
-SIDECAR="$ROOT/src-tauri/sidecar"
+# An audited tooling revision can stage the frozen source into an isolated
+# candidate sidecar without rebuilding or editing the frozen checkout (D-150).
+# Reuse the existing source-root override and the same lock/publish/audit path.
+SIDECAR="${PAPERCUSP_STAGE_SOURCE_SIDECAR:-$ROOT/src-tauri/sidecar}"
 SOURCE_PACKAGE_LOCK_PIN="${PAPERCUSP_SOURCE_PACKAGE_LOCK_PIN:-}"
 SOURCE_PACKAGE_LOCK_PIN_TMP=""
 SOURCE_PACKAGE_LOCK_PIN_DIR=""
@@ -96,14 +99,11 @@ fi
 [[ -f "$MONO/package-lock.json" ]] \
   || { echo "ERROR: $MONO/package-lock.json missing — refusing to stage without a committed lockfile member" >&2; exit 1; }
 
-# ── OWNER-NAME PREFLIGHT (EI-20976222603137006). The final bundle audit is
-# intentionally fail-closed when no explicit owner name is available, but that
-# check used to happen only after this script had scrubbed, tarred, and zstd-
-# compressed roughly 1 GiB of source. Run the same audit-owned resolver before
-# opening the sidecar lock or creating an archive so an automation Git identity
-# cannot turn an expensive, doomed staging attempt into the first signal.
+# ── IDENTITY-POLICY COMPATIBILITY PREFLIGHT. D-112 makes the release identity
+# policy machine-only, so owner name/email are not required. Keep this audit-owned
+# entrypoint in place for older cutters and future early policy checks.
 python3 "$HERE/audit-release-bundle.py" --owner-preflight \
-  || { echo "ERROR: owner-name preflight failed — refusing to start source staging" >&2; exit 2; }
+  || { echo "ERROR: identity-policy preflight failed — refusing to start source staging" >&2; exit 2; }
 
 OUT="$SIDECAR/source.tar.zst"
 
@@ -225,12 +225,25 @@ echo "    selection: ${#EXCLUDES[@]} exclude patterns (privacy half derived from
   || echo "    note: allowlist entries absent from this tree (skipped): ${MISSING[*]}"
 echo "    allowlist: ${#INCLUDES[@]} top-level entries"
 
+# GNU tar REQUIRED (WI-3307 mac leg): both the final source archive and the
+# scrub-candidate membership filter below must use the same exclude dialect.
+# On macOS: brew install gnu-tar → gtar.
+TAR_BIN=tar
+if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  if command -v gtar >/dev/null 2>&1; then
+    TAR_BIN=gtar
+  else
+    echo "ERROR: GNU tar required (macOS: brew install gnu-tar) — bsdtar's --owner/exclude dialect differs" >&2
+    exit 1
+  fi
+fi
+
 # ── IDENTITY SCRUB (WI-4419; desktop-v0-0-12-release-tri-platform-2026-07-19 D-004)
 # ─────────────────────────────────────────────────────────────────────────────
-# The audit gate (below) forbids this build box's identity — git name ("owner"),
+# The audit gate (below) forbids this build box's identity — git name ("Avi"),
 # home path, unix user, email, hostname — plus the known cross-box creds, in the
 # shipped bytes. Dev-infra and agent-authored SOURCE keeps re-introducing them into
-# MUST-SHIP files: [owner:owner] provenance comments in prod .ts/.sql, dev systemd
+# MUST-SHIP files: [owner:Avi] provenance comments in prod .ts/.sql, dev systemd
 # ExecStart=/home/<user> units, test fixtures hardcoding the build username. Those
 # files ship (or run), so they can't be pruned like a scratch dir, and hand-editing
 # each one is a treadmill that reds the next cut the instant a new tag lands. So:
@@ -257,6 +270,25 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
     [[ -n "$_leak_line" ]] && _leakers+=("$_leak_line")
   done < <(python3 "$HERE/audit-release-bundle.py" --source-leakers "$MONO" "${INCLUDES[@]#./}")
   if (( ${#_leakers[@]} > 0 )); then
+    # Selection owns which files ship. Filter the content-discovered candidates
+    # through its exact GNU-tar exclusions before creating the redacted overlay;
+    # otherwise that second pass can smuggle an excluded report back in.
+    _leaker_count_before_selection=${#_leakers[@]}
+    if ! _filtered_leakers="$(
+      source_tree_filter_candidate_files "$TAR_BIN" "$MONO" "${_leakers[@]}"
+    )"; then
+      echo "ERROR: could not filter identity scrub candidates through source selection" >&2
+      exit 1
+    fi
+    _leakers=()
+    while IFS= read -r _leak_line; do
+      [[ -n "$_leak_line" ]] && _leakers+=("$_leak_line")
+    done <<< "$_filtered_leakers"
+    _leaker_count_excluded=$((_leaker_count_before_selection - ${#_leakers[@]}))
+    (( _leaker_count_excluded == 0 )) \
+      || echo "    identity scrub: selection kept $_leaker_count_excluded excluded candidate file(s) out of the overlay"
+  fi
+  if (( ${#_leakers[@]} > 0 )); then
     # Keep the quarantine outside the packaged sidecar. Tauri/deb packaging can
     # read the sidecar after source.tar.zst appears but before this script's EXIT
     # trap runs; an in-sidecar quarantine then becomes public duplicate payload.
@@ -268,7 +300,7 @@ if [[ "${PAPERCUSP_STAGE_SCRUB:-1}" == "1" ]]; then
       mkdir -p "$SCRUB_DIR/SCRUBBED/$(dirname "$_rel")"
       cp -p "$MONO/$_rel" "$SCRUB_DIR/SCRUBBED/$_rel"
       # The audit-owned scrubber applies the same case-folded occurrence rule as
-      # the final scan. Unlike blanket sed it preserves proven owner media tokens
+      # the final scan. Unlike blanket sed it preserves proven AVI media tokens
       # and opaque Vite hashes even when a mixed file also carries real identity.
       python3 "$HERE/audit-release-bundle.py" --scrub-text \
         "$SCRUB_DIR/SCRUBBED/$_rel"
@@ -295,19 +327,6 @@ declare -a PACKAGE_LOCK_TAIL=(-C "$SOURCE_PACKAGE_LOCK_PIN_DIR" ./PINNED/package
 echo "    committed package-lock pin: overlaying Git HEAD copy into source.tar.zst"
 
 zstd_level="${PAPERCUSP_SOURCE_ZSTD_LEVEL:-6}"
-# GNU tar REQUIRED (WI-3307 mac leg): the exclude anchoring + --owner/--group
-# flags above are GNU dialect — macOS bsdtar rejects --owner outright and
-# matches excludes subtly differently (a silent-content bug, not a loud one).
-# On macOS: brew install gnu-tar → gtar.
-TAR_BIN=tar
-if ! tar --version 2>/dev/null | grep -q 'GNU tar'; then
-  if command -v gtar >/dev/null 2>&1; then
-    TAR_BIN=gtar
-  else
-    echo "ERROR: GNU tar required (macOS: brew install gnu-tar) — bsdtar's --owner/exclude dialect differs" >&2
-    exit 1
-  fi
-fi
 command -v zstd >/dev/null 2>&1 || { echo "ERROR: zstd not on PATH (macOS: brew install zstd)" >&2; exit 1; }
 # The shared tree is edited by the whole fleet WHILE this multi-minute tar
 # runs; GNU tar exits 1 for "file changed as we read it" — a warning (the
@@ -324,7 +343,14 @@ set +e +o pipefail
 # PAPERCUSP_STAGE_SCRUB=0 or nothing leaked.
 declare -a _scrub_tail=()
 [[ -n "$SCRUB_DIR" ]] && _scrub_tail=(-C "$SCRUB_DIR" "${SCRUB_MEMBERS[@]}")
+declare -a UUID_SOURCE_TAR_ARGS=()
+if [[ -n "${PAPERCUSP_SEED_UUID_CENSUS_PATH:-}${PAPERCUSP_SEED_UUID_CENSUS_SHA256:-}" ]]; then
+  # Each selected regular-file plaintext must be independently visible to the
+  # census; preserve symbolic links but materialize GNU tar hard-link payloads.
+  UUID_SOURCE_TAR_ARGS=(--hard-dereference)
+fi
 "$TAR_BIN" --numeric-owner --owner=0 --group=0 \
+  "${UUID_SOURCE_TAR_ARGS[@]}" \
   "${EXCLUDES[@]}" "${SCRUB_EXCLUDES[@]}" "${PACKAGE_LOCK_EXCLUDES[@]}" \
   "${SCRUB_TRANSFORM[@]}" "${PACKAGE_LOCK_TRANSFORM[@]}" \
   -C "$MONO" -cf - "${INCLUDES[@]}" \
@@ -360,6 +386,14 @@ if ! cmp -s "$SOURCE_PACKAGE_LOCK_PIN_COPY" "$SOURCE_PACKAGE_LOCK_ARCHIVE_TMP"; 
 fi
 echo "    ✓ source.tar.zst ./package-lock.json matches committed Git pin"
 
+# D166 extends the audit-owned COPY path after exact selection, normal privacy
+# and the committed lock pin. Freeze that produced archive outside every ship
+# root, then replace it with a mechanically projected archive. Canonical and
+# frozen source files are never rewritten or silently excluded.
+. "$HERE/lib/seed-reuse-age.sh"
+seed_uuid_project_source_archive "$HERE/lib/print-gitleaks-findings.py" "$OUT_TMP" "$SIDECAR" || exit 1
+OUT_TMP="$SEED_UUID_SOURCE_ARCHIVE_PATH"
+
 # ── THE GATE (WI-4419). Audit what we ACTUALLY produced, not what we meant to.
 # Wired HERE, in the producer, rather than in each of the three callers
 # (release-local.sh / mac-vm-build.sh / build-windows-on-vm.sh) — a gate that
@@ -379,10 +413,8 @@ set -e
 if [[ $_audit_rc -eq 2 ]]; then
   echo "" >&2
   echo "ERROR: release bundle audit COULD NOT CHECK — it did NOT find a leak (WI-4419)." >&2
-  echo "  Almost always: no owner-name literal resolved, because git user.name is unset" >&2
-  echo "  or belongs to an automation. Export PAPERCUSP_RELEASE_OWNER_NAME (and" >&2
-  echo "  PAPERCUSP_RELEASE_OWNER_EMAIL; both take a comma-separated list) and re-run." >&2
-  echo "  Read at run time — never write either into a file." >&2
+  echo "  Inspect the audit's preceding coverage error (missing tool, unreadable archive," >&2
+  echo "  or empty/missing scan target), fix that condition, and re-run." >&2
   exit 2
 elif [[ $_audit_rc -ne 0 ]]; then
   echo "" >&2

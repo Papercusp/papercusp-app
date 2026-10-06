@@ -115,6 +115,12 @@ export interface ConversationRow {
   superseded_ts: string | null;
 }
 
+/** The minimum lifecycle data needed for an id-based reconciliation. */
+export interface ConversationStateById {
+  id: string;
+  state: ConversationState;
+}
+
 export interface CreateConversationInput {
   id: string;
   kind: ConversationKind;
@@ -287,6 +293,20 @@ export class PgConversationStore {
         FROM harness_shared.coord_conversations
        WHERE workspace_id = ${this.ws} AND id = ${id}`;
     return rows[0] ? toRow(rows[0]) : null;
+  }
+
+  /** Read lifecycle for only the requested ids; the caller bounds this set to
+   *  a capped source batch and workspace/id is the table's primary key. */
+  async getStatesByIds(ids: readonly string[]): Promise<ConversationStateById[]> {
+    const uniqueIds = [...new Set(ids.filter((id) => typeof id === 'string' && id.trim().length > 0))];
+    if (uniqueIds.length === 0) return [];
+    await this.opts.ensureSchema();
+    const sql = this.opts.getSql();
+    return sql<ConversationStateById[]>`
+      SELECT id, state
+        FROM harness_shared.coord_conversations
+       WHERE workspace_id = ${this.ws}
+         AND id = ANY(${uniqueIds}::text[])`;
   }
 
   /**

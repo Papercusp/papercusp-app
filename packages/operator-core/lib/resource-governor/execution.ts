@@ -15,6 +15,16 @@ import { WorkItemAdmissionQueueDriver, type AdmissionQueueLeaseClaim, type SqlCl
 export const GOVERNED_EXECUTION_LEASE_TTL_MS = 24 * 60 * 60_000;
 
 /**
+ * WI-10004631: every governed execution leases its receipt, and each lease used to
+ * re-scan every active lease owner's liveness before its transaction. A git-sync
+ * burst through the spawner sidecar (2-connection pool) queued ~45 PG round trips
+ * per call. Within this window a lease reuses the last settled scan; owner-death
+ * reclamation is at most this much later, and the reconcile UPDATE still re-checks
+ * state and lease id before requeueing anything.
+ */
+export const GOVERNED_EXECUTION_ENDED_OWNER_REUSE_MS = 2_000;
+
+/**
  * Process-bound executions should not inherit the day-long lease used by
  * interactive sessions.  A test runner knows its foreground budget, so it can
  * derive a lease that is just long enough to cover that budget plus the small
@@ -342,10 +352,10 @@ export function governedExecutionRuntime(workspaceId: string, namespace = 'agent
   const key = `${workspaceId}\0${namespace}`;
   let runtime = runtimes.get(key);
   if (!runtime) {
-    const driver = new WorkItemAdmissionQueueDriver(new PgAdmissionCutoverQueueStore({ workspaceId }), {
-      namespace,
-      leaseIdFactory: () => randomUUID(),
-    });
+    const driver = new WorkItemAdmissionQueueDriver(
+      new PgAdmissionCutoverQueueStore({ workspaceId, endedLeaseOwnerReuseMs: GOVERNED_EXECUTION_ENDED_OWNER_REUSE_MS }),
+      { namespace, leaseIdFactory: () => randomUUID() },
+    );
     runtime = { driver, governor: new Governor(driver) };
     runtimes.set(key, runtime);
   }
@@ -404,7 +414,11 @@ function governedProcessRuntime(workspaceId: string, namespace: string): Governe
   let runtime = processRuntimes.get(key);
   if (!runtime) {
     const driver = new WorkItemAdmissionQueueDriver(
-      new PgAdmissionCutoverQueueStore({ workspaceId, sql: processClient.sql }),
+      new PgAdmissionCutoverQueueStore({
+        workspaceId,
+        sql: processClient.sql,
+        endedLeaseOwnerReuseMs: GOVERNED_EXECUTION_ENDED_OWNER_REUSE_MS,
+      }),
       { namespace, leaseIdFactory: () => randomUUID() },
     );
     runtime = { driver, governor: new Governor(driver) };

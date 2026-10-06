@@ -138,10 +138,10 @@ export const TASK_DEADLINE_REFUSAL_MARKER = "TASK_DEADLINE_REFUSAL";
 /**
  * Format the pre-flight refusal.
  *
- * `knownEstimateMs` is a LOWER BOUND over the tasks whose duration history exists — never a
- * total. `unknownTasks` is reported beside it precisely so the number is not read as one:
- * unknowns can only make the run longer, which is what makes a refusal keyed on the lower
- * bound sound. A run refused here has measured nothing; the marker says so.
+ * `knownEstimateMs` is the history-based wall projection under the configured lane policy,
+ * with sequential shards added together. Unknown tasks contribute zero and are reported
+ * separately. Historical durations are a prognosis, not a guaranteed lower bound on the
+ * next run. A run refused here has measured nothing; the marker says so.
  */
 export function formatTaskDeadlineRefusal({
   remainingMs,
@@ -152,9 +152,9 @@ export function formatTaskDeadlineRefusal({
   return (
     `${TASK_DEADLINE_REFUSAL_MARKER} remainingMs=${Math.round(remainingMs)} ` +
     `knownEstimateMs=${Math.round(knownEstimateMs)} knownTasks=${knownTasks} ` +
-    `unknownTasks=${unknownTasks} remedy=raise-caller-timeout — the work already KNOWN to be ` +
-    `queued exceeds the wall clock this run was launched with, so it would be SIGKILLed ` +
-    `part-way through with no verdict. Refusing before anything runs instead.`
+    `unknownTasks=${unknownTasks} remedy=raise-caller-timeout — the lane-aware historical ` +
+    `wall projection exceeds the remaining launch clock, so a kill part-way through with ` +
+    `no verdict is predicted. Refusing before anything runs instead.`
   );
 }
 
@@ -830,7 +830,7 @@ function takeShortest(pending) {
  * durations and call that a wall-time lower bound — the parallel lanes make that sum serial-
  * equivalent work, not elapsed time.
  *
- * The simulation mirrors `runBudgetedTasksWithoutSharedAdmission`: the primary lane takes the
+ * The simulation mirrors an uncontended admission turn: the primary lane takes the
  * longest known pending task, the reserved lane takes the shortest known pending task, and the
  * next task on each lane starts when that lane becomes free. Shards are summed because
  * `runBudgetedTaskShards` runs them sequentially.
@@ -907,7 +907,7 @@ export function estimateBudgetedTaskWallMs(plan, options) {
  * multiplying a per-workspace cap. A one-worker/memory-token budget collapses to serial.
  * Results are returned in declaration order regardless of completion order.
  */
-async function runBudgetedTasksWithoutSharedAdmission(tasks, options) {
+function createBudgetedTaskRun(tasks, options) {
   const budget = resolveTaskBudget(options);
   const estimateMs = options.estimateMs ?? (() => null);
   const runTask = options.runTask;
@@ -1030,50 +1030,64 @@ async function runBudgetedTasksWithoutSharedAdmission(tasks, options) {
     }
   };
 
-  const runLane = async (lane, workers, take) => {
-    while (pending.length > 0 && firstError == null) {
+  const runLane = async (lane, workers, take, turn) => {
+    while (pending.length > 0 && firstError == null && !turn.yielded) {
+      // Let the initial concurrent wave start, then stop refilling when a peer
+      // is queued. Both lanes drain before the holder releases its FIFO slot.
+      if (
+        admissions - turn.startedAdmissions >= budget.maxConcurrentTasks &&
+        turn.hasWaiters && await turn.hasWaiters()
+      ) turn.yielded = true;
+      // The other lane may have settled or taken the final task during the read.
+      if (turn.yielded || firstError != null || pending.length === 0) break;
       const entry = take(pending);
       await runOne(entry, lane, admitWorkersFor(workers));
     }
   };
 
-  if (budget.mode === "parallel" && pending.length > 1) {
-    // Promise.all rejects before its siblings settle. A task failure must instead stop NEW
-    // admission, drain the child already running in the other lane, and only then reject so the
-    // caller never tears down while an unobserved child is still writing output/history.
-    const lanes = await Promise.allSettled([
-      runLane("primary", budget.primaryWorkers, takeLongest),
-      runLane("reserved", budget.reserveLaneWorkers, takeShortest),
-    ]);
-    const rejected = lanes.find((lane) => lane.status === "rejected");
-    if (rejected) throw rejected.reason;
-  } else {
-    await runLane("serial", budget.effectiveWorkerBudget, takeLongest);
-  }
+  return async (hasWaiters) => {
+    const turn = { startedAdmissions: admissions, yielded: false, hasWaiters };
+    if (budget.mode === "parallel" && pending.length > 1) {
+      // Promise.all rejects before its siblings settle. Stop new admissions and
+      // drain the surviving child and its persistence before releasing the slot.
+      const lanes = await Promise.allSettled([
+        runLane("primary", budget.primaryWorkers, takeLongest, turn),
+        runLane("reserved", budget.reserveLaneWorkers, takeShortest, turn),
+      ]);
+      const rejected = lanes.find((lane) => lane.status === "rejected");
+      if (rejected) throw rejected.reason;
+    } else {
+      await runLane("serial", budget.effectiveWorkerBudget, takeLongest, turn);
+    }
 
-  return {
-    results,
-    stats: {
-      ...budget,
-      observedMaxWorkers,
-      observedMaxMemoryMb,
-      observedMaxTasks,
-      memoryReadings,
-      admissionClamps,
-      minAdmittedWorkers,
-      lastMemAvailableMb,
-    },
+    return {
+      results,
+      pendingTasks: pending.length,
+      stats: {
+        ...budget,
+        observedMaxWorkers,
+        observedMaxMemoryMb,
+        observedMaxTasks,
+        memoryReadings,
+        admissionClamps,
+        minAdmittedWorkers,
+        lastMemAvailableMb,
+      },
+    };
   };
 }
 
 /**
  * Run one scheduler invocation behind the shared test-process admission gate.
  *
- * The lock deliberately covers the whole invocation, not just the synchronous
+ * The lock covers all active children, not just the synchronous
  * launch call: the child process and all of its Vitest descendants remain the
  * admitted resident workload until `runTask` settles.  `withFsMutex` releases
  * in a finally block and reclaims a stale/dead owner, so a failed or crashed
- * runner cannot leave later verification permanently wedged.
+ * runner cannot leave later verification permanently wedged. A queued peer
+ * stops lane refill after the initial wave; pending tasks resume through a
+ * fresh FIFO ticket after all active work drains. State and queue spending
+ * remain scoped to the complete invocation, rather than restarting per turn.
  *
  * EI-21921867787033533: under heavy fleet-wide load this mutex is a real,
  * intentional serialization point — most concurrent `test:affected` callers
@@ -1254,12 +1268,17 @@ export async function runBudgetedTasks(tasks, options) {
     Number(options?.admissionTimeoutMs) > 0
       ? Number(options.admissionTimeoutMs)
       : SHARED_TEST_PROCESS_ADMISSION_TIMEOUT_MS;
-  return withFsMutex(
+  const runTurn = createBudgetedTaskRun(tasks, options);
+  let queuedMs = 0;
+  let run;
+  do {
+    const remainingQueueMs = Math.max(1, timeoutMs - queuedMs);
+    run = await withFsMutex(
     // WI-1746759: the release gate rides its own lane; everyone else shares one.
     admissionMutexName(),
-    () => runBudgetedTasksWithoutSharedAdmission(tasks, options),
+    ({ hasWaiters } = {}) => runTurn(hasWaiters),
     {
-      timeoutMs,
+      timeoutMs: remainingQueueMs,
       staleMs: SHARED_TEST_PROCESS_ADMISSION_STALE_MS,
       retryMs: SHARED_TEST_PROCESS_ADMISSION_RETRY_MS,
       waitingNoticeIntervalMs: SHARED_TEST_PROCESS_ADMISSION_NOTICE_INTERVAL_MS,
@@ -1276,27 +1295,35 @@ export async function runBudgetedTasks(tasks, options) {
         notify(
           `AFFECTED_TESTS_ADMISSION_QUEUED waiting on the shared test-process ` +
             `admission mutex (${Math.round(elapsedMs / 1000)}s so far, budget ` +
-            `${Math.round(timeoutMs / 1000)}s) — this is normal serialization under ` +
+            `${Math.round(remainingQueueMs / 1000)}s) — this is normal serialization under ` +
             `fleet load, not a hang; holder: ${formatAdmissionHolder(owner)}` +
-            formatAdmissionProspect(owner, { elapsedMs, budgetMs: timeoutMs }),
-          { kind: "queued", elapsedMs, budgetMs: timeoutMs },
+            formatAdmissionProspect(owner, { elapsedMs, budgetMs: remainingQueueMs }),
+          { kind: "queued", elapsedMs, budgetMs: remainingQueueMs },
         );
       },
       onAcquired: ({ waitedMs }) => {
+        queuedMs += waitedMs;
         // `budgetMs` is the bound THIS acquisition was actually given. Reporting it is what
         // lets a caller (and a test) see the whole-run budget spending down across shards
         // instead of silently restarting at full value on every one.
         if (options?.onAdmissionAcquired)
-          options.onAdmissionAcquired({ waitedMs, budgetMs: timeoutMs });
+          options.onAdmissionAcquired({ waitedMs, budgetMs: remainingQueueMs });
         if (waitedMs >= SHARED_TEST_PROCESS_ADMISSION_NOTICE_INTERVAL_MS) {
           notify(
             `AFFECTED_TESTS_ADMISSION_GRANTED after ${Math.round(waitedMs / 1000)}s queued`,
-            { kind: "granted", waitedMs, budgetMs: timeoutMs },
+            { kind: "granted", waitedMs, budgetMs: remainingQueueMs },
           );
         }
       },
     },
   );
+    if (run.pendingTasks > 0) notify(
+      `AFFECTED_TESTS_ADMISSION_YIELD completedTasks=${tasks.length - run.pendingTasks} ` +
+        `remainingTasks=${run.pendingTasks} — active children drained; rejoining the FIFO queue`,
+      { kind: "yielded", budgetMs: Math.max(0, timeoutMs - queuedMs) },
+    );
+  } while (run.pendingTasks > 0);
+  return { results: run.results, stats: run.stats };
 }
 
 /** Run deterministic shards sequentially while preserving declaration-order results. */
@@ -1337,22 +1364,12 @@ export async function runBudgetedTaskShards(plan, options) {
       : options.deadlineEpochMs;
   const deadlineNotify =
     options?.onAdmissionNotice ?? ((line) => console.error(line));
-  const estimateFor =
-    typeof options?.estimateMs === "function" ? options.estimateMs : () => null;
-  /** Sum only the KNOWN estimates — a lower bound, reported as one. */
-  const knownWork = (tasks) => {
-    let knownEstimateMs = 0;
-    let knownTasks = 0;
-    let unknownTasks = 0;
-    tasks.forEach((task, index) => {
-      const estimate = finiteEstimate(estimateFor(task, index));
-      if (estimate == null) unknownTasks += 1;
-      else {
-        knownEstimateMs += estimate;
-        knownTasks += 1;
-      }
-    });
-    return { knownEstimateMs, knownTasks, unknownTasks };
+  // Reuse the same concurrent-lane projection as admission ETA. Summed task durations
+  // describe serial-equivalent work and can falsely refuse a run that fits in parallel.
+  const projectedKnownWork = (taskPlan) => {
+    const { projectedWallMs, knownTasks, unknownTasks } =
+      estimateBudgetedTaskWallMs(taskPlan, options);
+    return { knownEstimateMs: projectedWallMs, knownTasks, unknownTasks };
   };
 
   if (deadlineEpochMs != null) {
@@ -1371,7 +1388,7 @@ export async function runBudgetedTaskShards(plan, options) {
     // and turns "killed with no verdict" into an attributable refusal. Deliberately NOT
     // re-raised between shards: by then earlier shards hold real results, and throwing them
     // away to report a deadline would trade a measured verdict for a predicted one.
-    const preflight = knownWork(plan.shards.flatMap((shard) => shard.tasks));
+    const preflight = projectedKnownWork(plan);
     if (remainingMs <= 0 || preflight.knownEstimateMs > remainingMs) {
       throw new Error(formatTaskDeadlineRefusal({ remainingMs, ...preflight }));
     }
@@ -1381,7 +1398,7 @@ export async function runBudgetedTaskShards(plan, options) {
   for (const shard of plan.shards) {
     if (deadlineEpochMs != null) {
       const remainingMs = deadlineEpochMs - Date.now();
-      const upcoming = knownWork(shard.tasks);
+      const upcoming = projectedKnownWork({ ...plan, shards: [shard] });
       if (upcoming.knownEstimateMs > remainingMs) {
         deadlineNotify(
           `AFFECTED_TESTS_DEADLINE_SHORTFALL shard=${shard.index} ` +

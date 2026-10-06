@@ -1432,9 +1432,37 @@ export async function getSessionDetail(spawnId: string): Promise<SessionDetail |
         LIMIT 1
       `) as AdvSessionRow[]);
   const advSession = advSessionRows[0] ?? null;
+
+  // A native CLI transcript can outlive its adv_sessions row. Resolve its
+  // owner and per-session time bounds before reading tool_invocations, which
+  // are keyed by coord_owner_id for interactive sessions rather than by the
+  // native session id. Keep every leading PK column bound: the writer sets
+  // workspace_id='default', and session_turn_parts is intentionally not
+  // indexed by session_id alone.
+  type TranscriptRow = {
+    owner: string | null;
+    started_at: string | null;
+    ended_at: string | null;
+  };
+  const transcriptRows =
+    !agent && !advSession
+      ? ((await sql`
+          SELECT owner,
+                 MIN(COALESCE(ts, ingested_at))::text AS started_at,
+                 MAX(COALESCE(ts, ingested_at))::text AS ended_at
+          FROM harness_shared.session_turn_parts
+          WHERE workspace_id = 'default'
+            AND source_kind IN ('claude', 'omp', 'codex')
+            AND session_id = ${spawnId}
+          GROUP BY source_kind, owner
+          ORDER BY MAX(ingested_at) DESC
+          LIMIT 1
+        `) as TranscriptRow[])
+      : [];
+  const transcriptOnly = transcriptRows[0] ?? null;
   const resolvedSpawnId = agent?.spawn_id ?? spawnId;
 
-  // 2. tool_invocations for this spawn (timeline).
+  // 2. Tool invocations for this native session or spawn (timeline).
   type InvocRow = {
     id: string;
     tool_name: string;
@@ -1444,16 +1472,29 @@ export async function getSessionDetail(spawnId: string): Promise<SessionDetail |
     error_message: string | null;
     args_json: unknown;
   };
-  const invocations = (await (advSession
-    ? sql`
-        SELECT id::text, tool_name, invoked_at, duration_ms, status, error_message, args_json
-        FROM harness_shared.tool_invocations
-        WHERE coord_owner_id = ${advSession.coord_owner_id}
-          AND invoked_at >= ${advSession.started_at}
-          AND (${advSession.ended_at} IS NULL OR invoked_at <= ${advSession.ended_at})
-        ORDER BY invoked_at ASC
-        LIMIT 500
-      `
+  const hasOwnerScopedSession = advSession !== null || transcriptOnly?.owner != null;
+  const invocationOwner = advSession?.coord_owner_id ?? transcriptOnly?.owner ?? null;
+  const invocationStartedAt = advSession?.started_at ?? transcriptOnly?.started_at ?? null;
+  const invocationEndedAt = advSession?.ended_at ?? transcriptOnly?.ended_at ?? null;
+  const invocations = (await (hasOwnerScopedSession
+    ? invocationEndedAt
+      ? sql`
+          SELECT id::text, tool_name, invoked_at, duration_ms, status, error_message, args_json
+          FROM harness_shared.tool_invocations
+          WHERE coord_owner_id = ${invocationOwner}
+            AND invoked_at >= ${invocationStartedAt}
+            AND invoked_at <= ${invocationEndedAt}
+          ORDER BY invoked_at ASC
+          LIMIT 500
+        `
+      : sql`
+          SELECT id::text, tool_name, invoked_at, duration_ms, status, error_message, args_json
+          FROM harness_shared.tool_invocations
+          WHERE coord_owner_id = ${invocationOwner}
+            AND invoked_at >= ${invocationStartedAt}
+          ORDER BY invoked_at ASC
+          LIMIT 500
+        `
     : sql`
         SELECT id::text, tool_name, invoked_at, duration_ms, status, error_message, args_json
         FROM harness_shared.tool_invocations
@@ -1527,15 +1568,15 @@ export async function getSessionDetail(spawnId: string): Promise<SessionDetail |
     }
   }
 
-  if (!agent && !advSession && invocations.length === 0 && children.length === 0) {
+  if (!agent && !advSession && invocations.length === 0 && children.length === 0 && !transcriptOnly) {
     return null;
   }
 
   return {
     spawn_id: resolvedSpawnId,
-    session_id: agent?.session_id ?? advSession?.session_id ?? null,
+    session_id: agent?.session_id ?? advSession?.session_id ?? (transcriptOnly ? spawnId : null),
     omp_thread_id: advSession?.omp_thread_id ?? null,
-    coord_owner_id: advSession?.coord_owner_id ?? null,
+    coord_owner_id: advSession?.coord_owner_id ?? transcriptOnly?.owner ?? null,
     agent,
     invocations,
     children,

@@ -20,6 +20,7 @@
  */
 
 import type { AppKeyRow, AppKeyScopes } from './store';
+import type { RefusalContract } from '../capability-envelope/identity-refusal-contract';
 
 /**
  * Capability namespaces no app key may hold, and therefore no tool needing one may be called.
@@ -137,7 +138,15 @@ export type AppScopeDenialCode =
   | 'harness_not_in_scope'
   | 'harness_required_by_scope';
 
-export type AppScopeVerdict = { allow: true } | { allow: false; code: AppScopeDenialCode; reason: string };
+export type AppScopeVerdict =
+  | { allow: true }
+  | {
+      allow: false;
+      code: AppScopeDenialCode;
+      reason: string;
+      /** WI-10005197: what would LIFT the refusal. Present on `hard_denied` (a platform policy, not a per-key grant). */
+      refusal?: RefusalContract;
+    };
 
 const HARNESS_ARG_KEYS = ['harness', 'harnessSlug', 'harness_slug'] as const;
 const WORKSPACE_ARG_KEYS = ['workspace', 'workspaceId', 'workspace_id'] as const;
@@ -185,6 +194,33 @@ export function hardDenyReason(tool: Pick<AppScopeTool, 'name' | 'capabilities'>
     if (prefix) return `capability "${cap}" is never grantable to an app key`;
   }
   return null;
+}
+
+/**
+ * The capabilities an app key's principal carries (WI-10004317). A key's grant is its `tools`
+ * allowlist; the tools it names declare capabilities (`work_items:list` → `work_items:read`), and
+ * the generic tools/list filter and dispatch capability gate check THOSE against the principal. A
+ * key issued with exact tools and no capabilities (every "Connect an app" key) would otherwise
+ * list nothing and be refused `missing_capability` on every real tool.
+ *
+ * Adds the declared capabilities of every catalog tool the allowlist covers, skipping hard-denied
+ * and cross-workspace tools, so a tampered row naming one never lifts its capability into the
+ * principal. The dispatch seat (`evaluateAppScope`) still decides WHICH tools run: a capability
+ * shared with an ungranted tool does not reach that tool.
+ */
+export function grantedToolCapabilities(
+  scopes: AppKeyScopes | null | undefined,
+  catalog: Iterable<AppScopeTool>,
+): Set<string> {
+  const out = new Set<string>(scopes?.capabilities ?? []);
+  const entries = nonEmpty(scopes?.tools);
+  if (!entries) return out;
+  for (const tool of catalog) {
+    if (!entries.some((entry) => scopeEntryMatches(entry, tool.name))) continue;
+    if (tool.crossWorkspace || hardDenyReason(tool)) continue;
+    for (const cap of tool.capabilities) out.add(cap);
+  }
+  return out;
 }
 
 /** True when a scope allowlist entry covers the tool name. */
@@ -244,7 +280,22 @@ export function evaluateAppScope(
   }
 
   const denied = hardDenyReason(input.tool);
-  if (denied) return { allow: false, code: 'hard_denied', reason: denied };
+  if (denied) {
+    return {
+      allow: false,
+      code: 'hard_denied',
+      reason: denied,
+      refusal: {
+        observed: { tool: input.tool.name, toolGroup: toolGroupOf(input.tool.name) },
+        liftsWhen:
+          'the tool is no longer in a hard-deny group and declares no wildcard / hard-denied capability prefix ' +
+          '(HARD_DENY_GROUPS / HARD_DENY_CAPABILITY_PREFIXES in connected-apps/scope-policy.ts). No app-key grant ' +
+          'or scope edit lifts it — adding the tool to the key allowlist changes nothing. An app key can only call a ' +
+          'non-denied tool that does the job; changing the deny policy itself is a platform code change',
+        whoCanMakeItTrue: ['host'],
+      },
+    };
+  }
   if (input.tool.crossWorkspace) {
     return {
       allow: false,

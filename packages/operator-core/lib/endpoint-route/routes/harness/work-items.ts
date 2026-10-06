@@ -29,6 +29,12 @@ import {
 } from '../../../work-items';
 import { getOrgPg } from '@papercusp/db-org';
 import { defineTool } from '@papercusp/agent-mcp';
+import { z } from 'zod';
+import { getSessionUser } from '../../../auth';
+import { activeWorkspaceId } from '../../../workspace-registry';
+import { humanAssignee, publicHumanMarketOffer, readHumanMarketJob } from '../../../work-items-human-market';
+import { actOnHumanMarketItem, getHumanMarketItem, reviewHumanMarketItem, type HumanMarketItem } from '../../../work-items-human-market-store';
+import { requireAllowedOriginOr403 } from '../../cors';
 
 export interface WorkItemDimensions {
   /** Source plan this feature was imported from (hfc.source_plan_slug); null for issues / unplanned. */
@@ -265,7 +271,83 @@ const postWorkItem = defineTool({
   },
 });
 
-export default [getWorkItems, postWorkItem];
+const humanWorkAction = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('claim'), version: z.number().int().nonnegative() }).strict(),
+  z.object({ action: z.literal('submit'), version: z.number().int().nonnegative(), result: z.string().trim().min(1).max(32000) }).strict(),
+  z.object({ action: z.literal('grade'), version: z.number().int().nonnegative(), scorecardRef: z.string().trim().min(1).max(200) }).strict(),
+  z.object({ action: z.literal('payment'), version: z.number().int().nonnegative(), receiptRef: z.string().trim().min(1).max(2000) }).strict(),
+]);
+
+function humanWorkResponse(item: HumanMarketItem, userId: string): Response {
+  const offer = publicHumanMarketOffer(item);
+  const job = readHumanMarketJob(item);
+  if (!offer || !job) return Response.json({ error: 'market_offer_required' }, { status: 404 });
+  const mine = item.assignee === humanAssignee(userId);
+  return Response.json({ offer, version: job.version, mine,
+    submission: mine ? job.submission?.result ?? null : null });
+}
+
+/** Cookie identity is mandatory: neither a loopback nor an agent bearer is a human. */
+async function humanWorkSession(req: Request) {
+  const user = await getSessionUser(req.headers);
+  if (!user) return { error: Response.json({ error: 'human_session_required' }, { status: 401 }) };
+  if (!z.string().uuid().safeParse(user.id).success || user.workspace_id !== activeWorkspaceId()) {
+    return { error: Response.json({ error: 'human_workspace_required' }, { status: 403 }) };
+  }
+  return { user };
+}
+
+const getHumanWork = defineTool({
+  method: 'GET', path: '/harness/:slug/work-items/:id/human-work', auth: 'public', cors: true,
+  async handler(req, ctx) {
+    const session = await humanWorkSession(req);
+    if (session.error) return session.error;
+    const item = await getHumanMarketItem({ workspaceId: session.user.workspace_id,
+      harness: String(ctx.params.slug), id: String(ctx.params.id) });
+    return item ? humanWorkResponse(item, session.user.id)
+      : Response.json({ error: 'market_offer_required' }, { status: 404 });
+  },
+});
+
+const postHumanWork = defineTool({
+  method: 'POST', path: '/harness/:slug/work-items/:id/human-work', auth: 'public', cors: true,
+  async handler(req, ctx) {
+    const session = await humanWorkSession(req);
+    if (session.error) return session.error;
+    // Reuse the route layer's desktop/dev allowlist: a Tauri WebView origin
+    // differs from its operator API origin. Cookie identity is still mandatory.
+    const origin = req.headers.get('origin');
+    if ((origin && origin !== new URL(req.url).origin && requireAllowedOriginOr403(req)) ||
+        !req.headers.get('content-type')?.startsWith('application/json')) {
+      return Response.json({ error: 'human_request_origin_required' }, { status: 403 });
+    }
+    const parsed = humanWorkAction.safeParse(await req.json().catch(() => null));
+    if (!parsed.success) return Response.json({ error: 'invalid_human_work_action' }, { status: 400 });
+    try {
+      const scope = { workspaceId: session.user.workspace_id, harness: String(ctx.params.slug),
+        id: String(ctx.params.id), userId: session.user.id };
+      const item = parsed.data.action === 'claim' || parsed.data.action === 'submit'
+        ? await actOnHumanMarketItem({ ...scope, ...parsed.data })
+        : await reviewHumanMarketItem({ ...scope, ...parsed.data });
+      return humanWorkResponse(item, session.user.id);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      if (['market_offer_changed', 'claim_conflict', 'submission_already_recorded', 'grade_already_recorded',
+        'payment_already_recorded', 'market_rubric_identity_required', 'market_scorecard_required',
+        'market_scorecard_mismatch', 'market_grade_unsettled', 'submission_required', 'passing_grade_required'].includes(code)) {
+        return Response.json({ error: code }, { status: 409 });
+      }
+      if (['external_human_required', 'human_claim_required', 'needs_human_required', 'market_job_not_active',
+        'market_owner_required', 'market_grader_not_independent', 'market_scope_required'].includes(code)) {
+        return Response.json({ error: code }, { status: 403 });
+      }
+      if (code === 'market_offer_required') return Response.json({ error: code }, { status: 404 });
+      return Response.json({ error: 'human_work_write_failed' }, { status: 500 });
+    }
+  },
+});
+
+export default [getWorkItems, postWorkItem, getHumanWork, postHumanWork];
 
 // Exported for unit tests (the pure merge; the SQL is live-exercised).
 export const __test = { mergeWorkItemDimensions };

@@ -100,6 +100,15 @@ async function handleLaunchSu(req: Request): Promise<Response> {
     kickoff_prompt?: string | null;
     /** Existing GOAL attachment bootstrap must verify before a first turn. */
     goal_bootstrap_subject?: string | null;
+    /**
+     * WI-10004787: the ownerId this launch is made ON BEHALF OF, forwarded as
+     * psu's `--launched-by=<id>`. That flag is the one seam bootstrap-su reads
+     * to inherit the launcher's goal context (session_briefs.goal_id), so a
+     * server-side caller launching FOR an agent — the goal-drain-fleet watchdog
+     * relaunching a holder's drain worker — must pass it, or every call the new
+     * session makes is stamped goal_id NULL and its goal never sees the work.
+     */
+    launched_by?: string | null;
     // WI-6321 (owner ask 2026-07-27): psu-parity launch options the GUI could
     // not express, so every GUI launch was silently unfleeted and on the
     // default system credential.
@@ -278,6 +287,13 @@ async function handleLaunchSu(req: Request): Promise<Response> {
   const seat = body.seat?.trim() || null;
   if (seat && (seat.length > 256 || /[\u0000-\u001f\u007f]/u.test(seat))) {
     return json({ status: 'error', error: 'invalid seat ref' }, 400);
+  }
+  // WI-10004787: same identity shape injectLaunchedByArg and bootstrap-su accept,
+  // so a value this route forwards is never one bootstrap then refuses.
+  const launchedBy = typeof body.launched_by === 'string' ? body.launched_by.trim() || null : null;
+  if (body.launched_by != null &&
+      (typeof body.launched_by !== 'string' || (launchedBy && !/^[A-Za-z0-9._:-]{1,120}$/.test(launchedBy)))) {
+    return json({ status: 'error', error: 'launched_by must be an owner id' }, 400);
   }
   const carry = body.carry?.trim() || null;
   if (carry && carry !== 'warm' && carry !== 'cold') {
@@ -549,6 +565,7 @@ async function handleLaunchSu(req: Request): Promise<Response> {
   if (resumeSessionId) psuArgs.push(`--resume-session=${resumeSessionId}`);
   if (kickoffFile) psuArgs.push(`--launch-context=${kickoffFile}`);
   if (goalBootstrapSubject) psuArgs.push(`--goal-bootstrap-subject=${goalBootstrapSubject}`);
+  if (launchedBy) psuArgs.push(`--launched-by=${launchedBy}`);
   // hive-agent-tabs P-006: a New-plan launch IS the Planner — launch the
   // planner role/persona (`=` form; psu drops the space form) so the dock
   // panes it as a typed 📋 Planner pane (responsive — auto-injection OFF).

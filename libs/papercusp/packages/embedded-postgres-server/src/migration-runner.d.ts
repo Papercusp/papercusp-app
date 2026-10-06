@@ -1,3 +1,27 @@
+/**
+ * Schema-qualified `schema.relation` names a migration chunk mentions, in first-seen order.
+ * Non-relations (`alias.column`, `schema.function`) are harmless: they match no
+ * pg_class row in {@link describeMigrationLockHolders}.
+ * @param {string} ddl
+ * @returns {string[]}
+ */
+export function migrationRelationNames(ddl: string): string[];
+/**
+ * WI-10004820: a SQLSTATE 55P03 means ANOTHER session holds a lock this
+ * migration's DDL conflicts with. When the retry and failure lines named no
+ * holder, a staging boot crash loop on migration 1295 (a 40-minute ad-hoc
+ * `psql` read holding ACCESS SHARE on the altered table) was attributed to
+ * backup contention. Name the granted relation-lock holders on the relations
+ * the failing chunk mentions, oldest transaction first, so the log answers "who".
+ * Read-only catalog query, run after the failed transaction was rolled back.
+ * Never throws: a failed diagnosis is reported inline instead of masking the 55P03.
+ * @param {{ unsafe: (sql: string) => Promise<unknown> }} client
+ * @param {string} ddl the chunk that hit the lock timeout
+ * @returns {Promise<string>}
+ */
+export function describeMigrationLockHolders(client: {
+    unsafe: (sql: string) => Promise<unknown>;
+}, ddl: string): Promise<string>;
 /** @param {string} ddl */
 export function migrationTransactionChunks(ddl: string): string[];
 export function defaultSkipFile(f: any): any;

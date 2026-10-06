@@ -25,12 +25,25 @@ type OperationStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 type TimelineLevel = 'info' | 'warn' | 'error';
 type LogStream = 'cloud-init' | 'systemd' | 'controller';
 
+function lifecycleActionInvalidatesHealth(action: WorkspaceHostLifecycleAction): boolean {
+  return action === 'start' || action === 'stop' || action === 'restart';
+}
+
 export class WorkspaceHostControllerFenceError extends Error {
   constructor(readonly hostId: string) {
     super(`workspace-host controller authority or host generation is stale for '${hostId}'`);
     this.name = 'WorkspaceHostControllerFenceError';
   }
 }
+
+/**
+ * WI-10005312: `error.code` of the terminal row recorded when the fence refuses an operation
+ * before it began. Without it, a request already answered 202 had no row at all, so the
+ * timeline it was pointed at could never show the failure. A refused row never ran on the
+ * host: it never holds authority, never counts as a prior operation, and never displaces an
+ * in-flight operation as the host's current progress.
+ */
+export const WORKSPACE_HOST_FENCE_REFUSED_CODE = 'controller_fence_refused';
 
 const SECRET_KEY = /(?:authorization|cookie|password|passphrase|secret|token|private.?key|access.?key)/i;
 const SAFE_REFERENCE_KEY = /(?:credential|secret|token|key)ref$/i;
@@ -153,6 +166,9 @@ async function requireWorkspaceHostControllerAuthority(
             AND operation.controller_id = host.controller_id
             AND operation.controller_fence = host.controller_fence
             AND operation.desired_revision = host.desired_revision
+            -- A refused operation never held authority, even when its stale request happens
+            -- to name the host's current controller and revision (WI-10005312).
+            AND operation.error->>'code' IS DISTINCT FROM ${WORKSPACE_HOST_FENCE_REFUSED_CODE}
         )
       )
     FOR SHARE OF host
@@ -270,6 +286,30 @@ export async function readWorkspaceHostConnection(
         ...(Object.keys(row.provider_config ?? {}).length > 0 ? { provider: row.provider_config } : {}),
       },
     };
+  });
+}
+
+/**
+ * Hosts on one connection that still hold — or are acquiring — cloud resources: every host whose
+ * desired state is not `absent`. `destroying` counts (its resources still exist), and a NULL state
+ * counts too, so an unreadable row can never make room under a cap. Feeds the per-connection
+ * instance cap (`instance-cap.ts`, aws-byoc-gcp-parity-2026-10-01 P-007).
+ */
+export async function listLiveWorkspaceHostIdsOnConnection(
+  workspaceId: string,
+  connectionId: string,
+  tx?: Sql,
+): Promise<string[]> {
+  return inWorkspace(workspaceId, tx, async (query) => {
+    const rows = await query<Array<{ id: string }>>`
+      SELECT id
+      FROM harness_shared.workspace_hosts
+      WHERE workspace_id = ${workspaceId}
+        AND connection_id = ${connectionId}
+        AND desired_state IS DISTINCT FROM 'absent'
+      ORDER BY created_at, id
+    `;
+    return rows.map((row) => row.id);
   });
 }
 
@@ -516,12 +556,17 @@ export async function readWorkspaceHostDestroyTarget(
       throw new Error(`Workspace host '${hostId}' has no recorded desired spec`);
     }
 
+    // An identity is registered iff its LATEST row says it exists. A resource confirmed absent on a
+    // different row than the one that registered it would otherwise stay registered forever: an
+    // AWS upgrade terminates the original instance on its own step row, under a different logical
+    // key than the provision row that recorded it (WI-10005971). GCP's same-name re-insert is the
+    // newest row for its identity, so it stays registered.
     const rows = (await query`
-      SELECT target, kind, provider_id, parent_provider_id, region, zone, updated_at
+      SELECT target, kind, provider_id, parent_provider_id, region, zone, state, updated_at
       FROM harness_shared.workspace_host_resources
       WHERE workspace_id = ${workspaceId}
         AND host_id = ${hostId}
-        AND state IN ('applied', 'unchanged')
+        AND state IN ('applied', 'unchanged', 'absent')
         AND target IS NOT NULL
         AND kind IS NOT NULL
         AND provider_id IS NOT NULL
@@ -533,6 +578,7 @@ export async function readWorkspaceHostDestroyTarget(
       parent_provider_id: string | null;
       region: string | null;
       zone: string | null;
+      state: string;
       updated_at: Date | string;
     }>;
     const seen = new Set<string>();
@@ -541,6 +587,7 @@ export async function readWorkspaceHostDestroyTarget(
       const key = `${row.target}:${row.kind}:${row.provider_id}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      if (row.state === 'absent') continue;
       resources.push({
         resource: {
           target: row.target,
@@ -624,6 +671,24 @@ export async function updateWorkspaceHostLifecycleState(input: {
           recoverability_updated_at = CASE
             WHEN ${recoverability !== null} THEN ${recoverability?.updatedAt ?? input.observedAt ?? new Date().toISOString()}
             ELSE recoverability_updated_at
+          END,
+          -- WI-10004969: reaching 'absent' under a destroy operation means the host converged on
+          -- that operation's desired revision. Without this, every destroyed host stayed at
+          -- observed_revision < desired_revision forever and release.cleanup's convergence
+          -- predicate could never pass. Same GREATEST rule as recordWorkspaceHostObservation.
+          observed_revision = CASE
+            WHEN ${input.state} <> 'absent' OR ${input.operationId ?? null}::text IS NULL THEN observed_revision
+            ELSE GREATEST(
+              observed_revision,
+              COALESCE((
+                SELECT operation.desired_revision
+                FROM harness_shared.workspace_host_operations operation
+                WHERE operation.workspace_id = ${input.workspaceId}
+                  AND operation.id = ${input.operationId ?? null}
+                  AND operation.host_id = ${input.hostId}
+                  AND operation.action = 'destroy'
+              ), observed_revision)
+            )
           END,
           updated_at = now()
       WHERE workspace_id = ${input.workspaceId} AND id = ${input.hostId}
@@ -730,8 +795,9 @@ export interface WorkspaceHostOperationInput {
   desiredRevision?: number;
 }
 
-export async function beginWorkspaceHostOperation(input: WorkspaceHostOperationInput): Promise<void> {
+async function beginFencedWorkspaceHostOperation(input: WorkspaceHostOperationInput): Promise<void> {
   const percent = Math.max(0, Math.min(100, Math.round(input.percent ?? 0)));
+  const invalidatesHealth = lifecycleActionInvalidatesHealth(input.action);
   await withWorkspace(input.workspaceId, async (tx) => {
     let desiredRevision = input.desiredRevision ?? null;
     if (input.controllerAuthority) {
@@ -743,9 +809,11 @@ export async function beginWorkspaceHostOperation(input: WorkspaceHostOperationI
           controller_id: string | null;
           controller_fence: number | null;
           request_matches: boolean;
+          error_code: string | null;
         }>
       >`
         SELECT host_id, action, desired_revision, controller_id, controller_fence,
+               error->>'code' AS error_code,
                request IS NOT DISTINCT FROM ${input.request === undefined ? null : tx.json(json(input.request) as never)}::jsonb AS request_matches
         FROM harness_shared.workspace_host_operations
         WHERE workspace_id = ${input.workspaceId} AND id = ${input.operationId}
@@ -762,14 +830,19 @@ export async function beginWorkspaceHostOperation(input: WorkspaceHostOperationI
         ) {
           throw new WorkspaceHostControllerFenceError(input.hostId);
         }
-        await requireWorkspaceHostControllerAuthority(
-          tx,
-          input.workspaceId,
-          input.hostId,
-          input.operationId,
-          input.controllerAuthority,
-        );
-        return;
+        // A refused row records an earlier attempt of THIS request that never began. A retry
+        // (DBOS re-runs a failed step with the same input) runs the fence again below, and an
+        // admitted retry replaces the refusal in place via the INSERT's conflict clause.
+        if (existing[0].error_code !== WORKSPACE_HOST_FENCE_REFUSED_CODE) {
+          await requireWorkspaceHostControllerAuthority(
+            tx,
+            input.workspaceId,
+            input.hostId,
+            input.operationId,
+            input.controllerAuthority,
+          );
+          return;
+        }
       }
 
       const controlled = await tx<Array<{ desired_revision: number }>>`
@@ -795,6 +868,17 @@ export async function beginWorkspaceHostOperation(input: WorkspaceHostOperationI
               AND NOT EXISTS (
                 SELECT 1 FROM harness_shared.workspace_host_operations prior
                 WHERE prior.workspace_id = ${input.workspaceId} AND prior.host_id = ${input.hostId}
+                  -- A first operation that FAILED, with no recovery in flight, never brought the
+                  -- host into existence, so a retry is still the host's first operation. Counting
+                  -- it fenced every retry of a failed first provision forever (WI-10005307).
+                  AND NOT (
+                    prior.action IN ('provision', 'restore')
+                    AND prior.status = 'failed'
+                    AND prior.recovery_state = 'none'
+                  )
+                  -- A refused operation never ran, so it is never a prior operation (WI-10005312);
+                  -- counting one refused start would fence every later provision retry.
+                  AND prior.error->>'code' IS DISTINCT FROM ${WORKSPACE_HOST_FENCE_REFUSED_CODE}
               )
             )
           )
@@ -808,6 +892,19 @@ export async function beginWorkspaceHostOperation(input: WorkspaceHostOperationI
       if (!controlled[0]) throw new WorkspaceHostControllerFenceError(input.hostId);
       desiredRevision = controlled[0].desired_revision;
     }
+    if (invalidatesHealth) {
+      // WI-10005373: a liveness-changing operation makes the previous health sample stale at
+      // admission. Clear it before provider mutation so a partial stop cannot remain displayed
+      // as healthy, and a quick start cannot inherit a timestamp the standing pass treats as fresh.
+      await tx`
+        UPDATE harness_shared.workspace_hosts
+        SET health_status = NULL,
+            health_attested_at = NULL,
+            health_checks = '[]'::jsonb,
+            updated_at = now()
+        WHERE workspace_id = ${input.workspaceId} AND id = ${input.hostId}
+      `;
+    }
     await tx`
       INSERT INTO harness_shared.workspace_host_operations (
         workspace_id, id, host_id, action, status, percent, message, request,
@@ -820,6 +917,75 @@ export async function beginWorkspaceHostOperation(input: WorkspaceHostOperationI
         ${input.controllerAuthority?.fence ?? null},
         ${input.status === 'running' ? new Date().toISOString() : null}, now()
       )
+      ON CONFLICT (workspace_id, id) DO UPDATE SET
+        status = EXCLUDED.status,
+        percent = EXCLUDED.percent,
+        message = EXCLUDED.message,
+        request = EXCLUDED.request,
+        error = NULL,
+        desired_revision = EXCLUDED.desired_revision,
+        controller_id = EXCLUDED.controller_id,
+        controller_fence = EXCLUDED.controller_fence,
+        started_at = EXCLUDED.started_at,
+        finished_at = NULL,
+        updated_at = now()
+      -- Only an earlier refusal of this same request is replaced; a live row is never touched.
+      WHERE workspace_host_operations.error->>'code' = ${WORKSPACE_HOST_FENCE_REFUSED_CODE}
+    `;
+  });
+}
+
+export async function beginWorkspaceHostOperation(input: WorkspaceHostOperationInput): Promise<void> {
+  try {
+    await beginFencedWorkspaceHostOperation(input);
+    if (lifecycleActionInvalidatesHealth(input.action)) await pushControl();
+  } catch (error) {
+    if (error instanceof WorkspaceHostControllerFenceError) {
+      try {
+        await recordWorkspaceHostOperationRefusal(input, error);
+      } catch (recordError) {
+        // The refusal itself is the caller's answer; failing to record it must not replace it.
+        console.error(
+          `[workspace-host] could not record fence refusal for operation ${input.operationId}: ${
+            recordError instanceof Error ? recordError.message : String(recordError)
+          }`,
+        );
+      }
+    }
+    throw error;
+  }
+}
+
+/**
+ * WI-10005312: a fence refusal rolls back the transaction that would have written the
+ * operation row, so a request already answered 202 had no row and its timeline never showed
+ * the failure. Record a terminal row OUTSIDE that transaction (like
+ * {@link recordWorkspaceHostOperationTerminalFailure}). `DO NOTHING` on conflict: an existing
+ * row belongs to an earlier attempt or a different request and is never overwritten.
+ */
+async function recordWorkspaceHostOperationRefusal(
+  input: WorkspaceHostOperationInput,
+  error: WorkspaceHostControllerFenceError,
+): Promise<void> {
+  const described = { code: WORKSPACE_HOST_FENCE_REFUSED_CODE, cause: error };
+  await withWorkspace(input.workspaceId, async (tx) => {
+    await tx`
+      INSERT INTO harness_shared.workspace_host_operations (
+        workspace_id, id, host_id, action, status, percent, message, request, error,
+        desired_revision, controller_id, controller_fence, finished_at, updated_at
+      )
+      -- From the host row: a refusal for a host that does not exist has no timeline to show it
+      -- on, so nothing is written. A lifecycle request without an explicit revision asked for
+      -- the next one; the controller-authority check constraint requires a positive revision.
+      SELECT ${input.workspaceId}, ${input.operationId}, host.id, ${input.action}, 'failed', 0,
+             ${redactWorkspaceHostText(`refused before it began: ${error.message}`)},
+             ${input.request === undefined ? null : tx.json(json(input.request) as never)},
+             ${tx.json(json(described) as never)},
+             COALESCE(${input.desiredRevision ?? null}::bigint, host.desired_revision + 1),
+             ${input.controllerAuthority?.controllerId ?? null},
+             ${input.controllerAuthority?.fence ?? null}, now(), now()
+      FROM harness_shared.workspace_hosts AS host
+      WHERE host.workspace_id = ${input.workspaceId} AND host.id = ${input.hostId}
       ON CONFLICT (workspace_id, id) DO NOTHING
     `;
   });
@@ -1359,12 +1525,13 @@ interface LogDbRow {
   metadata: unknown;
 }
 
-function capabilities(state: string): Record<string, boolean> {
+function capabilities(state: string, hasSnapshot = false): Record<string, boolean> {
   return {
     start: state === 'stopped',
     stop: state === 'running' || state === 'degraded',
     repair: state !== 'absent' && state !== 'destroying',
     snapshot: state === 'running' || state === 'stopped' || state === 'degraded',
+    restore: hasSnapshot && ['running', 'stopped', 'degraded', 'absent'].includes(state),
     destroy: state !== 'absent' && state !== 'destroying',
   };
 }
@@ -1397,8 +1564,18 @@ export async function readWorkspaceHostControl(workspaceId: string, tx?: Sql): P
              id, host_id, action, status, percent, message, request, error,
              created_at, started_at, finished_at, updated_at,
              desired_revision, controller_id, controller_fence
-      FROM harness_shared.workspace_host_operations
-      ORDER BY host_id, updated_at DESC, id DESC
+      FROM harness_shared.workspace_host_operations AS operation
+      ORDER BY host_id,
+               -- A refused request never ran, so it never displaces an in-flight operation as
+               -- the host's current progress; otherwise it competes by recency (WI-10005312).
+               (operation.error->>'code' IS NOT DISTINCT FROM ${WORKSPACE_HOST_FENCE_REFUSED_CODE}
+                 AND EXISTS (
+                   SELECT 1 FROM harness_shared.workspace_host_operations AS live
+                   WHERE live.workspace_id = operation.workspace_id
+                     AND live.host_id = operation.host_id
+                     AND live.status IN ('queued', 'running')
+                 )),
+               updated_at DESC, id DESC
     `;
     const resources = await query<ResourceDbRow[]>`
       SELECT host_id, logical_key, operation_id, state, attempts, retry_class,
@@ -1413,8 +1590,17 @@ export async function readWorkspaceHostControl(workspaceId: string, tx?: Sql): P
       FROM harness_shared.workspace_host_events e
       JOIN (
         SELECT DISTINCT ON (host_id) workspace_id, host_id, id
-        FROM harness_shared.workspace_host_operations
-        ORDER BY host_id, updated_at DESC, id DESC
+        FROM harness_shared.workspace_host_operations AS operation
+        -- Same pick as the operation projection above (WI-10005312).
+        ORDER BY host_id,
+                 (operation.error->>'code' IS NOT DISTINCT FROM ${WORKSPACE_HOST_FENCE_REFUSED_CODE}
+                   AND EXISTS (
+                     SELECT 1 FROM harness_shared.workspace_host_operations AS live
+                     WHERE live.workspace_id = operation.workspace_id
+                       AND live.host_id = operation.host_id
+                       AND live.status IN ('queued', 'running')
+                   )),
+                 updated_at DESC, id DESC
       ) latest ON latest.workspace_id = e.workspace_id
               AND latest.host_id = e.host_id
               AND latest.id = e.operation_id
@@ -1512,7 +1698,7 @@ export async function readWorkspaceHostControl(workspaceId: string, tx?: Sql): P
           label: row.recoverability_label,
           updatedAt: iso(row.recoverability_updated_at),
         },
-        capabilities: capabilities(row.observed_state),
+        capabilities: capabilities(row.observed_state, hostResources.some((resource) => resource.kind === 'snapshot' && resource.state === 'applied' && Boolean(resource.provider_id))),
         resources: hostResources.map((resource) => ({
           logicalKey: resource.logical_key,
           kind: resource.kind,

@@ -17,6 +17,7 @@ import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { resolveAgentIdentity } from '../coordination/identity';
 import { ackDelivery, cancelAwaitDetailed, retireAnnouncement } from '../../events/await/store';
 import { cancelComposedTree } from '../../events/await/compose-store';
+import { rebaseLoopAfterAwaitCancellation } from '../../harness/routines/loop-fire';
 import { bulkContent, runBulk } from '../_bulk';
 
 const cancelItemSchema = z
@@ -47,11 +48,18 @@ type CancelItem = {
 export default defineTool({
   name: 'events:cancel',
   description:
-    'Cancel one of your active events:await registrations (await_id — you will not be woken), retire one of your unfired announced gate declarations (announcement_id, optionally guarded by expected_generation), cancel a whole composed await TREE by its root_id, or ACK a pending/parked wake delivery (delivery_id). Standing once:false watches require confirm_standing:true after checking events:status because queued deliveries are dropped with the watch. Pass at least one.',
+    'Cancel one of your active events:await registrations (await_id — you will not be woken), retire one of your unfired announced gate declarations (announcement_id, optionally guarded by expected_generation), cancel a whole composed await TREE by its root_id, or ACK a pending/parked wake delivery (delivery_id). Standing once:false watches require confirm_standing:true after checking events:status because queued deliveries are dropped with the watch. An active loop owner cannot cancel their coord:inbox-wake; call loop:end first. Loopless owners may still opt out. Pass at least one.',
   guidance: {
-    when: 'The thing you were waiting on no longer matters (cancel the await), or a parked wake reached you in-turn via the inbox and you handled it (ack the delivery so the system does not also resume you). For a standing watch, inspect events:status and pass confirm_standing:true deliberately.',
+    when: 'The thing you were waiting on no longer matters (cancel the await), or a parked wake reached you in-turn via the inbox and you handled it (ack the delivery so the system does not also resume you). For a standing watch, inspect events:status and pass confirm_standing:true deliberately. A loopless owner may opt out of coord:inbox-wake; an active loop must end before its wake watch can be cancelled.',
     notWhen: 'A fired await needs no cancel (one-shot — it already cleared). Do not use await_id as a mistaken substitute for the narrow delivery_id ACK path. You cannot cancel or ack a peer’s.',
+    returns: '`active_loop_inbox_wake_requires_loop_end` means the owner still has an active engine loop, so the standing coord:inbox-wake remains armed. Call loop:end before retrying; an owner without an active loop may explicitly opt out.',
     chaining: 'events:status to find the await_id / delivery_id / declaration id → events:cancel.',
+    argRedirects: {
+      reason: {
+        drop: true,
+        note: 'reason is an internal cancel_reason database requirement, not a tool argument. Await cancellation records operator internally; delivery_id only ACKs the wake delivery. Omit reason and keep the selected ID.',
+      },
+    },
     seeAlso: [
       'events:status (find the await_id / delivery_id / declaration id to cancel)',
       'events:await (re-arm a wait after cancelling)',
@@ -94,6 +102,7 @@ export default defineTool({
     ),
   async handler(args, ctx) {
     const identity = resolveAgentIdentity(ctx);
+    const workspaceId = ctx.workspaceId?.trim() || identity.workspaceId?.trim() || null;
     const items: CancelItem[] = [
       ...(args.await_id != null || args.delivery_id != null || args.root_id != null || args.announcement_id != null
         ? [{
@@ -130,9 +139,31 @@ export default defineTool({
           if (cancellation.cancelled) {
             out.dropped_deliveries = cancellation.droppedDeliveries;
             out.in_flight_deliveries = cancellation.inFlightDeliveries;
+            if (cancellation.eventKey != null) {
+              if (!workspaceId) {
+                const warning =
+                  'Await cancelled, but the loop recheck could not be scheduled: no concrete workspace ID is available.';
+                out.warning = out.warning ? `${out.warning} ${warning}` : warning;
+              } else {
+                try {
+                  const recheckScheduled = await rebaseLoopAfterAwaitCancellation({
+                    workspaceId,
+                    targetOwnerId: identity.ownerId,
+                    eventKey: cancellation.eventKey,
+                  });
+                  if (recheckScheduled > 0) out.loop_recheck_scheduled = recheckScheduled;
+                } catch (error) {
+                  const warning =
+                    `Await cancelled, but the loop recheck could not be scheduled: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`;
+                  out.warning = out.warning ? `${out.warning} ${warning}` : warning;
+                }
+              }
+            }
             if (cancellation.inFlightDeliveries > 0) {
-              out.warning =
-                'The await was canceled, but one or more deliveries were already in flight and cannot be recalled.';
+              const warning = 'One or more deliveries were already in flight and cannot be recalled.';
+              out.warning = out.warning ? `${out.warning} ${warning}` : warning;
             }
           } else {
             out.ok = false;

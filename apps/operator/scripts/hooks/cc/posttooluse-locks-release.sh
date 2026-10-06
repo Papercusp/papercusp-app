@@ -6,8 +6,9 @@
 #   $PAPERCUSP_LOCKS_CACHE_DIR/<tool_use_id>.lock
 # and calls locks:release. If the matching cache is missing, a completed
 # Codex code-mode parent may recover an orphaned nested apply_patch token;
-# other calls no-op. Always exit 0 — surfacing release noise to the agent
-# changes nothing, and the lock's TTL covers any missed release anyway.
+# other calls no-op. Always exit 0 so a release failure never blocks the edit;
+# emit a PostToolUse context update when release is unconfirmed, because a lock
+# can block git-sync for its full TTL.
 #
 # EI-63: ALSO reads the sidecar $PAPERCUSP_LOCKS_CACHE_DIR/<tool_use_id>.paths
 # (written by the matching PreToolUse's _grant()) and, when present, passes it
@@ -185,6 +186,26 @@ def mark_release_error(phase, detail):
     write_marker(owner_marker_name('error'), value)
 
 
+def emit_release_warning(paths):
+    valid_paths = [path for path in paths if isinstance(path, str) and path]
+    path_text = ', '.join(valid_paths[:6]) if valid_paths else 'the just-edited path(s)'
+    if len(valid_paths) > 6:
+        path_text += ', …'
+    event = payload.get('hook_event_name')
+    if event not in ('PostToolUse', 'PostToolBatch'):
+        event = 'PostToolUse'
+    context = (
+        'LOCK MODE UPDATE: automatic file-lock release was not confirmed after the completed edit for '
+        + path_text
+        + '. Its lock may remain active. Treat lock handling as manual until a fresh coord:orient reports '
+        + 'automatic/verified: inspect locks:queue and explicitly acquire/release before any next file edit.'
+    )
+    json.dump({'hookSpecificOutput': {
+        'hookEventName': event,
+        'additionalContext': context,
+    }}, sys.stdout)
+
+
 def run_declaration_regenerator(args, input_text=None):
     """Run the shared enrolled-.mjs filter while this edit's lock is held.
 
@@ -252,6 +273,14 @@ def call_tool(name, arguments):
                 inner, rpc_error, phase = parse_mcp_response(raw_response)
                 if rpc_error is not None:
                     return None, 'rpc: ' + str(rpc_error)[:200]
+                if phase in ('no-result', 'no-text'):
+                    # HTTP 200 is not a usable release verdict. Advance to the
+                    # stable authority when this endpoint returned no parseable
+                    # tool result; a repeated locks:release is safe because the
+                    # verb confirms an already-absent path as held_before=0.
+                    last_exc = RuntimeError('response: ' + str(phase))
+                    all_conn_refused = False
+                    continue
                 if phase != 'ok' or not isinstance(inner, dict):
                     return None, 'response: ' + str(phase)
                 return inner, None
@@ -406,10 +435,12 @@ def recover_failed_code_mode_edit(current_cache_path):
         })
         if queue_error is not None or not isinstance(queued, dict):
             mark_release_error('parent-recovery-queue', queue_error or 'invalid queue response')
+            emit_release_warning(paths)
             continue
         rows = queued.get('active_locks', queued.get('activeLocks'))
         if not isinstance(rows, list):
             mark_release_error('parent-recovery-queue', 'invalid active_locks response')
+            emit_release_warning(paths)
             continue
         owned = [
             row for row in rows
@@ -434,6 +465,7 @@ def recover_failed_code_mode_edit(current_cache_path):
                 'parent-recovery-release',
                 release_error or released or 'release not confirmed',
             )
+            emit_release_warning(paths)
             continue
         cleanup_sidecars(base)
         mark_release_success('parent-recovery')
@@ -541,11 +573,13 @@ if compatibility_error and coordination_domain:
         cleanup_sidecars(cache_path[:-len('.lock')])
     else:
         mark_release_error('release', release_error or released or 'release not confirmed')
+        emit_release_warning(release_paths or [])
 elif release_error is None and release_confirmed(released, release_paths or []):
     mark_release_success()
     cleanup_sidecars(cache_path[:-len('.lock')])
 else:
     mark_release_error('release', release_error or released or 'release not confirmed')
+    emit_release_warning(release_paths or [])
 
 sys.exit(0)
 PYEOF

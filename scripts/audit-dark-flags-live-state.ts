@@ -47,13 +47,15 @@
  */
 import { getOrgPg } from '@papercusp/db-org';
 import { DARK_FLAGS, type DarkCase } from '@papercusp/flags';
+import { GLOBAL_FLAG_OVERRIDES_WORKSPACE_ID } from '@papercusp/operator-core/lib/flag-override-store';
+import { isCliEntry } from '@papercusp/operator-core/lib/util/cli-entry';
 
 type OverrideRow = { workspace_id: string; payload: Record<string, boolean> | null };
 
 /** Mirrors flag-override-store's env-override key derivation (same formula, read-only here). */
-function envOverride(flagKey: string): boolean | null {
+function envOverride(flagKey: string, env: NodeJS.ProcessEnv): boolean | null {
   const envKey = `PAPERCUSP_FLAG_${flagKey.toUpperCase().replace(/-/g, '_')}`;
-  const raw = process.env[envKey];
+  const raw = env[envKey];
   if (raw === undefined) return null;
   return raw === '1' || raw.toLowerCase() === 'true';
 }
@@ -68,23 +70,25 @@ type Finding = {
   severity: 'critical' | 'info';
 };
 
-async function main(): Promise<void> {
-  const json = process.argv.includes('--json');
-  const { sql } = getOrgPg();
-  const rows = (await sql`
-    SELECT workspace_id, payload FROM harness_shared.operator_flag_overrides
-  `) as unknown as OverrideRow[];
-
+/** Audit the same global-row cutover and env precedence the production resolver uses. */
+export function collectDarkFlagFindings(rows: OverrideRow[], env: NodeJS.ProcessEnv = process.env) {
+  // An empty global map is authoritative. A SQL-null payload, like an absent
+  // row, retains the compatibility fallback in flag-override-store.load().
+  const globalRow = rows.find(row => row.workspace_id === GLOBAL_FLAG_OVERRIDES_WORKSPACE_ID && row.payload !== null);
+  const effectiveRows = globalRow ? [globalRow] : rows.filter(row => row.workspace_id !== GLOBAL_FLAG_OVERRIDES_WORKSPACE_ID);
+  const shadowedWorkspaceOverrides = globalRow ? rows.filter(row => row !== globalRow).map(row => row.workspace_id) : [];
   const darkEntries = [...DARK_FLAGS.entries()];
   const findings: Finding[] = [];
 
   for (const [key, { case: darkCase }] of darkEntries) {
     const severity: Finding['severity'] = SANCTIONED_LIVE_CASES.has(darkCase) ? 'info' : 'critical';
 
-    if (envOverride(key) === true) {
-      findings.push({ key, case: darkCase, workspace: '(env, this process)', via: 'env', severity });
+    const envValue = envOverride(key, env);
+    if (envValue !== null) {
+      if (envValue) findings.push({ key, case: darkCase, workspace: '(env, this process)', via: 'env', severity });
+      continue;
     }
-    for (const row of rows) {
+    for (const row of effectiveRows) {
       if (row.payload?.[key] === true) {
         findings.push({ key, case: darkCase, workspace: row.workspace_id, via: 'override', severity });
       }
@@ -93,6 +97,17 @@ async function main(): Promise<void> {
 
   const critical = findings.filter((f) => f.severity === 'critical');
   const info = findings.filter((f) => f.severity === 'info');
+  return { critical, info, effectiveOverrideWorkspaces: effectiveRows.map(row => row.workspace_id), shadowedWorkspaceOverrides };
+}
+
+async function main(): Promise<void> {
+  const json = process.argv.includes('--json');
+  const { sql } = getOrgPg();
+  const rows = (await sql`
+    SELECT workspace_id, payload FROM harness_shared.operator_flag_overrides
+  `) as unknown as OverrideRow[];
+  const { critical, info, effectiveOverrideWorkspaces, shadowedWorkspaceOverrides } = collectDarkFlagFindings(rows);
+  const darkEntries = [...DARK_FLAGS.entries()];
 
   if (json) {
     console.log(
@@ -102,6 +117,8 @@ async function main(): Promise<void> {
           critical,
           info,
           scannedWorkspaces: rows.map((r) => r.workspace_id),
+          effectiveOverrideWorkspaces,
+          shadowedWorkspaceOverrides,
           darkFlagCount: darkEntries.length,
           caveats: ["PostHog-side overrides are not probed (network, opt-in) — this is PG override + env only."],
         },
@@ -111,7 +128,8 @@ async function main(): Promise<void> {
     );
   } else {
     console.log(
-      `Scanned ${darkEntries.length} DARK_FLAGS entries across ${rows.length} workspace override row(s) + this process's env.\n`,
+      `Scanned ${darkEntries.length} DARK_FLAGS entries across ${rows.length} workspace override row(s) ` +
+        `(${effectiveOverrideWorkspaces.length} effective, ${shadowedWorkspaceOverrides.length} shadowed by the global row) + this process's env.\n`,
     );
     if (critical.length > 0) {
       console.log(
@@ -138,7 +156,9 @@ async function main(): Promise<void> {
   process.exitCode = critical.length > 0 ? 1 : 0;
 }
 
-main().catch((err) => {
-  console.error('[audit-dark-flags-live-state] FAILED:', err instanceof Error ? (err.stack ?? err.message) : err);
-  process.exitCode = 1;
-});
+if (isCliEntry(import.meta.url)) {
+  main().catch((err) => {
+    console.error('[audit-dark-flags-live-state] FAILED:', err instanceof Error ? (err.stack ?? err.message) : err);
+    process.exitCode = 1;
+  });
+}

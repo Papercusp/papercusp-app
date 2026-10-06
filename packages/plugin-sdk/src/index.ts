@@ -735,18 +735,44 @@ export interface PluginTriggerPackRecipeTarget {
 
 export type PluginTriggerPackTarget = PluginTriggerPackPlanTarget | PluginTriggerPackRecipeTarget;
 
-export type PluginTriggerPackSource =
+/**
+ * An external pack source names its provider in one of two ways
+ * (generalized-integrations D-013 §1):
+ *
+ * - provider-pinned: `sourceKind` (`gmail`, `slack`, `gcal`, ...). The pattern
+ *   starts `ext:<sourceKind>:`. First-party packs use this.
+ * - portable: `datatype` (+ optional `capabilities`). The pattern starts
+ *   `ext:*:`. At install the host binds it to an installer-chosen local data
+ *   source whose registered provider produces that datatype and serves every
+ *   listed capability, and rewrites the `*` to that source's kind. The pack
+ *   never names a provider, account or source id.
+ */
+export type PluginTriggerPackExternalSource = {
+  kind: 'external';
+  /**
+   * Optional configSchema property that acquires the source credential
+   * through OAuth. Cross-validation requires explicit secret/share/snapshot
+   * semantics plus matching inline/top-level provider + scopes.
+   */
+  oauthField?: string;
+} & (
   | {
-      kind: 'external';
       /** Canonical trigger-source kind (`gmail`, `slack`, `gcal`, ...). */
       sourceKind: string;
-      /**
-       * Optional configSchema property that acquires the source credential
-       * through OAuth. Cross-validation requires explicit secret/share/snapshot
-       * semantics plus matching inline/top-level provider + scopes.
-       */
-      oauthField?: string;
+      datatype?: never;
+      capabilities?: never;
     }
+  | {
+      sourceKind?: never;
+      /** Canonical datatype id the bound source must produce (`email-message`, ...). */
+      datatype: string;
+      /** Provider capabilities the bound source must serve (`mail.read`, ...). */
+      capabilities?: string[];
+    }
+);
+
+export type PluginTriggerPackSource =
+  | PluginTriggerPackExternalSource
   | { kind: 'internal'; event: 'binding-run-completed' | 'plan-completed' }
   /**
    * @deprecated Trigger packs do not consume schedules. Use a `manual` binding
@@ -912,10 +938,30 @@ export function validateTriggerPackDeclaration(manifest: {
       continue;
     }
     if (binding.source.kind !== 'external') continue;
-    const sourceKind = binding.source.sourceKind.trim();
     const eventPattern = binding.eventPattern?.trim() ?? '';
-    if (!eventPattern.startsWith(`ext:${sourceKind}:`)) {
-      issues.push(`triggerPack binding "${binding.id}" eventPattern must start with "ext:${sourceKind}:"`);
+    const sourceKind = typeof binding.source.sourceKind === 'string' ? binding.source.sourceKind.trim() : '';
+    const datatype = typeof binding.source.datatype === 'string' ? binding.source.datatype.trim() : '';
+    if (Boolean(sourceKind) === Boolean(datatype)) {
+      issues.push(
+        `triggerPack binding "${binding.id}" external source must declare exactly one of sourceKind or datatype`,
+      );
+    } else if (sourceKind) {
+      if (!eventPattern.startsWith(`ext:${sourceKind}:`)) {
+        issues.push(`triggerPack binding "${binding.id}" eventPattern must start with "ext:${sourceKind}:"`);
+      }
+    } else if (!eventPattern.startsWith('ext:*:') || eventPattern.length <= 'ext:*:'.length) {
+      // A portable source names no provider: the host rewrites `*` to the
+      // installer-chosen local source's kind at install time.
+      issues.push(`triggerPack binding "${binding.id}" portable datatype source eventPattern must start with "ext:*:"`);
+    }
+    if (!sourceKind && binding.source.capabilities !== undefined) {
+      const capabilities = binding.source.capabilities;
+      if (
+        !Array.isArray(capabilities) ||
+        capabilities.some((capability) => typeof capability !== 'string' || capability.trim() === '')
+      ) {
+        issues.push(`triggerPack binding "${binding.id}" capabilities must be non-empty strings`);
+      }
     }
 
     const oauthField = binding.source.oauthField?.trim() ?? '';
@@ -1257,6 +1303,19 @@ export interface Plugin {
    * descriptor after install; arming remains an explicit trigger action.
    */
   triggerPack?: PluginTriggerPack;
+
+  /**
+   * Integration provider descriptor (pure data, validated at load/install).
+   * See `./provider` and plan generalized-integrations-…-2026-10-05 D-006.
+   */
+  provider?: import('./provider').ProviderDescriptor;
+
+  /**
+   * Adapter implementing the provider contract. `js` providers export it
+   * in-process; daemon providers serve the same three methods over JSON-RPC.
+   * Providers never receive tokens — network access goes through `host.fetch`.
+   */
+  providerAdapter?: import('./provider').ProviderAdapter;
 
   /** Full-route UI mounted at /harness/<slug>. */
   ui?: UiContribution;
@@ -1661,6 +1720,42 @@ export const PAPERCUSP_RUNTIME_VERSION = '0.1.1' as const;
 
 export { lookupTier, TIER_TABLE } from './tier-table';
 export type { CapabilityTier } from './tier-table';
+export {
+  PROVIDER_CONTRACT_VERSIONS,
+  PROVIDER_ID_PATTERN,
+  PROVIDER_DATATYPE_PATTERN,
+  PROVIDER_CAPABILITY_PATTERN,
+  PROVIDER_EGRESS_HOST_PATTERN,
+  providerEgressAllows,
+  validateProviderDescriptor,
+  validateProviderDeclaration,
+  isProviderAdapter,
+  PROVIDER_DAEMON_METHODS,
+  PROVIDER_SYNC_WAKE_CAPABILITY,
+  PROVIDER_SYNC_ADOPT_CAPABILITY,
+} from './provider';
+export type {
+  ProviderDaemonCallParams,
+  ProviderDaemonFetchParams,
+  ProviderContractVersion,
+  ProviderOAuthDescriptor,
+  ProviderOAuthIdentity,
+  ProviderDescriptor,
+  ProviderSyncRequest,
+  ProviderRecord,
+  ProviderSyncPage,
+  ProviderSyncError,
+  ProviderInvokeRequest,
+  ProviderServiceCredential,
+  ProviderServices,
+  ProviderWakeResult,
+  ProviderAdoptResult,
+  HostFetchRequest,
+  HostFetchResponse,
+  HostFetch,
+  ProviderHost,
+  ProviderAdapter,
+} from './provider';
 
 
 /* ─────────────────────────────────────────────────────────────────────

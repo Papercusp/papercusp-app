@@ -51,7 +51,7 @@
  *           each USING / WITH CHECK expression from pg_policies by identity.
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, realpathSync, rmSync } from 'node:fs';
 import { stripScratchTableDeclarations } from '../src/schema-scratch-tables.mjs';
 import { repairEmptyArrayDefaults } from '../src/schema/schema-defaults.mjs';
 import {
@@ -104,6 +104,21 @@ if (import.meta.url !== __entry) {
   );
 }
 
+// drizzle-kit writes fixed schema.ts / relations.ts intermediates, and the
+// promotion step removes those names. Serialize the WHOLE pull (introspection,
+// fixups, and promotion) across concurrent CLI processes so one run cannot
+// remove another run's source between its read and copy.
+const REPO_ROOT_FOR_MUTEX = resolve(DB_ROOT, '../../../..');
+const fsMutexPath = join(REPO_ROOT_FOR_MUTEX, 'scripts/lib/fs-mutex.mjs');
+if (!existsSync(fsMutexPath)) {
+  throw new Error(
+    `Cannot safely run pull-schema.mjs without the shared filesystem mutex at ${fsMutexPath}`,
+  );
+}
+const { withFsMutex } = await import(pathToFileURL(fsMutexPath).href);
+const REAL_DB_ROOT = realpathSync(DB_ROOT);
+
+async function runPullSchema() {
 console.log('==> running drizzle-kit pull against live papercusp DB');
 
 // Resolve the admin URL ONCE and reuse it for both the precheck below and the
@@ -136,7 +151,8 @@ const { url: dbUrl, source: dbUrlSource } = resolveAdminUrlWithSource();
         '  Fix: set HARNESS_ADMIN_DATABASE_URL (or DATABASE_URL) to a reachable ' +
         'connection string, or start the desktop app / native PG this resolved from.\n',
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 }
 
@@ -179,14 +195,16 @@ if (captureDrizzleKitOutput && result.stdout) {
 }
 if (result.status !== 0) {
   console.error('drizzle-kit pull failed');
-  process.exit(result.status ?? 1);
+  process.exitCode = result.status ?? 1;
+  return;
 }
 
 const schemaPath = join(SCHEMA_DIR, 'schema.ts');
 const relationsPath = join(SCHEMA_DIR, 'relations.ts');
 if (!existsSync(schemaPath)) {
   console.error('expected drizzle-kit to write src/schema/schema.ts');
-  process.exit(1);
+  process.exitCode = 1;
+  return;
 }
 
 console.log('==> applying quirk fixups');
@@ -234,7 +252,8 @@ const policyQuery = [
 const policyResult = spawnSync('psql', [dbUrl, '-tA', '-c', policyQuery], { encoding: 'utf8' });
 if (policyResult.status !== 0) {
   console.error('failed to read authoritative pg_policy metadata:', policyResult.stderr);
-  process.exit(1);
+  process.exitCode = 1;
+  return;
 }
 let policyRows;
 try {
@@ -244,7 +263,8 @@ try {
     'authoritative pg_policy metadata was not valid JSON:',
     error instanceof Error ? error.message : String(error),
   );
-  process.exit(1);
+  process.exitCode = 1;
+  return;
 }
 const policyFix = repairPgPolicyPredicates({ source: schema, policies: policyRows });
 if (policyFix.unresolved.length > 0) {
@@ -252,7 +272,8 @@ if (policyFix.unresolved.length > 0) {
     'refusing to promote generated schema with unresolved pgPolicy predicates:\n  - ' +
       policyFix.unresolved.join('\n  - '),
   );
-  process.exit(1);
+  process.exitCode = 1;
+  return;
 }
 schema = policyFix.source;
 console.log(`    Fix 13: repaired ${policyFix.repaired} pgPolicy declaration(s) from pg_policies`);
@@ -692,7 +713,8 @@ if (compositeForeignKeysResult.status !== 0) {
     'failed to read authoritative composite foreign-key metadata:',
     compositeForeignKeysResult.stderr,
   );
-  process.exit(1);
+  process.exitCode = 1;
+  return;
 }
 
 let compositeForeignKeys;
@@ -711,7 +733,8 @@ try {
     'composite foreign-key metadata was not valid JSON:',
     error instanceof Error ? error.message : String(error),
   );
-  process.exit(1);
+  process.exitCode = 1;
+  return;
 }
 
 const relationsSource = existsSync(relationsPath) ? readFileSync(relationsPath, 'utf8') : '';
@@ -725,7 +748,8 @@ if (compositeForeignKeyFix.unresolved.length > 0) {
     'refusing to promote generated schema with unresolved composite foreign keys:\n  - ' +
       compositeForeignKeyFix.unresolved.join('\n  - '),
   );
-  process.exit(1);
+  process.exitCode = 1;
+  return;
 }
 schema = compositeForeignKeyFix.schema;
 if (existsSync(relationsPath)) {
@@ -870,7 +894,8 @@ if (process.env.PAPERCUSP_SKIP_IDENTITY_KEYED_GATE === '1') {
     console.error(`\n${verdict.output.trim()}`);
     console.error(`\n==> REFUSING TO PROMOTE: ${verdict.message}`);
     console.error('    generated.ts is UNCHANGED — nothing inconsistent can be committed.');
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   if (!verdict.ok) {
     // The check could not run, so we learned nothing. Do not claim a pass, but
@@ -890,3 +915,18 @@ promoteGeneratedSchemaArtifacts({ schemaPath, relationsPath, schemaDir: SCHEMA_D
 
 console.log('==> done. generated.ts + generated-relations.ts updated.');
 console.log('    Inspect with: git diff src/schema/generated.ts');
+}
+
+await withFsMutex(
+  `papercusp-db-pull-schema:${REAL_DB_ROOT}`,
+  runPullSchema,
+  {
+    intent: { operation: 'pull-schema', dbRoot: REAL_DB_ROOT },
+    onWaiting: ({ owner, elapsedMs }) => {
+      console.error(
+        `==> waiting ${Math.round(elapsedMs / 1000)}s for another schema pull to finish (${owner})`,
+      );
+    },
+    waitingNoticeIntervalMs: 30_000,
+  },
+);

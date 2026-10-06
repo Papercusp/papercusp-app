@@ -324,11 +324,15 @@ export async function fetchSourceTurns(
   const wrap = (values: unknown[]) => (sql.array ? sql.array(values) : values);
   const width = Math.max(chars, TURN_ORIGIN_HEAD_CHARS);
   const rows = await sql<
-    Array<{ source_kind: string; session_id: string; turn_idx: number; speaker: string | null; head: string | null; tail: string | null }>
+    Array<{
+      source_kind: string; session_id: string; turn_idx: number; speaker: string | null; head: string | null; tail: string | null;
+      turn_origin?: string | null; turn_origin_verdict?: string | null;
+    }>
   >`
     SELECT turns.source_kind, turns.session_id, turns.turn_idx, turns.speaker,
            left(turns.text, ${width}) AS head,
-           right(turns.text, ${TURN_ORIGIN_TAIL_CHARS}) AS tail
+           right(turns.text, ${TURN_ORIGIN_TAIL_CHARS}) AS tail,
+           turns.turn_origin, turns.turn_origin_verdict
       FROM harness_shared.session_turns AS turns
      WHERE (turns.workspace_id = ${workspaceId} OR turns.workspace_id = 'default')
        AND EXISTS (
@@ -349,11 +353,14 @@ export async function fetchSourceTurns(
       speaker: row.speaker ?? null,
       text: head === null ? null : head.slice(0, chars),
       // The tail lets a paste-wrapped injection longer than the head still unwrap
-      // (WI-10004057) — without it such a turn counts as OWNER evidence.
+      // (WI-10004057) — without it such a turn counts as OWNER evidence. The stored
+      // ingest verdict downgrades a text `owner-typed` residual that ingest could not
+      // prove (WI-10004510: `unenrolled-origin` is an owner candidate, not owner speech).
       verdict: classifyHitTurnOrigin(
         row.speaker,
         head === null ? null : head.slice(0, TURN_ORIGIN_HEAD_CHARS),
         row.tail,
+        { verdict: row.turn_origin_verdict, origin: row.turn_origin },
       ).verdict,
     });
   }

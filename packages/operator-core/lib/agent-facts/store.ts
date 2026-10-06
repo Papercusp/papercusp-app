@@ -36,6 +36,7 @@ import { pinModuleState } from '@papercusp/module-singleton';
 import { GUARD_RAIL_TAG } from '@papercusp/verification-harness';
 import { activeWorkspaceId } from '../workspace-registry';
 import { boundedOrgTxn } from '../pg-bounded-txn';
+import { SEALED_FIELD_STUB, sealSharedTextInTxOrRefuse } from '../personal-vault/shared-store-seal';
 // P-008 (b): the unknown vocabulary a failed dependency read records. Imported,
 // never re-declared — cell-contract.ts declares itself the canonical home and
 // forbids a local copy, and a second enumeration is precisely how a caller's
@@ -943,6 +944,13 @@ export interface AssertFactInput {
   /** P-010: how to re-run the claim and what concrete result disproves it. */
   recheck?: FactRecheck | null;
   createdBy: string;
+  /**
+   * personal-data-reader-set-labels P-012 / D-006: the agent identity that
+   * authored the body. While it holds a restricted Personal Vault disclosure the
+   * stored body is a sealed stub (personal:open-sealed opens it). Omit for
+   * system writers, which hold no disclosures.
+   */
+  writerOwnerId?: string | null;
   /**
    * P-001 (facts-require-explicit-expiry-2026-09-02) — one half of the REQUIRED
    * lifetime declaration; see {@link validateFactLifetime}. There is no silent 7d
@@ -1852,6 +1860,33 @@ export async function assertFact(input: AssertFactInput, inject?: Sql): Promise<
   const recheck = normalizeFactRecheck(input.recheck);
   const dependsOn = normalizeFactDependencies(input.dependsOn);
   const claim = input.claim && typeof input.claim === 'object' ? input.claim : null;
+  const sourceRef = input.sourceRef ?? null;
+
+  // personal-data-reader-set-labels P-012 / D-006, R-8: a writer holding a
+  // restricted Personal Vault disclosure stores a sealed stub. The body AND every
+  // other authored field (settledBy, recheck, claim, sourceRef — WI-10005549) move
+  // to ONE sealed row in THIS transaction, so none lands on the shared row in the
+  // clear. Sealed after validation, so the sealed row holds the normalized values.
+  // Not sealed: the key (it is the row's identity), measurement/enforcement/
+  // dependsOn (structured metadata, not prose) and sourceProvenance (its quote is
+  // captured server-side from the cited source, never authored by the writer).
+  const seal = input.writerOwnerId?.trim()
+    ? await sealSharedTextInTxOrRefuse(sql, {
+        workspaceId: ws,
+        writerOwnerId: input.writerOwnerId,
+        store: 'fact',
+        text: body,
+        context: { scope: input.scope, scopeRef: ref, key },
+        fields: { settledBy, recheck, claim, sourceRef },
+      })
+    : null;
+  const sealed = seal?.sealed === true;
+  const storedBody = seal ? seal.text : body;
+  // settledBy keeps a placeholder so an undecidable fact still reads as having an exit.
+  const storedSettledBy = sealed && settledBy ? SEALED_FIELD_STUB : settledBy;
+  const storedRecheck = sealed ? null : recheck;
+  const storedClaim = sealed ? null : claim;
+  const storedSourceRef = sealed ? null : sourceRef;
 
   // EI-21488671343297100: serialize one cap population's complete seat
   // decision. This MUST be its own statement: under READ COMMITTED PostgreSQL
@@ -1977,21 +2012,21 @@ export async function assertFact(input: AssertFactInput, inject?: Sql): Promise<
        -- it (never NULL it back out) — carried forward off the superseded row,
        -- since there is no longer an UPDATE branch to COALESCE against.
        COALESCE(${input.potHomeSlug ?? null}, (SELECT harness_slug FROM superseded)),
-       ${input.scope}, ${ref}, ${key}, ${body},
-       ${input.sourceRef ?? null}, ${input.createdBy ?? null},
+       ${input.scope}, ${ref}, ${key}, ${storedBody},
+       ${storedSourceRef}, ${input.createdBy ?? null},
        ${permanentFact ? sql`'infinity'::timestamptz` : sql`now() + make_interval(secs => ${ttl})`},
        ${input.shareable === true},
        ${audienceScope},
        ${input.sourceProvenance ? JSON.stringify(input.sourceProvenance) : null}::text::jsonb,
        ${confidence},
        ${measurement ? JSON.stringify(measurement) : null}::text::jsonb,
-       ${recheck ? JSON.stringify(recheck) : null}::text::jsonb,
+       ${storedRecheck ? JSON.stringify(storedRecheck) : null}::text::jsonb,
        (SELECT id FROM superseded),
        ${kind},
        ${dependsOn ? JSON.stringify(dependsOn) : null}::text::jsonb,
-       ${claim ? JSON.stringify(claim) : null}::text::jsonb,
+       ${storedClaim ? JSON.stringify(storedClaim) : null}::text::jsonb,
        ${enforcement ? JSON.stringify(enforcement) : null}::text::jsonb,
-       ${settledBy})
+       ${storedSettledBy})
       RETURNING id, superseded_at::text, supersedes_id,
                 scope, scope_ref, key, body, source_ref, audience_scope, source_provenance,
                 confidence, measurement, recheck, kind, depends_on, claim, enforcement, settled_by, created_by, updated_at::text, expires_at::text

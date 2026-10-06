@@ -162,6 +162,42 @@ export async function reconcileActivationAuditRepairFiling(input: {
   planSlug: string;
   auditSeq: number;
 }): Promise<ActivationAuditRepairReconciliation> {
+  return closeActivationAuditRepairFiling(
+    input,
+    `activation audit #${input.auditSeq} recorded clean for plan '${input.planSlug}' ` +
+      '(no unresolved blockers, no open requirement mappings) — the condition this filing named has cleared',
+  );
+}
+
+/**
+ * Close the open activation-repair filing for a plan that just went TERMINAL
+ * (shipped or superseded) — the second event that ends the condition.
+ *
+ * A clean audit is not the only way out: a plan can reach a terminal status
+ * without one ever being recorded, and then nothing reconciled its filing.
+ * Measured 2026-10-01 (EI-24746042684666503): WI-2141077 was filed at 06:26Z
+ * for papercup-chat-public-release-2026-09-01, the plan shipped at 06:27Z, and
+ * the filing was still open and claimable a month later. Once the plan is
+ * terminal there is no activation left to repair, so the filing is moot.
+ * Called from the plans:set-plan-status terminal tidy-up; same fail-soft rail.
+ */
+export async function reconcileActivationAuditRepairFilingForTerminalPlan(input: {
+  workspaceId: string;
+  harnessSlug: string;
+  planSlug: string;
+  terminalStatus: 'shipped' | 'superseded';
+}): Promise<ActivationAuditRepairReconciliation> {
+  return closeActivationAuditRepairFiling(
+    input,
+    `plan '${input.planSlug}' is ${input.terminalStatus} — there is no activation left to repair, ` +
+      'so the condition this filing named no longer applies',
+  );
+}
+
+async function closeActivationAuditRepairFiling(
+  input: { workspaceId: string; harnessSlug: string; planSlug: string },
+  completionRef: string,
+): Promise<ActivationAuditRepairReconciliation> {
   const conditionKey = activationAuditRepairConditionKey(input);
   try {
     // Workspace-scoped, NOT harness-scoped — same reason condition-upsert reads
@@ -172,9 +208,7 @@ export async function reconcileActivationAuditRepairFiling(input: {
     await setWorkItemState(holder, 'dropped', {
       harness: input.harnessSlug,
       by: ACTIVATION_AUDIT_REPAIR_ACTOR,
-      completionRef:
-        `activation audit #${input.auditSeq} recorded clean for plan '${input.planSlug}' ` +
-        '(no unresolved blockers, no open requirement mappings) — the condition this filing named has cleared',
+      completionRef,
     });
     return { conditionKey, closed: holder };
   } catch (error) {

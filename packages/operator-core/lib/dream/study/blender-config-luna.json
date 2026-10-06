@@ -1,0 +1,215 @@
+{
+  "config": {
+    "protocolPin": "29a0a6e4914c26e79b13fbb561373596b18aca44966ab733feb72ac660ee7ddf",
+    "installSlug": "papercusp-workspace",
+    "payload": {
+      "scout": {
+        "lenses": [
+          "analogical",
+          "first-principles",
+          "reframing",
+          "constraint-removal"
+        ],
+        "novelty": {
+          "matchFloor": 0.5,
+          "maxMatches": 5,
+          "decidedStates": [
+            "dropped",
+            "shipped",
+            "resolved",
+            "closed",
+            "done"
+          ],
+          "decidedPenalty": 0.15,
+          "semanticBaselineQuantile": 0.9
+        },
+        "buckets": {
+          "noveltyFloor": 0.34,
+          "feasibilityFloor": 0.5,
+          "moonshotNoveltyFloor": 0.66,
+          "maxMoonshots": 2,
+          "moonshotFloorQuantile": 0.75,
+          "moonshotFloorMin": 0.45
+        },
+        "routing": {
+          "defaultRail": "improvement",
+          "wholeSystemMarkers": [
+            "genome",
+            "whole instance",
+            "whole-instance",
+            "whole system",
+            "whole-system",
+            "system-level",
+            "instance-level",
+            "interacting wholes",
+            "queen prompt",
+            "queen persona",
+            "queen placement",
+            "placement policy",
+            "wake policy",
+            "min-sleep",
+            "coordination economy",
+            "memory architecture",
+            "memory-seeding",
+            "memory seeding",
+            "the operator itself",
+            "papercusp itself",
+            "across harnesses",
+            "across the hive"
+          ],
+          "goalScaleMarkers": [
+            "goal-scale",
+            "goal mode",
+            "multi-plan",
+            "multiple plans",
+            "several plans",
+            "spans plans",
+            "weeks-long",
+            "weeks long",
+            "over weeks",
+            "multi-week",
+            "long-horizon",
+            "long horizon",
+            "measurable end-state",
+            "measurable end state",
+            "north star",
+            "kill criterion",
+            "spend ceiling",
+            "standing outcome",
+            "campaign"
+          ],
+          "goalBudgetCentsCap": 20000
+        },
+        "framing": {
+          "ideatorMission": "You are a SCOUT — an autonomous ideator for the Hive, a multi-agent coding platform that improves itself.\nYour job is the deliberate creative LEAP: broad, novel ideas that day-to-day work never surfaces.",
+          "criticMission": "You are TWO adversarial critics judging ONE creative idea proposed for the Papercusp \"Hive\" (a multi-agent coding platform). You pull against each other on purpose:"
+        },
+        "federatedPriming": {
+          "foreignElites": 3,
+          "crowded": 5,
+          "empty": 5
+        },
+        "models": {
+          "ideator": "gpt-5.6-luna:medium",
+          "critic": "gpt-5.6-sol:xhigh",
+          "recombine": "gpt-5.6-luna:medium",
+          "revision": "gpt-5.6-sol:xhigh",
+          "experiment": "gpt-5.6-sol:xhigh"
+        }
+      },
+      "budget": {
+        "maxCostUsd": 10,
+        "maxIdeators": 1,
+        "maxCriticsPerIdea": 2
+      }
+    },
+    "potDelta": {
+      "scout": {
+        "models": {
+          "ideator": "gpt-5.4:medium",
+          "critic": "gpt-5.4:medium",
+          "recombine": "gpt-5.4:medium",
+          "revision": "gpt-5.4:medium",
+          "experiment": "gpt-5.4:medium"
+        }
+      }
+    },
+    "modelPolicy": "D019 invocation-local model pin supersedes stored models; all other pot deltas and production gates retained",
+    "effectiveScoutConfig": {
+      "lenses": [
+        "analogical",
+        "first-principles",
+        "reframing",
+        "constraint-removal"
+      ],
+      "novelty": {
+        "matchFloor": 0.5,
+        "maxMatches": 5,
+        "decidedStates": [
+          "dropped",
+          "shipped",
+          "resolved",
+          "closed",
+          "done"
+        ],
+        "decidedPenalty": 0.15,
+        "semanticBaselineQuantile": 0.9
+      },
+      "buckets": {
+        "noveltyFloor": 0.34,
+        "feasibilityFloor": 0.5,
+        "moonshotNoveltyFloor": 0.66,
+        "maxMoonshots": 2,
+        "moonshotFloorQuantile": 0.75,
+        "moonshotFloorMin": 0.45
+      },
+      "routing": {
+        "defaultRail": "improvement",
+        "wholeSystemMarkers": [
+          "genome",
+          "whole instance",
+          "whole-instance",
+          "whole system",
+          "whole-system",
+          "system-level",
+          "instance-level",
+          "interacting wholes",
+          "queen prompt",
+          "queen persona",
+          "queen placement",
+          "placement policy",
+          "wake policy",
+          "min-sleep",
+          "coordination economy",
+          "memory architecture",
+          "memory-seeding",
+          "memory seeding",
+          "the operator itself",
+          "papercusp itself",
+          "across harnesses",
+          "across the hive"
+        ],
+        "goalScaleMarkers": [
+          "goal-scale",
+          "goal mode",
+          "multi-plan",
+          "multiple plans",
+          "several plans",
+          "spans plans",
+          "weeks-long",
+          "weeks long",
+          "over weeks",
+          "multi-week",
+          "long-horizon",
+          "long horizon",
+          "measurable end-state",
+          "measurable end state",
+          "north star",
+          "kill criterion",
+          "spend ceiling",
+          "standing outcome",
+          "campaign"
+        ],
+        "goalBudgetCentsCap": 20000
+      },
+      "framing": {
+        "ideatorMission": "You are a SCOUT — an autonomous ideator for the Hive, a multi-agent coding platform that improves itself.\nYour job is the deliberate creative LEAP: broad, novel ideas that day-to-day work never surfaces.",
+        "criticMission": "You are TWO adversarial critics judging ONE creative idea proposed for the Papercusp \"Hive\" (a multi-agent coding platform). You pull against each other on purpose:"
+      },
+      "federatedPriming": {
+        "foreignElites": 3,
+        "crowded": 5,
+        "empty": 5
+      },
+      "models": {
+        "ideator": "gpt-5.6-luna:medium",
+        "critic": "gpt-5.6-sol:xhigh",
+        "recombine": "gpt-5.6-luna:medium",
+        "revision": "gpt-5.6-sol:xhigh",
+        "experiment": "gpt-5.6-sol:xhigh"
+      }
+    },
+    "attemptUnit": "one ordinary governed Scout cycle; report candidate counts separately"
+  },
+  "configHash": "0b00cd04e2a7cb06b76bc58571605c818d59a973241332f0fc6bebc086f13e11"
+}

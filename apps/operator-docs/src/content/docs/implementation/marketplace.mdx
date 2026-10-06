@@ -370,7 +370,7 @@ CREATE INDEX idx_package_versions_published_at ON package_versions(published_at 
   - `ReviewsSection` on every detail page (rating histogram + per-review cards with linked author)
   - Author byline on detail pages now links to `/authors/[login]/` (was external GitHub)
 
-**Verified end-to-end** at https://api.papercuspai.com/v1/authors/owner (200) + http://localhost:3060/authors/owner/ + reviews showing on /marketplace/signed-test/.
+**Verified end-to-end** at https://api.papercuspai.com/v1/authors/avi (200) + http://localhost:3060/authors/avi/ + reviews showing on /marketplace/signed-test/.
 
 ### Phase M9 — Stats + popularity ✅ SHIPPED + popularity surface
 
@@ -435,7 +435,7 @@ CREATE INDEX idx_package_versions_published_at ON package_versions(published_at 
    ```sql
    CREATE TABLE webhook_subscriptions (
      id              TEXT PRIMARY KEY,
-     owner           TEXT NOT NULL,           -- '@owner' or '*' (operator only)
+     owner           TEXT NOT NULL,           -- '@avi' or '*' (operator only)
      url             TEXT NOT NULL,
      events          TEXT[] NOT NULL,         -- ['version.published', ...]
      secret          TEXT NOT NULL,           -- HMAC key
@@ -566,7 +566,7 @@ CREATE INDEX idx_package_versions_published_at ON package_versions(published_at 
 - `resolveRegistry(slug)` walks scopes in order; first match wins. `*` matches anything; `@owner/*` matches `@owner/anything`.
 - `--registry <url>` flag overrides config for one-off installs.
 - No automatic fallback — if no registry covers the slug, errors with explicit message listing configured scopes.
-- Slug regex extended to accept scoped names (`@owner/package`); version splitter handles `@owner/foo@1.2.0` correctly.
+- Slug regex extended to accept scoped names (`@owner/package`); version splitter handles `@avi/foo@1.2.0` correctly.
 - Verified: 4 scenarios — scoped → internal, no-match → error, `--registry` override → bypasses config, no config → falls back to `PAPERCUSP_MARKETPLACE_URL`.
 
 Files touched this round:

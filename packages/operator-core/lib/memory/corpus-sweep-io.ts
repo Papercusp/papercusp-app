@@ -77,6 +77,19 @@ export async function liveCorpusSweepDeps(
     judgeWired = true;
   }
 
+  // Content-free layer (P-011): the substance judge is Jev, so it is wired only
+  // when a Jev key resolves. Unwired ⇒ the sweep reports the layer NOT MEASURED.
+  let judgeSubstance: CorpusSweepDeps['judgeSubstance'];
+  try {
+    const { ensureJevDecisionClient, readJevApiKey } = await import('./jev-settings');
+    if (await readJevApiKey()) {
+      const { judgeSubstanceWithJev } = await import('./jev-conflict-judge');
+      judgeSubstance = (text: string) => judgeSubstanceWithJev(text, { client: ensureJevDecisionClient });
+    }
+  } catch {
+    judgeSubstance = undefined;
+  }
+
   const deps: CorpusSweepDeps = {
     listPools: async () => {
       const { rows } = await client.query(
@@ -125,6 +138,9 @@ export async function liveCorpusSweepDeps(
     // reported as `conflictPairs: 0`, indistinguishable from a real result.
     // The sweep skips the layer outright when this is false.
     judgeAvailable: () => judgeWired,
+
+    ...(judgeSubstance ? { judgeSubstance } : {}),
+    substanceAvailable: () => judgeSubstance !== undefined,
 
     ...(fileConflict ? { fileConflict } : {}),
   };

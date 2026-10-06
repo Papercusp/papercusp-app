@@ -23,8 +23,24 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { gitSidecarEnabled, noteSidecarFallback, runGitViaSpawnerSidecar } from './fleet/git-via-sidecar';
+import {
+  gitSidecarEnabled,
+  isSidecarInfrastructureFault,
+  noteSidecarDeadlineFallback,
+  noteSidecarFallback,
+  runCommandViaSpawnerSidecar,
+  runGitViaSpawnerSidecar,
+} from './fleet/git-via-sidecar';
 import { type CellUnknown, cellUnknown, formatCellUnknown } from './cell-contract';
+import { resolveReleaseRoot } from './release/release-root';
+import {
+  buildGitBatchInvocation,
+  isReadOnlyGitBatchExec,
+  parseGitBatchResults,
+  type GitBatchCommand,
+  type GitBatchResult,
+  runGitBatch,
+} from './git-batch';
 
 const pexec = promisify(execFile);
 
@@ -214,8 +230,9 @@ function resolveConfig(): Pick<
   // PAPERCUSP_INTEGRATION_ROOT is exported into the :3070 operator's unit env
   // (the release-gate cutover). Off that env, derive from cwd's git toplevel.
   const integrationRoot = process.env.PAPERCUSP_INTEGRATION_ROOT || gitToplevel();
-  const parent = path.dirname(integrationRoot);
-  const releaseRoot = process.env.PAPERCUSP_RELEASE_ROOT ?? path.join(parent, 'papercup-release');
+  // WI-10005161: never `dirname(integrationRoot)` directly — on :3170 the integration
+  // root is the physical staging generation, whose sibling is not the release checkout.
+  const releaseRoot = resolveReleaseRoot({ integrationRoot });
   // staging→main model (staging-branch-pipeline-2026-06-06): the integration
   // branch (agent firehose) is `staging`; the green pin is the `main` BRANCH.
   // Field names below predate the rename and read generically: `stagingHead` = the
@@ -267,6 +284,129 @@ interface CommitRefResult {
   ref: CommitRef | null;
   /** Non-null iff `ref` is null — WHY it's null, per cell-contract.ts. */
   unknown: CellUnknown | null;
+}
+
+function commitRefArgs(ref: string): string[] {
+  return ['log', '-1', '--format=%H%n%ct%n%s', ref + '^{commit}'];
+}
+
+const DEV_DEPLOY_BATCH_TIMEOUT_MS = 60_000;
+export const DEV_DEPLOY_SIDECAR_BATCH_DEADLINE_MS = 2_000;
+
+export interface DevDeployGitBatchDeps {
+  sidecarEnabled?: () => boolean;
+  viaSidecar?: typeof runCommandViaSpawnerSidecar;
+  localBatch?: typeof runGitBatch;
+  noteFallback?: typeof noteSidecarFallback;
+  noteDeadlineFallback?: typeof noteSidecarDeadlineFallback;
+}
+
+function isSidecarBatchDeadlineMiss(result: { code: number; stderr: string }): boolean {
+  return result.code === -1 && /timed out after \d+ms — killed by the spawner sidecar guard/.test(result.stderr);
+}
+
+/**
+ * One bounded sidecar attempt for the diagnostic's verified read-only Git batch.
+ * A missed child deadline is counted for visibility but does not trip the shared
+ * sidecar breaker; the same reads then run in the local one-shell batch.
+ */
+export async function runDevDeployGitBatch(
+  commands: readonly GitBatchCommand[],
+  useSpawnerSidecar: boolean,
+  deps: DevDeployGitBatchDeps = {},
+): Promise<Array<GitBatchResult | null>> {
+  const runLocal = deps.localBatch ?? runGitBatch;
+  const local = (): Promise<Array<GitBatchResult | null>> =>
+    runLocal(commands, { label: 'dev-deploy-state', timeoutMs: DEV_DEPLOY_BATCH_TIMEOUT_MS });
+  if (commands.length === 0) return [];
+
+  const sidecarEnabled = deps.sidecarEnabled ?? (() => gitSidecarEnabled('PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR'));
+  if (!useSpawnerSidecar || !sidecarEnabled()) return local();
+
+  const invocation = buildGitBatchInvocation(commands, 'dev-deploy-state');
+  if (!isReadOnlyGitBatchExec({ command: 'sh', args: invocation.args })) return local();
+  const viaSidecar = deps.viaSidecar ?? runCommandViaSpawnerSidecar;
+  const recordFallback = deps.noteFallback ?? noteSidecarFallback;
+  const recordDeadline = deps.noteDeadlineFallback ?? noteSidecarDeadlineFallback;
+  let result: Awaited<ReturnType<typeof runCommandViaSpawnerSidecar>>;
+  try {
+    // Do not attach an AbortSignal: this is a read-only command batch, and the
+    // remote result is either a complete frame set or a counted deadline miss.
+    result = await viaSidecar('sh', invocation.args, {
+      cwd: process.cwd(),
+      env: process.env,
+      timeoutMs: DEV_DEPLOY_SIDECAR_BATCH_DEADLINE_MS,
+    });
+  } catch (error) {
+    recordFallback('dev-deploy', error);
+    return local();
+  }
+
+  if (isSidecarInfrastructureFault(result)) {
+    recordFallback('dev-deploy', new Error(result.stderr));
+    return local();
+  }
+  if (isSidecarBatchDeadlineMiss(result)) {
+    recordDeadline('dev-deploy', new Error(result.stderr));
+    return local();
+  }
+  if (result.code !== 0) {
+    recordFallback('dev-deploy', new Error(`read-only Git batch helper exited ${result.code}: ${result.stderr}`));
+    return local();
+  }
+
+  const parsed = parseGitBatchResults(commands, result.stdout, invocation.nonce);
+  if (parsed.some((entry) => entry === null)) {
+    recordFallback('dev-deploy', new Error('sidecar read-only Git batch returned an incomplete frame set'));
+    return local();
+  }
+  return parsed;
+}
+
+/** One `git log -1` result from a batch, classified exactly as {@link commitRef} does. */
+export function commitRefFromBatch(repo: string, ref: string, result: GitBatchResult | null): CommitRefResult {
+  if (!result) {
+    return { ref: null, unknown: classifyCommitRefFailure(ref, repo, 'git helper did not complete') };
+  }
+  if (result.code !== 0) {
+    const message = `git -C ${repo} ${commitRefArgs(ref).join(' ')} exited ${result.code}: ${result.stderr.trim()}`;
+    return { ref: null, unknown: classifyCommitRefFailure(ref, repo, message) };
+  }
+  const [sha, ct, ...rest] = result.stdout.trim().split('\n');
+  return {
+    ref: { sha, shortSha: sha.slice(0, 8), committedAtMs: Number(ct) * 1000, subject: rest.join('\n') },
+    unknown: null,
+  };
+}
+
+async function commitRefs(
+  specs: ReadonlyArray<readonly [repo: string, ref: string]>,
+  useSpawnerSidecar: boolean,
+): Promise<CommitRefResult[]> {
+  const results = await runDevDeployGitBatch(
+    specs.map(([repo, ref]) => ({ repo, args: commitRefArgs(ref) })),
+    useSpawnerSidecar,
+  );
+  return specs.map(([repo, ref], i) => commitRefFromBatch(repo, ref, results[i] ?? null));
+}
+
+/** `rev-list --count from..to` for each pair (null pair → null); one `sh` on the local path. */
+async function aheadCounts(
+  repo: string,
+  pairs: ReadonlyArray<readonly [from: string, to: string] | null>,
+  useSpawnerSidecar: boolean,
+): Promise<Array<number | null>> {
+  const live = pairs.flatMap((p, i) => (p ? [{ i, from: p[0], to: p[1] }] : []));
+  const results = await runDevDeployGitBatch(
+    live.map(({ from, to }) => ({ repo, args: ['rev-list', '--count', from + '..' + to] })),
+    useSpawnerSidecar,
+  );
+  const counts: Array<number | null> = pairs.map(() => null);
+  live.forEach(({ i }, k) => {
+    const r = results[k];
+    counts[i] = r && r.code === 0 ? Number(r.stdout.trim()) : null;
+  });
+  return counts;
 }
 
 async function commitRef(repo: string, ref: string, useSpawnerSidecar: boolean): Promise<CommitRefResult> {
@@ -394,12 +534,15 @@ async function computeDevDeployState(opts: DevDeployStateOptions = {}): Promise<
   // EI-19341938682536275: `origin/<integrationBranch>` is resolved LOCALLY (the remote-tracking
   // ref a successful `git push` already updates as a side effect) — no network call, same cost
   // class as the other 3 resolves below.
-  const [stagingHeadR, greenPinR, deployedR, originHeadR] = await Promise.all([
-    commitRef(cfg.integrationRoot, cfg.integrationBranch, useSpawnerSidecar),
-    commitRef(cfg.integrationRoot, cfg.releaseRef, useSpawnerSidecar),
-    commitRef(cfg.releaseRoot, 'HEAD', useSpawnerSidecar),
-    commitRef(cfg.integrationRoot, `origin/${cfg.integrationBranch}`, useSpawnerSidecar),
-  ]);
+  const [stagingHeadR, greenPinR, deployedR, originHeadR] = await commitRefs(
+    [
+      [cfg.integrationRoot, cfg.integrationBranch],
+      [cfg.integrationRoot, cfg.releaseRef],
+      [cfg.releaseRoot, 'HEAD'],
+      [cfg.integrationRoot, `origin/${cfg.integrationBranch}`],
+    ],
+    useSpawnerSidecar,
+  );
   // Every downstream reader keeps the plain `CommitRef | null` shape it always
   // had — only `errors[]` (below) additionally consumes the `unknown` reason.
   const stagingHead = stagingHeadR.ref;
@@ -426,16 +569,20 @@ async function computeDevDeployState(opts: DevDeployStateOptions = {}): Promise<
   // All counts are measured in the integration tree (it has every object — the
   // release worktree shares its object store). deployed must be reachable there.
   // aheadCount(from, to) = `rev-list --count from..to` = commits `to` has that `from` lacks.
-  const [deployedBehindStaging, greenPinBehindStaging, deployedBehindGreenPin, stagingAheadOfOrigin] = await Promise.all([
-    // live :3070 → staging tip (spans the un-checkpointed buffer; not a fault on its own)
-    deployed && stagingHead ? aheadCount(cfg.integrationRoot, deployed.sha, stagingHead.sha, useSpawnerSidecar) : Promise.resolve(null),
-    // green pin (main) → staging tip = THE STAGING BUFFER (normal; not a deploy fault)
-    greenPin && stagingHead ? aheadCount(cfg.integrationRoot, greenPin.sha, stagingHead.sha, useSpawnerSidecar) : Promise.resolve(null),
-    // live :3070 → green pin (main) = THE REAL DEPLOY GAP (green but not shipped)
-    deployed && greenPin ? aheadCount(cfg.integrationRoot, deployed.sha, greenPin.sha, useSpawnerSidecar) : Promise.resolve(null),
-    // origin/<branch> → staging tip = THE SAFETY-CRITICAL UNPUSHED LEG (never "normal")
-    originHead && stagingHead ? aheadCount(cfg.integrationRoot, originHead.sha, stagingHead.sha, useSpawnerSidecar) : Promise.resolve(null),
-  ]);
+  const [deployedBehindStaging, greenPinBehindStaging, deployedBehindGreenPin, stagingAheadOfOrigin] = await aheadCounts(
+    cfg.integrationRoot,
+    [
+      // live :3070 → staging tip (spans the un-checkpointed buffer; not a fault on its own)
+      deployed && stagingHead ? [deployed.sha, stagingHead.sha] : null,
+      // green pin (main) → staging tip = THE STAGING BUFFER (normal; not a deploy fault)
+      greenPin && stagingHead ? [greenPin.sha, stagingHead.sha] : null,
+      // live :3070 → green pin (main) = THE REAL DEPLOY GAP (green but not shipped)
+      deployed && greenPin ? [deployed.sha, greenPin.sha] : null,
+      // origin/<branch> → staging tip = THE SAFETY-CRITICAL UNPUSHED LEG (never "normal")
+      originHead && stagingHead ? [originHead.sha, stagingHead.sha] : null,
+    ],
+    useSpawnerSidecar,
+  );
 
   return {
     ...cfg,

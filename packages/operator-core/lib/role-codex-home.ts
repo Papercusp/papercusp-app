@@ -51,13 +51,17 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { codexHomeForSessionKey } from '@papercusp/orchestrator/session-launch-dirs';
+import {
+  codexHomeForSessionKey,
+  codexSqliteHomeForSessionKey,
+} from '@papercusp/orchestrator/session-launch-dirs';
 import {
   codexGatewayConfigToml,
   codexManagedFeaturesToml,
@@ -83,6 +87,8 @@ const __dirname = __esmDirname(__esmFileURLToPath(import.meta.url));
 export interface RoleCodexHome {
   /** Absolute path to set as the child's CODEX_HOME. */
   codexHome: string;
+  /** Fast, session-keyed directory configured as Codex's `sqlite_home`. */
+  sqliteHome: string;
   /** The AGENTS.md (role prompt) path — diagnostics. */
   agentsPath: string;
   /** The config.toml (role-scoped MCP) path — diagnostics. */
@@ -136,12 +142,14 @@ const CODEX_WRITE_BYTE_INTEGRITY_MATCHER = '^(?:Write|mcp__.*__capability_write)
  * Must precede any `[table]` (TOML top-level keys before tables); the `[mcp_servers]`
  * table each writer appends comes after.
  */
-const CODEX_ISOLATION_PREAMBLE = [
-  '# psu prompt isolation (P-004 / D-001): no cwd AGENTS.md read; native memory off.',
-  'project_doc_max_bytes = 0',
-  '',
-  ...codexManagedFeaturesToml(),
-].join('\n');
+function codexIsolationPreamble(headless = false): string {
+  return [
+    '# psu prompt isolation (P-004 / D-001): no cwd AGENTS.md read; native memory off.',
+    'project_doc_max_bytes = 0',
+    '',
+    ...codexManagedFeaturesToml({ headless }),
+  ].join('\n');
+}
 
 const CODEX_LOCK_GUIDANCE_RE =
   /<!-- PAPERCUSP-CODEX:LOCK-GUIDANCE-START -->[\s\S]*?<!-- PAPERCUSP-CODEX:LOCK-GUIDANCE-END -->/g;
@@ -189,7 +197,75 @@ function freshCodexHome(codexHome: string): string {
   rmSync(codexHome, { recursive: true, force: true });
   mkdirSync(codexHome, { recursive: true });
   inheritUserCodexHome(codexHome);
+  ensureCodexSkillWatchRoots({ codexHome });
   return codexHome;
+}
+
+/** Rebuild the disposable/high-write SQLite companion for a fresh launch. */
+function freshCodexSqliteHome(sessionKey: string | number): string {
+  const sqliteHome = codexSqliteHomeForSessionKey(sessionKey);
+  rmSync(sqliteHome, { recursive: true, force: true });
+  mkdirSync(sqliteHome, { recursive: true, mode: 0o700 });
+  return sqliteHome;
+}
+
+/** The system skills root Codex reads. Creating it needs root, so host setup provisions it. */
+export const CODEX_SYSTEM_SKILLS_DIR = '/etc/codex/skills';
+
+export interface CodexSkillWatchRoots {
+  /** `<CODEX_HOME>/skills` — a symlink to ~/.codex/skills when that exists, else an empty dir. */
+  codexHomeSkillsDir: string;
+  codexHomeSkillsReady: boolean;
+  /** `~/.agents/skills` — user-writable, created here. */
+  userSkillsDir: string;
+  userSkillsReady: boolean;
+  /** `/etc/codex/skills` — only reported; a missing one makes every Codex session watch /etc. */
+  systemSkillsDir: string;
+  systemSkillsReady: boolean;
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * EI-21417256075155406 (measured 2026-10-01, codex-cli 0.159.3): Codex's skills watcher
+ * watches each skills root, and for a MISSING root it watches the nearest existing ancestor
+ * with an inotify mask that includes IN_OPEN. A missing /etc/codex/skills therefore puts a
+ * watch on /etc, and every process start anywhere on the host (each opens /etc/ld.so.cache)
+ * wakes every Codex session; a missing ~/.agents/skills or <CODEX_HOME>/skills does the same
+ * for $HOME / the busy Codex home. On a 128-core agent host this held idle sessions at
+ * ~1/3 core each; creating the roots dropped them to ~0.1%. Creating the roots as empty
+ * directories pins the watches onto quiet directories. Best-effort and never throws.
+ */
+export function ensureCodexSkillWatchRoots(
+  opts: { codexHome?: string; home?: string; systemSkillsDir?: string } = {},
+): CodexSkillWatchRoots {
+  const codexHomeSkillsDir = join(opts.codexHome ?? join(opts.home ?? homedir(), '.codex'), 'skills');
+  const userSkillsDir = join(opts.home ?? homedir(), '.agents', 'skills');
+  const systemSkillsDir = opts.systemSkillsDir ?? CODEX_SYSTEM_SKILLS_DIR;
+  for (const dir of [codexHomeSkillsDir, userSkillsDir]) {
+    if (isDirectory(dir)) continue;
+    try {
+      // A dangling inherited symlink would make mkdir fail; replace it with a real dir.
+      if (lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink()) unlinkSync(dir);
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      /* reported below as not ready */
+    }
+  }
+  return {
+    codexHomeSkillsDir,
+    codexHomeSkillsReady: isDirectory(codexHomeSkillsDir),
+    userSkillsDir,
+    userSkillsReady: isDirectory(userSkillsDir),
+    systemSkillsDir,
+    systemSkillsReady: isDirectory(systemSkillsDir),
+  };
 }
 
 /** EI-11366: the sid `writeSuCodexHome` last stamped at this codexHome path
@@ -229,10 +305,32 @@ function numericAdvSessionId(value: string | number | null | undefined): string 
 export function rekeyCodexHome(sourceSessionKey: string | number, targetSessionKey: string | number): string {
   const source = codexHomeForSessionKey(sourceSessionKey);
   const target = codexHomeForSessionKey(targetSessionKey);
+  const sourceSqlite = codexSqliteHomeForSessionKey(sourceSessionKey);
+  const targetSqlite = codexSqliteHomeForSessionKey(targetSessionKey);
   if (source === target) return target;
   if (!existsSync(source)) throw new Error(`temporary Codex home does not exist: ${source}`);
   if (existsSync(target)) throw new Error(`target Codex home already exists: ${target}`);
-  renameSync(source, target);
+  if (existsSync(targetSqlite)) throw new Error(`target Codex sqlite home already exists: ${targetSqlite}`);
+  const movedSqlite = existsSync(sourceSqlite);
+  if (movedSqlite) renameSync(sourceSqlite, targetSqlite);
+  try {
+    renameSync(source, target);
+  } catch (error) {
+    if (movedSqlite) renameSync(targetSqlite, sourceSqlite);
+    throw error;
+  }
+  const configPath = join(target, 'config.toml');
+  try {
+    const config = readFileSync(configPath, 'utf8');
+    const next = config.replace(
+      `sqlite_home = "${tomlEscape(sourceSqlite)}"`,
+      `sqlite_home = "${tomlEscape(targetSqlite)}"`,
+    );
+    if (next !== config) writeFileSync(configPath, next, { mode: 0o600 });
+  } catch {
+    // The normal launch path writes this file before rekey. If a legacy home
+    // lacks it, the resume repair path renders the canonical target path.
+  }
   return target;
 }
 
@@ -439,13 +537,12 @@ function copyInheritedCodexPrompts(codexHome: string): boolean {
  * hook's stdin carries { prompt, cwd, session_id, turn_id, model, ... }.
  * The turn-start port is therefore REACHABLE on codex via THIS file.
  *
- * TURN PROVENANCE (turn-provenance-owner-vs-agent-2026-07-11 P-004): that plan
- * concluded codex sessions must run LAYER-1 ONLY (envelope tagged
- * operator-side, never ledger-VERIFIED) because the classification hook had
- * nowhere to attach. The premise above is refuted, so codex layer-2 provenance
- * is now UNBLOCKED — but it is NOT implemented here (out of scope for this
- * plan; the classification hook is a separate script). Do not read the
- * injection registration below as provenance parity.
+ * TURN PROVENANCE + OWNER-DIRECTIVE CAPTURE: Codex's UserPromptSubmit hook
+ * carries the same prompt/session/turn identity the shared provenance script
+ * needs. Register that script beside the context-injection dispatcher below;
+ * it verifies Papercusp's nonce ledger, stamps the turn, and captures only an
+ * interactive owner prompt. Keep both entries behind the session identity and
+ * the provenance script's installed-file check.
  *
  * ⚠ TRUST IS SILENT (D-004, measured): an UNTRUSTED codex hook does not fire
  * and does not warn — no error, no log line, exit 0, session otherwise normal.
@@ -639,6 +736,18 @@ export function writeCodexLockHooks(
   // §5 explains why the frozen array interface absorbs that).
   const injectDispatcher = join(homedir(), '.papercusp', 'hooks', 'inject', 'index.mjs');
   const userPromptSubmit: CodexHook[] = [];
+  const provenance = join(dir, 'userpromptsubmit-provenance.sh');
+  if (opts.injectSid && existsSync(provenance)) {
+    userPromptSubmit.push({
+      matcher: '.*',
+      hooks: [
+        {
+          type: 'command',
+          command: `PAPERCUSP_SID=${shellSingleQuote(opts.injectSid)} PAPERCUSP_AGENT=codex ${provenance}`,
+        },
+      ],
+    });
+  }
   if (opts.injectSid && existsSync(injectDispatcher)) {
     const injectIdentity = `PAPERCUSP_SID=${shellSingleQuote(opts.injectSid)} PAPERCUSP_AGENT=codex`;
     userPromptSubmit.push({
@@ -725,6 +834,23 @@ export function writeCodexLockHooks(
     preToolUse.push({
       matcher: CODEX_CONTROL_BYTES_PRE_MATCHER,
       hooks: [{ type: 'command', command: generatedFiles }],
+    });
+  }
+
+  // WI-10001350: use the same migration reservation policy for Codex's native
+  // apply_patch payloads as the Claude hooks. This shared path matcher accepts
+  // apply_patch plus Edit/Write/MCP writer inputs; baking the managed root lets
+  // the guard resolve Codex's repository-relative patch targets safely.
+  const migrationReservation = join(dir, 'pretooluse-unreserved-migration-guard.mjs');
+  if (existsSync(migrationReservation)) {
+    preToolUse.push({
+      matcher: CODEX_CONTROL_BYTES_PRE_MATCHER,
+      hooks: [
+        {
+          type: 'command',
+          command: `PAPERCUSP_WORKSPACE_ROOT=${root} ${migrationReservation}`,
+        },
+      ],
     });
   }
 
@@ -822,6 +948,9 @@ function writeCodexHomeDiagnostics(
     requiresExplicitPapercuspLocks: opts.lockRuntime.lockMode === 'manual',
     ...(opts.lockOwnerSid ? { lockOwnerSid: opts.lockOwnerSid } : {}),
     inheritedPromptsCopied: opts.inheritedPromptsCopied,
+    // EI-21417256075155406: systemSkillsReady=false means every Codex session on this host
+    // watches /etc and wakes on every process start — provision /etc/codex/skills.
+    codexSkillWatchRoots: ensureCodexSkillWatchRoots({ codexHome }),
   };
   writeFileSync(join(codexHome, 'papercusp-diagnostics.json'), `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
 }
@@ -995,6 +1124,8 @@ export function writeRoleCodexHome(opts: {
   codexGatewayAuto?: boolean;
   /** Admission label written beside the owner header for a gateway-routed role home. */
   codexGatewayPriority?: string | null;
+  /** Suppress optional interactive plugin authentication in an unattended TUI. */
+  headless?: boolean;
   /** The directory the operator is launching this agent into (spec.cwd). Seeded
    *  as `[projects."<dir>"] trust_level = "trusted"` so a fresh CODEX_HOME does
    *  not block at codex's "Do you trust this directory?" boot prompt. */
@@ -1006,6 +1137,7 @@ export function writeRoleCodexHome(opts: {
   // path wrote to a separate `role-codex-homes/` root the resume leg never
   // looked in, so a woken codex role session resumed from nothing.
   const codexHome = freshCodexHome(codexHomeForSessionKey(opts.sessionKey));
+  const sqliteHome = freshCodexSqliteHome(opts.sessionKey);
   const inheritedPromptsCopied = copyInheritedCodexPrompts(codexHome);
 
   // AGENTS.md = the role prompt. codex has no per-launch system-prompt
@@ -1034,10 +1166,11 @@ export function writeRoleCodexHome(opts: {
   const toml = [
     ...(contextConfig ? contextConfig.split('\n') : []),
     ...modelConfig,
+    `sqlite_home = "${tomlEscape(sqliteHome)}"`,
     `log_dir = "${tomlEscape(logDir)}"`,
     ...gatewayConfig.root,
     ...CODEX_DANGER_TOML,
-    CODEX_ISOLATION_PREAMBLE,
+    codexIsolationPreamble(opts.headless),
     ...inheritedCodexTrustToml(opts.trustDir),
     ...gatewayConfig.tables,
     ...CODEX_TUI_TOML,
@@ -1077,12 +1210,14 @@ export function writeRoleCodexHome(opts: {
     lockRuntime,
   });
 
-  return { codexHome, agentsPath, configPath, instructionLint };
+  return { codexHome, sqliteHome, agentsPath, configPath, instructionLint };
 }
 
 export interface SuCodexHome {
   /** Absolute path to set as the child's CODEX_HOME. */
   codexHome: string;
+  /** Fast, session-keyed directory configured as Codex's `sqlite_home`. */
+  sqliteHome: string;
   /** The AGENTS.md (engineer playbook) path — diagnostics. */
   agentsPath: string;
   /** The config.toml (superuser MCP) path — diagnostics. */
@@ -1131,10 +1266,14 @@ export interface SuCodexConfigInput {
   model?: string | null;
   /** Direct per-session CODEX_HOME whose model registry should seed context roots. */
   codexHome?: string | null;
+  /** Fast session companion for Codex's high-write SQLite state. */
+  sqliteHome?: string | null;
   token?: string | null;
   codexGatewayAccountId?: string | null;
   codexGatewayAuto?: boolean;
   codexGatewayPriority?: string | null;
+  /** Suppress optional interactive plugin authentication in an unattended TUI. */
+  headless?: boolean;
   trustDir?: string | null;
   /** Launch cwd for project-scoped external HTTP MCP servers. */
   projectDir?: string | null;
@@ -1189,6 +1328,8 @@ function mcpUrlWithClient(mcpUrl: string, sid: string): string {
  * The per-session client identity is baked into the url because codex cannot
  * env-expand config.toml, and the superuser bearer rides as an http_headers
  * Authorization (D-006 — the env-var form doesn't deliver on codex 0.135).
+ * `env_http_headers` resolves CODEX_SESSION_ID at request time, independently
+ * proving which native Codex incarnation is using the inherited coord owner.
  */
 export function suCodexConfigToml(opts: SuCodexConfigInput): string {
   const url = mcpUrlWithClient(opts.mcpUrl, opts.sid);
@@ -1207,10 +1348,11 @@ export function suCodexConfigToml(opts: SuCodexConfigInput): string {
   return [
     ...(contextConfig ? contextConfig.split('\n') : []),
     ...modelConfig,
+    ...(opts.sqliteHome ? [`sqlite_home = "${tomlEscape(opts.sqliteHome)}"`] : []),
     ...(opts.logDir ? [`log_dir = "${tomlEscape(opts.logDir)}"`] : []),
     ...gatewayConfig.root,
     ...CODEX_DANGER_TOML,
-    CODEX_ISOLATION_PREAMBLE,
+    codexIsolationPreamble(opts.headless),
     ...inheritedCodexTrustToml(opts.trustDir),
     ...gatewayConfig.tables,
     ...CODEX_TUI_TOML,
@@ -1218,6 +1360,7 @@ export function suCodexConfigToml(opts: SuCodexConfigInput): string {
     '[mcp_servers.papercusp-su]',
     `url = "${tomlEscape(url)}"`,
     ...(opts.token ? [`http_headers = { Authorization = "Bearer ${tomlEscape(opts.token)}" }`] : []),
+    'env_http_headers = { "x-papercusp-native-session" = "CODEX_SESSION_ID" }',
     ...projectHttpMcpToml(opts.projectDir ?? opts.trustDir),
     '',
   ].join('\n');
@@ -1255,6 +1398,7 @@ export function ensureSuCodexHomeConfig(opts: SuCodexConfigInput & {
   recoverMissingHome?: boolean;
 }): {
   codexHome: string;
+  sqliteHome: string;
   configPath: string;
   repaired: boolean;
   identityRepaired: boolean;
@@ -1262,21 +1406,30 @@ export function ensureSuCodexHomeConfig(opts: SuCodexConfigInput & {
   reason?: 'no-home';
 } {
   const codexHome = codexHomeForSessionKey(opts.sessionKey);
+  const sqliteHome = codexSqliteHomeForSessionKey(opts.sessionKey);
   const configPath = join(codexHome, 'config.toml');
   if (!existsSync(codexHome)) {
     if (!opts.recoverMissingHome || !opts.promptText?.trim()) {
-      return { codexHome, configPath, repaired: false, identityRepaired: false, promptRepaired: false, reason: 'no-home' };
+      return { codexHome, sqliteHome, configPath, repaired: false, identityRepaired: false, promptRepaired: false, reason: 'no-home' };
     }
     mkdirSync(codexHome, { recursive: true, mode: 0o700 });
     inheritUserCodexHome(codexHome);
+    ensureCodexSkillWatchRoots({ codexHome });
   }
+  mkdirSync(sqliteHome, { recursive: true, mode: 0o700 });
   const logDir = join(codexHome, 'log');
   mkdirSync(logDir, { recursive: true });
   const resolvedModel = resolveCodexModel(opts.model);
   const expectedModelConfig = codexModelConfigToml(resolvedModel).join('\n');
   const expectedContextConfig = codexContextConfigToml(resolvedModel, { codexHome });
   const expectedLogDir = `log_dir = "${tomlEscape(logDir)}"`;
+  const expectedSqliteHome = `sqlite_home = "${tomlEscape(sqliteHome)}"`;
   const expectedClient = `client=${encodeURIComponent(opts.sid)}`;
+  const expectedNativeSessionHeader = 'env_http_headers = { "x-papercusp-native-session" = "CODEX_SESSION_ID" }';
+  const expectedSuMcpRoute =
+    '[mcp_servers.papercusp-su]\nurl = "' +
+    tomlEscape(mcpUrlWithClient(opts.mcpUrl, opts.sid)) +
+    '"';
   const expectedGateway = codexGatewayConfigToml(opts.codexGatewayAccountId, {
     gatewayOn: opts.codexGatewayAuto,
     ownerId: opts.sid,
@@ -1293,19 +1446,27 @@ export function ensureSuCodexHomeConfig(opts: SuCodexConfigInput & {
     const gatewayReady = expectedGateway.root.length
       ? current.includes(expectedGateway.root.join('\n')) && current.includes(expectedGateway.tables.join('\n'))
       : !current.includes('PAPERCUSP_CODEX_GATEWAY_ROOT') && !current.includes('PAPERCUSP_CODEX_GATEWAY_PROVIDER');
+    const hasHeadlessPluginsPolicy = current.includes('plugins = false');
+    const hasHeadlessAuthPolicy = current.includes('auth_elicitation = false');
+    const headlessPolicyReady = opts.headless === true
+      ? hasHeadlessPluginsPolicy && hasHeadlessAuthPolicy
+      : !hasHeadlessPluginsPolicy && !hasHeadlessAuthPolicy;
     configReady =
-      current.includes('[mcp_servers.papercusp-su]') &&
+      current.includes(expectedSuMcpRoute) &&
       current.includes(expectedProjectMcp) &&
       current.includes(expectedClient) &&
+      current.includes(expectedNativeSessionHeader) &&
       contextMatches &&
+      current.includes(expectedSqliteHome) &&
       current.includes(expectedLogDir) &&
       current.includes('[tui]\nterminal_title = []\nalternate_screen = "never"\n') &&
-      gatewayReady;
+      gatewayReady &&
+      headlessPolicyReady;
   } catch {
     /* absent or unreadable — that is precisely the repair case */
   }
   if (!configReady) {
-    writeFileSync(configPath, suCodexConfigToml({ ...opts, logDir, codexHome }), { mode: 0o600 });
+    writeFileSync(configPath, suCodexConfigToml({ ...opts, logDir, codexHome, sqliteHome }), { mode: 0o600 });
   }
   const identity = repairSuCodexHomeIdentity(
     codexHome,
@@ -1339,6 +1500,7 @@ export function ensureSuCodexHomeConfig(opts: SuCodexConfigInput & {
   }
   return {
     codexHome,
+    sqliteHome,
     configPath,
     repaired: !configReady || identity.repaired || promptRepaired,
     identityRepaired: identity.repaired,
@@ -1368,6 +1530,8 @@ export function writeSuCodexHome(opts: {
   codexGatewayAuto?: boolean;
   /** Gateway admission label; `su` for interactive SU homes. */
   codexGatewayPriority?: string | null;
+  /** Suppress optional interactive plugin authentication in an unattended TUI. */
+  headless?: boolean;
   /** The directory the operator is launching this SU session into (resolveSuLaunchCwd).
    *  Seeded as `[projects."<dir>"] trust_level = "trusted"` so a fresh CODEX_HOME
    *  does not block at codex's "Do you trust this directory?" boot prompt. */
@@ -1409,6 +1573,7 @@ export function writeSuCodexHome(opts: {
     );
   }
   const codexHome = freshCodexHome(targetHome);
+  const sqliteHome = freshCodexSqliteHome(opts.sessionKey);
   const inheritedPromptsCopied = copyInheritedCodexPrompts(codexHome);
 
   const agentsPath = join(codexHome, 'AGENTS.md');
@@ -1419,7 +1584,7 @@ export function writeSuCodexHome(opts: {
   const configPath = join(codexHome, 'config.toml');
   const logDir = join(codexHome, 'log');
   mkdirSync(logDir, { recursive: true });
-  writeFileSync(configPath, suCodexConfigToml({ ...opts, logDir, codexHome: targetHome }), { mode: 0o600 });
+  writeFileSync(configPath, suCodexConfigToml({ ...opts, logDir, codexHome: targetHome, sqliteHome }), { mode: 0o600 });
 
   // SU sessions pass coordSid so the merged activity hook's coord fold stays
   // ON (new coord:inbox messages folded into the SAME activity:report round
@@ -1455,7 +1620,7 @@ export function writeSuCodexHome(opts: {
     /* non-fatal: the collision guard simply skips on the next write */
   }
 
-  return { codexHome, agentsPath, configPath, instructionLint };
+  return { codexHome, sqliteHome, agentsPath, configPath, instructionLint };
 }
 
 const PAPERCUSP_SU_TABLE_RE = /^mcp_servers\.(?:papercusp-su|"papercusp-su")(?:\.|$)/;

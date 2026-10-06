@@ -29,8 +29,14 @@ export function warningFor(marker: any, editedPath: string, ledger?: {
     detail?: string;
 } | null): string | null;
 /** Every path an Edit/Write/MultiEdit payload touched. */
-export function editedPathsFrom(payload: any): any[];
-export function hunksFrom(payload: any): any[];
+/**
+ * A trimmed psu surface reaches capability:edit/write only through tools:invoke — MUST match
+ * `unwrapToolsInvoke` in frozen-repair-edit-ledger.ts. Returns the payload in direct-call form;
+ * an invoke of any other tool keeps its name with an empty input, so it extracts nothing.
+ */
+export function unwrapToolsInvoke(payload: any): any;
+export function editedPathsFrom(rawPayload: any): any[];
+export function hunksFrom(rawPayload: any): any[];
 /** Did the client report the edit itself failed? A failed edit made no hunk to record. */
 export function toolCallFailed(payload: any): boolean;
 /**

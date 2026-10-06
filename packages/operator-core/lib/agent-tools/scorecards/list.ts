@@ -17,7 +17,13 @@ import { resolveAgentIdentity } from '../coordination/identity';
 import { COORD_ROLES } from '../coordination/roles';
 import { OrgTxnTimeoutError } from '../../pg-bounded-txn';
 import { listScorecardPage } from '../../scorecards';
+import type { ScorecardListCursor } from '../../scorecards';
 import { runWithWorkspaceIfConcrete } from '../../workspace-als';
+
+const scorecardListCursorSchema = z.object({
+  createdAt: z.string().datetime({ offset: true }),
+  issueId: z.string().min(1).max(160),
+}).strict();
 
 export default defineTool({
   name: 'scorecards:list',
@@ -29,9 +35,9 @@ export default defineTool({
     notWhen:
       'Need a rubric definition — rubrics:get/list; cross-corpus ideation rollup — curation:state-of-pot; or filing a scorecard — scorecards:emit.',
     chaining:
-      'scorecards:list { rubricRef, subjectRef: "EI-123", since } → inspect missingKeys/ratings → drill row with work_items:get { id: issueId } or rubric criteria with rubrics:get { rubricRef }.',
+      'scorecards:list { rubricRef, subjectRef: "EI-123", since } → while nextCursor is non-null, call scorecards:list again with the same filters and cursor: nextCursor → inspect missingKeys/ratings → drill row with work_items:get { id: issueId } or rubric criteria with rubrics:get { rubricRef }.',
     returns:
-      'Rows include ratings, synthesized, nKeys, missingKeys; `ratings`, `gradedGeneration`, and `generationFreshness` are nested OBJECTS, not scalars (`generationFreshness` only appears with `gradedGeneration`), so flat/CSV projection fails. `count` is page size; `hasMore`/`truncatedByLimit` signal a capped page.',
+      'Rows include ratings, synthesized, nKeys, missingKeys; `ratings`, `gradedGeneration`, and `generationFreshness` are nested OBJECTS, not scalars (`generationFreshness` only appears with `gradedGeneration`), so flat/CSV projection fails. `count` is page size; when `hasMore` is true, pass `nextCursor` back as `cursor` to continue the keyset page. `nextCursor` is null when exhausted.',
     seeAlso: [
       'scorecards:freshness (staleness / partial-emit summary)',
       'scorecards:evaluate (typed grading skeleton + evidence delta)',
@@ -89,6 +95,9 @@ export default defineTool({
       .boolean()
       .optional()
       .describe('Audit view: also include deliberately retracted scorecards and their withdrawal metadata.'),
+    cursor: scorecardListCursorSchema
+      .optional()
+      .describe('Keyset continuation returned as nextCursor by the previous page; keep the same filters when continuing.'),
   }),
   result: z
     .object({
@@ -96,6 +105,7 @@ export default defineTool({
       count: z.number().int().nonnegative().optional(),
       hasMore: z.boolean().optional(),
       truncatedByLimit: z.boolean().optional(),
+      nextCursor: scorecardListCursorSchema.nullable().optional(),
       scorecards: z.array(z.unknown()).optional(),
       error: z.string().optional(),
       retryable: z.boolean().optional(),
@@ -116,16 +126,25 @@ export default defineTool({
           includeSynthesized: args.includeSynthesized,
           includeSuperseded: args.includeSuperseded,
           includeRetracted: args.includeRetracted,
+          before: args.cursor as ScorecardListCursor | undefined,
           // WI-6124: links are opt-IN. This tool returns whole rows to an agent, so it is a
           // surfacing read — keep it true or agents silently see every scorecard as unlinked.
           includeLinks: true,
         });
+        const lastRow = page.rows.at(-1);
+        if (page.hasMore && !lastRow) {
+          throw new Error('scorecards:list pagination invariant violated: hasMore requires a visible row for nextCursor');
+        }
+        const nextCursor = page.hasMore
+          ? { createdAt: lastRow!.createdAt, issueId: lastRow!.issueId }
+          : null;
         return {
           data: {
             ok: true,
             count: page.rows.length,
             hasMore: page.hasMore,
             truncatedByLimit: page.hasMore,
+            nextCursor,
             scorecards: page.rows,
           },
         };

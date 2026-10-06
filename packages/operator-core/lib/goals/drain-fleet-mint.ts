@@ -36,6 +36,7 @@ import type { GoalSqlTag } from '@papercusp/agent-mcp/goals';
 import { createFleetIfAbsent, deleteFleet, setFleetLeader } from '../agent-fleets-store';
 import { setPresenceFleet } from '../agent-tools/coordination/presence';
 import { declareCoupling } from '../coord/couplings';
+import { potHomeSlugForHarness } from '../hive-federation';
 import { DEFAULT_CLAIM_SPEC } from '../scheduler/claim-spec';
 import { clearClaimSpec, fleetSpecBeeKey, setClaimSpec } from '../scheduler/claim-spec-store';
 
@@ -98,6 +99,8 @@ export function buildGoalDrainClaimSpec(goalId: string): Record<string, unknown>
 
 export interface DrainFleetMintArgs {
   workspaceId: string;
+  /** The concrete install_slug stored on the goal. */
+  harnessSlug: string;
   goalId: string;
   goalTitle: string;
   /** The goal agent's pre-pinned identity — the portfolio owner of this fleet.
@@ -124,6 +127,10 @@ export interface DrainFleetMintResult {
  */
 export async function mintDrainFleetForGoal(args: DrainFleetMintArgs): Promise<DrainFleetMintResult> {
   const fleetSlug = drainFleetSlugForGoal(args.goalId);
+  // Claim-spec rows use the Hive home slug as their harness binding. Resolve it
+  // from the goal's actual install instead of writing an operator-local null;
+  // an unbound fleet spec makes its members' scoped ptool calls fail closed.
+  const potSlug = await potHomeSlugForHarness(args.workspaceId, args.harnessSlug);
   const { created } = await createFleetIfAbsent({
     workspaceId: args.workspaceId,
     fleetSlug,
@@ -140,7 +147,7 @@ export async function mintDrainFleetForGoal(args: DrainFleetMintArgs): Promise<D
       workspaceId: args.workspaceId,
       spec: buildGoalDrainClaimSpec(args.goalId),
       updatedBy: args.agentOwnerId,
-      potSlug: null,
+      potSlug,
     });
     if (!applied.ok) {
       throw new Error(`goal-scoped claim spec rejected: ${applied.errors.join('; ') || 'no detail'}`);

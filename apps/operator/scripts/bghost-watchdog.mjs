@@ -371,7 +371,10 @@ const log = (m) => {
 
 function sh(cmd, args, opts = {}) {
   return new Promise((resolve_) => {
-    const child = execFile(cmd, args, { timeout: opts.timeout ?? 10_000 }, (err, stdout, stderr) =>
+    const child = execFile(cmd, args, {
+      timeout: opts.timeout ?? 10_000,
+      ...(opts.env ? { env: opts.env } : {}),
+    }, (err, stdout, stderr) =>
       resolve_({ err, stdout: stdout || '', stderr: stderr || '' }),
     );
     // Optional stdin payload (EI-9419: psql only interpolates -v variables in stdin/file
@@ -954,7 +957,7 @@ export async function readCommittedHotPathState(deps = {}) {
       '--untracked-files=all',
       '--',
       ...BG_HOST_COMMITTED_HOT_PATHS,
-    ]),
+    ], { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } }),
   ]);
 
   let latestCommitMs = null;

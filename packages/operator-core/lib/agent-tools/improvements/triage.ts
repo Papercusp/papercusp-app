@@ -172,6 +172,8 @@ export default defineTool({
           `the repair is to LAND THE DEPLOY, not a code change. Confirm with dev:pipeline_position before re-routing.`;
       } else if (effectiveDecision === 'place') {
         note = 'Decision persisted. Use work_items:create to assign and track the implementation.';
+      } else if (effectiveDecision === 'gate' && result.target === 'owner-escalation') {
+        note = 'Decision persisted for owner escalation. Use coord:escalate to request the owner action with the issue id and supporting evidence.';
       } else if (effectiveDecision === 'gate') {
         note = 'Decision persisted. Escalate for human review before proceeding.';
       } else if (effectiveDecision === 'gym') {
@@ -381,6 +383,7 @@ export default defineTool({
           id: item.id,
           decision: triage.decision,
           reason: triage.reason,
+          target: triage.target,
           by: 'improvement-retriage',
           comment: false, // batch pass — the lifecycle carries the decision, no thread spam
         });
@@ -504,6 +507,8 @@ export default defineTool({
           `the repair is to LAND THE DEPLOY, not a code change. Confirm with dev:pipeline_position before re-routing.`;
       } else if (effectiveDecision === 'place') {
         note = 'Decision persisted. Use work_items:create to assign and track the implementation.';
+      } else if (effectiveDecision === 'gate' && result.target === 'owner-escalation') {
+        note = 'Decision persisted for owner escalation. Use coord:escalate to request the owner action with the issue id and supporting evidence.';
       } else if (effectiveDecision === 'gate') {
         note = 'Decision persisted. Escalate for human review before proceeding.';
       } else if (effectiveDecision === 'gym') {

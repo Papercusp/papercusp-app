@@ -37,6 +37,7 @@ import { readIdentity } from '../locks/identity';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { getOwnerDirective } from '../../owner-directives';
 import { readDeployStatus, launchDetachedDeploy, integrationRoot, type DeployStatus, type DeployStatusReadStage } from '../../release-deploy-launch';
+import type { RestrictedHoldRefusal } from '../testing/restricted-hold-fence';
 import { currentDiagnosticVintage } from '../../diagnostic-vintage';
 import { fireGitSyncNow } from '../../harness/git-sync/git-sync-action';
 import { operatorHomeHarnessSlug, canonicalHarnessSlug } from '../../harness/operator-home-harness';
@@ -627,12 +628,15 @@ export default defineTool({
         unit: launch.unit,
         logPath: launch.logPath,
         ...(launch.reason ? { reason: launch.reason } : {}),
+        ...(launch.restrictedHold ? { restricted_hold: launch.restrictedHold } : {}),
         // EI-18724155280048738: both notes name the ONE authoritative re-check. The failure note
         // no longer hedges ("likely") — a duplicate-unit refusal IS the in-flight guard firing,
         // and op:status now proves it instead of leaving the caller to guess with `ps`.
         note: launch.launched
           ? 'Green deploy started (detached). Watch /admin/git or await release:deployed / deploy-failed — this connection survives (the deploy restarts :3070, not this tool). IF THIS CALL RETURNED A TRANSPORT ERROR INSTEAD OF THIS RESULT: the deploy still launched. Do NOT re-trigger — confirm with release:deploy{op:status}, whose `deployInFlight.active` reads the systemd unit and is authoritative from the moment of launch. A `ps` check is NOT a valid discriminator: the deploy-cli process tree only becomes visible ~20s in, so an immediate `ps` false-negatives.'
-          : 'Deploy NOT launched — a deploy is already in flight (the manual lever + auto-serve share one transient unit, so one deploy runs at a time; this refusal IS that guard working, not a fault). Confirm and watch it via release:deploy{op:status} → `deployInFlight`.',
+          : launch.restrictedHold
+            ? restrictedHoldDeployNote(launch.restrictedHold)
+            : 'Deploy NOT launched — a deploy is already in flight (the manual lever + auto-serve share one transient unit, so one deploy runs at a time; this refusal IS that guard working, not a fault). Confirm and watch it via release:deploy{op:status} → `deployInFlight`.',
       });
     }
 
@@ -752,9 +756,24 @@ export default defineTool({
       acknowledgeRedTests: args.acknowledgeRedTests,
       logPath: launch.logPath,
       ...(launch.reason ? { reason: launch.reason } : {}),
+      ...(launch.restrictedHold ? { restricted_hold: launch.restrictedHold } : {}),
       note: launch.launched
         ? 'FORCE deploy started (detached) — audited + owner-notified. Watch /admin/git; the deploy reports its outcome (broadcast + pipeline event).'
-        : 'Force deploy NOT launched — likely a deploy is already in flight. Re-check release:deploy{op:status}.',
+        : launch.restrictedHold
+          ? restrictedHoldDeployNote(launch.restrictedHold)
+          : 'Force deploy NOT launched — likely a deploy is already in flight. Re-check release:deploy{op:status}.',
     });
   },
 });
+
+/**
+ * WI-10005763: launchDetachedDeploy refuses before spawning deploy-cli while a restricted session
+ * holds writes in the integration tree (D-012). That refusal must not read as the in-flight
+ * guard: the caller would wait for a deploy that was never started.
+ */
+function restrictedHoldDeployNote(hold: RestrictedHoldRefusal): string {
+  return (
+    `Deploy NOT launched: ${hold.hint}. This is the restricted-write fence (D-012), not a deploy already in flight: ` +
+    'nothing was started, and force does not bypass it. Retry once the disclosure is released.'
+  );
+}

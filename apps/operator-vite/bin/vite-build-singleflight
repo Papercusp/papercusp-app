@@ -98,7 +98,9 @@ fi
 source "$DISK_PREFLIGHT_LIB"
 
 CMD="${VITE_BUILD_CMD:-npx vite build}"
-WAIT_SECS="${VITE_BUILD_WAIT_SECS:-300}"
+# PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC: the one unattended-build lock budget
+# (EI-24961470606265468); VITE_BUILD_WAIT_SECS still wins when set.
+WAIT_SECS="${VITE_BUILD_WAIT_SECS:-${PAPERCUSP_UNATTENDED_LOCK_WAIT_SEC:-300}}"
 
 # EI-22614955223428270: the full operator graph transformed all 13,126 modules
 # and then exhausted Node's inherited ~4 GiB old-space ceiling during output

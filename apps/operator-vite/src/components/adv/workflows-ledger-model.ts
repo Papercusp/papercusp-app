@@ -101,7 +101,53 @@ export interface SourceHealth {
 }
 
 /** What the operator is being asked to do about it. Ported from the retired landing model. */
-export type NeedsYouKind = 'reconnect' | 'review-runs';
+export type NeedsYouKind = 'reconnect' | 'review-runs' | 'dispatch-paused';
+
+/**
+ * The ONE drain of every event-triggered workflow's run queue (binding-engine.ts →
+ * `dispatchPendingTriggerRuns`). While this routine is inactive, armed triggered
+ * workflows keep matching and QUEUING runs, but nothing launches them — so each row
+ * still reads "on event" while the system as a whole cannot fire. WI-10004922: on
+ * 2026-09-15 it was paused for two weeks with an armed workflow and no visible sign.
+ */
+export const TRIGGER_DISPATCH_ROUTINE = 'external-trigger-dispatch';
+
+/**
+ * The dispatcher's state from the automation catalog's routine rows, or `null` when the
+ * catalog carries no such row (not loaded / not installed). `null` is UNKNOWN and must
+ * never be rendered as "paused" — only a row that is present and inactive in every
+ * install is a pause.
+ */
+export function triggerDispatcherState(
+  routines: readonly { name: string; active: boolean }[] | null | undefined,
+): { active: boolean } | null {
+  const rows = (routines ?? []).filter((routine) => routine.name === TRIGGER_DISPATCH_ROUTINE);
+  if (rows.length === 0) return null;
+  return { active: rows.some((routine) => routine.active) };
+}
+
+/**
+ * How many workflows a dispatcher pause actually holds: those with at least one ARMED
+ * external (event) trigger. A schedule trigger never passes through
+ * `external-trigger-dispatch` (plan schedules fire on their own path), so a schedule-only
+ * workflow keeps firing during a pause. Counting it — every un-paused `triggered` ledger
+ * row, which includes schedule-only plans — raised a false "event triggers are paused"
+ * alarm over plans that were running normally.
+ *
+ * Event-driven is not enough either: the dispatcher drains only `trigger_runs`, and only a
+ * trigger BINDING creates those. A sync-triggered routine (doc-freshness-sweep,
+ * doc-steward-dispatch) also renders as an event trigger, but it fires as a call at the end
+ * of every git-sync and a dispatcher pause never holds it. WI-10004955: one seeded armed
+ * binding read "2 armed workflows" because an armed sweep was counted too. So the test is
+ * an armed trigger that carries a `bindingId`.
+ */
+export function dispatcherDependentWorkflows(items: readonly AutomationItem[]): number {
+  return items.filter((item) =>
+    item.triggers.some(
+      (trigger) => isEventTrigger(trigger) && trigger.bindingId != null && trigger.armed === true,
+    ),
+  ).length;
+}
 
 export interface NeedsYouItem {
   id: string;
@@ -391,8 +437,28 @@ function prettyKind(kind: string): string {
 export function buildNeedsYou(input: {
   sources: readonly LedgerSourceInput[];
   rows: readonly Pick<LedgerRow, 'id' | 'label' | 'needsAttention'>[];
+  /**
+   * The trigger dispatcher's state plus how many armed (un-paused) triggered workflows
+   * depend on it. Omitted or `null` state is unknown and raises nothing.
+   */
+  dispatcher?: { active: boolean; heldWorkflows: number } | null;
 }): NeedsYouItem[] {
   const items: NeedsYouItem[] = [];
+
+  // First, because it outranks every per-source problem: while the drain is off NO
+  // triggered workflow can fire, whatever the health of its connection.
+  if (input.dispatcher && !input.dispatcher.active && input.dispatcher.heldWorkflows > 0) {
+    const n = input.dispatcher.heldWorkflows;
+    items.push({
+      id: 'needs-you:trigger-dispatcher',
+      kind: 'dispatch-paused',
+      message: `Event triggers are paused: ${n} armed ${
+        n === 1 ? 'workflow is' : 'workflows are'
+      } queuing runs that will not launch until the trigger dispatcher is resumed`,
+      actionLabel: 'Ask agent',
+      severity: 'bad',
+    });
+  }
 
   for (const source of input.sources) {
     // A source with no bindings is not a problem to escalate — nothing depends on it yet.

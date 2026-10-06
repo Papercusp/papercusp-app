@@ -41,6 +41,7 @@ import { CREATIVE_LENSES, type CreativeLens, type SuIdeationLens } from './types
 import { SHADOW_VARIANT_ORIGIN, type ShadowVariantOrigin } from './shadow-variant-origin';
 import { trackDetached } from '../detached-imports';
 import type { PortfolioOutcomeCandidate } from './portfolio-frontier';
+import { recordProducerObservation, withProducerLifecycleWrite } from '../experiment/producer-lifecycle-store';
 
 /**
  * Routing-only provenance used by the agent-review lifecycle. It is deliberately
@@ -279,6 +280,7 @@ export async function recordRoutedIdea(input: RecordRoutedIdeaInput): Promise<vo
   // P-005 (D-009): the origin dimension. Default 'scout' so every existing caller (which
   // passes no origin) lands a Scout-origin row exactly as before.
   const origin = input.origin ?? 'scout';
+  await withProducerLifecycleWrite(sql, async (sql) => {
   await sql`
     INSERT INTO harness_shared.scout_routed_ideas
       (idea_id, workspace_id, harness_slug, source_hive, target_hive, cycle_id, lens, rail,
@@ -315,6 +317,10 @@ export async function recordRoutedIdea(input: RecordRoutedIdeaInput): Promise<vo
       model_spec = COALESCE(EXCLUDED.model_spec, scout_routed_ideas.model_spec),
       model_config = COALESCE(EXCLUDED.model_config, scout_routed_ideas.model_config)
     WHERE ${!input.preserveExisting}`;
+  if (origin === 'scout') {
+    await recordProducerObservation(sql, { producer: 'scout', workspaceId: ws, sourceId: input.ideaId });
+  }
+  });
   // Push the Learning tab's Scout view (learning.scout reads this ledger).
   // Fire-and-forget via a lazy import so the PG seam (+ its tests) never
   // statically depends on the SSE layer; a missing SSE bus is a no-op.
@@ -351,6 +357,7 @@ export async function propagateWorkItemOutcome(input: {
   const routedRef = `wi:${input.workItemId}`;
   const now = Date.now();
   const { sql } = getOrgPg();
+  return withProducerLifecycleWrite(sql, async (sql) => {
   const rows = await sql<{ idea_id: string }[]>`
     UPDATE harness_shared.scout_routed_ideas
        SET outcome = ${outcome},
@@ -360,7 +367,9 @@ export async function propagateWorkItemOutcome(input: {
        ${input.harnessSlug ? sql`AND harness_slug = ${input.harnessSlug}` : sql``}
        AND outcome IS DISTINCT FROM ${outcome}
     RETURNING idea_id`;
+  await recordProducerObservation(sql, { producer: 'scout', workspaceId: ws, sourceIds: rows.map((row) => row.idea_id) });
   return rows.length;
+  });
 }
 
 /**
@@ -402,6 +411,7 @@ export async function propagatePlanOutcome(input: {
   const routedRef = `plan:${input.planSlug}`;
   const now = Date.now();
   const { sql } = getOrgPg();
+  return withProducerLifecycleWrite(sql, async (sql) => {
   const rows = await sql<{ idea_id: string }[]>`
     UPDATE harness_shared.scout_routed_ideas
        SET outcome = ${outcome},
@@ -411,7 +421,9 @@ export async function propagatePlanOutcome(input: {
        AND routed_ref = ${routedRef}
        AND outcome IS DISTINCT FROM ${outcome}
     RETURNING idea_id`;
+  await recordProducerObservation(sql, { producer: 'scout', workspaceId: ws, sourceIds: rows.map((row) => row.idea_id) });
   return rows.length;
+  });
 }
 
 /** Input to {@link gradeRoutedIdea} — one grader's verdict on a routed idea (C-2). */
@@ -465,9 +477,11 @@ export async function gradeRoutedIdea(input: GradeRoutedIdeaInput): Promise<Grad
   // self-join FROM reads the PRE-update grade in the same statement (FB-15:
   // 'regrade' detection for the owner-interaction capture below) — same
   // unnarrowed idea_id predicate as before, so apply semantics are unchanged.
-  const updated = await sql<
+  const updated = await withProducerLifecycleWrite(sql, async (sql) => {
+  const rows = await sql<
     {
       idea_id: string;
+      workspace_id: string;
       lens: string;
       rail: string;
       routed_ref: string;
@@ -486,8 +500,13 @@ export async function gradeRoutedIdea(input: GradeRoutedIdeaInput): Promise<Grad
              WHERE idea_id = ${input.ideaId}) prev
      WHERE t.idea_id = prev.idea_id
        AND (${input.gradedBy} = 'owner' OR t.graded_by IS DISTINCT FROM 'owner')
-     RETURNING t.idea_id, t.lens, t.rail, t.routed_ref, t.title,
+     RETURNING t.idea_id, t.workspace_id, t.lens, t.rail, t.routed_ref, t.title,
                prev.prev_grade, prev.prev_graded_by`;
+  for (const row of rows) await recordProducerObservation(sql, {
+    producer: 'scout', workspaceId: row.workspace_id, sourceId: row.idea_id,
+  });
+  return rows;
+  });
   if (updated.length === 0) {
     const exists = await sql<{ idea_id: string }[]>`
       SELECT idea_id FROM harness_shared.scout_routed_ideas WHERE idea_id = ${input.ideaId}`;
@@ -647,6 +666,7 @@ interface PendingOutcomeCandidateRow {
   routed_ref: string;
   routed_at: string | number;
   human_grade: number | string | null;
+  outcome_checked_at: string | number | null;
 }
 
 /**
@@ -663,7 +683,7 @@ export async function readPendingOutcomeCandidates(opts: {
   const { sql } = getOrgPg();
   const limit = Math.max(1, Math.min(10_000, Math.floor(opts.limit ?? 5_000)));
   const rows = await sql<PendingOutcomeCandidateRow[]>`
-    SELECT idea_id, origin, routed_ref, routed_at, human_grade
+    SELECT idea_id, origin, routed_ref, routed_at, human_grade, outcome_checked_at
       FROM harness_shared.scout_routed_ideas
      WHERE workspace_id = ${opts.workspaceId}
        AND origin = ANY(${['scout', 'su-ideate']}::text[])
@@ -677,27 +697,49 @@ export async function readPendingOutcomeCandidates(opts: {
     routedRef: row.routed_ref,
     routedAtMs: Number(row.routed_at),
     humanGrade: row.human_grade == null ? null : Number(row.human_grade),
+    // null = never verified (the frontier staleness tier's first-check lane).
+    outcomeCheckedAtMs: row.outcome_checked_at == null ? null : Number(row.outcome_checked_at),
   }));
 }
 
 /**
- * Last-routed instant per lens (ms epoch), workspace-scoped, origin='scout' by
+ * Last successful ideator attempt or routed instant per lens (ms epoch), workspace-scoped, origin='scout' by
  * default (D-009 lens-learning isolation) and deliberately NOT harness-filtered
  * (EI-10520: the scout corpus is ONE per-workspace bucket under '@singleton').
  * Feeds the WI-5041 lens-rotation order: a budget-capped ideator roster runs
  * the STALEST lenses first, so even a 2-ideator roster spans the whole lens set
  * across cycles instead of pinning the first two — the multi-lens-routing v2
- * release bar (>=4 distinct lenses / 7d). A lens absent from the result has
- * never routed (treat as most stale).
+ * release bar (>=4 distinct lenses / 7d). EI-24926443593885283: routing alone
+ * cannot advance rotation when critics reject every idea. Reuse the existing
+ * tick's ideator slots so a successful zero-output attempt still takes its turn.
+ * Historical routes remain a fallback; failed slots and non-Scout ticks cannot
+ * make the production Scout roster look exercised.
  */
 export async function readLensRecency(opts: ScoutLedgerOpts = {}): Promise<Record<string, number>> {
   const { sql } = getOrgPg();
   const ws = opts.workspaceId ?? activeWorkspaceId();
   const rows = await sql<Array<{ lens: string; last_routed_at: string | number }>>`
-    SELECT lens, max(routed_at) AS last_routed_at
-      FROM harness_shared.scout_routed_ideas
-     WHERE workspace_id = ${ws}
-       ${originClause(sql, opts.origin)}
+    WITH lens_visits AS (
+      SELECT lens, routed_at AS visited_at
+        FROM harness_shared.scout_routed_ideas
+       WHERE workspace_id = ${ws}
+         ${originClause(sql, opts.origin)}
+      UNION ALL
+      SELECT slot->>'lens' AS lens,
+             (extract(epoch FROM t.tick_at) * 1000)::bigint AS visited_at
+        FROM harness_shared.scout_ticks t
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE WHEN jsonb_typeof(t.detail->'ideators') = 'array'
+               THEN t.detail->'ideators' ELSE '[]'::jsonb END
+        ) slot
+       WHERE t.workspace_id = ${ws}
+         AND ${opts.origin ?? 'scout'} = 'scout'
+         AND t.origin = 'scout' AND t.status = 'ran'
+         AND jsonb_typeof(slot->'lens') = 'string'
+         AND slot->>'error' IS NULL
+    )
+    SELECT lens, max(visited_at) AS last_routed_at
+      FROM lens_visits
      GROUP BY lens`;
   const out: Record<string, number> = {};
   for (const r of rows) if (r.lens) out[r.lens] = Number(r.last_routed_at) || 0;
@@ -1531,6 +1573,7 @@ export async function refreshScoutOutcomes(
     const outcomes = selectedProvenance.map((p) => classifyIdeaOutcome(p, byRef) as string);
     const now = Date.now();
     // One batched UPDATE … FROM unnest(…) — no per-row serial loop.
+    await withProducerLifecycleWrite(sql, async (sql) => {
     await sql`
       UPDATE harness_shared.scout_routed_ideas AS t
          SET outcome = d.outcome, outcome_checked_at = ${now}
@@ -1538,6 +1581,8 @@ export async function refreshScoutOutcomes(
           SELECT * FROM unnest(${ids}::text[], ${outcomes}::text[]) AS u(idea_id, outcome)
         ) AS d
        WHERE t.idea_id = d.idea_id AND t.workspace_id = ${ws}`;
+    await recordProducerObservation(sql, { producer: 'scout', workspaceId: ws, sourceIds: ids });
+    });
 
     if (opts.ideaIds) {
       const observedAt = new Date(now).toISOString();

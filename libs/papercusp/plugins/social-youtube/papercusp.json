@@ -90,8 +90,7 @@
                 "event",
                 "sourceId",
                 "externalId",
-                "dedupeKey",
-                "payload"
+                "dedupeKey"
               ],
               "properties": {
                 "key": {

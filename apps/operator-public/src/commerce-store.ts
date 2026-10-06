@@ -24,6 +24,7 @@ import type {
   WebhookInboxStore,
 } from '@papercusp/operator-core/lib/cupboard/webhook-inbox';
 import type { Organization } from '@papercusp/operator-core/lib/cupboard/commerce-accounts';
+import { witnessAfterAppend } from './ledger-chain-store.ts';
 
 /** The `WebhookInboxStore` the pure `ingestWebhook` asks for, backed by D1.
  *  Idempotency is enforced by the table's UNIQUE(provider, provider_event_id). */
@@ -96,6 +97,7 @@ export async function appendLedgerEvents(db: D1Database, events: readonly Ledger
       )
       .run();
   }
+  if (events.length > 0) await witnessAfterAppend(db, 'commerce.ledger', Date.now());
 }
 
 export async function loadLedgerEvents(db: D1Database): Promise<LedgerEvent[]> {

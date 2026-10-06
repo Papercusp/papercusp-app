@@ -479,6 +479,14 @@ if [ -n "$physical_probe_cmd" ]; then
     physical_run_dir="$physical_runs_dir/$(date -u +%Y%m%dT%H%M%SZ)-$$-rc$physical_probe_rc"
     if mkdir -p "$physical_run_dir" 2>/dev/null; then
       cp -p "$WORK/physical-probe.stdout" "$WORK/physical-probe.stderr" "$physical_run_dir/" 2>/dev/null || true
+      # A failed probe banks a sanitized, size-capped bundle of the failing phase's
+      # files beside the evidence file, i.e. inside $WORK, which the next drill wipes.
+      # Archive it with the adapter output, or a failed run's phase files are lost
+      # (WI-10004228: same-box runs kept only stdout/stderr).
+      if [ -n "${physical_evidence_file:-}" ] && [ -d "$physical_evidence_file.failure-diagnostics" ]; then
+        cp -pR "$physical_evidence_file.failure-diagnostics" "$physical_run_dir/failure-diagnostics" \
+          || echo "    ⚠ could not archive $physical_evidence_file.failure-diagnostics into $physical_run_dir"
+      fi
       # Bound disk: keep the newest 30 runs.
       ls -1dt "$physical_runs_dir"/*/ 2>/dev/null | tail -n +31 | xargs -r rm -rf --
     else

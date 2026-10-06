@@ -11,6 +11,7 @@
 
 import { withHostedServiceContext, withTenantContext } from '@papercusp/db-org/tenant-context';
 import { Hono } from 'hono';
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
 import { createHostedIdentityBinder } from '../auth/hosted-identity-binding';
 import { PostgresHostedSelfSignupAdmission } from '../auth/hosted/self-signup';
 import {
@@ -34,6 +35,16 @@ import {
   HOSTED_AUTH_ROUTES,
   createHostedAuthRoutes,
 } from './routes/hosted-auth';
+
+// The billing runtime rides in this module's portal prebundle (one bundle, one
+// dynamic import). It mounts its own pinned surface; the four auth routes below
+// stay exactly as pinned (stripe-subscription-signup-2026-10-01 P-005).
+export {
+  createHostedBillingRuntime,
+  readHostedBillingRuntimeConfiguration,
+  type HostedBillingRuntime,
+  type HostedBillingRuntimeDependencies,
+} from './hosted-billing-runtime';
 
 export const HOSTED_AUTH_RUNTIME_MOUNTED_ROUTE_KEYS = HOSTED_AUTH_ROUTES.map(
   (route) => `${route.method} ${route.path}`,
@@ -140,7 +151,20 @@ function createHostedAuthApp(
         if (!resolution.ok) return denial(resolution.reason);
         const required = typeof route.auth === 'object' ? route.auth.capabilities ?? [] : [];
         if (required.some((permission) => !resolution.principal.capabilities.has(permission as never))) {
-          return Response.json({ error: { code: 'forbidden', message: 'permission_missing' } }, { status: 403 });
+          return Response.json({
+            error: {
+              code: 'forbidden',
+              message: 'permission_missing',
+              refusal: {
+                observed: { route: `${route.method} ${route.path}`, required: required.join(',') },
+                liftsWhen:
+                  'the session principal holds every capability the route requires (a hosted-membership role ' +
+                  'change by the organization owner/admin; the session then re-resolves on its next request). ' +
+                  'Retrying the same session without the capability changes nothing',
+                whoCanMakeItTrue: ['owner'],
+              } satisfies RefusalContract,
+            },
+          }, { status: 403 });
         }
         principal = resolution.principal;
       }

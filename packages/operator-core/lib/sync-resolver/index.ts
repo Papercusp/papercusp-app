@@ -46,6 +46,7 @@
 
 import { z } from 'zod';
 import { createResolver, type QueryRegistry } from '@papercusp/sync/server';
+import { projectChatFailureTranscript } from '../chat-model-failure';
 // Flat-row sync reads carry page metadata (e.g. the true total) on row[0]._meta;
 // attachListMeta is the one place that convention lives. See ./list-meta.
 import { attachListMeta } from './list-meta';
@@ -61,6 +62,7 @@ import {
   buildWorkItemsPredicate,
   normalizeWorkItemsListArgs,
   readWorkItemsPageFromStore,
+  readWorkItemPresentations,
   readWorkItemsSummaryFromStore,
   workItemsSummarySelection,
   type WorkItemsListWireArgs,
@@ -115,10 +117,8 @@ import {
 import {
   LEARNING_OBSERVATIONS_PAGE_LIMIT,
   buildLearningObservationsPredicate,
-  isDefaultLearningObservationsPage,
   learningObservationsSummarySelection,
   normalizeLearningObservationsArgs,
-  pageLearningObservationsSnapshot,
   readLearningObservationsPageFromStore,
   readLearningObservationsSummaryFromStore,
   type LearningObservationRow,
@@ -257,6 +257,7 @@ const designFeaturesListArgsSchema = z.object({
 });
 
 const learningObservationsFiltersSchema = z.object({
+  triageStates: z.array(z.enum(['awaiting', 'handled'])).max(2).optional(),
   scopes: z.array(z.string().max(300)).max(500).optional(),
   sourceRoles: z.array(z.string().max(160)).max(200).optional(),
   confidences: z.array(z.string().max(80)).max(100).optional(),
@@ -796,6 +797,25 @@ async function resolveHiveMemberSlugs(potHomeSlug: string, workspaceId?: string)
  * is a silent correctness bug: the badge would count a different corpus than
  * the rows it sits above.
  */
+/**
+ * WI-10005548 / D-006: a memory a restricted agent wrote to a shared pool is stored
+ * as a sealed stub. The Learning views are the owner's, and the owner is always a
+ * permitted reader, so they show the text. This runs on the SOURCE rows, before
+ * retainMemoryTitle clamps a title to 200 chars: a stub is longer, so a clamped
+ * title would lose the ref it is opened by.
+ */
+async function unsealMemoriesForOwner<T extends { text: string }>(
+  workspaceId: string | null | undefined,
+  rows: readonly T[],
+): Promise<T[]> {
+  const { unsealRowsForOwner } = await import('../personal-vault/shared-store-seal');
+  return unsealRowsForOwner(rows, {
+    workspaceId,
+    textOf: (row) => row.text,
+    withText: (row, text) => ({ ...row, text }),
+  });
+}
+
 async function retainStoreDeps(
   sql: import('postgres').Sql,
   workspaceId: string,
@@ -821,7 +841,7 @@ async function retainStoreDeps(
     if (!avail.ok) throw new Error(avail.reason);
     const scopes = await resolveMemoryScopes();
     if (scopes.length === 0) return [];
-    return backend.list({ scope: scopes.length === 1 ? scopes[0]! : scopes });
+    return unsealMemoriesForOwner(workspaceId, await backend.list({ scope: scopes.length === 1 ? scopes[0]! : scopes }));
   };
 
   return {
@@ -835,7 +855,10 @@ async function retainStoreDeps(
       ? {
           listMemoriesPage: async (opts) => {
             const { listCanonicalRetainMemoriesPage } = await import('./learning-retain-read');
-            return listCanonicalRetainMemoriesPage(sql, await resolveMemoryScopes(), opts);
+            return unsealMemoriesForOwner(
+              workspaceId,
+              await listCanonicalRetainMemoriesPage(sql, await resolveMemoryScopes(), opts),
+            );
           },
           countMemories: async () => {
             const { countCanonicalRetainMemories } = await import('./learning-retain-read');
@@ -1063,16 +1086,12 @@ const learningObservationsQueryPair = createCompanionListQueryPair({
   domain: 'learning.observations',
   rowsQueryName: 'learning.observations',
   argsSchema: learningObservationsArgsSchema,
-  backingTables: ['harness_shared.work_items'] as const,
+  backingTables: ['harness_shared.work_items', 'harness_shared.work_item_occurrences'] as const,
   normalizeArgs: (args: LearningObservationsWireArgs) => normalizeLearningObservationsArgs(args),
   buildPredicate: buildLearningObservationsPredicate,
-  readPage: async ({ args, predicate }) => {
-    if (isDefaultLearningObservationsPage(args)) {
-      const { readDerivedSnapshotRows } = await import('../derived-reads/registry');
-      await import('../derived-reads/producers');
-      const snapshot = await readDerivedSnapshotRows('learning.observations');
-      return pageLearningObservationsSnapshot(snapshot as LearningObservationRow[], predicate);
-    }
+  // Intake receipts and new occurrences must agree with the companion summary.
+  // The retained-stock snapshot does not carry that live partition.
+  readPage: async ({ predicate }) => {
     const [{ getOrgPg }, { activeWorkspaceId }, { resolveIssuesScopeWorkspace }] = await Promise.all([
       import('@papercusp/db-org'),
       import('../workspace-registry'),
@@ -1118,6 +1137,24 @@ const retainFeedArgsSchema = z
   .optional();
 
 const REGISTRY: Record<string, QueryEntry<unknown>> = {
+  'harnessPrs.byHarness': {
+    backingTables: ['harness_shared.pr_review_reports', 'harness_shared.pr_check_status_cache', 'harness_shared.harness_feature_prs', 'harness_shared.routines'],
+    argsSchema: z.object({ harnessSlug: z.string().trim().min(1), scope: z.enum(['harness', 'hive']).optional() }),
+    resolve: async (raw) => {
+      const { harnessSlug, scope } = raw as { harnessSlug: string; scope?: 'harness' | 'hive' };
+      const { readPrsPayload } = await import('../endpoint-route/routes/harness/prs');
+      return [await readPrsPayload(harnessSlug, scope)];
+    },
+  },
+  'harnessPrs.detail': {
+    backingTables: ['harness_shared.pr_review_reports', 'harness_shared.pr_check_status_cache', 'harness_shared.routines', 'harness_shared.pr_reviewer_settings', 'harness_shared.shared_repo_binding_cache'],
+    argsSchema: z.object({ harnessSlug: z.string().trim().min(1), number: z.number().int().positive() }),
+    resolve: async (raw) => {
+      const { harnessSlug, number } = raw as { harnessSlug: string; number: number };
+      const { livePrViewerDeps, readPrViewerDetails } = await import('../pr-host/pr-viewer');
+      return [await readPrViewerDetails(number, await livePrViewerDeps(harnessSlug))];
+    },
+  },
   // identities.surface — P-011's one bounded, flat-row settings read over the
   // existing identity source catalog, launch receipt, control activation, and
   // append-only transition ledger. Provider bindings remain an explicit M3 state.
@@ -1480,6 +1517,23 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
         },
       ),
     ],
+  },
+  // The human-facing sync adapter for reports:get: reuse its exact-ID store
+  // lookup and full wire projection. Never resolve a pin through its lineage.
+  'reports.get': {
+    backingTables: ['harness_shared.report_library'],
+    argsSchema: z.object({ reportId: z.string().min(1).max(400) }).strict(),
+    resolve: async (args) => {
+      const [{ getOrgPg }, { activeWorkspaceId }, { getReport }, { toReportFull }] = await Promise.all([
+        import('@papercusp/db-org'), import('../workspace-registry'),
+        import('../report-library'), import('../agent-tools/reports/_shared'),
+      ]);
+      // Sync routes are operator UI reads; the workspace comes from the bound
+      // server context, while owner visibility belongs to the human UI viewer.
+      const report = await getReport(getOrgPg().sql, activeWorkspaceId(),
+        (args as { reportId: string }).reportId, { isOwner: true });
+      return report ? [toReportFull(report)] : [];
+    },
   },
   'goals.detail': {
     backingTables: [
@@ -1926,6 +1980,70 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
       const { progressId } = args as { progressId: string };
       const { getFromRepoProgress } = await import('../harness/from-repo-progress');
       return getFromRepoProgress(progressId) as unknown[];
+    },
+  },
+
+  // ── potIntegration.createQuestion — P-018 (pot-review-integration-mode-2026-10-05) ──
+  // The new-pot form's "Where should the agents' work go?" question for a pasted
+  // GitHub URL, with the recommendation (and lock) derived from the repo's
+  // checkable facts and the workspace default (PotControlPolicy.newPotIntegrationMode).
+  // One row. NOT table-backed (a GitHub read): the create step re-probes and is
+  // authoritative, so a stale row can only mislabel a badge, never bypass a lock.
+  // An unparseable URL or any failure degrades to [] — the form keeps its
+  // fact-free question.
+  'potIntegration.createQuestion': {
+    argsSchema: z.object({ githubUrl: z.string().min(1).max(500) }),
+    // The only Postgres input is the workspace default (PotControlPolicy); a policy write
+    // re-asks every open form. The GitHub facts are re-probed by the create step.
+    backingTables: ['harness_shared.operator_pot_control_policy'],
+    resolve: async (args) => {
+      const { githubUrl } = args as { githubUrl: string };
+      try {
+        const { parseGithubUrl } = await import('../harness/clone-github');
+        const parsed = parseGithubUrl(githubUrl);
+        if (!parsed) return [];
+        const [{ fetchRepoIntegrationFacts }, { recommendIntegrationMode }, { integrationModeQuestion }, policy] =
+          await Promise.all([
+            import('../harness/github-repo-permissions'),
+            import('../harness/git-sync/integration-mode-recommendation'),
+            import('../harness/git-sync/integration-mode-question'),
+            import('../pot-control-policy'),
+          ]);
+        const repoLabel = `${parsed.owner}/${parsed.repo}`;
+        const defaultMode = policy.resolveNewPotIntegrationModeDefault(policy.placementOverride());
+        const facts = await fetchRepoIntegrationFacts(parsed.owner, parsed.repo);
+        const recommendation = recommendIntegrationMode(facts, { repoLabel, policyDefault: defaultMode });
+        return [{ githubUrl, ...integrationModeQuestion({ repoLabel, recommendation, defaultMode }) }];
+      } catch (err) {
+        console.warn('[potIntegration.createQuestion] read failed:', err instanceof Error ? err.message : err);
+        return [];
+      }
+    },
+  },
+
+  // ── potIntegration.settings — P-017 settings section, live (EI-25188362216785598) ──
+  // The pot-settings form of "Where should the agents' work go?" for one harness slug:
+  // the question (with option availability) and the pot's current answer. The same
+  // read GET /harness/:slug/integration-mode serves (readIntegrationModeSettings), so
+  // the two cannot disagree. One row; `isPot:false` for a project that is not a pot
+  // (the section hides). Pushed by the PUT after a switch, and by any pot_settings
+  // write (a federated switch from a peer). A failed read degrades to [].
+  'potIntegration.settings': {
+    argsSchema: z.object({ slug: z.string().min(1).max(200) }),
+    backingTables: ['harness_shared.pot_settings'],
+    resolve: async (args) => {
+      const { slug } = args as { slug: string };
+      try {
+        const { readIntegrationModeSettings, defaultIntegrationModeSettingsDeps } = await import(
+          '../harness/git-sync/integration-mode-settings'
+        );
+        const r = await readIntegrationModeSettings(defaultIntegrationModeSettingsDeps, slug);
+        if (r.kind !== 'pot') return [{ slug, isPot: false }];
+        return [{ slug, isPot: true, question: r.question, current: r.current, workingCopyUrl: r.workingCopyUrl }];
+      } catch (err) {
+        console.warn('[potIntegration.settings] read failed:', err instanceof Error ? err.message : err);
+        return [];
+      }
     },
   },
 
@@ -2939,7 +3057,12 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
       const { harnessSlug, id } = args as { harnessSlug: string; id: string };
       const { getEnrichedWorkItem } = await import('../endpoint-route/routes/harness/work-items');
       const item = await getEnrichedWorkItem(harnessSlug, id);
-      return item ? [item] : [];
+      if (!item) return [];
+      const [{ getOrgPg }, { activeWorkspaceId }] = await Promise.all([
+        import('@papercusp/db-org'), import('../workspace-registry'),
+      ]);
+      const presentations = await readWorkItemPresentations(getOrgPg().sql, activeWorkspaceId(), [{ id, harnessSlug }]);
+      return [{ ...item, presentation: presentations.get(`${harnessSlug}#${id}`) }];
     },
   },
 
@@ -4109,14 +4232,24 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
   'plans.cleanupRun': {
     backingTables: ['harness_shared.attention_bulk_runs', 'harness_shared.plan_cleanup_run_findings'],
     resolve: async (args) => {
-      const [{ classifyRunLiveness, getRun, getLatestRun }, { getRunFindings }] = await Promise.all([
-        import('../attention/bulk-run-store'),
-        import('../plan-cleanup/run-store'),
-      ]);
+      const [{ classifyRunLiveness, getRun, getLatestRun, getActiveRun }, { getRunFindings }, { selectPlanCleanupPaneRun }] =
+        await Promise.all([
+          import('../attention/bulk-run-store'),
+          import('../plan-cleanup/run-store'),
+          import('../plan-cleanup/pane-run'),
+        ]);
       const runId =
         typeof (args as { runId?: unknown })?.runId === 'string' ? String((args as { runId: string }).runId) : null;
       try {
-        const run = runId ? await getRun(runId) : await getLatestRun(undefined, 'plan-cleanup');
+        // No deep link: an open run (pending/running/review) outranks a newer
+        // terminal one, so a failed run can't hide owner-waiting review work
+        // (WI-10004730).
+        const run = runId
+          ? await getRun(runId)
+          : await selectPlanCleanupPaneRun({
+              getActive: () => getActiveRun(undefined, 'plan-cleanup'),
+              getLatest: () => getLatestRun(undefined, 'plan-cleanup'),
+            });
         if (!run || run.runKind !== 'plan-cleanup') return [{ run: null, findings: [] }];
         return [
           {
@@ -5520,7 +5653,10 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
           const avail = await backend.available();
           if (!avail.ok) throw new Error(avail.reason);
           const entry = await backend.get(id);
-          return entry ? (entry as typeof entry & { scope?: string }) : null;
+          if (!entry) return null;
+          const { activeWorkspaceId } = await import('../workspace-registry');
+          const [owned] = await unsealMemoriesForOwner(activeWorkspaceId(), [entry]);
+          return owned as typeof entry & { scope?: string };
         },
       });
       return detail ? [detail] : [];
@@ -6090,7 +6226,8 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
   // `remoteAccess.overview` — Settings → Remote access (external-app-access P-010, D-025): ONE row
   // with the workspace's switch, every live phone / app key / service key of the workspace (with
   // creator, last use and state, R-26 / D-007), and the install's own-tunnel route + health
-  // (P-009). The screen's writes (routes/remote-access, /connected-apps/rotate) invalidate it.
+  // (P-009) and Papercusp relay state (P-008). The screen's writes (routes/remote-access,
+  // /connected-apps/rotate) and the relay's reconciler invalidate it.
   'remoteAccess.overview': {
     backingTables: ['harness_shared.connected_apps', 'harness_shared.connected_app_access_settings'],
     argsSchema: z.object({ workspaceId: z.string().trim().min(1).max(200).default('default') }),
@@ -6106,7 +6243,17 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
       } catch (err) {
         ownTunnelError = err instanceof Error ? err.message : String(err);
       }
-      return [{ workspaceId, remoteAccess, entries, ownTunnel, ownTunnelError }];
+      // P-008 (D-031): the opt-in Papercusp relay, the install's other route. The reconciler that
+      // runs the connector invalidates this query on every change (relay-opt-in.ts notifyChanged).
+      let portalRelay: unknown = null;
+      let portalRelayError: string | null = null;
+      try {
+        const { portalRelayStatus } = await import('../remote-access/relay-opt-in');
+        portalRelay = await portalRelayStatus();
+      } catch (err) {
+        portalRelayError = err instanceof Error ? err.message : String(err);
+      }
+      return [{ workspaceId, remoteAccess, entries, ownTunnel, ownTunnelError, portalRelay, portalRelayError }];
     },
   },
 
@@ -6764,7 +6911,8 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
           const backend = getMemoryBackend();
           const avail = await backend.available();
           if (!avail.ok) throw new Error(avail.reason);
-          return backend.list({ scope });
+          const { activeWorkspaceId } = await import('../workspace-registry');
+          return unsealMemoriesForOwner(activeWorkspaceId(), await backend.list({ scope }));
         },
         loadPack: (id) => loadKnowledgePack(id),
         listPotSlugs: async () => {
@@ -7438,11 +7586,15 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
       const { and, eq } = await import('drizzle-orm');
       const t = generated.agentChatsConsolidatedInHarnessShared;
       const { db } = getOrgPg();
-      return db
+      const rows = await db
         .select()
         .from(t)
         .where(workspaceId ? and(eq(t.id, id), eq(t.workspaceId, workspaceId)) : eq(t.id, id))
-        .limit(1) as unknown as Promise<unknown[]>;
+        .limit(1);
+      return rows.map((row) => ({
+        ...row,
+        transcript: projectChatFailureTranscript(row.transcript),
+      })) as unknown[];
     },
   },
 
@@ -7704,7 +7856,18 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
         ...post,
         id: typeof post.id === 'bigint' ? Number(post.id) : post.id,
       }));
-      return [{ thread: thread[0], posts: safePosts }];
+      // WI-10005548 / D-006: a post a restricted agent wrote is stored as a sealed
+      // stub; the owner is always a permitted reader, so this view shows the text.
+      const [{ unsealRowsForOwner }, { activeWorkspaceId }] = await Promise.all([
+        import('../personal-vault/shared-store-seal'),
+        import('../workspace-registry'),
+      ]);
+      const ownerPosts = await unsealRowsForOwner(safePosts, {
+        workspaceId: activeWorkspaceId(),
+        textOf: (post) => (post as { body?: unknown }).body,
+        withText: (post, body) => ({ ...post, body }),
+      });
+      return [{ thread: thread[0], posts: ownerPosts }];
     },
   },
   'conversations.agentChatList': {
@@ -7754,7 +7917,10 @@ const REGISTRY: Record<string, QueryEntry<unknown>> = {
           FROM harness_shared.agent_chats_consolidated
          WHERE id = ${id}
          LIMIT 1`;
-      return rows;
+      return rows.map((row) => ({
+        ...row,
+        transcript: projectChatFailureTranscript(row.transcript),
+      }));
     },
   },
   // P-029 / cockpit D-004: the ONE typed conversation/context projection.

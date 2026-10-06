@@ -93,6 +93,8 @@ export interface PortableSessionPort {
      * identity: changing the file behind a stable path must create a new logical
      * request, while moving byte-identical context must not. */
     launchContextHash: string;
+    /** Explicit distinct answer identity. Omitted for source continuation. */
+    ownerId?: string;
   };
   fidelity: 'full' | 'summary-tail';
   versions: {

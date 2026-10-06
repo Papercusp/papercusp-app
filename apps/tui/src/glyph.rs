@@ -211,7 +211,7 @@ pub fn terminal_safe_text(s: &str) -> String {
             }
             '\t' => {
                 let pad = TAB_STOP - col % TAB_STOP;
-                out.extend(std::iter::repeat(' ').take(pad));
+                out.extend(std::iter::repeat_n(' ', pad));
                 col += pad;
             }
             '\u{1b}' => match chars.peek() {

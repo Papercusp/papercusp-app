@@ -64,6 +64,7 @@ import {
 } from '../../adv-sessions';
 import { deactivateLoop } from '../../harness/routines/loop';
 import { resolveSessionStates } from '../coordination/liveness-oracle';
+import type { RefusalContract } from '../../capability-envelope/identity-refusal-contract';
 import type { SessionState } from '../coordination/presence-wakeability';
 
 /** Console-marker substring stamped into every fleet/desktop launch command
@@ -165,6 +166,8 @@ export interface KillOneResult {
   processes_aborted?: number;
   code?: 'self_kill_refused' | 'not_found' | 'live_unmanaged' | 'cleanup_failed';
   error?: string;
+  /** WI-10005197: what would LIFT a refusal. Present on `self_kill_refused` (the authority refusal). */
+  refusal?: RefusalContract;
 }
 
 const defaultReadProc = (pid: number): ProcInfo | null => {
@@ -317,6 +320,14 @@ export async function killOne(input: KillOneInput, deps: KillDeps): Promise<Kill
       target: input.target,
       code: 'self_kill_refused',
       error: 'refusing to kill your own session — end your turn / loop:end instead',
+      refusal: {
+        observed: { target: input.target, actor: input.actor },
+        liftsWhen:
+          'the target is a session other than the caller (target !== actor). To stop yourself, end your turn or call ' +
+          'loop:end (an armed loop is what keeps a session waking) — fleet:kill cannot tear down the session that is ' +
+          'issuing it; another agent or the owner can kill this session if it must be force-stopped',
+        whoCanMakeItTrue: ['another-agent', 'owner'],
+      },
     };
   }
 

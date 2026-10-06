@@ -22,6 +22,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { parseReportBlock, type ReportBlock } from '@papercusp/chat-protocol';
+import type { CoordEnvelope } from '@papercusp/coordination';
 import {
   resolveAgentIdentity,
   deriveFleetMembership,
@@ -102,7 +103,7 @@ import { resolveWorkspaceHiveScope, resolveSharedHiveDisambiguation } from '../f
 import { COORD_REPLY_ROLES } from '../roles';
 import { forceEndTurn } from '../../turn/interrupt';
 import { runBulk, bulkContent, type BulkEnvelope, type BulkItemResult } from '../../_bulk';
-import { cellTranscriptionHint } from '../../../cell-transcription-detector';
+import { cellTranscriptionHintResolvingCommits } from '../../../git-commit-resolver';
 import {
   messageBodyArg,
   PREMISES_REF_OBJECT_REENCODING,
@@ -137,10 +138,17 @@ import { chunkOverCapMessage, type ChunkPartMeta } from './send-chunking';
 import { withDbCallDeadline, DEFAULT_DB_CALL_DEADLINE_MS } from '@papercusp/db-org';
 import {
   GOAL_OWNER_REPORT_FIELD,
+  GOAL_OWNER_REPORT_FIELDS,
+  GOAL_OWNER_REPORT_HEADING_LIST,
+  GOAL_OWNER_REPORT_HEADINGS,
+  describeGoalOwnerReportTruthViolations,
   parseGoalOwnerReport,
   stampGoalOwnerReport,
+  type GoalOwnerReportField,
+  type GoalOwnerReportParseResult,
   type GoalOwnerReportStamp,
 } from '../../../goal-owner-report';
+import type { GoalOwnerReportTruthVerdict } from '../../../goal-owner-report-truth';
 
 /** Settle window between an endTurn ESC and the following wake (coord-end-turn D-003): lets each recipient's
  *  CLI finish ending the dead turn + re-arm its `coord:inbox-wake:<owner>` watch before the wake fires, so
@@ -349,9 +357,9 @@ function readClaimKind(value: unknown): string | null {
 /**
  * Whether `address` is the same owner-id alias that the live recipient
  * resolver accepts for `ownerId`. This matters when a reply closes a thread
- * after the original sender's session has ended: the dead owner is no longer
- * in the roster, so the normal resolver cannot expand a copied short handle
- * or prefix. The related message is the proof of which owner the alias names;
+ * after the original sender has ended, or when the sender's short handle is
+ * ambiguous among live owners. The related message proves which owner the alias
+ * names;
  * keep this matcher exactly aligned with resolveRecipientsAgainst's
  * exact/prefix/substring rules.
  */
@@ -717,6 +725,7 @@ const expectEffectArg = z
 const reportArg = z
   .object({
     title: z.string().optional(),
+    goalReport: z.object({ schemaVersion: z.literal(1), goalId: z.string(), reportId: z.string(), bodySha256: z.string() }).optional(),
     plans: z.array(
       z.object({
         slug: z.string().optional(),
@@ -840,6 +849,213 @@ export const itemSpec = z.object({
  * A recipient-resolve miss is this message's { ok:false } (it does NOT throw), so
  * one bad address never fails the other messages in the batch.
  */
+/**
+ * The GOAL owner-report verdict for ONE logical message (P-006 / A-05).
+ *
+ * `skip` marks a chunk CONTINUATION: the report was judged (and stamped) on the
+ * whole message, and the stamp rides the final part only.
+ */
+export type GoalOwnerReportVerdict =
+  | { kind: 'none' }
+  | { kind: 'skip' }
+  | { kind: 'warning'; warning: string }
+  | {
+      kind: 'not-stamped';
+      diagnostic: {
+        status: 'not-stamped';
+        goalId: string;
+        reason: 'not-attempted';
+        missing: GoalOwnerReportField[];
+        bodyAuthoredChars?: number;
+        bodyDeliveryCap: number;
+        message: string;
+      };
+    }
+  | { kind: 'stamped'; stamp: GoalOwnerReportStamp }
+  | { kind: 'reference'; stamp: GoalOwnerReportStamp; body: string; summary: string;
+      persistEnvelope: (envelope: CoordEnvelope) => Promise<CoordEnvelope> }
+  | { kind: 'refused'; result: BulkItemResult };
+
+function hasAllGoalOwnerReportLabels(body: SendMsg['body']): boolean {
+  const text = sectionsToText(toSections(body));
+  return GOAL_OWNER_REPORT_FIELDS.every((field) => {
+    const label = GOAL_OWNER_REPORT_HEADINGS[field].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${label}\\b`, 'i').test(text);
+  });
+}
+
+/**
+ * Judge a message against the GOAL owner-report contract.
+ *
+ * EI-23793424529287793: must be called with the WHOLE authored message. It used
+ * to run only inside sendOne, i.e. AFTER send-chunking had split an over-cap
+ * report into inbox-sized parts, so each part was judged alone: a part carrying
+ * only MOVED was refused for missing COST / OWNER-WALLED / KILLED while its
+ * siblings were delivered, and the owner received orphan fragments of a report
+ * that was complete as authored (and an incomplete one was half-delivered
+ * instead of refused). The handler now calls this once per original message and
+ * threads the verdict to every part, so a report is delivered whole or not at all.
+ */
+export async function evaluateGoalOwnerReport(
+  msg: Pick<SendMsg, 'to' | 'body' | 'report'>,
+  identity: Pick<AgentIdentity, 'workspaceId' | 'ownerId'>,
+): Promise<GoalOwnerReportVerdict> {
+  if (msg.report && typeof msg.report === 'object' && 'goalReport' in msg.report) {
+    const block = parseReportBlock(msg.report);
+    if (!block?.goalReport) return { kind: 'refused', result: { ok: false, to: msg.to, error: 'report_invalid', oracle: 'goal-reference-shape' } };
+    if (msg.to.length !== 1 || msg.to[0] !== 'human') return { kind: 'refused', result: { ok: false, to: msg.to, error: 'report_reference_unavailable', oracle: 'owner-recipient' } };
+    try {
+      const { getModeSubject } = await import('../../../modes/store');
+      const goalId = await getModeSubject(identity.workspaceId!, identity.ownerId, 'goal');
+      if (!goalId || !identity.workspaceId || identity.workspaceId === '*') return { kind: 'refused', result: { ok: false, to: msg.to, error: 'goal-owner-report-untruthful', oracle: 'current-goal-subject' } };
+      const { coordSql } = await import('../log');
+      const bridge = await import('../../../goal-owner-report-reference');
+      const sql = coordSql();
+      const context = { workspaceId: identity.workspaceId, goalId, ref: block.goalReport, viewer: { ownerId: identity.ownerId } };
+      const report = await bridge.resolveGoalReportReference(sql, context.workspaceId, goalId, context.ref, context.viewer);
+      await bridge.validateGoalReportReferenceSnapshot(report.goalOwnerReport!, bridge.makeGoalReportReferenceReads(sql, context.workspaceId, goalId), Date.now());
+      const body = bridge.deriveGoalReportNotification(report.goalOwnerReport!);
+      return { kind: 'reference', body, summary: report.title, stamp: stampGoalOwnerReport(goalId, parseGoalOwnerReport(body)),
+        persistEnvelope: (envelope) => bridge.persistGoalReportReference(sql, envelope, context) };
+    } catch (error) {
+      const failure = error as { code?: string; oracle?: string; message?: string };
+      return { kind: 'refused', result: { ok: false, to: msg.to, error: failure.code ?? 'goal-owner-report-untruthful', oracle: failure.oracle ?? 'current-source-read', message: failure.message } };
+    }
+  }
+  if (!msg.to.includes('human')) return { kind: 'none' };
+  const parsed = parseGoalOwnerReport(msg.body);
+  // A complete set of labels in the body that is not parseable as headings is
+  // still report-like. Resolve the active goal for this narrow case so the
+  // sender gets an explicit not-stamped result instead of a silent kind:none.
+  // Ordinary owner-facing prose stays on the cheap path without a mode-store read.
+  const unrecognizedReportShape = !parsed.attempted && hasAllGoalOwnerReportLabels(msg.body);
+  if (!parsed.attempted && !unrecognizedReportShape) return { kind: 'none' };
+  let goalId: string | null = null;
+  if (!identity.workspaceId || identity.workspaceId === '*') {
+    return {
+      kind: 'warning',
+      warning:
+        'GOAL owner-report validation was unavailable because this sender has no concrete workspace; the message was delivered but does not carry canonical report evidence.',
+    };
+  }
+  try {
+    const { getModeSubject } = await import('../../../modes/store');
+    goalId = await getModeSubject(identity.workspaceId, identity.ownerId, 'goal');
+  } catch (error) {
+    return {
+      kind: 'warning',
+      warning:
+        'GOAL owner-report validation was unavailable at send time; the message was delivered without canonical report evidence. ' +
+        `Retry after the active GOAL subject is readable (${error instanceof Error ? error.message : String(error)}).`,
+    };
+  }
+  // No active GOAL row means this is ordinary owner-facing prose, even if
+  // its headings resemble the GOAL contract. Do not manufacture authority.
+  if (!goalId) return { kind: 'none' };
+  const authoredBodyChars = bodyTextLength(msg.body);
+  const overCap = authoredBodyChars !== null && authoredBodyChars > DEFAULT_INBOX_BODY_CAP;
+  if (unrecognizedReportShape) {
+    const multipartNote = overCap && authoredBodyChars !== null
+      ? ` The ${authoredBodyChars}-character body exceeded the ${DEFAULT_INBOX_BODY_CAP}-character cap and was delivered in parts; multipart sends cannot reset the report cadence.`
+      : '';
+    return {
+      kind: 'not-stamped',
+      diagnostic: {
+        status: 'not-stamped',
+        goalId,
+        reason: 'not-attempted',
+        missing: [...GOAL_OWNER_REPORT_FIELDS],
+        ...(authoredBodyChars !== null ? { bodyAuthoredChars: authoredBodyChars } : {}),
+        bodyDeliveryCap: DEFAULT_INBOX_BODY_CAP,
+        message:
+          `GOAL owner report for ${goalId} was delivered but not stamped: no report headings were recognized at the start of a body line or section. Use exactly one non-empty section headed ${GOAL_OWNER_REPORT_FIELDS.map((field) => GOAL_OWNER_REPORT_HEADINGS[field]).join(', ')}; this send will not reset the report cadence.` +
+          multipartNote,
+      },
+    };
+  }
+  const overCapNote = overCap
+    ? ` The body has ${authoredBodyChars} characters, above the ${DEFAULT_INBOX_BODY_CAP}-character inbox cap. ` +
+      'A GOAL owner report must fit in one message so the whole report is delivered as a unit. Nothing was sent; shorten it and retry.'
+    : '';
+  if (!parsed.complete) {
+    return {
+      kind: 'refused',
+      result: {
+        ok: false,
+        to: msg.to,
+        error: 'goal-owner-report-incomplete',
+        goalId,
+        missing: parsed.missing,
+        empty: parsed.empty,
+        duplicate: parsed.duplicate,
+        ...(overCap && authoredBodyChars !== null
+          ? { bodyAuthoredChars: authoredBodyChars, bodyDeliveryCap: DEFAULT_INBOX_BODY_CAP }
+          : {}),
+        message:
+          `GOAL owner report for ${goalId} is incomplete; nothing was sent. ` +
+          `Provide exactly one non-empty body section headed each of ${GOAL_OWNER_REPORT_HEADING_LIST}. ` +
+          'Use explicit `none` or `unknown (<source/provenance>)` when that is the factual value. ' +
+          'NEXT WAKE names what will wake you next and roughly when (loop interval, awaited event, or owner reply). ' +
+          `Missing: ${parsed.missing.join(', ') || 'none'}; empty: ${parsed.empty.join(', ') || 'none'}; ` +
+          `duplicate: ${parsed.duplicate.join(', ') || 'none'}.` +
+          overCapNote,
+      },
+    };
+  }
+  if (overCap && authoredBodyChars !== null) {
+    return {
+      kind: 'refused',
+      result: {
+        ok: false,
+        to: msg.to,
+        error: 'goal-owner-report-over-cap',
+        goalId,
+        bodyAuthoredChars: authoredBodyChars,
+        bodyDeliveryCap: DEFAULT_INBOX_BODY_CAP,
+        message:
+          `GOAL owner report for ${goalId} is ${authoredBodyChars} characters; its sections must fit ` +
+          `one ${DEFAULT_INBOX_BODY_CAP}-character inbox message to update the reporting rail as a unit. ` +
+          'Nothing was sent. Shorten the report and retry; put long supporting detail on its work-item.',
+      },
+    };
+  }
+  // P-005 (goal-holder-plans-ideation-truthful-reports-2026-10-03): a complete
+  // report is judged against MEASURED goal state before it reaches the owner.
+  // An unreadable measurement skips its check; only a readable contradiction refuses.
+  const truth = await readGoalOwnerReportTruth(identity.workspaceId, goalId, parsed.fields);
+  if (truth && truth.violations.length) {
+    return {
+      kind: 'refused',
+      result: {
+        ok: false,
+        to: msg.to,
+        error: 'goal-owner-report-untruthful',
+        goalId,
+        violations: truth.violations,
+        message: describeGoalOwnerReportTruthViolations(goalId, truth.violations),
+      },
+    };
+  }
+  return {
+    kind: 'stamped',
+    stamp: stampGoalOwnerReport(goalId, parsed, truth ? { citedRefStates: truth.citedRefStates, summary: truth.summary } : undefined),
+  };
+}
+
+/** Lazy so the truth module's DB reads stay off the cheap path of ordinary sends. */
+async function readGoalOwnerReportTruth(
+  workspaceId: string,
+  goalId: string,
+  fields: GoalOwnerReportParseResult['fields'],
+): Promise<GoalOwnerReportTruthVerdict | null> {
+  try {
+    const { readGoalOwnerReportTruth: read } = await import('../../../goal-owner-report-truth');
+    return await read(workspaceId, goalId, fields);
+  } catch {
+    return null;
+  }
+}
+
 async function sendOne(
   msg: SendMsg,
   identity: AgentIdentity,
@@ -868,7 +1084,24 @@ async function sendOne(
   observeCensus?: (census: DerivedSignalCensus) => void,
   idempotencyKey?: string,
   itemIndex?: number,
+  /**
+   * EI-23793424529287793: the GOAL owner-report verdict for the WHOLE message
+   * this part belongs to, computed by the handler before chunking. Absent for an
+   * unchunked message, which is judged here as before.
+   */
+  goalReportPreVerdict?: GoalOwnerReportVerdict,
+  /** The dispatcher aborts this signal when the caller stops waiting. */
+  requestSignal?: AbortSignal,
 ): Promise<BulkItemResult> {
+  // Reference prose is server-derived before cap/chunk/inline truth checks.
+  // A caller's short body cannot substitute for the pinned snapshot.
+  if (msg.report && typeof msg.report === 'object' && 'goalReport' in msg.report) {
+    goalReportPreVerdict = await evaluateGoalOwnerReport(msg, identity);
+    if (goalReportPreVerdict.kind === 'refused') return goalReportPreVerdict.result;
+    if (goalReportPreVerdict.kind === 'reference') {
+      msg = { ...msg, summary: goalReportPreVerdict.summary, body: [{ text: goalReportPreVerdict.body }] };
+    }
+  }
   // EI-21826596284846555: a normal inbox read exposes at most the first
   // 600 characters of one message body (and less on a crowded page). For a
   // load-bearing message, persisting a longer body and warning only after the
@@ -917,49 +1150,18 @@ async function sendOne(
   // cannot stamp evidence for another subject. The mode import stays lazy: the
   // dominant ordinary-send path must not acquire a DB/module dependency merely
   // because this optional evidence class exists.
-  let goalOwnerReport: GoalOwnerReportStamp | null = null;
-  let goalOwnerReportWarning: string | null = null;
-  if (msg.to.includes('human')) {
-    const parsed = parseGoalOwnerReport(msg.body);
-    if (parsed.attempted) {
-      let goalId: string | null = null;
-      if (!identity.workspaceId || identity.workspaceId === '*') {
-        goalOwnerReportWarning =
-          'GOAL owner-report validation was unavailable because this sender has no concrete workspace; the message was delivered but does not carry canonical report evidence.';
-      } else {
-        try {
-          const { getModeSubject } = await import('../../../modes/store');
-          goalId = await getModeSubject(identity.workspaceId, identity.ownerId, 'goal');
-        } catch (error) {
-          goalOwnerReportWarning =
-            'GOAL owner-report validation was unavailable at send time; the message was delivered without canonical report evidence. ' +
-            `Retry after the active GOAL subject is readable (${error instanceof Error ? error.message : String(error)}).`;
-        }
-      }
-      // No active GOAL row means this is ordinary owner-facing prose, even if
-      // its headings resemble the GOAL contract. Do not manufacture authority.
-      if (goalId) {
-        if (!parsed.complete) {
-          return {
-            ok: false,
-            to: msg.to,
-            error: 'goal-owner-report-incomplete',
-            goalId,
-            missing: parsed.missing,
-            empty: parsed.empty,
-            duplicate: parsed.duplicate,
-            message:
-              `GOAL owner report for ${goalId} is incomplete; nothing was sent. ` +
-              'Provide exactly one non-empty body section headed MOVED, COST, OWNER-WALLED, and KILLED. ' +
-              'Use explicit `none` or `unknown (<source/provenance>)` when that is the factual value. ' +
-              `Missing: ${parsed.missing.join(', ') || 'none'}; empty: ${parsed.empty.join(', ') || 'none'}; ` +
-              `duplicate: ${parsed.duplicate.join(', ') || 'none'}.`,
-          };
-        }
-        goalOwnerReport = stampGoalOwnerReport(goalId, parsed);
-      }
-    }
-  }
+  //
+  // EI-23793424529287793: a CHUNKED message arrives with its verdict already
+  // computed over the whole authored body (see evaluateGoalOwnerReport); only an
+  // unchunked message is judged here.
+  const goalReportVerdict = goalReportPreVerdict ?? (await evaluateGoalOwnerReport(msg, identity));
+  if (goalReportVerdict.kind === 'refused') return goalReportVerdict.result;
+  const goalOwnerReport: GoalOwnerReportStamp | null =
+    goalReportVerdict.kind === 'stamped' || goalReportVerdict.kind === 'reference' ? goalReportVerdict.stamp : null;
+  const goalOwnerReportWarning: string | null =
+    goalReportVerdict.kind === 'warning' ? goalReportVerdict.warning : null;
+  const goalOwnerReportDiagnostic =
+    goalReportVerdict.kind === 'not-stamped' ? goalReportVerdict.diagnostic : null;
 
   // Wake INTENT (directed-wake-honesty D-002): 'required' = the wake must land
   // (a clean miss → recipient_absent); 'optimistic' = best-effort over a durable
@@ -996,8 +1198,7 @@ async function sendOne(
   // stays fail-soft (never refuse a genuine reply on a transient read hiccup).
   // The fetched original is reused by the reply-wake block below (one lookup),
   // AND by the recipient-resolution block right after (EI-18145: see
-  // `goneRepliedTo` — resolved BEFORE recipient resolution so that block can
-  // tell "closing a loop with a since-ended sender" apart from a bad address).
+  // recipient block can use the authenticated sender for only that alias).
   let relatedOriginal: Awaited<ReturnType<typeof getMessageById>> = null;
   // Keep the caller's ref for diagnostics, but persist and reuse the canonical
   // full id when resolveMessageRef accepted a unique leading prefix.
@@ -1070,9 +1271,12 @@ async function sendOne(
   // happen — instead of the old silent ok:true. Fail-soft: a roster-read hiccup
   // degrades to the raw ids (never blocks coord). Local-roster scoped.
   //
-  // EI-18145: a reply CLOSING A LOOP with the original sender of `related_msg_id`
-  // is exempt from the unknown-recipient refusal for THAT one id. A directed
-  // obligation (unanswered-directed / the delivery-ladder alarm) is satisfied by
+  // EI-18145 / EI-24838286424095637: the related message authenticates its
+  // original sender for that exact alias. This permits an unknown alias when
+  // that sender has left the roster, or an ambiguous alias when that sender is
+  // one of the live candidates. Any OTHER unknown or ambiguous recipient still
+  // hard-refuses. A directed obligation (unanswered-directed / the delivery-ladder
+  // alarm) is satisfied by
   // recording a reply authored by the recipient with `related_msg_id` set — it
   // does NOT require the original sender to still exist. Before this fix, once
   // a correspondent's session ended (reaped from the roster), NOTHING could ever
@@ -1081,31 +1285,54 @@ async function sendOne(
   // named the now-gone sender — a structurally unresolvable dead end (observed
   // live: EI-18145123522199011, a directed ping from a since-ended sender kept
   // re-surfacing as "unanswered" with no way to ever clear it). Scoped tight:
-  // only the specific unknown id that IS `relatedOriginal.from` is exempted —
-  // any OTHER unknown/ambiguous recipient on the same send still hard-refuses.
+  // only an unknown or ambiguous alias matching `relatedOriginal.from` is
+  // canonicalized; unrelated recipients still go through normal validation.
   let toSend = msg.to;
   let goneRepliedTo: string[] = [];
   if (msg.to.some((id) => !isSelectorOrWildcard(id))) {
     try {
       const r = await resolveRecipients(msg.to, identity.workspaceId);
-      const closingGoneSender = relatedOriginal?.from ?? null;
-      const goneReplyAliases = closingGoneSender ? r.unknown.filter((id) => isOwnerIdAlias(id, closingGoneSender)) : [];
-      // Canonicalize a resolver-supported short handle/prefix to the full
-      // ownerId in the durable reply. Once the session is gone there is no
-      // roster left to perform that expansion, but the related message gives
-      // us the authenticated canonical sender id.
-      if (goneReplyAliases.length && closingGoneSender !== null) {
-        goneRepliedTo = [closingGoneSender];
+      const closingReplySender = relatedOriginal?.from ?? null;
+      const goneReplyAliases = closingReplySender
+        ? r.unknown.filter((id) => isOwnerIdAlias(id, closingReplySender))
+        : [];
+      const ambiguousReplyAliases = closingReplySender
+        ? r.ambiguous.filter(
+            ({ id, matches }) => matches.includes(closingReplySender) && isOwnerIdAlias(id, closingReplySender),
+          )
+        : [];
+      // Canonicalize an unknown alias to the full ownerId in the durable reply
+      // when the original sender has left the roster. For a live sender, the
+      // matching entry in `r.ambiguous` proves the alias was shared by multiple
+      // owners and lets this related message disambiguate only that sender.
+      if (goneReplyAliases.length && closingReplySender !== null && !r.resolved.includes(closingReplySender)) {
+        goneRepliedTo = [closingReplySender];
       }
+      // A related message authenticates its exact sender, so it can disambiguate
+      // that sender's own short handle even when other live respawn IDs share it.
+      // The candidate check above keeps unrelated ambiguous addresses refused.
+      const resolvedAmbiguousReplySender =
+        ambiguousReplyAliases.length &&
+        closingReplySender !== null &&
+        !r.resolved.includes(closingReplySender)
+          ? [closingReplySender]
+          : [];
       const trulyUnknown = r.unknown.filter((id) => !goneReplyAliases.includes(id));
-      if (trulyUnknown.length || r.ambiguous.length) {
+      const trulyAmbiguous = r.ambiguous.filter(
+        ({ id }) => !ambiguousReplyAliases.some((alias) => alias.id === id),
+      );
+      if (trulyUnknown.length || trulyAmbiguous.length) {
         // EI-19343900550313022: this is ALL-OR-NOTHING BY DESIGN (see toArg's
         // own description), but that is easy to miss in the moment — a sender
         // with 2 valid + 1 fabricated/typo'd recipient reads "nothing was sent"
         // and can reasonably assume the valid two are unaffected. They are not:
         // say so explicitly whenever the list carried >1 addressee, so the
         // sender knows to re-notify the valid ones (or re-split via items[]).
-        const otherValidCount = r.resolved.length + goneRepliedTo.length;
+        const otherValidCount = new Set([
+          ...r.resolved,
+          ...resolvedAmbiguousReplySender,
+          ...goneRepliedTo,
+        ]).size;
         // knowledge-at-symptom-time-2026-08-09 P-005: when the bad address is
         // session-SHAPED, the existing advice ("use the handle / look it up in
         // coord:presence") answers the wrong question — no live session will
@@ -1144,10 +1371,10 @@ async function sendOne(
               : '') +
             roleHint,
           ...(trulyUnknown.length ? { unknown_recipients: trulyUnknown } : {}),
-          ...(r.ambiguous.length ? { ambiguous_recipients: r.ambiguous } : {}),
+          ...(trulyAmbiguous.length ? { ambiguous_recipients: trulyAmbiguous } : {}),
         };
       }
-      toSend = [...r.resolved, ...goneRepliedTo];
+      toSend = [...r.resolved, ...resolvedAmbiguousReplySender, ...goneRepliedTo];
     } catch (e) {
       console.warn(`[coord:send] recipient resolve failed, sending unresolved: ${e instanceof Error ? e.message : e}`);
     }
@@ -1209,7 +1436,9 @@ async function sendOne(
   // trust this stamp (or their explicitly bounded legacy compatibility arm),
   // never the mere fact that a message reached the human.
   if (goalOwnerReport) extra[GOAL_OWNER_REPORT_FIELD] = goalOwnerReport;
-  if (goalOwnerReportWarning) {
+  if (goalOwnerReportDiagnostic) {
+    extra.goalOwnerReportValidation = goalOwnerReportDiagnostic;
+  } else if (goalOwnerReportWarning) {
     extra.goalOwnerReportValidation = { status: 'unknown', reason: goalOwnerReportWarning };
   }
   // P-013: the declared side effect rides the envelope so the ACTUATION probe
@@ -1469,9 +1698,23 @@ async function sendOne(
   // on the envelope. Deliberately NOT re-caught/reshaped here: that would
   // diverge from the one established, tested shape every other sendMessage
   // failure (e.g. a PG lock-timeout) already reports through.
-  const env = await withDbCallDeadline(
+  // A client disconnect or request deadline can fire while the per-message
+  // enrichment above is still running. Check at the durable-write boundary so
+  // that work cannot append a message after its caller has stopped waiting.
+  if (requestSignal?.aborted) {
+    return {
+      ok: false,
+      to: msg.to,
+      error: 'request_aborted',
+      message: 'coord:send was aborted before persistence; the message was not appended.',
+    };
+  }
+  let env: Awaited<ReturnType<typeof sendMessage>>;
+  try {
+    env = await withDbCallDeadline(
     sendMessage(identity, {
       to: toSend,
+      ...(goalReportVerdict.kind === 'reference' ? { persistEnvelope: goalReportVerdict.persistEnvelope } : {}),
       ...(idempotencyKey !== undefined && itemIndex !== undefined
         ? { msgId: idempotentCoordMsgId(identity, harnessSlug, idempotencyKey, itemIndex) }
         : {}),
@@ -1495,7 +1738,17 @@ async function sendOne(
       ...(Object.keys(extra).length ? { extra } : {}),
     }),
     { ms: COORD_SEND_DB_DEADLINE_MS, label: 'coord:send.sendMessage' },
-  );
+    );
+  } catch (error) {
+    // The transaction can invalidate a successful preflight. Keep the failed
+    // oracle visible on reference refusals, just as on preflight refusals.
+    if (goalReportVerdict.kind === 'reference') {
+      const failure = error as { code?: string; oracle?: string; message?: string };
+      return { ok: false, to: msg.to, error: failure.code ?? 'goal-owner-report-untruthful',
+        oracle: failure.oracle ?? 'delivery-transaction', message: failure.message };
+    }
+    throw error;
+  }
 
   // EI-6874 (zero-recipient audience send is a refusal-class event, not a silent
   // ok): a LIVE-audience selector (@fleet:/@fleet-leader:/@topic:/@plan:/@object:/
@@ -2167,7 +2420,10 @@ async function sendOne(
   // claim bug below — a detector reading the wrong text reports a confident
   // clean.
   const sentText = [msg.summary, bodyText].filter(Boolean).join('\n');
-  const cellHint = cellTranscriptionHint(sentText);
+  // EI-24684014950807803: resolve each sha-shaped token against the integration tree
+  // before flagging it — an agent short id like `c0b38c83` is hex-shaped but names no
+  // commit. Async + parallel (never a sync spawn on the send hot path), never throws.
+  const cellHint = await cellTranscriptionHintResolvingCommits(sentText);
 
   // WI-41323 — the SENDER-side half of EI-21333824056510800. That item fixed what
   // the RECEIVER sees: an unbacked "OWNER-VERIFIED DIRECTIVE" now renders prefixed
@@ -2319,7 +2575,17 @@ async function sendOne(
       : {}),
     ...(dispatchAdvisory ? { dispatchAdvisory } : {}),
     ...(staleBasisStamps.length ? { staleBasis: staleBasisStamps } : {}),
-    ...(goalOwnerReport ? { goalOwnerReport: { status: 'stamped' as const, goalId: goalOwnerReport.goalId } } : {}),
+    ...(goalOwnerReport
+      ? {
+          goalOwnerReport: {
+            status: 'stamped' as const,
+            goalId: goalOwnerReport.goalId,
+            // The watchdog reads this persisted message row's ts as lastReportAt.
+            lastReportAt: env.ts,
+          },
+        }
+      : {}),
+    ...(goalOwnerReportDiagnostic ? { goalOwnerReport: goalOwnerReportDiagnostic } : {}),
     ...(goalOwnerReportWarning ? { goalOwnerReportWarning } : {}),
   };
 }
@@ -2412,12 +2678,19 @@ export default defineTool({
   // Budget is recovered by tightening prose instead; response/refusal detail lives in the
   // free `returns` below (EI-22083648545226771 / EI-18742337097445085).
   description:
-    'Send coordination messages. Single: {to, summary, expects, body?}; `summary` is the required one-line inbox headline, `body` optional detail. Distinct messages: items:[…]. `to` takes ownerIds, ["*"], or ["human"]. `expects` required: ack|answer|action|none. `why` is { goalRef, note? } — a goal REF, never prose. `basedOn` is OUTPUT-ONLY, auto-derived — omit it; authored refs go in `body[].premises`. `wake` re-invokes sleeping recipients (`required` reports misses; `optimistic` needs `backstop`).',
+    'Send coordination messages. Single: {to, summary, expects, body?}; `summary` is the required inbox headline; `body` optional detail. Distinct messages: items:[…]. `to` takes ownerIds, ["*"], or ["human"]. `expects` required: ack|answer|action|none. `why` is { goalRef, note? } — a goal REF, never prose. `basedOn` is OUTPUT-ONLY, auto-derived — omit it; `body[].premises` are ref strings; `body[].youMayNotKnow` uses {ref, provenance} objects. `wake` re-invokes sleeping recipients; `optimistic` needs `backstop`.',
   guidance: {
-    when: 'Share context or ask. `summary` is the required inbox headline; `body` is detail. Directed action/answer needs `forYouBecause: { relation, ref?, note? }` on a body section; broadcasts, human, ack and none are exempt. `why` is { goalRef, note? } — a goal REF, never prose. `basedOn` is OUTPUT-ONLY, auto-derived — omit it. Waiting? `blockedOn: { kind, ref }` on that section gets readers a live cleared/pending verdict. SHAPES: `premises` is an array of ref STRINGS; `youMayNotKnow` is [{ ref, provenance }]; `couldNotDetermine` is [{ what, note? }] — objects, never bare strings. Transferring a named WI-/EI- item? coord:dispatch.',
+    when:
+      'Share context or ask. `summary` is the required inbox headline; `body` is detail. A complete active-GOAL owner report (MOVED/COST/OWNER-WALLED/KILLED) must fit in one body of at most ' +
+      DEFAULT_INBOX_BODY_CAP +
+      ' characters; longer ones are refused unsent (see returns). Directed action/answer needs `forYouBecause: { relation, ref?, note? }` on a body section; broadcasts, human, ack and none are exempt. `why` is { goalRef, note? } — a goal REF, never prose. `basedOn` is OUTPUT-ONLY, auto-derived — omit it. Waiting? `blockedOn: { kind, ref }` on a section gives a live cleared/pending verdict. SHAPES: `premises` is an array of ref STRINGS; `youMayNotKnow` is [{ ref, provenance }]; `couldNotDetermine` is [{ what, note? }] — objects, never bare strings. ',
     argRedirects: sectionOnlyArgRedirects,
     returns:
-      'Per-message {ok, to, msg_id|error} counts. Envelope `ok` is DERIVED from results[].ok, so ANY failed delivery makes it false; `partial:true` and `deliveryFailureWarning` then name which messages failed and why. A body above the ' + DEFAULT_INBOX_BODY_CAP + '-character inbox cap is delivered in full as ordered parts (`chunked[]`; only the final part, `askMsgId`, carries expects/wake/reply-threading); one needing more than ' + COORD_SEND_MAX_CHUNK_PARTS + ' parts is refused. A directed action that mentions an existing WI-/EI- item but does not assign it may include `dispatchAdvisory` naming the live assignment and `coord:dispatch` remedy. `draftSuspension` appears when the sender\'s own tool activity shows a gap (default >10m) before the send — a wake-pump can interleave a turn between measuring a claim and sending it, so any measurement taken before `gapStartedAt` may have aged; it reports the measured gap only and never guesses which claim is stale.',
+      'Per-message {ok, to, msg_id|error} counts. Envelope `ok` is DERIVED from results[].ok, so ANY failed delivery makes it false; `partial:true` and `deliveryFailureWarning` then name which messages failed and why. A complete active-GOAL owner report above ' +
+      DEFAULT_INBOX_BODY_CAP +
+      ' characters is refused before persistence (`goal-owner-report-over-cap`); generic over-cap bodies are delivered in full as ordered parts (`chunked[]`; only the final part, `askMsgId`, carries expects/wake/reply-threading). A generic body needing more than ' +
+      COORD_SEND_MAX_CHUNK_PARTS +
+      ' parts is refused. A directed action that mentions an existing WI-/EI- item but does not assign it may include `dispatchAdvisory` naming the live assignment and `coord:dispatch` remedy. `draftSuspension` appears when the sender\'s own tool activity shows a gap (default >10m) before the send — a wake-pump can interleave a turn between measuring a claim and sending it, so any measurement taken before `gapStartedAt` may have aged; it reports the measured gap only and never guesses which claim is stale.',
     notWhen: 'Human reply: speak. File lock: locks:acquire. Ambient note: omit wake. One message to many: to:[…]; distinct messages: items:[…]. Named work-item transfer: coord:dispatch with workItemIds:[…]; plan-lane transfer: coord:handoff.',
     seeAlso: [
       'EI-21927749510698309: relaying an owner or fleet-leader directive? Pass relayOf/relayQuote on THIS send, not after — a text claim ("owner said/directive/approved") with neither ships anyway but renders [UNVERIFIED authority claim] to every recipient; re-sending backed does not un-flag the first copy, so a fleet-wide broadcast lands twice.',
@@ -2489,10 +2762,28 @@ export default defineTool({
       if ('harness_slug' in m) delete m.harness_slug;
     };
     applyHarnessSlugAlias(a);
+    // WI-10005668 (measured 2026-10-02, 24h of tool_invocations): a caller who passes
+    // `to` as a BARE recipient string — `to: "su-…"` — was refused 13x/6 owners and
+    // re-failed 11 of those 13 times. The cause was this file, not the caller:
+    // `toPresent` below is `Array.isArray(a.to) && …`, so a scalar string read as
+    // MISSING and the refusal said "needs `to`: at least one recipient id" to a
+    // caller who HAD supplied one — no retry could get closer to the contract from
+    // that message. A single recipient string is unambiguous (ids, `*`, `human` and
+    // @selectors are all strings), so normalize it to the one-element array the
+    // schema declares, here — before the strict object schema sees it — exactly as
+    // `harness_slug` is. The published JSON Schema is unchanged (preprocess is
+    // transparent to it): `to` still advertises an array. An EMPTY string is left
+    // alone so it keeps falling through to the specific refusal below.
+    const applyScalarToNormalization = (m: { to?: unknown } | null | undefined) => {
+      if (!m || typeof m !== 'object') return;
+      if (typeof m.to === 'string' && m.to.length > 0) m.to = [m.to];
+    };
+    applyScalarToNormalization(a);
     if (Array.isArray(a?.items)) {
       for (const it of a.items) {
         if (it && typeof it === 'object') {
           applyHarnessSlugAlias(it as { harness?: unknown; harness_slug?: unknown });
+          applyScalarToNormalization(it as { to?: unknown });
         }
       }
     }
@@ -2804,6 +3095,9 @@ export default defineTool({
       .describe(
         'send many DISTINCT messages at once — each { to, summary, expects, harness?, body?, files?, plan_slug?, related_msg_id?, wake?, wakeOnReply?, endTurn? }; a top-level `harness` is the default for items that omit it — `expects` is required on EVERY item',
       ),
+  }).meta({
+    'x-papercusp-call-constraint':
+      'When `items` is omitted, top-level `to`, `summary`, and `expects` are required; when `items` is used, each item must include its own `to`, `summary`, and `expects`.',
   })),
   result: z
     .object({
@@ -2920,19 +3214,43 @@ export default defineTool({
     const expanded: Array<{
       msg: SendMsg;
       chunk?: ChunkPartMeta;
-      refusal?: { error: string; message: string };
+      refusal?: { error: string; message: string } & Record<string, unknown>;
+      goalReportPreVerdict?: GoalOwnerReportVerdict;
     }> = [];
     for (const original of list) {
+      if (original.report && typeof original.report === 'object' && 'goalReport' in original.report) {
+        expanded.push({ msg: original });
+        continue;
+      }
       const plan = chunkOverCapMessage(original);
       if (plan.kind === 'single') expanded.push({ msg: original });
       else if (plan.kind === 'refused') {
         expanded.push({ msg: original, refusal: { error: plan.error, message: plan.message } });
-      } else for (const part of plan.parts) expanded.push({ msg: part.message, chunk: part.meta });
+      } else {
+        // EI-23793424529287793: judge a GOAL owner report on the WHOLE authored
+        // body, never per part. An incomplete report is refused as one message
+        // (no part persists); a complete one is stamped once, on the final part,
+        // and its continuations skip the check they would each fail alone.
+        const verdict = await evaluateGoalOwnerReport(original, identity);
+        if (verdict.kind === 'refused') {
+          const { ok: _ok, to: _to, ...refusal } = verdict.result;
+          expanded.push({ msg: original, refusal: refusal as { error: string; message: string } });
+          continue;
+        }
+        for (const part of plan.parts) {
+          const isFinal = part.meta.part === part.meta.of;
+          expanded.push({
+            msg: part.message,
+            chunk: part.meta,
+            goalReportPreVerdict: isFinal ? verdict : { kind: 'skip' },
+          });
+        }
+      }
     }
 
     const env = await runBulk(
       expanded,
-      async ({ msg, refusal }, itemIndex) => {
+      async ({ msg, refusal, goalReportPreVerdict }, itemIndex) => {
         if (refusal) return { ok: false, to: msg.to, ...refusal };
         // Capture the ORIGINAL broadcast intent BEFORE scopeBroadcastAudience
         // rewrites `*` → @fleet:<slug>: only a broadcast is stamped (P-003).
@@ -3003,6 +3321,8 @@ export default defineTool({
           observeCensus,
           idempotencyKey,
           itemIndex,
+          goalReportPreVerdict,
+          ctx.signal,
         );
       },
       {

@@ -193,6 +193,13 @@ export interface PlanWriteMeta {
    * since replaced.
    */
   outputSchema: unknown;
+  /**
+   * The plan's LATEST `plan_revisions` snapshot, read INSIDE the lock — present only when the
+   * caller opted in with `loadLatestRevision` (WI-10004529). A mutator whose write is
+   * append-only compares it with the live body to detect a row that silently diverged BELOW its
+   * own revision head (a stale replay records no revision). `null` = the plan has no revision.
+   */
+  latestRevision?: { seq: number; body: string } | null;
 }
 
 /**
@@ -267,6 +274,12 @@ export interface WithPlanLockOpts<T = unknown> {
   /** Advisory-lock acquisition budget before reporting busy. Default ~5s. */
   ttlSec?: number;
   /**
+   * Hand the mutator the plan's latest `plan_revisions` snapshot as `meta.latestRevision`
+   * (read inside the lock). Opt-in because it costs one indexed read per write; only
+   * append-only writers that must refuse a stale base (plans:add-decision, WI-10004529) ask.
+   */
+  loadLatestRevision?: boolean;
+  /**
    * Optional hook run *after* the upsert transaction commits (EI-118).
    * The `plans:*` verbs append a `plan_revisions` row here. `scope` is
    * the (workspaceId, harnessSlug) this lock resolved for the write —
@@ -298,6 +311,7 @@ export interface WithPlanLockOpts<T = unknown> {
     writtenBody: string,
     scope: { workspaceId: string; harnessSlug: string },
     writtenTemplateData: unknown,
+    writtenVersion?: number,
   ) => Promise<void>;
   /**
    * Strict post-mutation hook that runs BEFORE the transaction commits. Unlike
@@ -465,6 +479,19 @@ export async function withPlanLock<T>(
     `;
     const cur = rows[0] ?? null;
     const curVersion = cur ? Number(cur.version) : 0;
+    // WI-10004529: opt-in read of the revision-spine head, under the SAME lock as `cur`.
+    let latestRevision: { seq: number; body: string } | null = null;
+    if (opts.loadLatestRevision && cur) {
+      const revRows = await tx<{ seq: number | string; content_snapshot: string }[]>`
+        SELECT seq, content_snapshot
+          FROM harness_shared.plan_revisions
+         WHERE workspace_id = ${workspaceId} AND harness_slug = ${harnessSlug}
+           AND plan_slug = ${slug}
+         ORDER BY seq DESC
+         LIMIT 1
+      `;
+      if (revRows[0]) latestRevision = { seq: Number(revRows[0].seq), body: revRows[0].content_snapshot };
+    }
     const meta: PlanWriteMeta | null = cur
       ? {
           version: curVersion,
@@ -473,6 +500,7 @@ export async function withPlanLock<T>(
           templateData: cur.template_data ?? null,
           inputSchema: cur.input_schema ?? null,
           outputSchema: cur.output_schema ?? null,
+          ...(opts.loadLatestRevision ? { latestRevision } : {}),
         }
       : null;
 
@@ -899,6 +927,7 @@ export async function withPlanLock<T>(
         writtenBody,
         { workspaceId, harnessSlug },
         writtenTemplateData,
+        newVersion,
       );
     }
 

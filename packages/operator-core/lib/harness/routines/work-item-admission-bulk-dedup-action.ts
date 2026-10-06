@@ -92,6 +92,7 @@ async function productionRun(ctx: SystemActionCtx): Promise<BulkDedupRunResult> 
     ...bulkDedupRuntimeWiring(runId),
     model: optionalModelSpec(payload.model, 'bulk dedup'),
     maxStages: optionalPositiveInteger(payload.maxStages),
+    maxPairsPerStage: optionalPositiveInteger(payload.maxPairsPerStage),
     pairsPerCall: optionalPositiveInteger(payload.pairsPerCall),
     shardConcurrency: optionalPositiveInteger(payload.shardConcurrency),
     census: {

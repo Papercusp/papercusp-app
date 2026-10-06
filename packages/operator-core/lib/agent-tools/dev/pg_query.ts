@@ -33,6 +33,7 @@ import {
   buildJsonTextSearchAdvisory,
   buildSilentNullPathAdvisory,
   buildJsonbTypeofNegationAdvisory,
+  buildJsonNullArrowAdvisory,
   buildUnusedCteAdvisory,
   buildPopulationNarrowingAdvisory,
   buildNonSummingPartitionAdvisory,
@@ -665,6 +666,7 @@ export default defineTool({
     // the answer is wrong for EVERY row and looks like a clean "none".
     const nullPathAdvisory = advisoryOf(() => buildSilentNullPathAdvisory(sql));
     const jsonbTypeofAdvisory = advisoryOf(() => buildJsonbTypeofNegationAdvisory(sql));
+    const jsonNullArrowAdvisory = advisoryOf(() => buildJsonNullArrowAdvisory(sql));
     // EI-20261038811991822: a CTE defined but never joined. The sibling of the
     // advisories above in kind — the query SUCCEEDS and returns well-formed
     // rows from the WRONG population, so nothing in the result distinguishes it
@@ -763,6 +765,7 @@ export default defineTool({
       eventFireWindowAdvisory,
       nullPathAdvisory,
       jsonbTypeofAdvisory,
+      jsonNullArrowAdvisory,
       unusedCteAdvisory,
       populationNarrowingAdvisory,
       // The sibling of populationNarrowing above: that one warns a ZERO cannot
@@ -858,9 +861,16 @@ export default defineTool({
         ? await buildTenantScopeAdvisory(args.positiveControlSql, tenantScope).catch(() => null)
         : null;
       if (positiveControlTenantAdvisory && !args.allowUnscoped) {
+        const correction = positiveControlTenantAdvisory.startsWith('⚠ harness_shared.test_runs:')
+          ? 'For a local reporter positive control, use an exact file_path = value with both tenant predicates and a bounded LIMIT, ' +
+            'or a bounded id/run_group_id with both tenant predicates; for CI/gate controls, filter by source or commit_sha. ' +
+            'An open-ended file_path LIKE does not establish local identity, and workspace_id/harness_slug alone are ' +
+            'insufficient because CI/gate rows have NULL-by-design tenant columns. Pass allowUnscoped: true only for a ' +
+            'deliberate broader read.'
+          : 'Add tenant predicate(s) to positiveControlSql, or pass allowUnscoped: true for a deliberate cross-tenant read.';
         return jsonError(
           'positive_control_tenant_scope_required',
-          `${positiveControlTenantAdvisory} Add the tenant predicate(s) to positiveControlSql, or pass allowUnscoped: true for a deliberate cross-tenant read.`,
+          `${positiveControlTenantAdvisory} ${correction}`,
         );
       }
       const result = await pgReadQuery(sql, {

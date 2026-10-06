@@ -533,6 +533,87 @@ export function issueOwnAuthorWhereSql(sql: OrgSql, workspaceId: string) {
 }
 
 /**
+ * WI-10003565 — is `id` an origin='remote' row authored by one of THIS workspace's own keys?
+ * Read-only twin of {@link selfHealOwnNodeOriginIfStranded}, for a guard that must decide
+ * BEFORE the write path runs (work_items:complete's early remote-authored refusal).
+ * Workspace-scoped; any read failure answers false (fail-closed: the refusal stands).
+ */
+export async function isOwnNodeAuthoredRemoteRow(workspaceId: string, id: string): Promise<boolean> {
+  if (!workspaceId || !id) return false;
+  try {
+    const { sql } = getOrgPg();
+    const rows = await sql<{ one: number }[]>`
+      SELECT 1 AS one FROM harness_shared.work_items wi
+       WHERE wi.workspace_id = ${workspaceId} AND wi.feature_id = ${id}
+         AND wi.origin = 'remote' AND ${issueOwnAuthorWhereSql(sql, workspaceId)}
+       LIMIT 1`;
+    return rows.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * WI-10006515 — batch twin of {@link isOwnNodeAuthoredRemoteRow} for a READ that classifies many
+ * rows at once (a report must not write, so it cannot heal). Returns the subset of `ids` that are
+ * origin='remote' rows authored by one of this workspace's own keys. Empty on any read failure
+ * (fail-closed: every row keeps its remote classification). `harnessSlug` pins the physical row
+ * when the caller's rows are harness-scoped, so a same-id twin elsewhere cannot mark them. Reads on
+ * the shared pool, never a caller's transaction: a failed read here must not poison that tx.
+ */
+export async function ownNodeAuthoredRemoteIds(
+  workspaceId: string,
+  ids: readonly string[],
+  opts: { harnessSlug?: string | null } = {},
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!workspaceId || ids.length === 0) return out;
+  try {
+    const { sql } = getOrgPg();
+    const rows = await sql<{ feature_id: string }[]>`
+      SELECT DISTINCT wi.feature_id FROM harness_shared.work_items wi
+       WHERE wi.workspace_id = ${workspaceId} AND wi.feature_id = ANY(${[...ids]}::text[])
+         ${opts.harnessSlug ? sql`AND wi.harness_slug = ${opts.harnessSlug}` : sql``}
+         AND wi.origin = 'remote' AND ${issueOwnAuthorWhereSql(sql, workspaceId)}`;
+    for (const r of rows) out.add(r.feature_id);
+  } catch {
+    out.clear();
+  }
+  return out;
+}
+
+/**
+ * WI-10003565 — heal an own-node row's mislabelled `origin` so the remote-authored guard stops
+ * stranding it. The claim gate already treats such a row as ours ({@link issueOwnAuthorWhereSql}:
+ * `origin` records how a row ARRIVED, not who wrote it), but every write path refused it as
+ * "remote-authored ... its authoring peer must claim/resolve it" — and the authoring peer IS this
+ * node, so the row could be claimed and never closed. Measured: system-filed rows
+ * (createdBy="system:*") match none of the caller-identity hatches, so they were undrainable.
+ *
+ * Same shape as selfHealAuthorOriginIfStranded: resets `origin` on the BASE table (the
+ * `engineer_issues` view trigger no-ops any write while origin='remote'), and the WHERE clause IS
+ * the identity check — a row whose author key this workspace never wrote locally is untouched.
+ * Returns true iff a row was healed.
+ */
+export async function selfHealOwnNodeOriginIfStranded(
+  workspaceId: string,
+  id: string,
+  /** WI-10006010: the pinned physical row; omitted, every same-id twin is eligible. */
+  harnessSlug?: string | null,
+): Promise<boolean> {
+  if (!workspaceId || !id) return false;
+  const { sql } = getOrgPg();
+  const rows = await sql<{ feature_id: string }[]>`
+    UPDATE harness_shared.work_items wi
+       SET origin = 'local'
+     WHERE wi.workspace_id = ${workspaceId} AND wi.feature_id = ${id}
+       ${harnessSlug ? sql`AND wi.harness_slug = ${harnessSlug}` : sql``}
+       AND wi.origin = 'remote' AND ${issueOwnAuthorWhereSql(sql, workspaceId)}
+    RETURNING wi.feature_id`;
+  return rows.length > 0;
+}
+
+/**
  * The issue-family locally-claimable SQL floor, own-node aware — the composable counterpart of
  * {@link isIssueLocallyClaimable}. `(origin local/null OR own-node)`; `workspaceId` omitted ⇒ the
  * own-node leg is dropped (fail-safe: only ever UNDER-admits when unscoped). `wi.`-qualified.
@@ -871,7 +952,7 @@ export type StopTheLineRowContext = 'issue-wi' | 'feature-consolidated';
  *
  * The inner EXISTS probes the open red-streak condition row for the CANDIDATE ROW'S OWN
  * workspace+harness, so only the affected harness throttles; migration 741's partial
- * unique index on open condition keys makes the probe an index hit.
+ * unique index on non-null condition keys makes the probe an index hit.
  *
  * The feature-consolidated form has no `condition_key` column on the view (verified
  * 2026-09-01 against information_schema) and its kinds are placement kinds, so it gets
@@ -885,7 +966,10 @@ export function stopTheLineExclusionSql(sql: OrgSql, rowContext: StopTheLineRowC
       FROM harness_shared.work_items stl
      WHERE stl.workspace_id = ${sql.unsafe(`${q}workspace_id`)}
        AND stl.harness_slug = ${sql.unsafe(`${q}harness_slug`)}
-       AND stl.condition_key = ${GATE_RED_STREAK_CONDITION_PREFIX} || stl.harness_slug
+       -- Use the candidate harness already equated above: the equivalent inner-row
+       -- expression prevents a parameterized condition_key lookup and scans every
+       -- condition in the harness once per candidate (EI-23204229251577253).
+       AND stl.condition_key = ${GATE_RED_STREAK_CONDITION_PREFIX} || ${sql.unsafe(`${q}harness_slug`)}
        AND NOT (stl.status = ANY(${ANY_FAMILY_TERMINAL_STATES as string[]}::text[]))
        AND stl.created_ts <= (EXTRACT(EPOCH FROM now()) * 1000)::bigint - ${STOP_THE_LINE_RED_HOURS * 3600 * 1000}
   )`;

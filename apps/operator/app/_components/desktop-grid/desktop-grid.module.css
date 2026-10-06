@@ -1,0 +1,177 @@
+.grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.filter {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  max-width: 360px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg-mute);
+}
+
+.filter input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+}
+
+.count,
+.noMatch {
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tile {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+}
+
+.tile[data-selected="true"] {
+  border-color: var(--accent);
+}
+
+.tile[data-pinned="true"] {
+  grid-column: span 2;
+}
+
+.open,
+.live {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.open {
+  cursor: pointer;
+}
+
+.open:hover:not(:disabled) {
+  background: var(--bg-2);
+}
+
+.open:focus-visible,
+.pin:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.open:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.thumbnail {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  background: var(--bg-2);
+  color: var(--fg-mute);
+}
+
+.thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px 10px;
+}
+
+.title,
+.owner,
+.workItem,
+.state {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.owner,
+.state {
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.workItem {
+  font-size: 12px;
+}
+
+.watch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px 10px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.pin {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+
+.pin[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pin:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}

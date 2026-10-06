@@ -34,11 +34,34 @@
  */
 
 import {
-  TOTAL_COVERAGE_FLOOR,
-  RECENT_COVERAGE_FLOOR,
-  MIN_RECENT_SAMPLE,
-} from './embed-coverage';
+  createCoverageGate,
+  type CoverageGate,
+  type CoverageSample,
+  type CoverageSnapshot,
+  type SearchCoverageReport,
+  type SourceCoverageAssessment,
+} from '@papercusp/search';
 import { withChunkSearchColumns } from './chunks/registry';
+
+/** Shared query/alarm floors. Keep them on the read side so a cold query
+ * does not initialize the background monitor and its backfill dependencies.
+ * Total coverage tolerates a converging backlog; recent coverage detects
+ * write-path regressions, with a sample floor that avoids rounding noise. */
+export const TOTAL_COVERAGE_FLOOR = 0.95;
+export const RECENT_COVERAGE_FLOOR = 0.99;
+export const MIN_RECENT_SAMPLE = 20;
+
+// shared-vector-search-libraries-2026-09-29 P-002: the verdict logic lives in
+// @papercusp/search (createCoverageGate). This module is papercusp's host half:
+// the source → vector-column map, the thresholds, the persisted-sample reader
+// and its memo. The types are re-exported so existing importers are unchanged.
+export type {
+  CoverageSnapshot,
+  CoverageVerdict,
+  SearchCoverageReport,
+  SourceCoverageAssessment,
+  SurfaceReading,
+} from '@papercusp/search';
 
 /**
  * Minimal structural handle — mirrors the `sql.unsafe` call shape used by
@@ -104,45 +127,30 @@ export const COVERAGE_SAMPLE_MAX_AGE_MS = 90 * 60 * 1000;
  *  a burst of queries into one read. */
 export const COVERAGE_SNAPSHOT_TTL_MS = 60 * 1000;
 
-export type CoverageVerdict =
-  /** Every known leg is at or above the floor. */
-  | 'healthy'
-  /** The best known leg is below the floor — hits may be missing. */
-  | 'degraded'
-  /** No fresh sample. NOT a synonym for healthy. */
-  | 'unknown'
-  /** This source has no embedding leg; the semantic verdict does not apply. */
-  | 'not-semantic';
+let configuredGate: CoverageGate | null = null;
 
-export interface SurfaceReading {
-  surface: string;
-  observedAt: Date;
-  eligibleRows: number;
-  embeddedRows: number;
-  /** embedded / eligible, 0..1. `null` when eligible is 0 (nothing to embed). */
-  pct: number | null;
-  /** Recent-window coverage, when the sample carries one. */
-  recentPct: number | null;
-  stale: boolean;
-  ageMs: number;
+/**
+ * Papercusp's configured gate: the library's verdict logic with this host's
+ * source map, floors and unmapped-source note.
+ *
+ * Built on first use. The query reader owns the shared floors; the background
+ * monitor re-exports them without becoming a dependency of cold queries.
+ */
+function gate(): CoverageGate {
+  configuredGate ??= createCoverageGate({
+    sources: SEARCH_SOURCE_SURFACES,
+    thresholds: {
+      coverageFloor: TOTAL_COVERAGE_FLOOR,
+      recentFloor: RECENT_COVERAGE_FLOOR,
+      minRecentSample: MIN_RECENT_SAMPLE,
+      maxSampleAgeMs: COVERAGE_SAMPLE_MAX_AGE_MS,
+    },
+    describeUnmappedSource: (source) =>
+      `source '${source}' has no coverage mapping in SEARCH_SOURCE_SURFACES — ` +
+      `treating as unknown. Add it (coverage-gate.ts) so this reports a real verdict.`,
+  });
+  return configuredGate;
 }
-
-export interface SourceCoverageAssessment {
-  source: string;
-  verdict: CoverageVerdict;
-  /** Best known leg, 0..1 — the number the verdict is derived from. */
-  coverage: number | null;
-  /** Recent-window coverage of the best known leg, when available. */
-  recentCoverage: number | null;
-  /** Per-surface detail, including legs that were missing or stale. */
-  surfaces: SurfaceReading[];
-  /** Surfaces with no fresh sample. Non-empty ⇒ `coverage` is a partial view. */
-  unknownSurfaces: string[];
-  /** One line an agent or a human can act on. */
-  note: string;
-}
-
-export type CoverageSnapshot = Map<string, SurfaceReading>;
 
 interface SampleRow {
   surface: string;
@@ -176,29 +184,15 @@ export async function loadCoverageSnapshot(
     [workspaceId],
   )) as SampleRow[] | null;
 
-  const snapshot: CoverageSnapshot = new Map();
-  for (const r of rows ?? []) {
-    const observedAt = r.observed_at instanceof Date ? r.observed_at : new Date(r.observed_at);
-    const eligibleRows = Number(r.eligible_rows);
-    const embeddedRows = Number(r.embedded_rows);
-    const recentEligible = r.recent_eligible === null ? null : Number(r.recent_eligible);
-    const recentEmbedded = r.recent_embedded === null ? null : Number(r.recent_embedded);
-    const ageMs = now.getTime() - observedAt.getTime();
-    snapshot.set(r.surface, {
-      surface: r.surface,
-      observedAt,
-      eligibleRows,
-      embeddedRows,
-      pct: eligibleRows > 0 ? embeddedRows / eligibleRows : null,
-      recentPct:
-        recentEligible !== null && recentEmbedded !== null && recentEligible >= MIN_RECENT_SAMPLE
-          ? recentEmbedded / recentEligible
-          : null,
-      stale: ageMs > COVERAGE_SAMPLE_MAX_AGE_MS,
-      ageMs,
-    });
-  }
-  return snapshot;
+  const samples: CoverageSample[] = (rows ?? []).map((r) => ({
+    surface: r.surface,
+    observedAt: r.observed_at,
+    eligibleRows: r.eligible_rows,
+    embeddedRows: r.embedded_rows,
+    recentEligible: r.recent_eligible,
+    recentEmbedded: r.recent_embedded,
+  }));
+  return gate().snapshot(samples, now);
 }
 
 let memo: { at: number; workspaceId: string; snapshot: CoverageSnapshot } | null = null;
@@ -280,8 +274,6 @@ export function resetCoverageSnapshotCache(): void {
   lastWarnAt = 0;
 }
 
-const pctStr = (v: number | null): string => (v === null ? 'n/a' : `${(v * 100).toFixed(1)}%`);
-
 /**
  * Assess ONE source against a snapshot. Pure — no I/O, no clock beyond `now`.
  *
@@ -295,23 +287,7 @@ export function assessSourceCoverage(
   source: string,
   snapshot: CoverageSnapshot,
 ): SourceCoverageAssessment {
-  const surfaces = SEARCH_SOURCE_SURFACES[source];
-
-  if (surfaces === undefined) {
-    return {
-      source,
-      verdict: 'unknown',
-      coverage: null,
-      recentCoverage: null,
-      surfaces: [],
-      unknownSurfaces: [],
-      note:
-        `source '${source}' has no coverage mapping in SEARCH_SOURCE_SURFACES — ` +
-        `treating as unknown. Add it (coverage-gate.ts) so this reports a real verdict.`,
-    };
-  }
-
-  return assessSurfaceCoverage(source, surfaces, snapshot);
+  return gate().assessSource(source, snapshot);
 }
 
 /**
@@ -344,94 +320,7 @@ export function assessSurfaceCoverage(
   surfaces: readonly string[],
   snapshot: CoverageSnapshot,
 ): SourceCoverageAssessment {
-  if (surfaces.length === 0) {
-    return {
-      source,
-      verdict: 'not-semantic',
-      coverage: null,
-      recentCoverage: null,
-      surfaces: [],
-      unknownSurfaces: [],
-      note: `source '${source}' has no embedding leg (BM25-only); embedding coverage does not apply.`,
-    };
-  }
-
-  const readings: SurfaceReading[] = [];
-  const unknownSurfaces: string[] = [];
-  for (const s of surfaces) {
-    const r = snapshot.get(s);
-    if (!r || r.stale) {
-      unknownSurfaces.push(s);
-      if (r) readings.push(r);
-    } else {
-      readings.push(r);
-    }
-  }
-
-  const known = readings.filter((r) => !r.stale && r.pct !== null);
-  if (known.length === 0) {
-    return {
-      source,
-      verdict: 'unknown',
-      coverage: null,
-      recentCoverage: null,
-      surfaces: readings,
-      unknownSurfaces,
-      note:
-        `no fresh embedding-coverage sample for '${source}' ` +
-        `(${unknownSurfaces.join(', ') || 'no surfaces sampled'}) — ` +
-        `coverage is UNKNOWN, which is not the same as healthy. ` +
-        `Results may be drawn from an under-populated index.`,
-    };
-  }
-
-  const best = known.reduce((a, b) => ((b.pct ?? 0) > (a.pct ?? 0) ? b : a));
-  const coverage = best.pct;
-  const degraded = coverage !== null && coverage < TOTAL_COVERAGE_FLOOR;
-  const partial = unknownSurfaces.length > 0;
-
-  const parts: string[] = [];
-  if (degraded) {
-    parts.push(
-      `'${source}' embedding coverage is ${pctStr(coverage)} ` +
-        `(${best.embeddedRows.toLocaleString()}/${best.eligibleRows.toLocaleString()} rows), ` +
-        `below the ${pctStr(TOTAL_COVERAGE_FLOOR)} floor — semantic hits for this source are ` +
-        `drawn from a PARTIAL index and a better match may simply not be embedded yet.`,
-    );
-    if (best.recentPct !== null && best.recentPct >= RECENT_COVERAGE_FLOOR) {
-      parts.push(
-        `Recent rows are ${pctStr(best.recentPct)} covered, so this is historical backlog ` +
-          `rather than a live ingestion failure.`,
-      );
-    }
-  } else {
-    parts.push(`'${source}' embedding coverage is ${pctStr(coverage)} (at or above floor).`);
-  }
-  if (partial) {
-    parts.push(`Partial view — no fresh sample for: ${unknownSurfaces.join(', ')}.`);
-  }
-
-  return {
-    source,
-    verdict: degraded ? 'degraded' : 'healthy',
-    coverage,
-    recentCoverage: best.recentPct,
-    surfaces: readings,
-    unknownSurfaces,
-    note: parts.join(' '),
-  };
-}
-
-export interface SearchCoverageReport {
-  /** True when ANY scoped source is degraded or unknown. */
-  degraded: boolean;
-  /** Sources whose semantic results are drawn from a partial index. */
-  degradedSources: string[];
-  /** Sources with no fresh evidence either way. */
-  unknownSources: string[];
-  perSource: SourceCoverageAssessment[];
-  /** One-line summary, or null when everything semantic is healthy. */
-  warning: string | null;
+  return gate().assessSurfaces(source, surfaces, snapshot);
 }
 
 /** Assess every scoped source and roll it up for a tool response. */
@@ -439,29 +328,5 @@ export function assessSearchCoverage(
   scope: readonly string[],
   snapshot: CoverageSnapshot,
 ): SearchCoverageReport {
-  const perSource = scope.map((s) => assessSourceCoverage(s, snapshot));
-  const degradedSources = perSource.filter((a) => a.verdict === 'degraded').map((a) => a.source);
-  const unknownSources = perSource.filter((a) => a.verdict === 'unknown').map((a) => a.source);
-
-  const bits: string[] = [];
-  if (degradedSources.length > 0) {
-    bits.push(
-      `semantic results are DEGRADED for: ${degradedSources.join(', ')} — ` +
-        `these surfaces are only partially embedded, so a better match may exist but be unindexed`,
-    );
-  }
-  if (unknownSources.length > 0) {
-    bits.push(
-      `embedding coverage is UNKNOWN (no fresh sample) for: ${unknownSources.join(', ')} — ` +
-        `treat these results as unverified rather than healthy`,
-    );
-  }
-
-  return {
-    degraded: degradedSources.length > 0 || unknownSources.length > 0,
-    degradedSources,
-    unknownSources,
-    perSource,
-    warning: bits.length > 0 ? bits.join('; ') : null,
-  };
+  return gate().assessScope(scope, snapshot);
 }

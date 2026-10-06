@@ -10,6 +10,12 @@
 //
 // Flags:
 //   --integration   also run `npm run test:integration` where defined
+//   --integration-only
+//                   run ONLY `test:integration` tasks (implies --integration): no unit
+//                   lanes, no lint:el-tools. The bounded schema/migration verification
+//                   (`npm run test:integration-only` = `--all --integration-only`) —
+//                   EI-24955492938994792: `--all --integration` queued every unit suite too
+//                   and starved behind gate-sized admission.
 //   --all           ignore git diff; run every workspace's tests
 //   --dry           print what would run, don't run
 //
@@ -40,6 +46,7 @@ import { fileURLToPath } from "node:url";
 import { loadavg, availableParallelism, tmpdir, homedir } from "node:os";
 import { createHash, randomBytes } from "node:crypto";
 import { parseQuarantineWorkspaces } from "./lib/quarantine.mjs";
+import { formatMutationProbeWindow, readMutationProbeWindow } from "./lib/mutation-probe-window.mjs";
 import {
   parseSummaryFailedCounts,
   parseFailedTestFiles,
@@ -68,10 +75,13 @@ import {
 import {
   EXECUTED_MAP_RESULT_ENV,
   EXECUTED_MAP_WORKSPACE_ENV,
+  EXECUTED_MAP_OUT_ENV,
+  EXECUTED_MAP_NO_PERSIST_ENV,
   clearExecutedMapResult,
   executedMapResultPath,
   formatExecutedMapAlarmLines,
   formatExecutedMapResultLines,
+  formatTestReuseAuditResultLines,
   formatExecutedMapTotalLine,
   readExecutedMapResults,
   resolveTaskReportExpectation,
@@ -81,24 +91,32 @@ import {
   executedMapRecordingEnabled,
   formatExecutedMapLine,
   gitChangedBetween,
+  gitInertGlobalChange,
   loadExecutedSourceMap,
   loadPassDurations,
   loadReuseProofs,
 } from "./lib/executed-source-map.mjs";
+import { gitSchemaDriftJudge } from "./lib/schema-symbol-drift.mjs";
 import {
   TEST_REUSE_SKIP_LIST_ENV,
   estimateReuseSavings,
   formatReuseAlarmLine,
   formatTestReuseLine,
   formatTestReuseTotalLine,
+  laneOfFromSplit,
+  laneOfTaskScript,
+  laneScopedCandidates,
   reuseCandidates,
   reuseSoundnessAlarms,
+  reuseRunnerIdentity,
   selectReusablePasses,
   testReuseAuditRate,
   testReuseEnabled,
   testReuseMaxAgeMs,
   writeReuseSkipList,
 } from "./lib/test-pass-reuse.mjs";
+import { LANE_SCRIPTS as SHARED_LANE_SCRIPTS } from "./lib/targeted-task-reuse.mjs";
+import { exactRadiusAdmission } from "./lib/exact-radius-admission.mjs";
 import {
   decideRetry,
   deriveRetryBudget,
@@ -107,7 +125,16 @@ import {
   formatRetryPoolLine,
 } from "./lib/retry-failure-shape.mjs";
 import { stripCommentsOnly } from "./lib/strip-comments-and-strings.mjs";
-import { emptySuiteGuardArgs } from "./lib/empty-suite-guard.mjs";
+// P-008 (gitnexus-selective-hardening-and-comparison-2026-09-13): snapshot-bound,
+// source-corroborated graph dependency SUGGESTIONS. Superset-only and file-read-only — see
+// the module header. Nothing here may remove a workspace the baseline selected.
+import {
+  computeGraphSuggestions,
+  formatSuggestionLine,
+  resolveSnapshotPath,
+  unionSuperset,
+} from "./lib/graph-dependency-suggestions.mjs";
+import { emptySuiteGuardArgs, scriptRunsZeroFilesAsPass } from "./lib/empty-suite-guard.mjs";
 // EI-21082046676950143: the lint:declared-consumed guard entry below keys on the guard's OWN
 // declaring-path set rather than restating any of it — fields (`declaredIn`), columns (their
 // migration), and the registry module itself. Import-safe: check-declared-consumed.mjs runs
@@ -147,6 +174,7 @@ import {
 } from "./lib/batch-watchdog.mjs";
 import { ensurePapercuspTmpdir } from "../libs/test-config/src/tmpdir-guard.ts";
 import { sweepStaleTestScratch } from "../libs/test-config/src/hermetic-tmpdir.ts";
+import { testConfigMainProcessFiles } from "../libs/test-config/src/main-process-closure.ts";
 
 // EI-20767792192323374 — MUST happen HERE, in the launcher, and not in vitest.config.ts.
 // Vitest fixes its module-cache root as a class field initializer (`_tmpDir = join(tmpdir(),
@@ -236,7 +264,7 @@ import {
 // hoisted and fully initialized before this module's body executes, so unlike a closure
 // over a `let` declared further down (the TDZ hazard the abort block below is built
 // around), this binding cannot be unresolved when emitAbortMarker fires.
-import { formatTerminalCounterFields } from "./lib/terminal-counter-fields.mjs";
+import { formatRefusalCounterFields, formatTerminalCounterFields } from "./lib/terminal-counter-fields.mjs";
 // EI-10542: this runner interleaves its own header/status lines (fd 1/2) with
 // child suite output written synchronously via `stdio: 'inherit'`. On a non-TTY
 // fd (the gate captures to a pipe/file) `console.*` is async-buffered and flushes
@@ -287,6 +315,8 @@ import {
 const RUN_TOKEN = `${process.pid}-${randomBytes(4).toString("hex")}`;
 /** WI-10003603: taskKey → the executed-source-map result file its initial invocation was given. */
 const executedMapResultFiles = new Map();
+// Snapshot at initial settlement: a fresh retry must never replace a first-attempt audit miss.
+const initialExecutedMapReads = new Map();
 /** WI-10003792: taskKey → whether that task's recorder is EXPECTED to report (resolved at arming). */
 const executedMapReportExpectations = new Map();
 // WI-41782: keep one attributable entry in the SHARED TMPDIR instead of one
@@ -540,8 +570,10 @@ let plannedTaskCount = 0;
 // risk — which is what lets an abort BEFORE the run loop stay honest too.
 let observedNonzeroExits = 0;
 let observedAdmissionErrors = 0;
+let observedCompletedTasks = 0;
 let readTerminalCounters = () => ({
   tasks: plannedTaskCount,
+  completedTasks: observedCompletedTasks,
   failed: 0,
   quarantinedFailed: 0,
   timedOutTasks: 0,
@@ -843,6 +875,14 @@ const TASK_DURATION_HISTORY_PATH =
   );
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// EI-18750303030034478: a peer's in-tree mutation probe deliberately breaks a tracked file for the
+// length of its guard run, and a red read from that mutant is indistinguishable from a regression in
+// the caller's own change (a two-markdown-file prompt edit once got a cpu-task-worker red this way).
+// Diagnostic only — one stderr line on a FAILING run, never a verdict input, never throws.
+function emitMutationProbeWindow() {
+  const window = readMutationProbeWindow(ROOT);
+  if (window) errSync(formatMutationProbeWindow(window, ROOT));
+}
 // Accept the conventional `--flag=value` spelling for value-taking flags before
 // the small parser below examines argv. Keeping one canonical [flag, value]
 // representation means equals-form callers get the same positional-argument
@@ -929,7 +969,10 @@ if (resolvedBase.source === "watermark") {
   errSync(baseSourceLine(resolvedBase));
 }
 const base = resolvedBase.base;
-const runIntegration = has("--integration");
+// EI-24955492938994792: `--integration-only` narrows the task set to `test:integration`
+// tasks. It IMPLIES --integration so the integration task is never dropped by omission.
+const integrationOnly = has("--integration-only");
+const runIntegration = has("--integration") || integrationOnly;
 const runAll = has("--all");
 // EI-19463337855465369: `--dry-run` is the more common CLI convention (npm,
 // git, rsync, kubectl all use it) and this repo's own agent guidance points
@@ -1102,6 +1145,7 @@ const excludes = new Set(excludeArg.split(",").filter(Boolean));
 const KNOWN_FLAGS = [
   "--base",
   "--integration",
+  "--integration-only",
   "--all",
   "--dry",
   "--dry-run",
@@ -1683,6 +1727,11 @@ const STANDALONE_PACKAGE_DIRS = [
 // divergence from the first nobody would notice.
 const NON_WORKSPACE_PATH_ROUTES = [
   { prefix: "scripts/", workspace: "@papercusp/operator-core" },
+  // WI-10004418. The hosted workspace launches the released `bin/psu` wrapper
+  // packaged from apps/tui/release/psu. Its re-exec contract is covered by the
+  // operator integration suite, but apps/tui has no npm workspace, so without
+  // this route a release-wrapper-only change selected zero workspaces.
+  { prefix: "apps/tui/release/psu", workspace: "@papercusp/web" },
   // CLAUDE.md is a PRESCRIPTIVE artifact spliced into every agent's prompt, and
   // its executable claims are asserted by operator-core's doc-claims suite
   // (false-premise-in-prescriptive-artifacts-2026-08-02 P-004). MEASURED before
@@ -1991,6 +2040,44 @@ const SU_SPLICE_MARKER_TRIGGER_PATHS = new Set([
 
 const REPO_WIDE_INVARIANT_GUARDS = [
   {
+    // WI-10005302: workflow/config-only changes are outside npm workspaces.
+    // Catch misplaced label rules before GitHub rejects a push with zero jobs.
+    workspace: "@papercusp/operator-core",
+    script: "test:github-workflows",
+    appliesTo: (f) =>
+      f.startsWith(".github/workflows/") ||
+      f === ".github/labeler.yml" ||
+      f === "packages/operator-core/lib/github-workflows.test.ts" ||
+      f === "packages/operator-core/package.json" ||
+      f === "scripts/affected-tests.mjs",
+  },
+  {
+    // WI-10005194. lib/scout/pty-host-health-lane.test.ts reads
+    // apps/operator/scripts/psu-pty-host.mjs BY PATH and fails when the host
+    // emits an event kind the classifier does not know. The host lives in
+    // @papercusp/web, so a host-only edit never selected operator-core and the
+    // red first surfaced at the fleet gate. That happened twice in about 3 hours
+    // (EI-24823553355491316, then WI-10004943's launch-kickoff-fresh-child-retry).
+    // The task runs that one file only (11 assertions, under 1s).
+    workspace: "@papercusp/operator-core",
+    script: "test:pty-host-event-classification",
+    appliesTo: (f) =>
+      f === "apps/operator/scripts/psu-pty-host.mjs" ||
+      f === "packages/operator-core/lib/scout/pty-host-health-lane.ts" ||
+      f === "packages/operator-core/lib/scout/pty-host-health-lane.test.ts",
+  },
+  {
+    // Phone media sources are outside npm workspaces. Include all three layers even
+    // when the web unit suite is selected; it excludes the integration suite.
+    workspace: "@papercusp/web",
+    script: "test:phone-media",
+    appliesTo: (f) =>
+      f.startsWith("infra/phone-app/") ||
+      f.startsWith("apps/operator/scripts/__tests__/phone-app-hosted-config.") ||
+      f === "apps/operator/e2e/phone-media-probe.spec.ts" ||
+      f === "apps/operator/package.json",
+  },
+  {
     // EI-24368307678871025 — the host's real esbuild graph must resolve imports
     // against the committed operator-core tree before a restart uses that graph.
     // The existing check builds into a temporary directory, so it cannot replace
@@ -2025,6 +2112,58 @@ const REPO_WIDE_INVARIANT_GUARDS = [
         !f.includes("node_modules/") &&
         !f.includes("_retired/")) ||
       f === "scripts/check-no-unenrolled-detached-spawn.mjs" ||
+      f === "scripts/affected-tests.mjs" ||
+      f === "packages/operator-core/package.json" ||
+      f === "package.json",
+  },
+  {
+    // EI-24958945974387688 — this guard scans canonical JS/TS injection sources
+    // across the tree. Keep its trigger population aligned with the scanner's
+    // generated, vendored, retired, dependency, and test exclusions.
+    workspace: "@papercusp/operator-core",
+    script: "lint:no-unenrolled-injector",
+    appliesTo: (f) =>
+      (/\.[cm]?[jt]sx?$/.test(f) &&
+        !/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(f) &&
+        !f.startsWith("_retired/") &&
+        !f.includes("/_retired/") &&
+        !f.includes("/node_modules/") &&
+        !f.includes("/dist/") &&
+        !f.includes("/build/") &&
+        !f.includes("/coverage/") &&
+        !f.includes("/target/") &&
+        !f.includes("/env-sidecars/")) ||
+      f === "scripts/check-no-unenrolled-injector.mjs" ||
+      f === "scripts/affected-tests.mjs" ||
+      f === "packages/operator-core/package.json" ||
+      f === "package.json",
+  },
+  {
+    // WI-10005282 — `lint:no-eager-execfile-promisify` (EI-10161) scans the whole tracked
+    // tree, but its only blocking runner was a GitHub Actions job that runs on `main` pushes
+    // and has failed on every run for days, so nobody acted on it. 14 new offenders landed
+    // unseen; WI-10005282 lazy-wrapped them. Registering it here makes the gate's own
+    // affected suite enforce it.
+    //
+    // COST, measured before registering: ~5.7 s for a whole-tree scan, because the shared
+    // stripper parses every file. A sound raw-text pre-filter in the guard (skip files with
+    // no `promisify(`) brought it to ~1.1 s.
+    workspace: "@papercusp/operator-core",
+    script: "lint:no-eager-execfile-promisify",
+    // MIRRORS `isExcluded` in scripts/check-no-eager-execfile-promisify.mjs (.ts/.mjs/.cjs,
+    // tests excluded, vendored and build output excluded) so the trigger set matches the scan.
+    appliesTo: (f) =>
+      (/\.(?:ts|mjs|cjs)$/.test(f) &&
+        !/\.(?:test|spec)\.[cm]?[tj]sx?$/.test(f) &&
+        !f.startsWith("_retired/") &&
+        !f.includes("/_retired/") &&
+        !f.includes("/node_modules/") &&
+        !f.includes("/dist/") &&
+        !f.includes("/dist-sidecar/") &&
+        !f.includes("/.next/") &&
+        !f.includes("/build/") &&
+        !f.includes("/spa/assets/") &&
+        !f.includes("/env-sidecars/")) ||
       f === "scripts/affected-tests.mjs" ||
       f === "packages/operator-core/package.json" ||
       f === "package.json",
@@ -3595,6 +3734,26 @@ const REPO_WIDE_INVARIANT_GUARDS = [
         f.endsWith(".sql.PENDING-CODE-DEPLOY")),
   },
   {
+    // WI-10003236 — applyMigrationsForTest detects a stale fixture list only when these
+    // real-Postgres tests run. Attach both fixtures to migration changes so that detector
+    // runs in the affected pass that introduces a new work-item migration.
+    workspace: "@papercusp/operator-core",
+    script: "test:integration:work-items-migration-fixtures",
+    appliesTo: (f) =>
+      f === "libs/papercusp" ||
+      (f.startsWith(`${MIGRATION_SQL_DIR}/`) &&
+        (f.endsWith(".sql") ||
+          f.endsWith(".sql.DRAFT") ||
+          f.endsWith(".sql.PENDING-CODE-DEPLOY"))) ||
+      f === "packages/operator-core/lib/work-items-closed-ts.integration.test.ts" ||
+      f === "packages/operator-core/lib/work-items-terminal-attribution-preserve.integration.test.ts" ||
+      f === "packages/operator-core/test/_pg-helpers.ts" ||
+      f === "packages/operator-core/test/_work-items-schema.ts" ||
+      f === "packages/operator-core/package.json" ||
+      f === "packages/operator-core/vitest.integration.config.ts" ||
+      f === "scripts/affected-tests.mjs",
+  },
+  {
     // WI-10004160 — the federated-column drift guard is the only check that a column added
     // to a federated CDC table is either carried by the federation mapper or declared
     // machine-local. It is an integration test, so the unit-layer operator-core task never
@@ -3753,6 +3912,23 @@ const REPO_WIDE_INVARIANT_GUARDS = [
     // in the libs/generic/tooldef-http submodule, whose superproject ignore rule pointed
     // at a `packages/` path that no longer existed). None need touch a file this run
     // would otherwise select.
+    appliesTo: () => true,
+  },
+  {
+    // WI-10002095 — the GENERAL form of the two guards above. WI-39630 and WI-10002064 each
+    // closed ONE class of "tracked path that a repo .gitignore rule also matches"; measuring
+    // the whole population found 1,969 superproject paths across four more classes
+    // (`.papercup-console-active.*`, `.next/`, `**/.papercusp/scratch/`, `**/.tmp-claude/`)
+    // that no class-specific guard could see. The rule is inert while the file behaves as
+    // tracked content, and once churn deletes it git-sync hands git an explicit pathspec for
+    // an ignored path, git refuses, and that repo's whole sync leg dies every tick.
+    workspace: "@papercusp/operator-core",
+    script: "lint:no-tracked-ignored",
+    // Deliberately NO hostSuiteRatchet (same fail-safe reasoning as the siblings: a ratchet
+    // would make the standalone leg depend on one test case continuing to exist).
+    // Deliberately EVERY changed path: the violation is armed by `git add -f`, by a build
+    // or scratch dir swept into a commit, or by a NEW .gitignore rule landing over
+    // already-tracked files — none of which need touch a file this run would select.
     appliesTo: () => true,
   },
   {
@@ -4699,6 +4875,48 @@ function affectedWorkspaces() {
 // The path-set -> workspace-set rule, factored out so the --changed-paths probe
 // (and its guard test) exercise the SAME code the real git-diff path does. Two
 // copies of this that could drift would make the test prove nothing.
+/**
+ * P-008 graph suggestions for `changed`, read from a PRE-COMPUTED snapshot FILE — never a live
+ * graph. The default path is the SHARED file the hourly `system:gitnexus-reindex` routine writes
+ * (`~/.papercusp/graph-snapshot/papercusp/`, outside every checkout — so the gate's isolated tree
+ * reads it too), falling back to the legacy per-checkout `.papercusp/graph-snapshot/` file; see
+ * `resolveSnapshotPath`. Under Vitest with no explicit path the lookup is off (hermetic-test).
+ * Importer SOURCE is still read from THIS checkout, so an edge only applies where the judged
+ * tree's importer content matches the hash the snapshot pinned — the snapshot can add, never
+ * vouch for, a file that differs.
+ *   PAPERCUSP_AFFECTED_GRAPH_SNAPSHOT     snapshot file (overrides the default chain)
+ *   PAPERCUSP_AFFECTED_GRAPH_SUGGESTIONS  `0` disables suggestions entirely
+ *   PAPERCUSP_AFFECTED_GRAPH_MAX_AGE_MS   snapshot age ceiling (default 24h)
+ *   PAPERCUSP_AFFECTED_GRAPH_SOURCE_ROOT  where importer SOURCE is read for corroboration (hermetic-test seam; default repo root)
+ */
+function graphSuggestionsFor(changed) {
+  if (process.env.PAPERCUSP_AFFECTED_GRAPH_SUGGESTIONS === "0") {
+    return { status: "unavailable", reason: "disabled", workspaces: [], accepted: 0, rejected: 0, index: null, ageMs: null, source: null };
+  }
+  const resolved = resolveSnapshotPath({ env: process.env, root: ROOT });
+  const sourceRoot = process.env.PAPERCUSP_AFFECTED_GRAPH_SOURCE_ROOT || ROOT;
+  const maxAge = Number(process.env.PAPERCUSP_AFFECTED_GRAPH_MAX_AGE_MS);
+  const report = computeGraphSuggestions({
+    changed,
+    snapshotPath: resolved.path,
+    readFile: (p) => readFileSync(p, "utf8"),
+    readSource: (rel) => {
+      try {
+        return readFileSync(join(sourceRoot, rel), "utf8");
+      } catch {
+        return null;
+      }
+    },
+    ownerOfPath: (file) =>
+      [...wsByDir.values()]
+        .filter((ws) => file === ws.dir || file.startsWith(`${ws.dir}/`))
+        .map((ws) => ws.name),
+    now: Date.now(),
+    maxAgeMs: Number.isFinite(maxAge) && maxAge > 0 ? maxAge : undefined,
+  });
+  return { ...report, source: resolved.source };
+}
+
 function resolveAffected(changed) {
   const directlyChanged = new Set();
   for (const file of changed) {
@@ -4725,6 +4943,18 @@ function resolveAffected(changed) {
       if (wsByName.has(route.workspace)) directlyChanged.add(route.workspace);
     }
   }
+
+  // Graph dependency suggestions (P-008): ADD workspaces owning verified importers of the
+  // changed files, as extra seeds for the closure below. Seeds only ever grow the closure
+  // (monotone), so the final set is a superset of the baseline by construction;
+  // `unionSuperset` additionally asserts it. Stale/invalid/absent snapshot => nothing added.
+  const baselineSeeds = new Set(directlyChanged);
+  const graphReport = graphSuggestionsFor(changed);
+  const merged = unionSuperset(baselineSeeds, graphReport.workspaces);
+  for (const name of merged.names) directlyChanged.add(name);
+  // EVERY run, including absent/stale/disabled (gitnexus-deterministic-integration P-001): the
+  // P-008 snapshot went dormant for days while this line stayed silent on `unavailable`.
+  errSync(formatSuggestionLine(graphReport, merged.added, graphReport.source ?? null));
 
   // Walk reverse-deps transitively
   const affected = new Set(directlyChanged);
@@ -4808,7 +5038,9 @@ const affected = affectedWorkspaces();
 // (`npm run test --workspace <ws> -- <files>`), which sets no lane env — so those re-runs
 // stay isolated BY CONSTRUCTION, and WI-6956 keeps its ability to classify "passes alone,
 // fails co-executed" as a real concurrency defect rather than absorbing it.
-const LANE_SCRIPTS = ["test:lane-pure", "test:lane-stateful"];
+// The lane list is shared with the gate's targeted task re-runs (EI-24538088938561684), which must
+// recognise the same unit tasks this runner arms reuse and proof recording on.
+const LANE_SCRIPTS = SHARED_LANE_SCRIPTS;
 const hasLaneSplit = (ws) => LANE_SCRIPTS.every((s) => ws.scripts?.[s]);
 /**
  * Do this workspace's already-queued tasks cover its FULL unit suite?
@@ -4834,7 +5066,9 @@ for (const ws of affected) {
     outSync(`(excluded ${ws.name})`);
     continue;
   }
-  if (ws.scripts.test) {
+  // --integration-only (EI-24955492938994792) skips the unit lanes and lint:el-tools: the
+  // caller asked for integration fixtures alone, and unit coverage is test:affected's job.
+  if (ws.scripts.test && !integrationOnly) {
     if (hasLaneSplit(ws))
       for (const script of LANE_SCRIPTS) tasks.push({ ws, script });
     else tasks.push({ ws, script: "test" });
@@ -4842,8 +5076,9 @@ for (const ws of affected) {
   // Static drift check between el-agent-sync TOOLS list and the
   // commands registry. Cheap (no network), catches the runtime crash
   // class that hit us yesterday ("Client tool not defined on client").
-  // Always runs when present — no integration flag gate.
-  if (ws.scripts["lint:el-tools"]) tasks.push({ ws, script: "lint:el-tools" });
+  // Runs whenever present, except under --integration-only.
+  if (ws.scripts["lint:el-tools"] && !integrationOnly)
+    tasks.push({ ws, script: "lint:el-tools" });
   if (runIntegration && ws.scripts["test:integration"])
     tasks.push({ ws, script: "test:integration" });
   // EL Conv AI behavior suite. Hits the live agent; expensive (a few
@@ -4990,6 +5225,8 @@ function tsconfigAliasesFor(wsRoot) {
 // safe direction: over-running costs minutes, under-running certifies nothing.
 let checkpointMaterializationSelection = null;
 let checkpointTargetedReVerdictSelection = null;
+/** Why the exact radius was refused, when the admission rule (not a failed selection) refused it. */
+let checkpointTargetedReVerdictRefusal = null;
 
 // P-002 (gate-latency-selection-and-retry-policy-2026-09-06): the executed-source map. The
 // static closure the selector computes is a SUPERSET; a map of what each test file actually
@@ -5211,14 +5448,16 @@ if (relatedOnly) {
         .sort((a, b) =>
           `${a.workspace}\0${a.file}`.localeCompare(`${b.workspace}\0${b.file}`),
         );
-      const everyTaskIsCoveredByTheExactFileRunner = tasks.every((task) =>
-        narrowable(task.script),
-      );
-      if (
-        everyTaskIsCoveredByTheExactFileRunner &&
-        selectedInvariantGuards.length === 0 &&
-        affectedFiles.length > 0
-      ) {
+      // D-129 (1): invariant guards no longer refuse the exact radius — each one is emitted as
+      // its own AFFECTED_GUARD leg, which the repair-head consumer runs beside the exact files.
+      // A changed global runner input still widens fully (see exact-radius-admission.mjs).
+      const admission = exactRadiusAdmission({
+        everyTaskNarrowable: tasks.every((task) => narrowable(task.script)),
+        affectedFileCount: affectedFiles.length,
+        changedPaths: invariantGuardChangedPaths(),
+      });
+      if (!admission.admitted) checkpointTargetedReVerdictRefusal = admission.reason;
+      if (admission.admitted) {
         checkpointTargetedReVerdictSelection = {
           affectedWorkspaces: [...new Set(affected.map((ws) => ws.name))].sort(),
           affectedFiles,
@@ -5359,7 +5598,9 @@ if (printAffected) {
       }
     } else {
       outSync(
-        "RELATED_AFFECTED_FILES status=full reason=no-complete-exact-file-radius",
+        `RELATED_AFFECTED_FILES status=full reason=${
+          checkpointTargetedReVerdictRefusal ?? "no-complete-exact-file-radius"
+        }`,
       );
     }
   }
@@ -5474,7 +5715,8 @@ async function armTestPassReuse(taskList) {
     (t) =>
       (t.script === "test" || LANE_SCRIPTS.includes(t.script)) &&
       // An all-reused task runs zero files; only a script that treats that as a pass may skip.
-      /--passWithNoTests\b/.test(t.ws.scripts?.[t.script] ?? ""),
+      // The pure-lane runner does, without naming the flag (gate-test-reuse-yield P-006, D-005).
+      scriptRunsZeroFilesAsPass(t.ws.scripts?.[t.script] ?? ""),
   );
   if (unitTasks.length === 0) return;
   const off = (reason) => outSync(`TEST_PASS_REUSE applied=false reason=${reason}`);
@@ -5517,13 +5759,16 @@ async function armTestPassReuse(taskList) {
   }
   // The identity of the node the task will spawn (npm -> PATH node), not this process's: the
   // proof was stamped by the vitest process. vitest-config re-checks it against its own process.
+  // reuseRunnerIdentity prefixes the proof format (P-001), so older-format proofs never match.
   let runnerIdentity = null;
   try {
-    runnerIdentity = execFileSync(
-      "node",
-      ["-p", "process.version + ' ' + process.platform + ' ' + process.arch"],
-      { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 },
-    ).trim();
+    runnerIdentity = reuseRunnerIdentity(
+      execFileSync(
+        "node",
+        ["-p", "process.version + ' ' + process.platform + ' ' + process.arch"],
+        { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 },
+      ),
+    );
   } catch {
     runnerIdentity = null;
   }
@@ -5536,12 +5781,58 @@ async function armTestPassReuse(taskList) {
     return off(`pg-unavailable(${String((err && err.message) || err).replace(/\s+/g, "_")})`);
   }
   const changedBetween = gitChangedBetween({ repoRoot: ROOT, relative: true });
+  // gate-test-reuse-yield-2026-10-01 P-002: a scripts-only root package.json change is not global.
+  const inertGlobalChange = gitInertGlobalChange({ repoRoot: ROOT });
+  // P-007 (D-010): a regenerated DB schema reaches only the proofs that name a changed table.
+  // Reads the judged tree from the working tree: sound because a dirty checkout already
+  // returned off("dirty-checkout") above.
+  const schemaDriftJudge = gitSchemaDriftJudge({ repoRoot: ROOT, judgedSha });
+  // P-003: the test-config files the vitest main process can load, derived at the judged tree.
+  // Unavailable = null, which keeps every test-config source file global (the pre-P-003 rule).
+  let testConfigMainProcess = null;
+  try {
+    testConfigMainProcess = testConfigMainProcessFiles({
+      repoRoot: ROOT,
+      srcDir: join(ROOT, "libs/test-config/src"),
+    });
+  } catch (err) {
+    outSync(
+      `TEST_PASS_REUSE_TEST_CONFIG_CLOSURE state=unavailable reason=${String((err && err.message) || err).replace(/\s+/g, "_").slice(0, 120)}`,
+    );
+  }
+  // P-004 (D-007): the tsconfig/jsconfig files vite and vite-tsconfig-paths read, derived at the
+  // judged tree. Unavailable = null, which keeps every root tsconfig global (the pre-P-004 rule).
+  // Imported lazily: a missing tsconfck must degrade to "unavailable", never break this script.
+  let toolchainTsconfigs = null;
+  try {
+    const { toolchainTsconfigFiles } = await import("../libs/test-config/src/toolchain-tsconfigs.ts");
+    toolchainTsconfigs = await toolchainTsconfigFiles({
+      repoRoot: ROOT,
+      // WI-10004941: untracked configs tsconfck cannot parse are skipped (sound); say so.
+      onUntrackedParseFailures: (failures) =>
+        outSync(
+          `TEST_PASS_REUSE_TSCONFIG_CLOSURE skippedUntracked=${failures.length} first=${String(failures[0]).replace(/\s+/g, "_").slice(0, 160)}`,
+        ),
+    });
+  } catch (err) {
+    outSync(
+      `TEST_PASS_REUSE_TSCONFIG_CLOSURE state=unavailable reason=${String((err && err.message) || err).replace(/\s+/g, "_").slice(0, 120)}`,
+    );
+  }
   const maxAgeMs = testReuseMaxAgeMs();
   const auditRate = testReuseAuditRate();
   const nowMs = Date.now();
   const loaded = new Map();
   /** @type {{ tasks: number, summaries: Record<string, number>[], savedMs: number | null, unmeasured: number }} */
   const reuseTotals = { tasks: 0, summaries: [], savedMs: 0, unmeasured: 0 };
+  // WI-10004617: classify with the SAME function each lane's vitest config uses (lane-split.ts),
+  // so a lane task's candidates are exactly the files that lane runs. Loaded once, on demand.
+  /** @type {any} */
+  let laneSplit = null;
+  const laneClassifier = async (wsRoot, wsRelFiles) => {
+    laneSplit ??= await import("@papercusp/test-config/lane-split");
+    return laneOfFromSplit(laneSplit, wsRoot, wsRelFiles);
+  };
   try {
     for (const t of unitTasks) {
       if (!loaded.has(t.ws.name)) {
@@ -5567,8 +5858,26 @@ async function armTestPassReuse(taskList) {
       }
       const wsRel = relative(ROOT, join(ROOT, t.ws.dir)).replaceAll("\\", "/");
       const prefix = wsRel === "" ? "" : `${wsRel}/`;
+      let candidates = reuseCandidates({ wsRel, relatedFiles: t.relatedFiles, proofFiles: proofs.keys() });
+      // WI-10004617: a lane task's selection covers BOTH lanes; count only the files it can run.
+      const lane = laneOfTaskScript(t.script);
+      let laneNote = "";
+      if (lane !== null) {
+        try {
+          const laneOf = await laneClassifier(
+            join(ROOT, t.ws.dir),
+            candidates.map((f) => f.slice(prefix.length)),
+          );
+          const scoped = laneScopedCandidates({ candidates, wsRel, lane, laneOf });
+          candidates = scoped.candidates;
+          laneNote = ` lane=${lane} otherLane=${scoped.otherLane}`;
+        } catch (err) {
+          // Fail-open: the unfiltered list only over-counts noProof; it never skips a wrong file.
+          laneNote = ` lane=${lane} laneFilter=unavailable(${String((err && err.message) || err).replace(/\s+/g, "_")})`;
+        }
+      }
       const { skip, summary, watch } = selectReusablePasses({
-        candidates: reuseCandidates({ wsRel, relatedFiles: t.relatedFiles, proofFiles: proofs.keys() }),
+        candidates,
         proofs,
         judgedSha,
         changedBetween,
@@ -5577,13 +5886,20 @@ async function armTestPassReuse(taskList) {
         nowMs,
         maxAgeMs,
         auditRate,
+        inertGlobalChange,
+        testConfigMainProcess,
+        toolchainTsconfigs,
+        schemaDriftJudge,
       });
       // P-012: the files reuse WOULD have skipped but that run this time; a red among them is a
       // TEST_PASS_REUSE_ALARM (phase C), judged on the first pass before any retry.
       if (watch.size > 0) t.reuseWatch = { watch, prefix };
       if (skip.length > 0) {
+        // Workspace-relative, for the EI-11132 guard: a run this list empties must keep its
+        // script's --passWithNoTests (see reuseSkipCoversRun in scripts/lib/empty-suite-guard.mjs).
+        t.reuseSkipped = skip.map((f) => f.slice(prefix.length));
         t.reuseSkipList = writeReuseSkipList(RUN_LOG_ROOT, {
-          files: skip.map((f) => f.slice(prefix.length)),
+          files: t.reuseSkipped,
           runContext,
           runnerIdentity,
           judgedSha,
@@ -5617,7 +5933,9 @@ async function armTestPassReuse(taskList) {
           label,
           summary,
           ` rows=${rows} narrowed=${Array.isArray(t.relatedFiles)} ` +
-            `minSavedTestMs=${savings === null ? "unknown" : savings.savedMs}`,
+            `minSavedTestMs=${savings === null ? "unknown" : savings.savedMs} auditRate=${auditRate}${laneNote}`,
+          { version: 1, judgedSha, runnerIdentity, runContext,
+            runGroupId: process.env.PAPERCUSP_TEST_RUN_GROUP ?? null, dirty: false },
         ),
       );
     }
@@ -6096,6 +6414,7 @@ let coverage = emptyCoverage();
 // because a closure over these `let`s is a TDZ throw until this point.
 readTerminalCounters = () => ({
   tasks: tasks.length,
+  completedTasks: observedCompletedTasks,
   failed,
   quarantinedFailed,
   timedOutTasks,
@@ -6159,7 +6478,8 @@ const taskContexts = tasks.map((t) => ({
   isQuarantined: quarantined.has(t.ws.name),
   coverageArgs: coverageArgsFor(t),
   // EI-11132: when this script declares --passWithNoTests AND the workspace genuinely
-  // has matching test files on disk, disable passWithNoTests for THIS task.
+  // has matching test files on disk, disable passWithNoTests for THIS task — unless the
+  // pass-reuse skip list covers every file the task would run, which empties it on purpose.
   // A guard that diffs git must see the same base this runner used to select it;
   // otherwise a clean-after-git-sync tree looks like a no-op to the child process.
   guardArgs: [
@@ -6167,6 +6487,8 @@ const taskContexts = tasks.map((t) => ({
       scriptText: t.ws.scripts[t.script] ?? "",
       wsAbsDir: join(ROOT, t.ws.dir),
       script: t.script,
+      reuseSkipped: t.reuseSkipped ?? null,
+      selectedFiles: Array.isArray(t.relatedFiles) ? t.relatedFiles : null,
     }),
     ...(t.guardArgs ?? []),
     ...(t.guardBase ? ["--base", t.guardBase] : []),
@@ -6279,14 +6601,25 @@ function runCapturedTask(
   // phase-C report reads exactly one invocation per task. An inherited value is stripped.
   const recordsExecutedMap =
     executedMapRecordingEnabled() &&
-    (spawnTask.script === "test" || LANE_SCRIPTS.includes(spawnTask.script));
+    (spawnTask.script === "test" || LANE_SCRIPTS.includes(spawnTask.script) ||
+      spawnTask.script === "test:integration");
   const executedMapResultFile =
     recordsExecutedMap && extraArgs.length === 0 && scriptOverride == null
       ? executedMapResultPath(RUN_LOG_ROOT, RUN_TOKEN, `${context.t.ws.name}::${context.t.script}`)
       : null;
+  // Integration runs need execution diagnostics, including failures and source gaps, rather
+  // than reusable unit-pass rows. Keep each workspace/attempt's OUT separate from its result
+  // channel; retries retain diagnostics without replacing the initial invocation's verdict.
+  const integrationSourceMapOut = recordsExecutedMap &&
+    (spawnTask.script === "test:integration" || context.t.script === "test:integration")
+    ? `${executedMapResultPath(RUN_LOG_ROOT, RUN_TOKEN, taskKey(spawnTask))}.${createHash("sha256")
+      .update(JSON.stringify([taskKey(context.t), taskKey(spawnTask), journalLabel, extraArgs])).digest("hex").slice(0, 16)}.sources.json`
+    : null;
   const {
     [TEST_REUSE_SKIP_LIST_ENV]: _inheritedReuseSkipList,
     [EXECUTED_MAP_RESULT_ENV]: _inheritedExecutedMapResult,
+    [EXECUTED_MAP_WORKSPACE_ENV]: _inheritedExecutedMapWorkspace,
+    [EXECUTED_MAP_OUT_ENV]: inheritedExecutedMapOut,
     ...parentEnv
   } = process.env;
   const childEnv = {
@@ -6295,13 +6628,16 @@ function runCapturedTask(
     ...(relatedFilterList ? { [RELATED_FILTER_LIST_ENV]: relatedFilterList.path } : {}),
     ...(reuseSkipList ? { [TEST_REUSE_SKIP_LIST_ENV]: reuseSkipList.path } : {}),
     // P-002 (gate-latency-selection-and-retry-policy-2026-09-06): arm the executed-source-map
-    // reporter on every unit vitest task (the `test` script and the lane split), naming the
-    // workspace whose map it records. The reporter itself rails the recording to a CLEAN,
-    // isolated, passing run — so on the shared dirty checkout this stamps and records nothing,
-    // and only the gate's checkpoint checkout actually writes rows. Integration/el-suite/guard
-    // tasks are not narrowable and get no stamp.
+    // reporter on unit tasks and integration tasks, naming the workspace it observes. Unit
+    // proof persistence keeps the reporter's clean/passing guards. Integration OUT is local
+    // diagnostic evidence only: it never enables selection narrowing or pass-proof persistence.
+    // El-suite/guard tasks remain unarmed, including when the caller was itself armed.
     ...(recordsExecutedMap ? { [EXECUTED_MAP_WORKSPACE_ENV]: spawnTask.ws.name } : {}),
     ...(executedMapResultFile ? { [EXECUTED_MAP_RESULT_ENV]: executedMapResultFile } : {}),
+    ...(recordsExecutedMap && inheritedExecutedMapOut
+      ? { [EXECUTED_MAP_OUT_ENV]: inheritedExecutedMapOut } : {}),
+    ...(integrationSourceMapOut
+      ? { [EXECUTED_MAP_OUT_ENV]: integrationSourceMapOut, [EXECUTED_MAP_NO_PERSIST_ENV]: "1" } : {}),
     // P-006 (design-to-code-coverage-seam-2026-09-02): arm coverage attribution for every task
     // this runner spawns, so a `test:affected` run contributes surface→test evidence the way
     // `testing:run` and the admin-UI runner already do. Inert unless a seam is exercised — the
@@ -6371,6 +6707,9 @@ function runCapturedTask(
         // drift apart: a field added to one would otherwise silently weaken the other.
         const cacheIdentitySpec = {
           taskKey: taskKey(context.t),
+          // lint:as-committed isolates its cache by source repository. Only that
+          // explicit immutable launch may compare relocated checkout commands.
+          commandRoot: process.env.PAPERCUSP_LINT_AS_COMMITTED_CLONE === "1" ? ROOT : null,
           command: {
             cmd,
             argv,
@@ -6538,6 +6877,10 @@ function runCapturedTask(
   // Retain the declared task key as the per-entry identity while also recording
   // the command shape that actually ran.
   const processIdentity = `${taskKey(context.t)}=>${taskKey(spawnTask)}:${journalLabel}`;
+  if (integrationSourceMapOut) {
+    outSync(`EXECUTED_SOURCE_MAP_OUT task=${JSON.stringify(taskKey(spawnTask))} ` +
+      `path=${JSON.stringify(integrationSourceMapOut)} noPersist=true`);
+  }
   // WI-10003603: registered only once the task really spawns (a cache hit returned above), so the
   // phase-C report never reads a result for a run that did not happen.
   if (executedMapResultFile) {
@@ -6645,7 +6988,7 @@ function runCapturedTask(
         allocation,
         journalLabel,
       );
-      rawErrSync(
+      errSync(
         `AFFECTED_TASK_PROGRESS state=spawn-error task=${progressTask} ` +
           `elapsedSec=${Math.floor((Date.now() - startedAt) / 1000)} capturedBytes=0 ` +
           `stalledForSec=0 timeoutMs=${taskTimeoutMs} timeoutSource=${taskTimeoutSource} ` +
@@ -6686,9 +7029,10 @@ function runCapturedTask(
       signal = null,
       settled = false,
     ) => {
-      // Deliberately bypass the ordered replay buffer: this tiny, self-identifying marker is
-      // the live pulse consumed by green-checkpoint while the child output remains captured.
-      // It contains no child bytes, so concurrent tasks cannot misattribute test output.
+      // Bypass ordered task-output replay, but retain the live pulse in the canonical
+      // run log as well as stderr. A resumed observer may only have RUN_LOG_PATH:
+      // rawErrSync alone made a progressing suite look silent until phase C replayed it.
+      // capturedBytes/stalledForSec, not the pulse's mtime alone, establish progress.
       const outcome = formatTaskOutcomeFields({ status, signal, settled });
       // Deliberately narrow: only an UNAMBIGUOUS non-clean settlement counts — a nonzero
       // numeric status, or death by signal. A settled beat carrying neither (status null,
@@ -6701,7 +7045,7 @@ function runCapturedTask(
         countedNonzeroExit = true;
         observedNonzeroExits++;
       }
-      rawErrSync(
+      errSync(
         `AFFECTED_TASK_PROGRESS state=${state} task=${progressTask} ` +
           `elapsedSec=${Math.floor((Date.now() - startedAt) / 1000)} capturedBytes=${capturedBytes} ` +
           // WI-41180: `elapsedSec` rises identically whether the task is working or
@@ -7171,10 +7515,20 @@ try {
     durationEstimate(durationHistory, taskKey(context.t)),
   runTask: (context, allocation) => runCapturedTask(context, allocation),
   onTaskSettled: (scheduled) => {
+    // Refusal can interrupt a later shard before the aggregate tally. Count
+    // only outcomes whose exit is known; an unreadable result remains unknown.
+    const value = scheduled?.value ?? {};
+    if ((typeof value.status === "number" && Number.isFinite(value.status)) || value.signal) observedCompletedTasks++;
     // Coverage first: it is pure bookkeeping over output already in hand, while the verdict
     // cache does filesystem work whose environmental failures are tolerated. Ordering them
     // this way keeps a slow or failing cache write from costing the tally.
     foldSettledTaskCoverage(scheduled);
+    const initialKey = taskKey(scheduled.task.t);
+    const initialResultFile = executedMapResultFiles.get(initialKey);
+    if (initialResultFile) initialExecutedMapReads.set(initialKey, {
+      ...readExecutedMapResults(initialResultFile),
+      expectsReport: executedMapReportExpectations.get(initialKey)?.expectsReport ?? null,
+    });
     persistCleanFirstPassTaskVerdict(scheduled);
   },
   // WI-1490656: send the shared-admission queue notices through `errSync`, so they land in
@@ -7197,15 +7551,15 @@ try {
       `AFFECTED_TESTS_REFUSAL kind=deadline-insufficient detail=${String(error?.message ?? error)}`,
     );
     errSync(
-      `AFFECTED_TESTS_RESULT status=refused reason=deadline-insufficient tasks=${tasks.length} ` +
-        `failed=0 quarantinedFailed=0 timedOutTasks=0 undeterminedTasks=${tasks.length}`,
+      `AFFECTED_TESTS_RESULT status=refused reason=deadline-insufficient ` +
+        formatRefusalCounterFields(readTerminalCounters()) + ` ${formatCoverageFields(coverage)}`,
     );
     errSync(
-      "NOT MEASURED — this run's launcher gave it a wall clock shorter than the work it was " +
-        "asked to do, so it refused before running anything rather than being killed mid-suite " +
-        "with no verdict. Nothing here is a test verdict. Re-fire with a longer timeout: the " +
-        "TASK_DEADLINE_REFUSAL line above names the remaining clock and the KNOWN work (a lower " +
-        "bound — unknown-duration tasks are counted as zero and reported separately).",
+      "NOT MEASURED — this run's launcher gave it a wall clock shorter than the projected " +
+        "task work. The full plan was refused; any existing task observations remain above. " +
+        "Nothing here is a full test verdict. Re-fire with a longer timeout: the " +
+      "TASK_DEADLINE_REFUSAL line above names the remaining clock and the lane-aware historical " +
+        "wall projection (unknown-duration tasks are counted as zero and reported separately).",
     );
     // EI-22431012667356741: the documented triage grep includes AFFECTED_EXIT, but this
     // deliberate refusal previously emitted only status=refused and NOT MEASURED. Publish the
@@ -7219,14 +7573,14 @@ try {
   if (!isSharedAdmissionTimeout(error)) throw error;
   errSync(`AFFECTED_TESTS_REFUSAL kind=admission-starved detail=${String(error?.message ?? error)}`);
   errSync(
-    `AFFECTED_TESTS_RESULT status=refused reason=admission-starved tasks=${tasks.length} ` +
-      `failed=0 quarantinedFailed=0 timedOutTasks=0 undeterminedTasks=${tasks.length}`,
+    `AFFECTED_TESTS_RESULT status=refused reason=admission-starved ` +
+      formatRefusalCounterFields(readTerminalCounters()) + ` ${formatCoverageFields(coverage)}`,
   );
   errSync(
-    "NOT MEASURED — this run spent its whole shared-admission budget queued behind another " +
-      "test process and never got to run its tasks. Nothing here is a test verdict. The " +
-      "holder is named in the AFFECTED_TESTS_ADMISSION_QUEUED lines above; re-fire once the " +
-      "queue drains.",
+    "NOT MEASURED — the full task plan could not finish within its shared-admission " +
+      "queue budget. Settled shards retain their coverage and observed exit counters " +
+      "above; this is not a full test verdict. The holder is named in the " +
+      "AFFECTED_TESTS_ADMISSION_QUEUED lines above.",
   );
   terminalEmitted = true;
   errSync(`Full run log: ${RUN_LOG_PATH}`);
@@ -7545,8 +7899,8 @@ for (const scheduled of initialPool.results) {
   // reporter's own line went to the task's stderr, which the gate discards.
   const executedMapResultFile = executedMapResultFiles.get(taskKey(t));
   if (executedMapResultFile) {
-    const read = {
-      ...readExecutedMapResults(executedMapResultFile),
+    const read = initialExecutedMapReads.get(taskKey(t)) ?? {
+      status: "no-report", results: [], malformed: 0,
       expectsReport: executedMapReportExpectations.get(taskKey(t))?.expectsReport ?? null,
     };
     executedMapReads.push(read);
@@ -7554,6 +7908,9 @@ for (const scheduled of initialPool.results) {
     for (const line of formatExecutedMapResultLines(label, read)) outSync(line);
     for (const line of formatExecutedMapAlarmLines(label, read)) errSync(line);
   }
+  for (const line of formatTestReuseAuditResultLines(
+    `${t.ws.name}::${t.script}`, initialExecutedMapReads.get(taskKey(t)), t.reuseWatch,
+  )) outSync(line);
   let r = scheduled.value;
   const prep = retryPrep.get(scheduled.index);
   const { watchdogTimedOut } = prep;
@@ -8102,6 +8459,7 @@ if (undeterminedTasks) {
   for (const name of undeterminedTaskNames) errSync(`  - ${name}`);
 }
 if (!failed && undeterminedTasks) {
+  emitMutationProbeWindow();
   errSync(resultLine("failed"));
   terminalEmitted = true;
   errSync(`Full run log: ${RUN_LOG_PATH}`);
@@ -8231,6 +8589,7 @@ if (failed) {
       }),
     );
   }
+  emitMutationProbeWindow();
   errSync(resultLine("failed"));
   terminalEmitted = true;
   errSync(`Full run log: ${RUN_LOG_PATH}`);

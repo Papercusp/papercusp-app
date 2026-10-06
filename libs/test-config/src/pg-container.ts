@@ -2,6 +2,7 @@ import {
   PostgreSqlContainer,
   type StartedPostgreSqlContainer,
 } from "@testcontainers/postgresql";
+import { Wait } from "testcontainers";
 import postgres from "postgres";
 import { randomBytes } from "node:crypto";
 import { readFile, rename, writeFile } from "node:fs/promises";
@@ -77,8 +78,10 @@ export async function withContainerRecoveryReResolution<T>(
   options: {
     maxResolutions?: number;
     slowStageMs?: number;
+    /** Confirm a failed reused candidate is still unhealthy before invalidating its shared reuse generation. */
+    shouldRetire?: (container: T, error: unknown) => Promise<boolean>;
     onStage?: (event: {
-      stage: "resolve" | "ensure" | "retire";
+      stage: "resolve" | "ensure" | "retire-check" | "retire";
       resolution: number;
       status: "waiting" | "done" | "failed";
       elapsedMs: number;
@@ -93,7 +96,7 @@ export async function withContainerRecoveryReResolution<T>(
   }
 
   const runStage = async <R>(
-    stage: "resolve" | "ensure" | "retire",
+    stage: "resolve" | "ensure" | "retire-check" | "retire",
     resolution: number,
     action: () => Promise<R>,
   ): Promise<R> => {
@@ -131,7 +134,12 @@ export async function withContainerRecoveryReResolution<T>(
       ) {
         throw error;
       }
-      await runStage("retire", resolution, () => retire(container));
+      const shouldRetire = options.shouldRetire
+        ? await runStage("retire-check", resolution, () => options.shouldRetire!(container, error))
+        : true;
+      if (shouldRetire) {
+        await runStage("retire", resolution, () => retire(container));
+      }
       container = await runStage("resolve", resolution + 1, resolve);
     }
   }
@@ -210,13 +218,16 @@ function isReprovisionableSharedTestPgFailure(message: string): boolean {
  *
  * ⚠ THIS CONSTANT IS ONLY SAFE WITH A HOST-SIDE SQL READINESS PROBE, and that
  * is why it is a shared constant rather than something each site inlines.
- * `PostgreSqlContainer` gates startup on
+ * `PostgreSqlContainer` defaults to
  * `Wait.forAll([Wait.forHealthCheck(), Wait.forListeningPorts()])`
- * (@testcontainers/postgresql/build/postgresql-container.js). Overriding the
- * healthcheck to `exit 0` therefore REMOVES a real startup gate — what remains
- * is only "the TCP port is published", which is NOT "Postgres accepts SQL"
- * (it can still be in crash recovery). Every site using this MUST perform its
- * own host-side readiness wait immediately after `.start()`:
+ * (@testcontainers/postgresql/build/postgresql-container.js). Setting a Docker
+ * healthcheck does NOT replace that wait strategy. Call sites that use this
+ * harmless `exit 0` healthcheck must explicitly use
+ * `.withWaitStrategy(Wait.forListeningPorts())`; then the host-side SQL probe,
+ * not Docker's mutable/reused health state, decides whether Postgres is ready.
+ * The port-only wait is NOT "Postgres accepts SQL" (it can still be in crash
+ * recovery), so every site using this MUST perform its own host-side readiness
+ * wait immediately after `.start()`:
  *   - `getTestPg` below     -> the FRAMEWORK_ROLES_DDL retry loop
  *   - baseline-schema-global-setup -> `isBaselineContainerHealthy` + reprovision
  * A site with no such probe must NOT adopt this constant until it grows one;
@@ -260,7 +271,8 @@ export async function startDedicatedTestPg(
   opts: { command?: string[]; readyBudgetMs?: number } = {},
 ): Promise<StartedPostgreSqlContainer> {
   let container = new PostgreSqlContainer(TEST_PG_IMAGE)
-    .withHealthCheck({ ...NON_DESTRUCTIVE_PG_HEALTHCHECK });
+    .withHealthCheck({ ...NON_DESTRUCTIVE_PG_HEALTHCHECK })
+    .withWaitStrategy(Wait.forListeningPorts());
   if (opts.command) container = container.withCommand(opts.command);
   const started = await container.start();
   const ready = await probePgReachable(started.getConnectionUri(), opts.readyBudgetMs ?? 120_000);
@@ -485,9 +497,11 @@ export async function getTestPg(): Promise<string> {
               // the 250ms healthcheck then repeats the crash indefinitely. Keep the
               // Docker health bit non-destructive and let the host-side
               // FRAMEWORK_ROLES_DDL loop below own real SQL readiness. The sibling
-              // listening-port wait still prevents returning before the TCP port is
-              // published, and the host loop refuses until Postgres is writable.
+              // listening-port wait prevents Testcontainers from rejecting a
+              // reused candidate on a stale/transient Docker health status; the
+              // host loop still refuses until Postgres is writable.
               .withHealthCheck({ ...NON_DESTRUCTIVE_PG_HEALTHCHECK })
+              .withWaitStrategy(Wait.forListeningPorts())
               .withReuse()
               .start(),
           async (container) => {
@@ -589,6 +603,22 @@ export async function getTestPg(): Promise<string> {
             await rotateTestPgReuseGeneration();
           },
           {
+            shouldRetire: async (container, error) => {
+              // The ensure retry can exhaust while Postgres is recovering, then
+              // recover before this decision. Recheck SQL reachability so a
+              // healthy shared container does not lose its hash and force every
+              // waiting test process down the serialized Docker-create path.
+              const probe = await probePgReachable(container.getConnectionUri(), 5_000);
+              const cause = error instanceof Error ? error.message : String(error);
+              process.stderr.write(
+                `[getTestPg] recovery-disposition=${probe.ok ? "preserve-generation" : "rotate-generation"} ` +
+                  `pid=${process.pid} container=${describeContainer(container)} ` +
+                  `cause=${JSON.stringify(cause.slice(0, 240))} probe=${probe.ok ? "healthy" : "unreachable"} ` +
+                  `probeElapsedMs=${probe.elapsedMs}` +
+                  `${probe.lastError ? ` probeError=${JSON.stringify(probe.lastError.slice(0, 240))}` : ""}\n`,
+              );
+              return !probe.ok;
+            },
             onStage: ({ stage, resolution, status, elapsedMs }) => {
               process.stderr.write(
                 `[getTestPg] stage=${stage} resolution=${resolution} status=${status} elapsedMs=${elapsedMs}\n`,

@@ -425,6 +425,32 @@ export async function getOwnerDirective(id: number, sql?: Sql): Promise<OwnerDir
   return rows[0] ? rowOf(rows[0]) : null;
 }
 
+/**
+ * The newest OWNER-TYPED turn captured in `recordedBy`'s session whose text
+ * contains `token` (case-insensitive), declined rows excluded. Personal Vault
+ * release authority (personal-data-reader-set-labels-2026-10-01 D-005) uses it
+ * to find the turn in which the owner typed a release code.
+ */
+export async function findCapturedDirectiveContaining(
+  input: { workspaceId: string; recordedBy: string; token: string },
+  sql?: Sql,
+): Promise<OwnerDirectiveRow | null> {
+  const token = input.token.trim();
+  if (!token) return null;
+  const ws = resolveConcreteWorkspaceId(input.workspaceId);
+  const rows = await db(sql)<RawRow[]>`
+    SELECT * FROM harness_shared.owner_directives
+     WHERE workspace_id = ${ws}
+       AND recorded_by = ${input.recordedBy}
+       AND captured_by_hook = true
+       AND disposition_status IS DISTINCT FROM 'declined'
+       AND strpos(lower(verbatim_text), lower(${token})) > 0
+     ORDER BY id DESC
+     LIMIT 1
+  `;
+  return rows[0] ? rowOf(rows[0]) : null;
+}
+
 export interface ListOwnerDirectivesOpts {
   workspaceId: string;
   /** true → only open rows; false → only dispositioned history; omitted → all. */
@@ -436,6 +462,14 @@ export interface ListOwnerDirectivesOpts {
    * away, which reads as a real absence. Combined with `open`, both apply (AND).
    */
   state?: OwnerDirectiveState | readonly OwnerDirectiveState[];
+  /**
+   * Explicit ledger filter by who recorded a directive. Unlike viewerOwnerId,
+   * this does not apply agenda-cleared exclusions; it is safe for orders:list.
+   * Applied in SQL before limit so a matching row cannot be truncated away.
+   */
+  recordedBy?: string;
+  /** Exclude rows recorded by this session; also applied in SQL before limit. */
+  excludeRecordedBy?: string;
   /**
    * P-008 / D-008: the session this list is being rendered FOR. When given,
    * directives that session has cleared off its own agenda are excluded — for
@@ -475,6 +509,8 @@ export async function listOwnerDirectives(
       FROM harness_shared.owner_directives
      WHERE (workspace_id = ${ws} OR workspace_id = 'default')
        ${opts.open === true ? s`AND dispositioned_at IS NULL` : opts.open === false ? s`AND dispositioned_at IS NOT NULL` : s``}
+       ${opts.recordedBy !== undefined ? s`AND recorded_by = ${opts.recordedBy}` : s``}
+       ${opts.excludeRecordedBy !== undefined ? s`AND recorded_by IS DISTINCT FROM ${opts.excludeRecordedBy}` : s``}
        ${agendaClearedExclusionSql(s, opts.viewerOwnerId)}
        ${
          states && states.length > 0

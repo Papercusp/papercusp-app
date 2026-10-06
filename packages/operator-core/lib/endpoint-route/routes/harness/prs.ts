@@ -61,6 +61,9 @@ import { isPrAuthorRevoked } from '../../../pr-host/contribution-admission';
 import { activeWorkspaceId } from '../../../workspace-registry';
 import { getOrgPg } from '@papercusp/db-org';
 import type { PrRowData, PrRowReport } from '../../../pr-host/pr-row-data';
+import type { PrHost } from '../../../pr-host/types';
+import { prToRow, livePrViewerDeps, readPrViewerDetails, actOnPr } from '../../../pr-host/pr-viewer';
+import { notifySyncInvalidate } from '../../../sync-sse';
 
 /** Flat runtime shape that github.ts actually returns (predates types.ts restructure). */
 interface FlatPr {
@@ -97,12 +100,9 @@ export type HarnessPrListing =
  * PrHost wiring or the git-origin remote derivation (#5). `host` is passed in
  * so a fan-out shares ONE PrHost across members.
  */
-export async function listHarnessPrs(
-  slug: string,
-  host: NonNullable<Awaited<ReturnType<typeof createGitHubPrHost>>>,
-): Promise<HarnessPrListing> {
+export async function resolveHarnessPrRemote(slug: string): Promise<string | null> {
   const project = await resolveProject(slug);
-  if (!project) return { ok: false, reason: 'unknown_project' };
+  if (!project) return null;
 
   // Read remote from project metadata; fall back to the checkout's git origin
   // (#5) so a harness with no `remote` field still lists PRs.
@@ -111,9 +111,15 @@ export async function listHarnessPrs(
     const projectPath = (project as unknown as { path?: string }).path ?? '';
     if (projectPath) remote = (await gitOriginRemote(projectPath)) ?? '';
   }
+  return remote || null;
+}
+
+export async function listHarnessPrs(slug: string, host: PrHost): Promise<HarnessPrListing> {
+  if (!await resolveProject(slug)) return { ok: false, reason: 'unknown_project' };
+  const remote = await resolveHarnessPrRemote(slug);
   if (!remote) return { ok: false, reason: 'no_remote' };
 
-  const result = await host.listOpenPrs({ remote });
+  const result = host.listPrs ? await host.listPrs({ remote, state: 'all' }) : await host.listOpenPrs({ remote });
   if (!result.ok) {
     return { ok: false, reason: 'poll_failed', pollingFailedAt: new Date().toISOString() };
   }
@@ -140,21 +146,11 @@ export async function listHarnessPrs(
   }
 
   const headShaByNumber = new Map<number, string>();
-  const prs: PrRowData[] = (result.data as unknown as FlatPr[]).map((pr) => {
-    headShaByNumber.set(pr.number, pr.head_sha);
+  const prs: PrRowData[] = result.data.map((pr) => {
+    headShaByNumber.set(pr.ref.number, pr.head_sha);
     return {
-      remote: pr.remote,
-      number: pr.number,
-      title: pr.title,
-      author_login: pr.author_login,
-      author_github_id: pr.author_github_id,
-      html_url: pr.html_url,
-      state: pr.state as PrRowData['state'],
-      review_decision: pr.review_decision as PrRowData['review_decision'],
-      check_conclusion: checkCache.get(pr.head_sha) ?? pr.check_conclusion,
-      // trusted + reviewerRoleEnabled are resolved client-side in PrsTab.
-      trusted: false,
-      reviewerRoleEnabled: false,
+      ...prToRow(pr),
+      check_conclusion: checkCache.get(pr.head_sha) ?? prToRow(pr).check_conclusion,
     };
   });
 
@@ -462,7 +458,8 @@ const reviewPr = defineTool({
       }
     }
 
-    const flatPr = pr as unknown as FlatPr;
+    const flatPr = { author_github_id: pr.author.github_user_id, author_login: pr.author.github_login,
+      html_url: pr.url, base_branch: pr.base_ref };
 
     // PR-5 contribution-admission: even a MANUAL approve/merge must not admit a
     // REVOKED contributor's code. A manual action bypasses the trust gate, so
@@ -481,6 +478,20 @@ const reviewPr = defineTool({
         },
         { status: 403 },
       );
+    }
+
+    // The standing PR lands only via the exact tested merge commit, never squash. Branch
+    // BEFORE posting a GitHub approval: the pot's own account authors it and GitHub
+    // refuses self-approval, so that post would fail this request outright. The
+    // reviewer's merge decision is the approval (WI-10006351); actOnPr re-checks the
+    // review permission.
+    if (action === 'approve_and_merge') {
+      const { isStandingPr } = await import('../../../harness/git-sync/standing-pr-merge');
+      if (isStandingPr(pr)) {
+        const result = await actOnPr(prNumber, 'merge', await livePrViewerDeps(slug));
+        await Promise.all(['harnessPrs.byHarness', 'harnessPrs.detail'].map(name => notifySyncInvalidate(name)));
+        return Response.json({ ok: true, ...result });
+      }
     }
 
     const approveCtx: AutoApproveContext = {
@@ -550,7 +561,8 @@ const reviewPr = defineTool({
       }
     }
 
-    return Response.json({ ok: true });
+    await Promise.all(['harnessPrs.byHarness', 'harnessPrs.detail'].map(name => notifySyncInvalidate(name)));
+    return Response.json({ ok: true, action: action === 'approve' ? 'approved' : 'reviewed' });
   },
 });
 
@@ -625,4 +637,37 @@ const reReviewPr = defineTool({
   },
 });
 
-export default [listPrs, reviewPr, reReviewPr];
+/** HTTP and sync share the same listing implementation. */
+export async function readPrsPayload(slug: string, scope: 'harness' | 'hive' = 'harness') {
+  const host = await createGitHubPrHost();
+  if (!host) throw new Error('GitHub is not authenticated.');
+  if (scope === 'hive') {
+    const members = await resolveHivePrScope(slug);
+    return { ...await aggregateHivePrs(members, m => listHarnessPrs(m, host)), members };
+  }
+  const result = await listHarnessPrs(slug, host);
+  if (result.ok) return { prs: result.prs };
+  if (result.reason === 'no_remote') return { prs: [], noRemote: true };
+  if (result.reason === 'poll_failed') return { prs: [], pollingFailedAt: result.pollingFailedAt };
+  throw new Error('Unknown harness.');
+}
+const prDetail = defineTool({ method: 'GET', path: '/harness/:slug/prs/:number', auth: 'public',
+  async handler(_req, ctx) {
+    const number = Number(ctx.params.number);
+    if (!Number.isSafeInteger(number) || number <= 0) return Response.json({ error: 'Invalid PR number' }, { status: 400 });
+    try { return Response.json(await readPrViewerDetails(number, await livePrViewerDeps(ctx.params.slug as string))); }
+    catch (e) { return Response.json({ error: String(e) }, { status: 502 }); }
+  },
+});
+const prAction = defineTool({ method: 'POST', path: '/harness/:slug/prs/:number/action', auth: 'loopback',
+  async handler(req, ctx) {
+    const { action } = await req.json().catch(() => ({}));
+    if (!['merge', 'close', 'send-green'].includes(action)) return Response.json({ error: 'Invalid action' }, { status: 400 });
+    try {
+      const outcome = await actOnPr(Number(ctx.params.number), action, await livePrViewerDeps(ctx.params.slug as string));
+      await Promise.all(['harnessPrs.byHarness', 'harnessPrs.detail'].map(name => notifySyncInvalidate(name)));
+      return Response.json({ ok: true, ...outcome });
+    } catch (e) { return Response.json({ error: String(e) }, { status: 403 }); }
+  },
+});
+export default [listPrs, reviewPr, reReviewPr, prDetail, prAction];

@@ -895,6 +895,8 @@ export interface CodexCapacityWindows {
   windowResetAt?: number;
   utilization7d?: number;
   windowResetAt7d?: number;
+  /** Credit-funded continuation is separate from the included allowance. */
+  usageCreditsAvailable?: boolean;
   /** Which METER produced this reading (EI-22103680502746318). `premium` = the generic weekly/5h
    *  windows (`x-codex-*`) — the meter the account-pool projection (`rate.utilization[7d]`)
    *  describes. `base_model_inference` = the Luna reserve tier (`x-base-model-inference-*`) — a
@@ -998,6 +1000,18 @@ export function parseCodexRateLimitHeaders(
   const lower: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(h)) lower[key.toLowerCase()] = value;
   const generic = ['x-codex-primary', 'x-codex-secondary'] as const;
+  const flag = (value: string | undefined): boolean | undefined => {
+    const normalized = value?.trim().toLowerCase();
+    return normalized === 'true' ? true : normalized === 'false' ? false : undefined;
+  };
+  const hasCredits = flag(lower['x-codex-credits-has-credits']);
+  const unlimited = flag(lower['x-codex-credits-unlimited']);
+  const balance = lower['x-codex-credits-balance'];
+  const credits: Pick<CodexCapacityWindows, 'usageCreditsAvailable'> =
+    hasCredits === undefined && unlimited === undefined ? {} : {
+      usageCreditsAvailable: unlimited === true ||
+        (hasCredits === true && (balance === undefined || (Number.isFinite(Number(balance)) && Number(balance) > 0))),
+    };
   const reserve = ['x-base-model-inference-primary', 'x-base-model-inference-secondary'] as const;
   const bucket = codexRateLimitBucket(lower);
   // When the backend tells us which meter is active, do not project a different
@@ -1013,10 +1027,10 @@ export function parseCodexRateLimitHeaders(
     // reserve meter into the premium slots (EI-22103680502746318). Stamped only when a family
     // actually parsed — an empty result stays `{}` so "saw a rate header at all" checks hold.
     if (Object.keys(parsed).length > 0) {
-      return { ...parsed, bucket: family === reserve ? 'base_model_inference' : 'premium' };
+      return { ...parsed, ...credits, bucket: family === reserve ? 'base_model_inference' : 'premium' };
     }
   }
-  return {};
+  return credits;
 }
 
 /** A window at/over this utilization is EXHAUSTED — the meter that produced the 429. Matches the
@@ -1069,8 +1083,12 @@ export function parseCodexRateReset(
       walledResetAt = walledResetAt === null ? resetAt : Math.max(walledResetAt, resetAt);
     }
   };
-  consider(windows.utilization, windows.windowResetAt);
-  consider(windows.utilization7d, windows.windowResetAt7d);
+  // Paid continuation makes the included premium meter non-binding. A real
+  // request/token throttle and the separate reserve meter still supply their resets.
+  if (windows.usageCreditsAvailable !== true || windows.bucket === 'base_model_inference') {
+    consider(windows.utilization, windows.windowResetAt);
+    consider(windows.utilization7d, windows.windowResetAt7d);
+  }
 
   // api.openai.com's bearer lane speaks the generic OpenAI dialect rather than
   // the ChatGPT subscription's x-codex-* windows. Reset values are durations

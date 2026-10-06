@@ -66,7 +66,7 @@ async function main(): Promise<void> {
   }
   console.log(
     active
-      ? '[seed-oddsmith-cron-routines] all three seeded ACTIVE — restart papercup-bg-host to live-arm on a host that was already up.'
+      ? '[seed-oddsmith-cron-routines] all three seeded ACTIVE — restart papercusp-bg-host to live-arm on a host that was already up.'
       : '[seed-oddsmith-cron-routines] all three seeded inactive — enable via the routines admin or re-run without --inactive.',
   );
   await sql.end({ timeout: 5 });

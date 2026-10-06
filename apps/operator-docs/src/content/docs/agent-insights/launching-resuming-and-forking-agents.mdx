@@ -6,6 +6,7 @@
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
 title: "Launching, resuming and forking agents — capability:launch-agent"
 description: "The one tool for putting an agent on work that is NOT a plan-fleet: an ad-hoc brief, bringing a DEAD agent back mid-thread (resume), or branching a LIVE one (fork). Covers the account-pin login trap, why a live source must be forked, and how the first turn actually gets delivered."
+type: Insight
 discovered: 2026-07-12
 tags: ["fleet", "launch-agent", "resume", "fork", "psu", "spawn", "coordination"]
 status: active
@@ -24,7 +25,6 @@ documents:
 plans:
   - "agent-launch-resume-primitives-2026-07-12"
   - "psu-cross-backend-session-port-2026-07-14"
-type: Insight
 generated:
   by: agent
   at: 2026-07-12
@@ -60,6 +60,32 @@ See [the Mug · Kettle · Cup tier is retired](/internal/docs/agent-insights/mug
 All three sit on ONE shared core (`agent-launch-core.ts`) — command construction,
 fleet/launched-by/account injection, resume resolution. There is deliberately no
 second spawn path to drift out of sync.
+
+## Keep in-place resume and successor settings separate
+
+Use an in-place `resume` to continue the same session and transcript:
+
+```js
+{ resume: { agentId: 'su-…' }, brief: 'Continue the recovery.' }
+```
+
+The target's saved launch profile and loop carry are kept. Leave `carry` out because
+the schema rejects it for in-place resume/fork. Usually omit `account` and `model` as
+well; an intentional account/model override is supported only when it fits any saved
+fleet launch profile.
+
+Use `successor` to start a fresh context while retaining the predecessor's coord
+identity and durable carry/claims, especially when recovery needs new runtime settings:
+
+```js
+{
+  successor: { agentId: 'su-…' },
+  brief: 'Continue from the saved recovery state.',
+  account: 'auto',
+  model: 'sonnet',
+  carry: 'cold'
+}
+```
 
 ## Trap 1: a scripted resume that does not pin an account stops on the login picker
 

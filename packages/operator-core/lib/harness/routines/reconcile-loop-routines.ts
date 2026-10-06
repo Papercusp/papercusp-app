@@ -182,8 +182,17 @@ import {
   type EscalationRecord,
 } from '../../agent-tools/coordination/escalations';
 import type { AgentIdentity } from '../../agent-tools/coordination/identity';
-import { SESSION_END_MARKER, SESSION_START_MARKER } from '../../agent-tools/activity/lifecycle-markers';
-import { classifySessionEnd, isMachineModelErrorText, type SessionEndReason } from '../../search/session-end-reason';
+import {
+  LOOP_TURN_START_MARKER,
+  SESSION_END_MARKER,
+  SESSION_START_MARKER,
+} from '../../agent-tools/activity/lifecycle-markers';
+import {
+  classifySessionEnd,
+  isMachineModelErrorText,
+  isMachineUsageLimitText,
+  type SessionEndReason,
+} from '../../search/session-end-reason';
 import {
   parseUsageReset,
   clampUsageRearmDelayMs,
@@ -197,6 +206,10 @@ import {
   recordZeroToolFireObservation as defaultRecordZeroToolFireObservation,
   zeroToolEscalationThreshold,
 } from './loop-zero-tool-escalation';
+import {
+  readCodexProviderErrorAfter as defaultReadCodexProviderErrorAfter,
+  type CodexProviderError,
+} from '../../system-health/codex-rollout-persistence-watchdog';
 import {
   decideMonitorSettlement,
   monitorDeltaObservedForFire,
@@ -411,6 +424,10 @@ export function classifyLoopLifecycleTurn(
   // re-open the bug this leg exists for, so require only the MACHINE-emitted half: a real
   // `API Error: Request rejected (429) …` death still matches it.
   if (cls.reason === 'model_error' && !isMachineModelErrorText(text)) return null;
+  // Usage-limit's shared classifier also accepts `limit … resets`, which can match
+  // a quoted weekly-cap message anywhere in ordinary assistant prose. This caller
+  // scans blindly, so require the provider-shaped signature at the text opening.
+  if (cls.reason === 'usage_limit' && !isMachineUsageLimitText(text)) return null;
   let rearmDelayMs = intervalMs;
   if (cls.reason === 'usage_limit') {
     const reset = parseUsageReset(text, nowMs);
@@ -846,6 +863,13 @@ interface LoopRow {
    *  in flight — the psu-host stacks the queued prompt into the NEXT turn — so a missing
    *  loop-origin turn is EXPECTED until that in-flight turn ends, not evidence of a failed wake. */
   last_wake_channel?: string | null;
+  /** EI-24791346664119438: the DISPATCH clock (`created_at`) of that same latest row.
+   *  `last_wake_at` prefers `delivered_at`, which is a SETTLE stamp: the coalesce / turn-end
+   *  settle paths write `delivered_at = now()` when they close the row, which can be AFTER the
+   *  loop-fire turn it opened has already ended (measured 2026-10-02, su-9ec5d030: 5 of 7 fires
+   *  had a loop-fire prompt 1-3s after created_at and its reply 1-4s BEFORE delivered_at). So the
+   *  loop-turn proof is floored on this clock, never on the settle clock. */
+  last_wake_created_at?: Date | string | null;
   /** Strict per-fire loop-turn completion clock. This is the latest assistant
    *  turn paired to a user prompt carrying `turn_origin='loop-fire'`, not an
    *  owner-wide assistant/journal signal. */
@@ -859,6 +883,10 @@ interface LoopRow {
   /** max(agent_activity.created_at) for a kind='lifecycle' 'started' marker after the fire —
    *  the cold reset-boundary guard (see completionSignal). */
   lifecycle_started_at: Date | string | null;
+  /** EI-24791346664119438: max(agent_activity.created_at) for the real-time
+   *  LOOP_TURN_START_MARKER after the fire — written at UserPromptSubmit when a
+   *  loop-fire prompt opens a turn. Optional: legacy/unit seams may omit it. */
+  loop_turn_started_at?: Date | string | null;
   /** payload_template->>'carry' — 'cold' marks a cold loop (reset/recycle wakes), which
    *  changes what counts as a settle (see completionSignal). */
   carry: string | null;
@@ -876,6 +904,8 @@ interface LoopRow {
    *  'lifecycle' via (see classifyLoopLifecycleTurn). null when no such turn is indexed yet
    *  (session_turns ingest lag) — never treated as a death, only ever as "nothing to check". */
   last_assistant_text_after_fire: string | null;
+  /** Current native Codex session row, used only when a settled fire has zero tool calls. */
+  codex_adv_session_id?: number | string | null;
   /** WI-6852: newest session_turns ts indexed for this owner (any speaker) — the ingest
    *  WATERMARK. Disambiguates the field above: a null text with a watermark BEHIND the quiet
    *  instant is an ingest lag, not evidence the turn ended cleanly. null when the owner has no
@@ -934,9 +964,22 @@ function deliveredWakeWithoutLoopTurn(
   if (wakeAtMs == null || wakeAtMs <= lastFiredMs) return null;
 
   const loopTurnAtMs = tsMs(row.last_loop_turn_at);
-  if (loopTurnAtMs != null && loopTurnAtMs >= wakeAtMs) return null;
+  if (loopTurnAtMs != null && loopTurnAtMs >= loopTurnFloorMs(row, wakeAtMs)) return null;
 
   const intervalMs = row.interval_sec * 1000;
+  // EI-24791346664119438: the strict clock above is derived from INGESTED transcripts, and a
+  // long loop turn is ingested after it ends — measured 2026-10-02: 64 of 334 settles in 24h
+  // were real loop turns (prompt ~70s after the fire, mean turn 329s) whose rows landed
+  // 500-600s AFTER this detector had already scored them 'retry' → recordFire('error').
+  // Presence cannot rescue them (1 of 64 had any activity in the 60s before the settle: a long
+  // silent Bash or text generation is quiet). The real-time turn-start stamp proves the fire
+  // DID become a turn, so hold until the turn ends — the Stop-hook journal then lifts the
+  // owner-wide suppression (see hasDeliveredWakeWithoutLoopTurn) and the ordinary ladder
+  // settles it. Bounded by the stuck-park dwell, like the two holds below, so a lost Stop hook
+  // cannot strand the loop: past the dwell the pre-existing ladder judges it as before.
+  if (loopTurnStartedAt(row, wakeAtMs) != null && nowMs - wakeAtMs < stuckParkMs(intervalMs)) {
+    return { kind: 'awaiting-turn' };
+  }
   // EI-22127560919383327: a 'suppressed-redundant' delivery was settled by the await engine
   // WITHOUT spending a turn because a turn was ALREADY IN FLIGHT; the psu-host stacks the queued
   // loop-fire prompt into the next turn once that one ends (measured 2026-09-02: fires 05:37:32Z
@@ -998,6 +1041,26 @@ function deliveredWakeWithoutLoopTurn(
   return { kind: 'retry', completedAt: wakeAtMs, via: 'delivered-wake-no-loop-turn' };
 }
 
+/** EI-24791346664119438: the earliest clock a loop-origin assistant reply may carry and still
+ *  count as proof for the latest delivered wake — the wake's DISPATCH time (`created_at`), not
+ *  its settle-time `delivered_at` (see `LoopRow.last_wake_created_at`). A short loop-fire turn
+ *  routinely ends before the settle stamp lands; flooring on `delivered_at` scored those real
+ *  turns as 'delivered-wake-no-loop-turn' → recordFire('error'), and five of them opened the
+ *  fire-gate backoff that withheld the next fire. Legacy/unit rows without the dispatch clock
+ *  keep the delivery clock. */
+function loopTurnFloorMs(row: LoopRow, wakeAtMs: number): number {
+  const createdAtMs = tsMs(row.last_wake_created_at ?? null);
+  return createdAtMs != null && createdAtMs < wakeAtMs ? createdAtMs : wakeAtMs;
+}
+
+/** EI-24791346664119438: the real-time loop-fire turn-start stamp, when it belongs to the
+ *  latest delivered wake (same dispatch-clock floor as the strict completion proof). A stamp
+ *  is proof the wake became a turn, never proof the turn COMPLETED. */
+function loopTurnStartedAt(row: LoopRow, wakeAtMs: number): number | null {
+  const startedMs = tsMs(row.loop_turn_started_at ?? null);
+  return startedMs != null && startedMs >= loopTurnFloorMs(row, wakeAtMs) ? startedMs : null;
+}
+
 /** Return the strict loop-origin assistant completion for this fire, when the
  *  provenance clock proves it belongs to the latest delivered wake. */
 function loopTurnCompletionAt(row: LoopRow, lastFiredMs: number): number | null {
@@ -1006,7 +1069,9 @@ function loopTurnCompletionAt(row: LoopRow, lastFiredMs: number): number | null 
   if (loopTurnAtMs == null || loopTurnAtMs <= lastFiredMs) return null;
 
   const wakeAtMs = tsMs(row.last_wake_at);
-  if (row.last_wake_status === 'delivered' && wakeAtMs != null && loopTurnAtMs < wakeAtMs) return null;
+  if (row.last_wake_status === 'delivered' && wakeAtMs != null && loopTurnAtMs < loopTurnFloorMs(row, wakeAtMs)) {
+    return null;
+  }
   return loopTurnAtMs;
 }
 
@@ -1198,6 +1263,8 @@ export async function reconcileLoopRoutines(
     escalateLifecycleDeath?: (info: LifecycleDeathInfo) => Promise<void>;
     /** WI-41228: canonical agent-authored tool-call evidence for the dispatched fire window. */
     countAgentToolCallsInWindow?: typeof defaultCountAgentToolCallsInWindow;
+    /** Native Codex rollout evidence for a settled zero-tool fire; null means no current failure. */
+    readCodexProviderErrorAfter?: typeof defaultReadCodexProviderErrorAfter;
     /** WI-41228: idempotent routine-metadata streak writer, injectable for focused tests. */
     recordZeroToolFireObservation?: typeof defaultRecordZeroToolFireObservation;
     /** WI-41228: shared disarm primitive used before the existing dead-loop termination path. */
@@ -1221,6 +1288,7 @@ export async function reconcileLoopRoutines(
   const cancelInboxWake = opts.cancelInboxWake ?? defaultCancelInboxWake;
   const escalateLifecycleDeath = opts.escalateLifecycleDeath ?? defaultEscalateLifecycleDeath;
   const countAgentToolCallsInWindow = opts.countAgentToolCallsInWindow ?? defaultCountAgentToolCallsInWindow;
+  const readCodexProviderErrorAfter = opts.readCodexProviderErrorAfter ?? defaultReadCodexProviderErrorAfter;
   const recordZeroToolFireObservation = opts.recordZeroToolFireObservation ?? defaultRecordZeroToolFireObservation;
   const autoPauseLoopRoutine = opts.autoPauseLoopRoutine ?? defaultAutoPauseLoopRoutine;
   const zeroToolThreshold = opts.zeroToolThreshold ?? zeroToolEscalationThreshold();
@@ -1247,6 +1315,7 @@ export async function reconcileLoopRoutines(
            fs.last_fired_at AS fire_state_last_fired_at,
            fs.last_withheld_at AS fire_state_last_withheld_at,
            lw.last_wake_at,
+           lw.last_wake_created_at,
            lw.status AS last_wake_status,
            lw.channel AS last_wake_channel,
            -- EI-21743034835075378: pair each loop-fire USER prompt with the
@@ -1307,6 +1376,20 @@ export async function reconcileLoopRoutines(
                AND a.kind = 'lifecycle'
                AND a.summary = ${SESSION_START_MARKER}
                AND a.created_at > r.last_fired_at) AS lifecycle_started_at,
+           (SELECT max(a.created_at)
+              FROM harness_shared.agent_activity a
+             WHERE a.owner_id = r.target_owner_id
+               AND a.kind = 'lifecycle'
+               AND a.summary = ${LOOP_TURN_START_MARKER}
+               AND a.created_at > r.last_fired_at) AS loop_turn_started_at,
+           (SELECT a.id
+              FROM harness_shared.adv_sessions a
+             WHERE a.coord_owner_id = r.target_owner_id
+               AND a.workspace_id = r.workspace_id
+               AND a.agent = 'codex'
+               AND a.ended_at IS NULL
+             ORDER BY a.id DESC
+             LIMIT 1) AS codex_adv_session_id,
            (r.payload_template->>'carry') AS carry,
            r.metadata->>'armed_at' AS armed_at,
            (SELECT max(cn.updated_ts)
@@ -1353,7 +1436,8 @@ export async function reconcileLoopRoutines(
       LEFT JOIN LATERAL (
         SELECT w.status,
                w.channel,
-               COALESCE(w.delivered_at, w.created_at) AS last_wake_at
+               COALESCE(w.delivered_at, w.created_at) AS last_wake_at,
+               w.created_at AS last_wake_created_at
           FROM harness_shared.event_wake_deliveries w
          WHERE w.subscriber_id = r.target_owner_id
            AND w.source = ('loop:' || r.id)
@@ -1607,6 +1691,16 @@ export async function reconcileLoopRoutines(
       // 8/8 with zero post-fire loop-fire turns, averaging 17.5x their own interval, against
       // 1.8-5.2x for every other parked group.
       const presenceLastActiveMs = tsMs(row.presence_last_active_at);
+      // EI-24791346664119438: once the real-time loop-fire turn-start stamp proves this wake
+      // became a turn, a Stop-hook journal row at/after that stamp IS that turn's end — no
+      // longer "unrelated owner activity" — so the suppression below must lift and let the
+      // ordinary turn-journal layer settle the fire as 'ok', instead of holding until the
+      // ingest-derived strict clock catches up. A journal row BEFORE the stamp (a prior turn
+      // that ended while the loop-fire prompt was queued) is still excluded.
+      const loopTurnStartMs = wakeAtMs != null ? loopTurnStartedAt(row, wakeAtMs) : null;
+      const turnJournalMs = tsMs(row.turn_journal_completed_at);
+      const loopTurnEndedByJournal =
+        loopTurnStartMs != null && turnJournalMs != null && turnJournalMs >= loopTurnStartMs;
       const suppressedRedundantTurnEnded =
         row.last_wake_channel === 'suppressed-redundant' &&
         presenceLastActiveMs != null &&
@@ -1621,7 +1715,9 @@ export async function reconcileLoopRoutines(
         row.last_wake_status === 'delivered' &&
         wakeAtMs != null &&
         wakeAtMs > lastFiredMs &&
-        (loopTurnAtMs == null || loopTurnAtMs < wakeAtMs) &&
+        // loopTurnCompletionAt already floors on the dispatch clock (EI-24791346664119438),
+        // so a non-null value here is proof for this wake.
+        loopTurnAtMs == null &&
         // WI-2140827: the suppression is a GRACE, so it has to expire. Unbounded, it was the
         // other half of the wedge documented in deliveredWakeWithoutLoopTurn(): the strict
         // loop-origin clock is the discriminator only while it can still plausibly arrive, and
@@ -1631,7 +1727,8 @@ export async function reconcileLoopRoutines(
         // the loop as 'ok' rather than letting it ride the retry leg's 'error' indefinitely.
         nowMs - wakeAtMs < stuckParkMs(intervalMs) &&
         // EI-22177872501023528 — see the note above this block.
-        !suppressedRedundantTurnEnded;
+        !suppressedRedundantTurnEnded &&
+        !loopTurnEndedByJournal;
       const signal = completionSignal(row, lastFiredMs, nowMs, {
         suppressOwnerWideSignals: hasDeliveredWakeWithoutLoopTurn,
       });
@@ -1666,11 +1763,24 @@ export async function reconcileLoopRoutines(
       // unreclassified meant its own captured wedge text was fetched and then silently never
       // read — the loop kept re-firing at the bare interval into the same wall instead of the
       // reset-aware delay every other via already gets.
+      // WI-10005545: 'loop-turn' is reclassified too. completionSignal() returns it FIRST for a
+      // warm loop whenever a loop-origin turn was indexed after the fire — and a provider-killed
+      // turn IS such a turn (the prompt landed, the reply is the API error). Leaving it out meant
+      // every psu-hosted warm loop recorded a 429 / usage-wall turn as 'ok' and re-fired at the
+      // bare interval with the failure-streak circuit reading 0 (measured 2026-10-02: goal holder
+      // su-9ec5d030, fires 13:53:06Z and 14:02:01Z, both 'API Error: Request rejected (429)').
+      // Like presence-quiescence, it is a turn-completion clock, not a real-work signal, so the
+      // reply text decides; note-refresh stays excluded for the reason above.
       let turnDeath: LoopLifecycleDeathVerdict | null = null;
       if (signal) {
         completedAt = signal.completedAt;
         via = signal.via;
-        if (via === 'lifecycle' || via === 'turn-journal' || via === 'presence-quiescence') {
+        if (
+          via === 'lifecycle' ||
+          via === 'turn-journal' ||
+          via === 'presence-quiescence' ||
+          via === 'loop-turn'
+        ) {
           turnDeath = classifyLoopLifecycleTurn(row.last_assistant_text_after_fire, intervalMs, nowMs);
         }
       } else {
@@ -1891,7 +2001,7 @@ export async function reconcileLoopRoutines(
       // `deferPastWall` branch can actually push the next fire out.
       // WI-36792: a 'gate-backoff' re-arm targets the gate's own expiry, not the interval —
       // and never sooner than one interval, so it can never out-pace the loop's own cadence.
-      const rearmMs = gateRetryMs != null ? Math.max(gateRetryMs, intervalMs) : (turnDeath?.rearmDelayMs ?? intervalMs);
+      let rearmMs = gateRetryMs != null ? Math.max(gateRetryMs, intervalMs) : (turnDeath?.rearmDelayMs ?? intervalMs);
 
       // WI-41228 (P-005) — ESCALATION RUNG R4. A fire can settle cleanly at the session layer
       // while the agent produces zero authored tool calls (expired bearer, split state, or a new
@@ -1924,6 +2034,34 @@ export async function reconcileLoopRoutines(
         });
 
         if (toolCalls != null) {
+          let nativeCodexUsageFailure: CodexProviderError | null = null;
+          if (toolCalls === 0 && row.codex_adv_session_id != null) {
+            const nativeError = await runWithWorkspace(row.routine_workspace_id, () =>
+              readCodexProviderErrorAfter(row.codex_adv_session_id!, lastFiredMs),
+            ).catch((e) => {
+              console.warn(
+                `[loop-reconcile] native Codex provider evidence read failed for '${row.id}': ${e instanceof Error ? e.message : e}`,
+              );
+              return null;
+            });
+            if (nativeError && /usage.?limit|quota/i.test(nativeError.code)) {
+              nativeCodexUsageFailure = nativeError;
+              const text = `You've hit your usage limit${nativeError.message ? `: ${nativeError.message}` : ''}`;
+              turnDeath = classifyLoopLifecycleTurn(text, intervalMs, nowMs);
+              if (turnDeath) {
+                // Keep the native machine cause in the lifecycle escalation. The synthesized
+                // prose above classifies the wall and reset time, but otherwise erases the
+                // provider code that distinguished this failure from a generic usage-limit turn.
+                turnDeath = {
+                  ...turnDeath,
+                  evidence:
+                    `native Codex ${nativeError.source} reported code=${nativeError.code}` +
+                    (turnDeath.evidence ? `; ${turnDeath.evidence}` : ''),
+                };
+                rearmMs = Math.max(intervalMs, turnDeath.rearmDelayMs);
+              }
+            }
+          }
           const fireToken = new Date(lastFiredMs).toISOString();
           const observation = await recordZeroToolFireObservation(db, {
             routineId: row.id,
@@ -1941,7 +2079,11 @@ export async function reconcileLoopRoutines(
             const reason =
               `zero-tool escalation (WI-41228): ${observation.streak} consecutive dispatched turns ` +
               `recorded zero agent-authored tool calls (threshold=${observation.threshold}, ` +
-              `last_fire=${observation.fireToken})`;
+              `last_fire=${observation.fireToken})` +
+              (nativeCodexUsageFailure
+                ? `; native Codex ${nativeCodexUsageFailure.source} reported code=${nativeCodexUsageFailure.code}` +
+                  (nativeCodexUsageFailure.retryAt ? `, retry hint=${nativeCodexUsageFailure.retryAt}` : '')
+                : '');
             // Pause FIRST so this fire cannot be re-armed below. Then reuse the existing terminal
             // path for attributed fire history, ghost-await cancellation, deduped human escalation,
             // and the loud terminal log. Cause-agnostic by design; no blind auto-respawn loop.

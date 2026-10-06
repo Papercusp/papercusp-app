@@ -49,11 +49,15 @@ import type { ClaimSpecSubject } from '../../scheduler/claim-spec-match';
 import { ROUTING_GATE_INTENTS } from '../../routing-gate-hints';
 import { getModes } from '../../modes/store';
 import { withDrainBugAdmission } from './drain-flow';
+import { workItemsCreateAbortCompletionReceipt } from './create-abort-completion';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { resolveGoalContext } from '../../modes/goal-context';
+import { evaluateStewardHandDispatch } from '../../goals/steward-hand-dispatch';
 import { gateWorkScope } from '../../work-scope-policy';
 import { canonicalizeAssigneeOwnerId } from '../../work-item-holder-identity';
+import { stampFiledBugReproduction } from '../../attention/bug-reproduction';
+import { defaultReproductionLedgerDeps } from '../../attention/intake-promotion';
 
 /**
  * Inline typed-link spec (WI-3956) — one edge written from the NEW work-item to a
@@ -259,6 +263,10 @@ const itemSpec = z.object({
 export default defineTool({
   name: 'work_items:create',
   profile: 'engineer',
+  // WI-10005718: a create that outruns the 60s dispatch budget has ALREADY inserted the
+  // row; the receipt makes dispatch return that late envelope (id + downgrade notices)
+  // instead of a bare `timeout` that invites a duplicate-filing retry.
+  abortCompletionReceipt: workItemsCreateAbortCompletionReceipt,
   description:
     "Create ONE or MANY work-items. bug/change/task file tracked issues; feature enters the harness queue; chunk is retired (rejected). If creation requests an assignment to a fleet MEMBER outside that member's claim scope, the finding is retained as an explicitly unassigned, claim-held filing with a visible downgrade — it never grants an out-of-scope claim. Single: { kind, title, … }; many: items:[…]. Returns per-item outcomes, including a visible warning when dedup coverage is degraded.",
   guidance: {
@@ -457,6 +465,26 @@ export default defineTool({
         // available when the semantic probe is unavailable; feature/chunk/bug/change
         // still inherit the resolved GOAL fail-closed rail.
         spec.goalDedupGate = goalDedupGate && spec.kind !== 'task';
+        // P-013 / D-024: `payload.reproduction` is a SERVER-computed stamp — it is what
+        // lets an encountered bug skip the bulk-review reproduction step. A caller value
+        // is never stored verbatim: re-stamp it under the caller's identity (ledger refs
+        // resolved, any caller-written verdict discarded), or refuse one that won't parse.
+        const callerPayload =
+          typeof spec.payload === 'object' && spec.payload !== null ? (spec.payload as Record<string, unknown>) : null;
+        if (callerPayload && callerPayload.reproduction !== undefined) {
+          const raw = callerPayload.reproduction;
+          const receiptInput =
+            raw && typeof raw === 'object' && !Array.isArray(raw) && 'receipt' in raw
+              ? (raw as { receipt: unknown }).receipt
+              : raw;
+          const stamp = await stampFiledBugReproduction(
+            receiptInput,
+            { filedBy: ident.ownerId },
+            defaultReproductionLedgerDeps(),
+          );
+          if (!stamp.ok) throw new Error(`payload.reproduction: ${stamp.error}`);
+          spec.payload = { ...callerPayload, reproduction: stamp.stored };
+        }
         // EI-18784357226895330: a claim spec governs what a member may PULL from the
         // shared claimable pool. It must NOT govern what a member may FILE. This block
         // used to refuse the whole create, which meant a member who discovered an
@@ -503,6 +531,33 @@ export default defineTool({
             spec.admissionBypass = 'bypass:explicit-assignment';
             spec.assign_to = undefined;
             assigneeResolutionDowngrade = { assigneeResolutionDowngrade: `FILED UNASSIGNED — ${canonical.message}` };
+          }
+        }
+        // WI-10005281 (recurrence of WI-10004867): a goal HOLDER files work UNASSIGNED
+        // and steers through claim specs/priority — it does not hand work to another
+        // agent. Downgrade (never refuse) so the finding stays durable and claimable;
+        // inherited goal context (fleet members/leaders) is deliberately NOT affected.
+        // No admissionBypass: a named assignment must not step around the screening floor.
+        let stewardHandDispatchDowngrade: Record<string, never> | { stewardHandDispatchDowngrade: string } = {};
+        if (spec.assign_to && resolvedGoalContext) {
+          const steward = await evaluateStewardHandDispatch({
+            workspaceId: ident.workspaceId,
+            ownerId: ident.ownerId,
+            assignTo: spec.assign_to,
+            goalContextId: resolvedGoalContext,
+          });
+          if (steward.handDispatch) {
+            spec.payload = {
+              ...(typeof spec.payload === 'object' && spec.payload !== null ? spec.payload : {}),
+              stewardHandDispatchDowngrade: {
+                requestedAssignee: steward.requestedAssignee,
+                reportedBy: ident.ownerId,
+                goalId: steward.goalId,
+                at: new Date().toISOString(),
+              },
+            };
+            spec.assign_to = undefined;
+            stewardHandDispatchDowngrade = { stewardHandDispatchDowngrade: steward.notice };
           }
         }
         let workScopeDowngrade: Record<string, never> | { workScopeDowngrade: string } = {};
@@ -653,6 +708,8 @@ export default defineTool({
             ...(res.similarOpen !== undefined ? { similarOpen: res.similarOpen } : {}),
             ...(res.admissionIdentity !== undefined ? { admissionIdentity: res.admissionIdentity } : {}),
             ...(res.dedupCoverage !== undefined ? { dedupCoverage: res.dedupCoverage } : {}),
+            // EI-23799808825983763: the refusal's own next action (retry / force).
+            ...(res.disposition !== undefined ? { disposition: res.disposition } : {}),
             ...(res.queueAdmission !== undefined ? { queueAdmission: res.queueAdmission } : {}),
           };
         }
@@ -761,6 +818,7 @@ export default defineTool({
           // EI-18784357226895330: filed, but the requested self-assignment was refused
           // by the fleet lane — the caller must see this on an ok:true result.
           ...assigneeResolutionDowngrade,
+          ...stewardHandDispatchDowngrade,
           ...workScopeDowngrade,
           ...fleetScopeDowngrade,
           // work-queue-admission-and-bulk-dedup-2026-08-24 P-002 (item d): the P-008

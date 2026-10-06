@@ -19,5 +19,5 @@
  * — the b1-timeout green-gate red). The leaf imports only `zod`, so it is
  * cycle-free and the symbols are always defined regardless of import order.
  */
-export { scalarOrArray, toList, mergeIds, runBulk, bulkContent, bulkEnvelopeSchema } from '@papercusp/agent-mcp/_bulk';
+export { scalarOrArray, toList, mergeIds, runBulk, mergeBulkEnvelopes, bulkContent, bulkEnvelopeSchema } from '@papercusp/agent-mcp/_bulk';
 export type { BulkItemResult, BulkEnvelope } from '@papercusp/agent-mcp/_bulk';

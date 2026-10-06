@@ -11,8 +11,9 @@
  *     blind to the planted rows (zero-leak by partition).
  *   - collectors() wraps the REAL collector function — same SQL, same pure
  *     signal builders — pointed at the sandbox workspace, then stamps
- *     origin='drill' + the sandbox scope on every signal (the WatchdogSignal
- *     fields FB-03 threaded for exactly this).
+ *     origin='drill' + the valid operator storage scope on every signal (the
+ *     WatchdogSignal fields FB-03 threaded for exactly this). The origin is the
+ *     read partition; a synthetic harness slug is not a registered Pot.
  *   - heal() applies the known remedy; cleanup() removes every planted row
  *     (exact-identity deletes, idempotent — runs even after a failed cycle).
  *
@@ -48,7 +49,7 @@ export function stampDrillSignals(signals: WatchdogSignal[]): WatchdogSignal[] {
 
 /**
  * Wrap a real collector for the given workspace. Sandbox sweeps stamp
- * origin='drill' + the sandbox scope; a live-workspace sweep (the zero-leak
+ * origin='drill' + the operator storage scope; a live-workspace sweep (the zero-leak
  * check) passes signals through untouched — it only ever ASSERTS emptiness,
  * never captures.
  */

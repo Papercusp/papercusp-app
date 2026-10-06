@@ -197,7 +197,11 @@ export async function readGoalKickoffEvidence(args: ReadGoalKickoffEvidenceArgs)
     await args.flushTelemetry();
 
     const readRows = (await sql`
-      SELECT tool_name, max(invoked_at) AS invoked_at
+      -- WI-10004981: min, not max. The contract is "a report AFTER the four
+      -- reads" — i.e. after the first moment all four existed. With max(), a
+      -- routine re-read of any one of them later in the window moved the
+      -- boundary past an already-valid report and re-locked every launch.
+      SELECT tool_name, min(invoked_at) AS invoked_at
         FROM harness_shared.tool_invocations
        WHERE workspace_id = ${args.workspaceId}
          AND coord_owner_id = ${args.ownerId}

@@ -42,6 +42,7 @@ import {
 } from './release/live-release-certification';
 import type { ReleaseTraceManualRunAuthority } from './release-trace';
 import { SYSTEMD_TRANSIENT_UNIT_COLLECTION_ARGS } from './systemd-scope';
+import { restrictedTreeHoldRefusal, type RestrictedHoldRefusal } from './agent-tools/testing/restricted-hold-fence';
 
 /**
  * The fixed transient systemd unit the detached deploy runs as. MUST match
@@ -935,6 +936,9 @@ export interface LaunchDeployResult {
   logPath: string;
   /** Present on a launch failure (e.g. the unit already exists ⇒ a deploy is in flight). */
   reason?: string;
+  /** Present when the launch was refused because a restricted session's writes are held in the
+   *  tree deploy-cli runs from (WI-10005763, D-012); `reason` is its `error`. Nothing started. */
+  restrictedHold?: RestrictedHoldRefusal;
 }
 
 const SHA_RE = /^[0-9a-fA-F]{7,40}$/;
@@ -981,15 +985,26 @@ export type SpawnLike = typeof spawn;
  *
  * `spawnFn` is injectable so the tool's handler is unit-testable without launching anything.
  */
-export function launchDetachedDeploy(opts: LaunchDeployOpts, spawnFn: SpawnLike = spawn): Promise<LaunchDeployResult> {
+export async function launchDetachedDeploy(
+  opts: LaunchDeployOpts,
+  spawnFn: SpawnLike = spawn,
+  restrictedHoldFence: (roots: readonly string[]) => Promise<RestrictedHoldRefusal | null> = restrictedTreeHoldRefusal,
+): Promise<LaunchDeployResult> {
   const root = opts.root ?? integrationRoot();
   const mode: 'trigger' | 'force' = opts.force ? 'force' : 'trigger';
   const logPath = `/tmp/${DEPLOY_UNIT}.log`;
   const deployCliArgs = buildDeployCliArgs(opts);
   const argv = buildSystemdRunArgv(root, deployCliArgs, logPath, process.env.PATH ?? '');
+  const base: LaunchDeployResult = { launched: false, unit: DEPLOY_UNIT, mode, commit: opts.commit, argv, logPath };
+
+  // WI-10005763 (D-012): the unit runs `tsx apps/operator/lib/release/deploy-cli.ts` FROM `root`, the
+  // live shared tree, with network. Code a restricted session left there must not execute, so this
+  // refuses before spawning — trigger and force alike. Same census + reason text as the routine
+  // dispatchers (harness/routines/restricted-tree-skip.ts).
+  const restrictedHold = await restrictedHoldFence([root]);
+  if (restrictedHold) return { ...base, reason: restrictedHold.error, restrictedHold };
 
   return new Promise<LaunchDeployResult>((resolve) => {
-    const base: LaunchDeployResult = { launched: false, unit: DEPLOY_UNIT, mode, commit: opts.commit, argv, logPath };
     const child = spawnFn('systemd-run', argv);
     const stderrOut = createTextCollector(child.stderr);
     child.on('error', (e: unknown) => {

@@ -1,32 +1,84 @@
-#!/bin/sh
+#!/bin/bash
 # psu — the Papercusp superuser launcher, shipped inside the PUI release unit
 # (pui-first-party-public-release D-031). It runs the bundled lib/psu/psu.mjs on
 # the release's own private Node (lib/node/node), so no system Node, npm or
 # checkout is needed. PAPERCUSP_SIDECAR_BIN puts that Node first on PATH for
 # everything psu launches (the same contract as the desktop app's sidecar).
-set -eu
+# Keep this parent alive for the same exit-87 host-code handoff as the managed
+# ~/.papercusp/bin/psu shim. The hosted workspace starts this release entrypoint
+# as the PTY process, so an exec-only wrapper left compaction/respawn as a hard
+# exit with no process to start the successor.
+set -e
 
-self=$0
-# Follow the launcher link (~/.local/bin/psu → …/current/bin/psu) to this unit.
-while [ -L "$self" ]; do
-  command -v readlink >/dev/null 2>&1 || {
-    echo "psu: cannot resolve the link $self without readlink; run $(dirname "$self")/psu from the PUI release directory instead" >&2
-    exit 1
-  }
-  link=$(readlink "$self")
-  case $link in
-    /*) self=$link ;;
-    *) self=$(dirname "$self")/$link ;;
-  esac
-done
-root=$(cd "$(dirname "$self")/.." && pwd -P)
-node="$root/lib/node/node"
-entry="$root/lib/psu/psu.mjs"
-if [ ! -x "$node" ] || [ ! -f "$entry" ]; then
-  echo "psu: this PUI release is incomplete: $root is missing lib/node/node or lib/psu/psu.mjs." >&2
-  echo "psu: repair: reinstall PUI (pui self update, or run install.sh from a fresh download)." >&2
-  exit 1
+PSU_REEXEC_EXIT_CODE=87
+PSU_REEXEC_MAX=16
+if [ "${PAPERCUSP_PSU_HOST_ADOPT:-}" = "0" ]; then
+  unset PAPERCUSP_PSU_REEXEC PAPERCUSP_PSU_REEXEC_PPID
+  psu_reexec_enabled=0
+else
+  export PAPERCUSP_PSU_REEXEC="$PSU_REEXEC_EXIT_CODE"
+  export PAPERCUSP_PSU_REEXEC_PPID=$$
+  psu_reexec_enabled=1
 fi
-PAPERCUSP_SIDECAR_BIN="$root/lib/node"
-export PAPERCUSP_SIDECAR_BIN
-exec "$node" "$entry" "$@"
+psu_reexecs=0
+
+while :; do
+  self=$0
+  # Re-resolve the current link each pass so a handoff picks up the active release.
+  while [ -L "$self" ]; do
+    command -v readlink >/dev/null 2>&1 || {
+      echo "psu: cannot resolve the link $self without readlink; run $(dirname "$self")/psu from the PUI release directory instead" >&2
+      exit 1
+    }
+    link=$(readlink "$self")
+    case $link in
+      /*) self=$link ;;
+      *) self=$(dirname "$self")/$link ;;
+    esac
+  done
+  root=$(cd "$(dirname "$self")/.." && pwd -P)
+  node="$root/lib/node/node"
+  entry="$root/lib/psu/psu.mjs"
+  if [ ! -x "$node" ] || [ ! -f "$entry" ]; then
+    echo "psu: this PUI release is incomplete: $root is missing lib/node/node or lib/psu/psu.mjs." >&2
+    echo "psu: repair: reinstall PUI (pui self update, or run install.sh from a fresh download)." >&2
+    exit 1
+  fi
+  PAPERCUSP_SIDECAR_BIN="$root/lib/node"
+  export PAPERCUSP_SIDECAR_BIN
+  if [ "$psu_reexec_enabled" -eq 0 ]; then
+    exec "$node" "$entry" "$@"
+  fi
+
+  if "$node" "$entry" "$@"; then
+    psu_code=0
+  else
+    psu_code=$?
+  fi
+  if [ "$psu_code" -ne "$PSU_REEXEC_EXIT_CODE" ]; then
+    exit "$psu_code"
+  fi
+
+  # Kickoff is a one-shot launch input; the host handoff carries its continuation.
+  unset PAPERCUSP_KICKOFF_PROMPT
+  psu_next_args=()
+  psu_drop_kickoff_value=0
+  for psu_arg in "$@"; do
+    if [ "$psu_drop_kickoff_value" -eq 1 ]; then
+      psu_drop_kickoff_value=0
+      continue
+    fi
+    case "$psu_arg" in
+      --kickoff) psu_drop_kickoff_value=1 ;;
+      --kickoff=*) ;;
+      *) psu_next_args+=("$psu_arg") ;;
+    esac
+  done
+  set -- "${psu_next_args[@]}"
+  psu_reexecs=$((psu_reexecs + 1))
+  if [ "$psu_reexecs" -gt "$PSU_REEXEC_MAX" ]; then
+    printf '%s\n' "papercusp psu: $PSU_REEXEC_MAX host re-execs in one session — refusing to loop again" >&2
+    exit "$psu_code"
+  fi
+  printf '%s\n' "papercusp psu: adopting updated host code (re-exec $psu_reexecs)" >&2
+done

@@ -89,7 +89,7 @@ export default defineTool({
       args.id,
       `🙅 ${ident.ownerId} DECLINED the release request from ${resolved.by}${reasonLine} — item stays with ${ident.ownerId}, no consequence fires.`,
       ident.ownerId,
-      { harness },
+      { harness, writerOwnerId: ident.ownerId },
     ).catch(() => {});
 
     await sendMessage(ident, {

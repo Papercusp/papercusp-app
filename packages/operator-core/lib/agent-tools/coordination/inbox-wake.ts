@@ -34,7 +34,11 @@ import { listPresence } from './presence';
 import { resolveBestEffortAgainstRoster, isSelectorOrWildcard, knownOwnerIdSet } from './recipient-resolve';
 import { getLoopStatuses, type LoopStatus } from '../../harness/routines/loop';
 import { withBoundedTimeout } from '../../bounded-timeout';
-import { isOwnerVerifiedRelay, type RelayProvenanceStamp } from './relay-provenance';
+import {
+  isOwnerVerifiedRelay,
+  RELAY_PROVENANCE_FIELD,
+  type RelayProvenanceStamp,
+} from './relay-provenance';
 
 /** Prefix for the per-agent inbox-wake key. A bee watches `inboxWakeKey(self)`;
  *  a `{wake:true}` send to that bee fires exactly this key. */
@@ -91,6 +95,9 @@ export const DELIVERY_LADDER_WAKE_SOURCE = 'system:delivery-ladder';
  * time-sensitive system handoff. */
 export const ESCALATION_SLA_REROUTE_WAKE_SOURCE = 'system:escalation-sla-reroute';
 
+/** Prefix for a wake explicitly released by the owner from coord:wake-queue. */
+export const MANUAL_WAKE_QUEUE_RELEASE_SOURCE_PREFIX = 'coord:wake-queue-release:';
+
 /**
  * Is this wake a LOOP's self-wake? A loop wake is the agent driving ITSELF (loop:arm), so it
  * must BYPASS the manual pause/edit gate below: there is no separate owner to release a staged
@@ -138,6 +145,21 @@ export function isEscalationSlaRerouteWakeSource(source: string | undefined): bo
  */
 export function isOwnerGuiWakeSource(source: string | undefined): boolean {
   return source === ADMIN_COORD_UI_OWNER;
+}
+
+/** Carry server-verified authority through the async delivery row. */
+function payloadWithRelayProvenance(
+  payload: unknown,
+  stamp: RelayProvenanceStamp | null | undefined,
+): unknown {
+  if (!stamp) return payload;
+  const record =
+    payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : payload === undefined || payload === null
+        ? {}
+        : { value: payload };
+  return { ...record, [RELAY_PROVENANCE_FIELD]: stamp };
 }
 
 export interface WakeRecipientsResult {
@@ -389,7 +411,7 @@ export async function wakeRecipients(
             const res = await emitAwaitedEvent({
               key,
               summary: opts.summary,
-              payload: opts.payload,
+              payload: payloadWithRelayProvenance(opts.payload, opts.relayProvenance),
               source: opts.source,
               workspaceId: opts.workspaceId,
             });
@@ -617,6 +639,12 @@ export interface IdleRecipientReport {
    * behavior), never invents a false alive verdict.
    */
   aliveNotWakeable: string[];
+  /**
+   * Recipients whose complete probe set includes a measured shared-oracle
+   * `sessionState: 'ended'` verdict. This is narrower than `idle`: callers
+   * making routing decisions must use this positive classification only.
+   */
+  confirmedDead?: string[];
 }
 
 /** Complete fail-soft value for callers that need to degrade a report probe
@@ -630,6 +658,7 @@ export const EMPTY_IDLE_REPORT: IdleRecipientReport = {
   unknown: [],
   degraded: true,
   aliveNotWakeable: [],
+  confirmedDead: [],
 };
 
 /**
@@ -653,7 +682,7 @@ export async function reportIdleRecipients(
   const concrete = [...new Set(recipients)].filter(
     (r) => !isSelectorOrWildcard(r) && !NON_WAKEABLE.has(r),
   );
-  if (concrete.length === 0) return { idle: [], live: [], dormantScheduled: [], unknown: [], degraded: false, aliveNotWakeable: [] };
+  if (concrete.length === 0) return { idle: [], live: [], dormantScheduled: [], unknown: [], degraded: false, aliveNotWakeable: [], confirmedDead: [] };
 
   // The local roster — the membership truth for "is this recipient federated?".
   // A read hiccup DEGRADES the whole probe (invariant c): we cannot tell idle
@@ -729,6 +758,7 @@ export async function reportIdleRecipients(
   // `idle` (today's behavior), never invents a false dormant-scheduled entry.
   const idle: string[] = [];
   const dormantScheduled: DormantScheduledInfo[] = [];
+  let loopStatusDegraded = false;
   if (idleCandidates.length > 0) {
     let loops: Map<string, LoopStatus>;
     try {
@@ -737,6 +767,7 @@ export async function reportIdleRecipients(
       console.warn(
         `[inbox-wake] idle-probe loop-status read failed, treating candidates as plain idle: ${e instanceof Error ? e.message : e}`,
       );
+      loopStatusDegraded = true;
       loops = new Map();
     }
     for (const ownerId of idleCandidates) {
@@ -760,6 +791,7 @@ export async function reportIdleRecipients(
   // lazily). Best-effort: an oracle hiccup leaves every candidate in `idle` (prior
   // behavior), never invents a false alive verdict.
   const aliveNotWakeable: string[] = [];
+  const confirmedDead: string[] = [];
   if (idle.length > 0) {
     try {
       const { resolveSessionStates } = await import('./liveness-oracle');
@@ -779,6 +811,16 @@ export async function reportIdleRecipients(
         if (v && (v.sessionState === 'live' || v.sessionState === 'recorded')) {
           aliveNotWakeable.unshift(idle[i]);
           idle.splice(i, 1);
+        } else if (
+          !loopStatusDegraded &&
+          v?.sessionState === 'ended' &&
+          v.signalMissing !== true &&
+          v.confirmLiveness === false
+        ) {
+          // Only a complete, positive verdict supports moving work away from
+          // this recipient. Missing/degraded oracle data and suspect/draining
+          // states remain plain `idle`, never confirmed dead.
+          confirmedDead.unshift(idle[i]);
         }
       }
     } catch (e) {
@@ -788,5 +830,5 @@ export async function reportIdleRecipients(
     }
   }
 
-  return { idle, live, dormantScheduled, unknown, degraded: false, aliveNotWakeable };
+  return { idle, live, dormantScheduled, unknown, degraded: false, aliveNotWakeable, confirmedDead };
 }

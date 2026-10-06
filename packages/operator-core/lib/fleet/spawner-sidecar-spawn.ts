@@ -31,6 +31,7 @@ import { isBenignHostError } from '../host-benign-errors';
 import { managedSpawn } from '../task-manager/managed-spawn';
 import { newTaskId, scopeUnitForTask } from '../task-manager/types';
 import { SPAWNER_SCOPE_ENV } from './sidecar-exec-lifetime';
+import { isGracefulDrainInstalled, isShuttingDown, onBeforeHostExit } from '../shutdown-state';
 
 // This package is ESM (type:module), where `__dirname` is undefined. Derive the
 // module dir from import.meta (the substrate EI-1612 fix) so the sidecar script
@@ -120,6 +121,10 @@ let gaveUp = false;
  *  caller does when the sidecar is unreachable — same degrade path as today). */
 function scheduleRespawn(socketPath: string): void {
   if (deliberateStop) return;
+  // EI-24863236643374267: the sidecar is kept up through the host drain, so a crash
+  // inside that window lands here. A fresh child would only be stopped again at
+  // exit; leave git on its local fallback for the last seconds instead.
+  if (isShuttingDown()) return;
   if (respawnTimer) return; // a respawn is already pending
   const now = Date.now();
   respawnAttempts = pruneRespawnWindow(respawnAttempts, now, RESPAWN_WINDOW_MS);
@@ -268,6 +273,7 @@ async function spawnSpawnerSidecarInner(socketPath?: string): Promise<void> {
     selfPath,
     devScriptPath: sidecarScript,
     bundledModeEnvVar: 'PAPERCUSP_SPAWNER_SIDECAR_MODE',
+    bundledScriptName: 'spawner-sidecar.mjs',
     execPath: process.execPath,
     spawnerPid: process.pid,
   });
@@ -572,13 +578,46 @@ export async function stopSpawnerSidecar(): Promise<void> {
 }
 
 /**
+ * EI-24863236643374267: SYNCHRONOUS stop, run by the host's before-exit hook
+ * (shutdown-state onBeforeHostExit → host-recycle exitOnce). The host exits by
+ * SIGKILLing itself right after, so this cannot await gracefulStopChild's SIGKILL
+ * escalation: it signals the owned scope and the child, and the sidecar's own
+ * SIGTERM handling (plus its owner-PID watchdog, WI-10002859) finishes the job.
+ */
+export function stopSpawnerSidecarAtHostExit(): void {
+  adoptedSocketPath = null;
+  if (!sidecarProcess || sidecarProcess.killed) return;
+  deliberateStop = true;
+  if (respawnTimer) {
+    clearTimeout(respawnTimer);
+    respawnTimer = null;
+  }
+  const proc = sidecarProcess;
+  killOwnedScope(sidecarScopeUnit);
+  try {
+    proc.kill('SIGTERM');
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
  * Register graceful shutdown hooks.
+ *
+ * EI-24863236643374267: when this process has a graceful drain armed
+ * (installGracefulShutdown), SIGTERM/SIGINT no longer stop the sidecar up front —
+ * measured 2026-10-02 11:49:26-33Z on bg-host, that sent every git call made during
+ * the ~10 s drain to a 256-512 ms main-thread fork. The sidecar now serves through
+ * the drain and is stopped by the before-exit hook. Processes without that drain
+ * (cluster primary, short-lived CLIs) keep the immediate stop.
  */
 export function registerSpawnerSidecarShutdownHooks(): void {
+  onBeforeHostExit('spawner-sidecar-spawn', stopSpawnerSidecarAtHostExit);
   registerSharedSidecarShutdownHooks({
     label: 'spawner-sidecar-spawn',
     mode: 'async-with-exit',
     stop: () => stopSpawnerSidecar(),
+    deferStopToHostExit: isGracefulDrainInstalled,
     // P-006: only tear down the sidecar for an uncaughtException that is
     // ACTUALLY fatal to the host — one hono-host's own guard does NOT already
     // swallow. Otherwise every benign client-disconnect `write EPIPE` kills a

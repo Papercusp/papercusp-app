@@ -49,6 +49,36 @@ export interface GoalStartArgs {
   body?: string;
 }
 
+export interface GoalStartRequestIdentity {
+  requestKey: string;
+  fingerprint: string;
+}
+
+/**
+ * Reuse a request key only while the validated payload and its filing scope are
+ * unchanged. The fingerprint stays client-local; the server independently
+ * fingerprints the accepted arguments before persisting the idempotency claim.
+ */
+export function getGoalStartRequestIdentity(
+  args: GoalStartArgs,
+  scope: { workspaceId: string; harnessSlug: string },
+  previous: GoalStartRequestIdentity | null,
+  createKey: () => string = () => globalThis.crypto.randomUUID(),
+): GoalStartRequestIdentity {
+  const fingerprint = JSON.stringify({
+    workspaceId: scope.workspaceId,
+    harnessSlug: scope.harnessSlug,
+    args: {
+      title: args.title,
+      killCriterion: args.killCriterion ?? null,
+      budgetCents: args.budgetCents ?? null,
+      body: args.body ?? null,
+    },
+  });
+  if (previous?.fingerprint === fingerprint) return previous;
+  return { requestKey: createKey(), fingerprint };
+}
+
 export type GoalDraftValidation =
   | { ok: true; args: GoalStartArgs }
   | { ok: false; errors: Partial<Record<keyof GoalComposerDraft, string>> };
@@ -139,6 +169,7 @@ export async function postGoalStart(
   opts: {
     workspaceId: string;
     harnessSlug: string;
+    requestKey: string;
     fetchImpl?: typeof fetch;
   },
 ): Promise<GoalStartResult> {
@@ -151,7 +182,12 @@ export async function postGoalStart(
     const r = await doFetch(`/api/agent-tools/goals/start?${qs.toString()}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-papercusp-workspace': opts.workspaceId },
-      body: JSON.stringify({ ...args, harness: opts.harnessSlug, headless: OWNER_LAUNCH_HEADLESS }),
+      body: JSON.stringify({
+        ...args,
+        harness: opts.harnessSlug,
+        headless: OWNER_LAUNCH_HEADLESS,
+        requestKey: opts.requestKey,
+      }),
     });
     httpOk = r.ok;
     status = r.status;

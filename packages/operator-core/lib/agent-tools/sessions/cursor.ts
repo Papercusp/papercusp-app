@@ -54,13 +54,32 @@ export function sessionCursorFingerprint(value: unknown, authority?: SessionCurs
  * Build the stable query portion of a cursor fingerprint for paginated session
  * reads. The page size and cursor are transport details; timeline bounds are
  * carried in the cursor itself so a caller may omit them on replay.
+ * Timeline's false-default booleans and empty/ordered kind filters are
+ * canonicalized so equivalent effective filters keep the same cursor.
  */
 export function sessionCursorQueryFingerprint(
   value: Record<string, unknown>,
   authority?: SessionCursorAuthority,
 ): string {
-  const { cursor: _cursor, limit: _limit, since: _since, until: _until, ...query } = value;
-  return sessionCursorFingerprint(query, authority);
+  const {
+    cursor: _cursor,
+    limit: _limit,
+    since: _since,
+    until: _until,
+    include_auto: includeAuto,
+    group_repeated: groupRepeated,
+    kinds,
+    ...query
+  } = value;
+  const normalizedKinds = Array.isArray(kinds)
+    ? [...new Set(kinds.filter((kind): kind is string => typeof kind === 'string'))].sort()
+    : [];
+  return sessionCursorFingerprint({
+    ...query,
+    ...(normalizedKinds.length > 0 ? { kinds: normalizedKinds } : {}),
+    ...(includeAuto === true ? { include_auto: true } : {}),
+    ...(groupRepeated === true ? { group_repeated: true } : {}),
+  }, authority);
 }
 
 /**

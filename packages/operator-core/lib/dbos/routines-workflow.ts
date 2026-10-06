@@ -57,6 +57,7 @@ import {
   SYSTEM_TARGET_PREFIX,
   type SystemActionResult,
 } from '../harness/routines/system-actions';
+import { restrictedTreeSkipReason } from '../harness/routines/restricted-tree-skip';
 import { clearStaleReaperLastError } from './dbos-executor-reaper';
 import {
   CRITICAL_PROBE_MS,
@@ -64,6 +65,8 @@ import {
   poolPressure,
   recordPoolShed,
   lastPoolProbeMs,
+  lastPoolProbeRawMs,
+  lastPoolProbeLoopDelayMs,
   recordPoolShedEvent,
   type PoolPressure,
 } from './pool-pressure';
@@ -665,6 +668,30 @@ async function routineFireImpl(
     } else if (targetRole.startsWith(SYSTEM_TARGET_PREFIX)) {
       const action = targetRole.slice(SYSTEM_TARGET_PREFIX.length);
       const entry = getSystemActionEntry(action);
+      // WI-10005745 (D-012): an action that executes integration-tree code is skipped while a
+      // restricted session's writes are held in that tree. The verdict is a step so a replay takes
+      // the same branch; the skip is recorded on the routine row, never silent.
+      if (entry?.executesIntegrationTreeCode) {
+        const skip = await DBOS.runStep(() => restrictedTreeSkipReason(action, entry), {
+          name: `system:${action}:restricted-hold`,
+        });
+        if (skip) {
+          console.warn(`[routines] ${skip} (routine ${routineId})`);
+          await DBOS.runStep(
+            async () => {
+              const { sql } = getOrgPg();
+              await sql`
+                UPDATE harness_shared.routines
+                   SET metadata = COALESCE(metadata, '{}'::jsonb)
+                         || jsonb_build_object('last_skip_reason', ${skip.slice(0, 600)}::text, 'last_skip_at', now()::text),
+                       updated_at = now()
+                 WHERE id = ${routineId}`.catch(() => {});
+            },
+            { name: `system:${action}:restricted-hold-record` },
+          );
+          return;
+        }
+      }
       const systemActionCtx = {
         installSlug,
         workspaceId,
@@ -687,9 +714,25 @@ async function routineFireImpl(
         const { sql } = getOrgPg();
         try {
           actionResult = (await entry.fn(systemActionCtx)) ?? undefined;
+          if (actionResult?.replayAbandoned) {
+            // WI-10004472: this recovery replay could not reproduce the step sequence
+            // the original execution recorded. ANY further DBOS operation (the settle
+            // step below, clear-reaper-last-error, a durable spawn) would land on a
+            // function id recorded under a different name and fail the workflow with
+            // DBOSUnexpectedStepError. End the fire here; the next tick redoes it.
+            console.warn(
+              `[routines] system:${action} (routine ${routineId}) recovery replay ABANDONED ` +
+                `(${actionResult.replayAbandoned.reason}) — ending the fire without further steps`,
+            );
+            return;
+          }
+          const softError = actionResult?.softError;
           await DBOS.runStep(
             async () => {
-              await sql`
+              // WI-10005164: same step name and count either way, so replay is unchanged.
+              if (softError) await recordRunnerLastError(sql, routineId, softError);
+              else
+                await sql`
                 UPDATE harness_shared.routines
                    SET metadata = COALESCE(metadata, '{}'::jsonb) - 'last_error' - 'last_error_at' - 'last_error_source',
                        updated_at = now()
@@ -728,7 +771,10 @@ async function routineFireImpl(
             const { sql } = getOrgPg();
             try {
               const result = await fn(systemActionCtx);
-              await sql`
+              // WI-10005164: a fail-soft sub-pass failure is recorded, not cleared.
+              if (result?.softError) await recordRunnerLastError(sql, routineId, result.softError);
+              else
+                await sql`
                 UPDATE harness_shared.routines
                    SET metadata = COALESCE(metadata, '{}'::jsonb) - 'last_error' - 'last_error_at' - 'last_error_source',
                        updated_at = now()
@@ -844,6 +890,25 @@ export const routineFireWorkflow = idempotentRegisterWorkflow(ROUTINE_FIRE_WORKF
  * `next_fire_at = infinity` while its turn runs; skipping this pass strands it until the next
  * non-shed tick (the 20–70 minute gaps measured in EI-21859486764076047).
  */
+/**
+ * WI-10005164: record a system action's fail-soft `softError` as the routine's
+ * runner-sourced `last_error` (the same keys a throw writes), so the next clean
+ * fire's source-scoped clear removes it. Best-effort, like the other writes here.
+ */
+async function recordRunnerLastError(
+  sql: ReturnType<typeof getOrgPg>['sql'],
+  routineId: string,
+  softError: string,
+): Promise<void> {
+  const msg = softError.slice(0, 600);
+  await sql`
+    UPDATE harness_shared.routines
+       SET metadata = COALESCE(metadata, '{}'::jsonb)
+             || jsonb_build_object('last_error', ${msg}::text, 'last_error_at', now()::text, 'last_error_source', 'runner'),
+           updated_at = now()
+     WHERE id = ${routineId}`.catch(() => {});
+}
+
 async function runLoopRebaseSweep(sql: ReturnType<typeof getOrgPg>['sql']): Promise<void> {
   await DBOS.runStep(
     async () => {
@@ -876,14 +941,11 @@ async function routinesTickImpl(): Promise<void> {
     console.warn(`[routines-tick] SKIPPED — event loop pressure, shedding scheduler tick`);
     return;
   }
-  // P-006/W4 (D-002/D-003): symmetric PG-CONNECTION-POOL shed. The loopPressure() gate
-  // above covers the event-loop freeze mode; POOL STARVATION is the OTHER (the real
-  // ~8× Jul 1-2 root cause) and had no guard. If a trivial acquire+`SELECT 1` against
-  // the org pool is critically slow, every PG sweep below would block the same way and
-  // pile MORE work onto an already-exhausted pool — freezing git-sync (enqueued at the
-  // tick top) with it, then a silent bghost-watchdog restart. Shed + COUNT instead, so
-  // the starvation becomes a loud counted signal (the bghost-watchdog stays the backstop;
-  // the dead-routine detector still catches a sustained freeze — this adds attribution).
+  // P-006/W4 (D-002/D-003): shed heavy sweeps when the shared org pool's probe
+  // classifies critical. Its acquire+SELECT1 wall time also includes query execution,
+  // transport and JS scheduling. The live p99 discount is a heuristic; neither the
+  // raw nor adjusted duration isolates connection acquisition or proves starvation.
+  // Retain both values in the warning so later attribution can inspect the evidence.
   // Fail-soft: poolPressure() returns 'ok' on any probe error (never shed on no signal).
   //
   // EI-11171 CRITICAL-ROUTINE FLOOR: a critical shed no longer goes fully dark. The original
@@ -892,16 +954,26 @@ async function routinesTickImpl(): Promise<void> {
   // starvation froze every commit + deploy for 7h on 2026-06-23). Shedding it too silently
   // re-armed that exact incident class. Instead we set `poolCritical` and fall through to a
   // MINIMAL pass: fire ONLY critical-queue routines (shouldFireUnderPoolShed), then return
-  // before the heavy sweeps. Strictly additive — every non-critical fire + loop-rebase + the
-  // heavy sweeps stay shed exactly as before, so the shed's protective behaviour is unchanged;
-  // this only guarantees the must-never-starve lane survives (bounded to ~a few quick queries).
+  // before the heavy sweeps. Non-critical fires and heavy sweeps remain shed;
+  // the liveness-critical loop-rebase pass below also survives the shed.
   const pool = await poolPressure();
   const poolProbeMs = lastPoolProbeMs();
   const poolCritical = pool === 'critical';
   if (poolCritical) {
     const shedCount = recordPoolShed();
+    const probeRawMs = lastPoolProbeRawMs();
+    const loopP99DiscountMs = lastPoolProbeLoopDelayMs();
     console.warn(
-      `[routines-tick] PG pool starvation (acquire+SELECT1 probe ${poolProbeMs}ms ≥ critical) — shedding heavy sweeps; still firing CRITICAL-queue routines only (git-sync floor, EI-11171/P-006/W4); pool-shed #${shedCount}`,
+      `[routines-tick] slow pool probe — shedding heavy sweeps; still firing CRITICAL-queue routines only (git-sync floor, EI-11171/P-006/W4); pool-shed #${shedCount}`,
+      {
+        probeRawMs,
+        probeNetMs: Math.max(0, probeRawMs - loopP99DiscountMs),
+        // The timeout floor can make the classified value exceed the net duration.
+        probeAdmissionMs: poolProbeMs,
+        loopP99DiscountMs,
+        criticalProbeMs: CRITICAL_PROBE_MS,
+        shedCount,
+      },
     );
     // EI-13108 ask (2): durably record the shed (fire-and-forget — never await on an
     // already-starved pool) so instrument-staleness consumers can distinguish
@@ -916,9 +988,8 @@ async function routinesTickImpl(): Promise<void> {
   // ticks ran CONCURRENTLY, each independently walking this same serial
   // PG-touching sweep chain and compounding the contention that slowed the
   // first one. That pile-up starved due routines (armed su loop wakes) past
-  // the infra-liveness dead-routines >10m threshold. The loopPressure()/
-  // poolPressure() sheds above gate a tick's OWN start against pressure at
-  // that instant; they don't stop a SECOND tick starting once a first is
+  // the infra-liveness dead-routines >10m threshold. The pool-pressure policy
+  // above gates heavy work at that instant; it doesn't stop a SECOND tick once a first is
   // already past that gate and simply running long — this closes that gap
   // directly. Fail-soft + stale-safe (see routine-tick-overlap-guard.ts).
   if (
@@ -994,19 +1065,25 @@ async function routinesTickImpl(): Promise<void> {
       // executors race every tick and one must lose quietly), so the classifier stays silent
       // unless the row has been due far longer than any race could explain. Fail-soft and not
       // awaited: an instrument on the fire hot path must never delay or break dispatch.
-      const verdict = classifyClaimSkip(
-        {
-          id: r.id,
-          name: r.name,
-          installSlug: r.installSlug,
-          nextFireAt: r.nextFireAt ?? null,
-          lastFiredAt: r.lastFiredAt ?? null,
-        },
-        Date.now(),
-      );
-      if (verdict.state === 'unclaimable') {
-        console.warn(`[routines-tick] UNCLAIMABLE ROUTINE — ${verdict.reason}`);
-        void recordUnclaimableRoutine(sql, r.id, verdict);
+      // WI-10005062: this instrument threw (a non-Date lastFiredAt) and, unguarded, aborted
+      // the whole tick — every later due routine went undispatched. It must stay fail-soft.
+      try {
+        const verdict = classifyClaimSkip(
+          {
+            id: r.id,
+            name: r.name,
+            installSlug: r.installSlug,
+            nextFireAt: r.nextFireAt ?? null,
+            lastFiredAt: r.lastFiredAt ?? null,
+          },
+          Date.now(),
+        );
+        if (verdict.state === 'unclaimable') {
+          console.warn(`[routines-tick] UNCLAIMABLE ROUTINE — ${verdict.reason}`);
+          void recordUnclaimableRoutine(sql, r.id, verdict);
+        }
+      } catch (e) {
+        console.warn(`[routines-tick] claim-skip classifier failed for '${r.name}' (non-fatal): ${String(e)}`);
       }
       continue;
     }
@@ -1938,7 +2015,7 @@ async function routinesTickImpl(): Promise<void> {
 
   // platform-to-app-data-producer-2026-08-30 P-005 (D-001): the app data
   // producer's reconcile sweep. For each configured (owner, app) mapping it
-  // asks the APP where its cursor is (D-002), reads canonical personal_documents
+  // asks the APP where its cursor is (D-002), reads canonical documents
   // rows after it (D-004), and POSTs them through the SAME mapper the live push
   // sink uses, so push and reconcile cannot produce divergent app rows.
   //

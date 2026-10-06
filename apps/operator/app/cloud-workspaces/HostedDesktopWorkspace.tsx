@@ -1,6 +1,6 @@
 "use client";
 
-import { Eye, Monitor, RefreshCw } from "lucide-react";
+import { Monitor, RefreshCw } from "lucide-react";
 import { Button } from "@/app/harness/Button";
 import {
   HostedDesktopViewer,
@@ -16,6 +16,8 @@ import type {
   HostedDesktopViewerMode,
 } from "./hosted-desktop-viewer-protocol";
 import { formatTimestamp } from "./workspace-view-model";
+import { DesktopGrid } from "@/app/_components/desktop-grid/DesktopGrid";
+import type { DesktopGridTile } from "@/app/_components/desktop-grid/desktop-grid-model";
 import styles from "./hosted-workspace-session.module.css";
 
 export type DesktopSelection = {
@@ -40,12 +42,44 @@ export interface HostedDesktopWorkspaceProps {
   viewerState: HostedDesktopViewerState | null;
   onSelectDesktop: (selection: DesktopSelection | null) => void;
   onViewerStateChange: (state: HostedDesktopViewerState) => void;
+  /** P-006: tiles streaming live in place (≤ 2) and the tile filter — URL state. */
+  pinned: readonly string[];
+  onPinnedChange: (pinned: string[]) => void;
+  filter: string;
+  onFilterChange: (filter: string) => void;
 }
 
 function desktopLabel(entry: HostedDesktopRosterEntry): string {
+  if (entry.name) return entry.name;
   return entry.displayNumber !== undefined
     ? `Display ${entry.displayNumber}`
     : entry.desktopSessionId;
+}
+
+function ownerLabel(entry: HostedDesktopRosterEntry): string | null {
+  if (!entry.owner) return entry.scope === "workspace" ? "Workspace desktop" : null;
+  return entry.scope === "pot" ? `Pot ${entry.owner}` : `Agent ${entry.owner}`;
+}
+
+/** Map one relay roster row onto the source-agnostic grid tile (D-009). */
+export function hostedDesktopTile(
+  entry: HostedDesktopRosterEntry,
+  thumbnail: HostedDesktopThumbnailResult | undefined,
+): DesktopGridTile {
+  return {
+    desktopSessionId: entry.desktopSessionId,
+    title: desktopLabel(entry),
+    ownerLabel: ownerLabel(entry),
+    workItemLabel: entry.workItemId
+      ? entry.workItemIntent
+        ? `${entry.workItemId} · ${entry.workItemIntent}`
+        : entry.workItemId
+      : null,
+    state: entry.state,
+    ...(entry.geometry ? { geometry: entry.geometry } : {}),
+    ...(entry.lastActiveAt ? { lastActiveAt: entry.lastActiveAt } : {}),
+    thumbnailSrc: thumbnail?.data ? `data:image/jpeg;base64,${thumbnail.data}` : null,
+  };
 }
 
 /** D-062: one large desktop, with authenticated discovery and activity alongside. */
@@ -65,6 +99,10 @@ export function HostedDesktopWorkspace({
   viewerState,
   onSelectDesktop,
   onViewerStateChange,
+  pinned,
+  onPinnedChange,
+  filter,
+  onFilterChange,
 }: HostedDesktopWorkspaceProps) {
   const selectedEntry = roster.find(
     (entry) => entry.desktopSessionId === selectedDesktop?.desktopSessionId,
@@ -219,55 +257,6 @@ export function HostedDesktopWorkspace({
               <RefreshCw size={14} aria-hidden="true" />
             </Button>
           </div>
-          <ul className={styles.desktopRoster} aria-label="Available desktops">
-            {roster.map((entry) => {
-              const thumbnail = thumbnails[entry.desktopSessionId];
-              const selected =
-                selectedEntry?.desktopSessionId === entry.desktopSessionId;
-              return (
-                <li key={entry.desktopSessionId}>
-                  <button
-                    className={styles.desktopRosterCard}
-                    type="button"
-                    aria-label={`Watch ${desktopLabel(entry)}`}
-                    aria-pressed={selected}
-                    disabled={!canOpenViewer}
-                    onClick={() =>
-                      onSelectDesktop({
-                        desktopSessionId: entry.desktopSessionId,
-                        mode: "watch",
-                      })
-                    }
-                  >
-                    <span
-                      className={styles.desktopThumbnail}
-                      aria-hidden="true"
-                    >
-                      {thumbnail?.data ? (
-                        <img
-                          src={`data:image/jpeg;base64,${thumbnail.data}`}
-                          alt=""
-                          loading="lazy"
-                        />
-                      ) : (
-                        <Monitor size={22} />
-                      )}
-                    </span>
-                    <span className={styles.desktopRosterInfo}>
-                      <strong>{desktopLabel(entry)}</strong>
-                      <span className={styles.desktopRosterMeta}>
-                        {entry.state}
-                        {entry.geometry ? ` · ${entry.geometry}` : ""}
-                      </span>
-                      <span className={styles.desktopWatchLabel}>
-                        <Eye size={12} aria-hidden="true" /> Watch
-                      </span>
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
           {roster.length === 0 ? (
             <p className={styles.desktopRosterEmpty}>
               {rosterState === "loading"
@@ -306,6 +295,38 @@ export function HostedDesktopWorkspace({
           </p>
         </aside>
       </div>
+      {roster.length > 0 ? (
+        <DesktopGrid
+          tiles={roster.map((entry) =>
+            hostedDesktopTile(entry, thumbnails[entry.desktopSessionId]),
+          )}
+          selectedId={selectedEntry?.desktopSessionId ?? null}
+          pinned={pinned}
+          filter={filter}
+          canOpen={canOpenViewer}
+          onOpen={(desktopSessionId) =>
+            onSelectDesktop({ desktopSessionId, mode: "watch" })
+          }
+          onPinnedChange={onPinnedChange}
+          onFilterChange={onFilterChange}
+          renderLive={(tile) =>
+            workspaceId && routeLabel ? (
+              <HostedDesktopViewer
+                key={`pin:${tile.desktopSessionId}`}
+                workspaceId={workspaceId}
+                hostId={hostId}
+                routeLabel={routeLabel}
+                desktopSessionId={tile.desktopSessionId}
+                desktopLabel={tile.title}
+                mode="watch"
+                // A pinned tile only watches; take over from the large viewer.
+                canTakeControl={false}
+                onStateChange={() => {}}
+              />
+            ) : null
+          }
+        />
+      ) : null}
     </section>
   );
 }

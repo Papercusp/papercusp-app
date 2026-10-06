@@ -232,8 +232,8 @@ export interface RecallCanaryDeps {
   // backend without a lexical leg is still a valid canary backend.
   backend?: Pick<MemoryBackend, 'name' | 'search' | 'searchLexical' | 'scoreScale' | 'lexicalScoreScale'>;
   sample?: (sql: Sql) => Promise<CanaryCandidate[]>;
-  /** Override the still-exists check (returns the ids that remain active). */
-  verifyTargets?: (sql: Sql, ids: string[]) => Promise<Set<string>>;
+  /** Override the active-target check (map of id to its current recall scope). */
+  verifyTargets?: (sql: Sql, ids: string[]) => Promise<Map<string, string | null>>;
   loadSet?: typeof loadLatestRecallCanarySet;
   saveSet?: typeof saveRecallCanarySet;
   record?: typeof recordRecallCanaryRun;
@@ -256,19 +256,19 @@ export type RecallCanaryOutcome =
   | { ran: false; skipReason: 'failed'; error: string }
   | { ran: true; status: RecallCanaryStatus; metrics: RecallCanaryRunMetrics; rowId: number };
 
-async function defaultVerifyTargets(sql: Sql, ids: string[]): Promise<Set<string>> {
+async function defaultVerifyTargets(sql: Sql, ids: string[]): Promise<Map<string, string | null>> {
   const rows = (await sql`
-    SELECT id FROM harness_shared.memory_canonical
+    SELECT id, payload->>'user_id' AS scope FROM harness_shared.memory_canonical
      WHERE id = ANY(${ids as unknown as string[]}) AND state = 'active'
-  `) as Array<{ id: string }>;
-  return new Set(rows.map((r) => String(r.id)));
+  `) as Array<{ id: string; scope: string | null }>;
+  return new Map(rows.map((r) => [String(r.id), r.scope == null ? null : String(r.scope)]));
 }
 
 async function defaultPrevStatus(sql: Sql, workspaceId: string): Promise<RecallCanaryStatus | null> {
   try {
     const rows = (await sql`
       SELECT status FROM harness_shared.memory_live_recall_canary_run
-       WHERE workspace_id = ${workspaceId}
+       WHERE workspace_id = ${workspaceId} AND status IN ('ok', 'degraded')
        ORDER BY ran_at DESC LIMIT 1
     `) as Array<{ status: string }>;
     return rows.length > 0 ? (String(rows[0].status) as RecallCanaryStatus) : null;
@@ -423,15 +423,24 @@ export async function runRecallCanary(
     }
 
     // Targets forgotten since freeze are excluded from scoring (natural churn,
-    // not degradation); too much churn means the set no longer measures
-    // anything — reseed and mark the run 'decayed' (no alert).
-    const alive = await (deps.verifyTargets ?? defaultVerifyTargets)(
+    // not degradation). A target moved to a different recall scope also
+    // invalidates the frozen comparison: replaying its old scope would count
+    // an intentional pool move as retrieval loss and compare a changed cohort
+    // against the original baseline. Reseed the whole set without alerting.
+    const activeScopes = await (deps.verifyTargets ?? defaultVerifyTargets)(
       sql,
       set.pairs.map((p) => p.memoryId),
     );
-    const living = set.pairs.filter((p) => alive.has(p.memoryId));
-    const missing = set.pairs.length - living.length;
-    if (living.length === 0 || missing / set.pairs.length > RECALL_CANARY_DECAY_MISSING_FRAC) {
+    const living = set.pairs.filter((p) => activeScopes.get(p.memoryId) === p.scope);
+    const missing = set.pairs.filter((p) => !activeScopes.has(p.memoryId)).length;
+    const scopeChanged = set.pairs.filter(
+      (p) => activeScopes.has(p.memoryId) && activeScopes.get(p.memoryId) !== p.scope,
+    ).length;
+    if (
+      scopeChanged > 0 ||
+      living.length === 0 ||
+      missing / set.pairs.length > RECALL_CANARY_DECAY_MISSING_FRAC
+    ) {
       const { set: fresh } = await seedRecallCanarySet(
         sql, backend, input.workspaceId, deps, degradedRegime,
       );
@@ -450,10 +459,16 @@ export async function runRecallCanary(
         retrievalRAt10: null,
         latencyP50Ms: null,
         status: 'decayed',
-        notes: `set v${set.version} decayed (${missing}/${set.pairs.length} targets gone); reseeded v${fresh.version}`,
+        notes: scopeChanged > 0
+          ? `set v${set.version} invalidated (${scopeChanged}/${set.pairs.length} active targets changed scope); reseeded v${fresh.version}`
+          : `set v${set.version} decayed (${missing}/${set.pairs.length} targets gone); reseeded v${fresh.version}`,
       };
       const rowId = await (deps.record ?? recordRecallCanaryRun)(sql, input.workspaceId, metrics);
-      log(`set v${set.version} decayed; reseeded v${fresh.version}`);
+      log(
+        scopeChanged > 0
+          ? `set v${set.version} invalidated after scope changes; reseeded v${fresh.version}`
+          : `set v${set.version} decayed; reseeded v${fresh.version}`,
+      );
       return { ran: true, status: 'decayed', metrics, rowId };
     }
 

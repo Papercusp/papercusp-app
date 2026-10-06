@@ -38,7 +38,13 @@ import { getOrgPg } from '@papercusp/db-org';
 import { getFlag } from '@papercusp/flags/server';
 import { FLAGS } from '@papercusp/flags';
 import { describeSpecTriadGap } from '@papercusp/plan-parser';
-import { specTriadGate, specTriadEpoch, planInSpecTriadScope } from './spec-triad-policy';
+import {
+  specTriadGate,
+  specTriadEpoch,
+  planInSpecTriadScope,
+  isSpecTriadExcludedTemplate,
+  SPEC_TRIAD_EXCLUDED_TEMPLATES,
+} from './spec-triad-policy';
 import { ensureSpecTriadFiling, SPEC_TRIAD_NON_TERMINAL_STATUSES } from './spec-triad-filing';
 import { setWorkItemState } from '../../work-items';
 
@@ -207,17 +213,11 @@ export interface SpecTriadOpenFiling {
 }
 
 /**
- * `harness_plans.template` values the sweep never files against (WI-10004229).
- *
- * An acceptance rubric (`template: rubric`) is stored in the plan store, but it
- * is a grading BAR, not a plan with work to promote: it carries no P-NNN items
- * and no `## Requirements` / `## Design` by design. A "write the spec triad"
- * filing against one has no correct resolution. An agent that followed it
- * would rewrite the rubric's content under an in-flight vetting attestation or
- * independent grade. Measured 2026-09-30: 335 rubric rows in
- * papercusp-workspace, and at least 8 open filings against them.
+ * `harness_plans.template` values the sweep never files against (WI-10004229). The
+ * list is owned by the shared scope verdict (spec-triad-policy.ts) since WI-10005441,
+ * so the promotion runner applies the same exclusion; re-exported for existing importers.
  */
-export const SPEC_TRIAD_EXCLUDED_TEMPLATES: readonly string[] = ['rubric'];
+export { SPEC_TRIAD_EXCLUDED_TEMPLATES };
 
 /** Where a plan row actually lives, plus the fields the liveness predicate reads. */
 export interface SpecTriadPlanLocator {
@@ -244,7 +244,7 @@ export function planRowIsSweepLive(
   return (
     !p.archived &&
     !p.is_legacy &&
-    !(p.template !== null && SPEC_TRIAD_EXCLUDED_TEMPLATES.includes(p.template)) &&
+    !isSpecTriadExcludedTemplate(p.template) &&
     (p.status === null || LIVE_PLAN_STATUSES.includes(p.status))
   );
 }

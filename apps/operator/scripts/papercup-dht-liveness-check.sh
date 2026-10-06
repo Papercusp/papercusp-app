@@ -50,7 +50,10 @@
 # unreachable / degenerate) · 2 usage · 3 INCONCLUSIVE (could not run the
 # experiment). 3 is NEVER filed as a wedge — see the handler below.
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# The systemd unit runs this from a papercusp-script-snapshot.sh copy under
+# $TMPDIR, where a path climbed from BASH_SOURCE points nowhere, so the unit pins
+# PAPERCUSP_REPO_ROOT; the self-located default serves a direct run (WI-10006358).
+REPO_ROOT="${PAPERCUSP_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 PROBE="$REPO_ROOT/apps/operator/scripts/p2p-dht-liveness-probe.mjs"
 
 DHT_UNIT="${DHT_UNIT:-papercup-isolated-dht.service}"

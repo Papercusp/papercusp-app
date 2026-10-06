@@ -1,7 +1,7 @@
 -- 659-pot-scope-learning-tables.sql
 --
 -- P-001 of plan `pot-scope-all-learnings-2026-07-26`.
--- [owner:owner 2026-07-25 interactive, verbatim] "THERE SHOULD BE NO WORKSPACE
+-- [owner:Avi 2026-07-25 interactive, verbatim] "THERE SHOULD BE NO WORKSPACE
 -- SCOPED LEARNINGS. FIX THAT. ALL LEARNINGS SHOULD BE SCOPED TO A POT."
 --
 -- Measured state that motivated this (2026-07-25): five learning stores carried

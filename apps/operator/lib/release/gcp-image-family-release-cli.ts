@@ -31,6 +31,12 @@ import type {
   GcpImageFamilyReleaseResumePhase,
 } from "@papercusp/operator-core/lib/workspace-host/gcp-image-family";
 
+import {
+  isRecord,
+  parseGuestToolVersions,
+  readJsonInput,
+} from "./release-cli-input";
+
 export interface GcpImageFamilyReleaseCliInput {
   request: GcpImageFamilyReleaseRequest;
   connection: WorkspaceHostProviderConnection;
@@ -81,10 +87,6 @@ function resumePhaseArg(value: string): GcpImageFamilyReleaseResumePhase {
 }
 
 type ArgValue = string | boolean;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim())
@@ -179,40 +181,6 @@ export function parseGcpImageFamilyReleaseCliInput(
   };
 }
 
-function parseGuestToolVersions(
-  raw: unknown,
-): Readonly<Record<string, string>> {
-  if (!isRecord(raw))
-    throw new Error("guest tool versions file must contain a JSON object");
-  const versions: Record<string, string> = {};
-  for (const [name, version] of Object.entries(raw)) {
-    if (typeof version !== "string" || !version.trim()) {
-      throw new Error(
-        `guest tool version for ${name} must be a non-empty string`,
-      );
-    }
-    versions[name] = version.trim();
-  }
-  return versions;
-}
-
-async function readJson(
-  path: string,
-  read: (path: string) => Promise<string>,
-): Promise<unknown> {
-  let text: string;
-  try {
-    text = await read(path);
-  } catch {
-    throw new Error(`cannot read JSON input '${path}'`);
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    throw new Error(`JSON input '${path}' is not valid JSON`);
-  }
-}
-
 /**
  * Execute one already-parsed request through the production composition seam.
  *
@@ -278,10 +246,12 @@ async function main(): Promise<void> {
   const args = parseGcpImageFamilyReleaseCliArgs(process.argv.slice(2));
   const read = (path: string) => readFile(path, "utf8");
   const input = parseGcpImageFamilyReleaseCliInput(
-    await readJson(args.requestFile, read),
+    await readJsonInput(args.requestFile, read),
   );
   const guestToolVersions = args.guestToolVersionsFile
-    ? parseGuestToolVersions(await readJson(args.guestToolVersionsFile, read))
+    ? parseGuestToolVersions(
+        await readJsonInput(args.guestToolVersionsFile, read),
+      )
     : undefined;
   const options = envOptions(args, guestToolVersions);
 

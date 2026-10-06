@@ -61,6 +61,8 @@ import { sendMessage } from './messages';
 import { DELIVERY_LADDER_WAKE_SOURCE, wakeRecipients } from './inbox-wake';
 import { lastInboxReadAtBatch } from './inbox-read-freshness';
 import { fetchWakeability, type WakeabilitySignals } from './presence-wakeability';
+import { coordHasPgFastPath } from './log';
+import { fetchUnansweredDirected, type UnansweredDirectedSummary } from './unanswered-directed';
 import type { AgentIdentity } from './identity';
 import { isMachineAuthoredSender, MACHINE_SENDER_PATTERN } from './machine-authored';
 
@@ -524,6 +526,12 @@ export async function runDeliveryLadderSweepOnce(
       fetchReads?: (ownerIds: string[]) => Promise<Map<string, string>>;
       fetchSignals?: (ownerIds: string[]) => Promise<Map<string, WakeabilitySignals>>;
       fetchCapped?: (nowMs: number, stormMs: number) => Promise<Set<string>>;
+      /** An absent owner in a successful map means measured zero unanswered asks. */
+      fetchUnanswered?: (
+        ownerIds: string[],
+        workspaceId: string,
+      ) => Promise<Map<string, UnansweredDirectedSummary>>;
+      hasPgFastPath?: () => boolean;
       send?: typeof sendMessage;
       wake?: typeof wakeRecipients;
     };
@@ -539,13 +547,70 @@ export async function runDeliveryLadderSweepOnce(
   if (rows.length === 0) return { candidates: 0, escalations: 0, woken: 0, truncated: false };
 
   const recipients = [...new Set(rows.map((r) => r.recipient))];
-  const [lastReadByOwner, signals, capped] = await Promise.all([
+  // The ladder's unread candidate set includes FYIs and stale asks. Only an
+  // authoritative unanswered-directed read can distinguish those from work
+  // waiting on the recipient. The helper returns an empty map both for a
+  // measured zero and when its PG fast path is unavailable, so check the path
+  // first and preserve the legacy escalation behavior on any unavailable read.
+  const unansweredByWorkspacePromise = (async (): Promise<
+    Map<string, Map<string, UnansweredDirectedSummary> | null> | null
+  > => {
+    let available: boolean;
+    try {
+      available = (io.hasPgFastPath ?? coordHasPgFastPath)();
+    } catch (err) {
+      console.warn(
+        `[delivery-ladder] unanswered lookup availability failed; preserving candidates: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+    if (!available) return null;
+
+    const recipientsByWorkspace = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const owners = recipientsByWorkspace.get(row.workspace_id) ?? new Set<string>();
+      owners.add(row.recipient);
+      recipientsByWorkspace.set(row.workspace_id, owners);
+    }
+    const fetchUnanswered = io.fetchUnanswered ?? ((ownerIds, workspaceId) =>
+      fetchUnansweredDirected(ownerIds, { workspaceId }));
+    const reads = await Promise.all(
+      [...recipientsByWorkspace].map(async ([workspaceId, ownerIds]) => {
+        try {
+          return [workspaceId, await fetchUnanswered([...ownerIds], workspaceId)] as const;
+        } catch (err) {
+          console.warn(
+            `[delivery-ladder] unanswered lookup for workspace ${workspaceId} failed; preserving candidates: ${err instanceof Error ? err.message : err}`,
+          );
+          return [workspaceId, null] as const;
+        }
+      }),
+    );
+    return new Map(reads);
+  })();
+  const [lastReadByOwner, signals, capped, unansweredByWorkspace] = await Promise.all([
     (io.fetchReads ?? lastInboxReadAtBatch)(recipients),
     (io.fetchSignals ?? fetchWakeability)(recipients),
     (io.fetchCapped ?? findStormCappedRecipients)(nowMs, storm),
+    unansweredByWorkspacePromise,
   ]);
 
-  const escalations = classifyLadderEscalations({ rows, lastReadByOwner, signals, capped, nowMs });
+  const actionableRows = unansweredByWorkspace
+    ? rows.filter((row) => {
+        const unansweredByOwner = unansweredByWorkspace.get(row.workspace_id);
+        if (!unansweredByOwner) return true; // that workspace's read failed; fail open
+        const summary = unansweredByOwner.get(row.recipient);
+        if (!summary) return false; // successful reads omit measured zeroes by contract
+        return !Number.isSafeInteger(summary.count) || summary.count < 0 || summary.count > 0;
+      })
+    : rows;
+  const escalations = classifyLadderEscalations({
+    rows: actionableRows,
+    lastReadByOwner,
+    signals,
+    capped,
+    nowMs,
+  });
   const batch = escalations.slice(0, limit);
 
   const send = io.send ?? sendMessage;

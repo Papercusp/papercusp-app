@@ -4,6 +4,8 @@ import { defineTool } from '@papercusp/agent-mcp';
 import { COORD_ROLES } from '../coordination/roles';
 import { resolveAgentIdentity } from '../coordination/identity';
 import {
+  GRADING_AUDIT_BACKLOG_SCAN_LIMIT,
+  GRADING_AUDIT_DISPATCH_LIMIT,
   reconcilePendingGradingAudits,
   type DispatchPendingGradingAuditsInput,
 } from '../../grading-integrity';
@@ -16,6 +18,18 @@ import {
  */
 export const SCORECARD_REPAIR_TIMEOUT_SEC = 15 * 60;
 
+/**
+ * What an omitted `targetIds` actually selects (WI-10005150). The dispatcher
+ * reads only the NEWEST `GRADING_AUDIT_BACKLOG_SCAN_LIMIT` scorecards and takes
+ * the oldest pending ones from THAT window, so a pending card older than the
+ * window is never reached by a no-target sweep. This used to read "the oldest
+ * bounded backlog", which promised the opposite. Derived from the dispatcher's
+ * own constants so the text cannot drift from the selection it describes.
+ */
+export const SCORECARD_REPAIR_NO_TARGET_SELECTION =
+  `up to ${GRADING_AUDIT_DISPATCH_LIMIT} of the oldest pending cards among only the NEWEST ` +
+  `${GRADING_AUDIT_BACKLOG_SCAN_LIMIT} scorecards; an older pending card is reachable only via targetIds`;
+
 export const scorecardRepairArgs = z
   .object({
     targetIds: z
@@ -23,7 +37,7 @@ export const scorecardRepairArgs = z
       .max(50)
       .optional()
       .describe(
-        'Optional scorecard issue ids to repair immediately. Omit to reconcile the oldest bounded pending-audit backlog.',
+        `Optional scorecard issue ids to repair immediately. Omit to dispatch ${SCORECARD_REPAIR_NO_TARGET_SELECTION}.`,
       ),
     harness: z
       .string()
@@ -39,7 +53,9 @@ export default defineTool({
   name: 'scorecards:repair',
   profile: 'engineer',
   description:
-    'Immediately reconcile pending grading-integrity audits by dispatching independent auditors through the bounded, idempotency-keyed pending-audit dispatcher. Pass targetIds for a stale scorecard named by a refusal, or omit them to process the oldest bounded backlog. This is the callable repair path behind scorecards:emit and the acceptance-grading sweep.',
+    'Immediately reconcile pending grading-integrity audits by dispatching independent auditors through the bounded, idempotency-keyed pending-audit dispatcher. ' +
+    `Pass targetIds for a pending scorecard named by a refusal; omitting them dispatches ${SCORECARD_REPAIR_NO_TARGET_SELECTION}. ` +
+    'This is the callable repair path behind scorecards:emit and the acceptance-grading sweep.',
   guidance: {
     when: 'scorecards:emit or a completion gate says a scorecard must be re-opened through the pending-audit dispatcher, or a known pending grading-integrity backlog needs an immediate bounded retry instead of waiting for the periodic sweep.',
     notWhen: 'Do not use this to settle an audit yourself. It only dispatches an independent auditor; the auditor must re-read the target and emit exactly one grading-integrity card. Do not use it for ordinary same-rubric scorecard emission.',

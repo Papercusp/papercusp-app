@@ -32,6 +32,8 @@ import { readFile as readFileAsync, readdir as readdirAsync } from 'node:fs/prom
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { integrationRoot, tsxBin, type SpawnLike } from './release-deploy-launch';
+import { restrictedTreeHoldRefusal, type RestrictedHoldRefusal } from './agent-tools/testing/restricted-hold-fence';
+import { CHECKPOINT_RUN_LOCK_STALE_MS } from './release-checkpoint-lock';
 import { greenCheckpointDbPoolSetenvArgs } from './release/checkpoint-db-pool';
 import { GREEN_CHECKPOINT_RESULT_MARKER, isFixtureLogLine } from './release/checkpoint-log-tags';
 import {
@@ -43,6 +45,7 @@ import {
   GATE_VERDICT_HARNESS_ENV,
   GATE_VERDICT_WORKSPACE_ENV,
   gateVerdictEnv,
+  resolveHomeGateVerdictTarget,
   type GateVerdictTarget,
 } from './release/gate-verdict-target';
 import { GATE_FIRE_ID_ENV, isGateFireId, mintGateFireId, recordGateFire } from './release/gate-fire-ledger';
@@ -65,7 +68,9 @@ import {
   type MissingReason,
   type PathContainment,
   type TestImplSplitRisk,
+  type GitRead,
 } from './candidate-contains';
+import { execFileResultShared, runSyncWithAsyncExec, type AsyncExec } from './sync-exec-replay';
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `\\'"'"'`)}'`;
@@ -85,20 +90,6 @@ function shellQuote(value: string): string {
  * the operator-home harness. Fail-safe — if either half won't resolve we stamp nothing, the run
  * doesn't record, and the routine records exactly as it did before.
  */
-function resolveHomeGateTarget(): GateVerdictTarget | null {
-  try {
-    const { activeWorkspaceId } = require('./workspace-registry') as typeof import('./workspace-registry');
-    const { operatorHomeHarnessSlug } =
-      require('./harness/operator-home-harness') as typeof import('./harness/operator-home-harness');
-    const workspaceId = activeWorkspaceId();
-    const installSlug = operatorHomeHarnessSlug();
-    if (!workspaceId || !installSlug) return null;
-    return { workspaceId, installSlug };
-  } catch {
-    return null;
-  }
-}
-
 /**
  * The transient systemd unit the detached manual checkpoint runs as. DISTINCT from the deploy
  * unit (a checkpoint and a deploy are independent) — but a second manual checkpoint while one
@@ -196,7 +187,7 @@ export function resolveCheckpointCapacity(
   }
   const fix =
     `Set ${CHECKPOINT_CAPACITY_MODE_ENV}=reserved on the service that launched this run ` +
-    `(a systemd drop-in like the 20-green-checkpoint-capacity.conf on papercup-bg-host), restart it, ` +
+    `(a systemd drop-in like the 20-green-checkpoint-capacity.conf on papercusp-bg-host), restart it, ` +
     `and confirm the run log's GREEN_CHECKPOINT_CAPACITY line. Scheduled gate runs use their own ` +
     `host's contract, so this manual run may be several times slower than a scheduled one (WI-10003521).`;
   if (declared === null) {
@@ -234,6 +225,10 @@ export interface LaunchCheckpointResult {
    *  run is holding the budget, retry later" is a different instruction to the caller than a
    *  spawn failure, and the numbers behind the verdict are what make it checkable. */
   memoryAdmission?: CheckpointMemoryAdmission;
+  /** Present when the launch was refused because a restricted session's writes are held in the
+   *  tree this launch executes from (WI-10005763, D-012); `reason` is its `error`. Nothing was
+   *  started or stopped. The census and the reason text are the routine dispatchers' own. */
+  restrictedHold?: RestrictedHoldRefusal;
   /** EI-9672: set when `replaceStale:true` found the active run CONFIRMED stale and stopped
    *  it before this launch — the detail of what was stopped, for the caller's audit trail. */
   replacedStale?: ActiveCheckpointCheck;
@@ -479,6 +474,63 @@ function defaultExecSync(
 ): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync(cmd, args, { encoding: 'utf8', ...options });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+/** `defaultExecSync`'s async twin: same result semantics, never blocks the event loop.
+ *  EI-24852529885337741: read-only git calls share one child per argv for 2 s
+ *  (execFileResultShared), because concurrent callers issue identical bursts and each fork of
+ *  this process costs ~160 ms of main-thread time. */
+const defaultAsyncExec: AsyncExec = (cmd, args, options) =>
+  execFileResultShared(cmd, args, { timeout: typeof options?.timeout === 'number' ? options.timeout : undefined });
+
+/**
+ * WI-10005268: run a sync, exec-injected probe (`checkActiveCheckpointRun`,
+ * `currentCheckpointCandidate`, `excludedCommitsSync`, …) from an operator handler WITHOUT parking
+ * the main thread.
+ *
+ * With the real default exec, every git/systemctl call the probe makes goes through async
+ * `execFile` under record/replay (sync-exec-replay.ts, WI-10005261); the final pass is a faithful
+ * re-execution against the fetched results. A main-thread `spawnSync` is what the event-loop
+ * sentinel wedge-kills :3070/:3170 for, dropping every MCP session on the host (#1155).
+ *
+ * An INJECTED exec (a test seam, or a caller already off the main thread) runs the probe directly
+ * and returns its value SYNCHRONOUSLY, not a Promise. `launchDetachedCheckpoint` depends on that:
+ * with synchronous seams it must reach `spawnFn` and attach the child's listeners in the caller's
+ * own tick (see the note above its process-authority read). Await the result only when
+ * `isPromiseLike` says so.
+ *
+ * Precondition (sync-exec-replay's): the probe is side-effect free apart from its exec calls, and
+ * never issues the same exec call twice expecting a different answer. Read-only probes qualify;
+ * `terminateActiveCheckpointUnit` (a kill) is deliberately not routed through here.
+ */
+export function runCheckpointProbe<T>(
+  probe: (execFn: ExecSyncLike) => T,
+  execFn: ExecSyncLike = defaultExecSync,
+  asyncExec: AsyncExec = defaultAsyncExec,
+): T | Promise<T> {
+  if (execFn !== defaultExecSync) return probe(execFn);
+  return runSyncWithAsyncExec(probe, asyncExec).then((r) => r.value);
+}
+
+/**
+ * WI-10005268: `checkActiveCheckpointRun(root)` with the real probes, off the event loop. Use this
+ * from any operator handler; the sync form with its default exec parks the main thread for every
+ * systemctl/git call it makes.
+ */
+export async function checkActiveCheckpointRunAsync(root: string): Promise<ActiveCheckpointCheck> {
+  return runCheckpointProbe((e) => checkActiveCheckpointRun(root, e));
+}
+
+/**
+ * WI-10005268: a `GitRead` for `repo` that does not block the event loop when `execFn` is the
+ * real default. An injected exec keeps the existing sync-backed adapter so tests stay hermetic.
+ */
+function checkpointGitRead(execFn: ExecSyncLike, repo: string): GitRead {
+  if (execFn !== defaultExecSync) return gitReadFromExecSync(execFn, repo);
+  return async (args) => {
+    const r = await defaultAsyncExec('git', ['-C', repo, ...args]);
+    return r.status === 0 ? r.stdout.trim() : null;
+  };
 }
 
 function defaultReadLogHead(logPath: string): string | null {
@@ -989,11 +1041,11 @@ function defaultReadProcessStartMs(pid: number): number | null {
   }
 }
 
-/** Keep this in sync with green-checkpoint.ts's CHECKPOINT_LOCK_STALE_MS. The writer
- * reclaims a lock at this age even when its recorded PID still appears alive; the reader
- * must not continue presenting that same over-age lock as a measured in-flight run when no
- * contender has arrived to trigger the writer-side cleanup. */
-export const CHECKPOINT_RUN_LOCK_STALE_MS = 190 * 60_000;
+/** Defined in the dependency-free leaf ./release-checkpoint-lock (WI-10005170) and
+ * re-exported here so existing importers keep working. New importers that need only
+ * this number should import the leaf: importing this module drags its whole static
+ * graph, including release-checkpoint-config.ts's module-scope database read. */
+export { CHECKPOINT_RUN_LOCK_STALE_MS };
 
 /** Procfs start times and lock timestamps use different clocks/precision on some hosts. A
  * small allowance avoids rejecting the genuine owner when it acquired the lock immediately
@@ -1192,7 +1244,9 @@ export const CHECKPOINT_PROCESS_AUTHORITY_SCAN_CONCURRENCY = 384;
 type ProbeAwaitable<T> = T | PromiseLike<T>;
 
 function isPromiseLike<T>(value: ProbeAwaitable<T>): value is PromiseLike<T> {
-  return typeof (value as PromiseLike<T>).then === 'function';
+  // Null-safe: a synchronous seam may legitimately answer `null` (the restricted-hold fence's
+  // "nothing held", WI-10005763), and reading `.then` off it would throw.
+  return value != null && typeof (value as PromiseLike<T>).then === 'function';
 }
 
 export interface CheckpointProcessAuthorityProbeDeps {
@@ -2150,7 +2204,7 @@ export async function checkpointCandidateContainment(args: {
 }): Promise<CheckpointContainment> {
   const root = args.root ?? integrationRoot();
   const execFn = args.execFn ?? defaultExecSync;
-  const git = gitReadFromExecSync(execFn, root);
+  const git = checkpointGitRead(execFn, root);
 
   // A caller that names its files gets an EXACT answer. One that doesn't gets the
   // objectively-hazardous set instead: anything uncommitted is invisible to every
@@ -2316,10 +2370,14 @@ export async function assessPreLaunchExclusion(args: {
   const root = args.root ?? integrationRoot();
   const execFn = args.execFn ?? defaultExecSync;
 
-  const isActive = args.activeRun ?? ((r: string, e: ExecSyncLike) => checkActiveCheckpointRun(r, e).active);
-  if (isActive(root, execFn)) return open('run-already-active');
+  // WI-10005268: the real probes run off the event loop (runCheckpointProbe); an injected
+  // `activeRun` seam is called once, directly, exactly as before.
+  const isActive = args.activeRun
+    ? args.activeRun(root, execFn)
+    : (await runCheckpointProbe((e) => checkActiveCheckpointRun(root, e), execFn)).active;
+  if (isActive) return open('run-already-active');
 
-  const current = currentCheckpointCandidate(root, execFn);
+  const current = await runCheckpointProbe((e) => currentCheckpointCandidate(root, e), execFn);
   const candidate = current.current_candidate;
   const tip = current.current_head;
   const quietCutSec = current.quiet_cut_sec;
@@ -2341,7 +2399,7 @@ export async function assessPreLaunchExclusion(args: {
   // `excludedCommitsSync` reports `%h` for the same window in the same repo, so the row's
   // leading token is that sha. A row we cannot join to an eligibility is a wait we cannot
   // compute — which fails OPEN below, never into a refusal.
-  const excluded = excludedCommitsSync(root, candidate, tip, quietCutSec, execFn);
+  const excluded = await runCheckpointProbe((e) => excludedCommitsSync(root, candidate, tip, quietCutSec, e), execFn);
   const eligibilityOf = (row: string): number | null =>
     excluded.find((e) => e.sha && row.startsWith(e.sha))?.eligibleInSec ?? null;
 
@@ -2686,8 +2744,23 @@ export async function launchDetachedCheckpoint(
     });
   }
 
+  // WI-10005763 (D-012): the launched unit runs the green-checkpoint orchestrator FROM `root`, the
+  // live shared tree, with network. Code a restricted session left there must not execute, so this
+  // refuses before everything else — `force` included, and BEFORE the replaceStale branch below, so
+  // a refusal can never stop a live run. Fencing the launcher (not only the release:checkpoint-run
+  // door) covers its other callers too: repair auto-verify, the fire drill, the stall watchdog and
+  // the eligibility workflow. Same census + reason text as the routine dispatchers
+  // (restricted-tree-skip.ts). A synchronous injected fence keeps the same-tick spawn contract.
+  const fenceRead: ProbeAwaitable<RestrictedHoldRefusal | null> = restrictedTreeHoldRefusal([root, subjectRoot]);
+  const restrictedHold = isPromiseLike(fenceRead) ? await fenceRead : fenceRead;
+  if (restrictedHold) {
+    return { launched: false, unit, argv: [], logPath, reason: restrictedHold.error, restrictedHold };
+  }
+
   if (!opts.force) {
-    const active = checkActiveCheckpointRun(subjectRoot, execFn, readLogHead);
+    // WI-10005268: off the event loop with the real exec; same-tick with an injected one.
+    const activeRead = runCheckpointProbe((e) => checkActiveCheckpointRun(subjectRoot, e, readLogHead), execFn);
+    const active = isPromiseLike(activeRead) ? await activeRead : activeRead;
     // WI-6962: an INDETERMINATE probe is not a refusal to launch "because something is
     // running" — it is a refusal to GAMBLE. The costs are wildly asymmetric: refusing costs
     // the caller one retry, while launching into a live run destroys 20+ minutes of an
@@ -2875,7 +2948,9 @@ export async function launchDetachedCheckpoint(
     });
   }
 
-  const current = currentCheckpointCandidate(subjectRoot, execFn);
+  // WI-10005268: this and the quiet-window reads below run off the event loop with the real exec.
+  const currentRead = runCheckpointProbe((e) => currentCheckpointCandidate(subjectRoot, e), execFn);
+  const current = isPromiseLike(currentRead) ? await currentRead : currentRead;
   const tipSha = current.current_head;
   const candidateSha = opts.candidate ?? current.current_candidate;
   // Keep the provenance in lockstep with the candidate forwarded below. Invalid or omitted
@@ -2888,7 +2963,7 @@ export async function launchDetachedCheckpoint(
   // omitted ⇒ the operator-home gate, which is this launcher's documented scope. Hoisted so
   // the P-001 fire ANCHOR (in the close handler below) and the argv env stamps can never
   // disagree about which gate the run records into.
-  const verdictTarget = opts.target === undefined ? resolveHomeGateTarget() : opts.target;
+  const verdictTarget = opts.target === undefined ? resolveHomeGateVerdictTarget() : opts.target;
   const gateFireId = verdictTarget ? mintGateFireId() : undefined;
   const argv = buildCheckpointSystemdArgv(
     root,
@@ -2915,10 +2990,19 @@ export async function launchDetachedCheckpoint(
   // the LaunchCheckpointResult.willJudge doc for the benign launch-time-vs-run-time race this
   // does not (and cannot) close.
   const quietCutApplied = Boolean(tipSha && candidateSha && tipSha !== candidateSha);
-  const excluded =
-    quietCutApplied && candidateSha && tipSha
-      ? excludedCommitsSync(subjectRoot, candidateSha, tipSha, current.quiet_cut_sec, execFn)
-      : [];
+  const noQuietWindow = { excluded: [] as ReturnType<typeof excludedCommitsSync>, paths: [] as string[] };
+  const quietWindowRead = runCheckpointProbe(
+    (e) =>
+      quietCutApplied && candidateSha && tipSha
+        ? {
+            excluded: excludedCommitsSync(subjectRoot, candidateSha, tipSha, current.quiet_cut_sec, e),
+            paths: pathsBetweenSync(subjectRoot, candidateSha, tipSha, e),
+          }
+        : noQuietWindow,
+    execFn,
+  );
+  const quietWindow = isPromiseLike(quietWindowRead) ? await quietWindowRead : quietWindowRead;
+  const excluded = quietWindow.excluded;
   const willJudge: LaunchCheckpointResult['willJudge'] = {
     candidate: candidateSha,
     candidateSource,
@@ -2926,11 +3010,9 @@ export async function launchDetachedCheckpoint(
     quietCutApplied,
     quietCutSec: current.quiet_cut_sec,
     excludedCommits: excluded.map((e) => e.line),
-    // P-004: same window, expressed in the space the caller can actually check. Sync
-    // (`git diff --name-only`) so it stays inside the single-tick constraint this
-    // function's spawn path depends on.
-    excludedPaths:
-      quietCutApplied && candidateSha && tipSha ? pathsBetweenSync(subjectRoot, candidateSha, tipSha, execFn) : [],
+    // P-004: same window, expressed in the space the caller can actually check
+    // (`git diff --name-only`, read in the quiet-window probe above).
+    excludedPaths: quietWindow.paths,
     // EI-18759622667757826: how close each exclusion is to aging in — the difference between
     // a prediction a caller can act on and one that talks it into killing a healthy run.
     excludedEligibility: excluded.map(({ sha, subject, eligibleInSec }) => ({ sha, subject, eligibleInSec })),
@@ -2955,7 +3037,9 @@ export async function launchDetachedCheckpoint(
     child.on('error', (e: unknown) => {
       resolve({ ...base, launched: false, reason: e instanceof Error ? e.message : String(e) });
     });
-    child.on('close', (code: number | null) => {
+    // Async only for the collision re-probe below, which awaits nothing with an injected exec.
+    // Every path resolves and nothing in it can reject (the probe is wrapped in try/catch).
+    child.on('close', async (code: number | null) => {
       if (code === 0) {
         // P-001 (gate-verdict-liveness-and-repair-reliability-2026-08-31): anchor the FIRE —
         // one kind='green_checkpoint_fire' ledger row per accepted detached launch, so a unit
@@ -2977,8 +3061,15 @@ export async function launchDetachedCheckpoint(
         // Return the same structured refusal as the normal preflight path when it is. Do not
         // retry under a new unit name: that would create a second process which immediately
         // loses the shared run-lock, and would hide the real in-flight run from the caller.
-        const active = checkActiveCheckpointRun(subjectRoot, execFn, readLogHead);
-        if (active.probe_failed || active.active) {
+        // WI-10005268: off the event loop with the real exec; same-tick with an injected one.
+        let active: ActiveCheckpointCheck | null = null;
+        try {
+          const activeRead = runCheckpointProbe((e) => checkActiveCheckpointRun(subjectRoot, e, readLogHead), execFn);
+          active = isPromiseLike(activeRead) ? await activeRead : activeRead;
+        } catch {
+          active = null; // unanswerable: fall through to the plain exit report below
+        }
+        if (active && (active.probe_failed || active.active)) {
           resolve({
             ...base,
             launched: false,

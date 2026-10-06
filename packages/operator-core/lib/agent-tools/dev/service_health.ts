@@ -26,12 +26,14 @@ import { substrateSidecarSupervisionStatus, type SidecarSupervisionStatus } from
 import { spawnerSidecarSupervisionStatus } from "../../fleet/spawner-sidecar-spawn";
 import { runtimeDiagnostic, type RuntimeDiagnostic } from "../../runtime-diagnostic";
 import { probeServiceStart, probeUnitStates, type ServiceStartInfo } from "./systemd-service-probe";
+import { dhtUniverseNextVerb, probeProductHostDhtUniverse } from "./dht-universe-probe";
 import { isSidecarEnabledFromEnv } from "../../process-supervision/sidecar-spawn-shared";
 import {
   readMcpProxyFailureTail,
   summarizeMcpProxyHealth,
   type McpProxyFailureRecord,
 } from "../../system-health/mcp-proxy-health";
+import { MCP_PROXY_CRITICAL_CONTINUATION_WAIT_CRIT_MS } from "../../system-health/thresholds";
 
 function sidecarFlapState(s: SidecarSupervisionStatus): SupervisionFlapState {
   return s.gaveUp ? "gave-up" : s.respawnAttemptsInWindow > 0 ? "damping" : "ok";
@@ -496,7 +498,7 @@ export function buildMcpProxyTransportBlock(
   const h = summarizeMcpProxyHealth(recs, nowMs);
   // `recovered` is deliberately NOT in this sum: on its own it means the proxy absorbed a deploy
   // blip, which is the resilience working. The notable set is what an agent should act on.
-  const notable = h.hardFailures + h.handshakeStalls + h.shed + h.otherNon2xx;
+  const notable = h.hardFailures + h.handshakeStalls + h.shed + h.otherNon2xx + h.criticalContinuationQueueStalls;
   if (notable === 0) return {};
   return {
     mcpProxyTransport: {
@@ -504,12 +506,16 @@ export function buildMcpProxyTransportBlock(
       hardFailures: h.hardFailures,
       handshakeStalls: h.handshakeStalls,
       shed: h.shed,
+      criticalContinuationQueueStalls: h.criticalContinuationQueueStalls,
+      criticalContinuationQueueMaxWaitMs: h.criticalContinuationQueueMaxWaitMs,
       otherNon2xx: h.otherNon2xx,
       recovered: h.recovered,
       byKind: h.byKind,
       newestAt: h.newestAt,
       note:
-        h.handshakeStalls > 0
+        h.criticalContinuationQueueStalls > 0
+          ? `${h.criticalContinuationQueueStalls} critical continuation request(s) exceeded ${MCP_PROXY_CRITICAL_CONTINUATION_WAIT_CRIT_MS / 60_000}m during the last hour (longest observed ${Math.round(h.criticalContinuationQueueMaxWaitMs / 1000)}s). This is a recent incident signal and does not establish whether a request remains queued.`
+          : h.handshakeStalls > 0
           ? `${h.handshakeStalls} upstream-silence stall(s) on the MCP handshake (WI-6740). Each was RETRIED and survived — but this is the class that leaves a session tool-dark for its entire life if the retry ever runs out. Not benign.`
           : `${h.hardFailures} hard tool-transport failure(s) the proxy could not hide from callers.`,
     },
@@ -524,6 +530,10 @@ export function buildServiceHealthDiagnostic(
    *  could read it. Drives the ownership disclosure on a bg-host `nextVerb`; `undefined` is an
    *  honest unknown that discloses ownership WITHOUT asserting the watchdog is up. */
   watchdogActive?: boolean,
+  /** WI-10005995: product hosts resolved OFF the public DHT with no drill holding the rig.
+   *  Lowest-priority root cause — named only when nothing is down or unhealthy, so a real
+   *  outage still leads, while a quiet isolated host cannot read as an all-clear. */
+  dhtWarnings?: ReadonlyArray<{ unit: string; warning: string }>,
 ): RuntimeDiagnostic<
   { services: string[]; supervised: string[] },
   { up: number; down: number; wedged: number; absent: number; supervisionUnhealthy: number },
@@ -543,6 +553,8 @@ export function buildServiceHealthDiagnostic(
   const wedgedFailures = failures.filter((s) => s.wedged === true);
   const first = wedgedFailures[0] ?? failures[0];
   const supervisor = unhealthySupervision[0];
+  const dhtWarning = dhtWarnings?.[0];
+  const rootCauseIsDht = !first && !supervisor && dhtWarning !== undefined;
   const rootCause: ServiceRootCause | null = first
     ? { component: first.name, reason: first.note ?? `probe failed (status ${first.status ?? "none"})` }
     : supervisor
@@ -553,7 +565,9 @@ export function buildServiceHealthDiagnostic(
               ? `systemd state ${supervisor.activeState ?? "unhealthy"}`
               : `supervisor state ${supervisor.flapState}`,
         }
-      : null;
+      : dhtWarning
+        ? { component: dhtWarning.unit, reason: dhtWarning.warning }
+        : null;
   return runtimeDiagnostic({
     configured: {
       services: services.map((s) => s.name),
@@ -576,7 +590,9 @@ export function buildServiceHealthDiagnostic(
     // verb must name that owner. Same `includes("bg-host")` predicate `restartVerbForService`
     // uses, so every component routed to the bg-host restart carries the disclosure with it —
     // a name that earns the verb but not the caveat is exactly how this gap reappears.
-    nextVerb: rootCause
+    nextVerb: rootCauseIsDht && dhtWarning
+      ? dhtUniverseNextVerb(dhtWarning.unit)
+      : rootCause
       ? nextVerbForService(rootCause.component, first?.wedged) +
         (rootCause.component.includes("bg-host") ? bgHostWatchdogOwnership(watchdogActive) : "")
       : null,
@@ -615,7 +631,7 @@ export default defineTool({
       },
     },
     returns:
-      "{ configured, effective, evidence, rootCause, nextVerb, services, telemetry, supervision }. On a failed service, `wedged:true` plus `acceptQueue` means a listener exists but its event loop is blocked; `down` means no listener. PID/port/TCP liveness cannot overrule a failed probe. Missing `wedged` is unknown. Capture logs before restarting a wedged service, because restart destroys the evidence.",
+      "{ configured, effective, evidence, rootCause, nextVerb, services, telemetry, supervision, dhtUniverse?, unitStates?, unitsUnknown?, scopesUnavailable? }. `dhtUniverse.warnings` flags a product host off the public DHT outside a drill. The last three fields appear when `units` is requested; read `unitsUnknown` before treating an inactive `unitStates` entry as a stopped unit. On a failed service, `wedged:true` plus `acceptQueue` means a listener exists but its event loop is blocked; `down` means no listener. PID/port/TCP liveness cannot overrule a failed probe. Missing `wedged` is unknown. Capture logs before restarting a wedged service, because restart destroys the evidence.",
     seeAlso: [
       "dev:restart (restart a down service)",
       "dev:pg_health (Postgres health specifically)",
@@ -683,6 +699,9 @@ export default defineTool({
       services: z.unknown().optional(),
       telemetry: z.unknown().optional(),
       supervision: z.unknown().optional(),
+      unitStates: z.unknown().optional(),
+      unitsUnknown: z.unknown().optional(),
+      scopesUnavailable: z.unknown().optional(),
     })
     .passthrough(),
   async handler({ units, scope }) {
@@ -701,11 +720,14 @@ export default defineTool({
         spawnerSidecarSupervisionStatus(),
       ),
     );
-    const [unitStates, rawServices, mcpHandshake, supervision] = await Promise.all([
+    const [unitStates, rawServices, mcpHandshake, supervision, dhtUniverse] = await Promise.all([
       unitStatesPromise,
       probeAll(),
       probeMcpHandshake(),
       supervisionPromise,
+      // WI-10005995: product hosts on an isolated DHT outside a drill. null = systemd unreadable
+      // (no verdict); a probe failure must never take the rest of the snapshot down with it.
+      probeProductHostDhtUniverse().catch(() => null),
     ]);
     // EI-19934795546523351: reconcile the bg-host-ticker verdict against this SAME
     // response's supervision block BEFORE it can drive a contradictory rootCause/
@@ -751,7 +773,11 @@ export default defineTool({
                     : {}),
                 }
               : {}),
-            ...buildServiceHealthDiagnostic(services, supervision),
+            // WI-10005995: present on Linux whenever systemd answered; `warnings` is the alarm.
+            ...(dhtUniverse ? { dhtUniverse } : {}),
+            // watchdogActive was computed above but never passed, so a failing bg-host always
+            // read as watchdog-liveness UNKNOWN on the live tool (WI-10005995 review).
+            ...buildServiceHealthDiagnostic(services, supervision, watchdogActive, dhtUniverse?.warnings),
           }),
         },
       ],

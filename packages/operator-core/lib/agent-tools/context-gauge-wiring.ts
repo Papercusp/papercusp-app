@@ -12,9 +12,15 @@
  * Runtime kill-switch: FLAGS.CONTEXT_GAUGE (default ON). The annotator is on a SYNC hot
  * path, so it reads a mirror the watchdog refreshes from the flag each 2-min pass rather
  * than paying an async flag read per call (see context-usage-cache.ts).
+ *
+ * tooldef holds exactly ONE annotator (last registration wins), so any other ambient
+ * result line MUST be composed here rather than registered separately — a second
+ * `setResultAnnotator` call would silently evict the gauge (EI-23755915994199376 added the
+ * once-per-owner build stamp this way).
  */
 
 import { setResultAnnotator } from '@papercusp/agent-mcp';
+import { buildStampAnnotator, composeResultAnnotators } from './build-stamp-annotator';
 import { contextGaugeAnnotator } from './context-gauge-annotator';
 
-setResultAnnotator(contextGaugeAnnotator);
+setResultAnnotator(composeResultAnnotators(contextGaugeAnnotator, buildStampAnnotator));

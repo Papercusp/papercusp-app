@@ -11,8 +11,11 @@
  * This is the cheap, synchronous DOOR check that names that sibling before publish. For every
  * admitted TS/JS blob at the proved admission commit, each RELATIVE import specifier
  * (`./x`, `../y`) is resolved the way TypeScript's bundler / node16 resolution would —
- * extension probe, `.js` → `.ts` rewrite, `/index.*` — against the commit's tree, in ONE
- * `git cat-file --batch-check` call. Anything unresolved comes back with the path to admit.
+ * extension probe, `.js` → `.ts` rewrite, `/index.*` — against the commit's tree. When the
+ * admitted source contains `readFileSync(new URL(...))`, its URL filename and data filenames
+ * in its imported source cohort are checked as runtime dependencies too. All candidate
+ * paths share ONE `git cat-file --batch-check` call. Anything unresolved comes back with the
+ * path to admit.
  *
  * It is deliberately NOT a typechecker. Bare specifiers (packages, `@/` aliases), type errors,
  * a file at repairHead that imports something this admission DELETES, and everything else
@@ -25,6 +28,7 @@
  * that QUOTES import statements — this module's own test does — is not misread as importing.
  */
 import { posix } from 'node:path';
+import ts from 'typescript';
 
 import {
   realAdmissionGit,
@@ -52,6 +56,7 @@ const JS_TO_TS: Readonly<Record<string, readonly string[]>> = {
 const EXPLICIT_EXTENSIONS: ReadonlySet<string> = new Set([
   ...SCANNED_EXTENSIONS,
   '.json',
+  '.jsonl',
   '.css',
   '.scss',
   '.sass',
@@ -181,6 +186,145 @@ export function extractRelativeImportSpecifiers(source: string): string[] {
   return out;
 }
 
+interface RuntimeDataDependencies {
+  specifiers: string[];
+  imports: Array<{ specifier: string; name: string }>;
+}
+
+interface RuntimeDataFileScan {
+  url: RuntimeDataDependencies;
+  exports: Map<string, RuntimeDataDependencies>;
+}
+
+/**
+ * Read local data-file names from source literals. A whole-blob admission can include a module
+ * that names data files while an admitted test or runner reads them through a dynamic expression
+ * such as `readFileSync(new URL('./study/' + block.file, import.meta.url))`. The reader and the
+ * literal names need not be in the same file, so the caller follows the imported bindings
+ * that feed the URL expression, then those bindings' exported declarations.
+ * Unrelated admitted tests and fixture filenames in the reader are not runtime dependencies.
+ */
+function scanRuntimeDataFiles(source: string): RuntimeDataFileScan {
+  const ast = ts.createSourceFile('admission.ts', source, ts.ScriptTarget.Latest, true);
+  const bindings = new Map<string, ts.Expression[]>();
+  const importedBindings = new Map<string, { specifier: string; name: string }>();
+  const exportedBindings = new Map<string, ts.Expression[]>();
+  const reexports = new Map<string, { specifier: string; name: string }>();
+  const filenames: ts.Expression[] = [];
+  const bind = (name: string, value: ts.Expression): void => {
+    bindings.set(name, [...(bindings.get(name) ?? []), value]);
+  };
+  const isLocalData = (value: string): boolean =>
+    /\.(?:json|jsonl|md)$/i.test(value) && !/^(?:\/)/.test(value) && !/[\\:?#\s]/.test(value);
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const specifier = node.moduleSpecifier.text;
+      const clause = node.importClause;
+      if (clause?.name) importedBindings.set(clause.name.text, { specifier, name: 'default' });
+      if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const binding of clause.namedBindings.elements) {
+          importedBindings.set(binding.name.text, { specifier, name: (binding.propertyName ?? binding.name).text });
+        }
+      } else if (clause?.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        importedBindings.set(clause.namedBindings.name.text, { specifier, name: '*' });
+      }
+    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      bind(node.name.text, node.initializer);
+      const statement = node.parent.parent;
+      if (ts.isVariableStatement(statement) && statement.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
+        exportedBindings.set(node.name.text, [node.initializer]);
+      }
+    }
+    if (ts.isExportAssignment(node)) exportedBindings.set('default', [node.expression]);
+    if (ts.isExportDeclaration(node) && node.exportClause && ts.isNamedExports(node.exportClause)) {
+      for (const binding of node.exportClause.elements) {
+        const name = (binding.propertyName ?? binding.name).text;
+        if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+          reexports.set(binding.name.text, { specifier: node.moduleSpecifier.text, name });
+        } else {
+          exportedBindings.set(binding.name.text, [ts.factory.createIdentifier(name)]);
+        }
+      }
+    }
+    // Object.values(DATA).map(block => readFile(new URL(prefix + block.file, ...)))
+    // carries filenames from DATA even when its declaration is local to the reader.
+    if (ts.isParameter(node) && ts.isIdentifier(node.name) && ts.isArrowFunction(node.parent)) {
+      const call = node.parent.parent;
+      if (ts.isCallExpression(call) && ts.isPropertyAccessExpression(call.expression)) {
+        bind(node.name.text, call.expression.expression);
+      }
+    }
+    if (ts.isCallExpression(node)) {
+      const name = ts.isIdentifier(node.expression) ? node.expression.text
+        : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : '';
+      const url = node.arguments[0];
+      const base = url && ts.isNewExpression(url) ? url.arguments?.[1] : undefined;
+      if ((name === 'readFile' || name === 'readFileSync') && url && ts.isNewExpression(url) &&
+          ts.isIdentifier(url.expression) && url.expression.text === 'URL' && base &&
+          ts.isPropertyAccessExpression(base) && base.name.text === 'url' &&
+          ts.isMetaProperty(base.expression) && base.expression.keywordToken === ts.SyntaxKind.ImportKeyword) {
+        const filename = url.arguments?.[0];
+        if (filename) filenames.push(filename);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  const staticString = (node: ts.Node, seen = new Set<ts.Node>()): string | undefined => {
+    if (seen.has(node)) return undefined;
+    seen.add(node);
+    if (ts.isStringLiteralLike(node)) return node.text;
+    if (ts.isParenthesizedExpression(node)) return staticString(node.expression, seen);
+    if (ts.isIdentifier(node)) {
+      const values = bindings.get(node.text);
+      return values?.length === 1 ? staticString(values[0]!, seen) : undefined;
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const left = staticString(node.left, new Set(seen));
+      const right = staticString(node.right, new Set(seen));
+      return left !== undefined && right !== undefined ? left + right : undefined;
+    }
+    return undefined;
+  };
+  const dependencies = (expressions: ts.Expression[]): RuntimeDataDependencies => {
+    const specifiers = new Set<string>();
+    const imports = new Map<string, { specifier: string; name: string }>();
+    const followed = new Set<ts.Node>();
+    const addImport = (binding: { specifier: string; name: string }): void => {
+      imports.set(binding.specifier + ':' + binding.name, binding);
+    };
+    const collect = (node: ts.Node): void => {
+      if (followed.has(node)) return;
+      followed.add(node);
+      const literal = staticString(node);
+      if (literal !== undefined) {
+        if (isLocalData(literal)) specifiers.add(literal);
+        return;
+      }
+      if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+        const binding = importedBindings.get(node.expression.text);
+        if (binding?.name === '*') {
+          addImport({ specifier: binding.specifier, name: node.name.text });
+          return;
+        }
+      }
+      if (ts.isIdentifier(node) &&
+          (!node.parent || !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node))) {
+        const binding = importedBindings.get(node.text);
+        if (binding) addImport(binding);
+        for (const value of bindings.get(node.text) ?? []) collect(value);
+      }
+      ts.forEachChild(node, collect);
+    };
+    expressions.forEach(collect);
+    return { specifiers: [...specifiers], imports: [...imports.values()] };
+  };
+  const exports = new Map([...exportedBindings].map(([name, expressions]) => [name, dependencies(expressions)]));
+  for (const [name, binding] of reexports) exports.set(name, { specifiers: [], imports: [binding] });
+  return { url: dependencies(filenames), exports };
+}
+
 /**
  * The repo-relative paths a relative specifier from `fromPath` may name, in probe order, or
  * null when it escapes the repository root (nothing in the tree can satisfy it; the gate's
@@ -231,18 +375,19 @@ export interface ImportCompletenessInput {
 export interface ImportCompletenessSkip {
   path: string;
   reason: 'not-scanned-extension' | 'not-a-blob' | 'escapes-repo' | 'inside-submodule' | 'generated-by-tracked-builder';
-  /** Import-specific skips: the specifier this refers to. */
+  /** The import specifier or runtime data filename this refers to. */
   specifier?: string;
 }
 
 export type ImportCompletenessOutcome =
-  | { ok: true; checked: string[]; imports: number; skipped: ImportCompletenessSkip[] }
+  | { ok: true; checked: string[]; imports: number; runtimeData: number; skipped: ImportCompletenessSkip[] }
   | {
       ok: false;
       code: 'admission-incomplete';
       missing: AdmissionMissingImport[];
       checked: string[];
       imports: number;
+      runtimeData: number;
       skipped: ImportCompletenessSkip[];
     }
   | { ok: false; code: 'git-failed'; step: string; detail: string };
@@ -297,6 +442,59 @@ function ancestors(path: string): string[] {
  * conventionally named builder whose own source names the exact output path. Merely living under
  * `dist/`, being gitignored on the shared checkout, or having an unrelated builder is not enough.
  */
+function builderNamesOutput(source: string, output: string): boolean {
+  const ast = ts.createSourceFile('builder.mjs', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  type Suffix = { text: string; complete: boolean };
+  const binding = (identifier: ts.Identifier): ts.Expression | undefined => {
+    for (let scope: ts.Node | undefined = identifier.parent; scope; scope = scope.parent) {
+      if (ts.isFunctionLike(scope)) {
+        const parameter = scope.parameters.find(p => ts.isIdentifier(p.name) && p.name.text === identifier.text);
+        if (parameter) return parameter.initializer;
+      }
+      if (ts.isBlock(scope) || ts.isSourceFile(scope)) {
+        const declarations = scope.statements.flatMap(statement => ts.isVariableStatement(statement)
+          ? [...statement.declarationList.declarations] : []);
+        const matches = declarations.filter(d => ts.isIdentifier(d.name) && d.name.text === identifier.text);
+        if (matches.length) return matches.length === 1 ? matches[0]!.initializer : undefined;
+      }
+    }
+    return undefined;
+  };
+  // An unresolved checkout prefix is allowed, but every character of the package output
+  // must be static. An unresolved directory + basename therefore cannot prove an output.
+  const suffix = (node: ts.Expression, seen = new Set<ts.Node>()): Suffix => {
+    if (seen.has(node)) return { text: '', complete: false };
+    seen.add(node);
+    if (ts.isStringLiteralLike(node)) return { text: node.text, complete: true };
+    if (ts.isParenthesizedExpression(node)) return suffix(node.expression, seen);
+    if (ts.isIdentifier(node)) {
+      const value = binding(node);
+      return value ? suffix(value, seen) : { text: '', complete: false };
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const right = suffix(node.right, new Set(seen));
+      if (!right.complete) return right;
+      const left = suffix(node.left, new Set(seen));
+      return { text: left.text + right.text, complete: left.complete };
+    }
+    return { text: '', complete: false };
+  };
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    const value = ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'outfile'
+      ? node.initializer
+      : ts.isPropertyAssignment(node) && (ts.isIdentifier(node.name) || ts.isStringLiteral(node.name)) && node.name.text === 'outfile'
+        ? node.initializer : undefined;
+    if (value) {
+      const path = suffix(value).text;
+      if (path === output || path === `dist/${posix.basename(output)}` || path.endsWith(`/${output}`)) found = true;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return found;
+}
+
 function trackedGeneratedPackageBuilder(
   ask: { candidates: string[] },
   input: ImportCompletenessInput,
@@ -311,7 +509,7 @@ function trackedGeneratedPackageBuilder(
   const builders = [...new Set([`${packageRoot}/build-${topic}.mjs`, `${packageRoot}/build.mjs`])];
   for (const builder of builders) {
     const blob = git(['cat-file', 'blob', `${input.commit}:${builder}`], { cwd: input.root });
-    if (blob.status === 0 && (blob.stdout.includes(output) || blob.stdout.includes(`dist/${outputBase}`))) {
+    if (blob.status === 0 && builderNamesOutput(blob.stdout, output)) {
       return builder;
     }
   }
@@ -360,8 +558,9 @@ export function checkAdmissionImportCompleteness(input: ImportCompletenessInput)
   const git = input.git ?? realAdmissionGit;
   const skipped: ImportCompletenessSkip[] = [];
   const checked: string[] = [];
-  type Ask = { from: string; specifier: string; candidates: string[] };
+  type Ask = { from: string; specifier: string; candidates: string[]; relation?: 'runtime-data' };
   const asks: Ask[] = [];
+  const sources: Array<{ path: string; imports: string[]; runtimeData: RuntimeDataFileScan }> = [];
 
   for (const path of input.paths) {
     const ext = posix.extname(path);
@@ -376,7 +575,10 @@ export function checkAdmissionImportCompleteness(input: ImportCompletenessInput)
       continue;
     }
     checked.push(path);
-    for (const specifier of extractRelativeImportSpecifiers(blob.stdout)) {
+    const imports = extractRelativeImportSpecifiers(blob.stdout);
+    const runtimeData = scanRuntimeDataFiles(blob.stdout);
+    sources.push({ path, imports, runtimeData });
+    for (const specifier of imports) {
       const candidates = resolveImportCandidates(path, specifier);
       if (!candidates) {
         skipped.push({ path, reason: 'escapes-repo', specifier });
@@ -385,6 +587,36 @@ export function checkAdmissionImportCompleteness(input: ImportCompletenessInput)
       asks.push({ from: path, specifier, candidates });
     }
   }
+
+  const importCount = asks.length;
+  const sourceByPath = new Map(sources.map(source => [source.path, source]));
+  const pending = sources.map(source => ({ path: source.path, data: source.runtimeData.url }));
+  const visited = new Set<string>();
+  const dataAsks = new Set<string>();
+  while (pending.length > 0) {
+    const { path, data } = pending.shift()!;
+    const source = sourceByPath.get(path)!;
+    const imports = new Set(source.imports);
+    for (const specifier of data.specifiers) {
+      const key = path + ':' + specifier;
+      if (imports.has(specifier) || dataAsks.has(key)) continue;
+      dataAsks.add(key);
+      const candidates = resolveImportCandidates(path, specifier);
+      if (!candidates) skipped.push({ path, reason: 'escapes-repo', specifier });
+      else asks.push({ from: path, specifier, candidates, relation: 'runtime-data' });
+    }
+    for (const binding of data.imports) {
+      const imported = resolveImportCandidates(path, binding.specifier)?.find(candidate => sourceByPath.has(candidate));
+      if (!imported) continue;
+      const key = imported + ':' + binding.name;
+      if (visited.has(key)) continue;
+      visited.add(key);
+      const exports = sourceByPath.get(imported)!.runtimeData.exports;
+      const values = binding.name === '*' ? [...exports.values()] : [exports.get(binding.name)];
+      for (const value of values) if (value) pending.push({ path: imported, data: value });
+    }
+  }
+  const runtimeDataCount = asks.length - importCount;
 
   const at = (rev: string, p: string) => `${rev}:${p}`;
   const first = batchKinds(
@@ -399,7 +631,9 @@ export function checkAdmissionImportCompleteness(input: ImportCompletenessInput)
     const hit = ask.candidates.some((c) => first.kinds.get(at(input.commit, c)) === 'blob');
     if (!hit) unresolved.push(ask);
   }
-  if (unresolved.length === 0) return { ok: true, checked, imports: asks.length, skipped };
+  if (unresolved.length === 0) {
+    return { ok: true, checked, imports: importCount, runtimeData: runtimeDataCount, skipped };
+  }
 
   // A path under a SUBMODULE cannot be read through the superproject's tree: the candidate
   // pins a gitlink there. That is not a missing sibling, so it is skipped, not refused.
@@ -423,7 +657,9 @@ export function checkAdmissionImportCompleteness(input: ImportCompletenessInput)
       skipped.push({ path: ask.from, reason: 'generated-by-tracked-builder', specifier: ask.specifier });
     } else reallyMissing.push(ask);
   }
-  if (reallyMissing.length === 0) return { ok: true, checked, imports: asks.length, skipped };
+  if (reallyMissing.length === 0) {
+    return { ok: true, checked, imports: importCount, runtimeData: runtimeDataCount, skipped };
+  }
 
   let probe: Map<string, ObjectKind> | null = null;
   if (input.probeRef) {
@@ -442,9 +678,18 @@ export function checkAdmissionImportCompleteness(input: ImportCompletenessInput)
       wanted: present ?? ask.candidates[0]!,
       tried: ask.candidates,
       atProbeRef: probe ? (present ? 'present' : 'absent') : 'unknown',
+      ...(ask.relation ? { relation: ask.relation } : {}),
     };
   });
-  return { ok: false, code: 'admission-incomplete', missing, checked, imports: asks.length, skipped };
+  return {
+    ok: false,
+    code: 'admission-incomplete',
+    missing,
+    checked,
+    imports: importCount,
+    runtimeData: runtimeDataCount,
+    skipped,
+  };
 }
 
 /**
@@ -564,7 +809,10 @@ export function renderMissingImports(missing: readonly AdmissionMissingImport[])
           : m.atProbeRef === 'absent'
             ? 'does not exist on the shared tip either — write it, let git-sync commit it, then admit it'
             : 'admit it too';
-      return `${m.from} imports ${JSON.stringify(m.specifier)} → ${m.wanted} (${where})`;
+      const reference = m.relation === 'runtime-data'
+        ? `references runtime data ${JSON.stringify(m.specifier)}`
+        : `imports ${JSON.stringify(m.specifier)}`;
+      return `${m.from} ${reference} → ${m.wanted} (${where})`;
     })
     .join('; ');
 }
@@ -596,7 +844,7 @@ export function importCompletenessPreflight(opts: {
         code: 'admission-incomplete',
         missing: r.missing,
         detail:
-          `REFUSED: admission ${built.commit.slice(0, 12)} is incomplete — ${r.missing.length} import(s) resolve to nothing at ` +
+          `REFUSED: admission ${built.commit.slice(0, 12)} is incomplete — ${r.missing.length} dependency reference(s) resolve to nothing at ` +
           `the proved commit (${renderMissingImports(r.missing)}). It was NOT published and repairHead did not move; ` +
           'the tip is never widened for you — admit the named path(s) alongside yours.',
       };

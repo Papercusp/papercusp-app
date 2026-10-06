@@ -45,13 +45,17 @@ import {
 import { shapeLocksList } from './list-shape';
 import { readFileLockSummary } from './file-lock-summary';
 
-function holderJson(h: ResourceHolder) {
+function holderJson(h: ResourceHolder, callerOwnerId: string) {
   return {
     resource: h.resource,
     owner: h.owner,
     owner_label: h.owner_label,
     mode: h.mode,
     status: h.status,
+    // A resumed owner can recover the handle needed by locks:heartbeat_resource
+    // after its original acquire result fell out of context. Lock IDs are
+    // owner-checked capabilities, so never expose another holder's value.
+    lock_id: h.owner === callerOwnerId ? h.lock_id : null,
     reason: h.reason,
     acquired_ts: h.acquired_ts.toISOString(),
     expires_ts: h.expires_ts.toISOString(),
@@ -70,11 +74,11 @@ function registryJson(r: ResourceRegistryRow) {
 export default defineTool({
   name: 'locks:list',
   description:
-    'List registered named resources (name, rule, enforcement level) and who currently holds each, with a draining flag. This is a workspace-global lock diagnostic: omit workspace/harness and pass resource only when narrowing. The authoritative discovery surface for resource locks — only registered names are acquirable. Browse a large registry with `q` (name substring) and/or `limit`: both narrow resources[] only, never holders[]; registryCount reports the narrowing.',
+    'List registered named resources (name, rule, enforcement level) and who currently holds each, with a draining flag. Your own holder rows include lock_id for locks:heartbeat_resource; other owners’ IDs are null. This is a workspace-global lock diagnostic: omit workspace/harness and pass resource only when narrowing. The authoritative discovery surface for resource locks — only registered names are acquirable. Browse a large registry with `q` (name substring) and/or `limit`: both narrow resources[] only, never holders[]; registryCount reports the narrowing.',
   guidance: {
     when: 'Before acquiring a named resource (to learn the exact name + the rule), or to see who holds a resource / whether it is draining. This is workspace-global: omit workspace/harness and pass only resource. The fileLocks block measures the FILE plane on this same call — holders[] alone never answers "is a peer on this file".',
     notWhen: 'Full file-lock rows or a release handle — that is locks:queue; this carries a bounded fileLocks summary only.',
-    chaining: 'Workspace-global diagnostic (omit workspace/harness) → locks:list { resource? | q?, limit? } → locks:acquire_resource { resource, mode }.',
+    chaining: 'Workspace-global diagnostic (omit workspace/harness) → locks:list { resource? | q?, limit? } → locks:acquire_resource { resource, mode }. After resuming a held resource, use your holder row’s lock_id with locks:heartbeat_resource { lock_id, ttl_sec }; peer IDs are redacted.',
     // EI-20206183390542424 (+ its independent re-filing EI-22367587259064593).
     // Measured in harness_shared.tool_invocations: `paths` 48 calls / 37 distinct
     // agents, `mine` 18/17, `harness` 12/12, `workspace` 11/10 — all rejected.
@@ -179,14 +183,14 @@ export default defineTool({
     // early-returns and grades its own fixture green.
     contract: {
       rows: 'holders',
-      fields: ['resource', 'owner', 'mode', 'status', 'expires_ts', 'coordination_domain'],
+      fields: ['resource', 'owner', 'mode', 'status', 'expires_ts', 'coordination_domain', 'lock_id'],
       alsoRows: { resources: ['resource', 'enforcement', 'rule', 'holders', 'held'] },
     },
     standard: (data) => shapeLocksList(data, 'standard'),
     trimmed: (data) => shapeLocksList(data, 'trimmed'),
   },
   async handler(args, ctx) {
-    const { coordinationDomain: callerDomain } = readIdentity(ctx);
+    const { ownerId: callerOwnerId, coordinationDomain: callerDomain } = readIdentity(ctx);
     const pool = getTxPool();
 
     const considered = args.resource
@@ -261,7 +265,7 @@ export default defineTool({
     // unlabelled holder list ambiguous about WHICH namespace holds the lock,
     // and that is precisely what a reader needs in order to act on it.
     const holders = queues.flatMap(({ coordinationDomain, queue }) =>
-      queue.holders.map((h) => ({ ...holderJson(h), coordination_domain: coordinationDomain })),
+      queue.holders.map((h) => ({ ...holderJson(h, callerOwnerId), coordination_domain: coordinationDomain })),
     );
     const draining = queues.some(({ queue }) => queue.draining);
 

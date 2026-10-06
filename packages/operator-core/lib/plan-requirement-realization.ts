@@ -180,6 +180,8 @@ export interface UnrealizedRequirement {
   /** The `P-NNN` target that failed to demonstrate the requirement. */
   planTarget: string;
   reason: UnrealizedReason;
+  /** Current liveness state is diagnostic only; a dropped target still owes evidence. */
+  targetDropped: boolean;
 }
 
 /**
@@ -337,6 +339,7 @@ export function judgeRequirementRealization(
           disposition: mapping.disposition,
           planTarget: trimmed,
           reason: 'target-not-in-plan',
+          targetDropped: false,
         });
         continue;
       }
@@ -363,6 +366,7 @@ export function judgeRequirementRealization(
           disposition: mapping.disposition,
           planTarget: trimmed,
           reason: 'no-item-audit',
+          targetDropped: currentStatus === 'dropped',
         });
         continue;
       }
@@ -380,6 +384,7 @@ export function judgeRequirementRealization(
           disposition: mapping.disposition,
           planTarget: trimmed,
           reason: 'no-verifying-citation',
+          targetDropped: currentStatus === 'dropped',
         });
       }
     }
@@ -432,5 +437,6 @@ export function describeUnrealized(entry: UnrealizedRequirement): string {
         : 'audited with no verifying (code/test) citation or current operational proof for a non-code outcome';
   const requirement =
     entry.requirement.length > 80 ? `${entry.requirement.slice(0, 77)}...` : entry.requirement;
-  return `${entry.mappingId} (${entry.disposition}) → ${entry.planTarget}: ${why} — "${requirement}"`;
+  const targetState = entry.targetDropped ? ' (dropped; still subject to the evidence rule)' : '';
+  return `${entry.mappingId} (${entry.disposition}) → ${entry.planTarget}${targetState}: ${why} — "${requirement}"`;
 }

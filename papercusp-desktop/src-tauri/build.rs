@@ -127,6 +127,26 @@ fn ensure_seed_placeholder(manifest_dir: &Path) {
     );
 }
 
+/// ship-precomputed-doc-vectors-2026-10-01 P-003: same reason as the hive seed —
+/// `tauri.server.conf.json` bundles `doc-vector-seed/**/*`, and an unmatched
+/// resource glob fails the build. The release cut replaces this dir with the
+/// real seed (scripts/export-doc-vector-seed.mts). The runtime only loads a dir
+/// holding manifest.json (doc-vector-seed-dir.ts), so this placeholder reads as
+/// "no seed" and the backfill sweep embeds the docs as before.
+fn ensure_doc_vector_seed_placeholder(manifest_dir: &Path) {
+    let dir = manifest_dir.join("doc-vector-seed");
+    if dir.join("manifest.json").exists() {
+        return;
+    }
+    std::fs::create_dir_all(&dir).expect("create doc-vector-seed placeholder dir");
+    let note = "Placeholder created by build.rs so the bundle.resources glob matches on a\n\
+                fresh/cleaned checkout. The release cut writes the real precomputed doc\n\
+                vectors here (scripts/export-doc-vector-seed.mts); without them a fresh\n\
+                install embeds every doc section itself on first boot.\n";
+    std::fs::write(dir.join("PLACEHOLDER-README.txt"), note)
+        .expect("write doc-vector-seed placeholder");
+}
+
 /// EI-12083: cross-check the `AppManifest::commands(&[...])` list below against
 /// the app-command permission GRANTS in `capabilities/default.json`, before
 /// handing off to `tauri_build::try_build`. When a grant references a command
@@ -214,6 +234,7 @@ fn main() {
     reject_unpruned_spa_docs(&manifest_dir);
     ensure_sidecar_placeholder(&manifest_dir);
     ensure_seed_placeholder(&manifest_dir);
+    ensure_doc_vector_seed_placeholder(&manifest_dir);
     println!("cargo:rerun-if-changed=sidecar/serve.mjs");
     // Build provenance: rebuild main.rs when the build sets a new git sha so
     // `option_env!("PAPERCUSP_BUILD_SHA")` re-bakes (the operator forwards it

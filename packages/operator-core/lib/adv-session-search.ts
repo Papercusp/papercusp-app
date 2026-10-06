@@ -13,6 +13,8 @@
  */
 
 import type { MatchProvenance, RecencyRank } from '@papercusp/search';
+// Type-only (erased): this module is also bundled into the browser (HudView), the literal module is not.
+import type { SessionTurnTier } from './agent-tools/search/session-turn-literal';
 import type { RosterEntry } from './adv-roster';
 import type { AdvSessionRow } from './adv-sessions';
 /* The ONE runtime import in this module, and chosen for that reason (WI-37883).
@@ -138,6 +140,24 @@ export interface TranscriptTurnHit {
   lexicalScore?: number;
   /** Pre-fusion cosine similarity, when the vector leg returned this turn. */
   semanticScore?: number;
+  /**
+   * The precedence tier that WON this turn (session-transcript-exact-fuzzy-search P-004, D-001):
+   * `exact` (raw-text containment) > `fuzzy` (typo-tolerant vocabulary expansion) > the hybrid
+   * remainder (`lexical` | `semantic` | `both`). `matchedBy` is the ENGINE's attribution and reads
+   * `unknown` on a literal-only hit — `tier` is the real claim. OPTIONAL: a hit from any path that
+   * does not compose tiers (a fixture, the id leg) carries none, and absence is "no claim".
+   */
+  tier?: SessionTurnTier;
+  /** Lower-precedence tiers that ALSO returned this turn (never includes `tier`). */
+  alsoMatchedBy?: SessionTurnTier[];
+  /**
+   * The lowercased literal this turn actually contains — the exact needle, or the fuzzy phrase
+   * variant. A deep-link must anchor on `focusTerm ?? query`: the viewer requires the focused
+   * message to CONTAIN its term, so a fuzzy hit anchored on the typed typo misses its own turn.
+   */
+  focusTerm?: string;
+  /** Fuzzy hits only: which query token matched which vocabulary word, and how closely. */
+  fuzzy?: { token: string; word: string; similarity: number };
   /** Stamped from session_turns metadata (hydrated by the route). */
   ts?: string | null;
   speaker?: string | null;

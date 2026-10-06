@@ -175,7 +175,32 @@ export function parseAgentIdentitySpec(raw) {
   if (stringArray(spec, 'remotePath').length === 0) {
     throw refused('agent_identity_spec_invalid', "agent identity spec: 'remotePath' must name at least one directory");
   }
+  fixedEnv(spec);
   return spec;
+}
+
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Operator-set env the agent ALWAYS gets, over anything allowlisted from the request (plan
+ * agent-capacity-and-cost-gcp-2026-09-30 D-031: heavy-job admission's NODE_OPTIONS + pc-heavy
+ * profile). HOME/PATH stay owned by remoteHome/remotePath; a credential-shaped name is refused,
+ * the same rule the allowlist applies.
+ */
+function fixedEnv(spec) {
+  const value = spec.fixedEnv ?? {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw refused('agent_identity_spec_invalid', "agent identity spec: 'fixedEnv' must be an object of strings");
+  }
+  for (const [key, v] of Object.entries(value)) {
+    if (!ENV_NAME_RE.test(key) || typeof v !== 'string') {
+      throw refused('agent_identity_spec_invalid', `agent identity spec: fixedEnv.${key} must be a string under a valid env name`);
+    }
+    if (key === 'HOME' || key === 'PATH' || SECRET_NAME_RE.test(key)) {
+      throw refused('agent_identity_spec_invalid', `agent identity spec: fixedEnv may not set ${key}`);
+    }
+  }
+  return value;
 }
 
 function underRoot(path, roots) {
@@ -204,7 +229,7 @@ function readSecrets(files, readFile) {
  * turn. psu launches claude interactively (`--dangerously-skip-permissions`, a kickoff turn), and
  * psu's own launch-readiness self-heal only ever touched the SPAWNING account's home — so on a
  * hosted host every New Session parked on the first-run wizard / folder-trust / bypass-accept
- * prompts that nobody can answer (measured on owner-test r55: no transcript after 3m20s; the same
+ * prompts that nobody can answer (measured on avi-test r55: no transcript after 3m20s; the same
  * launch took its turn once these flags were set). The stage hop, which already runs as the
  * target, asserts exactly these flags: idempotent, every other key preserved, never a credential
  * or MCP server (D-422 — the account's own agent config stays what the agent uses).
@@ -288,6 +313,7 @@ export function planAgentIdentityTty(rawSpec, request, deps = {}) {
     if (SECRET_NAME_RE.test(key)) continue;
     if (allow.has(key) || prefixes.some((prefix) => key.startsWith(prefix))) env[key] = String(value);
   }
+  Object.assign(env, fixedEnv(spec));
   env.HOME = spec.remoteHome;
   env.PATH = stringArray(spec, 'remotePath').join(':');
   if (!env.TERM) env.TERM = 'xterm-256color';

@@ -1,12 +1,13 @@
 /**
- * Doc claim: CLAUDE.md's two-port section states that an agent's own MCP tool calls
- * execute `:3070` — because the `papercusp-su` client points at the resilient proxy on
- * `:9071`, which forwards to the release checkout on `:3070`.
+ * Doc claim: CLAUDE.md documents the MCP proxy's default listen/upstream ports and
+ * directs agents to use per-invocation serving-host telemetry before attributing a
+ * loaded build to a specific host.
  *
- * That is code-describing prose, so it is PINNED here rather than hand-maintained: the
- * ports live in the proxy entrypoint's defaults and in the shipped systemd unit. If any
- * of them moves, this judge fails and forces the CLAUDE.md text to move with it, instead
- * of the doc quietly describing a route the system no longer takes.
+ * The default proxy route is not proof of which operator host served a particular MCP
+ * invocation: telemetry has recorded the same owner on both `port-3070` and `port-3170`.
+ * The default ports are PINNED here rather than hand-maintained: they live in the proxy
+ * entrypoint and shipped systemd unit. This judge checks those defaults; the companion
+ * test separately guards the per-invocation telemetry guidance.
  *
  * Subjects:
  *   apps/operator/bin/mcp-proxy.ts                          listen + target defaults
@@ -90,8 +91,8 @@ export function judgeMcpRoutePorts(input: {
     );
   }
 
-  // The doc must name the SAME two ports the code resolves. This is the whole point of
-  // the pin: a port change that leaves the prose behind fails here.
+  // The doc must name the SAME two DEFAULT ports the code resolves. This does not assert
+  // which host served any particular call; the companion test pins that distinction.
   if (listenPort !== null && !input.docSource.includes(`:${listenPort}`)) {
     problems.push(`doc does not mention the proxy listen port :${listenPort}.`);
   }

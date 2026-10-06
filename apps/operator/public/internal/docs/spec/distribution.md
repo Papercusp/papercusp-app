@@ -220,9 +220,9 @@ The marketplace is the trust boundary. The spec commits to one namespace policy,
 
 Namespace policy
 
-Names are scoped: @\<owner>/\<package>, where `owner` is a verified GitHub user or org. Examples: `@papercusp/coding-project`, `@owner/habit-tracker`, `@anthropic-team/internal-roles`.
+Names are scoped: @\<owner>/\<package>, where `owner` is a verified GitHub user or org. Examples: `@papercusp/coding-project`, `@avi/habit-tracker`, `@anthropic-team/internal-roles`.
 
-To publish under `@owner/foo`, the publisher must prove ownership of GitHub user `owner` via OAuth at publish time. The marketplace verifies via GitHub's token-introspection API and stores the verified login on the package row (`publishedBy: 'owner'`).
+To publish under `@avi/foo`, the publisher must prove ownership of GitHub user `avi` via OAuth at publish time. The marketplace verifies via GitHub's token-introspection API and stores the verified login on the package row (`publishedBy: 'avi'`).
 No bare names. `papercusp install foo` is rejected; the user must spell the full namespace. This eliminates a whole class of typo-squatting.
 Reserved namespaces: `@papercusp/*` for first-party packages, gated by a hard-coded membership list (currently: members of the `Papercusp` GitHub organization — see the canonical identity note below; `papercupai` is a person, not an org, and cannot be an org-membership target). Plus reserved single-word namespaces blocked from claim: `examples`, `test`, `internal`, `system`, `admin`, `root`, `public`, `private`, `papercup`, `cli`, `sdk`, `api`, `ui` — these are reserved at the marketplace server. New first-party reservations are added by patch-version bumps to the spec.
 `publishedBy` is immutable. The verified GitHub login stamped on a published version is permanent for that row, even if the user later renames their GitHub account. The marketplace tracks renames separately (a `github_login_rename` audit table) so the spec can answer "who originally published this?" deterministically. Renames don't affect ownership of packages — those follow the GitHub identity (`user.id`, not `user.login`).
@@ -257,7 +257,7 @@ papercuspai.com is the canonical marketplace for the open standard. Other market
 Updating a plugin is structurally different from a fresh install: the substrate has to compare two manifests and reason about migration ordering.
 
 ```
-$ papercusp update @owner/shareholder-briefings
+$ papercusp update @avi/shareholder-briefings
 
 Currently installed: 1.0.4
 Latest available:    1.2.0
@@ -277,7 +277,7 @@ Routine changes:
 
 Approve new capabilities? [y/N/per-capability]: y
 Apply migrations? [y/N]: y
-Updating ... done. Pinned old version 1.0.4 at ~/.papercusp/installed/@owner/shareholder-briefings/.snapshots/1.0.4/
+Updating ... done. Pinned old version 1.0.4 at ~/.papercusp/installed/@avi/shareholder-briefings/.snapshots/1.0.4/
 ```
 
 The update flow is governed by these rules:
@@ -293,11 +293,11 @@ Active state preserved. Plugin's data (Postgres tables, granted-capabilities) is
 The default uninstall is conservative: stop the code, leave the data.
 
 ```
-$ papercusp uninstall @owner/shareholder-briefings
+$ papercusp uninstall @avi/shareholder-briefings
 
 Will remove:
 - 4 routines (weekly-briefings, daily-cost-report, ...)
-- Plugin code: ~/.papercusp/installed/@owner/shareholder-briefings/
+- Plugin code: ~/.papercusp/installed/@avi/shareholder-briefings/
 - Granted capabilities
 - Registry entry
 - Hook subscriptions
@@ -421,7 +421,7 @@ Subscribe to catalog events
 // Authenticated; only the namespace owner can subscribe to events for that namespace.
 POST /v1/webhooks
 {
-"owner": "@owner",                           // namespace this webhook subscribes to
+"owner": "@avi",                           // namespace this webhook subscribes to
 "url": "https://hooks.example.com/papercusp",
 "events": ["version.published", "version.yanked", "package.withdrawn"],
 "secret": "<32-byte-base64-shared-secret>" // for HMAC-SHA-256 signing
@@ -439,12 +439,12 @@ Each delivery is an HTTP POST with header `X-Papercusp-Signature: sha256=<hex>` 
 "ts": 1777286087000,
 "deliveryAttempt": 1,
 "data": {
-"slug": "@owner/habit-tracker",
+"slug": "@avi/habit-tracker",
 "version": "1.2.0",
-"publishedBy": "owner",
+"publishedBy": "avi",
 "publishedAt": "2026-04-27T14:34:47Z",
 "tarballSha256": "abc123...",
-"manifestUrl": "https://api.papercuspai.com/catalog/@owner/habit-tracker/1.2.0"
+"manifestUrl": "https://api.papercuspai.com/catalog/@avi/habit-tracker/1.2.0"
 }
 }
 ```
@@ -469,14 +469,14 @@ Enterprise and air-gapped environments can't reach
 Vendoring with `papercusp pack`
 
 ```
-$ papercusp pack @owner/habit-tracker @owner/habit-tracker@1.2.0 \
+$ papercusp pack @avi/habit-tracker @avi/habit-tracker@1.2.0 \
 --output ./vendored/
 
 Wrote:
-./vendored/@owner/habit-tracker/1.2.0/papercusp.json
-./vendored/@owner/habit-tracker/1.2.0/README.md
-./vendored/@owner/habit-tracker/1.2.0/habit-tracker-1.2.0.tar.gz
-./vendored/@owner/habit-tracker/1.2.0/habit-tracker-1.2.0.tar.gz.sig
+./vendored/@avi/habit-tracker/1.2.0/papercusp.json
+./vendored/@avi/habit-tracker/1.2.0/README.md
+./vendored/@avi/habit-tracker/1.2.0/habit-tracker-1.2.0.tar.gz
+./vendored/@avi/habit-tracker/1.2.0/habit-tracker-1.2.0.tar.gz.sig
 ./vendored/marketplace.pub                              ← public key for verification
 ./vendored/index.json                                   ← catalog snapshot
 
@@ -494,7 +494,7 @@ papercusp config set registry file:///mnt/usb/vendored/
 # or
 papercusp config set registry https://internal-mirror.example.com/papercusp/
 # or for a specific install:
-papercusp install --registry file:///mnt/usb/vendored/ @owner/habit-tracker
+papercusp install --registry file:///mnt/usb/vendored/ @avi/habit-tracker
 ```
 
 File-based registries use the same JSON-blob layout that
@@ -525,7 +525,7 @@ Multi-registry config
 }
 ```
 
-Scope-based routing. First match wins. `@example/foo` always resolves to internal; `@owner/foo` resolves to papercuspai.com.
+Scope-based routing. First match wins. `@example/foo` always resolves to internal; `@avi/foo` resolves to papercuspai.com.
 Explicit fallback only. No registry can claim packages it doesn't have a scope match for. The CLI errors with "no registry covers @other/foo" rather than searching all configured registries.
 `trustOnFail: false` (default): if a higher-priority registry is unreachable, the install fails — never silently falls through to a lower-priority one. Setting `true` requires explicit operator opt-in (logged in audit).
 
@@ -552,7 +552,7 @@ open standards. Authors can generate them via existing tools
 $ papercusp publish --sbom ./sbom.spdx.json
 
 Validated against SPDX 2.3 schema. Found 47 dependencies, 0 vulnerabilities.
-Attestation published. Detail page at https://papercuspai.com/marketplace/@owner/foo/1.2.0/sbom
+Attestation published. Detail page at https://papercuspai.com/marketplace/@avi/foo/1.2.0/sbom
 ```
 
 What it enables
@@ -565,7 +565,7 @@ Discoverability
 
 Detail page surfaces:
 
-"Has SBOM" badge (with link to formatted SBOM viewer at `/marketplace/@owner/foo/1.2.0/sbom`).
+"Has SBOM" badge (with link to formatted SBOM viewer at `/marketplace/@avi/foo/1.2.0/sbom`).
 "N known vulnerabilities" if any deps have unpatched CVEs (linked to the specific advisories).
 SBOM diff between versions (helpful for reviewers to see new dependencies).
 

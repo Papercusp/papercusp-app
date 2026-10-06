@@ -170,8 +170,44 @@ export interface CreateOneWorkItemCtx {
 
 export interface WorkItemDedupCoverage {
   lexical: 'ok' | 'unavailable' | 'skipped';
-  semantic: 'ok' | 'unavailable' | 'skipped';
+  semantic: 'ok' | 'partial' | 'unavailable' | 'skipped';
   degraded: boolean;
+}
+
+/**
+ * EI-23799808825983763: the machine-readable NEXT ACTION attached to a
+ * `dedup_unavailable` refusal. The refusal itself is correct (filing blind to the
+ * semantic leg is how duplicates get minted), but filing is the LAST step of a unit
+ * of work — so a bare hard refusal is exactly what an agent reads as "filing is
+ * unavailable" and drops the finding. The refusal therefore names its own
+ * disposition: it is RETRYABLE (the probe legs recover on their own — the report
+ * that filed this saw the semantic leg back within seconds), and the explicit,
+ * audited way to file anyway when it does not.
+ */
+export interface DedupUnavailableDisposition {
+  retryable: true;
+  /** A floor, not a schedule: the leg that was down recovered within seconds in the
+   *  measured case. */
+  retryAfterSec: number;
+  /** When a retry keeps failing: re-issue the SAME call with `force:true`. The item
+   *  files with the degraded coverage stamped on its row, never silently. */
+  ifPersistent: { retryWith: { force: true }; effect: string };
+  /** A persistent outage also raises a workspace alarm — it is not a per-call fault. */
+  structuralSignal: 'semantic-dedup-probe-alarm';
+}
+
+export function dedupUnavailableDisposition(): DedupUnavailableDisposition {
+  return {
+    retryable: true,
+    retryAfterSec: 10,
+    ifPersistent: {
+      retryWith: { force: true },
+      effect:
+        'files immediately with lexical-only dedup; the degraded coverage is recorded ' +
+        'on the item (payload.dedupCoverage) and on the result',
+    },
+    structuralSignal: 'semantic-dedup-probe-alarm',
+  };
 }
 
 export type CreateOneWorkItemResult =
@@ -233,6 +269,8 @@ export type CreateOneWorkItemResult =
       similarOpen?: SemanticDupeCandidate[];
       admissionIdentity?: AdmissionIdentity;
       dedupCoverage?: WorkItemDedupCoverage;
+      /** EI-23799808825983763: set on `dedup_unavailable` — the refusal's own next action. */
+      disposition?: DedupUnavailableDisposition;
       /** P-005: present on a losslessly coalesced low-diversity burst report. */
       queueAdmission?: IssueAdmissionPressure;
     };
@@ -738,9 +776,12 @@ export async function createOneWorkItem(
         summary: args.summary,
         harness: args.harness ?? ctx.harnessSlug ?? undefined,
       });
-      if (recentDupes && recentDupes.length > 0) {
+      if (semanticLeg === 'ok' && recentDupes && !recentDupes.coverage.complete) {
+        semanticLeg = 'partial';
+      }
+      if (recentDupes && recentDupes.candidates.length > 0) {
         const seen = new Set((similarOpen ?? []).map((c) => c.id));
-        const fresh = recentDupes.filter((c) => !seen.has(c.id));
+        const fresh = recentDupes.candidates.filter((c) => !seen.has(c.id));
         if (fresh.length > 0) similarOpen = [...(similarOpen ?? []), ...fresh];
       }
     }
@@ -781,8 +822,8 @@ export async function createOneWorkItem(
     // P-004 (goal-mode-design-intent-hardening-2026-08-16): a GOAL-mode create whose
     // dedup probe could not actually run fails CLOSED instead of open. The WI-39373
     // relapse this hardens against: the probes RAN but semantic coverage was
-    // 'unavailable' — the ONLY leg that catches a reworded title — so the duplicate
-    // was admitted with a degraded marker stamped where nobody looks. Unlike DRAIN
+    // 'unavailable' or 'partial' — the ONLY leg that catches a reworded title — so
+    // the duplicate was admitted with a degraded marker stamped where nobody looks. Unlike DRAIN
     // above, force:true remains an explicit escape for work that must land now; the
     // coverage verdict + any candidates still come back on the result either way.
     if (
@@ -795,14 +836,19 @@ export async function createOneWorkItem(
         ok: false,
         error: 'dedup_unavailable',
         message:
-          `goal-mode create requires a LIVE dedup probe and the semantic leg is down ` +
+          `goal-mode create requires complete dedup coverage; semantic coverage is ${dedupCoverage.semantic} ` +
           `(lexical=${dedupCoverage.lexical}, semantic=${dedupCoverage.semantic}) — a reworded ` +
-          `duplicate cannot be screened, which is how WI-39373 relapsed. No work-item was ` +
-          `created: retry when the probe is back, or pass force:true if this must land now ` +
-          `(the degraded coverage is then recorded on the item).`,
+          `duplicate cannot be fully screened, which is how WI-39373 relapsed. No work-item was ` +
+          `created, and your finding is NOT lost. ` +
+          (dedupCoverage.semantic === 'partial'
+            ? `Recent OPEN rows are unembedded or the 50-row census is capped; retry after that changes. `
+            : `This is usually transient — retry the identical call in ~10s. `) +
+          `If coverage remains incomplete, re-call with force:true to file now ` +
+          `(the degraded coverage is then recorded on the item). See \`disposition\`.`,
         ...(similarOpen ? { similarOpen } : {}),
         ...(issueAdmission ? { admissionIdentity: identity } : {}),
         dedupCoverage,
+        disposition: dedupUnavailableDisposition(),
       };
     }
     const exactIdentity = fulltextDupes?.find(

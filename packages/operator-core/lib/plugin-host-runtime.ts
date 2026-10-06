@@ -56,6 +56,18 @@ import { InMemoryAuditWriter as _InMemoryAuditWriter } from '@papercusp/plugin-l
 import { cooperativeYield } from './event-loop-lag-monitor';
 import { pinModuleState } from '@papercusp/module-singleton';
 import { trackDetached } from './detached-imports';
+import {
+  providerRegistry,
+  ProviderRegistrationError,
+  type ProviderRegistry,
+} from './integrations/provider-registry';
+import {
+  startDaemonProvider,
+  stopDaemonProvider,
+  trackDaemonProvider,
+  type DaemonProviderRuntime,
+  type StartDaemonProviderOptions,
+} from './integrations/daemon-provider';
 
 // operator-core is an ESM package (`type: module`); under the host's ESM
 // runtime (tsx) the CommonJS globals `require` and `__dirname` are UNDEFINED.
@@ -359,6 +371,17 @@ async function discover(): Promise<HostState> {
     loadErrors = [{ error: `discovery threw: ${e?.message ?? e}`, path: '<discovery>' }];
   }
 
+  // Register integration providers (generalized-integrations D-006 / P-001).
+  // Runs before the tool sweep so a provider is resolvable by the time any
+  // plugin tool or connector driver reaches for it. A refused registration is
+  // recorded on the host status and leaves the rest of the plugin loaded.
+  await registerPluginProviders(loaded, (err) => {
+    loadErrors.push({
+      error: `provider registration failed for "${err.provider}" in plugin "${err.plugin}" (${err.code}): ${err.error}`,
+      path: err.plugin,
+    });
+  });
+
   // Wire plugin-contributed tools into agent-mcp's projected-tool registry
   // (PR 0c.A-E). Each manifest tools[] entry is mounted on both HTTP and
   // MCP transports automatically, with sensible defaults derived from
@@ -425,6 +448,145 @@ async function discover(): Promise<HostState> {
   }
 
   return { loaded, loadErrors, initialized: new Set(), registries: new Map(), grants: new Map(), wasmHandles: new Map() };
+}
+
+export interface ProviderRegistrationFailure {
+  plugin: string;
+  provider: string;
+  code: string;
+  error: string;
+}
+
+/**
+ * Register every loaded plugin's integration provider into the process-wide
+ * provider registry. The manifest descriptor (validated by the loader) is
+ * authoritative; an entry-exported `provider` is the fallback for plugins
+ * that declare it only in code. Each plugin's previous registrations are
+ * dropped first, so a re-discovery (hot reload, no-op Cupboard reinstall,
+ * workspace switch) re-registers instead of colliding with itself.
+ *
+ * `daemon` providers are started here under the fixed provider sandbox
+ * (P-002, D-006) and registered once the sandboxed process answers
+ * `describe`; a refused start (no sandbox on this host, a describe that
+ * disagrees with the manifest) is reported, never retried unsandboxed. WASM
+ * plugins cannot carry a provider.
+ */
+export async function registerPluginProviders(
+  loaded: LoadedPlugin[],
+  onError: (err: ProviderRegistrationFailure) => void,
+  registry: ProviderRegistry = providerRegistry(),
+  startDaemon: (opts: StartDaemonProviderOptions) => Promise<DaemonProviderRuntime> = startDaemonProvider,
+): Promise<string[]> {
+  const registered: string[] = [];
+  for (const lp of loaded) {
+    const descriptor = lp.provider ?? lp.plugin.provider;
+    if (!descriptor) continue;
+    const pluginName = lp.plugin.name;
+    registry.unregisterPlugin(pluginName);
+    // A re-discovery replaces the running daemon: its code may have changed in place.
+    await stopDaemonProvider(pluginName);
+    const runtimeKind = lp.runtime?.kind ?? 'js';
+    if (runtimeKind === 'daemon') {
+      const id = await registerDaemonProvider(lp, descriptor, registry, startDaemon, onError);
+      if (id) registered.push(id);
+      continue;
+    }
+    if (runtimeKind !== 'js') {
+      onError({
+        plugin: pluginName,
+        provider: descriptor.id,
+        code: 'unsupported-runtime',
+        error: `runtime "${runtimeKind}" cannot host a provider adapter (use js or daemon)`,
+      });
+      continue;
+    }
+    try {
+      await registry.register({
+        descriptor,
+        adapter: lp.plugin.providerAdapter,
+        pluginName,
+        runtime: 'js',
+      });
+      registered.push(descriptor.id);
+    } catch (e: unknown) {
+      onError({
+        plugin: pluginName,
+        provider: descriptor.id,
+        code: e instanceof ProviderRegistrationError ? e.code : 'register-threw',
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  return registered;
+}
+
+function errorCode(e: unknown, fallback: string): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : fallback;
+}
+
+async function registerDaemonProvider(
+  lp: LoadedPlugin,
+  descriptor: NonNullable<LoadedPlugin['provider']>,
+  registry: ProviderRegistry,
+  startDaemon: (opts: StartDaemonProviderOptions) => Promise<DaemonProviderRuntime>,
+  onError: (err: ProviderRegistrationFailure) => void,
+): Promise<string | null> {
+  const pluginName = lp.plugin.name;
+  const fail = (code: string, e: unknown): null => {
+    onError({ plugin: pluginName, provider: descriptor.id, code, error: e instanceof Error ? e.message : String(e) });
+    return null;
+  };
+  const cmd = lp.runtime?.daemonCommand;
+  if (!cmd || cmd.length === 0) return fail('daemon-command-missing', 'runtime.daemonCommand is empty');
+  let runtime: DaemonProviderRuntime;
+  try {
+    runtime = await startDaemon({
+      pluginName,
+      pluginDir: lp.path,
+      cmd,
+      declared: descriptor,
+      onLog: (line: string) => console.log(`[daemon-provider ${pluginName}] ${line}`),
+    });
+  } catch (e: unknown) {
+    return fail(errorCode(e, 'daemon-start-failed'), e);
+  }
+  try {
+    // The MANIFEST descriptor is what gets registered, so its egress hosts are
+    // the ones host.fetch enforces; the daemon cannot widen them by describing more.
+    await registry.register({ descriptor, adapter: runtime.adapter, pluginName, runtime: 'daemon' });
+  } catch (e: unknown) {
+    await runtime.shutdown().catch(() => {});
+    return fail(e instanceof ProviderRegistrationError ? e.code : 'register-threw', e);
+  }
+  trackDaemonProvider(pluginName, runtime);
+  return descriptor.id;
+}
+
+/**
+ * Drop every provider registered by the given plugins and stop their
+ * sandboxed provider daemons (unload half of the lifecycle).
+ */
+export function unregisterPluginProviders(
+  loaded: LoadedPlugin[],
+  registry: ProviderRegistry = providerRegistry(),
+): string[] {
+  const removed: string[] = [];
+  for (const lp of loaded) {
+    removed.push(...registry.unregisterPlugin(lp.plugin.name));
+    void stopDaemonProvider(lp.plugin.name);
+  }
+  return removed;
+}
+
+/**
+ * A daemon plugin that declares a provider runs ONLY as the sandboxed provider
+ * daemon started by {@link registerPluginProviders}. The legacy action daemon
+ * must not also be started for it: that would be a second, unsandboxed copy of
+ * the same third-party code with the host's network and filesystem (D-006).
+ */
+export function isDaemonProviderPlugin(lp: LoadedPlugin): boolean {
+  return lp.runtime?.kind === 'daemon' && Boolean(lp.provider ?? lp.plugin.provider);
 }
 
 function regKey(pluginName: string, installSlug: string): string {
@@ -1034,6 +1196,10 @@ async function initializeDaemonPlugin(
   ctx: PapercuspContext,
 ): Promise<void> {
   const key = regKey(lp.plugin.name, ctx.installSlug);
+  if (isDaemonProviderPlugin(lp)) {
+    ctx.log(`daemon plugin ${lp.plugin.name} is a provider: served by its sandboxed provider daemon, no action daemon started`);
+    return;
+  }
   const cmd = lp.runtime?.daemonCommand;
   if (!cmd || cmd.length === 0) {
     throw new Error(`daemon runtime requested but runtime.daemonCommand empty on ${lp.plugin.name}`);
@@ -1262,8 +1428,10 @@ export async function pluginHostStatus(): Promise<PluginHostStatus & {
           targetCount: lp.triggerPack.targets.length,
           bindingCount: lp.triggerPack.bindings.length,
           edgeCount: lp.triggerPack.edges.length,
+          // Provider-pinned sources only: a portable (datatype) source names no
+          // provider until install binds it to a local source (D-013 §1).
           sourceKinds: [...new Set(lp.triggerPack.bindings.flatMap((binding) =>
-            binding.source.kind === 'external' ? [binding.source.sourceKind] : []))].sort(),
+            binding.source.kind === 'external' && binding.source.sourceKind ? [binding.source.sourceKind] : []))].sort(),
           armed: false as const,
         }]
       : []),
@@ -1353,6 +1521,10 @@ async function buildContextFor(lp: LoadedPlugin, harnessSlug: string): Promise<P
 }
 
 export function _resetPluginHostForTests(): void {
+  // Every unload path (uninstall, host refresh, Cupboard install, hot reload,
+  // workspace switch) funnels through this reset, so it is where providers
+  // leave the registry. The next discovery re-registers the survivors.
+  if (__cache.state) unregisterPluginProviders(__cache.state.loaded);
   __cache.promise = null;
   __cache.state = null;
   // Also clear Node's CJS require.cache for plugin entry files so

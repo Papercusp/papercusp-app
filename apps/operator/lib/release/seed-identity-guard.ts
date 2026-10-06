@@ -9,7 +9,7 @@
  * `host.identity` into every SST (a table property, not content). Neither could have caught
  * the other, and a THIRD mechanism that stamps the box into some future file would be caught
  * by neither. This guard is deliberately mechanism-agnostic: it reads the staged bytes and
- * asks the only question that actually matters — is the owner's identity in there.
+ * asks the only question that actually matters — is the build box's identity in there.
  *
  * ── WHY NOT SHELL OUT TO audit-release-bundle.py --scan-dir ──
  * ⛔ That path would PASS on exactly the bytes this must catch. Its
@@ -22,21 +22,14 @@
  *
  * ── THE LITERAL SET IS DERIVED, NEVER WRITTEN DOWN ──
  * Mirrors `identity_literals()` in `papercusp-desktop/bin/audit-release-bundle.py`
- * (build-user-name / build-home-path / build-hostname / build-git-name / build-git-email),
- * including its two matching asymmetries — see {@link needsWordBoundary}. A tracked source
- * file must never contain the real values (WI-4776): they are resolved at runtime here and
- * synthesised in the tests.
+ * (build-user-name / build-home-path / build-hostname), including its matching asymmetry —
+ * see {@link needsWordBoundary}. A tracked source file must never contain the real values
+ * (WI-4776): they are resolved at runtime here and synthesised in the tests.
  *
- * ── WHY THE GIT HALF DOES NOT FALSE-POSITIVE (measured, not assumed) ──
- * A seed also ships git bundles, and every commit object in them carries an author name and
- * email — i.e. two of the five literals, by the thousand. They do not trip this guard because
- * pack objects are DEFLATED, so the names are not present as plaintext. That is an empirical
- * property, not a guarantee: MEASURED 2026-08-11 against the real committed seed — 54 files
- * scanned, 4 hits, ALL of them in `corestore/db/`, none in a bundle. If a future change ships
- * loose objects or an uncompressed pack, expect this guard to start firing on the git half —
- * and the correct response is a bundle-aware exemption for AUTHORSHIP metadata specifically,
- * never dropping build-git-name / build-git-email from the literal set (they are exactly the
- * strings the owner asked to keep out of a public build).
+ * D-112 deliberately removes owner names and owner emails from the release identity policy,
+ * including this staged-seed guard. A full-history seed contains legitimate authorship and
+ * owner records; treating those bytes as a build-box leak made the required seed impossible
+ * to ship. The machine-only boundary is explicit: user, home and hostname remain forbidden.
  *
  * ── THE SANDBOX WRINKLE (read before changing the hostname handling) ──
  * The cut re-execs under `bwrap --unshare-uts --hostname papercusp-build`, so inside it
@@ -52,12 +45,11 @@
 
 import { hostname as osHostname, userInfo } from 'node:os';
 import { homedir } from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { open, readdir, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
-// Imported, never re-declared: the owner-name env key is ONE truth and a second copy of it
-// here is exactly how these three gates drifted apart in the first place.
-import { OWNER_NAME_ENV } from './release-content-scrub';
+import { moduleRepoRoot } from '@papercusp/operator-core/lib/module-repo-root';
+import { GENERIC_ACCOUNTS, isGenericHost } from '../../../../scripts/lib/identity-leak-patterns.mjs';
 
 /**
  * Carries the REAL build hostname across the `bwrap --unshare-uts` boundary, because
@@ -67,10 +59,11 @@ export const SEED_REAL_HOSTNAME_ENV = 'PAPERCUSP_SEED_REAL_HOSTNAME';
 
 /**
  * Identity keys, named exactly as `audit-release-bundle.py` names them — plus the RELEASE
- * literal set (`release-literal:<n>`): the owner name / handle / email / cross-box aliases
+ * literal set (`release-literal:<n>`): machine aliases and other explicitly retained
+ * cross-box identifiers
  * that `audit-release-bundle.py --identity-literals` resolves and the final build gate hunts.
- * EI-22086776666843792: the cut #3 guard hunted only the five build-box literals, reported
- * CLEAN, and the build gate red'd 3h40m later on the owner's handle in the same bytes. The
+ * EI-22086776666843792: the cut #3 guard hunted only the build-box literals, reported CLEAN,
+ * and the build gate red'd 3h40m later on a retained cross-box handle in the same bytes. The
  * cut passes that set in ({@link assertStagedSeedCarriesNoIdentity} `extraLiterals`) so the
  * two gates hunt ONE list and the cut fails closed first.
  */
@@ -78,26 +71,68 @@ export type IdentityKey =
   | 'build-user-name'
   | 'build-home-path'
   | 'build-hostname'
-  | 'build-git-name'
-  | 'build-git-email'
   | `release-literal:${number}`;
 
 export type IdentityLiterals = ReadonlyMap<IdentityKey, string>;
 
-/** Generic account names that identify a CI runner, not a person. Same set as the python gate. */
-const IMPERSONAL_USERS = new Set(['root', 'runner', 'build', 'ubuntu']);
+/** Preserve the real host across the audit's neutralized UTS namespace. */
+export function mergeReleaseSeedRedactionValues(output: string, realHostname?: string): readonly string[] {
+  return [...new Set([
+    realHostname?.trim(),
+    ...output.split(/\r?\n/).map((line) => line.split('\t', 1)[0]?.trim()),
+  ].filter((value): value is string => !!value && value.length >= 3))];
+}
+
+/** ONE release literal source for fresh cuts, reused cuts, and seed usability checks. */
+export function releaseSeedRedactionValues(
+  root?: string,
+  env: NodeJS.ProcessEnv = process.env,
+): readonly string[] {
+  // Fallback walks to `.git`, not a fixed `..` climb (wrong inside a bundle; P-016).
+  const workspaceRoot = root ?? env.PAPERCUSP_WORKSPACE_ROOT ?? moduleRepoRoot(import.meta.url);
+  const audit = join(workspaceRoot, 'papercusp-desktop', 'bin', 'audit-release-bundle.py');
+  const result = spawnSync('python3', [audit, '--identity-literals'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+  });
+  if (result.status !== 0) {
+    const detail = typeof result.stderr === 'string' ? result.stderr.trim() : '';
+    throw new Error(`[seed-identity] could not resolve release identity literals from ${audit}${detail ? `: ${detail}` : ''}`);
+  }
+  return mergeReleaseSeedRedactionValues(result.stdout ?? '', env[SEED_REAL_HOSTNAME_ENV]);
+}
+
+/** Keep matching, de-duplication, and neutral-host handling identical in both callers. */
+export function mergeSeedIdentityLiterals(
+  machine: IdentityLiterals,
+  extraLiterals: readonly string[],
+  neutralHostname: string,
+): IdentityLiterals {
+  const merged = new Map<IdentityKey, string>(machine);
+  const known = new Set([...machine.values()].map((v) => v.toLowerCase()));
+  const neutral = neutralHostname.trim().toLowerCase();
+  let n = 0;
+  for (const lit of extraLiterals) {
+    const value = lit.trim();
+    if (value.length < 3 || known.has(value.toLowerCase()) || value.toLowerCase() === neutral) continue;
+    known.add(value.toLowerCase());
+    merged.set(`release-literal:${n++}`, value);
+  }
+  return merged;
+}
+
+/** Generic account names that identify a CI runner, not a person — the ONE shared list,
+ *  pinned equal to the python gate's GENERIC_ACCOUNTS (WI-10004233: a local copy drifted). */
+const IMPERSONAL_USERS: ReadonlySet<string> = GENERIC_ACCOUNTS;
 const IMPERSONAL_HOMES = new Set(['/root', '/', '/home']);
-const IMPERSONAL_HOST_PREFIXES = ['runner', 'ci-', 'localhost'];
 
 /**
  * A SHORT literal must match as a whole word or it matches half the seed.
  *
- * The owner's git `user.name` on this box is a THREE-LETTER first name — the exact string
- * they asked to keep out of a public build. Substring-matching it would fire on every video
- * file extension in vendored bytes; skipping it would make the owner's own example the one
- * identity we cannot catch. So short alphanumeric literals match on a word boundary, and are
- * additionally scanned in TEXT files only (see {@link isLowEntropy}) — byte-for-byte the
- * asymmetry the python gate uses, so the two cannot disagree about what counts as a hit.
+ * Short retained literals (for example a cross-box account alias) must match on a word
+ * boundary or they match half the seed. They are additionally scanned in TEXT files only
+ * (see {@link isLowEntropy}) — byte-for-byte the asymmetry the Python gate uses.
  */
 export function needsWordBoundary(lit: string): boolean {
   return lit.length < 6 && /^[a-zA-Z0-9]+$/.test(lit);
@@ -107,25 +142,11 @@ export function needsWordBoundary(lit: string): boolean {
  * A literal so short that RANDOM BINARY hits it by coincidence. In a compressed SST every
  * 3-byte sequence occurs; `\bAvi\b` over 85 MiB of entropy is a guaranteed false positive,
  * which is how a gate gets switched off. High-entropy literals (a home path, a username, a
- * hostname, an email) are hunted everywhere, binary included — those are the ones that
+ * hostname) are hunted everywhere, binary included — those are the ones that
  * actually leak.
  */
 export function isLowEntropy(lit: string): boolean {
   return needsWordBoundary(lit);
-}
-
-function gitConfig(key: string, cwd?: string): string | undefined {
-  try {
-    const v = execFileSync('git', ['config', '--get', key], {
-      encoding: 'utf8',
-      timeout: 5_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-      ...(cwd ? { cwd } : {}),
-    }).trim();
-    return v || undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 export type ResolveIdentityInput = {
@@ -137,8 +158,6 @@ export type ResolveIdentityInput = {
     readonly user?: () => string | undefined;
     readonly home?: () => string | undefined;
     readonly hostname?: () => string | undefined;
-    readonly gitName?: () => string | undefined;
-    readonly gitEmail?: () => string | undefined;
   };
 };
 
@@ -152,7 +171,6 @@ export type ResolveIdentityInput = {
 export function resolveIdentityLiterals(inp: ResolveIdentityInput): {
   readonly literals: IdentityLiterals;
   readonly unknownHostname: boolean;
-  readonly unknownOwnerName: boolean;
 } {
   const env = inp.env ?? process.env;
   const probe = inp.probe ?? {};
@@ -173,50 +191,12 @@ export function resolveIdentityLiterals(inp: ResolveIdentityInput): {
   if (
     realHost &&
     !hostIsNeutral &&
-    !IMPERSONAL_HOST_PREFIXES.some((p) => realHost.startsWith(p))
+    !isGenericHost(realHost)
   ) {
     literals.set('build-hostname', realHost);
   }
 
-  /**
-   * The owner's NAME comes from {@link OWNER_NAME_ENV} or it does not come at all. This
-   * mirrors `release-content-scrub.ts` exactly, on purpose — the two used to disagree, and
-   * that disagreement is what refused the 0.0.21 cut after a 7h scan (WI-10001835).
-   *
-   * NEVER `git config user.name`. It names the COMMITTER, which on an automated box is by
-   * construction not the owner. Taking it here produced BOTH failure directions from one
-   * defect, measured 2026-09-18:
-   *   - FALSE POSITIVE (this gate): `user.name` was this box's build automation identity, a
-   *     synthetic name that is ALSO a legitimate commit author inside the pot's own shipped
-   *     history — so the guard found it in `corestore/db/000239.blob` and hard-refused a seed
-   *     that was never leaking anything.
-   *   - FALSE NEGATIVE (the python sibling): it hunted a bot's name all build long while the
-   *     owner's real name went unhunted, and still printed CLEAN.
-   *
-   * ⛔ Do NOT "fix" this with a denylist of bot-name shapes. That is the approach
-   * `release-content-scrub.ts` deliberately abandoned: it fails OPEN for every spelling
-   * nobody enumerated, and its incompleteness is SILENT. Measured 2026-09-18 by EXECUTING
-   * `AUTOMATION_NAME_RE` against this box's real values: it matches NEITHER of the two
-   * automation identities live here today (the build identity nor the git-sync one), while
-   * matching only the older `-agent` spelling the original incident was reported against. A
-   * denylist that already misses two of the three spellings it exists to catch is not a gate.
-   *
-   * `unknownOwnerName` is the fail-closed signal, exactly like `unknownHostname` above:
-   * dropping the bot name means this gate now hunts NOTHING for the owner-name class, and a
-   * caller that publishes must refuse rather than certify on a class it cannot see. Prefer
-   * the loud gap to the silent one.
-   */
-  const explicitOwner = (env[OWNER_NAME_ENV] ?? '').trim();
-  if (explicitOwner) literals.set('build-git-name', explicitOwner);
-  const unknownOwnerName = !explicitOwner;
-
-  // `git-email` is deliberately still taken from git: an address is caught by SHAPE via the
-  // release literal set even when no literal knows it, so a bot address cannot go blind the
-  // way a bare first name can. Same narrow asymmetry as release-content-scrub.ts.
-  const gitEmail = (probe.gitEmail ?? (() => gitConfig('user.email')))();
-  if (gitEmail) literals.set('build-git-email', gitEmail);
-
-  return { literals, unknownHostname, unknownOwnerName };
+  return { literals, unknownHostname };
 }
 
 function safe<T>(f: () => T): T | undefined {
@@ -373,9 +353,9 @@ export async function judgeSeedIdentity(inp: {
  * Enforce the verdict on a staged seed directory. Throws unless clean.
  *
  * Deliberately has NO acknowledgement env, unlike its sibling `assertSeedNotDegraded`: a
- * degraded seed is a big seed, while this one publishes a person's machine, home directory
- * and email to everyone who downloads the app. There is no build worth getting through that
- * badly.
+ * degraded seed is a big seed, while this one publishes a build machine's account, home
+ * directory and hostname to everyone who downloads the app. There is no build worth getting
+ * through that badly.
  */
 export async function assertStagedSeedCarriesNoIdentity(inp: {
   readonly dir: string;
@@ -389,27 +369,17 @@ export async function assertStagedSeedCarriesNoIdentity(inp: {
    */
   readonly extraLiterals?: readonly string[];
 }): Promise<SeedIdentityVerdict> {
-  const { literals: machine, unknownHostname, unknownOwnerName } = resolveIdentityLiterals({
+  const { literals: machine, unknownHostname } = resolveIdentityLiterals({
     env: inp.env,
     neutralHostname: inp.neutralHostname,
     probe: inp.probe,
   });
-  const merged = new Map<IdentityKey, string>(machine);
-  const known = new Set([...machine.values()].map((v) => v.toLowerCase()));
   // The neutral label is the FIX, not an identity (see resolveIdentityLiterals) — but it can
   // arrive HERE through the release set: audit-release-bundle.py's live hostname probe runs
   // inside the UTS child and reports the neutral label, and the projection's redact list keeps
   // it. Cut #4 (2026-09-01) red-ed on exactly that — `release-literal:2` = 'papercusp-build'
   // at rocksdb.creating.host.identity in 4 SSTs, after a 3h scan. Fold it here as well.
-  const neutral = inp.neutralHostname.trim().toLowerCase();
-  let n = 0;
-  for (const lit of inp.extraLiterals ?? []) {
-    const v = lit.trim();
-    if (v.length < 3 || known.has(v.toLowerCase()) || v.toLowerCase() === neutral) continue;
-    known.add(v.toLowerCase());
-    merged.set(`release-literal:${n++}`, v);
-  }
-  const literals: IdentityLiterals = merged;
+  const literals = mergeSeedIdentityLiterals(machine, inp.extraLiterals ?? [], inp.neutralHostname);
   if (unknownHostname) {
     throw new Error(
       `[seed-identity] ⛔ cannot prove the staged seed is clean: gethostname() reports the neutral ` +
@@ -417,25 +387,6 @@ export async function assertStagedSeedCarriesNoIdentity(inp: {
         `${SEED_REAL_HOSTNAME_ENV} was not handed down — the REAL build hostname is unknowable from ` +
         `here. Reporting "clean" would be a statement about the sandbox, not about the seed. Fix the ` +
         `re-exec to export ${SEED_REAL_HOSTNAME_ENV} (seed-hostname-neutralization.ts).`,
-    );
-  }
-  // FAIL CLOSED on the owner-name class, for the same reason as the hostname class above and
-  // NOT separable from the git-name change that made it possible (WI-10001835): with the bot
-  // name no longer taken from `git config`, an unset OWNER_NAME_ENV means this gate hunts
-  // NOTHING for the highest-cost leak class. Certifying "clean" then would be a statement
-  // about our own blindness, not about the seed — which is precisely the silent
-  // false-negative the python sibling shipped for weeks. `release-cut-launch.ts` exports this
-  // from the cut's `ownerName`, and `buildNeutralizedChildEnv` copies the whole env across the
-  // bwrap boundary, so a cut launched the normal way already satisfies it.
-  if (unknownOwnerName) {
-    throw new Error(
-      `[seed-identity] ⛔ cannot prove the staged seed is clean: ${OWNER_NAME_ENV} is unset, so ` +
-        `the owner's real name is unknown here and the owner-name class is hunted with NOTHING. ` +
-        `The name is deliberately NOT taken from \`git config user.name\` — that names the ` +
-        `committer, which on an automated box is not the owner (WI-10001835). Reporting "clean" ` +
-        `would be a statement about this gate's blindness, not about the seed. Fix: export ` +
-        `${OWNER_NAME_ENV}='<the owner's name>' for this cut (release-cut-launch.ts sets it from ` +
-        `the cut's \`ownerName\`).`,
     );
   }
   const verdict = await judgeSeedIdentity({ dir: inp.dir, literals });

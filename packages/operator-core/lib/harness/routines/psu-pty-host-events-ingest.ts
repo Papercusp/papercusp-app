@@ -365,7 +365,17 @@ export async function ingestPsuPtyHostEvents(
                         ) AS u(w, o, t, k, p, d)
             ON CONFLICT (row_digest) DO NOTHING
           `;
-          result.rowsInserted += inserted.count ?? 0;
+          const insertedCount = inserted.count;
+          if (
+            !Number.isSafeInteger(insertedCount) ||
+            insertedCount < 0 ||
+            insertedCount > chunk.length
+          ) {
+            throw new Error(
+              `INSERT row count must be an integer between 0 and ${chunk.length}; received ${String(insertedCount)}`,
+            );
+          }
+          result.rowsInserted += insertedCount;
         }
         ingested = true;
       } catch (err) {

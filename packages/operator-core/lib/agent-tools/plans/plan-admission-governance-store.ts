@@ -26,8 +26,16 @@ import {
   type GovernanceRound,
   type GovernanceVoteEvent,
 } from './governance-round';
+import {
+  pgLedgerChainLinkStore,
+  witnessLedgerAfterAppend,
+  type LedgerChainLinkStore,
+  type LedgerSource,
+} from '../../cupboard/ledger-chain';
 
 export const PLAN_ADMISSION_GOVERNANCE_EVENT_PREFIX = 'governanceEvent.v1.';
+/** Hash-chain stream per pot (agent-economy-flywheel P-040); suffix is the federated pot id. */
+export const PLAN_ADMISSION_GOVERNANCE_STREAM_PREFIX = 'governance.plan-admission:';
 
 type ListSettings = (
   workspaceId: string,
@@ -48,6 +56,8 @@ export interface PlanAdmissionGovernanceStoreDeps {
   readonly listSettings?: ListSettings;
   readonly setSetting?: SetSetting;
   readonly resolvePotScope?: ResolvePotScope;
+  /** Where the hash-chain links are witnessed; defaults to Postgres. `null` skips witnessing. */
+  readonly ledgerChain?: LedgerChainLinkStore | null;
 }
 
 export interface PlanAdmissionGovernanceSnapshot {
@@ -263,15 +273,15 @@ export async function appendPlanAdmissionGovernanceEvent(
     (event) => planAdmissionGovernanceEventDigest(event) === digest,
   );
   const settingKey = planAdmissionGovernanceEventSettingKey(input.event);
+  let record: HiveSettingRecord | undefined;
   if (existing) {
-    const listed = (await (deps.listSettings ?? listHiveSettings)(
+    record = (await (deps.listSettings ?? listHiveSettings)(
       input.workspaceId,
       input.potHomeSlug,
       sql,
     )).find((row) => row.settingKey === settingKey);
-    if (listed) return listed;
   }
-  return (deps.setSetting ?? setHiveSetting)(
+  record ??= await (deps.setSetting ?? setHiveSetting)(
     {
       workspaceId: input.workspaceId,
       potHomeSlug: input.potHomeSlug,
@@ -280,4 +290,58 @@ export async function appendPlanAdmissionGovernanceEvent(
     },
     sql,
   );
+  // Witness after the append committed (a replay also heals an earlier failed pass).
+  const chain = deps.ledgerChain === undefined ? pgLedgerChainLinkStore(sql) : deps.ledgerChain;
+  if (chain) {
+    const source = planAdmissionGovernanceLedgerSourceFor(input, snapshot.potId, sql, deps);
+    await witnessLedgerAfterAppend(input.workspaceId, source, chain);
+  }
+  return record;
+}
+
+function planAdmissionGovernanceLedgerSourceFor(
+  input: { workspaceId: string; potHomeSlug: string },
+  potId: string,
+  sql: Sql | undefined,
+  deps: PlanAdmissionGovernanceStoreDeps,
+): LedgerSource {
+  const listSettings = deps.listSettings ?? listHiveSettings;
+  return {
+    streamId: `${PLAN_ADMISSION_GOVERNANCE_STREAM_PREFIX}${potId}`,
+    async list() {
+      // Raw rows, not the validated snapshot: an entry edited in place must
+      // still be hashed as stored so verify names its position.
+      const rows = (await listSettings(input.workspaceId, input.potHomeSlug, sql)).filter((row) =>
+        row.settingKey.startsWith(PLAN_ADMISSION_GOVERNANCE_EVENT_PREFIX),
+      );
+      const occurredAt = (row: HiveSettingRecord): number => {
+        const value = object(row.value)?.occurredAtMs;
+        return finiteNumber(value) ? value : Number.MAX_SAFE_INTEGER;
+      };
+      rows.sort(
+        (a, b) =>
+          occurredAt(a) - occurredAt(b) || (a.settingKey < b.settingKey ? -1 : a.settingKey > b.settingKey ? 1 : 0),
+      );
+      return rows.map((row) => ({ sourceId: row.settingKey, entry: row.value }));
+    },
+  };
+}
+
+/**
+ * The pot's plan-admission governance event log as a hash-chain ledger source
+ * (agent-economy-flywheel P-040): entries are the federated `governanceEvent.v1.*`
+ * rows, source id = the content-addressed setting key, fold order =
+ * (occurredAtMs, settingKey).
+ */
+export async function planAdmissionGovernanceLedgerSource(
+  input: { workspaceId: string; potHomeSlug: string },
+  sql?: Sql,
+  deps: PlanAdmissionGovernanceStoreDeps = {},
+): Promise<LedgerSource> {
+  const potId = await (deps.resolvePotScope ?? resolveFederatedPotScope)(
+    input.workspaceId,
+    input.potHomeSlug,
+    sql === undefined ? undefined : { sql },
+  );
+  return planAdmissionGovernanceLedgerSourceFor(input, potId, sql, deps);
 }

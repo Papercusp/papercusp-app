@@ -28,12 +28,13 @@ import {
   pokeResource,
   readResourceLockStatus,
   readResourceQueue,
+  releaseAllResourcesForOwner,
   tryAcquireResource,
   tryReleaseResource,
   type ResourceHolder,
 } from './su-lock-store';
 import { inWorkspaceTxn, type WorkspaceTxnOptions } from './in-workspace-txn';
-import { acquireWithContentionRetry } from './contention-retry';
+import { acquireWithContentionRetry, isWorkspaceContended } from './contention-retry';
 import { subscribeWorkspace } from './workspace-listener';
 
 /** Per-iteration ceiling: re-poll status at least this often even if the
@@ -62,7 +63,7 @@ export function workspaceTxnOptionsForExclusiveWait(maxWaitSec: number): Workspa
  * else is treated as ALIVE — we must never force-reclaim a lock we can't prove is
  * abandoned; a false "dead" verdict would let two live holders race the resource.
  */
-function isPidDefinitivelyDead(pid: number): boolean {
+export function isPidDefinitivelyDead(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return false;
@@ -420,7 +421,15 @@ export async function acquireResourceExclusiveWithWait(
       }
 
       // Nudge: a TTL-lapsed shared holder fires no cascade on its own.
-      await inWorkspaceTxn(cd, owner, (tx) => pokeResource(tx, cd));
+      // WI-10004638: a transient contention timeout here (the sweep runs under a 500ms
+      // statement_timeout and loses to an autovacuum truncate or a busy advisory lock)
+      // only skips one nudge — the next tick repeats it. Letting it escape aborted the
+      // whole drain on 2026-10-01 and orphaned the queued exclusive (see the catch below).
+      try {
+        await inWorkspaceTxn(cd, owner, (tx) => pokeResource(tx, cd));
+      } catch (e) {
+        if (!isWorkspaceContended(e)) throw e;
+      }
 
       const st = await readResourceLockStatus(getTxPool(), lockId);
       if (st.status === 'held') {
@@ -436,7 +445,131 @@ export async function acquireResourceExclusiveWithWait(
 
     const q = await readResourceQueue(getTxPool(), { coordinationDomain: cd, resource });
     return { ok: false, reason: 'drain_timeout', lock_id: lockId, holders: q.holders, waited_sec: elapsedSec(startedAt) };
+  } catch (error) {
+    // WI-10004638: once queued, our exclusive is a live row the caller never learns the
+    // lock_id of when we throw — so nobody else can release it. A draining exclusive
+    // refuses every new shared acquire (writer preference), so an orphan stalls the
+    // resource for its whole TTL; worse, callers wrap this in acquireWithContentionRetry
+    // and re-queue under a FRESH owner, leaving the orphan ahead of their own row.
+    // Measured 2026-10-01: two dev:restart git-sync barriers orphaned this way blocked
+    // every pot's git-sync for ~3 min each. Release it before rethrowing.
+    if (lockId) {
+      const queued = lockId;
+      await acquireWithContentionRetry(() =>
+        inWorkspaceTxn(cd, owner, (tx) => tryReleaseResource(tx, { coordinationDomain: cd, owner, lockId: queued })),
+      ).catch((releaseError: unknown) => {
+        // The TTL is the backstop; say so rather than swallow it, so the next stall is attributable.
+        console.warn(
+          `[resource-acquire-wait] could not release queued exclusive ${queued} on ${resource} ` +
+            `after the drain wait threw; it now lives until its TTL`,
+          releaseError,
+        );
+      });
+    }
+    throw error;
   } finally {
     if (unsubscribe) await unsubscribe().catch(() => undefined);
+  }
+}
+
+type WorkspaceTx = Parameters<Parameters<typeof inWorkspaceTxn>[2]>[0];
+
+export interface ExclusiveQueuedParams {
+  coordinationDomain: string;
+  /** Must be unique to this attempt: failure cleanup releases EVERYTHING this owner holds. */
+  owner: string;
+  ownerLabel: string | null;
+  resource: string;
+  reason: string;
+  ttlSec: number;
+  /** How long to keep a FIFO ticket behind another owner's exclusive; 0 = one attempt. */
+  maxQueueSec: number;
+  /** Re-poll cadence while queued. */
+  pollMs?: number;
+  /** Runs in each acquire transaction first, e.g. to auto-register the resource. */
+  beforeAcquire?: (tx: WorkspaceTx) => Promise<void>;
+}
+
+export type ExclusiveQueuedResult =
+  | { ok: true; lock_id: string; status: 'held' | 'draining'; waited_sec: number; fence_seq: number }
+  | {
+      ok: false;
+      reason: ConflictReason | 'queue_timeout';
+      holders: ResourceHolder[];
+      waited_sec: number;
+      queue_position?: number;
+    };
+
+/**
+ * Wait in the durable exclusive FIFO (`agent_resource_exclusive_queue`) for ANOTHER
+ * owner's exclusive to end — the case `acquireResourceExclusiveWithWait` returns
+ * immediately on, because its wait covers shared holders only.
+ *
+ * A one-shot caller racing a periodic exclusive holder loses whenever the holder is
+ * mid-run, and a fixed-schedule caller can lose every time. Measured: the P-008
+ * staging-lineage bridge made one `git-sync:<slug>` attempt per hourly gate tick and
+ * lost it at 16:23Z and 17:24Z on 2026-09-29, 14:23Z on 2026-09-30 and 07:22Z on
+ * 2026-10-01, while git-sync (every 3 min) held the lease for minutes per fire.
+ * With `queueOnConflict`, the store keeps this owner's ticket at a stable FIFO
+ * position across retries, `resource_grant_cascade` grants it when the holder
+ * releases, and a later one-shot acquirer is refused rather than jumping the ticket.
+ *
+ * Every non-granted exit releases this owner's ticket AND any lease the cascade
+ * granted after the last poll, so an abandoned wait cannot strand the resource.
+ */
+export async function acquireResourceExclusiveQueued(
+  params: ExclusiveQueuedParams,
+): Promise<ExclusiveQueuedResult> {
+  const { coordinationDomain: cd, owner, ownerLabel, resource, reason, ttlSec, maxQueueSec, beforeAcquire } = params;
+  const pollMs = Math.max(1, params.pollMs ?? WAIT_CEILING_MS);
+  const startedAt = Date.now();
+  const deadline = startedAt + Math.max(0, maxQueueSec) * 1000;
+  const releaseOwner = () =>
+    acquireWithContentionRetry(() =>
+      inWorkspaceTxn(cd, owner, (tx) => releaseAllResourcesForOwner(tx, cd, owner)),
+    ).catch((releaseError: unknown) => {
+      console.warn(
+        `[resource-acquire-wait] could not clear queued exclusive for ${owner} on ${resource}; ` +
+          'its ticket and any granted lease now live until their TTLs',
+        releaseError,
+      );
+    });
+
+  let granted = false;
+  try {
+    for (;;) {
+      const r = await acquireWithContentionRetry(() =>
+        inWorkspaceTxn(cd, owner, async (tx) => {
+          if (beforeAcquire) await beforeAcquire(tx);
+          return tryAcquireResource(tx, {
+            coordinationDomain: cd,
+            resource,
+            mode: 'exclusive',
+            owner,
+            ownerLabel,
+            reason,
+            ttlSec,
+            queueOnConflict: true,
+          });
+        }),
+      );
+      if (r.ok) {
+        granted = true;
+        return { ok: true, lock_id: r.lock_id, status: r.status, waited_sec: elapsedSec(startedAt), fence_seq: r.fence_seq };
+      }
+      const remainingMs = deadline - Date.now();
+      if (r.reason !== 'held_exclusive' || remainingMs <= 0) {
+        return {
+          ok: false,
+          reason: r.reason === 'held_exclusive' ? 'queue_timeout' : r.reason,
+          holders: r.holders,
+          waited_sec: elapsedSec(startedAt),
+          ...(r.queue_position !== undefined ? { queue_position: r.queue_position } : {}),
+        };
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollMs, remainingMs)));
+    }
+  } finally {
+    if (!granted) await releaseOwner();
   }
 }

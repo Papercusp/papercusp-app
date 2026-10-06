@@ -690,6 +690,10 @@ export interface McpProxyHealth {
    * :3070 is not draining — the congestion-collapse precursor.
    */
   shed: number;
+  /** Distinct requests whose critical-continuation queue dwell reached the five-minute alarm floor. */
+  criticalContinuationQueueStalls: number;
+  /** Longest observed critical-continuation queue dwell in the lookback window (ms). */
+  criticalContinuationQueueMaxWaitMs: number;
   /** Count by raw `kind` — every kind the ledger carries, including ones no alarm class
    *  above consumes. Retained as the forensic catch-all, but note that a kind appearing
    *  ONLY here is a kind nothing can page on: if a new `recordProxyFailure` kind is

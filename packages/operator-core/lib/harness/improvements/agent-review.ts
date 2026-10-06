@@ -35,6 +35,8 @@
  * is ever relaxed to admit a converging regrade, that test fails and forces this
  * paragraph to be corrected in the same change.
  */
+import { isDeepStrictEqual } from 'node:util';
+
 import { getOrgPg } from '@papercusp/db-org';
 import {
   claimWorkItem,
@@ -47,19 +49,30 @@ import {
   type WorkItem,
 } from '../../work-items';
 import { activeWorkspaceId } from '../../workspace-registry';
+import { selfHealOwnNodeOriginIfStranded } from '../../work-items-admission';
 import { recordRoutedIdea } from '../../scout/routed-ledger';
 import { boundedOrgTxn } from '../../pg-bounded-txn';
 import {
   agentReviewEligibility,
   agentReviewPendingSelectorSql,
   createImplementationReadiness,
+  evaluateImplementationAcceptance,
+  type ImplementationAcceptanceContract,
+  readImplementationAcceptanceProposal,
+  sealImplementationAcceptance,
   LEGACY_AGENT_REVIEW_SUBMITTER,
   mintAgentReviewClaimAdmission,
   readAgentReviewState,
   readImplementationReadiness,
   type AgentReviewState,
   type ImplementationReadinessState,
+  verificationConflict,
+  verificationConflictSql,
+  verificationParties,
+  verificationTaskConflictSql,
+  type VerificationConflictRole,
 } from './agent-review-policy';
+import { readBornVerifiedReproduction } from '../../attention/bug-reproduction';
 // The canonical "this session can still act" set, IMPORTED rather than re-derived.
 // Deliberately not a delegation to `rebindIdentity` itself: that migrates ~16 ownerId-keyed
 // surfaces (loop, presence, fleet membership, claims, facts, watermarks) from one sid to
@@ -120,6 +133,11 @@ export interface AgentReviewDeps {
     ownerId: string,
     hints: { claimsHeld: boolean },
   ) => Promise<SubmitterLivenessVerdict | null>;
+  /**
+   * WI-10006314: flip an own-node row's stranded `origin='remote'` to 'local'. The heal's WHERE
+   * clause IS the identity check (WI-10003565), so a foreign remote row is never touched.
+   */
+  healOwnNodeOrigin: typeof selfHealOwnNodeOriginIfStranded;
 }
 
 async function readLedgerGrade(ideaId: string): Promise<AgentReviewLedgerGrade | null> {
@@ -363,7 +381,41 @@ const defaultDeps: AgentReviewDeps = {
   readLedgerGrade,
   deliverRevision,
   resolveSubmitterLiveness,
+  healOwnNodeOrigin: selfHealOwnNodeOriginIfStranded,
 };
+
+/**
+ * WI-10006314 — heal an own-node row stranded at `origin='remote'` BEFORE the eligibility check.
+ *
+ * `agentReviewEligibility` is pure and reads the raw `origin` column, but `origin` records how a
+ * row ARRIVED, not who wrote it (WI-10003565): the claim gate (`issueOwnAuthorWhereSql`) and the
+ * write path (`setWorkItemState`) already treat an own-author row as ours. Without this the review
+ * doors were the one place that disagreed — they refused such a row as 'remote-owned', and only the
+ * failure stamp's write healed it as a side effect, so it entered review on a LATER attempt
+ * (measured 2026-10-06: 3 of 601 rows in the P-003 stranded sweep). Healing first also matters for
+ * what follows the check: the `engineer_issues` view trigger no-ops writes while origin='remote'.
+ *
+ * A foreign row is untouched (the heal's WHERE is the identity check) and stays refused. Any heal
+ * failure FAILS CLOSED: the row is returned unchanged, so the refusal stands as before.
+ */
+async function healOwnNodeRemoteOrigin(
+  workItem: WorkItem,
+  deps: AgentReviewDeps,
+  scope: { harnessSlug?: string; workspaceId?: string },
+): Promise<WorkItem> {
+  if (workItem.origin !== 'remote') return workItem;
+  try {
+    const healed = await deps.healOwnNodeOrigin(
+      scope.workspaceId ?? activeWorkspaceId(),
+      workItem.id,
+      scope.harnessSlug ?? workItem.harness ?? null,
+    );
+    if (!healed) return workItem;
+    return (await deps.getWorkItem(workItem.id, scope.harnessSlug)) ?? { ...workItem, origin: 'local' };
+  } catch {
+    return workItem;
+  }
+}
 
 function reviewImplementationReadiness(
   payload: unknown,
@@ -374,10 +426,17 @@ function reviewImplementationReadiness(
     round: number;
     reviewer?: string;
     grade?: number;
+    /** Sealed contract written by an approval; other transitions carry the unsealed proposal. */
+    acceptance?: Partial<ImplementationAcceptanceContract>;
   },
 ): ImplementationReadinessState {
   const existing = readImplementationReadiness(payload);
   const review = existing?.evidence?.review;
+  // P-005: never drop a producer's acceptance proposal across review transitions.
+  // A previously sealed contract is carried as its proposal fields only, so a
+  // re-review judges it afresh rather than inheriting the old authority.
+  const proposal = readImplementationAcceptanceProposal(payload);
+  const acceptance = input.acceptance ?? (Object.keys(proposal).length > 0 ? proposal : undefined);
   if (
     existing?.source === 'agent-review' &&
     existing.status === input.status &&
@@ -385,7 +444,9 @@ function reviewImplementationReadiness(
     review?.submittedBy === input.submittedBy &&
     review.round === input.round &&
     review.reviewer === input.reviewer &&
-    review.grade === input.grade
+    review.grade === input.grade &&
+    // Order-insensitive: the stored side came back through jsonb, which reorders keys.
+    isDeepStrictEqual(existing.evidence?.acceptance ?? null, acceptance ?? null)
   ) {
     return existing;
   }
@@ -400,8 +461,59 @@ function reviewImplementationReadiness(
         ...(input.reviewer ? { reviewer: input.reviewer } : {}),
         ...(input.grade == null ? {} : { grade: input.grade }),
       },
+      ...(acceptance ? { acceptance } : {}),
     },
   });
+}
+
+/**
+ * Approval is the independent-review authority (R-20). It seals the producer's
+ * proposal into a qualifying contract bound to the revision the reviewer judged;
+ * an incomplete proposal is NOT defaulted — the approval stays a bare `ready`
+ * that the intake-stage derivation keeps in intake (R-4).
+ */
+export function approvalAcceptance(
+  workItem: Pick<WorkItem, 'kind' | 'title' | 'summary' | 'payload'>,
+  input: { reviewer: string; submittedBy: string; round: number; grade: number },
+): ImplementationAcceptanceContract | undefined {
+  const authority = {
+    kind: 'agent-review',
+    reviewer: input.reviewer,
+    submittedBy: input.submittedBy,
+    round: input.round,
+  } as const;
+  const reason = `agent-review-approved (grade ${input.grade}/5)`;
+  const source = { kind: workItem.kind, title: workItem.title, summary: workItem.summary ?? null };
+  // Convergence: a retried approval of the same round must not re-seal (a fresh
+  // acceptedAt would rewrite readiness on every retry). Reuse the standing contract
+  // when it is still qualifying for this exact authority, grade and revision.
+  const standing = evaluateImplementationAcceptance(workItem.payload, source);
+  if (
+    standing.state === 'qualifying' &&
+    standing.contract?.reason === reason &&
+    isDeepStrictEqual(standing.contract.authority, authority)
+  ) {
+    return standing.contract;
+  }
+  const sealed = sealImplementationAcceptance({
+    proposal: readImplementationAcceptanceProposal(workItem.payload),
+    authority,
+    reason,
+    source,
+    // P-006 (D-019): the seal is the one verification stage. A bug is accepted only
+    // with its reproduction receipt — the born-verified filing receipt (D-024) or the
+    // one recorded at intake (D-023); without one the approval stays a bare `ready`.
+    reproduction: workItem.kind === 'bug' ? approvalReproduction(workItem.payload) : undefined,
+  });
+  return sealed.ok ? sealed.contract : undefined;
+}
+
+function approvalReproduction(payload: unknown): unknown {
+  const bornVerified = readBornVerifiedReproduction(payload);
+  if (bornVerified) return bornVerified;
+  if (!payload || typeof payload !== 'object') return undefined;
+  const intake = (payload as Record<string, unknown>).intakeReproduction;
+  return intake && typeof intake === 'object' ? (intake as Record<string, unknown>).receipt : undefined;
 }
 
 export interface EnterAgentReviewInput {
@@ -415,8 +527,9 @@ export async function enterAgentReview(
   input: EnterAgentReviewInput,
   deps: AgentReviewDeps = defaultDeps,
 ): Promise<{ entered: boolean; state?: AgentReviewState; reason?: string }> {
-  const workItem = await deps.getWorkItem(input.id, input.harnessSlug);
-  if (!workItem) return { entered: false, reason: 'not-found' };
+  const found = await deps.getWorkItem(input.id, input.harnessSlug);
+  if (!found) return { entered: false, reason: 'not-found' };
+  const workItem = await healOwnNodeRemoteOrigin(found, deps, input);
   const eligibility = agentReviewEligibility(workItem);
   if (!eligibility.eligible) return { entered: false, reason: eligibility.reason };
 
@@ -649,6 +762,14 @@ export async function reconcileAgentReviewGrade(
   if (ledger.grade == null) throw new Error(`agent review ledger '${input.ideaId}' has no standing grade`);
 
   const grade = ledger.grade;
+  // `gradedBy` is ATTRIBUTION only (comments, the revision notice). The ledger's standing
+  // grade may be authored by someone who never held the work item — an owner-sovereign grade
+  // on a pre-existing su-ideate row that agent review enrolled with `preserveExisting`
+  // (EI-24720168531118378, EI-21887295701926471). Every CAS release/transfer below therefore
+  // targets the CURRENT claim holder (`workItem.assignee`), never `ledger.gradedBy`: releasing
+  // with `expectedAssignee:'owner'` against a row held by the reviewer session always lost the
+  // CAS, threw 'could not release reviewer claim' AFTER the approval payload had committed,
+  // and the row stayed held until a manual `work_items:release`.
   const gradedBy = ledger.gradedBy ?? input.gradedBy;
   if (grade <= AGENT_REVIEW_MAX_REVISION_GRADE) {
     const feedback = ledger.feedback?.trim();
@@ -684,7 +805,7 @@ export async function reconcileAgentReviewGrade(
       if (changed && workItem.assignee) {
         const released = await deps.releaseWorkItem(workItem.id, {
           ...(workItem.harness ? { harness: workItem.harness } : {}),
-          expectedAssignee: gradedBy,
+          expectedAssignee: workItem.assignee,
         });
         if (!released) throw new Error(`agent review could not release reviewer claim on '${workItem.id}'`);
       }
@@ -694,7 +815,7 @@ export async function reconcileAgentReviewGrade(
     if (changed) {
       const transferred = await deps.claimWorkItem(workItem.id, current.submittedBy, {
         ...(workItem.harness ? { harness: workItem.harness } : {}),
-        ...(workItem.assignee ? { fromHolder: gradedBy } : {}),
+        ...(workItem.assignee ? { fromHolder: workItem.assignee } : {}),
       });
       if (!transferred) {
         // WI-41687: the submitter frequently no longer EXISTS by review time — a session
@@ -719,7 +840,7 @@ export async function reconcileAgentReviewGrade(
         if (workItem.assignee) {
           await deps.releaseWorkItem(workItem.id, {
             ...(workItem.harness ? { harness: workItem.harness } : {}),
-            expectedAssignee: gradedBy,
+            expectedAssignee: workItem.assignee,
           });
         }
       }
@@ -751,6 +872,12 @@ export async function reconcileAgentReviewGrade(
         reviewer: gradedBy,
         round: current.round,
         grade,
+        acceptance: approvalAcceptance(workItem, {
+          reviewer: gradedBy,
+          submittedBy: current.submittedBy,
+          round: current.round,
+          grade,
+        }),
       }),
     },
     {
@@ -763,7 +890,7 @@ export async function reconcileAgentReviewGrade(
   if (workItem.assignee) {
     const released = await deps.releaseWorkItem(workItem.id, {
       ...(workItem.harness ? { harness: workItem.harness } : {}),
-      expectedAssignee: gradedBy,
+      expectedAssignee: workItem.assignee,
     });
     if (!released) throw new Error(`agent review could not release reviewer claim on '${workItem.id}'`);
   }
@@ -779,8 +906,18 @@ export type ClaimAgentReviewReason =
   | 'owner-capability'
   | 'agent-review-not-pending'
   | 'own-submission'
+  /** P-007: the reviewer filed or reported the subject. */
+  | 'reporter-conflict'
+  /** P-007: the reviewer implemented the subject (terminal owner or a recorded implementer). */
+  | 'implementer-conflict'
   | 'claim-conflict'
   | 'claim-not-claimable';
+
+function conflictReason(role: VerificationConflictRole | null): ClaimAgentReviewReason | null {
+  if (role === 'reporter') return 'reporter-conflict';
+  if (role === 'implementer') return 'implementer-conflict';
+  return null;
+}
 
 export interface ClaimAgentReviewResult {
   claimed: boolean;
@@ -808,13 +945,14 @@ export async function claimAgentReview(
   input: { id: string; reviewer: string; harnessSlug: string },
   deps: AgentReviewDeps = defaultDeps,
 ): Promise<ClaimAgentReviewResult> {
-  const workItem = await deps.getWorkItem(input.id, input.harnessSlug);
+  let workItem = await deps.getWorkItem(input.id, input.harnessSlug);
   if (!workItem || workItem.harness !== input.harnessSlug) {
     return { claimed: false, workItem: null, reason: 'not-found' };
   }
   if (workItem.state !== 'open') {
     return { claimed: false, workItem: null, reason: 'not-open' };
   }
+  workItem = await healOwnNodeRemoteOrigin(workItem, deps, { harnessSlug: input.harnessSlug });
   const eligibility = agentReviewEligibility(workItem);
   if (!eligibility.eligible) {
     return { claimed: false, workItem: null, reason: eligibility.reason };
@@ -826,12 +964,16 @@ export async function claimAgentReview(
   if (current.submittedBy === input.reviewer) {
     return { claimed: false, workItem: null, reason: 'own-submission' };
   }
+  const parties = verificationParties(workItem);
+  const conflict = conflictReason(verificationConflict(parties, input.reviewer));
+  if (conflict) return { claimed: false, workItem: null, reason: conflict };
 
   const agentReviewAdmission = mintAgentReviewClaimAdmission({
     itemId: workItem.id,
     reviewer: input.reviewer,
     harnessSlug: input.harnessSlug,
     review: current,
+    parties,
   });
   if (!agentReviewAdmission) {
     return { claimed: false, workItem: null, reason: 'claim-not-claimable' };
@@ -860,6 +1002,8 @@ export async function claimAgentReview(
     if (latestReview.submittedBy === input.reviewer) {
       return { claimed: false, workItem: null, reason: 'own-submission' };
     }
+    const latestConflict = conflictReason(verificationConflict(verificationParties(latest), input.reviewer));
+    if (latestConflict) return { claimed: false, workItem: null, reason: latestConflict };
     const holder = latest.assignee?.trim();
     if (holder && holder !== input.reviewer) {
       return {
@@ -883,7 +1027,7 @@ export async function claimAgentReview(
       ? 'agent-review-not-pending'
       : claimedState.submittedBy === input.reviewer
         ? 'own-submission'
-        : null;
+        : conflictReason(verificationConflict(verificationParties(claimed), input.reviewer));
   if (postClaimReason) {
     const released = await deps.releaseWorkItem(claimed.id, {
       ...(claimed.harness ? { harness: claimed.harness } : {}),
@@ -914,20 +1058,53 @@ export async function claimNextAgentReview(
        AND ${depsBlockedExclusionSql(sql)}
        AND ${agentReviewPendingSelectorSql(sql)}
        AND COALESCE(payload, '{}'::jsonb) -> 'agentReview' ->> 'submittedBy' IS DISTINCT FROM ${input.reviewer}
+       AND NOT ${verificationConflictSql(sql, input.reviewer, { payload: 'wi.payload', terminalOwner: 'wi.terminal_owner' })}
        AND ${input.harnessSlug ? sql`harness_slug = ${input.harnessSlug}` : sql`TRUE`}
      ORDER BY feature_order ASC NULLS LAST, created_ts ASC
      LIMIT 25`;
   for (const row of rows) {
-    const workItem = await deps.getWorkItem(row.feature_id, input.harnessSlug);
-    if (!workItem || !agentReviewEligibility(workItem).eligible) continue;
+    const found = await deps.getWorkItem(row.feature_id, input.harnessSlug);
+    if (!found) continue;
+    const workItem = await healOwnNodeRemoteOrigin(found, deps, { harnessSlug: input.harnessSlug, workspaceId: ws });
+    if (!agentReviewEligibility(workItem).eligible) continue;
     const review = readAgentReviewState(workItem.payload);
     if (review?.status !== 'pending' || review.submittedBy === input.reviewer) continue;
+    const parties = verificationParties(workItem);
+    if (verificationConflict(parties, input.reviewer)) continue;
+    // A 'pending' round whose ledger row ALREADY carries a standing grade is not reviewable:
+    // `enterAgentReview` enrolls with `preserveExisting`, so a pre-existing su-ideate row that
+    // the owner had already graded keeps that sovereign grade while the payload starts at
+    // 'pending' — and nothing reconciles the two until someone grades. Handing it out made the
+    // reviewer burn a review on a foregone conclusion (their grade cannot displace the owner's
+    // and is refused or ignored). Converge it here from the standing grade instead, then move
+    // on. Best-effort: a row that cannot converge (e.g. a low grade with no feedback) is
+    // skipped, never handed out. (EI-24720168531118378)
+    //
+    // ROUND 1 ONLY. A standing grade is sovereign only when it pre-dates enrollment, which is
+    // round 1. Resubmit and re-entry advance the round without clearing the ledger row, so in
+    // round >= 2 the standing grade is the one that ALREADY decided an earlier round.
+    // Converging from it replays the old grade and feedback as the new round, bounces the
+    // item back to its submitter, and no reviewer ever sees the revision (WI-10005365).
+    // A fresh grade in round >= 2 arrives through blender:grade-idea, which reconciles it itself.
+    const standing = review.round === 1 ? await deps.readLedgerGrade(review.ledgerIdeaId) : null;
+    if (standing && standing.grade != null && standing.workItemId === workItem.id) {
+      try {
+        await reconcileAgentReviewGrade(
+          { ideaId: review.ledgerIdeaId, gradedBy: standing.gradedBy ?? input.reviewer },
+          deps,
+        );
+      } catch {
+        // leave it for a direct regrade / the next pickup; never hand out a settled row
+      }
+      continue;
+    }
     const agentReviewAdmission = workItem.harness
       ? mintAgentReviewClaimAdmission({
           itemId: workItem.id,
           reviewer: input.reviewer,
           harnessSlug: workItem.harness,
           review,
+          parties,
         })
       : null;
     const claimed = await deps.claimWorkItem(workItem.id, input.reviewer, {
@@ -937,4 +1114,51 @@ export async function claimNextAgentReview(
     if (claimed) return claimed;
   }
   return null;
+}
+
+/**
+ * P-007 Phase B (D-027): the verification-task leg of the verifier lane. A verification
+ * task (payload.verification, stamped by `investigate`) is an ordinary ready row, so it is
+ * claimed through claimWorkItem, the by-id writer that enforces the D-021 conflict rule,
+ * the floors and admission. The SQL only orders candidates and applies the self-select
+ * dependency floor; it admits nothing the writer would refuse.
+ */
+export async function claimNextVerificationTask(
+  input: { verifier: string; harnessSlug?: string },
+  deps: Pick<AgentReviewDeps, 'claimWorkItem'> = defaultDeps,
+): Promise<WorkItem | null> {
+  const verifier = input.verifier.trim();
+  if (!verifier) return null;
+  const { sql } = getOrgPg();
+  const ws = activeWorkspaceId();
+  const rows = await sql<{ feature_id: string; harness_slug: string | null }[]>`
+    SELECT feature_id, harness_slug
+      FROM harness_shared.work_items wi
+     WHERE workspace_id = ${ws}
+       AND status = 'open'
+       AND (taken_by IS NULL OR btrim(taken_by) = '')
+       AND jsonb_typeof(COALESCE(payload, '{}'::jsonb) -> 'verification') = 'object'
+       ${input.harnessSlug ? sql`AND harness_slug = ${input.harnessSlug}` : sql``}
+       AND ${depsBlockedExclusionSql(sql)}
+       AND NOT ${verificationTaskConflictSql(sql, verifier, 'wi.payload')}
+     ORDER BY created_ts ASC, feature_id ASC
+     LIMIT 20`;
+  for (const row of rows) {
+    const claimed = await deps.claimWorkItem(row.feature_id, verifier, row.harness_slug ? { harness: row.harness_slug } : {});
+    if (claimed) return claimed;
+  }
+  return null;
+}
+
+export type VerificationWorkKind = 'agent-review' | 'verification-task';
+
+/** P-007 Phase B (D-027): one verifier-lane pull. Pending reviews first, then verification tasks. */
+export async function claimNextVerificationWork(
+  input: { verifier: string; harnessSlug?: string },
+  deps: AgentReviewDeps = defaultDeps,
+): Promise<{ workItem: WorkItem; kind: VerificationWorkKind } | null> {
+  const review = await claimNextAgentReview({ reviewer: input.verifier, harnessSlug: input.harnessSlug }, deps);
+  if (review) return { workItem: review, kind: 'agent-review' };
+  const task = await claimNextVerificationTask(input, deps);
+  return task ? { workItem: task, kind: 'verification-task' } : null;
 }

@@ -114,6 +114,8 @@ export async function healOrphanedRemoteOriginIfAuthorEnded(
     by?: string | null;
     workspaceId?: string | null;
     lookupEnded?: EndedSessionLookupFn;
+    /** WI-10006010: the pinned physical row; omitted, every same-id twin is eligible. */
+    harnessSlug?: string | null;
   },
 ): Promise<{
   healed: boolean;
@@ -133,6 +135,7 @@ export async function healOrphanedRemoteOriginIfAuthorEnded(
     SELECT payload #>> '{_ei,created_by}' AS created_by
       FROM harness_shared.work_items
      WHERE feature_id = ${id}
+       ${opts.harnessSlug ? sql`AND harness_slug = ${opts.harnessSlug}` : sql``}
        AND origin = 'remote'`;
   if (rows.length === 0) return miss('not-remote');
   const author = rows[0]?.created_by ?? null;
@@ -158,6 +161,7 @@ export async function healOrphanedRemoteOriginIfAuthorEnded(
              )
            )
      WHERE feature_id = ${id}
+       ${opts.harnessSlug ? sql`AND harness_slug = ${opts.harnessSlug}` : sql``}
        AND origin = 'remote'
        AND payload #>> '{_ei,created_by}' = ${author}
     RETURNING feature_id`;

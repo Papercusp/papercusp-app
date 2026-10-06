@@ -6,8 +6,7 @@
  * call — and every dependency injected so `runCompletionClaimRecheckSweep` stays testable
  * with no database and no checkout.
  */
-import path, { dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../../module-repo-root';
 
 import { getOrgPg } from '@papercusp/db-org';
 
@@ -29,7 +28,9 @@ export const COMPLETION_CLAIM_RECHECK = 'completion-claim-recheck';
 
 /** Repo root: lib/harness/routines -> lib -> operator-core -> packages -> <repo root>. */
 function repoRoot(): string {
-  return path.resolve(dirname(fileURLToPath(import.meta.url)), '../../../../..');
+  // Not a fixed `../` climb: inside the host bundle that lands outside the checkout, and every
+  // cited source then reads as missing (P-016). See module-repo-root.ts.
+  return moduleRepoRoot(import.meta.url);
 }
 
 /**

@@ -7,29 +7,32 @@
  * `response=json` returns the immediate-use URL for the owned desktop shell
  * and a shareable start URL that mints fresh state when visited.
  *
+ * Managed connections (Google Workspace, Facebook, and every descriptor
+ * provider with `oauth`) resolve a ConnectionAdapter for the plugin; the
+ * adapter supplies the provider pairing, scope policy, source kinds and return
+ * path. This route holds no provider-name branch (P-003).
+ *
  * Ported from app/api/oauth/start/route.ts. `auth: 'public'` — the
  * caller is an un-authed browser starting an OAuth flow.
  */
 import { randomBytes } from 'node:crypto';
 import { getOrgPg } from '@papercusp/db-org';
-import { getProvider, loadAndRegisterProvidersFromDisk } from '../../../oauth/providers';
+import { loadAndRegisterProvidersFromDisk } from '../../../oauth/providers';
 import { signState } from '../../../oauth/state';
 import { getSessionUserOrDefault } from '../../../auth';
 import { activeWorkspaceId } from '../../../workspace-registry';
-import {
-  GOOGLE_WORKSPACE_OAUTH_PLUGIN,
-  GOOGLE_WORKSPACE_SOURCE_KINDS,
-  googleWorkspaceOAuthField,
-} from '../../../external-triggers/google-workspace';
 import { listOwnedExternalTriggerSources } from '../../../external-triggers/source-store';
 import {
-  FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN,
-  facebookPersonalVaultOAuthField,
-} from '../../../external-triggers/facebook';
+  connectionAdapterForPlugin,
+  connectionScopes,
+  resolveOAuthProvider,
+} from '../../../integrations/connection-lifecycle';
+import { ensureBuiltinConnectionAdapters } from '../../../integrations/builtin-connection-adapters';
 import { defineTool } from '@papercusp/agent-mcp';
 
 let providersLoaded = false;
 async function ensureProvidersLoaded(): Promise<void> {
+  ensureBuiltinConnectionAdapters();
   if (providersLoaded) return;
   await loadAndRegisterProvidersFromDisk();
   providersLoaded = true;
@@ -56,18 +59,16 @@ export default defineTool({
     if (responseMode !== 'redirect' && responseMode !== 'json') {
       return Response.json({ ok: false, error: 'response must be redirect or json' }, { status: 400 });
     }
-    const connectsGoogleWorkspace = providerId === 'google' && plugin === GOOGLE_WORKSPACE_OAUTH_PLUGIN;
-    const connectsFacebookPersonalVault = providerId === 'facebook' && plugin === FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN;
-    if (plugin === GOOGLE_WORKSPACE_OAUTH_PLUGIN && !connectsGoogleWorkspace) {
-      return Response.json({ ok: false, error: 'google-workspace plugin requires provider google' }, { status: 400 });
-    }
-    if (plugin === FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN && !connectsFacebookPersonalVault) {
+    // A managed-connection plugin is bound to exactly one OAuth provider; a
+    // mismatched pair would write a credential the lifecycle cannot read.
+    const adapter = connectionAdapterForPlugin(plugin);
+    if (adapter && adapter.oauthProviderId !== providerId) {
       return Response.json(
-        { ok: false, error: 'facebook-personal-vault plugin requires provider facebook' },
+        { ok: false, error: `${plugin} plugin requires provider ${adapter.oauthProviderId}` },
         { status: 400 },
       );
     }
-    const provider = getProvider(providerId);
+    const provider = await resolveOAuthProvider(providerId);
     if (!provider) {
       return Response.json({ ok: false, error: `unknown provider "${providerId}"` }, { status: 404 });
     }
@@ -86,29 +87,21 @@ export default defineTool({
         { status: 400 },
       );
     }
-    // The reserved Workspace connection backs Gmail, Calendar, and Contacts as
-    // one consent. A caller-supplied subset must not create source rows that look
-    // connected but cannot actually read one of those provider surfaces.
-    const scopes = connectsGoogleWorkspace
-      ? [...new Set([...(provider.defaultScopes ?? []), ...requestedScopes])]
-      : connectsFacebookPersonalVault
-        ? [...(provider.defaultScopes ?? [])]
-        : requestedScopes.length > 0
-          ? requestedScopes
-          : [...(provider.defaultScopes ?? [])];
-    if (connectsGoogleWorkspace && scopes.length === 0) {
-      return Response.json({ ok: false, error: 'google-workspace provider has no default scopes' }, { status: 500 });
-    }
-    if (connectsFacebookPersonalVault && scopes.length === 0) {
-      return Response.json(
-        { ok: false, error: 'facebook-personal-vault provider has no default scopes' },
-        { status: 500 },
-      );
+    // A managed connection requests what its adapter's scope policy says: a
+    // caller-supplied subset must not create source rows that look connected
+    // but cannot read one of the provider surfaces.
+    const scopes = adapter
+      ? connectionScopes(adapter, provider, requestedScopes)
+      : requestedScopes.length > 0
+        ? requestedScopes
+        : [...(provider.defaultScopes ?? [])];
+    if (adapter && scopes.length === 0) {
+      return Response.json({ ok: false, error: `${plugin} provider has no default scopes` }, { status: 500 });
     }
     const providerHost = new URL(provider.config.authorizeUrl).host;
     let field = requestedField;
     let privateContext: Record<string, string> = { ...((await provider.createFlowContext?.()) ?? {}) };
-    if (connectsGoogleWorkspace || connectsFacebookPersonalVault) {
+    if (adapter) {
       const owner = await getSessionUserOrDefault(req.headers);
       let reconnectProviderAccountId: string | undefined;
       let reconnectField: string | null = null;
@@ -116,44 +109,23 @@ export default defineTool({
         const owned = await listOwnedExternalTriggerSources(getOrgPg().sql, activeWorkspaceId(), owner.id);
         const accountSources = owned.filter(
           (source) =>
-            source.providerAccountId === requestedProviderAccountId &&
-            (connectsGoogleWorkspace
-              ? GOOGLE_WORKSPACE_SOURCE_KINDS.includes(
-                  source.kind as (typeof GOOGLE_WORKSPACE_SOURCE_KINDS)[number],
-                )
-              : source.kind === 'facebook'),
+            source.providerAccountId === requestedProviderAccountId && adapter.sourceKinds.includes(source.kind),
         );
         if (!accountSources.length) {
-          return Response.json(
-            {
-              ok: false,
-              error: connectsGoogleWorkspace
-                ? 'google_workspace_account_not_found'
-                : 'facebook_personal_vault_account_not_found',
-            },
-            { status: 404 },
-          );
+          return Response.json({ ok: false, error: `${adapter.errorPrefix}_account_not_found` }, { status: 404 });
         }
         reconnectProviderAccountId = requestedProviderAccountId;
         const credentialRef = accountSources.find((source) => source.credentialRef)?.credentialRef ?? null;
-        reconnectField = credentialRef
-          ? connectsGoogleWorkspace
-            ? googleWorkspaceOAuthField(credentialRef)
-            : facebookPersonalVaultOAuthField(credentialRef)
-          : null;
+        reconnectField = credentialRef ? adapter.oauthField(credentialRef) : null;
       }
       field = reconnectField ?? `owner-${owner.id}-${randomBytes(8).toString('hex')}`;
       privateContext = {
         ...privateContext,
         ownerUserId: owner.id,
         workspaceId: activeWorkspaceId(),
-        returnPath: '/settings/personal-vault',
+        returnPath: adapter.returnPath,
         ...(reconnectProviderAccountId ? { reconnectProviderAccountId } : {}),
-        ...(connectsGoogleWorkspace
-          ? {
-              requestedScopes: JSON.stringify(scopes),
-            }
-          : {}),
+        ...(adapter.recordRequestedScopes ? { requestedScopes: JSON.stringify(scopes) } : {}),
       };
     }
     if (responseMode === 'json') {

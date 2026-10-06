@@ -208,13 +208,19 @@ export function classifyInteractionMeasure(
  * after dispatch and were each reported UNMEASURABLE rather than as breaches.)
  */
 export interface AttemptTimeoutObservation {
+  /** Completed measures belonging to THIS gesture, re-read after wait expiry.
+   * A completion can consume the start between the wait and this observation. */
+  measureCount?: number;
+  /** The driver observed a start synchronously after THIS trigger. */
+  beginObserved?: boolean;
   /** Whether a `<name>:start` mark exists at the observation. */
   startMarkPresent: boolean;
   /** Age of the newest start mark, or null when absent. */
   startMarkAgeMs: number | null;
   /** The instrument's stale-start threshold (see InteractionMeasureObservation). */
   staleStartMs: number;
-  /** Phase names already marked for this interaction (e.g. `request-started`). */
+  /** Phase names attributed to THIS gesture (e.g. `request-started`), excluding
+   * previous attempts and unrelated starts. An unscoped phase list is not proof. */
   phasesSeen: readonly string[];
   /**
    * The phase that proves the attempt dispatched its timed work — after it, the
@@ -232,9 +238,11 @@ export interface AttemptTimeoutDiagnosis {
   /**
    * `slow` — the attempt is a real (breaching) sample and must be recorded, never
    * retried away. `void` — the attempt never exercised the timed path; trying
-   * another subject is correct.
+   * another subject is correct. `measured` retains a late completion's real
+   * duration. `inconclusive` means timing evidence was lost or consumed without
+   * an observed measure; fail the instrument rather than retry or invent a time.
    */
-  verdict: 'slow' | 'void';
+  verdict: 'slow' | 'void' | 'measured' | 'inconclusive';
   /** One line naming why. */
   reason: string;
 }
@@ -248,6 +256,8 @@ export function classifyAttemptTimeout(
   observation: AttemptTimeoutObservation,
 ): AttemptTimeoutDiagnosis {
   const {
+    measureCount = 0,
+    beginObserved = false,
     startMarkPresent,
     startMarkAgeMs,
     staleStartMs,
@@ -256,6 +266,12 @@ export function classifyAttemptTimeout(
     terminalPlaceholder,
   } = observation;
 
+  if (measureCount > 0) {
+    return {
+      verdict: 'measured',
+      reason: `${measureCount} measure(s) present at the diagnostic read — retain the completed duration even though the earlier wait expired`,
+    };
+  }
   if (terminalPlaceholder !== null && terminalPlaceholder.trim() !== '') {
     return {
       verdict: 'void',
@@ -263,9 +279,15 @@ export function classifyAttemptTimeout(
     };
   }
   if (!startMarkPresent || startMarkAgeMs === null) {
+    if (beginObserved || phasesSeen.length > 0) {
+      return {
+        verdict: 'inconclusive',
+        reason: 'this gesture has begin/phase evidence but no remaining start or completed measure — completion or cleanup was not observed; do not retry it away as void',
+      };
+    }
     return {
       verdict: 'void',
-      reason: 'no start mark exists, so this attempt never began timing',
+      reason: 'no current start, observed begin, phase or completed measure attributes timing to this attempt',
     };
   }
   if (startMarkAgeMs > staleStartMs) {

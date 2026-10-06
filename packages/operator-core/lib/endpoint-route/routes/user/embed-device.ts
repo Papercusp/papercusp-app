@@ -40,8 +40,10 @@ import {
 import { EMBED_SIDECAR_CAP_DEVICE_RELOAD } from '../../../memory/embed-sidecar-server';
 import { embedSidecarEnabled, embedSidecarLocalUrl, probeSidecarHealth } from '../../../memory/embed-sidecar-spawn';
 
-/** Which process embeds for this host. */
-export type EmbedDeviceHost = { kind: 'sidecar'; url: string } | { kind: 'in-process' };
+/** Which process embeds for this host. `sidecar-idle` (P-530): this Server
+ *  spawns its sidecar on demand and none is running now; the next one reads
+ *  the stored setting when it starts. */
+export type EmbedDeviceHost = { kind: 'sidecar'; url: string } | { kind: 'sidecar-idle' } | { kind: 'in-process' };
 
 /** What the embedding host reports about its device, or why it could not be read. */
 export type EmbedDeviceHostReport = {
@@ -88,7 +90,10 @@ export const EMBED_DEVICE_RELOAD_TIMEOUT_MS = 60_000;
 export function resolveEmbedDeviceHost(): EmbedDeviceHost {
   const explicit = resolveEmbedSidecarUrl();
   if (explicit) return { kind: 'sidecar', url: explicit.replace(/\/$/, '') };
-  if (embedSidecarEnabled()) return { kind: 'sidecar', url: embedSidecarLocalUrl() };
+  if (embedSidecarEnabled()) {
+    const url = embedSidecarLocalUrl();
+    return url ? { kind: 'sidecar', url } : { kind: 'sidecar-idle' };
+  }
   return { kind: 'in-process' };
 }
 
@@ -120,6 +125,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 
 async function readHostReport(deps: EmbedDeviceRouteDeps, host: EmbedDeviceHost): Promise<EmbedDeviceHostReport> {
   if (host.kind === 'in-process') return { health: deps.localHealth(), error: null, reloadSupported: null };
+  if (host.kind === 'sidecar-idle') return { health: null, error: null, reloadSupported: null };
   const body = await deps.probeSidecar(host.url);
   if (!isRecord(body)) {
     return { health: null, error: `The embedding sidecar at ${host.url} did not answer.`, reloadSupported: null };

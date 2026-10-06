@@ -56,5 +56,7 @@ export {
   generateSeedKey,
   sealBytes,
   openBytes,
+  sealFile,
+  openFile,
   keysEqual,
 } from './crypto';

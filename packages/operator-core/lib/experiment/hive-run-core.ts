@@ -108,13 +108,14 @@ export function hiveResultsToExperimentResult(
     const cells = resultsByArm.get(armId) ?? [];
     const scored = cells.filter((c) => c.status === 'scored' && c.score);
     const meanScore = scored.length ? scored.reduce((s, c) => s + (c.score?.composite ?? 0), 0) / scored.length : null;
-    const costUsd = cells.reduce((s, c) => s + (c.handle?.costUsd ?? 0) + (c.score?.costUsd ?? 0), 0);
-    return { id: armId, label, meanScore, cells: cells.length, scored: scored.length, costUsd };
+    const costUsd = cells.reduce((s, c) => s + (c.handle?.costUsd ?? 0) + c.judgeCostUsd, 0);
+    return { id: armId, label, meanScore, cells: cells.length, scored: scored.length, costUsd, costMeasured: cells.every((c) => c.judgeCostMeasured) };
   });
   const baseline = arms.find((a) => a.id === BASELINE_ID);
   const candidates = arms.filter((a) => a.id !== BASELINE_ID);
+  const costMeasured = arms.every((a) => a.costMeasured);
   let comparison: Omit<CompareSelectResult, 'scenarioId'> | null = null;
-  if (baseline && candidates.length > 0) {
+  if (costMeasured && baseline && candidates.length > 0) {
     const toArm = (a: ExperimentArmResult): CompareArm => ({
       variantId: a.id,
       metrics: { composite: a.meanScore ?? undefined },
@@ -139,11 +140,12 @@ export function hiveResultsToExperimentResult(
     comparison,
     winner: comparison?.selected ?? null,
     totalCostUsd: arms.reduce((s, a) => s + a.costUsd, 0),
+    costMeasured,
     budgetExhausted: false,
     scorecardScores: {
-      outcome: meanDimension('d1'),
-      efficiency: meanDimension('d2'),
-      speed: meanDimension('d3'),
+      outcome: costMeasured ? meanDimension('d1') : null,
+      efficiency: costMeasured ? meanDimension('d2') : null,
+      speed: costMeasured ? meanDimension('d3') : null,
     },
   };
 }
@@ -202,7 +204,7 @@ export async function hiveRunCore(
     maxDistillChars: request.maxDistillChars ?? DEFAULTS.maxDistillChars,
   };
   const results = await deps.runBattery<HiveScenarioCell, HiveRunHandle, HiveRunSignals, unknown>(
-    { cells, rubric: request.payload.rubric, maxDistillChars: opts.maxDistillChars },
+    { cells, rubric: request.payload.rubric, maxDistillChars: opts.maxDistillChars, stopOnUnmeasuredJudgeCost: true },
     {
       subject: hiveScenarioSubject(ctx.ports, opts),
       llmCall: ctx.llmCall,

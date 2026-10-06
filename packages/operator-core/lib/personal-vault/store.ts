@@ -138,7 +138,7 @@ async function mergePersonalIdentities(
      WHERE workspace_id = ${workspaceId} AND user_id = ${userId}
        AND identity_id = ANY(${duplicateIds}::uuid[])`;
   await sql`
-    UPDATE harness_shared.personal_documents d
+    UPDATE harness_shared.documents d
        SET participant_ids = ARRAY(
          SELECT DISTINCT CASE
            WHEN participant_id = ANY(${duplicateIds}::uuid[]) THEN ${targetId}::uuid
@@ -266,37 +266,38 @@ export async function upsertPersonalDocuments(
     const occurredAt = doc.occurredAt instanceof Date ? doc.occurredAt.toISOString() : doc.occurredAt ?? null;
     const metadata = JSON.stringify(doc.metadata ?? {});
     const rows = await sql<Array<{ id: string }>>`
-      INSERT INTO harness_shared.personal_documents
-        (workspace_id, user_id, source, source_id, provider_account_id, kind, external_id, occurred_at,
+      INSERT INTO harness_shared.documents
+        (workspace_id, user_id, source, source_id, provider_account_id, datatype_id, kind, external_id, occurred_at,
          participants, participant_ids, title, text, metadata, dedupe_key)
       VALUES
         (${workspaceId}, ${userId}, ${source}, ${sourceId}::uuid, ${providerAccountId},
-         ${doc.kind.trim()}, ${doc.externalId ?? null},
+         ${doc.datatypeId?.trim() || null}, ${doc.kind.trim()}, ${doc.externalId ?? null},
          ${occurredAt}, ${participants}, ${participantIds}, ${doc.title ?? ''}, ${doc.text ?? ''},
          ${metadata}::jsonb, ${dedupeKeyFor(doc)})
       ON CONFLICT (workspace_id, user_id, source, dedupe_key) DO UPDATE
         SET kind = EXCLUDED.kind,
-            source_id = COALESCE(EXCLUDED.source_id, personal_documents.source_id),
-            provider_account_id = COALESCE(EXCLUDED.provider_account_id, personal_documents.provider_account_id),
+            datatype_id = COALESCE(EXCLUDED.datatype_id, documents.datatype_id),
+            source_id = COALESCE(EXCLUDED.source_id, documents.source_id),
+            provider_account_id = COALESCE(EXCLUDED.provider_account_id, documents.provider_account_id),
             external_id = EXCLUDED.external_id,
-            occurred_at = COALESCE(EXCLUDED.occurred_at, personal_documents.occurred_at),
+            occurred_at = COALESCE(EXCLUDED.occurred_at, documents.occurred_at),
             participants = EXCLUDED.participants,
             participant_ids = EXCLUDED.participant_ids,
             title = EXCLUDED.title,
             text = EXCLUDED.text,
             metadata = EXCLUDED.metadata,
             embedding = CASE
-              WHEN personal_documents.title IS DISTINCT FROM EXCLUDED.title
-                OR personal_documents.text IS DISTINCT FROM EXCLUDED.text
-              THEN NULL ELSE personal_documents.embedding END,
+              WHEN documents.title IS DISTINCT FROM EXCLUDED.title
+                OR documents.text IS DISTINCT FROM EXCLUDED.text
+              THEN NULL ELSE documents.embedding END,
             embedding_mode = CASE
-              WHEN personal_documents.title IS DISTINCT FROM EXCLUDED.title
-                OR personal_documents.text IS DISTINCT FROM EXCLUDED.text
-              THEN NULL ELSE personal_documents.embedding_mode END,
+              WHEN documents.title IS DISTINCT FROM EXCLUDED.title
+                OR documents.text IS DISTINCT FROM EXCLUDED.text
+              THEN NULL ELSE documents.embedding_mode END,
             embedding_profile = CASE
-              WHEN personal_documents.title IS DISTINCT FROM EXCLUDED.title
-                OR personal_documents.text IS DISTINCT FROM EXCLUDED.text
-              THEN NULL ELSE personal_documents.embedding_profile END,
+              WHEN documents.title IS DISTINCT FROM EXCLUDED.title
+                OR documents.text IS DISTINCT FROM EXCLUDED.text
+              THEN NULL ELSE documents.embedding_profile END,
             updated_at = now()
       RETURNING id`;
     ids.push(rows[0]!.id);
@@ -435,13 +436,13 @@ export async function personalVaultStats(sql: Sql, workspaceId: string, userId: 
     }>>`
       SELECT source, source_id::text, provider_account_id,
              count(*)::int AS documents, max(occurred_at)::text AS newest_at
-        FROM harness_shared.personal_documents
+        FROM harness_shared.documents
        WHERE workspace_id = ${workspaceId} AND user_id = ${userId}
        GROUP BY source, source_id, provider_account_id
        ORDER BY source, provider_account_id NULLS FIRST, source_id NULLS FIRST`,
     sql<Array<{ count: number }>>`
       SELECT count(*)::int AS count
-        FROM harness_shared.personal_documents
+        FROM harness_shared.documents
        WHERE workspace_id = ${workspaceId} AND user_id = ${userId}
          AND embedding IS NULL`,
   ]);
@@ -461,7 +462,7 @@ export async function purgePersonalSource(
   const accountScoped = sourceId !== null || providerAccountId !== null;
   return sql.begin(async (tx) => {
     const docs = await tx<Array<{ id: string }>>`
-      DELETE FROM harness_shared.personal_documents
+      DELETE FROM harness_shared.documents
        WHERE workspace_id = ${workspaceId} AND user_id = ${userId}
          AND (${source}::text IS NULL OR source = ${source})
          AND (${sourceId}::uuid IS NULL OR source_id = ${sourceId}::uuid)
@@ -479,7 +480,7 @@ export async function purgePersonalSource(
          AND (
            (${!accountScoped} AND (${source}::text IS NULL OR source = ${source}))
            OR (${accountScoped} AND NOT EXISTS (
-             SELECT 1 FROM harness_shared.personal_documents document
+             SELECT 1 FROM harness_shared.documents document
               WHERE document.workspace_id = personal_identity_aliases.workspace_id
                 AND document.user_id = personal_identity_aliases.user_id
                 AND personal_identity_aliases.identity_id = ANY(document.participant_ids)
@@ -552,7 +553,7 @@ export async function searchPersonalDocuments(
   }>>`
     WITH filtered AS (
       SELECT d.*
-        FROM harness_shared.personal_documents d
+        FROM harness_shared.documents d
        WHERE d.workspace_id = ${workspaceId} AND d.user_id = ${userId}
          ${scopeFilter} ${sourceIdFilter} ${providerAccountFilter}
          ${participantFilter} ${fromFilter} ${toFilter}

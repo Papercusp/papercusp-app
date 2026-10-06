@@ -393,3 +393,100 @@ export async function readIssueOccurrenceCounts(
     writer: 'harness_shared.work_item_occurrences',
   };
 }
+
+export interface RecurringInstanceEvidenceRow {
+  id: string;
+  /** The canonical item's own harness (engineer_issues.base_harness_slug). */
+  harness: string;
+  /** Severity as the filer left it — only minor/nit rows are ever returned. */
+  severity: 'minor' | 'nit';
+  /** Ledger rows for this canonical item INSIDE the window (all report kinds). */
+  rows: number;
+  /** DISTINCT non-null reporters among those rows (a null reporter is not independent evidence). */
+  reporters: number;
+  firstAt: string;
+  lastAt: string;
+}
+
+export interface RecurringInstanceEvidenceArgs {
+  workspaceId: string;
+  windowDays: number;
+  minRows: number;
+  minReporters: number;
+  limit: number;
+  /** Body prefix of the audited proposal comment; an item already carrying one is excluded. */
+  proposedMarker: string;
+}
+
+/**
+ * Open, unassigned, minor/nit WORK items (observation lane excluded — D-005) whose OWN
+ * occurrence ledger shows sustained independent re-reporting inside a window: ≥`minRows`
+ * rows from ≥`minReporters` distinct reporters. This is the cross-instance view that the
+ * filer's n=1 severity never sees (EI-23768242440859949).
+ *
+ * The population is measured, not assumed: on 2026-10-01 the lifetime form of this gate
+ * passed ~90% of the 232 open minor/nit items and the 7-day form still passed ~105 of 233,
+ * so the caller MUST treat the result as a ranked, capped proposal slate — never a bulk
+ * apply. Ranking is reporters DESC, rows DESC, id; `limit` bounds the slate.
+ *
+ * The `NOT EXISTS` over the item's comment thread is what makes the proposal idempotent:
+ * once the marker comment lands the item drops out, so a re-run never re-posts.
+ */
+export async function readRecurringInstanceEvidence(
+  args: RecurringInstanceEvidenceArgs,
+  sqlOverride?: OrgSql,
+): Promise<RecurringInstanceEvidenceRow[]> {
+  const sql = sqlOverride ?? getOrgPg().sql;
+  const rows = await sql<Array<{
+    id: string;
+    harness: string;
+    severity: string;
+    rows: string | number;
+    reporters: string | number;
+    first_at: Date | string;
+    last_at: Date | string;
+  }>>`
+    WITH ev AS (
+      SELECT canonical_harness_slug AS harness,
+             canonical_work_item_id AS id,
+             count(*)                AS rows,
+             count(DISTINCT reporter) AS reporters,
+             min(occurred_at)        AS first_at,
+             max(occurred_at)        AS last_at
+        FROM harness_shared.work_item_occurrences
+       WHERE workspace_id = ${args.workspaceId}
+         AND occurred_at > now() - make_interval(days => ${args.windowDays}::int)
+       GROUP BY 1, 2
+      HAVING count(*) >= ${args.minRows}::int
+         AND count(DISTINCT reporter) >= ${args.minReporters}::int
+    )
+    SELECT ev.id, ev.harness, i.severity, ev.rows, ev.reporters, ev.first_at, ev.last_at
+      FROM ev
+      JOIN harness_shared.engineer_issues i
+        ON i.workspace_id = ${args.workspaceId}
+       AND i.issue_id = ev.id
+       AND i.base_harness_slug = ev.harness
+     WHERE i.state = 'open'
+       AND i.assignee IS NULL
+       AND i.lane IS DISTINCT FROM 'observation'
+       AND i.severity IN ('minor', 'nit')
+       AND NOT EXISTS (
+         SELECT 1
+           FROM harness_shared.coord_thread_posts p
+          WHERE p.workspace_id = ${args.workspaceId}
+            AND p.thread_id = 'issue-thread-' || ev.id
+            AND starts_with(p.body, ${args.proposedMarker})
+       )
+     ORDER BY ev.reporters DESC, ev.rows DESC, ev.id
+     LIMIT ${args.limit}::int
+  `;
+  return rows.map((r) => ({
+    id: r.id,
+    harness: r.harness,
+    severity: r.severity === 'nit' ? 'nit' : 'minor',
+    rows: Number(r.rows),
+    reporters: Number(r.reporters),
+    firstAt: new Date(r.first_at).toISOString(),
+    lastAt: new Date(r.last_at).toISOString(),
+  }));
+}

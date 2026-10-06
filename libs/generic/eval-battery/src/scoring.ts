@@ -13,6 +13,9 @@
  * the Apiary supplies its instance rubric — the engine only sees a `BatteryRubric`.
  */
 import { createHash } from 'node:crypto';
+import { captureSourceHash } from './source-identity';
+
+export const SCORING_SOURCE_HASH = captureSourceHash(import.meta.url);
 
 export interface DimensionWeights {
   d1: number;

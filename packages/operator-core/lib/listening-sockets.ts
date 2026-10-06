@@ -34,9 +34,8 @@
  * Never collapse the middle case into the third.
  */
 
-import { execFile } from 'node:child_process';
 import { readlinkSync } from 'node:fs';
-import { promisify } from 'node:util';
+import { execFileViaSidecar } from './fleet/git-via-sidecar';
 import { isReservedServicePort } from './reserved-service-ports';
 import {
   attributeSocket,
@@ -46,25 +45,6 @@ import {
   type SocketAttribution,
 } from './listening-socket-apps';
 
-// Lazily promisified (NOT `const execFileAsync = promisify(execFile)` at module
-// scope): this module is reachable via a transitive import chain from test files
-// that narrowly mock `node:child_process` for their own subprocess assertions —
-// under such a mock the `execFile` import binding resolves to `undefined`, and
-// eagerly calling `promisify(undefined)` at module-eval time throws for every such
-// suite, even ones that never call `listListeningSockets` (lint:no-eager-execfile-
-// promisify / EI-10161; same pattern as watchdog.ts's `execFileP`). Deferring the
-// promisify to first actual call means a transitive importer that never exercises
-// this function never pays the cost.
-type ExecFileAsync = (
-  file: string,
-  args: string[],
-  opts?: Record<string, unknown>,
-) => Promise<{ stdout: string; stderr: string }>;
-let cachedExecFileAsync: ExecFileAsync | null = null;
-function execFileAsync(file: string, args: string[], opts?: Record<string, unknown>): Promise<{ stdout: string; stderr: string }> {
-  if (!cachedExecFileAsync) cachedExecFileAsync = promisify(execFile) as unknown as ExecFileAsync;
-  return cachedExecFileAsync(file, args, opts);
-}
 
 /** Default cap on returned rows — this host has ~240 listening sockets. */
 export const LISTENING_SOCKETS_DEFAULT_LIMIT = 60;
@@ -316,7 +296,16 @@ export async function listListeningSockets(
 ): Promise<ListeningSocketsResult> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync('ss', [...SS_ARGV], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 }));
+    // Forked by the spawner sidecar where this host has one (WI-10005424): service-health
+    // probes call this from the bg-host main thread, where a local fork measured
+    // 128-256 ms at 8 GB RSS (2026-10-02 10:25Z). A sick sidecar falls back to a counted
+    // local fork, and the seam imports node:child_process lazily, so a test that mocks
+    // it narrowly still loads this module.
+    ({ stdout } = await execFileViaSidecar('ss', [...SS_ARGV], {
+      timeoutMs: 5000,
+      subsystem: 'listening-sockets',
+      maxBuffer: 4 * 1024 * 1024,
+    }));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     throw new ListeningSocketsError(

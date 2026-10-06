@@ -88,6 +88,7 @@ async function previewGitSync(repoDir: string): Promise<GitSyncPreview> {
       cwd: repoDir,
       timeout: HEAD_SHA_TIMEOUT_MS,
       maxBuffer: GIT_STATUS_MAX_BUFFER,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
     });
     const entries = stdout.split('\0').filter(Boolean);
     const dirtyPaths = entries.map((entry) => (entry.length >= 3 ? entry.slice(3) : entry));

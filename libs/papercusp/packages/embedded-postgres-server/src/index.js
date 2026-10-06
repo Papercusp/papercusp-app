@@ -639,6 +639,126 @@ export async function extractSeed(seedPath, dataDir) {
   }
 }
 
+// Pseudo-roles a GRANT/policy may name that are never real, creatable roles.
+const PSEUDO_ROLES = new Set(['public', 'current_user', 'current_role', 'session_user']);
+
+// The attributes a seed-referenced role is created with when the fresh cluster
+// lacks it: the most restrictive set (identical to migration 978's hosted_* roles).
+// A role that exists only to satisfy a restored GRANT or policy may hold nothing
+// else; the migration that owns the role re-stamps it on the delta pass.
+export const SEED_ROLE_ATTRIBUTES =
+  'NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS';
+
+function addRoleList(roles, list) {
+  let current = '';
+  let quoted = false;
+  const flush = () => {
+    const token = current.trim();
+    current = '';
+    if (!token) return;
+    const name = token.startsWith('"') && token.endsWith('"') && token.length >= 2
+      ? token.slice(1, -1).replace(/""/g, '"')
+      : token.replace(/^GROUP\s+/i, '').toLowerCase();
+    if (!name || PSEUDO_ROLES.has(name.toLowerCase()) || name.startsWith('pg_')) return;
+    roles.add(name);
+  };
+  for (let i = 0; i < list.length; i += 1) {
+    const ch = list[i];
+    if (ch === '"') {
+      if (quoted && list[i + 1] === '"') { current += '""'; i += 1; continue; }
+      quoted = !quoted;
+      current += ch;
+    } else if (ch === ',' && !quoted) {
+      flush();
+    } else {
+      current += ch;
+    }
+  }
+  flush();
+}
+
+/**
+ * Every role a logical seed's restore SQL grants to, revokes from, or names in a
+ * row-level-security policy. pg_dump never serializes roles (they are
+ * cluster-global), so a seed built on a cluster where a migration created a role
+ * (978 creates hosted_owner/hosted_app/hosted_service) carries GRANTs and policies
+ * naming a role the fresh install's cluster does not have, and `pg_restore
+ * --exit-on-error` then fails on the first one (WI-10004427). Reading the names
+ * out of the dump itself keeps this correct for any future role-creating migration.
+ *
+ * @param {string} restoreSql output of `pg_restore --schema-only --no-owner --file -`
+ * @returns {string[]} sorted, de-duplicated role names, excluding PUBLIC,
+ *          CURRENT_USER/CURRENT_ROLE/SESSION_USER and PostgreSQL's pg_* built-ins
+ */
+export function granteeRolesInRestoreSql(restoreSql) {
+  const roles = new Set();
+  for (const raw of String(restoreSql).split('\n')) {
+    const line = raw.trim();
+    let match;
+    if (/^ALTER DEFAULT PRIVILEGES\s/i.test(line)) {
+      const forRole = /\sFOR\s+(?:ROLE|USER)\s+(.+?)\s+(?:IN\s+SCHEMA|GRANT|REVOKE)\s/i.exec(line);
+      if (forRole) addRoleList(roles, forRole[1]);
+      const grantee = /\s(?:TO|FROM)\s+(.+?)(?:\s+WITH\s+GRANT\s+OPTION)?(?:\s+CASCADE|\s+RESTRICT)?;$/i.exec(line);
+      if (grantee) addRoleList(roles, grantee[1]);
+    } else if ((match = /^(?:GRANT|REVOKE)\s.*?\s(?:TO|FROM)\s+(.+?);$/i.exec(line))) {
+      addRoleList(
+        roles,
+        match[1]
+          .replace(/\s+GRANTED\s+BY\s+.*$/i, '')
+          .replace(/\s+WITH\s+(?:GRANT|ADMIN|INHERIT|SET)\s+OPTION.*$/i, '')
+          .replace(/\s+(?:CASCADE|RESTRICT)$/i, ''),
+      );
+    } else if (/^CREATE\s+POLICY\s/i.test(line)) {
+      const head = line.split(/\s(?:USING|WITH\s+CHECK)\s*\(/i)[0].replace(/;$/, '');
+      const to = /\sTO\s+(.+)$/i.exec(head);
+      if (to) addRoleList(roles, to[1]);
+    }
+  }
+  return [...roles].sort();
+}
+
+/**
+ * The roles a pg_dump custom archive references (see granteeRolesInRestoreSql).
+ * `pg_restore --file -` renders the archive's SQL without connecting to a server.
+ *
+ * @param {string} seedPath
+ * @param {{ pgRestoreBin?: string }} [opts]
+ * @returns {string[]}
+ */
+export function logicalSeedGranteeRoles(seedPath, {
+  pgRestoreBin = process.env.PAPERCUSP_PG_RESTORE_BIN ?? 'pg_restore',
+} = {}) {
+  const restoreSql = execFileSync(
+    pgRestoreBin,
+    ['--schema-only', '--no-owner', '--file', '-', seedPath],
+    { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  return granteeRolesInRestoreSql(restoreSql);
+}
+
+function quoteIdent(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+/**
+ * Create, with SEED_ROLE_ATTRIBUTES, every seed-referenced role the cluster lacks.
+ * Existing roles are left untouched.
+ *
+ * @param {import('postgres').Sql} sql a connection allowed to CREATE ROLE
+ * @param {string[]} roles
+ * @returns {Promise<string[]>} the roles this call created
+ */
+export async function createMissingSeedRoles(sql, roles) {
+  const created = [];
+  for (const role of roles) {
+    const [exists] = await sql`SELECT 1 FROM pg_roles WHERE rolname = ${role}`;
+    if (exists) continue;
+    await sql.unsafe(`CREATE ROLE ${quoteIdent(role)} ${SEED_ROLE_ATTRIBUTES}`);
+    created.push(role);
+  }
+  return created;
+}
+
 /**
  * Restore a pg_dump custom archive into an ALREADY-INITIALISED fresh cluster.
  * initdb must run before this helper: its per-cluster system_identifier is the
@@ -921,10 +1041,20 @@ export async function startEmbeddedPostgresServer(opts = {}) {
     if (logicalSeedPath) {
       try {
         log(`restoring logical seed ${logicalSeedPath} into unique per-install cluster`);
+        const pgRestoreBin = opts.pgRestoreBin ?? process.env.PAPERCUSP_PG_RESTORE_BIN ?? 'pg_restore';
+        // Roles are cluster-global, so the dump carries GRANTs/policies naming roles a
+        // migration created on the build cluster but this fresh cluster lacks (WI-10004427).
+        const createdRoles = await createMissingSeedRoles(
+          sql,
+          logicalSeedGranteeRoles(logicalSeedPath, { pgRestoreBin }),
+        );
+        if (createdRoles.length) {
+          log(`created ${createdRoles.length} seed-referenced role(s) before restore: ${createdRoles.join(', ')}`);
+        }
         restoreLogicalSeed(logicalSeedPath, {
           port,
           dbName,
-          pgRestoreBin: opts.pgRestoreBin ?? process.env.PAPERCUSP_PG_RESTORE_BIN ?? 'pg_restore',
+          pgRestoreBin,
           ownerSecret: secrets.owner,
         });
         log('logical seed restored — per-install system_identifier retained; applying migration delta');
@@ -1043,7 +1173,12 @@ export async function startEmbeddedPostgresServer(opts = {}) {
         log('postgres had already exited; nothing to stop');
         return;
       }
-      await pg.stop().catch((e) => log(`stop error: ${e?.message ?? e}`));
+      try {
+        await pg.stop();
+      } catch (error) {
+        log(`stop error: ${error?.message ?? error}`);
+        throw error;
+      }
     },
   };
 }

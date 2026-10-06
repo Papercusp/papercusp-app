@@ -289,15 +289,15 @@ export function specClauseContentHash(input: SpecClauseWrite): string {
 }
 
 /**
- * WI-10002889 (R-1) + WI-10003763: does this write differ from the stored prior revision ONLY in
- * acceptance provenance, i.e. `lifecycleStatus` and/or `acceptanceRef`? Neither is part of what a
- * proof measures (behavior, falsifier, layers, evidence, BAR pin), so proof bound to the prior
- * revision still proves this one. Both stay in the content hash on purpose (a promotion, or a
- * restored acceptance ref, must remain an auditable immutable revision), so re-hash THIS write
- * under the prior provenance and compare it with the prior revision's stored hash: equal means
- * nothing else moved. An omitted `sourceBar` rides the prior pin forward (see setSpecClause), so
- * that variant is tried too. A hash that differs for any other reason (a canonicalization change,
- * a real edit) answers false, which is the safe direction: proof is then re-run rather than carried.
+ * WI-10002889 (R-1) + WI-10003763: does this write differ from the stored prior revision only in
+ * acceptance provenance (`lifecycleStatus` and/or `acceptanceRef`), or in the rubric revision
+ * number on an otherwise identical BAR pin? Those values do not change what the existing proof
+ * measures (behavior, falsifier, layers, evidence, or BAR identity). They remain in the content
+ * hash so each promotion/reprojection is an auditable immutable revision, so re-hash THIS write
+ * under the prior provenance and compare it with the prior revision's stored hash. An omitted
+ * `sourceBar` rides the prior pin forward (see setSpecClause); an explicit pin may differ only in
+ * `rubricRevision` when every BAR identity field is unchanged. Any other difference answers false,
+ * which is the safe direction: proof is then re-run rather than carried.
  */
 export function differsOnlyInAcceptanceProvenance(
   input: SpecClauseWrite,
@@ -311,11 +311,22 @@ export function differsOnlyInAcceptanceProvenance(
     acceptanceRef: prior.acceptanceRef,
   };
   if (specClauseContentHash(asPrior) === priorContentHash) return true;
-  return (
-    input.sourceBar === undefined &&
-    priorBarPin !== null &&
-    specClauseContentHash({ ...asPrior, sourceBar: priorBarPin }) === priorContentHash
-  );
+  if (input.sourceBar === undefined && priorBarPin !== null) {
+    return specClauseContentHash({ ...asPrior, sourceBar: priorBarPin }) === priorContentHash;
+  }
+  if (input.sourceBar == null || priorBarPin === null) return false;
+
+  const sameBarIdentity =
+    input.sourceBar.barKey.trim() === priorBarPin.barKey &&
+    input.sourceBar.barHash.trim() === priorBarPin.barHash &&
+    input.sourceBar.barSetHash.trim() === priorBarPin.barSetHash &&
+    input.sourceBar.rubricSlug.trim() === priorBarPin.rubricSlug &&
+    input.sourceBar.evidencePlane === priorBarPin.evidencePlane;
+  return sameBarIdentity &&
+    specClauseContentHash({
+      ...asPrior,
+      sourceBar: { ...input.sourceBar, rubricRevision: priorBarPin.rubricRevision },
+    }) === priorContentHash;
 }
 
 interface IdentityRow {
@@ -526,8 +537,8 @@ export async function setSpecClause(
     }
 
     // WI-10002889 (R-1) + WI-10003763: the prior revision this write differs from ONLY in
-    // acceptance provenance (lifecycle and/or acceptanceRef), or null. The hash-equality return
-    // below guarantees SOMETHING moved, so no separate "lifecycle changed" test is needed.
+    // acceptance provenance and/or the rubric revision of an identical BAR pin, or null. The
+    // hash-equality return below guarantees SOMETHING moved, so no separate change test is needed.
     let provenanceOnlyFrom: number | null = null;
     if (identity) {
       const current = await tx<{ content_hash: string; lifecycle_status: SpecLifecycleStatus | null }[]>`
@@ -638,8 +649,9 @@ export async function setSpecClause(
          AND spec_id = ${input.specId}`;
 
     // WI-10002889 (R-1) + WI-10003763: a provenance-only revision (the D-019 draft->active
-    // promotion, or a restored acceptanceRef) keeps behavior, falsifier, layers and BAR pin
-    // byte-identical, so the proof bound to the prior revision still proves this one. Re-attach
+    // promotion, a restored acceptanceRef, or a rubric-only reprojection of an identical BAR)
+    // keeps behavior, falsifier, layers and BAR identity unchanged, so the proof bound to the
+    // prior revision still proves this one. Re-attach
     // every work-item bound at the prior revision to this one (the carry joins through that edge,
     // and the FK demands it), then carry its live bindings. Without this, every promotion
     // stranded all proof and forced a full re-proof.
@@ -738,6 +750,13 @@ interface RevisionRow {
 
 export interface ListSpecClausesOptions {
   harnessSlug?: string;
+  /**
+   * Pin the workspace. A caller that already resolved its subject plan row MUST pass
+   * that row's workspace: for the operator-home harness `resolvePlanScope` otherwise
+   * falls back to PAPERCUSP_WORKSPACE_ID, so a plan installed in any other workspace
+   * reads zero clauses and every BAR reports `bar_snapshot_mapping_missing` (WI-10005140).
+   */
+  workspaceId?: string;
   planSlug: string;
   specIds?: string[];
   sourceValIds?: string[];
@@ -751,7 +770,10 @@ export interface ListSpecClausesOptions {
 
 /** Exact structured read; current-only unless includeHistory or revision is requested. */
 export async function listSpecClauses(options: ListSpecClausesOptions): Promise<SpecClauseRevision[]> {
-  const scope = await resolvePlanScope({ harnessSlug: options.harnessSlug });
+  const scope = await resolvePlanScope({
+    harnessSlug: options.harnessSlug,
+    ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
+  });
   const specIds = options.specIds ?? [];
   const valIds = options.sourceValIds ?? [];
   const itemIds = options.planItemIds ?? [];

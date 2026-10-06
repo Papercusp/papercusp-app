@@ -36,7 +36,7 @@
  */
 import { egressEntries, type AccountEgress, type ClaudeAccount } from '../deployment/account-pool';
 import { parseUnifiedWindow, parseUnified7dWindow } from './gateway';
-import { withOAuthBeta } from './credential-store';
+import { claudeAttemptHeaders, claudeAuthModeForRef } from './credential-store';
 import { resolveAccountEgress } from './egress-dispatcher';
 import { parseCodexCliRef } from './codex-cli-bridge';
 import {
@@ -69,6 +69,7 @@ export interface CapacityWindows {
   windowResetAt?: number;
   utilization7d?: number;
   windowResetAt7d?: number;
+  usageCreditsAvailable?: boolean;
   /** Codex only: which METER the reading came from — `premium` (the meter the pool projection
    *  describes) or `base_model_inference` (the Luna reserve tier, a separate budget that must
    *  never be projected into the premium slots — EI-22103680502746318). Absent for Anthropic. */
@@ -131,6 +132,7 @@ export function storedWindows(a: ClaudeAccount): CapacityWindows {
     windowResetAt: r.windowResetAt,
     utilization7d: r.utilization7d,
     windowResetAt7d: r.windowResetAt7d,
+    ...(r.usageCreditsAvailable !== undefined ? { usageCreditsAvailable: r.usageCreditsAvailable } : {}),
   };
 }
 
@@ -313,12 +315,13 @@ export async function probeAccountCapacity(
         () => fetchImpl(`${UPSTREAM}/v1/messages`, {
           method: 'POST',
           signal: ac.signal,
-          headers: {
-            'content-type': 'application/json',
-            'anthropic-version': ANTHROPIC_VERSION,
-            'anthropic-beta': withOAuthBeta(null),
-            authorization: `Bearer ${token}`,
-          },
+          // P-006: an API-key account is probed with `x-api-key` and no OAuth beta; a Bearer
+          // probe would 401/400 and read as a dead account.
+          headers: claudeAttemptHeaders(
+            { 'content-type': 'application/json', 'anthropic-version': ANTHROPIC_VERSION },
+            claudeAuthModeForRef(account.credentialRef),
+            token,
+          ),
           body: JSON.stringify({
             model: CAPACITY_PROBE_MODEL,
             max_tokens: 1,
@@ -340,6 +343,8 @@ export async function probeAccountCapacity(
       });
       const windows = parseCapacityHeaders(h);
       const sawHeader = Object.keys(windows).length > 0;
+      // A real upstream quota refusal wins over a positive wallet balance.
+      if (res.status === 429) windows.usageCreditsAvailable = false;
       if (sawHeader) {
         return {
           ...base,

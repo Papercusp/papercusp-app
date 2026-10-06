@@ -1091,6 +1091,11 @@ export interface LoopStatus {
    *  interface): most rows genuinely have `last_withheld_at IS NULL`, so a required field would
    *  force every construction site to assert a value that does not exist. */
   lastWithheldAt?: string | null;
+  /** WI-10005352 — WHICH path withheld that fire (`autoloop_state.last_withheld_reason`):
+   *  `'fire-gate'` (backoff/circuit deny) or `'await-blocking'` (loop-fire's blocking-await
+   *  suppression, which has ALSO re-armed `next_fire_at` to the await's resume threshold).
+   *  Same optional-on-semantics reasoning as `lastWithheldAt`: null when nothing was withheld. */
+  lastWithheldReason?: string | null;
   /** EI-16210: the most recent `event_wake_deliveries` row recorded for THIS loop's own
    *  wake (`source = 'loop:<routineId>'`) — the actual delivery-ladder outcome behind a
    *  generic `lastDeliveryOutcome:'loop-stuck-backstop'`. Distinguishes "the wake was
@@ -1118,6 +1123,14 @@ export interface LoopStatus {
    *  it is the completion signal used by turnsStalled. Optional for legacy
    *  fixture compatibility; production status rows always populate it. */
   lastLoopTurnAt?: string | null;
+  /** EI-24933871787030971 — completion proof for the latest fire when its
+   *  delivery outcome was recorded as `loop-delivered-wake-no-loop-turn`.
+   *  Unlike lastLoopTurnAt, this is scoped to `routines.last_fired_at`, not
+   *  `metadata.armed_at`: a later loop:arm must not hide a delayed real turn
+   *  that completed after the failed fire. Null when that latest outcome is
+   *  not the no-turn failure, or when no matching loop-fire turn is proven.
+   */
+  lastFailedFireLoopTurnCompletedAt?: string | null;
   /** WI-6951: ISO of the most recent GENUINE turn completion — the lifecycle session-end
    *  marker deliberately EXCLUDED (EI-19316779460752535 widened the SOURCE from the
    *  journal alone to journal ∪ session_turns assistant turns, because the journal covers
@@ -1932,12 +1945,16 @@ function loopStatusFromRow(r: any, fallbackOwnerId: string): LoopStatus {
     lastDeliveryOutcome: r.last_delivery_outcome ?? null,
     consecutiveErrors: r.consecutive_errors == null ? 0 : Number(r.consecutive_errors),
     lastWithheldAt: r.last_withheld_at ? new Date(r.last_withheld_at).toISOString() : null,
+    lastWithheldReason: r.last_withheld_reason ?? null,
     lastWakeChannel: r.last_wake_channel ?? null,
     lastWakeStatus: r.last_wake_status ?? null,
     lastWakeAt: r.last_wake_at ? new Date(r.last_wake_at).toISOString() : null,
     lastWakeError: r.last_wake_error ?? null,
     lastTurnAt: r.last_turn_at ? new Date(r.last_turn_at).toISOString() : null,
     lastLoopTurnAt: r.last_loop_turn_at ? new Date(r.last_loop_turn_at).toISOString() : null,
+    lastFailedFireLoopTurnCompletedAt: r.last_failed_fire_loop_turn_completed_at
+      ? new Date(r.last_failed_fire_loop_turn_completed_at).toISOString()
+      : null,
     lastRealTurnAt: r.last_real_turn_at ? new Date(r.last_real_turn_at).toISOString() : null,
     turnsStalled,
     parkedForSec: parked && parkedMs != null ? Math.max(0, Math.round(parkedMs / 1000)) : null,
@@ -1990,6 +2007,7 @@ export async function getLoopStatuses(
            -- read it). Selected here because it is the ONLY signal that separates "the fire went
            -- out and reached nobody" from "the fire never went out" — see LoopStatus.lastWithheldAt.
            a.last_withheld_at    AS last_withheld_at,
+           a.last_withheld_reason AS last_withheld_reason,
            (SELECT max(ag.created_at) FROM harness_shared.agent_activity ag
              WHERE ag.owner_id = r.target_owner_id AND ag.kind = 'lifecycle'
                AND ag.summary = ${SESSION_END_MARKER} AND ag.created_at > r.last_fired_at) AS lifecycle_completed_at,
@@ -2120,6 +2138,42 @@ export async function getLoopStatuses(
                      (r.metadata->>'armed_at')::timestamptz,
                      '-infinity'::timestamptz
                    ))                                                    AS last_loop_turn_at,
+           -- EI-24933871787030971: lastLoopTurnAt is arm-scoped for turnsStalled, so a
+           -- re-arm after a delayed real loop turn hides the evidence needed to clear a
+           -- sticky last_status='loop-delivered-wake-no-loop-turn'. Keep a separate,
+           -- per-fire proof: only compute it while that is still the latest recorded outcome,
+           -- and only from loop-fire prompts strictly after this routine's latest fire.
+           -- This bounded owner+time lookup prevents a prior fire's assistant row from
+           -- repairing a newer failure; the status classifier also compares the returned
+           -- completion timestamp strictly against last_fired_at.
+           CASE WHEN a.last_status = 'loop-delivered-wake-no-loop-turn'
+                      AND r.last_fired_at IS NOT NULL
+                THEN (SELECT max((
+                  SELECT max(a2.ts)
+                    FROM harness_shared.session_turns a2
+                   WHERE a2.workspace_id = u.workspace_id
+                     AND a2.source_kind = u.source_kind
+                     AND a2.session_id = u.session_id
+                     AND a2.speaker = 'assistant'
+                     AND a2.ts > r.last_fired_at
+                     AND a2.turn_idx > u.turn_idx
+                     AND a2.turn_idx < COALESCE((
+                           SELECT min(u2.turn_idx)
+                             FROM harness_shared.session_turns u2
+                            WHERE u2.workspace_id = u.workspace_id
+                              AND u2.source_kind = u.source_kind
+                              AND u2.session_id = u.session_id
+                              AND u2.speaker = 'user'
+                              AND u2.turn_idx > u.turn_idx
+                         ), 2147483647)
+                ))
+                  FROM harness_shared.session_turns u
+                 WHERE u.owner = r.target_owner_id
+                   AND u.speaker = 'user'
+                   AND u.turn_origin = 'loop-fire'
+                   AND u.ts > r.last_fired_at)
+                ELSE NULL
+           END                                                               AS last_failed_fire_loop_turn_completed_at,
            -- EI-20217869515819188: compute the largest observed gap in this arm's
            -- wake-delivery history without fetching the whole event ledger into JS.
            -- COALESCE(delivered_at, created_at) matches lastWakeAt's existing

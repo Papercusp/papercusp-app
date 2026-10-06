@@ -84,6 +84,10 @@
   position: relative;
   flex: 1;
   min-height: 260px;
+  /* FitAddon sizes xterm to this box. Its resulting canvas must not become
+     the box's intrinsic size and trigger another larger fit every frame. */
+  contain: size;
+  overflow: hidden;
   padding: 8px;
   background: #101418;
 }

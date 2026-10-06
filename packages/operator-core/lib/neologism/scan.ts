@@ -28,6 +28,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import type { Sql } from 'postgres';
 import { ALL_FLAG_KEYS } from '@papercusp/flags';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
@@ -63,7 +64,7 @@ const NAMESPACE_TOOL_WINDOW_DAYS = 120;
 // packages/operator-core/lib/neologism → repo root. ESM-safe: bare
 // `__dirname` is UNDEFINED under tsx file-mode in this type:module package
 // (the 2026-06-12 DBOS stall) — never use __dirname in operator-core.
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url); // bundle-safe, unlike a fixed climb (P-016)
 const INSIGHTS_DIR = join(REPO_ROOT, 'apps/operator-docs/src/content/docs/agent-insights');
 
 export interface NeologismTickOptions extends NeologismFilingOptions {

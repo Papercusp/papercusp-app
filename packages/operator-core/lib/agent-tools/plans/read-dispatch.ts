@@ -17,6 +17,7 @@ import { handleHttpToolRequest, type HttpToolHostExtras } from '@papercusp/agent
 // including all plans:* tools. Same import the agent-tools catch-all uses.
 import '../index';
 import { PROJECTED_DEPS } from '../../projected-tool-deps';
+import { currentRequestWorkspaceId } from '../../workspace-als';
 
 const ADMIN_UI_CLIENT_ID = 'pc-admin-plans-ui';
 
@@ -86,12 +87,18 @@ export async function callPlansReadRaw(
   // needs-you / sidebar Inbox (WI-5078). A caller that wants a shaped read can
   // still pass its own payloadTier.
   if (b.payloadTier == null) b.payloadTier = 'full';
+  // Keep the nested tool context in the same workspace as its HTTP request.
+  // Otherwise superuser dispatch supplies '*': source reads may inherit ALS,
+  // but cachedRead keys that wildcard independently from the admin feed.
+  const workspaceId = currentRequestWorkspaceId()?.trim();
   const result = await handleHttpToolRequest(
     {
       method: 'POST',
       pathname: `/api/agent-tools/plans/${verb}`,
       searchParams: sp,
-      headers: {},
+      headers: workspaceId && workspaceId !== '*'
+        ? { 'x-papercusp-workspace': workspaceId }
+        : {},
       body: b,
     },
     HOST_EXTRAS,

@@ -17,6 +17,7 @@
  */
 
 import { join } from 'node:path';
+import { pinModuleState } from '@papercusp/module-singleton';
 import type { GitRunner, SubjectRef, FeatureCommitLookup } from './subject-ref';
 import { resolveAnchorPaths } from './subject-ref';
 
@@ -49,6 +50,102 @@ function collectNameOnly(stdout: string): string[] {
   }
   return [...files];
 }
+
+// ── Sticky-drift memo (WI-10006256) ──────────────────────────────────────────────
+// Drift against a FIXED baseline is monotone along history: if `B..H1` holds a
+// matching commit, `B..H2` holds it too for every descendant H2 of H1. The git-sync
+// sweep re-confirms every doc whose anchors the tick touched, and on a busy shared
+// tree that is mostly docs ALREADY drifted from a months-old baseline — each re-walk
+// cost 5-11 s of git CPU (measured ~0.8 core of the bg-host spawner sidecar). So a
+// POSITIVE (drifted) range result is remembered with the exact head it was evaluated
+// at, and reused only while that head is still an ancestor of the current HEAD (a
+// rewind or branch switch recomputes). Negative and error results are never cached:
+// they can change as HEAD advances. A baseline change is a different key. Trade-off:
+// a reused result keeps the changed-path list from when it was first computed.
+const DRIFT_MEMO_MAX = 4096;
+const driftMemo = pinModuleState('@papercusp/operator-core.harness-docs-drift-memo', () => ({
+  entries: new Map<string, { head: string; stdout: string }>(),
+}));
+
+/** Clear the sticky-drift memo — for tests only. */
+export function __clearDriftMemoForTests(): void {
+  driftMemo.entries.clear();
+}
+
+/**
+ * Run a drift `git log <base>..HEAD ...` (args[1] is the range), memoizing a result
+ * for which `isDrifted(stdout)` holds. The range is evaluated against the resolved
+ * HEAD sha, so the recorded head is exactly the tip the walk covered.
+ */
+async function runDriftRangeLog(
+  runGit: GitRunner,
+  args: string[],
+  cwd: string,
+  isDrifted: (stdout: string) => boolean,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const key = `${cwd}\0${args.join('\0')}`;
+  const hit = driftMemo.entries.get(key);
+  if (hit) {
+    const anc = await runGit(['merge-base', '--is-ancestor', hit.head, 'HEAD'], cwd);
+    if (anc.code === 0) {
+      driftMemo.entries.delete(key);
+      driftMemo.entries.set(key, hit); // LRU touch
+      return { code: 0, stdout: hit.stdout, stderr: '' };
+    }
+    driftMemo.entries.delete(key);
+  }
+  const range = args[1] ?? '';
+  const headRes = range.endsWith('..HEAD') ? await runGit(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], cwd) : null;
+  const head = headRes && headRes.code === 0 ? headRes.stdout.trim() : '';
+  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/i.test(head)) return runGit(args, cwd); // cannot pin: uncached
+  const pinned = [args[0], `${range.slice(0, -'HEAD'.length)}${head}`, ...args.slice(2)];
+  const res = await runGit(pinned, cwd);
+  if (res.code === 0 && isDrifted(res.stdout)) {
+    driftMemo.entries.set(key, { head, stdout: res.stdout });
+    if (driftMemo.entries.size > DRIFT_MEMO_MAX) {
+      const oldest = driftMemo.entries.keys().next().value;
+      if (oldest !== undefined) driftMemo.entries.delete(oldest);
+    }
+  }
+  return res;
+}
+
+/**
+ * Multi-path drift (WI-10006256). A `git log <base>..HEAD -- p1 p2 …` walk cannot use
+ * the commit-graph's changed-path Bloom filters (git 2.43 applies them to a SINGLE
+ * pathspec only), so on a ~34k-commit range it cost 6-14 s of CPU per doc, measured
+ * as the bulk of the spawner sidecar's drift CPU. Two cheaper steps give the same
+ * stale verdict:
+ *  1. Endpoint `git diff --name-only <base> HEAD -- paths` (milliseconds). Any path
+ *     that differs at the endpoints was touched by some commit in the range: stale.
+ *  2. Only when nothing differs (no change, or every change reverted) fall back to
+ *     one single-pathspec `git log` per path — Bloom-accelerated (~0.7 s vs 8.5 s for
+ *     two paths, measured) — so a touched-then-reverted path still counts as drift,
+ *     exactly as the old walk did.
+ * The changed-path list in step 1 can omit paths that were touched and reverted
+ * while another path really differs; it only feeds the human-readable reason.
+ */
+async function multiPathDrift(
+  runGit: GitRunner,
+  base: string,
+  rels: string[],
+  cwd: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const diff = await runGit(['diff', '--name-only', base, 'HEAD', '--', ...rels], cwd);
+  if (diff.code !== 0) return diff;
+  if (collectNameOnly(diff.stdout).length > 0) return diff;
+  const range = `${base}..HEAD`;
+  const out: string[] = [];
+  for (const rel of rels) {
+    const res = await runDriftRangeLog(runGit, ['log', range, '--name-only', '--format=%H', '--', rel], cwd, hasChangedName);
+    if (res.code !== 0) return res;
+    out.push(res.stdout);
+  }
+  return { code: 0, stdout: out.join('\n'), stderr: '' };
+}
+
+const hasCommitLine = (stdout: string): boolean => stdout.split('\n').some((l) => l.trim() !== '');
+const hasChangedName = (stdout: string): boolean => collectNameOnly(stdout).length > 0;
 
 /** Is `sha` a single concrete (non-glob) path? Then `--follow` is valid. */
 function isConcretePath(p: string): boolean {
@@ -200,14 +297,14 @@ export async function checkSubjectRefDrift(
     }
     const range = `${base}..HEAD`;
     // Precise: trace just the function's line range across history.
-    const lRes = await runGit(['log', range, '-L', `:${ref.name}:${file}`, '-s', '--format=%H'], cwd);
+    const lRes = await runDriftRangeLog(runGit, ['log', range, '-L', `:${ref.name}:${file}`, '-s', '--format=%H'], cwd, hasCommitLine);
     if (lRes.code === 0) {
       const commits = lRes.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
       return { stale: commits.length > 0, changedPaths: commits.length ? [ref.file] : [], method: 'symbol' };
     }
     // `-L` failed (file renamed/removed, or the symbol regex didn't match a
     // function in the current tree). Fall back to file-level drift with --follow.
-    const fRes = await runGit(['log', range, '--follow', '--name-only', '--format=%H', '--', file], cwd);
+    const fRes = await runDriftRangeLog(runGit, ['log', range, '--follow', '--name-only', '--format=%H', '--', file], cwd, hasChangedName);
     if (fRes.code !== 0) {
       return { stale: false, changedPaths: [], method: 'symbol-fallback', error: gitErr(fRes) };
     }
@@ -234,10 +331,9 @@ export async function checkSubjectRefDrift(
     const range = `${g.baseline}..HEAD`;
     // --follow is only valid for a single concrete file pathspec.
     const single = g.rels.length === 1 && isConcretePath(g.rels[0]);
-    const args = single
-      ? ['log', range, '--follow', '--name-only', '--format=%H', '--', g.rels[0]]
-      : ['log', range, '--name-only', '--format=%H', '--', ...g.rels];
-    const res = await runGit(args, g.cwd);
+    const res = single
+      ? await runDriftRangeLog(runGit, ['log', range, '--follow', '--name-only', '--format=%H', '--', g.rels[0]], g.cwd, hasChangedName)
+      : await multiPathDrift(runGit, g.baseline, g.rels, g.cwd);
     if (res.code !== 0) {
       firstErr ??= gitErr(res);
       continue;

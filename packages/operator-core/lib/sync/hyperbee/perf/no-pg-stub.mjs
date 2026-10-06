@@ -104,7 +104,6 @@ export const getOrgPg = stub('getOrgPg');
 export const getOrgPgListener = stub('getOrgPgListener');
 export const getOrgPgLosslessBigint = stub('getOrgPgLosslessBigint');
 export const GOAL_SPEND_SNAPSHOT_SOURCE = stub('GOAL_SPEND_SNAPSHOT_SOURCE');
-export const GOAL_SPEND_TICK_SOURCE = stub('GOAL_SPEND_TICK_SOURCE');
 export const goalSpend = stub('goalSpend');
 export const GoalSpend = stub('GoalSpend');
 export const goalsForPot = stub('goalsForPot');
@@ -126,10 +125,12 @@ export const orgPg = stub('orgPg');
 export const parseStoreIdentity = stub('parseStoreIdentity');
 export const PG_BIGINT_AS_NUMBER_TYPES = stub('PG_BIGINT_AS_NUMBER_TYPES');
 export const pgbouncerEnabled = stub('pgbouncerEnabled');
+export const pgDiagnosticIdentity = stub('pgDiagnosticIdentity');
 export const pinOrVerifyStoreIdentity = stub('pinOrVerifyStoreIdentity');
 export const poolIdleTimeoutSec = stub('poolIdleTimeoutSec');
 export const potsForGoal = stub('potsForGoal');
 export const recordEphemeralFire = stub('recordEphemeralFire');
+export const recordPgResult = stub('recordPgResult');
 export const restoreRawJsonbSerializer = stub('restoreRawJsonbSerializer');
 export const retryOnRetryableDbDeadline = stub('retryOnRetryableDbDeadline');
 export const RoutineRow = stub('RoutineRow');
@@ -203,6 +204,9 @@ export const setPgDiagnosticContextResolver = stub('setPgDiagnosticContextResolv
 // 2026-09-28: snapshot-read helper operator-core newly binds from @papercusp/db-org
 // (carry-note.integration.test.ts and friends).
 export const acquireSnapshot = stub('acquireSnapshot');
+// 2026-10-02: completed-query diagnostic row type operator-core newly names from
+// @papercusp/db-org (service-memory-attribution.integration.test.ts).
+export const PgResultDiagnostic = stub('PgResultDiagnostic');
 
 export default new Proxy(
   {},

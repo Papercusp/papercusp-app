@@ -127,6 +127,11 @@ export interface ReviseRecipeSourceInput {
   id: string;
   script: string;
   toolsUsed: string[];
+  /** Omit to preserve the current contract; supply both declarations to replace it atomically. */
+  contract?: {
+    bindingSchema: RecipeBindingSchemaV1 | null;
+    capabilityManifest: CapabilityManifestV1 | null;
+  };
   /** Compare-and-swap token read from the current row. */
   expectedUpdatedAt: string;
 }
@@ -314,9 +319,9 @@ export async function recordRecipeRun(sql: postgres.Sql, input: RecordRecipeRunI
  * compare-and-swap rail: a caller that inspected an older revision can never
  * overwrite a concurrent edit silently.
  *
- * The versioned binding/capability contract is deliberately preserved. This
- * operation is for source corrections whose runtime-input contract is unchanged;
- * capture/upsert remains the authoring path for a different contract.
+ * The versioned binding/capability contract is preserved when omitted, or
+ * replaced atomically when supplied. Both changes share the same updated_at
+ * compare-and-swap so source and runtime inputs cannot split across revisions.
  */
 export async function reviseRecipeSource(
   sql: postgres.Sql,
@@ -341,6 +346,12 @@ export async function reviseRecipeSource(
       UPDATE harness_shared.code_recipes
          SET script = ${input.script},
              tools_used = ${input.toolsUsed},
+             binding_schema = CASE WHEN ${input.contract !== undefined}
+               THEN ${input.contract?.bindingSchema == null ? null : JSON.stringify(input.contract.bindingSchema)}::jsonb
+               ELSE binding_schema END,
+             capability_manifest = CASE WHEN ${input.contract !== undefined}
+               THEN ${input.contract?.capabilityManifest == null ? null : JSON.stringify(input.contract.capabilityManifest)}::jsonb
+               ELSE capability_manifest END,
              updated_at = now()
        WHERE id = ${input.id}
       RETURNING ${SELECT_COLS(tx)}`;

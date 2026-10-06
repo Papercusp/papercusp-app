@@ -25,6 +25,7 @@ import {
   PAPERCUP_CHAT_MODEL_PIN,
   type AgentBackend,
 } from '../agent-config-constants';
+import type { AgentCredentialUnusableReason, AgentCredentialVerdict } from '../agent-auth-detect';
 import type { ChatModelFailure } from '../chat-model-failure';
 
 export type PapercupChatModelSource = 'env' | 'agent-config' | 'pin';
@@ -104,28 +105,47 @@ export interface PapercupChatFailover {
   cause: PapercupChatFailoverCause;
 }
 
+/**
+ * `failover`: retry on the paired alternate. `unavailable`: the alternate exists but its
+ * login is known dead, so a retry there cannot succeed either (WI-10004897).
+ */
+export type PapercupChatFailoverDecision =
+  | ({ kind: 'failover' } & PapercupChatFailover)
+  | ({ kind: 'unavailable'; credential: AgentCredentialUnusableReason } & PapercupChatFailover);
+
 function isFailoverCause(code: ChatModelFailure['code']): code is PapercupChatFailoverCause {
   return code === 'model_usage_limited' || code === 'model_auth_required';
 }
 
 /**
- * The model + backend the papercup role's RETRY runs on after an attempt that produced
- * nothing, or null to retry where it was (WI-10003608).
+ * What the papercup role's RETRY does after an attempt that produced nothing, or null to
+ * retry where it was (WI-10003608).
  *
  * Only a usage cap or a dead credential moves the retry: re-running the same backend
  * cannot succeed against either (a cap lifts in hours or days; a revoked login needs a
  * human). A transient rate limit or an unclassified failure keeps the existing
  * same-backend retry. `engine` is the backend that actually RAN (resolveBackend), not
  * the configured one, so an inherited backend fails over correctly too.
+ *
+ * WI-10004897: `credentialOf` judges the alternate's login before the retry is spent on
+ * it. On a hosted workspace host the alternate is often a copy whose refresh token was
+ * blanked (D-311) and whose access token has expired; failing over to it cost a second
+ * spawn and replaced the real reason (the cap) with a 401. Such an alternate yields
+ * `unavailable` with the credential reason, so the caller can stop and say both things.
+ * Without `credentialOf`, or when it cannot judge the backend (null), the failover runs.
  */
 export function papercupChatFailover(input: {
   engine: string | undefined;
   failure: ChatModelFailure | null;
-}): PapercupChatFailover | null {
+  credentialOf?: (backend: AgentBackend) => AgentCredentialVerdict | null;
+}): PapercupChatFailoverDecision | null {
   const code = input.failure?.code;
   if (!code || !isFailoverCause(code)) return null;
   if (!isAgentBackend(input.engine)) return null;
   const alternate = PAPERCUP_CHAT_FAILOVER[input.engine];
   if (!alternate || alternate.backend === input.engine) return null;
-  return { model: alternate.model, backend: alternate.backend, cause: code };
+  const target = { model: alternate.model, backend: alternate.backend, cause: code };
+  const verdict = input.credentialOf?.(alternate.backend) ?? null;
+  if (verdict && !verdict.usable) return { kind: 'unavailable', credential: verdict.reason, ...target };
+  return { kind: 'failover', ...target };
 }

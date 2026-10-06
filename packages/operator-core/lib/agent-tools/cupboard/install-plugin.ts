@@ -12,6 +12,7 @@
 import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { activeWorkspaceId } from '../../workspace-registry';
+import type { InstallPluginManifestReview } from '../../cupboard/install-plugin-core';
 
 const text = (payload: Record<string, unknown>) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
@@ -43,6 +44,17 @@ export default defineTool({
       .boolean()
       .optional()
       .describe("Grant the manifest's declared capabilities for `harness` at install (install-consent)."),
+    expectedReview: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe('Echo data.review from a provider_install_consent_required refusal (with acceptCapabilities).'),
+    triggerPackConfig: z
+      .object({
+        sourceMappings: z.record(z.string(), z.string().uuid()).optional(),
+        inputs: z.record(z.string(), z.unknown()).optional(),
+      })
+      .optional()
+      .describe('Trigger pack in `harness`: pack binding id → local source id, and pack inputs.'),
     workspace: z.string().max(120).optional(),
   }),
   async handler(args, ctx) {
@@ -72,10 +84,21 @@ export default defineTool({
       ...(args.listingRef ? { listingRef: args.listingRef } : {}),
       ...(args.harness ? { harness: args.harness } : {}),
       acceptCapabilities: args.acceptCapabilities === true,
+      ...(args.expectedReview
+        ? { expectedReview: args.expectedReview as unknown as InstallPluginManifestReview }
+        : {}),
+      ...(args.triggerPackConfig ? { triggerPackConfig: args.triggerPackConfig } : {}),
     });
 
     if (!outcome.ok) {
-      return text({ ok: false, error: outcome.error, detail: outcome.detail, status: outcome.status });
+      return text({
+        ok: false,
+        error: outcome.error,
+        detail: outcome.detail,
+        status: outcome.status,
+        ...(outcome.code ? { code: outcome.code } : {}),
+        ...(outcome.data ? { data: outcome.data } : {}),
+      });
     }
     const r = outcome.result;
     return text({
@@ -85,6 +108,7 @@ export default defineTool({
       kind: r.kind,
       installedTo: r.installedTo,
       granted: r.granted,
+      ...(r.triggerPackInstallation ? { triggerPackInstallation: r.triggerPackInstallation } : {}),
       ...(r.installableDependencies ? { installableDependencies: r.installableDependencies } : {}),
     });
   },

@@ -41,6 +41,12 @@ export function write(root: string, rel: string, body: string): void {
   writeFileSync(p, body);
 }
 
+/** Eligible runtime docs must survive both public and installer selection (D-009/D-012). */
+export const INTERNAL_DOC_CONTENTS = {
+  'apps/operator/public/internal/docs/runtime-guide.md': '# Runtime guide\nBuilt-in agent documentation.\n',
+  'apps/operator-docs/src/content/docs/agent-insights/runtime-guide.mdx': '# Agent guide\nBuilt-in product documentation.\n',
+};
+
 /** Paths the preview must ship (relative to the export root). */
 export const SHIPPED = [
   'package.json',
@@ -50,6 +56,7 @@ export const SHIPPED = [
   'apps/operator/src/index.ts',
   'packages/core/index.ts',
   'docs/architecture.md',
+  ...Object.keys(INTERNAL_DOC_CONTENTS),
   'libs/papercusp/package.json',
   'libs/papercusp/libs/db/sql/001-init.sql',
   'libs/papercusp/plugins/markdown-preview/papercusp.json', // a sibling plugin still ships
@@ -126,6 +133,7 @@ export function makeSuperproject(root: string): Superproject {
   write(repo, 'apps/operator/src/index.ts', 'export const x = 1;\n');
   write(repo, 'packages/core/index.ts', 'export const y = 2;\n');
   write(repo, 'docs/architecture.md', '# architecture\n');
+  for (const [path, body] of Object.entries(INTERNAL_DOC_CONTENTS)) write(repo, path, body);
   write(repo, 'apps/operator/.env', 'DATABASE_URL=postgres://local\n');
   write(repo, 'docs/plans/internal-plan.md', '# internal plan\n');
   write(repo, 'scratch/notes.md', 'scratch\n');

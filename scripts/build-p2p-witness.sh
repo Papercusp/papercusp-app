@@ -41,6 +41,7 @@ echo "→ bundling headless P2P witness"
   --minify-whitespace --minify-syntax \
   --outfile="$STAGE/serve.mjs" \
   --banner:js="$HOST_BANNER" \
+  "${HOST_BANNER_DEFINES[@]}" \
   --define:__PAPERCUSP_BUNDLED_SIDECAR__=true \
   "${HOST_EXTERNALS[@]}")
 

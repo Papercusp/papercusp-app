@@ -16,12 +16,27 @@ export const PORTFOLIO_FRONTIER_VERIFICATION_FLOOR = 3 as const;
 
 export type PortfolioFrontierPhase = 'grading' | 'outcome-verification' | 'drained';
 
+/**
+ * Verification slots ALWAYS left to the cursor round-robin when the slice has
+ * more than one slot. The stale tier below is least-recently-checked-first, so
+ * a row whose refresh never stamps `outcome_checked_at` would otherwise sit at
+ * the head of that tier on every wake; a permanent reserve means such poison
+ * rows can occupy at most `budget - 1` slots and the round-robin keeps moving.
+ */
+export const PORTFOLIO_FRONTIER_CURSOR_RESERVE = 1 as const;
+
 export interface PortfolioOutcomeCandidate {
   ideaId: string;
   origin: string;
   routedRef: string;
   routedAtMs: number;
   humanGrade: number | null;
+  /**
+   * Epoch ms of the last authoritative outcome verification
+   * (`outcome_checked_at`). `null` = never verified; `undefined` = the caller
+   * did not read it, so the staleness tier is skipped for this row.
+   */
+  outcomeCheckedAtMs?: number | null;
 }
 
 export interface PortfolioEvidenceSource {
@@ -49,7 +64,17 @@ export interface PortfolioFrontierCheckpoint {
 
 export interface PortfolioFrontierPlan {
   checkpoint: PortfolioFrontierCheckpoint;
+  /**
+   * Stale/never-verified rows first (`priorityCount` of them), then the
+   * cursor round-robin rows. Process in this order.
+   */
   selected: PortfolioOutcomeCandidate[];
+  /**
+   * How many LEADING entries of `selected` came from the staleness tier. They
+   * do not move the round-robin cursor, so a caller that rebases the cursor
+   * after a partial batch must only consider `selected.slice(priorityCount)`.
+   */
+  priorityCount: number;
 }
 
 const finiteNonNegative = (value: unknown, fallback: number): number => {
@@ -107,9 +132,35 @@ function comparePortfolioCandidates(a: PortfolioOutcomeCandidate, b: PortfolioOu
   return a.ideaId.localeCompare(b.ideaId);
 }
 
+/** True when this row is due for verification regardless of cursor position. */
+function isStalePortfolioCandidate(candidate: PortfolioOutcomeCandidate, staleBeforeMs: number): boolean {
+  const checkedAt = candidate.outcomeCheckedAtMs;
+  if (checkedAt === undefined) return false;
+  return checkedAt === null || checkedAt < staleBeforeMs;
+}
+
+/** Never-verified rows first, then least-recently-verified, then stable order. */
+function compareStalePortfolioCandidates(a: PortfolioOutcomeCandidate, b: PortfolioOutcomeCandidate): number {
+  const checkedA = a.outcomeCheckedAtMs ?? Number.NEGATIVE_INFINITY;
+  const checkedB = b.outcomeCheckedAtMs ?? Number.NEGATIVE_INFINITY;
+  if (checkedA !== checkedB) return checkedA - checkedB;
+  return comparePortfolioCandidates(a, b);
+}
+
 /**
  * Plan one bounded step. A non-empty grading frontier keeps priority, but
  * reserves a bounded outcome-verification slice so it cannot starve forever.
+ *
+ * WI-10005247: the slice is NOT a pure cursor round-robin. Two independent
+ * writers stamp `outcome_checked_at` — the frontier itself, and the Scout
+ * corpus refresh, which only covers origin=scout. A cursor that ignores the
+ * stamp spends its few reserved slots re-verifying rows another path just
+ * refreshed, while su-ideate rows (all graded, so they sort FIRST and are only
+ * reached once per full wrap, ~5 days at 3 slots/wake over ~1.5k rows) and
+ * brand-new routes (never verified) wait out the whole lap. When the caller
+ * passes `staleBeforeMs`, rows never verified or last verified before it are
+ * selected first, least-recently-verified first; the cursor round-robin
+ * fills the rest and always keeps `PORTFOLIO_FRONTIER_CURSOR_RESERVE` slot.
  */
 export function planPortfolioFrontierStep(args: {
   gradingBacklog: number;
@@ -118,6 +169,8 @@ export function planPortfolioFrontierStep(args: {
   itemBudget: number;
   timeBudgetMs: number;
   nowMs: number;
+  /** Rows with `outcomeCheckedAtMs` null or below this are due. Omit to disable the tier. */
+  staleBeforeMs?: number;
 }): PortfolioFrontierPlan {
   const itemBudget = Math.max(0, Math.floor(finiteNonNegative(args.itemBudget, 0)));
   const timeBudgetMs = Math.max(0, Math.floor(finiteNonNegative(args.timeBudgetMs, 0)));
@@ -152,11 +205,25 @@ export function planPortfolioFrontierStep(args: {
         evidenceSource: args.previous?.evidenceSource ?? null,
         updatedAt,
       },
+      priorityCount: 0,
     };
   }
 
-  const cursorIndex = previousCursor ? ordered.findIndex((candidate) => candidate.ideaId === previousCursor) : -1;
-  let start = cursorIndex >= 0 ? (cursorIndex + 1) % ordered.length : 0;
+  // Staleness tier. Leave the cursor its reserved slot(s) whenever it has rows
+  // to walk, so a row that never gets stamped cannot freeze the round-robin.
+  const stale =
+    args.staleBeforeMs === undefined
+      ? []
+      : ordered
+          .filter((candidate) => isStalePortfolioCandidate(candidate, args.staleBeforeMs as number))
+          .sort(compareStalePortfolioCandidates);
+  const cursorReserve = Math.min(PORTFOLIO_FRONTIER_CURSOR_RESERVE, Math.max(0, verificationBudget - 1));
+  const priority = stale.slice(0, Math.max(0, Math.min(stale.length, verificationBudget - cursorReserve)));
+  const priorityIds = new Set(priority.map((candidate) => candidate.ideaId));
+  const roundRobin = priority.length === 0 ? ordered : ordered.filter((candidate) => !priorityIds.has(candidate.ideaId));
+
+  const cursorIndex = previousCursor ? roundRobin.findIndex((candidate) => candidate.ideaId === previousCursor) : -1;
+  let start = cursorIndex >= 0 ? (cursorIndex + 1) % Math.max(1, roundRobin.length) : 0;
   if (
     cursorIndex < 0 &&
     previousCursor &&
@@ -169,18 +236,22 @@ export function planPortfolioFrontierStep(args: {
       routedAtMs: args.previous.cursorRoutedAtMs,
       humanGrade: args.previous.cursorGrade,
     };
-    const afterBoundary = ordered.findIndex((candidate) => comparePortfolioCandidates(candidate, boundary) > 0);
+    const afterBoundary = roundRobin.findIndex((candidate) => comparePortfolioCandidates(candidate, boundary) > 0);
     start = afterBoundary >= 0 ? afterBoundary : 0;
   }
-  const selected: PortfolioOutcomeCandidate[] = [];
-  const count = Math.min(verificationBudget, ordered.length);
+  const cursorSelected: PortfolioOutcomeCandidate[] = [];
+  const count = Math.min(verificationBudget - priority.length, roundRobin.length);
   for (let offset = 0; offset < count; offset += 1) {
-    selected.push(ordered[(start + offset) % ordered.length]!);
+    cursorSelected.push(roundRobin[(start + offset) % roundRobin.length]!);
   }
-  const lastSelected = selected.at(-1);
+  const selected = [...priority, ...cursorSelected];
+  // Only the round-robin rows move the cursor; a priority pick must not drag
+  // the lap position to wherever that stale row happens to sort.
+  const lastSelected = cursorSelected.at(-1);
 
   return {
     selected,
+    priorityCount: priority.length,
     checkpoint: {
       version: PORTFOLIO_FRONTIER_CHECKPOINT_VERSION,
       phase: 'outcome-verification',

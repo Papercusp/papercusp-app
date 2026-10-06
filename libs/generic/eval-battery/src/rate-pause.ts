@@ -2,14 +2,17 @@
  * Rate-limit pause+resume for the battery's unattended LLM calls (factored out of the
  * gym's `rate-pause.ts` into the shared eval-battery engine, reconciliation D-001).
  *
- * The battery (judge, the optimization loop's proposer + evaluator) must NEVER abort on
- * a single rate-limited turn. `runWithRatePause` wraps a call so a `rate_limited`/
- * `overloaded` failure with a NEAR reset is waited out and retried (unattended
- * pause+resume); a far-off reset (past `maxPauseMs`) or a non-rate error is rethrown for
- * the caller to record + skip and continue. Pure: clock + sleep are injected for the
- * fake-clock test.
+ * `runWithRatePause` waits out a NEAR reset and retries only a `rate_limited`/
+ * `overloaded` failure with complete, explicitly measured zero spend. Retrying a
+ * whole evaluation after paid or unmeasured work would replace its usage receipt
+ * with a later result. Those failures, far-off resets (past `maxPauseMs`) and
+ * non-rate errors propagate to the caller's accounting and skip policy. Pure:
+ * clock + sleep are injected for the fake-clock test.
  */
 import { rateLimitInfo } from '@papercusp/testing-shell/llm';
+import { captureSourceHash } from './source-identity';
+
+export const RATE_PAUSE_SOURCE_HASH = captureSourceHash(import.meta.url);
 
 export const BATTERY_MAX_RATE_PAUSE_MS = Number(process.env.BATTERY_MAX_RATE_PAUSE_MS ?? 30 * 60_000);
 export const BATTERY_RATE_PAUSE_RETRIES = Number(process.env.BATTERY_RATE_PAUSE_RETRIES ?? 3);
@@ -37,6 +40,14 @@ export async function runWithRatePause<T>(fn: () => Promise<T>, deps: RatePauseD
     } catch (err) {
       const rl = rateLimitInfo(err);
       if (!rl || attempt >= maxRetries) throw err;
+      const usage = err as { costUsd?: unknown; costUsdMeasurementMissing?: unknown; unreportedFrames?: unknown } | null;
+      const measuredZero = usage?.costUsd === 0 &&
+        (usage.costUsdMeasurementMissing === undefined || usage.costUsdMeasurementMissing === false) &&
+        (usage.unreportedFrames === undefined || usage.unreportedFrames === 0);
+      // Error classification/reset headers say when a retry can run, not whether
+      // the failed attempt spent anything. Preserve unsafe usage before emitting
+      // pause/reset hooks or sleeping; the enclosing reservation must see it.
+      if (!measuredZero) throw err;
       // Wait out the server's stated reset; bail (rethrow) if it's farther off than we'll wait.
       const waitMs = rl.retryAfterMs ?? (rl.resetAt !== undefined ? rl.resetAt - deps.now() : maxPauseMs);
       if (waitMs > maxPauseMs) throw err;

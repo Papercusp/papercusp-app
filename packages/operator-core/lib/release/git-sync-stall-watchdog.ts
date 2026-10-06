@@ -44,6 +44,7 @@ import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-reg
 import { broadcastSevereEvent, broadcastSevereEventResolvedMany } from '../severe-event-broadcast';
 import { readRoutineEngineLiveness } from './routine-engine-liveness';
 import type { IneligibleReason } from '../harness/git-sync/git-sync-eligibility';
+import { isLocalDiskFullError, localDiskFullClause } from '../harness/git-sync/git-fetch-headroom-refusal';
 
 /** Tree HEAD unchanged this long while the routine is active ⇒ commits aren't landing.
  *  EI-7531: the papercusp tree stranded 2622 dirty paths for 10.5h while git-sync looked
@@ -181,6 +182,14 @@ const ERROR_CONTEXT_MAX_CHARS = 600;
  * final non-empty line.
  */
 function gitSyncErrorHeadline(raw: string): string | null {
+  // WI-10004397: a disk-full refusal sits behind git-sync's ~110-char generic fetch prefix, so a
+  // head-of-line cut dropped the only actionable words. Lead with the disk clause itself.
+  const diskFull = localDiskFullClause(raw);
+  if (diskFull) {
+    return diskFull.length <= ERROR_HEADLINE_MAX_CHARS
+      ? diskFull
+      : `${diskFull.slice(0, ERROR_HEADLINE_MAX_CHARS - 1)}…`;
+  }
   const lines = raw
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -248,6 +257,22 @@ export function gitSyncStallDiagnosis(
   installSlug: string,
 ): { summary: string; title: string; why: string } {
   const cause = verdict.errorHeadline ? ` Cause: ${verdict.errorHeadline}` : '';
+  // WI-10004397: a full local disk strands commits too, but the engine is healthy. Naming the
+  // executor reaper here (as the generic stranding text does) sent readers after a wedge that
+  // did not exist while every superproject commit on the box was refused for want of space.
+  if (isStrandingVerdict(verdict) && isLocalDiskFullError(verdict.errorHeadline)) {
+    return {
+      summary: `git-sync STALLED on ${installSlug} — LOCAL DISK FULL: fetches are refused below the headroom reserve, so nothing commits and code is stranding.${cause}`,
+      title: 'git-sync STALLED — local disk below the fetch-headroom reserve',
+      why:
+        `Why it matters: a deploy ships only COMMITTED HEAD, and git-sync will not fetch or commit ` +
+        `while the filesystem named in the cause is at or under its critical write reserve. The ` +
+        `root cause is DISK SPACE, not the engine, the network or credentials: a restart, a lock ` +
+        `or a rescue-commit will not help. Free space on that filesystem (find the GROWER, not just ` +
+        `the biggest stock); git-sync resumes on its own at the next tick once free space clears ` +
+        `the reserve.`,
+    };
+  }
   if (isStrandingVerdict(verdict)) {
     return {
       summary: `git-sync STALLED on ${installSlug} — firing but NOT committing; code is stranding uncommitted + un-deployable.${cause}`,

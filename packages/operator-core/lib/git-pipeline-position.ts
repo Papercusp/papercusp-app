@@ -53,6 +53,7 @@ import {
   type PathContainment,
 } from './candidate-contains';
 import { cellUnknown, formatCellUnknown, type CellUnknown } from './cell-contract';
+import { gitRefContains } from './git-ref-contains';
 import { describeRefusal, refuseAnswer, type RefusedAnswer } from './field-reliability';
 import {
   describeRefireBudget,
@@ -98,8 +99,12 @@ import {
   resolveServingRuntimes,
   selectServingRuntimes,
   servingRuntimesLead,
+  type ServingRuntimeBundleState,
   type ServingRuntimeEntry,
 } from './serving-runtimes';
+
+import { createCache } from '@papercusp/cache';
+import { pinModuleState } from '@papercusp/module-singleton';
 
 const pexec = promisify(execFile);
 
@@ -119,6 +124,9 @@ export function gitPipelinePositionSidecarEnabled(env: NodeJS.ProcessEnv = proce
 
 export const realGit: GitRunner = async (repo, args) => {
   const argv = ['-C', repo, ...args];
+  const env = args[0] === 'status'
+    ? { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+    : process.env;
   // EI-22737582656157929: a decisive bg-host CPU profile attributed 23.9% of real sampled CPU
   // to this runner's native spawn calls. Reuse the existing small-process git sidecar rather
   // than forking from the multi-GB bg host. A real non-zero git result remains a fail-soft null;
@@ -130,7 +138,7 @@ export const realGit: GitRunner = async (repo, args) => {
         argv,
         process.cwd(),
         GIT_PIPELINE_POSITION_SUBPROCESS_TIMEOUT_MS,
-        process.env,
+        env,
       );
       return result.code === 0 ? result.stdout.trim() : null;
     } catch (error) {
@@ -141,6 +149,7 @@ export const realGit: GitRunner = async (repo, args) => {
     const { stdout } = await pexec('git', argv, {
       maxBuffer: 16 * 1024 * 1024,
       timeout: GIT_PIPELINE_POSITION_SUBPROCESS_TIMEOUT_MS,
+      ...(args[0] === 'status' ? { env } : {}),
     });
     return stdout.trim();
   } catch {
@@ -148,21 +157,81 @@ export const realGit: GitRunner = async (repo, args) => {
   }
 };
 
+/**
+ * EI-24040329952723202 — TOTAL wall-clock budget for the git reads of ONE `gitPipelinePosition`
+ * call. The per-subprocess cap above bounds each read, but one call issues ~40 of them in
+ * sequential waves, so 5s x N has no upper bound: the invocation ledger showed a p95 of 17.8s
+ * and a 67.5s outlier against the 60s MCP abort. Past this budget further reads are NOT
+ * spawned; they resolve null, exactly as a wedged git already does, so each leg degrades to
+ * UNKNOWN through the existing fail-soft paths. Keep it well under the MCP deadline INCLUDING
+ * one in-flight subprocess ({@link GIT_PIPELINE_POSITION_SUBPROCESS_TIMEOUT_MS}) and the non-git legs.
+ */
+export const GIT_PIPELINE_POSITION_TOTAL_BUDGET_MS = 35_000;
+
+export interface GitReadBudgetOptions {
+  budgetMs?: number;
+  /** Injectable clock (tests). */
+  now?: () => number;
+  /** Fired ONCE, on the first read refused for budget. */
+  onExhausted?: () => void;
+}
+
+export interface GitReadBudgetStats {
+  requested: number;
+  spawned: number;
+  /** Reads answered from an identical in-flight/settled read of THIS call. */
+  deduped: number;
+  /** Reads refused because the total budget was spent. */
+  refused: number;
+}
+
+/**
+ * Per-call wrapper over a {@link GitRunner}: (1) identical reads (same repo + argv) share ONE
+ * subprocess — a measured call ran `log -1 HEAD -- <path>` 5x concurrently, each ~3.3s under
+ * contention, so the duplicates were pure amplification; (2) once the total budget is spent,
+ * later reads resolve null without spawning. Safe ONLY for read-only git, which is all this
+ * module runs. The memo is scoped to the wrapper, so it never outlives one call and a caller
+ * that wants a fresh read simply makes a fresh call.
+ */
+export function withGitReadBudget(
+  base: GitRunner,
+  opts: GitReadBudgetOptions = {},
+): { git: GitRunner; stats: GitReadBudgetStats } {
+  const budgetMs = opts.budgetMs ?? GIT_PIPELINE_POSITION_TOTAL_BUDGET_MS;
+  const now = opts.now ?? Date.now;
+  const startedAt = now();
+  const memo = new Map<string, Promise<string | null>>();
+  const stats: GitReadBudgetStats = { requested: 0, spawned: 0, deduped: 0, refused: 0 };
+  const git: GitRunner = (repo, args) => {
+    stats.requested += 1;
+    const key = `${repo}\u0000${args.join('\u0000')}`;
+    const hit = memo.get(key);
+    if (hit) {
+      stats.deduped += 1;
+      return hit;
+    }
+    if (now() - startedAt >= budgetMs) {
+      if (stats.refused === 0) opts.onExhausted?.();
+      stats.refused += 1;
+      return Promise.resolve(null);
+    }
+    stats.spawned += 1;
+    const pending = base(repo, args);
+    memo.set(key, pending);
+    return pending;
+  };
+  return { git, stats };
+}
+
 /** Is `sha` an ancestor-or-equal of `ref` (i.e. does ref's history contain it)? */
 async function refContains(git: GitRunner, repo: string, ref: string, sha: string): Promise<boolean | null> {
-  // `${ref}..${sha}` = commits reachable from sha but NOT from ref. Zero of them
-  // means ref's history already contains sha (sha is an ancestor-or-equal of ref).
-  // rev-list prints a count on success, so this works through the plain GitRunner —
-  // unlike `merge-base --is-ancestor`, whose 0/1 exit a stdout-only runner swallows.
-  const contained = await git(repo, ['rev-list', '--count', `${ref}..${sha}`]);
-  // D-038 axis 2 — NEVER derive a verdict from an absence. GitRunner returns null
-  // on ANY failure, and the old `return contained === '0'` turned that into
-  // `false`: byte-IDENTICAL to the honest "this ref genuinely does not contain the
-  // commit". So a failed git read reported "your change has not reached this
-  // stage", and an agent waits for a stage it already passed. Exactly the
-  // `systemctl is-active` phantom-unit shape, in the pipeline's headline leg.
-  if (contained === null) return null;
-  return contained === '0';
+  // Ancestor-or-equal via `merge-base` (git-ref-contains.ts): the earlier
+  // `rev-list --count ${ref}..${sha}` read miscounted whenever `ref` headed a run of
+  // repair-queue admission commits (dated 2000-01-01), so every path read
+  // `inMain:false, deployed:false` on a release that contained it.
+  // D-038 axis 2 — NEVER derive a verdict from an absence: a failed read stays null,
+  // never `false`, or an agent waits for a stage it already passed.
+  return gitRefContains((args) => git(repo, args), ref, sha);
 }
 
 /**
@@ -547,21 +616,6 @@ const RUNTIME_OWNERS: RuntimeOwnerEntry[] = [
           'This package is ALSO called directly by operator-served surfaces: the `backup:*` MCP tools (agent-tools/backup/*.ts), the `/api/backups/*` HTTP routes, and boot-time migration guards (db-boot-migrate.ts / db:migrate). For THOSE consumers the ordinary staging→green-gate→deploy pipeline is the activation path (or dev:restart { target: "staging", confirm: true } to exercise it now on :3170).',
       },
     ],
-  },
-  // EI-21458114771988888: Google Pub/Sub provisioning/pull/ack helpers are
-  // imported only by the `google-gmail-poll` system action below the routine
-  // boundary. The action is dispatched by routinesTick in bg-host, so this
-  // dependency must receive the same activation verdict even though it lives
-  // under external-triggers rather than harness/routines.
-  {
-    match: /^packages\/operator-core\/lib\/external-triggers\/google-pubsub\.ts$/,
-    own: {
-      host: 'bg-host',
-      releasePipelineApplies: false,
-      restartTarget: 'bg-host',
-      activation:
-        'Google Pub/Sub Gmail polling imports this module from the `google-gmail-poll` system action, dispatched by routinesTick only when PAPERCUSP_BACKGROUND_WORKERS=1 (bg-host). It loads on RESTART: dev:restart { target: "bg-host", confirm: true }. A deploy does not carry it.',
-    },
   },
   // EI-22090053297465523: fleet-transition-sweep-action.ts dynamically imports
   // this helper from a registered system action. It is therefore executed by
@@ -3623,6 +3677,72 @@ export function mainBufferIsStale(
 }
 
 /**
+ * WI-10006493: the last git-sync pass's deliberate deferral of the queried path, if any.
+ *
+ * git-sync defers a dirty path for three reasons: a live edit lock (`owner` + `intent`), a
+ * migration whose number reservation was refused (`migration-reservation`), or a superproject
+ * path held back with such a migration by the dependency fence (`migration-dependency-fence`).
+ * In all three a forced sync defers the path again, so `git-sync:run` is not a lever. The
+ * returned `lever` names what actually unblocks the path, and deliberately does NOT contain
+ * the `git-sync:run` token, because callers copy the lever verbatim.
+ *
+ * `skippedPaths` entries are repo-relative within their `scope` (a submodule path, or
+ * `superproject`); the queried path is superproject-relative, so the two are joined first.
+ * Pure: matches against the snapshot the resolver already read.
+ */
+export function gitSyncDeferralFor(
+  path: string | null,
+  gitSync: Pick<GitSyncLegs, 'skippedPaths' | 'syncAgeMs'>,
+): { reason: 'edit-lock' | 'migration-reservation' | 'migration-dependency-fence'; detail: string; lever: string } | null {
+  if (!path) return null;
+  const want = path.replace(/^\.\//, '');
+  const entry = (gitSync.skippedPaths ?? []).find((s) => {
+    const full = !s.scope || s.scope === 'superproject' ? s.path : `${s.scope}/${s.path}`;
+    return full === want;
+  });
+  if (!entry) return null;
+  const when =
+    gitSync.syncAgeMs === null || gitSync.syncAgeMs === undefined
+      ? 'The last git-sync pass'
+      : `The last git-sync pass (~${Math.max(0, Math.round(gitSync.syncAgeMs / 60_000))} min ago)`;
+  const listOr = (xs: readonly string[] | undefined, none: string): string =>
+    xs && xs.length > 0 ? xs.join(', ') : none;
+
+  if ('owner' in entry) {
+    return {
+      reason: 'edit-lock',
+      detail:
+        `${when} deferred this path because a live edit lock covers it (held by ${entry.owner}: "${entry.intent}"). ` +
+        'git-sync excludes locked paths from every commit, so forcing git-sync:run skips it again until the lock is released or expires.',
+      lever: `release the edit lock on this path (held by ${entry.owner}) — check locks:queue first: if it is already released, the next sweep commits the path`,
+    };
+  }
+  if (entry.reason === 'migration-reservation') {
+    return {
+      reason: 'migration-reservation',
+      detail:
+        `${when} deferred this migration because its number reservation was refused: ${entry.detail}. ` +
+        'git-sync re-checks the reservation on every pass, so forcing git-sync:run defers it again until the reservation is valid.',
+      lever:
+        'reserve a migration number with node scripts/next-migration.mjs --name <slug> --intent "..." and rename this file to the printed path; it commits on the next sweep after that',
+    };
+  }
+  const migrations = listOr(entry.blockingMigrations, 'an unidentified migration');
+  const authors = listOr(entry.blockingAgents, 'unattributed');
+  const workItems = listOr(entry.blockingWorkItems, 'none recorded');
+  return {
+    reason: 'migration-dependency-fence',
+    detail:
+      `${when} held this path behind the migration dependency fence: ${entry.detail}. ` +
+      `Blocking migration(s): ${migrations}; author(s): ${authors}; work-item(s): ${workItems}. ` +
+      'The fence holds the path for as long as that migration\'s reservation is refused, so forcing git-sync:run defers it again.',
+    lever:
+      `unblock the migration first — ${migrations} (author: ${authors}; work-item: ${workItems}) needs a valid reservation ` +
+      '(node scripts/next-migration.mjs, then rename it); this path commits with it on the next sweep after that',
+  };
+}
+
+/**
  * Derive the stage table from state the caller ALREADY computed — this function
  * makes no git calls and adds no measurement, so it is pure and unit-testable.
  * P-002/P-003/P-004 replace the `unknown` healths with real signals.
@@ -3646,6 +3766,11 @@ export function computeStages(
      * The resolver always passes it; a caller that omits it has no failed legs to report.
      */
     positionsUnknown?: readonly string[];
+    /**
+     * WI-10006493: the queried path, read only to match it against the last git-sync pass's
+     * `skippedPaths`. The resolver always passes it; a caller that omits it gets no deferral match.
+     */
+    input?: { path: string | null };
   },
   /**
    * WI-6525: set when there is genuinely nothing to measure a position for — no
@@ -3711,6 +3836,10 @@ export function computeStages(
   // EI-24049239243821100: an unreadable working tree cannot put this stage behind us —
   // "committed" is exactly the question the failed `git status` could not answer.
   const workingTreeUnknown = !p.dirtyUncommitted && (p.positionsUnknown?.includes('workingTree') ?? false);
+  // WI-10006493: git-sync:run is only the lever when a sync CAN commit this path. When the last
+  // pass deliberately deferred it (a migration guard, or a live edit lock), forcing another pass
+  // defers it again, so the blocker and its owner are named instead.
+  const deferral = p.dirtyUncommitted ? gitSyncDeferralFor(p.input?.path ?? null, p.gitSync) : null;
   stages.push({
     name: 'committed',
     plane: 'delivery',
@@ -3722,13 +3851,17 @@ export function computeStages(
         : targetUnresolvedDetail
           ? 'stalled'
           : 'advancing',
-    detail: p.dirtyUncommitted
+    detail: deferral
+      ? deferral.detail
+      : p.dirtyUncommitted
       ? 'Uncommitted edits in the working tree. The release gate checks out a COMMITTED candidate and cannot see the tree, so this change is invisible to it until git-sync commits. Force it now: git-sync:run.' +
         (sweep.detail ? ` ${sweep.detail}` : '')
       : workingTreeUnknown
         ? 'The working-tree status read failed, so whether this path has uncommitted edits is unknown. Treat nothing past this stage as proof the edit on disk is live.'
         : targetUnresolvedDetail,
-    lever: p.dirtyUncommitted
+    lever: deferral
+      ? deferral.lever
+      : p.dirtyUncommitted
       ? multiFileSweep
         ? `git-sync:run (commit the working tree — the gate cannot see it) — ⚠ this sweeps ALL ${sweep.dirtyPathCount} dirty paths in the tree, not just yours; only fire it once the set is complete`
         : 'git-sync:run (commit the working tree — the gate cannot see it)'
@@ -4433,6 +4566,8 @@ export function resolveEditTreeRoot(integrationRoot: string, env: NodeJS.Process
 
 export interface PipelinePositionDeps {
   git?: GitRunner;
+  /** EI-24040329952723202: override the per-call git read budget / clock. TESTS only — the default is the real budget. */
+  gitReadBudget?: Pick<GitReadBudgetOptions, 'budgetMs' | 'now'>;
   /** EI-24049239243821100: the edit-tree resolution; defaults to {@link resolveEditTreeRoot}. */
   resolveEditTreeRoot?: (integrationRoot: string) => string;
   loadDeploy?: () => Promise<DevDeployState>;
@@ -4458,6 +4593,8 @@ export interface PipelinePositionDeps {
   localRuntimeHost?: string;
   /** P-001 (acceptance-runtime-plane): per-port `/api/health` sha for servingRuntimes. */
   probeHealthSha?: (port: number) => Promise<string | null>;
+  /** WI-10005936: a bundling host's `/api/health` report of the bundle it booted. */
+  probeHealthBundle?: (port: number) => Promise<ServingRuntimeBundleState | null>;
   /** P-001: `/proc/<pid>/cgroup`, to join a unit's child process to its runtime-vintage row. */
   readCgroup?: (pid: number) => Promise<string | null>;
   /** P-001: live psu sessions (each loaded psu-pty-host.mjs at its own launch). */
@@ -4872,30 +5009,35 @@ export function mapCheckpointRunInFlight(
 export const realResolveGateCandidates = async (root: string): Promise<GateCandidates> => {
   try {
     const { checkActiveCheckpointRun, currentCheckpointCandidate } = await import('./release-checkpoint-launch');
-    const { spawnSync } = await import('node:child_process');
-    const execFn = (cmd: string, args: string[]) => {
-      const r = spawnSync(cmd, args, {
-        encoding: 'utf8',
-        timeout: GIT_PIPELINE_POSITION_SUBPROCESS_TIMEOUT_MS,
-      });
-      return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-    };
-    const active = checkActiveCheckpointRun(root, execFn);
-    // checkActiveCheckpointRun ALREADY resolves the quiet-cut candidate internally (it
-    // spreads `...current` into its result) whenever a run is active — only pay for the
-    // second resolution when it did not, or this hot path (CLAUDE.md points agents here
-    // for "is my edit live") runs the same 4-5 git reads twice per call.
-    const nextCandidateSha =
-      active.current_candidate !== undefined
-        ? active.current_candidate
-        : currentCheckpointCandidate(root, execFn).current_candidate;
-    return {
-      // Only a genuinely ACTIVE run has a judging sha. `current_candidate` describes a
-      // HYPOTHETICAL fresh launch and must never be reported as "what is being judged"
-      // (EI-18695275971973546 cost a wrong fleet-wide broadcast to that exact conflation).
-      judgingSha: active.active ? (active.candidate ?? null) : null,
-      nextCandidateSha,
-    };
+    const { runSyncWithAsyncExec, execFileResultShared } = await import('./sync-exec-replay');
+    // WI-10005261: these probes are sync and exec-injected. A spawnSync exec here blocked the
+    // operator main thread (98.6% of a measured sentinel stall), so they run under
+    // record/replay: every git/systemctl call goes through async execFile, and the final pass
+    // is a faithful re-execution against the fetched results.
+    const { value } = await runSyncWithAsyncExec(
+      (execFn) => {
+        const active = checkActiveCheckpointRun(root, execFn);
+        // checkActiveCheckpointRun ALREADY resolves the quiet-cut candidate internally (it
+        // spreads `...current` into its result) whenever a run is active — only pay for the
+        // second resolution when it did not, or this hot path (CLAUDE.md points agents here
+        // for "is my edit live") runs the same 4-5 git reads twice per call.
+        const nextCandidateSha =
+          active.current_candidate !== undefined
+            ? active.current_candidate
+            : currentCheckpointCandidate(root, execFn).current_candidate;
+        return {
+          // Only a genuinely ACTIVE run has a judging sha. `current_candidate` describes a
+          // HYPOTHETICAL fresh launch and must never be reported as "what is being judged"
+          // (EI-18695275971973546 cost a wrong fleet-wide broadcast to that exact conflation).
+          judgingSha: active.active ? (active.candidate ?? null) : null,
+          nextCandidateSha,
+        };
+      },
+      // EI-24852529885337741: concurrent callers repeat these exact git reads in ~1 s bursts;
+      // the shared memo gives each argv one child per 2 s.
+      (cmd, args) => execFileResultShared(cmd, args, { timeout: GIT_PIPELINE_POSITION_SUBPROCESS_TIMEOUT_MS }),
+    );
+    return value;
   } catch {
     return { judgingSha: null, nextCandidateSha: null };
   }
@@ -4913,12 +5055,54 @@ const realReadDeployInFlight = (): Promise<DeployInFlight> => readDeployInFlight
 // codeAsOfMs` more likely TRUE. This detector exists to refuse exactly that
 // unearned YES, so the derivation is a fallback for hosts without /proc, never a
 // preference. Preference order + rationale live on the helper.
-const realProbeUnitStart = async (unit: string): Promise<{ pid: number | null; startedAtMs: number | null } | null> =>
+const probeUnitStartUncached = async (unit: string): Promise<{ pid: number | null; startedAtMs: number | null } | null> =>
   // EI-24356772206513832: this diagnostic already keeps its release Git reads
   // local. A failed spawner-sidecar startup otherwise adds its 10s timeout to
   // the systemd probe before it falls back to the same local command. Several
   // unit probes share this read, so use the bounded local exec path directly.
   resolveServiceStartMs(await probeServiceStart(unit, (command, args, options) => pexec(command, args, options)), Date.now());
+
+/**
+ * jev-memory-timeouts-to-zero-2026-10-01 D-001: ONE unit-start probe per unit per
+ * {@link UNIT_START_PROBE_TTL_MS}, shared by every concurrent caller.
+ *
+ * One `gitPipelinePosition({ path })` probes the serving unit, every
+ * GENERATION_HOSTS unit, and the serving-runtime census, and
+ * `deploymentPositionForEvidence` runs up to 12 paths in parallel. Unmemoized,
+ * that was ~10 local forks per path (systemctl + ps per unit). Each fork froze a
+ * 1.5-4 GB operator's event loop for 16-55 ms (bpftrace 2026-10-01: 30 systemctl
+ * + 30 ps in 30 s on :3170, 6.0 s of a 60 s window frozen in one :3070 worker).
+ * Soft TTL = hard TTL, so an expired entry is re-probed BLOCKING and is never
+ * served stale. Within the 2 s window a just-restarted unit can still read its
+ * previous start, which errs toward "not yet running your code", the
+ * conservative direction for this detector. Null results are cached too
+ * (`cacheEmpty`), so an unreadable systemd is not re-forked per path.
+ */
+export const UNIT_START_PROBE_TTL_MS = 2_000;
+
+const unitStartProbe = pinModuleState('@papercusp/operator-core.git-pipeline-position.unit-start-probe', () => ({
+  cache: createCache(),
+}));
+
+/** Memoized unit-start probe; `uncached` is injectable for tests. */
+export function probeUnitStartShared(
+  unit: string,
+  uncached: (unit: string) => Promise<{ pid: number | null; startedAtMs: number | null } | null> = probeUnitStartUncached,
+): Promise<{ pid: number | null; startedAtMs: number | null } | null> {
+  return unitStartProbe.cache.getOrSet('host-local', `unit-start:${unit}`, () => uncached(unit), {
+    softTtlMs: UNIT_START_PROBE_TTL_MS,
+    hardTtlMs: UNIT_START_PROBE_TTL_MS,
+    cacheEmpty: true,
+  });
+}
+
+const realProbeUnitStart = (unit: string): Promise<{ pid: number | null; startedAtMs: number | null } | null> =>
+  probeUnitStartShared(unit);
+
+/** Test-only: drop memoized unit-start probes. */
+export function resetUnitStartProbeCacheForTest(): void {
+  unitStartProbe.cache = createCache();
+}
 
 /**
  * WI-2141731 — the release operator's own `/api/health` origin.
@@ -5375,7 +5559,7 @@ export async function gitPipelinePosition(
   inp: PipelinePositionInput,
   deps: PipelinePositionDeps = {},
 ): Promise<PipelinePosition> {
-  const git = deps.git ?? realGit;
+  const baseGit = deps.git ?? realGit;
   // This is a read-only diagnostic hot path.  Do not lazily boot or queue behind
   // the host spawner sidecar while resolving the release refs: when the checkpoint
   // gate is already stalled, that IPC hop can hold the whole pipeline-position read
@@ -5387,6 +5571,16 @@ export async function gitPipelinePosition(
     deps.loadSnapshot ?? (() => gitPipelineSnapshot(undefined, { useSpawnerSidecar: false }));
 
   const notes: string[] = [];
+  // EI-24040329952723202: ONE de-duplicating, budgeted git runner for this whole call — identical
+  // reads share a subprocess and, once the total budget is spent, later reads resolve null (UNKNOWN).
+  const gitBudgetMs = deps.gitReadBudget?.budgetMs ?? GIT_PIPELINE_POSITION_TOTAL_BUDGET_MS;
+  const { git } = withGitReadBudget(baseGit, {
+    ...deps.gitReadBudget,
+    onExhausted: () =>
+      notes.push(
+        `Git read budget (${Math.round(gitBudgetMs / 1000)}s) was spent mid-read: later git reads were NOT run, so the legs that needed them read UNKNOWN (never "not contained"). Re-call when the host is less contended.`,
+      ),
+  });
   // EI-21544761852770720: these are independent read-only snapshots, but this hot
   // path historically awaited them in series.  On a busy host each can take
   // several seconds, leaving `state:read` with almost no margin under its 10s
@@ -6519,6 +6713,7 @@ export async function gitPipelinePosition(
     servingRuntimes = await resolveServingRuntimes(selectServingRuntimes(servingPath, runtimes), {
       probeUnitStart: probeUnit,
       probeHealthSha: deps.probeHealthSha,
+      probeHealthBundle: deps.probeHealthBundle,
       vintageRows,
       localHost: deps.localRuntimeHost ?? hostname(),
       readCgroup: deps.readCgroup,

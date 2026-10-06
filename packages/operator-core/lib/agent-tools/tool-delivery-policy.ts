@@ -288,3 +288,127 @@ export function explainToolDelivery(input: ResolveToolDeliveryInput): ToolDelive
 export function resolveToolDelivery(input: ResolveToolDeliveryInput): Map<string, DeliveryTier> {
   return explainToolDelivery(input).tiers;
 }
+
+// ── FLOOR HEADROOM — the edit-time signal for the floor mandate (WI-10004590) ───
+//
+// Step 1 above seats every floor at COMPACT whether or not it fits, so the only
+// budget a floor-tool author can overrun is the floors' OWN total. When the floors
+// spend nearly the whole budget (8 B of headroom measured 2026-10-01) the next
+// description edit to ANY floor tool tips `budgetOverrun` positive, and the one
+// assertion that notices (`psu-launcher.test.ts`, `budgetOverrun` toBe(0) off the
+// generated artifact) fires only at gate time. This is the pure measurement behind
+// the line `npm run tool-weight -- <tool>` and `gen-tool-delivery --report` print,
+// so an author sees the remaining bytes BEFORE the gate does.
+
+/**
+ * Below this many bytes of floor headroom the signal reads LOW. It is the stated
+ * margin of WI-10004590: one ordinary single-sentence growth of a floor tool's
+ * summary or schema prose is larger than this, so anything under it means the next
+ * routine edit overruns. ADVISORY — only an actual overrun is a gate failure.
+ */
+export const FLOOR_HEADROOM_MARGIN_BYTES = 64;
+
+export interface FloorHeadroom {
+  budgetBytes: number;
+  floorCount: number;
+  /** Σ compact wire bytes of every floor seat. */
+  floorBytes: number;
+  /** `budgetBytes − floorBytes`; NEGATIVE means the floors alone overrun the budget. */
+  headroomBytes: number;
+  marginBytes: number;
+  /** `overrun` ⇔ `headroomBytes < 0` ⇔ `budgetOverrun > 0`; `low` ⇔ under the margin. */
+  status: 'ok' | 'low' | 'overrun';
+}
+
+/**
+ * How many more bytes the floor tools can collectively grow before the floor
+ * mandate overruns the budget. Pure: takes the budget and the floors' compact
+ * costs, so the SAME function serves the live resolution (`decisions` of kind
+ * `floor`) and the committed artifact (rows whose name is in `floors`).
+ */
+export function floorHeadroom(
+  budgetBytes: number,
+  floorCompactBytes: Iterable<number>,
+  marginBytes: number = FLOOR_HEADROOM_MARGIN_BYTES,
+): FloorHeadroom {
+  let floorBytes = 0;
+  let floorCount = 0;
+  for (const bytes of floorCompactBytes) {
+    floorBytes += bytes;
+    floorCount += 1;
+  }
+  const headroomBytes = budgetBytes - floorBytes;
+  const status = headroomBytes < 0 ? 'overrun' : headroomBytes < marginBytes ? 'low' : 'ok';
+  return { budgetBytes, floorCount, floorBytes, headroomBytes, marginBytes, status };
+}
+
+/** {@link floorHeadroom} of a live resolution — its floor SEATS, not its filler spend. */
+export function floorHeadroomOf(
+  resolution: Pick<ToolDeliveryResolution, 'budgetBytes' | 'decisions'>,
+  marginBytes: number = FLOOR_HEADROOM_MARGIN_BYTES,
+): FloorHeadroom {
+  return floorHeadroom(
+    resolution.budgetBytes,
+    resolution.decisions.filter((d) => d.kind === 'floor').map((d) => d.cost),
+    marginBytes,
+  );
+}
+
+/**
+ * One human line, shared by every surface that prints the signal so the wording
+ * (and the lever) cannot diverge between `tool-weight` and `--report`.
+ */
+export function describeFloorHeadroom(h: FloorHeadroom): string {
+  const spend = `${h.floorCount} floor tools seat ${h.floorBytes} B at compact`;
+  if (h.status === 'overrun') {
+    return (
+      `floor headroom: OVERRUN by ${-h.headroomBytes} B of ${h.budgetBytes} (${spend}) — ` +
+      'the floors alone exceed the tool-delivery budget; psu-launcher.test.ts budgetOverrun fails. ' +
+      'Cut a floor tool’s summary/schema prose, or raise the budget deliberately'
+    );
+  }
+  if (h.status === 'low') {
+    return (
+      `floor headroom: LOW ${h.headroomBytes} B of ${h.budgetBytes} (${spend}; margin ${h.marginBytes} B) — ` +
+      `growing any floor tool’s description or schema by more than ${h.headroomBytes} B overruns the budget ` +
+      'and breaks psu-launcher.test.ts at gate time'
+    );
+  }
+  return `floor headroom: OK ${h.headroomBytes} B of ${h.budgetBytes} (${spend})`;
+}
+
+/** What delivery decided for ONE tool — the per-tool half of the edit-time signal. */
+export interface ToolDeliveryDetail {
+  tier: DeliveryTier;
+  isFloor: boolean;
+  compactBytes: number;
+  fullBytes: number;
+}
+
+/** The whole signal: the catalog-wide headroom plus each tool's own delivery detail. */
+export interface DeliverySummary {
+  headroom: FloorHeadroom;
+  tools: Map<string, ToolDeliveryDetail>;
+}
+
+/**
+ * {@link explainToolDelivery} reduced to the edit-time signal. A thin view, never a
+ * second resolution: the headroom is read off the same floor seats the generator
+ * commits, so this and the artifact cannot disagree.
+ */
+export function summarizeDelivery(input: ResolveToolDeliveryInput): DeliverySummary {
+  const resolution = explainToolDelivery(input);
+  // Read from the resolution's own floor seats, never by re-iterating `input.floors`:
+  // it is an `Iterable`, so a one-shot generator would already be spent by now.
+  const floorSet = new Set(resolution.decisions.filter((d) => d.kind === 'floor').map((d) => d.name));
+  const tools = new Map<string, ToolDeliveryDetail>();
+  for (const entry of input.catalog) {
+    tools.set(entry.name, {
+      tier: resolution.tiers.get(entry.name) ?? 'deferred',
+      isFloor: floorSet.has(entry.name),
+      compactBytes: entry.compactBytes,
+      fullBytes: entry.fullBytes,
+    });
+  }
+  return { headroom: floorHeadroomOf(resolution), tools };
+}

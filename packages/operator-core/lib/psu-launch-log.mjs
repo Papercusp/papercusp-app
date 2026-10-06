@@ -42,18 +42,8 @@
  * unique per launch, so each launch owns its own file and no launch can ever
  * read another's diagnostic.
  */
-import {
-  closeSync,
-  existsSync,
-  fstatSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  readSync,
-  rmSync,
-  statSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { open, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 
@@ -136,22 +126,32 @@ function headlessLaunchLogPath(terminalBin) {
   return file;
 }
 
-/** Read at most `bytes` from the END of a file. Never throws. */
-function readFileTailBytes(file, bytes) {
-  let fd = null;
+/**
+ * Read at most `bytes` from the END of a file. Never throws.
+ *
+ * ASYNC on purpose (EI-24748208098755918). The roster rebuild calls this once
+ * per starting launch on every poll, from the operator's main thread. The sync
+ * form held the event loop for the whole disk latency: one saturation profile
+ * (2026-10-01 22:41Z, ~/.papercusp/loop-profiles, pid 2848507) attributed
+ * 790 ms of a 3 s window to this `readSync`. Under the fleet's I/O load a cold
+ * fleet-log page is not a microsecond read, and every request queued behind it,
+ * including the Jev memory reads whose 400 ms budget then lapsed.
+ */
+async function readFileTailBytesAsync(file, bytes) {
+  let handle = null;
   try {
-    fd = openSync(file, 'r');
-    const size = fstatSync(fd).size;
+    handle = await open(file, 'r');
+    const { size } = await handle.stat();
     const length = Math.min(size, Math.max(1, bytes));
     const buffer = Buffer.alloc(length);
-    const read = readSync(fd, buffer, 0, length, Math.max(0, size - length));
-    return buffer.subarray(0, read).toString('utf8');
+    const { bytesRead } = await handle.read(buffer, 0, length, Math.max(0, size - length));
+    return buffer.subarray(0, bytesRead).toString('utf8');
   } catch {
     return null;
   } finally {
-    if (fd != null) {
+    if (handle != null) {
       try {
-        closeSync(fd);
+        await handle.close();
       } catch {
         // best-effort display-path diagnostic
       }
@@ -193,14 +193,17 @@ export function detectPsuHeadlessLaunchBlockHint(logText) {
 /**
  * Read the bounded headless-terminal tail named by `terminal_bin` and return an
  * actionable PRE-TURN block hint, or null when the row/log proves no such state.
+ *
+ * There is deliberately no synchronous twin: its only production caller is the
+ * polled roster read, where a sync read froze the operator event loop.
  */
-export function readPsuHeadlessLaunchBlockHint(
+export async function readPsuHeadlessLaunchBlockHintAsync(
   terminalBin,
   { scanBytes = HEADLESS_LAUNCH_LOG_SCAN_BYTES } = {},
 ) {
   const file = headlessLaunchLogPath(terminalBin);
   if (!file) return null;
-  const tail = readFileTailBytes(file, scanBytes);
+  const tail = await readFileTailBytesAsync(file, scanBytes);
   return tail == null ? null : detectPsuHeadlessLaunchBlockHint(tail);
 }
 
@@ -261,6 +264,23 @@ export function readPsuLaunchLogTail(ownerId, { home = homedir(), chars = PSU_LA
   if (!file) return null;
   try {
     return readFileSync(file, 'utf8').trim().slice(-chars);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * {@link readPsuLaunchLogTail} for request paths that run on the operator's
+ * main thread (the polled roster read). Same null-vs-'' contract.
+ */
+export async function readPsuLaunchLogTailAsync(
+  ownerId,
+  { home = homedir(), chars = PSU_LAUNCH_LOG_TAIL_CHARS } = {},
+) {
+  const file = psuLaunchLogPath(ownerId, { home });
+  if (!file) return null;
+  try {
+    return (await readFile(file, 'utf8')).trim().slice(-chars);
   } catch {
     return null;
   }

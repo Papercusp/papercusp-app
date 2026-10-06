@@ -152,6 +152,40 @@ export function seedKind(seedPath: any): "logical" | "physical" | null;
  */
 export function extractSeed(seedPath: any, dataDir: any): Promise<void>;
 /**
+ * Every role a logical seed's restore SQL grants to, revokes from, or names in a
+ * row-level-security policy. pg_dump never serializes roles (they are
+ * cluster-global), so a seed built on a cluster where a migration created a role
+ * (978 creates hosted_owner/hosted_app/hosted_service) carries GRANTs and policies
+ * naming a role the fresh install's cluster does not have, and `pg_restore
+ * --exit-on-error` then fails on the first one (WI-10004427). Reading the names
+ * out of the dump itself keeps this correct for any future role-creating migration.
+ *
+ * @param {string} restoreSql output of `pg_restore --schema-only --no-owner --file -`
+ * @returns {string[]} sorted, de-duplicated role names, excluding PUBLIC,
+ *          CURRENT_USER/CURRENT_ROLE/SESSION_USER and PostgreSQL's pg_* built-ins
+ */
+export function granteeRolesInRestoreSql(restoreSql: string): string[];
+/**
+ * The roles a pg_dump custom archive references (see granteeRolesInRestoreSql).
+ * `pg_restore --file -` renders the archive's SQL without connecting to a server.
+ *
+ * @param {string} seedPath
+ * @param {{ pgRestoreBin?: string }} [opts]
+ * @returns {string[]}
+ */
+export function logicalSeedGranteeRoles(seedPath: string, { pgRestoreBin, }?: {
+    pgRestoreBin?: string;
+}): string[];
+/**
+ * Create, with SEED_ROLE_ATTRIBUTES, every seed-referenced role the cluster lacks.
+ * Existing roles are left untouched.
+ *
+ * @param {import('postgres').Sql} sql a connection allowed to CREATE ROLE
+ * @param {string[]} roles
+ * @returns {Promise<string[]>} the roles this call created
+ */
+export function createMissingSeedRoles(sql: import("postgres").Sql, roles: string[]): Promise<string[]>;
+/**
  * Restore a pg_dump custom archive into an ALREADY-INITIALISED fresh cluster.
  * initdb must run before this helper: its per-cluster system_identifier is the
  * identity boundary WI-39304 requires. `--single-transaction` makes a failed
@@ -359,6 +393,7 @@ export const PORTABLE_INITDB_LOCALES: string[];
  * FORMATTING only (never collation/ctype), so plain 'C' loses nothing.
  */
 export const UNIVERSAL_LC_VALUES: string[];
+export const SEED_ROLE_ATTRIBUTES: "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS";
 declare function openRoleClient({ port, user, password, database }: {
     port: any;
     user: any;

@@ -20,9 +20,9 @@ import { resolveClaimSpecPotSlug } from '../../scheduler/claim-spec-workspace';
 export { resolveClaimSpecPotSlug } from '../../scheduler/claim-spec-workspace';
 import { resolveWorkspaceHiveScope } from '../coordination/federation-scope';
 import { fetchWakeability } from '../coordination/presence-wakeability';
-import { claimSpecSchema, positiveIdCohortIds, validateClaimSpec, type ClaimSpec } from '../../scheduler/claim-spec';
+import { claimSpecSchema, claimSpecReferencesField, positiveIdCohortIds, validateClaimSpec, type ClaimSpec } from '../../scheduler/claim-spec';
 import type { ClaimFloorAttribution } from '../../work-items';
-import { evaluateGoalFenceGuard } from '../../scheduler/spec-pool-preview';
+import { evaluateGoalFenceGuardForIncumbent } from '../../scheduler/spec-pool-preview';
 
 /**
  * The coding-FACTORY push-pipeline roles: each is HANDED a FEATURE_ID by the orchestrator
@@ -106,7 +106,11 @@ export interface ClaimSpecAdmissionPreview {
   checkedIssueIds?: string[];
   uncheckedFeatureIds?: string[];
   unknownIds?: string[];
+  /** New-acquisition eligibility, never inflated by the target fleet's existing claims. */
   admissibleIds?: string[];
+  /** Scope can also include admissible work already held by a verified target-fleet member. */
+  scopeAdmissibleIds?: string[];
+  alreadyHeldIds?: string[];
   floored?: ClaimFloorAttribution[];
   effectiveStates?: readonly string[];
   reason?: string;
@@ -136,11 +140,7 @@ export interface ClaimSpecAdmissionPreview {
   previewError?: string;
 }
 
-type ExplainIssueFloors = (
-  harness: string,
-  ids: readonly string[],
-  opts?: { assignee?: string; rigAvailable?: boolean; states?: readonly string[] },
-) => Promise<ClaimFloorAttribution[]>;
+type ExplainIssueFloors = typeof import('../../work-items').explainIssueClaimFloors;
 
 type ResolveWorkItemFamily = (id: string, harness: string) => Promise<'issue' | 'feature' | null>;
 
@@ -148,13 +148,18 @@ type ResolveWorkItemFamily = (id: string, harness: string) => Promise<'issue' | 
  * WI-4429: reject a fixed issue cohort that is already 0-admissible BEFORE the
  * spec is stored. Reuses explainIssueClaimFloors (the claim path's own SQL floor
  * fragments) and the same conservative ID extractor the issue fallback uses.
+ * EI-25159722494650027: storing a fleet's scope is not acquiring a new claim.
+ * A verified member's existing claim can keep the cohort alive, but only after
+ * the shared evaluator checks every remaining floor in that member's context.
  */
 export async function previewClaimSpecAdmission(args: {
   spec: ClaimSpec;
   harness?: string;
   assignee: string;
+  fleet?: string;
   explain?: ExplainIssueFloors;
   resolveFamily?: ResolveWorkItemFamily;
+  resolveFleetMembers?: (fleet: string) => Promise<string[]>;
 }): Promise<{ preview: ClaimSpecAdmissionPreview; errors: string[]; warning?: string }> {
   const cohortIds = positiveIdCohortIds(args.spec.view.filter);
   if (cohortIds === null) {
@@ -235,7 +240,53 @@ export async function previewClaimSpecAdmission(args: {
     detail: 'no such work-item in either family for this harness/workspace',
   }));
   const admissibleIds = rows.filter((row) => row.admissible).map((row) => row.id);
-  const floored = [...rows.filter((row) => !row.admissible), ...unknownRows];
+  const scopeRows = new Map(rows.map((row) => [row.id, row]));
+  const alreadyHeldIds: string[] = [];
+  let heldPreviewError: string | undefined;
+  const heldRows = rows.filter((row) => row.refusedBy === 'already-taken' && row.heldBy);
+  if (args.fleet && heldRows.length > 0) {
+    try {
+      // Reuse the binding-control roster, NOT the delivery audience: muted/digest
+      // members still own fleet work. Never infer membership from the writer.
+      const resolveMembers = args.resolveFleetMembers ??
+        (await import('../coordination/audience-host')).listFleetControlMembers;
+      const members = new Set(await resolveMembers(args.fleet));
+      const byHolder = new Map<string, string[]>();
+      for (const row of heldRows) {
+        if (!members.has(row.heldBy!)) continue;
+        const ids = byHolder.get(row.heldBy!) ?? [];
+        ids.push(row.id);
+        byHolder.set(row.heldBy!, ids);
+      }
+      for (const [holder, ids] of byHolder) {
+        // already-taken is the FIRST refusal. Merely waiving that attribution
+        // would conceal claim-hold, admission, blockers, etc. Recheck through
+        // the SAME SQL floors, with this holder's cooldown/plan-lane context.
+        const checked = await explain(args.harness, ids, {
+          assignee: holder,
+          states: effectiveStates,
+          scopeHeldBy: [holder],
+          claimantFleetSlug: args.fleet,
+          claimSpecReferencesFleet: claimSpecReferencesField(args.spec, 'fleet'),
+          claimSpecReferencesGoal: claimSpecReferencesField(args.spec, 'goal'),
+        });
+        for (const row of checked) {
+          if (!ids.includes(row.id)) continue;
+          scopeRows.set(row.id, row);
+          if (row.admissible) alreadyHeldIds.push(row.id);
+        }
+      }
+    } catch (err) {
+      // Unknown membership/floors never authorize held work. Preserve the
+      // ordinary attributions and disclose the failed preview, not a false zero.
+      heldPreviewError = `could not verify target-fleet held-cohort admission: ${err instanceof Error ? err.message : String(err)}`;
+      scopeRows.clear();
+      for (const row of rows) scopeRows.set(row.id, row);
+      alreadyHeldIds.length = 0;
+    }
+  }
+  const scopeAdmissibleIds = rows.filter((row) => scopeRows.get(row.id)?.admissible).map((row) => row.id);
+  const floored = [...scopeRows.values()].filter((row) => !row.admissible).concat(unknownRows);
   const preview: ClaimSpecAdmissionPreview = {
     mode: 'fixed-cohort',
     checked: featureIds.length === 0,
@@ -244,21 +295,31 @@ export async function previewClaimSpecAdmission(args: {
     uncheckedFeatureIds: featureIds,
     unknownIds,
     admissibleIds,
+    scopeAdmissibleIds,
+    alreadyHeldIds,
     floored,
     effectiveStates,
+    ...(heldPreviewError ? { previewError: heldPreviewError } : {}),
     ...(featureIds.length > 0 ? { reason: 'feature-family claim floors remain enforced at pull time' } : {}),
   };
   const floorSummary = floored.map((row) => `${row.id}:${row.refusedBy ?? 'unknown'}`).join(', ');
   const noUncheckedFeatureCandidate = featureIds.length === 0;
-  if (noUncheckedFeatureCandidate && admissibleIds.length === 0) {
+  if (noUncheckedFeatureCandidate && scopeAdmissibleIds.length === 0) {
     return {
       preview,
       errors: [
         `claim spec names ${cohortIds.length} id(s); 0 are claim-path admissible under states=[${effectiveStates.join(',')}]: ${floorSummary}`,
+        ...(heldPreviewError ? [heldPreviewError] : []),
       ],
     };
   }
   const warningParts: string[] = [];
+  if (alreadyHeldIds.length > 0) {
+    warningParts.push(
+      `${alreadyHeldIds.length} cohort id(s) are already held by target fleet "${args.fleet}" and accepted for scope authoring only, not new acquisition: ${alreadyHeldIds.join(',')}`,
+    );
+  }
+  if (heldPreviewError) warningParts.push(heldPreviewError);
   if (floored.length > 0) {
     warningParts.push(
       `${floored.length}/${issueIds.length + unknownIds.length} checked issue/unknown id(s) are currently floored ` +
@@ -462,20 +523,6 @@ export default defineTool({
     }
     const ctxHarnessRaw = (ctx as { harnessSlug?: unknown }).harnessSlug;
     const resolvedHarness = resolveClaimSpecPotSlug(args.harness, ctxHarnessRaw);
-    const admission = await previewClaimSpecAdmission({
-      spec: validated.spec,
-      harness: resolvedHarness,
-      assignee: ident.ownerId,
-    });
-    if (admission.errors.length > 0) {
-      return {
-        data: {
-          ok: false,
-          errors: admission.errors,
-          admissibilityPreview: admission.preview,
-        },
-      };
-    }
     // Fleet target (P-002): validate the fleet exists (mirrors WI-1408 — a typo'd slug
     // must fail loud, not store a spec no member will ever inherit), then store under
     // the sentinel key. Membership-spec resolution happens bee-side in getClaimSpec.
@@ -499,6 +546,21 @@ export default defineTool({
       const { fleetSpecBeeKey } = await import('../../scheduler/claim-spec-store');
       targetBeeId = fleetSpecBeeKey(fleetSlug);
     }
+    const admission = await previewClaimSpecAdmission({
+      spec: validated.spec,
+      harness: resolvedHarness,
+      assignee: ident.ownerId,
+      fleet: args.fleet?.trim(),
+    });
+    if (admission.errors.length > 0) {
+      return {
+        data: {
+          ok: false,
+          errors: admission.errors,
+          admissibilityPreview: admission.preview,
+        },
+      };
+    }
 
     // EI-22389918023611568: a replacement can widen a GOAL-scoped lane while
     // increasing its pool count (so the generic collapse guard is intentionally
@@ -516,11 +578,9 @@ export default defineTool({
         cupId: targetBeeId,
         workspaceId: resolveClaimSpecWorkspace(ident.workspaceId),
       });
-      const goalFence = evaluateGoalFenceGuard({
-        previousFilter:
-          incumbentRecord.source === 'default' ? undefined : incumbentRecord.spec.view.filter,
+      const goalFence = evaluateGoalFenceGuardForIncumbent({
+        incumbent: incumbentRecord,
         candidateFilter: validated.spec.view.filter,
-        previousSource: incumbentRecord.source === 'default' ? 'default' : 'authored',
         confirm: args.confirmGoalFenceDrop === true,
       });
       if (goalFence.refuse) {

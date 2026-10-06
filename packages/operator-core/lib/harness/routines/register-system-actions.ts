@@ -275,8 +275,13 @@ import './blueprint-operation-action';
 import './goal-start-action';
 import './external-trigger-dispatch-action';
 import './facebook-personal-vault-poll-action';
-import './google-calendar-poll-action';
-import './google-gmail-poll-action';
+// enterprise-data-sources-2026-10-01 P-016 / D-026: Slack organization connector cadence
+// (membership sync + paced backfill); inert while papercusp-slack-org-connector is dark.
+import './slack-org-sync-action';
+// GitHub Issues, Gmail and Google Calendar have no poll action of their own: they are provider
+// plugins synced by connector-sync (generalized-integrations-google-migration-cupboard-workflows-
+// 2026-10-05 P-010 / D-015, P-008 / D-017, P-009 / D-021).
+import './connector-sync-action';
 import './personal-vault-import-action';
 // overwatch-role-2026-06-15 B-04 (C-3): the `system:overwatch-launch` action the
 // one-shot `overwatch-wake` routine fires — computes the OverwatchBrief + launches
@@ -541,6 +546,10 @@ import './launch-cost-ceiling-action';
 // burst detector. None of these actions spawns an agent.
 import './work-item-admission-promoter-action';
 import './work-item-admission-bulk-dedup-action';
+// WI-10004722 (work-queue-bulk-cleanup-remediation-2026-10-01 P-005): the daily driver
+// that arms one bounded bulk-dedup run unless one is already in flight. Landed with its
+// TARGET_ROLE_SPEND entry, its seed script and its BESPOKE_ACTIVE_SEEDS row.
+import './work-item-admission-bulk-dedup-driver-action';
 import './work-item-admission-delta-sweep-action';
 import './completion-claim-recheck-action';
 import './dead-citation-sweep-action';
@@ -563,6 +572,15 @@ import './episode-scoped-operational-reconcile-action';
 // autonomous-inbox-resolution-2026-08-31 P-009: durable routinesTick backstop
 // for the existing supervised Inbox bulk-resolver launch path.
 import './inbox-bulk-resolve-action';
+// observation-candidate-acceptance-promotion-2026-09-30 P-008 (D-020):
+// `system:intake-triage-drain` — the registered executor that drains awaiting
+// observations/candidates as `intake-triage` runs, apart from accepted work.
+import './intake-triage-drain-action';
+// plan-cleanup-system-repair-2026-10-01 P-004: `system:plan-cleanup-sweep` — the
+// deterministic recurring plan clean-up (same start path as the Plans-pane button;
+// a resolver only for judgment residue). Replaces the never-producing LLM plan-run
+// template `plan-cleanup-recurring-sweep-2026-09-01`.
+import './plan-cleanup-sweep-action';
 import './work-item-admission-daily-digest-action';
 // silent-intake-central-resolution-2026-09-01 P-007: `system:resolver-whole-corpus` — the
 // infrequent, quality-first whole-corpus resolver pass (same-defect merges + same-cause
@@ -585,6 +603,10 @@ import './supervision-reconcile-action';
 // timeout. A bespoke ephemeral (tier:'ephemeral', 300s) operator-HOME cadence (one sweep
 // serves every workspace's rows). Seeded ACTIVE by seed-consult-expiry-routine.ts.
 import './consult-expiry-action';
+// external-app-access-to-workspaces-2026-09-29 P-328 (D-030): `system:connected-app-alert-sweep`
+// — every 15 minutes, owner alerts for a connected app's usage spike, repeated auth failures, a
+// key about to expire, and a key whose creator left the organization. Seeded by migration 1267.
+import './connected-app-alert-sweep-action';
 // frozen-candidate-compliance-enforcement-2026-08-30 P-008: `system:frozen-candidate-drift-sweep`
 // — the ATTESTATION leg. Reports commits that touched the FROZEN candidate's failing paths
 // while landing above it, which is the exact signature of a fix the gate cannot see. Every
@@ -778,3 +800,10 @@ import './account-capacity-reprobe-action';
 // cadence, same deviation reasoning as supervision-reconcile-action. Seeded ACTIVE by
 // seed-hosted-lifecycle-reconcile-routine.ts.
 import './hosted-lifecycle-reconcile-action';
+// WI-10004437: `system:hosted-public-ingress-probe` — the hosted origin's tunnel ingress is
+// hand-maintained outside the repo, and four times a public route family the plane serves fell
+// through to the session-gated portal (WI-10003292, WI-10004436, WI-10005066), each found by hand
+// during an e2e run. This probes every plane route family against the cloudflared config and the
+// live origin and THROWS on a miss (routine-failure watchdog). A bespoke ephemeral (900s) cadence;
+// seeded ACTIVE by seed-hosted-public-ingress-probe-routine.ts.
+import './hosted-public-ingress-probe-action';

@@ -76,6 +76,51 @@ export interface AzureArmOperationObservation extends AzureArmOperationRef {
   error?: { code?: string; message: string };
 }
 
+// These ARM operation-error codes have recovery semantics that can safely cross the provider
+// seam. OperationNotAllowed is intentionally absent: Azure uses it for both quota refusals and
+// throttling, so the code alone cannot distinguish terminal from retryable.
+const AZURE_OPERATION_THROTTLE_CODES: ReadonlySet<string> = new Set([
+  'toomanyrequests',
+  'retryableerrorduetoanotheroperation',
+]);
+
+const AZURE_OPERATION_TERMINAL_STATUS_BY_CODE: Readonly<Record<string, number>> = {
+  authorizationfailed: 403,
+  linkedauthorizationfailed: 403,
+  requestdisallowedbypolicy: 403,
+  invalidtemplate: 400,
+  invalidtemplatedeployment: 400,
+  invalidparameter: 400,
+  invalidparametervalue: 400,
+  invalidrequestcontent: 400,
+  invalidresourcereference: 400,
+  quotaexceeded: 400,
+  resourcequotaexceeded: 400,
+  skunotavailable: 400,
+};
+
+/** A settled ARM failure with retry-class signals for the workspace-host controller. */
+export class AzureOperationFailedError extends Error {
+  readonly status?: number;
+  readonly throttled?: boolean;
+  readonly code?: string;
+
+  constructor(operationId: string, operationStatus: string, error?: AzureArmOperationObservation['error']) {
+    super(`Azure operation '${operationId}' failed: ${error?.message ?? operationStatus}`);
+    this.name = 'AzureOperationFailedError';
+    if (error?.code !== undefined) {
+      this.code = error.code;
+      const normalizedCode = error.code.toLowerCase();
+      if (AZURE_OPERATION_THROTTLE_CODES.has(normalizedCode)) {
+        this.throttled = true;
+      } else {
+        const status = AZURE_OPERATION_TERMINAL_STATUS_BY_CODE[normalizedCode];
+        if (status !== undefined) this.status = status;
+      }
+    }
+  }
+}
+
 export interface AzureArmResourceObservation {
   id: string;
   kind: AzureArmResourceKind;
@@ -1227,7 +1272,7 @@ export class AzureWorkspaceHostProvider implements WorkspaceHostProvider {
   private async settled(operation: AzureArmOperationRef, signal?: AbortSignal): Promise<boolean> {
     const observed = await this.client.waitForOperation(operation, signal);
     if (observed.error || observed.status === 'Failed' || observed.status === 'Canceled') {
-      throw new Error(`Azure operation '${operation.id}' failed: ${observed.error?.message ?? observed.status}`);
+      throw new AzureOperationFailedError(operation.id, observed.status, observed.error);
     }
     return observed.status === 'Succeeded';
   }

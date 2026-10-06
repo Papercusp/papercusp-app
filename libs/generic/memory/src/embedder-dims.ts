@@ -97,7 +97,7 @@ export type EmbeddingProfileId = `${string}@v${number}`;
 export type EmbeddingRecipeId = `${string}@v${number}`;
 
 export type EmbeddingDistanceMetric = 'cosine' | 'l2' | 'inner-product' | 'l1';
-export type EmbeddingPooling = 'mean' | 'last-token' | 'model-graph' | 'provider-managed';
+export type EmbeddingPooling = 'mean' | 'cls' | 'last-token' | 'model-graph' | 'provider-managed';
 export type EmbeddingOutputDtype = 'float32';
 export type EmbeddingRevisionPolicy = 'profile-versioned-provider-model-id' | 'immutable-artifact';
 export type EmbeddingNormalization = Readonly<{
@@ -306,7 +306,7 @@ export function validateEmbedderProfile(mode: string, spec: EmbedderProfileSpec)
   ) {
     problems.push(`${at}: normalization.timing is not a supported closed value`);
   }
-  if (!['mean', 'last-token', 'model-graph', 'provider-managed'].includes(String(candidate.pooling))) {
+  if (!['mean', 'cls', 'last-token', 'model-graph', 'provider-managed'].includes(String(candidate.pooling))) {
     problems.push(`${at}: pooling is not a supported closed value`);
   }
   if (candidate.outputDtype !== 'float32') problems.push(`${at}: outputDtype must be 'float32'`);
@@ -487,7 +487,12 @@ export const EMBEDDER_DIM_SPECS: Readonly<Record<EmbedderMode, EmbedderProfileSp
  * neither direction. What these specs assert is only that a width is declared
  * and reviewable — the gold set, not this table, says which model to ship.
  */
-export const CANDIDATE_DIM_SPECS: Record<'granite97' | 'granite311' | 'qwen3', EmbedderDimSpec> = {
+export const CANDIDATE_DIM_SPECS: Record<'granite97' | 'granite311' | 'qwen3' | 'mdenseon', EmbedderDimSpec> = {
+  // Pinned local ONNX validation candidate; native width only, no MRL claim.
+  mdenseon: {
+    model: 'lightonai/mDenseOn', nativeDims: 768, targetDims: 768,
+    mrl: 'none', trainedDims: [768],
+  },
   /**
    * Granite-Embedding-97M-Multilingual-R2 — natively 384. The cheapest
    * possible resolution of the untrained-cut bug: at the width the prose

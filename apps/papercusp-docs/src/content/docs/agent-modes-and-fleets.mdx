@@ -1,0 +1,94 @@
+---
+title: Agent modes and fleets
+description: Choose one agent or coordinated workers, set autonomy deliberately, and stop work safely.
+documents:
+  - packages/operator-core/lib/modes/registry.ts
+  - packages/operator-core/lib/agent-tools/mode/set.ts
+  - packages/operator-core/lib/agent-tools/fleet_registry/launch-on-plan.ts
+  - packages/operator-core/lib/agent-tools/coordination/tools/dispatch.ts
+---
+
+Execution choices answer two different questions: **who runs the work?** and
+**how much approval is needed while it runs?** Choosing a fleet does not itself
+enable AUTO, and enabling AUTO does not create a fleet.
+
+## Start with a single agent
+
+For a small or tightly coupled task, approve the plan and ask the current
+session to implement it itself. This keeps one accountable conversation and
+avoids workers competing to edit the same files.
+
+> Implement the approved plan yourself. Keep the recorded scope and verify the
+> result before completing it.
+
+If the agent proposes a different execution route later, have it explain the
+change. A failed launch should not silently change who performs the work.
+
+## Use a fleet for genuinely independent work
+
+A **fleet** is a coordinated group with a leader, named members and visible
+assignments. Ask for work to be split into independent lanes, with real
+dependencies and separate file ownership.
+
+When supported in your installation, choose an existing active fleet or a new
+one. New fleet members can have **visible desktop terminals** or run
+**headless**, without desktop windows. Both remain registered members with
+assignments; headless does not mean untracked.
+
+The maintained plan-backed launch is `fleet:launch-on-plan`. Ask the leader to
+confirm member registration, first-turn pickup and actual claimed work.
+A window opening is not proof that its agent started the assigned task.
+
+## Choose model, account and context carry
+
+If you use a fleet, specify the model and reasoning effort if they matter.
+Higher effort is a reasoning-depth/cost choice, not a guarantee of correctness.
+Have the agent list currently supported choices rather than copying an old
+model name.
+
+Where account routing is available:
+
+- **default** uses the system credential directly.
+- **auto** lets the inference gateway select an available account and fail
+  over when needed.
+- A **named account** pins usage to that credential, with predictable billing
+  but without the same automatic account failover.
+
+**Warm carry** resumes the agent's existing context across wakes.
+**Cold carry** rebuilds context from its durable checkpoint. Cold carry makes
+the checkpoint particularly important for long unattended work.
+Carry and visible/headless execution are independent choices.
+
+Never paste account credentials into the task. Use the supported connection
+or credential setup.
+
+## Enable autonomy for a bounded goal
+
+By default, an agent may ask for approval before substantive work.
+Explicit **AUTO** authorization lets it act within the agreed scope without
+repeated approval requests. It does not bypass tool permissions, security
+boundaries, backups or verification.
+
+> Enable AUTO for this approved plan only. Continue through verification.
+> Do not publish outside the named destination or expand the scope.
+
+Modes are recorded state, not only words in an old chat message. Ask the agent
+to confirm its registered mode if behavior does not match your instruction.
+
+AUTO is also **not a wake source**. If you ask for ongoing work between turns,
+the agent needs the supported continuation mechanism. Ask what keeps it
+running, what its stop condition is, and where progress is recorded.
+
+## Pause, stop and resume safely
+
+Ask explicitly to pause or stop and check the acknowledgement. Workers should
+finish their atomic edit, release file ownership and save their next action.
+Closing a tab or hiding a terminal does not necessarily stop remote work.
+
+To resume, name the plan or work item and keep the previously chosen route:
+
+> Resume this plan with the same execution route. Read the checkpoint first
+> and tell me which step is next.
+
+See [Plans and work](/docs/plans-and-work) for the durable record and
+[Troubleshooting](/docs/troubleshooting) for stalled sessions.

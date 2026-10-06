@@ -55,6 +55,7 @@ import {
   validatePlanCandidateDependencies,
 } from './plan-candidate-dependencies';
 import { evaluatePlanSpecQualityGate, type PlanSpecQualityGateVerdict } from './plan-spec-quality-gate';
+import { specQualityPlanItemIds } from './spec-quality';
 import { mugKettleSystemEnabled } from '../../pot/started';
 import { bulkContent, mergeIds, runBulk } from '../_bulk';
 import { buildPromotedRows, upsertPromotedBlock } from '../coordination/tools/promote';
@@ -92,10 +93,21 @@ const argsSchema = z
       .max(2000)
       .optional()
       .describe('Why you are overriding (consulted: false) or what the consult concluded (consulted: true). Recorded.'),
+    consult_id: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe(
+        'Consult you requested and proceeded on (full id or unique prefix). Recorded; the result says whether a proceed-consult still owes consult:reconcile. Needs `consulted`.',
+      ),
     harness: harnessArg,
   })
   .refine((a) => Boolean(a.slug) || (a.slugs?.length ?? 0) > 0, {
     message: 'pass `slug` or `slugs`',
+  })
+  .refine((a) => a.consult_id === undefined || a.consulted !== undefined, {
+    message: 'consult_id needs `consulted` — it names the consult behind your override/acknowledgement',
   })
   .refine((a) => a.consulted !== false || Boolean(a.consult_reason), {
     message:
@@ -258,7 +270,7 @@ export default defineTool({
         // plans with zero first-class clauses remain explicitly report-only.
         let specQuality: PlanSpecQualityGateVerdict | undefined;
         if (read) {
-          const planItemIds = (read.row.items.length ? read.row.items : read.parsed.items).map((item) => item.id);
+          const planItemIds = specQualityPlanItemIds(read.row.items.length ? read.row.items : read.parsed.items);
           specQuality = await evaluatePlanSpecQualityGate({
             harnessSlug,
             planSlug: slug,
@@ -369,16 +381,56 @@ export default defineTool({
           // Override / acknowledgement path: routing already ran on the
           // refused call — record the caller's disposition durably (the
           // tool_invocations ledger via ctx.metadata + the result) and start.
+          // WI-10005177: an optional structured consult_id ties the override to a
+          // consult_state row the caller requested (read-only; refuses before any
+          // approval/promotion write so a mistyped id never half-starts a plan).
+          let linkedConsult: Record<string, unknown> | undefined;
+          if (args.consult_id) {
+            const [{ getOrgPg }, { consultResolveRequestedConsult }, { resolveAgentIdentity }] = await Promise.all([
+              import('@papercusp/db-org'),
+              import('../../consult/consult-verbs-core'),
+              import('../coordination/identity'),
+            ]);
+            const resolvedConsult = await consultResolveRequestedConsult(
+              {
+                workspaceId: startWorkspaceId,
+                requesterId: resolveAgentIdentity(ctx).ownerId,
+                conversationRef: args.consult_id,
+              },
+              { getSql: () => getOrgPg().sql },
+            );
+            if ('error' in resolvedConsult) {
+              return {
+                ok: false as const,
+                slug,
+                harnessSlug,
+                error: 'invalid_consult_id' as const,
+                consultError: resolvedConsult,
+                hint: 'consult_id must be a consult YOU requested (full id or unique prefix) — fix it or omit consult_id; nothing was started.',
+              };
+            }
+            linkedConsult = {
+              consultId: resolvedConsult.conversation_id,
+              consultState: resolvedConsult.consult_state,
+              latencyContract: resolvedConsult.latency_contract,
+              reconciliationOwed: resolvedConsult.reconciliation_owed,
+              ...(resolvedConsult.reconciliation_owed
+                ? { reconcileWith: 'consult:reconcile { conversation_id, disposition, note }' }
+                : {}),
+            };
+          }
           checkpointConsult = {
             overridden: true,
             consulted: args.consulted,
             ...(args.consult_reason ? { reason: args.consult_reason } : {}),
+            ...(linkedConsult ?? {}),
           };
           ctxAny.metadata?.({
             slug,
             harnessSlug,
             consultOverride: args.consulted,
             ...(args.consult_reason ? { consultReason: args.consult_reason } : {}),
+            ...(linkedConsult ? { consultId: linkedConsult.consultId } : {}),
           });
         } else if (read?.row.content) {
           try {
@@ -545,7 +597,7 @@ export default defineTool({
                 },
               };
               const currentSpecQuality = await evaluatePlanSpecQualityGate({
-                harnessSlug, planSlug: slug, planItemIds: lockedPlan.items.map((item) => item.id),
+                harnessSlug, planSlug: slug, planItemIds: specQualityPlanItemIds(lockedPlan.items),
               });
               if (!currentSpecQuality.satisfied) return {
                 newBody: null,

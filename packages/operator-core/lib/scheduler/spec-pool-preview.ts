@@ -50,7 +50,7 @@
 import { getOrgPg } from '@papercusp/db-org';
 import type { ClaimSpec, FilterLeaf, FilterNode } from './claim-spec';
 import { compileFilter } from './get-next';
-import { observationLaneExclusionSql } from '../work-items';
+import { observationLaneExclusionSql, type OrgSql } from '../work-items';
 import { issuesScopeWorkspace } from '../issues-engineer';
 
 export interface SpecPoolEffect {
@@ -76,8 +76,45 @@ export async function previewSpecPoolEffect(
   const sql = getOrgPg().sql;
   // Mirrors claimFloorsWhereSql's unified ['open'] default (work-item-status-full-unify P-004/P-005)
   // so the WI-5212 pool-effect preview counts the SAME pool the real claim runs against.
-  const states = [...(spec.states ?? ['open'])];
+  const states = specPoolStates(spec);
   const harness = opts.harness ?? null;
+  const filter = compileFilter(sql, spec.view.filter);
+  const rows = (await sql`
+    SELECT count(*)::int AS pool,
+           (count(*) FILTER (WHERE ${filter}))::int AS matched
+      FROM harness_shared.work_items wi
+     WHERE ${specPoolFloors(sql, { workspaceId: opts.workspaceId, harness, states })}
+  `) as Array<{ pool: number; matched: number }>;
+  const row = rows[0] ?? { pool: 0, matched: 0 };
+  return { matched: row.matched, pool: row.pool, states, harness };
+}
+
+/** The states a spec's pool count runs under: `spec.states ?? ['open']`. */
+export function specPoolStates(spec: ClaimSpec): string[] {
+  return [...(spec.states ?? ['open'])];
+}
+
+/**
+ * The neutral pool floors as ONE parenthesised WHERE conjunct — the single definition
+ * {@link previewSpecPoolEffect} COUNTS under and the predicate-partition adapter
+ * (spec-predicate-partition.ts, EI-23760081161304754) PARTITIONS under. Extracted rather than
+ * copied: a second hand-written copy of these floors is exactly how a preview and a pull come to
+ * measure different pools.
+ *
+ * Columns are deliberately UNQUALIFIED (no `wi.`), the same way FIELD_MAP's column fragments
+ * are: the partition surface re-renders this text into `FROM <relation> t …` statements whose
+ * alias is not `wi`, and a qualified reference there fails with a missing-FROM-entry error that
+ * the fail-open probe then swallows (the preview silently degrades to statements-only). Every
+ * caller reads one table, so an unqualified column resolves identically.
+ *
+ * The conjunct names `workspace_id`, which is what lets planPredicatePartition classify it as a
+ * SCOPE predicate carried into the partition's WHERE rather than as a discriminating dimension.
+ */
+export function specPoolFloors(
+  sql: OrgSql,
+  opts: { workspaceId: string; harness: string | null; states: string[] },
+) {
+  const { harness, states } = opts;
   // EI-18675972728146330: the real issue-family claim path (issueClaimCandidateSubquery /
   // aggregateIssueClaimExclusions, which backs work_items:claimable's matchedByFilter) admits
   // BOTH `wi.harness_slug = harness` AND the operator-scope alias `operator:<issuesScopeWorkspace()>`
@@ -90,37 +127,32 @@ export async function previewSpecPoolEffect(
   // making its reported `matched`/`pool` disagree with the real claim path for no structural
   // reason (the doc above promises "cannot drift" from `get_next` — this closes that gap).
   const operatorScopeSlug = harness ? `operator:${issuesScopeWorkspace()}` : null;
-  const filter = compileFilter(sql, spec.view.filter);
-  const rows = (await sql`
-    SELECT count(*)::int AS pool,
-           (count(*) FILTER (WHERE ${filter}))::int AS matched
-      FROM harness_shared.work_items wi
-     WHERE wi.workspace_id = ${opts.workspaceId}
-       AND (
-         ${harness}::text IS NULL
-         OR wi.harness_slug = ${harness}
-         OR wi.harness_slug = ${operatorScopeSlug}
-       )
-       -- Keep the storage-boundary compatibility fold identical to claimFloorsWhereSql:
-       -- legacy feature rows at "todo" are admitted when callers request the unified
-       -- claimable token "open", so a plan-scoped recovery preview cannot report 0 for
-       -- work the real claim path would offer. Restrict the fold to the feature family:
-       -- issue-family claims still compare their stored status directly.
-       AND (
-         CASE
-           WHEN wi.item_kind NOT IN ('bug', 'change', 'task') AND wi.status = 'todo' THEN 'open'
-           ELSE wi.status
-         END
-       ) = ANY(${states}::text[])
-       AND wi.taken_by IS NULL
-       -- D-005: observation-lane rows are never claimable — the same NULL-safe floor
-       -- the claim path applies (a raw count without this overstates the pool ~7x).
-       AND ${observationLaneExclusionSql(sql)}
-       -- WI-2797 claim-holds are parked out of self-select; same IS DISTINCT FROM idiom.
-       AND COALESCE(wi.payload, '{}'::jsonb) ->> '_claimHold' IS DISTINCT FROM 'true'
-  `) as Array<{ pool: number; matched: number }>;
-  const row = rows[0] ?? { pool: 0, matched: 0 };
-  return { matched: row.matched, pool: row.pool, states, harness };
+  // The storage-boundary compatibility fold below is identical to claimFloorsWhereSql's: legacy
+  // feature rows at "todo" are admitted when callers request the unified claimable token "open",
+  // so a plan-scoped recovery preview cannot report 0 for work the real claim path would offer.
+  // The fold is restricted to the feature family — issue-family claims compare their stored
+  // status directly. D-005: observation-lane rows are never claimable (the same NULL-safe floor
+  // the claim path applies; a raw count without it overstates the pool ~7x). WI-2797 claim-holds
+  // are parked out of self-select, with the same IS DISTINCT FROM idiom. (These notes are JS
+  // comments, not SQL ones, on purpose: this text is re-parsed by the partition planner and an
+  // apostrophe inside a SQL comment is exactly what a literal-stripper can misread.)
+  return sql`(
+    workspace_id = ${opts.workspaceId}
+    AND (
+      ${harness}::text IS NULL
+      OR harness_slug = ${harness}
+      OR harness_slug = ${operatorScopeSlug}
+    )
+    AND (
+      CASE
+        WHEN item_kind NOT IN ('bug', 'change', 'task') AND status = 'todo' THEN 'open'
+        ELSE status
+      END
+    ) = ANY(${states}::text[])
+    AND taken_by IS NULL
+    AND ${observationLaneExclusionSql(sql, 'payload')}
+    AND COALESCE(payload, '{}'::jsonb) ->> '_claimHold' IS DISTINCT FROM 'true'
+  )`;
 }
 
 export interface CollapseGuardInput {
@@ -257,6 +289,64 @@ export function hasGuaranteedPositiveGoalFence(filter: FilterNode | undefined): 
 }
 
 /**
+ * The rows a single leaf admits when it is a BOUNDED id selector, else `null`.
+ *
+ * An id leaf admits at most the rows it names, so it cannot widen a lane into another
+ * goal's CLASS of work — the one harm {@link evaluateGoalFenceGuard} exists to prevent.
+ * `op:'='` names one row; `op:'in'` names a finite enumerated set, the shape `claim-spec`
+ * itself documents for an OR lane. An empty value names nothing and is a vacuous
+ * selector rather than an escape, so it does not qualify.
+ */
+function boundedIdLeafIds(node: FilterNode): string[] | null {
+  if (!('field' in node) || node.field !== 'id') return null;
+  if (node.op === '=') {
+    const value = String(node.value).trim();
+    return value.length > 0 ? [value] : null;
+  }
+  if (node.op === 'in') {
+    if (!Array.isArray(node.value)) return null;
+    const ids = node.value.map((value) => String(value).trim()).filter((value) => value.length > 0);
+    return ids.length > 0 ? ids : null;
+  }
+  return null;
+}
+
+/**
+ * The ids a candidate admits ALONGSIDE a retained positive goal fence, or `null` when the
+ * candidate is not that shape.
+ *
+ * This shape is the platform's OWN sanctioned repair: `fleet-scope-admission`'s
+ * `fencePreservingWidenFilter` emits `{ any: [ <current fence>, { field:'id', … } ] }`, and
+ * the `fleet_scope_violation` notice tells a leader to send exactly that through
+ * `scheduler:set_claim_spec`. Judged by {@link hasGuaranteedPositiveGoalFence} alone it is
+ * refused — every `any` arm must be fenced and an id leaf never is — so the platform
+ * recommended a repair its own write door rejected (WI-10005683; independently observed as
+ * EI-24769116390470623, where the strict every-arm rule "misreads sanctioned fleets").
+ *
+ * The carve-out is deliberately narrow, and both halves are load-bearing: at least one arm
+ * must still GUARANTEE the goal fence, and every other arm must name bounded rows. So
+ * `{ any: [ <fence>, {kind in …} ] }` stays refused, because a kind arm admits another
+ * active goal's whole backlog, which is exactly the drop-all-goal-scope edit this guard
+ * was built for.
+ */
+export function boundedRowEscapeIds(filter: FilterNode | undefined): string[] | null {
+  if (!filter || !('any' in filter) || filter.any.length === 0) return null;
+  let fencedArms = 0;
+  const admitted: string[] = [];
+  for (const arm of filter.any) {
+    if (hasGuaranteedPositiveGoalFence(arm)) {
+      fencedArms += 1;
+      continue;
+    }
+    const ids = boundedIdLeafIds(arm);
+    if (!ids) return null;
+    admitted.push(...ids);
+  }
+  if (fencedArms === 0 || admitted.length === 0) return null;
+  return admitted;
+}
+
+/**
  * Pure decision for the positive-goal-fence replacement guard.
  *
  * The guard is deliberately independent of pool counts: a widening replacement
@@ -270,6 +360,29 @@ export function evaluateGoalFenceGuard(input: GoalFenceGuardInput): CollapseGuar
     input.previousSource === 'authored' && hasGuaranteedPositiveGoalFence(input.previousFilter);
   if (!previousHasFence || hasGuaranteedPositiveGoalFence(input.candidateFilter)) {
     return { refuse: false, errors: [] };
+  }
+
+  // The fence-preserving row escape is ALLOWED but still DISCLOSED: the incumbent goal
+  // fence survives and the extra arms name bounded rows, so refusing it would reject the
+  // platform's own `fencePreservingWidenFilter` recommendation (WI-10005683). It is not
+  // routed through confirmGoalFenceDrop on purpose — that flag asserts the fence was
+  // DROPPED, which is false here, and habituating leaders to pass it on a routine
+  // platform-recommended admission would hollow out the acknowledgement where it matters.
+  const escapedIds = boundedRowEscapeIds(input.candidateFilter);
+  if (escapedIds) {
+    const shown = escapedIds.slice(0, 5).join(', ');
+    const more = escapedIds.length > 5 ? `, +${escapedIds.length - 5} more` : '';
+    return {
+      refuse: false,
+      errors: [],
+      warning:
+        'the proposed claim-spec revision RETAINS the incumbent positive goal fence and admits ' +
+        `${escapedIds.length} explicitly named row(s) alongside it (${shown}${more}). This is the ` +
+        'fence-preserving shape fleet-scope admission recommends for a verified cross-scope ' +
+        'dependency, so it is allowed without confirmGoalFenceDrop:true. The admitted rows are ' +
+        'bounded by enumeration and cannot pull in another active goal\'s class of work; verify ' +
+        'each named row is one this lane genuinely needs.',
+    };
   }
 
   const message =
@@ -294,6 +407,28 @@ export function evaluateGoalFenceGuard(input: GoalFenceGuardInput): CollapseGuar
         'do not widen a live GOAL drain merely to make a zero-match lane look productive (EI-22389918023611568).',
     ],
   };
+}
+
+/**
+ * The ONE place an incumbent claim-spec RECORD becomes goal-fence guard input, so the write door
+ * (`scheduler:set_claim_spec`) and the read-only preview door (`scheduler:preview_spec_delta`)
+ * cannot disagree about a proposed filter (WI-10005785). Before this existed only the write door
+ * ran the guard, so a fence-DROPPING revision previewed as clean counts and was then refused at
+ * the write, and the fence-preserving widen shape previewed without the disclosure the write adds.
+ * A `default` incumbent (no stored row) carries no fence, whatever the baseline spec contains.
+ */
+export function evaluateGoalFenceGuardForIncumbent(input: {
+  incumbent: { source: string; spec: { view: { filter?: FilterNode } } };
+  candidateFilter?: FilterNode;
+  confirm: boolean;
+}): CollapseGuardVerdict {
+  const authored = input.incumbent.source !== 'default';
+  return evaluateGoalFenceGuard({
+    previousFilter: authored ? input.incumbent.spec.view.filter : undefined,
+    candidateFilter: input.candidateFilter,
+    previousSource: authored ? 'authored' : 'default',
+    confirm: input.confirm,
+  });
 }
 
 /**

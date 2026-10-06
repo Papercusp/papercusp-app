@@ -74,6 +74,11 @@ import type { PgHandle } from './types';
  * answer is collectable with it.
  */
 const supportByHandle = new WeakMap<PgHandle, Promise<boolean>>();
+// Keep bounded probes separate so a concurrent legacy probe that is still
+// waiting on pool acquisition cannot make an abort-aware caller wait on it.
+const boundedSupportByHandle = new WeakMap<PgHandle, Promise<boolean>>();
+
+type ReadOnlyTransactionRunner = <T>(body: (sql: PgHandle) => Promise<T>) => Promise<T>;
 
 function isMissingIterativeScanParameter(error: unknown): boolean {
   const candidate = error as { code?: unknown; message?: unknown } | null;
@@ -85,8 +90,9 @@ function isMissingIterativeScanParameter(error: unknown): boolean {
   return code === '42704' || /unrecognized configuration parameter[\s\S]*hnsw\.iterative_scan/i.test(message);
 }
 
-function probeIterativeScan(sql: PgHandle): Promise<boolean> {
-  const cached = supportByHandle.get(sql);
+function probeIterativeScan(sql: PgHandle, runReadOnlyTransaction?: ReadOnlyTransactionRunner): Promise<boolean> {
+  const cache = runReadOnlyTransaction ? boundedSupportByHandle : supportByHandle;
+  const cached = cache.get(sql);
   if (cached) return cached;
 
   let probe!: Promise<boolean>;
@@ -94,9 +100,15 @@ function probeIterativeScan(sql: PgHandle): Promise<boolean> {
     try {
       // Inside a transaction so the SET is rolled back either way and can never
       // leak onto a pooled connection.
-      await sql.begin(async (tx) => {
-        await tx`SET LOCAL hnsw.iterative_scan = relaxed_order`;
-      });
+      if (runReadOnlyTransaction) {
+        await runReadOnlyTransaction(async (tx) => {
+          await tx`SET LOCAL hnsw.iterative_scan = relaxed_order`;
+        });
+      } else {
+        await sql.begin(async (tx) => {
+          await tx`SET LOCAL hnsw.iterative_scan = relaxed_order`;
+        });
+      }
       return true;
     } catch (error) {
       const permanentUnsupported = isMissingIterativeScanParameter(error);
@@ -112,14 +124,40 @@ function probeIterativeScan(sql: PgHandle): Promise<boolean> {
       // An undefined GUC is a stable server capability result and remains
       // cached. Any other failure may be a pool hiccup or restart; remove only
       // THIS probe so a newer probe that raced with it is never deleted.
-      if (!permanentUnsupported && supportByHandle.get(sql) === probe) {
-        supportByHandle.delete(sql);
+      if (!permanentUnsupported && cache.get(sql) === probe) {
+        cache.delete(sql);
       }
       return false;
     }
   })();
-  supportByHandle.set(sql, probe);
+  cache.set(sql, probe);
   return probe;
+}
+
+/** pgvector's accepted range for `hnsw.ef_search`. */
+const EF_SEARCH_MIN = 1;
+const EF_SEARCH_MAX = 1000;
+
+export interface IterativeScanOptions {
+  runReadOnlyTransaction?: ReadOnlyTransactionRunner;
+  /**
+   * `hnsw.ef_search` for the body's transaction (pgvector default 40): the size
+   * of the candidate list each HNSW scan iteration keeps. Larger buys recall at
+   * the cost of reading more of the graph. Measured for consult's ANN chunk leg
+   * (generic-rag-chunking D-046): top-1 agreed with exact on 81/90 queries at
+   * 40, 90/90 at 100 and 200. Set with set_config(..., true), so it is
+   * transaction-local exactly like `SET LOCAL`, and applied only where iterative
+   * scan is (a server without it runs the body unchanged, as before).
+   */
+  efSearch?: number;
+}
+
+function efSearchSetting(efSearch: number | undefined): string | null {
+  if (efSearch === undefined) return null;
+  if (!Number.isInteger(efSearch) || efSearch < EF_SEARCH_MIN || efSearch > EF_SEARCH_MAX) {
+    throw new Error(`withIterativeScan: efSearch must be an integer in ${EF_SEARCH_MIN}..${EF_SEARCH_MAX}, got ${String(efSearch)}`);
+  }
+  return String(efSearch);
 }
 
 /**
@@ -138,24 +176,75 @@ function probeIterativeScan(sql: PgHandle): Promise<boolean> {
 export async function withIterativeScan<T>(
   sql: PgHandle,
   body: (sql: PgHandle) => Promise<T>,
+  options: IterativeScanOptions = {},
 ): Promise<T> {
+  const runReadOnlyTransaction = options.runReadOnlyTransaction;
+  // Validated before anything runs: a bad value is a caller bug, not a degrade.
+  const efSearch = efSearchSetting(options.efSearch);
   // A transaction-scoped handle (postgres.js TransactionSql, e.g. the one
   // sessions:search hands runHybridSearch) has no `begin`. Probing it threw
   // `sql.begin is not a function` on EVERY call and warned as if transient
   // (WI-10002536). Run the body on the caller's transaction with the legacy
   // capped scan — the same fallback that failed probe always produced.
-  if (typeof (sql as { begin?: unknown }).begin !== 'function') return body(sql);
-  if (!(await probeIterativeScan(sql))) return body(sql);
+  if (!runReadOnlyTransaction && typeof (sql as { begin?: unknown }).begin !== 'function') return body(sql);
+  const supported = await probeIterativeScan(sql, runReadOnlyTransaction);
+  if (runReadOnlyTransaction) {
+    // The injected runner owns the READ ONLY transaction and its acquisition,
+    // statement timeout, and abort handling. Run the body through it even on an
+    // older server without iterative scan so the fallback query stays bounded.
+    return runReadOnlyTransaction(async (tx) => {
+      if (!supported) return body(tx);
+      return pipelined(
+        [
+          tx`SET LOCAL hnsw.iterative_scan = relaxed_order`,
+          // SET cannot take a bind parameter; set_config(..., is_local => true) can.
+          ...(efSearch !== null ? [tx`SELECT set_config('hnsw.ef_search', ${efSearch}, true)`] : []),
+        ],
+        () => body(tx),
+      );
+    });
+  }
+  if (!supported) return body(sql);
   return sql.begin(async (tx) => {
-    // READ ONLY keeps it honest: these are search reads, and the marker makes an
-    // accidental write inside a search leg fail loudly rather than commit.
-    await tx`SET TRANSACTION READ ONLY`;
-    await tx`SET LOCAL hnsw.iterative_scan = relaxed_order`;
-    return body(tx as unknown as PgHandle);
+    const handle = tx as unknown as PgHandle;
+    return pipelined(
+      [
+        // READ ONLY keeps it honest: these are search reads, and the marker makes an
+        // accidental write inside a search leg fail loudly rather than commit.
+        handle`SET TRANSACTION READ ONLY`,
+        handle`SET LOCAL hnsw.iterative_scan = relaxed_order`,
+        ...(efSearch !== null ? [handle`SELECT set_config('hnsw.ef_search', ${efSearch}, true)`] : []),
+      ],
+      () => body(handle),
+    );
   }) as Promise<T>;
+}
+
+/**
+ * Issue the setup statements, then the body, without waiting in between.
+ *
+ * On one transaction connection the driver sends them in issue order and the
+ * server runs them in that order, so the body still sees the settings — but the
+ * setup and the body's first query share one network round trip instead of one
+ * each. Measured on consult's chunk-aware lookup (generic-rag-chunking D-047):
+ * the six-round-trip wrapper cost 1.5/1.9 ms p50/p95 over a 0.24/0.37 ms single
+ * statement under fleet load.
+ *
+ * Setup is issued first: each statement is started (`then` attached) before the
+ * body is called, and the body runs a microtask later. A failing setup statement
+ * aborts the transaction, so the body's query fails with it and the transaction
+ * rolls back; Promise.all observes both, so neither rejection goes unhandled, and
+ * the setup error (the earlier response) is the one reported.
+ */
+async function pipelined<T>(setup: readonly PromiseLike<unknown>[], body: () => Promise<T>): Promise<T> {
+  const settled = Promise.all(setup);
+  const result = Promise.resolve().then(body);
+  const [, value] = await Promise.all([settled, result]);
+  return value;
 }
 
 /** Test seam: forget the cached capability probe for a handle. */
 export function resetIterativeScanProbe(sql: PgHandle): void {
   supportByHandle.delete(sql);
+  boundedSupportByHandle.delete(sql);
 }

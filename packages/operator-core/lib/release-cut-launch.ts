@@ -20,10 +20,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SYSTEMD_TRANSIENT_UNIT_COLLECTION_ARGS } from './systemd-scope';
+import { serviceUnitForTask, TASK_ROOT_SLICE } from './task-manager/types';
+import { execFileViaSidecar } from './fleet/git-via-sidecar';
 
 /** Transient systemd unit for the detached cut. Distinct from DEPLOY_UNIT /
  *  the checkpoint unit — a cut, a deploy and a green-checkpoint touch different trees and
@@ -65,14 +68,30 @@ export const PLATFORMS: readonly Platform[] = ['linux', 'mac', 'windows', 'arm64
 export function cutUnitFor(platform?: Platform): string {
   return platform ? `${CUT_UNIT}-${platform}` : CUT_UNIT;
 }
-export function cutLogFor(platform?: Platform): string {
+/** Task-manager service unit for one managed release cut. */
+export function cutUnitForTask(taskId: string): string {
+  return serviceUnitForTask(taskId);
+}
+function rootScopedCutPath(extension: 'log' | 'done' | 'started', platform: Platform | undefined, root: string): string {
+  const rootKey = createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 24);
+  const unit = platform ? `${CUT_UNIT}-${platform}` : CUT_UNIT;
+  return `/tmp/${unit}-${rootKey}.${extension}`;
+}
+export function cutLogFor(platform?: Platform, root?: string): string {
+  if (root !== undefined) return rootScopedCutPath('log', platform, root);
   return platform ? `/tmp/${CUT_UNIT}-${platform}.log` : CUT_LOG;
 }
-export function cutDoneFor(platform?: Platform): string {
+export function cutDoneFor(platform?: Platform, root?: string): string {
+  if (root !== undefined) return rootScopedCutPath('done', platform, root);
   return platform ? `/tmp/${CUT_UNIT}-${platform}.done` : CUT_DONE;
 }
-export function cutStartedFor(platform?: Platform): string {
+export function cutStartedFor(platform?: Platform, root?: string): string {
+  if (root !== undefined) return rootScopedCutPath('started', platform, root);
   return platform ? `/tmp/${CUT_UNIT}-${platform}.started` : CUT_STARTED;
+}
+/** Stable lock for the logical whole-cut/platform slot, independent of task unit id. */
+export function cutLockFor(platform?: Platform): string {
+  return platform ? `/tmp/${CUT_UNIT}-${platform}.lock` : `/tmp/${CUT_UNIT}.lock`;
 }
 
 /** Map a single platform leg to the `CutLegs` flags release-local.sh reads (WITH_MAC=1 /
@@ -157,8 +176,27 @@ export function validateMigrationBootSmokeOverride(
 export interface CutRuntimeEnv {
   ownerName: string;
   ownerEmail?: string;
+  /** Caller scope shared by the managed task and its focused test proof. */
+  harnessSlug?: string | null;
+  /** Explicit shipping policy: re-cut Git with its full reachable history. The
+   * cutter distinguishes this from its depth-1 default by a PRESENT-EMPTY env
+   * value, so the launcher must render the empty string rather than omit it. */
+  fullHistory?: boolean;
+  /** Approved speculative build only: leave all release tags and canonical
+   * version manifests untouched until a matching containment receipt arrives. */
+  deferTag?: boolean;
   /** Explicit retry-only fast path: reuse a seed already cut in this isolated root. */
   reuseSeed?: boolean;
+  /** Reviewed private D-140 exact-content seed finding evidence, never a path skip. */
+  seedFindingProof?: string;
+  /** Private D166 plan bound to a frozen ORIGINAL store. Transport only;
+   * independent source/candidate acceptance remains required. */
+  seedUuidIdempotency?: { plansPath: string; plansSha256: string; sourceStoreDir: string;
+    censusPath: string; censusSha256: string };
+  /** Explicit new-build path: package the validated placeholder-only seed directory
+   * without cutting or reusing a hive seed. Unlike reuseSeed, this does not restore
+   * retry-owned version residue before launch. */
+  seedless?: boolean;
   /** The CANONICAL papercusp-desktop checkout, so release-local.sh can write the
    *  version bump back to it (WI-10001570). The cutter derives its own ROOT from
    *  where the script lives, so a cut launched against an isolated worktree bumps
@@ -222,6 +260,8 @@ export function buildCutEnv(
   if (overrideError) throw new Error(overrideError);
   const env: Record<string, string> = {
     PAPERCUSP_PUBLISH_GITHUB: '0',
+    // Reset inherited state for ordinary cuts, including detached retries.
+    PAPERCUSP_RELEASE_DEFER_TAG: runtime.deferTag === true ? '1' : '0',
     PAPERCUSP_EXPECTED_SOURCE_SHA: expectedSourceSha,
     PAPERCUSP_RELEASE_OWNER_NAME: requiredOwnerName(runtime.ownerName),
     // A release cut may execute a frozen exact-source dependency-generation
@@ -245,6 +285,10 @@ export function buildCutEnv(
   if (runtime.migrationBootSmokeOverride) env.PAPERCUSP_SKIP_MIGRATION_BOOTSMOKE = '1';
   const ownerEmail = runtime.ownerEmail?.trim();
   if (ownerEmail) env.PAPERCUSP_RELEASE_OWNER_EMAIL = ownerEmail;
+  const harnessSlug = runtime.harnessSlug?.trim();
+  if (harnessSlug && harnessSlug !== '*' && harnessSlug !== 'all') {
+    env.PAPERCUSP_TEST_RUN_HARNESS = harnessSlug;
+  }
   // Absent => release-local.sh skips the writeback rather than guessing a path.
   // It is a no-op when the cut already runs in the canonical checkout, so passing
   // it unconditionally is safe.
@@ -252,7 +296,37 @@ export function buildCutEnv(
   if (canonicalDesktopRoot) {
     env.PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT = canonicalDesktopRoot;
   }
-  if (runtime.reuseSeed) env.PAPERCUSP_SKIP_SEED_CUT = '1';
+  if (runtime.reuseSeed && runtime.seedless) {
+    throw new Error('seed_mode_conflict — reuseSeed and seedless are mutually exclusive');
+  }
+  if (runtime.fullHistory && (runtime.reuseSeed || runtime.seedless)) {
+    throw new Error(
+      'seed_history_mode_conflict — fullHistory requires a fresh Git seed cut and cannot accompany reuseSeed or seedless',
+    );
+  }
+  if (runtime.reuseSeed || runtime.seedless) env.PAPERCUSP_SKIP_SEED_CUT = '1';
+  if (runtime.seedUuidIdempotency) {
+    const { plansPath, plansSha256, sourceStoreDir, censusPath, censusSha256 } = runtime.seedUuidIdempotency;
+    if (runtime.reuseSeed || runtime.seedless || !plansPath?.startsWith('/')
+        || !sourceStoreDir?.startsWith('/') || !/^[0-9a-f]{64}$/.test(plansSha256)
+        || !censusPath?.startsWith('/') || !/^[0-9a-f]{64}$/.test(censusSha256)) {
+      throw new Error('seed_uuid_mode_conflict — UUID plans require exact absolute private inputs and a fresh frozen-source cut');
+    }
+    env.PAPERCUSP_SEED_UUID_PLAN_PATH = plansPath;
+    env.PAPERCUSP_SEED_UUID_PLAN_SHA256 = plansSha256;
+    // Keep census context after the seed function clears the one-use row plan:
+    // later copy points must discover mirrors without reapplying that plan.
+    env.PAPERCUSP_SEED_UUID_CENSUS_PATH = censusPath;
+    env.PAPERCUSP_SEED_UUID_CENSUS_SHA256 = censusSha256;
+    env.PAPERCUSP_SEED_STORE_DIR = sourceStoreDir;
+    env.PAPERCUSP_SEED_FORCE = '1';
+    env.PAPERCUSP_SEED_CORESTORE = '1';
+    env.PAPERCUSP_SEED_REUSE_CORESTORE = '0';
+    env.PAPERCUSP_SEED_SPARSE = '0';
+    env.PAPERCUSP_SEED_SNAPSHOT_DIR = '';
+  }
+  if (runtime.seedFindingProof) env.PAPERCUSP_RELEASE_SEED_FINDING_PROOF = runtime.seedFindingProof;
+  if (runtime.fullHistory) env.PAPERCUSP_SEED_DEPTH = '';
   // BOTH-OR-NEITHER, enforced HERE rather than discovered in the cut. release-local.sh's
   // release_task_journal_configure() hard-refuses a half-configured pair (`managed release
   // resume requires BOTH ...`, exit 2) — but that refusal happens inside the detached unit,
@@ -336,8 +410,8 @@ export function wrapWithStagingSyncLock(
 /** Pure: the full `systemd-run` argv for the detached LOCAL cut. Mirrors
  *  release-deploy-launch.buildSystemdRunArgv (PATH passthrough so the transient unit
  *  doesn't depend on the systemd-manager env). The inner command clears a stale DONE
- *  sentinel, runs the cut logging to CUT_LOG, then records the real exit code in
- *  CUT_DONE. Exported for unit testing the command construction. */
+ *  sentinel, writes root-scoped status files and updates the host-wide pointers, then
+ *  records the real exit code. Exported for unit testing the command construction. */
 export function buildCutArgv(
   root: string,
   version: string,
@@ -353,16 +427,27 @@ export function buildCutArgv(
   const envPrefix = Object.entries(env)
     .map(([k, v]) => `${k}=${shellSingleQuote(v)}`)
     .join(' ');
-  const unit = cutUnitFor(platform);
-  const log = cutLogFor(platform);
-  const done = cutDoneFor(platform);
-  const started = cutStartedFor(platform);
+  const taskId = runtime.releaseTaskId?.trim();
+  const unit = taskId ? cutUnitForTask(taskId) : cutUnitFor(platform);
+  const log = cutLogFor(platform, root);
+  const done = cutDoneFor(platform, root);
+  const started = cutStartedFor(platform, root);
+  // Rootless status and preflight keep their host-wide view of the latest cut;
+  // an explicit root reads its own independent markers/log/done files.
+  const currentStatusPointers = [
+    [log, cutLogFor(platform)],
+    [done, cutDoneFor(platform)],
+    [started, cutStartedFor(platform)],
+  ]
+    .map(([target, pointer]) => `ln -sfn ${shellSingleQuote(target!)} ${shellSingleQuote(pointer!)}`)
+    .join('; ') + '; ';
+  const lock = cutLockFor(platform);
   // A first pass writes these version fields before cutting the seed. A retry
   // validates that exact residue in release:cut, then restores only those files
   // so release-local.sh starts from a clean provenance baseline and reapplies the
   // same idempotent bump while preserving the ignored completed seed.
   const resumeReset = runtime.reuseSeed
-    ? 'git restore -- package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json && '
+    ? 'git restore -- package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json src-tauri/Cargo.lock && '
     : '';
   // The selected root owns the exact target bytes and artifact paths, while the
   // current tooling root owns retry orchestration. Invoking the selected root's
@@ -389,16 +474,24 @@ export function buildCutArgv(
   // `STARTED:<epoch>` stays the FIRST line so a marker written by an older launcher, or
   // read by an older parser, still resolves.
   const operationId = env.PAPERCUSP_RELEASE_OPERATION_ID;
-  const taskId = env.PAPERCUSP_RELEASE_TASK_ID;
+  const markerTaskId = env.PAPERCUSP_RELEASE_TASK_ID;
   const startedMarker =
-    operationId && taskId
-      ? `printf 'STARTED:%s\\nOPERATION:%s\\nTASK:%s\\n' "$(date +%s)" ${shellSingleQuote(operationId)} ${shellSingleQuote(taskId)} > ${started}; `
+    operationId && markerTaskId
+      ? `printf 'STARTED:%s\\nOPERATION:%s\\nTASK:%s\\n' "$(date +%s)" ${shellSingleQuote(operationId)} ${shellSingleQuote(markerTaskId)} > ${started}; `
       : `printf 'STARTED:%s\\n' "$(date +%s)" > ${started}; `;
-  const inner = `rm -f ${done}; ${startedMarker}` + `${resumeReset}${envPrefix} ${cutterInvocation} > ${log} 2>&1; ` + `echo "DONE:$?" > ${done}`;
+  const inner =
+    `exec 9>${shellSingleQuote(lock)}; flock -n 9 || { echo 'release_cut_slot_busy' >&2; exit 73; }; ` +
+    `rm -f ${done}; ${currentStatusPointers}${startedMarker}systemd-notify --ready || exit $?; ` +
+    `${resumeReset}${envPrefix} ${cutterInvocation} > ${log} 2>&1; echo "DONE:$?" > ${done}`;
   return [
     '--user',
     ...SYSTEMD_TRANSIENT_UNIT_COLLECTION_ARGS,
     `--unit=${unit}`,
+    `--slice=${TASK_ROOT_SLICE}`,
+    '--property=Type=notify',
+    // READY comes from the shell's systemd-notify child, not the main bash PID.
+    // Without this, systemd discards it and kills a running cut at its startup deadline.
+    '--property=NotifyAccess=all',
     `--working-directory=${root}`,
     `--setenv=PATH=${pathEnv}`,
     'bash',
@@ -471,7 +564,9 @@ export function launchDetachedCut(opts: LaunchCutOpts, spawnFn: SpawnLike = spaw
   return new Promise<LaunchCutResult>((resolve) => {
     const base: LaunchCutResult = {
       launched: false,
-      unit: cutUnitFor(opts.platform),
+      unit: opts.runtime.releaseTaskId?.trim()
+        ? cutUnitForTask(opts.runtime.releaseTaskId.trim())
+        : cutUnitFor(opts.platform),
       version: opts.version,
       channel: opts.channel,
       legs,
@@ -545,6 +640,28 @@ export function parseCutStartedMarker(text: string): CutOperationMarker {
   };
 }
 
+function cutTaskIdFromStartedMarker(
+  startedPath: string,
+  exists: (path: string) => boolean,
+  read: (path: string) => string,
+): string | null {
+  if (!exists(startedPath)) return null;
+  try {
+    return parseCutStartedMarker(read(startedPath)).taskId;
+  } catch {
+    return null;
+  }
+}
+
+function cutUnitFromStartedMarker(
+  platform: Platform | undefined,
+  exists: (path: string) => boolean,
+  read: (path: string) => string,
+): string {
+  const taskId = cutTaskIdFromStartedMarker(cutStartedFor(platform), exists, read);
+  return taskId ? cutUnitForTask(taskId) : cutUnitFor(platform);
+}
+
 export interface ReadCutStatusDeps {
   existsSync?: (p: string) => boolean;
   readFileSync?: (p: string) => string;
@@ -552,6 +669,8 @@ export interface ReadCutStatusDeps {
   isUnitActive?: (unit: string) => boolean;
   /** Read ONE platform leg's status (WI-4233) instead of the legacy whole-cut unit. */
   platform?: Platform;
+  /** Select one registered cut root's status files instead of the latest host-wide cut. */
+  root?: string;
 }
 
 /** Default: `systemctl --user is-active <unit>` → true only on exit 0 ("active"). */
@@ -563,6 +682,34 @@ export function defaultIsUnitActive(unit: string): boolean {
     // Non-zero exit = inactive/failed/unknown unit → not running.
     return false;
   }
+}
+
+/**
+ * `systemctl --user is-active <unit>` without blocking the event loop: the raw
+ * ActiveState, or '' when systemctl could not answer. `is-active` exits non-zero
+ * for every state except active, and still prints the state, so stdout is read
+ * on both paths.
+ */
+export async function readUnitActiveStateAsync(unit: string): Promise<string> {
+  try {
+    const { stdout } = await execFileViaSidecar(
+      'systemctl',
+      ['--user', 'is-active', unit],
+      { timeoutMs: 5000, subsystem: 'release-cut-launch' },
+    );
+    return stdout.trim();
+  } catch (err) {
+    // `is-active` exits non-zero for inactive/failed states but prints ActiveState
+    // to stdout. execFileViaSidecar preserves that stdout on its rejection shape.
+    const stdout = (err as { stdout?: unknown } | null)?.stdout;
+    return typeof stdout === 'string' ? stdout.trim() : '';
+  }
+}
+
+/** Async {@link defaultIsUnitActive}: true only for active/activating. */
+export async function defaultIsUnitActiveAsync(unit: string): Promise<boolean> {
+  const state = await readUnitActiveStateAsync(unit);
+  return state === 'active' || state === 'activating';
 }
 
 function tailLines(text: string, n: number): string {
@@ -579,15 +726,69 @@ function tailLines(text: string, n: number): string {
  * else sentinel ⇒ done/failed by exit code; else started marker ⇒ interrupted; else idle.
  */
 export function readCutStatus(deps: ReadCutStatusDeps = {}): CutStatus {
+  const probe = cutStatusProbe(deps);
+  return cutStatusFrom(probe, (deps.isUnitActive ?? defaultIsUnitActive)(probe.unit));
+}
+
+export interface ReadCutStatusAsyncDeps extends Omit<ReadCutStatusDeps, 'isUnitActive'> {
+  /** Async unit probe; defaults to {@link defaultIsUnitActiveAsync}. */
+  isUnitActiveAsync?: (unit: string) => Promise<boolean>;
+}
+
+/**
+ * {@link readCutStatus} with the systemd probe off the event loop
+ * (jev-memory-timeouts-to-zero-2026-10-01). The sync probe is an execFileSync
+ * that froze the calling worker for 50-240 ms per read on this host; the
+ * liveness alarm runs it on every tick. Same marker reads, same precedence.
+ */
+export async function readCutStatusAsync(deps: ReadCutStatusAsyncDeps = {}): Promise<CutStatus> {
+  const probe = cutStatusProbe(deps);
+  return cutStatusFrom(probe, await (deps.isUnitActiveAsync ?? defaultIsUnitActiveAsync)(probe.unit));
+}
+
+interface CutStatusProbe {
+  exists: (p: string) => boolean;
+  read: (p: string) => string;
+  logPath: string;
+  donePath: string;
+  startedSeen: boolean;
+  operation: CutOperationMarker | null;
+  unit: string;
+}
+
+/** The marker reads that decide WHICH unit to ask systemd about. */
+function cutStatusProbe(deps: Omit<ReadCutStatusDeps, 'isUnitActive'>): CutStatusProbe {
   const exists = deps.existsSync ?? ((p: string) => fs.existsSync(p));
   const read = deps.readFileSync ?? ((p: string) => fs.readFileSync(p, 'utf8'));
-  const active = deps.isUnitActive ?? defaultIsUnitActive;
-  const unit = cutUnitFor(deps.platform);
-  const logPath = cutLogFor(deps.platform);
-  const donePath = cutDoneFor(deps.platform);
-  const startedPath = cutStartedFor(deps.platform);
+  const startedPath = cutStartedFor(deps.platform, deps.root);
 
-  const running = active(unit);
+  const startedSeen = exists(startedPath);
+  let operation: CutOperationMarker | null = null;
+  if (startedSeen) {
+    try {
+      operation = parseCutStartedMarker(read(startedPath));
+    } catch {
+      operation = { operationId: null, taskId: null, startedAtSec: null };
+    }
+  }
+  const unit = operation?.taskId ? cutUnitForTask(operation.taskId) : cutUnitFor(deps.platform);
+  return {
+    exists,
+    read,
+    logPath: cutLogFor(deps.platform, deps.root),
+    donePath: cutDoneFor(deps.platform, deps.root),
+    startedSeen,
+    operation,
+    unit,
+  };
+}
+
+/**
+ * The rest of the status, read AFTER the unit probe answered, so a cut that ends
+ * between the two reads lands as running-or-done, never as interrupted.
+ */
+function cutStatusFrom(probe: CutStatusProbe, running: boolean): CutStatus {
+  const { exists, read, logPath, donePath, startedSeen, operation } = probe;
   let exitCode: number | null = null;
   let doneSeen = false;
   if (exists(donePath)) {
@@ -597,17 +798,8 @@ export function readCutStatus(deps: ReadCutStatusDeps = {}): CutStatus {
       doneSeen = true;
     }
   }
-  const startedSeen = exists(startedPath);
   // A marker that exists but cannot be read is still evidence a cut STARTED, so the
-  // state machine below must not lose that; only the identity degrades to null.
-  let operation: CutOperationMarker | null = null;
-  if (startedSeen) {
-    try {
-      operation = parseCutStartedMarker(read(startedPath));
-    } catch {
-      operation = { operationId: null, taskId: null, startedAtSec: null };
-    }
-  }
+  // state machine above keeps the interrupted/running decision and only identity degrades.
   const logTail = exists(logPath) ? tailLines(read(logPath), 40) : null;
 
   let state: CutStateKind;
@@ -1087,6 +1279,7 @@ export function releaseToolingDrift(args: {
 
 export interface PreflightDeps {
   exists?: (p: string) => boolean;
+  readFileSync?: (p: string) => string;
   isUnitActive?: (unit: string) => boolean;
   /** HOME for resolving the signing key (default process.env.HOME). */
   home?: string;
@@ -1100,6 +1293,67 @@ export interface PreflightDeps {
   /** The sha an exact release tag points at on `remote` (null = the tag is absent); throws
    *  when the remote cannot be read. Default: `git ls-remote`. Tests inject. */
   remoteTagSha?: (monorepo: string, tag: string, remote: string) => string | null;
+  /** Run bin/smoke-target-preflight.sh for one native smoke target (WI-10004346).
+   *  Default: a bounded read-only `bash <script> --platform <p>`. Tests inject. */
+  runSmokeTargetPreflight?: (scriptPath: string, platform: 'mac' | 'windows') => SmokeTargetProbe;
+}
+
+/** Raw result of bin/smoke-target-preflight.sh. exitCode null = it did not finish
+ *  (timeout / spawn failure), which is unmeasured, never READY. */
+export interface SmokeTargetProbe {
+  exitCode: number | null;
+  output: string;
+}
+
+function defaultRunSmokeTargetPreflight(scriptPath: string, platform: 'mac' | 'windows'): SmokeTargetProbe {
+  const res = spawnSync('bash', [scriptPath, '--platform', platform], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60_000,
+  });
+  return { exitCode: res.status, output: `${res.stdout ?? ''}${res.stderr ?? ''}${res.error ? `\n${res.error.message}` : ''}` };
+}
+
+/**
+ * The native installed-upgrade smoke TARGET check (WI-10004346). Preflight used to
+ * confirm only that the verify SCRIPTS exist; 0.0.26 then burned a full cut before
+ * both native smokes refused on their TARGETS (Mac rig not ready, Windows VM stopped).
+ * This runs the shared read-only detector so that is visible BEFORE the build.
+ * Always warnOnly: the cut can run; the smoke is a downstream ship-gate.
+ */
+export function smokeTargetCheck(
+  platform: 'mac' | 'windows',
+  scriptPath: string,
+  exists: (p: string) => boolean,
+  run: (scriptPath: string, platform: 'mac' | 'windows') => SmokeTargetProbe,
+): PreflightCheck {
+  const name = `smoke-target:${platform}`;
+  if (!exists(scriptPath)) {
+    return { name, ok: false, warnOnly: true, detail: `missing ${scriptPath} — native smoke target readiness is UNMEASURED` };
+  }
+  const probe = run(scriptPath, platform);
+  const blockers = probe.output
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('SMOKE_TARGET_BLOCKER'));
+  const tail = blockers.length ? ` — ${blockers.join('; ')}` : '';
+  switch (probe.exitCode) {
+    case 0:
+      return { name, ok: true, warnOnly: true, detail: `${platform} smoke target READY` };
+    case 2:
+      return { name, ok: false, warnOnly: true, detail: `${platform} smoke target NOT-READY${tail}` };
+    case 3: {
+      const hint = probe.output.trim().split('\n').slice(-1)[0] ?? '';
+      return { name, ok: false, warnOnly: true, detail: `${platform} smoke target STOPPED — boot it before the smoke step${hint ? `: ${hint}` : ''}` };
+    }
+    default:
+      return {
+        name,
+        ok: false,
+        warnOnly: true,
+        detail: `${platform} smoke target UNMEASURED (detector exit ${probe.exitCode ?? 'none — timed out or failed to spawn'})${tail}`,
+      };
+  }
 }
 
 /** The public remote the shipped app clones its dogfood hive from. release-local.sh
@@ -1152,14 +1406,17 @@ export function preflightCut(
     /** The release this cut would produce. When given, preflight also checks the exact
      *  dogfood-pin tag on the canonical remote (EI-24611322499942803). */
     release?: { version: string; channel: Channel; sourceSha: string };
+    /** Build-only opt-in; defers the tag probe, never signing/source gates. */
+    deferTag?: boolean;
   } = {},
   deps: PreflightDeps = {},
 ): PreflightResult {
   const root = opts.root ?? desktopRoot();
   const exists = deps.exists ?? ((p: string) => fs.existsSync(p));
+  const read = deps.readFileSync ?? ((p: string) => fs.readFileSync(p, 'utf8'));
   const active = deps.isUnitActive ?? defaultIsUnitActive;
   const home = deps.home ?? process.env.HOME ?? '';
-  const unit = cutUnitFor(opts.platform);
+  const unit = cutUnitFromStartedMarker(opts.platform, exists, read);
 
   const checks: PreflightCheck[] = [];
 
@@ -1330,7 +1587,15 @@ export function preflightCut(
   // tag is not already on the canonical remote at the exact source sha, and only op:prepare-tag
   // creates it. Preflight used to skip this, so go:true could precede a run that was certain
   // to fail at the pin check (after bumping the manifests, which left the cut root dirty).
-  if (opts.release) {
+  if (opts.release && opts.deferTag === true) {
+    checks.push({
+      name: 'release-tag',
+      ok: true,
+      warnOnly: true,
+      detail: `${desktopReleaseTag(opts.release.version, opts.release.channel)} deferred for a build-only run; ` +
+        'bind the exact tag only after a containment receipt matches the built sourceSha. Candidate/GO/publication remain blocked.',
+    });
+  } else if (opts.release) {
     const { version, channel, sourceSha } = opts.release;
     const tag = desktopReleaseTag(version, channel);
     const where = `${DOGFOOD_CANONICAL_REMOTE} refs/tags/${tag}`;
@@ -1384,6 +1649,13 @@ export function preflightCut(
       warnOnly: true,
     });
   }
+  // The legs cross-build without a VM, but their installed-upgrade SMOKE needs one.
+  // The detector is release machinery, so read it from the current orchestrator tree.
+  const smokeScript = path.join(opts.orchestratorRoot ?? desktopRoot(), 'bin', 'smoke-target-preflight.sh');
+  const runSmoke = deps.runSmokeTargetPreflight ?? defaultRunSmokeTargetPreflight;
+  for (const platform of ['mac', 'windows'] as const) {
+    if (legs[platform]) checks.push(smokeTargetCheck(platform, smokeScript, exists, runSmoke));
+  }
 
   const blockers = checks.filter((c) => !c.ok && !c.warnOnly).map((c) => `${c.name}: ${c.detail}`);
   return { go: blockers.length === 0, desktopRoot: root, checks, blockers };
@@ -1400,6 +1672,8 @@ export interface AbortLegResult {
 export interface AbortLegDeps {
   /** `systemctl --user stop <unit>` by default; throws on failure. Injectable for tests. */
   stopUnit?: (unit: string) => void;
+  existsSync?: (p: string) => boolean;
+  readFileSync?: (p: string) => string;
 }
 
 /** Stop ONE platform leg's detached unit (best-effort — a leg that already finished or
@@ -1407,7 +1681,9 @@ export interface AbortLegDeps {
  *  Its log/done files are left in place for post-mortem; the next op:run-leg for the same
  *  platform clears the done sentinel itself (buildCutArgv's `rm -f`). */
 export function abortLeg(platform: Platform, deps: AbortLegDeps = {}): AbortLegResult {
-  const unit = cutUnitFor(platform);
+  const exists = deps.existsSync ?? ((p: string) => fs.existsSync(p));
+  const read = deps.readFileSync ?? ((p: string) => fs.readFileSync(p, 'utf8'));
+  const unit = cutUnitFromStartedMarker(platform, exists, read);
   const stop =
     deps.stopUnit ??
     ((u: string) => {

@@ -36,7 +36,8 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { moduleRepoRoot } from '../module-repo-root';
 
 import {
   DEFAULT_RESOURCE_BUDGET,
@@ -1482,7 +1483,7 @@ export async function runGitnexusFacadeLeg(
  * answers an AST-pattern question, not a symbol-definition question. Giving it
  * a symbol case merely because both produce sites would compare unlike things.
  */
-const BENCH_REPO_ROOT = resolve(import.meta.dirname, '../../../..');
+const BENCH_REPO_ROOT = moduleRepoRoot(import.meta.url);
 const AST_GREP_BENCH_FALSIFIES =
   'A text-shaped or mutating implementation either misses the multiline call, ' +
   'returns non-AST matches, or changes the source while claiming to preview.';

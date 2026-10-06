@@ -67,6 +67,7 @@ import { parseRemote } from './github';
 import { decideAutoReview, type AutoReviewSettings } from './auto-review-decision-types';
 import { tryAutoApprove, type AutoApproveContext } from './auto-approve';
 import { tryAutoMerge, type AutoMergeContext } from './auto-merge';
+import { isStandingPr, type StandingPrMergeOutcome } from '../harness/git-sync/standing-pr-merge';
 import { decideRetry, DEFAULT_RETRY_POLICY, type RetryDecision } from './retry-policy-types';
 import {
   summarizeCheckRuns,
@@ -110,6 +111,12 @@ export interface LastSeenEntry {
 export interface PollMeta {
   last_seen: Record<string, LastSeenEntry>;
   consecutive_errors: number;
+  /**
+   * Per-PR exact-merge test records for the standing PR (plan
+   * pot-review-integration-mode-2026-10-05, D-008), keyed by PR number. Owned and
+   * validated by harness/git-sync/standing-pr-merge-deps; passed through untouched.
+   */
+  standing_pr_merge_tests?: Record<string, unknown>;
 }
 
 /**
@@ -123,6 +130,8 @@ export interface PollStore {
   readTrust(workspaceId: string, installSlug: string, viewerId: number): Promise<ReadonlySet<number>>;
   readMeta(installSlug: string): Promise<PollMeta>;
   patchMeta(installSlug: string, patch: Record<string, unknown>): Promise<void>;
+  /** Create this pot's pr-poll routine row (inactive) when it has none (WI-10006418). */
+  ensureRecordRow?(installSlug: string, workspaceId: string): Promise<void>;
   setNextFireAt(installSlug: string, at: Date): Promise<void>;
   /** Best-effort WI↔PR row (resolves feature_id via completion_ref; no-op if unlinked). */
   upsertFeaturePr(args: { workspaceId: string; installSlug: string; pr: Pr }): Promise<void>;
@@ -182,6 +191,22 @@ export interface PollDaemonDeps {
     pr: Pr;
     mergeCommitSha: string;
   }) => Promise<void>;
+  /**
+   * The standing PR's exact-merge gate (plan pot-review-integration-mode-2026-10-05,
+   * P-021 / P-024, D-008): one step of build-merge-result → test that sha → advance the
+   * base to exactly that sha. The standing PR is NEVER merged through `tryAutoMerge`;
+   * without this dep it is simply not merged.
+   */
+  standingPrMerge?: (args: {
+    workspaceId: string;
+    installSlug: string;
+    remote: string;
+    pr: Pr;
+    /** The install's auto-merge setting (the policy input for an auto merge). */
+    autoMerge: boolean;
+    /** contribution-admission verdict for the PR author. */
+    authorRevoked: boolean;
+  }) => Promise<StandingPrMergeOutcome>;
   now?: () => number;
   random?: () => number;
 }
@@ -249,6 +274,7 @@ interface ResolvedDeps {
     pr: Pr;
     mergeCommitSha: string;
   }) => Promise<void>;
+  standingPrMerge: PollDaemonDeps['standingPrMerge'];
   now: () => number;
   random: () => number;
 }
@@ -263,6 +289,7 @@ function resolveDeps(deps: PollDaemonDeps): ResolvedDeps {
     readReport: deps.readReport ?? defaultReadReport,
     isAuthorRevoked: deps.isAuthorRevoked ?? defaultIsAuthorRevoked,
     stampMerge: deps.stampMerge ?? defaultStampMerge,
+    standingPrMerge: deps.standingPrMerge,
     now: deps.now ?? Date.now,
     random: deps.random ?? Math.random,
   };
@@ -432,6 +459,28 @@ export async function pollHarnessPrs(args: PollHarnessArgs, deps: PollDaemonDeps
       decision.kind === 'approve_and_merge' &&
       (approveRes.action === 'approved' || approveRes.action === 'skipped_already_approved')
     ) {
+      if (isStandingPr(enriched)) {
+        // D-008: the standing PR lands only by advancing the base to an exact merge sha
+        // the pot suite passed on — never through tryAutoMerge (GitHub would build its
+        // own, untested merge). No gate wired → not merged at all.
+        if (!d.standingPrMerge) continue;
+        const out = await d.standingPrMerge({
+          workspaceId,
+          installSlug,
+          remote,
+          pr: { ...enriched, review_decision: 'approved' },
+          autoMerge: settings.auto_merge,
+          authorRevoked,
+        });
+        if (out.action === 'merged') {
+          counts.merged.push(enriched.ref.number);
+          await d.stampMerge({ workspaceId, installSlug, remote, pr: enriched, mergeCommitSha: out.mergeSha });
+        } else if (out.action === 'testing' || out.action === 'waiting' || out.action === 'retest') {
+          // Re-check next poll even when the PR itself did not change.
+          deferred.add(enriched.ref.number);
+        }
+        continue;
+      }
       // The in-memory PR still carries its pre-approve review_decision; reflect the
       // approval we just posted so tryAutoMerge's "approved" gate sees the truth.
       const mergeRes = await tryAutoMerge(host, { ...enriched, review_decision: 'approved' }, mergeCtx);
@@ -551,7 +600,7 @@ export function makeSqlStore(sql: Sql): PollStore {
     },
 
     async readMeta(installSlug) {
-      const rows = await sql<Array<{ m: { last_seen?: unknown; consecutive_errors?: unknown } | null }>>`
+      const rows = await sql<Array<{ m: Record<string, unknown> | null }>>`
         SELECT metadata->'pr_poll' AS m
           FROM harness_shared.routines
          WHERE install_slug = ${installSlug} AND target_role = ${PR_POLL_TARGET}
@@ -572,6 +621,20 @@ export function makeSqlStore(sql: Sql): PollStore {
         );
       } catch {
         // Metadata is observability/idempotency state — never sink the poll on a write blip.
+      }
+    },
+
+    async ensureRecordRow(installSlug, workspaceId) {
+      // patchMeta writes into this pot's pr-poll routine row. Only the PR-reviewer settings
+      // route created one, so a working-copy pot without that role had no row, and its
+      // standing-PR merge-test record was silently dropped (WI-10006418). Create it
+      // inactive: this stores records and does not turn polling on.
+      const { getPrPollRoutine, seedPrPollRoutineForHarness } = await import('./pr-poll-routine');
+      if (await getPrPollRoutine(sql, installSlug)) return;
+      const seeded = await seedPrPollRoutineForHarness({ workspaceId, installSlug, active: false }, { sql });
+      if (!seeded.seeded) {
+        const why = seeded.reason === 'error' ? `${seeded.reason}: ${seeded.message}` : seeded.reason;
+        throw new Error(`Could not create the row that stores ${installSlug}'s merge tests (${why}).`);
       }
     },
 
@@ -663,7 +726,12 @@ export function parsePollMeta(m: unknown): PollMeta {
       }
     }
   }
-  return { last_seen, consecutive_errors: Number(obj.consecutive_errors ?? 0) || 0 };
+  const meta: PollMeta = { last_seen, consecutive_errors: Number(obj.consecutive_errors ?? 0) || 0 };
+  const tests = obj.standing_pr_merge_tests;
+  if (tests && typeof tests === 'object' && !Array.isArray(tests)) {
+    meta.standing_pr_merge_tests = { ...(tests as Record<string, unknown>) };
+  }
+  return meta;
 }
 
 // ── Production default seams (lazy-imported so boot stays light) ─────────────────
@@ -878,7 +946,15 @@ export async function handlePrPoll(ctx: SystemActionCtx): Promise<void> {
     console.warn(`[pr-poll] ${installSlug}: no upstream remote resolvable — skipping tick`);
     return;
   }
-  const outcome = await pollHarnessPrs({ installSlug, workspaceId, remote });
+  // The standing PR's exact-merge gate runs only on this production path (P-021 /
+  // P-024); it shares the poll store so its test records live on the routine metadata.
+  const store = makeSqlStore(getOrgPg().sql);
+  const { makeLiveStandingPrMerge } = await import('../harness/git-sync/standing-pr-merge-live');
+  const standingPrMerge = makeLiveStandingPrMerge({
+    store,
+    onError: (err) => console.warn(`[pr-poll] ${installSlug}: standing PR merge run failed:`, err),
+  });
+  const outcome = await pollHarnessPrs({ installSlug, workspaceId, remote }, { store, standingPrMerge });
   if (outcome.status === 'error') {
     console.warn(
       `[pr-poll] ${installSlug}: poll error (${outcome.error?.kind}: ${outcome.error?.message}) — backing off ${Math.round((outcome.backoffMs ?? 0) / 1000)}s`,

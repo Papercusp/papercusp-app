@@ -46,8 +46,11 @@ export default defineTool({
       .optional()
       .describe('Required for a per-use offer: maximum micro-units this channel may commit.'),
   }),
-  async handler(args) {
-    const { checkoutDoor } = await import('../../cupboard/commerce-door-gate-io');
+  async handler(args, ctx) {
+    const [{ checkoutDoor }, { activeWorkspaceId }] = await Promise.all([
+      import('../../cupboard/commerce-door-gate-io'),
+      import('../../workspace-registry'),
+    ]);
     const outcome = await checkoutDoor({
       buyerOrgId: args.buyerOrgId,
       actingUserId: args.actingUserId,
@@ -57,6 +60,11 @@ export default defineTool({
       idempotencyKey: args.idempotencyKey,
       ...(args.quantity !== undefined ? { quantity: args.quantity } : {}),
       ...(args.maxSpendMicros !== undefined ? { maxSpendMicros: args.maxSpendMicros } : {}),
+    }, {}, {
+      // P-016 (D-011): an identity-release preflight records its channel as this
+      // workspace's funding for that release.
+      workspaceId: ctx?.principal?.workspaceId ?? activeWorkspaceId(),
+      actorId: args.actingUserId,
     });
 
     if (!outcome.ok) {
@@ -70,7 +78,10 @@ export default defineTool({
     }
 
     if (outcome.session.kind === 'microcharge-preflight') {
-      return text({ ...outcome.session });
+      return text({
+        ...outcome.session,
+        ...(outcome.fundingBinding ? { fundingBinding: outcome.fundingBinding } : {}),
+      });
     }
 
     return text({

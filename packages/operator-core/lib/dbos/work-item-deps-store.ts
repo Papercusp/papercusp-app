@@ -121,6 +121,8 @@ export interface WorkItemDependencyMutationTelemetry extends DependencyGraphPerf
 export interface WorkItemDependencyWriterOptions {
   readonly createdBy?: string;
   readonly satisfaction?: DependencySatisfaction;
+  /** Sync only this prior owned subset; undefined retains the full replace contract. */
+  readonly priorBlockerIds?: readonly string[];
   /** Injectable root database handle for real-Postgres tests and explicitly scoped internal callers. */
   readonly sql?: Sql;
   /** Endpoint-row workspace. Edge rows remain in DEFAULT_COORD_WORKSPACE. */
@@ -210,13 +212,16 @@ function applyDependencyMutations(
       }
       continue;
     }
+    const key = storedEdgeKey({ blocked: mutation.blocked, blocker: mutation.blocker });
+    const existing = candidate.get(key);
     const edge: StoredDependencyEdge = {
       blocked: mutation.blocked,
       blocker: mutation.blocker,
-      createdBy: mutation.createdBy ?? null,
-      satisfaction: mutation.satisfaction ?? 'settled',
+      createdBy: mutation.createdBy ?? existing?.createdBy ?? null,
+      // An idempotent add is not a request to weaken an existing SUCCESS edge.
+      // Explicit satisfaction still updates the requirement through this same seam.
+      satisfaction: mutation.satisfaction ?? existing?.satisfaction ?? 'settled',
     };
-    const key = storedEdgeKey(edge);
     if (mutation.op === 'add') candidate.set(key, edge);
     else candidate.delete(key);
   }
@@ -1326,6 +1331,8 @@ export function wouldCreateCycle(
 /**
  * Set ONE work-item's `blocks` edges in work_item_deps to exactly `blockedBy` (delete + insert),
  * through the canonical P-005 candidate-graph admission transaction. Transactional + idempotent.
+ * With priorBlockerIds, remove only prior owned edges absent from blockedBy and add the new
+ * set. All other families/harnesses and retained edge requirements are left intact.
  *
  * ⚠ EI-19325959789634791 / D-017 — endpoint kind is resolved from the TARGET ROW'S FAMILY, not
  * assumed to be `feature`. It was assumed for a long time, and the assumption held only because
@@ -1359,6 +1366,11 @@ export async function syncWorkItemDepEdges(
   const blockers = blockerResolutions
     .map((resolution) => resolution.endpoint)
     .filter((blocker) => workItemBlockingEdge(blocker, blockedResolution.endpoint) !== null);
+  const priorResolutions = await Promise.all(
+    (opts.priorBlockerIds ?? []).map((blockerId) =>
+      resolveActualDepEndpoint(sql, { kind: FEATURE_KIND, ref: featureRef(harnessSlug, blockerId) }),
+    ),
+  );
   const mutations: WorkItemDependencyMutation[] = [];
   if (blockedResolution.endpoint.kind === ISSUE_ENDPOINT_KIND) {
     const historicalFeatureAlias = { kind: FEATURE_KIND, ref: featureRef(harnessSlug, featureId) };
@@ -1366,17 +1378,35 @@ export async function syncWorkItemDepEdges(
       mutations.push({ op: 'replace', blocked: historicalFeatureAlias, blockers: [] });
     }
   }
-  mutations.push({
-    op: 'replace',
-    blocked: blockedResolution.endpoint,
-    blockers,
-    createdBy: opts.createdBy,
-    satisfaction: opts.satisfaction,
-  });
+  if (opts.priorBlockerIds === undefined) {
+    mutations.push({
+      op: 'replace',
+      blocked: blockedResolution.endpoint,
+      blockers,
+      createdBy: opts.createdBy,
+      satisfaction: opts.satisfaction,
+    });
+  } else {
+    const desiredKeys = new Set(blockers.map(dependencyIdentityKey));
+    for (const { endpoint: blocker } of priorResolutions) {
+      if (!desiredKeys.has(dependencyIdentityKey(blocker))) {
+        mutations.push({ op: 'remove', blocked: blockedResolution.endpoint, blocker });
+      }
+    }
+    for (const blocker of blockers) {
+      mutations.push({
+        op: 'add', blocked: blockedResolution.endpoint, blocker,
+        createdBy: opts.createdBy, satisfaction: opts.satisfaction,
+      });
+    }
+  }
+  if (mutations.length === 0) return;
   await mutateWorkItemDependencies(
     {
       workspaceId: DEFAULT_COORD_WORKSPACE,
-      itemWorkspaceId: mutationItemWorkspaceId([blockedResolution, ...blockerResolutions], opts.itemWorkspaceId),
+      itemWorkspaceId: mutationItemWorkspaceId(
+        [blockedResolution, ...blockerResolutions, ...priorResolutions], opts.itemWorkspaceId,
+      ),
       mutations,
     },
     { sql, retry: opts.retry },

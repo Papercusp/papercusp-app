@@ -161,6 +161,26 @@ function bridgedDedupeWindowMs(queryName: string, sourceEventName: string): numb
     : undefined;
 }
 
+// D-012 (plan papercusp-log-performance-remediation-2026-09-23, WI-10004929).
+// These list targets aggregate over the whole work_items table, so each refetch
+// is expensive. Five hot sources (work_items, harness_features_consolidated,
+// engineer_issues, coord_links, spawned_agents) feed them. Under sustained writes
+// the bus's 2 s trailing bound, not its 90 s floor, sets the delivered rate.
+// Measured 2026-10-01: 51 invalidations per 180 s per target, so every open Work
+// Items panel refetched summary + page about every 3.5 s. A 10 s window keeps
+// staleness bounded (the library clamps overrides to 15 s) and cuts that rate
+// about fivefold. Every other target keeps the 2 s default: a cheap query should
+// not pay a freshness cost for an expensive one.
+export const EXPENSIVE_LIST_QUERY_NAMES: ReadonlySet<string> = new Set([
+  'workItems.summary',
+  'workItems.byHarness',
+]);
+export const EXPENSIVE_LIST_COALESCE_WINDOW_MS = 10_000;
+
+export function bridgedCoalesceWindowMs(queryName: string, _sourceEventName: string): number | undefined {
+  return EXPENSIVE_LIST_QUERY_NAMES.has(queryName) ? EXPENSIVE_LIST_COALESCE_WINDOW_MS : undefined;
+}
+
 /**
  * Best-effort invalidation notifications can outlive the database they use.
  * This is expected when an integration-test database is torn down while a
@@ -223,6 +243,9 @@ const bus = createInvalidationBus({
   // WI-37446: only low-volume agent-mode projections use the short bridge
   // window; hot sources feeding those same names retain the global 90s guard.
   bridgedDedupeWindowMs,
+  // D-012: expensive aggregate list targets get a longer, still-bounded
+  // trailing window; every other target keeps the bus default.
+  bridgedCoalesceWindowMs,
   log: (m) => console.log(m),
   onError: (where, e) => {
     // The notify path is intentionally detached from writes. A test fixture

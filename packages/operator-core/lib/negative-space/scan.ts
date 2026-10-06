@@ -26,6 +26,7 @@
 import { readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import type { Sql } from 'postgres';
 import { DEFAULT_COORD_WORKSPACE } from '@papercusp/coordination/event-log';
 import {
@@ -164,7 +165,7 @@ export async function markDemandFiled(
 // packages/operator-core/lib/negative-space → repo root. ESM-safe: bare
 // `__dirname` is UNDEFINED under tsx file-mode in this type:module package —
 // never use __dirname in operator-core (the neologism miner carries the same note).
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url); // bundle-safe, unlike a fixed climb (P-016)
 const DOCS_CONTENT_DIR = join(REPO_ROOT, 'apps/operator-docs/src/content/docs');
 
 /**

@@ -23,9 +23,12 @@ import { z } from 'zod';
 import { defineTool, AGENT_ROLES } from '@papercusp/agent-mcp';
 import { resolveCtxHarnessSlug } from './_ctx-opts';
 import { harnessArg, harnessScopedCtx } from '../_harness-scope';
+import { resolveAgentIdentity } from '../coordination/identity';
 import { withPlanLock, type TemplateDataPatch } from './with-plan-lock';
 import { parsePlan, type LegacyReason } from './parser';
 import { planRevisionCapture, type PlanRevisionCtx } from './revisions';
+import { createRubricRevisionCapture } from '../../rubrics';
+import { RUBRIC_TEMPLATE_NAME } from './rubric-template';
 import { validatePlanData } from './plan-input-validation';
 import { softText, clampText, LIMITS } from '../limits';
 
@@ -149,12 +152,22 @@ export default defineTool({
   async handler(args, ctx) {
     const sctx = harnessScopedCtx(args.harness, ctx);
     const harnessSlug = resolveCtxHarnessSlug(sctx);
+    const rationale = clampText(args.rationale, LIMITS.ANNOTATION) ?? 'set template_data';
     const rev = planRevisionCapture(
       ctx as PlanRevisionCtx,
       args.slug,
-      clampText(args.rationale, LIMITS.ANNOTATION) ?? 'set template_data',
+      rationale,
       harnessSlug ? { harnessSlug } : {},
     );
+    let actorId: string | undefined;
+    try {
+      actorId = resolveAgentIdentity(ctx).ownerId;
+    } catch {
+      // The rubric snapshot writer has an explicit system identity fallback;
+      // the generic plan revision path remains best-effort as before.
+    }
+    const rubricRevision = createRubricRevisionCapture(args.slug, actorId, rationale);
+    let writtenTemplate: string | null = null;
 
     const result = await withPlanLock<SetTemplateDataValue>(
       ctx as never,
@@ -162,13 +175,32 @@ export default defineTool({
         slug: args.slug,
         intent: 'plans:set-template-data',
         ...(harnessSlug ? { harnessSlug } : {}),
-        afterWrite: rev.afterWrite,
+        // Generic plans retain their existing best-effort body revision. Rubric
+        // template_data is grading identity, so it needs the same strict,
+        // version-stamped snapshot as writes made through the rubric API.
+        afterWrite: async (writtenBody, scope) => {
+          if (writtenTemplate === RUBRIC_TEMPLATE_NAME) return;
+          await rev.afterWrite(writtenBody, scope);
+        },
+        revisionInTransaction: async (tx, writtenBody, scope, writtenTemplateData, version) => {
+          if (writtenTemplate !== RUBRIC_TEMPLATE_NAME) return;
+          await rubricRevision.revisionInTransaction(
+            tx,
+            writtenBody,
+            scope,
+            writtenTemplateData,
+            version,
+          );
+        },
       },
       // `meta.inputSchema` is read INSIDE the lock (P-004), so the data is validated
       // against the plan's schema as of THIS write — a concurrent set-input-schema
       // cannot slip between an unlocked read and the write.
-      async (current, meta) =>
-        evaluateSetTemplateData(current, args.data, args.slug, meta?.inputSchema ?? null),
+      async (current, meta) => {
+        const evaluated = evaluateSetTemplateData(current, args.data, args.slug, meta?.inputSchema ?? null);
+        if (evaluated.value.ok) writtenTemplate = evaluated.value.template;
+        return evaluated;
+      },
     );
 
     if (result.kind === 'busy') {
@@ -229,12 +261,15 @@ export default defineTool({
       /* best-effort — the next natural refresh picks it up */
     }
 
+    const recordedRevision = writtenTemplate === RUBRIC_TEMPLATE_NAME
+      ? rubricRevision.recorded.current
+      : rev.recorded.current;
     return text({
       ok: true,
       slug: v.slug,
       template: v.template,
       version: result.version,
-      revision: rev.recorded.current ? { seq: rev.recorded.current.seq } : null,
+      revision: recordedRevision ? { seq: recordedRevision.seq } : null,
       ...(result.activationAudit ? { activationAudit: result.activationAudit } : {}),
     });
   },

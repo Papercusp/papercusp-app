@@ -25,6 +25,7 @@ import { verifyFinalizationCertificate, type FinalizationCertificate } from '../
 import { authorizeTreasuryTransfer, type SafeTreasuryConfig, type TreasuryTransferRequest } from './treasury-controls';
 import { buildEvmBatchSettlementRequest, type EvmBatchSettlementRequest, type EvmSettlementConfig } from './evm-settlement';
 import type { PaymentChannelState } from './payment-channel';
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
 
 /** Finalized actions that MAY be mirrored on-chain. */
 export const MIRRORABLE_ACTION_KINDS = ['treasury-transfer', 'settlement-batch'] as const;
@@ -75,7 +76,15 @@ export type BridgeRefusalCode =
   | 'treasury-refused'
   | 'settlement-refused';
 
-export type BridgeResult = { ok: true; plan: MirrorPlan } | { ok: false; code: BridgeRefusalCode; detail: string };
+export type BridgeResult =
+  | { ok: true; plan: MirrorPlan }
+  | {
+      ok: false;
+      code: BridgeRefusalCode;
+      detail: string;
+      /** WI-10005197: what would LIFT this refusal. Present on the treasury / settlement policy refusals. */
+      refusal?: RefusalContract;
+    };
 
 export function isMirrorableActionKind(kind: string): kind is MirrorableActionKind {
   return (MIRRORABLE_ACTION_KINDS as readonly string[]).includes(kind);
@@ -105,7 +114,22 @@ export function planOnChainMirror(input: MirrorRequest): BridgeResult {
   // arm below needs the discriminated member, not the widened one.
   if (action.kind === 'treasury-transfer') {
     const authorized = authorizeTreasuryTransfer(action.treasury, action.request);
-    if (!authorized.ok) return { ok: false, code: 'treasury-refused', detail: `${authorized.code}: ${authorized.detail}` };
+    if (!authorized.ok) {
+      return {
+        ok: false,
+        code: 'treasury-refused',
+        detail: `${authorized.code}: ${authorized.detail}`,
+        refusal: {
+          observed: { treasuryCode: authorized.code, role: action.request.role, chainId: String(action.treasury.chainId) },
+          liftsWhen:
+            'the transfer request satisfies the treasury policy rule named in observed.treasuryCode (role enabled, ' +
+            'policy approved, token and recipient on the allowlist, amount within the role cap and bound to a ' +
+            'settlement receipt). Re-sending the SAME request cannot lift it: the requester corrects the request, ' +
+            'or the treasury OWNERS change the Safe/Roles configuration through a new governance round',
+          whoCanMakeItTrue: ['another-agent', 'owner'],
+        },
+      };
+    }
     const body = {
       amountMicros: action.request.amountMicros.toString(),
       recipient: action.request.recipient.toLowerCase(),
@@ -137,7 +161,21 @@ export function planOnChainMirror(input: MirrorRequest): BridgeResult {
     amountMicros: action.amountMicros,
     voucherDigests: action.voucherDigests,
   });
-  if (!built.ok) return { ok: false, code: 'settlement-refused', detail: `${built.code}: ${built.detail}` };
+  if (!built.ok) {
+    return {
+      ok: false,
+      code: 'settlement-refused',
+      detail: `${built.code}: ${built.detail}`,
+      refusal: {
+        observed: { settlementCode: built.code, voucherCount: String(action.voucherDigests.length) },
+        liftsWhen:
+          'the batch-settlement request is buildable: the EVM settlement config, payment channel and voucher ' +
+          'digests satisfy the rule named in observed.settlementCode. Re-sending the SAME batch cannot lift it: ' +
+          'the requester rebuilds the batch from a valid channel state, or the settlement OWNER corrects the EVM config',
+        whoCanMakeItTrue: ['another-agent', 'owner'],
+      },
+    };
+  }
   return {
     ok: true,
     plan: {
@@ -165,7 +203,7 @@ export interface MirrorLedger {
 
 export type MirrorExecution =
   | { ok: true; mirrorId: string; txHash: string; replayed: boolean; decisionStanding: true }
-  | { ok: false; code: BridgeRefusalCode; detail: string; decisionStanding: false }
+  | { ok: false; code: BridgeRefusalCode; detail: string; decisionStanding: false; refusal?: RefusalContract }
   | { ok: false; code: 'submission-failed'; detail: string; mirrorId: string; decisionStanding: true };
 
 /**
@@ -182,7 +220,15 @@ export async function executeOnChainMirror(input: {
   ledger: MirrorLedger;
 }): Promise<MirrorExecution> {
   const planned = planOnChainMirror(input.request);
-  if (!planned.ok) return { ok: false, code: planned.code, detail: planned.detail, decisionStanding: false };
+  if (!planned.ok) {
+    return {
+      ok: false,
+      code: planned.code,
+      detail: planned.detail,
+      decisionStanding: false,
+      ...(planned.refusal ? { refusal: planned.refusal } : {}),
+    };
+  }
 
   const { plan } = planned;
   if (await input.ledger.has(plan.mirrorId)) {

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # sync-staging-checkout.sh — isolated-staging-tier-2026-06-21 (su, session e24ec9b4).
 #
-# Auto-advances the ISOLATED staging checkout ($PAPERCUSP_STAGING_ROOT) to the
-# latest COMMITTED `staging` HEAD and restarts the :3170 operator — ONLY when the
-# branch actually moved. This is what makes :3170 a clean, always-current staging
-# tier (vs today's second-snapshot-of-the-live-working-tree behaviour).
+# Auto-advances the ISOLATED staging checkout to the latest COMMITTED `staging`
+# HEAD by preparing a unique immutable generation, building it completely, then
+# atomically publishing it through a stable sibling alias. The live :3170
+# process keeps its physical source root for its entire lifetime.
 #
 # Reuses the release system's standalone setup-release-checkout.sh (worktree +
 # git-archive submodules + hardlinked node_modules + SPA build) — no parallel
@@ -78,11 +78,16 @@ fi
 _HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _REPO_DEFAULT="$(git -C "$_HERE" rev-parse --show-toplevel 2>/dev/null || (cd "$_HERE/../../../.." && pwd))"
 INTEGRATION_ROOT="${PAPERCUSP_INTEGRATION_ROOT:-$_REPO_DEFAULT}"
-STAGING_ROOT="${PAPERCUSP_STAGING_ROOT:-$(dirname "$INTEGRATION_ROOT")/papercusp-staging}"
+LEGACY_STAGING_ROOT="${PAPERCUSP_STAGING_ROOT:-$(dirname "$INTEGRATION_ROOT")/papercusp-staging}"
+STAGING_ROOT="${LEGACY_STAGING_ROOT}.current"
+STAGING_GENERATIONS_ROOT="${LEGACY_STAGING_ROOT}.generations"
 UNIT="${PAPERCUSP_STAGING_UNIT:-papercusp-staging-api.service}"
 HEALTH_URL="${PAPERCUSP_STAGING_HEALTH_URL:-http://127.0.0.1:3170/api/health}"
 BRANCH="${PAPERCUSP_INTEGRATION_BRANCH:-staging}"
 STAGING_BUNDLE_SCRIPT="${PAPERCUSP_STAGING_BUNDLE_SCRIPT:-$STAGING_ROOT/apps/operator/bin/bundle-host.sh}"
+STAGING_CANDIDATE_HOME=""
+STAGING_CANDIDATE_ROOT=""
+STAGING_CANDIDATE_PUBLISHED=0
 
 # WI-5710. The port we watch for live client connections — derived from
 # HEALTH_URL so the two can never disagree, overridable for tests.
@@ -95,15 +100,317 @@ MAX_STALE_SEC="${PAPERCUSP_STAGING_SYNC_MAX_STALE_SEC:-1800}"
 
 log() { echo "[staging-sync] $(date -Is) $*"; }
 
+# Lock diagnostics are fail-open. The helper writes bounded records to stderr
+# (captured by journald); a missing helper must not change sync admission.
+STAGING_LOCK_ATTRIBUTION_HELPER="$INTEGRATION_ROOT/apps/operator/scripts/systemd/staging-lock-attribution.sh"
+if [[ -r "$STAGING_LOCK_ATTRIBUTION_HELPER" ]]; then
+  . "$STAGING_LOCK_ATTRIBUTION_HELPER" || log "lock-attribution helper could not be loaded; recording unknown holder evidence"
+else
+  log "lock-attribution helper is unavailable; recording unknown holder evidence"
+fi
+if ! declare -F staging_lock_log >/dev/null 2>&1; then
+  staging_lock_log() { log "lock-attribution-unavailable $*"; }
+  staging_lock_attempt_id() { printf '%s' "${INVOCATION_ID:-unavailable}"; }
+  staging_lock_now_ms() { printf '%s' unknown; }
+  staging_lock_elapsed_ms() { printf '%s' unknown; }
+  staging_lock_holder_fields() { printf '%s' 'holder_pid=unknown holder_comm=unknown'; }
+fi
+
+staging_alias_bootstrap() {
+  local tmp
+  mkdir -p "$(dirname "$STAGING_ROOT")" "$STAGING_GENERATIONS_ROOT" || return 1
+  if [[ -L "$STAGING_ROOT" ]]; then
+    if [[ ! -d "$STAGING_ROOT" ]]; then
+      log "FATAL: stable staging alias is broken: $STAGING_ROOT"
+      return 1
+    fi
+    return 0
+  fi
+  if [[ -e "$STAGING_ROOT" ]]; then
+    log "FATAL: stable staging alias path exists as a non-symlink; refusing to replace it: $STAGING_ROOT"
+    return 1
+  fi
+  if [[ -d "$LEGACY_STAGING_ROOT" ]]; then
+    tmp="${STAGING_ROOT}.bootstrap.$$"
+    ln -s "$LEGACY_STAGING_ROOT" "$tmp" || return 1
+    if ! mv -T -- "$tmp" "$STAGING_ROOT"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    log "bootstrapped stable staging alias to the existing serving checkout"
+  fi
+}
+
+create_staging_candidate() {
+  local expected_sha="$1"
+  mkdir -p "$STAGING_GENERATIONS_ROOT" || return 1
+  STAGING_CANDIDATE_HOME="$(mktemp -d "$STAGING_GENERATIONS_ROOT/.candidate-${expected_sha:0:12}.XXXXXX")" || return 1
+  STAGING_CANDIDATE_ROOT="$STAGING_CANDIDATE_HOME/checkout"
+}
+
+# Prints the first unmet publication condition; prints nothing when the
+# candidate is complete. EI-24867768475421999: the refusal used to name no
+# condition, and the EXIT trap deletes the candidate, so a refused run destroyed
+# the only evidence of which check failed. The reason now lands in the journal.
+staging_candidate_unready_reason() {
+  local candidate_root="$1" candidate_home="$2" expected_sha="$3" require_host_bundle="${4:-1}"
+  local ready_sha dist_host="$candidate_root/apps/operator/dist-host"
+  ready_sha="$(cat "$candidate_home/.ready" 2>/dev/null || true)"
+  if [[ "$ready_sha" != "$expected_sha" ]]; then
+    printf '%s/.ready holds %s, expected %s\n' "$candidate_home" "${ready_sha:-<missing>}" "$expected_sha"
+  elif [[ ! -s "$candidate_root/apps/operator-vite/dist/index.html" ]]; then
+    printf 'SPA dist missing or empty: apps/operator-vite/dist/index.html\n'
+  elif [[ "$require_host_bundle" != 1 ]]; then
+    return 0
+  elif [[ ! -s "$dist_host/hono-host.mjs" ]]; then
+    printf 'host bundle missing or empty: apps/operator/dist-host/hono-host.mjs\n'
+  elif [[ ! -s "$dist_host/.bundle-fresh.json" ]]; then
+    printf 'host bundle freshness proof missing: apps/operator/dist-host/.bundle-fresh.json (the bundle-host.sh stamp step failed; its [bundle-freshness] line above names the cause)\n'
+  elif [[ -e "$dist_host/.bundle-stale.json" ]]; then
+    printf 'host bundle is marked stale: apps/operator/dist-host/.bundle-stale.json exists\n'
+  fi
+}
+
+publish_staging_generation() {
+  local candidate_root="$1" candidate_home="$2" expected_sha="$3" require_host_bundle="${4:-1}"
+  local tmp="${STAGING_ROOT}.publish.$$" unready
+  unready="$(staging_candidate_unready_reason "$candidate_root" "$candidate_home" "$expected_sha" "$require_host_bundle")"
+  if [[ -n "$unready" ]]; then
+    log "FATAL: refusing to publish an incomplete staging generation: $unready"
+    return 1
+  fi
+  if [[ -e "$STAGING_ROOT" && ! -L "$STAGING_ROOT" ]]; then
+    log "FATAL: stable staging alias became a non-symlink; refusing publication"
+    return 1
+  fi
+  if [[ -e "$tmp" || -L "$tmp" ]]; then
+    log "FATAL: staging publication temp path already exists: $tmp"
+    return 1
+  fi
+  ln -s "$candidate_root" "$tmp" || return 1
+  if ! mv -Tf -- "$tmp" "$STAGING_ROOT"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  STAGING_CANDIDATE_PUBLISHED=1
+  log "published staging generation $candidate_root through stable alias $STAGING_ROOT"
+}
+
+# WI-10005311: one pass over /proc for the whole host, not one per candidate.
+# The old check forked tr|grep|readlink for every process, once per candidate:
+# with ~7,000 processes and 13 candidates a single prune took minutes. Here one
+# grep reads every environ and one find reads every cwd, about 0.5s in total.
+# Each line of STAGING_GENERATION_REFS is a PAPERCUSP_INTEGRATION_ROOT value or
+# a process cwd. Unreadable or vanished processes are skipped.
+collect_staging_generation_refs() {
+  STAGING_GENERATION_REFS="$(
+    {
+      grep -sazho '^PAPERCUSP_INTEGRATION_ROOT=.*' /proc/[0-9]*/environ 2>/dev/null |
+        tr '\0' '\n' | sed 's/^PAPERCUSP_INTEGRATION_ROOT=//' || true
+      find /proc/[0-9]* -maxdepth 1 -name cwd -printf '%l\n' 2>/dev/null || true
+    } | sort -u || true
+  )"
+}
+
+staging_generation_in_use() {
+  local root="$1" ref
+  while IFS= read -r ref; do
+    if [[ -n "$ref" && ( "$ref" == "$root" || "$ref" == "$root/"* ) ]]; then
+      return 0
+    fi
+  done <<< "${STAGING_GENERATION_REFS:-}"
+  return 1
+}
+
+prune_staging_generations() {
+  local current_root candidate_root resolved_root candidate_home refs_collected=0
+  [[ -d "$STAGING_GENERATIONS_ROOT" ]] || return 0
+  current_root="$(realpath -e "$STAGING_ROOT" 2>/dev/null || true)"
+  while IFS= read -r -d '' candidate_root; do
+    resolved_root="$(realpath -e "$candidate_root" 2>/dev/null || true)"
+    [[ -n "$resolved_root" && "$resolved_root" != "$current_root" ]] || continue
+    # Scan /proc only when there is something to prune, so the every-tick prune
+    # at sync start costs nothing in the steady state.
+    if [[ "$refs_collected" -eq 0 ]]; then
+      collect_staging_generation_refs
+      refs_collected=1
+    fi
+    if staging_generation_in_use "$resolved_root"; then
+      log "retaining prior staging generation still referenced by a process: $resolved_root"
+      continue
+    fi
+    candidate_home="$(dirname "$resolved_root")"
+    [[ "$(dirname "$candidate_home")" == "$STAGING_GENERATIONS_ROOT" &&
+       "$(basename "$candidate_home")" == .candidate-* ]] || continue
+    git -C "$INTEGRATION_ROOT" worktree remove --force "$resolved_root" >/dev/null 2>&1 || true
+    rm -rf -- "$candidate_home"
+    log "pruned unused staging generation $resolved_root"
+  done < <(find "$STAGING_GENERATIONS_ROOT" -mindepth 2 -maxdepth 2 -type d -name checkout -print0 2>/dev/null)
+}
+
+cleanup_staging_candidate() {
+  if [[ -n "$STAGING_CANDIDATE_HOME" && "$STAGING_CANDIDATE_PUBLISHED" -eq 0 ]]; then
+    [[ ! -d "$STAGING_CANDIDATE_ROOT" ]] ||
+      git -C "$INTEGRATION_ROOT" worktree remove --force "$STAGING_CANDIDATE_ROOT" >/dev/null 2>&1 || true
+    rm -rf -- "$STAGING_CANDIDATE_HOME"
+  fi
+}
+
+prepare_staging_candidate() {
+  local target_sha="$1"
+  local snapshot_script="$INTEGRATION_ROOT/apps/operator/scripts/systemd/papercusp-script-snapshot.sh"
+  local setup_script="$INTEGRATION_ROOT/apps/operator/bin/release/setup-release-checkout.sh"
+  create_staging_candidate "$target_sha" || return 1
+  log "preparing isolated staging candidate $STAGING_CANDIDATE_ROOT at ${target_sha:0:10}"
+  if ! PAPERCUSP_INTEGRATION_ROOT="$INTEGRATION_ROOT" PAPERCUSP_RELEASE_ROOT="$STAGING_CANDIDATE_ROOT" \
+    bash "$snapshot_script" "$setup_script" \
+      --ref "$target_sha" --release "$STAGING_CANDIDATE_ROOT" --node-modules auto --build-spa; then
+    log "FATAL: candidate checkout preparation failed; the published staging alias is unchanged"
+    return 1
+  fi
+  if [[ -f "$STAGING_ROOT/apps/operator/.env.local" ]]; then
+    if ! cp -p -- "$STAGING_ROOT/apps/operator/.env.local" "$STAGING_CANDIDATE_ROOT/apps/operator/.env.local"; then
+      log "FATAL: could not copy the staging runtime environment into the candidate"
+      return 1
+    fi
+  fi
+}
+
+mark_staging_candidate_ready() {
+  local expected_sha="$1" ready_tmp
+  [[ -n "$STAGING_CANDIDATE_HOME" && -d "$STAGING_CANDIDATE_ROOT" ]] || return 1
+  ready_tmp="$STAGING_CANDIDATE_HOME/.ready.$$"
+  if ! printf '%s\n' "$expected_sha" > "$ready_tmp" || ! mv -f -- "$ready_tmp" "$STAGING_CANDIDATE_HOME/.ready"; then
+    rm -f -- "$ready_tmp"
+    return 1
+  fi
+}
+
+trap cleanup_staging_candidate EXIT
+
+# A sidecar's reviewBy is intentionally fail-closed in the restart preflight,
+# but that only runs when server code needs a restart. This advisory scan runs on
+# every useful timer pass against the CURRENT serving checkout, including an
+# unchanged-HEAD no-op, so a date cannot expire silently between releases.
+# Warn 14 days before the review date and send one coord alarm per warning state;
+# if delivery fails, retry at most once per UTC day rather than flooding inboxes.
+forward_compat_review_warnings() {
+  local warning_days=14 warning_report state_home state_dir state_file fingerprint today
+  local previous_fingerprint previous_day previous_status alert_body alert_status tmp_file
+  state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  state_dir="$state_home/papercusp"
+  state_file="$state_dir/staging-sync-forward-compat-review"
+
+  if ! warning_report="$(cd "$INTEGRATION_ROOT" && node scripts/check-migration-forward-compat.mjs \
+    "--warn-review-by-days=$warning_days" \
+    "--sidecar-directory=$STAGING_ROOT/libs/papercusp/libs/db/sql")"; then
+    log "ALARM: forward-compat review-date scan failed; the staging sync will continue and the full restart preflight remains fail-closed"
+    return 0
+  fi
+
+  if [ -z "$warning_report" ]; then
+    rm -f "$state_file"
+    return 0
+  fi
+
+  fingerprint="$(printf '%s' "$warning_report" | sha256sum | cut -d' ' -f1)"
+  today="$(date -u +%F)"
+  previous_fingerprint=""
+  previous_day=""
+  previous_status=""
+  if [ -r "$state_file" ]; then
+    read -r previous_fingerprint previous_day previous_status < "$state_file" || true
+  fi
+  if [ "$fingerprint" = "$previous_fingerprint" ] && [ "$previous_status" = sent ]; then
+    return 0
+  fi
+  if [ "$fingerprint" = "$previous_fingerprint" ] && [ "$previous_day" = "$today" ]; then
+    return 0
+  fi
+
+  log "ALARM: migration forward-compat sidecar review dates need attention"
+  while IFS= read -r warning_line; do
+    [ -n "$warning_line" ] && log "$warning_line"
+  done <<< "$warning_report"
+
+  # An expiring sidecar is WORK, not news (WI-10005182). This alarm used to be
+  # only a one-shot `*` FYI broadcast: 987's warning went out ~26h before its
+  # reviewBy, nobody owned it, and the lapse froze :3170 fleet-wide exactly as
+  # 941's had (WI-10003591). File a claimable work-item that stays open until a
+  # sidecar is renewed. The broadcast is now only the fallback when filing
+  # fails, so delivery is never silently dropped.
+  alert_status=failed
+  if [ -f "$INTEGRATION_ROOT/scripts/mcp-call.mjs" ]; then
+    alert_body="$(PAPERCUSP_REVIEW_WARNING_REPORT="$warning_report" node -e '
+      const report = process.env.PAPERCUSP_REVIEW_WARNING_REPORT || "";
+      // One stable subject per (sidecar, reviewBy): the "is within N days" and
+      // "has passed" phrasings of the same expiry name the same work.
+      const due = [...report.matchAll(/(\S+?)\.sql\.forward-compat\.json reviewBy (\d{4}-\d{2}-\d{2})/g)]
+        .map((m) => `${m[1].replace(/^.*\//, "")} reviewBy ${m[2]}`);
+      const subjects = [...new Set(due)].sort().join(", ") || "see body";
+      process.stdout.write(JSON.stringify({
+        kind: "task",
+        title: `Renew or remove expiring migration forward-compat sidecar(s) before staging-sync freezes :3170: ${subjects}`,
+        body: `${report}\n\nAn expired reviewBy makes the staging-sync restart preflight fail closed, which keeps :3170 on its old build for every agent until the sidecar is fixed (WI-10003591, WI-10005182). If the sidecar requiresDeployedCommit is already in the deployed :3070 release, renew reviewBy; otherwise ship that commit first. Verify with: node scripts/check-migration-forward-compat.mjs`,
+      }));
+    ' 2>/dev/null || true)"
+    if [ -n "$alert_body" ] && (
+      cd "$INTEGRATION_ROOT" &&
+      timeout 30 node scripts/mcp-call.mjs work_items:create "$alert_body" \
+        --client system-staging-sync-review-alarm --harness papercusp --workspace papercusp-workspace >/dev/null
+    ); then
+      alert_status=sent
+      log "ALARM: filed a sidecar-renewal work-item for: $(printf '%s' "$alert_body" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).title)}catch{}})' 2>/dev/null)"
+    else
+      log "ALARM: could not file the sidecar-renewal work-item; falling back to a workspace broadcast"
+    fi
+  fi
+  if [ "$alert_status" != sent ] && [ -f "$INTEGRATION_ROOT/scripts/mcp-call.mjs" ]; then
+    alert_body="$(PAPERCUSP_REVIEW_WARNING_REPORT="$warning_report" node -e '
+      const report = process.env.PAPERCUSP_REVIEW_WARNING_REPORT || "";
+      process.stdout.write(JSON.stringify({
+        to: ["*"],
+        expects: "none",
+        summary: "Staging migration forward-compat reviews need attention",
+        body: [{ text: `${report}\n\nRenew or remove each sidecar before its reviewBy date.` }],
+      }));
+    ' 2>/dev/null || true)"
+    if [ -n "$alert_body" ] && (
+      cd "$INTEGRATION_ROOT" &&
+      timeout 30 node scripts/mcp-call.mjs coord:send "$alert_body" \
+        --client system-staging-sync-review-alarm --harness papercusp --workspace papercusp-workspace >/dev/null
+    ); then
+      alert_status=sent
+    else
+      log "ALARM DELIVERY FAILED: neither work_items:create nor coord:send reached the Papercusp workspace; this condition will be retried tomorrow"
+    fi
+  elif [ "$alert_status" != sent ]; then
+    log "ALARM DELIVERY FAILED: scripts/mcp-call.mjs is unavailable; this condition will be retried tomorrow"
+  fi
+
+  if ! mkdir -p "$state_dir"; then
+    log "WARNING: could not persist the sidecar warning state; a later tick may repeat this alarm"
+    return 0
+  fi
+  tmp_file="$state_file.$$"
+  if ! printf '%s %s %s\n' "$fingerprint" "$today" "$alert_status" > "$tmp_file" || ! mv -f "$tmp_file" "$state_file"; then
+    rm -f "$tmp_file"
+    log "WARNING: could not persist the sidecar warning state; a later tick may repeat this alarm"
+  fi
+  return 0
+}
+
 # A migration is applied during the next host boot, before :3170 can bind. Run
 # the same source lints against the checkout we are about to serve while the old
 # process is still alive. In particular, forward-compat catches an unacknowledged
 # index change that the host's per-file preapply guard would otherwise discover
 # only after the coordinated restart stopped the old process.
 preflight_staging_migrations() {
+  local candidate_root="${1:-$STAGING_ROOT}"
   log "checking staging migration safety before restarting $UNIT"
   if ! (
-    cd "$STAGING_ROOT" &&
+    cd "$candidate_root" &&
+    export PAPERCUSP_INTEGRATION_ROOT="$candidate_root" &&
     node scripts/lint-migrations.mjs &&
     node scripts/check-migration-forward-compat.mjs
   ); then
@@ -118,11 +425,12 @@ preflight_staging_migrations() {
 # this returns is safe too: boot sees the applied target set and takes its
 # existing no-pending path without applying new files outside the rendezvous.
 prepare_staging_schema() {
+  local candidate_root="${1:-$STAGING_ROOT}"
   log "preparing the target schema while the current $UNIT process keeps serving"
   if ! (
-    cd "$STAGING_ROOT" &&
-    PAPERCUSP_INTEGRATION_ROOT="$STAGING_ROOT" \
-      TSX_TSCONFIG_PATH="$STAGING_ROOT/apps/operator/tsconfig.json" \
+    cd "$candidate_root" &&
+    PAPERCUSP_INTEGRATION_ROOT="$candidate_root" \
+      TSX_TSCONFIG_PATH="$candidate_root/apps/operator/tsconfig.json" \
       node --import tsx --input-type=module - <<'JS'
 import { resolve } from 'node:path';
 import { applyPendingMigrationsNow } from './packages/operator-core/lib/db-boot-migrate.ts';
@@ -186,6 +494,15 @@ staging_exec_forces_loopback() {
   [ "$last_bind" = "PAPERCUSP_BIND_HOST=127.0.0.1" ]
 }
 
+staging_exec_pins_integration_root() {
+  local exec_start="${1:-}" launch_tail="${1:-}"
+  if [[ "$exec_start" == *".env.local"* ]]; then
+    launch_tail="${exec_start##*.env.local}"
+  fi
+  [[ "$launch_tail" == *'PAPERCUSP_INTEGRATION_ROOT="$(cd ../.. && pwd -P)"'* ||
+     "$launch_tail" == *'PAPERCUSP_INTEGRATION_ROOT=$(cd ../.. && pwd -P)'* ]]
+}
+
 assert_staging_unit_loopback() {
   local exec_start
   if ! exec_start="$(systemctl --user show -p ExecStart --value "$UNIT" 2>/dev/null)"; then
@@ -205,33 +522,51 @@ assert_staging_unit_loopback() {
 # isolated papercusp-staging tree; builds and restarts therefore described
 # different source. Fail before touching either tree when that contract drifts.
 staging_exec_pre_uses_bundle() {
-  local exec_pre="${1:-}" expected_workdir="${2:-}" required_prefix
-  # systemctl show reports the EFFECTIVE executable in path=, which is flock
-  # after the bundle-time checkout lock was added. Pin the complete argv prefix:
-  # the same shared lock and the same isolated bundle script must both survive.
+  local exec_pre="${1:-}" expected_workdir="${2:-}" required_prefix expected_root helper_prefix
+  # systemctl show reports the EFFECTIVE executable in path=. Accept the legacy
+  # direct flock command and the guarded helper wrapper, which falls back to
+  # that same flock while papercusp-staging.current is one generation behind.
+  # Both shapes must use the exact shared lock and isolated bundle script.
   required_prefix="{ path=/usr/bin/flock ; argv[]=/usr/bin/flock -s /tmp/papercup-staging-sync.lock $expected_workdir/bin/bundle-host.sh ; "
-  [[ "$exec_pre" == "$required_prefix"* ]]
+  if [[ "$exec_pre" == "$required_prefix"* ]]; then
+    return 0
+  fi
+
+  [[ "$expected_workdir" == */apps/operator ]] || return 1
+  expected_root="${expected_workdir%/apps/operator}"
+  helper_prefix="{ path=/usr/bin/bash ; argv[]=/usr/bin/bash -c root=\"$expected_root\"; helper=\"\$\$root/apps/operator/scripts/systemd/staging-lock-attribution.sh\"; if [ -f \"\$\$helper\" ]; then exec /usr/bin/bash \"\$\$helper\" api-pre /tmp/papercup-staging-sync.lock \"\$\$root/apps/operator/bin/bundle-host.sh\"; fi; echo \"[95-bundled-entry] \$\$helper is absent from this staging generation; bundling under the shared flock without attribution\" >&2; exec /usr/bin/flock -s /tmp/papercup-staging-sync.lock \"\$\$root/apps/operator/bin/bundle-host.sh\" ; "
+  [[ "$exec_pre" == "$helper_prefix"* ]]
 }
 
 assert_staging_unit_checkout() {
-  local expected_root expected_workdir working_dir integration_env exec_pre reuse_env
-  expected_root="$(realpath -m "$STAGING_ROOT")"
+  local expected_root expected_workdir expected_spa_dist working_dir integration_env exec_pre exec_start reuse_env
+  expected_root="$STAGING_ROOT"
   expected_workdir="$expected_root/apps/operator"
+  expected_spa_dist="$expected_root/apps/operator-vite/dist"
   working_dir="$(systemctl --user show -p WorkingDirectory --value "$UNIT" 2>/dev/null || true)"
   working_dir="${working_dir#\!}"
   integration_env="$(systemctl --user show -p Environment --value "$UNIT" 2>/dev/null || true)"
   exec_pre="$(systemctl --user show -p ExecStartPre --value "$UNIT" 2>/dev/null || true)"
+  exec_start="$(systemctl --user show -p ExecStart --value "$UNIT" 2>/dev/null || true)"
   reuse_env="PAPERCUSP_BUNDLE_REUSE_FRESH=1"
-  if [[ -z "$working_dir" || "$(realpath -m "$working_dir")" != "$expected_workdir" ]]; then
-    log "FATAL: $UNIT WorkingDirectory does not resolve to $expected_workdir (got ${working_dir:-<empty>}); refusing to build one checkout and restart another"
+  if [[ "$working_dir" != "$expected_workdir" ]]; then
+    log "FATAL: $UNIT WorkingDirectory must follow the stable staging alias $expected_workdir (got ${working_dir:-<empty>}); refusing to build one checkout and restart another"
     return 1
   fi
   if [[ " $integration_env " != *" PAPERCUSP_INTEGRATION_ROOT=$expected_root "* ]]; then
     log "FATAL: $UNIT PAPERCUSP_INTEGRATION_ROOT does not name $expected_root; refusing cross-checkout staging sync"
     return 1
   fi
+  if [[ " $integration_env " != *" PAPERCUSP_SPA_DIST=$expected_spa_dist "* ]]; then
+    log "FATAL: $UNIT PAPERCUSP_SPA_DIST must follow the stable staging alias $expected_spa_dist so SPA-only advances remain visible without a restart"
+    return 1
+  fi
   if ! staging_exec_pre_uses_bundle "$exec_pre" "$expected_workdir"; then
     log "FATAL: $UNIT ExecStartPre must take the shared staging-sync lock and build from $expected_workdir/bin/bundle-host.sh"
+    return 1
+  fi
+  if ! staging_exec_pins_integration_root "$exec_start"; then
+    log "FATAL: $UNIT ExecStart must resolve PAPERCUSP_INTEGRATION_ROOT from its physical startup directory after sourcing .env.local"
     return 1
   fi
   if [[ " $integration_env " != *" $reuse_env "* ]]; then
@@ -443,8 +778,15 @@ current_commit_age_sec() {
 # checkout also holds the lock SHARED for its whole run (WI-10003515,
 # release-cut-launch.ts wrapWithStagingSyncLock), so re-cloning submodules in place
 # cannot delete scripts out from under an in-flight cut.
-exec 9>"/tmp/papercup-staging-sync.lock"
+STAGING_SYNC_LOCK_PATH="/tmp/papercup-staging-sync.lock"
+STAGING_SYNC_ATTEMPT_ID="$(staging_lock_attempt_id)"
+STAGING_SYNC_WAIT_START_MS="$(staging_lock_now_ms)"
+staging_lock_log "event=start surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=wait_start lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=exclusive wait_start_ms=$STAGING_SYNC_WAIT_START_MS" || true
+exec 9>"$STAGING_SYNC_LOCK_PATH"
 if ! flock -n 9; then
+  STAGING_SYNC_END_MS="$(staging_lock_now_ms)"
+  STAGING_SYNC_HOLDER="$(staging_lock_holder_fields "$STAGING_SYNC_LOCK_PATH" exclusive)"
+  staging_lock_log "event=end surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=complete lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=exclusive wait_start_ms=$STAGING_SYNC_WAIT_START_MS wait_elapsed_ms=$(staging_lock_elapsed_ms "$STAGING_SYNC_WAIT_START_MS" "$STAGING_SYNC_END_MS") acquisition_outcome=not_acquired $STAGING_SYNC_HOLDER" || true
   cut_note=""
   active_cuts="$(systemctl --user list-units --state=active --no-legend --plain 'papercup-release-cut*' 2>/dev/null | awk '{print $1}' | paste -sd, -)"
   if [[ -n "$active_cuts" ]]; then
@@ -455,6 +797,19 @@ if ! flock -n 9; then
 fi
 
 [ -d "$INTEGRATION_ROOT/.git" ] || { log "FATAL: integration root not a git repo: $INTEGRATION_ROOT"; exit 1; }
+staging_alias_bootstrap || { log "FATAL: could not bootstrap the stable staging alias"; exit 1; }
+
+# WI-10005311: prune superseded generations at the START of every tick. The two
+# post-publish prunes only run when a tick reaches its success exit. Every other
+# exit after a publish (the recent-restart grace skip, the git-sync deferral, a
+# refused restart, a readiness timeout) used to leave the superseded generation
+# on / forever. By 05:30Z on 2026-10-02, 13 generations of ~3G each had piled
+# up and git-sync stopped fleet-wide on a full disk. This tick holds the exclusive
+# lock, so no peer sync or release cut can be mid-create. The published
+# generation and any generation a process still references are retained.
+prune_staging_generations
+
+forward_compat_review_warnings
 
 # Fail BEFORE even the no-op/advance decision: a drifted launch command must be visible on the
 # next timer tick, and it must never reach a restart that replaces a healthy old process with a
@@ -527,45 +882,64 @@ if [ "$restart_required" = 1 ] && [ -z "$PTOOL_BIN" ]; then
   exit 1
 fi
 
+SYNC_ROOT="$(realpath -e "$STAGING_ROOT" 2>/dev/null || printf '%s' "$STAGING_ROOT")"
 if [ "$checkout_needs_advance" = 1 ]; then
-  log "advancing staging checkout ${current:0:8} → ${target:0:8} (${changed_count} changed path(s), restart_required=${restart_required})"
-  PAPERCUSP_INTEGRATION_ROOT="$INTEGRATION_ROOT" PAPERCUSP_RELEASE_ROOT="$STAGING_ROOT" \
-    bash "$INTEGRATION_ROOT/apps/operator/scripts/systemd/papercusp-script-snapshot.sh" \
-      "$INTEGRATION_ROOT/apps/operator/bin/release/setup-release-checkout.sh" \
-      --ref "$BRANCH" --release "$STAGING_ROOT" --node-modules auto --build-spa
+  log "preparing isolated staging candidate for ${target:0:10}"
+  prepare_staging_candidate "$target"
+  SYNC_ROOT="$STAGING_CANDIDATE_ROOT"
 else
   log "isolated checkout already at ${target:0:10}; repairing only the stale running generation"
 fi
 
-# WI-5710 — SPA-only advance: the dist is now refreshed on disk and host-spa.ts
-# serves it per request, so :3170 is ALREADY current. Restarting here would be
-# a ~10-13s outage for zero freshness gain.
+if [ "$restart_required" = 1 ]; then
+  preflight_staging_migrations "$SYNC_ROOT"
+  bundle_script="$STAGING_BUNDLE_SCRIPT"
+  if [[ -n "$STAGING_CANDIDATE_ROOT" ]]; then
+    bundle_script="$STAGING_CANDIDATE_ROOT/apps/operator/bin/bundle-host.sh"
+  fi
+  if [[ ! -f "$bundle_script" ]]; then
+    log "FATAL: staging bundle script not found at $bundle_script"
+    exit 1
+  fi
+  log "prebuilding proof-bound host bundle before publishing or stopping $UNIT"
+  PAPERCUSP_INTEGRATION_ROOT="$SYNC_ROOT" PAPERCUSP_BUNDLE_REUSE_FRESH=1 bash "$bundle_script"
+  prepare_staging_schema "$SYNC_ROOT"
+fi
+
+if [ "$checkout_needs_advance" = 1 ]; then
+  mark_staging_candidate_ready "$target"
+  require_host_bundle=0
+  if [ "$restart_required" = 1 ]; then
+    require_host_bundle=1
+  fi
+  publish_staging_generation "$STAGING_CANDIDATE_ROOT" "$STAGING_CANDIDATE_HOME" "$target" "$require_host_bundle"
+  if [ "$restart_required" = 0 ]; then
+    prune_staging_generations
+  fi
+fi
+
+# WI-5710 — SPA-only advance: the stable alias now points at the complete
+# candidate dist and host-spa.ts follows that alias per request. Restarting
+# would add a ~10-13s outage for zero server-code freshness gain.
 if [ "$restart_required" = 0 ]; then
-  log "✅ skipping restart — all ${changed_count} changed path(s) are restart-exempt (SPA/docs/tests); the rebuilt SPA is already live on :$STAGING_PORT at ${target:0:8}"
+  log "✅ skipping restart — all ${changed_count} changed path(s) are restart-exempt (SPA/docs/tests); the published SPA is live on :$STAGING_PORT at ${target:0:8}"
   exit 0
 fi
 
-# The checkout and its submodules are complete. Downgrade the single-flight
-# lock to shared before any host bundle read: :3170's ExecStartPre takes a
-# shared lock on this same file, so a peer restart cannot bundle a half-cloned
-# submodule while setup-release-checkout holds the exclusive lock. Keep our
-# shared lock through prebuild/restart so another sync still cannot mutate it.
-flock -s 9
-
-preflight_staging_migrations
-
-# Build the expensive host graph while the old process is still serving.
-# The staging-only freshness proof lets systemd's later ExecStartPre verify
-# and reuse these exact bytes in milliseconds; any source/output drift falls
-# back to the ordinary full rebuild before start.
-if [[ ! -f "$STAGING_BUNDLE_SCRIPT" ]]; then
-  log "FATAL: staging bundle script not found at $STAGING_BUNDLE_SCRIPT"
-  exit 1
+# The candidate is complete and published. Downgrade the single-flight lock
+# before systemd ExecStartPre takes the shared lock to verify/reuse the bundle.
+STAGING_SYNC_SHARED_WAIT_START_MS="$(staging_lock_now_ms)"
+staging_lock_log "event=transition surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=shared_wait_start phase=preflight-restart lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=shared wait_start_ms=$STAGING_SYNC_SHARED_WAIT_START_MS" || true
+if flock -s 9; then
+  STAGING_SYNC_SHARED_END_MS="$(staging_lock_now_ms)"
+  staging_lock_log "event=transition surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=shared_acquired phase=preflight-restart lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=shared wait_start_ms=$STAGING_SYNC_SHARED_WAIT_START_MS wait_elapsed_ms=$(staging_lock_elapsed_ms "$STAGING_SYNC_SHARED_WAIT_START_MS" "$STAGING_SYNC_SHARED_END_MS") acquisition_outcome=acquired" || true
+else
+  STAGING_SYNC_SHARED_RC=$?
+  STAGING_SYNC_SHARED_END_MS="$(staging_lock_now_ms)"
+  STAGING_SYNC_HOLDER="$(staging_lock_holder_fields "$STAGING_SYNC_LOCK_PATH" shared)"
+  staging_lock_log "event=transition surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=shared_failed phase=preflight-restart lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=shared wait_start_ms=$STAGING_SYNC_SHARED_WAIT_START_MS wait_elapsed_ms=$(staging_lock_elapsed_ms "$STAGING_SYNC_SHARED_WAIT_START_MS" "$STAGING_SYNC_SHARED_END_MS") acquisition_outcome=failed command_exit_status=$STAGING_SYNC_SHARED_RC $STAGING_SYNC_HOLDER" || true
+  exit "$STAGING_SYNC_SHARED_RC"
 fi
-log "prebuilding proof-bound host bundle before stopping $UNIT"
-PAPERCUSP_BUNDLE_REUSE_FRESH=1 bash "$STAGING_BUNDLE_SCRIPT"
-
-prepare_staging_schema
 
 # EI-13221: skip a REDUNDANT restart when $UNIT's current MainPID already came
 # up within the last RECENT_RESTART_GRACE_SEC — most likely a peer's `dev:restart`
@@ -637,6 +1011,24 @@ PTOOL_CLIENT_SID="$(resolve_ptool_client_sid)" || {
   log "FATAL: coordinated dev:restart requires PAPERCUSP_SID or the installer's valid machine identity at \$HOME/.papercusp/su-agent-id"
   exit 1
 }
+
+# All checkout mutation and bundle work is complete. Downgrade the held
+# exclusive lock to shared before the final dev:restart: restart's nonblocking
+# shared-lock probe now admits this sync-owned cutover, while this process keeps
+# excluding a new staging-sync until exact-source readiness is verified.
+STAGING_SYNC_SHARED_WAIT_START_MS="$(staging_lock_now_ms)"
+staging_lock_log "event=transition surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=shared_wait_start phase=final-restart lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=shared wait_start_ms=$STAGING_SYNC_SHARED_WAIT_START_MS" || true
+if flock -s 9; then
+  STAGING_SYNC_SHARED_END_MS="$(staging_lock_now_ms)"
+  staging_lock_log "event=transition surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=shared_acquired phase=final-restart lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=shared wait_start_ms=$STAGING_SYNC_SHARED_WAIT_START_MS wait_elapsed_ms=$(staging_lock_elapsed_ms "$STAGING_SYNC_SHARED_WAIT_START_MS" "$STAGING_SYNC_SHARED_END_MS") acquisition_outcome=acquired" || true
+else
+  STAGING_SYNC_SHARED_RC=$?
+  STAGING_SYNC_SHARED_END_MS="$(staging_lock_now_ms)"
+  STAGING_SYNC_HOLDER="$(staging_lock_holder_fields "$STAGING_SYNC_LOCK_PATH" shared)"
+  staging_lock_log "event=transition surface=staging-sync attempt_id=$STAGING_SYNC_ATTEMPT_ID state=shared_failed phase=final-restart lock_path=$STAGING_SYNC_LOCK_PATH lock_mode=shared wait_start_ms=$STAGING_SYNC_SHARED_WAIT_START_MS wait_elapsed_ms=$(staging_lock_elapsed_ms "$STAGING_SYNC_SHARED_WAIT_START_MS" "$STAGING_SYNC_SHARED_END_MS") acquisition_outcome=failed command_exit_status=$STAGING_SYNC_SHARED_RC $STAGING_SYNC_HOLDER" || true
+  log "FATAL: could not downgrade the staging-sync checkout lock for final restart"
+  exit "$STAGING_SYNC_SHARED_RC"
+fi
 
 # The ptool result may be lost when this request restarts its own :3170 server.
 log "requesting coordinated restart of $UNIT via dev:restart (git_sync_drain_sec=${GIT_SYNC_DRAIN_SEC})"
@@ -763,6 +1155,12 @@ while [ "$readiness_elapsed_sec" -lt "$READINESS_TIMEOUT_SEC" ]; do
   if health_sha_matches_target "$last_health_sha" "$target" &&
      { [ "$restart_pending" -eq 0 ] || staging_restart_is_observed "$main_pid" "$observed_main_pid" "$last_health_sha" "$target"; }; then
     log "✅ :3170 healthy on exact staging source ${last_health_sha}"
+    # WI-10005310: the SPA-only path prunes right after publishing, but a restart
+    # advance is the common case and used to prune nothing, so every superseded
+    # generation stayed on / (13 candidates, ~45G measured 2026-10-02). The old
+    # process has now been replaced, and the shared lock is still held, so no
+    # concurrent sync can be mid-create. In-use generations are still retained.
+    prune_staging_generations
     exit 0
   fi
   readiness_elapsed_sec=$(( $(date +%s) - readiness_started_at ))

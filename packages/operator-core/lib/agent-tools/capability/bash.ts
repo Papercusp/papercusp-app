@@ -52,6 +52,7 @@ import { realpathSoft, resolveCapabilityBaseDir } from './base-dir';
 import { maskIntegrationKey, readIntegrationKey } from '../../integration-credentials';
 import { RIPGREP_SCOPE_GUIDANCE } from '../../code-intelligence/contracts.ts';
 import { resolveAgentIdentity, type ResolveIdentityCtx } from '../coordination/identity';
+import { findProviderEgressTargets } from '../../personal-vault/provider-egress.mjs';
 import { BashProvenanceRefusal, resolveBashTaskProvenance } from './bash-task-provenance';
 import { listLiveTasks } from '../../task-manager/store';
 import { loopLaunchRefusal } from '../../verification-attempts/loop-gate';
@@ -63,9 +64,11 @@ import {
   evaluateFrozenLineageShellCommand,
   frozenLineageShellCommandViolationPayload,
 } from '../../release/frozen-lineage-execution-policy';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
 import { repoHeadSha } from '../../harness/docs/git-runner';
 import { resolveCapabilityIntegrationRoot } from './base-dir';
 import { classifyCapabilityBashEffect, commandBase, splitClassifiableShell } from './bash-effect';
+import { readRestrictedSourceHoldState } from '../../personal-vault/git-sync-hold';
 
 export { classifyCapabilityBashEffect } from './bash-effect';
 
@@ -408,8 +411,9 @@ export default defineTool({
     // consumable export), which is why it lost to the rg/backtick and background-job
     // guidance. If it needs to be agent-facing again, put it in a doc and point at it.
     when:
-      'fixed-string searches: prefer `rg -F`, else `grep -F`; single-quote — unmatched backtick fails before either tool runs. ' +
-      'Apostrophe regexes break single-quoted arguments; use `rg -F`, `-e` per pattern, or quoted stdin/file. ' +
+      'For `systemd-run`, put `-- executable argv` after options; `&&` starts another command. ' +
+      'Fixed strings: use `rg -F` or `grep -F`; quote backticks before shell use. ' +
+      'Apostrophes break single-quoted regexes; use `-e` or quoted input. ' +
       `${RIPGREP_SCOPE_GUIDANCE} Do not run an unbounded search from the repository root. Bound git history scans with \`-n\`; unbounded refused. do not shell-background child without \`wait\`.`,
     notWhen:
       'Use capability:read/write/edit for one-file ops and capability:git for git. Shell execution strips DB credential env vars, so use dev:pg_query for read-only operator DB queries.',
@@ -472,8 +476,12 @@ export default defineTool({
           `Explicit run_in_background calls default to ${DEFAULT_BACKGROUND_TIMEOUT_MS}. Maximum ${MAX_BACKGROUND_TIMEOUT_MS}. ` +
           `The whole confined task subtree IS terminated only at this execution deadline ` +
           `(systemd RuntimeMaxSec plus the local SIGTERM/SIGKILL path), ` +
-          `so raise this for a job that legitimately runs longer. Deliberately daemonized descendants remain tracked ` +
-          `inside the same task and share its deadline; use a dedicated service launcher for a different lifetime.`,
+          `so raise this for a job that legitimately runs longer. The deadline is FIXED AT LAUNCH and cannot be extended ` +
+          `on a running task (systemd 255 refuses a runtime RuntimeMaxSec change): size it for retries, or chain longer work as separate tasks. ` +
+          `Deliberately daemonized descendants remain tracked ` +
+          `inside the same task and share its deadline; use a dedicated service launcher for a different lifetime. ` +
+          `Work submitted to an external server can outlive the shell: killing psql does not prove its PostgreSQL query stopped. ` +
+          `Use dev:pg_query for bounded diagnostic reads, or set and verify a server-side statement_timeout for native SQL.`,
       ),
     yield_after_ms: z
       .number()
@@ -542,6 +550,25 @@ export default defineTool({
     // the child's misleading `spawn /usr/bin/bash ENOENT`.
     const cwdError = missingBashCwdError(cwd, Boolean(args.cwd));
     if (cwdError) throw new Error(cwdError);
+    // P-007 / BAR R-11: a session that has read restricted personal data reaches
+    // mail, chat, calendar and social providers only through the gated verbs.
+    // The scan is a pure regex; the disclosure ledger is read only when the
+    // command names a provider host, a sidecar, or the sidecars' secrets.
+    if (findProviderEgressTargets(command).length) {
+      const { checkRestrictedEgress, egressRefusalPayload } = await import('../../personal-vault/binding-enforcement');
+      let egressOwnerId: string | null = null;
+      try {
+        egressOwnerId = resolveAgentIdentity(ctx as unknown as ResolveIdentityCtx).ownerId;
+      } catch {
+        egressOwnerId = null;
+      }
+      const refusal = egressRefusalPayload(
+        await checkRestrictedEgress({ ownerId: egressOwnerId, tool: 'capability:bash', texts: [command] }),
+      );
+      if (refusal) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify(refusal) }], isError: true };
+      }
+    }
     const unboundedGitHistorySearch = detectUnboundedGitHistorySearch(command);
     if (unboundedGitHistorySearch) {
       return {
@@ -569,6 +596,7 @@ export default defineTool({
     const frozenLineageRefusal = async () => {
       if (!frozenLineageRoot) return null;
       const verdict = await evaluateFrozenLineageShellCommand(frozenLineageCommand, frozenLineageRoot, {
+        target: resolveHomeGateVerdictTarget(),
         readCheckoutHead: repoHeadSha,
         canonicalizePath: realpathSoft,
         readFrozenRepairQueue: () =>
@@ -700,6 +728,19 @@ export default defineTool({
     } catch {
       callerSid = '';
     }
+    // WI-10005589 / D-012 (BAR R-11): a session holding a personal disclosure runs
+    // its shell with NO network — the existing bwrap wrapper with --unshare-net,
+    // never srt (whose domain allowlist IS network), and required, so a host with
+    // no working bwrap refuses before spawn. Matching provider names in the text
+    // (above) cannot see a host built at run time; an empty network namespace can.
+    // Fail closed: an unreadable ledger (null) also runs offline.
+    const { readSessionRestriction } = await import('../../personal-vault/binding-enforcement');
+    const sessionRestricted = (await readSessionRestriction(callerSid || null)) !== false;
+    // This runs inside the already-loaded operator bundle, before the only spawn.
+    // A live-tree hold must fence every integration-tree shell, even when this
+    // caller has no personal disclosure; an unknown root/census is fail-closed.
+    const sourceHold = await readRestrictedSourceHoldState(frozenLineageRoot);
+    const runOffline = sessionRestricted || sourceHold !== 'clear';
     const childEnv = {
       ...(desktopEnv ?? {}),
       ...integrationEnv,
@@ -767,8 +808,9 @@ export default defineTool({
         cwd,
         stateDir: ctx.stateDir,
         ...(!args.run_in_background ? { onChunk: (chunk: string) => ctx.emit('output', chunk) } : {}),
-        sandboxEnabled: sandboxPolicy.enabled,
-        sandboxRequired: sandboxPolicy.required,
+        sandboxEnabled: runOffline || sandboxPolicy.enabled,
+        sandboxRequired: runOffline || sandboxPolicy.required,
+        ...(runOffline ? { sandboxBuildOpts: { denyAllEgress: true, srtBin: null } } : {}),
         ...(Object.keys(childEnv).length > 0 ? { env: childEnv } : {}),
         ...(redactValues.length > 0 ? { redactValues } : {}),
         ...provenance,

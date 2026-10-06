@@ -41,6 +41,17 @@ export const SERVING_RUNTIME_IDS = [
 ] as const;
 export type ServingRuntimeId = (typeof SERVING_RUNTIME_IDS)[number];
 
+/** A row in the existing vintage registry, identified by workspace/unit/host. */
+export type RuntimeVintageEvidenceRuntimeId = `runtime-vintage:${string}/${string}@${string}`;
+export type EvidenceRuntimeId = ServingRuntimeId | RuntimeVintageEvidenceRuntimeId;
+
+// Explicit identity only: a bare external app name must never alias an operator.
+export const RUNTIME_VINTAGE_EVIDENCE_RUNTIME_RE = /^runtime-vintage:[A-Za-z0-9][A-Za-z0-9._-]{0,119}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,119}@[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
+
+export function isRuntimeVintageEvidenceRuntimeId(value: unknown): value is RuntimeVintageEvidenceRuntimeId {
+  return typeof value === 'string' && RUNTIME_VINTAGE_EVIDENCE_RUNTIME_RE.test(value);
+}
+
 export type ServingRuntimeCodeSource =
   | 'release-checkout'
   | 'staging-checkout'
@@ -56,8 +67,10 @@ export interface ServingRuntimeSpec {
   codeSource: ServingRuntimeCodeSource;
   /** systemd --user unit, when the runtime is a single long-lived service. */
   unit: string | null;
-  /** Loopback port whose `/api/health` reports the build sha, when there is one. */
+  /** Loopback port whose health route reports the build sha, when there is one. */
   healthPort: number | null;
+  /** Health route on `healthPort`; omitted ⇒ `/api/health` (the operator/bg-host contract). */
+  healthPath?: string;
   /** Literal runtime-vintage unit label, when the runtime reports under a fixed one. */
   vintageUnit: string | null;
   /** Aliases a human or an agent writes for this runtime (used to recognise citations). */
@@ -95,7 +108,11 @@ export const SERVING_RUNTIMES: Readonly<Record<ServingRuntimeId, ServingRuntimeS
     releasePipelineApplies: false,
     codeSource: 'canonical-tree',
     unit: RESTART_TARGET_UNITS['bg-host'],
-    healthPort: null,
+    // WI-10005936: bg-host serves /api/health on :3271 (PAPERCUSP_HONO_PORT in its unit).
+    // Its `sha` is the source sha baked into the bundle at build time, and `bundleStale`
+    // says when ExecStartPre's rebuild failed and it booted a last-known-good bundle,
+    // the one case where its start time says nothing about which code it loaded.
+    healthPort: 3271,
     vintageUnit: null,
     aliases: ['bg-host', 'bghost', 'background host', 'routines engine', ':3271', '3271'],
     activation:
@@ -119,7 +136,12 @@ export const SERVING_RUNTIMES: Readonly<Record<ServingRuntimeId, ServingRuntimeS
     releasePipelineApplies: false,
     codeSource: 'canonical-tree',
     unit: RESTART_TARGET_UNITS['embed-sidecar'],
-    healthPort: null,
+    // WI-10005944: the same bundle-host.sh builds this unit's bundle, including the
+    // fallback to a last-known-good bundle when the rebuild fails, so start-after-mtime
+    // is false here exactly as it was for bg-host (WI-10005936). Its /healthz reports the
+    // source sha baked into the bundle and `bundleStale` when it booted the fallback.
+    healthPort: 3384,
+    healthPath: '/healthz',
     vintageUnit: null,
     aliases: ['embed-sidecar', 'embed sidecar', ':3384', '3384'],
     activation:
@@ -266,7 +288,7 @@ export function currentBuildTestRoute(id: string): CurrentBuildTestRoute | null 
 }
 
 /** An owning runtime may serve more than one test class; never infer universal readiness. */
-export function currentBuildRoutesForRuntime(runtime: ServingRuntimeId): CurrentBuildTestRoute[] {
+export function currentBuildRoutesForRuntime(runtime: EvidenceRuntimeId): CurrentBuildTestRoute[] {
   return CURRENT_BUILD_TEST_CLASSES.filter((route) => route.runtime === runtime && route.readiness !== 'release-only');
 }
 
@@ -348,6 +370,16 @@ export interface ServingRuntimeProbe {
   /** mtime of the path in the canonical tree (what a canonical-tree host bundles). */
   fileMtimeMs: number | null;
   instances: ServingRuntimeInstances | null;
+  /** The process's own report of the bundle it booted (from /api/health); null = not measured. */
+  bundle?: ServingRuntimeBundleState | null;
+}
+
+/** What a bundling host says about the bundle it is actually executing. */
+export interface ServingRuntimeBundleState {
+  /** TRUE when its ExecStartPre rebuild failed and it booted the last-known-good bundle. */
+  stale: boolean;
+  /** When the bundle it is executing was built; null when the stale marker omitted it. */
+  servingBuiltAtMs: number | null;
 }
 
 export interface ServingRuntimeEntry {
@@ -363,7 +395,7 @@ export interface ServingRuntimeEntry {
   /** TRUE — this runtime executes the change as it stands. FALSE — measured, it does not.
    *  NULL — could not be measured; `unknownReason` says why. Never copied from :3070. */
   containsChange: boolean | null;
-  method: 'blob' | 'start-after-mtime' | 'instances' | null;
+  method: 'blob' | 'start-after-mtime' | 'bundle-mtime' | 'instances' | null;
   instances: ServingRuntimeInstances | null;
   unknownReason: CellUnknown | null;
   activation: string;
@@ -393,7 +425,10 @@ function entryBase(probe: ServingRuntimeProbe): Omit<ServingRuntimeEntry, 'conta
  *    blob containment at that sha is the whole answer;
  *  - a canonical-tree host bundles the WORKING TREE on start, so a matching blob at its
  *    boot HEAD is sufficient, and "started after the file last changed" is equally
- *    sufficient (it loaded an edit that was uncommitted at boot);
+ *    sufficient (it loaded an edit that was uncommitted at boot) — UNLESS that rebuild
+ *    failed and it booted a last-known-good bundle (WI-10005936). Then its start time
+ *    and its boot HEAD both postdate the code it runs, so only the bundle's own baked
+ *    sha (health) or its build time can answer;
  *  - a per-session runtime is many processes of different ages, so it answers with
  *    instance counts;
  *  - a compiled binary has no probe at all.
@@ -455,7 +490,30 @@ export function evaluateServingRuntime(probe: ServingRuntimeProbe): ServingRunti
 
   // canonical-tree host
   if (probe.pid === null && probe.startedAtMs === null && probe.buildSha === null) {
-    return unknown('insufficient-data', `${spec.label} is not running (no process for ${spec.unit ?? 'its unit'}).`);
+    return unknown(
+      'insufficient-data',
+      `${spec.label} could not be inspected: no unit pid, start time, or health build sha was available for ${spec.unit ?? 'its unit'}, so its running state is unknown.`,
+    );
+  }
+  if (probe.bundle?.stale) {
+    // WI-10005936: the rebuild at start FAILED and the host booted an older bundle.
+    // Start time and the runtime-vintage boot HEAD both postdate the code it runs, so
+    // neither rule below may be used. A health sha is the sha baked into THAT bundle.
+    if (probe.buildShaSource === 'health' && probe.blobContains === true) {
+      return { ...base, containsChange: true, method: 'blob', unknownReason: null };
+    }
+    if (probe.bundle.servingBuiltAtMs !== null && probe.fileMtimeMs !== null) {
+      return {
+        ...base,
+        containsChange: probe.bundle.servingBuiltAtMs > probe.fileMtimeMs,
+        method: 'bundle-mtime',
+        unknownReason: null,
+      };
+    }
+    return unknown(
+      'insufficient-data',
+      `${spec.label} booted a last-known-good bundle after its rebuild failed, and reported neither a matching baked sha nor that bundle's build time.`,
+    );
   }
   if (probe.blobContains === true) {
     return { ...base, containsChange: true, method: 'blob', unknownReason: null };
@@ -547,6 +605,27 @@ export function resolveServingRuntimeAlias(text: string): ServingRuntimeId | nul
   return null;
 }
 
+/** Vintage references preserve the registry's case-sensitive identity. */
+export function resolveEvidenceRuntimeAlias(text: string): EvidenceRuntimeId | null {
+  const value = text.trim();
+  if (isRuntimeVintageEvidenceRuntimeId(value)) return value;
+  // Never interpret a malformed vintage reference as one of its embedded unit labels.
+  if (value.startsWith('runtime-vintage:')) return null;
+  return resolveServingRuntimeAlias(value);
+}
+
+/** Read explicit vintage citations alongside the existing built-in runtime aliases. */
+export function evidenceRuntimesMentioned(text: string): EvidenceRuntimeId[] {
+  const vintage = new Set<RuntimeVintageEvidenceRuntimeId>();
+  const remainder = text.replace(/runtime-vintage:[^\s`'"(),;\[\]<>]+/g, (token) => {
+    // Sentence punctuation is not part of a hostname.
+    const value = token.replace(/[.!?]+$/, '');
+    if (isRuntimeVintageEvidenceRuntimeId(value)) vintage.add(value);
+    return ' ';
+  });
+  return [...servingRuntimesMentioned(remainder), ...vintage];
+}
+
 /** Every runtime id or alias mentioned anywhere in `text` (word-bounded). */
 export function servingRuntimesMentioned(text: string): ServingRuntimeId[] {
   const hay = ` ${text.toLowerCase()} `;
@@ -572,7 +651,9 @@ export function servingRuntimesMentioned(text: string): ServingRuntimeId[] {
 
 export interface ServingRuntimeProbeDeps {
   probeUnitStart: (unit: string) => Promise<{ pid: number | null; startedAtMs: number | null } | null>;
-  probeHealthSha?: (port: number) => Promise<string | null>;
+  probeHealthSha?: (port: number, path?: string) => Promise<string | null>;
+  /** A bundling host's own report of the bundle it booted (WI-10005936); null when unreadable. */
+  probeHealthBundle?: (port: number, path?: string) => Promise<ServingRuntimeBundleState | null>;
   vintageRows: ReadonlyArray<RuntimeVintageRow>;
   localHost: string;
   /** Read `/proc/<pid>/cgroup`; null when unreadable. */
@@ -584,13 +665,39 @@ export interface ServingRuntimeProbeDeps {
 }
 
 const HEALTH_TIMEOUT_MS = 1_000;
+const DEFAULT_HEALTH_PATH = '/api/health';
 
-export async function realProbeHealthSha(port: number): Promise<string | null> {
+export async function realProbeHealthSha(port: number, path = DEFAULT_HEALTH_PATH): Promise<string | null> {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
     if (!res.ok) return null;
     const body = (await res.json()) as { sha?: unknown } | null;
     return typeof body?.sha === 'string' && body.sha.trim() ? body.sha.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * WI-10005936: a bundling host's /api/health carries `bundleStale` ONLY when its
+ * ExecStartPre rebuild failed and it booted the last-known-good bundle (see
+ * bundle-staleness.ts). The process read that marker at its own start, so this is the
+ * runtime's own answer and not a read of a dist-host/ another unit may since have rebuilt.
+ */
+export function parseHealthBundleState(body: unknown): ServingRuntimeBundleState | null {
+  if (!body || typeof body !== 'object') return null;
+  const stale = (body as { bundleStale?: unknown }).bundleStale;
+  if (stale === undefined || stale === null) return { stale: false, servingBuiltAtMs: null };
+  const mtime = typeof stale === 'object' ? (stale as { servingBundleMtime?: unknown }).servingBundleMtime : undefined;
+  const builtAtMs = typeof mtime === 'string' ? Date.parse(mtime) : Number.NaN;
+  return { stale: true, servingBuiltAtMs: Number.isFinite(builtAtMs) ? builtAtMs : null };
+}
+
+export async function realProbeHealthBundle(port: number, path = DEFAULT_HEALTH_PATH): Promise<ServingRuntimeBundleState | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    if (!res.ok) return null;
+    return parseHealthBundleState(await res.json());
   } catch {
     return null;
   }
@@ -672,10 +779,14 @@ export async function probeServingRuntime(
     probe.startedAtMs = started?.startedAtMs ?? null;
   }
   if (spec.healthPort !== null) {
-    const sha = await (deps.probeHealthSha ?? realProbeHealthSha)(spec.healthPort).catch(() => null);
+    const healthPath = spec.healthPath ?? DEFAULT_HEALTH_PATH;
+    const sha = await (deps.probeHealthSha ?? realProbeHealthSha)(spec.healthPort, healthPath).catch(() => null);
     if (sha) {
       probe.buildSha = sha;
       probe.buildShaSource = 'health';
+    }
+    if (spec.codeSource === 'canonical-tree') {
+      probe.bundle = await (deps.probeHealthBundle ?? realProbeHealthBundle)(spec.healthPort, healthPath).catch(() => null);
     }
   }
   if (!probe.buildSha && spec.unit && (probe.pid !== null || probe.startedAtMs !== null)) {

@@ -340,6 +340,10 @@ export const TARGET_ROLE_SPEND: Readonly<Record<string, SpendEntry>> = {
     spend: 'llm',
     why: 'Runs the reviewed staged corpus dedup pass through bounded strong-model shard judgements',
   },
+  'system:work-item-admission-bulk-dedup-driver': {
+    spend: 'llm',
+    why: 'Arms one stage-bounded system:work-item-admission-bulk-dedup run (strong-model shard judgements) daily unless one is already in flight',
+  },
   'system:work-item-admission-delta-sweep': {
     spend: 'llm',
     why: 'Runs one strong-model call over the hourly admitted-item delta to detect shared-root-cause bursts',
@@ -365,13 +369,13 @@ export const TARGET_ROLE_SPEND: Readonly<Record<string, SpendEntry>> = {
     spend: 'none',
     why: 'Polls the owner-authorized Facebook Graph surface and emits replay-safe trigger/vault deliveries',
   },
-  'system:google-calendar-poll': {
+  'system:slack-org-sync': {
     spend: 'none',
-    why: 'Polls Google Calendar, advances provider cursors, and emits local trigger/vault deliveries',
+    why: 'Syncs Slack channel membership into permission lists and writes paced backfill pages as chat messages; no agent or model call',
   },
-  'system:google-gmail-poll': {
+  'system:connector-sync': {
     spend: 'none',
-    why: 'Renews Gmail watches, reconciles Pub/Sub doorbells through history, and emits local trigger/vault deliveries',
+    why: 'Drives every registered provider source through leased backfill/incremental sync pages and admits records into the local delivery ledger; no agent or model call',
   },
   'system:personal-vault-import': {
     spend: 'none',
@@ -628,9 +632,21 @@ export const TARGET_ROLE_SPEND: Readonly<Record<string, SpendEntry>> = {
     spend: 'llm',
     why: 'Starts the supervised Inbox resolver agent, which can bill model turns',
   },
+  'system:intake-triage-drain': {
+    spend: 'llm',
+    why: 'Starts the supervised intake-triage resolver agent over awaiting observations/candidates, which can bill model turns',
+  },
+  'system:plan-cleanup-sweep': {
+    spend: 'llm',
+    why: 'Runs the deterministic plan clean-up pass, then starts the supervised cleanup resolver agent when judgment residue remains, which can bill model turns',
+  },
   'system:consult-expiry-sweep': {
     spend: 'llm',
     why: 'Expiry emit wakes a hard-blocked parked requester (latched consult:reply key), and a wake bills a turn',
+  },
+  'system:connected-app-alert-sweep': {
+    spend: 'none',
+    why: 'One bounded read of connected-app keys, their activity counts and auth-failure counters, then owner-attention notifications (push/desktop/audit row) — no spawn/dispatch/wake',
   },
   'system:worker-breaker-watch': {
     spend: 'none',
@@ -643,6 +659,10 @@ export const TARGET_ROLE_SPEND: Readonly<Record<string, SpendEntry>> = {
   'system:hosted-lifecycle-reconcile': {
     spend: 'none',
     why: 'One bounded SELECT of the workspace’s queued/running workspace_host_operations plus recovery_state UPDATEs and a deduped intervention notice — no spawn/dispatch/wake. A notice can lead a HUMAN to act, but nothing this fire does bills a turn directly (same reading as worker-breaker-watch, which even broadcasts on coord, being none)',
+  },
+  'system:hosted-public-ingress-probe': {
+    spend: 'none',
+    why: 'A read of the tunnel config plus ~36 unauthenticated GETs against the public hosted origin; a finding throws into the routine’s own last_error — no spawn/dispatch/wake',
   },
   'system:readiness-drift-monitor': {
     spend: 'none',

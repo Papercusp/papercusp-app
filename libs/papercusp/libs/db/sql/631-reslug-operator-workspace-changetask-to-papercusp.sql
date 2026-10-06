@@ -1,6 +1,6 @@
 -- 631-reslug-operator-workspace-changetask-to-papercusp.sql
 --
--- Owner-directed 2026-07-19 [owner:owner, "retype harness_slug" — P-009 Option B]:
+-- Owner-directed 2026-07-19 [owner:Avi, "retype harness_slug" — P-009 Option B]:
 -- second slice of the harness_slug retype. Migration 630 moved the BUG rows off
 -- the invented slug 'operator:papercusp-workspace'; this moves the remaining
 -- issue-family rows (change/task) to the real pot 'papercusp', fully emptying

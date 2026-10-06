@@ -6,8 +6,17 @@
  * that construction graph into the operator's static module graph. A stale
  * process can otherwise fail at ESM link time when the builder changes its
  * named exports, before the dossier's optional diagnostics leg can catch it.
+ *
+ * WI-10005188: every read here is ASYNC (node:fs/promises). Every caller runs on
+ * an operator request path (coord:orient, the agent dossier, GET /agent-config),
+ * and this reader walks the session's whole `sessions/` rollout tree. A sync
+ * readdir/lstat/open there parks the operator main thread whenever the
+ * filesystem stalls: WI-10004754 measured a 10s D-state stall from one sync open
+ * on this same orient path. Do not add a sync twin. A launch-time caller that
+ * needs a sync answer should read the one file it needs directly.
  */
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import type { Dirent } from 'node:fs';
+import { access, lstat, readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { codexHomeForSessionKey } from '@papercusp/orchestrator/session-launch-dirs';
 
@@ -47,9 +56,19 @@ export interface CodexHomeDiagnostics {
   error: string | null;
 }
 
-function readJsonObject(path: string): Record<string, unknown> | null {
+/** `existsSync` semantics: follows symlinks, and any error reads as "absent". */
+async function pathExists(path: string): Promise<boolean> {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readJsonObject(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? (parsed as Record<string, unknown>)
       : null;
@@ -82,25 +101,25 @@ function coerceCodexPapercuspDiagnostics(
   };
 }
 
-function latestCodexRollout(codexHome: string): { id: string; path: string } | null {
+async function latestCodexRollout(codexHome: string): Promise<{ id: string; path: string } | null> {
   const root = join(codexHome, 'sessions');
   const files: Array<{ path: string; mtimeMs: number }> = [];
-  const walk = (dir: string, depth: number): void => {
+  const walk = async (dir: string, depth: number): Promise<void> => {
     if (depth > 6) return;
-    let entries: import('node:fs').Dirent[];
+    let entries: Dirent[];
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
     for (const entry of entries) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) {
-        walk(path, depth + 1);
+        await walk(path, depth + 1);
       } else if (entry.isFile() && /^rollout-.*\.jsonl$/.test(entry.name)) {
         let mtimeMs = 0;
         try {
-          mtimeMs = lstatSync(path).mtimeMs;
+          mtimeMs = (await lstat(path)).mtimeMs;
         } catch {
           // Keep deterministic enough if cleanup races the read.
         }
@@ -108,7 +127,7 @@ function latestCodexRollout(codexHome: string): { id: string; path: string } | n
       }
     }
   };
-  walk(root, 0);
+  await walk(root, 0);
   files.sort((a, b) => b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path));
   const latest = files[0];
   if (!latest) return null;
@@ -129,7 +148,7 @@ function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function readCodexHomeDiagnostics(sessionKey: string | number): CodexHomeDiagnostics {
+export async function readCodexHomeDiagnostics(sessionKey: string | number): Promise<CodexHomeDiagnostics> {
   const codexHome = codexHomeForSessionKey(sessionKey);
   const agentsPath = join(codexHome, 'AGENTS.md');
   const configPath = join(codexHome, 'config.toml');
@@ -138,23 +157,43 @@ export function readCodexHomeDiagnostics(sessionKey: string | number): CodexHome
   const authPath = join(codexHome, 'auth.json');
   const diagnosticsPath = join(codexHome, 'papercusp-diagnostics.json');
   try {
-    const rollout = latestCodexRollout(codexHome);
+    const [
+      rollout,
+      exists,
+      agentsExists,
+      configExists,
+      hooksExists,
+      promptsExists,
+      authExists,
+      diagnosticsExists,
+      diagnosticsRaw,
+    ] = await Promise.all([
+      latestCodexRollout(codexHome),
+      pathExists(codexHome),
+      pathExists(agentsPath),
+      pathExists(configPath),
+      pathExists(hooksPath),
+      pathExists(promptsPath),
+      pathExists(authPath),
+      pathExists(diagnosticsPath),
+      readJsonObject(diagnosticsPath),
+    ]);
     return {
       codexHome,
-      exists: existsSync(codexHome),
+      exists,
       agentsPath,
-      agentsExists: existsSync(agentsPath),
+      agentsExists,
       configPath,
-      configExists: existsSync(configPath),
+      configExists,
       hooksPath,
-      hooksExists: existsSync(hooksPath),
+      hooksExists,
       promptsPath,
-      promptsExists: existsSync(promptsPath),
+      promptsExists,
       authPath,
-      authExists: existsSync(authPath),
+      authExists,
       diagnosticsPath,
-      diagnosticsExists: existsSync(diagnosticsPath),
-      diagnostics: coerceCodexPapercuspDiagnostics(readJsonObject(diagnosticsPath)),
+      diagnosticsExists,
+      diagnostics: coerceCodexPapercuspDiagnostics(diagnosticsRaw),
       latestRolloutId: rollout?.id ?? null,
       latestRolloutPath: rollout?.path ?? null,
       resumeStrategy: 'codex-resume-last-in-code-home',

@@ -67,7 +67,12 @@ import {
 } from './spawn-mcp';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentBackend, HarnessConfig, InvokeResult } from './types';
-import { resolveAgentBackend, normalizeModelForBackend, resolveCodexModel } from './env';
+import {
+  claudeModelFlagArgs,
+  resolveAgentBackend,
+  normalizeModelForBackend,
+  resolveCodexModel,
+} from './env';
 import { capabilityPolicyFlags } from './managed-capability-policy';
 import { hasExplicitDisallowedTools } from './native-scheduler-deny';
 import { NO_SUBAGENT_TOOLS_DENY } from './no-subagent-deny';
@@ -451,6 +456,7 @@ export function resolveModel(cfg: HarnessConfig, role: string): string {
  * but a command like `codex exec --model chatgpt:5.5` used to bypass that path
  * because invoke() saw the model flag and did not append one. */
 export function normalizeExplicitModelFlagsForBackend(argv: string[], backend: AgentBackend): string[] {
+  if (backend === 'claude-code') return splitClaudeExplicitModelEffort(argv);
   if (backend !== 'codex') return [...argv];
   const out = [...argv];
   for (let i = 0; i < out.length; i += 1) {
@@ -463,6 +469,34 @@ export function normalizeExplicitModelFlagsForBackend(argv: string[], backend: A
     }
     const eq = /^(--model=|-m=)(.+)$/.exec(arg);
     if (eq) out[i] = `${eq[1]}${normalizeModelForBackend(eq[2], backend)}`;
+  }
+  return out;
+}
+
+/** claude-code half of {@link normalizeExplicitModelFlagsForBackend} (WI-10006244): an
+ *  explicit `--model <m>:<effort>` / `--model=<m>:<effort>` on the agent command becomes
+ *  `--model <m> --effort <level>` (Opus 5 `xhigh` -> `max`), because claude drops a
+ *  suffixed effort. An explicit `--effort` already on the command wins, so only the
+ *  model is normalized then. Specs without an effort suffix pass through unchanged. */
+function splitClaudeExplicitModelEffort(argv: readonly string[]): string[] {
+  const hasEffort = argv.some((a) => a === '--effort' || a.startsWith('--effort='));
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i] ?? '';
+    let spec: string | undefined;
+    if (arg === '--model' && i + 1 < argv.length) {
+      spec = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith('--model=')) {
+      spec = arg.slice('--model='.length);
+    }
+    if (spec === undefined) {
+      out.push(arg);
+      continue;
+    }
+    const [, model = spec, ...rest] = claudeModelFlagArgs(spec);
+    out.push('--model', model);
+    if (!hasEffort) out.push(...rest);
   }
   return out;
 }
@@ -3287,7 +3321,10 @@ export async function invoke(
     const model = normalizeModelForBackend(resolveModel(cfg, role), agentBackend);
     if (model) {
       resolvedModel = model;
-      extraFlags.push(modelFlag, model);
+      // claude-code takes effort as its own flag; a suffixed --model drops it
+      // (WI-10006244). Every other backend keeps its single model flag.
+      if (agentBackend === 'claude-code') extraFlags.push(...claudeModelFlagArgs(model));
+      else extraFlags.push(modelFlag, model);
       ctx.log(`  role=${role} model=${model} (from config.json)`);
     }
   } else {

@@ -559,10 +559,44 @@ export interface ConvergenceVerdict {
   state: ConvergenceState;
 }
 
+/**
+ * GUARD 1's input, built in ONE place (WI-10006394): the attested member devices,
+ * minus self, minus REVOKED devices, de-duplicated in first-seen order.
+ *
+ * Revocation is how a device that is gone for good (a deleted VM, a wiped laptop)
+ * is retired. Without this filter its last announcement stays judgeable and pins
+ * the pot NOT CONVERGED forever, because nothing can bring the local mirror up to
+ * a snapshot only the departed device held. Measured: 63 h on hello-world-3-pot
+ * after the S1 capacity-test VM was deleted, its attestation still listed under
+ * the member that lent it a GitHub identity.
+ *
+ * A silent device is deliberately NOT aged out. A laptop offline for a weekend
+ * with unpulled commits is a REAL non-convergence; only an explicit revocation
+ * can say that device's data is not coming back.
+ */
+export function selectConvergenceCandidates(input: {
+  memberDevicePubkeys: readonly string[];
+  selfDevicePubkey: string | null | undefined;
+  revokedDevicePubkeys: ReadonlySet<string>;
+}): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const device of input.memberDevicePubkeys) {
+    if (!device || seen.has(device)) continue;
+    seen.add(device);
+    if (device === input.selfDevicePubkey) continue;
+    if (input.revokedDevicePubkeys.has(device)) continue;
+    out.push(device);
+  }
+  return out;
+}
+
 export interface JudgeConvergenceInput {
   /**
    * GUARD 1 — the ONLY devices that may be judged: attested hive members,
-   * EXCLUDING self. Anything announcing from outside this set is ignored.
+   * EXCLUDING self and REVOKED devices (build it with
+   * `selectConvergenceCandidates`). Anything announcing from outside this set
+   * is ignored.
    */
   candidateDevicePubkeys: readonly string[];
   /**
@@ -588,7 +622,9 @@ export interface JudgeConvergenceInput {
  *
  *   1. Only devices in `candidateDevicePubkeys` are judged. Drops self (our own
  *      local always equals our own announcement by construction), drops former
- *      members, and drops any unknown/hostile announcer.
+ *      members, drops REVOKED devices of current members (a departed device is
+ *      retired by revoking it — see `selectConvergenceCandidates`), and drops any
+ *      unknown/hostile announcer.
  *   2. A device with NO announcement is NEVER judged behind — absence of a
  *      claim is not evidence of lag.
  *   3. `local >= announced` ⇒ converged; any prior lag state for that device is

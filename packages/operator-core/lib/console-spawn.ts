@@ -35,19 +35,22 @@ import {
   closeSync,
   chmodSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
-  renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type { ConsoleEnvelope } from './console-launcher';
+import { prepareKickoffEnvironment } from './agent-kickoff/prompt-transport.mjs';
 import type { ColorScheme } from './console-color-schemes';
 // WI-37920 / P-001: plain-ESM shared module — psu-launcher.mjs (bare `node`,
 // cannot import TypeScript) imports the SAME definitions, so detection and
@@ -57,12 +60,17 @@ import { isWindowsDesktopHost } from './windows-desktop-windows';
 import { requestDesktopConsoleLaunch } from './console-launch-bridge';
 // task-manager P-009 follow-up: the HEADLESS path enrols (see
 // buildHeadlessSpawnCommand's doc for why this file's windowed path does not).
-import { scrubTerminalContextEnv } from './terminal-spawn';
+import { agentInheritedOperatorEnv, scrubTerminalContextEnv } from './terminal-spawn';
 import { CLIENT_SERVER_TERMINALS, PROCESS_PER_WINDOW_TERMINALS } from './linux-terminals';
 import { beginSyncEnrolment, completeSyncEnrolment } from './task-manager/enroll-sync';
 import { killTask } from './task-manager/control';
 import { scopeUnitForTask, sliceForClass } from './task-manager/types';
 import { warmScopeProbe } from './task-manager/managed-spawn';
+import {
+  acquireInstallBoundaryLease,
+  installBoundaryRoot,
+  type InstallBoundaryLease,
+} from './install-boundary-lease';
 import {
   agentSpawnScopeMemoryMaxG,
   SYSTEMD_TRANSIENT_UNIT_COLLECTION_ARGS,
@@ -286,7 +294,21 @@ function isSignedSingleAgentMcpConfig(contents: string): boolean {
   return /[?&]sig=[^&"'\s]+/.test(contents);
 }
 
-function writeMcpJsonFile(envelope: ConsoleEnvelope, enabled: boolean): string | null {
+/** Async existence probe — the fs/promises analogue of existsSync (false on any error). */
+function pathExists(p: string): Promise<boolean> {
+  return fsp.access(p).then(
+    () => true,
+    () => false,
+  );
+}
+
+// WI-10005243: this runs inside spawnConsole/spawnHeadless, which execute on the
+// operator's and bg-host's event loop. The tmp write + rename over an existing
+// .mcp.json measured 22 ms and 156 ms of main-thread block on bg-host (bpftrace,
+// 2026-10-02), because ext4 flushes the replaced file's data at rename
+// (auto_da_alloc). Every fs call here is therefore async; a source guard in
+// console-spawn.test.ts keeps the *Sync forms out of this function.
+async function writeMcpJsonFile(envelope: ConsoleEnvelope, enabled: boolean): Promise<string | null> {
   if (!enabled || !envelope.mcpJsonContents) return null;
 
   // EI-23765667869335651: a signed single-agent door must NOT be written into a
@@ -317,9 +339,9 @@ function writeMcpJsonFile(envelope: ConsoleEnvelope, enabled: boolean): string |
 
   try {
     const mcpPath = join(envelope.cwd, '.mcp.json');
-    if (existsSync(mcpPath)) {
+    if (await pathExists(mcpPath)) {
       const bak = join(envelope.cwd, '.mcp.json.papercusp.bak');
-      if (!existsSync(bak)) renameSync(mcpPath, bak);
+      if (!(await pathExists(bak))) await fsp.rename(mcpPath, bak);
     }
     // Atomic write via temp-file + rename instead of a direct writeFileSync.
     // WHY (owner-hit 2026-07-11: resume/fork consoles failed with HTTP 500
@@ -338,15 +360,13 @@ function writeMcpJsonFile(envelope: ConsoleEnvelope, enabled: boolean): string |
       envelope.cwd,
       `.mcp.json.tmp-${process.pid}-${Date.now()}-${randomBytes(6).toString('hex')}`,
     );
-    writeFileSync(tmp, envelope.mcpJsonContents);
+    await fsp.writeFile(tmp, envelope.mcpJsonContents);
     try {
-      renameSync(tmp, mcpPath);
+      await fsp.rename(tmp, mcpPath);
     } catch (e) {
-      try {
-        unlinkSync(tmp);
-      } catch {
+      await fsp.unlink(tmp).catch(() => {
         /* best-effort temp cleanup */
-      }
+      });
       throw e;
     }
   } catch (e: any) {
@@ -446,6 +466,10 @@ function formatWindowTitle(opts: AppearanceOpts): string {
  *    `PAPERCUSP_SCRIPTS_DIR` (bundled scripts). These are papercusp's OWN
  *    commands; a user shim must win over a same-named bundled script, and both
  *    must win over anything else called `papercup` on the box.
+ *  • ALSO PREPENDED — `PAPERCUSP_NODE_RUNTIME_DIR`, set only for a Papercusp
+ *    checkout. Its commands must use the operator's Node runtime so native
+ *    addons such as better-sqlite3 match the ABI; a desktop PATH may put an
+ *    older system Node first.
  *  • APPENDED — the backend-CLI dirs the OPERATOR resolved
  *    ({@link SPAWN_PATH_DIRS_ENV}, filled by `buildConsoleEnvelope` because only
  *    the operator process has the full environment; this window does not — see
@@ -466,7 +490,11 @@ function formatWindowTitle(opts: AppearanceOpts): string {
  * `bun` reachable too.
  */
 export function buildPathExport(env: Record<string, string>): string | null {
-  const pathPrepend = [env.PAPERCUSP_BIN_DIR, env.PAPERCUSP_SCRIPTS_DIR].filter(Boolean) as string[];
+  const pathPrepend = [
+    env.PAPERCUSP_BIN_DIR,
+    env.PAPERCUSP_SCRIPTS_DIR,
+    env.PAPERCUSP_NODE_RUNTIME_DIR,
+  ].filter(Boolean) as string[];
   const pathAppend = decodeSpawnPathDirs(env[SPAWN_PATH_DIRS_ENV]);
   if (!pathPrepend.length && !pathAppend.length) return null;
   const segments = [
@@ -586,10 +614,36 @@ export function buildConsoleOneliner(
  * that consumes host resources and hides the real failure from the process
  * liveness probe.
  */
+/**
+ * Mirror only stderr: piping stdout would remove the launcher's real TTY and
+ * change managed-PTY startup. The bounded tail is flushed before the status
+ * sentinel, so the poller cannot observe a footer without the actual refusal.
+ * Keep the capture shell-local and Bash 3.2 compatible (macOS).
+ */
+function greetingWithBootDiagnostics(command: string, receiptPath?: string | null): string {
+  const greeting = `(eval ${shellEscape(command)})`;
+  if (!receiptPath) return greeting;
+  // Open both consumers in this supervising shell. A process substitution on
+  // the greeting subshell belongs to that subshell, so the parent's $! cannot
+  // wait for it; a nested tail can then append after the failure banner.
+  return '(' + [
+    `exec 3> >(umask 077; tail -c 16384 >> ${shellEscape(receiptPath)} || cat >/dev/null)`,
+    '__papercusp_boot_tail=$!',
+    'exec 4> >(tee /dev/fd/3 >&2)',
+    '__papercusp_boot_tee=$!',
+    `${greeting} 2>&4 3>&- 4>&-`,
+    '__papercusp_boot_rc=$?',
+    'exec 4>&- 3>&-',
+    'wait "$__papercusp_boot_tee" 2>/dev/null || true',
+    'wait "$__papercusp_boot_tail" 2>/dev/null || true',
+    '(exit "$__papercusp_boot_rc")',
+  ].join('; ') + ')';
+}
+
 function runCommandAndExit(command: string, opts?: { receiptPath?: string | null }): string {
   const receiptTee = opts?.receiptPath ? ` | tee -a ${shellEscape(opts.receiptPath)}` : '';
   return [
-    `(eval ${shellEscape(command)})`,
+    greetingWithBootDiagnostics(command, opts?.receiptPath),
     `__papercusp_greeting_rc=$?`,
     `if [ "$__papercusp_greeting_rc" -ne 0 ]; then ` +
       `printf '\\n[papercusp] initial terminal command exited with status %s; headless launch exiting.\\n' ` +
@@ -651,7 +705,7 @@ export function keepWindowOpenOnFailure(
   const interactiveScript = [
     terminalPidReceipt,
     opts?.interactivePrelude,
-    `(eval ${shellEscape(command)})`,
+    greetingWithBootDiagnostics(command, opts?.receiptPath),
     banner,
     `exec "\${SHELL:-/bin/bash}" -l`,
   ]
@@ -1331,7 +1385,13 @@ export type SpawnConsoleResult =
        */
       kickoffProof?: KickoffProofResult;
     }
-  | { status: 'error'; error: string; code: number };
+  | {
+      status: 'error';
+      error: string;
+      code: number;
+      /** Durable log for a headless spawn that created its log before failing. */
+      logPath?: string;
+    };
 
 /** Detached-child lifecycle evidence exposed after a spawn result is returned. */
 export interface SpawnChildExit {
@@ -1476,10 +1536,9 @@ async function pollConsoleBootReceipt(
     const failed = HEADLESS_GREETING_FAILURE_RE.exec(readLog(receiptPath));
     if (failed) {
       const tail = readLog(receiptPath).trim().slice(-800);
-      try {
-        unlinkSync(receiptPath);
-      } catch {
-        /* best-effort */
+      const retained = existsSync(receiptPath);
+      if (!retained && receiptPath.endsWith('/boot.log')) {
+        try { rmdirSync(dirname(receiptPath)); } catch { /* absent/unavailable diagnostic only */ }
       }
       return {
         status: 'error',
@@ -1488,7 +1547,8 @@ async function pollConsoleBootReceipt(
           ' — the one-liner `exec`s a login shell after the greeting regardless, so the window' +
           ' stays open holding a DEAD session and this never surfaced as a process exit' +
           ` (EI-19330040718883562, the visible-path sibling of spawnHeadless's` +
-          ` EI-19311623077693508 boot receipt)${tail ? ` — receipt tail: ${tail}` : ''}`,
+          ` EI-19311623077693508 boot receipt) — boot receipt ${retained ? 'retained' : 'unavailable'}: ${receiptPath}` +
+          `${tail ? ` — receipt tail: ${tail}` : ''}`,
         code: 502,
       };
     }
@@ -1497,6 +1557,9 @@ async function pollConsoleBootReceipt(
   }
   try {
     unlinkSync(receiptPath); // healthy launch (or nothing was ever written) — nothing to keep
+    if (receiptPath.endsWith('/boot.log') && dirname(receiptPath).includes('papercup-console-receipt-')) {
+      rmdirSync(dirname(receiptPath)); // only our empty, private receipt directory
+    }
   } catch {
     /* best-effort */
   }
@@ -1563,10 +1626,18 @@ async function pollTerminalPidReceipt(
  * client that died off-screen.
  */
 export async function spawnConsole(opts: SpawnConsoleOpts): Promise<SpawnConsoleResult> {
+  try {
+    return await spawnConsolePrepared({ ...opts, envelope: { ...opts.envelope, env: prepareKickoffEnvironment(opts.envelope.env) } });
+  } catch (error) {
+    return { status: 'error', code: 500, error: `console spawn failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function spawnConsolePrepared(opts: SpawnConsoleOpts): Promise<SpawnConsoleResult> {
   const { envelope } = opts;
 
   // 1. Optional .mcp.json displacement (backup the user's, write ours).
-  const mcpJsonError = writeMcpJsonFile(envelope, opts.writeMcpJson ?? false);
+  const mcpJsonError = await writeMcpJsonFile(envelope, opts.writeMcpJson ?? false);
   if (mcpJsonError) {
     return { status: 'error', error: mcpJsonError, code: 500 };
   }
@@ -1576,10 +1647,7 @@ export async function spawnConsole(opts: SpawnConsoleOpts): Promise<SpawnConsole
   //      null (the default) flows straight through buildConsoleOneliner to an
   //      unmodified banner, so an opted-out caller sees zero behavior change.
   const receiptPath = opts.verifyBootReceipt
-    ? join(
-        tmpdir(),
-        `papercup-console-receipt-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}.log`,
-      )
+    ? join(mkdtempSync(join(tmpdir(), 'papercup-console-receipt-')), 'boot.log')
     : null;
   const terminalPidReceiptPath = opts.captureTerminalPid
     ? join(
@@ -1793,7 +1861,7 @@ export async function spawnConsole(opts: SpawnConsoleOpts): Promise<SpawnConsole
   // The WAYLAND_DISPLAY line below is the same lesson learned once before
   // (WI-4272) and never generalised — this is that generalisation.
   const spawnEnv: NodeJS.ProcessEnv = scrubTerminalContextEnv({
-    ...process.env,
+    ...agentInheritedOperatorEnv(process.env),
     ...desktopEnv,
     ...envelope.env,
   });
@@ -2048,7 +2116,7 @@ async function spawnMacConsole(
       // involved here, so the zero-window failure cannot occur — but
       // ITERM_SESSION_ID / TERM_SESSION_ID / the multiplexer vars are still this
       // process's terminal identity, and a new window is not in it.
-      env: scrubTerminalContextEnv({ ...process.env, ...envelope.env }),
+      env: scrubTerminalContextEnv({ ...agentInheritedOperatorEnv(process.env), ...envelope.env }),
     });
     child.unref();
     if (stderrFd != null) {
@@ -2270,6 +2338,12 @@ export interface SpawnHeadlessOpts {
     windowMs?: number;
   };
   /**
+   * WI-10005137: injectable seam for the install-boundary read lease taken
+   * before the fork. Tests pass a fake; production uses
+   * acquireInstallBoundaryLease against the checkout psu boots from.
+   */
+  installBoundary?: (root: string | null) => Promise<InstallBoundaryLease>;
+  /**
    * Opt into a parent-visible proof that the detached launch kickoff reached
    * the backend's native transcript. The receipt env is carried through the
    * shell/psu launcher boundary; ordinary headless launches do not create or
@@ -2311,7 +2385,7 @@ export function wrapHeadlessSigtermDiagnostic(oneliner: string): string {
     `trap 'echo "[EI-9748] SIGTERM received at $(date -u +%FT%TZ) — on this host, if the ` +
     `systemd-run --user --scope cgroup escape (EI-9748 Route A, landed 2026-07-11) succeeded ` +
     `at spawn time, this is NOT an operator-service restart (that escape makes this scope a ` +
-    `SIBLING of papercup-dev-api/papercup-staging-api, immune to their KillMode=control-group ` +
+    `SIBLING of papercusp-dev-api/papercusp-staging-api, immune to their KillMode=control-group ` +
     `restarts) — look elsewhere: a manual kill, host reboot/shutdown, or OOM. Only on a host ` +
     `WITHOUT systemd-run on PATH (no escape available, plain detached child) does an ` +
     `operator-service restart remain a likely cause. See work-item EI-9748 for detail." >&2; ` +
@@ -2546,8 +2620,16 @@ export function buildConsoleScopedSpawnCommand(
  * error-with-log-tail instead of a false ok+pid.
  */
 export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConsoleResult> {
+  try {
+    return await spawnHeadlessPrepared({ ...opts, envelope: { ...opts.envelope, env: prepareKickoffEnvironment(opts.envelope.env) } });
+  } catch (error) {
+    return { status: 'error', code: 500, error: `headless spawn failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function spawnHeadlessPrepared(opts: SpawnHeadlessOpts): Promise<SpawnConsoleResult> {
   const { envelope } = opts;
-  const mcpJsonError = writeMcpJsonFile(envelope, opts.writeMcpJson ?? false);
+  const mcpJsonError = await writeMcpJsonFile(envelope, opts.writeMcpJson ?? false);
   if (mcpJsonError) {
     return { status: 'error', error: mcpJsonError, code: 500 };
   }
@@ -2605,6 +2687,12 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
     logFd = null; // last resort: inherit-nothing (stdio ignore) below
   }
 
+  // WI-10005137: a launch while install:safe is reifying the checkout psu boots
+  // from dies at boot with ERR_MODULE_NOT_FOUND. Wait for the install's verified
+  // boundary, and hold the read lease through the boot window below so an
+  // install cannot start tearing node_modules down mid-resolution. Taken BEFORE
+  // the task enrolment so a long wait never leaves a half-enrolled task.
+  let installLease: InstallBoundaryLease | null = null;
   try {
     // EI-9748 Route (A): escape the operator service's own cgroup via
     // systemd-run --user --scope when available, so a headless member
@@ -2615,6 +2703,9 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
     // being created for EI-9748; this only gives it our slice + a joinable name,
     // and mints the ledger row that makes the member visible in /admin/tasks with
     // its fleet, its log, and its live cost.
+    installLease = await (opts.installBoundary ?? ((root) => acquireInstallBoundaryLease(root)))(
+      installBoundaryRoot({ ...agentInheritedOperatorEnv(process.env), ...launchEnv }),
+    );
     const memoryMaxBytes = agentSpawnScopeMemoryMaxG() * 1024 ** 3;
     const enrolment = beginSyncEnrolment({ class: 'agent-session', memoryMaxBytes });
     const taskScope = enrolment.confined
@@ -2646,7 +2737,7 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
       // would tell the psu it is running inside the OPERATOR's multiplexer pane,
       // which it is not. pui and `psu --brain` both drive zellij, so that is a
       // live wrong-answer, not a hypothetical one.
-      env: normalizeHeadlessAgentTerm(scrubTerminalContextEnv({ ...process.env, ...launchEnv })),
+      env: normalizeHeadlessAgentTerm(scrubTerminalContextEnv({ ...agentInheritedOperatorEnv(process.env), ...launchEnv })),
     });
     // Keep a second, persistent observer before the bounded boot probes remove
     // their own listeners. The consult reviver consumes this promise to turn a
@@ -2699,12 +2790,13 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
           `headless spawn failed to start: ${earlyExit.error.message}` +
           ` — the binary never ran (is the agent CLI on the operator's PATH?); see ${logPath}`,
         code: 502,
+        logPath,
       };
     }
     if (earlyExit) {
       let logTail = '';
       try {
-        logTail = readFileSync(logPath, 'utf8').trim().slice(-800);
+        logTail = bootDeathLogExcerpt(readFileSync(logPath, 'utf8'));
       } catch {
         logTail = '';
       }
@@ -2713,8 +2805,10 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
         status: 'error',
         error:
           `headless psu died at boot (${earlyExit.signal ? `signal ${earlyExit.signal}` : `exit ${earlyExit.code ?? 0}`}) within ${EARLY_EXIT_PROBE_MS}ms` +
+          installBoundaryNote(installLease) +
           `${logTail ? ` — log tail: ${logTail}` : ` — see ${logPath}`}`,
         code: 502,
+        logPath,
       };
     }
 
@@ -2746,20 +2840,25 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
     for (;;) {
       const failed = HEADLESS_GREETING_FAILURE_RE.exec(readLog(logPath));
       if (failed) {
-        const tail = readLog(logPath).trim().slice(-800);
+        const tail = bootDeathLogExcerpt(readLog(logPath));
         cleanupKickoffProofRequest(kickoffProofRequest);
         return {
           status: 'error',
           error:
             `headless member launched but its agent command died at boot (exit ${failed[1]})` +
             ` — the shell stays open holding a DEAD session, so this never surfaced as a` +
-            ` process exit (EI-19311623077693508)${tail ? ` — log tail: ${tail}` : ` — see ${logPath}`}`,
+            ` process exit (EI-19311623077693508)${installBoundaryNote(installLease)}` +
+            `${tail ? ` — log tail: ${tail}` : ` — see ${logPath}`}`,
           code: 502,
+          logPath,
         };
       }
       if (Date.now() >= bootDeadline) break;
       await bootSleep(250);
     }
+    // The boot window is over: module resolution is done, so let a queued
+    // install proceed instead of holding it for the kickoff-proof wait.
+    installLease?.release();
 
     const kickoffProof = kickoffProofRequest
       ? await waitForKickoffProof(kickoffProofRequest, opts.kickoffProofProbes)
@@ -2785,6 +2884,7 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
           status: 'error',
           error: `headless kickoff was not submitted (${kickoffProof.reason}); task ${enrolment.taskId} was stopped or already gone`,
           code: 502,
+          logPath,
         };
       }
     }
@@ -2809,6 +2909,31 @@ export async function spawnHeadless(opts: SpawnHeadlessOpts): Promise<SpawnConso
         closeSync(logFd);
       } catch { /* already closed */ }
     }
-    return { status: 'error', error: `headless spawn failed: ${e?.message}`, code: 500 };
+    return { status: 'error', error: `headless spawn failed: ${e?.message}`, code: 500, logPath };
+  } finally {
+    // Idempotent; covers every early-return and throw path above.
+    installLease?.release();
   }
+}
+
+/**
+ * WI-10005137: the boot-death error used to carry only the last 800 chars of
+ * the log, which for a Node resolution failure is the bottom of the stack
+ * (package_json_reader / esm resolve) — the line naming the missing package was
+ * cut. Keep that head line in front of the tail when the tail lost it.
+ */
+export function bootDeathLogExcerpt(log: string, tailChars = 800): string {
+  const trimmed = log.trim();
+  const tail = trimmed.slice(-tailChars);
+  const head = trimmed
+    .match(/^.*(?:Cannot find (?:package|module) .*|Error \[ERR_[A-Z0-9_]+\]: .*)$/m)?.[0]
+    ?.trim();
+  if (!head || tail.includes(head)) return tail;
+  return `${head.slice(0, 400)} … ${tail}`;
+}
+
+/** Names a boot that ran WITHOUT the install boundary (empty when it held). */
+export function installBoundaryNote(lease: InstallBoundaryLease | null): string {
+  if (!lease || (lease.outcome !== 'timed-out' && lease.outcome !== 'error')) return '';
+  return ` (launched without the install:safe boundary: ${lease.outcome}${lease.detail ? ` — ${lease.detail}` : ''}; an npm install may have been reifying node_modules)`;
 }

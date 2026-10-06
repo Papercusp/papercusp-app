@@ -602,7 +602,7 @@ export interface ApplyDeps {
   /** Atomic, FAIL-CLOSED acquire over the whole target set. */
   withLock: <T>(absPaths: string[], run: () => Promise<T>) => Promise<LockOutcome<T>>;
   /** Re-open a written document on the server so diagnostics describe the new text. */
-  resync: (absPath: string, rootPath: string, newText: string) => boolean;
+  resync: (absPath: string, rootPath: string, newText: string) => boolean | Promise<boolean>;
   /** Diagnostic count for one file, or `null` when it could not be measured. */
   diagnosticCount: (absPath: string, rootPath: string) => Promise<number | null>;
   now: () => number;
@@ -736,7 +736,7 @@ export async function applyRenameEdit(
 
       for (const t of targets) {
         const before = await deps.diagnosticCount(t.absPath, computed.projectRoot);
-        const resynced = deps.resync(t.absPath, computed.projectRoot, nextText.get(t.absPath)!);
+        const resynced = await deps.resync(t.absPath, computed.projectRoot, nextText.get(t.absPath)!);
         const after = resynced ? await deps.diagnosticCount(t.absPath, computed.projectRoot) : null;
         if (before === null || after === null) {
           measured = false;

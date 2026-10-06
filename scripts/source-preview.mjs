@@ -27,6 +27,7 @@
 //   node scripts/source-preview.mjs gate <dir>
 //   node scripts/source-preview.mjs check [--ref main] [--remote <url>]
 //   node scripts/source-preview.mjs push  [--ref main] [--remote <url>] [--confirm]
+//   node scripts/source-preview.mjs licenses [--json <file>]
 // npm: preview:export · preview:gate · preview:check · preview:push
 // Every command takes --target preview|public (default preview). The public target
 // (plan open-source-release-2026-09-29) publishes to Papercusp/papercusp-app under the
@@ -190,6 +191,137 @@ function run(cmd, args, opts = {}) {
 }
 
 const git = (repo, args, opts) => run('git', ['-C', repo, ...args], opts);
+
+/** Read GitHub JSON plus pagination headers without requiring a recent gh CLI. */
+function githubPage(endpoint) {
+  const raw = run('gh', ['api', '--include', endpoint]).replace(/\r\n/g, '\n');
+  const boundary = raw.indexOf('\n\n');
+  if (boundary < 0) throw new PreviewError('GitHub response has no HTTP header boundary', 2);
+  const headers = Object.fromEntries(raw.slice(0, boundary).split('\n').slice(1).map((line) => {
+    const colon = line.indexOf(':');
+    return [line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim()];
+  }));
+  return { headers, body: JSON.parse(raw.slice(boundary + 2)) };
+}
+
+/**
+ * R13: inspect the current public population and actual default-branch license bytes.
+ * Reuses the public export's canonical ELv2 and the maintained Apache library text.
+ * Unknown text, an API failure, incomplete pagination or a changed population refuses.
+ * GitHub's license metadata is supplementary; it is never the license oracle.
+ * @typedef {{ path: string, gitBlob: string, sha256: string, license: string | null, url: string }} PublicRepositoryLicense
+ * @typedef {{ repo: string, defaultBranch: string, metadataSpdx: string | null, head: string | null, licenses: PublicRepositoryLicense[], errors: string[] }} PublicRepositoryLicenseRow
+ */
+/**
+ * @param {{ api?: (endpoint: string) => Promise<{ headers: Record<string, string>, body: any }> | { headers: Record<string, string>, body: any }, licenseHashes?: Record<string, string>, libraryRepositories?: string[], log?: Log }} [options]
+ */
+export async function auditPublicRepositoryLicenses({ api = githubPage, licenseHashes, libraryRepositories, log = () => {} } = {}) {
+  const startedAt = new Date().toISOString();
+  const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
+  const reviewed = licenseHashes ?? {
+    [digest(readFileSync(PUBLIC_LICENSE_PATH))]: 'ELv2',
+    [digest(readFileSync(join(ROOT, 'libs/generic/cache/LICENSE')))]: 'Apache-2.0',
+    // Existing SideStage-mobile MIT declaration, read and reviewed in the R13 census.
+    '84ea0f54f720885e4e0a6d2e45baca5a7d6e30aa26db12eabbeda4b3b48c3ea7': 'MIT',
+  };
+  if (!libraryRepositories) {
+    // Derive the library policy from the existing registry, never a remembered count.
+    const modules = new Map();
+    const config = run('git', ['config', '--file', join(ROOT, '.gitmodules'), '--get-regexp', '^submodule\\..*\\.(path|url)$']);
+    for (const line of config.trim().split('\n')) {
+      const space = line.indexOf(' ');
+      const key = line.slice(0, space);
+      const dot = key.lastIndexOf('.');
+      const name = key.slice(0, dot);
+      const module = modules.get(name) ?? {};
+      module[key.slice(dot + 1)] = line.slice(space + 1);
+      modules.set(name, module);
+    }
+    libraryRepositories = [...modules.values()].filter((module) => module.path?.startsWith('libs/generic/') || ['libs/agent-chat', 'libs/testing-shell', 'libs/test-config'].includes(module.path)).map((module) => module.url.replace(/^git@github\.com:/, '').replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, ''));
+  }
+  const libraries = new Set(libraryRepositories.map((repo) => repo.toLowerCase()));
+  async function population() {
+    const repositories = [];
+    const pages = [];
+    const seen = new Set();
+    let endpoint = 'orgs/Papercusp/repos?type=public&per_page=100&page=1';
+    while (endpoint) {
+      if (seen.has(endpoint)) throw new PreviewError('GitHub pagination repeated a page', 2);
+      seen.add(endpoint);
+      const { headers, body } = await api(endpoint);
+      if (!Array.isArray(body)) throw new PreviewError('GitHub population is not an array', 2);
+      for (const repo of body) {
+        if (!/^Papercusp\/[A-Za-z0-9._-]+$/i.test(repo.full_name ?? '') || repo.private !== false || !repo.default_branch) {
+          throw new PreviewError('GitHub population contains an invalid public repository', 2);
+        }
+        if (repositories.some((r) => r.full_name.toLowerCase() === repo.full_name.toLowerCase())) {
+          throw new PreviewError(`GitHub population repeats ${repo.full_name}`, 2);
+        }
+        repositories.push(repo);
+      }
+      const link = headers.link ?? '';
+      const next = link.split(',').find((part) => /rel="next"/.test(part));
+      const url = next?.match(/<([^>]+)>/)?.[1];
+      if (next && !url?.startsWith('https://api.github.com/orgs/Papercusp/repos?')) {
+        throw new PreviewError('GitHub next-page link is missing or outside the population endpoint', 2);
+      }
+      pages.push({ endpoint, size: body.length, next: url ?? null });
+      endpoint = url ? url.slice('https://api.github.com/'.length) : '';
+    }
+    if (!repositories.length) throw new PreviewError('GitHub public population is empty', 2);
+    return { repositories, pages };
+  }
+  const first = await population();
+  /** @type {PublicRepositoryLicenseRow[]} */
+  const rows = [];
+  /** @type {Record<string, string>} */
+  const licenseTexts = {};
+  for (const repo of first.repositories) {
+    log(`license census: ${repo.full_name} default=${repo.default_branch}`);
+    /** @type {PublicRepositoryLicenseRow} */
+    const row = { repo: repo.full_name, defaultBranch: repo.default_branch, metadataSpdx: repo.license?.spdx_id ?? null, head: null, licenses: [], errors: [] };
+    try {
+      const { body: commit } = await api(`repos/${row.repo}/commits/${encodeURIComponent(row.defaultBranch)}`);
+      if (!/^[a-f0-9]{40}$/.test(commit.sha ?? '')) throw new Error('default branch has no measured commit');
+      row.head = commit.sha;
+      const { body: root } = await api(`repos/${row.repo}/contents?ref=${row.head}`);
+      if (!Array.isArray(root)) throw new Error('default-branch root was not measured');
+      const candidates = root.filter((f) => f.type === 'file' && /^(?:licen[cs]e|copying)(?:\.(?:md|txt))?$/i.test(f.name));
+      if (!candidates.length) throw new Error('default branch has no root license file');
+      for (const file of candidates) {
+        const { body: content } = await api(`repos/${row.repo}/contents/${encodeURIComponent(file.path)}?ref=${row.head}`);
+        if (content.encoding !== 'base64' || typeof content.content !== 'string') throw new Error(`license bytes unavailable: ${file.path}`);
+        const bytes = Buffer.from(content.content, 'base64');
+        if (bytes.toString('base64') !== content.content.replace(/\s/g, '')) throw new Error(`invalid license base64: ${file.path}`);
+        const blob = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+        if (blob !== content.sha || blob !== file.sha) throw new Error(`license blob mismatch: ${file.path}`);
+        const sha256 = digest(bytes);
+        const license = reviewed[sha256] ?? null;
+        licenseTexts[sha256] = bytes.toString('utf8');
+        row.licenses.push({ path: file.path, gitBlob: blob, sha256, license, url: `https://github.com/${row.repo}/blob/${row.head}/${file.path}` });
+        if (!license) row.errors.push(`unreviewed license text: ${file.path}`);
+        if (license && libraries.has(row.repo.toLowerCase()) && license !== 'Apache-2.0' && license !== 'MIT') {
+          row.errors.push(`D-003 requires a permissive library license: ${file.path}`);
+        }
+        if (license && (row.repo.toLowerCase() === PUBLIC_REPO.toLowerCase() || ['goals', 'cupboard-actions', 'blueprints', 'sidestage', 'scout-runtime', 'recipes', 'plans', 'scout-chat', 'drawer-stack', 'cart-drawer', 'data-fetch'].includes(row.repo.split('/')[1].toLowerCase())) && license !== 'ELv2') {
+          row.errors.push(`D-011/D-023 require ELv2: ${file.path}`);
+        }
+      }
+    } catch (error) {
+      row.errors.push(error instanceof Error ? error.message : String(error));
+    }
+    rows.push(row);
+  }
+  const last = await population();
+  const identity = (repos) => repos.map((r) => `${r.full_name}:${r.default_branch}`).sort().join('\n');
+  const stablePopulation = identity(first.repositories) === identity(last.repositories);
+  const assertions = [
+    { id: 'complete-stable-population', passed: stablePopulation, evidence: 'Both population reads followed every next-page link to a terminal page. Exact page receipts are in pagination; both repository/default-branch populations must agree.' },
+    { id: 'actual-default-branch-license-bytes', passed: rows.every((row) => !row.errors.length), evidence: 'Every repository is enumerated in rows with its measured default-branch commit, root license blob and SHA-256. Any missing/unreadable/unreviewed/mismatched license fails this assertion; full errors remain on the affected row.' },
+  ];
+  const exitCode = assertions.every((assertion) => assertion.passed) ? 0 : 1;
+  return { schemaVersion: 1, kind: 'operational-test-evidence', name: 'Public repository default-branch license census', framework: 'operational', command: ['node --import tsx scripts/source-preview.mjs licenses'], startedAt, finishedAt: new Date().toISOString(), exitCode, evidencePlane: 'live', summary: `${rows.length} public repositories; ${rows.filter((row) => row.errors.length).length} license failures; population ${stablePopulation ? 'stable' : 'changed'}`, assertions, pagination: { first: first.pages, last: last.pages }, rows, licenseTexts };
+}
 
 /** Resolve a ref to a full commit SHA in `repo`. */
 export function resolveCommit(repo, ref) {
@@ -371,8 +503,8 @@ export async function readmeText(dir, manifest, releasesUrl) {
       '# Papercusp',
       '',
       'Papercusp is a desktop workspace where coding agents work alongside you, coordinated',
-      'through shared plans, work items, locks and memory. This repository is its source,',
-      'licensed under the Elastic License 2.0 (see LICENSE and NOTICE): you may read, run,',
+      'through shared plans, work items, locks and memory. Papercusp is source-available',
+      'under the Elastic License 2.0 (see LICENSE and NOTICE): you may read, run,',
       'modify and self-host it, but not offer it to others as a hosted or managed service.',
       '',
       `- Exported from \`${manifest.source.repo}\` at \`${manifest.source.commit}\`, with`,
@@ -1020,6 +1152,12 @@ function printGate(verdict) {
 async function main(argv) {
   const { cmd, opts } = parseArgs(argv);
   const log = (m) => console.error(`==> ${m}`);
+  if (cmd === 'licenses') {
+    const census = await auditPublicRepositoryLicenses({ log });
+    if (opts.json) await fs.writeFile(opts.json, `${JSON.stringify(census, null, 2)}\n`);
+    console.log(census.summary);
+    return census.exitCode;
+  }
   loadReleaseHost();
   const target = resolveTarget(opts.target ?? 'preview');
   const remote = opts.remote ?? defaultRemote(target);
@@ -1057,7 +1195,7 @@ async function main(argv) {
     console.log(`pushed ${r.pushedCommit}${r.parent ? ` (parent ${r.parent})` : ''} (tree ${r.tree}) = ${SOURCE_REPO}@${r.commit} → ${REPO}`);
     return 0;
   }
-  console.error('usage: source-preview.mjs export|gate|check|push [--target preview|public] [--ref <ref>] [--out <dir>] [--remote <url>] [--confirm] [--co-author "Name <email>"]...');
+  console.error('usage: source-preview.mjs export|gate|check|push|licenses [--target preview|public] [--ref <ref>] [--out <dir>] [--remote <url>] [--json <file>] [--confirm] [--co-author "Name <email>"]...');
   return 2;
 }
 

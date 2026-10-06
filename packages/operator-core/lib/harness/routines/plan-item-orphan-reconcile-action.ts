@@ -50,7 +50,8 @@ registerSystemAction('plan-item-orphan-reconcile', async (ctx: SystemActionCtx) 
     result.planSaysDoneOpen !== 0
   ) {
     console.log(
-      `[plan-item-orphan-reconcile] ${ctx.installSlug}: ${result.candidatePlanItems} candidate plan-item(s), ` +
+      `[plan-item-orphan-reconcile] ${ctx.installSlug}: ${result.candidatePlanItems}` +
+        `${result.candidateWindowSaturated ? '+ (window saturated at cap — a floor)' : ''} candidate plan-item(s), ` +
         `${result.terminalPlanItems} terminal — reconciled ${result.reconciled.length} work-item(s), ` +
         `lane-parked ${result.gated.length}, lane-restored ${result.ungated.length} ` +
         `(${result.skippedInFlight.length} in-flight, ${result.skippedAlreadyTerminal.length} already-terminal skipped)` +

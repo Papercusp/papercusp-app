@@ -97,4 +97,11 @@ registerSystemAction('sweep-stalled-loops', async (ctx: SystemActionCtx) => {
         `(EI-19441932615368003): ${result.vetoedByProviderWall.join(', ')}`,
     );
   }
+  if (result.vetoedByAwaitSuppression.length > 0) {
+    console.log(
+      `[sweep-stalled-loops] AWAIT-SUPPRESSED ${result.vetoedByAwaitSuppression.length}/${result.checked} ` +
+        `loop(s) left ARMED (not disarmed) — each is parked on a blocking await and its suppression ` +
+        `re-arm has a resume pending (WI-10005352): ${result.vetoedByAwaitSuppression.join(', ')}`,
+    );
+  }
 });

@@ -6,6 +6,7 @@
  * cloud services. See `operator-voice-proxy.test.ts`.
  */
 import type { VoicePrefs, TtsEngineKind } from '../../../voice-prefs';
+import { isTtsEngineUnavailable, releaseUnavailableMessage } from '../../../voice-release-availability';
 
 /** Voicemode whisper base URL (OpenAI-compatible /v1/audio/transcriptions). */
 export const VOICEMODE_URL = process.env.VOICEMODE_URL ?? 'http://localhost:2022';
@@ -97,6 +98,11 @@ export async function resolveTtsEngine(
   }
   if (!isServerTtsEngine(engine)) {
     return { ok: false, error: `unsupported engine '${engine}'`, status: 400 };
+  }
+  // Release scope (voice-final-public-release-2026-10-01#D-005): refuse, never
+  // substitute — a silent fallback would speak with an engine the user did not pick.
+  if (isTtsEngineUnavailable(engine)) {
+    return { ok: false, error: releaseUnavailableMessage(engine), status: 400 };
   }
   return { ok: true, engine };
 }

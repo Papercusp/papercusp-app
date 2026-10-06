@@ -78,8 +78,8 @@ export const RESTART_RATE_READ_LIMIT = 200;
 
 /** The long-lived operator units whose restart rate is meaningful. */
 export const RESTART_RATE_WATCHED_UNITS = [
-  'papercup-dev-api.service',
-  'papercup-staging-api.service',
+  'papercusp-dev-api.service',
+  'papercusp-staging-api.service',
 ] as const;
 
 const WATCHDOG_IDENTITY: AgentIdentity = {
@@ -195,13 +195,13 @@ async function defaultEscalate(alert: RestartRateAlert): Promise<void> {
       `${alert.unit} recorded ${count} systemd "Started" events in the trailing hour, ` +
       `above the ${alert.threshold}/hour threshold.\n\n` +
       `Each restart is a ~10-13s connection-refused window for anything holding a ` +
-      `connection to that unit's port. For papercup-dev-api.service it is worse: the ` +
+      `connection to that unit's port. For papercusp-dev-api.service it is worse: the ` +
       `headless fleet children run inside THAT unit's cgroup (KillMode=control-group), ` +
       `so a restart storm there reaps live agent processes.\n\n` +
       `Triage:\n` +
       `  1. Confirm and see the cadence:\n` +
       `     journalctl --user -u ${alert.unit} --since -4h | grep 'Started ' \n` +
-      `  2. Find what is driving it. For papercup-staging-api.service the usual driver ` +
+      `  2. Find what is driving it. For papercusp-staging-api.service the usual driver ` +
       `is the papercup-staging-sync.timer:\n` +
       `     journalctl --user -u papercup-staging-sync.service --since -4h | grep -E 'staleness ceiling|restarting'\n` +
       `     A restart preceded by "staleness ceiling reached" is MAX_STALE_SEC ` +

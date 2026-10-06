@@ -20,7 +20,7 @@
  * if any test failed, pass if all passed).
  */
 
-import type { Reporter, TestCase, TestResult } from '@playwright/test/reporter';
+import type { FullConfig, Reporter, TestCase, TestResult } from '@playwright/test/reporter';
 import { resolveGitContext } from '@papercusp/operator-core/lib/testing-branch-resolve';
 import { resolveAgentWorkspaceRoot } from '@papercusp/operator-core/lib/agent-tools/capability/base-dir';
 import {
@@ -29,6 +29,7 @@ import {
   type WorktreeGitSnapshot,
 } from '@papercusp/operator-core/lib/testing-worktree';
 import { resolveTestRunSource } from '@papercusp/operator-core/lib/testing-run-source';
+import { describeWorktreeDirt } from '@papercusp/test-config/admin-test-runs-reporter';
 import { posix, relative } from 'node:path';
 import {
   TEST_RUN_EXECUTION_DETAILS_SCHEMA_VERSION,
@@ -91,8 +92,8 @@ function captureReporterSaturationSnapshot(): { loopLagP95Ms: number | null; rss
   return { loopLagP95Ms: null, rssMb };
 }
 
-function toWorkspaceRel(absPath: string): string {
-  const rel = relative(resolveAgentWorkspaceRoot({}), absPath);
+function toWorkspaceRel(absPath: string, root: string): string {
+  const rel = relative(root, absPath);
   return rel.split(/[/\\]/).join(posix.sep);
 }
 
@@ -120,11 +121,12 @@ async function tryGetPg(): Promise<{
   }
 }
 
-async function insertRow(row: TestRunRow, worktreeAfter: WorktreeGitSnapshot): Promise<void> {
+async function insertRow(row: TestRunRow, worktreeAfter: WorktreeGitSnapshot, root: string): Promise<void> {
   let branch: string | null = null;
   try {
-    const ctx = await resolveGitContext();
-    branch = ctx.branch;
+    // The ambient resolver describes the agent's tree. It cannot name the
+    // branch of a separate proof checkout; its actual snapshot names the commit.
+    if (root === resolveAgentWorkspaceRoot({})) branch = (await resolveGitContext()).branch;
   } catch { /* fail-soft */ }
   // Use the post-run snapshot for attribution. The cached resolver's commit
   // may describe a different tree if git-sync or a peer changed it while the
@@ -154,7 +156,7 @@ async function insertRow(row: TestRunRow, worktreeAfter: WorktreeGitSnapshot): P
         VALUES
           (${row.filePath}, 'playwright', ${row.status}, ${row.durationMs}, ${row.startedAt},
            ${row.finishedAt}, ${row.outputTail}, ${runGroupId}, ${source}, ${branch}, ${commit}, ${harnessSlug}, ${workspaceId}, ${loopLagP95Ms}, ${rssMb}, ${row.worktreeDirty},
-           ${JSON.stringify(playwrightExecutionDetails(row, { root: resolveAgentWorkspaceRoot({}), runGroupId, workspaceId, harnessSlug, commitSha: commit }))}::jsonb)
+           ${playwrightExecutionDetails(row, { root, runGroupId, workspaceId, harnessSlug, commitSha: commit }) as never}::jsonb)
       `,
       new Promise((_, reject) => setTimeout(() => reject(new Error('pg_insert_timeout')), 1000)),
     ]).catch(() => {
@@ -182,9 +184,11 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
   private pending: Promise<void>[] = [];
   /** Captured before Playwright begins executing tests. */
   private worktreeBefore: WorktreeGitSnapshot | null = null;
+  private runRoot = resolveAgentWorkspaceRoot({});
 
-  onBegin(): void {
-    this.worktreeBefore = captureWorktreeSnapshot();
+  onBegin(config?: Pick<FullConfig, 'rootDir'>): void {
+    this.runRoot = resolveAgentWorkspaceRoot(config?.rootDir ? { projectDir: config.rootDir } : {});
+    this.worktreeBefore = captureWorktreeSnapshot(this.runRoot);
   }
 
   onTestEnd(test: TestCase, result: TestResult): void {
@@ -241,7 +245,7 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
     try {
       let worktreeAfter: WorktreeGitSnapshot = { commit: null, porcelain: null };
       try {
-        worktreeAfter = captureWorktreeSnapshot();
+        worktreeAfter = captureWorktreeSnapshot(this.runRoot);
       } catch {
         // D-007: missing proof of stability is dirty, never a false clean.
       }
@@ -249,16 +253,20 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
         this.worktreeBefore ?? { commit: null, porcelain: null },
         worktreeAfter,
       );
+      const dirtReason = describeWorktreeDirt(this.worktreeBefore ?? { commit: null, porcelain: null }, worktreeAfter)?.slice(0, 500);
       for (const [file, agg] of this.byFile) {
         try {
-          const filePath = toWorkspaceRel(file);
+          const filePath = toWorkspaceRel(file, this.runRoot);
           const status: TestRunRow['status'] = agg.anyFail
             ? 'fail'
             : agg.allSkipped
             ? 'skip'
             : 'pass';
           const durationMs = Math.max(0, agg.finishedAt - agg.startedAt);
-          const outputTail = agg.errors.length > 0 ? agg.errors.join('\n').slice(-4000) : null;
+          // Preserve diagnostics in the existing text column while deployed
+          // strict execution_details readers await the expanded reason field.
+          const output = [...agg.errors, ...(dirtReason ? [`[worktree provenance] ${dirtReason}`] : [])].join('\n');
+          const outputTail = output ? output.slice(-4000) : null;
           this.pending.push(
             insertRow({
               filePath,
@@ -271,7 +279,7 @@ export default class AdminTestRunsPlaywrightReporter implements Reporter {
               passed: agg.passed,
               failed: agg.failed,
               skipped: agg.skipped,
-            }, worktreeAfter),
+            }, worktreeAfter, this.runRoot),
           );
         } catch {
           /* swallow per-file */

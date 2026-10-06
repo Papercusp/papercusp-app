@@ -28,6 +28,7 @@ import type { SelectionInputRow } from './selection-core';
 import type { CandidateChange, CandidateReplayScore } from './counterfactual-core';
 import type { RegretTickDeps } from './mine';
 import { captureImprovement } from '../../harness/improvements/capture-core';
+import { recordProducerObservation, withProducerLifecycleWrite } from '../../experiment/producer-lifecycle-store';
 
 export type ReplayStatus = 'pending' | 'replayed' | 'skipped';
 
@@ -134,6 +135,7 @@ export async function listKnownRunIds(sql: Sql, workspaceId: string): Promise<Se
  * report id CARRY FORWARD (paid-for work never regresses on a re-mine).
  */
 export async function upsertFinding(sql: Sql, finding: RegretFindingRecord): Promise<void> {
+  await withProducerLifecycleWrite(sql, async (sql) => {
   await sql`
     INSERT INTO harness_shared.regret_findings
       (workspace_id, run_id, harness_slug, role, badness_score, badness_reasons,
@@ -163,6 +165,8 @@ export async function upsertFinding(sql: Sql, finding: RegretFindingRecord): Pro
       replay_scores = COALESCE(harness_shared.regret_findings.replay_scores, EXCLUDED.replay_scores),
       report_improvement_id = COALESCE(harness_shared.regret_findings.report_improvement_id, EXCLUDED.report_improvement_id),
       updated_at = now()`;
+  await recordProducerObservation(sql, { producer: 'regret', workspaceId: finding.workspaceId, sourceId: finding.runId });
+  });
 }
 
 function recordFromRow(row: Record<string, unknown>): RegretFindingRecord {
@@ -203,12 +207,16 @@ export async function recordReplayScores(
   runId: string,
   scores: CandidateReplayScore[],
 ): Promise<void> {
-  await sql`
+  await withProducerLifecycleWrite(sql, async (sql) => {
+  const rows = await sql`
     UPDATE harness_shared.regret_findings
        SET replay_scores = ${JSON.stringify(scores)}::text::jsonb,
            replay_status = 'replayed',
            updated_at = now()
-     WHERE workspace_id = ${workspaceId} AND run_id = ${runId}`;
+     WHERE workspace_id = ${workspaceId} AND run_id = ${runId}
+     RETURNING run_id`;
+  if (rows.length) await recordProducerObservation(sql, { producer: 'regret', workspaceId, sourceId: runId });
+  });
 }
 
 /** Replayed-but-unfiled findings — the filing queue. */
@@ -224,10 +232,13 @@ export async function readUnfiledReplayed(sql: Sql, workspaceId: string, limit: 
 
 /** Stamp the filed report's improvement id onto its finding row. */
 export async function markReportFiled(sql: Sql, workspaceId: string, runId: string, improvementId: string): Promise<void> {
-  await sql`
+  await withProducerLifecycleWrite(sql, async (sql) => {
+  const rows = await sql`
     UPDATE harness_shared.regret_findings
        SET report_improvement_id = ${improvementId}, updated_at = now()
-     WHERE workspace_id = ${workspaceId} AND run_id = ${runId}`;
+     WHERE workspace_id = ${workspaceId} AND run_id = ${runId} RETURNING run_id`;
+  if (rows.length) await recordProducerObservation(sql, { producer: 'regret', workspaceId, sourceId: runId });
+  });
 }
 
 /**

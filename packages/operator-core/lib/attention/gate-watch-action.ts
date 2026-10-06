@@ -22,6 +22,7 @@
 import { registerSystemAction, type SystemActionCtx } from '../harness/routines/system-actions';
 import { tickGateWatch } from './gate-watch';
 import { sweepSessionIndependentGates } from './gate-reaper';
+import { sweepWorkItemBlockerDefaults } from './work-item-blocker-reaper';
 
 registerSystemAction('gate-watcher-tick', async (ctx: SystemActionCtx) => {
   const cfg = ctx.triggerConfig ?? {};
@@ -66,6 +67,23 @@ registerSystemAction('gate-watcher-tick', async (ctx: SystemActionCtx) => {
     );
   } catch (err) {
     console.warn(`[gate-reaper]   ! sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // WI-10005010: the WORK-ITEM sibling of the session-gate reaper — applies the TYPED
+  // `defaultAction` of an owner ask whose `decideBy` has passed. Same isolation rule as
+  // above: additive, so a failure here is a logged warning, never a reason to take the
+  // transcript watcher or the session-gate reaper down with it.
+  try {
+    const reaped = await sweepWorkItemBlockerDefaults({ limit: readPositiveMs(cfg.blocker_sweep_limit) });
+    if (reaped.examined > 0 || Object.keys(reaped.skipped).length > 0) {
+      console.log(
+        `[blocker-default-reaper] examined ${reaped.examined} item(s) → ${reaped.applied.stay_parked} stay_parked, ` +
+          `${reaped.applied.release_to_agents} release_to_agents; skipped ${JSON.stringify(reaped.skipped)}` +
+          (reaped.truncatedByLimit ? ' — TRUNCATED BY LIMIT, more remain' : ''),
+      );
+    }
+  } catch (err) {
+    console.warn(`[blocker-default-reaper]   ! sweep skipped: ${err instanceof Error ? err.message : String(err)}`);
   }
 });
 

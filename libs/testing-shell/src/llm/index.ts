@@ -118,6 +118,7 @@ export {
   isTemperatureDeprecatedError,
   type LlmCallOpts,
   type LlmCallResult,
+  type LlmExecutionReceipt,
 } from './llm-client';
 
 // Typed LLM-call error.

@@ -1,0 +1,84 @@
+---
+title: Troubleshooting
+description: Resolve portal sign-in, workspace, agent-session and documentation problems safely.
+documents:
+  - packages/operator-core/lib/auth/hosted/self-signup.ts
+  - packages/operator-core/lib/agent-tools/mode/get.ts
+  - packages/operator-core/lib/public-docs.ts
+---
+
+## Sign-in returns to the welcome screen
+
+Read the recovery message and reference code, if shown. Start a fresh
+**Sign in** or **Create account** flow as appropriate. A link from an earlier,
+already-used sign-up attempt may no longer be valid.
+
+Use the account and organization intended for the workspace. Connecting Gmail
+does not establish a Papercusp owner session. If the sign-in flow fails again,
+report the exact reference code and time through the support destination
+offered by the portal; do not include session cookies or tokens.
+
+## A workspace is offline or unavailable
+
+Confirm you selected the right workspace. For a local computer, check that it
+is awake, Papercusp is running and the connection setup is complete. For a
+cloud machine, inspect provisioning/connection status and any provider error.
+
+The browser cannot repair a machine simply by switching tabs. An unavailable
+workspace is not an empty project, so do not recreate or delete the project to
+make an error disappear.
+
+For provider-specific setup and stack completion, use
+[Cloud workspaces](/docs/cloud-workspaces). For a pending subscription or
+account/organization mismatch, use
+[Accounts and billing](/docs/accounts-and-billing).
+
+## An agent seems stopped
+
+Read the latest session and work-item status. It may need approval, a
+credential, a reachable dependency, or an explicit wake/continuation mechanism.
+Ask it to state the next concrete action and what is blocking it.
+
+If you authorized ongoing work, ask whether its continuation mechanism is
+registered and reachable. Do not assume AUTO alone schedules new turns.
+Avoid launching competing sessions on the same task.
+
+Check the registered mode, execution route and named stop condition using
+[Agent modes and fleets](/docs/agent-modes-and-fleets).
+
+## “Done” does not match what you see
+
+Check whether the report means implemented, verified, or shipped. A public
+service can still be serving an older artifact while a working-build test
+passes. Ask for the actual destination, artifact/revision and observed
+verification rather than repeatedly refreshing a different environment.
+
+## Docs, project docs and search
+
+The public manual lives at [/docs/](/docs/). It is readable without signing
+in. **Project docs** needs the intended authenticated project; engineering
+documentation is not a public help page.
+
+If a documentation link fails, include the full non-secret path. If search
+fails, try a concrete topic such as “workspace” or “snapshot” and record
+whether the search dialog opens, results appear, and a result opens correctly.
+Report broken links/assets rather than treating a generic portal page as
+successful documentation.
+
+If instructions look outdated, include the article path, the step that no
+longer matches, and the actual UI label or behavior you observed. Distinguish
+an old served page from a wrong instruction in the maintained source. Do not
+include private project docs in a public report.
+
+## Before restoring or deleting
+
+Verify the target and preserve newer work. Confirm the appropriate backup
+finished and identify a restore procedure before replacing data. See
+[Snapshots and backups](/docs/harness-snapshots).
+
+## A useful support report
+
+Include the app/install version if available, operating system/browser,
+workspace or project identifier if safe to share, expected result, steps
+taken, exact error and time. Remove secrets and private content from logs or
+screenshots. A public report is visible beyond your workspace.

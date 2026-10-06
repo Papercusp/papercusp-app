@@ -33,6 +33,7 @@ import { clampText, softText } from '../limits';
 import { buildDurableParkReleaseContract } from '../../durable-park-release-contract';
 import type { DurableParkReleaseContract } from '../../work-items-durable-park-audit';
 import { PREMISE_STAMPS_FIELD } from '../coordination/premise-resolve';
+import { healOwnNodeIssueOrigin as healOwnNodeOrigin } from '../../issues-engineer';
 
 const RELEASE_REASON_MAX_CHARS = 500;
 const releaseReasonSchema = () =>
@@ -97,6 +98,12 @@ const NON_COMPLETION_PATTERNS = [
   /\b(?:still|currently|actively)\s+(?:working|running|investigating|in progress)\b/i,
   /\b(?:will|would|should|might|may|could)\s+(?:be\s+)?(?:complete|completed|done|finished|resolved|closed)\b/i,
 ] as const;
+
+// These are bounded activities a holder can finish while the referenced work-item
+// remains open. Only match them as the subject immediately before the completion
+// predicate; a later explicit "<item> is complete" in the same clause must still warn.
+const BOUNDED_ACTIVITY_SUBJECT_PATTERN =
+  /^(?:['’]s\s+)?(?:(?:the|a|an|bounded|brief|initial|targeted)\s+)*(?:observation|investigation|analysis|research|evidence[- ](?:collection|gathering)|lookup|search|scan|probe|check|test(?:\s+run)?|verification|review|inspection|audit|monitoring|triage|diagnosis|reproduction|experiment|validation|measurement|assessment|query|read|fetch)(?:\s+(?:of|for|into|on)\s+(?:(?:the|a|an)\s+)?(?:root[- ]cause|blocker|record|repository|evidence|work[- ]item|item))?\s*$/i;
 
 function escapedRegExp(value: string): RegExp {
   return new RegExp(`(?:^|[^A-Za-z0-9])${value.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}(?:$|[^A-Za-z0-9])`, 'i');
@@ -204,7 +211,8 @@ function hasStructuredCompletionPremise(message: unknown, itemId: string): boole
  * Keep an affirmative completion phrase attached to the clause that names the
  * item. A message can legitimately contain both "consolidation is complete"
  * and a still-open item that is being released; treating the whole message as
- * one segment makes the former look like a claim about the latter.
+ * one segment makes the former look like a claim about the latter. When one
+ * clause names multiple work items, the nearest reference owns each phrase.
  */
 function completionClauses(segment: string): string[] {
   return segment
@@ -213,14 +221,64 @@ function completionClauses(segment: string): string[] {
     .filter(Boolean);
 }
 
+type TextRange = { start: number; end: number };
+
+function rangeDistance(left: TextRange, right: TextRange): number {
+  if (left.end <= right.start) return right.start - left.end;
+  if (right.end <= left.start) return left.start - right.end;
+  return 0;
+}
+
+function hasItemScopedPattern(
+  clause: string,
+  itemId: string,
+  patterns: readonly RegExp[],
+  ignoreBoundedActivitySubject = false,
+): boolean {
+  const references = [...clause.matchAll(/\b(?:WI|EI|F)-\d+\b/gi)].map((match) => ({
+    value: match[0],
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length,
+  }));
+  const targetRef = escapedRegExp(itemId);
+  const targetReferences = references.filter(({ value }) => targetRef.test(value));
+  const otherReferences = references.filter(({ value }) => !targetRef.test(value));
+  if (!targetReferences.length) return false;
+
+  const matches = patterns.flatMap((pattern) => {
+    const matcher = new RegExp(pattern.source, `${pattern.flags}g`);
+    return [...clause.matchAll(matcher)].map((match) => ({
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    }));
+  });
+
+  return matches.some((match) => {
+    const nearestTargetReference = targetReferences.reduce((nearest, reference) =>
+      rangeDistance(match, reference) < rangeDistance(match, nearest) ? reference : nearest,
+    );
+    const targetDistance = rangeDistance(match, nearestTargetReference);
+    const otherDistance = otherReferences.length
+      ? Math.min(...otherReferences.map((reference) => rangeDistance(match, reference)))
+      : Number.POSITIVE_INFINITY;
+    // A tie is ambiguous. Keep the warning conservative and do not attribute a
+    // sibling's status to this item just because both occur in one clause.
+    if (targetDistance >= otherDistance) return false;
+
+    if (ignoreBoundedActivitySubject && nearestTargetReference.end <= match.start) {
+      const subject = clause.slice(nearestTargetReference.end, match.start).trim();
+      if (BOUNDED_ACTIVITY_SUBJECT_PATTERN.test(subject)) return false;
+    }
+    return true;
+  });
+}
+
 function assertsCompletionForItem(message: unknown, itemId: string): boolean {
   if (hasStructuredCompletionPremise(message, itemId)) return true;
-  const itemRef = escapedRegExp(itemId);
   return coordMessageText(message).some((segment) => {
     return completionClauses(segment).some((clause) => {
-      if (!itemRef.test(clause)) return false;
-      if (!COMPLETION_ASSERTION_PATTERNS.some((pattern) => pattern.test(clause))) return false;
-      return !NON_COMPLETION_PATTERNS.some((pattern) => pattern.test(clause));
+      if (!hasItemScopedPattern(clause, itemId, COMPLETION_ASSERTION_PATTERNS, true)) return false;
+      return !hasItemScopedPattern(clause, itemId, NON_COMPLETION_PATTERNS);
     });
   });
 }
@@ -534,8 +592,13 @@ export default defineTool({
         // or one already held by `ident.ownerId` (unless `force`), so a peer's live claim
         // can never be silently cleared. A null return here is either "not found" or "held
         // by someone else" — re-read to tell them apart and report an honest error.
-        const workItem = await releaseWorkItem(it.id, {
+        const releaseOpts: NonNullable<Parameters<typeof releaseWorkItem>[1]> = {
           harness,
+          // The durable claim hold is applied after releaseWorkItem returns. Suppress its
+          // broad pool announcement here so the pre-hold snapshot cannot advertise work
+          // that this same release is about to park. The targeted claim:released:<id> event
+          // remains available to agents already waiting on this exact item.
+          ...(claimHold === true ? { announceClaimable: false } : {}),
           // Every cross-holder force is authorized against one exact pre-read holder.
           // Preserve that holder as the mutation CAS so a successor claim that races
           // the authorization can never be cleared.
@@ -545,7 +608,25 @@ export default defineTool({
             prior.assignee = p.assignee;
             prior.wasClaimed = p.wasClaimed;
           },
-        });
+        };
+        let workItem = await releaseWorkItem(it.id, releaseOpts);
+        // WI-10006515: a null release on an OWN-NODE issue row stranded at origin='remote' is
+        // the view trigger no-op'ing a write this node is entitled to make (`origin` records how
+        // the row arrived, not who wrote it). Heal it and retry ONCE. The heal's WHERE clause is
+        // the identity check, so a true peer row is untouched and falls through to the refusal
+        // below; a row a peer holds is never healed here (that is the not_holder answer).
+        if (!workItem) {
+          const probe = await getWorkItem(it.id, harness);
+          const probeHolder = probe?.assignee?.trim();
+          if (
+            probe?.family === 'issue' &&
+            probe.origin === 'remote' &&
+            (!probeHolder || probeHolder === ident.ownerId || (forced !== null && forced !== undefined && probeHolder === forced.holder)) &&
+            (await healOwnNodeOrigin(it.id, probe.harness))
+          ) {
+            workItem = await releaseWorkItem(it.id, releaseOpts);
+          }
+        }
         // The force path read the row a moment earlier for the authority guard; prefer the
         // library's read (it is the one the UPDATE acted on) and fall back to that read only
         // if the row vanished before it.

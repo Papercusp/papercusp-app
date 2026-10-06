@@ -4,7 +4,7 @@ const j = JSON.parse(readFileSync(process.env.HOME + '/.restart-org/briefings.js
 const sql = postgres('postgresql://harness_app:harness_app_pwd@localhost:5432/papercusp');
 let n = 0;
 for (const b of j.briefings ?? []) {
-  await sql`INSERT INTO papercup_shared.briefings
+  await sql`INSERT INTO papercusp_shared.briefings
     (id, title, quarter, status, created_at, script_path, duration_seconds,
      youtube_url, youtube_video_id, thumbnail_url, render_log, error, summary)
     VALUES (${b.id}, ${b.title}, ${b.quarter ?? ''}, ${b.status},
@@ -15,6 +15,6 @@ for (const b of j.briefings ?? []) {
   n++;
 }
 console.log('inserted', n);
-const rows = await sql`SELECT id, title, status FROM papercup_shared.briefings ORDER BY id`;
+const rows = await sql`SELECT id, title, status FROM papercusp_shared.briefings ORDER BY id`;
 for (const r of rows) console.log('  ', r.id, r.status, r.title);
 await sql.end();

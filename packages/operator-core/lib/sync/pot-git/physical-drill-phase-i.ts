@@ -96,7 +96,62 @@ export type PhaseIOwnerRecord = {
   startedAt: string;
   /** True only on the first start: every later start reuses the same key file. */
   mintedKey: boolean;
+  /**
+   * Where the owning key lives. `drill-minted` = the disposable run-bound key
+   * file (ephemeral target). `host-keychain` = the canary hive's REAL key,
+   * signed through on its owning host and never copied (canary-owner target,
+   * D-119). Absent on pre-WI-10004748 evidence, read as `drill-minted`.
+   */
+  keySource?: PhaseIKeySource;
 };
+
+export type PhaseIKeySource = 'drill-minted' | 'host-keychain';
+
+/**
+ * The canary hive's REAL owning key, exposed to Phase I ONLY as a signing
+ * capability on its owning host (identity/hive-keypair `signWithHiveKey`).
+ * The private key never enters Phase I, a file, or the other host.
+ */
+export type PhaseIHostKeychainSigner = {
+  hiveId: string;
+  sign: (bytes: Buffer) => Buffer | Promise<Buffer>;
+};
+
+/**
+ * The canary's REAL protected refs, read-only. Phase I never writes them: a
+ * canary-owner run proves they did not move while the owner was down (G1) and
+ * that the restored owner made fresh authorized progress (G3).
+ */
+export type PhaseIRealTargetSnapshot = {
+  observedAt: string;
+  stagingRef: string | null;
+  releaseRef: string | null;
+  githubMain: string | null;
+  forkRefs: Array<{ ref: string; sha: string }>;
+  pullRequests: Array<{ number: number; headRef: string }>;
+};
+
+/**
+ * What Phase I's owner IS (WI-10004748). `ephemeral` = a disposable minted
+ * key against stand-in targets: valid for the P-521 drill, NOT for P-502.
+ * `canary-owner` = the live canary hive's real owning authority. Effect
+ * attempts still run against disposable stand-ins, but are scoped by the real
+ * hive_id/repo_key, and the real refs are snapshotted around the outage.
+ */
+export type PhaseITarget =
+  | { kind: 'ephemeral' }
+  | {
+      kind: 'canary-owner';
+      workspaceId: string;
+      potHomeSlug: string;
+      hiveId: string;
+      repoKey: string;
+      realTargets: {
+        beforeOutage: PhaseIRealTargetSnapshot;
+        duringOutage: PhaseIRealTargetSnapshot;
+        afterRecovery: PhaseIRealTargetSnapshot;
+      };
+    };
 
 export type PhaseITargetSnapshot = {
   /** Protected targets: a refused attempt must leave every one unchanged. */
@@ -170,6 +225,8 @@ export type PhysicalPhaseIInput = {
   runId: string;
   window: { startedAt: string; finishedAt: string };
   identities: { towerDeviceKey: string; vmDeviceKey: string };
+  /** Absent = `{ kind: 'ephemeral' }` (the P-521 drill). P-502 requires `canary-owner`. */
+  target?: PhaseITarget;
   owner: { first: PhaseIOwnerRecord; restored: PhaseIOwnerRecord; goneAfterLost: boolean };
   steps: {
     live: { vm: PhysicalPhaseIAttempt; tower: PhysicalPhaseIAttempt };
@@ -211,6 +268,16 @@ export function phaseIRosterEpoch(runId: string): number {
 
 export function phaseIRepoKey(runId: string): string {
   return `p521-phase-i:${runId}`;
+}
+
+export function phaseITargetOf(input: { target?: PhaseITarget }): PhaseITarget {
+  return input.target ?? { kind: 'ephemeral' };
+}
+
+/** The repo_key every attempt must be scoped by: the run-bound key, or the canary's real one. */
+export function phaseIExpectedRepoKey(input: { runId: string; target?: PhaseITarget }): string {
+  const target = phaseITargetOf(input);
+  return target.kind === 'canary-owner' ? target.repoKey : phaseIRepoKey(input.runId);
 }
 
 function validDeviceKey(value: unknown): value is string {
@@ -257,6 +324,11 @@ export async function startPhaseIOwner(input: {
   now?: () => string;
   /** Tests only: an in-process owner shares the test's pid. The producer never sets this. */
   pid?: number;
+  /**
+   * canary-owner target: sign through the canary host's real hive key instead
+   * of minting one. No key file is written or read; `mintedKey` stays false.
+   */
+  signer?: PhaseIHostKeychainSigner;
 }): Promise<{
   record: PhaseIOwnerRecord;
   close: () => Promise<void>;
@@ -267,12 +339,21 @@ export async function startPhaseIOwner(input: {
   await mkdir(paths.ownerDir, { recursive: true, mode: 0o700 });
   await chmod(paths.ownerDir, 0o700);
   let mintedKey = false;
-  if (!existsSync(paths.key)) {
-    await writeFile(paths.key, generateEd25519KeypairDer().privateKeyDer, { flag: 'wx', mode: 0o600 });
-    mintedKey = true;
+  let hiveId: string;
+  let sign: (bytes: Buffer) => Buffer | Promise<Buffer>;
+  if (input.signer) {
+    if (!validDeviceKey(input.signer.hiveId)) throw new Error('physical Phase I host-keychain signer must name a raw Ed25519 hive key');
+    hiveId = input.signer.hiveId;
+    sign = input.signer.sign;
+  } else {
+    if (!existsSync(paths.key)) {
+      await writeFile(paths.key, generateEd25519KeypairDer().privateKeyDer, { flag: 'wx', mode: 0o600 });
+      mintedKey = true;
+    }
+    const privateKeyDer = await readFile(paths.key);
+    hiveId = pubkeyBase64FromDer(privateKeyDer);
+    sign = (bytes) => signWithPrivateKeyDer(privateKeyDer, bytes);
   }
-  const privateKeyDer = await readFile(paths.key);
-  const hiveId = pubkeyBase64FromDer(privateKeyDer);
   if (existsSync(paths.socket)) {
     const live = await ownerSocketSigner(paths.socket, 1_000)(Buffer.from('probe')).then(() => true, () => false);
     if (live) throw new Error('physical Phase I owner is already serving');
@@ -285,12 +366,17 @@ export async function startPhaseIOwner(input: {
       buf += chunk;
       const end = buf.indexOf('\n');
       if (end < 0) return;
+      let bytes: Buffer;
       try {
-        const bytes = Buffer.from(JSON.parse(buf.slice(0, end)).bytes, 'base64');
-        sock.end(`${JSON.stringify({ signature: signWithPrivateKeyDer(privateKeyDer, bytes).toString('base64') })}\n`);
+        bytes = Buffer.from(JSON.parse(buf.slice(0, end)).bytes, 'base64');
       } catch (error) {
         sock.end(`${JSON.stringify({ error: String(error) })}\n`);
+        return;
       }
+      Promise.resolve().then(() => sign(bytes)).then(
+        (signature) => sock.end(`${JSON.stringify({ signature: Buffer.from(signature).toString('base64') })}\n`),
+        (error) => sock.end(`${JSON.stringify({ error: String(error) })}\n`),
+      );
     });
     sock.on('error', () => undefined);
   });
@@ -307,6 +393,7 @@ export async function startPhaseIOwner(input: {
     pid: input.pid ?? process.pid,
     startedAt: (input.now ?? (() => new Date().toISOString()))(),
     mintedKey,
+    keySource: input.signer ? 'host-keychain' : 'drill-minted',
   };
   const tmp = `${paths.record}.${process.pid}.tmp`;
   await writeFile(tmp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
@@ -669,6 +756,11 @@ export async function attemptPhysicalPhaseI(input: {
   vmLive?: PhysicalPhaseIAttempt | null;
   /** Tower outage: the VM's outage-step record (its signed device head). */
   vmOutage?: PhysicalPhaseIAttempt | null;
+  /**
+   * canary-owner target: scope every attempt by the canary's REAL repo_key
+   * (with `hiveId` = its real hive key). Absent = the run-bound drill key.
+   */
+  repoKey?: string;
 }, deps: PhaseIAttemptDeps): Promise<PhysicalPhaseIAttempt> {
   if (!(PHASE_I_STEPS as readonly string[]).includes(input.step)) throw new Error(`physical Phase I step is invalid: ${input.step}`);
   if (input.host !== 'tower' && input.host !== 'vm') throw new Error(`physical Phase I host is invalid: ${input.host}`);
@@ -680,7 +772,10 @@ export async function attemptPhysicalPhaseI(input: {
   const now = deps.now ?? (() => new Date().toISOString());
   const runGit = deps.runGit ?? defaultRunGit;
   const startedAt = now();
-  const repoKey = phaseIRepoKey(input.runId);
+  if (input.repoKey !== undefined && (!input.repoKey.trim() || input.repoKey === phaseIRepoKey(input.runId))) {
+    throw new Error('physical Phase I canary repoKey must be the canary hive\'s real repo_key, not the run-bound drill key');
+  }
+  const repoKey = input.repoKey ?? phaseIRepoKey(input.runId);
   const targets = await ensureTargets(input.dir, input.runId, input.deviceKey, runGit);
   const captured = input.vmLive?.capturedOwnerProof ?? null;
   let capturedOwnerProof: PhysicalPhaseIAttempt['capturedOwnerProof'] = null;
@@ -834,7 +929,7 @@ function stepHeader(label: string, a: PhysicalPhaseIAttempt | undefined, host: P
   if (!a) { errors.push(`${label}: missing step evidence`); return false; }
   if (a.schemaVersion !== PHASE_I_ATTEMPT_SCHEMA) errors.push(`${label}: schemaVersion must be ${PHASE_I_ATTEMPT_SCHEMA}`);
   if (a.hostId !== host || a.step !== step) errors.push(`${label}: host/step label mismatch`);
-  if (a.runId !== input.runId || a.repoKey !== phaseIRepoKey(input.runId)) errors.push(`${label}: not bound to this run`);
+  if (a.runId !== input.runId || a.repoKey !== phaseIExpectedRepoKey(input)) errors.push(`${label}: not bound to this run`);
   if (a.hiveId !== input.owner.first.hiveId) errors.push(`${label}: attempted against a different hive`);
   if (!a.deviceSigner.verified || a.deviceSigner.devicePubkey !== deviceKey) errors.push(`${label}: device signer is not the host's physical device key`);
   if (a.advisory.rosterEpoch !== phaseIRosterEpoch(input.runId) || !a.advisory.isSelf || a.advisory.leaderDevicePubkey !== deviceKey) {
@@ -847,6 +942,46 @@ function stepHeader(label: string, a: PhysicalPhaseIAttempt | undefined, host: P
   if (!same(a.attempts.map((x) => `${x.variant}/${x.effect}`), expected)) errors.push(`${label}: attempt matrix is incomplete or reordered`);
   if (host === 'tower' && a.ownerKeyMaterialOnHost) errors.push(`${label}: the owner key is present on the tower`);
   return true;
+}
+
+/** The protected identity of a real-target snapshot (observation time excluded). */
+function realProtectedRefs(s: PhaseIRealTargetSnapshot): string {
+  return JSON.stringify({
+    stagingRef: s.stagingRef,
+    releaseRef: s.releaseRef,
+    githubMain: s.githubMain,
+    forkRefs: [...(s.forkRefs ?? [])].sort((a, b) => a.ref.localeCompare(b.ref)),
+    pullRequests: [...(s.pullRequests ?? [])].sort((a, b) => a.number - b.number),
+  });
+}
+
+/**
+ * canary-owner target checks (WI-10004748, D-119): the run is bound to the
+ * canary's real owning authority, and its real refs are G1-frozen across the
+ * outage and G3-advanced after recovery. Ref movement is observed, never
+ * pushed by Phase I: the advance is production git-sync's own.
+ */
+function validatePhaseICanaryTarget(input: PhysicalPhaseIInput, target: Extract<PhaseITarget, { kind: 'canary-owner' }>): string[] {
+  const errors: string[] = [];
+  if (!target.workspaceId?.trim() || !target.potHomeSlug?.trim()) errors.push('canary target: workspaceId and potHomeSlug are required');
+  if (!validDeviceKey(target.hiveId)) errors.push('canary target: hiveId must be the canary hive\'s raw Ed25519 key');
+  if (!target.repoKey?.trim() || target.repoKey === phaseIRepoKey(input.runId)) errors.push('canary target: repoKey must be the canary\'s real repo_key, not the run-bound drill key');
+  const rt = target.realTargets;
+  if (!rt?.beforeOutage || !rt.duringOutage || !rt.afterRecovery) {
+    errors.push('canary target: real-target snapshots before, during and after the owner outage are required');
+    return errors;
+  }
+  const at = [rt.beforeOutage, rt.duringOutage, rt.afterRecovery].map((s) => Date.parse(s.observedAt));
+  const lo = Date.parse(input.window?.startedAt);
+  const hi = Date.parse(input.window?.finishedAt);
+  if (!at.every(Number.isFinite) || !(at[0] < at[1] && at[1] < at[2])) errors.push('canary target: real-target snapshots must be ordered before < during < after');
+  else if (!(at[0] >= lo && at[2] <= hi)) errors.push('canary target: real-target snapshots must fall inside the Phase I window');
+  if (!rt.beforeOutage.stagingRef || !OID.test(rt.beforeOutage.stagingRef)) errors.push('canary target: the canary\'s real staging ref must be observed');
+  if (realProtectedRefs(rt.beforeOutage) !== realProtectedRefs(rt.duringOutage)) errors.push('G1: the canary\'s real protected refs moved while its owner was down');
+  if (!rt.afterRecovery.stagingRef || !OID.test(rt.afterRecovery.stagingRef) || rt.afterRecovery.stagingRef === rt.duringOutage.stagingRef) {
+    errors.push('G3: the restored owner made no fresh progress on the canary\'s real staging ref');
+  }
+  return errors;
 }
 
 export function validatePhysicalPhaseI(input: PhysicalPhaseIInput): PhysicalPhaseIVerdict {
@@ -866,7 +1001,16 @@ export function validatePhysicalPhaseI(input: PhysicalPhaseIInput): PhysicalPhas
 
   // Owner: one key, minted once, on the VM; restored by relaunch, not replaced.
   if (!validDeviceKey(first.hiveId) || first.hiveId !== back.hiveId) errors.push('owner: the restored owner must hold the SAME hive key');
-  if (!first.mintedKey || back.mintedKey) errors.push('owner: the key must be minted exactly once (first start only)');
+  const target = phaseITargetOf(input);
+  if (target.kind === 'canary-owner') {
+    if (first.mintedKey || back.mintedKey) errors.push('owner: a canary-owner run must never mint a key');
+    if (first.keySource !== 'host-keychain' || back.keySource !== 'host-keychain') errors.push('owner: a canary-owner run must sign through the canary host\'s real hive key');
+    if (first.hiveId !== target.hiveId) errors.push('owner: the owning key is not the canary hive key the target names');
+    errors.push(...validatePhaseICanaryTarget(input, target));
+  } else {
+    if (first.keySource === 'host-keychain' || back.keySource === 'host-keychain') errors.push('owner: an ephemeral run must use the drill-minted key');
+    if (!first.mintedKey || back.mintedKey) errors.push('owner: the key must be minted exactly once (first start only)');
+  }
   if (first.pid === back.pid) errors.push('owner: restoration must be a new owner process');
   if ([towerDeviceKey, vmDeviceKey].includes(first.hiveId)) errors.push('owner: the hive key must not be a physical device key');
   if (first.runId !== input.runId || back.runId !== input.runId) errors.push('owner: records are not bound to this run');

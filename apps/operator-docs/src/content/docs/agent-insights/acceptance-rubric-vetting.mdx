@@ -24,6 +24,8 @@ plans:
 normative: true
 ---
 
+The long-form method behind the acceptance-rubric ship gate's vetting step: how an author vets their rubric against meta-acceptance-rubric (a get_feedback critique consult opened with policy:'rubric-vetting' → improve → scorecards:emit meta-scorecard with vettingConsult), how the six meta-criteria are judged, revision currency (D-010), the gate's refusal/disable/flag mechanics (D-009), and three traps that make a correct vetting read as a failure — or a wrong binding read as a pass.
+
 ## What this is
 
 Every plan ships with a graded acceptance rubric (CLAUDE.md § "Every plan ships with a graded acceptance rubric"). Before that rubric may satisfy the ship gate, its AUTHOR vets it against the meta-rubric `meta-acceptance-rubric` (the rubric-rubric). This runbook is the long-form method that rubric's `methodRef` points at: how to run the vetting step, how to judge each meta-criterion, and how the gate decides "vetted".
@@ -33,7 +35,7 @@ Plan of record: `consult-min-max-and-rubric-vetting-2026-08-17` (D-001, D-006, D
 ## The flow (author-side)
 
 1. **Author the acceptance rubric post-implementation** — `rubrics:propose { kind:'acceptance', subjectPlan, classRef, criteria }` (never at plan-creation time).
-2. **Open the critique consult** — `get_feedback` with the rubric's criteria + the plan goal in the question; pass **`policy:'rubric-vetting'` and NO responder count**. That key resolves min/max from `packages/operator-core/lib/consult/selection-policies.ts`, the only place the bound is written, so this runbook cannot instruct a menu wider than the selector enforces — which is exactly what the hand-typed cap it replaces ended up doing after the bound moved. The policy's minimum still guarantees at least one best-available LIVE reviewer even when nobody clears the relevance floor (D-003); a `responder_via:'minimum'` reply is a first-principles review, weigh it as such.
+2. **Open the critique consult** — `get_feedback` with the rubric's criteria + the plan goal in the question; pass **`policy:'rubric-vetting'` and NO responder count**. That key resolves min/max from `packages/operator-core/lib/consult/selection-policies.ts`, the only place the bound is written, so this runbook cannot instruct a menu wider than the selector enforces — which is exactly what the hand-typed cap it replaces ended up doing after the bound moved. When a selectable transcript candidate exists, the minimum fills from the best-ranked candidate even if nobody clears the relevance floor (`via:'minimum'`, D-003). Delivery forks or converts the selected transcript into a dedicated answering session (D-002), so the original expert session need not be live. A `responder_via:'minimum'` reply is a first-principles review; weigh it as such.
 3. **Improve the rubric from the critique** — `rubrics:get` → edit → `rubrics:propose` (whole-document re-propose; the rubric's version bumps).
 4. **Attest (the meta-scorecard)** — grade YOUR OWN rubric against the meta-rubric:
 
@@ -53,20 +55,20 @@ Note the vetting self-grade is the ONE deliberate exception to "grader ≠ autho
 
 ## Judging the six meta-criteria
 
-- **Outcomes, not diff restatements** — a criterion that re-narrates the change ("the function was extracted") fails; one about observable behavior ("a contradicted pass-rating refuses the emit") passes.
-- **Traces to the plan goal or a Decision** — each criterion should cite the goal or a D-NNN. An untraceable criterion is scope invention.
-- **Falsifiable with evidence** — name the concrete observation that would FAIL the criterion. If you cannot, rewrite the criterion.
-- **Failure/regression modes covered** — at least one criterion must catch the plan's plausible regression, not only the happy path.
-- **Non-overlapping** — two criteria that always fail together on the same observation are one criterion.
-- **Structured check preferred (D-006)** — wherever the outcome is objectively checkable, bind it: `check:{ kind:'tests', files }` (deterministic must-pass — paths must resolve at propose time or the propose is refused, and the files are actually RUN at grading time) or `check:{ kind:'instrument', instrumentKey }`. Rate prose-only criteria for checkable outcomes DOWN here — that pressure is this criterion's purpose: it pushes authors from prose to bindings over time.
+* **Outcomes, not diff restatements** — a criterion that re-narrates the change ("the function was extracted") fails; one about observable behavior ("a contradicted pass-rating refuses the emit") passes.
+* **Traces to the plan goal or a Decision** — each criterion should cite the goal or a D-NNN. An untraceable criterion is scope invention.
+* **Falsifiable with evidence** — name the concrete observation that would FAIL the criterion. If you cannot, rewrite the criterion.
+* **Failure/regression modes covered** — at least one criterion must catch the plan's plausible regression, not only the happy path.
+* **Non-overlapping** — two criteria that always fail together on the same observation are one criterion.
+* **Structured check preferred (D-006)** — wherever the outcome is objectively checkable, bind it: `check:{ kind:'tests', files }` (deterministic must-pass — paths must resolve at propose time or the propose is refused, and the files are actually RUN at grading time) or `check:{ kind:'instrument', instrumentKey }`. Rate prose-only criteria for checkable outcomes DOWN here — that pressure is this criterion's purpose: it pushes authors from prose to bindings over time.
 
 ### Author the falsifier, not the confirming pattern
 
 For every criterion phrased as a negative, name the enumeration that could exhibit a violation — never a search that can only find the compliant pattern. The method must also name what makes that enumeration complete. An empty or partial enumeration is `unknown`/no-verdict, not clean.
 
-- **Absence or bypass claims:** enumerate every write to the state, every read of the row, or every caller/reference to the decision surface, then verify each path resolves through the named authority. Grepping only for the compliant constant or helper cannot reveal a bypass that omits it.
-- **Set-difference and replication claims:** establish corpus coverage before reading pass/fail. Every replication drill that runs tests must assert `matched === filesRequested` (equivalently, matched files equal requested files, with no route error or skipped request) before interpreting the test verdict. `matched=0`, a short match, or an errored route is `unknown`, even when the residual set is empty.
-- **Semantic actuation claims:** use a typed call graph, registry/dispatch resolution, or a live instrument for dynamic surfaces. A textual search for an exported symbol can miss string-dispatched or registered consumers and can match only comments/tests; zero textual references is `unknown`, never proof the surface is inert.
+* **Absence or bypass claims:** enumerate every write to the state, every read of the row, or every caller/reference to the decision surface, then verify each path resolves through the named authority. Grepping only for the compliant constant or helper cannot reveal a bypass that omits it.
+* **Set-difference and replication claims:** establish corpus coverage before reading pass/fail. Every replication drill that runs tests must assert `matched === filesRequested` (equivalently, matched files equal requested files, with no route error or skipped request) before interpreting the test verdict. `matched=0`, a short match, or an errored route is `unknown`, even when the residual set is empty.
+* **Semantic actuation claims:** use a typed call graph, registry/dispatch resolution, or a live instrument for dynamic surfaces. A textual search for an exported symbol can miss string-dispatched or registered consumers and can match only comments/tests; zero textual references is `unknown`, never proof the surface is inert.
 
 These inversions are deliberately cheap: enumerate possible violators, prove the instrument covered the requested corpus, then judge the observation. If the authoring-time property leaves no artifact (for example intent or attendance), restate it as the observable artifact that property should have produced.
 
@@ -76,10 +78,10 @@ The attestation pins the rubric plan row's `version` at emit time. ANY later `ru
 
 ## Gate mechanics (D-009)
 
-- **Refusal**: `acceptance_rubric_unvetted` from the ship gate (`plans:set-plan-status → 'shipped'`/`'done'`), whose teaching error names the exact `scorecards:emit` call to run — and renders the consult step from the policy registry, so the refusal cannot instruct a bound the selector does not enforce.
-- **Prerequisite**: the meta-rubric must be REGISTERED — any status; `'proposed'` suffices (ratification governs CONTENT authority, never gate mechanics; demanding `'active'` would deadlock every plan ship on the owner's ratification wall). No meta-rubric registered in the workspace at all ⇒ the vetting check DISABLES (a gate demanding a flow the workspace cannot run is a deadlock, not a guard).
-- **Flags**: its own flag `ACCEPTANCE_RUBRIC_VETTING_GATE` (default ON), NOT waivable by `force`; it nests inside the `ACCEPTANCE_RUBRIC_COMPLETION_GATE` family — family OFF ⇒ no rubric demanded ⇒ nothing to vet.
-- **Exemptions**: empty-criteria (investigation-only) acceptance rubrics, and the meta-rubric itself. One level deep BY CONSTRUCTION: there is no meta-meta-rubric — the meta-rubric's content is owner-ratified instead.
+* **Refusal**: `acceptance_rubric_unvetted` from the ship gate (`plans:set-plan-status → 'shipped'`/`'done'`), whose teaching error names the exact `scorecards:emit` call to run — and renders the consult step from the policy registry, so the refusal cannot instruct a bound the selector does not enforce.
+* **Prerequisite**: the meta-rubric must be REGISTERED — any status; `'proposed'` suffices (ratification governs CONTENT authority, never gate mechanics; demanding `'active'` would deadlock every plan ship on the owner's ratification wall). No meta-rubric registered in the workspace at all ⇒ the vetting check DISABLES (a gate demanding a flow the workspace cannot run is a deadlock, not a guard).
+* **Flags**: its own flag `ACCEPTANCE_RUBRIC_VETTING_GATE` (default ON), NOT waivable by `force`; it nests inside the `ACCEPTANCE_RUBRIC_COMPLETION_GATE` family — family OFF ⇒ no rubric demanded ⇒ nothing to vet.
+* **Exemptions**: empty-criteria (investigation-only) acceptance rubrics, and the meta-rubric itself. One level deep BY CONSTRUCTION: there is no meta-meta-rubric — the meta-rubric's content is owner-ratified instead.
 
 ## Grading-time checks (D-011) — what the eventual grader inherits
 
@@ -89,8 +91,8 @@ The NON-implementer who later grades the acceptance rubric meets the structured 
 
 The two refusals below look like a closed loop, and every agent who meets them reads them that way:
 
-- **Vet first, then grade** → `grader_is_sole_vetting_critic`. Vetting the rubric made you its only recorded critic, so rubric fitness and work compliance would be attested by the same party.
-- **Grade first, to escape that ordering** → `bar_snapshot_vetting_missing` / `bar_snapshot_vetting_stale`. With no current attestation, the readiness projection blocks instead.
+* **Vet first, then grade** → `grader_is_sole_vetting_critic`. Vetting the rubric made you its only recorded critic, so rubric fitness and work compliance would be attested by the same party.
+* **Grade first, to escape that ordering** → `bar_snapshot_vetting_missing` / `bar_snapshot_vetting_stale`. With no current attestation, the readiness projection blocks instead.
 
 Refused before, refused after — so the natural conclusion is that the rule is unsatisfiable and the only way out is to hand the whole plan to someone else. **It is not a deadlock, and the way out is not a different ORDER.** The guard is about *independence*, not sequence: it unions the recorded critics across BOTH vetting channels at the current rubric revision and refuses only when every one of them collapses to the same party as the grader. Add one critic who is not you and the same grader becomes eligible, in either order.
 
@@ -103,13 +105,13 @@ Refused before, refused after — so the natural conclusion is that the rule is 
 
 **Three things that look like the escape and are not:**
 
-- **A second critic in your own spawn/rebind lineage.** Critics are collapsed to the distinct PARTIES they represent (`collapseCriticsToSoleParty`), so a longer list of related identities still resolves to one party and the refusal stands unchanged.
-- **Grading first to get ahead of the attestation.** That only swaps which of the two refusals you receive. The pair reads as a deadlock precisely because both orderings are blocked; independence is the axis that actually moves.
-- **Re-vetting the rubric yourself at a newer revision.** That re-records the same sole party. Bumping the revision changes the counter, not the independence question.
+* **A second critic in your own spawn/rebind lineage.** Critics are collapsed to the distinct PARTIES they represent (`collapseCriticsToSoleParty`), so a longer list of related identities still resolves to one party and the refusal stands unchanged.
+* **Grading first to get ahead of the attestation.** That only swaps which of the two refusals you receive. The pair reads as a deadlock precisely because both orderings are blocked; independence is the axis that actually moves.
+* **Re-vetting the rubric yourself at a newer revision.** That re-records the same sole party. Bumping the revision changes the counter, not the independence question.
 
 **You no longer have to find this here.** The refusal itself carries the same route as a structured `remedy` — `{ summary, steps[], doesNotWork[], docRef }` on the `grader_is_sole_vetting_critic` payload (`grader-eligibility.ts`), pointing back at this section. That matters because of WHEN the refusal arrives: it fires at the END of the ceremony, after the implementation, the audit and the rubric authoring are all paid for. A remedy discoverable only by reading `resolveAggregatedVettingCritics` in the source is a remedy discovered after the expensive work is done.
 
-## Three traps — two that make a correct vetting look broken, one that makes a bad binding look fine
+## Four traps — two that make a correct vetting look broken, one that makes a bad binding look fine, one that fails the attestation's own audit
 
 All three were hit in a single vetting run (plan `on-demand-local-inference-lifecycle-2026-08-17`, 2026-08-19). None is a defect; each is a place where the honest reading of what you see is the wrong one.
 
@@ -140,8 +142,21 @@ While you are there, read `vetting.rubricRevision` and compare it to the rubric'
 
 Two corollaries worth applying at bind time:
 
-- **Bind the file that tests the criterion's CORE claim, not its cheapest neighbour.** Where a criterion insists on database-level enforcement, the integration test IS the criterion; the unit test over the JS validator is the thing that criterion explicitly calls insufficient. Check the file actually runs cheaply before worrying (`testing:runs { filePath }` gives the last duration — a real-PG integration test at ~1s is a fine binding; a Docker-gated one that cannot start would refuse the emit).
-- **When a check covers only PART of a criterion, say so in the criterion's `method`.** A green run must not be allowed to imply the uncovered clause passed. Declare the partition explicitly — "the check covers clause 1; clause 2 has no automated coverage and must be graded on its own evidence" — so the grader inherits the boundary instead of the impression.
+* **Bind the file that tests the criterion's CORE claim, not its cheapest neighbour.** Where a criterion insists on database-level enforcement, the integration test IS the criterion; the unit test over the JS validator is the thing that criterion explicitly calls insufficient. Check the file actually runs cheaply before worrying (`testing:runs { filePath }` gives the last duration — a real-PG integration test at \~1s is a fine binding; a Docker-gated one that cannot start would refuse the emit).
+* **When a check covers only PART of a criterion, say so in the criterion's `method`.** A green run must not be allowed to imply the uncovered clause passed. Declare the partition explicitly — "the check covers clause 1; clause 2 has no automated coverage and must be graded on its own evidence" — so the grader inherits the boundary instead of the impression.
+
+### 4. The attestation card is itself audited — write it so an auditor can RE-RUN it
+
+Your `scorecards:emit` against `meta-acceptance-rubric` is a scorecard like any other: it receives an independent grading-integrity audit (the card's `gradingAudit` stamp, dispatched automatically), and vetting reads `vetted` only once that audit **passes**. A revision of the grading-integrity meta-rubric re-opens settled audits, so an attestation that passed under an old revision can fail on re-audit.
+
+Measured 2026-10-02 on `acceptance-work-on-everything-rubric-evidence-hardening-2026-09-20` rev 6: attestation EI-24711387607832509 FAILED rev-10 audit EI-24852491646605042 (instrument-split, terminal-re-rate, re-runnable-evidence). Its re-derived replacement EI-24854304791243030 PASSED (audit EI-24854415468269087). The differences:
+
+- **Re-derive, don't cite.** Open each rating with the immutable `rubrics:get { rubricRef, revision }` call it judges, and re-derive every count over the FULL revision. Citing a critic's consult post, or carrying a conclusion from an earlier revision's attestation, failed: an auditor cannot re-run a post.
+- **Pin tree evidence by blob at a commit** (`git rev-parse <sha>:<path>`), never a bare path. Evidence that pointed at a mutable table or an SQL fragment is what the re-runnable-evidence criterion rejected.
+- **Quote live probe outputs verbatim** (the call and what it returned) for any criterion that names a probe.
+- **A second attestation for the same rubric needs `acknowledgeExisting: true`.** Without it `scorecards:emit` refuses with `ok:false` inside the result body, while the invocation ledger still records the call as ok. Read the result, not the ledger.
+- **Run a long emit detached and read the file**: `node scripts/mcp-call.mjs scorecards:emit --json-file <args.json> --client <your-su-id> > <out> 2>&1 &`. A foreground `capability:bash` window that times out loses the result even though the emit may still land; check `scorecards:list` before re-emitting.
+- **Await the verdict instead of polling**: `events:await { event: "scorecard:grading-audit:<attestation id>" }` fires when the audit settles, with `state` and `auditIssueId` in the payload (EI-24852356444105284; live once :3070 deploys it). A stuck audit re-dispatches via `scorecards:repair { targetIds }`, which must run on a build that descends from the card's graded build (a lineage refusal records `dispatchBackoff` code `generation_incompatible` on the card).
 
 ### Budget note for a multi-check rubric
 

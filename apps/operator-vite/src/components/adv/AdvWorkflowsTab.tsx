@@ -30,6 +30,10 @@ import { toast } from 'sonner';
 import { CalendarClock, DatabaseZap, Plus, RefreshCw, Search, Sparkles, X } from 'lucide-react';
 import type { AutomationCatalog } from '@papercusp/operator-core/lib/automation/catalog';
 import type { ExternalTriggerAdminSnapshot } from '@papercusp/operator-core/lib/external-triggers/admin';
+import type {
+  TriggerPackReview,
+  TriggerPackReviewState,
+} from '@papercusp/operator-core/lib/cupboard/trigger-pack-lifecycle';
 import type { PlanInputSchemaInfo } from '@/app/admin/plans/plans-api';
 import { fetchPlanInputs } from '@/app/admin/plans/plans-api';
 import { useResolvedHarnessSlug } from '@/app/adv/create/use-create-data';
@@ -51,6 +55,8 @@ import {
   buildFacetCounts,
   buildLedgerRows,
   buildNeedsYou,
+  dispatcherDependentWorkflows,
+  triggerDispatcherState,
   buildPopulationSummary,
   buildSourceHealth,
   buildSuggestionChips,
@@ -417,9 +423,17 @@ export default function AdvWorkflowsTab() {
   const sources = useMemo(() => buildAutomationSources(modelInput), [modelInput]);
   const sourceHealth = useMemo(() => buildSourceHealth(sources), [sources]);
   const landingSources = external?.sources ?? [];
+  // WI-10004922: the dispatcher is a system routine, not a workflow row, so without this the
+  // strip had no input for "armed workflows cannot fire" and every triggered row looked ready.
+  const dispatcher = useMemo(() => {
+    const state = triggerDispatcherState(catalog?.routines);
+    if (!state) return null;
+    // Only workflows with an ARMED event trigger are held; schedule-only plans keep firing.
+    return { active: state.active, heldWorkflows: dispatcherDependentWorkflows(items) };
+  }, [catalog, items]);
   const needsYou = useMemo(
-    () => collapseNeedsYou(buildNeedsYou({ sources: landingSources, rows })),
-    [landingSources, rows],
+    () => collapseNeedsYou(buildNeedsYou({ sources: landingSources, rows, dispatcher })),
+    [landingSources, rows, dispatcher],
   );
   const chips = useMemo(() => buildSuggestionChips(landingSources), [landingSources]);
 
@@ -507,6 +521,33 @@ export default function AdvWorkflowsTab() {
     }
   }, [refreshAll]);
 
+  // A pack-owned binding arms only through its pack's review (P-013, D-016): show the whole
+  // review, then arm every binding of the pack against exactly the fingerprint shown.
+  const reviewAndArmPack = useCallback(async (installationId: string): Promise<boolean> => {
+    const reviewed = await patchTriggers({ op: 'pack-review', installationId }) as {
+      review?: TriggerPackReviewState;
+    };
+    const state = reviewed.review;
+    if (!state) throw new Error('Trigger pack review unavailable');
+    if (state.review.unmet.length > 0) {
+      throw new Error(
+        `${state.review.pluginName} needs configuration before it can arm: ` +
+          state.review.unmet.map((unmet) => `${unmet.bindingId} (${unmet.reason})`).join(', '),
+      );
+    }
+    if (!(await confirm({
+      title: `Review and arm ${state.review.pluginName}?`,
+      body: <TriggerPackReviewBody review={state.review} />,
+      confirmLabel: `Arm ${state.bindingCount} trigger${state.bindingCount === 1 ? '' : 's'}`,
+    }))) return false;
+    const armed = await patchTriggers(
+      { op: 'pack-arm', installationId, fingerprint: state.fingerprint, confirm: true },
+      { trigger_pack_review_stale: 'The pack changed while you were reviewing it. Arm again to review the new version.' },
+    ) as { armedBindingIds?: string[] };
+    toast.success(`${state.review.pluginName} armed (${armed.armedBindingIds?.length ?? 0} triggers)`);
+    return true;
+  }, [confirm]);
+
   const setBindingArmed = useCallback(async (bindingId: string, armed: boolean) => {
     setBusy(`binding:${bindingId}`);
     try {
@@ -515,7 +556,15 @@ export default function AdvWorkflowsTab() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ op: 'set-armed', id: bindingId, armed, confirm: true }),
       });
-      const body = await response.json() as { detail?: string; error?: string };
+      const body = await response.json() as {
+        detail?: string;
+        error?: string;
+        pack?: { installationId?: string };
+      };
+      if (armed && body.error === 'trigger_pack_review_required' && body.pack?.installationId) {
+        if (await reviewAndArmPack(body.pack.installationId)) refreshAll();
+        return;
+      }
       if (!response.ok) throw new Error(body.detail ?? body.error ?? `HTTP ${response.status}`);
       toast.success(armed ? 'Trigger armed' : 'Trigger paused');
       refreshAll();
@@ -682,6 +731,12 @@ export default function AdvWorkflowsTab() {
   const onNeedsYouAction = useCallback((entry: NeedsYouItem) => {
     if (entry.kind === 'reconnect') {
       openComposer(`${entry.message}. Check the connection and tell me what it needs to be restored.`);
+      return;
+    }
+    // Resuming the dispatcher can release a queued backlog of agent launches, and a pause
+    // is often a deliberate spend hold — so it routes through the agent, never a one-click write.
+    if (entry.kind === 'dispatch-paused') {
+      openComposer(`${entry.message}. Tell me why it is paused, what is queued, and whether it is safe to resume.`);
       return;
     }
     // The collapsed aggregate stands for N workflows, so its action is the attention FACET —
@@ -1080,6 +1135,60 @@ export default function AdvWorkflowsTab() {
   );
 }
 
+/** PATCH /api/admin/triggers; throws the route's detail (or a mapped message) on refusal. */
+async function patchTriggers(
+  args: Record<string, unknown>,
+  messages: Record<string, string> = {},
+): Promise<Record<string, unknown>> {
+  const response = await fetch('/api/admin/triggers', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(args),
+  });
+  const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok || body.ok === false) {
+    const code = typeof body.error === 'string' ? body.error : null;
+    const detail = typeof body.detail === 'string' ? body.detail : null;
+    throw new Error((code && messages[code]) ?? detail ?? code ?? `HTTP ${response.status}`);
+  }
+  return body;
+}
+
+/** The trigger-pack review shown before arming: what the pack will do once armed. */
+export function TriggerPackReviewBody({ review }: { review: TriggerPackReview }) {
+  const scopes = review.oauth.flatMap((grant) => grant.scopes.map((scope) => `${grant.provider}: ${scope}`));
+  return (
+    <div className="pc-wf-pack-review" data-testid="trigger-pack-review">
+      <p>
+        {review.pluginName} {review.pluginVersion} arms all of its triggers together. Updating the
+        pack later disarms them until you review it again.
+      </p>
+      <dl>
+        <dt>Triggers</dt>
+        <dd>
+          <ul>
+            {review.bindings.map((binding) => (
+              <li key={binding.packBindingId}>
+                {binding.eventPattern} → {binding.target.planSlug ?? 'no plan'}
+              </li>
+            ))}
+          </ul>
+        </dd>
+        <dt>Capabilities</dt>
+        <dd>{review.capabilities.length > 0 ? review.capabilities.join(', ') : 'none'}</dd>
+        <dt>OAuth scopes</dt>
+        <dd>{scopes.length > 0 ? scopes.join(', ') : 'none'}</dd>
+        {review.recipients.length > 0 ? (
+          <>
+            <dt>Recipients</dt>
+            <dd>{review.recipients.map((recipient) => `${recipient.input}: ${String(recipient.value)}`).join(', ')}</dd>
+          </>
+        ) : null}
+      </dl>
+    </div>
+  );
+}
+
 async function mutateExternalTrigger(args: Record<string, unknown>): Promise<{
   ok: boolean;
   message?: string;
@@ -1304,8 +1413,10 @@ function CreateAutomationModal({
           ...targetPayload,
           eventPattern: eventPattern.trim(),
           eventFilter: {},
-          maxRuns: null,
-          windowSeconds: 60,
+          // No rate fields, deliberately: stating any (this sent windowSeconds: 60)
+          // displaces the source's own default, which costs a social source its
+          // per-platform coalesce-with-cap policy. Silence lets the route apply that
+          // default, plus the engine's bounded 24h dispatch window (WI-10004920).
         });
         if (!attached.ok || !attached.bindingId) {
           throw new Error(`${createdThisAttempt && plan ? `Plan ${plan.title} was created, but ` : ''}the external binding was not attached. ${attached.message ?? 'The binding id was missing.'}`);

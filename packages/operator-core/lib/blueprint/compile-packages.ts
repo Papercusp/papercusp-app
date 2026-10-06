@@ -40,7 +40,8 @@ import {
   parseCapabilityClassRef,
   type ProviderBindingRow,
 } from '../capability-class-registry-store';
-import { IDENTITY_GRANT_PROVIDER_KINDS } from '../agent-identities/grant-provider-kinds';
+import { grantProviderToolReach, IDENTITY_GRANT_PROVIDER_KINDS } from '../agent-identities/grant-provider-kinds';
+import type { IdentityGrantPolicy } from '../capability-envelope/identity-grants-port';
 import {
   resolveIdentityClassProvider,
   type IdentityClassProviderResolution,
@@ -115,6 +116,51 @@ export function capabilityProviderInput(
   };
 }
 
+/** The pot/role ceiling a launch evaluates required grants against (P-012, D-040(d)). */
+export type GrantCeilingReader = (input: {
+  workspaceId: string;
+  harnessSlug: string;
+  role?: string;
+  classRefs: readonly string[];
+}) => Promise<Pick<IdentityGrantPolicy, 'ceilings' | 'tools' | 'protectedAdditions'>>;
+
+/**
+ * P-012 / D-040(d): refuse a launch whose REQUIRED grant class reaches a tool
+ * the current pot/role ceiling excludes. Otherwise it launches a session whose
+ * every call the kernel denies. Same predicate and tool reach as install and the
+ * per-call kernel. An unreadable ceiling (unregistered target, ambiguous role)
+ * is not a refusal: the per-call kernel still denies what it cannot vouch for.
+ * Optional classes are not refused here; one above the ceiling grants nothing.
+ */
+async function refuseRequiredGrantsAboveCeiling(
+  bindings: readonly ProviderBindingRow[],
+  options: CompileBlueprintPackagesOptions,
+): Promise<void> {
+  if (bindings.length === 0 || options.readGrantCeiling === null) return;
+  const readCeiling = options.readGrantCeiling ??
+    (await import('../capability-envelope/identity-grants-port')).readIdentityGrantPolicy;
+  let policy: Awaited<ReturnType<GrantCeilingReader>>;
+  try {
+    policy = await readCeiling({
+      workspaceId: options.workspaceId, harnessSlug: options.harnessSlug,
+      ...(options.role ? { role: options.role } : {}), classRefs: bindings.map((binding) => binding.classRef),
+    });
+  } catch {
+    return;
+  }
+  if (!policy.ceilings.length) return;
+  const { identityGrantToolFailure } = await import('../capability-envelope/blueprint-envelopes');
+  for (const binding of bindings) {
+    for (const toolName of grantProviderToolReach(binding) ?? []) {
+      const cause = identityGrantToolFailure({ ...policy, toolName });
+      if (cause) {
+        throw new CompositionCompilerError('input-invalid',
+          `required capability class exceeds the pot/role ceiling: ${toolName} is ${cause}`, binding.classRef);
+      }
+    }
+  }
+}
+
 /** Where a blueprint repo vendors its bundled packages (D-037): `<dir>/packages/<kind>/<ref>/`. */
 export const VENDORED_PACKAGES_DIR = 'packages';
 
@@ -143,9 +189,9 @@ async function resolveStoredBlueprintPackage(
     return snapshotPackageDirectory({ packageKind: 'rule', ref: request.ref, revision: asset.version, dir, value });
   }
   if (request.kind === 'event') {
-    // Events are host registrations, never vendored content.
-    if (vendoredDir) return null;
-    const asset = resolveInstalledEvent(request.ref);
+    // A vendored event resolves from <repo>/packages/event/ (D-037, D-042);
+    // install claims its key before the async rule that fires on it.
+    const asset = resolveInstalledEvent(request.ref, only('event'));
     if (!asset) return null;
     const { dir, source: _source, ...value } = asset;
     return snapshotPackageDirectory({ packageKind: 'event', ref: request.ref, revision: asset.version, dir, value });
@@ -243,6 +289,10 @@ export interface CompileBlueprintPackagesOptions {
   /** Exact target pot; inferred from the harness registry when omitted. */
   potSlug?: string;
   resolveCapabilityProvider?: CapabilityProviderResolver;
+  /** The worker role the artifact launches as; selects the pot's role ceiling. */
+  role?: string;
+  /** Current pot/role ceiling for required grants; `null` skips the launch check. */
+  readGrantCeiling?: GrantCeilingReader | null;
   /** Context capabilities resolve through the pot's attested class choices by default. */
   resolveContextCapability?: ContextCapabilityResolver;
   /** Prompt, addressed-document and versioned policy inputs belong to this same boundary. */
@@ -354,6 +404,7 @@ export async function compileBlueprintWithPackages(
       });
     });
   const capabilityProviders: ResolvedCapabilityProviderInput[] = [];
+  const requiredBindings: ProviderBindingRow[] = [];
   if (resolvedPotSlug) {
     for (const classRef of classRefs) {
       const binding = await resolveCapabilityProvider(classRef, resolvedPotSlug);
@@ -367,9 +418,11 @@ export async function compileBlueprintWithPackages(
         }
         continue;
       }
+      if (requiredClasses.has(classRef)) requiredBindings.push(binding);
       capabilityProviders.push(capabilityProviderInput(binding));
     }
   }
+  await refuseRequiredGrantsAboveCeiling(requiredBindings, options);
   // Context capabilities (P-004): each declared class@major + verb resolves to the
   // newest stable version THIS pot selected, its passing conformed provider, and the
   // contract's output schema. Unknown, unbound, unconformed, async or schema-less

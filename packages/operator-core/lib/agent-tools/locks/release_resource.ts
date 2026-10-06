@@ -22,6 +22,7 @@ import { broadcastResourceBackUp } from './resource-broadcast';
 import { bulkContent, mergeIds, runBulk } from '../_bulk';
 import { resourceLockDomain, candidateResourceLockDomains } from './coordination-domain';
 import { ensureResourceDomainKindsFresh } from './resource-domain-kinds';
+import { resourceLockIdDomains } from './resource-lock-id-domains';
 
 const releaseItem = z.object({
   lock_id: z.string().uuid().optional(),
@@ -109,7 +110,14 @@ export default defineTool({
       // here, so try the caller's domain first (the common case, zero extra
       // cost), falling back to the special-domain families (WI-5960) only if
       // that finds neither a release nor matching expiry evidence.
-      for (const domain of candidateResourceLockDomains()) {
+      // WI-10004326: the lease's own recorded domain comes first (located by its
+      // globally unique lock_id), so a lease acquired through another operator
+      // install is released where it actually lives, not only where this
+      // operator would infer it.
+      const domains = item.lock_id
+        ? await resourceLockIdDomains(ownerId, item.lock_id)
+        : candidateResourceLockDomains();
+      for (const domain of domains) {
         const r = await acquireWithContentionRetry(() =>
           inWorkspaceTxn(domain, ownerId, (tx) =>
             tryReleaseResource(tx, { coordinationDomain: domain, owner: ownerId, lockId: item.lock_id }),

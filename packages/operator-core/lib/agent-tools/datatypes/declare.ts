@@ -39,6 +39,10 @@ import {
   findCanonicalDuplicate,
   slugifyDatatype,
   DATATYPE_TIERS,
+  DATATYPE_NATURES,
+  WORK_AUDIENCES,
+  checkNatureSpec,
+  isBuiltinWorkItemKind,
   type SimilarDatatype,
 } from '../../datatype-registry-store';
 import { checkSelfImprovementForDeclare } from '../../datatype-self-improvement';
@@ -71,7 +75,7 @@ export default defineTool({
       'with the registered kind). A first-class (SQL-backed) datatype\'s migration does NOT ship here — it goes through ' +
       'the dogfood PR rail (tools:scaffold → platform:contribute).',
     chaining:
-      'meta:define-datatype { name, description, tier } → (generic-kind) work_items:create { kind } → search/plans/gym ' +
+      'meta:define-datatype { name, description, tier, nature, audience? } → (generic-kind) work_items:create { kind } → search/plans/gym ' +
       'inherit it for free. A blueprint references it via dependencies.datatypes [name].',
     seeAlso: [
       'cupboard:publish-datatype (publish the datatype you defined)',
@@ -96,13 +100,21 @@ export default defineTool({
       .enum([...DATATYPE_TIERS] as [string, ...string[]])
       .default('generic-kind')
       .describe('generic-kind (default: work_item kind + payload, runtime) | first-class (SQL-backed; migration via PR rail) | projection (read-only, external engine writes)'),
+    nature: z
+      .enum([...DATATYPE_NATURES] as [string, ...string[]])
+      .optional()
+      .describe('Required for new types; updates may omit to retain. Only work is claimable.'),
+    audience: z
+      .enum([...WORK_AUDIENCES] as [string, ...string[]])
+      .optional()
+      .describe('For work: agent can claim; human cannot.'),
     title: z.string().min(1).max(200).optional().describe('human label (defaults to name)'),
     workItemKind: z
       .string()
       .min(1)
       .max(80)
       .optional()
-      .describe('generic-kind tier: the work_items:create kind this datatype registers (defaults to the slug). Unique within the workspace.'),
+      .describe('generic-kind tier: work_items:create kind, defaults to slug, unique per workspace.'),
     payloadSchema: z
       .record(z.string(), z.unknown())
       .optional()
@@ -132,9 +144,8 @@ export default defineTool({
       .max(32)
       .optional()
       .describe(
-        'free-form tags. Special: include "hive-placement" on a generic-kind datatype to opt its ' +
-          'work-items into the autonomous placement frontier (a bee gets auto-placed); omit it and items ' +
-          'are tracked + visible but not auto-placed.',
+        'free-form tags. No tag affects placement: the frontier auto-places a kind only when its ' +
+          'nature is work and audience is agent.',
       ),
     force: z.boolean().optional().describe('bypass the soft semantic-dedup gate (declare even when a similar datatype exists)'),
   }),
@@ -158,8 +169,42 @@ export default defineTool({
       });
     }
     const tier = args.tier as (typeof DATATYPE_TIERS)[number];
+    // P-008 / D-013 §1: the built-in item kinds (feature, chunk, bug, change, task) are
+    // registered by migration 1318 as first-class work. Neither their ids nor their kind
+    // names can be claimed by a declaration — a generic-kind `bug` would shadow the native
+    // kind and could re-classify built-in work as data.
+    const declaredKind = tier === 'generic-kind' ? (args.workItemKind ?? id) : (args.workItemKind ?? null);
+    const reservedKind = isBuiltinWorkItemKind(id) ? id : declaredKind && isBuiltinWorkItemKind(declaredKind) ? declaredKind : null;
+    if (reservedKind) {
+      return reply({
+        ok: false,
+        reason: 'builtin_reserved',
+        message: `"${reservedKind}" is a built-in work item kind (registered as work by the platform) and cannot be re-declared`,
+      });
+    }
 
     const exists = await getDatatype(sql, workspaceId, id);
+
+    // P-008 / D-013 §5: every datatype states its NATURE — the work/data boundary. A NEW
+    // declaration gets no default (a default is exactly how data ends up in the work queue);
+    // an in-place update may omit it and keep the stored one. The audience rides with the
+    // nature: kept from the stored row only when the nature itself is unchanged.
+    const natureInput = args.nature ?? exists?.nature ?? null;
+    if (natureInput == null) {
+      return reply({
+        ok: false,
+        reason: 'nature_required',
+        message:
+          `a new datatype must declare its nature: ${DATATYPE_NATURES.join(' | ')} — work is something to do ` +
+          '(and then also give audience: agent | human); record, document and event are data and are never claimable',
+      });
+    }
+    const audienceInput =
+      args.audience !== undefined ? args.audience : natureInput === exists?.nature ? (exists?.audience ?? null) : null;
+    const natureCheck = checkNatureSpec(natureInput, audienceInput);
+    if (!natureCheck.ok) {
+      return reply({ ok: false, reason: natureCheck.reason, message: natureCheck.message });
+    }
 
     // P-010 — the self-improvement surface. Validate the caller's OWN input completeness
     // first (before the similarity search): an authoritative datatype must be self-
@@ -250,8 +295,10 @@ export default defineTool({
       title: args.title ?? args.name,
       description: args.description,
       tier,
+      nature: natureCheck.value.nature,
+      audience: natureCheck.value.audience,
       // generic-kind registers a work_item kind (defaults to the slug); other tiers leave it null
-      workItemKind: tier === 'generic-kind' ? (args.workItemKind ?? id) : (args.workItemKind ?? null),
+      workItemKind: declaredKind,
       payloadSchema: args.payloadSchema ?? null,
       // Omission on an in-place declaration preserves the current display contract.
       display: args.display ?? exists?.display ?? null,

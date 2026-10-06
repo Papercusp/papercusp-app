@@ -54,7 +54,6 @@ import {
 } from "node:net";
 import { dirname, join } from "node:path";
 import {
-  appendFileSync,
   existsSync,
   readFileSync,
   writeFileSync,
@@ -78,7 +77,8 @@ import { assertRemoteAuthReady } from "@papercusp/operator-core/lib/remote-auth-
 import { runShutdownWithDeadline } from "../lib/shutdown-deadline";
 import { getBuildInfo } from "@papercusp/operator-core/lib/build-info";
 import { readProcessIdentity } from "@papercusp/operator-core/lib/process-identity";
-import { managedSetInterval } from "@papercusp/scheduled-registry";
+import { pidAlive, startParentDeathWatch, startSidecarParentDeathWatch } from "@papercusp/operator-core/lib/process-supervision/parent-death-watch";
+export { pidAlive, isOrphanedFromParent, resolveExpectedParentPid, startParentDeathWatch, startSidecarParentDeathWatch } from "@papercusp/operator-core/lib/process-supervision/parent-death-watch";
 import { installTimestampedConsole } from "@papercusp/operator-core/lib/timestamped-console";
 import { installStdioPeerGuard } from "@papercusp/operator-core/lib/process-supervision/stdio-peer-guard";
 import {
@@ -149,19 +149,6 @@ const stdioPeerGuard = installStdioPeerGuard();
 // This backstop exists purely for the detached fire-and-forget class: log
 // loudly (so the fault stays debuggable) and keep booting, instead of the
 // whole app dying silently mid-boot with nothing but a raw V8 stack dump.
-// (EI-19486216732882752) Capture our parent pid at MODULE LOAD — the earliest
-// point our JS runs — rather than when the parent-death watch is finally armed.
-// startParentDeathWatch() used to read `process.ppid` at ARM time, which happens
-// deep inside main(), AFTER `reconcileEnsure()`, `resolveStickyPort()` and (the
-// window that actually bites) the cold-start-lock contention loop, which sleeps
-// in 500ms slices for as long as a concurrent instance holds the lock. A desktop
-// parent that dies inside that multi-second window leaves the watch recording the
-// ALREADY-REPARENTED ppid as its "original", so isOrphanedFromParent() compares
-// that value against itself and returns false FOREVER — the sidecar never
-// self-terminates, survives as an orphan, and busy-spins on its closed-peer stdio.
-// Measured on this box 2026-08-08: 8 such orphans, 3 cores and 18.4GB held, all
-// spawned in one 8-minute window of concurrent packaged-desktop e2e runs.
-const PROCESS_START_PPID = process.ppid;
 
 // WI-39599: both handlers report BY WRITING, so once our stdio peer is gone the
 // report is itself a failing write that re-enters the handler that made it. The
@@ -226,38 +213,6 @@ export function embeddedPgCredentialsFile(
 }
 const SUPERUSER_TOKEN = join(PAPERCUSP_DIR, "superuser-token");
 
-/**
- * Durable sink for the parent-death decision. The gateway already owns
- * `gateway.log`; use that exact surface in gateway-sidecar mode so its next
- * postmortem has the watch decision and the SIGTERM drain outcome in one file.
- * Other packaged sidecars share this entrypoint but not the gateway logger, so
- * they use one small lifecycle log under PAPERCUSP_HOME instead of depending on
- * their already-broken stdout pipe.
- */
-function parentDeathLogPath(): string {
-  if (process.env.PAPERCUSP_GATEWAY_SIDECAR_MODE === "1") {
-    return (
-      process.env.PAPERCUSP_GATEWAY_LOG ||
-      join(homedir(), ".papercusp", "gateway.log")
-    );
-  }
-  return join(PAPERCUSP_DIR, "parent-death.log");
-}
-
-function writeParentDeathDiagnostic(message: string): void {
-  try {
-    const path = parentDeathLogPath();
-    mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(
-      path,
-      `[serve-parent-watch ${new Date().toISOString()}] ${message}\n`,
-      { encoding: "utf8", mode: 0o600 },
-    );
-  } catch {
-    // Diagnostics must never block the termination path. `log()` below remains
-    // the best-effort console fallback when the file is unavailable.
-  }
-}
 // WI-3287: a packaged env-sidecar sibling (env-operator-launcher.ts's bundled
 // spawn — prod/staging running request-only alongside the primary, EI-126)
 // re-execs THIS SAME serve.mjs under the SAME $HOME, identified by
@@ -323,191 +278,6 @@ function log(msg: string): void {
   console.log(`[serve] ${msg}`);
 }
 
-/** True if a process with `pid` exists (signal 0 probe). */
-export function pidAlive(pid: number): boolean {
-  if (!pid || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    // ESRCH = no such process; EPERM = exists but not ours.
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-/**
- * (EI-8894) True when a process's parent has changed since we recorded
- * `originalPpid` at startup — i.e. we've been reparented/orphaned.
- *
- * Only meaningful on Unix: a hard-killed parent (SIGKILL, `launchctl
- * kickstart -k`, a crash — anything that skips OUR OWN SIGTERM handler)
- * never runs the desktop app's graceful `shutdown_children` teardown, so a
- * managed sidecar can otherwise run forever as a zombie holding ports/
- * storage under stale env (the "runaway serve.mjs --ensure at 357% CPU"
- * symptom). Comparing the live ppid against the ppid recorded at spawn is
- * portable across whatever the OS reparents orphans to (traditionally pid
- * 1, but not guaranteed) — ANY change means our original parent is gone.
- */
-export function isOrphanedFromParent(
-  originalPpid: number,
-  currentPpid: number,
-): boolean {
-  return originalPpid > 0 && currentPpid !== originalPpid;
-}
-
-/**
- * (EI-8894) Start a low-frequency watch that self-terminates this process
- * (via `onOrphaned`, expected to be the same graceful `shutdown()` the
- * SIGTERM handler uses) the moment our desktop parent dies WITHOUT signaling
- * us first. Desktop-managed only (`PAPERCUSP_DESKTOP === '1'` — the same
- * marker `resolveStickyPort` already gates on): a plain dev/CLI `serve` has
- * no such parent contract and legitimately outlives its launching shell.
- */
-/**
- * (EI-19486216732882752) The pid the LAUNCHER declared as our parent, when it
- * told us (`PAPERCUSP_DESKTOP_PARENT_PID`, set by main.rs's `spawn_serve`).
- *
- * Why an env handoff rather than just reading `process.ppid`: a ppid read is an
- * OBSERVATION whose correctness depends on when it happens, and every window in
- * which it can be wrong is a window in which the watch goes permanently blind.
- * A declared pid is an IDENTITY — it stays correct no matter how late we read it,
- * which is what lets us also answer "is that parent still alive?" rather than only
- * "has my ppid changed since I looked?".
- *
- * Falls back to the module-load ppid when the launcher did not declare one (an
- * older packaged app against a newer sidecar), which preserves the pre-existing
- * reparent-only semantics exactly.
- */
-export function resolveExpectedParentPid(
-  // Record<…>, not NodeJS.ProcessEnv and not an all-optional literal shape.
-  // NodeJS.ProcessEnv here is Next.js's augmentation (NODE_ENV is REQUIRED), so
-  // demanding it forces every test caller into an `as` cast that typechecks
-  // nothing; but an all-optional literal type is a WEAK type, and assigning
-  // process.env to it fails TS2559 ("no properties in common") because an index
-  // signature does not count as an overlapping declared property. Record<> matches
-  // ProcessEnv's index signature and accepts a bare `{}` from tests.
-  env: Record<string, string | undefined> = process.env,
-  fallbackPpid: number = PROCESS_START_PPID,
-): { pid: number; declaredByLauncher: boolean } {
-  const raw = env.PAPERCUSP_DESKTOP_PARENT_PID;
-  const n = raw === undefined || raw === "" ? Number.NaN : Number(raw);
-  if (Number.isInteger(n) && n > 0) return { pid: n, declaredByLauncher: true };
-  return { pid: fallbackPpid, declaredByLauncher: false };
-}
-
-/**
- * (EI-8894) Start a low-frequency watch that self-terminates this process
- * (via `onOrphaned`, expected to be the same graceful `shutdown()` the
- * SIGTERM handler uses) the moment our desktop parent dies WITHOUT signaling
- * us first. Desktop-managed only (`PAPERCUSP_DESKTOP === '1'` — the same
- * marker `resolveStickyPort` already gates on): a plain dev/CLI `serve` has
- * no such parent contract and legitimately outlives its launching shell.
- *
- * (EI-19486216732882752) Two changes that turn this from "usually works" into
- * "cannot go blind":
- *  1. The reference ppid is captured at MODULE LOAD (or declared outright by the
- *     launcher), never at arm time — see PROCESS_START_PPID for the race.
- *  2. It checks ONCE IMMEDIATELY as well as on the interval, so a parent that
- *     died during boot is caught before we finish booting (and before we pay for
- *     embedded Postgres) instead of up to 5s later — or, in the blind case that
- *     produced the 3-core/18.4GB fire, never.
- *
- * ⚠ Do NOT "simplify" the orphan test to `process.ppid === 1`. On this box an
- * orphan reparents to `systemd --user` (pid 2026497), not to pid 1, so that test
- * silently matches nothing — and main.rs:8243 documents the converse hazard on
- * macOS, where a launchd-launched app has PPID==1 while perfectly healthy.
- */
-export function startParentDeathWatch(
-  onOrphaned: () => void,
-  opts: {
-    expectedPpid?: number;
-    declaredByLauncher?: boolean;
-    parentAlive?: (pid: number) => boolean;
-    currentPpid?: () => number;
-  } = {},
-): void {
-  if (process.env.PAPERCUSP_DESKTOP !== "1") return;
-  // Headless rig frames (deb-hetzner-matrix / local-matrix) run the packaged
-  // sidecar with PAPERCUSP_DESKTOP=1 for production parity but launch it from a
-  // shell that exits right after spawn — there IS no desktop parent, so this
-  // watch would kill the instance seconds after boot (2026-07-16 local-matrix
-  // gate RED: frame A self-terminated mid-initdb on the launcher bash exiting).
-  // Those launchers opt out explicitly; a real desktop never sets this.
-  if (process.env.PAPERCUSP_PARENT_DEATH_WATCH === "0") return;
-
-  const resolved = resolveExpectedParentPid();
-  const originalPpid = opts.expectedPpid ?? resolved.pid;
-  const declaredByLauncher = opts.declaredByLauncher ?? resolved.declaredByLauncher;
-  const isAlive = opts.parentAlive ?? pidAlive;
-  const readPpid = opts.currentPpid ?? (() => process.ppid);
-  if (!(originalPpid > 0)) return;
-
-  const orphanReason = (): string | null => {
-    const currentPpid = readPpid();
-    if (isOrphanedFromParent(originalPpid, currentPpid)) {
-      return `now reparented to ${currentPpid}`;
-    }
-    // Only sound when the launcher DECLARED its pid: then it is an identity we
-    // can outlive-check. Against a bare ppid read this would be self-referential
-    // — the value may ALREADY be the reparent target, which is alive by
-    // definition — so the fallback path deliberately keeps reparent-only
-    // semantics rather than guessing.
-    if (declaredByLauncher && !isAlive(originalPpid)) {
-      return `declared parent pid is no longer alive (ppid now ${currentPpid})`;
-    }
-    return null;
-  };
-
-  const fire = (why: string): void => {
-    const message =
-      `desktop parent pid ${originalPpid} is gone (${why}) — ` +
-      "self-terminating instead of running orphaned";
-    // Write the durable evidence FIRST: the parent just died, so stdout may
-    // already be a broken pipe and its silence is not evidence that fire()
-    // failed to run (WI-39599).
-    writeParentDeathDiagnostic(message);
-    log(message);
-    onOrphaned();
-  };
-
-  // Check once before arming: if the parent died during boot we are ALREADY
-  // orphaned, and waiting a full interval to notice is the cheap half of the bug.
-  const immediate = orphanReason();
-  if (immediate) {
-    fire(`${immediate}, detected before the watch armed`);
-    return;
-  }
-
-  managedSetInterval(
-    "serve-desktop-parent-death-watch",
-    5000,
-    () => {
-      const why = orphanReason();
-      if (why) fire(why);
-    },
-    {
-      category: "watchdog",
-      // This watchdog has an explicit fake-timer regression test for the
-      // healthy-arm -> parent-dies interval path. The scheduled registry is
-      // inert under Vitest unless a deliberately exercised timer opts in.
-      allowInTest: true,
-    },
-  );
-}
-
-/**
- * Arm the parent-death watch for a packaged sidecar before its sidecar module
- * is imported. Sidecar entrypoints own their graceful SIGTERM handlers, so the
- * watch hands the signal back to the process instead of duplicating cleanup
- * here. The signal callback is injectable for the lifecycle regression tests.
- */
-export function startSidecarParentDeathWatch(
-  opts: Parameters<typeof startParentDeathWatch>[1] = {},
-  sendSignal: (signal: NodeJS.Signals) => void = (signal) =>
-    process.kill(process.pid, signal),
-): void {
-  startParentDeathWatch(() => sendSignal("SIGTERM"), opts);
-}
 
 /** Read the current operator.json discovery, or null. */
 export function readOperatorDiscovery(): OperatorDiscovery | null {
@@ -575,6 +345,44 @@ export function buildIdentityMismatch(
   return existing.version !== mine.version;
 }
 
+/** The version a non-release build (dev tree, rig compose) reports: build-info's
+ *  fallback when no PAPERCUSP_BUILD_VERSION / baked version is present. */
+const DEV_BUILD_VERSION = "0.0.0";
+
+function releaseTriple(v: string): [number, number, number] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/**
+ * (WI-10005958) True when the build-mismatched operator already running is
+ * NEWER than the one launching, so replacing it would be a DOWNGRADE over data
+ * a newer build may already have migrated. EI-9002's guard used to treat every
+ * mismatch as "stale": an installed 0.0.26 app on the Mac test VM killed a rig
+ * sidecar composed from current staging, and the old build's sweeps then
+ * rewrote federated rows the newer build had fixed.
+ *
+ * - A dev launcher (0.0.0) may always replace — dev builds carry no order.
+ * - A release launcher never replaces a running dev/rig compose.
+ * - Release vs release: newer only when the running major.minor.patch is
+ *   strictly greater (a pre-release suffix is ignored, so equal triples keep
+ *   the EI-9002 replace behaviour).
+ */
+export function runningOperatorIsNewer(
+  existing: Pick<OperatorDiscovery, "version">,
+  mine: { version: string },
+): boolean {
+  if (mine.version === DEV_BUILD_VERSION) return false;
+  if (existing.version === DEV_BUILD_VERSION) return true;
+  const running = releaseTriple(existing.version);
+  const launching = releaseTriple(mine.version);
+  if (!running || !launching) return false;
+  for (let i = 0; i < 3; i++) {
+    if (running[i] !== launching[i]) return running[i] > launching[i];
+  }
+  return false;
+}
+
 /** Poll until `pid` is gone, or `ms` elapses. True when it exited. */
 async function waitForExit(pid: number, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
@@ -631,6 +439,7 @@ export async function reconcileEnsure(
     sha: BUILD_SHA,
     version: VERSION,
   },
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<OperatorDiscovery | null> {
   const existing = readOperatorDiscovery();
   if (
@@ -644,6 +453,21 @@ export async function reconcileEnsure(
       `already running (pid ${existing.pid}) at ${existing.httpUrl} — reusing`,
     );
     return existing;
+  }
+  // WI-10005958: a mismatch is only "stale" when the running build is not
+  // newer. Refusing loudly (main exits 1) beats a silent downgrade; neither
+  // adopting it nor cold-starting beside it is safe.
+  if (
+    runningOperatorIsNewer(existing, mine) &&
+    env.PAPERCUSP_ALLOW_OPERATOR_DOWNGRADE !== "1"
+  ) {
+    throw new Error(
+      `refusing to replace pid ${existing.pid} at ${existing.httpUrl}: it runs a NEWER build ` +
+        `(running sha=${existing.sha ?? "unknown"} version=${existing.version}, ` +
+        `mine sha=${mine.sha ?? "unknown"} version=${mine.version}). Replacing it would ` +
+        `downgrade the operator over data a newer build may have migrated (WI-10005958). ` +
+        `Stop that operator deliberately, or set PAPERCUSP_ALLOW_OPERATOR_DOWNGRADE=1.`,
+    );
   }
   log(
     `refusing to adopt pid ${existing.pid} at ${existing.httpUrl}: build mismatch ` +
@@ -1518,6 +1342,15 @@ async function main(): Promise<void> {
     return;
   }
 
+  // R6 admission pre-check workers are managed tasks whose lifetime is independent of this
+  // serving host. Divert before the ordinary sidecar parent-death watch and before host boot.
+  if (process.env.PAPERCUSP_REPAIR_PRECHECK_WORKER_MODE === "1") {
+    const { runAdmissionPrecheckWorkerFromEnvironment } =
+      await import("@papercusp/operator-core/lib/release/admission-fix-precheck-managed");
+    process.exitCode = await runAdmissionPrecheckWorkerFromEnvironment();
+    return;
+  }
+
   // The packaged sidecar branches below return before the normal operator
   // shutdown handlers are installed. Arm the shared parent-death watch first;
   // once the sidecar entrypoint is running, its SIGTERM handler receives this
@@ -1529,7 +1362,8 @@ async function main(): Promise<void> {
     process.env.PAPERCUSP_SPAWNER_SIDECAR_MODE === "1" ||
     process.env.PAPERCUSP_EMBED_SIDECAR_MODE === "1" ||
     process.env.PAPERCUSP_GATEWAY_SIDECAR_MODE === "1" ||
-    process.env.PAPERCUSP_RESOURCE_GOVERNOR_MONITOR_MODE === "1";
+    process.env.PAPERCUSP_RESOURCE_GOVERNOR_MONITOR_MODE === "1" ||
+    process.env.PAPERCUSP_LSP_DAEMON_MODE === "1";
   if (packagedSidecarMode) startSidecarParentDeathWatch();
 
   // PACKAGED substrate-sidecar (P-006): the spawner re-execs THIS bundled
@@ -1540,6 +1374,11 @@ async function main(): Promise<void> {
     const { runSubstrateSidecarServer } =
       await import("@papercusp/operator-core/lib/sync/hyperbee/substrate-sidecar-server");
     runSubstrateSidecarServer();
+    return;
+  }
+  if (process.env.PAPERCUSP_LSP_DAEMON_MODE === "1") {
+    const { runLspDaemonServer } = await import('@papercusp/operator-core/lib/code-intelligence/lsp-daemon-server');
+    runLspDaemonServer();
     return;
   }
   // PACKAGED spawner-sidecar (WI-344 ③): same re-exec divert for the agent-spawn

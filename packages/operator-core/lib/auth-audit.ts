@@ -13,10 +13,10 @@
  */
 
 import { createHmac, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { getOrgPg } from '@papercusp/db-org';
+// WI-10004357: the one token reader ($PAPERCUSP_HOME first, then ~/.papercusp), so a
+// scoped-home operator keys its HMAC off the token it actually authenticates with.
+import { readSuperuserToken } from './superuser-token';
 
 export type AuthAuditKind =
   | 'login_ok'
@@ -45,15 +45,11 @@ let _hmacKey: Buffer | null = null;
 
 function loadHmacKey(): Buffer {
   if (_hmacKey) return _hmacKey;
-  try {
-    const tokenPath = join(homedir(), '.papercusp', 'superuser-token');
-    const tok = readFileSync(tokenPath, 'utf8').trim();
-    if (tok.length >= 16) {
-      _hmacKey = Buffer.from(tok, 'utf8');
-      return _hmacKey;
-    }
-  } catch {
-    /* fall through to ephemeral key */
+  // readSuperuserToken already rejects tokens shorter than 16 characters.
+  const tok = readSuperuserToken();
+  if (tok) {
+    _hmacKey = Buffer.from(tok, 'utf8');
+    return _hmacKey;
   }
   // Fall back to an ephemeral key generated this process. Audit rows
   // won't be cross-correlatable across operator restarts, but at least

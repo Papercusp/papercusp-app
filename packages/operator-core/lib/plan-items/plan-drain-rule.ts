@@ -1,27 +1,31 @@
 /**
  * plan-drain-rule.ts — P-004 of deterministic-plan-state-derivation-2026-08-31.
  *
- * When a `plans:set-status` flip moves an item ACROSS the terminal boundary,
- * re-read the plan and move its lifecycle `status` if the graph now warrants a
- * different one — `ready`/`active` → `awaiting-acceptance` once the last live
- * item goes terminal, and back to `ready` if one reopens.
+ * When a structured item write crosses the terminal boundary/adds an item, a
+ * content writer changes the currently warranted transition, or a lifecycle
+ * writer attaches `ready` to an already-drained graph, re-read the plan and move
+ * its lifecycle `status` if the graph warrants it. Creation/conversion and
+ * draft→ready approval have no prior graph edge to cross, but their item graph
+ * can already be drained.
  *
- * # Why the matcher only asks about the BOUNDARY
+ * # Why matching stays cheap and synchronous
  *
- * The interesting question — "was that the last non-terminal item?" — cannot be
- * asked here. A reaction matcher is pure and synchronous; answering it requires
- * re-reading the plan, which is I/O. So the matcher asks the cheap pure
- * question it CAN answer (did this flip change whether the item is terminal?)
- * and the ACTION, which may do I/O, asks the real one. A `todo → wip` flip
- * cannot change whether a plan is drained, so it is filtered out here and never
- * costs a read.
+ * The reaction matcher is pure and synchronous, so it cannot re-read the plan.
+ * For `plans:set-status` it asks whether the item crossed the terminal boundary;
+ * for `plans:add-item` it asks whether an item was successfully added. For
+ * `plans:new` and `plans:set-frontmatter`, it asks whether the initial status
+ * is non-draft. The
+ * shared whole-content evaluator marks the three raw content writers only when
+ * the before/after graph changes the transition currently warranted by the
+ * stored status. The ACTION performs the authoritative graph check under the
+ * plan lock.
  *
  * # The event shape — read this before changing the predicate
  *
- * `plans:set-status` is bulk-capable (`runBulk`/`bulkContent`), and the
- * reaction engine FANS a bulk result into one synthetic event PER ITEM without
- * matching the bulk-level carrier. So this rule sees the flat per-item record
- * `{ ok, slug, itemId, oldStatus, newStatus }`, never `{ results: [...] }`.
+ * Both tools are bulk-capable (`runBulk`/`bulkContent`), and the reaction
+ * engine FANS a bulk result into one synthetic event PER ITEM without matching
+ * the bulk-level carrier. The rules therefore see flat per-item records, never
+ * `{ results: [...] }`.
  * Reading the bulk shape is precisely the bug that made `reconcile-rule.ts`
  * silently never fire (EI-6960; the same caveat is restated in
  * `lane-sync-rule.ts` for EI-6980). A bulk flip of N items therefore produces N
@@ -33,13 +37,14 @@ import { registerReactionRule } from '../events';
 import { PLAN_DRAIN_TRANSITION_ACTION } from '../events/builtin-actions';
 import type { ToolInvocationEvent } from '../events/types';
 
-/** One fanned per-item `plans:set-status` result. */
-interface SetStatusItemResult {
+/** One fanned per-item `plans:add-item` or `plans:set-status` result. */
+interface PlanDrainWriteResult {
   ok?: boolean;
   slug?: string;
   itemId?: string;
   oldStatus?: string | null;
   newStatus?: string;
+  planDrainTransitionChanged?: boolean;
 }
 
 function isTerminalItemStatus(status: string | null | undefined): boolean {
@@ -47,23 +52,42 @@ function isTerminalItemStatus(status: string | null | undefined): boolean {
 }
 
 /**
- * The plan whose drained-ness this flip may have changed, or null.
+ * The plan whose lifecycle may have changed, or null.
  *
- * Gated on the terminal BOUNDARY rather than on any status change: a
- * `todo → wip` or `done → dropped` flip leaves the drained bit untouched, so
- * reacting to it would re-read the plan to learn nothing. Exported for the
- * unit test.
+ * A successful addition may reopen a drained plan; status flips only qualify
+ * when they cross the terminal boundary. A `todo → wip` or
+ * `done → dropped` flip leaves the drained bit untouched. Exported for tests.
  */
 export function planWhoseDrainStateMayHaveChanged(
   e: ToolInvocationEvent,
 ): { planSlug: string; harnessSlug: string | null } | null {
-  const r = e.result?.data as SetStatusItemResult | undefined;
+  const r = e.result?.data as PlanDrainWriteResult | undefined;
+  const itemWriteMayChangeDrain =
+    typeof r?.itemId === 'string' &&
+    (e.tool === 'plans:add-item' ||
+      (e.tool === 'plans:set-status' &&
+        typeof r.newStatus === 'string' &&
+        isTerminalItemStatus(r.oldStatus) !== isTerminalItemStatus(r.newStatus)));
+  const contentWriteMayChangeDrain =
+    (e.tool === 'plans:set-content' ||
+      e.tool === 'plans:edit' ||
+      e.tool === 'plans:set-content-chunk') &&
+    r?.planDrainTransitionChanged === true;
+  // `ToolInvocationEvent.args` is `unknown`: narrow to an object before reading `status`.
+  const requestedStatus =
+    typeof e.args === 'object' && e.args !== null ? (e.args as { status?: unknown }).status : undefined;
+  const initialPlanStatus = typeof requestedStatus === 'string' ? requestedStatus : 'draft';
+  const initialLifecycleWriteMayChangeDrain =
+    (e.tool === 'plans:new' || e.tool === 'plans:set-frontmatter') && initialPlanStatus !== 'draft';
+  const readyLifecycleWriteMayChangeDrain =
+    e.tool === 'plans:set-plan-status' && r?.changed === true && r.newStatus === 'ready';
   if (
     r?.ok === true &&
     typeof r.slug === 'string' &&
-    typeof r.itemId === 'string' &&
-    typeof r.newStatus === 'string' &&
-    isTerminalItemStatus(r.oldStatus) !== isTerminalItemStatus(r.newStatus)
+    (itemWriteMayChangeDrain ||
+      contentWriteMayChangeDrain ||
+      initialLifecycleWriteMayChangeDrain ||
+      readyLifecycleWriteMayChangeDrain)
   ) {
     // Thread the triggering call's harness through, exactly as reconcile-rule
     // does (EI-8970): re-reading under the operator-home harness would resolve
@@ -77,6 +101,76 @@ export function planWhoseDrainStateMayHaveChanged(
 registerReactionRule({
   id: 'plan-drain:terminality-changed',
   on: 'plans:set-status',
+  when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
+  fire: PLAN_DRAIN_TRANSITION_ACTION,
+  args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),
+  onlyOnSuccess: true,
+  source: 'plan-drain',
+});
+
+registerReactionRule({
+  id: 'plan-drain:item-added',
+  on: 'plans:add-item',
+  when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
+  fire: PLAN_DRAIN_TRANSITION_ACTION,
+  args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),
+  onlyOnSuccess: true,
+  source: 'plan-drain',
+});
+
+registerReactionRule({
+  id: 'plan-drain:plan-created',
+  on: 'plans:new',
+  when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
+  fire: PLAN_DRAIN_TRANSITION_ACTION,
+  args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),
+  onlyOnSuccess: true,
+  source: 'plan-drain',
+});
+
+registerReactionRule({
+  id: 'plan-drain:legacy-plan-converted',
+  on: 'plans:set-frontmatter',
+  when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
+  fire: PLAN_DRAIN_TRANSITION_ACTION,
+  args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),
+  onlyOnSuccess: true,
+  source: 'plan-drain',
+});
+
+registerReactionRule({
+  id: 'plan-drain:plan-readied',
+  on: 'plans:set-plan-status',
+  when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
+  fire: PLAN_DRAIN_TRANSITION_ACTION,
+  args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),
+  onlyOnSuccess: true,
+  source: 'plan-drain',
+});
+
+registerReactionRule({
+  id: 'plan-drain:content-rewritten',
+  on: 'plans:set-content',
+  when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
+  fire: PLAN_DRAIN_TRANSITION_ACTION,
+  args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),
+  onlyOnSuccess: true,
+  source: 'plan-drain',
+});
+
+registerReactionRule({
+  id: 'plan-drain:content-edited',
+  on: 'plans:edit',
+  when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
+  fire: PLAN_DRAIN_TRANSITION_ACTION,
+  args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),
+  onlyOnSuccess: true,
+  source: 'plan-drain',
+});
+
+registerReactionRule({
+  id: 'plan-drain:content-chunk-committed',
+  on: 'plans:set-content-chunk',
   when: (e) => planWhoseDrainStateMayHaveChanged(e) !== null,
   fire: PLAN_DRAIN_TRANSITION_ACTION,
   args: (e) => ({ plans: [planWhoseDrainStateMayHaveChanged(e)!] }),

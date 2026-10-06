@@ -14,14 +14,16 @@
  * task-manager process through the existing identity-safe control primitives.
  */
 
+import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 
 import { getOrgPg } from '@papercusp/db-org';
+import type { Sql } from 'postgres';
 import { resolveSessionStates } from '../agent-tools/coordination/liveness-oracle';
 import { upsertConditionWorkItem } from '../coord/condition-upsert';
 import { spawnAgentInHarness } from '../fleet/operator-spawn';
 import { ANY_FAMILY_TERMINAL_STATES } from '../work-item-dispatch-states';
-import { mergeWorkItemPayload } from '../work-items';
+import { claimWorkItem, mergeWorkItemPayload, releaseWorkItem } from '../work-items';
 import { getTask, listLifecycleJudgementTasks, mergeTaskLifecycleProbes } from './store';
 import { killScopeUnit, killTask, type ControlOutcome, type ScopeControlOutcome } from './control';
 import { isAutoReapExempt, isTerminalState, type TaskRow } from './types';
@@ -60,7 +62,21 @@ export interface ProcessLifecycleProbe {
   logPath: string | null;
   logMtimeMs: number | null;
   cpuUsec: number | null;
+  /** Time of the stored CPU counter baseline; unchanged counters keep this time. */
+  cpuSampledAtMs: number | null;
   lastActivityAtMs: number | null;
+}
+
+export interface CpuActivityEvidence {
+  state: 'unknown' | 'idle' | 'active';
+  previous: { cpuUsec: number; sampledAtMs: number } | null;
+  current: { cpuUsec: number | null; sampledAtMs: number | null };
+}
+
+export interface LifecycleLivenessEvidence {
+  status: 'present' | 'unknown';
+  source: 'healthy-task-reconcile' | 'not-established';
+  observedAt: string | null;
 }
 
 export interface ProcessLifecycleVerdict {
@@ -85,8 +101,10 @@ export interface LifecycleCandidate {
   endedAt: string | null;
   kinds: LifecycleCandidateKind[];
   reasons: string[];
+  liveness: LifecycleLivenessEvidence;
   metrics: {
     cpuUsec: number | null;
+    cpuActivity: CpuActivityEvidence;
     pidsCurrent: number | null;
     lastMemoryBytes: number | null;
     logMtimeMs: number | null;
@@ -117,10 +135,26 @@ export interface LifecycleVerdictEnforcement {
   detail?: string;
 }
 
+export interface LifecycleVerdictAuditContext {
+  workspaceId: string;
+  harnessSlug: string;
+}
+
+export interface LifecycleVerdictAuditRecord extends LifecycleVerdictAuditContext {
+  taskId: string;
+  verdict: ProcessLifecycleVerdict;
+  target: LifecycleVerdictEnforcement['target'];
+  targetId: string | null;
+  phase: 'intent' | 'outcome';
+  auditId?: string;
+  outcome?: LifecycleVerdictEnforcement;
+}
+
 export interface LifecycleVerdictEnforcementDeps {
   loadTask(taskId: string): Promise<TaskRow | null>;
   killTask(taskId: string, opts: { reapTerminalResidue?: boolean }): Promise<ControlOutcome>;
   killScopeUnit(scopeUnit: string): Promise<ScopeControlOutcome>;
+  recordAudit?(record: LifecycleVerdictAuditRecord): Promise<string>;
 }
 
 export interface OpenLifecycleCandidateItem {
@@ -129,6 +163,12 @@ export interface OpenLifecycleCandidateItem {
   harnessSlug: string | null;
   /** A claim is dispatch ownership, even when the item still has open status. */
   takenBy?: string | null;
+  /**
+   * Holder as the engineer_issues VIEW names it (taken_by AS assignee). The base
+   * work_items table has no assignee column, so the real query never sets this;
+   * it exists only for callers and fakes that hand over view-shaped rows (WI-10005157).
+   */
+  assignee?: string | null;
 }
 
 export interface LifecycleJudgementDeps {
@@ -136,7 +176,10 @@ export interface LifecycleJudgementDeps {
   resolveLauncherStates(ownerIds: readonly string[]): Promise<Map<string, string | null>>;
   statLogMtimeMs(path: string): number | null;
   readLatestVerdicts(workspaceId: string, taskIds: readonly string[]): Promise<Map<string, ProcessLifecycleVerdict>>;
-  enforceVerdicts(verdicts: ReadonlyMap<string, ProcessLifecycleVerdict>): Promise<LifecycleVerdictEnforcement[]>;
+  enforceVerdicts(
+    verdicts: ReadonlyMap<string, ProcessLifecycleVerdict>,
+    context: LifecycleVerdictAuditContext,
+  ): Promise<LifecycleVerdictEnforcement[]>;
   persistProbes(updates: readonly { taskId: string; probe: ProcessLifecycleProbe }[]): Promise<number>;
   upsertCandidate(
     conditionKey: string,
@@ -144,10 +187,16 @@ export interface LifecycleJudgementDeps {
     fallbackHarness: string,
   ): Promise<{ id: string | null }>;
   listOpenCandidateItems(workspaceId: string): Promise<OpenLifecycleCandidateItem[]>;
+  claimOpenCandidateItems(
+    items: readonly OpenLifecycleCandidateItem[],
+    assignee: string,
+  ): Promise<OpenLifecycleCandidateItem[]>;
+  releaseCandidateItems(items: readonly OpenLifecycleCandidateItem[], expectedAssignee: string): Promise<void>;
   spawnJudge(input: {
     workspaceId: string;
     harnessSlug: string;
     idempotencyKey: string;
+    spawnId: string;
     brief: string;
   }): Promise<{ ok: boolean; spawnId: string | null; deduped?: boolean; error?: string | null }>;
 }
@@ -173,6 +222,7 @@ export function processLifecycleProbeFromDetail(detail: Record<string, unknown>)
     logPath: typeof raw.logPath === 'string' && raw.logPath ? raw.logPath : null,
     logMtimeMs: finiteNumber(raw.logMtimeMs),
     cpuUsec: finiteNumber(raw.cpuUsec),
+    cpuSampledAtMs: finiteNumber(raw.cpuSampledAtMs),
     lastActivityAtMs: finiteNumber(raw.lastActivityAtMs),
   };
 }
@@ -202,8 +252,31 @@ function sameProbe(a: ProcessLifecycleProbe | null, b: ProcessLifecycleProbe): b
     a.logPath === b.logPath &&
     a.logMtimeMs === b.logMtimeMs &&
     a.cpuUsec === b.cpuUsec &&
+    a.cpuSampledAtMs === b.cpuSampledAtMs &&
     a.lastActivityAtMs === b.lastActivityAtMs
   );
+}
+
+function cpuActivityEvidence(
+  currentCpuUsec: number | null,
+  currentSampledAtMs: number | null,
+  prior: ProcessLifecycleProbe | null,
+): CpuActivityEvidence {
+  const previous =
+    prior?.cpuUsec !== null && prior?.cpuUsec !== undefined &&
+    prior.cpuSampledAtMs !== null && prior.cpuSampledAtMs !== undefined
+      ? { cpuUsec: prior.cpuUsec, sampledAtMs: prior.cpuSampledAtMs }
+      : null;
+  const current = { cpuUsec: currentCpuUsec, sampledAtMs: currentSampledAtMs };
+  if (
+    previous === null ||
+    currentCpuUsec === null ||
+    currentSampledAtMs === null ||
+    currentSampledAtMs <= previous.sampledAtMs
+  ) {
+    return { state: 'unknown', previous, current };
+  }
+  return { state: currentCpuUsec === previous.cpuUsec ? 'idle' : 'active', previous, current };
 }
 
 function parsedMs(value: string | null | undefined): number | null {
@@ -235,18 +308,69 @@ function controlOutcomeSettled(
   return terminalConfinedTask && outcome.error === 'not_live';
 }
 
+export async function recordLifecycleVerdictAudit(record: LifecycleVerdictAuditRecord, inject?: Sql): Promise<string> {
+  const sql = inject ?? getOrgPg().sql;
+  const auditId = record.auditId ?? 'task-lifecycle-' + randomUUID();
+  const details = {
+    schemaVersion: 1,
+    phase: record.phase,
+    taskId: record.taskId,
+    harnessSlug: record.harnessSlug,
+    verdict: record.verdict,
+    target: record.target,
+    targetId: record.targetId,
+    ...(record.outcome ? { outcome: record.outcome } : {}),
+    recordedAt: new Date().toISOString(),
+  };
+
+  if (record.phase === 'outcome' && record.auditId) {
+    const updated = await sql.unsafe<{ id: string }[]>(
+      'UPDATE harness_shared.audit_log SET details = $2::jsonb WHERE id = $1 AND workspace_id = $3 RETURNING id',
+      [auditId, JSON.stringify(details), record.workspaceId],
+    );
+    if (updated.length !== 1) throw new Error('lifecycle verdict audit intent was not found for settlement');
+    return auditId;
+  }
+
+  const inserted = await sql.unsafe<{ id: string }[]>(
+    'INSERT INTO harness_shared.audit_log (id, ts, actor, action, subject, details, workspace_id) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7) RETURNING id',
+    [
+      auditId,
+      Date.now(),
+      'system:task-manager',
+      'task.lifecycle.verdict',
+      record.taskId,
+      JSON.stringify(details),
+      record.workspaceId,
+    ],
+  );
+  if (inserted.length !== 1) throw new Error('lifecycle verdict audit intent was not inserted');
+  return auditId;
+}
+
 export const nodeLifecycleVerdictEnforcementDeps: LifecycleVerdictEnforcementDeps = {
   loadTask: (taskId) => getTask(taskId),
   killTask: (taskId, opts) => killTask(taskId, opts),
   killScopeUnit: (scopeUnit) => killScopeUnit(scopeUnit),
+  recordAudit: (record) => recordLifecycleVerdictAudit(record),
 };
 
 /** Enforce completed agent verdicts from the trusted task-manager boundary. */
 export async function enforceLifecycleVerdicts(
   verdicts: ReadonlyMap<string, ProcessLifecycleVerdict>,
   deps: LifecycleVerdictEnforcementDeps = nodeLifecycleVerdictEnforcementDeps,
+  context?: LifecycleVerdictAuditContext,
 ): Promise<LifecycleVerdictEnforcement[]> {
   const outcomes: LifecycleVerdictEnforcement[] = [];
+  const recordAudit = async (
+    event: Omit<LifecycleVerdictAuditRecord, 'workspaceId' | 'harnessSlug'>,
+  ): Promise<string | null> => {
+    if (!deps.recordAudit) return null;
+    if (!context) throw new Error('lifecycle verdict audit requires workspace context');
+    return deps.recordAudit({ ...context, ...event });
+  };
+
   for (const [taskId, verdict] of verdicts) {
     if (verdict.decision === 'keep') continue;
     if (verdict.decision === 'gone') {
@@ -294,8 +418,16 @@ export async function enforceLifecycleVerdicts(
         });
         continue;
       }
+      const auditId = await recordAudit({
+        taskId,
+        verdict,
+        target: 'scope-unit',
+        targetId: row.scopeUnit,
+        phase: 'intent',
+      });
+      if (deps.recordAudit && !auditId) throw new Error('lifecycle verdict audit intent returned no id');
       const outcome = await deps.killScopeUnit(row.scopeUnit);
-      outcomes.push({
+      const enforcement: LifecycleVerdictEnforcement = {
         taskId,
         decision: 'kill',
         target: 'scope-unit',
@@ -305,11 +437,29 @@ export async function enforceLifecycleVerdicts(
         reapTerminalResidue: false,
         ...(!outcome.ok ? { error: outcome.error } : {}),
         ...(outcome.detail ? { detail: outcome.detail } : {}),
+      };
+      await recordAudit({
+        ...(auditId ? { auditId } : {}),
+        taskId,
+        verdict,
+        target: 'scope-unit',
+        targetId: row.scopeUnit,
+        phase: 'outcome',
+        outcome: enforcement,
       });
+      outcomes.push(enforcement);
       continue;
     }
 
     let reapingResidue = isTerminalState(row.state);
+    const auditId = await recordAudit({
+      taskId,
+      verdict,
+      target: 'task-id',
+      targetId: taskId,
+      phase: 'intent',
+    });
+    if (deps.recordAudit && !auditId) throw new Error('lifecycle verdict audit intent returned no id');
     let outcome = await deps.killTask(taskId, { reapTerminalResidue: reapingResidue });
     // A live row can become terminal between the routing read and killTask's own
     // authoritative read. Re-read once and use the positive residue path.
@@ -322,7 +472,7 @@ export async function enforceLifecycleVerdicts(
       }
     }
     const terminalConfinedTask = reapingResidue && row.confined && Boolean(row.scopeUnit);
-    outcomes.push({
+    const enforcement: LifecycleVerdictEnforcement = {
       taskId,
       decision: 'kill',
       target: 'task-id',
@@ -332,7 +482,17 @@ export async function enforceLifecycleVerdicts(
       reapTerminalResidue: reapingResidue,
       ...(!outcome.ok ? { error: outcome.error } : {}),
       ...(outcome.detail ? { detail: outcome.detail } : {}),
+    };
+    await recordAudit({
+      ...(auditId ? { auditId } : {}),
+      taskId,
+      verdict,
+      target: 'task-id',
+      targetId: taskId,
+      phase: 'outcome',
+      outcome: enforcement,
     });
+    outcomes.push(enforcement);
   }
   return outcomes;
 }
@@ -364,6 +524,7 @@ export function evaluateLifecycleCandidates(input: {
     const confirmedResidue = input.confirmedResidueTaskIds.has(row.taskId);
     const prior = processLifecycleProbeFromDetail(row.detail);
     let nextProbe = prior;
+    const currentCpuSampledAtMs = parsedMs(row.lastSeenAt);
 
     if (row.state === 'unaccounted' && confirmedResidue) {
       const startedAtMs = parsedMs(row.startedAt);
@@ -381,6 +542,45 @@ export function evaluateLifecycleCandidates(input: {
       }
     }
 
+    if (row.state === 'unaccounted') {
+      const cpuUsec = finiteNumber(row.cpuUsec);
+      let nextCpuUsec = cpuUsec;
+      let cpuSampledAtMs: number | null = null;
+      let lastActivityAtMs = prior?.lastActivityAtMs ?? null;
+      if (cpuUsec !== null) {
+        if (prior?.cpuUsec == null || prior.cpuSampledAtMs == null) {
+          // First measurable value is a baseline, not proof of past activity.
+          cpuSampledAtMs = currentCpuSampledAtMs;
+        } else if (currentCpuSampledAtMs !== null && currentCpuSampledAtMs > prior.cpuSampledAtMs) {
+          if (cpuUsec !== prior.cpuUsec) {
+            // A counter decrease means reset/wrap too; it is still observed CPU
+            // activity and starts a new timestamped baseline.
+            cpuSampledAtMs = currentCpuSampledAtMs;
+            lastActivityAtMs = currentCpuSampledAtMs;
+          } else {
+            // Keep the prior baseline so a repeated no-delta pass stays write-free
+            // while the candidate can compare it with the latest scan timestamp.
+            nextCpuUsec = prior.cpuUsec;
+            cpuSampledAtMs = prior.cpuSampledAtMs;
+          }
+        } else {
+          // No ordered timestamp means this sample cannot establish activity.
+          nextCpuUsec = prior.cpuUsec;
+          cpuSampledAtMs = prior.cpuSampledAtMs;
+        }
+      }
+      nextProbe = {
+        version: 1,
+        launcherEndedSinceMs: null,
+        logPath: null,
+        logMtimeMs: null,
+        cpuUsec: nextCpuUsec,
+        cpuSampledAtMs,
+        lastActivityAtMs,
+      };
+      if (!sameProbe(prior, nextProbe)) probeUpdates.push({ taskId: row.taskId, probe: nextProbe });
+    }
+
     if (row.state === 'pending' || row.state === 'running') {
       const launcherIsSu = /^su-[0-9A-Za-z]/.test(row.launchedBy);
       const launcherState = launcherIsSu ? input.launcherStates.get(row.launchedBy) : null;
@@ -396,6 +596,7 @@ export function evaluateLifecycleCandidates(input: {
       const logMtimeMs = validLogMtime(logPath ? input.statLogMtimeMs(logPath) : null, input.nowMs);
       const cpuUsec = finiteNumber(row.cpuUsec);
       let lastActivityAtMs = sameLogPath ? (prior?.lastActivityAtMs ?? null) : null;
+      let cpuSampledAtMs: number | null = prior?.cpuSampledAtMs ?? null;
 
       if (logMtimeMs !== null) {
         lastActivityAtMs = Math.max(lastActivityAtMs ?? 0, logMtimeMs);
@@ -403,12 +604,23 @@ export function evaluateLifecycleCandidates(input: {
       if (sameLogPath && prior?.cpuUsec !== null && cpuUsec !== null && prior?.cpuUsec !== cpuUsec) {
         // A decrease means the counter reset; that is activity too, not evidence
         // that the process was quiet throughout the reset window.
-        lastActivityAtMs = input.nowMs;
+        lastActivityAtMs = currentCpuSampledAtMs ?? input.nowMs;
       }
       if (!sameLogPath || prior === null) {
         // A readable log already carries its own activity clock. With no readable
         // log, the first CPU sample is only a baseline and starts the quiet clock now.
-        lastActivityAtMs = logMtimeMs ?? (cpuUsec !== null ? input.nowMs : null);
+        lastActivityAtMs = logMtimeMs ?? (cpuUsec !== null ? currentCpuSampledAtMs ?? input.nowMs : null);
+      }
+      if (cpuUsec === null) {
+        cpuSampledAtMs = null;
+      } else if (prior?.cpuUsec == null || prior.cpuSampledAtMs == null || !sameLogPath) {
+        cpuSampledAtMs = currentCpuSampledAtMs;
+      } else if (
+        currentCpuSampledAtMs !== null &&
+        currentCpuSampledAtMs > prior.cpuSampledAtMs &&
+        cpuUsec !== prior.cpuUsec
+      ) {
+        cpuSampledAtMs = currentCpuSampledAtMs;
       }
 
       nextProbe = {
@@ -417,6 +629,7 @@ export function evaluateLifecycleCandidates(input: {
         logPath,
         logMtimeMs,
         cpuUsec,
+        cpuSampledAtMs,
         lastActivityAtMs,
       };
       if (!sameProbe(prior, nextProbe)) probeUpdates.push({ taskId: row.taskId, probe: nextProbe });
@@ -468,8 +681,25 @@ export function evaluateLifecycleCandidates(input: {
       endedAt: row.endedAt ?? null,
       kinds,
       reasons,
+      liveness:
+        confirmedResidue && (kinds.includes('unaccounted-residue') || kinds.includes('terminal-residue'))
+          ? {
+              status: 'present',
+              source: 'healthy-task-reconcile',
+              observedAt: new Date(input.nowMs).toISOString(),
+            }
+          : { status: 'unknown', source: 'not-established', observedAt: null },
       metrics: {
         cpuUsec: finiteNumber(row.cpuUsec),
+        cpuActivity: cpuActivityEvidence(
+          row.state === 'unaccounted' || row.state === 'pending' || row.state === 'running'
+            ? finiteNumber(row.cpuUsec)
+            : null,
+          row.state === 'unaccounted' || row.state === 'pending' || row.state === 'running'
+            ? currentCpuSampledAtMs
+            : null,
+          prior,
+        ),
         pidsCurrent: finiteNumber(row.pidsCurrent),
         lastMemoryBytes: finiteNumber(row.lastMemoryBytes),
         logMtimeMs: probe?.logMtimeMs ?? null,
@@ -488,9 +718,9 @@ export function lifecycleCandidateConditionKey(taskId: string): string {
 }
 
 export function lifecycleJudgeIntervalKey(workspaceId: string, nowMs: number): string {
-  // v2 deliberately does not dedupe onto v1 rows: every v1 production spawn
-  // selected an unusable persona and therefore cannot satisfy this operation.
-  return `process-lifecycle-judge:v2:${workspaceId}:${Math.floor(nowMs / LIFECYCLE_JUDGE_INTERVAL_MS)}`;
+  // v3 teaches the explicit Count/PidCount process-list contract. Do not dedupe
+  // this guidance update onto a v2 judge that may still use the ambiguous keys.
+  return `process-lifecycle-judge:v3:${workspaceId}:${Math.floor(nowMs / LIFECYCLE_JUDGE_INTERVAL_MS)}`;
 }
 
 export function lifecycleJudgeBrief(items: readonly OpenLifecycleCandidateItem[]): string {
@@ -500,23 +730,49 @@ export function lifecycleJudgeBrief(items: readonly OpenLifecycleCandidateItem[]
     '',
     ...refs,
     '',
-    'For each item: read and claim the work item, then inspect its processLifecycleCandidate kinds and scopeUnit. For unaccounted-residue, a taskId-filtered processes:list result cannot prove absence: use processes:list { scopeUnit, live:true } and inspect live.exactScopeUnitMatches. If scopeUnit is missing, use an unfiltered live census and inspect all live.unaccountedGroups; an omitted or truncated group list cannot prove absence. Require a known-present positive control before a gone verdict. For other kinds, use processes:list { taskId, live:true } and judge current evidence.',
+    'processLifecycleCandidate.liveness is a timestamped host-side observation: present means the task was seen during a healthy task-reconcile scan at observedAt, not necessarily now; unknown is not dead. Use processes:list for current evidence.',
+    'capability:bash may run in a separate PID namespace: a missing /proc/<host-pid> means the PID is not visible to that shell, not that it exited. When diagnosing a bash-side probe, report readlink /proc/self/ns/pid, the visible numeric /proc PID count, and $$ in that same call. If $$ is tiny or only a few PIDs are visible, discard every /proc absence from that call. cgroup.procs containing only 0 means at least one task is in the cgroup but hidden from that PID namespace; it is presence evidence, not an empty cgroup or PID 0. A non-zero pids.current and the number of cgroup.procs entries can corroborate cgroup presence, but the listed PID values are namespace-relative. pids.current counts kernel tasks (including threads), not task-manager process rows. capability:bash loopback is proxied; HTTP 502 is not ECONNREFUSED (curl exit 7) and proves neither that the target answered nor that it is absent. Treat these shell readings as unknown; use host-side processes:list or dev:listening_ports for current evidence.',
+    'For each item: read and claim the work item, then inspect its processLifecycleCandidate kinds and scopeUnit. For unaccounted-residue, a taskId-filtered processes:list result cannot prove absence: use processes:list { scopeUnit, live:true } and inspect only live.exactScopeUnitMatches entries with kind "unaccounted". An empty exact-scope result is not proof by itself. If scopeUnit is missing, use an unfiltered processes:list { live:true } census and inspect all live.unaccountedGroups and listed PIDs.',
+    'Before a gone verdict, require a known-present same-kind unaccounted control from the unfiltered census. Read the control twice and confirm tasks[].ageSec advances by elapsed wall time. Require live.degraded=false, live.ownedTruncated=false, live.foreignTruncated=false, live.unaccountedCount matching live.unaccountedGroups.length, and live.unaccountedPidCount matching the listed PIDs. The complete, self-consistent census must contain every listed unaccounted group and PID; if a check is missing, unhealthy, truncated, inconsistent, or the control does not advance, leave the result unknown. unaccounted with confined:false does not prove abandonment; a kill needs positive abandonment evidence such as a dead spawner and a stale rig. For other kinds, use processes:list { taskId, live:true } and judge current evidence.',
+    'Use processLifecycleCandidate.metrics.cpuActivity as cgroup cpu.stat evidence: active means usage_usec changed between its timestamps, idle means unchanged over that interval, and unknown means there is no valid comparison. Idle describes CPU use only; it does not prove the process is gone, and unknown must remain unknown.',
     'You produce evidence and a verdict only. NEVER signal a process: do not call processes:kill, shell, systemctl, or any pid/name/pattern kill. Trusted task-manager code enforces a completed kill verdict later through the exact task/scope identity.',
     'Complete every item with assumptions:"none" and top-level outputPayload.processLifecycleVerdict = { taskId, decision:"keep"|"kill"|"gone", reason, keepCount, recheckAt, decidedAt }. A keep MUST give a future ISO recheckAt and increment prior keepCount; kill/gone use recheckAt:null. Record concrete processes:list evidence in completion. Then exit.',
   ].join('\n');
 }
 
 export function lifecycleCandidateSummary(candidate: LifecycleCandidate): string {
-  const verification = candidate.kinds.includes('unaccounted-residue')
-    ? candidate.scopeUnit
-      ? `For unaccounted residue, re-verify with processes:list { scopeUnit:${JSON.stringify(candidate.scopeUnit)}, live:true } and inspect live.exactScopeUnitMatches. A taskId-filtered read cannot prove absence.`
-      : 'For unaccounted residue with no recorded scopeUnit, re-verify with an unfiltered processes:list { live:true } and inspect the complete live.unaccountedGroups inventory. A taskId-filtered read cannot prove absence.'
-    : 'Re-verify with processes:list { taskId, live:true }.';
+  const namespaceProbeCaveat =
+    'capability:bash may use a separate PID namespace: missing /proc/<host-pid> means invisible, cgroup.procs containing only 0 means hidden presence (not PID 0), and pids.current counts kernel tasks including threads. When diagnosing a shell probe, report readlink /proc/self/ns/pid, the visible numeric /proc PID count, and $$ in the same call; if $$ is tiny or only a few PIDs are visible, discard every /proc absence. Loopback traffic is proxied, so HTTP 502 is not ECONNREFUSED and proves neither presence nor absence. Do not infer death from these shell readings. ';
+  // A condition-upsert refreshes this summary on each healthy reconcile tick.
+  // Keep the claim subject stable: timestamped liveness, CPU samples, kinds,
+  // reasons, and scope metadata live in processLifecycleCandidate payload and
+  // can change while a judge holds the item.
   return (
-    `Task ${candidate.taskId} is a lifecycle candidate (${candidate.kinds.join(', ')}). ` +
-    `${candidate.reasons.join('; ')}. ${verification} ` +
-    'Before recording gone, require a known-present positive control and check that reconciliation is healthy and the relevant inventory is complete. Keep with a reason and future recheck date, kill only by taskId, or record gone.'
+    `Task ${candidate.taskId} is a process-lifecycle candidate. ` +
+    'Read payload.processLifecycleCandidate for the current detector snapshot. Its liveness and metrics are timestamped host-side observations; present is a positive baseline only, and unknown is not dead. Use processes:list for current evidence. ' +
+    namespaceProbeCaveat +
+    'For unaccounted residue, a taskId-filtered read cannot prove absence. Read payload.processLifecycleCandidate.scopeUnit and use processes:list { scopeUnit, live:true }; inspect only live.exactScopeUnitMatches entries with kind "unaccounted". An empty result is not proof by itself. If scopeUnit is missing, use an unfiltered processes:list { live:true } and inspect the complete live.unaccountedGroups inventory and listed PIDs. ' +
+    'Read cgroup CPU evidence from payload.processLifecycleCandidate.metrics.cpuActivity; active means usage_usec changed between its timestamps, idle means unchanged, and unknown means there is no valid comparison. ' +
+    'Before recording gone, require a known-present same-kind unaccounted positive control from an unfiltered census. Read the control twice and confirm tasks[].ageSec advances by elapsed wall time; verify live.degraded, live.ownedTruncated, and live.foreignTruncated are false and the unaccounted group/PID counts match their complete lists. unaccounted with confined:false does not prove abandonment; require positive abandonment evidence before a kill. Keep with a reason and future recheck date, kill only by taskId, or record gone.'
   );
+}
+
+export function lifecycleCandidatePayload(candidate: LifecycleCandidate, observedAt: string) {
+  return {
+    taskId: candidate.taskId,
+    scopeUnit: candidate.scopeUnit,
+    observedAt,
+    taskClass: candidate.taskClass,
+    state: candidate.state,
+    launchedBy: candidate.launchedBy,
+    startedAt: candidate.startedAt,
+    endedAt: candidate.endedAt,
+    kinds: candidate.kinds,
+    reasons: candidate.reasons,
+    liveness: candidate.liveness,
+    metrics: candidate.metrics,
+    previousVerdict: candidate.previousVerdict,
+  };
 }
 
 export interface LifecycleSweepResult {
@@ -562,7 +818,10 @@ export async function runLifecycleJudgementSweep(
     deps.resolveLauncherStates(launcherIds),
     deps.readLatestVerdicts(input.workspaceId, taskIds),
   ]);
-  const enforcement = await deps.enforceVerdicts(latestVerdicts);
+  const enforcement = await deps.enforceVerdicts(latestVerdicts, {
+    workspaceId: input.workspaceId,
+    harnessSlug: input.harnessSlug,
+  });
   const settledVerdictTaskIds = new Set(
     enforcement.filter((outcome) => outcome.settled).map((outcome) => outcome.taskId),
   );
@@ -592,10 +851,35 @@ export async function runLifecycleJudgementSweep(
   const open = (await deps.listOpenCandidateItems(input.workspaceId)).filter(
     (item) =>
       !item.takenBy &&
+      !item.assignee &&
       !settledVerdictTaskIds.has(item.taskId) &&
       latestVerdicts.get(item.taskId)?.decision !== 'gone',
   );
   if (open.length === 0) {
+    return {
+      rowsInspected: rows.length,
+      candidates: evaluation.candidates.length,
+      suppressedByKeep: evaluation.suppressedByKeep.length,
+      suppressedByVerdict: evaluation.suppressedByVerdict.length,
+      probesPersisted,
+      enforcement,
+      candidateItems,
+      openItems: [],
+      judge: { attempted: false, idempotencyKey: null },
+    };
+  }
+
+  // Reserve ownership before the asynchronous child boot. The first version
+  // spawned an agent and left the candidate rows unclaimed until its first turn;
+  // an hourly boundary could then use a new idempotency key to launch a duplicate.
+  // `spawnAgentInHarness` accepts a pre-minted spawnId, so the child owns exactly
+  // the same claims when it starts and can idempotently claim them again in its brief.
+  const spawnId = `s-${nowMs}-${randomUUID().slice(0, 8)}`;
+  // The spawned operator's work-item caller identity is role-qualified. Store
+  // that exact owner id so the judge can complete the candidate it was assigned.
+  const judgeOwnerId = `system:${LIFECYCLE_JUDGE_ROLE}/${spawnId}`;
+  const claimed = await deps.claimOpenCandidateItems(open, judgeOwnerId);
+  if (claimed.length === 0) {
     return {
       rowsInspected: rows.length,
       candidates: evaluation.candidates.length,
@@ -614,8 +898,15 @@ export async function runLifecycleJudgementSweep(
     workspaceId: input.workspaceId,
     harnessSlug: input.harnessSlug,
     idempotencyKey,
-    brief: lifecycleJudgeBrief(open),
+    spawnId,
+    brief: lifecycleJudgeBrief(claimed),
   });
+  // A failure or an idempotency hit on a different spawn did not attach this
+  // preclaim to a child. Compare-and-release only our own claims; a concurrent
+  // holder can never be cleared by this recovery path.
+  if (!spawned.ok || spawned.deduped || spawned.spawnId !== spawnId) {
+    await deps.releaseCandidateItems(claimed, judgeOwnerId);
+  }
   return {
     rowsInspected: rows.length,
     candidates: evaluation.candidates.length,
@@ -624,7 +915,7 @@ export async function runLifecycleJudgementSweep(
     probesPersisted,
     enforcement,
     candidateItems,
-    openItems: open.map((item) => item.id),
+    openItems: claimed.map((item) => item.id),
     judge: {
       attempted: true,
       idempotencyKey,
@@ -674,7 +965,9 @@ export const nodeLifecycleJudgementDeps: LifecycleJudgementDeps = {
        WHERE workspace_id = ${workspaceId}
          AND payload #>> '{processLifecycleCandidate,taskId}' = ANY(${taskIds as string[]}::text[])
          AND payload #> '{out,processLifecycleVerdict}' IS NOT NULL
-       ORDER BY payload #>> '{processLifecycleCandidate,taskId}', updated_ts DESC
+       ORDER BY payload #>> '{processLifecycleCandidate,taskId}',
+                payload #>> '{out,processLifecycleVerdict,decidedAt}' DESC NULLS LAST,
+                updated_ts DESC
     `;
     for (const row of rows) {
       const verdict = processLifecycleVerdictFrom(row.verdict);
@@ -683,26 +976,14 @@ export const nodeLifecycleJudgementDeps: LifecycleJudgementDeps = {
     return out;
   },
 
-  enforceVerdicts: (verdicts) => enforceLifecycleVerdicts(verdicts),
+  enforceVerdicts: (verdicts, context) =>
+    enforceLifecycleVerdicts(verdicts, nodeLifecycleVerdictEnforcementDeps, context),
 
   persistProbes: (updates) => mergeTaskLifecycleProbes(updates),
 
   async upsertCandidate(conditionKey, candidate, fallbackHarness) {
     const harness = candidate.harnessSlug ?? fallbackHarness;
-    const payload = {
-      taskId: candidate.taskId,
-      scopeUnit: candidate.scopeUnit,
-      observedAt: new Date().toISOString(),
-      taskClass: candidate.taskClass,
-      state: candidate.state,
-      launchedBy: candidate.launchedBy,
-      startedAt: candidate.startedAt,
-      endedAt: candidate.endedAt,
-      kinds: candidate.kinds,
-      reasons: candidate.reasons,
-      metrics: candidate.metrics,
-      previousVerdict: candidate.previousVerdict,
-    };
+    const payload = lifecycleCandidatePayload(candidate, new Date().toISOString());
     const result = await upsertConditionWorkItem(conditionKey, {
       kind: 'task',
       harness,
@@ -722,7 +1003,12 @@ export const nodeLifecycleJudgementDeps: LifecycleJudgementDeps = {
 
   async listOpenCandidateItems(workspaceId) {
     const { sql } = getOrgPg();
-    const rows = await sql<Array<{ id: string; task_id: string; harness_slug: string | null; taken_by: string | null }>>`
+    const rows = await sql<Array<{
+      id: string;
+      task_id: string;
+      harness_slug: string | null;
+      taken_by: string | null;
+    }>>`
       SELECT feature_id AS id,
              payload #>> '{processLifecycleCandidate,taskId}' AS task_id,
              harness_slug, taken_by
@@ -730,8 +1016,11 @@ export const nodeLifecycleJudgementDeps: LifecycleJudgementDeps = {
        WHERE workspace_id = ${workspaceId}
          AND NOT (status = ANY(${ANY_FAMILY_TERMINAL_STATES as string[]}::text[]))
          -- Open is not unclaimed: the judge leaves status open while working.
-         -- A dead holder is released by the existing stale-claim reaper;
-         -- do not launch another judge against a still-owned candidate.
+         -- In this BASE table every family (feature AND issue) stores its holder
+         -- in taken_by. The 'assignee' column exists only on the engineer_issues
+         -- VIEW (taken_by AS assignee), so naming it here throws 42703 on every
+         -- pass (WI-10005157). A dead holder is released by the stale-claim
+         -- reaper; do not launch another judge against a still-owned item.
          AND (taken_by IS NULL OR taken_by = '')
          AND COALESCE(payload #>> '{processLifecycleCandidate,taskId}', '') <> ''
        ORDER BY updated_ts ASC, feature_id ASC
@@ -744,7 +1033,25 @@ export const nodeLifecycleJudgementDeps: LifecycleJudgementDeps = {
     }));
   },
 
-  spawnJudge: ({ workspaceId, harnessSlug, idempotencyKey, brief }) =>
+  async claimOpenCandidateItems(items, assignee) {
+    const claimed: OpenLifecycleCandidateItem[] = [];
+    for (const item of items) {
+      const result = await claimWorkItem(item.id, assignee, { harness: item.harnessSlug ?? undefined });
+      if (result) claimed.push({ ...item, takenBy: assignee, assignee });
+    }
+    return claimed;
+  },
+
+  async releaseCandidateItems(items, expectedAssignee) {
+    await Promise.all(items.map((item) => releaseWorkItem(item.id, {
+      harness: item.harnessSlug ?? undefined,
+      expectedAssignee,
+      releasingOwnerId: expectedAssignee,
+      announceClaimable: false,
+    })));
+  },
+
+  spawnJudge: ({ workspaceId, harnessSlug, idempotencyKey, spawnId, brief }) =>
     spawnAgentInHarness({
       workspaceId,
       harness: harnessSlug,
@@ -753,6 +1060,7 @@ export const nodeLifecycleJudgementDeps: LifecycleJudgementDeps = {
       tier: 'quick',
       accountOverride: 'auto',
       brief,
+      spawnId,
       spawnCaller: 'task-manager/lifecycle-judgement',
       parentRole: 'system:task-reconcile',
       turnTrigger: 'cron',

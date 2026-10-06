@@ -1,0 +1,28 @@
+-- Optional provenance badge for third-party repos (cupboard-release-pipeline-
+-- content-trust-2026-09-16 P-010, SPEC-P-010 / SPEC-P-010b, AUTO-BAR R-6;
+-- D-055/D-056).
+--
+-- `verified_by` records WHO vouched for the bytes a listing pins, as a browse
+-- badge and nothing more:
+--
+--   'worker'       the Worker's OWN pin + content scan (P-001/P-003) is the only
+--                  verification. This is every listing's baseline and the value
+--                  stored when a publisher has no attestation, when the
+--                  attestation does not verify, or when GitHub could not be
+--                  asked. The listing is still created — an attestation can
+--                  never be a precondition for publishing.
+--   'attestation'  ADDITIONALLY a Sigstore build attestation produced by the
+--                  reusable workflow Papercusp/cupboard-actions verify.yml binds
+--                  this listing's `<ref>/` tree digest (`pinned_tree_digest`)
+--                  and commit to that workflow, and the Worker verified it
+--                  against the Sigstore trusted root itself.
+--
+-- 'attestation' is never a substitute for the pin and scan: it is set only AFTER
+-- the Worker has pinned and scanned the bytes, and it is a label on a row the
+-- Worker already trusts for its own reasons (R-6).
+--
+-- NOT NULL DEFAULT 'worker': every existing row was pinned/scanned by the Worker
+-- alone, so 'worker' is the truthful backfill, and a row nobody has attested
+-- must never read as attested. The CHECK keeps a typo from minting a third
+-- trust tier that the browse UI would have to guess at.
+ALTER TABLE harnesses ADD COLUMN verified_by TEXT NOT NULL DEFAULT 'worker' CHECK (verified_by IN ('worker', 'attestation'));

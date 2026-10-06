@@ -32,6 +32,25 @@ const APP_DIR = resolve(ROOT, 'apps/operator-vite');
 const OPERATOR_DIR = resolve(ROOT, 'apps/operator');
 const PACKAGES_DIR = resolve(ROOT, 'packages');
 
+// These exact operator-core leaves are deliberately imported by browser-facing
+// UI code. They live under otherwise backend-heavy subtrees, so keep the
+// package seam closed by default and open only these paths. The checker walks
+// each allowed leaf's source and relative imports, preserving the boundary
+// guard if one grows a server-only dependency later.
+const CLIENT_SAFE_OPERATOR_CORE_PREFIX = '@papercusp/operator-core/lib/';
+const CLIENT_SAFE_OPERATOR_CORE_LEAVES = new Set([
+  'agent-tools/coordination/owner-chat-turn',
+  'agent-tools/coordination/status-display',
+  'sync-resolver/agent-runs-list-query',
+  'sync-resolver/coord-ui-projection',
+  'sync-resolver/learning-retain-types',
+]);
+
+function isClientSafeOperatorCoreLeaf(spec) {
+  return spec.startsWith(CLIENT_SAFE_OPERATOR_CORE_PREFIX) &&
+    CLIENT_SAFE_OPERATOR_CORE_LEAVES.has(spec.slice(CLIENT_SAFE_OPERATOR_CORE_PREFIX.length));
+}
+
 /** Modules forbidden in the client graph (defined by vite.config.ts shims and safety rules) */
 const FORBIDDEN_PATTERNS = [
   // Node.js built-ins — NEVER in browser
@@ -92,6 +111,7 @@ function getPackageName(spec) {
  */
 export function isForbidden(specifier) {
   if (specifier.startsWith('.') || specifier.startsWith('/')) return false;
+  if (isClientSafeOperatorCoreLeaf(specifier)) return false;
   const pkg = getPackageName(specifier);
   return FORBIDDEN_PATTERNS.some((p) => p.test(specifier) || p.test(pkg));
 }
@@ -122,6 +142,11 @@ function loadSourceFile(path) {
  * @returns {string | null} Resolved path, or null if not found
  */
 export function resolveModulePath(spec, fromFile) {
+  if (isClientSafeOperatorCoreLeaf(spec)) {
+    const path = resolve(PACKAGES_DIR, 'operator-core', 'lib', spec.slice(CLIENT_SAFE_OPERATOR_CORE_PREFIX.length));
+    return findFile(path);
+  }
+
   if (spec.startsWith('@/')) {
     // @/ alias → apps/operator
     const path = resolve(OPERATOR_DIR, spec.slice(2));

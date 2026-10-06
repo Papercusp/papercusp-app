@@ -4,18 +4,19 @@
 # Edit the doc with docs:author { overwrite: true } — a hand-edit here is REFUSED by
 # the next projection (it cannot tell your edit from corruption), so it blocks the
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
-title: ":3170 flaps to ERR_CONNECTION_REFUSED every ~5-7min — it's papercup-staging-sync, not load or a crash"
-description: "The staging operator (:3170) self-restarts on its own schedule via papercup-staging-sync.timer, outside dev:restart's drain/coalesce path — a real ~10-13s hard-down window roughly every 5-7 minutes, whenever staging has advanced (near-continuous under git-sync). dev:service_health now surfaces a recentRestartNote so this is diagnosable instead of mysterious (EI-13221)."
+title: ":3170 connection refusals during staging sync — diagnose the coordinated restart path"
+description: "The staging sync timer can trigger a coordinated :3170 restart when server code changes; SPA-only advances skip it and active clients can defer the sync. The current script uses dev:restart with its drain/coalesce path and verifies the exact served staging SHA."
+type: Insight
 discovered: 2026-07-19
-tags: [staging, "3170", availability, systemd, flap, connection-refused, restart, EI-13221]
+tags: ["staging", "3170", "availability", "systemd", "flap", "connection-refused", "restart", "EI-13221"]
 status: active
 documents:
-  - apps/operator/bin/release/sync-staging-checkout.sh
-  - apps/operator/bin/release/setup-release-checkout.sh
-  - packages/operator-core/lib/agent-tools/dev/restart.ts
-  - packages/operator-core/lib/agent-tools/dev/service_health.ts
-  - packages/operator-core/lib/agent-tools/dev/systemd-service-probe.ts
-type: Insight
+  - "apps/operator/bin/release/sync-staging-checkout.sh"
+  - "apps/operator/lib/release/sync-staging-checkout.test.ts"
+  - "apps/operator/bin/release/setup-release-checkout.sh"
+  - "packages/operator-core/lib/agent-tools/dev/restart.ts"
+  - "packages/operator-core/lib/agent-tools/dev/service_health.ts"
+  - "packages/operator-core/lib/agent-tools/dev/systemd-service-probe.ts"
 generated:
   by: agent
   at: 2026-07-19
@@ -27,7 +28,9 @@ A session actively using the staging operator (`http://127.0.0.1:3170`) — a
 `verdict` browser session, a raw `curl`, a health probe — gets a clean 200,
 then moments later `ERR_CONNECTION_REFUSED` / `net::ERR_CONNECTION_REFUSED` /
 a raw `fetch failed` against the exact same URL, with no code change and no
-one having run `dev:restart` or `systemctl restart`. It "self-recovers" a few
+one having deliberately requested a restart. The staging sync timer can request
+a coordinated `dev:restart` automatically, so a sync-triggered cutover may occur
+without anyone invoking the tool interactively. The port can recover a few
 seconds later. Easy to misdiagnose as load, a memory-watchdog recycle, or a
 regression in whatever you were just testing.
 
@@ -53,9 +56,10 @@ Its driven service, `papercup-staging-sync.service`, runs
    git compare).
 2. Otherwise fast-forwards the isolated checkout + rebuilds the SPA (reusing
    `setup-release-checkout.sh`, same machinery as a real release cutover).
-3. **Then runs a plain `systemctl --user restart papercup-staging-api.service`**
-   — a genuine SIGKILL-then-restart cycle, ~10-13s hard down, confirmed live
-   via `journalctl --user -u papercup-staging-api.service`:
+3. **In the original 2026-07-19 implementation, it ran a plain
+   `systemctl --user restart papercup-staging-api.service`** — a genuine
+   SIGKILL-then-restart cycle, measured as a ~10-13s hard-down window and
+   confirmed at the time via `journalctl --user -u papercup-staging-api.service`:
 
    ```
    Stopping papercup-staging-api.service ...
@@ -65,28 +69,19 @@ Its driven service, `papercup-staging-sync.service`, runs
    Started papercup-staging-api.service ...          # ~10-13s later
    ```
 
-Given git-sync auto-commits the whole fleet's work to `staging` continuously
-(step 1's no-op almost never fires on a busy fleet), this restart cycle fires
-essentially **every 5-7 minutes, indefinitely**, for as long as the fleet is
-active. Anyone probing `:3170` for more than a couple of minutes has real
-odds of landing a request inside that window.
+In the original report, frequent fleet commits made the timer advance the
+checkout and attempt a server restart on many consecutive ticks. The timer's
+5-minute cadence is an explicit owner tradeoff (freshness vs. thrash), not by
+itself a bug. The subsequent WI-5710 gates made the decision depend on changed
+server paths and live clients: SPA/docs/tests-only advances skip the process
+restart, and a live client can defer the whole sync up to the configured stale
+ceiling.
 
-**This is a real gap against the repo's own restart policy.** CLAUDE.md /
-`repo-conventions.mdx` (and `dev:restart`'s own tool guidance) are explicit:
-*"Never a raw `systemctl --user restart papercup-staging-api.service`"* —
-that's exactly what step 3 does, just from automation instead of a human. It
-bypasses:
-- **the drain** (`dev:restart`'s `guardResource` exclusive-hold — existing
-  users are given a chance to finish before the restart lands),
-- **the coalesce cooldown** (`staging-server-cooldown`, `STAGING_COOLDOWN_SEC`
-  = 120s in `dev/restart.ts`) — so an agent's `dev:restart` and the timer's own
-  restart don't know about each other and can compound.
-
-The timer's 5-minute cadence is an explicit, documented owner tradeoff
-(freshness vs. thrash — see the `.timer` unit's own comment), not itself a
-bug; the bug is that the *mechanism* it uses to apply that tradeoff is the
-exact uncoordinated raw-restart anti-pattern WI-4221 already named and fixed
-for humans/agents, just never closed for this one automated caller.
+The original implementation also used a raw `systemctl --user restart`, which
+violated the repository's restart policy and bypassed `dev:restart`'s resource
+drain and coalesce cooldown. That finding was valid for the 2026-07-19 code but
+is no longer the current behavior. The current coordinated path is documented
+below; it preserves those restart controls and has no raw-restart fallback.
 
 ## Fix (EI-13221)
 
@@ -111,6 +106,30 @@ for humans/agents, just never closed for this one automated caller.
 3. Documented the independent restart cadence + the diagnostic path in
    `repo-conventions.mdx`'s two-port section (previously silent on it — the
    section described only the deliberate human/agent restart path).
+
+## Current coordinated-restart contract (2026-10-01)
+
+The current `sync-staging-checkout.sh` requests `dev:restart` through `ptool`
+against the staging operator at `http://127.0.0.1:3170`, with
+`target: "staging"`, `confirm: true`, `authorize: true`, and a bounded
+`git_sync_drain_sec` (default 45 seconds, clamped to the oldest supported
+operator schema). This follows the normal `dev:restart` resource-drain and
+coalesce path. The sync script downgrades its checkout lock to shared before the
+request and holds it through readiness verification.
+
+The restart can close the HTTP stream that carried the ptool response, so the
+script verifies a changed systemd MainPID and the exact target source SHA from
+`:3170` health. Once that proof exists, it terminates only the ptool client; it
+does not repeat the restart mutation. A pre-dispatch refusal or invalid result
+fails loudly. A recognized transient git-sync barrier/collision refusal may
+defer to the next tick while the served build is younger than
+`PAPERCUSP_STAGING_SYNC_MAX_STALE_SEC` (default 1800 seconds); it fails loudly
+at the ceiling. There is no raw `systemctl restart` fallback.
+
+`apps/operator/lib/release/sync-staging-checkout.test.ts` covers this contract,
+including the coordinated `dev:restart` arguments and the absence of a raw
+restart invocation. Use that focused suite as the recurrence guard when this
+path changes.
 
 ## Root-cause fix (WI-5710, 2026-07-26) — the branch moving is not the code changing
 
@@ -168,9 +187,9 @@ is deliberately *not* built here — with the stale-chunk 404s already fixed by
 `dist-chunk-retention-default-2026-07-26` and the cadence cut by these gates,
 that architectural change no longer pays for itself.
 
-Behaviour is locked by `apps/operator/lib/release/sync-staging-checkout.test.ts`
-(27 tests), including structural guards that the shipped script still *calls*
-the gates and still orders the deferral before the checkout advance.
+Behaviour is locked by `apps/operator/lib/release/sync-staging-checkout.test.ts`,
+including structural guards that the shipped script calls the gates and orders
+deferral before the checkout advance.
 
 ## The tell
 
@@ -181,7 +200,8 @@ it as a real outage, a memory-watchdog recycle, or evidence your own change
 broke something.
 
 If instead `:3170` seems to be serving **stale** code, check the sync journal
-for a `deferring sync` line — that is gate 2 holding the checkout because your
-own session (or another) is connected. It clears when you disconnect, at the
-staleness ceiling, or immediately via `dev:restart { target: 'staging' }`, which
-is unaffected by either gate.
+for a `deferring sync` line — that is gate 2 holding the checkout because a
+client is connected. It clears when clients disconnect or at the staleness
+ceiling. For an intentional restart, use `dev:restart { target: 'staging' }`;
+it coordinates the service drain and coalesces recent restarts, and can report a
+busy staging-sync barrier rather than bypassing it with raw systemd.

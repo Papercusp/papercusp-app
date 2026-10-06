@@ -20,13 +20,15 @@ import { useRef } from "react";
 import { Cloud, Plus, ShieldCheck, X } from "lucide-react";
 import { Button } from "@/app/harness/Button";
 import { TextInput } from "@/app/harness/TextInput";
+import { Select } from "@/app/harness/Select";
+import { resolveBrowserApiTransport } from "../../lib/hosted-browser-api";
 import {
   Field,
   StageHeader,
   StatusBadge,
   useFocusLifecycle,
 } from "./stage-primitives";
-import { PROVIDERS } from "./workspace-host-actions";
+import { PROVIDERS, type WorkspaceHostActionArgs } from "./workspace-host-actions";
 import {
   formatTimestamp,
   type ProviderTarget,
@@ -39,6 +41,19 @@ export interface ConnectDraft {
   credentialRef: string;
   projectId: string;
   serviceAccountEmail: string;
+  accountId: string;
+  region: string;
+  subnetId: string;
+  imageId: string;
+  kmsKeyArn: string;
+  instanceProfileArn: string;
+  vpcId: string;
+  securityGroupIds: string;
+  launchTemplateId: string;
+  credentialMethod: "default-chain" | "shared-profile" | "assume-role";
+  profile: string;
+  roleArn: string;
+  externalIdRef: string;
 }
 
 export const EMPTY_CONNECT_DRAFT: ConnectDraft = {
@@ -46,16 +61,53 @@ export const EMPTY_CONNECT_DRAFT: ConnectDraft = {
   credentialRef: "",
   projectId: "",
   serviceAccountEmail: "",
+  accountId: "",
+  region: "us-east-1",
+  subnetId: "",
+  imageId: "",
+  kmsKeyArn: "",
+  instanceProfileArn: "",
+  vpcId: "",
+  securityGroupIds: "",
+  launchTemplateId: "",
+  credentialMethod: "default-chain",
+  profile: "",
+  roleArn: "",
+  externalIdRef: "",
 };
 
-/** Every field of the GCP admission contract must be non-blank. */
-export function connectDraftComplete(draft: ConnectDraft): boolean {
-  return Boolean(
-    draft.label.trim() &&
-      draft.credentialRef.trim() &&
-      draft.projectId.trim() &&
-      draft.serviceAccountEmail.trim(),
-  );
+/** Admission uses the selected provider's fields; secrets are never requested. */
+export function connectDraftComplete(draft: ConnectDraft, target: ProviderTarget = "gcp"): boolean {
+  if (!draft.label.trim() || !draft.credentialRef.trim()) return false;
+  if (target === "gcp") return Boolean(draft.projectId.trim() && draft.serviceAccountEmail.trim());
+  if (target !== "aws") return false;
+  return /^\d{12}$/.test(draft.accountId.trim()) &&
+    [draft.region, draft.subnetId, draft.imageId, draft.kmsKeyArn,
+      draft.instanceProfileArn, draft.vpcId, draft.securityGroupIds, draft.launchTemplateId]
+      .every((value) => Boolean(value.trim())) &&
+    (draft.credentialMethod !== "shared-profile" || Boolean(draft.profile.trim())) &&
+    (draft.credentialMethod !== "assume-role" || Boolean(draft.roleArn.trim()));
+}
+
+export function connectionActionFromDraft(target: ProviderTarget, draft: ConnectDraft):
+  Extract<WorkspaceHostActionArgs, { action: "connect" }> | null {
+  if (!connectDraftComplete(draft, target)) return null;
+  const common = { action: "connect" as const, label: draft.label.trim(), credentialRef: draft.credentialRef.trim() };
+  if (target === "gcp") return { ...common, target, projectId: draft.projectId.trim(), serviceAccountEmail: draft.serviceAccountEmail.trim() };
+  if (target !== "aws") return null;
+  const credentialSource = draft.credentialMethod === "shared-profile"
+    ? { environment: "local" as const, method: "shared-profile" as const, profile: draft.profile.trim() }
+    : draft.credentialMethod === "assume-role"
+      ? { environment: "local" as const, method: "assume-role" as const, roleArn: draft.roleArn.trim(),
+          ...(draft.profile.trim() ? { sourceProfile: draft.profile.trim() } : {}),
+          ...(draft.externalIdRef.trim() ? { externalIdRef: draft.externalIdRef.trim() } : {}) }
+      : { environment: "local" as const, method: "default-chain" as const };
+  return { ...common, target, credentialSource,
+    accountId: draft.accountId.trim(), region: draft.region.trim(), subnetId: draft.subnetId.trim(),
+    imageId: draft.imageId.trim(), kmsKeyArn: draft.kmsKeyArn.trim(), instanceProfileArn: draft.instanceProfileArn.trim(),
+    vpcId: draft.vpcId.trim(), launchTemplateId: draft.launchTemplateId.trim(),
+    securityGroupIds: [...new Set(draft.securityGroupIds.split(",").map((id) => id.trim()).filter(Boolean))],
+  };
 }
 
 export function ConnectStage({
@@ -81,6 +133,11 @@ export function ConnectStage({
 }) {
   const activeProvider =
     PROVIDERS.find((provider) => provider.target === connectTarget) ?? null;
+  const setupTemplateReady = /^\d{12}$/.test(draft.accountId.trim()) &&
+    /^(?!us-gov-|cn-)[a-z]{2}(?:-[a-z]+)+-\d{1,2}$/.test(draft.region.trim());
+  const setupTemplateUrl = setupTemplateReady
+    ? `/api/workspace-hosts/aws-setup-template?${new URLSearchParams({ accountId: draft.accountId.trim(), region: draft.region.trim() })}`
+    : null;
 
   /*
    * The panel is a DISCLOSURE, so it owes the disclosure focus contract; it is
@@ -113,6 +170,8 @@ export function ConnectStage({
 
   return (
     <section
+      data-tutorial-target="cloud-connection"
+      tabIndex={-1}
       className={styles.stage}
       aria-labelledby="connect-stage-heading"
       data-stage="connect"
@@ -232,8 +291,8 @@ export function ConnectStage({
             onSubmit={(event) => {
               event.preventDefault();
               if (
-                !connectDraftComplete(draft) ||
-                activeProvider.target !== "gcp" ||
+                !connectDraftComplete(draft, activeProvider.target) ||
+                !activeProvider.supported ||
                 busyKeys.has("connect")
               )
                 return;
@@ -266,13 +325,15 @@ export function ConnectStage({
                 onChange={(event) =>
                   onDraftChange({ label: event.target.value })
                 }
-                placeholder="production-gcp"
+                placeholder={`production-${activeProvider.target}`}
                 aria-label="Connection label"
               />
             </Field>
             <Field
               label="Injected credential reference"
-              hint="Use adc://default or gcloud://active-user. Service-account key files are rejected."
+              hint={activeProvider.target === "aws"
+                ? "Use a reference to locally injected AWS credentials. Access keys never enter this form."
+                : "Use adc://default or gcloud://active-user. Service-account key files are rejected."}
             >
               {(hintId) => (
                 <TextInput
@@ -280,12 +341,13 @@ export function ConnectStage({
                   onChange={(event) =>
                     onDraftChange({ credentialRef: event.target.value })
                   }
-                  placeholder="adc://default"
+                  placeholder={activeProvider.target === "aws" ? "resolver://aws/default" : "adc://default"}
                   aria-label="Injected credential reference"
                   aria-describedby={hintId}
                 />
               )}
             </Field>
+            {activeProvider.target === "gcp" ? <>
             <Field
               label="Google Cloud project ID"
               hint="The project must be active and visible to the selected credential."
@@ -302,23 +364,57 @@ export function ConnectStage({
                 />
               )}
             </Field>
-            <Field
-              label="Runtime service account email"
-              hint="This identity is attached to the host VM; no key material is stored."
-            >
-              {(hintId) => (
-                <TextInput
-                  value={draft.serviceAccountEmail}
-                  onChange={(event) =>
-                    onDraftChange({ serviceAccountEmail: event.target.value })
-                  }
-                  placeholder="papercusp-host@papercusp-prod.iam.gserviceaccount.com"
-                  aria-label="Runtime service account email"
-                  aria-describedby={hintId}
-                />
-              )}
-            </Field>
 
+            <Field label="Runtime service account email" hint="This identity is attached to the host VM; no key material is stored.">
+              {(hintId) => <TextInput value={draft.serviceAccountEmail}
+                onChange={(event) => onDraftChange({ serviceAccountEmail: event.target.value })}
+                placeholder="papercusp-host@papercusp-prod.iam.gserviceaccount.com"
+                aria-label="Runtime service account email" aria-describedby={hintId} />}
+            </Field>
+            </> : activeProvider.target === "aws" ? <>
+              {resolveBrowserApiTransport().mode === "local" ? <Field
+                label="AWS setup template"
+                hint="Enter your account ID and region to download the CloudFormation template. Create the stack in your AWS account, then copy its Outputs into the resource fields below. Use OperatorRoleArn with the Assume an IAM role credential source."
+              >
+                {setupTemplateUrl ? <Button asChild variant="ghost" aria-label="Download AWS setup template">
+                  <a href={setupTemplateUrl} download>Download AWS setup template</a>
+                </Button> : <Button variant="ghost" disabled aria-label="Download AWS setup template">Download AWS setup template</Button>}
+              </Field> : null}
+              <Field label="Credential source" hint="Credentials resolve on this machine using the AWS SDK.">
+                {(hintId) => <Select value={draft.credentialMethod} ariaLabel="AWS credential source" describedBy={hintId}
+                  options={[
+                    { value: "default-chain", label: "Default credential chain" },
+                    { value: "shared-profile", label: "Shared AWS profile" },
+                    { value: "assume-role", label: "Assume an IAM role" },
+                  ]}
+                  onChange={(value) => onDraftChange({ credentialMethod: value as ConnectDraft["credentialMethod"] })} />}
+              </Field>
+              {draft.credentialMethod !== "default-chain" ? <Field label="AWS profile" hint={draft.credentialMethod === "assume-role" ? "Optional source profile; otherwise use the default chain." : "A named profile already configured on this machine."}>
+                {(hintId) => <TextInput value={draft.profile} aria-label="AWS profile" aria-describedby={hintId}
+                  onChange={(event) => onDraftChange({ profile: event.target.value })} />}
+              </Field> : null}
+              {draft.credentialMethod === "assume-role" ? <>
+                <Field label="IAM role ARN"><TextInput value={draft.roleArn} aria-label="IAM role ARN" onChange={(event) => onDraftChange({ roleArn: event.target.value })} /></Field>
+                <Field label="External ID reference" hint="Optional injected reference, never the external ID itself.">
+                  {(hintId) => <TextInput value={draft.externalIdRef} aria-label="External ID reference" aria-describedby={hintId} onChange={(event) => onDraftChange({ externalIdRef: event.target.value })} />}
+                </Field>
+              </> : null}
+              {([
+                ["accountId", "AWS account ID", "123456789012"],
+                ["region", "AWS region", "us-east-1"],
+                ["vpcId", "VPC ID", "vpc-0123456789abcdef0"],
+                ["subnetId", "Private subnet ID", "subnet-0123456789abcdef0"],
+                ["securityGroupIds", "Security group IDs", "sg-0123456789abcdef0"],
+                ["launchTemplateId", "Launch template ID", "lt-0123456789abcdef0"],
+                ["imageId", "AMI ID", "ami-0123456789abcdef0"],
+                ["instanceProfileArn", "Instance profile ARN", "arn:aws:iam::123456789012:instance-profile/papercusp-host"],
+                ["kmsKeyArn", "KMS key ARN", "arn:aws:kms:us-east-1:123456789012:key/your-key-id"],
+              ] as const).map(([key, label, placeholder]) => <Field key={key} label={label}
+                hint={key === "securityGroupIds" ? "Comma-separated groups with no public inbound access." : key === "subnetId" ? "Use a private subnet with outbound access for the host." : undefined}>
+                {(hintId) => <TextInput value={draft[key]} aria-label={label} aria-describedby={hintId} placeholder={placeholder}
+                  onChange={(event) => onDraftChange({ [key]: event.target.value })} />}
+              </Field>)}
+            </> : null}
             <div className={styles.connectPanelActions}>
               <Button
                 variant="ghost"
@@ -331,8 +427,8 @@ export function ConnectStage({
                 variant="primary"
                 type="submit"
                 disabled={
-                  activeProvider.target !== "gcp" ||
-                  !connectDraftComplete(draft) ||
+                  !activeProvider.supported ||
+                  !connectDraftComplete(draft, activeProvider.target) ||
                   busyKeys.has("connect")
                 }
               >

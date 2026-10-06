@@ -19,6 +19,14 @@
  * operator, a bad response — each ends the turn normally with no output.
  */
 import { operatorBase, sessionId } from '../inject/core.mjs';
+// WI-10004945: is the CLI running this hook NESTED inside another agent? Such a CLI (a
+// `claude -p` run from an su's Bash tool, or under a capability:bash job) inherited the
+// su's PAPERCUSP_SID, so without this check its Stop would be bounced on the SU's owner
+// directives: a programmatic `claude -p` pushed into an extra turn about work it never
+// held. The per-CLI cached verdict; any failure answers false (the check runs as before).
+import { nestedCliCached } from './pc_nested_cli.mjs';
+
+export { nestedCliCached };
 
 /** Hard wall on the operator call; past it the turn ends unchecked. */
 export const CHECK_TIMEOUT_MS = 2500;
@@ -30,13 +38,19 @@ function truthy(v) {
 
 /**
  * The block reason for this Stop, or null to let the turn end.
- * @param {{ hook: Record<string, unknown>, env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch }} input
+ * @param {{ hook: Record<string, unknown>, env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch, isNested?: () => boolean }} input
  * @returns {Promise<string | null>}
  */
-export async function evaluateStop({ hook, env = process.env, fetchImpl = globalThis.fetch }) {
+export async function evaluateStop({
+  hook,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  isNested = nestedCliCached,
+}) {
   if (truthy(hook.stop_hook_active ?? hook.stopHookActive)) return null;
   const owner = sessionId(env);
   if (!owner) return null;
+  if (isNested()) return null;
   const params = new URLSearchParams({ owner });
   if (env.PAPERCUSP_WORKSPACE) params.set('workspace', env.PAPERCUSP_WORKSPACE);
   const res = await fetchImpl(`${operatorBase(env)}/api/agent-mcp/turn-end-directive-check?${params}`, {

@@ -1,6 +1,6 @@
 /** Dedicated, frozen acceptance-grader launch for the plan completion gate. */
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import launchAgentTool from './agent-tools/capability/launch-agent';
 import { resolveAgentIdentity } from './agent-tools/coordination/identity';
 import { ACCEPTANCE_DRAIN_ACTOR } from './agent-tools/plans/acceptance-drain-filing';
@@ -20,6 +20,7 @@ import type { LivenessVerdict } from './agent-tools/coordination/liveness-oracle
 // the fresh-judge prompt and the assigned-grader briefs must say so identically —
 // so the guidance is single-sourced beside the briefs, in grading-cascade.ts.
 import {
+  ACCEPTANCE_GRADING_BAR_SCOPE_GUIDANCE,
   ACCEPTANCE_CITATION_SPOT_CHECK_GUIDANCE,
   acceptanceReviewReservationGuidance,
   GRADING_CASCADE_FLAVOR,
@@ -373,6 +374,7 @@ const ACCEPTANCE_GRADER_FALLBACK = {
 export type AcceptanceGraderTerminalFailureCode =
   | 'model_quota_exhausted'
   | 'startup_connection_stalled'
+  | 'startup_first_turn_stalled'
   | 'inference_gateway_error'
   /**
    * WI-10002155: the launcher's OWN structured receipt said the kickoff was
@@ -398,7 +400,13 @@ export type AcceptanceGraderTerminalFailureCode =
   /** A completed grading auditor turn explicitly says it could not reach platform tools. */
   | 'tool_surface_unavailable'
   /** A completed grading auditor turn explicitly declined to emit its audit. */
-  | 'grading_audit_refused';
+  | 'grading_audit_refused'
+  /**
+   * WI-10005295: the auditor finished a turn and then sat idle at its prompt past the
+   * reservation TTL while its card stayed pending, whatever the reason it stopped
+   * without emitting (misread target, tool error, unrecognised refusal wording).
+   */
+  | 'parked_without_emit';
 
 export interface AcceptanceGraderTerminalFailure {
   code: AcceptanceGraderTerminalFailureCode;
@@ -554,6 +562,20 @@ function normalizeAcceptanceGraderLog(rawLog: string): string {
  * plan evidence is rendered in the same log, so broad words would create false
  * positives from the material the judge was asked to inspect.
  */
+/**
+ * WI-10004926: parsers for psu-pty-host's startup-turn drop receipt, which
+ * apps/operator/scripts/psu-pty-host.mjs writes ONLY through
+ * `formatStartupTurnDroppedLine`. Both are `$`-anchored on the
+ * `within <N>ms over <N> attempt(s))` tail. The contract is pinned by
+ * apps/operator/lib/psu-pty-host-drop-line-contract.test.ts, which runs every
+ * drop reason through the real formatter into these patterns. Non-global, so
+ * `String#match` is stateless and the constants are safe to share.
+ */
+export const LAUNCHER_QUOTA_KICKOFF_DROP_RE =
+  /psu-pty-host:\s+launch kickoff DROPPED for [^\n()]{1,200}\s+\(submit verification aborted \(quota-blocked\) within \d+ms over \d+ attempt\(s\)\)$/im;
+export const LAUNCHER_KICKOFF_DROP_RE =
+  /psu-pty-host:\s+launch kickoff DROPPED for [^\n()]{1,200}\s+\((?!submit verification aborted \(quota-blocked\))[^\n]{1,240}? within \d+ms over \d+ attempt\(s\)\)$/im;
+
 export function classifyAcceptanceGraderTerminalFailure(
   rawLog: string,
   {
@@ -625,11 +647,7 @@ export function classifyAcceptanceGraderTerminalFailure(
   // host remains kernel-live, the launch dedupes forever, and the audit
   // reservation never settles. Recognize only the host-owned terminal receipt,
   // only for controlled callers, and reuse the existing quota fallback path.
-  const launcherQuotaDrop = allowLauncherQuotaDrop
-    ? normalized.match(
-        /psu-pty-host:\s+launch kickoff DROPPED for [^\n()]{1,200}\s+\(submit verification aborted \(quota-blocked\) within \d+ms over \d+ attempt\(s\)\)$/im,
-      )
-    : null;
+  const launcherQuotaDrop = allowLauncherQuotaDrop ? normalized.match(LAUNCHER_QUOTA_KICKOFF_DROP_RE) : null;
   if (launcherQuotaDrop) {
     return {
       code: 'model_quota_exhausted',
@@ -645,11 +663,7 @@ export function classifyAcceptanceGraderTerminalFailure(
   // EI-24118203560334206). The quota variant is excluded here so it keeps its
   // dedicated code and backoff above, and a log that shows any first-turn
   // progress is never retired on this signal alone.
-  const launcherKickoffDrop = allowLauncherKickoffDrop
-    ? normalized.match(
-        /psu-pty-host:\s+launch kickoff DROPPED for [^\n()]{1,200}\s+\((?!submit verification aborted \(quota-blocked\))[^\n]{1,240}? within \d+ms over \d+ attempt\(s\)\)$/im,
-      )
-    : null;
+  const launcherKickoffDrop = allowLauncherKickoffDrop ? normalized.match(LAUNCHER_KICKOFF_DROP_RE) : null;
   if (launcherKickoffDrop && !hasAcceptanceGraderFirstTurnProgress(normalized)) {
     return {
       code: 'launch_kickoff_dropped',
@@ -681,6 +695,37 @@ export function classifyAcceptanceGraderTerminalFailure(
   // mission. Require BOTH the exact gateway screen and Claude's completed-turn
   // footer, and keep recognition opt-in so quoted error prose in a general frozen
   // acceptance prompt cannot retire a healthy grader.
+  const codexOAuthInvalidRefreshError = allowInferenceGatewayError
+    ? normalized.match(
+        /API Error:\s*(?:unexpected status\s+)?502 Bad Gateway:\s+inference-gateway:\s+codex OAuth token refresh failed:[\s\S]{0,600}?refresh_token_invalidated[\s\S]{0,800}?✻\s*\p{L}{3,24}\s+for [^\n]{1,120}?\s*·\s*done\b/iu,
+      )
+    : null;
+  if (codexOAuthInvalidRefreshError) {
+    return {
+      code: 'inference_gateway_error',
+      evidence: codexOAuthInvalidRefreshError[0].replace(/\s+/g, ' ').trim().slice(0, 400),
+    };
+  }
+
+  // EI-24761061357755499: a routed judge can land on a model/backend that
+  // rejects the system-role frame before the grading brief is processed. The
+  // interactive PTY remains live at its prompt after the completed error turn,
+  // so task liveness is not mission liveness and the audit repair otherwise
+  // dedupes to this dead mission forever. Keep this inside the controlled
+  // inference-error opt-in: general acceptance evidence may quote the same
+  // provider error, while the grading-integrity brief cannot.
+  const unsupportedSystemRole = allowInferenceGatewayError
+    ? normalized.match(
+        /API Error:\s*400\s+role\s+['"]system['"]\s+is not supported on this model[\s\S]{0,800}?✻\s*\p{L}{3,24}\s+for [^\n]{1,120}?\s*·\s*done\b/iu,
+      )
+    : null;
+  if (unsupportedSystemRole) {
+    return {
+      code: 'inference_gateway_error',
+      evidence: unsupportedSystemRole[0].replace(/\s+/g, ' ').trim().slice(0, 400),
+    };
+  }
+
   const gatewayError = allowInferenceGatewayError
     ? normalized.match(
         /API Error:\s*(?:5\d{2}\s+inference-gateway internal error\.|Request rejected \(429\)(?:\s*·\s*inference-gateway:\s*(?:all accounts\s+throttled|account\s+'[^'\n]{1,120}'\s+paced\/paused);\s*retry after \d+s|\s+This request would exceed your\s+account(?:'|’)s rate limit\.\s*Please try again later\.))[\s\S]{0,800}?✻\s*\p{L}{3,24}\s+for [^\n]{1,120}?\s*·\s*done\b/iu,
@@ -747,8 +792,9 @@ export function classifyAcceptanceGraderTerminalFailure(
 /**
  * True when a normalized judge log shows ANY sign the judge entered its first
  * turn: a platform tool it would call, an MCP/tool-use trace, a thinking/working
- * spinner, or a transcript bullet. Shared by the startup-stall and kickoff-drop
- * classifiers so neither can retire a judge that actually started.
+ * spinner, or a transcript bullet. Shared by startup-stall and kickoff-drop
+ * classifiers plus the TTL-bounded stale-live-task check, so none can retire a
+ * judge that actually started.
  */
 function hasAcceptanceGraderFirstTurnProgress(normalized: string): boolean {
   return (
@@ -784,6 +830,151 @@ export function classifyAcceptanceGraderStartupStall(rawLog: string): Acceptance
     .trim()
     .slice(0, 400);
   return { code: 'startup_connection_stalled', evidence };
+}
+
+/**
+ * A live task can outlast the grading reservation while its CLI is still
+ * parked in startup UI. Process liveness is not first-turn progress: retire
+ * only when the task itself and its log have both been quiet for the caller's
+ * bounded stale window and the log contains no evidence that grading began.
+ *
+ * This is candidate-only. Callers must first check explicit terminal receipts,
+ * and should keep this opt-in at the stale-live-task recovery seam.
+ */
+export function classifyAcceptanceGraderNoFirstTurnStall(
+  rawLog: string,
+  {
+    startedAt,
+    logMtimeMs,
+    nowMs,
+    staleAfterMs,
+  }: {
+    startedAt: string;
+    logMtimeMs: number | null;
+    nowMs: number;
+    staleAfterMs: number;
+  },
+): AcceptanceGraderTerminalFailure | null {
+  const quiet = measureAcceptanceGraderQuietWindow({ startedAt, logMtimeMs, nowMs, staleAfterMs });
+  if (!quiet) return null;
+
+  const normalized = normalizeAcceptanceGraderLog(rawLog);
+  if (!normalized.trim() || hasAcceptanceGraderFirstTurnProgress(normalized)) return null;
+
+  return {
+    code: 'startup_first_turn_stalled',
+    evidence:
+      `no first-turn progress; task age ${quiet.taskAgeMs}ms and ` +
+      `grading log quiet for ${quiet.quietMs}ms`,
+  };
+}
+
+interface AcceptanceGraderQuietWindowInput {
+  startedAt: string;
+  logMtimeMs: number | null;
+  nowMs: number;
+  staleAfterMs: number;
+}
+
+/**
+ * Both the task AND its log must be older than `staleAfterMs`, measured on sane clocks.
+ * A live judge keeps writing its log (Claude's spinner and Codex's `Working ·` status
+ * tick while a turn or a long tool call runs), so a quiet log is the precondition every
+ * TTL-bounded live-task classifier shares. Any unmeasurable input answers null, which
+ * keeps the task: missing evidence is never permission to kill.
+ */
+function measureAcceptanceGraderQuietWindow({
+  startedAt,
+  logMtimeMs,
+  nowMs,
+  staleAfterMs,
+}: AcceptanceGraderQuietWindowInput): { taskAgeMs: number; quietMs: number } | null {
+  const startedAtMs = Date.parse(startedAt);
+  const measuredLogMtimeMs =
+    typeof logMtimeMs === 'number' && Number.isFinite(logMtimeMs) ? logMtimeMs : null;
+  if (
+    !Number.isFinite(startedAtMs) ||
+    measuredLogMtimeMs === null ||
+    !Number.isFinite(nowMs) ||
+    !Number.isFinite(staleAfterMs) ||
+    staleAfterMs <= 0 ||
+    startedAtMs > nowMs ||
+    measuredLogMtimeMs < startedAtMs - 5_000 ||
+    measuredLogMtimeMs > nowMs + 5_000 ||
+    nowMs - startedAtMs < staleAfterMs ||
+    nowMs - measuredLogMtimeMs < staleAfterMs
+  ) {
+    return null;
+  }
+  return {
+    taskAgeMs: Math.floor(nowMs - startedAtMs),
+    quietMs: Math.floor(nowMs - measuredLogMtimeMs),
+  };
+}
+
+/**
+ * Completed-turn markers of the two judge CLIs, matched on whitespace-stripped text
+ * because PTY redraws join and split words (WI-10003331). Claude ends a turn with
+ * `✻ <Verb> for <duration> · done`. Codex prints `Worked for <duration>` and flips its
+ * status bar to `Ready ·` (observed in task 0muqeanqadsbkcjglk2's log:
+ * `Worked for 20m 18s • 11:40 PMReady ·GPT-5.6-Sol high`).
+ */
+const COMPLETED_TURN_MARKERS: readonly RegExp[] = [
+  /✻[^●✻❯]{1,160}·done/gu,
+  /Workedfor\d+[hms][^●✻❯]{0,120}?Ready·/gu,
+];
+
+/** Turn activity that, AFTER the last completed-turn marker, means the judge resumed. */
+const RESUMED_TURN_ACTIVITY = /●|Working·|Working\(|Thinking·|Thinking\(|esctointerrupt/u;
+
+/**
+ * WI-10005295: a grading auditor that completed its turn and then sat idle at its prompt
+ * past `staleAfterMs`. Without this, a live-task guard keeps any such task "viable" and
+ * dedupes every later repair to it until a human kills it, whatever the reason the
+ * auditor stopped without emitting. The caller owns the "card still pending" premise:
+ * it only consults this for a pending audit's live task.
+ *
+ * Deliberately narrower than "idle": the latest turn-state in the log must be a
+ * completed-turn marker with no resumed activity after it, so a judge hung mid-turn
+ * (spinner frozen) or still inside a turn is not classified here.
+ */
+export function classifyAcceptanceGraderParkedWithoutEmit(
+  rawLog: string,
+  input: AcceptanceGraderQuietWindowInput,
+): AcceptanceGraderTerminalFailure | null {
+  const quiet = measureAcceptanceGraderQuietWindow(input);
+  if (!quiet) return null;
+
+  const compact = normalizeAcceptanceGraderLog(rawLog).replace(/\s+/g, '');
+  let markerStart = -1;
+  let markerEnd = -1;
+  for (const pattern of COMPLETED_TURN_MARKERS) {
+    for (const match of compact.matchAll(pattern)) {
+      const end = match.index + match[0].length;
+      if (end > markerEnd) {
+        markerStart = match.index;
+        markerEnd = end;
+      }
+    }
+  }
+  if (markerEnd < 0) return null;
+  if (RESUMED_TURN_ACTIVITY.test(compact.slice(markerEnd))) return null;
+
+  return {
+    code: 'parked_without_emit',
+    evidence:
+      `completed its turn and parked without emitting; task age ${quiet.taskAgeMs}ms, ` +
+      `log quiet for ${quiet.quietMs}ms; last marker ${compact.slice(markerStart, markerEnd).slice(0, 120)}`,
+  };
+}
+
+/** Read a grader log's mtime without turning a missing/unreadable file into evidence. */
+export function readAcceptanceGraderLogMtimeMs(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 export function readAcceptanceGraderLogTail(path: string): string {
@@ -1980,6 +2171,35 @@ export async function advanceGradingCascadeOnCard(input: {
         };
       },
     );
+    // The shared cascade records its final answer but deliberately leaves the
+    // terminal transition to the trigger. Unlike consult:reply and the expiry
+    // sweep, this card trigger is fire-and-forget from the grader's perspective:
+    // they are told to emit the card and not reply. Close the row here when the
+    // selected menu is complete and its minimum was met, or it stays `active`
+    // until the four-hour expiry even though grading has finished.
+    if (result.exhausted && !result.raced && !result.underFilled) {
+      const closed = (await sql`
+        UPDATE harness_shared.consult_state
+           SET state = 'closed_answered',
+               closed_at = ${nowIso}::timestamptz,
+               expires_at = NULL,
+               updated_at = ${nowIso}::timestamptz,
+               outcome = jsonb_build_object(
+                 'source', 'acceptance-grader-card',
+                 'reason', 'cascade_complete',
+                 'answeredBy', ${input.graderOwnerId}::text,
+                 'answeredAt', ${nowIso}::text
+               )
+         WHERE workspace_id = ${input.workspaceId}
+           AND conversation_id = ${row.conversation_id}
+           AND responder_id = ${input.graderOwnerId}
+           AND cascade_cursor = ${row.cascade_cursor}
+           AND state IN ('awaiting_responder', 'active')
+           AND closed_at IS NULL
+        RETURNING conversation_id
+      `) as unknown as Array<{ conversation_id: string }>;
+      if (!closed[0]) return { advanced: false, reason: 'raced' };
+    }
     return {
       advanced: result.advanced,
       ...(result.next ? { next: result.next.ownerId } : {}),
@@ -2334,6 +2554,7 @@ export async function launchAcceptanceGrader(
     `You are the dedicated acceptance judge for plan ${planSlug}. Grade rubric ${rubricRef} as a fresh non-implementer.`,
     'Do not modify implementation files, run shell commands, recruit peers, or broaden scope. Inspect the frozen evidence below, spot-check cited source/tests with read-only tools, and emit exactly one complete scorecards:emit verdict with concrete evidence for every criterion. After a successful create or unchanged-evidence result, the scorecard writer terminates this task automatically.',
     'If FROZEN_ACCEPTANCE_CONTEXT has contextIntegrity.degraded, follow its recovery recipe with read-only Papercusp tools BEFORE returning NOT GRADED. Recovered evidence is admissible only when plans:get still matches frozenIdentity.planVersion/planContentHash and the completion audit still matches frozenIdentity.auditSeq; on a read or identity mismatch, mark only the affected criteria unknown and name the exact gap.',
+    ACCEPTANCE_GRADING_BAR_SCOPE_GUIDANCE,
     ACCEPTANCE_CITATION_SPOT_CHECK_GUIDANCE,
     acceptanceReviewReservationGuidance(deps.reviewReservation),
     `Recorded rerun command (for provenance; your judge policy forbids executing Bash): ${rerun}`,

@@ -10,7 +10,8 @@ You have a **soft compaction limit** L — a token target set *below* your model
 hard context window, chosen for leanness and quality, not just to avoid overflow.
 Your live usage is injected each turn as `context: <used>/<L> (<pct>%)`.
 
-- **Set your own limit for the task**: `set_compaction_limit { tokens }`. It
+- **Set your own limit for the task**: `config:set-compaction-limit { limit }` (an
+  integer token count; no other args — a `tokens`/`reason` key is refused). It
   starts at a per-model default and is clamped so `L × 1.25` stays under your
   window. Raise it for wide-context work (a broad refactor), lower it to stay
   sharp on a tight task.

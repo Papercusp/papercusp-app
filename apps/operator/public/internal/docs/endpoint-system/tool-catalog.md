@@ -107,7 +107,7 @@ rather than round-tripping a tool), not as its own top-level singleton.
 
 ## Plugin tools (36)
 
-In-repo plugins under `libs/papercusp/plugins/<name>/`. They run without a principal (URL-baked spawn context); gates: role allowlist, capability tier, per-window quota. The **(36)** here is a snapshot that mixes static manifest tools (repomix 1 + firecrawl 3 + code2prompt 2 + fetch-plus 1 + design-phase 12 + example-tool-pack 2 = 21), the dynamically-registered gitnexus bridge (13), and historical entries — so it drifts from the live runtime count. Several in-repo plugin dirs (`cloudflare-pages`, `cloudflare-stack`, `example-tui-pane`, `github-repo`, `jira-sync`, `linear-sync`, `markdown-preview`, `notion-export`, `pi-coding`, `postgres-manager`, `pythonista`, `slack-notifier`, `starlight`) currently ship **0** tools. Treat the runtime `/api/plugins/tools` count as authoritative.
+In-repo plugins under `libs/papercusp/plugins/<name>/`. They run without a principal (URL-baked spawn context); gates: role allowlist, capability tier, per-window quota. The **(36)** here is a snapshot that mixes static manifest tools (repomix 1 + firecrawl 3 + code2prompt 2 + fetch-plus 1 + design-phase 12 + example-tool-pack 2 = 21), the dynamically-registered gitnexus bridge (13), and historical entries — so it drifts from the live runtime count. Several in-repo plugin dirs (`cloudflare-pages`, `cloudflare-stack`, `example-tui-pane`, `github-repo`, `markdown-preview`, `notion-export`, `pi-coding`, `postgres-manager`, `pythonista`, `slack-notifier`, `starlight`) currently ship **0** tools. Treat the runtime `/api/plugins/tools` count as authoritative.
 
 ### `@papercupai/repomix` (1)
 

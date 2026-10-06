@@ -1,0 +1,32 @@
+# Plan dependency reconciliation must preserve manual SUCCESS blockers
+URL: /internal/docs/agent-insights/plan-dependency-reconciliation-preserves-manual-success
+
+Why a feature-only dependency reader cannot authorize whole-endpoint replacement, and how canonical admission preserves independent blockers and their requirements.
+
+## Failure mechanism
+
+EI-25207568447564415 exposed a mismatch between a partial reader and a complete writer. Plan reconciliation reads feature-family blockers with `getFeatureBlockers`, subtracts its recorded plan-authored IDs, and unions the newly resolved plan blockers. The canonical dependency writer also understands issue-family endpoints. Passing the feature-only result as a whole-endpoint replacement therefore deleted independent issue blockers. Recreating retained feature edges with an omitted requirement also changed `success` to the default `settled`.
+
+An isolated real-Postgres regression reproduced both changes without any unlink call. Empty and replaced provenance fixtures lost the manual issue SUCCESS edge and weakened the manual feature SUCCESS edge under the previous writer. This distinguishes the deterministic reconciliation defect from a concurrent explicit unlink; it does not claim exclusive historical attribution for the live incident.
+
+## Canonical repair
+
+Reconciliation passes the previous plan-authored IDs in `priorBlockerIds` to the existing `syncFeatureBlockEdges` facade. The canonical `syncWorkItemDepEdges` writer resolves those identities, removes only prior owned edges absent from the desired set, and adds desired blockers through the same candidate-graph admission transaction. Independent endpoint families and harnesses remain outside the removal set. Calls without `priorBlockerIds` retain the existing complete replacement contract.
+
+An idempotent `add` preserves an existing edge's creator and satisfaction when the caller omits them. An explicit requirement still updates through the same seam. Candidate validation, canonical endpoint resolution, cycle rejection, transaction retries, and historical alias repair remain in the existing writer. The provenance marker advances only after a successful dependency write.
+
+## Recurrence guards
+
+The conventional reconciliation integration suite covers empty and replaced provenance, manual ISSUE and FEATURE SUCCESS edges, retained row identity/creator/timestamp/requirement, repeated reconciliation, strengthening a plan edge, and clearing the plan's final blocker. The admission integration suite verifies that an omitted requirement preserves SUCCESS while an explicit `settled` update remains effective.
+
+Run the focused proof with:
+
+```sh
+npm run test:file -- packages/operator-core/lib/plan-items/reconcile-linked-work-items.integration.test.ts packages/operator-core/lib/dbos/work-item-deps-admission.integration.test.ts packages/operator-core/lib/dbos/feature-blockers-edges.integration.test.ts packages/operator-core/lib/dbos/work-item-deps-store.test.ts
+```
+
+The lifecycle companion fixture explicitly establishes an owned dependant before expecting a blocker-abandonment refusal. Its released-idle control permits abandonment while the SUCCESS frontier remains blocked. This reflects migration 992's ownership prerequisite; the repair does not broaden production lifecycle policy.
+
+## Evidence boundary
+
+The bug's work-item checkpoint records the counterfactual reproduction and focused verification. This repair is source and isolated-suite work. Live P004 reconciliation, final readiness, full-rig acceptance, and release shipment retain their own evidence requirements.

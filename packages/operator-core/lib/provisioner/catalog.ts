@@ -79,15 +79,28 @@ export interface CatalogEntry {
     /** llama-server `--reasoning-budget N` (0 = disable thinking-mode preambles — part of
      *  the certified qwen3 config; WI-1596). Only meaningful when `backend === 'llama-server'`. */
     reasoningBudget?: number;
-    /** llama-server `-ngl N` (`--n-gpu-layers`) — how many transformer layers to offload to the
-     *  GPU. 999 means "all of them"; ABSENT means the engine's own default, which for a packaged
-     *  ollama build is effectively CPU-only. Only meaningful when `backend === 'llama-server'`.
+    /** llama-server `-ngl` (`--n-gpu-layers`) — how many transformer layers to offload to the
+     *  GPU: an exact count (999 = every layer), `'all'`, or `'auto'` (let `--fit` decide from the
+     *  device memory actually free at start). ABSENT means the flag is not written at all.
+     *  Only meaningful when `backend === 'llama-server'`.
      *
      *  Declare it whenever the deployed unit sets it. The drift guard COMPARES it, so a catalog
      *  that stays silent about a flag the unit sets reports drift — deliberately, and in line with
      *  this module's "never substitute a default" rule: an undeclared GPU-offload setting is
-     *  exactly what let a CPU-only fallback pass every green check (WI-39735, D-012). */
-    gpuLayers?: number;
+     *  exactly what let a CPU-only fallback pass every green check (WI-39735, D-012).
+     *
+     *  An ON-DEMAND backend must use `'auto'` with `fit: 'on'`, never a pinned count (WI-10006354).
+     *  It cold-starts into whatever GPU occupancy exists at that moment, and a pinned full offload
+     *  turns any co-tenant (embedding hosts, TTS, another operator) into `cudaMalloc failed: out of
+     *  memory` and a unit that never serves. */
+    gpuLayers?: number | 'auto' | 'all';
+    /** llama-server `--fit on|off` — adjust the arguments left unset (here `-ngl auto`) so the model
+     *  fits the device memory free at start, spilling MoE expert weights to the CPU first. Declared
+     *  explicitly rather than relying on the engine default, for the same never-substitute reason
+     *  as `gpuLayers`. Only meaningful when `backend === 'llama-server'`. */
+    fit?: 'on' | 'off';
+    /** llama-server `--fit-target MiB` — device memory `--fit` leaves free for co-tenants. */
+    fitTargetMiB?: number;
     /** Environment variable NAMES this backend cannot serve correctly without. The drift guard
      *  asserts each is PRESENT and non-empty in the deployed unit; it deliberately does NOT compare
      *  their VALUES, which are per-box install paths — comparing those is how a guard starts crying
@@ -150,7 +163,17 @@ export const CERTIFIED_CATALOG: readonly CatalogEntry[] = [
       // invisible to the drift guard until WI-39735. Measured 2026-08-17: without them the unit
       // loads ~10.1GB into system RAM, GPU memory stays flat, /health returns 200 in 117.9s; with
       // them it loads to the card (4448 -> 21754 MiB) and cold-starts in 67.5s.
-      gpuLayers: 999,
+      //
+      // Offload is SIZED AT START, not pinned (WI-10006354). With `-ngl 999` the unit needs ~19.8 GiB
+      // free, and under normal occupancy (embed sidecar ~7 GiB, hosted control plane ~1.8 GiB,
+      // kokoro ~1 GiB, terminal operators) it exited 1 three times on `cudaMalloc failed: out of
+      // memory` and hit StartLimit, so every on-demand request failed. Measured 2026-10-06 with
+      // 7.5 GiB free: `-ngl auto --fit on --fit-target 1024` spilled MoE experts to the CPU, took
+      // 6.4 GiB of VRAM, left 1.2 GiB free, reached /health in 237s and served a completion. On an
+      // idle card `--fit` keeps every layer on the GPU, so the uncontended case is unchanged.
+      gpuLayers: 'auto',
+      fit: 'on',
+      fitTargetMiB: 1024,
       requiredEnv: ['LD_LIBRARY_PATH', 'GGML_BACKEND_PATH'],
     },
     // DEMOTED 2026-08-17 from 'certified' — on-demand-local-inference-lifecycle-2026-08-17 D-011.

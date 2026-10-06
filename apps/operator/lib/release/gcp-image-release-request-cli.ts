@@ -51,6 +51,10 @@
  *     the publication manifest, which measured them from the bytes it published.
  *   - material digests and sizes, measured from `--source-root` when the input omits them.
  *   - `builder.kind`, which is pinned to the Packer kind rather than read from input.
+ *   - `baseImage.sha256` — the identity digest of the GCE image `baseImage.reference` names, read
+ *     through the Compute API with `--credential-ref` (`gcp-base-image-identity.ts`). An input that
+ *     supplies it is refused: a hand-copied value was attested as provenance without ever being
+ *     compared to the image (WI-10005746). The adapter re-measures before the billable build.
  *
  * Everything the publication directory cannot know — the target project, image name, family,
  * base image, clean-room placement and compatibility request — comes from the input file and is
@@ -73,6 +77,11 @@ import {
   type WorkspaceHostImageArtifact,
 } from "@papercusp/deployment-driver";
 import { isCliEntry } from "@papercusp/operator-core/lib/util/cli-entry";
+import {
+  measureGcpBaseImage,
+  type GcpBaseImageMeasurement,
+} from "@papercusp/operator-core/lib/workspace-host/gcp-base-image-identity";
+import { GoogleComputeGcpImageFamilyComputeApi } from "@papercusp/operator-core/lib/workspace-host/gcp-image-family-adapter";
 import {
   buildGcpImageFamilyExactPathReadinessConfig,
   isSupportedGcpImageFamilyCredentialRef,
@@ -387,6 +396,25 @@ function resolveTargets(
   });
 }
 
+/** Seams the CLI reaches the outside world through. Production uses the live Compute API. */
+export interface GcpImageReleaseRequestDeps {
+  /** Measure the base image `reference` names, authenticating with `credentialRef`. */
+  measureBaseImage?: (
+    reference: string,
+    credentialRef: string,
+  ) => Promise<GcpBaseImageMeasurement>;
+}
+
+function liveMeasureBaseImage(
+  reference: string,
+  credentialRef: string,
+): Promise<GcpBaseImageMeasurement> {
+  return measureGcpBaseImage(
+    new GoogleComputeGcpImageFamilyComputeApi({ credentialRef }),
+    reference,
+  );
+}
+
 export interface ImageArtifactBuild {
   artifact: WorkspaceHostImageArtifact;
   trustReport: Record<string, unknown>;
@@ -408,6 +436,7 @@ export interface ImageArtifactBuild {
  */
 export async function buildImageArtifact(
   args: GcpImageReleaseRequestCliArgs,
+  deps: GcpImageReleaseRequestDeps = {},
 ): Promise<ImageArtifactBuild> {
   const input = await readJson(resolve(args.inputFile), "input file");
 
@@ -502,6 +531,22 @@ export async function buildImageArtifact(
   );
 
   const baseImage = requiredRecord(input.baseImage, "baseImage");
+  if (baseImage.sha256 !== undefined) {
+    fail(
+      "baseImage.sha256 must not be supplied: it is measured from the GCE image baseImage.reference " +
+        "names (WI-10005746). Remove it from the input file.",
+    );
+  }
+  const baseReference = requiredImmutableImageId(
+    baseImage.reference,
+    "baseImage.reference",
+  );
+  // MEASURED: the adapter re-measures the image it hands Packer and refuses a mismatch, so a
+  // value accepted here without measurement would only move the refusal to after the cut.
+  const measuredBase = await (deps.measureBaseImage ?? liveMeasureBaseImage)(
+    baseReference,
+    args.credentialRef,
+  );
   const builderInput = requiredRecord(input.builder, "builder");
   const templatePath = repoRelativePath(
     builderInput.templatePath,
@@ -537,15 +582,12 @@ export async function buildImageArtifact(
       sizeBytes: Number(publishedReleaseArtifact.sizeBytes),
     },
     baseImage: {
-      reference: requiredImmutableImageId(
-        baseImage.reference,
-        "baseImage.reference",
-      ),
+      reference: baseReference,
       architecture: requiredString(
         baseImage.architecture,
         "baseImage.architecture",
       ),
-      sha256: requiredDigest(baseImage.sha256, "baseImage.sha256"),
+      sha256: requiredDigest(measuredBase.sha256, "measured baseImage.sha256"),
     },
     builder: {
       strategy: "shared",
@@ -652,8 +694,9 @@ export async function buildImageArtifact(
  */
 export async function composeRequest(
   args: GcpImageReleaseRequestCliArgs,
+  deps: GcpImageReleaseRequestDeps = {},
 ): Promise<Record<string, unknown>> {
-  const built = await buildImageArtifact(args);
+  const built = await buildImageArtifact(args, deps);
   const reportDocument = await readJson(
     resolve(args.cleanRoomReportFile!),
     "clean-room report",

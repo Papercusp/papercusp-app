@@ -1,0 +1,22 @@
+-- 1272 — external-app-access-to-workspaces-2026-09-29 P-324: the CONTRACT half of 1244's rename.
+--
+-- 1244 renamed harness_shared.mobile_devices to harness_shared.connected_apps (EXPAND) and left a
+-- security_invoker, auto-updatable VIEW under the old name so the release serving :3070, which
+-- still ran pre-rename code, could keep pairing and revoking phones through the deploy window.
+-- 1244's own comment on the view says a later contract migration drops it; this is that migration.
+-- The underlying table and every phone row stay in connected_apps (kind = 'mobile'), so dropping
+-- the view removes a name, not data. Its grants (harness_app, harness_zero) go with it.
+--
+-- FORWARD-COMPAT: every runtime that uses this database now reads and writes connected_apps
+-- directly. Checked 2026-09-30 18:17Z against the build each one reports on /api/health: :3070
+-- serves 29bf735091, :3170 serves 3549792653 and the bg-host :3271 serves 71f0a829c8, and a
+-- git grep of each build (superproject plus its libs/papercusp pin) finds mobile_devices only in a
+-- comment in device-store.ts, in _retired/ code that is never deployed, in committed tsx cache
+-- files and in the retired Zero reference JSON. No view, function or trigger depends on it
+-- (pg_depend / pg_proc / pg_trigger, same time).
+--
+-- Fresh-DB safe: IF EXISTS covers a database that never had the view.
+--
+-- lint-migrations: allow-view-drop nothing depends on the VIEW itself: live pg_depend shows 0 dependent views, and no function body (pg_proc) or trigger mentions it (2026-09-30 18:19Z); no migration after 1244 builds on it (1252 names it only in a comment). The drop is bare, not CASCADE, so a dependent created elsewhere would fail this migration loudly rather than being silently removed.
+
+DROP VIEW IF EXISTS harness_shared.mobile_devices;

@@ -56,6 +56,15 @@ import { evaluateScoutRatificationGate } from '../../scout/ratification-gate';
 import { checkPlanAdmission } from './plan-admission-gate';
 import { resolvePlanScope } from './source';
 import { retireAcceptanceRubricForPlan } from '../../rubrics';
+import { restoreHistoricalShipment } from './restore-historical-shipment';
+import {
+  settleAcceptanceReviewReservationsForPlan,
+  type AcceptanceReviewReservationSettlement,
+} from '../../coord/condition-upsert';
+import {
+  reconcileActivationAuditRepairFilingForTerminalPlan,
+  type ActivationAuditRepairReconciliation,
+} from './activation-audit-repair';
 import { bulkContent, mergeIds, runBulk } from '../_bulk';
 import { domainFailureMessage } from './plan-activation-gate';
 import { PLAN_STATUSES } from './parser';
@@ -123,6 +132,14 @@ const argsSchema = z
       .describe(
         'Optional note on why the lifecycle moved. Stored on the plan revision (D-009), not in the frontmatter.',
       ),
+    restoreShippedRevision: z.object({
+      seq: z.number().int().positive(),
+      contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+      expectedVersion: z.number().int().positive(),
+      expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    }).optional().describe(
+      'Restore an exact previously shipped revision after an unrecorded remote rollback. Requires the latest revision to be that shipment, the current body to equal its immediate predecessor, a local shipment capture, and the original rubric retirement with shipment. Refuses authored reopenings or changed work; does not reopen acceptance or recruit a grader.',
+    ),
     // ── queen-scout-feedback-loop-2026-06-20 P-006 / B10: the DEPRECATE path.
     learnings: z
       .object({
@@ -173,6 +190,13 @@ const argsSchema = z
   .refine((a) => !a.force?.acceptanceBarProofMetadata || normalizePlanStatus(a.status).status === 'shipped', {
     message: 'force.acceptanceBarProofMetadata is only valid for a shipped target',
     path: ['force', 'acceptanceBarProofMetadata'],
+  })
+  .refine((a) => !a.restoreShippedRevision || (
+    normalizePlanStatus(a.status).status === 'shipped' && Boolean(a.slug) && !a.slugs &&
+    Boolean(a.expectedCurrent) && !a.force
+  ), {
+    message: 'restoreShippedRevision requires one slug, status shipped, expectedCurrent, and no force',
+    path: ['restoreShippedRevision'],
   });
 
 type SetPlanStatusValue =
@@ -283,6 +307,90 @@ export function applyPlanStatusBody(
  */
 export function shouldEvaluateAcceptanceGate(status: string, expectedCurrent?: string): boolean {
   return status === 'shipped' && expectedCurrent !== 'shipped';
+}
+
+export interface TerminalPlanTidyDeps {
+  retire: typeof retireAcceptanceRubricForPlan;
+  settle: typeof settleAcceptanceReviewReservationsForPlan;
+  reconcileActivationRepair: typeof reconcileActivationAuditRepairFilingForTerminalPlan;
+}
+
+export interface TerminalPlanTidyResult {
+  /** Id of the acceptance rubric this call retired; absent when none was live. */
+  acceptanceRubricRetired?: string;
+  /** Present only when a reservation was settled or failed, or the settle itself threw. */
+  acceptanceReviewReservations?: AcceptanceReviewReservationSettlement | { error: string };
+  /** Present only when an open activation-repair filing was closed or the close failed. */
+  activationAuditRepair?: ActivationAuditRepairReconciliation;
+}
+
+/**
+ * Lifecycle tidy-up for a plan that just reached a terminal status. Every artifact
+ * here was FILED for the plan's pre-terminal lifecycle and has no other close once
+ * the plan is terminal, so the filer side owns closing it (EI-24746042684666503):
+ *
+ *  - the acceptance rubric archives WITH its subject plan
+ *    (acceptance-rubrics-on-every-plan-2026-08-11 P-005); best-effort, a busy lock is
+ *    skipped and the rubric remains resolvable by id;
+ *  - the recruiter's review-target reservations are settled (EI-24654801606034099):
+ *    condition-upsert filings have no auto-settle, so a grader who graded through their
+ *    own item otherwise leaves one open forever;
+ *  - an activation-audit repair filing is closed: its own reconcile fires only on a
+ *    clean audit, which a plan that ships without one never records.
+ *
+ * Runs on `superseded` even when unchanged (a repeat write repairs older terminal rows),
+ * and on `shipped` only when the status changed. Failures are reported on the result,
+ * never thrown. Exported with injectable deps so the wiring is unit-tested (WI-10004531).
+ */
+export async function tidyFilingsForTerminalPlan(
+  input: {
+    slug: string;
+    status: string;
+    changed: boolean;
+    ownerId: () => string;
+    scope: { workspaceId: string; harnessSlug?: string | null };
+  },
+  deps: TerminalPlanTidyDeps = {
+    retire: retireAcceptanceRubricForPlan,
+    settle: settleAcceptanceReviewReservationsForPlan,
+    reconcileActivationRepair: reconcileActivationAuditRepairFilingForTerminalPlan,
+  },
+): Promise<TerminalPlanTidyResult> {
+  const { slug, status, changed, scope } = input;
+  if (!(status === 'superseded' || (status === 'shipped' && changed))) return {};
+  const terminalStatus: 'shipped' | 'superseded' = status;
+  const harnessSlug = scope.harnessSlug ?? null;
+
+  const retired = await deps.retire(slug, input.ownerId(), {
+    ...(harnessSlug ? { harnessSlug } : {}),
+    terminalStatus,
+  });
+
+  let reservations: AcceptanceReviewReservationSettlement | { error: string };
+  try {
+    reservations = await deps.settle(slug, { workspaceId: scope.workspaceId, harnessSlug, terminalStatus });
+  } catch (err) {
+    reservations = { error: err instanceof Error ? err.message : String(err) };
+  }
+  const reportReservations =
+    'error' in reservations || reservations.settled.length > 0 || reservations.failed.length > 0;
+
+  // The activation-repair condition key is harness-qualified; without a harness there
+  // is no key to reconcile.
+  const activation = harnessSlug
+    ? await deps.reconcileActivationRepair({
+        workspaceId: scope.workspaceId,
+        harnessSlug,
+        planSlug: slug,
+        terminalStatus,
+      })
+    : null;
+
+  return {
+    ...(retired ? { acceptanceRubricRetired: retired } : {}),
+    ...(reportReservations ? { acceptanceReviewReservations: reservations } : {}),
+    ...(activation && (activation.closed || activation.error) ? { activationAuditRepair: activation } : {}),
+  };
 }
 
 /**
@@ -544,6 +652,15 @@ export default defineTool({
     const env = await runBulk(
       slugs,
       async (slug) => {
+        if (args.restoreShippedRevision) {
+          const restored = await restoreHistoricalShipment(sctx, {
+            slug,
+            harnessSlug,
+            expectedCurrent: args.expectedCurrent!,
+            ...args.restoreShippedRevision,
+          });
+          return { slug, ...restored };
+        }
         // Completion gate (acceptance-rubrics-on-every-plan-2026-08-11 P-004/P-005):
         // shipping requires a graded acceptance rubric — the refusal message IS the
         // authoring nudge (author it post-implementation, D-007; grader ≠ implementer,
@@ -558,6 +675,7 @@ export default defineTool({
         // evidence was (or was not) live. A ship on undeployed evidence is allowed and
         // must never be SILENT.
         let citationDeployment: CitationDeployment | undefined;
+        let acceptanceGateSatisfied = false;
         if (shouldEvaluateAcceptanceGate(status, args.expectedCurrent)) {
           // Match withPlanLock's member → Hive-home resolution. The caller's
           // harness can name a member, while the subject row lives at its home.
@@ -606,6 +724,7 @@ export default defineTool({
               ...acceptanceGraderRefusalFields(gate.repairAction, acceptanceGrader, sweep),
             };
           }
+          acceptanceGateSatisfied = true;
         }
         // EI-19403437795858863 — the deprecate counterpart. The acceptance gate above
         // fires only on `shipped`, so until now a supersede could strand every one of
@@ -618,6 +737,8 @@ export default defineTool({
         if (shouldEvaluateSupersedeItemGate(status, args.expectedCurrent)) {
           const gate = await evaluateSupersedeItemGate(slug, {
             ...(args.force ? { force: args.force } : {}),
+            // A candidate only — the gate confirms the plan's home harness (WI-10005174).
+            harnessSlug,
           });
           if (gate.forcedPast) {
             const actor = resolveAgentIdentity(ctx);
@@ -706,6 +827,27 @@ export default defineTool({
             intent: `plans:set-plan-status → ${status}`,
             ...(harnessSlug ? { harnessSlug } : {}),
             afterWrite: rev.afterWrite,
+            // Keep the rich acceptance policy in TypeScript. The deferred DB
+            // constraint only verifies that this exact plan transition carries
+            // a receipt from this successful gate evaluation in the same xact.
+            inTransaction: acceptanceGateSatisfied
+              ? async (tx, _writtenBody, scope, value) => {
+                  if (!value.ok || value.newStatus !== 'shipped' || value.changed !== true) return;
+                  await tx`
+                    SELECT set_config(
+                      'papercusp.plan_shipment_acceptance_gate_receipt',
+                      jsonb_build_object(
+                        'schemaVersion', 1,
+                        'transactionId', txid_current()::text,
+                        'workspaceId', ${scope.workspaceId}::text,
+                        'harnessSlug', ${scope.harnessSlug}::text,
+                        'planSlug', ${slug}::text
+                      )::text,
+                      true
+                    )
+                  `;
+                }
+              : undefined,
           },
           async (current): Promise<{ newBody: string | null; value: SetPlanStatusValue }> => {
             if (current === null) {
@@ -831,18 +973,15 @@ export default defineTool({
           );
         }
 
-        // Lifecycle tidy-up (acceptance-rubrics-on-every-plan-2026-08-11 P-005): an
-        // acceptance rubric archives WITH its terminal subject plan, shipped or superseded.
-        // Repeat on superseded no-ops too, repairing older terminal rows with live rubrics.
-        // Best-effort: a busy lock is skipped and the rubric remains resolvable by id.
-        let acceptanceRubricRetired: string | null = null;
-        if (status === 'superseded' || (status === 'shipped' && result.value.changed)) {
-          const id = resolveAgentIdentity(ctx);
-          acceptanceRubricRetired = await retireAcceptanceRubricForPlan(slug, id.ownerId, {
-            harnessSlug: result.scope.harnessSlug,
-            terminalStatus: status,
-          });
-        }
+        // Terminal tidy-up: retire the acceptance rubric, settle review-target
+        // reservations, close an activation-repair filing (see tidyFilingsForTerminalPlan).
+        const terminalTidy = await tidyFilingsForTerminalPlan({
+          slug,
+          status,
+          changed: result.value.changed,
+          ownerId: () => resolveAgentIdentity(ctx).ownerId,
+          scope: { workspaceId: result.scope.workspaceId, harnessSlug: result.scope.harnessSlug },
+        });
 
         let learningsObservation:
           | { emitted: true; created: boolean; issueId?: string }
@@ -880,7 +1019,7 @@ export default defineTool({
           filePath: result.filePath,
           ...(mappedFrom ? { mappedFrom } : {}),
           ...(learningsObservation ? { learningsObservation } : {}),
-          ...(acceptanceRubricRetired ? { acceptanceRubricRetired } : {}),
+          ...terminalTidy,
           ...(scopeCascade ? { scopeCascade } : {}),
           // A forced ship is loud in the RESPONSE too, not only in the plan
           // file: the caller who waived the gate should not have to re-read the

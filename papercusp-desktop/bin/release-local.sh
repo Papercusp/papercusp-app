@@ -155,6 +155,9 @@ source "$ORCHESTRATOR_HERE/lib/release-tag-pin.sh"
 # release-local.sh, even when $0 names a frozen target worktree.
 # shellcheck source=lib/rust-path-remap.sh
 source "$ORCHESTRATOR_HERE/lib/rust-path-remap.sh"
+# shellcheck source=lib/seed-reuse-age.sh
+source "$ORCHESTRATOR_HERE/lib/seed-reuse-age.sh"
+seed_uuid_row_drop_prepare || exit 1
 
 # A brand-new version needs an exact remote ref before the LOCAL-only cutter can
 # bake its dogfood clone pin. Keep that outward write separate from the cut:
@@ -235,11 +238,15 @@ export PAPERCUSP_EXPECTED_SOURCE_SHA="$EXPECTED_SOURCE_SHA"
 # discovering the missing env only when build-desktop-sidecar.sh starts.
 # Runtime-only is load-bearing: persisting the owner's identity in the release
 # tree would manufacture the very identity leak this audit exists to catch.
-if [[ -z "${PAPERCUSP_RELEASE_OWNER_NAME:-}" ]]; then
-  echo "ERROR: release cut requires PAPERCUSP_RELEASE_OWNER_NAME at run time before any seed/build work." >&2
-  echo "       Pass the human owner name through release:cut; never write it into a tracked file." >&2
-  exit 2
-fi
+#
+# WI-10004349: the caller-supplied literals alone are NOT enough. 0.0.25 and 0.0.26 shipped
+# an owner name unscrubbed because release:cut passed one hand-typed name and no email while
+# ~/.papercusp/release-identity.env held the full set. So UNION that owner-provisioned file
+# into the environment first, then refuse unless both a name AND an email literal resolved.
+# shellcheck source=lib/release-identity-env.sh
+source "$ORCHESTRATOR_HERE/lib/release-identity-env.sh"
+papercusp_union_release_identity_env || exit 2
+papercusp_require_release_owner_identity || exit 2
 
 # ── EI-17272: reap orphaned build-tool descendants on ANY exit ────────────────
 # The Linux leg (below) launches `tauri build` → cargo → rustc, and
@@ -297,10 +304,15 @@ cleanup_release_local() {
   fi
   [[ -z "${_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST:-}" ]] \
     || rm -f "$_OWN_PROVENANCE_SOURCE_DIRTY_MANIFEST"
-  # The gitleaks report contains redacted matches and is kept only for the
-  # duration of this cut. The directory is private (mktemp -d) and is removed
-  # on every ordinary exit so a failed cut leaves no diagnostic bundle behind.
-  [[ -z "${_GITLEAKS_REPORT_DIR:-}" ]] || rm -rf -- "$_GITLEAKS_REPORT_DIR"
+  # A failed credential scan must keep its redacted proof for diagnosis. Normal
+  # cuts store it under the existing run directory, covered by VH run retention.
+  if [[ -n "${_GITLEAKS_REPORT_DIR:-}" ]]; then
+    if [[ "${_GITLEAKS_STATUS:-0}" != "0" ]]; then
+      echo "       Redacted credential evidence retained privately: $_GITLEAKS_REPORT_DIR" >&2
+    else
+      rm -rf -- "$_GITLEAKS_REPORT_DIR"
+    fi
+  fi
 }
 # Override any inherited value before the EXIT trap can observe it. The report
 # directory is assigned only by the gate below after a successful mktemp -d.
@@ -370,6 +382,21 @@ if [[ -n "${VERSION:-}" && -n "${CHANNEL:-}" ]]; then
   export PAPERCUSP_RELEASE_TAG
 fi
 source "$ORCHESTRATOR_HERE/lib/claim-target-dir.sh"
+
+# EI-24514809679788531: a non-Linux run-leg always skips the Linux build, so
+# validate its same-version salvage input in the exact Cargo slot just claimed.
+# This must precede migration, sidecar, identity and boot gates, and the first
+# manifest write; otherwise an invalid Windows/macOS/arm64 leg burns ~20 minutes
+# before release-local.sh eventually notices that there are no Linux bytes.
+if [[ "${PAPERCUSP_REUSE_LINUX:-0}" == "1" ]]; then
+  CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$ROOT/src-tauri")"
+  LINUX_BUNDLE="$CARGO_TARGET_ROOT/release/bundle"
+  if ! release_artifacts_has_linux_version_artifact "$LINUX_BUNDLE" "$VERSION"; then
+    echo "ERROR: PAPERCUSP_REUSE_LINUX=1 but no $VERSION Linux artifacts in $LINUX_BUNDLE. A non-Linux run-leg requires a completed same-version Linux leg in this target slot; run the Linux leg first, or use release:cut{op:'run',windows:true} (or the requested platform flag) for a single-command cut." >&2
+    exit 1
+  fi
+fi
+
 require_release_host
 
 # EI-22579401012596804: reserve sidecar staging headroom BEFORE the long WSL,
@@ -1998,14 +2025,18 @@ if ! git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
   exit 1
 fi
-_dogfood_pin_remote_sha="$(release_tag_remote_sha "$MONOREPO" "$TAG" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE")"
-if [[ "$_dogfood_pin_remote_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
-  echo "ERROR: dogfood pin: $PAPERCUP_DOGFOOD_CANONICAL_REMOTE refs/tags/$TAG is ${_dogfood_pin_remote_sha:-<missing>}, expected $EXPECTED_SOURCE_SHA" >&2
-  echo "       Nothing has been modified. Create the tag first with release:cut{op:'prepare-tag',...,confirm:true}" >&2
-  echo "       (or PAPERCUSP_RELEASE_PREPARE_TAG_SHA=<sha> PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM=1 $0 $VERSION $CHANNEL)." >&2
-  exit 1
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "==> dogfood pin deferred: build-only $TAG at $EXPECTED_SOURCE_SHA; matching containment receipt required before tag binding/candidate/GO/publication"
+else
+  _dogfood_pin_remote_sha="$(release_tag_remote_sha "$MONOREPO" "$TAG" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE")"
+  if [[ "$_dogfood_pin_remote_sha" != "$EXPECTED_SOURCE_SHA" ]]; then
+    echo "ERROR: dogfood pin: $PAPERCUP_DOGFOOD_CANONICAL_REMOTE refs/tags/$TAG is ${_dogfood_pin_remote_sha:-<missing>}, expected $EXPECTED_SOURCE_SHA" >&2
+    echo "       Nothing has been modified. Create the tag first with release:cut{op:'prepare-tag',...,confirm:true}" >&2
+    echo "       (or PAPERCUSP_RELEASE_PREPARE_TAG_SHA=<sha> PAPERCUSP_RELEASE_PREPARE_TAG_CONFIRM=1 $0 $VERSION $CHANNEL)." >&2
+    exit 1
+  fi
+  echo "==> dogfood pin precondition: $TAG is at ${EXPECTED_SOURCE_SHA:0:12} on $PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
 fi
-echo "==> dogfood pin precondition: $TAG is at ${EXPECTED_SOURCE_SHA:0:12} on $PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
 
 # ── PRECHECK-ONLY EXIT ────────────────────────────────────────────────────────
 # THE LAST POINT AT WHICH THIS SCRIPT HAS TOUCHED NOTHING. Everything above is
@@ -2201,10 +2232,14 @@ bump_version_manifests "$ROOT"
 # pin is a precondition failure, not an invitation for the cutter to force-push.
 if git -C "$MONOREPO" rev-parse --git-dir >/dev/null 2>&1; then
   export PAPERCUP_DOGFOOD_REPO_REF="$TAG"
-  echo "==> dogfood pin: verifying $TAG at expected source ${EXPECTED_SOURCE_SHA:0:12}"
-  # Certify against PAPERCUP_DOGFOOD_CANONICAL_REMOTE (set by the read-only
-  # precondition above the PRECHECK-ONLY exit), not the inherited origin.
-  release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
+  if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+    # Bake the eventual clone ref into the bytes without creating a local ref.
+    echo "==> dogfood pin: $TAG metadata only; local tag preparation deferred"
+  else
+    echo "==> dogfood pin: verifying $TAG at expected source ${EXPECTED_SOURCE_SHA:0:12}"
+    # Certify against the public remote, not the inherited origin.
+    release_tag_prepare_local_exact "$MONOREPO" "$TAG" "$EXPECTED_SOURCE_SHA" "$PAPERCUP_DOGFOOD_CANONICAL_REMOTE"
+  fi
 else
   echo "ERROR: dogfood pin: $MONOREPO is not a git repo; refusing an unpinned release" >&2
   exit 1
@@ -2240,6 +2275,7 @@ release_seed_cut_is_quiesced() {
 }
 
 cut_release_seed() {
+  seed_uuid_row_drop_prepare || return 1
   if [[ "${PAPERCUSP_SKIP_SEED_CUT:-0}" == "1" ]]; then
     echo "==> seed: PAPERCUSP_SKIP_SEED_CUT=1 — leaving src-tauri/seed as-is"
     return 0
@@ -2257,7 +2293,9 @@ cut_release_seed() {
   local seed_origin="${PAPERCUSP_SEED_ORIGIN:-https://github.com/Papercusp/papercup}"
   local seed_rev="${PAPERCUSP_SEED_REV:-HEAD}"
   local seed_depth="${PAPERCUSP_SEED_DEPTH-1}"
-  local operator_dir="$MONOREPO/apps/operator"
+  # Cutter and audit policy follow the current orchestrator; --repo below
+  # still pins the Git payload to the immutable product source.
+  local operator_dir="$(cd "$ORCHESTRATOR_HERE/../../apps/operator" && pwd)"
   local seed_out="$ROOT/src-tauri/seed"
   if [[ ! -d "$operator_dir" ]]; then
     echo "ERROR: seed cutter not found at $operator_dir"
@@ -2292,7 +2330,7 @@ cut_release_seed() {
   # first. Copy rather than hardlink: the reuse cut writes into $seed_out. An
   # empty PAPERCUSP_SEED_SNAPSHOT_DIR disables hydration.
   local seed_snapshot="${PAPERCUSP_SEED_SNAPSHOT_DIR-$HOME/.papercusp/release-seeds/current}"
-  if [[ "$seed_reuse" == "auto" && -n "$seed_snapshot" && ! -d "$seed_out/corestore" \
+  if [[ "$SEED_UUID_ROW_DROP_ACTIVE" != "1" && "$seed_reuse" == "auto" && -n "$seed_snapshot" && ! -d "$seed_out/corestore" \
         && -d "$seed_snapshot/corestore" && -f "$seed_snapshot/manifest.json" ]]; then
     echo "==> seed: hydrating $seed_out from snapshot store $seed_snapshot (WI-10003231)"
     local seed_tmp="$seed_out.hydrate.$$"
@@ -2315,11 +2353,24 @@ cut_release_seed() {
       echo "==> seed: no committed corestore to reuse — cutting FRESH from the live store (requires a quiesced operator)"
     fi
   fi
+  # WI-10004429: reuse ships the committed corestore AS-CUT, of ANY age. 0.0.26
+  # reused release-seeds/current, cut 2026-09-22, three days before the first
+  # P-530 receipt-filtered set existed. Every joiner therefore seeded at the old
+  # unfiltered set and folded ~887k dead governor receipts. Nothing refreshes
+  # the snapshot store automatically, so refuse a stale one loudly rather than
+  # publish old hive state. PAPERCUSP_SEED_REUSE_MAX_AGE_HOURS=0 accepts any age.
+  # The guard is shared with mac-vm-build.sh + ensure-release-seed.sh (WI-10004593).
+  if [[ "$seed_reuse" == "1" ]]; then
+    local reuse_age_line
+    reuse_age_line="$(seed_reuse_age_check "$seed_out/manifest.json")" || return 1
+    [[ -n "$reuse_age_line" ]] && echo "==> $reuse_age_line"
+  fi
   if [[ "$seed_reuse" == "1" ]]; then
     core_args+=(--reuse-corestore "$seed_out")
     [[ -n "${PAPERCUSP_SEED_STORE_DIR:-}" ]] && echo "WARN: PAPERCUSP_SEED_STORE_DIR ignored under seed-reuse (PAPERCUSP_SEED_REUSE_CORESTORE=$seed_reuse)" >&2
   fi
   if [[ "${PAPERCUSP_SEED_CORESTORE:-1}" == "1" && "$seed_reuse" != "1" ]] \
+      && [[ "$SEED_UUID_ROW_DROP_ACTIVE" != "1" ]] \
       && ! release_seed_cut_is_quiesced; then
     echo "ERROR: fresh release seed cut requires a quiesced operator; run bin/cut-seed-quiesced.sh." >&2
     return 1
@@ -2368,7 +2419,7 @@ cut_release_seed() {
     # spawns with inherited env, so this reaches the bwrap re-exec. Mirrors
     # cut-seed-quiesced.sh:100; a NODE_OPTIONS from the .env.local sourced above still wins.
     export NODE_OPTIONS="${NODE_OPTIONS:-${SEED_CUT_NODE_OPTIONS:---max-old-space-size=24576}}"
-    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$MONOREPO" \
+    PAPERCUSP_ALLOW_DEV_RESTART=1 PAPERCUSP_WORKSPACE_ROOT="$(cd "$operator_dir/../.." && pwd)" \
       npx tsx lib/release/cut-seed-cli.ts \
         --out "$seed_out" \
         --repo "$MONOREPO" \
@@ -2379,6 +2430,7 @@ cut_release_seed() {
         "${depth_args[@]}" \
         "${core_args[@]}" \
         "${emit_args[@]}" \
+        "${SEED_UUID_ROW_DROP_ARGS[@]}" \
         "$@"
   ) 2>&1 | tee -a "$cut_log"
   }
@@ -2424,8 +2476,48 @@ cut_release_seed() {
     echo "ERROR: installer seed cut failed (rc=$cut_rc); refusing to continue the release cut." >&2
     return 1
   fi
+  # Later Tauri/VM hooks consume the completed seed, never reapply its source plan.
+  unset PAPERCUSP_SEED_UUID_PLAN_PATH PAPERCUSP_SEED_UUID_PLAN_SHA256
 }
 
+# Precomputed doc_sections vectors (plan ship-precomputed-doc-vectors-2026-10-01,
+# P-003). Without them every fresh Server install embeds all ~15k doc sections
+# itself on first boot (~1 CPU core for 45+ min, WI-10004455). Its OWN step,
+# separate from the hive-seed cut, so a seed/sidecar rerun never redoes it and a
+# failure here never fails the release: the install then embeds the uncovered
+# sections itself, exactly as before. Incremental: the previous release's seed is
+# applied first, so only sections whose page_sha changed are re-embedded. The
+# manifest holds only (source_key, slug, anchor, page_sha) keys — no build-box
+# paths for the bundle audit to refuse. Bundled via tauri.server.conf.json
+# `doc-vector-seed/**/*`; found at runtime by doc-vector-seed-dir.ts.
+cut_doc_vector_seed() {
+  local out="$ROOT/src-tauri/doc-vector-seed"
+  if [[ "${PAPERCUSP_SKIP_DOC_VECTOR_SEED:-0}" == "1" ]]; then
+    echo "==> doc-vector-seed: PAPERCUSP_SKIP_DOC_VECTOR_SEED=1 — leaving $out as-is"
+    return 0
+  fi
+  local tmp="$out.new" prev=""
+  local -a prev_args=()
+  rm -rf "$tmp"
+  if [[ -f "$out/manifest.json" ]]; then
+    prev="$(mktemp -d)"
+    cp -a "$out/." "$prev/"
+    prev_args=(--previous "$prev")
+  fi
+  if ( cd "$ROOT/.." && npx tsx scripts/export-doc-vector-seed.mts --out "$tmp" --allow-uncovered "${prev_args[@]}" ); then
+    rm -rf "$out" && mv "$tmp" "$out"
+    echo "==> doc-vector-seed: wrote $out"
+  else
+    rm -rf "$tmp"
+    local ships="no precomputed doc vectors"
+    [[ -f "$out/manifest.json" ]] && ships="the previous release's doc-vector seed"
+    echo "WARNING: doc-vector-seed export failed — the Server ships $ships; fresh installs embed the rest on first boot." >&2
+  fi
+  [[ -n "$prev" ]] && rm -rf "$prev"
+  return 0
+}
+
+cut_doc_vector_seed
 cut_release_seed
 
 # Belt-and-braces (0.0.11 cut r3, WI-4736): cut-seed-cli now prunes RocksDB's
@@ -2495,6 +2587,21 @@ if [[ "${PAPERCUSP_RELEASE_NICE:-1}" != "0" ]]; then
   command -v ionice >/dev/null 2>&1 && PC_NICE=(ionice -c2 -n "${PAPERCUSP_RELEASE_IONICE:-7}" "${PC_NICE[@]}")
 fi
 [[ ${#PC_NICE[@]} -gt 0 ]] && echo "==> local build legs run niced (P-006): ${PC_NICE[*]}"
+
+# A release stages multi-minute sidecar inputs and then packages them. Keep the
+# reader-facing transaction alive for a complete release leg; competing release
+# writers inherit this same bounded, release-sized wait budget.
+PAPERCUSP_SIDECAR_LOCK_WAIT_SEC="${PAPERCUSP_SIDECAR_LOCK_WAIT_SEC:-3600}"
+export PAPERCUSP_SIDECAR_LOCK_WAIT_SEC
+
+run_with_sidecar_read_lock() {
+  local rc
+  source "$ORCHESTRATOR_HERE/lib/sidecar-lock-yield.sh"
+  __pc_acquire_sidecar_read_lock "$ROOT/src-tauri/sidecar.lock" || return $?
+  if "$@"; then rc=0; else rc=$?; fi
+  __pc_release_sidecar_read_lock
+  return "$rc"
+}
 
 vh_begin sidecar
 echo "==> building sidecar"
@@ -2625,7 +2732,9 @@ fi
 # in 136s — ONE file off the per-leg AppDir gate's 17,560 / 3, for ~2 minutes
 # against the ~40 minutes of builds it now front-runs.
 echo "==> assembled-bundle identity gate (EI-20304355477263736): scanning the FULLY-staged bundle (scope-identical to the per-leg gate, ~40min earlier)"
-if ! python3 "$ROOT/bin/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; then
+seed_uuid_validate_release_artifacts "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" --assembled \
+  "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources" "$ROOT/src-tauri/seed" || exit 1
+if ! python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-dir "$ROOT/src-tauri/sidecar" "$ROOT/src-tauri/resources"; then
   echo "ERROR: the fully-assembled bundle (sidecar + bundled resources) carries a sensitive/build-box identity — refusing to launch the platform legs (EI-20304355477263736)." >&2
   echo "       This is the SAME rule the per-leg AppDir/.app gate enforces; it now fires BEFORE ~40 minutes of Rust builds instead of after them." >&2
   echo "       Fix the leak at its SOURCE in the monorepo (not in src-tauri/sidecar — that is regenerated build output), then re-run the cut." >&2
@@ -2635,7 +2744,7 @@ fi
 # ── ASSEMBLED-BUNDLE GITLEAKS GATE (EI-21546652106775901) ─────────────────────
 # The Python audit above owns build-box/identity literals. Gitleaks is a
 # supplementary credential detector: run it after every staging step, over the
-# same two resource roots, with a release-local config whose generated-byte
+# same resource roots plus the D-112 shipped seed, with a release-local config whose generated-byte
 # exceptions require BOTH a known path and a known line marker. Keep values
 # fully redacted in release logs; a finding still fails the cut. The report is
 # retained in a private run-scoped directory long enough to print only its
@@ -2644,15 +2753,33 @@ if ! command -v gitleaks >/dev/null 2>&1; then
   echo "ERROR: gitleaks is required for the assembled-bundle release gate (EI-21546652106775901)." >&2
   exit 1
 fi
-_GITLEAKS_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-release-gitleaks.XXXXXX")"
+if [[ -n "${VH_RUN_DIR:-}" && -d "$VH_RUN_DIR" ]]; then
+  _GITLEAKS_REPORT_DIR="$(mktemp -d "$VH_RUN_DIR/gitleaks.XXXXXX")"
+else
+  _GITLEAKS_REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/papercusp-release-gitleaks.XXXXXX")"
+fi
+chmod 700 "$_GITLEAKS_REPORT_DIR"
 _GITLEAKS_STATUS=0
 _GITLEAKS_FAILED_ROOTS=()
-for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources"; do
+for _gitleaks_root in "src-tauri/sidecar" "src-tauri/resources" "src-tauri/seed"; do
   _gitleaks_report_path="$_GITLEAKS_REPORT_DIR/$(basename "$_gitleaks_root").json"
-  if ! ( cd "$ROOT" && gitleaks dir "$_gitleaks_root" \
+  _gitleaks_redact=100
+  if [[ "$_gitleaks_root" == "src-tauri/seed" && -n "${PAPERCUSP_RELEASE_SEED_FINDING_PROOF:-}" ]]; then
+    # Exact-content digests require a private raw report. Never log its values.
+    _gitleaks_redact=0
+  fi
+  _gitleaks_rc=0
+  ( cd "$ROOT" && gitleaks dir "$_gitleaks_root" \
       --config "$ORCHESTRATOR_HERE/release-gitleaks.toml" \
-      --no-banner --log-level=error --redact=100 \
-      --report-format=json --report-path="$_gitleaks_report_path" ); then
+      --no-banner --log-level=error --redact="$_gitleaks_redact" \
+      --report-format=json --report-path="$_gitleaks_report_path" ) >/dev/null 2>&1 || _gitleaks_rc=$?
+  if [[ "$_gitleaks_redact" == "0" && ( "$_gitleaks_rc" == "0" || "$_gitleaks_rc" == "1" ) ]]; then
+    _gitleaks_rc=0
+    ( cd "$ROOT" && python3 "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" \
+        --filter-seed "$_gitleaks_report_path" "$_gitleaks_root" \
+        "$PAPERCUSP_RELEASE_SEED_FINDING_PROOF" "$ORCHESTRATOR_HERE/release-gitleaks.toml" ) || _gitleaks_rc=$?
+  fi
+  if [[ "$_gitleaks_rc" != "0" ]]; then
     _GITLEAKS_STATUS=1
     _GITLEAKS_FAILED_ROOTS+=("$_gitleaks_root")
   fi
@@ -2682,7 +2809,7 @@ fi
 # probe). Opt out only for a deliberate diagnostic cut: PAPERCUSP_SKIP_BOOT_GATE=1.
 if [[ "${PAPERCUSP_SKIP_BOOT_GATE:-0}" != "1" ]]; then
   echo "==> boot gate: verifying the staged sidecar actually starts (pre-pack)"
-  bash "$ROOT/bin/gate-sidecar-boots.sh" "$ROOT/src-tauri/sidecar" \
+  bash "$ORCHESTRATOR_HERE/gate-sidecar-boots.sh" "$ROOT/src-tauri/sidecar" \
     || { echo "ERROR: staged sidecar failed the boot gate — refusing to pack a DOA bundle. See the boot log above."; exit 1; }
 else
   echo "==> ⚠ boot gate SKIPPED (PAPERCUSP_SKIP_BOOT_GATE=1) — diagnostic cut only"
@@ -2707,10 +2834,9 @@ fi
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
 
 # Resolve the claimed cargo output root before any build leg reads or writes it.
-# claim-target-dir.sh exports CARGO_TARGET_DIR, and cargo metadata is the source
-# of truth that maps that selection to the bundle tree for every target triple.
-CARGO_TARGET_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
-[[ -n "$CARGO_TARGET_ROOT" ]] || CARGO_TARGET_ROOT="$ROOT/src-tauri/target"
+# The shared resolver honors CARGO_TARGET_DIR, otherwise asks Cargo, and refuses
+# to guess a possibly stale or relocated target directory.
+CARGO_TARGET_ROOT="$(papercusp_cargo_target_root "$ROOT/src-tauri")" || exit $?
 
 # Tauri CLI does the platform-native bundling + signing in one shot.
 # Two-bundle split (ONE binary, two roles — see src-tauri/src/app_role.rs):
@@ -2935,7 +3061,7 @@ else
       # see the collection globs) AND its multi-GB payload compression wedged the
       # 0.0.3-alpha linux leg for 33min+. deb only.
       echo "==> tauri build (linux x86_64, role=$role) — deb only (AppImage separate WI-2918; rpm not shipped)"
-      (cd "$ROOT" && RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" env "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+      (cd "$ROOT" && run_with_sidecar_read_lock env RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --bundles deb "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
     done
     # Repack BOTH role artifacts after Tauri finishes writing them. The helper
     # verifies the ar structure and dpkg readability, atomically replaces each
@@ -2948,7 +3074,7 @@ else
     if [[ " $PAPERCUSP_BUILD_ROLES " == *" gui "* ]]; then
       echo "==> building Linux AppImage (gui, via bin/build-appimage.sh — linuxdeploy workaround)"
       APPIMAGE_PRODUCER="$ORCHESTRATOR_HERE/build-appimage.sh"
-      (cd "$ROOT" && PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
+      (cd "$ROOT" && run_with_sidecar_read_lock env PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" \
          TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$KEY_FILE}" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
          PAPERCUSP_RELEASE_CHANNEL="$CHANNEL" PAPERCUSP_DESKTOP_TARGET_ROOT="$ROOT" \
          "${PC_NICE[@]}" bash "$APPIMAGE_PRODUCER")
@@ -3068,7 +3194,7 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   for role in ${PAPERCUSP_BUILD_ROLES:-gui server}; do
     role_cfg=(); [[ "$role" == "server" ]] && role_cfg=(--config src-tauri/tauri.server.conf.json)
     echo "==> tauri build (linux arm64, role=$role)"
-    (cd "$ROOT" && RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" env "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
+    (cd "$ROOT" && run_with_sidecar_read_lock env RUSTFLAGS="$PAPERCUSP_LINUX_RUSTFLAGS" PAPERCUSP_BUILD_SHA="$BUILD_SHA" PAPERCUSP_BUILD_VERSION="$VERSION" "${DESKTOP_CHANNEL_BUILD_ENV[@]}" "${PC_NICE[@]}" npx --yes -p @tauri-apps/cli@"$TAURI_CLI_VERSION" tauri build --target aarch64-unknown-linux-gnu "${role_cfg[@]}" "${DESKTOP_CHANNEL_BUILD_CFG[@]}")
   done
   # The base Tauri config includes deb among the unfiltered arm64 targets.
   # Repack both role artifacts before they enter ARTIFACTS, regenerating updater
@@ -3081,6 +3207,22 @@ if [[ "$WITH_ARM64" == "1" ]]; then
   # — arm64 was the only leg appending before that reset, and its entries never
   # survived. The single live arm64 collection is in that collector block.
 fi
+
+# Audit the finished Linux containers, after Debian repacking and for both fresh
+# and provenance-verified reused artifacts. The scan expands the shipped bytes,
+# rejects any sidecar *.tmp.* member, and requires the final source archive in
+# Server payloads before they can enter the release manifest.
+for linux_artifact in \
+  "$CARGO_TARGET_ROOT"/release/bundle/deb/*_"$VERSION"_*.deb \
+  "$CARGO_TARGET_ROOT"/release/bundle/appimage/*_"$VERSION"_*.AppImage \
+  "$CARGO_TARGET_ROOT"/aarch64-unknown-linux-gnu/release/bundle/deb/*_"$VERSION"_*.deb; do
+  [[ -f "$linux_artifact" ]] || continue
+  case "${linux_artifact##*/}" in
+    *Server*) python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-artifact --require-source-archive "$linux_artifact" ;;
+    *)        python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-artifact "$linux_artifact" ;;
+  esac
+done
+
 if [[ "$WITH_MAC" == "1" && "${PAPERCUSP_REUSE_MAC:-0}" == "1" ]]; then
   # EMERGENCY SALVAGE PATH (last resort — NOT first-class; see EI-12853). REUSE the
   # good mac artifacts already restored into $MAC_OUT from a backed-up successful cut
@@ -3111,7 +3253,7 @@ elif [[ "$WITH_MAC" == "1" ]]; then
   # retire). Mirrors the Windows cross leg above. mac-vm-build.sh + the VM
   # systemd/disk are intentionally LEFT IN PLACE (dormant, for on-device TESTING);
   # this leg no longer touches them.
-  MAC_PRODUCER="$ROOT/bin/build-mac-cross.sh"
+  MAC_PRODUCER="$ORCHESTRATOR_HERE/build-mac-cross.sh"
   MAC_OUT="$ROOT/src-tauri/target/universal-apple-darwin/release/bundle"
   # build-mac-cross bundles a fully-DARWIN sidecar (Mach-O node/pg/zellij/...) -- a
   # SEPARATE artifact from the linux sidecar cut above (that one is native/linux).
@@ -3175,6 +3317,7 @@ elif [[ "$WITH_MAC" == "1" ]]; then
       "PAPERCUSP_DARWIN_SIDECAR_DIR=$MAC_SIDECAR_DIR"
       "PAPERCUSP_EXPECTED_SERVE_SHA=$mac_expected_serve_sha"
       "PAPERCUSP_MAC_OUT=$MAC_OUT"
+      "PAPERCUSP_DESKTOP_TARGET_ROOT=$ROOT"
       MAC_BUILD_TARGET=universal-apple-darwin
     )
     env "${mac_env[@]}" bash "$MAC_PRODUCER"
@@ -3497,7 +3640,7 @@ if [[ -n "$MAC_PID" || "$MAC_REUSE" == "1" ]]; then
   # BENIGN_ERE — so the 0.0.22 cut failed on lost-pixel's vendor key, which ships in
   # the Server sidecar ON PURPOSE (design comparison, build-desktop-sidecar.sh) and
   # which the canonical gate already classifies as benign. One gate, one allowlist.
-  python3 "$ROOT/bin/audit-release-bundle.py" --scan-artifact "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
+  python3 "$ORCHESTRATOR_HERE/audit-release-bundle.py" --scan-artifact "$MAC_OUT"/dmg/*_"$VERSION"_*.dmg
   # EI-8914 parity: the Windows leg records build-provenance.json (⚠ CORRECTED
   # 2026-09-22: via the shared bin/emit-build-provenance.sh called from
   # bin/build-windows-cross.sh — the build-windows-on-vm.sh this line used to name
@@ -3549,6 +3692,12 @@ fi
 release_artifacts_assert_collected_sigs_complete "release-local" "${ARTIFACTS[@]}" \
   || { echo "ERROR: a release-local leg collector dropped an on-disk signature (see above) — fix its glob" >&2; exit 1; }
 
+# ARTIFACTS is now the exact publish set, including detached signatures and any
+# normalized spanned-Server outputs. Validate that same complete set before the
+# manifest can certify it; do not reconstruct a narrower platform root list.
+seed_uuid_validate_release_artifacts "$ORCHESTRATOR_HERE/lib/print-gitleaks-findings.py" --final \
+  "${ARTIFACTS[@]}" || exit 1
+
 # Retain all final target/artifact roots only after every enabled leg has
 # finished and ARTIFACTS contains the exact bytes this cut will publish.
 papercusp_retain_release_paths \
@@ -3592,12 +3741,16 @@ else
 fi
 
 vh_begin tag
-echo "==> committing version bump"
-git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to commit)"
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "==> build-only: version commit and local $TAG deferred; isolated build residue retained"
+else
+  echo "==> committing version bump"
+  git -C "$ROOT" add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+  git -C "$ROOT" commit -m "release: $TAG" 2>&1 | tail -3 || echo "(nothing to commit)"
 
-echo "==> tagging $TAG (local)"
-git -C "$ROOT" tag -f "$TAG"
+  echo "==> tagging $TAG (local)"
+  git -C "$ROOT" tag -f "$TAG"
+fi
 
 # ── Canonical version writeback (WI-10001570) ───────────────────────────────
 # $ROOT is derived from where THIS script lives, so a cut launched against an
@@ -3613,7 +3766,9 @@ git -C "$ROOT" tag -f "$TAG"
 # commit and NO push: git-sync owns commit+push for the shared tree and sweeps
 # the submodule on its own schedule.
 CANONICAL_WRITEBACK_STATUS=0
-if [[ -z "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT:-}" ]]; then
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "==> canonical writeback: deferred for build-only run"
+elif [[ -z "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT:-}" ]]; then
   echo "==> canonical writeback: skipped (PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT unset)"
 elif ! _canon="$(cd "${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT}" 2>/dev/null && pwd)"; then
   echo "⛔ canonical writeback: PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT=${PAPERCUSP_RELEASE_CANONICAL_DESKTOP_ROOT} is not a readable directory" >&2
@@ -3681,12 +3836,20 @@ fi
 # GitHub releases ever come back.
 echo
 echo "==> done (LOCAL-only — nothing was pushed to GitHub)"
-echo "    tag:       $TAG (local, not pushed)"
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "    tag:       $TAG (DEFERRED; build-only bytes, matching containment receipt and exact tag binding required)"
+else
+  echo "    tag:       $TAG (local, not pushed)"
+fi
 echo "    manifest:  $LATEST_JSON"
 [[ -f "$LATEST_SERVER_JSON" ]] && echo "    manifest (server): $LATEST_SERVER_JSON"
 echo "    notes:     $NOTES_FILE"
 echo "    artifacts: ${#ARTIFACTS[@]}"
-echo "    hand-off:  give the owner the paths + sha256 below."
+if [[ "${PAPERCUSP_RELEASE_DEFER_TAG:-0}" == "1" ]]; then
+  echo "    hand-off:  HELD — no candidate/GO/publication before matching receipt and exact tag binding."
+else
+  echo "    hand-off:  give the owner the paths + sha256 below."
+fi
 for f in "${ARTIFACTS[@]}"; do
   [[ -f "$f" ]] && echo "      $f  sha256:$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
 done

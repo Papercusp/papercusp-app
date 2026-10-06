@@ -310,6 +310,129 @@ pub fn copy_block(block: &CopyBlock, form: CopyForm, pt: Passthrough) -> CopyOut
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mouse selection (pui-chat-first-ux P-018)
+// ---------------------------------------------------------------------------
+
+/// A left-button drag over the screen, in cells as `(column, row)`.
+///
+/// Mouse reporting (on in the chat-first view so the wheel scrolls the
+/// conversation) takes plain drags away from the terminal's own selection, so
+/// the app makes the selection itself: a stream from `anchor` to `head` in
+/// reading order, both ends included, like a terminal's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseSelection {
+    pub anchor: (u16, u16),
+    pub head: (u16, u16),
+}
+
+impl MouseSelection {
+    /// A press and release on one cell: a click, not a selection.
+    pub fn is_click(&self) -> bool {
+        self.anchor == self.head
+    }
+
+    /// `(start, end)` in reading order, each as `(column, row)`.
+    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        let key = |(col, row): (u16, u16)| (row, col);
+        if key(self.anchor) <= key(self.head) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    /// The selected column span of `row`, clamped to `width` columns, or
+    /// `None` when the row is outside the selection.
+    fn columns(&self, row: u16, width: u16) -> Option<(u16, u16)> {
+        let ((c0, r0), (c1, r1)) = self.ordered();
+        if width == 0 || row < r0 || row > r1 {
+            return None;
+        }
+        let first = if row == r0 { c0 } else { 0 };
+        let last = if row == r1 { c1 } else { width - 1 };
+        let last = last.min(width - 1);
+        (first <= last).then_some((first, last))
+    }
+}
+
+/// The text a selection covers in a drawn frame: one line per screen row,
+/// trailing blanks trimmed, the cell after a wide character skipped (it only
+/// holds the padding ratatui leaves behind it).
+pub fn screen_selection_text(frame: &ratatui::buffer::Buffer, sel: &MouseSelection) -> String {
+    use unicode_width::UnicodeWidthStr as _;
+    let area = frame.area;
+    let mut lines: Vec<String> = Vec::new();
+    for row in area.top()..area.bottom() {
+        let Some((first, last)) = sel.columns(row - area.top(), area.width) else {
+            continue;
+        };
+        let mut line = String::new();
+        let mut col = first;
+        while col <= last {
+            let symbol = frame[(area.left() + col, row)].symbol();
+            line.push_str(symbol);
+            col += (symbol.width() as u16).max(1);
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n")
+}
+
+/// Show the selection by reversing the selected cells.
+pub fn paint_selection(frame: &mut ratatui::buffer::Buffer, sel: &MouseSelection) {
+    use ratatui::style::{Modifier, Style};
+    let area = frame.area;
+    for row in area.top()..area.bottom() {
+        let Some((first, last)) = sel.columns(row - area.top(), area.width) else {
+            continue;
+        };
+        for col in first..=last {
+            frame[(area.left() + col, row)]
+                .set_style(Style::default().add_modifier(Modifier::REVERSED));
+        }
+    }
+}
+
+/// Copy selected screen text through the same truncate + OSC 52 path as a
+/// transcript block, acknowledged in plain words.
+pub fn copy_selection(text: &str, pt: Passthrough) -> CopyOutcome {
+    let block = CopyBlock {
+        index: 0,
+        label: "selection".to_string(),
+        rendered: text.to_string(),
+        raw: None,
+    };
+    match copy_block(&block, CopyForm::Rendered, pt) {
+        CopyOutcome::Copied {
+            sequence,
+            bytes,
+            truncated,
+            ..
+        } => {
+            let chars = truncate_on_char_boundary(text, MAX_COPY_BYTES)
+                .0
+                .chars()
+                .count();
+            let ack = if truncated {
+                format!(
+                    "Copied {chars} characters (cut at {} KiB)",
+                    MAX_COPY_BYTES / 1024
+                )
+            } else {
+                format!("Copied {chars} characters")
+            };
+            CopyOutcome::Copied {
+                sequence,
+                ack,
+                bytes,
+                truncated,
+            }
+        }
+        other => other,
+    }
+}
+
 /// Truncate to at most `max` BYTES without splitting a UTF-8 char.
 fn truncate_on_char_boundary(s: &str, max: usize) -> (&str, bool) {
     if s.len() <= max {
@@ -1065,5 +1188,95 @@ mod tests {
         let b = block_at(&msgs, 1).unwrap();
         assert_eq!(b.index, 1);
         assert_eq!(b, block_at(&msgs, 1).unwrap());
+    }
+}
+
+/// pui-chat-first-ux P-018: the mouse selection reads what the screen shows.
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Modifier, Style};
+
+    fn screen() -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 3));
+        buf.set_string(0, 0, "hello wor", Style::default());
+        buf.set_string(0, 1, "日本語 ok", Style::default());
+        buf.set_string(0, 2, "last", Style::default());
+        buf
+    }
+
+    /// Dragged backwards from row 2 up to row 0: the text still reads top to
+    /// bottom, the middle row whole, each wide character once, no trailing
+    /// blanks.
+    #[test]
+    fn a_selection_reads_the_screen_in_reading_order() {
+        let sel = MouseSelection {
+            anchor: (1, 2),
+            head: (6, 0),
+        };
+        assert_eq!(screen_selection_text(&screen(), &sel), "wor\n日本語 ok\nla");
+    }
+
+    #[test]
+    fn a_one_row_selection_takes_only_the_columns_between_the_ends() {
+        let sel = MouseSelection {
+            anchor: (2, 0),
+            head: (4, 0),
+        };
+        assert_eq!(screen_selection_text(&screen(), &sel), "llo");
+        // Past the right edge is the end of the row, not a panic.
+        let wide = MouseSelection {
+            anchor: (6, 0),
+            head: (40, 0),
+        };
+        assert_eq!(screen_selection_text(&screen(), &wide), "wor");
+    }
+
+    #[test]
+    fn painting_reverses_exactly_the_selected_cells() {
+        let mut buf = screen();
+        let sel = MouseSelection {
+            anchor: (6, 0),
+            head: (1, 1),
+        };
+        paint_selection(&mut buf, &sel);
+        let reversed = |x: u16, y: u16| buf[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(!reversed(5, 0));
+        assert!(reversed(6, 0) && reversed(9, 0));
+        assert!(reversed(0, 1) && reversed(1, 1));
+        assert!(!reversed(2, 1));
+        assert!(!reversed(0, 2));
+    }
+
+    #[test]
+    fn a_copied_selection_is_acknowledged_in_characters_and_sent_as_osc52() {
+        let CopyOutcome::Copied {
+            sequence,
+            ack,
+            truncated,
+            ..
+        } = copy_selection("日本語 ok", Passthrough::None)
+        else {
+            panic!("a selection with text is copied");
+        };
+        assert_eq!(ack, "Copied 6 characters");
+        assert!(!truncated);
+        assert_eq!(sequence, osc52("日本語 ok", Passthrough::None));
+    }
+
+    #[test]
+    fn a_press_and_release_on_one_cell_is_a_click() {
+        let click = MouseSelection {
+            anchor: (3, 1),
+            head: (3, 1),
+        };
+        assert!(click.is_click());
+        assert!(!MouseSelection {
+            anchor: (3, 1),
+            head: (4, 1),
+        }
+        .is_click());
     }
 }

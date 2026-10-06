@@ -170,6 +170,12 @@ export interface JoinOptions {
    */
   readAdmittedCountFn?: (workspaceId: string, harnessSlug: string) => number;
   /**
+   * Injectable "is this harness's substrate booted" probe for
+   * await_admission_merge (tests, WI-10004746). Defaults to the live
+   * getBootedHarness registry when readAdmittedCountFn is not injected.
+   */
+  isBootedFn?: (workspaceId: string, harnessSlug: string) => boolean;
+  /**
    * Timeout for await_admission_merge (ms). Default 30_000.
    */
   awaitAdmissionTimeoutMs?: number;
@@ -418,19 +424,52 @@ export async function stepPublishBinding(opts: {
 //
 // Soft-skip (phase_0_pending) on boot failure: clone + publish are done;
 // federation completes on next online session.
+//
+// WI-10004746: `bootSingleHarness` does NOT throw when its race timeout fires —
+// it RETURNS `{ state:'failed', error:'boot timeout after 30000ms' }` while the
+// real boot keeps running (and is adopted later). Ignoring that result marked
+// boot_federate `done` for a substrate that had not joined its swarm topic, and
+// the admission wait then blamed "no peer" for what was a local boot still in
+// flight. The outcome is now read, never assumed.
+
+export interface BootFederateOutcome {
+  /** True unless the booter explicitly reported `failed` or `deferred`. */
+  booted: boolean;
+  /** Why the substrate is not booted yet (only when `booted` is false). */
+  detail?: string;
+}
+
+/** Map a booter's result to an outcome. Only an explicit failed/deferred state counts as not booted. */
+export function bootFederateOutcome(result: unknown): BootFederateOutcome {
+  const r = (result ?? {}) as { state?: unknown; error?: unknown; deferReason?: unknown };
+  if (r.state === 'failed') {
+    const err = typeof r.error === 'string' && r.error ? r.error : 'unknown error';
+    return {
+      booted: false,
+      detail: /boot timeout/i.test(err)
+        ? `substrate boot still in progress (${err}); the swarm topic is not joined yet — the late boot is adopted when it finishes`
+        : `substrate boot failed: ${err} (will retry on next session)`,
+    };
+  }
+  if (r.state === 'deferred') {
+    const why = typeof r.deferReason === 'string' ? r.deferReason : 'activation policy';
+    return { booted: false, detail: `substrate boot deferred (${why}); federation starts when the harness is activated` };
+  }
+  return { booted: true };
+}
 
 export async function stepBootFederate(opts: {
   workspaceId: string;
   harnessSlug: string;
   bootFn?: (workspaceId: string, harnessSlug: string) => Promise<unknown>;
-}): Promise<void> {
+}): Promise<BootFederateOutcome> {
   const boot =
     opts.bootFn ??
     (async (wsId: string, slug: string) => {
       const mod = await import('../sync/hyperbee/boot-all');
       return mod.bootSingleHarness(wsId, slug);
     });
-  await boot(opts.workspaceId, opts.harnessSlug);
+  return bootFederateOutcome(await boot(opts.workspaceId, opts.harnessSlug));
 }
 
 // ─── step 5: await_admission_merge ───────────────────────────────────────────
@@ -443,6 +482,22 @@ export async function stepBootFederate(opts: {
 
 export interface AwaitAdmissionResult {
   remoteOpLanded: boolean;
+  /**
+   * WI-10004746: whether a local substrate handle existed at any poll. `false`
+   * means the wait ended with this harness's OWN boot still in flight (topic not
+   * joined), which is a different condition from "booted, but no peer yet".
+   * `undefined` when it was not measured (an injected count reader with no
+   * injected handle probe, or timeoutMs <= 0).
+   */
+  substrateBooted?: boolean;
+}
+
+/** The step detail for a soft (no remote op) admission result — names which condition held. */
+export function admissionPendingDetail(r: AwaitAdmissionResult): string {
+  if (r.substrateBooted === false) {
+    return 'local substrate still booting when the admission wait ended (swarm topic not joined yet); federation will complete when the boot finishes and a peer comes online';
+  }
+  return 'no peer connected within timeout; federation will complete when a peer comes online';
 }
 
 export async function stepAwaitAdmissionMerge(opts: {
@@ -451,6 +506,8 @@ export async function stepAwaitAdmissionMerge(opts: {
   timeoutMs?: number;
   pollMs?: number;
   readAdmittedCountFn?: (workspaceId: string, harnessSlug: string) => number;
+  /** Whether this harness has a registered (booted) substrate handle. */
+  isBootedFn?: (workspaceId: string, harnessSlug: string) => boolean;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }): Promise<AwaitAdmissionResult> {
@@ -458,6 +515,21 @@ export async function stepAwaitAdmissionMerge(opts: {
   const pollMs = opts.pollMs ?? 1_000;
   const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const now = opts.now ?? (() => Date.now());
+  // Probe the live registry only when the count reader is live too; an injected
+  // reader with no injected probe leaves the booted state unmeasured.
+  const isBooted: ((wsId: string, slug: string) => boolean) | null =
+    opts.isBootedFn ??
+    (opts.readAdmittedCountFn
+      ? null
+      : (wsId: string, slug: string): boolean => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const mod = require('../sync/hyperbee/boot-all') as typeof import('../sync/hyperbee/boot-all');
+            return mod.getBootedHarness(wsId, slug) != null;
+          } catch {
+            return false;
+          }
+        });
 
   const readAdmitted =
     opts.readAdmittedCountFn ??
@@ -478,18 +550,20 @@ export async function stepAwaitAdmissionMerge(opts: {
     return { remoteOpLanded: false };
   }
 
+  let sawHandle = false;
   const deadline = now() + timeoutMs;
   while (now() < deadline) {
+    if (isBooted && !sawHandle) sawHandle = isBooted(opts.workspaceId, opts.harnessSlug);
     const count = readAdmitted(opts.workspaceId, opts.harnessSlug);
     if (count > 0) {
-      return { remoteOpLanded: true };
+      return { remoteOpLanded: true, ...(isBooted ? { substrateBooted: true } : {}) };
     }
     const remaining = deadline - now();
     if (remaining <= 0) break;
     await sleep(Math.min(pollMs, remaining));
   }
 
-  return { remoteOpLanded: false };
+  return { remoteOpLanded: false, ...(isBooted ? { substrateBooted: sawHandle } : {}) };
 }
 
 // ─── step 6: route_insights ──────────────────────────────────────────────────
@@ -717,12 +791,13 @@ export async function joinSharedHarness(opts: JoinOptions): Promise<JoinState> {
         }
       }
       const { activeWorkspaceId } = await import('../workspace-registry');
-      await stepBootFederate({
+      const boot = await stepBootFederate({
         workspaceId: activeWorkspaceId(),
         harnessSlug: opts.slug,
         bootFn: opts.bootFederateFn,
       });
-      markDone('boot_federate');
+      if (boot.booted) markDone('boot_federate');
+      else markPhase0('boot_federate', (boot.detail ?? 'substrate not booted').slice(0, 300));
     } catch (e: unknown) {
       // Non-fatal: DHT unreachable, port blocked, etc.
       const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
@@ -743,16 +818,15 @@ export async function joinSharedHarness(opts: JoinOptions): Promise<JoinState> {
         timeoutMs: opts.awaitAdmissionTimeoutMs ?? 30_000,
         pollMs: opts.awaitAdmissionPollMs ?? 1_000,
         readAdmittedCountFn: opts.readAdmittedCountFn,
+        isBootedFn: opts.isBootedFn,
         sleep: opts.sleepFn,
       });
       if (r.remoteOpLanded) {
         markDone('await_admission_merge', 'remote peer admitted + merge landed');
       } else {
-        // Soft: no peer connected yet — federation completes when a peer comes online.
-        markPhase0(
-          'await_admission_merge',
-          'no peer connected within timeout; federation will complete when a peer comes online',
-        );
+        // Soft: federation completes later. The detail names WHICH condition held —
+        // our own boot still in flight vs booted with no peer (WI-10004746).
+        markPhase0('await_admission_merge', admissionPendingDetail(r));
       }
     } catch (e: unknown) {
       const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);

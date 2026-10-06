@@ -9,7 +9,7 @@
  */
 
 import { loadHarnessRegistry, resolveHarnessContentPath } from '../../harness-registry';
-import { resolveDocsRoot } from '../../endpoint-route/routes/harness/project-docs';
+import { resolveDocsRoot, resolveDocsSources } from '../../endpoint-route/routes/harness/project-docs';
 
 /** The harness's git working-tree root, or null if unknown. For a repo-less
  *  `kind:'hive'` harness this resolves its MEMBER repo's path (git-sync-any-hive:
@@ -21,9 +21,10 @@ export async function resolveHarnessRepoRoot(slug: string): Promise<string | nul
 /** Both roots for a harness: the repo (git) root and the docs (bodies) root. */
 export async function resolveHarnessDocPaths(
   slug: string,
-): Promise<{ repoRoot: string; docsRoot: string } | null> {
+): Promise<{ repoRoot: string; docsRoot: string; sources?: Record<string, string> } | null> {
   const repoRoot = await resolveHarnessRepoRoot(slug);
   if (!repoRoot) return null;
   const docsRoot = await resolveDocsRoot(repoRoot);
-  return { repoRoot, docsRoot };
+  const sources = await resolveDocsSources(repoRoot);
+  return { repoRoot, docsRoot, ...(Object.keys(sources).length ? { sources } : {}) };
 }

@@ -17,7 +17,10 @@
  *
  * Ported from app/api/zero-harness/rest-query/route.ts.
  */
-import { resolveNamedQueryV2, NAME_NOT_FOUND } from '../../../sync-resolver';
+import { resolveNamedQueryV2, isRegisteredV2, NAME_NOT_FOUND } from '../../../sync-resolver';
+import {
+  withNamedQueryDiagnosticContext, recordNamedQueryResponse,
+} from '../../../agent-tools/db-diagnostic-correlation-wiring';
 import { observeResolve } from '../../../sync-resolver/resolve-observability';
 import { resourceDeltaConfig } from '../../../sync-resolver/resource-delta-config';
 import {
@@ -52,6 +55,7 @@ export default defineTool({
     if (req.signal.aborted) {
       return new Response(null, { status: 499 });
     }
+    return withNamedQueryDiagnosticContext(isRegisteredV2(name) ? name : null, async (requestId) => {
     const startedMs = Date.now();
     let resolverFailureObserved = false;
     try {
@@ -86,6 +90,7 @@ export default defineTool({
         );
       }
       const rows = v2;
+      recordNamedQueryResponse('resolvedRows', rows);
       if (req.signal.aborted) {
         return new Response(null, { status: 499 });
       }
@@ -153,10 +158,11 @@ export default defineTool({
         responseValue = { rows, version: String(Date.now()), timing };
         itemCount = Array.isArray(rows) ? rows.length : 1;
       }
+      recordNamedQueryResponse('responseValue', responseValue);
       const body = await serializeJsonResponse(responseValue, itemCount);
       return new Response(body, {
         status: 200,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
+        headers: { 'content-type': 'application/json; charset=utf-8', 'x-papercusp-request-id': requestId },
       });
     } catch (err: any) {
       const msg = err?.message ?? String(err);
@@ -188,5 +194,6 @@ export default defineTool({
         { status: 500 },
       );
     }
+    });
   },
 });

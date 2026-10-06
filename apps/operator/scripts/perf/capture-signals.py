@@ -15,7 +15,7 @@ Usage:  python3 capture-signals.py [--label round4] [--out DIR]
 Prints the written path on stdout. No shell=True (no injection surface).
 """
 import argparse
-import json, os, re, socket, subprocess, sys, time
+import json, os, re, shutil, socket, subprocess, sys, time
 import urllib.request
 from datetime import datetime, timezone
 
@@ -700,6 +700,368 @@ def cgroup_cpu(budget_sec=5.0, max_scanned=4096, top_n=40, root=None,
     }
 
 
+def _read_io_stat(dirpath):
+    """Sum a cgroup's ``io.stat`` counters across devices; None if unreadable.
+
+    The kernel lists only devices the cgroup has touched, so an EMPTY file is a
+    real zero, while a missing or unreadable one returns None (no measurement).
+    """
+    totals = {"rbytes": 0, "wbytes": 0, "rios": 0, "wios": 0}
+    try:
+        with open(os.path.join(dirpath, "io.stat")) as fh:
+            for line in fh:
+                for field in line.split()[1:]:
+                    key, _, value = field.partition("=")
+                    if key in totals and value.isdigit():
+                        totals[key] += int(value)
+    except Exception:
+        return None
+    return totals
+
+
+def _read_pressure(path):
+    """Parse a PSI file (host ``/proc/pressure/*`` or cgroup ``*.pressure``)."""
+    out = {}
+    try:
+        with open(path) as fh:
+            for ln in fh:
+                parts = ln.split()
+                if not parts:
+                    continue
+                vals = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+                out[parts[0]] = {"avg10": float(vals.get("avg10", "nan")),
+                                 "avg60": float(vals.get("avg60", "nan")),
+                                 "avg300": float(vals.get("avg300", "nan"))}
+    except Exception:
+        return None
+    return out or None
+
+
+def cgroup_io(budget_sec=5.0, max_scanned=4096, top_n=40, root=None,
+              sample_sec=CPU_SAMPLE_SEC, stat_reader=None,
+              monotonic_fn=time.monotonic, sleep_fn=time.sleep):
+    """Bounded two-sample cgroup-v2 IO ownership attribution (EI-24438849822675827).
+
+    Host ``/proc/pressure/io`` says the box is IO-stalled but not WHO is writing.
+    ``io.stat`` is cumulative per cgroup (inclusive of descendants), so a short
+    delta names the cgroups moving bytes during the stall, and each row carries
+    that cgroup's own ``io.pressure`` (its tasks' stall share). Forensic only: it
+    adds no threshold and does not claim the top writer caused the stall. Writers
+    outside any readable cgroup (kernel flushers, journal threads) do not appear
+    here — ``dstate_tasks()`` is the complementary view. A counter that went
+    backwards (cgroup recreated) is dropped, never reported as a delta.
+    """
+    root = root or os.environ.get("PAPERCUSP_PERF_CGROUP_ROOT", "/sys/fs/cgroup")
+    deadline = monotonic_fn() + budget_sec
+    reader = stat_reader or _read_io_stat
+
+    def collect():
+        rows, scanned, partial = {}, 0, False
+        try:
+            for dirpath, dirnames, _files in os.walk(root):
+                dirnames.sort()
+                if monotonic_fn() > deadline or scanned >= max_scanned:
+                    partial = True
+                    break
+                stat = reader(dirpath)
+                if stat is None:
+                    continue
+                scanned += 1
+                rows[dirpath] = stat
+        except Exception:
+            partial = True
+        return rows, scanned, partial
+
+    first, first_scanned, first_partial = collect()
+    sample_started = monotonic_fn()
+    sleep_fn(max(0, sample_sec))
+    elapsed = max(0.0, monotonic_fn() - sample_started)
+    second, second_scanned, second_partial = collect()
+
+    rows = []
+    if elapsed > 0:
+        for dirpath, before in first.items():
+            after = second.get(dirpath)
+            if after is None:
+                continue
+            delta = {key: after.get(key, 0) - before.get(key, 0) for key in before}
+            if any(value < 0 for value in delta.values()) or not any(delta.values()):
+                continue
+            relative = os.path.relpath(dirpath, root)
+            rows.append({
+                "path": "/" if relative == "." else "/" + relative,
+                "writeMBps": round(delta["wbytes"] / elapsed / 1e6, 2),
+                "readMBps": round(delta["rbytes"] / elapsed / 1e6, 2),
+                "writeIops": round(delta["wios"] / elapsed, 1),
+                "readIops": round(delta["rios"] / elapsed, 1),
+                "ioPressure": _read_pressure(os.path.join(dirpath, "io.pressure")),
+            })
+
+    rows.sort(key=lambda row: (-(row["writeMBps"] + row["readMBps"]), row["path"]))
+    return {
+        "accounting": "cgroup-v2-inclusive-descendants",
+        "top": rows[:top_n],
+        "scannedCgroups": max(first_scanned, second_scanned),
+        "candidateCgroups": len(rows),
+        "maxScanned": max_scanned,
+        "maxRows": top_n,
+        "sampleSec": elapsed,
+        "budgetSec": budget_sec,
+        "partial": first_partial or second_partial,
+    }
+
+
+_DISKSTATS_SKIP_PREFIXES = ("loop", "ram", "zram")
+
+
+def _read_diskstats(path):
+    """Parse ``/proc/diskstats`` into ``{name: counters}``; None if unreadable.
+
+    Field positions (kernel Documentation/admin-guide/iostats.rst, after the
+    major/minor/name columns): reads, reads merged, sectors read, ms reading,
+    writes, writes merged, sectors written, ms writing, I/Os in flight, ms doing
+    I/O, weighted ms. Sectors are always 512 bytes here regardless of the
+    device's logical block size.
+    """
+    out = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 14 or not all(p.isdigit() for p in parts[3:14]):
+                    continue
+                v = [int(p) for p in parts[3:14]]
+                out[parts[2]] = {
+                    "devno": f"{parts[0]}:{parts[1]}",
+                    "reads": v[0], "readSectors": v[2], "readMs": v[3],
+                    "writes": v[4], "writeSectors": v[6], "writeMs": v[7],
+                    "inFlight": v[8], "ioMs": v[9],
+                }
+    except Exception:
+        return None
+    return out
+
+
+def _disk_mounts(disk, sys_block_root, mounts_path):
+    """Mountpoints served by ``disk`` or one of its partitions (sorted, deduped)."""
+    try:
+        partitions = {name for name in os.listdir(os.path.join(sys_block_root, disk))
+                      if name.startswith(disk)}
+    except Exception:
+        partitions = set()
+    names = {disk} | partitions
+    points = set()
+    try:
+        with open(mounts_path) as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].startswith("/dev/") \
+                        and os.path.basename(parts[0]) in names:
+                    points.add(parts[1].replace("\\040", " "))
+    except Exception:
+        pass
+    return sorted(points)
+
+
+def disk_stats(proc_root=None, sys_block_root=None, sample_sec=CPU_SAMPLE_SEC,
+               monotonic_fn=time.monotonic, sleep_fn=time.sleep):
+    """Two-sample per-DISK IO rates, waits and queue depth (WI-10005308).
+
+    ``cgroup_io()`` names who moved bytes but sums across devices, so an incident
+    could not say WHICH disk was stalled (root NVMe vs data NVMe). This samples
+    ``/proc/diskstats`` twice over whole disks only (entries listed in
+    ``/sys/block``; loop/ram/zram skipped) and reports throughput, IOPS, average
+    read/write wait per completed I/O, the in-flight count at the second sample
+    and the busy share of the window. Each disk carries its mountpoints because
+    NVMe enumeration order is not stable across boots. A counter that went
+    backwards (reset/overflow) drops that disk rather than reporting a negative
+    rate; an unreadable ``/proc/diskstats`` is reported as unavailable, never as
+    an idle box.
+    """
+    proc_root = proc_root or os.environ.get("PAPERCUSP_PERF_PROC_ROOT", "/proc")
+    sys_block_root = sys_block_root or os.environ.get(
+        "PAPERCUSP_PERF_SYS_BLOCK_ROOT", "/sys/block")
+    stats_path = os.path.join(proc_root, "diskstats")
+    mounts_path = os.path.join(proc_root, "mounts")
+
+    first = _read_diskstats(stats_path)
+    if first is None:
+        return {"available": False, "devices": None}
+    started = monotonic_fn()
+    sleep_fn(max(0, sample_sec))
+    elapsed = max(0.0, monotonic_fn() - started)
+    second = _read_diskstats(stats_path)
+    if second is None or elapsed <= 0:
+        return {"available": False, "devices": None}
+
+    try:
+        whole_disks = set(os.listdir(sys_block_root))
+    except Exception:
+        whole_disks = None   # cannot tell disks from partitions: keep every row
+
+    rows = []
+    for name, before in first.items():
+        after = second.get(name)
+        if after is None or name.startswith(_DISKSTATS_SKIP_PREFIXES):
+            continue
+        if whole_disks is not None and name not in whole_disks:
+            continue
+        delta = {key: after[key] - before[key] for key in before if key not in ("devno", "inFlight")}
+        if any(value < 0 for value in delta.values()):
+            continue
+        mounts = _disk_mounts(name, sys_block_root, mounts_path)
+        # An unmounted disk that did nothing (idle nbd/virtual devices) is noise;
+        # an idle MOUNTED disk stays, because "this disk was quiet" is evidence.
+        if not mounts and not after["inFlight"] and not any(delta.values()):
+            continue
+        rows.append({
+            "device": name,
+            "devno": after["devno"],
+            "mounts": mounts,
+            "readMBps": round(delta["readSectors"] * 512 / elapsed / 1e6, 2),
+            "writeMBps": round(delta["writeSectors"] * 512 / elapsed / 1e6, 2),
+            "readIops": round(delta["reads"] / elapsed, 1),
+            "writeIops": round(delta["writes"] / elapsed, 1),
+            "readAwaitMs": round(delta["readMs"] / delta["reads"], 2) if delta["reads"] else None,
+            "writeAwaitMs": round(delta["writeMs"] / delta["writes"], 2) if delta["writes"] else None,
+            "inFlight": after["inFlight"],
+            "utilPct": round(min(100.0, delta["ioMs"] / (elapsed * 1000) * 100), 1),
+        })
+    rows.sort(key=lambda row: (-row["utilPct"], -(row["readMBps"] + row["writeMBps"]), row["device"]))
+    return {"available": True, "devices": rows, "sampleSec": elapsed,
+            "wholeDisksKnown": whole_disks is not None}
+
+
+def _dstate_comm_key(comm):
+    """Group per-worker kernel threads: ``kworker/u256:3+flush-259:1`` keeps its
+    work item (``+flush-259:1`` names the device) but drops the worker id."""
+    return re.sub(r"^kworker/[^+]*", "kworker/*", comm)
+
+
+def dstate_tasks(budget_sec=5.0, max_tasks=200000, top_n=15, proc_root=None,
+                 monotonic_fn=time.monotonic):
+    """Census of tasks in uninterruptible sleep (state D) at capture time.
+
+    During the 2026-09-27 saturation ~915 tasks sat in D while no user.slice
+    cgroup wrote >2 MB/s, so the stalled set (often kernel flushers and journal
+    threads) is the evidence cgroup IO alone cannot give. Counts per thread,
+    grouped by command, kernel wait channel (wchan) and owning cgroup. Bounded
+    by wall time and task count; a cut-off walk is marked ``partial``.
+    """
+    proc_root = proc_root or os.environ.get("PAPERCUSP_PERF_PROC_ROOT", "/proc")
+    deadline = monotonic_fn() + budget_sec
+    by_comm, by_wchan, by_cgroup = {}, {}, {}
+    scanned = d_count = 0
+    partial = False
+    try:
+        pids = sorted((p for p in os.listdir(proc_root) if p.isdigit()), key=int)
+    except Exception:
+        return {"available": False, "dStateTasks": None, "partial": True}
+
+    def bump(table, key):
+        table[key] = table.get(key, 0) + 1
+
+    for pid in pids:
+        if monotonic_fn() > deadline or scanned >= max_tasks:
+            partial = True
+            break
+        task_dir = os.path.join(proc_root, pid, "task")
+        try:
+            tids = os.listdir(task_dir)
+        except Exception:
+            continue  # exited between listdir calls
+        cgroup = None
+        for tid in tids:
+            scanned += 1
+            try:
+                with open(os.path.join(task_dir, tid, "stat")) as fh:
+                    raw = fh.read()
+            except Exception:
+                continue
+            close = raw.rfind(")")  # comm may itself contain spaces and parens
+            if close < 0 or raw[close + 2:close + 3] != "D":
+                continue
+            d_count += 1
+            bump(by_comm, _dstate_comm_key(raw[raw.find("(") + 1:close]))
+            try:
+                with open(os.path.join(task_dir, tid, "wchan")) as fh:
+                    wchan = fh.read().strip() or "?"
+            except Exception:
+                wchan = "?"
+            bump(by_wchan, wchan)
+            if cgroup is None:
+                cgroup = "?"
+                try:
+                    with open(os.path.join(proc_root, pid, "cgroup")) as fh:
+                        for line in fh:
+                            if line.startswith("0::"):
+                                cgroup = line[3:].strip() or "/"
+                                break
+                except Exception:
+                    pass
+            bump(by_cgroup, cgroup)
+
+    def top(table, label):
+        ranked = sorted(table.items(), key=lambda kv: (-kv[1], kv[0]))[:top_n]
+        return [{label: key, "count": count} for key, count in ranked]
+
+    return {
+        "available": True,
+        "dStateTasks": d_count,
+        "scannedTasks": scanned,
+        "topComms": top(by_comm, "comm"),
+        "topWchans": top(by_wchan, "wchan"),
+        "topCgroups": top(by_cgroup, "cgroup"),
+        "maxTasks": max_tasks,
+        "maxRows": top_n,
+        "budgetSec": budget_sec,
+        "partial": partial,
+    }
+
+
+IO_PSI_INCIDENT_FULL_AVG10 = 20.0   # host io `full avg10` that marks an IO-stall capture
+IO_INCIDENT_MIN_GAP_SEC = 1800       # at most one io-pressure incident copy per 30 min
+IO_INCIDENT_RETENTION_SEC = 14 * 86400  # matches perf-budgets INCIDENT_CAPTURE_RETENTION_DAYS
+
+
+def maybe_preserve_io_incident(host_psi, out_dir, path,
+                               threshold=IO_PSI_INCIDENT_FULL_AVG10,
+                               min_gap_sec=IO_INCIDENT_MIN_GAP_SEC,
+                               retention_sec=IO_INCIDENT_RETENTION_SEC, now_fn=time.time):
+    """Keep this capture past rotation when host IO is stalled.
+
+    The infra panel's crit edge (compute.ts -> preserveIncidentCapture) fires on
+    CPU/memory pressure, not IO, so an IO-only saturation would rotate out of the
+    newest-15 window before anyone looks. ``*-incident-*`` files are exempt from
+    that rotation and pruned by age in perf-budgets. Rate-limited so a long stall
+    yields one copy per ``min_gap_sec``, not one per 2-minute tick. Returns the
+    incident path, or None when not triggered or on any failure (fail-soft).
+    """
+    try:
+        full = ((((host_psi or {}).get("io") or {}).get("full")) or {}).get("avg10")
+        if not isinstance(full, (int, float)) or full != full or full < threshold:
+            return None
+        now = now_fn()
+        for name in os.listdir(out_dir):
+            if not name.endswith("-incident-io-pressure.json"):
+                continue
+            existing = os.path.join(out_dir, name)
+            age = now - os.path.getmtime(existing)
+            if age > retention_sec:
+                # perf-budgets prunes *-incident-* only on an infra-crit edge, which an
+                # IO-only stall never raises, so this writer bounds its own copies.
+                os.remove(existing)
+            elif age < min_gap_sec:
+                return None
+        base = os.path.basename(path)
+        stem = base[:-len(".json")] if base.endswith(".json") else base
+        dest = os.path.join(out_dir, f"{stem}-incident-io-pressure.json")
+        shutil.copyfile(path, dest)
+        return dest
+    except Exception:
+        return None
+
+
 def host_state(la):
     """stable | loaded | wedge-suspect — pure-local loadavg proxy. An agent run
     should overwrite with the real event-loop-lag verdict when available."""
@@ -754,9 +1116,12 @@ def main():
             "gateway_8788_reachable": tcp_reachable(GATEWAY_PORT),
             "operator_3070_reachable": tcp_reachable(OPERATOR_PORT),
             "kopia": kopia(),
-            "psi": psi(),
+            "psi": (host_psi := psi()),
             "cgroupMemory": cgroup_memory(),
             "cgroupCpu": cgroup_cpu(),
+            "cgroupIo": cgroup_io(),
+            "diskStats": disk_stats(),
+            "dState": dstate_tasks(),
             "inotify": inotify(),
             "sessionDirs": session_dirs(),
             "_mcp_supplemented": {
@@ -770,6 +1135,9 @@ def main():
     with open(path, "w") as f:
         json.dump(snap, f, indent=2)
     print(path)
+    incident = maybe_preserve_io_incident(host_psi, out_dir, path)
+    if incident:
+        print(incident)
 
 
 if __name__ == "__main__":

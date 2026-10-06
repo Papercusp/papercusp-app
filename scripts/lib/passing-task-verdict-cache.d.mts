@@ -156,6 +156,7 @@ export function shouldStorePassingTaskVerdict(args: {
 export function buildPassingTaskVerdictIdentity(args: {
   taskKey: string;
   command: unknown;
+  commandRoot?: string | null;
   environment: unknown;
   gateConfig: unknown;
   dependencyHash: string;

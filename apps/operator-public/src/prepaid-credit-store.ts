@@ -13,6 +13,7 @@ import {
   type PrepaidCreditRejectionCode,
 } from '@papercusp/operator-core/lib/cupboard/prepaid-credits.ts';
 import { loadLedgerEvents } from './commerce-store.ts';
+import { witnessAfterAppend } from './ledger-chain-store.ts';
 
 interface PrepaidCreditEventRow {
   credit_event_id: string;
@@ -291,6 +292,7 @@ export async function appendPrepaidCreditEvent(
       JSON.stringify(event.payload),
     )
     .run();
+  await witnessAfterAppend(db, 'commerce.prepaid-credits', requestedAtMs);
 
   const stored = await getPrepaidCreditEvent(db, event.creditEventId);
   if (!stored) {

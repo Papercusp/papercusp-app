@@ -43,7 +43,9 @@ export interface ItemTestGateResult {
  * `valsPassing === valsRequiringTest`. Refuse (`ok: false`) only when some
  * required-test VAL is not `passed`; the reason names the failing/uncovered VAL(s).
  * Zero required-test VALs anywhere ⇒ PASS (nothing to prove). FAIL-OPEN
- * (`{ ok: true }`) on any thrown error.
+ * (`{ ok: true }`) on any thrown error. A VAL promoted into an ENFORCEABLE spec clause
+ * (`plan_spec_clauses.source_val_id`) is excluded: `specTestAdequacyCompletionGate` judges it
+ * against current evidence bindings, and `harness_tests` can no longer prove anything new.
  */
 export async function itemTestGate(
   harness: string,
@@ -74,6 +76,37 @@ export async function itemTestGate(
     `;
     if (!assertions.some((a) => a.requires_test)) return { ok: true }; // nothing requires a test
 
+    // 2b. SPEC-GOVERNED VALs are NOT judged here (WI-10004463). Since first-class spec clauses
+    //     landed, a requires_test VAL that a plan item promoted into an ENFORCEABLE clause
+    //     (`plan_spec_clauses.source_val_id`, current revision accepted|active) is proven by
+    //     immutable `spec_evidence_bindings` and judged — with currentness, mutation and
+    //     graded-adequacy semantics — by `specTestAdequacyCompletionGate` at the same close.
+    //     `harness_tests` has had no writer since 2026-08-22 (its only writer is the
+    //     replace-all POST /internal/test-snapshot), so re-asking it about such a VAL is
+    //     structurally unsatisfiable: every NEW spec-era feature item was refused no matter
+    //     how well proven. Only VALs with NO enforceable clause still use the legacy rollup.
+    //     (A draft/exempt/retired/superseded clause does not exempt its VAL: nothing else
+    //     would judge it.)
+    const requiringVals = [...new Set(assertions.filter((a) => a.requires_test).map((a) => a.val_id))];
+    const governed = await sql<{ val_id: string }[]>`
+      SELECT c.source_val_id AS val_id
+        FROM harness_shared.plan_spec_clauses c
+        JOIN harness_shared.plan_spec_clause_revisions r
+          ON r.workspace_id = c.workspace_id
+         AND r.harness_slug = c.harness_slug
+         AND r.plan_slug = c.plan_slug
+         AND r.spec_id = c.spec_id
+         AND r.revision = c.current_revision
+       WHERE c.workspace_id = ${ws}
+         AND c.harness_slug = ${harness}
+         AND c.plan_slug = ${planSlug}
+         AND c.source_val_id = ANY(${requiringVals})
+         AND r.lifecycle_status IN ('accepted', 'active')
+    `;
+    const specGoverned = new Set(governed.map((g) => g.val_id));
+    const legacyAssertions = assertions.filter((a) => !specGoverned.has(a.val_id));
+    if (!legacyAssertions.some((a) => a.requires_test)) return { ok: true }; // all proof is spec-governed
+
     // 3. The harness's tests, mapped to the rollup shape (the VAL is the join key).
     const testRows = await sql<{ status: string; payload: { coversVALs?: unknown } }[]>`
       SELECT status, payload
@@ -90,7 +123,7 @@ export async function itemTestGate(
 
     // 4. Roll up by plan item; PASS iff every covered item has all of its
     //    test-requiring VALs passing (valsRequiringTest === 0 OR === valsPassing).
-    const rollup = computePlanItemTestStatus(assertions, tests);
+    const rollup = computePlanItemTestStatus(legacyAssertions, tests);
     const blocked = Object.values(rollup).some(
       (s) => s.valsRequiringTest > 0 && s.valsPassing < s.valsRequiringTest,
     );
@@ -99,7 +132,7 @@ export async function itemTestGate(
     // 5. Name the specific not-yet-passing required VAL(s) for the refusal reason.
     const failing = [
       ...new Set(
-        assertions
+        legacyAssertions
           .filter((a) => a.requires_test && deriveAssertionStatus(a.val_id, tests) !== 'passed')
           .map((a) => a.val_id),
       ),

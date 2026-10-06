@@ -47,6 +47,17 @@ export function inheritedContextDecision(forkedFromId: string): {
     systemMessage: string;
 };
 /**
+ * WI-10004953: a codex NESTED inside another agent (run from an su's Bash tool, or under a
+ * capability:bash job) inherits that su's CODEX_HOME, PAPERCUSP_SID and PAPERCUSP_MCP_URL.
+ * Bridging its auto-compaction would ask session:request-compaction on the SU's route and
+ * queue a carry-respawn of the live su. A nested CLI has no managed carry of its own, so
+ * it compacts natively.
+ */
+export function nestedCliDecision(): {
+    continue: boolean;
+    systemMessage: string;
+};
+/**
  * Run the bridge with injectable transport/token readers for hermetic tests.
  * @param {Record<string, unknown>} payload
  * @param {{
@@ -54,6 +65,7 @@ export function inheritedContextDecision(forkedFromId: string): {
  *   fetchImpl?: typeof globalThis.fetch,
  *   readToken?: (env: Record<string, string | undefined>) => string,
  *   inspectTranscript?: (transcriptPath: unknown) => { readable: boolean, forkedFromId: string | null, sampled: boolean | null },
+ *   isNested?: () => boolean,
  * }} [options]
  */
 export function runManagedPreCompact(payload: Record<string, unknown>, options?: {
@@ -65,6 +77,7 @@ export function runManagedPreCompact(payload: Record<string, unknown>, options?:
         forkedFromId: string | null;
         sampled: boolean | null;
     };
+    isNested?: () => boolean;
 }): Promise<{
     continue: boolean;
     systemMessage: string;

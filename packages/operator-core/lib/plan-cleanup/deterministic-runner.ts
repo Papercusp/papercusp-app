@@ -367,7 +367,18 @@ export async function runDeterministicPlanCleanup(input: {
   let phase: BulkRunPhase = authorityRefusal?.phase ?? run.phase;
   const needsResolver = !authorityRevoked && recommendationFindingIds.length > 0;
   if (!needsResolver && !authorityRevoked) {
-    phase = (await deps.settle({ runId: run.runId }))?.phase ?? 'complete';
+    // The final scan above completed in this process, so this settle carries
+    // its own evidence of life. Without `scanCompleted` a scan that found
+    // nothing settled `failed` ("no evidence the resolver ran"), because no
+    // resolver is ever launched for a run with zero judgment residue
+    // (WI-10004729). Report the settled phase faithfully; never default a
+    // missing row to `complete`.
+    const settled = await deps.settle({
+      runId: run.runId,
+      workspaceId: run.workspaceId,
+      scanCompleted: true,
+    });
+    phase = settled?.phase ?? phase;
   }
   await deps.notify().catch(() => undefined);
 

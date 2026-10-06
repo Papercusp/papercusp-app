@@ -15,6 +15,7 @@
  * the local template when the ref resolves.
  */
 import { publishListingToCupboard } from './publish-listing';
+import { buildSelfDescribingPublishExtras, type SelfDescribingPublishExtras } from './self-describing-release';
 import { resolveLocalTemplate } from './template-store';
 import { parseGithubRemote, fetchGithubRepoMeta } from './resolve-repo-coords';
 
@@ -69,9 +70,30 @@ export async function publishTemplateToCupboard(input: PublishTemplateInput): Pr
   // title/description then come from the input).
   const local = resolveLocalTemplate(ref);
 
+  const listingRef =
+    typeof input.listing_ref === 'string' && input.listing_ref.trim() ? input.listing_ref.trim() : ref;
+
+  // A template that resolves locally has bytes to ship: pin its content hash and upload the package to
+  // the R2 origin (GitHub stays the mirror). A ref NOT present locally has no bytes on this box, so it
+  // publishes GitHub-only exactly as before — the mirror repo is then the sole content authority.
+  let releaseExtras: Partial<SelfDescribingPublishExtras> = {};
+  if (local?.dir) {
+    const releaseBuild = await buildSelfDescribingPublishExtras({
+      listingKind: 'template',
+      listingRef,
+      dir: local.dir,
+      version: local.version,
+    });
+    if (!releaseBuild.ok) {
+      return { ok: false, status: releaseBuild.status, error: releaseBuild.error, detail: releaseBuild.detail };
+    }
+    releaseExtras = releaseBuild.extras;
+  }
+
   const result = await publishListingToCupboard({
+    ...releaseExtras,
     listing_kind: 'template',
-    listing_ref: typeof input.listing_ref === 'string' && input.listing_ref.trim() ? input.listing_ref.trim() : ref,
+    listing_ref: listingRef,
     project_ref: typeof input.project_ref === 'string' ? input.project_ref : undefined,
     github_repository_id: meta.id,
     github_owner: parsed.owner,

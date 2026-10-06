@@ -45,6 +45,7 @@ import type { OrgSql } from '../work-items';
 import type { BoundedListPage } from './bounded-list-read';
 import { attachListMeta, readListMeta } from './list-meta';
 import { createReadDeadline } from './read-deadline';
+import { intakeTriageStateSql } from '../attention/intake-promotion';
 
 /**
  * Whole-read deadline for this compute (WI-39823). 6s, the same budget the three
@@ -59,6 +60,7 @@ const OBSERVATIONS_READ_BUDGET_MS = 6_000;
 export const LEARNING_OBSERVATIONS_PAGE_LIMIT = 200;
 
 export interface LearningObservationsWireFilters {
+  triageStates?: string[];
   scopes?: string[];
   sourceRoles?: string[];
   confidences?: string[];
@@ -84,6 +86,7 @@ export interface NormalizedLearningObservationsArgs {
   state: 'open' | 'resolved' | 'closed' | null;
   q: string | null;
   filters: {
+    triageStates: string[];
     scopes: string[];
     sourceRoles: string[];
     confidences: string[];
@@ -142,6 +145,7 @@ export function normalizeLearningObservationsArgs(
     state: args.state ?? null,
     q: args.q?.trim() || null,
     filters: {
+      triageStates: uniq(filters.triageStates),
       scopes: uniq(filters.scopes),
       sourceRoles: uniq(filters.sourceRoles),
       confidences: uniq(filters.confidences),
@@ -174,6 +178,7 @@ export function learningObservationsSummarySelection(
   add('sourceRole', args.filters.sourceRoles);
   add('confidence', args.filters.confidences);
   add('kind', args.filters.kinds);
+  add('triageState', args.filters.triageStates);
   return new Map(entries);
 }
 
@@ -205,6 +210,7 @@ export interface LearningObservationsOpts {
  * actually carries and a consumer cannot read absence as a bug.
  */
 export interface LearningObservationRow {
+  triageState?: 'awaiting' | 'handled';
   id: string;
   title: string;
   body?: string;
@@ -216,9 +222,10 @@ export interface LearningObservationRow {
   createdAt: string;
 }
 
-type ObservationFacetKey = 'kind' | 'scope' | 'sourceRole' | 'confidence';
+type ObservationFacetKey = 'kind' | 'scope' | 'sourceRole' | 'confidence' | 'triageState';
 
 interface LearningObservationDbRow {
+  triageState: 'awaiting' | 'handled';
   id: string;
   title: string;
   body: string | null;
@@ -256,8 +263,14 @@ function observationScopedCte(
   // down the cursor/filter and defer display projection until after LIMIT.
   return sql`
     scoped AS ${summary ? sql`MATERIALIZED` : sql`NOT MATERIALIZED`} (
-      SELECT ${summary ? sql`` : sql`issue_id AS id, created_at,`}
-             ${!summary || args.q ? sql`COALESCE(title, '') AS title, body,` : sql``}
+      SELECT ${summary ? sql`` : sql`feature_id AS id, to_timestamp(created_ts / 1000.0) AS created_at,`}
+             ${intakeTriageStateSql(sql, {
+               payload: 'ei.payload',
+               latestOccurrenceId: `(SELECT max(occurrence_id) FROM harness_shared.work_item_occurrences o
+                 WHERE o.workspace_id = ei.workspace_id AND o.canonical_harness_slug = ei.harness_slug
+                   AND o.canonical_work_item_id = ei.feature_id)`,
+             })} AS triage_state,
+             ${!summary || args.q ? sql`COALESCE(title, '') AS title, summary AS body,` : sql``}
              ${!summary || args.q || args.filters.plans.length > 0 ? sql`
                ARRAY(
                  SELECT jsonb_array_elements_text(
@@ -271,19 +284,20 @@ function observationScopedCte(
              NULLIF(payload->'observation'->>'kind', '') AS observation_kind,
              COALESCE(
                NULLIF(payload->'observation'->>'scope', ''),
-               NULLIF(scope, '')
+               CASE WHEN ei.harness_slug LIKE 'operator:%' OR ei.harness_slug = ''
+                    THEN 'operator' ELSE 'harness:' || ei.harness_slug END
              ) AS observation_scope,
              COALESCE(
                NULLIF(payload->>'sourceRole', ''),
                NULLIF(payload->>'filedByRole', '')
              ) AS source_role,
              NULLIF(payload->'observation'->>'confidence', '') AS confidence
-        FROM harness_shared.engineer_issues
+        FROM harness_shared.work_items ei
        WHERE workspace_id = ${workspaceId}
-         AND kind = ANY(${['bug', 'change']}::text[])
-         AND lane = 'observation'
+         AND item_kind = ANY(${['bug', 'change']}::text[])
+         AND payload->>'lane' = 'observation'
          AND (payload->'observation'->>'rubricRef') IS NULL
-         AND ${args.state ? sql`state = ${args.state}` : sql`TRUE`}
+         AND ${args.state ? sql`status = ${args.state}` : sql`TRUE`}
     )`;
 }
 
@@ -295,6 +309,9 @@ function observationPredicateSql(
   const f = args.filters;
   const q = args.q ? likeContainsPattern(args.q) : null;
   return sql`
+    ${omit !== 'triageState' && f.triageStates.length > 0
+      ? sql`s.triage_state = ANY(${f.triageStates}::text[])` : sql`TRUE`}
+    AND
     ${
       q
         ? sql`(
@@ -344,6 +361,7 @@ function mapLearningObservationDbRow(
     ? row.createdAt.toISOString()
     : new Date(row.createdAt).toISOString();
   const out: LearningObservationRow = {
+    triageState: row.triageState,
     id: row.id,
     title: row.title,
     refs: Array.isArray(row.refs) ? row.refs : [],
@@ -389,6 +407,7 @@ export async function readLearningObservationsPageFromStore(
   const rows = await sql<LearningObservationDbRow[]>`
     WITH ${observationScopedCte(sql, workspaceId, args)}
     SELECT s.id,
+           s.triage_state AS "triageState",
            s.title,
            s.body,
            s.observation_kind AS kind,
@@ -459,6 +478,11 @@ export async function readLearningObservationsSummaryFromStore(
        WHERE ${observationPredicateSql(sql, args, 'confidence')}
          AND s.confidence IS NOT NULL
        GROUP BY s.confidence
+    ),
+    triage_facets AS (
+      SELECT s.triage_state AS value, count(*)::int AS n FROM scoped s
+       WHERE ${observationPredicateSql(sql, args, 'triageState')}
+       GROUP BY s.triage_state
     )
     SELECT 'totals'::text AS kind,
            NULL::text AS facet,
@@ -471,7 +495,8 @@ export async function readLearningObservationsSummaryFromStore(
     UNION ALL SELECT 'facet', 'kind', 'Signal', value, n, NULL, NULL FROM kind_facets
     UNION ALL SELECT 'facet', 'scope', 'Scope', value, n, NULL, NULL FROM scope_facets
     UNION ALL SELECT 'facet', 'sourceRole', 'Role', value, n, NULL, NULL FROM source_role_facets
-    UNION ALL SELECT 'facet', 'confidence', 'Confidence', value, n, NULL, NULL FROM confidence_facets`;
+    UNION ALL SELECT 'facet', 'confidence', 'Confidence', value, n, NULL, NULL FROM confidence_facets
+    UNION ALL SELECT 'facet', 'triageState', 'Intake triage', value, n, NULL, NULL FROM triage_facets`;
 
   return rows.map((row): CompanionSummaryAggregateRow =>
     row.kind === 'totals'

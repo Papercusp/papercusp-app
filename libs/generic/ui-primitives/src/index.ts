@@ -30,6 +30,7 @@ export {
   findPlanDocumentHeading,
   neutralizePlanDocumentPlantuml,
   planDocumentFallbackSurface,
+  preparePlanDocument,
   rankPlanDocumentCandidates,
   scrollPlanDocumentTarget,
   stripPlanFrontmatter,

@@ -33,7 +33,7 @@ import {
   type A11ySnapshot,
   type SnapshotOptions,
 } from './a11y-snapshot';
-import { captureScreenshotPng, computerExec, resolveBoundDisplay, type ComputerCtx } from './computer';
+import { captureScreenshotPng, computerExec, desktopArg, resolveBoundDisplay, type ComputerCtx } from './computer';
 import { planAction, xdotoolCommand, type DesktopTarget } from './desktop-driver';
 import { recordAction, renderLedgerLine } from './action-ledger';
 import { isRecording, noteRecordedAction } from './trajectory-recorder';
@@ -97,10 +97,11 @@ const observeArgs = z.object({
   include_hidden: z.boolean().optional().describe('Include elements the toolkit reports as not on screen (e.g. unopened menus). Default false.'),
   include_bounds: z.boolean().optional().describe('Include each element\'s on-screen box. Default false — you click by #ref, not by coordinate.'),
   max_nodes: z.number().int().positive().max(2000).optional().describe('Cap the elements returned (default 200).'),
+  desktop: desktopArg,
 });
 
 export async function runObserve(args: z.infer<typeof observeArgs>, ctx: ComputerCtx = {}) {
-  const target = await resolveBoundDisplay(ctx);
+  const target = await resolveBoundDisplay(ctx, { desktop: args.desktop });
   const snap = await snapshotOrThrow('computer:observe', target, {
     includeHidden: args.include_hidden ?? false,
     includeBounds: args.include_bounds ?? false,
@@ -143,10 +144,11 @@ export async function runObserve(args: z.infer<typeof observeArgs>, ctx: Compute
 const clickArgs = z.object({
   ref: z.string().describe('The #ref of the element, exactly as computer:observe printed it (e.g. "0/0/2/1").'),
   action: z.string().optional().describe('Which of the element\'s actions to fire (default: its first). computer:observe does not list these; omit unless a previous error named one.'),
+  desktop: desktopArg,
 });
 
 export async function runClickElement(args: z.infer<typeof clickArgs>, ctx: ComputerCtx = {}) {
-  const target = await resolveBoundDisplay(ctx);
+  const target = await resolveBoundDisplay(ctx, { desktop: args.desktop });
   const bus = await resolveBus(target.display, ctx.signal);
   const cmd = actionCommand(target.display, bus, args.ref, args.action);
   const r = await computerExec(cmd.bin, cmd.args, { env: cmd.env, signal: ctx.signal });

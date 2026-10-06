@@ -70,6 +70,7 @@ import {
   toolErrorFingerprintSqlCase,
   type ToolErrorClass,
 } from './tool-error-classifier';
+import { dispatchWrapperExclusionPredicate } from '../../agent-tools/sessions/automatic-tool-names';
 import type { ImprovementSeverity } from './policy';
 import type { LearningSloOptions } from './learning-slo';
 // Type-only (erased at runtime, so no import cycle with engagement.ts, which
@@ -77,6 +78,13 @@ import type { LearningSloOptions } from './learning-slo';
 import type { EngagementCollectorOptions } from '../../endpoint-ipc/engagement';
 import { isLoopArmOwnerRole } from '../routines/autoloop-chronic-failure';
 import { SESSION_END_MARKER } from '../../agent-tools/activity/lifecycle-markers';
+import {
+  toolLatencyBudgetSignalsFromRows,
+  toolLatencyBudgetsFromProjected,
+  writeToolNames,
+  type ToolLatencyBudget,
+  type ToolLatencyRow,
+} from './tool-latency-budget';
 
 export type WatchdogSource =
   | 'red-test' | 'smoke-fail' | 'repeated-tool-error' | 'service-down'
@@ -89,6 +97,10 @@ export type WatchdogSource =
   // the migration LEDGER and an object created outside the migration set leaves no
   // trace in it. See collectSchemaObjectDriftSignals.
   | 'schema-object-drift'
+  // WI-10004651: an applied migration edited after it ran, outside the acknowledged
+  // set — the fourth direction: ledger and live objects agree, the FILE does not.
+  // See collectMigrationContentDriftSignals.
+  | 'migration-content-drift'
   // a role fire-path in error-backoff (autoloop_state.consecutive_errors):
   | 'fire-circuit-open'
   // an engine LOOP (loop:arm) parked at 'infinity' far past its fire with NO completion
@@ -325,9 +337,11 @@ export interface WatchdogSignal {
      * (WI-10929) Did ONE sha both pass and fail in the window? If so the commit
      * does not determine this test's verdict, so the redness is not attributable
      * to code and bisecting it is wasted work. Computed by
-     * `hasSameShaVerdictFlip` — see it for why this is kept rather than dropped.
+     * `findSameShaVerdictFlipSha` — see it for why this is kept rather than dropped.
      */
     sameShaFlip?: boolean;
+    /** A SHA present in both the pass and fail sets, when `sameShaFlip` is true. */
+    sameShaFlipSha?: string;
   };
   /**
    * Resolution cooldown (ms). When set, a signal whose key matches only RESOLVED
@@ -835,6 +849,20 @@ export interface CollectOptions extends LearningSloOptions, EngagementCollectorO
   sharedStallDurationMs?: number;
   /** Bound the raw candidate read used by shared-stall correlation. Default 2000. */
   sharedStallMaxRows?: number;
+  /**
+   * tool-latency-budget (WI-10005730): a MUTATING tool whose p95 STRICTLY exceeds this fraction
+   * of its dispatch timeout budget is flagged (late-return / commit-unknown risk). Default 0.8.
+   */
+  toolLatencyRatio?: number;
+  /** Minimum calls in the window before a tool's p95 counts. Default 20. */
+  toolLatencyMinSamples?: number;
+  /** Window for the per-tool p95 aggregate, in hours. Default 24. */
+  toolLatencyWindowHours?: number;
+  /**
+   * Test seam: tool-name → budget map. Production leaves this unset and the collector reads
+   * the live projected-tool registry (the dispatcher's own `timeoutSec ?? 60` source).
+   */
+  toolLatencyBudgets?: ReadonlyMap<string, ToolLatencyBudget>;
   /** Caller/DX tool-error (invalid_args / role-denied) sustained-pattern bar. Default 10. */
   callerMinCount?: number;
   /** Soft-failure outcome current consecutive-run bar. Default 10. */
@@ -1016,7 +1044,8 @@ export function redTestSignalsFromRows(rows: RedTestRow[], windowHours: number):
     const passShas = countFailShas([...(r.pass_shas ?? []), r.last_pass_sha ?? null]).map(
       ([sha]) => sha,
     );
-    const sameShaFlip = hasSameShaVerdictFlip(failShas, passShas);
+    const sameShaFlipSha = findSameShaVerdictFlipSha(failShas, passShas);
+    const sameShaFlip = sameShaFlipSha !== undefined;
     const latestFailAt = toIsoOrUndefined(r.latest_fail_at);
     return {
       source: 'red-test' as const,
@@ -1025,7 +1054,7 @@ export function redTestSignalsFromRows(rows: RedTestRow[], windowHours: number):
       body:
         `Watchdog signal (red-test): ${r.file_path} (${r.framework}) failed ${r.fails}× in the last ` +
         `${windowHours}h and its latest run is still red.\n` +
-        renderRedTestCommitContext(failShaCounts, lastPassSha, lastPassAt, sameShaFlip) +
+        renderRedTestCommitContext(failShaCounts, lastPassSha, lastPassAt, sameShaFlipSha) +
         `\nFailure tail AS OF ${latestFailAt ?? 'the latest recorded failing run'} — the specific failing assertion may have changed; re-run this file before acting on the assertion below.\n` +
         `${(r.sample ?? '').slice(-1500) || '(no output captured)'}`,
       severity: 'major' as const,
@@ -1038,6 +1067,7 @@ export function redTestSignalsFromRows(rows: RedTestRow[], windowHours: number):
         ...(lastPassSha ? { lastPassSha } : {}),
         ...(lastPassAt ? { lastPassAt } : {}),
         ...(sameShaFlip ? { sameShaFlip } : {}),
+        ...(sameShaFlipSha ? { sameShaFlipSha } : {}),
       },
     };
   });
@@ -1087,9 +1117,18 @@ export function hasSameShaVerdictFlip(
   failShas: readonly string[],
   passShas: readonly string[] | string | undefined,
 ): boolean {
-  if (!passShas) return false;
+  return findSameShaVerdictFlipSha(failShas, passShas) !== undefined;
+}
+
+/** Return the first failing SHA also present in the pass set, if any. */
+export function findSameShaVerdictFlipSha(
+  failShas: readonly string[],
+  passShas: readonly string[] | string | undefined,
+): string | undefined {
+  if (!passShas) return undefined;
   const passes = typeof passShas === 'string' ? [passShas] : passShas;
-  return failShas.some((sha) => passes.includes(sha));
+  const passSet = new Set(passes);
+  return failShas.find((sha) => passSet.has(sha));
 }
 
 /**
@@ -1112,7 +1151,7 @@ function renderRedTestCommitContext(
   failShaCounts: Array<[string, number]>,
   lastPassSha: string | undefined,
   lastPassAt: string | undefined,
-  sameShaFlip: boolean,
+  sameShaFlipSha: string | undefined,
 ): string {
   const lines: string[] = [];
   if (failShaCounts.length > 0) {
@@ -1124,11 +1163,16 @@ function renderRedTestCommitContext(
           ` — these may be DIFFERENT causes, or runs against an already-superseded tree.`,
     );
   }
-  if (sameShaFlip && lastPassSha) {
+  if (sameShaFlipSha) {
+    if (lastPassSha || lastPassAt) {
+      lines.push(
+        `Last PASS in window: ${lastPassAt ?? 'unknown time'}` +
+          `${lastPassSha ? ` (${lastPassSha.slice(0, 10)})` : ''}` +
+          `${lastPassSha === sameShaFlipSha ? ' — SAME SHA as a failing run.' : ''}`,
+      );
+    }
     lines.push(
-      `Last PASS in window: ${lastPassAt ?? 'unknown time'} (${lastPassSha.slice(0, 10)})` +
-        ` — SAME SHA as a failing run.`,
-      `⚠ SAME-SHA VERDICT FLIP: ${lastPassSha.slice(0, 10)} both PASSED and FAILED here, so this commit` +
+      `⚠ SAME-SHA VERDICT FLIP: ${sameShaFlipSha.slice(0, 10)} both PASSED and FAILED here, so this commit` +
         ` does NOT determine the verdict and the redness is not attributable to code at that sha.` +
         ` DO NOT BISECT. Triage the two causes that survive: (1) the test reads state outside the` +
         ` commit — most often the WORKING TREE (a readdir/glob/file-scan census), which flips on a` +
@@ -1517,6 +1561,11 @@ export async function fetchRedTestRows(
          -- synthetic fixture rows ('b', 'fail', 'no-such-bin') into test_runs;
          -- a real run always carries a repo-relative path with a separator.
          AND file_path LIKE '%/%'
+         -- The assertion-detail integration test deliberately runs the failure
+         -- fixture as a nested red test. That row is expected input to a passing
+         -- outer test, not a repository regression. Exclude it from both the fail
+         -- count and rn=1 freshness.
+         AND file_path !~ '(^|/)packages/operator-core/lib/agent-tools/testing/__tests__/run-failure-fixture[.]test[.]ts$'
          AND ${pathFilter}
          -- EI-18767688096795873: a run whose vitest config resolved OUTSIDE the repo
          -- tree (a throwaway/mutation-testing config synthesized under /tmp, aliasing
@@ -1774,7 +1823,8 @@ export function analyzeSharedToolStallsFromRows(
   rows: SharedToolStallTelemetryRow[],
   opts: CollectOptions = {},
 ): SharedToolStallAnalysis {
-  const windowMs = Math.max(1, opts.sharedStallWindowMinutes ?? 5) * 60_000;
+  const windowMinutes = Math.max(1, opts.sharedStallWindowMinutes ?? 5);
+  const windowMs = windowMinutes * 60_000;
   const minTools = Math.max(2, opts.sharedStallMinTools ?? 3);
   const minSessions = Math.max(2, opts.sharedStallMinSessions ?? 2);
   const minFailures = Math.max(minTools, opts.sharedStallMinFailures ?? 3);
@@ -1849,8 +1899,8 @@ export function analyzeSharedToolStallsFromRows(
       body:
         `Watchdog signal (shared-resource stall): ${correlatedRows.length} transient timeout-class ` +
         `failures from ${tools.length} distinct tools and ${sessions.length} distinct sessions ` +
-        `within a ${Math.max(1, opts.sharedStallWindowMinutes ?? 5)}-minute window ` +
-        `(observed span ${spanSeconds}s). This shape points to a shared dependency/resource ` +
+        `across qualifying ${windowMinutes}-minute sliding windows ` +
+        `(aggregated observed span ${spanSeconds}s). This shape points to a shared dependency/resource ` +
         `rather than ${tools.length} independent tool defects; per-tool transient captures ` +
         `for these tools were suppressed.\n\nTools: ${tools.join(', ') || '(unknown)'}` +
         `\nSamples: ${samples.join(', ') || '(none)'}`,
@@ -2129,6 +2179,17 @@ export function toolErrorSignalsFromRows(
  * tick scoped to workspace W no longer counts another workspace's errors, without
  * going dark on the unscoped traffic where most signal lives.
  */
+/**
+ * Live projected-tool registry → `{tool name → timeoutSec, effect}` for the tool-latency-budget
+ * check. Read from the registry the dispatcher itself resolves budgets from (never a hand-kept
+ * copy that could drift). Imported lazily so merely loading the watchdog does not pull the
+ * whole tool catalog into every consumer.
+ */
+async function loadProjectedToolLatencyBudgets(): Promise<Map<string, ToolLatencyBudget>> {
+  const { listAllProjectedTools } = await import('@papercusp/agent-mcp');
+  return toolLatencyBudgetsFromProjected(listAllProjectedTools());
+}
+
 export async function collectToolErrorSignals(sql: Sql, opts: CollectOptions = {}, workspaceId?: string): Promise<WatchdogSignal[]> {
   const windowHours = opts.toolErrorWindowHours ?? 24;
   const scopes = workspaceId ? [...new Set([workspaceId, '*', DEFAULT_COORD_WORKSPACE])] : null;
@@ -2148,6 +2209,7 @@ export async function collectToolErrorSignals(sql: Sql, opts: CollectOptions = {
          AND ${scopes ? sql`workspace_id = ANY(${scopes}::text[])` : sql`TRUE`}
          AND tool_name NOT LIKE 'improvements:%'
          AND tool_name NOT LIKE 'system:improvement-%'
+         AND ${dispatchWrapperExclusionPredicate(sql)}
     ),
     tot AS (
       SELECT tool_name, count(*)::int AS total
@@ -2156,6 +2218,7 @@ export async function collectToolErrorSignals(sql: Sql, opts: CollectOptions = {
          AND ${scopes ? sql`workspace_id = ANY(${scopes}::text[])` : sql`TRUE`}
          AND tool_name NOT LIKE 'improvements:%'
          AND tool_name NOT LIKE 'system:improvement-%'
+         AND ${dispatchWrapperExclusionPredicate(sql)}
        GROUP BY tool_name
     ),
     -- P-003 + P-012 fingerprint: the normalized error-shape skeleton (first 6 alpha
@@ -2254,10 +2317,51 @@ export async function collectToolErrorSignals(sql: Sql, opts: CollectOptions = {
     HAVING count(*) >= ${softMinRun}
      ORDER BY count(*) DESC
      LIMIT 100`;
+  // tool-latency-budget (WI-10005730): write tools whose p95 runs near their dispatch timeout.
+  // Fail-soft like the shared-stall correlation above — a registry that cannot load (a tool file
+  // mid-edit) or a partial telemetry schema must not blind the rest of the tool-error sweep.
+  let toolLatencySignals: WatchdogSignal[] = [];
+  try {
+    const budgets = opts.toolLatencyBudgets ?? await loadProjectedToolLatencyBudgets();
+    const writeTools = writeToolNames(budgets);
+    if (writeTools.length === 0) {
+      // An EMPTY registry is indistinguishable from "no slow tools" in the output — say so,
+      // so a blind detector is a logged fact rather than a silent clean bill.
+      console.warn('[improvement-watchdog] tool-latency-budget skipped: no write tools in the projected registry');
+    } else {
+      const latencyWindowHours = opts.toolLatencyWindowHours ?? 24;
+      const latencyRows = await sql<ToolLatencyRow[]>`
+        SELECT tool_name,
+               count(*)::int AS n,
+               (percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms))::float8 AS p95_ms,
+               max(invoked_at) AS latest_at,
+               min(invoked_at) AS earliest_at
+          FROM harness_shared.tool_invocations
+         WHERE invoked_at > now() - make_interval(hours => ${latencyWindowHours})
+           AND tool_name = ANY(${writeTools}::text[])
+           AND status IN ('ok', 'error', 'timeout')
+           AND duration_ms > 0
+           AND ${scopes ? sql`workspace_id = ANY(${scopes}::text[])` : sql`TRUE`}
+           AND ${dispatchWrapperExclusionPredicate(sql)}
+         GROUP BY tool_name
+        HAVING count(*) >= ${opts.toolLatencyMinSamples ?? 20}
+         LIMIT 500`;
+      toolLatencySignals = toolLatencyBudgetSignalsFromRows(latencyRows, budgets, {
+        toolLatencyRatio: opts.toolLatencyRatio,
+        toolLatencyMinSamples: opts.toolLatencyMinSamples,
+        toolLatencyWindowHours: latencyWindowHours,
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[improvement-watchdog] tool-latency-budget unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   return [
     ...toolErrorSignalsFromRows(rows, opts, sharedStall.correlatedToolNames),
     ...sharedStall.signals,
     ...softFailureSignalsFromRunRows(softRows, opts),
+    ...toolLatencySignals,
   ];
 }
 
@@ -2530,6 +2634,49 @@ export async function collectSchemaAheadSignals(
     kind: 'bug',
     paths: ['libs/papercusp/libs/db/sql'],
   }];
+}
+
+/**
+ * migration-content-drift (WI-10004651): an APPLIED migration whose bytes on disk no
+ * longer match the sha256 recorded when it ran, and that is not in the acknowledged
+ * set (migration-content-drift-acknowledged.ts). The edit never executed and no
+ * restart will run it, so the file misdescribes the live schema until a NEW migration
+ * re-applies the intended state.
+ *
+ * `checkMigrationDrift` has measured this since EI-19365742982915607, but only
+ * db:check_drift read it, and the raw list is never empty on a long-lived database —
+ * so 1219 lost its run-instance exemption on the live trigger in silence until a
+ * deployed smoke tripped over it. One signal PER FILE, keyed by filename, so each
+ * repair closes its own item. Pays the content hash (~37ms, measured WI-10002541) once
+ * per watchdog tick, never the git-history classification.
+ */
+export async function collectMigrationContentDriftSignals(
+  check: () => Promise<{
+    contentDriftNew: Array<{ filename: string; recordedSha256: string; diskSha256: string; classification: string }> | null;
+    contentDriftSqlDir?: string | null;
+  }> = () => checkMigrationDrift({ checkContent: true }),
+): Promise<WatchdogSignal[]> {
+  let drift: Awaited<ReturnType<typeof check>>;
+  try { drift = await check(); } catch { return []; }
+  if (!drift.contentDriftNew?.length) return [];
+  const scanned = drift.contentDriftSqlDir ? `\n\nCompared against sql dir: ${drift.contentDriftSqlDir}` : '';
+  return drift.contentDriftNew.map((d) => ({
+    source: 'migration-content-drift' as const,
+    key: `migration-content-drift:${d.filename}`,
+    title: `Applied migration ${d.filename} was edited after it ran: the live DB never executed the edit`,
+    body:
+      `Watchdog signal (migration-content-drift): ${d.filename} is recorded as applied with sha256 ` +
+      `${d.recordedSha256.slice(0, 12)}, but the file on disk now hashes to ${d.diskSha256.slice(0, 12)}. ` +
+      `No restart or deploy re-runs an applied migration, so the edit is not live (1219 lost the live ` +
+      `stamp_acceptance_bar_epoch run-instance exemption this way, WI-10004651).\n\n` +
+      `Repair: compare the live object with the file (db:check_drift classifies it), then write a NEW ` +
+      `migration that re-applies the intended state. Once repaired or proven comment-only, add the file to ` +
+      `ACKNOWLEDGED_CONTENT_DRIFT in packages/operator-core/lib/migration-content-drift-acknowledged.ts ` +
+      `with a reason naming the repair. Do not acknowledge it unrepaired.${scanned}`,
+    severity: 'major' as const,
+    kind: 'bug' as const,
+    paths: [`libs/papercusp/libs/db/sql/${d.filename}`],
+  }));
 }
 
 /**
@@ -4226,14 +4373,31 @@ export async function defaultPapercuspCollectors(
         // row. Bounded per tick; runs before recovery so its failure is visible
         // in the note without blocking pending deliveries.
         const { foldLegacyToolFailureRows } = await import('./tool-failure-signature-fold');
-        const fold = await foldLegacyToolFailureRows(workspaceId).catch((error: unknown) => ({
-          error: error instanceof Error ? error.message : String(error),
-        }));
-        const foldNote = 'error' in fold
-          ? `signature-fold error=${fold.error}`
-          : `signature-fold scanned=${fold.scanned} folded=${fold.folded} rekeyed=${fold.rekeyed} failedGroups=${fold.failedGroups}`;
+        const foldPass = async (scope: 'probation' | 'promoted') => {
+          const fold = await foldLegacyToolFailureRows(workspaceId, {}, undefined, scope).catch((error: unknown) => ({
+            error: error instanceof Error ? error.message : String(error),
+          }));
+          return 'error' in fold
+            ? `signature-fold[${scope}] error=${fold.error}`
+            : `signature-fold[${scope}] scanned=${fold.scanned} folded=${fold.folded} rekeyed=${fold.rekeyed} failedGroups=${fold.failedGroups}`;
+        };
+        // WI-10004648: the promoted pass folds never-worked promoted legacy rows
+        // (bulk_dedup's reviewed gate refuses them by design). Same 200/tick bound.
+        const foldNote = `${await foldPass('probation')}; ${await foldPass('promoted')}`;
+        // unified-bug-pipeline P-003 / D-022: promoted tool-failure rows stamped
+        // awaiting-review or freshness-unknown with no reviewer get verified, retired
+        // with evidence, or enrolled in agent review. Bounded by rows and wall time.
+        const { sweepStrandedToolFailures, renderStrandedSweepNote } = await import('./stranded-tool-failure-sweep');
+        const sweepNote = renderStrandedSweepNote(
+          await sweepStrandedToolFailures(workspaceId).catch((error: unknown) => ({
+            error: error instanceof Error ? error.message : String(error),
+          })),
+        );
         const result = await recoverInvocationFriction(workspaceId);
-        return { signals: [], note: `friction delivered=${result.delivered}, locked-pending=${result.pending}; ${foldNote}` };
+        return {
+          signals: [],
+          note: `friction delivered=${result.delivered}, locked-pending=${result.pending}, expired=${result.expired}; ${foldNote}; ${sweepNote}`,
+        };
       },
     },
     {
@@ -4246,6 +4410,7 @@ export async function defaultPapercuspCollectors(
     // P-010 blind-source collectors (each conservative + behind the P-009 per-source budget).
     { name: 'papercusp-migration-drift', collect: () => collectMigrationDriftSignals() },
     { name: 'papercusp-schema-ahead-of-code', collect: () => collectSchemaAheadSignals() },
+    { name: 'papercusp-migration-content-drift', collect: () => collectMigrationContentDriftSignals() },
     { name: 'papercusp-schema-object-drift', collect: () => collectSchemaObjectDriftSignals() },
     { name: 'papercusp-routine-failure', collect: () => collectRoutineFailureSignals(getOrgPg().sql) },
     { name: 'papercusp-stuck-plan', collect: () => collectStuckPlanSignals(getOrgPg().sql, workspaceId) },
@@ -5158,8 +5323,12 @@ async function runWatchdogTickBody(
   // fixes. Those signals stay fully collected and are still written to watchdog_ticks, so
   // they continue to reach ideation via scout/watchdog-health-lane.ts (the Blender corpus
   // digest); they simply never mint a work item. Defect-lane signals are unaffected.
-  const fileable = partition.fresh.filter((s) => sourceFilesWorkItem(s.source));
-  const metricSuppressed = partition.fresh.filter((s) => !sourceFilesWorkItem(s.source));
+  // Synthetic Red-Queen drills are explicitly exercising the detector and
+  // capture path, even when their source is normally a metric. Keep the shared
+  // source classification unchanged; organic metric signals remain suppressed.
+  const isFileable = (s: WatchdogSignal) => s.origin === 'drill' || sourceFilesWorkItem(s.source);
+  const fileable = partition.fresh.filter(isFileable);
+  const metricSuppressed = partition.fresh.filter((s) => !isFileable(s));
 
   const planCap = Math.max(0, opts.maxPerTick ?? 3);
   // Reuses the single prior-tick read above (P-011: `ran` only, so a skipped tick can't wipe

@@ -26,6 +26,11 @@ export default mergeConfig(
         __dirname,
         '../../packages/operator-core/lib/coverage-census/attribution/setup-vitest.ts',
       ),
+      // WI-10004849: private dependency-copy lock + zero headroom for shell-driving tests.
+      resolve(
+        __dirname,
+        '../../packages/operator-core/lib/release/dependency-copy-isolation.setup-vitest.ts',
+      ),
     ],
   }),
   {

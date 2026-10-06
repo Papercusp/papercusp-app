@@ -19,10 +19,10 @@ import {
 
 import {
   NodeGcpIapWorkspaceHostInitializationCommandRunner,
-  buildGcpIapSshInvocation,
+  buildWorkspaceHostSshInvocation,
   type GcpIapWorkspaceHostInitializationCommand,
   type GcpIapWorkspaceHostInitializationCommandRunner,
-  type GcpIapWorkspaceHostTransportProfile,
+  type WorkspaceHostSshTransportProfile,
 } from './gcp-iap-initialization-operations';
 
 const ENROLLMENT_TICKET = /^ht_[A-Za-z0-9_-]{43}$/;
@@ -50,13 +50,13 @@ export class GcpIapWorkspaceHostConnectorEnrollmentError extends Error {
 }
 
 export function buildGcpIapWorkspaceHostConnectorEnrollmentCommand(
-  profile: GcpIapWorkspaceHostTransportProfile,
+  profile: WorkspaceHostSshTransportProfile,
   ticket: string,
 ): GcpIapWorkspaceHostInitializationCommand {
   if (!ENROLLMENT_TICKET.test(ticket)) {
     throw new GcpIapWorkspaceHostConnectorEnrollmentError('connector enrollment ticket is malformed', 1);
   }
-  return buildGcpIapSshInvocation(profile, {
+  return buildWorkspaceHostSshInvocation(profile, {
     entrypoint: WORKSPACE_HOST_CONNECTOR_ENROLLMENT_CONDUIT,
     entrypointLabel: 'Connector enrollment conduit',
     args: [...WORKSPACE_HOST_CONNECTOR_ENROLLMENT_ARGV],
@@ -91,7 +91,7 @@ export function parseGcpIapWorkspaceHostConnectorEnrollmentReceipt(
 }
 
 export async function enrollGcpIapWorkspaceHostConnector(
-  profile: GcpIapWorkspaceHostTransportProfile,
+  profile: WorkspaceHostSshTransportProfile,
   ticket: string,
   runner: GcpIapWorkspaceHostInitializationCommandRunner = new NodeGcpIapWorkspaceHostInitializationCommandRunner(),
 ): Promise<GcpIapWorkspaceHostConnectorEnrollmentReceipt> {

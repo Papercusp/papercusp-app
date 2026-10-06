@@ -206,6 +206,8 @@ function findPresenceRow(
   };
 }
 
+const CANONICAL_OWNER_ID_RE = /^su-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
 /**
  * PURE composition over an injected `call` (run SEQUENTIALLY so the sub-reads never
  * contend on the caller's single ctx connection). Order: presence (pre-state) →
@@ -231,20 +233,24 @@ export async function composeDispatch(
   //    hiccup degrades sessionState/wakeable to null but never blocks the dispatch.
   let sessionState: string | null = null;
   let wakeable: boolean | null = null;
-  let presenceOwnerId: string | null = null;
-  try {
-    // Targeted `owner` lookup: the default roster now omits `ended` rows, but a
-    // dispatch target may well be dead — pass `owner` so an `ended`/parked target is
-    // still resolved (for the wakeable/recipient_dead pre-state) instead of missed.
-    const snapshot = await call('coord:presence', { scope: 'workspace', owner: args.to });
-    const row = findPresenceRow(snapshot, args.to);
-    if (row) {
-      sessionState = row.sessionState;
-      wakeable = row.wakeable;
-      presenceOwnerId = row.ownerId || null;
+  const exactOwnerId = CANONICAL_OWNER_ID_RE.test(args.to);
+  let presenceOwnerId: string | null = exactOwnerId ? args.to : null;
+  if (!exactOwnerId) {
+    try {
+      // Resolve handles and add liveness hints when the input is ambiguous. A
+      // canonical owner id is already sufficient for assignment and coord:send;
+      // skip this optional read there so a slow roster lookup cannot consume the
+      // dispatch deadline before its required delivery leg runs.
+      const snapshot = await call('coord:presence', { scope: 'workspace', owner: args.to });
+      const row = findPresenceRow(snapshot, args.to);
+      if (row) {
+        sessionState = row.sessionState;
+        wakeable = row.wakeable;
+        presenceOwnerId = row.ownerId || null;
+      }
+    } catch {
+      /* degrade: sessionState/wakeable stay null */
     }
-  } catch {
-    /* degrade: sessionState/wakeable stay null */
   }
 
   // 1.25. Stable-agent work-item assignment. This is the concrete execution

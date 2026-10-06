@@ -31,6 +31,9 @@
  */
 import type { SignalOrigin } from '../harness/improvements/provenance';
 import type { ReplayTranscript } from '../replay/types';
+import type { ReplayOutcome } from '../replay/battery';
+import type { LearningContract, LearningExperiment } from '../experiment/types';
+import type { LearningSpendReservation } from '../learning-governor/store';
 
 /** The governor registration id for this loop (migration 244 vocabulary). */
 export const TRANSFER_LOOP_ID = 'frontier:transfer-harness';
@@ -123,6 +126,43 @@ export interface TransferTestOutcome {
   /** Groups the underlying replay_runs cells (replay_runs.battery_id). */
   batteryId: string;
   costUsd: number;
+  /** Actual replay execution and spend; legacy/fake ports may omit it.
+   * Missing pins remain null and cannot authorize common-contract promotion. */
+  evaluation?: TransferReplayEvidence;
+}
+
+export interface TransferReplayEvidence {
+  /** Complete evaluated contract; absent evidence never authorizes promotion. */
+  contract?: LearningContract;
+  /** Caller source bytes captured before any awaited execution. */
+  source?: { lesson: TransferLesson; transcript: ReplayTranscript };
+  costMeasured?: boolean;
+  experiment: Omit<LearningExperiment, 'modelHash' | 'promptHash' | 'codeHash'> & {
+    modelHash: string | null;
+    promptHash: string | null;
+    codeHash: string | null;
+  };
+  reservation: LearningSpendReservation | null;
+  outcomes: readonly ReplayOutcome[];
+  budgetExhausted: boolean;
+  judgeExecutions?: readonly (import('@papercusp/testing-shell/llm').LlmExecutionReceipt | null)[];
+  judgeInvocations?: readonly Parameters<import('@papercusp/eval-battery').JudgeLlmCall>[0][];
+  judgeResponses?: readonly (Awaited<ReturnType<import('@papercusp/eval-battery').JudgeLlmCall>> | null)[];
+  invocations: readonly {
+    variantId: string;
+    systemPromptHash: string;
+    contextHash: string;
+    model: string | null;
+    codeHash: string | null;
+    loadedCode?: Readonly<Record<string, string | null>>;
+    unresolved?: readonly string[];
+    /** Actual runner boundary artifacts, separate from task-success evidence. */
+    request?: Parameters<import('../replay/types').ReplayRunner>[0];
+    response?: Awaited<ReturnType<import('../replay/types').ReplayRunner>>;
+  }[];
+  /** Measured modules, kept separately from a complete execution-code pin. */
+  loadedCode: { adapter: string | null; battery: string | null;
+    evaluator?: Readonly<Record<string, string | null>> | null };
 }
 
 /**

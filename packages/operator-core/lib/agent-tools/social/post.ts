@@ -7,7 +7,9 @@ import {
   parseSocialDestinationRef,
   postToCanonicalSocialDestination,
 } from '../../capability-verbs/social';
+import { DisclosureRefused, disclosureRefusalData } from '../../personal-vault/disclosure-ledger';
 import { addresseeArg, toProvenance } from '../_addressee-arg';
+import { disclosureSubject } from '../_disclosure-subject';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 
 export default defineTool({
@@ -62,14 +64,21 @@ export default defineTool({
       `personal:${ref.platform}`,
     ]);
     if (!auth.allowed) return { data: { allowed: false, refusal: auth.reason } };
-    const result = await postToCanonicalSocialDestination(ctx.tx as unknown as postgres.Sql, {
-      workspaceId,
-      userId: user.id,
-      destination: ref,
-      text: args.text,
-      visibility: args.visibility ?? null,
-      provenance: toProvenance(args.addressee),
-    });
+    let result;
+    try {
+      result = await postToCanonicalSocialDestination(ctx.tx as unknown as postgres.Sql, {
+        workspaceId,
+        userId: user.id,
+        destination: ref,
+        text: args.text,
+        visibility: args.visibility ?? null,
+        provenance: toProvenance(args.addressee),
+        agentOwnerId: disclosureSubject(ctx),
+      });
+    } catch (error) {
+      if (error instanceof DisclosureRefused) return { data: disclosureRefusalData(error) };
+      throw error;
+    }
     return {
       data: {
         status: result.published ? 'published' : 'withheld',

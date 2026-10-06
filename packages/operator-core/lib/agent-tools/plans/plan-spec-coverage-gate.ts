@@ -319,6 +319,55 @@ function usableAdequacyCard(card: ScorecardRow, subjectRef: string): boolean {
   );
 }
 
+/** Newest adequacy cards consulted per subject — the window the per-clause read always used. */
+const ADEQUACY_CARDS_PER_SUBJECT = 20;
+/** listScorecards' own row cap; a batch that fills it may have dropped older cards. */
+const ADEQUACY_BATCH_CARD_LIMIT = 500;
+
+/**
+ * Every clause's adequacy cards in ONE read, grouped by subject.
+ *
+ * One read per clause made the gate scan the rubric's whole card population once
+ * per clause, in parallel (measured 2026-10-01: ~103ms and ~21k buffers each, 39
+ * at once for one plan). That pushed the GOAL portfolio read, which runs this gate
+ * for any plan that claims to be finished, past the obligation reader's 900ms budget.
+ * The batch keeps the per-subject window (newest {@link ADEQUACY_CARDS_PER_SUBJECT},
+ * newest-first) by grouping. A batch that fills its cap may have dropped older cards
+ * of some subject, so it falls back to the per-subject reads instead of
+ * guessing.
+ */
+async function readAdequacyCardsBySubject(
+  listCards: typeof listScorecards,
+  subjectRefs: readonly string[],
+): Promise<Map<string, ScorecardRow[]>> {
+  const bySubject = new Map<string, ScorecardRow[]>();
+  if (subjectRefs.length === 0) return bySubject;
+  const batch = await listCards({
+    rubricRef: SPEC_TEST_ADEQUACY_RUBRIC_REF,
+    subjectRefs,
+    limit: ADEQUACY_BATCH_CARD_LIMIT,
+  });
+  if (batch.length < ADEQUACY_BATCH_CARD_LIMIT) {
+    for (const card of batch) {
+      const ref = card.subject?.ref;
+      if (!ref) continue;
+      const cards = bySubject.get(ref) ?? [];
+      if (cards.length < ADEQUACY_CARDS_PER_SUBJECT) cards.push(card);
+      bySubject.set(ref, cards);
+    }
+    return bySubject;
+  }
+  await Promise.all(
+    subjectRefs.map(async (subjectRef) => {
+      bySubject.set(
+        subjectRef,
+        await listCards({ rubricRef: SPEC_TEST_ADEQUACY_RUBRIC_REF, subjectRef, limit: ADEQUACY_CARDS_PER_SUBJECT }),
+      );
+    }),
+  );
+  return bySubject;
+}
+
 /** The revision-pinned adequacy subject ref, mirroring spec-test-adequacy's own. */
 function adequacySubjectRef(planSlug: string, specId: string, revision: number): string {
   const exact = `${planSlug}#${specId}@${revision}`;
@@ -452,18 +501,15 @@ export async function computePlanSpecCoverage(
   const adequacyTruncatedByLimit = enforceable.length > ADEQUACY_CENSUS_CLAUSE_LIMIT;
   const ungradedSpecIds: string[] = [];
   let graded = 0;
-  await Promise.all(
-    adequacyScope.map(async (clause) => {
-      const subjectRef = adequacySubjectRef(clause.planSlug, clause.specId, clause.revision);
-      const cards = await listCards({
-        rubricRef: SPEC_TEST_ADEQUACY_RUBRIC_REF,
-        subjectRef,
-        limit: 20,
-      });
-      if (cards.some((card) => usableAdequacyCard(card, subjectRef))) graded += 1;
-      else ungradedSpecIds.push(clause.specId);
-    }),
+  const subjectRefBySpecId = new Map(
+    adequacyScope.map((clause) => [clause.specId, adequacySubjectRef(clause.planSlug, clause.specId, clause.revision)]),
   );
+  const cardsBySubject = await readAdequacyCardsBySubject(listCards, [...new Set(subjectRefBySpecId.values())]);
+  for (const clause of adequacyScope) {
+    const subjectRef = subjectRefBySpecId.get(clause.specId) ?? '';
+    if ((cardsBySubject.get(subjectRef) ?? []).some((card) => usableAdequacyCard(card, subjectRef))) graded += 1;
+    else ungradedSpecIds.push(clause.specId);
+  }
 
   return {
     planSlug: input.planSlug,

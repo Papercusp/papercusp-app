@@ -8,10 +8,13 @@
  * DIAGNOSABLE: a launcher (or any agent) compares its own tree's sha to the
  * server's and knows when it's ahead.
  *
- * Resolved ONCE and cached: prefer `PAPERCUSP_BUILD_SHA` (set at deploy), else a
- * one-time `git rev-parse --short HEAD` of the running checkout. Best-effort —
- * any failure yields `sha: null`, so the zero-dependency /api/health contract
- * (must answer even half-init, never throw) holds.
+ * Resolved ONCE and cached: generated bundles prefer the source SHA baked into
+ * the artifact, because a runtime environment can outlive the bundle it was
+ * meant to label. `PAPERCUSP_BUILD_SHA` remains the fallback when no baked SHA
+ * exists; non-bundled development hosts then use a one-time `git rev-parse
+ * --short HEAD`. Best-effort — any failure yields `sha: null`, so the
+ * zero-dependency /api/health contract (must answer even half-init, never
+ * throw) holds.
  *
  * WI-2644: the packaged desktop sidecar runs a bundled `serve.mjs` with no
  * `npm_package_version` in its env (that's only set when npm itself invokes a
@@ -54,7 +57,7 @@ declare const __PAPERCUSP_BUNDLED_SOURCE_SHA__: string | undefined;
 declare const __PAPERCUSP_BUNDLED_SIDECAR__: boolean | undefined;
 
 export interface BuildInfo {
-  /** Short git sha of the running checkout, or null if unresolved. */
+  /** Short source SHA for the running artifact, or null if unresolved. */
   sha: string | null;
   /** package.json version (npm_package_version), or '0.0.0' if unset. */
   version: string;
@@ -77,8 +80,6 @@ export function resolveBuildInfo(opts: {
     opts.bakedVersion ??
     (typeof __PAPERCUSP_SIDECAR_VERSION__ !== 'undefined' ? __PAPERCUSP_SIDECAR_VERSION__ : undefined);
   const version = envVersion || bakedVersion || env.npm_package_version || '0.0.0';
-  const envSha = env.PAPERCUSP_BUILD_SHA?.trim();
-  if (envSha) return { sha: envSha, version };
   const bakedSha =
     opts.bakedSha !== undefined
       ? opts.bakedSha?.trim() || null
@@ -86,6 +87,8 @@ export function resolveBuildInfo(opts: {
         ? __PAPERCUSP_BUNDLED_SOURCE_SHA__?.trim() || null
         : null);
   if (bakedSha) return { sha: bakedSha, version };
+  const envSha = env.PAPERCUSP_BUILD_SHA?.trim();
+  if (envSha) return { sha: envSha, version };
   const bundled =
     opts.bundled ??
     (typeof __PAPERCUSP_BUNDLED_SIDECAR__ !== 'undefined' && __PAPERCUSP_BUNDLED_SIDECAR__ === true);

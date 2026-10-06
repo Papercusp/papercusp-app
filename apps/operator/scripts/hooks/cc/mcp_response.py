@@ -13,6 +13,116 @@ rejected tool call, not a usable inner payload.
 
 import json
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+OUTPUT_ENVELOPE_SCHEMA_VERSION = 'papercusp.output-envelope/v1'
+SCRATCH_URI_PREFIX = 'papercusp://scratch/'
+
+
+def with_native_session(url, native_session_id):
+    """Bind a hook MCP request to its verified native session URL context.
+
+    The MCP host derives request.ctx.advSessionId from this query parameter;
+    a JSON-RPC argument named ``session_id`` is telemetry and cannot establish
+    the verified request context. Keep other query parameters intact and
+    replace any stale native_session value rather than sending duplicates.
+    """
+    if not isinstance(url, str) or not isinstance(native_session_id, str):
+        return url
+    native_session_id = native_session_id.strip()
+    if not native_session_id:
+        return url
+    try:
+        parts = urlsplit(url)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key != 'native_session'
+        ]
+        query.append(('native_session', native_session_id))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    except (TypeError, ValueError):
+        return url
+
+
+def _parse_json_object(text):
+    if not isinstance(text, str) or not text.strip().startswith('{'):
+        return None
+    try:
+        value = json.loads(text)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _scratch_uri_to_path(uri):
+    """Resolve only a local scratch URI contained beneath the configured root."""
+    if not isinstance(uri, str) or not uri.startswith(SCRATCH_URI_PREFIX):
+        return None
+    relative = uri[len(SCRATCH_URI_PREFIX):]
+    if not relative or '\x00' in relative or any(part == '..' for part in relative.split('/')):
+        return None
+
+    root = os.environ.get('PAPERCUSP_SCRATCH_ROOT', '').strip()
+    if not root:
+        root = os.path.join(os.path.expanduser('~'), '.papercusp', 'scratch')
+    root = os.path.realpath(os.path.abspath(root))
+    candidate = os.path.realpath(os.path.join(root, *relative.split('/')))
+    try:
+        if os.path.commonpath((root, candidate)) != root or candidate == root:
+            return None
+    except (OSError, ValueError):
+        return None
+    return candidate
+
+
+def _read_spilled_payload(path):
+    """Read the final JSON line from a result-door spill, matching ptool."""
+    try:
+        last_nonempty = None
+        with open(path, 'r', encoding='utf-8', errors='replace') as stream:
+            for line in stream:
+                if line.strip():
+                    last_nonempty = line
+        return json.loads(last_nonempty) if last_nonempty else None
+    except (OSError, ValueError):
+        return None
+
+
+def _unwrap_output_envelope(value):
+    """Return the tool result from a result-door envelope, or None if unreadable.
+
+    References are followed only for the operator's result-door schema and only
+    when their scratch URI resolves under this process's scratch root. Preview
+    text is deliberately not authoritative: a spilled result is read from disk.
+    """
+    if not isinstance(value, dict) or value.get('schemaVersion') != OUTPUT_ENVELOPE_SCHEMA_VERSION:
+        return value
+    if 'ok' in value:
+        return value
+
+    for part in value.get('content') or []:
+        if not isinstance(part, dict):
+            continue
+        inline = _parse_json_object(part.get('text'))
+        if inline is not None:
+            return inline
+
+        if part.get('kind') not in ('reference', 'evidence-reference') and part.get('type') != 'reference':
+            continue
+        path = _scratch_uri_to_path(part.get('uri'))
+        if not path:
+            continue
+        spilled = _read_spilled_payload(path)
+        if not isinstance(spilled, dict):
+            continue
+        for spilled_part in spilled.get('content') or []:
+            if not isinstance(spilled_part, dict):
+                continue
+            candidate = _parse_json_object(spilled_part.get('text'))
+            if candidate is not None:
+                return candidate
+    return None
 
 
 def read_hook_payload(fd=3):
@@ -73,10 +183,10 @@ def parse_mcp_response(raw_resp):
     for item in result.get('content') or []:
         if not isinstance(item, dict) or item.get('type') != 'text':
             continue
-        try:
-            inner = json.loads(item['text'])
-        except Exception:
+        parsed = _parse_json_object(item.get('text'))
+        if parsed is None:
             continue
-        if isinstance(inner, dict):
+        inner = _unwrap_output_envelope(parsed)
+        if inner is not None:
             return inner, None, 'ok'
     return None, None, 'no-text'

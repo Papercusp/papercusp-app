@@ -11,6 +11,9 @@
  *   npm run lint:launch-prose-budget              # gate (exit 1 on any failure)
  *   npm run lint:launch-prose-budget -- --json    # machine-readable report
  *   npm run lint:launch-prose-budget -- --ratchet # lower ceilings to current, never raise
+ *   node --import tsx scripts/check-launch-prose-budget.ts --projection-gate
+ *                                                 # headroom of ONLY the projection-governed surfaces;
+ *                                                 # exit 1 over / 2 not measured (project-doc-parts' post-write gate)
  *
  * DETERMINISM — the one seam that would otherwise make this flaky. `renderSuPlaybook`'s
  * default wire-schema legend is derived from the PROCESS-GLOBAL projected-tool registry,
@@ -39,6 +42,7 @@ import { fileURLToPath } from 'node:url';
 import {
   checkComposition,
   compareProseBudget,
+  launchProseHeadroom,
   ratchetCeilings,
   renderProseBudgetReport,
   type CompositionProbe,
@@ -227,6 +231,34 @@ async function main(): Promise<void> {
   }
 
   const report = compareProseBudget(measurements, baseline);
+
+  if (argv.includes('--projection-gate')) {
+    // The write-time view `project-doc-parts` runs AFTER it has written the projected client
+    // files: the lint measures the WRITTEN files, so the only faithful pre-commit check is a
+    // post-write one (with rollback on exit 1). It reuses THIS measurement — no second one —
+    // and is scoped to the surfaces a projection can move, so a peer's unrelated prompt growth
+    // can never block a guide edit. Exit 1 = a projection-governed surface is over its ceiling;
+    // exit 2 (the main() catch) = the instrument failed, which is NOT a pass.
+    const headroom = launchProseHeadroom(report);
+    if (headroom.rows.length === 0) {
+      // Zero governed rows means nothing was measured — never report that as "within budget".
+      console.error(
+        '[lint:launch-prose-budget] --projection-gate measured NO projection-governed surface ' +
+          '(unmeasured/unbaselined) — this is NOT a pass.',
+      );
+      process.exit(2);
+    }
+    for (const line of headroom.lines) console.log(line);
+    if (headroom.over.length === 0) return;
+    console.error(
+      `[lint:launch-prose-budget] projection-gate: OVER ceiling — ${headroom.over.map((r) => r.surface).join(', ')}. ` +
+        'Trim prose or raise that surface ceiling in scripts/launch-prose-budget-baseline.json WITH a note.',
+    );
+    // The headroom lines above go to a piped stdout; process.exit() would truncate them
+    // (EI-20055889379250637). Set the code and let the program end naturally.
+    process.exitCode = 1;
+    return;
+  }
 
   if (asJson) {
     // EI-20055889379250637: this payload is an unbounded, data-derived JSON dump and

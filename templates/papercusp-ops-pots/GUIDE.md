@@ -48,7 +48,8 @@ therefore fails loudly and retryably while the promoted work remains visible.
 
 ## MUST (Tier B — non-negotiable)
 
-1. **Declare one reusable blueprint operation.** In the stable app blueprint,
+1. **Declare one reusable blueprint operation.** In the app's ROOT
+   `.papercusp/blueprint.yaml` (materialize `reference/app-root.blueprint.yaml`),
    add an `operations[]` entry with a stable id/version, typed object input,
    typed accepted result, and an exact `plan-template` ref/revision/contentHash.
    The operation points at the plan; it never copies the plan's DAG. Apps call
@@ -153,13 +154,17 @@ decision-point answer so another engineer can review the resulting work plane.
 1. Answer the decision points and record the choices.
 2. Author the app-owned plan template: input schema, phases/items, real
    `blocked-by` edges, and acceptance conditions.
-3. Fill the app-agent blueprint's operation id/version, exact plan-template
-   revision/hash, and typed input/result schemas.
+3. Fill the ROOT blueprint's (`.papercusp/blueprint.yaml`, from
+   `reference/app-root.blueprint.yaml`) operation id/version, exact
+   plan-template revision/hash, and typed input/result schemas. An operation
+   with `execution: { kind: agent, role }` declares that worker role in the
+   same file. The app-agent blueprint under `blueprints/` declares none.
 4. Configure new external bindings/recurrences to invoke that operation; keep
    any legacy launch-plan row intact until its parity fixture passes.
 5. Specialize `contracts/candidate-set.ts` and test valid plus rejected payloads.
-6. Materialize `blueprints/README.md` and `blueprints/app-agent/blueprint.yaml`,
-   replacing every `{{…}}` token; grep for `{{` to prove none remain.
+6. Materialize `blueprints/README.md`, `blueprints/app-agent/blueprint.yaml`
+   and `.papercusp/blueprint.yaml`, replacing every `{{…}}` token; grep for
+   `{{` to prove none remain.
 7. Wire the app side through `@papercusp/pot-app-seam`, including non-ready
    result handling and reject events.
 8. Launch/adopt the stable app agent, then run this template's checks and the

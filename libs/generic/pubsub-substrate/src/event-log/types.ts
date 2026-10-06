@@ -176,16 +176,27 @@ export interface CoordEventLog {
    * `kinds` — re-call with the new cursor to keep walking). PgCoordLog gives
    * an exact, persistent cursor; the fs/in-memory doubles synthesize one from
    * their (deterministic, but call-scoped) read order — see each impl.
+   * `opts.beforeTs` excludes newer records before the page limit is applied.
+   * When `beforeMsgId` is present, records at the boundary timestamp remain
+   * candidates so the caller can apply its exact composite tie-break safely.
    */
   readEventsBoundedCursor(
     surface: EventSurface,
-    opts: { limit: number; kinds?: string[]; beforeId?: number },
+    opts: { limit: number; kinds?: string[]; beforeId?: number; beforeTs?: string; beforeMsgId?: string },
   ): Promise<CoordLogCursorPage>;
 
   /** The line-surface sibling of {@link readEventsBoundedCursor}. */
   readLinesBoundedCursor(
     surface: LineSurface,
-    opts: { limit: number; sinceTs?: string; planSlug?: string; kinds?: string[]; beforeId?: number },
+    opts: {
+      limit: number;
+      sinceTs?: string;
+      planSlug?: string;
+      kinds?: string[];
+      beforeId?: number;
+      beforeTs?: string;
+      beforeMsgId?: string;
+    },
   ): Promise<CoordLogCursorPage>;
 }
 

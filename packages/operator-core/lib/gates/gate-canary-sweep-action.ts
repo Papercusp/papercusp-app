@@ -351,4 +351,5 @@ registerSystemAction(GATE_CANARY_SWEEP_ACTION_NAME, async (ctx: SystemActionCtx)
   await sweepGreenCheckpointParserCanary(ctx).catch((e) => {
     console.warn(`[gate-canary-sweep] green-checkpoint-parser sweep failed (non-fatal): ${e instanceof Error ? e.message : e}`);
   });
-});
+  // WI-10005745: runs tsx <root>/apps/operator/lib/release/run-green-checkpoint-canary.ts.
+}, { executesIntegrationTreeCode: true });

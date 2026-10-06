@@ -552,7 +552,7 @@ export default defineTool({
               if (
                 declared.has(row.planSlug) ||
                 planInSpecTriadScope(
-                  { content: "", created: row.created },
+                  { content: "", created: row.created, template: row.template },
                   specTriadOpts,
                 ).inScope
               ) {
@@ -619,6 +619,7 @@ export default defineTool({
               content: contentBySlug.get(row.planSlug) ?? "",
               created: row.created,
               itemCount: planItems.length,
+              template: row.template,
             },
             specTriadOpts,
           );

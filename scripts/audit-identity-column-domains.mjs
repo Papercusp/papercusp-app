@@ -13,7 +13,7 @@
  *
  * named a real surface whose predicate was `WHERE owner_id = <from-session-id>`
  * against a column that holds the HUMAN owner label. Measured over all 203 live
- * rows: 'owner' x181, 'owner' x22 — zero session-shaped values, and `owner_id =
+ * rows: 'owner' x181, 'Avi' x22 — zero session-shaped values, and `owner_id =
  * recorded_by` false for every row. The UPDATE had never moved a row and could
  * not. So the one guard built to catch stranded identity columns (EI-8999 /
  * WI-3642) was reporting this one as protected, and any later reader auditing

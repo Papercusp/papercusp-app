@@ -33,6 +33,67 @@ export const TIMEOUT_WAKE_GUIDANCE =
   // not yet expired. Guard the re-arm behind a mechanical check rather than trusting this wake.
   'BEFORE re-arming, check events:status for this event key: if it appears in active_awaits with a future expires_ts, THIS wake is stale — do NOT re-arm (that would RETIRE the live registration and silently reset its deadline). Re-arm only when the key is genuinely absent from active_awaits.';
 
+export interface PredicateTimeoutSpec {
+  tool: string;
+  args: Record<string, unknown>;
+  path: string;
+  op: string;
+  value?: unknown;
+  intervalSec: number;
+  once: boolean;
+}
+
+export interface PredicateTimeoutRecovery {
+  tool: 'watch:create';
+  args: Record<string, unknown>;
+}
+
+/** Rebuild the same predicate under a fresh synthetic key after its paired await expires. */
+export function buildPredicateTimeoutRecovery(input: {
+  spec: PredicateTimeoutSpec;
+  timeoutSec?: number;
+}): PredicateTimeoutRecovery {
+  const predicate: Record<string, unknown> = {
+    tool: input.spec.tool,
+    args: input.spec.args,
+    path: input.spec.path,
+    op: input.spec.op,
+  };
+  if (input.spec.op !== 'exists' && input.spec.op !== 'changed') predicate.value = input.spec.value;
+
+  const args: Record<string, unknown> = {
+    pattern: 'predicate-timeout-recovery',
+    wake: true,
+    once: input.spec.once,
+    interval_sec: input.spec.intervalSec,
+    on_timeout: 'wake',
+    predicate,
+  };
+  if (input.timeoutSec != null && Number.isFinite(input.timeoutSec) && input.timeoutSec > 0) {
+    args.timeout_sec = Math.max(1, Math.ceil(input.timeoutSec));
+  }
+  return { tool: 'watch:create', args };
+}
+
+/** Predicate keys belong to a poller that is retired with its expired await. */
+export function buildPredicateTimeoutFallback(
+  eventKey: string,
+  predicateRecovery?: PredicateTimeoutRecovery | null,
+): { summary: string; guidance: string; predicateRecovery?: PredicateTimeoutRecovery } {
+  const summary =
+    'Predicate await ' +
+    eventKey +
+    ' timed out — register a fresh predicate watch and let its own wake registration notify you; do not re-arm the expired key.';
+  const guidance = predicateRecovery
+    ? 'This synthetic predicate await timed out. Its paired poller is retired when the await expires, so the same key has no emitter. Do NOT call events:await on this expired key. Call predicateRecovery.tool with predicateRecovery.args; watch:create registers the new predicate wake itself. Do NOT call events:await on the returned watch.pattern — end your turn and let the new watch wake you when the predicate crosses or reaches its deadline. The recovery arguments carry the original predicate specification.'
+    : 'This synthetic predicate await timed out. Its paired poller is retired when the await expires, so the same key has no emitter. Do NOT call events:await on this expired key. Re-register the original predicate with watch:create (or state:subscribe for its cell); the new registration owns its wake/subscription. Do NOT call events:await on the returned key — end your turn and let the new registration notify you. Recover the original predicate specification from the registration or prior context.';
+  return {
+    summary,
+    guidance,
+    ...(predicateRecovery ? { predicateRecovery } : {}),
+  };
+}
+
 /** Whether a (possibly coalesced) delivery payload carries a timeout fire.
  *  A plain timeout fire is `{ timeout: true }` (the engine sweeper). A COALESCED
  *  wake replaces that headline with `{ coalesced, count, events, latest }`

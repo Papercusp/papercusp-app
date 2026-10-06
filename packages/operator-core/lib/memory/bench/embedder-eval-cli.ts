@@ -3,11 +3,18 @@
  *
  *   npx tsx packages/operator-core/lib/memory/bench/embedder-eval-cli.ts \
  *     [--legs gemma@512,granite97@384,granite311@384,qwen3@384,local,openai,\
- *             harrier,harrier384,sidecar[:model],ollama:<model>] \
+ *             harrier,harrier384,pplx,sidecar[:model],ollama:<model>] \
  *     [--corpus memory|prose] \
  *     [--sidecar http://127.0.0.1:PORT] [--ollama http://127.0.0.1:11434] \
  *     [--dims 384] [--out <path.json>] \
  *     [--baseline <leg>] [--compare-with <prior-run.json>] [--limit <N>]
+ *     [--vectors <candidate-vectors.json>]
+ *     [--mdenseon-model <validated-local-directory>] [--isolated-sidecar]
+ *     [--vectors-out <path.json>] [--warm-trials <N>]
+ *     Performance manifest cells use frozen requests and five randomized
+ *     fresh-process blocks; retain cold/warm/batch/cache/resource raw samples.
+ *     --transport-trace adds private socket/client lifecycle evidence to a
+ *     diagnostic cell only; it changes no request/pool/timeout policy.
  *
  * `--limit N` is a SMOKE pass over the first N docs — use it to prove a newly
  * added leg loads/pools/sizes correctly before paying for a full corpus. Its
@@ -88,20 +95,36 @@ import {
   isTrainedDim,
   dimSpecFor,
   GEMMA_TARGET_DIMS,
+  embedExecutionTarget,
+  buildMdenseOnEmbedder,
+  readMdenseOnExport,
+  MDENSEON_MODEL,
+  MDENSEON_REVISION,
+  sidecarEmbedBatch,
+  shutdownLocalEmbedder,
+  getWorkerState,
 } from '@papercusp/memory';
-import { buildOpenAiEmbedder, resolveOpenAiKey } from '../configure';
-import { embedResponseMeasuredModel } from '../embed-sidecar-server';
+import { createEmbedSidecarServer, embedResponseMeasuredModel, EMBED_SIDECAR_RUNTIME, type EmbedSidecarHandle } from '../embed-sidecar-server';
 import { CORPUS_FIXTURE_VERSION, loadCorpusFixture } from './corpus';
 import { loadGoldSetFixture } from './gold-set';
 import { PROSE_CORPUS_FIXTURE_VERSION, loadProseCorpusFixture } from './prose-corpus';
 import { loadProseGoldSetFixture, PROSE_GOLD_SET_VERSION } from './prose-gold-set';
-import { compareLegs, classesDisagree, ALL_ANSWERABLE, type PerQueryRow } from './paired-leg-report';
+import { compareLegs, compareSourceGroupedLegs, classesDisagree, ALL_ANSWERABLE, type PerQueryRow } from './paired-leg-report';
+import { buildPplxBenchmarkEmbedder, loadCandidateVectors, qualifyIncumbentReferences, qualifyMdenseOnBoundaries, summarizeIncumbentReferenceFiles, PPLX_MODEL, PPLX_OUTPUT, PPLX_REVISION } from './candidate-embedders';
+import { prepareMeasurementCell, assertMeasuredEmbedResponse, assertMeasuredExecution, writeMeasurementCell,
+  assertCandidateArm, failMeasurementCell, loadIndependentMeasurementInputs, loadRetainedRelevanceVectors,
+  embedIncrementalRelevanceQueries, embedIncrementalRelevanceDocuments, type MeasurementArm, type PreparedMeasurement } from './measurement-manifest';
+import { ORT_SESSION_OPTIONS } from '../../../../../libs/generic/memory/src/local-embedder-worker';
+import { loadPerformanceInput, collectSidecarPerformance, runPerformanceBlocks, isolatedEvaluationBuilders, observeSidecarTransport } from './sidecar-performance';
+
+const processStartedAtMs = Date.now() - process.uptime() * 1000;
 
 type EmbedFn = (text: string) => Promise<number[]>;
 interface Leg {
   name: string;
   doc: EmbedFn;
   query: EmbedFn;
+  metadata?: Record<string, unknown>;
   /**
    * Set on legs that are MRL truncations of a shared base pass. Legs sharing a
    * `family` are embedded ONCE at the family's widest `dims` and the narrower
@@ -120,6 +143,8 @@ interface Leg {
 const K_VALUES = [1, 3, 5] as const;
 const MRR_CUTOFF = 10;
 const ANSWERABLE = new Set(['lexical-gap', 'exact-identifier', 'session-start-intent']);
+let isolatedSidecar: EmbedSidecarHandle | undefined;
+let preparedMeasurement: PreparedMeasurement | undefined;
 
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -150,25 +175,21 @@ function dot(a: number[], b: number[]): number {
  * honest: ask for the model explicitly, and refuse to time a response that says
  * it came from somewhere else.
  */
-function sidecarLeg(url: string, model: string): Leg {
+function sidecarLeg(url: string, model: string, arm?: MeasurementArm): Leg {
   const call = (kind: 'document' | 'query'): EmbedFn => async (text: string) => {
-    const res = await fetch(`${url.replace(/\/$/, '')}/embed`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      // A benchmark wants the model, not the cache in front of it.
-      body: JSON.stringify({ model, kind, texts: [text], bypassCache: true }),
-    });
-    if (!res.ok) throw new Error(`sidecar_embed_${res.status}: ${await res.text().catch(() => '')}`);
-    const j = (await res.json()) as { vectors: number[][] };
+    const j = await sidecarEmbedBatch(url, { model, kind, texts: [text], bypassCache: true,
+      // Cold model construction is recorded by this evaluation too.
+      timeoutMs: 180_000 });
     // Verify rather than trust the flag: an older sidecar bundle accepts
     // `bypassCache` as an unknown field, ignores it, and answers 200 from the
     // LRU. That response is indistinguishable from a real one except here.
-    const measured = embedResponseMeasuredModel(j, 1);
+    const measured = embedResponseMeasuredModel({ cache: j.cache }, 1);
     if (!measured.ok) {
       throw new Error(
         `sidecar_embed_not_measured: ${measured.reason} — the timings from this leg would be a throughput figure for the cache, so the run is stopped instead of reported.`,
       );
     }
+    if (arm) assertMeasuredEmbedResponse(arm, j, 1);
     return j.vectors[0];
   };
   return { name: `sidecar:${model}`, doc: call('document'), query: call('query') };
@@ -242,6 +263,7 @@ async function buildLegs(
   names: string[],
   sidecarUrl?: string,
   ollamaUrl = 'http://127.0.0.1:11434',
+  mdenseonModel?: string,
 ): Promise<Array<Leg | { name: string; error: string }>> {
   const out: Array<Leg | { name: string; error: string }> = [];
   const familyWidths = mrlFamilyWidths(names);
@@ -287,6 +309,20 @@ async function buildLegs(
           doc: buildHarrierEmbedder({ kind: 'document' }),
           query: buildHarrierEmbedder({ kind: 'query' }),
         });
+      } else if (name === 'pplx') {
+        const fn = buildPplxBenchmarkEmbedder();
+        out.push({ name, doc: fn, query: fn, metadata: {
+          model: PPLX_MODEL, revision: PPLX_REVISION, output: PPLX_OUTPUT,
+          runtime: 'transformers-js-direct-encoder-cpu-fp32', experimental: true,
+        } });
+      } else if (name === 'mdenseon') {
+        if (!mdenseonModel) throw new Error('pass --mdenseon-model <validated-local-directory>');
+        const manifest = readMdenseOnExport(mdenseonModel);
+        out.push({ name, doc: buildMdenseOnEmbedder({ kind: 'document', model: mdenseonModel }),
+          query: buildMdenseOnEmbedder({ kind: 'query', model: mdenseonModel }),
+          metadata: { model: MDENSEON_MODEL, revision: MDENSEON_REVISION,
+            runtime: 'transformers-js-worker-cpu-fp32', experimental: true,
+            graphSha256: manifest.files['onnx/model.onnx'].sha256 } });
       } else if (name === 'harrier384') {
         // Exploratory truncation — harrier has NO documented MRL (P-013).
         out.push({
@@ -300,6 +336,9 @@ async function buildLegs(
         const fn = await buildLocalEmbedder();
         out.push({ name, doc: fn, query: fn });
       } else if (name === 'openai') {
+        // The operator configuration hydrates its backend from Postgres on
+        // import. Local/reference/performance runs must stay database-free.
+        const { buildOpenAiEmbedder, resolveOpenAiKey } = await import('../configure');
         const key = await resolveOpenAiKey();
         if (!key) out.push({ name, error: 'no_key' });
         else {
@@ -308,7 +347,16 @@ async function buildLegs(
         }
       } else if (name.startsWith('sidecar')) {
         if (!sidecarUrl) out.push({ name, error: 'pass --sidecar <url>' });
-        else out.push(sidecarLeg(sidecarUrl, name.includes(':') ? name.split(':')[1] : 'gemma'));
+        else {
+          const leg = sidecarLeg(sidecarUrl, name.includes(':') ? name.split(':')[1] : 'gemma', preparedMeasurement?.arm);
+          if (name === 'sidecar:mdenseon' && mdenseonModel) {
+            const manifest = readMdenseOnExport(mdenseonModel);
+            leg.metadata = { model: MDENSEON_MODEL, revision: MDENSEON_REVISION,
+              runtime: 'native-client-isolated-sidecar-worker-cpu-fp32', experimental: true,
+              graphSha256: manifest.files['onnx/model.onnx'].sha256 };
+          }
+          out.push(leg);
+        }
       } else {
         out.push({
           name,
@@ -328,6 +376,27 @@ async function buildLegs(
  *  include the ONNX model+arena loaded inside the embed worker. */
 function rssMB(): number {
   return +(process.memoryUsage().rss / 1024 / 1024).toFixed(1);
+}
+
+async function warmTimings(leg: Leg, documents: string[], queries: string[], trials: number) {
+  const samples = { document: [] as number[], query: [] as number[] };
+  for (let trial = 0; trial < trials; trial++) {
+    for (const kind of (trial % 2 ? ['query', 'document'] : ['document', 'query']) as Array<'document' | 'query'>) {
+      const texts = kind === 'document' ? documents : queries;
+      const fn = kind === 'document' ? leg.doc : leg.query;
+      const selected = texts.filter((_, i) => i % Math.max(1, Math.floor(texts.length / 12)) === 0).slice(0, 12);
+      for (const text of trial % 2 ? selected.reverse() : selected) {
+        const start = performance.now();
+        await fn(text);
+        samples[kind].push(performance.now() - start);
+      }
+    }
+  }
+  return Object.fromEntries(Object.entries(samples).map(([kind, values]) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const quantile = (p: number) => sorted[Math.max(0, Math.ceil(sorted.length * p) - 1)] ?? null;
+    return [kind, { samples: values, n: values.length, p50Ms: quantile(0.5), p95Ms: quantile(0.95) }];
+  }));
 }
 
 /**
@@ -471,13 +540,75 @@ function scoreLeg(
 }
 
 async function main(): Promise<void> {
+  if (argValue('--qualify-boundaries')) {
+    const output = argValue('--out'), reference = argValue('--boundary-reference');
+    if (!output || !reference) throw new Error('--qualify-boundaries requires --boundary-reference and --out');
+    await qualifyMdenseOnBoundaries(argValue('--qualify-boundaries')!, argValue('--boundary-sha256') ?? '', reference,
+      argValue('--boundary-reference-sha256') ?? '', output, argValue('--boundary-cell'));
+    return;
+  }
+  if (argValue('--run-performance')) {
+    const model = argValue('--mdenseon-model'), driver = argValue('--driver-out');
+    if (!model || !driver) throw new Error('--run-performance requires --mdenseon-model and --driver-out');
+    console.log('performance summary', await runPerformanceBlocks(argValue('--run-performance')!, argValue('--manifest-sha256') ?? '', model, driver));
+    process.exit(0);
+  }
+  if (argValue('--summarize-reference')) {
+    const output = argValue('--out'), python = argValue('--python-reference');
+    if (!output || !python) throw new Error('--summarize-reference requires --python-reference and --out');
+    const summary = summarizeIncumbentReferenceFiles(argValue('--summarize-reference')!, python);
+    fs.writeFileSync(output, JSON.stringify(summary, null, 2), { flag: 'wx', mode: 0o600 });
+    return;
+  }
+  if (argValue('--qualify-reference')) {
+    const output = argValue('--out');
+    if (!output) throw new Error('--qualify-reference requires --out');
+    await qualifyIncumbentReferences(argValue('--qualify-reference')!, argValue('--reference-sha256') ?? '', output);
+    return;
+  }
   // `--legs none` embeds nothing: a PURE ANALYSIS pass that only re-compares
   // runs already on disk (paired stats are computed from stored per-query rows,
   // so re-deriving a verdict — or comparing two past runs against each other —
   // must not cost another corpus pass).
   const legsArg = argValue('--legs');
   const legNames = legsArg === 'none' ? [] : (legsArg?.split(',').filter(Boolean) ?? ['gemma', 'local']);
-  const sidecarUrl = argValue('--sidecar');
+  let sidecarUrl = argValue('--sidecar');
+  const mdenseonModel = argValue('--mdenseon-model');
+  if (argValue('--manifest')) {
+    preparedMeasurement = await prepareMeasurementCell(argValue('--manifest')!, argValue('--manifest-sha256') ?? '', argValue('--cell') ?? '');
+    const { cell, arm } = preparedMeasurement;
+    if (!['performance', 'relevance'].includes(cell.bar) || legNames.length !== 1 || argValue('--vectors') || argValue('--limit')) {
+      throw new Error('manifest evaluator requires one matching arm and complete declared inputs');
+    }
+    const http = legNames[0] === `sidecar:${arm.model}`;
+    if (http ? !process.argv.includes('--isolated-sidecar') : (cell.bar !== 'relevance' || legNames[0] !== arm.model
+      || process.argv.includes('--isolated-sidecar') || sidecarUrl)) throw new Error('manifest evaluator arm/transport mismatch');
+    if (cell.bar === 'relevance' && (process.argv.includes('--timing-only') || Number(argValue('--warm-trials') ?? 0) !== 0)) {
+      throw new Error('relevance cannot be a timing-only sample');
+    }
+    await assertCandidateArm(arm, arm.model as 'mdenseon' | 'gemma' | 'harrier', http ? 'local-http-client-worker' : 'worker', EMBED_SIDECAR_RUNTIME);
+  }
+  const retainedVectors: Record<string, { docVectors: number[][]; queryVectors: number[][] }> = {};
+  const performanceInput = preparedMeasurement?.cell.bar === 'performance' ? loadPerformanceInput(preparedMeasurement) : undefined;
+  if (performanceInput && (argValue('--warm-trials') || process.argv.includes('--timing-only') || argValue('--vectors-out'))) {
+    throw new Error('performance samples must come from the frozen request contract');
+  }
+  if (performanceInput && getWorkerState().alive) throw new Error('performance cell requires a fresh process with a cold worker');
+  const warmTrials = Number(argValue('--warm-trials') ?? 0);
+  const timingOnly = process.argv.includes('--timing-only');
+  if (timingOnly && warmTrials === 0) throw new Error('--timing-only requires --warm-trials');
+  if (!Number.isInteger(warmTrials) || warmTrials < 0 || warmTrials > 20) throw new Error('--warm-trials must be an integer from 0 to 20');
+  if (process.argv.includes('--isolated-sidecar')) {
+    if (sidecarUrl) throw new Error('--isolated-sidecar cannot target an existing sidecar');
+    if (!mdenseonModel) throw new Error('--isolated-sidecar requires --mdenseon-model');
+    readMdenseOnExport(mdenseonModel);
+    isolatedSidecar = createEmbedSidecarServer({ port: 0, warmAtBoot: false, concurrency: performanceInput?.serverConcurrency ?? 1,
+      builders: isolatedEvaluationBuilders(async (kind) => buildMdenseOnEmbedder({ kind, model: mdenseonModel })),
+      modelRevisions: { mdenseon: MDENSEON_REVISION },
+      log: (line) => console.log(`[isolated-sidecar] ${line}`),
+    });
+    sidecarUrl = `http://127.0.0.1:${await isolatedSidecar.listening}`;
+  }
   const ollamaUrl = argValue('--ollama') ?? 'http://127.0.0.1:11434';
   const outPath =
     argValue('--out') ??
@@ -487,6 +618,26 @@ async function main(): Promise<void> {
       'bench-reports',
       `embedder-eval-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`,
     );
+  if (preparedMeasurement && path.resolve(outPath) !== preparedMeasurement.rawOutput) throw new Error('runner output differs from declared cell');
+
+  if (performanceInput && preparedMeasurement && sidecarUrl) {
+    const { arm, cell } = preparedMeasurement;
+    const traceFd = process.argv.includes('--transport-trace') ? fs.openSync(`${outPath}.transport.jsonl`, 'wx', 0o600) : undefined;
+    const stopTrace = traceFd !== undefined && isolatedSidecar
+      ? observeSidecarTransport(isolatedSidecar.server, sidecarUrl, (event) => fs.writeSync(traceFd, `${JSON.stringify(event)}\n`)) : undefined;
+    let report: Awaited<ReturnType<typeof collectSidecarPerformance>>;
+    try {
+      report = await collectSidecarPerformance(sidecarUrl, arm, performanceInput, { processStartedAtMs,
+        onPhase: (phase) => console.log(`[performance] ${cell.id} ${phase}`),
+        onSample: (sample) => fs.promises.appendFile(`${outPath}.samples.jsonl`, `${JSON.stringify(sample)}\n`, { mode: 0o600 }),
+      });
+    } finally { stopTrace?.(); if (traceFd !== undefined) fs.closeSync(traceFd); }
+    assertMeasuredExecution(arm, embedExecutionTarget(), ORT_SESSION_OPTIONS, getWorkerState());
+    writeMeasurementCell(preparedMeasurement, { ...report, block: cell.parameters.block, order: cell.parameters.order,
+      execution: embedExecutionTarget(), threads: ORT_SESSION_OPTIONS, workerState: getWorkerState() });
+    await isolatedSidecar?.close(); await shutdownLocalEmbedder();
+    console.log('wrote', outPath); process.exit(0);
+  }
 
   // Which corpus/gold-set pair to score against. 'memory' (default) keeps the
   // original memory-bench behaviour; 'prose' scores the prose surfaces, whose
@@ -494,12 +645,13 @@ async function main(): Promise<void> {
   // transfer (prose-embedding-384-untrained-mrl-fix P-001).
   const corpusChoice = (argValue('--corpus') ?? 'memory') as 'memory' | 'prose';
   if (corpusChoice !== 'memory' && corpusChoice !== 'prose') {
-    console.error(`unknown --corpus '${corpusChoice}' (expected 'memory' or 'prose')`);
-    process.exit(1);
+    throw new Error(`unknown --corpus '${corpusChoice}' (expected 'memory' or 'prose')`);
   }
-  const fullCorpus = corpusChoice === 'prose' ? loadProseCorpusFixture() : loadCorpusFixture();
-  const gold = corpusChoice === 'prose' ? loadProseGoldSetFixture() : loadGoldSetFixture();
-  const baseCorpusVersion = corpusChoice === 'prose' ? PROSE_CORPUS_FIXTURE_VERSION : CORPUS_FIXTURE_VERSION;
+  const independent = preparedMeasurement?.cell.bar === 'relevance' ? loadIndependentMeasurementInputs(preparedMeasurement, corpusChoice) : undefined;
+  const fullCorpus = independent?.entries ?? (corpusChoice === 'prose' ? loadProseCorpusFixture() : loadCorpusFixture());
+  const gold = independent ? { version: independent.goldVersion, queries: independent.queries }
+    : (corpusChoice === 'prose' ? loadProseGoldSetFixture() : loadGoldSetFixture());
+  const baseCorpusVersion = independent?.corpusVersion ?? (corpusChoice === 'prose' ? PROSE_CORPUS_FIXTURE_VERSION : CORPUS_FIXTURE_VERSION);
 
   // `--limit N` — a SMOKE pass over the first N docs, for checking that a
   // newly added leg loads, pools and emits the width it claims BEFORE paying
@@ -518,8 +670,7 @@ async function main(): Promise<void> {
   const limitArg = argValue('--limit');
   const limit = limitArg === undefined ? undefined : Number(limitArg);
   if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
-    console.error(`--limit must be a positive integer, got '${limitArg}'`);
-    process.exit(1);
+    throw new Error(`--limit must be a positive integer, got '${limitArg}'`);
   }
   const corpus = limit === undefined ? fullCorpus : fullCorpus.slice(0, limit);
   const corpusVersion = limit === undefined ? baseCorpusVersion : `${baseCorpusVersion}+SMOKE-limit${limit}`;
@@ -535,6 +686,29 @@ async function main(): Promise<void> {
   const corpusKeys = corpus.map((e) => e.key);
   const corpusTexts = corpus.map((e) => e.text);
   const queryTexts = gold.queries.map((q) => q.query);
+  const reusedRelevance = preparedMeasurement && independent
+    ? await loadRetainedRelevanceVectors(preparedMeasurement, corpusChoice as 'memory' | 'prose') : undefined;
+  if (reusedRelevance && !reusedRelevance.missingIndexes.length && !reusedRelevance.missingDocumentIndexes.length) {
+    throw new Error('retained relevance has no new queries; use offline scoring rather than starting a worker');
+  }
+  if (preparedMeasurement && !independent) {
+    // Fixture files/order are input identities too; versions alone do not pin bytes.
+    const declared = preparedMeasurement.cell.inputIds.map((id) => preparedMeasurement!.manifest.inputs[id]);
+    const fixtureRoot = path.join(path.dirname(new URL(import.meta.url).pathname), 'fixtures');
+    const prefix = corpusChoice === 'prose' ? 'prose-' : '';
+    for (const name of [`${prefix}corpus.v1.json`, `${prefix}gold-set.v1.json`]) {
+      if (!declared.some((f) => path.resolve(f.path) === path.join(fixtureRoot, name))) throw new Error('fixture absent from frozen cell inputs');
+    }
+  }
+  const vectorsPath = argValue('--vectors');
+  const fixturesDir = path.join(path.dirname(new URL(import.meta.url).pathname), 'fixtures');
+  const fixturePrefix = corpusChoice === 'prose' ? 'prose-' : '';
+  const imported = vectorsPath ? loadCandidateVectors(
+    vectorsPath, corpusChoice,
+    path.join(fixturesDir, `${fixturePrefix}corpus.v1.json`),
+    path.join(fixturesDir, `${fixturePrefix}gold-set.v1.json`),
+    corpusKeys, gold.queries.map((q) => q.id),
+  ) : undefined;
   console.log(
     `corpus=${corpusChoice}/${corpusVersion} docs=${corpusKeys.length} queries=${gold.queries.length} legs=${legNames.join(',')}`,
   );
@@ -565,12 +739,11 @@ async function main(): Promise<void> {
       prior.corpusVersion !== corpusVersion ||
       prior.goldSetVersion !== gold.version
     ) {
-      console.error(
+      throw new Error(
         `--compare-with REFUSED: fixture mismatch. this run = ${corpusChoice}/${corpusVersion} gold ${gold.version}; ` +
           `${p} = ${prior.corpus}/${prior.corpusVersion} gold ${prior.goldSetVersion}. ` +
           `Comparing legs scored on different queries is not a comparison.`,
       );
-      process.exit(1);
     }
     priorRuns.push(prior);
   }
@@ -578,8 +751,19 @@ async function main(): Promise<void> {
   const results: Record<string, unknown> = {};
 
   const record = (name: string, docVecs: number[][], queryVecs: number[][], meta: Record<string, unknown>): void => {
-    const scored = scoreLeg(corpusKeys, docVecs, gold.queries, queryVecs);
-    results[name] = { dims: docVecs[0]?.length ?? 0, ...meta, ...scored };
+    if (preparedMeasurement && (docVecs.length !== corpus.length || queryVecs.length !== gold.queries.length
+      || [...docVecs, ...queryVecs].some((v) => v.length !== preparedMeasurement!.arm.profile.nativeDims
+        || v.some((x) => !Number.isFinite(x)) || Math.abs(Math.sqrt(v.reduce((s, x) => s + x * x, 0)) - 1) > 0.001))) {
+      throw new Error('measured relevance vector population/dimensions/normalization mismatch');
+    }
+    const testIndexes = independent?.queries.flatMap((q, i) => q.partition === 'test' ? [i] : []);
+    const scored = scoreLeg(corpusKeys, docVecs, testIndexes ? testIndexes.map((i) => gold.queries[i]) : gold.queries,
+      testIndexes ? testIndexes.map((i) => queryVecs[i]) : queryVecs);
+    retainedVectors[name] = { docVectors: docVecs, queryVectors: queryVecs };
+    const calibrationIndexes = independent?.queries.flatMap((q, i) => q.partition === 'calibration' ? [i] : []);
+    results[name] = { dims: docVecs[0]?.length ?? 0, ...meta, ...scored,
+      ...(calibrationIndexes ? { calibration: scoreLeg(corpusKeys, docVecs, calibrationIndexes.map((i) => gold.queries[i]),
+        calibrationIndexes.map((i) => queryVecs[i])) } : {}) };
     const a = scored.byClass.ALL_ANSWERABLE;
     console.log(
       `   ${name}: R@1=${a.recall_at_1} R@3=${a.recall_at_3} R@5=${a.recall_at_5} MRR=${a.mrr_at_10} ` +
@@ -587,8 +771,19 @@ async function main(): Promise<void> {
     );
   };
 
+  if (imported) {
+    const { manifest, suite } = imported;
+    record(manifest.name, suite.docVectors.map(l2norm), suite.queryVectors.map(l2norm), {
+      model: manifest.model, revision: manifest.revision, runtime: manifest.runtime,
+      experimental: true, vectorSource: vectorsPath, loadSeconds: manifest.loadSeconds,
+      assetBytes: manifest.assetBytes, docSeconds: suite.docSeconds, querySeconds: suite.querySeconds,
+      msPerDoc: suite.docSeconds * 1000 / corpusTexts.length,
+      msPerQuery: suite.querySeconds * 1000 / queryTexts.length, peakRssMB: suite.peakRssMB,
+    });
+  }
+
   // Partition: MRL siblings share one forward pass, everything else is its own.
-  const built = await buildLegs(legNames, sidecarUrl, ollamaUrl);
+  const built = await buildLegs(legNames, sidecarUrl, ollamaUrl, mdenseonModel);
   const families = new Map<string, Leg[]>();
   const standalone: Leg[] = [];
   for (const leg of built) {
@@ -609,11 +804,19 @@ async function main(): Promise<void> {
     const base = members[0];
     const baseDims = base.mrl!.dims;
     const widths = members.map((m) => m.mrl!.dims);
+    if (timingOnly) {
+      await base.doc(corpusTexts[0]); await base.query(queryTexts[0]);
+      const repeatedWarm = await warmTimings(base, corpusTexts, queryTexts, warmTrials);
+      for (const member of members) results[member.name] = { ...member.metadata, repeatedWarm,
+        execution: embedExecutionTarget(), workerState: getWorkerState(), timingOnly: true };
+      continue;
+    }
     console.log(`\n== ${family} MRL family ${widths.join('/')}: ONE pass at ${baseDims}, narrower widths derived ==`);
     const rssBeforeMB = rssMB();
     try {
       const doc = await embedAll(base.doc, corpusTexts, `${family}@${baseDims}/doc`);
       const query = await embedAll(base.query, queryTexts, `${family}@${baseDims}/query`);
+      const repeatedWarm = warmTrials ? await warmTimings(base, corpusTexts, queryTexts, warmTrials) : undefined;
       const spec = dimSpecFor(family);
       for (const m of members) {
         const d = m.mrl!.dims;
@@ -625,6 +828,7 @@ async function main(): Promise<void> {
             // Whether the model was actually TRAINED at this width — read from
             // the declared spec, never restated here (D-001).
             trainedDim: spec ? isTrainedDim(spec, d) : null,
+            repeatedWarm,
             model: spec?.model ?? null,
             sharedPass: `${family}@${baseDims}`,
             derived: d !== baseDims,
@@ -651,16 +855,48 @@ async function main(): Promise<void> {
   }
 
   for (const leg of standalone) {
+    if (timingOnly) {
+      await leg.doc(corpusTexts[0]); await leg.query(queryTexts[0]);
+      results[leg.name] = { ...leg.metadata, repeatedWarm: await warmTimings(leg, corpusTexts, queryTexts, warmTrials),
+        execution: embedExecutionTarget(), workerState: getWorkerState(), timingOnly: true };
+      continue;
+    }
     console.log(`\n== ${leg.name}: embedding ==`);
     const rssBeforeMB = rssMB();
     try {
-      const doc = await embedAll(leg.doc, corpusTexts, `${leg.name}/doc`);
-      const query = await embedAll(leg.query, queryTexts, `${leg.name}/query`);
+      let newDocumentPass: Awaited<ReturnType<typeof embedAll>> | undefined;
+      const doc = reusedRelevance ? {
+        vecs: await embedIncrementalRelevanceDocuments(reusedRelevance, corpusTexts, async (texts) => {
+          newDocumentPass = await embedAll(leg.doc, texts, `${leg.name}/new-doc`);
+          return newDocumentPass.vecs;
+        }),
+        seconds: newDocumentPass?.seconds ?? 0, peakRssMB: newDocumentPass?.peakRssMB ?? rssBeforeMB,
+      } : await embedAll(leg.doc, corpusTexts, `${leg.name}/doc`);
+      let newQueryPass: Awaited<ReturnType<typeof embedAll>> | undefined;
+      const query = reusedRelevance ? {
+        vecs: await embedIncrementalRelevanceQueries(reusedRelevance, queryTexts, async (texts) => {
+          newQueryPass = await embedAll(leg.query, texts, `${leg.name}/new-query`);
+          return newQueryPass.vecs;
+        }),
+        seconds: newQueryPass?.seconds ?? 0, peakRssMB: newQueryPass?.peakRssMB ?? rssBeforeMB,
+      } : await embedAll(leg.query, queryTexts, `${leg.name}/query`);
+      const workerState = getWorkerState();
+      if ((leg.name === 'mdenseon' || (leg.name === 'sidecar:mdenseon' && isolatedSidecar)) && (!workerState.alive || workerState.disabled)) {
+        throw new Error('mDenseOn validation requires a live worker; inline inference cannot qualify');
+      }
+      const repeatedWarm = warmTrials ? await warmTimings(leg, corpusTexts, queryTexts, warmTrials) : undefined;
       record(leg.name, doc.vecs, query.vecs, {
+        workerState, repeatedWarm,
+        ...leg.metadata,
+        ...(reusedRelevance ? { retainedRelevance: reusedRelevance.evidence,
+          measuredDocumentCount: reusedRelevance.missingDocumentIndexes.length,
+          measuredQueryCount: reusedRelevance.missingIndexes.length,
+          timingScope: reusedRelevance.missingDocumentIndexes.length
+            ? 'new documents and queries only; retained vectors reused' : 'new queries only; documents reused' } : {}),
         docSeconds: +doc.seconds.toFixed(1),
         querySeconds: +query.seconds.toFixed(1),
-        msPerDoc: +((doc.seconds * 1000) / Math.max(corpusTexts.length, 1)).toFixed(1),
-        msPerQuery: +((query.seconds * 1000) / Math.max(queryTexts.length, 1)).toFixed(1),
+        msPerDoc: +((doc.seconds * 1000) / Math.max(reusedRelevance?.missingDocumentIndexes.length ?? corpusTexts.length, 1)).toFixed(1),
+        msPerQuery: +((query.seconds * 1000) / Math.max(reusedRelevance?.missingIndexes.length ?? queryTexts.length, 1)).toFixed(1),
         rssBeforeMB,
         peakRssMB: Math.max(doc.peakRssMB, query.peakRssMB),
         rssDeltaMB: +(Math.max(doc.peakRssMB, query.peakRssMB) - rssBeforeMB).toFixed(1),
@@ -707,7 +943,9 @@ async function main(): Promise<void> {
     for (const [name, leg] of scoredLegs) {
       if (name === baselineName) continue;
       const cmp = compareLegs(baselineName!, baseline[1].perQuery, name, leg.perQuery);
-      comparisons[name] = { ...cmp, classesDisagree: classesDisagree(cmp) };
+      comparisons[name] = { ...cmp, classesDisagree: classesDisagree(cmp), ...(independent ? {
+        sourceGrouped: compareSourceGroupedLegs(baselineName!, baseline[1].perQuery, name, leg.perQuery,
+          independent.entries, independent.queries.filter((q) => q.partition === 'test')) } : {}) };
       console.log(`\n  ${baselineName} -> ${name}`);
       for (const cls of [ALL_ANSWERABLE, 'lexical-gap', 'exact-identifier', 'session-start-intent']) {
         const row = cmp.byClass[cls];
@@ -723,29 +961,37 @@ async function main(): Promise<void> {
     console.log(`\n(no paired comparison: --baseline '${baselineName}' did not match a scored leg)`);
   }
 
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(
-    outPath,
-    JSON.stringify(
-      {
-        generatedAt: new Date().toISOString(),
-        corpus: corpusChoice,
-        corpusVersion,
-        goldVersion: gold.version,
-        goldSetVersion: corpusChoice === 'prose' ? PROSE_GOLD_SET_VERSION : gold.version,
-        baseline: baselineName,
-        results,
-        comparisons,
-      },
-      null,
-      2,
-    ),
-  );
+  const report = { generatedAt: new Date().toISOString(), corpus: corpusChoice, corpusVersion,
+    goldVersion: gold.version, goldSetVersion: independent ? independent.goldVersion : (corpusChoice === 'prose' ? PROSE_GOLD_SET_VERSION : gold.version),
+    ...(independent ? { labelAuthority: 'independent-blind-before-inference', scoringPartition: 'test',
+      calibrationReportedSeparately: true, heldoutQueries: independent.queries.filter((q) => q.partition === 'test').map((q) => ({ id: q.id, class: q.class, group: q.group, expected: q.expected })),
+      sourceClusters: Object.fromEntries(independent.entries.map((e) => [e.key, String(e.metadata?.cluster)])) } : {}),
+    baseline: baselineName, results, comparisons };
+  if (preparedMeasurement) {
+    assertMeasuredExecution(preparedMeasurement.arm, embedExecutionTarget(), ORT_SESSION_OPTIONS, getWorkerState());
+    if (Object.values(results).some((r) => (r as { blocked?: string }).blocked)) throw new Error('failed arm cannot produce an accepted measured receipt');
+    writeMeasurementCell(preparedMeasurement, report);
+  } else {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+  }
   console.log('\nwrote', outPath);
+  const vectorsOut = argValue('--vectors-out');
+  if (vectorsOut) {
+    fs.mkdirSync(path.dirname(vectorsOut), { recursive: true });
+    fs.writeFileSync(vectorsOut, JSON.stringify({ corpus: corpusChoice, corpusVersion,
+      keys: corpus.map((entry) => entry.key), queryIds: gold.queries.map((query) => query.id),
+      vectors: retainedVectors }));
+  }
+  await isolatedSidecar?.close();
+  await shutdownLocalEmbedder();
   process.exit(0);
 }
 
-void main().catch((e) => {
-  console.error('embedder-eval failed:', e instanceof Error ? e.message : e);
+void main().catch(async (e) => {
+  if (preparedMeasurement) failMeasurementCell(preparedMeasurement, e);
+  console.error('embedder-eval failed:', e);
+  await isolatedSidecar?.close();
+  await shutdownLocalEmbedder();
   process.exit(1);
 });

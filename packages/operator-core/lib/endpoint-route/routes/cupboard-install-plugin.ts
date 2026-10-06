@@ -10,13 +10,24 @@
  * 2026-07-14 P-006, D-001 reuse-first). This route only parses the loopback body
  * and maps the structured result to an HTTP response.
  *
- * Body: { listingId?, githubUrl?, listingRef?, harness?, acceptCapabilities? }
+ * Body: { listingId?, githubUrl?, listingRef?, harness?, acceptCapabilities?, expectedReview? }
+ *
+ * A plugin that declares a data provider refuses with 409
+ * `{ code:'provider_install_consent_required', data:{ review } }` until the
+ * caller re-posts with `acceptCapabilities:true` and `expectedReview` set to
+ * that `review` (generalized-integrations plan P-001 / D-006). Refusal `code`
+ * and `data` are forwarded so the UI can render the review and re-call.
  *
  * `auth: 'loopback'` (auth-tier Wave 1) — loopback-only via the operator's Host-header gate. The
  * Cupboard ships UNGATED (no MARKETPLACE flag).
  */
 import { defineTool } from '@papercusp/agent-mcp';
 import { installPluginFromCupboard } from '../../cupboard/install-io';
+import type { InstallPluginManifestReview } from '../../cupboard/install-plugin-core';
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
 
 export default defineTool({
   method: 'POST',
@@ -30,6 +41,8 @@ export default defineTool({
       listingRef?: string;
       harness?: string;
       acceptCapabilities?: boolean;
+      expectedReview?: unknown;
+      triggerPackConfig?: { sourceMappings?: unknown; inputs?: unknown };
     };
     try {
       body = await req.json();
@@ -43,11 +56,30 @@ export default defineTool({
       ...(typeof body.listingRef === 'string' ? { listingRef: body.listingRef } : {}),
       ...(typeof body.harness === 'string' ? { harness: body.harness } : {}),
       acceptCapabilities: body.acceptCapabilities === true,
+      ...(isPlainObject(body.expectedReview)
+        ? { expectedReview: body.expectedReview as unknown as InstallPluginManifestReview }
+        : {}),
+      ...(isPlainObject(body.triggerPackConfig)
+        ? {
+            triggerPackConfig: {
+              ...(isPlainObject(body.triggerPackConfig.sourceMappings)
+                ? { sourceMappings: body.triggerPackConfig.sourceMappings as Record<string, string> }
+                : {}),
+              ...(isPlainObject(body.triggerPackConfig.inputs) ? { inputs: body.triggerPackConfig.inputs } : {}),
+            },
+          }
+        : {}),
     });
 
     if (!outcome.ok) {
       return Response.json(
-        { ok: false, error: outcome.error, ...(outcome.detail ? { detail: outcome.detail } : {}) },
+        {
+          ok: false,
+          error: outcome.error,
+          ...(outcome.detail ? { detail: outcome.detail } : {}),
+          ...(outcome.code ? { code: outcome.code } : {}),
+          ...(outcome.data ? { data: outcome.data } : {}),
+        },
         { status: outcome.status },
       );
     }

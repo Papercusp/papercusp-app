@@ -318,7 +318,12 @@ export type WakeOutcome =
   | { kind: 'delivered'; channel: WakeChannel }
   /** Recipient alive but uninjectable (detached terminal) — re-check later;
    *  converts to a resume when the process exits. */
-  | { kind: 'park'; reason: string }
+  | {
+      kind: 'park';
+      reason: string;
+      /** The psu host accepted this delivery id and still owns its detached gate pipeline. */
+      hostCommitPending?: true;
+    }
   /** Dead waiter (D-004 net #2) — no liveness, nothing resumable. Visible. */
   | { kind: 'drop'; reason: string }
   | { kind: 'error'; error: string };

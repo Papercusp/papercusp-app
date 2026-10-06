@@ -16,12 +16,14 @@
 
 import { z } from 'zod';
 import { defineTool } from '@papercusp/tooldef';
-import { GOAL_SPEND_SNAPSHOT_SOURCE, goalSpend } from '@papercusp/db-org';
 import type { Sql } from 'postgres';
 import type { PapercuspUnifiedToolContext } from '@papercusp/operator-core/lib/agent-tools/_tool-context';
 import { evaluateGoalWindDownOutputs } from '@papercusp/operator-core/lib/goals/goal-io-validation';
 import { killCriterionProblem } from '@papercusp/operator-core/lib/goals/kill-criterion';
-import { GENERICALLY_MEASURABLE_METRICS } from '@papercusp/operator-core/lib/goals/tripwire-refresh';
+import {
+  GENERICALLY_MEASURABLE_METRICS,
+  unmeasuredTripwireAdvisories,
+} from '@papercusp/operator-core/lib/goals/tripwire-refresh';
 import { HARNESS_SLUG_RE, isWildcardScopeToken } from '@papercusp/operator-core/lib/harness-slug';
 import {
   GOAL_LAUNCH_DEFAULTS,
@@ -42,7 +44,7 @@ import {
   isStopReport,
   type GoalTransitionReport,
 } from './stop-seam';
-import { clearGoalPause, stampGoalPause } from './pause-record';
+import { clearGoalDispositionOnReactivation, clearGoalPause, stampGoalPause } from './pause-record';
 import { addGoalFieldChange, appendGoalHistory, type GoalFieldChange } from './history';
 import { isGoalHolderAuthorityError } from '@papercusp/operator-core/lib/modes/goal-context';
 import { assertGoalWriteAuthorityForCaller } from '@papercusp/operator-core/lib/goals/write-authority';
@@ -111,14 +113,6 @@ const goalUpdateArgs = z.object({
     .optional()
     .describe(
       'revise the budget ceiling window in seconds; omit to leave it untouched, or pass null to restore a lifetime ceiling',
-    ),
-  spentCents: z
-    .number()
-    .int()
-    .nonnegative()
-    .optional()
-    .describe(
-      'cents from the all-time measured child-fleet goals:pots rollup; the handler rejects missing, partial, or mismatched measurements and never derives interactive-session cost',
     ),
   parentId: z.string().min(1).nullable().optional().describe('re-parent, or null to detach'),
   installSlug: z
@@ -402,54 +396,15 @@ const goalUpdateTool = defineTool({
       previousBlockedBy = sortedRefs((edges.get(args.id) ?? []).map((edge) => edge.ref));
     }
 
-    /* SPEND PROVENANCE (EI-20188678636377696).
-       `spentCents` used to be an owner-entered number. That made a guess
-       indistinguishable from a measurement and let a decorative ceiling read
-       as enforced. The only currently honest source is the existing measured
-       child-fleet rollup behind goals:pots. Read it in this transaction, reject
-       an incomplete rollup, and compare the caller's number to the source
-       before touching the goal row. The interactive GOAL session deliberately
-       remains outside this figure: provider billing is not attributable there. */
-    let measuredSpendCents: number | undefined;
-    if (args.spentCents !== undefined) {
-      const workspaceId = await resolveGoalWorkspace({
-        tx,
-        workspaceId: ctx.principal?.workspaceId,
-      });
-      if (!workspaceId) {
-        return {
-          data: null,
-          degraded: true,
-          degradedReasons: [
-            `spentCents refused for goal ${args.id}: no concrete workspace is available to read the measured goals:pots rollup`,
-          ],
-        };
-      }
-      const spend = await goalSpend(tx as Sql, { workspaceId, goalId: args.id });
-      if (!spend.measured || !Number.isFinite(spend.costUsd)) {
-        return {
-          data: null,
-          degraded: true,
-          degradedReasons: [
-            `spentCents refused for goal ${args.id}: goals:pots has no complete priced measurement (samples=${spend.samples}, priced=${spend.pricedSamples}, unpriced=${spend.unpricedSamples}); the spend tripwire remains unmeasured`,
-          ],
-        };
-      }
-      measuredSpendCents = Math.round(spend.costUsd * 100);
-      if (args.spentCents !== measuredSpendCents) {
-        return {
-          data: null,
-          degraded: true,
-          degradedReasons: [
-            `spentCents refused for goal ${args.id}: supplied ${args.spentCents} does not match the measured goals:pots rollup (${measuredSpendCents} cents); the spend tripwire remains unmeasured`,
-          ],
-        };
-      }
-    }
+    /* SPEND PROVENANCE (EI-20188678636377696, WI-1074208).
+       `spentCents` used to be an owner-entered number, then a caller-echoed copy
+       of the goals:pots rollup. It is no longer an argument at all: the platform
+       spend rollup (operator-core goals/spend-rollup.ts) is its only writer, from
+       the goal-attributed usage stream (D-003, D-011). */
 
     /* TRIPWIRE PROVENANCE (EI-22512669283419131).
-       The spend-provenance guard above stops a guess reaching `spentCents`. It
-       left the sibling field wide open: `tripwires[].current` accepted any
+       Spend provenance stops a guess reaching `spentCents`. That left the
+       sibling field wide open: `tripwires[].current` accepted any
        caller-supplied number, and for a `standing` goal the tripwires ARE the
        stopping condition (see the goals.standing column comment), so a
        hand-written `current` at or above its threshold is not a decorative bar
@@ -505,10 +460,6 @@ const goalUpdateTool = defineTool({
     // back to it when the column is empty rather than silently blanking the one
     // field the owner most needs to see.
     const metadata: Record<string, unknown> = { ...(prev.metadata ?? {}) };
-    if (measuredSpendCents !== undefined) {
-      metadata.spentCents = measuredSpendCents;
-      metadata.spentCentsSource = GOAL_SPEND_SNAPSHOT_SOURCE;
-    }
     // Standing drain fleet (EI-20581099901890760): omitted leaves it alone;
     // null clears it (re-establishment under a new slug passes the new one).
     if (args.drainFleet !== undefined) {
@@ -550,6 +501,11 @@ const goalUpdateTool = defineTool({
       // report a hold that is over, which is the same false-premise state the
       // record exists to prevent, inverted.
       pauseMetadata = clearGoalPause(metadata);
+      // Leaving a terminal status ends the wind-down too: a reactivated goal
+      // must not keep `metadata.disposition:'killed'`, which the loop:end /
+      // session:end gates read as "this end is already covered"
+      // (EI-24732367604234855). Terminal → terminal keeps the record.
+      pauseMetadata = clearGoalDispositionOnReactivation(pauseMetadata, prev.status, args.status);
     }
 
     // Resolve every column in JS so "omitted" and "explicitly null" stay
@@ -921,9 +877,24 @@ const goalUpdateTool = defineTool({
       }
     }
 
+    // WI-10004424: only when this call touched what decides measurability, and
+    // read off the PERSISTED row so a window change and a tripwire change made in
+    // one call are judged together.
+    const tripwireAdvisories =
+      row && (args.tripwires !== undefined || args.budgetWindowSec !== undefined)
+        ? unmeasuredTripwireAdvisories(Array.isArray(row.tripwires) ? row.tripwires : null, {
+            budgetWindowSec: row.budget_window_sec === null ? null : Number(row.budget_window_sec),
+          })
+        : [];
+
     return {
       data: row
-        ? { ...row, stop, ...(blockedByApplied !== null ? { blocked_by: blockedByApplied } : {}) }
+        ? {
+            ...row,
+            stop,
+            ...(blockedByApplied !== null ? { blocked_by: blockedByApplied } : {}),
+            ...(tripwireAdvisories.length ? { tripwire_advisories: tripwireAdvisories } : {}),
+          }
         : null,
       ...(degradedReasons.length ? { degraded: true, degradedReasons } : {}),
     };

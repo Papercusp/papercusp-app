@@ -261,17 +261,75 @@ function latestReceipt(receipts: readonly TaskReleaseReceipt[], requestIdentity:
   return [...receipts].reverse().find((receipt) => receipt.requestIdentity === requestIdentity) ?? null;
 }
 
+function identityLeaves(
+  value: unknown,
+  prefix = '',
+  leaves = new Map<string, unknown>(),
+): Map<string, unknown> {
+  if (Array.isArray(value)) {
+    if (value.length === 0) leaves.set(prefix || '$', value);
+    else value.forEach((entry, index) => identityLeaves(entry, `${prefix}[${index}]`, leaves));
+    return leaves;
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+    if (entries.length === 0) leaves.set(prefix || '$', value);
+    for (const [key, entry] of entries) {
+      const path = /^[A-Za-z_$][\w$]*$/.test(key)
+        ? prefix ? `${prefix}.${key}` : key
+        : `${prefix}[${JSON.stringify(key)}]`;
+      identityLeaves(entry, path, leaves);
+    }
+    return leaves;
+  }
+  leaves.set(prefix || '$', value);
+  return leaves;
+}
+
+function formatIdentityLeaf(value: unknown): string {
+  const serialized = canonicalJson(value);
+  return serialized.length > 160 ? `${serialized.slice(0, 157)}...` : serialized;
+}
+
+function describeIdentityChanges(previous: unknown, current: unknown): string {
+  const previousLeaves = identityLeaves(previous);
+  const currentLeaves = identityLeaves(current);
+  const changedPaths = [...new Set([...previousLeaves.keys(), ...currentLeaves.keys()])]
+    .filter((path) => {
+      if (!previousLeaves.has(path) || !currentLeaves.has(path)) return true;
+      return canonicalJson(previousLeaves.get(path)) !== canonicalJson(currentLeaves.get(path));
+    })
+    .sort((left, right) => left.localeCompare(right));
+  if (changedPaths.length === 0) return 'input identity snapshots have no differing leaf fields';
+
+  const limit = 16;
+  const changes = changedPaths.slice(0, limit).map((path) => {
+    const before = previousLeaves.has(path) ? formatIdentityLeaf(previousLeaves.get(path)) : '<missing>';
+    const after = currentLeaves.has(path) ? formatIdentityLeaf(currentLeaves.get(path)) : '<missing>';
+    return `${path}: ${before} -> ${after}`;
+  });
+  const remaining = changedPaths.length - changes.length;
+  return `changed fields: ${changes.join('; ')}${remaining > 0 ? `; ... ${remaining} more` : ''}`;
+}
+
 function stageReceipts(
   journal: TaskReleaseJournal,
   stage: string,
   inputHash: string,
+  inputIdentity: unknown,
 ): TaskReleaseReceipt[] {
   const receipts = journal.receipts.filter((receipt) => receipt.stage === stage);
   const conflict = receipts.find((receipt) => receipt.inputHash !== inputHash);
   if (conflict) {
+    const identityDetails =
+      conflict.inputIdentity == null
+        ? 'field-level diff unavailable because this receipt has no input identity snapshot'
+        : describeIdentityChanges(conflict.inputIdentity, inputIdentity);
     throw new Error(
       `release stage ${stage} input changed within operation ${journal.operationId}; ` +
-        `receipt ${conflict.sequence} pins ${conflict.inputHash}, current input is ${inputHash}`,
+        `receipt ${conflict.sequence} pins ${conflict.inputHash}, current input is ${inputHash}; ${identityDetails}`,
     );
   }
   return receipts;
@@ -282,8 +340,9 @@ function inspectJournal(
   journal: TaskReleaseJournal,
   input: ReleaseTaskStageInput,
 ): ReleaseTaskStageInspection {
-  const inputHash = releaseTaskStageInputHash(context, input);
-  const receipts = stageReceipts(journal, input.stage, inputHash);
+  const inputIdentity = releaseTaskStageContentIdentity(context, input);
+  const inputHash = releaseStageInputHash(inputIdentity);
+  const receipts = stageReceipts(journal, input.stage, inputHash, inputIdentity);
   const identities = [...new Set(receipts.map((receipt) => receipt.requestIdentity))];
   const requestIdentity = identities.at(-1) ?? null;
   const prior = requestIdentity ? latestReceipt(receipts, requestIdentity) : null;

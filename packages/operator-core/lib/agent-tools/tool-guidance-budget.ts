@@ -474,6 +474,10 @@ export const ALLOW_OVER_SCHEMA_BUDGET: ReadonlyMap<string, number> = new Map([
   ['watch:create', 10_000], // measured 9,302
   ['work_items:list', 10_000], // measured 9,271
   ['goals:update', 9_500], // measured 8,758
+  // The strict, typed GOAL snapshot is part of reports:publish's input contract; its
+  // 8,540 B schema is structural (only 784 B prose). Preserve that discoverable shape
+  // and cap future growth at a rounded 9,000 B.
+  ['reports:publish', 9_000], // measured 8,540
   ['events:await', 8_500], // measured 8,024
 ]);
 

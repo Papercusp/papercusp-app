@@ -57,7 +57,9 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
+import { isCliEntry } from '@papercusp/operator-core/lib/util/cli-entry';
 
 /**
  * Names that identify NOBODY: the stand-ins a test fixture or doc example uses on purpose,
@@ -788,4 +790,43 @@ export function redactIdentityLeaks(text, entries) {
   }
 
   return out;
+}
+
+/**
+ * Serialize diagnostic JSON through the same redactor as the distribution guard.
+ * Redact string values before JSON escaping; counters, hashes, keys and the input
+ * object stay intact. Reject identity-bearing keys instead of changing its schema.
+ * @param {unknown} value JSON-compatible diagnostic report
+ * @param {[string,string][]} [entries] synthetic identity literals for tests
+ * @returns {string} indented JSON with a final newline
+ */
+export function serializeIdentitySafeJson(value, entries) {
+  const json = JSON.stringify(value, (key, field) => {
+    if (redactIdentityLeaks(key, entries) !== key) {
+      throw new Error('Diagnostic JSON key contains a machine identity');
+    }
+    return typeof field === 'string' ? redactIdentityLeaks(field, entries) : field;
+  }, 2);
+  if (json === undefined) throw new Error('Diagnostic report must be JSON-compatible');
+  return json + '\n';
+}
+
+// Public evidence exports must use the same serializer as the distribution
+// guard. Read private JSON on stdin and emit only the sanitized copy on stdout;
+// the original receipt and its measured hashes remain untouched.
+// Usage: node scripts/lib/identity-leak-patterns.mjs --serialize-json < private.json
+if (isCliEntry(import.meta.url)) {
+  if (process.argv.length !== 3 || process.argv[2] !== '--serialize-json') {
+    console.error('Usage: node scripts/lib/identity-leak-patterns.mjs --serialize-json < private.json');
+    process.exitCode = 1;
+  } else {
+    try {
+      const publicJson = serializeIdentitySafeJson(JSON.parse(readFileSync(0, 'utf8')));
+      process.stdout.write(publicJson);
+    } catch {
+      // JSON parser errors can include private input snippets. Never echo them.
+      console.error('Identity-safe JSON export refused: invalid JSON or identity-bearing report keys');
+      process.exitCode = 1;
+    }
+  }
 }

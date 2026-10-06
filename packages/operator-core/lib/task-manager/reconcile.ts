@@ -170,6 +170,16 @@ export interface ReconcileOptions {
    * genuine escape.
    */
   releasedScopes?: ReadonlySet<string>;
+  /**
+   * pid → kernel identity for processes the scan READ but did not list
+   * (`ScanResult.unlistedIdentityByPid`, WI-10005782): out-of-slice processes
+   * whose argv carries no repo path, such as a wake executor's unconfined
+   * `claude -p --resume` turn. Consulted only when an unconfined row's identity
+   * is absent from `kernel`. A match needs the row's own pid AND its stored
+   * identity, so a recycled pid can never keep a dead row alive. Omitted ⇒ the
+   * row strands on absence, as before.
+   */
+  unlistedIdentityByPid?: ReadonlyMap<number, string>;
 }
 
 /**
@@ -321,6 +331,19 @@ export function reconcile(
           taskId: row.taskId,
           pid: hit.pid,
           processIdentity: hit.processIdentity,
+          pidsSeen: 1,
+          matchedBy: 'identity',
+        });
+        pushOverdue(row, now, overdue);
+        continue;
+      }
+      // Present in the kernel but unlisted by the scan's display filter: still
+      // alive. Same pid AND same start time, so this cannot be a recycled pid.
+      if (row.pid != null && opts.unlistedIdentityByPid?.get(row.pid) === row.processIdentity) {
+        alive.push({
+          taskId: row.taskId,
+          pid: row.pid,
+          processIdentity: row.processIdentity,
           pidsSeen: 1,
           matchedBy: 'identity',
         });

@@ -42,11 +42,8 @@
 #                              fast-iteration gui-only opt-in. A real Linux Server
 #                              deploy, e.g. a Hetzner box, does not go through this
 #                              knob — see bin/build-and-archive-deb.sh)
-#   PAPERCUSP_RELEASE_OWNER_NAME  human owner name asserted at run time for the
-#                                 release identity audit (required; never write it
-#                                 into the tree)
-#   PAPERCUSP_RELEASE_OWNER_EMAIL optional comma/semicolon-separated owner
-#                                 address list for email audit coverage
+#   PAPERCUSP_RELEASE_OWNER_NAME / _EMAIL are accepted as legacy metadata inputs,
+#                                 but D-112 does not treat them as release leaks.
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  minisign key passphrase (default empty)
 set -euo pipefail
 
@@ -101,15 +98,11 @@ case "$DISTRIBUTION_PROFILE" in
     ;;
 esac
 
-# ── OWNER-NAME PREFLIGHT (EI-21129566831677520). This entrypoint always
-# produces release artifacts, and its final identity audit cannot certify the
-# bundle without an explicitly asserted human owner name. The stager also runs
-# this shared check, but waiting until [3/5] means sidecar assembly and
-# env-sidecar staging have already spent time before a doomed build is refused.
-# Keep the policy in audit-release-bundle.py so every producer uses the same
-# non-secret, runtime-only contract.
+# ── IDENTITY-POLICY COMPATIBILITY PREFLIGHT. D-112 no longer requires owner
+# name/email, but older cutters call this stable audit-owned entrypoint and future
+# machine-policy checks still belong in one place.
 python3 "$HERE/audit-release-bundle.py" --owner-preflight \
-  || { echo "ERROR: owner-name preflight failed — refusing to start Linux release build" >&2; exit 2; }
+  || { echo "ERROR: identity-policy preflight failed — refusing to start Linux release build" >&2; exit 2; }
 
 # WI-240169: systemd user managers retain their launch-time PATH, which commonly
 # omits Cargo's default install directory even when the owner has a healthy
@@ -339,9 +332,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 # cargo's REAL target dir (this box has a global override → ~/.cargo-target, so it
 # is NOT src-tauri/target). Resolved once, up front: both the release-host gate
 # below and the artifact collection at the bottom need it.
-SRC_ROOT="$(cd "$ROOT/src-tauri" && cargo metadata --no-deps --format-version 1 2>/dev/null \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null || true)"
-[[ -n "$SRC_ROOT" ]] || SRC_ROOT="$ROOT/src-tauri/target"
+SRC_ROOT="$(papercusp_cargo_target_root "$ROOT/src-tauri")" || exit $?
 
 VM_RELEASE_FRESHNESS_MARKER=""
 if [[ "$DISTRIBUTION_PROFILE" == "vm-release" ]]; then

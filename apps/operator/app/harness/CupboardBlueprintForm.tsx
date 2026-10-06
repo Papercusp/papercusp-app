@@ -254,7 +254,7 @@ export function CupboardBlueprintForm({ onBack, onCreated, hiveLabel }: Cupboard
         return;
       }
       const data = (await res.json()) as { project: { slug: string; path: string } };
-      toast.success(`${hiveLabel} '${data.project.slug}' created from ${selected.title} — the ${t('brain')} is provisioning its fleet.`);
+      toast.success(`${hiveLabel} '${data.project.slug}' created from ${selected.title}.`);
       onCreated(data.project.slug);
     } catch (err: unknown) {
       setCreateError((err as Error).message ?? 'Network error');

@@ -376,12 +376,10 @@ function describe(result) {
         '  .sidecar-build-stamp carries no successful releaseIdentityAudit attestation.\n' +
         `  sidecar ${line}\n\n` +
         '  A normal/dev sidecar is not a release input: rebuild it with\n' +
-        '  PAPERCUSP_RELEASE_AUDIT=1 and the release owner identity environment set,\n' +
-        '  then re-run this cross-build. PAPERCUSP_ALLOW_STALE_SIDECAR does not\n' +
-        '  bypass a missing privacy attestation.\n\n' +
-        '  Canonical identity source (EI-22084619262074810): source\n' +
-        '  ~/.papercusp/release-identity.env (set -a) at runtime before the sidecar\n' +
-        '  build — never write identity values into any tracked or untracked file.'
+        '  PAPERCUSP_RELEASE_AUDIT=1, then re-run this cross-build. D-112 makes\n' +
+        '  owner name/email legitimate release content; the attested audit still\n' +
+        '  fails closed on build user/home/hostname and credentials.\n' +
+        '  PAPERCUSP_ALLOW_STALE_SIDECAR does not bypass a missing privacy attestation.'
       );
     case 'no-sidecar':
       return (

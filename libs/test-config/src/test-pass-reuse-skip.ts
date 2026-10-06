@@ -22,9 +22,17 @@ export function executedSourceRunContext(env: NodeJS.ProcessEnv = process.env): 
   return env.GREEN_CHECKPOINT === '1' ? 'green-checkpoint' : 'clean-local';
 }
 
-/** node version + platform + arch of this process (D-004 rule 6). */
+/**
+ * Proof format (gate-test-reuse-yield-2026-10-01 P-001): a `proof-v2` proof records, in readPaths,
+ * the vitest config that ran the file plus its relative imports (executed-source-map-reporter.ts),
+ * so the selector treats a nested vitest config as a per-proof input rather than a global one.
+ * PINNED equal to scripts/lib/test-pass-reuse.mjs REUSE_PROOF_FORMAT (the selector side).
+ */
+export const REUSE_PROOF_FORMAT = 'proof-v2';
+
+/** Proof format + node version + platform + arch of this process (D-004 rule 6, P-001). */
 export function executedSourceRunnerIdentity(): string {
-  return `${process.version} ${process.platform} ${process.arch}`;
+  return `${REUSE_PROOF_FORMAT} ${process.version} ${process.platform} ${process.arch}`;
 }
 
 export interface ReuseSkipList {
@@ -82,8 +90,13 @@ export function decideReuseSkip(
       exclude: [],
     };
   }
-  const files = [...new Set(list.files.map((f) => f.replaceAll('\\', '/').replace(/^\.\//, '')))].sort();
+  const files = normalizeReuseSkipFiles(list.files);
   return { applied: true, exclude: files.map(escapeGlobLiteral), skipped: files.length };
+}
+
+/** Workspace-relative POSIX form, de-duplicated and sorted: how skip-list files are compared. */
+export function normalizeReuseSkipFiles(files: Iterable<string>): string[] {
+  return [...new Set([...files].map((f) => f.replaceAll('\\', '/').replace(/^\.\//, '')))].sort();
 }
 
 /**
@@ -92,6 +105,20 @@ export function decideReuseSkip(
  * return [].
  */
 export function resolveReuseSkipExclude(
+  env: NodeJS.ProcessEnv = process.env,
+  log: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
+): string[] {
+  return resolveReuseSkipFiles(env, log).map(escapeGlobLiteral);
+}
+
+/**
+ * The LITERAL workspace-relative files this invocation's skip list excludes: the same decision
+ * resolveReuseSkipExclude makes (it is built on this), for a caller that must know the excluded
+ * set before vitest runs. scripts/run-vitest-pure-lane.mjs sizes its shards from the files left
+ * to run and passes an all-reused lane without spawning vitest (gate-test-reuse-yield-2026-10-01
+ * P-006, D-005). Returns [] whenever vitest would skip nothing.
+ */
+export function resolveReuseSkipFiles(
   env: NodeJS.ProcessEnv = process.env,
   log: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
 ): string[] {
@@ -119,5 +146,5 @@ export function resolveReuseSkipExclude(
     `[test-pass-reuse] skipping ${decision.skipped} file(s) with a valid pass proof at ` +
       `${list.judgedSha.slice(0, 12)} (root=${process.cwd()}) from ${listPath}`,
   );
-  return decision.exclude;
+  return normalizeReuseSkipFiles(list.files);
 }

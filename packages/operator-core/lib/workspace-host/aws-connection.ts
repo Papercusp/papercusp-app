@@ -1,3 +1,4 @@
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
 import {
   assertWorkspaceHostSecretIsolation,
   type CloudCredentialRef,
@@ -68,6 +69,9 @@ export const AWS_WORKSPACE_HOST_PERMISSION_ACTIONS = [
   'ec2:DescribeSubnets',
   'ec2:DescribeImages',
   'ec2:DescribeInstances',
+  'ec2:DescribeInstanceStatus',
+  'ec2:DescribeInstanceTypes',
+  'ec2:DescribeAvailabilityZones',
   'ec2:DescribeVolumes',
   'ec2:DescribeSnapshots',
   'ec2:RunInstances',
@@ -82,17 +86,35 @@ export const AWS_WORKSPACE_HOST_PERMISSION_ACTIONS = [
   'ec2:DeleteVolume',
   'ec2:CreateSnapshot',
   'ec2:DeleteSnapshot',
+  // WI-10005389: a spot host is launched by a PERSISTENT spot request, and terminating its instance
+  // while that request is still open makes EC2 launch a replacement. Destroy cancels it first.
+  'ec2:CancelSpotInstanceRequests',
+  // WI-10005454: the teardown census reads live spot requests, so a request that survived destroy
+  // is visible to the zero-orphan proof instead of only to the cancel step.
+  'ec2:DescribeSpotInstanceRequests',
+  // aws-byoc-gcp-parity D-009: the client already makes these calls as the customer role
+  // (security-group inbound check, console output, launch-template discovery).
+  'ec2:DescribeSecurityGroups',
+  'ec2:DescribeLaunchTemplates',
+  'ec2:GetConsoleOutput',
   'ssm:DescribeInstanceInformation',
   'ssm:GetConnectionStatus',
   'ssm:StartSession',
   'ssm:TerminateSession',
+  // aws-byoc-gcp-parity D-013: the host bootstrap is pushed over Run Command after the data volume
+  // attaches (EC2 UserData's 16 KiB cap cannot carry it), and the push waits for its invocation.
+  'ssm:SendCommand',
+  'ssm:GetCommandInvocation',
   'iam:GetRole',
   'iam:GetInstanceProfile',
   'iam:PassRole',
+  'iam:SimulatePrincipalPolicy',
   'kms:DescribeKey',
   'kms:CreateGrant',
   'servicequotas:GetServiceQuota',
   'servicequotas:ListServiceQuotas',
+  'servicequotas:GetAWSDefaultServiceQuota',
+  'pricing:GetProducts',
 ] as const;
 export type AwsWorkspaceHostPermissionAction = (typeof AWS_WORKSPACE_HOST_PERMISSION_ACTIONS)[number];
 
@@ -214,6 +236,8 @@ export interface AwsWorkspaceHostPreflightIssue {
     | 'probe-failed';
   message: string;
   remediation: string;
+  /** Present on fail-closed authority refusals (WI-10005197): what compared, what lifts it, who can. */
+  refusal?: RefusalContract;
 }
 
 export interface AwsWorkspaceHostPreflightRequest {
@@ -522,6 +546,13 @@ export async function preflightAwsWorkspaceHostConnection(
         code: 'permission-denied',
         message: `Permission '${action}' is denied${evidence.reason ? `: ${evidence.reason}` : '.'}`,
         remediation: `Grant '${action}' to the selected role with the narrowest applicable resource scope.`,
+        refusal: {
+          observed: { action, allowed: 'false', reason: evidence.reason ?? null },
+          liftsWhen:
+            `the selected IAM role is granted '${action}' (an AWS account administrator attaches it with the ` +
+            'narrowest applicable resource scope) and the preflight is re-run. Re-running unchanged cannot pass',
+          whoCanMakeItTrue: ['owner'],
+        } satisfies RefusalContract,
       });
     }
   }

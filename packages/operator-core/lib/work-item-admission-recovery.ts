@@ -1,14 +1,17 @@
 /** Original-item admission recovery, stored on the item and run by its existing promoter. */
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import postgres from 'postgres';
 import type { Sql } from 'postgres';
 import { getOrgPg } from '@papercusp/db-org';
 import { z } from 'zod';
+import { getHarnessAdminUrl } from './embedded-pg-discovery';
 import { getPresence } from './agent-tools/coordination/presence';
 import {
   authorizeWorkItemDispatch,
   assignAndWakeActionableWorkItems,
 } from './agent-tools/coordination/actionable-work-item-dispatch';
 import { WORK_ITEM_ADMISSION_PROMOTER } from './work-items-admission-promoter';
+import { issueOwnAuthorWhereSql } from './work-items-admission';
 import { decodeOperatorSecretKey } from './operator-secret-key';
 import { getModes } from './modes/store';
 import { AUDIT_MODE, auditModeMutationDenyReason } from './capability-envelope/audit-mode-guard';
@@ -53,6 +56,24 @@ export interface AdmissionRecoveryScope {
   harnessSlug: string;
   workItemId: string;
 }
+const ADMISSION_RECOVERY_LOCK_NAMESPACE = 'admission-recovery';
+
+function admissionRecoveryLockKey(scope: AdmissionRecoveryScope): string {
+  return JSON.stringify([
+    ADMISSION_RECOVERY_LOCK_NAMESPACE, scope.workspaceId, scope.harnessSlug, scope.workItemId,
+  ]);
+}
+
+/** Session locks must bypass getOrgPg's PgBouncer transaction pool. */
+function createAdmissionRecoveryLockSql(): postgres.Sql {
+  return postgres(getHarnessAdminUrl(), {
+    onnotice: () => {},
+    max: 1,
+    idle_timeout: 0,
+    connection: { application_name: 'pcusp:admission-recovery-lock:p' + process.pid },
+  });
+}
+
 interface RecoveryItem {
   feature_id: string;
   status: string;
@@ -65,6 +86,8 @@ export interface AdmissionRecoveryDeps {
   authorize: (scope: AdmissionRecoveryScope, request: Pick<AdmissionRecoveryRequest, 'caller' | 'target' | 'authority' | 'note' | 'body'>) => Promise<void>;
   screen: (scope: AdmissionRecoveryScope, beforePersist: () => Promise<void>) => Promise<unknown>;
   dispatch: typeof assignAndWakeActionableWorkItems;
+  /** Test seam for an isolated direct-PG database; production creates a direct lock client. */
+  lockSql?: Sql;
 }
 
 export class AdmissionRecoveryRefused extends Error {}
@@ -151,6 +174,26 @@ async function readItem(sql: Sql, scope: AdmissionRecoveryScope): Promise<Recove
   return item;
 }
 
+/**
+ * WI-10006515: an own-node row stranded at origin='remote' is OURS. `origin` records how a row
+ * ARRIVED, not who wrote it (WI-10003565), so "repaired by its originating actor" names THIS
+ * node. Heal the label on the base table before the eligibility gate, as the claim and write
+ * paths do (selfHealOwnNodeOriginIfStranded): left at 'remote', every later write through the
+ * engineer_issues view is a silent no-op. The WHERE clause IS the identity check, so a true
+ * peer's row is untouched and still refused. Runs on the caller's handle (inside its transaction
+ * where there is one), so a refusal later in that transaction rolls the heal back too.
+ */
+async function healOwnNodeStrand(sql: Sql, scope: AdmissionRecoveryScope, item: RecoveryItem): Promise<RecoveryItem> {
+  if (item.origin !== 'remote') return item;
+  const healed = await sql<{ feature_id: string }[]>`
+    UPDATE harness_shared.work_items wi SET origin = 'local'
+     WHERE wi.workspace_id = ${scope.workspaceId} AND wi.harness_slug = ${scope.harnessSlug}
+       AND wi.feature_id = ${scope.workItemId} AND wi.origin = 'remote'
+       AND ${issueOwnAuthorWhereSql(sql, scope.workspaceId)}
+     RETURNING wi.feature_id`;
+  return healed.length === 1 ? { ...item, origin: 'local' } : item;
+}
+
 function assertItemEligible(item: RecoveryItem, target: string): void {
   if (!['open', 'todo', 'failing', 'wip', 'in_progress', 'validating'].includes(item.status)) {
     throw new AdmissionRecoveryRefused(`original item is ${item.status}; recovery does not reopen it`);
@@ -194,7 +237,7 @@ async function writeRequest(
 async function lockRequest(sql: Sql, scope: AdmissionRecoveryScope): Promise<boolean> {
   const [row] = await sql<{ locked: boolean }[]>`
     SELECT pg_try_advisory_xact_lock(hashtextextended(
-      ${JSON.stringify(['admission-recovery', scope.workspaceId, scope.harnessSlug, scope.workItemId])}, 0)) AS locked`;
+      ${admissionRecoveryLockKey(scope)}, 0)) AS locked`;
   return row?.locked === true;
 }
 
@@ -211,7 +254,7 @@ export async function requestAdmissionRecovery(
   return sql.begin(async (rawTx) => {
     const tx = rawTx as unknown as Sql;
     const locked = await lockRequest(tx, input);
-    const item = await readItem(tx, input);
+    const item = await healOwnNodeStrand(tx, input, await readItem(tx, input));
     assertItemEligible(item, input.target);
     const rawPrevious = item.payload?._admissionRecovery;
     // This is a NEW authorized request, not replay by the routine. A rotated key or
@@ -268,88 +311,132 @@ export async function runAdmissionRecoveries(
      WHERE workspace_id = ${scope.workspaceId} AND harness_slug = ${scope.harnessSlug}
        AND payload->'_admissionRecovery'->>'state' = 'queued'
      ORDER BY feature_id LIMIT 20`;
-  for (const row of rows) {
-    const exact = { ...scope, workItemId: row.feature_id };
-    await sql.begin(async (rawTx) => {
-      const tx = rawTx as unknown as Sql;
-      if (!await lockRequest(tx, exact)) return;
-      const original = await readItem(tx, exact);
-      const rawRequest = original.payload?._admissionRecovery;
-      let request: AdmissionRecoveryRequest;
+  if (rows.length === 0) return 0;
+
+  const ownsLockSql = deps.lockSql === undefined;
+  const lockSql = deps.lockSql ?? createAdmissionRecoveryLockSql();
+  try {
+    for (const row of rows) {
+      const exact = { ...scope, workItemId: row.feature_id };
+      const lockKey = admissionRecoveryLockKey(exact);
+      const reserved = await lockSql.reserve();
+      let lockAcquired = false;
       try {
-        const parsed = savedRequest(original);
-        if (!parsed || parsed.state !== 'queued') return;
-        request = parsed;
-      } catch (error) {
-        if (!(error instanceof AdmissionRecoveryRefused)) throw error;
-        // Isolate one corrupt payload; do not abort the routine or admit its item.
-        await writeRequest(tx, exact, {
-          ...(rawRequest && typeof rawRequest === 'object' ? rawRequest : {}),
-          state: 'held', stage: 'authorize', reason: error.message, pickupConfirmed: false, updatedAt: new Date().toISOString(),
-        }, rawRequest);
-        return;
-      }
-      const assertAllowed = async () => {
-        await verifyRequest(sql, exact, request);
-        await assertRoutineActive(sql, exact, request.routineId);
-        const live = await readItem(sql, exact);
-        const current = savedRequest(live);
-        // SQL jsonb equality ignores object-key ordering, unlike JSON.stringify.
-        const [same] = await sql<{ unchanged: boolean }[]>`
-          SELECT COALESCE(payload->'_admissionRecovery', 'null'::jsonb) =
-            ${sql.typed(JSON.stringify(rawRequest ?? null), 25)}::jsonb AS unchanged
-            FROM harness_shared.work_items WHERE workspace_id = ${exact.workspaceId}
-              AND harness_slug = ${exact.harnessSlug} AND feature_id = ${exact.workItemId}`;
-        if (!current || !same?.unchanged) {
-          throw new AdmissionRecoveryRefused('original recovery identity changed');
-        }
-        await verifyRequest(sql, exact, current);
-        assertItemEligible(live, request.target);
-        await deps.authorize(exact, request);
-      };
-      let stage: z.infer<typeof recoveryStageSchema> = 'authorize';
-      try {
-        await assertAllowed();
-        const item = await readItem(sql, exact);
-        if (item.admission === 'pending' || item.admission === 'unreviewed') {
-          stage = 'screen';
-          await deps.screen(exact, assertAllowed);
-        }
-        await assertAllowed();
-        const screened = await readItem(sql, exact);
-        if (screened.admission === 'pending') {
-          throw new AdmissionRecoveryRefused('screening left the original item pending; repair its named admission hold and retry this same item');
-        }
-        stage = 'assign';
-        const result = await deps.dispatch({
-          workItemIds: [exact.workItemId], targetAgent: request.target,
-          harness: exact.harnessSlug, workspaceId: exact.workspaceId,
-          summary: request.note ?? `Resume original work item ${exact.workItemId} after admission recovery`,
-          ...(request.body !== undefined ? { instructions: request.body } : {}),
-          source: 'system:work-item-admission-recovery',
-          beforeMutate: async (mutation) => {
-            stage = mutation === 'wake' ? 'wake' : 'assign';
-            await assertAllowed();
-          },
+        const [lock] = await reserved<{ locked: boolean }[]>`
+          SELECT pg_try_advisory_lock(hashtextextended(${lockKey}, 0)) AS locked`;
+        if (lock?.locked !== true) continue;
+        lockAcquired = true;
+
+        // Keep the item lock across external screen/dispatch work, but commit this
+        // read immediately. Screening may wait on an LLM for minutes.
+        const setup = await sql.begin(async (rawTx) => {
+          const tx = rawTx as unknown as Sql;
+          const original = await readItem(tx, exact);
+          const rawRequest = original.payload?._admissionRecovery;
+          try {
+            const request = savedRequest(original);
+            if (!request || request.state !== 'queued') return null;
+            return { request, rawRequest };
+          } catch (error) {
+            if (!(error instanceof AdmissionRecoveryRefused)) throw error;
+            // Isolate one corrupt payload; do not abort the routine or admit its item.
+            await writeRequest(tx, exact, {
+              ...(rawRequest && typeof rawRequest === 'object' ? rawRequest : {}),
+              state: 'held', stage: 'authorize', reason: error.message,
+              pickupConfirmed: false, updatedAt: new Date().toISOString(),
+            }, rawRequest);
+            return null;
+          }
         });
-        // Assignment and wake have their own durable writes. A crash here rolls back only
-        // this receipt; retry retains that assignment and reuses the normal wake substrate.
-        // queued is authoritative when present; woken is only the older queue-count alias.
-        const queued = (result.wake?.queued ?? result.wake?.woken ?? 0) > 0;
-        stage = result.ok && queued ? 'await-pickup' : result.wake ? 'wake' : 'assign';
-        await writeRequest(tx, exact, {
-          ...request, state: result.ok && queued ? 'delivered' : 'held', stage,
-          reason: result.assignment?.skipped[0]?.reason ?? result.assignment?.failed[0]?.reason ?? result.warning ??
-            (queued ? 'wake queued; target pickup remains unconfirmed' : 'dispatch did not queue a wake'),
-          updatedAt: new Date().toISOString(),
-        }, rawRequest);
-      } catch (error) {
-        if (!(error instanceof AdmissionRecoveryRefused)) throw error;
-        await writeRequest(tx, exact, {
-          ...request, state: 'held', stage, reason: error.message.slice(0, 2000), updatedAt: new Date().toISOString(),
-        }, rawRequest);
+        if (!setup) continue;
+        const { request, rawRequest } = setup;
+        const assertAllowed = async () => {
+          await verifyRequest(sql, exact, request);
+          await assertRoutineActive(sql, exact, request.routineId);
+          const live = await healOwnNodeStrand(sql, exact, await readItem(sql, exact));
+          const current = savedRequest(live);
+          // SQL jsonb equality ignores object-key ordering, unlike JSON.stringify.
+          const [same] = await sql<{ unchanged: boolean }[]>`
+            SELECT COALESCE(payload->'_admissionRecovery', 'null'::jsonb) =
+              ${sql.typed(JSON.stringify(rawRequest ?? null), 25)}::jsonb AS unchanged
+              FROM harness_shared.work_items WHERE workspace_id = ${exact.workspaceId}
+                AND harness_slug = ${exact.harnessSlug} AND feature_id = ${exact.workItemId}`;
+          if (!current || !same?.unchanged) {
+            throw new AdmissionRecoveryRefused('original recovery identity changed');
+          }
+          await verifyRequest(sql, exact, current);
+          assertItemEligible(live, request.target);
+          await deps.authorize(exact, request);
+        };
+        let stage: z.infer<typeof recoveryStageSchema> = 'authorize';
+        try {
+          await assertAllowed();
+          const item = await readItem(sql, exact);
+          if (item.admission === 'pending' || item.admission === 'unreviewed') {
+            stage = 'screen';
+            await deps.screen(exact, assertAllowed);
+          }
+          await assertAllowed();
+          const screened = await readItem(sql, exact);
+          if (screened.admission === 'pending') {
+            throw new AdmissionRecoveryRefused('screening left the original item pending; repair its named admission hold and retry this same item');
+          }
+          stage = 'assign';
+          const result = await deps.dispatch({
+            workItemIds: [exact.workItemId], targetAgent: request.target,
+            harness: exact.harnessSlug, workspaceId: exact.workspaceId,
+            summary: request.note ?? 'Resume original work item ' + exact.workItemId + ' after admission recovery',
+            ...(request.body !== undefined ? { instructions: request.body } : {}),
+            source: 'system:work-item-admission-recovery',
+            beforeMutate: async (mutation) => {
+              stage = mutation === 'wake' ? 'wake' : 'assign';
+              await assertAllowed();
+            },
+          });
+          // Assignment and wake have their own durable writes. A crash here leaves the
+          // request queued; retry retains the assignment and reuses the normal wake path.
+          // queued is authoritative when present; woken is only the older queue-count alias.
+          const queued = (result.wake?.queued ?? result.wake?.woken ?? 0) > 0;
+          stage = result.ok && queued ? 'await-pickup' : result.wake ? 'wake' : 'assign';
+          const updated = await sql.begin(async (rawTx) => {
+            const tx = rawTx as unknown as Sql;
+            const current = await readItem(tx, exact);
+            const currentRequest = savedRequest(current);
+            const [same] = await tx<{ unchanged: boolean }[]>`
+              SELECT COALESCE(payload->'_admissionRecovery', 'null'::jsonb) =
+                ${tx.typed(JSON.stringify(rawRequest ?? null), 25)}::jsonb AS unchanged
+                FROM harness_shared.work_items WHERE workspace_id = ${exact.workspaceId}
+                  AND harness_slug = ${exact.harnessSlug} AND feature_id = ${exact.workItemId}`;
+            if (!currentRequest || !same?.unchanged) return false;
+            await verifyRequest(tx, exact, currentRequest);
+            await assertRoutineActive(tx, exact, request.routineId);
+            return writeRequest(tx, exact, {
+              ...request, state: result.ok && queued ? 'delivered' : 'held', stage,
+              reason: result.assignment?.skipped[0]?.reason ?? result.assignment?.failed[0]?.reason ?? result.warning ??
+                (queued ? 'wake queued; target pickup remains unconfirmed' : 'dispatch did not queue a wake'),
+              updatedAt: new Date().toISOString(),
+            }, rawRequest);
+          });
+          if (!updated) throw new AdmissionRecoveryRefused('original recovery identity changed');
+        } catch (error) {
+          if (!(error instanceof AdmissionRecoveryRefused)) throw error;
+          await sql.begin(async (rawTx) => {
+            const tx = rawTx as unknown as Sql;
+            await writeRequest(tx, exact, {
+              ...request, state: 'held', stage,
+              reason: error.message.slice(0, 2000), updatedAt: new Date().toISOString(),
+            }, rawRequest);
+          });
+        }
+      } finally {
+        if (lockAcquired) {
+          await reserved`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`.catch(() => {});
+        }
+        reserved.release();
       }
-    });
+    }
+  } finally {
+    if (ownsLockSql) await lockSql.end({ timeout: 5 }).catch(() => {});
   }
   return rows.length;
 }

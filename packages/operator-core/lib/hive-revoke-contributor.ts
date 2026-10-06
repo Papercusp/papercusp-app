@@ -68,7 +68,12 @@ export type RevokeHiveContributorResult =
         | 'no_owner_identity'
         | 'no_target'
         | 'no_owner_row'
-        | 'revoke_failed';
+        | 'revoke_failed'
+        /** WI-10006415: `devicePubkey` is not one of the target member's attested devices. */
+        | 'not_member_device'
+        /** WI-10006415: the revoke would cut off THIS Swarm's own device (or it could not be
+         *  ruled out) — a self-lockout of the Hive owner, refused. */
+        | 'self_device';
       detail?: string;
     };
 
@@ -78,6 +83,13 @@ export interface RevokeHiveContributorInput {
   potHomeSlug: string;
   /** Numeric GitHub user id of the contributor to revoke. Positive integer. */
   githubUserId: number;
+  /**
+   * WI-10006415: revoke ONLY this one device (base64 pubkey) instead of every device the
+   * member has attested. It must be one of that member's attested devices. This is how a
+   * departed test peer or a lost machine that borrowed the OWNER's own GitHub identity is cut
+   * off: a whole-member revoke of the owner's id would also revoke the owner's own device.
+   */
+  devicePubkey?: string;
 }
 
 export interface RevokeHiveContributorSeams {
@@ -89,6 +101,11 @@ export interface RevokeHiveContributorSeams {
   loadOwnerKeyStatus?: (workspaceId: string, potHomeSlug: string) => Promise<HiveKeyStatus>;
   /** The local owner's numeric GitHub id (whose row holds the revoked set). */
   resolveOwnerGithubUserId?: () => Promise<number | null>;
+  /** WI-10006415: THIS Swarm's own device pubkey (base64), or null when it cannot be
+   *  resolved. Read ONLY when the target is the owner's own GitHub identity — the one case
+   *  where the revoked set can contain this device. Default: the keychain-verified announce
+   *  identity cache, the same no-network self that git-sync uses. */
+  resolveSelfDevicePubkey?: () => Promise<string | null>;
   /** The target member's device pubkeys (the things to revoke).
    *  ⚠ SCOPE (WI-6312): receives the FEDERATED scope, resolved once by the caller. */
   loadTargetPubkeys?: (
@@ -184,7 +201,11 @@ async function revokeHiveContributorInner(
     resolveOwnerGithubUserId = realResolveOwnerGithubUserId,
     loadTargetPubkeys = loadHiveMemberDevicePubkeys,
     publishRevocation = realPublishRevocation,
+    resolveSelfDevicePubkey = realResolveSelfDevicePubkey,
   } = seams;
+  if (input.devicePubkey !== undefined && input.devicePubkey.trim() === '') {
+    return { ok: false, code: 'bad_target', detail: 'devicePubkey, when given, must be a non-empty base64 pubkey' };
+  }
 
   // 1. Owner gate: only the Swarm that holds the Hive secret may revoke.
   //
@@ -234,6 +255,44 @@ async function revokeHiveContributorInner(
   }
   if (pubkeys.length === 0) return { ok: false, code: 'no_target' };
 
+  // 3b. WI-10006415: narrow to ONE device when asked. The device must be one the target
+  // member actually attested, so a typo or another member's key can never be revoked here.
+  if (input.devicePubkey !== undefined) {
+    if (!pubkeys.includes(input.devicePubkey)) {
+      return {
+        ok: false,
+        code: 'not_member_device',
+        detail: `device ${input.devicePubkey.slice(0, 8)}… is not one of gh=${input.githubUserId}'s ${pubkeys.length} attested device(s) in this Hive`,
+      };
+    }
+    pubkeys = [input.devicePubkey];
+  }
+
+  // 3c. WI-10006415: never revoke THIS Swarm's own device. Only the owner's own identity can
+  // carry it (a test peer or second machine that borrowed the owner's GitHub login), so the
+  // self device is read only then. If it cannot be read, the revoke is refused rather than
+  // risking an owner that locks itself out of its own Hive.
+  if (input.githubUserId === ownerGithubUserId) {
+    const self = await resolveSelfDevicePubkey().catch(() => null);
+    if (self == null) {
+      return {
+        ok: false,
+        code: 'self_device',
+        detail:
+          "target is the owner's own GitHub identity and this Swarm's own device pubkey could not be resolved, so the revoke cannot rule out revoking this device",
+      };
+    }
+    if (pubkeys.includes(self)) {
+      return {
+        ok: false,
+        code: 'self_device',
+        detail:
+          `the revoked set includes this Swarm's own device ${self.slice(0, 8)}…` +
+          (input.devicePubkey === undefined ? ' — pass devicePubkey to revoke one other device of this identity' : ''),
+      };
+    }
+  }
+
   // 4. Publish: add to the owner's own row (federates via the Hive peer-log, P-004).
   try {
     const { live, newEpoch, distributed, skippedDevicePubkeys, reason } = await publishRevocation(
@@ -264,6 +323,11 @@ async function realResolveOwnerGithubUserId(): Promise<number | null> {
   const { resolveLocalGithubIdentity } = await import('./identity/resolve-local-github-identity');
   const identity = await resolveLocalGithubIdentity();
   return identity.kind === 'ok' ? identity.githubUserId : null;
+}
+
+async function realResolveSelfDevicePubkey(): Promise<string | null> {
+  const { loadCachedLocalAnnounceIdentity } = await import('./sync/hyperbee/local-announce-identity');
+  return (await loadCachedLocalAnnounceIdentity())?.devicePubkeyBase64 ?? null;
 }
 
 async function realPublishRevocation(

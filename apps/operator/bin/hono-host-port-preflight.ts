@@ -14,7 +14,8 @@ const sidecarMode =
   process.env.PAPERCUSP_SPAWNER_SIDECAR_MODE === '1' ||
   process.env.PAPERCUSP_GATEWAY_SIDECAR_MODE === '1' ||
   process.env.PAPERCUSP_EMBED_SIDECAR_MODE === '1' ||
-  process.env.PAPERCUSP_RESOURCE_GOVERNOR_MONITOR_MODE === '1';
+  process.env.PAPERCUSP_RESOURCE_GOVERNOR_MONITOR_MODE === '1' ||
+  process.env.PAPERCUSP_LSP_DAEMON_MODE === '1';
 const port = Number(process.env.PAPERCUSP_HONO_PORT ?? process.env.PORT ?? 3070);
 const hostname = resolveBindHost();
 

@@ -99,7 +99,7 @@ export const PAPERCUP_CHAT_MODEL_PIN = {
 /**
  * Where the chat `papercup` role goes for its retry when the backend it ran on
  * reports that its ACCOUNT is dead for this turn — a usage cap or a revoked /
- * expired credential (WI-10003608). Measured on hosted workspace owner-test
+ * expired credential (WI-10003608). Measured on hosted workspace avi-test
  * 2026-09-26..28: the codex account capped until Oct 3 and the Claude copy 401'd,
  * and because the retry re-ran the SAME backend, every portal turn died twice.
  *
@@ -107,7 +107,7 @@ export const PAPERCUP_CHAT_MODEL_PIN = {
  * for the same reason the pin is (a bare model id on the wrong CLI hard-downs the
  * role — WI-4623). `omp` has no entry: it routes to codex or anthropic
  * internally, so there is no alternate that is known to use a different account.
- * `sonnet:low` is the quick Claude tier the owner-test hand mitigation ran on.
+ * `sonnet:low` is the quick Claude tier the avi-test hand mitigation ran on.
  */
 export const PAPERCUP_CHAT_FAILOVER: Readonly<
   Partial<Record<AgentBackend, Readonly<{ model: string; backend: AgentBackend }>>>
@@ -298,7 +298,7 @@ export function modelWindowForTier(tier: Pick<ModelTier, 'spec' | 'contextWindow
  * the conservative role-cap derivation safe when the registry is absent.
  */
 export const CODEX_EXTENDED_WINDOW_FAMILY_RE =
-  /^(?:gpt-6-astra|gpt-5\.6-(?:sol|terra|luna)|gpt-5\.4|sol|terra|luna)(?:\[[^\]]*\])?(?::[a-z0-9]+)?$/i;
+  /^(?:gpt-6\.1-sol|gpt-6-(?:astra|sol|luna)|gpt-5\.6-(?:sol|terra|luna)|gpt-5\.4|sol|terra|luna)(?:\[[^\]]*\])?(?::[a-z0-9]+)?$/i;
 
 export function isCodexExtendedWindowSpec(spec?: string | null): boolean {
   return spec != null && CODEX_EXTENDED_WINDOW_FAMILY_RE.test(spec.trim());
@@ -794,6 +794,26 @@ export function defaultBulkResolverLaunchProfiles(): BulkResolverLaunchProfiles 
 export type LaunchAgentBackend = 'claude' | 'codex' | 'omp';
 
 /**
+ * Canonical Codex model ids that are NOT a `gpt-5.6-<menu alias>` expansion, so
+ * the menu derivation below cannot reach them. Without this list a configured
+ * `gpt-6.1-sol` (CODEX_SAFE_DEFAULT_MODEL, owner directive #1111) resolved to NO
+ * backend and every bulk-resolver start refused it — the Plans Clean-up button and
+ * the scheduled sweep both (WI-10004814). This module must stay client-safe, so it
+ * cannot import the server-side gateway lineup; instead
+ * `agent-config-constants.test.ts` pins every `CODEX_GATEWAY_FALLBACK_LINEUP` slug
+ * to resolve to `codex` here, so a model the gateway offers cannot be unlaunchable.
+ */
+export const CODEX_CANONICAL_MODEL_IDS = [
+  'gpt-6.1-sol',
+  'gpt-6-astra',
+  'gpt-6-sol',
+  'gpt-6-luna',
+  'gpt-5.5',
+  'gpt-5.4',
+  'gpt-5.4-mini',
+] as const;
+
+/**
  * Infer the CLI backend from the SAME model vocabulary the launch selectors
  * render. A host-local OMP selector is always `provider/id`; the native aliases
  * carry their backend on `CLOUD_MODEL_MENU`. Codex also exposes the canonical
@@ -810,6 +830,7 @@ export function launchAgentBackendForModel(model?: string | null): LaunchAgentBa
   const normalizedBase = base.toLowerCase();
   const bareChoice = CLOUD_MODEL_MENU.find((choice) => choice.value === normalizedBase);
   if (bareChoice) return bareChoice.backend;
+  if ((CODEX_CANONICAL_MODEL_IDS as readonly string[]).includes(normalizedBase)) return 'codex';
 
   // Codex's native model ids are the canonical expansion of the same three
   // selectable aliases. Keep the mapping derived from the menu so adding a

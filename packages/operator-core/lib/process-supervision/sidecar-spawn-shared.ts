@@ -33,6 +33,9 @@
  * remains a possible (riskier) follow-up if duplication resurfaces.
  */
 
+import { readFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
 // ── bundled-vs-dev-tsx spawn-plan resolution ────────────────────────────────
 // esbuild bundles EVERY module into one serve.mjs; in a PACKAGED build
 // `import.meta.url` for the spawn module IS the bundle (no tsx, no .ts on
@@ -66,6 +69,8 @@ export interface ResolveSidecarSpawnPlanOpts {
    *  itself silently reintroduces EI-20493378309289396 (see below), and a type
    *  error at every call site is the only thing that reliably prevents that. */
   spawnerPid: number;
+  /** Optional maintained sibling bundle. Older installs keep re-execing self. */
+  bundledScriptName?: string;
 }
 
 /** Pure: decide HOW to spawn a sidecar child (bundled re-exec-self vs dev
@@ -74,9 +79,19 @@ export interface ResolveSidecarSpawnPlanOpts {
 export function resolveSidecarSpawnPlan(opts: ResolveSidecarSpawnPlanOpts): SidecarSpawnPlan {
   const isBundled = !opts.selfPath.endsWith('.ts') && !opts.selfPath.endsWith('.tsx');
   if (isBundled) {
+    let entry = opts.selfPath;
+    if (opts.bundledScriptName) {
+      const candidate = join(dirname(opts.selfPath), opts.bundledScriptName);
+      try {
+        const info = statSync(candidate);
+        if (info.isFile() && info.size > 0) entry = candidate;
+      } catch {
+        // Older installations have no sibling; preserve the full-entry divert.
+      }
+    }
     return {
       cmd: opts.execPath, // the bundled node (e.g. ./bin/node), re-exec'ing selfPath
-      args: [opts.selfPath],
+      args: [entry],
       env: { [opts.bundledModeEnvVar]: '1', ...parentIdentityEnv(opts.spawnerPid) },
       mode: 'bundled-reexec',
     };
@@ -330,6 +345,16 @@ export interface SidecarShutdownHooksOpts {
    * (`() => true`) — preserves prior behavior for a caller that doesn't pass one.
    */
   isFatalException?: (err: unknown) => boolean;
+  /**
+   * EI-24863236643374267: asked at SIGTERM/SIGINT time. When it returns true the
+   * signal listener does NOT stop the sidecar; the caller has arranged a later stop
+   * (the spawner registers one with shutdown-state's onBeforeHostExit, which the
+   * host's graceful drain runs right before it exits). Without this the sidecar is
+   * stopped BEFORE the drain starts, because this listener is registered at spawn
+   * time, ahead of the drain's own — and every git call made during the drain then
+   * forks on the host's main thread. Default: never defer.
+   */
+  deferStopToHostExit?: () => boolean;
 }
 
 const hooksRegisteredFor = new Set<string>();
@@ -361,14 +386,16 @@ export function registerSidecarShutdownHooks(opts: SidecarShutdownHooksOpts): vo
     });
   }
 
-  process.on('SIGTERM', async () => {
-    console.log(`[${opts.label}] SIGTERM received, shutting down sidecar`);
+  const onSignal = async (sig: 'SIGTERM' | 'SIGINT'): Promise<void> => {
+    if (opts.deferStopToHostExit?.()) {
+      console.log(`[${opts.label}] ${sig} received, keeping sidecar up until the host drain exits`);
+      return;
+    }
+    console.log(`[${opts.label}] ${sig} received, shutting down sidecar`);
     await opts.stop();
-  });
-  process.on('SIGINT', async () => {
-    console.log(`[${opts.label}] SIGINT received, shutting down sidecar`);
-    await opts.stop();
-  });
+  };
+  process.on('SIGTERM', () => onSignal('SIGTERM'));
+  process.on('SIGINT', () => onSignal('SIGINT'));
   const isFatal = opts.isFatalException ?? (() => true);
   process.on('uncaughtException', async (err) => {
     if (!isFatal(err)) {
@@ -394,4 +421,87 @@ export function _resetSidecarShutdownHookRegistryForTests(): void {
  *  (which every other module in the test process also adds to). */
 export function _registeredSidecarShutdownLabelsForTests(): string[] {
   return [...hooksRegisteredFor].sort();
+}
+
+// ── who owns a loopback port (P-530, WI-10005481 class) ─────────────────────
+// A sidecar answering /healthz on 127.0.0.1:<port> says nothing about WHOSE it
+// is. On a host shared by several tenants (one Linux user each), adopting a
+// sibling by liveness alone hands this tenant's text to another tenant's
+// process. The kernel's socket tables record the owning uid of every LISTEN
+// socket, so the question has a direct answer that no process can forge.
+
+/** `/proc/net/tcp{,6}` state code for LISTEN. */
+const TCP_STATE_LISTEN = '0A';
+
+/** local_address hex forms a connection to 127.0.0.1 can land on: the
+ *  loopback address itself (either byte order) and the IPv4 wildcard; for
+ *  tcp6, the dual-stack wildcard `::` and `::ffff:127.0.0.1`. */
+const LOOPBACK_REACHABLE_ADDRS = new Set([
+  '0100007F',
+  '7F000001',
+  '00000000',
+  '00000000000000000000000000000000',
+  '0000000000000000FFFF00000100007F',
+]);
+
+/**
+ * Pure parser: the uids of every LISTEN socket in one `/proc/net/tcp`-format
+ * table whose local address a connection to 127.0.0.1:`port` can reach.
+ */
+export function parseLoopbackListenerUids(tableText: string, port: number): number[] {
+  const uids: number[] = [];
+  for (const line of tableText.split('\n').slice(1)) {
+    const f = line.trim().split(/\s+/);
+    // sl local_address rem_address st tx:rx tr:when retrnsmt uid timeout inode
+    if (f.length < 8 || f[3] !== TCP_STATE_LISTEN) continue;
+    const sep = f[1].lastIndexOf(':');
+    if (sep < 0) continue;
+    if (Number.parseInt(f[1].slice(sep + 1), 16) !== port) continue;
+    if (!LOOPBACK_REACHABLE_ADDRS.has(f[1].slice(0, sep).toUpperCase())) continue;
+    const uid = Number(f[7]);
+    if (Number.isInteger(uid)) uids.push(uid);
+  }
+  return uids;
+}
+
+/**
+ * The uids owning a LISTEN socket reachable at 127.0.0.1:`port`. `[]` = nothing
+ * listens there. `null` = this host cannot answer (no readable
+ * `/proc/net/tcp`, i.e. not Linux), and the caller must not treat that as
+ * "owned by me".
+ */
+export function loopbackListenerUids(
+  port: number,
+  readTable: (path: string) => string | null = readProcTable,
+): number[] | null {
+  let readable = false;
+  const uids: number[] = [];
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    const text = readTable(table);
+    if (text === null) continue;
+    readable = true;
+    uids.push(...parseLoopbackListenerUids(text, port));
+  }
+  return readable ? uids : null;
+}
+
+function readProcTable(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    // Only a filesystem error (ENOENT on a non-Linux host, EACCES) means "no
+    // table". Anything else is a bug and must stay loud: a swallowed
+    // ReferenceError once made every ownership check here read "unknown".
+    if (err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string') return null;
+    throw err;
+  }
+}
+
+/** May this process adopt whatever listens on 127.0.0.1:`port`? Only when every
+ *  listener there belongs to `uid`. Unknown ownership (null) is a refusal on
+ *  Linux-shaped hosts; a host with no socket table at all (`null` from
+ *  {@link loopbackListenerUids}) is decided by the caller. */
+export function loopbackListenerOwnedBy(uids: number[] | null, uid: number): boolean | null {
+  if (uids === null) return null;
+  return uids.length > 0 && uids.every((u) => u === uid);
 }

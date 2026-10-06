@@ -428,7 +428,7 @@ top_db_consumers() {
   # safe. A query that cannot run must be LOUD.
   out="$(timeout "${BACKUP_CONSUMERS_TIMEOUT_S}s" sudo -n -u postgres psql \
            -p "$BACKUP_DB_PORT" -d "$BACKUP_DB_NAME" -tA -c "$sql" 2>&1)" || true
-  if printf '%s' "$out" | grep -qE '^(ERROR|FATAL|psql):'; then
+  if grep -qE '^(ERROR|FATAL|psql):' <<<"$out"; then
     log "WARN top-consumers query FAILED (the alert will not name a consumer): $(printf '%s' "$out" | head -1)"
     out=""
   fi
@@ -565,7 +565,7 @@ check_db_relation_bloat() {
   # so, not fall silent. A silent detector is indistinguishable from a healthy database.
   bloated="$(timeout "${BACKUP_CONSUMERS_TIMEOUT_S}s" sudo -n -u postgres psql \
                -p "$BACKUP_DB_PORT" -d "$BACKUP_DB_NAME" -tA -c "$sql" 2>&1)" || true
-  if printf '%s' "$bloated" | grep -qE '^(ERROR|FATAL|psql):'; then
+  if grep -qE '^(ERROR|FATAL|psql):' <<<"$bloated"; then
     log "WARN TOAST-bloat query FAILED (this detector is BLIND until fixed): $(printf '%s' "$bloated" | head -1)"
     bloated=""
   fi
@@ -1185,7 +1185,7 @@ if [ "${1:-}" = "--self-test" ]; then
         PATH="$selftest_df_bin:$PATH" \
         bash "$self" 2>&1 >/dev/null)"
     note_shell_errors "$out"
-    if printf '%s' "$out" | grep -qE "$want_re"; then
+    if grep -qE "$want_re" <<<"$out"; then
       printf '  ok    %s\n' "$name"; p=$((p+1))
     else
       printf '  FAIL  %s — wanted /%s/ in probe output, got: %s\n' \
@@ -1261,9 +1261,14 @@ $(trend_seed 7200 10485760)" \
   # sentence inside generated output is invisible to every other check in this repo —
   # no typecheck or unit test can see prose drift — so it needs its own guard.
   guard_body() { awk '/^check_db_disk_headroom\(\)/,/^}/' "$self"; }
+  # WI-10005986: read the body ONCE into a variable and grep a here-string. Under
+  # `set -o pipefail`, `guard_body | grep -q` is a load-dependent false FAIL: the
+  # range is >4 KiB, mawk writes it in two chunks, grep -q exits on a match in the
+  # first, and the second write SIGPIPEs awk, so the pipeline fails WITH a match.
+  guard_text="$(guard_body)"
 
   # 19. The filed body must SPLICE THE DERIVED READING rather than a written-down list.
-  if guard_body | grep -q '\${consumers}'; then
+  if grep -q '\${consumers}' <<<"$guard_text"; then
     printf '  ok    alert body splices the derived top-consumers reading\n'; p=$((p+1))
   else
     printf '  FAIL  alert body no longer references ${consumers} — the consumer list is not being derived at alert time\n'; f=$((f+1))
@@ -1273,9 +1278,9 @@ $(trend_seed 7200 10485760)" \
   #     "was/were N GiB" is the shape of a remembered measurement, and a remembered
   #     measurement is exactly what went stale. Derived values interpolate at runtime
   #     and never match this, so a correct implementation cannot trip it.
-  if guard_body | grep -qE '(was|were) [0-9]+(\.[0-9]+)? ?(GiB|TiB|GB|TB)\b'; then
+  if grep -qE '(was|were) [0-9]+(\.[0-9]+)? ?(GiB|TiB|GB|TB)\b' <<<"$guard_text"; then
     printf '  FAIL  a remembered measurement is back in the alert body: ...%s...\n' \
-      "$(guard_body | grep -oE '.{0,45}(was|were) [0-9]+(\.[0-9]+)? ?(GiB|TiB|GB|TB)\b.{0,25}' | head -1)"; f=$((f+1))
+      "$(grep -oE '.{0,45}(was|were) [0-9]+(\.[0-9]+)? ?(GiB|TiB|GB|TB)\b.{0,25}' <<<"$guard_text" | head -1)"; f=$((f+1))
   else
     printf '  ok    alert body asserts no remembered measurement\n'; p=$((p+1))
   fi
@@ -1398,7 +1403,7 @@ EOF
         "$@" bash "$self" 2>&1 >/dev/null)"
     note_shell_errors "$out"
     [ -f "$t/state/backup-volume-red-ei-filed" ] && got_marker=yes
-    if [ "$got_marker" = "$want_marker" ] && printf '%s' "$out" | grep -qE "$want_re"; then
+    if [ "$got_marker" = "$want_marker" ] && grep -qE "$want_re" <<<"$out"; then
       printf '  ok    %s (marker=%s)\n' "$name" "$got_marker"; p=$((p+1))
     else
       printf '  FAIL  %s — wanted marker=%s and /%s/; got marker=%s, output: %s\n' \
@@ -1494,7 +1499,7 @@ EOF
     local f_name got
     for f_name in "$@"; do : > "$dir/$f_name"; done
     got="$(tmpdir_top_shapes "$dir")"
-    if printf '%s\n' "$got" | grep -qE "$want_re"; then
+    if grep -qE "$want_re" <<<"$got"; then
       printf '  ok    %s\n' "$name"; p=$((p+1))
     else
       printf '  FAIL  %s — wanted /%s/, got: %s\n' "$name" "$want_re" "$got"; f=$((f+1))

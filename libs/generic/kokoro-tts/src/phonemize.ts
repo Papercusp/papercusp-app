@@ -4,7 +4,60 @@
  * https://github.com/hexgrad/kokoro). Pure text transforms — no transformers
  * dependency, only the tiny `phonemizer` (espeak-ng WASM binding) package.
  */
-import { phonemize as espeakPhonemize } from 'phonemizer';
+import type { phonemize as EspeakPhonemize } from 'phonemizer';
+
+/**
+ * phonemizer's emscripten build registers PROCESS-WIDE handlers when it is evaluated:
+ *
+ *   process.on('uncaughtException', (e) => { if (!(e instanceof ExitStatus)) throw e })
+ *   process.on('unhandledRejection', (e) => { throw e })
+ *
+ * Throwing inside an 'uncaughtException' handler makes Node exit with code 7, so while
+ * this module was a static import, ANY stray error anywhere in the host process — an
+ * aborted request body's ECONNRESET, a forgotten rejection — killed the whole operator,
+ * overriding the host's own handlers (WI-10004324: the :3170 host died this way
+ * 2026-09-30 10:51 and stayed down 7 minutes). The package is therefore loaded lazily,
+ * on first use, and exactly the listeners its evaluation added are removed again.
+ */
+export const EMSCRIPTEN_PROCESS_HOOKS = ['uncaughtException', 'unhandledRejection'] as const;
+
+/**
+ * Run `load` and remove every listener it added to the process-wide crash events.
+ * Anything registered before the call is left untouched, so a host's own handlers
+ * survive. (A handler some OTHER code registers during the same await window would be
+ * removed too; hosts register theirs at boot, long before the first phonemize call.)
+ */
+export async function importWithoutProcessCrashHooks<T>(load: () => Promise<T>): Promise<T> {
+  // The plain EventEmitter view: `process.listeners` is overloaded per event name and
+  // rejects a union of names.
+  const emitter: NodeJS.EventEmitter = process;
+  const before = new Map(EMSCRIPTEN_PROCESS_HOOKS.map((event) => [event, new Set(emitter.listeners(event))]));
+  try {
+    return await load();
+  } finally {
+    for (const event of EMSCRIPTEN_PROCESS_HOOKS) {
+      const kept = before.get(event)!;
+      for (const listener of emitter.listeners(event)) {
+        if (!kept.has(listener)) emitter.removeListener(event, listener as (...args: unknown[]) => void);
+      }
+    }
+  }
+}
+
+let espeakLoad: Promise<typeof EspeakPhonemize> | null = null;
+
+function loadEspeak(): Promise<typeof EspeakPhonemize> {
+  espeakLoad ??= importWithoutProcessCrashHooks(() => import('phonemizer')).then((m) => m.phonemize);
+  // A failed load must not be cached forever: the next call retries.
+  espeakLoad.catch(() => {
+    espeakLoad = null;
+  });
+  return espeakLoad;
+}
+
+async function espeakPhonemize(text: string, language: string): Promise<string[]> {
+  return (await loadEspeak())(text, language);
+}
 
 /** Upstream `o()`: read a year/time-like number the way a speaker would. */
 function splitNum(match: string): string {

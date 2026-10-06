@@ -228,9 +228,10 @@ export function __resetSessionConfigDirCaches(): void {
  * does for a resume, and the only strategy that still works once the process is
  * gone. Measured at ~1ms across the live root.
  */
-function fromTranscriptScan(root: string, sessionId: string): string | null {
+function fromTranscriptScan(root: string, sessionId: string, preferOwners: readonly string[] = []): string | null {
   const now = Date.now();
-  const cacheKey = transcriptScanCacheKey(root, sessionId);
+  // The preferred owners are part of the key: the answer depends on them.
+  const cacheKey = transcriptScanCacheKey(root, `${sessionId}\0${preferOwners.join(',')}`);
   const cached = transcriptScanCache.get(cacheKey);
   if (cached) {
     // A cleanup/rotation may remove the file after a positive lookup. Re-scan
@@ -246,7 +247,12 @@ function fromTranscriptScan(root: string, sessionId: string): string | null {
   }
 
   const file = `${sessionId}.jsonl`;
-  for (const owner of safeReaddir(root)) {
+  // WI-10004654: the same `<id>.jsonl` can sit under several owner dirs — a
+  // managed fork seeds its own config dir with a copy of its source's
+  // transcript. A first-hit scan in readdir order can then name the FORK's dir
+  // as this session's config dir. Check the owners the caller expects first;
+  // the full scan stays the fallback for a session whose dir is keyed elsewhere.
+  for (const owner of [...preferOwners, ...safeReaddir(root)]) {
     const projects = join(root, owner, 'projects');
     for (const project of safeReaddir(projects)) {
       const transcript = join(projects, project, file);
@@ -284,7 +290,10 @@ export function resolveSessionConfigDir(opts: ResolveSessionConfigDirOptions): S
   }
 
   if (sessionId) {
-    const dir = fromTranscriptScan(root, sessionId);
+    const preferOwners = [ownerId, ...(opts.altOwnerIds ?? [])].filter(
+      (k): k is string => typeof k === 'string' && k.length > 0 && !k.includes('/') && k !== '.' && k !== '..',
+    );
+    const dir = fromTranscriptScan(root, sessionId, preferOwners);
     tried.push(dir ? `transcript-scan(${sessionId}): ${dir}` : `transcript-scan(${sessionId}): no transcript found`);
     if (dir) return { dir, source: 'transcript-scan', tried, unresolvedReason: null };
   } else {

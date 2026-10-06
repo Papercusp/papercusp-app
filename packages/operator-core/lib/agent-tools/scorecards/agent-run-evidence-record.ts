@@ -16,9 +16,14 @@
  * Design rules:
  *  - DERIVED, never grader-typed. The grader cannot supply this record: the
  *    emit args have no slot for it, and emit writes it after the subject.
- *  - Durable sources only. The goal link is `goals.metadata.agentOwnerId`
- *    (durable, never reaped). `agent_modes(mode='goal')` is only a fallback,
- *    because that row is current-state and is reaped when the holder exits.
+ *  - The goal link is read from the most window-specific source first (see
+ *    `findGoal`): the holder's own goal-stamped `tool_invocations` inside the
+ *    window, then its `agent_modes` goal-lease row, then
+ *    `goals.metadata.agentOwnerId`. That last field names only the agent that
+ *    STARTED the goal and is never updated when the lease moves (plan
+ *    goal-holder-plans-ideation-truthful-reports-2026-10-03 D-003), so reading
+ *    it first mapped a former holder to a goal it no longer held and gave a
+ *    lease successor no metadata link at all. `goalSource` names which one answered.
  *    Exposure comes from the holder's launch record
  *    (`adv_sessions.launch_spec.specificationRevision` = the lowercase sha256
  *    of the compiled specification artifact the holder was launched with, and
@@ -35,7 +40,12 @@ export type EvidenceRecordSql = <T = Record<string, unknown>>(
   ...values: unknown[]
 ) => Promise<T[]>;
 
-export type GoalSource = 'goals.agentOwnerId' | 'agent_modes' | 'not-found' | 'derivation-failed';
+export type GoalSource =
+  | 'tool_invocations'
+  | 'agent_modes'
+  | 'goals.agentOwnerId'
+  | 'not-found'
+  | 'derivation-failed';
 
 export type InstructionExposure =
   | {
@@ -91,6 +101,9 @@ function isoOrString(value: unknown): string {
   return String(value);
 }
 
+interface InvocationGoalRow {
+  goal_id: string | null;
+}
 interface GoalRow {
   id: string;
 }
@@ -105,12 +118,55 @@ interface SessionRow {
   model: string | null;
 }
 
+/**
+ * Which goal the holder was pursuing in the graded window. Sources in order, most
+ * window-specific first; the first that answers wins and is named in `goalSource`:
+ *
+ *  1. `tool_invocations`: the goal the holder's own goal-stamped calls served INSIDE
+ *     the window (most calls, then most recent). Durable and scoped to exactly the
+ *     graded window. Needs both bounds: an owner scan without a window is not an
+ *     answer about this window.
+ *  2. `agent_modes`: the holder's goal-lease row set no later than the window end.
+ *     Right for a lease successor, whom goals.metadata never names. It is current
+ *     state and can be reaped once the holder exits, which is why it is not first.
+ *  3. `goals.metadata.agentOwnerId`: the agent that STARTED a goal created by the
+ *     window end. goals/start.ts writes it once and lease succession never updates
+ *     it (D-003: at 2026-10-03 02:50Z it named su-6aab097a while su-9e72a11f held
+ *     lease epoch 18), so it is the weakest link and only a last resort.
+ */
 async function findGoal(
   sql: EvidenceRecordSql,
   workspaceId: string,
   holder: string,
+  windowStart: string | null,
   windowEnd: string | null,
 ): Promise<{ goalId: string | null; goalSource: GoalSource }> {
+  if (windowStart && windowEnd) {
+    const calls = await sql<InvocationGoalRow>`
+      SELECT goal_id
+        FROM harness_shared.tool_invocations
+       WHERE coord_owner_id = ${holder}
+         AND workspace_id = ${workspaceId}
+         AND invoked_at BETWEEN ${windowStart}::timestamptz AND ${windowEnd}::timestamptz
+         AND goal_id IS NOT NULL
+       GROUP BY goal_id
+       ORDER BY count(*) DESC, max(invoked_at) DESC
+       LIMIT 1`;
+    if (calls[0]?.goal_id) return { goalId: String(calls[0].goal_id), goalSource: 'tool_invocations' };
+  }
+
+  const modes = await sql<ModeRow>`
+    SELECT subject
+      FROM harness_shared.agent_modes
+     WHERE workspace_id = ${workspaceId}
+       AND owner_id = ${holder}
+       AND mode = 'goal'
+       AND subject IS NOT NULL
+       AND (${windowEnd}::timestamptz IS NULL OR set_at <= ${windowEnd}::timestamptz)
+     ORDER BY set_at DESC
+     LIMIT 1`;
+  if (modes[0]?.subject) return { goalId: String(modes[0].subject), goalSource: 'agent_modes' };
+
   const goals = await sql<GoalRow>`
     SELECT id
       FROM harness_shared.goals
@@ -120,17 +176,6 @@ async function findGoal(
      ORDER BY created_at DESC
      LIMIT 1`;
   if (goals[0]?.id) return { goalId: String(goals[0].id), goalSource: 'goals.agentOwnerId' };
-
-  const modes = await sql<ModeRow>`
-    SELECT subject
-      FROM harness_shared.agent_modes
-     WHERE workspace_id = ${workspaceId}
-       AND owner_id = ${holder}
-       AND mode = 'goal'
-       AND subject IS NOT NULL
-     ORDER BY set_at DESC
-     LIMIT 1`;
-  if (modes[0]?.subject) return { goalId: String(modes[0].subject), goalSource: 'agent_modes' };
   return { goalId: null, goalSource: 'not-found' };
 }
 
@@ -190,7 +235,7 @@ export async function deriveAgentRunEvidenceRecord(
   const windowStart = instantOrNull(input.windowStart);
   const windowEnd = instantOrNull(input.windowEnd);
   const [goal, launch] = await Promise.all([
-    findGoal(input.sql, input.workspaceId, input.holder, windowEnd),
+    findGoal(input.sql, input.workspaceId, input.holder, windowStart, windowEnd),
     findLaunch(input.sql, input.workspaceId, input.holder, windowEnd),
   ]);
   return {

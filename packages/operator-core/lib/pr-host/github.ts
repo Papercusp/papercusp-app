@@ -21,6 +21,7 @@ import {
   type PrState,
   type PrReviewDecision,
   type PrMergeableState,
+  type PrDetailsData,
   ok,
   err,
   statusToErrorKind,
@@ -277,26 +278,30 @@ export class GitHubPrHost implements PrHost {
   }
 
   async listOpenPrs(args: ListOpenPrsArgs): Promise<PrHostResult<Pr[]>> {
+    return this.listPrs({ ...args, state: 'open' });
+  }
+
+  async listPrs(args: ListOpenPrsArgs & { state: 'open' | 'closed' | 'all' }): Promise<PrHostResult<Pr[]>> {
     const parsed = parseRemote(args.remote);
     if (!parsed) {
       return err({ kind: 'validation', message: `Cannot parse remote: ${args.remote}` });
     }
     try {
-      const { data } = await this.oc.pulls.list({
+      const data = await this.oc.paginate(this.oc.pulls.list, {
         owner: parsed.owner,
         repo: parsed.repo,
-        state: 'open',
+        state: args.state,
         per_page: args.per_page ?? 100,
       });
       const prs: Pr[] = data.map((d) => ({
         ref: { remote: args.remote, number: d.number },
-        state: 'open' as PrState,
+        state: ghStateToPrState(d.state, !!d.merged_at),
         title: d.title,
         body: d.body ?? null,
         head_ref: d.head.ref,
         base_ref: d.base.ref,
         head_sha: d.head.sha,
-        merge_commit_sha: null,
+        merge_commit_sha: d.merged_at ? d.merge_commit_sha ?? null : null,
         author: { github_user_id: d.user?.id ?? 0, github_login: d.user?.login ?? '' },
         reviewers_requested: (d.requested_reviewers ?? []).map((r) => ({
           github_user_id: r.id,
@@ -314,6 +319,54 @@ export class GitHubPrHost implements PrHost {
     } catch (e) {
       return mapOctokitError(e);
     }
+  }
+
+  async closePr(ref: { remote: string; number: number }): Promise<PrHostResult<void>> {
+    const parsed = parseRemote(ref.remote);
+    if (!parsed) return err({ kind: 'validation', message: 'Invalid remote' });
+    try {
+      await this.oc.pulls.update({ ...parsed, pull_number: ref.number, state: 'closed' });
+      return ok(undefined);
+    } catch (e) { return mapOctokitError(e); }
+  }
+
+  async getPrDetails(ref: { remote: string; number: number }): Promise<PrHostResult<PrDetailsData>> {
+    const parsed = parseRemote(ref.remote);
+    if (!parsed) return err({ kind: 'validation', message: 'Invalid remote' });
+    try {
+      const first = await this.getPr(ref);
+      if (!first.ok) return first;
+      const args = { ...parsed, pull_number: ref.number, per_page: 100 };
+      const [commits, files, diff, checkRuns, statuses, base] = await Promise.all([
+        this.oc.paginate(this.oc.pulls.listCommits, args),
+        this.oc.paginate(this.oc.pulls.listFiles, args),
+        this.getPrDiff(ref),
+        this.oc.paginate(this.oc.checks.listForRef, { ...parsed, ref: first.data.head_sha, per_page: 100 }),
+        this.oc.repos.getCombinedStatusForRef({ ...parsed, ref: first.data.head_sha }),
+        this.oc.repos.getBranch({ ...parsed, branch: first.data.base_ref }),
+      ]);
+      if (!diff.ok) return diff;
+      const last = await this.getPr(ref);
+      if (!last.ok) return last;
+      if (last.data.head_sha !== first.data.head_sha || last.data.base_ref !== first.data.base_ref) {
+        return err({ kind: 'conflict', message: 'The PR changed while loading; refresh its details.' });
+      }
+      const checks = [
+        ...checkRuns.map(c => ({ name: c.name, conclusion: c.conclusion, status: c.status, url: c.html_url ?? null })),
+        ...statuses.data.statuses.map(c => ({ name: c.context, conclusion: c.state, status: c.state === 'pending' ? 'in_progress' : 'completed', url: c.target_url })),
+      ];
+      const failure = checks.some(c => ['failure', 'error', 'timed_out', 'cancelled', 'action_required'].includes(c.conclusion ?? ''));
+      const pending = checks.some(c => c.status !== 'completed');
+      const green = checks.length > 0 && checks.every(c => ['success', 'neutral', 'skipped'].includes(c.conclusion ?? ''));
+      return ok({
+        pr: { ...last.data, checks_state: failure ? 'failure' : pending ? 'pending' : green ? 'success' : 'unknown' },
+        targetSha: base.data.commit.sha,
+        commits: commits.map(c => ({ sha: c.sha, message: c.commit.message, author: c.commit.author?.name ?? '', url: c.html_url })),
+        files: files.map(f => ({ filename: f.filename, previous_filename: f.previous_filename, status: f.status, additions: f.additions, deletions: f.deletions, patch: f.patch })),
+        diff: diff.data.slice(0, 200_000), diffTruncated: diff.data.length > 200_000,
+        checks,
+      });
+    } catch (e) { return mapOctokitError(e); }
   }
 }
 

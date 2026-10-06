@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { getOrgPg } from '@papercusp/db-org';
 import { normalizeModelId } from '@papercusp/model-pricing';
 import { getWorkItem, type WorkItem } from '../work-items';
+import { workItemStorageSlug } from '../pot-membership';
 import { ANY_FAMILY_TERMINAL_STATES } from '../work-item-dispatch-states';
 import { runWithWorkspace } from '../workspace-als';
 import { getIdentitySource } from '../agent-identities/source';
@@ -13,7 +14,12 @@ import { readAcceptedBlueprintDirectWorkItem, type AcceptedOperationPin } from '
 
 export interface AcceptedOperationWorkerBinding {
   workItemId: string;
+  /** The harness the operation was accepted for: the launch harness and `pin.harnessSlug`. */
   harnessSlug: string;
+  /** The `harness_slug` the accepted work-item row is STORED under. createWorkItem re-homes
+   * a pot MEMBER harness's item to the pot home slug, so this differs from `harnessSlug`
+   * for a potted harness (WI-10004367). Row lookups use this; pin comparisons never do. */
+  storageHarnessSlug: string;
   operationId: string;
   specificationRevision: string;
   pin: AcceptedOperationPin;
@@ -135,8 +141,8 @@ export async function readActiveOperationModelPolicy(
   if (active.status !== 'bound') return active;
   try {
     return await runWithWorkspace(workspaceId, async () => {
-      const item = await getWorkItem(active.binding.workItemId, active.binding.harnessSlug);
-      if (!item || item.harness !== active.binding.harnessSlug) {
+      const item = await getWorkItem(active.binding.workItemId, active.binding.storageHarnessSlug);
+      if (!item || item.harness !== active.binding.storageHarnessSlug) {
         return { status: 'unavailable', reason: 'accepted operation work item is missing' } as const;
       }
       const { pin, operation } = await readAcceptedBlueprintDirectWorkItem(getOrgPg().sql, workspaceId, item);
@@ -230,7 +236,7 @@ export function matchOperationWorkerClaim(
   }
   const accepted = pin as Record<string, unknown>;
   const binding = read.binding;
-  if (item.id !== binding.workItemId || item.harness !== binding.harnessSlug ||
+  if (item.id !== binding.workItemId || item.harness !== binding.storageHarnessSlug ||
       accepted.kind !== 'blueprint-operation' || accepted.harnessSlug !== binding.harnessSlug ||
       accepted.operationId !== binding.operationId ||
       accepted.specificationRevision !== binding.specificationRevision ||
@@ -260,8 +266,8 @@ export function operationWorkerClaimWhereSql(
   return sql`(
     ${sql.unsafe(columns.id)} = ${binding.workItemId}
     AND ${sql.unsafe(columns.harness)} = ${columns.harness === 'target.scope'
-      ? (binding.harnessSlug ? `harness:${binding.harnessSlug}` : 'operator')
-      : binding.harnessSlug}
+      ? (binding.storageHarnessSlug ? `harness:${binding.storageHarnessSlug}` : 'operator')
+      : binding.storageHarnessSlug}
     AND ${pin} ->> 'kind' = 'blueprint-operation'
     AND ${pin} ->> 'harnessSlug' = ${binding.harnessSlug}
     AND ${pin} ->> 'operationId' = ${binding.operationId}
@@ -307,7 +313,12 @@ export function operationWorkerEffectWhereSql(
  * canonical row makes its old attempt unable to close successfully. */
 export interface AcceptedProgramRootAttempt {
   workspaceId: string;
+  /** The harness the operation was accepted for; receipt and pin comparisons use it. */
   harnessSlug: string;
+  /** The `harness_slug` the root row is STORED under: the pot home slug for a pot member's
+   * root (WI-10004562 / D-045), as `AcceptedOperationWorkerBinding.storageHarnessSlug` is for
+   * an agent operation. Row matching uses this; pin comparisons never do. */
+  storageHarnessSlug: string;
   workItemId: string;
   receiptId: number;
   operationId: string;
@@ -322,7 +333,7 @@ export async function validateAcceptedProgramRootAttempt(
 ): Promise<void> {
   if (!Number.isSafeInteger(attempt.receiptId) || attempt.receiptId <= 0 ||
       !Number.isSafeInteger(attempt.updatedTs) || attempt.updatedTs <= 0 ||
-      attempt.workItemId !== item.id || attempt.harnessSlug !== item.harness) {
+      attempt.workItemId !== item.id || attempt.storageHarnessSlug !== item.harness) {
     throw new Error('accepted program root attempt is stale or malformed');
   }
   const { pin, operation } = await readAcceptedBlueprintDirectWorkItem(
@@ -347,7 +358,7 @@ export function programRootEffectWhereSql(
   const payload = sql.unsafe(columns.payload);
   return sql`(
     ${sql.unsafe(columns.id)} = ${attempt.workItemId}
-    AND ${sql.unsafe(columns.harness)} IN (${attempt.harnessSlug}, ${`harness:${attempt.harnessSlug}`})
+    AND ${sql.unsafe(columns.harness)} IN (${attempt.storageHarnessSlug}, ${`harness:${attempt.harnessSlug}`})
     AND ${sql.unsafe(columns.updated)} = ${attempt.updatedTs}
     AND NOT (${sql.unsafe(columns.status)} = ANY(${ANY_FAMILY_TERMINAL_STATES as string[]}::text[]))
     AND NOT (COALESCE(${payload}, '{}'::jsonb) ? 'reopenHistory')
@@ -375,6 +386,20 @@ export function programRootEffectWhereSql(
   )`;
 }
 
+const RECEIPT_READ_FAULT = 'active operation worker receipt could not be read';
+
+/** EI-24400810686776632: the receipt read fails CLOSED on any error, which is right, but a
+ * bare reason hid the commonest cause: a test database that never built a relation this read
+ * joins (adv_sessions, session_briefs). Name a SCHEMA fault (missing relation / column) so the
+ * refusal points at the missing table; a transient fault keeps the generic reason. */
+export function describeOperationReceiptReadFault(err: unknown): string {
+  const e = err && typeof err === 'object' ? err as { code?: unknown; message?: unknown } : null;
+  if (e && (e.code === '42P01' || e.code === '42703') && typeof e.message === 'string' && e.message) {
+    return `${RECEIPT_READ_FAULT}: ${e.message} (SQLSTATE ${e.code}; the database lacks a relation or column this read needs)`;
+  }
+  return RECEIPT_READ_FAULT;
+}
+
 /** Read the current, applied operation identity for a claim target. A launch
  * request is only a desired identity; it cannot authorize a claim until the
  * host has applied it. Read a small role header first so ordinary SU pulls do
@@ -382,10 +407,11 @@ export function programRootEffectWhereSql(
 export async function readActiveOperationWorkerClaimBinding(
   workspaceId: string,
   ownerId: string,
+  opts?: { sql?: Sql; throwOnError?: boolean },
 ): Promise<ActiveOperationWorkerClaimRead> {
   if (!workspaceId.trim() || !ownerId.trim()) return { status: 'unavailable', reason: 'claim target scope is missing' };
   try {
-    const { sql } = getOrgPg();
+    const sql = opts?.sql ?? getOrgPg().sql;
     const [session] = await sql<Array<{ id: number; role: string | null }>>`
       SELECT id, role FROM harness_shared.adv_sessions
        WHERE workspace_id = ${workspaceId} AND coord_owner_id = ${ownerId}
@@ -457,6 +483,10 @@ export async function readActiveOperationWorkerClaimBinding(
         activation.attribution.sessionId !== ownerId) {
       return { status: 'unavailable', reason: 'active operation worker identity is not applied' };
     }
+    // WI-10004367: the accepted row lives under the pot home when the launch harness is a
+    // pot MEMBER. Resolved here, once, because the claim race fence is synchronous SQL.
+    // workItemStorageSlug fails open to the launch slug, which only ever narrows a claim.
+    const storageHarnessSlug = await workItemStorageSlug(row.launch_harness_slug, workspaceId);
     return {
       status: 'bound',
       receipt: {
@@ -470,6 +500,7 @@ export async function readActiveOperationWorkerClaimBinding(
       binding: {
         workItemId: accepted.workItemId,
         harnessSlug: row.launch_harness_slug,
+        storageHarnessSlug,
         operationId: accepted.operationId,
         specificationRevision: accepted.specificationRevision as string,
         pin: pin as AcceptedOperationPin,
@@ -478,8 +509,11 @@ export async function readActiveOperationWorkerClaimBinding(
         requiredTools: [...new Set(requiredTools as string[])].sort(),
       },
     };
-  } catch {
-    return { status: 'unavailable', reason: 'active operation worker receipt could not be read' };
+  } catch (err) {
+    // The scheduler's bounded transaction must see PostgreSQL timeout errors intact
+    // so it can report contention rather than a generic operation-authority failure.
+    if (opts?.throwOnError) throw err;
+    return { status: 'unavailable', reason: describeOperationReceiptReadFault(err) };
   }
 }
 
@@ -492,8 +526,10 @@ export async function resolveAcceptedOperationWorkerBinding(input: {
   repoDir: string;
 }): Promise<AcceptedOperationWorkerBinding | null> {
   return runWithWorkspace(input.workspaceId, async () => {
-    const item = await getWorkItem(input.workItemId, input.harnessSlug);
-    if (!item || item.harness !== input.harnessSlug) {
+    // WI-10004367: a pot MEMBER harness's accepted item is stored under the pot home slug.
+    const storageHarnessSlug = await workItemStorageSlug(input.harnessSlug, input.workspaceId);
+    const item = await getWorkItem(input.workItemId, storageHarnessSlug);
+    if (!item || item.harness !== storageHarnessSlug) {
       throw new Error('operation worker launch requires a work item in its harness');
     }
     const payload = item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
@@ -501,6 +537,9 @@ export async function resolveAcceptedOperationWorkerBinding(input: {
     if (!payload?.blueprintOperation) return null;
 
     const { pin, operation } = await readAcceptedBlueprintDirectWorkItem(input.sql, input.workspaceId, item);
+    if (pin.harnessSlug !== input.harnessSlug) {
+      throw new Error('operation worker launch requires a work item in its harness');
+    }
     if (operation.execution?.kind !== 'agent' || operation.execution.role !== input.role) {
       throw new Error('accepted blueprint operation does not authorize this worker role');
     }
@@ -520,7 +559,8 @@ export async function resolveAcceptedOperationWorkerBinding(input: {
     const requiredTools = [...new Set(operation.policy.requiredTools)].sort();
     return {
       workItemId: item.id,
-      harnessSlug: item.harness,
+      harnessSlug: input.harnessSlug,
+      storageHarnessSlug,
       operationId: pin.operationId,
       specificationRevision: pin.specificationRevision,
       pin,

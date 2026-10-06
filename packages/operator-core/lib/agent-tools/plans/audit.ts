@@ -45,6 +45,7 @@ import {
   recordPlanAudit,
   repoCitationContextForHarness,
   resolveCitation,
+  resolvePlanItemHomeHarness,
   summarizeCoverage,
   validateActivationAuditPlanTargets,
   type AuditCitation,
@@ -60,17 +61,20 @@ import {
 } from '../sessions/_shared';
 import { ensureActivationAuditRepairFiling } from './activation-audit-repair';
 import {
+  currentPlanItemIds,
   dbRefOriginLookup,
   evaluateActivationItemProvenance,
   itemProvenanceMissingProblems,
 } from '../../activation-item-provenance';
 import { persistDerivedDraftClauses } from '../../derive-draft-spec-clauses';
 import { detectUnderReadFromSource } from '../../activation-under-read';
+import { restrictedTurnSql } from '../../personal-vault/transcript-exclusion';
 import { assertSourceSpan } from '../../activation-source-span';
 import { setSpecClause } from './spec-clauses-store';
 import { getPlanRow } from './source';
 import {
   MAX_BAR_PROJECTION_EDGES,
+  acceptanceBarProjectionConflictDetail,
   unexpectedAcceptanceBarProjectionIds,
   validateAcceptanceBarSource,
   acceptanceBarSourceContractProblems,
@@ -89,9 +93,9 @@ const citationPathSchema = z.string().min(1).describe(
   'Repo-relative path. No leading `/` or `~`, no `..` segments — a citation that needs one is not evidence.',
 );
 const citationOptionalFields = {
-  line: z.number().int().positive().optional().describe('Optional line number, validated against the file\'s ACTUAL length — a hallucinated line is refused.'),
+  line: z.number().int().positive().optional().describe('Optional line number; must exist in the cited file.'),
   symbol: z.string().min(1).optional().describe('Optional symbol that must literally appear in the cited file.'),
-  ref: z.string().min(1).optional().describe('Doc id — for a `doc` citation naming a PG-canonical doc rather than a tree file. Requires `reason` too.'),
+  ref: z.string().min(1).optional().describe('PG-canonical doc id for a `doc` citation; requires `reason`.'),
   reason: z.string().min(1).optional().describe('REQUIRED for kind `none`, and for a `doc` cited by `ref` alone: why this item has no code-resolvable artifact.'),
 };
 const citationSchema = z.union([
@@ -179,7 +183,13 @@ const itemProvenanceSchema = z.discriminatedUnion('kind', [
     kind: z.literal('agent-added'),
     reason: z.string().min(1).max(2000).describe('Why the agent added it; shown to the owner.'),
   }),
-]);
+]).meta({
+  // The compact discovery projection merges array-item union fields. Preserve
+  // this branch contract beside the schema so callers cannot combine fields
+  // from the `derived` and `agent-added` variants.
+  'x-papercusp-call-constraint':
+    'when kind=derived => from required; when kind!=derived => from forbidden; when kind=agent-added => note forbidden; when kind=agent-added => reason required; when kind!=agent-added => reason forbidden',
+});
 
 // RSR-P-008-A: the activation rules are reported alongside any shape defect.
 const argsSchema = refineEvenWithShapeIssues(z.object({
@@ -244,6 +254,9 @@ const argsSchema = refineEvenWithShapeIssues(z.object({
       }
     }
   }
+}).meta({
+  'x-papercusp-call-constraint':
+    'phase=activation => classRef required; items, findings, auditedSha forbidden. phase=completion (including omitted phase) => items required; classRef, sourceRanges, mappings, itemProvenance, repairedOmissions, rejectedOrSuperseded, unresolvedBlockers forbidden.',
 });
 
 interface Problem {
@@ -481,7 +494,24 @@ export default defineTool({
           } };
         }
       }
-      const merged = mergeActivationAuditCoverage(previousAudit?.activation, submittedActivation);
+      const currentPlan = await getPlanRow(args.slug, {
+        workspaceId,
+        harnessSlug: harnessSlug ?? '',
+      });
+      // A prior target whose destination the current plan no longer contains (an R-N removed
+      // by a rubric amendment, a deleted item/decision/section) is dead: it may be retired,
+      // because keeping it could never pass the plan-target validation below. A malformed
+      // target is not "dead" — it never named a destination, so it stays a conflict.
+      const deadTargets = previousAudit?.activation && currentPlan
+        ? validateActivationAuditPlanTargets(previousAudit.activation, currentPlan.content)
+          .filter((problem) => problem.code !== 'invalid_plan_target')
+          .map(({ mappingId, target }) => ({ mappingId, target }))
+        : [];
+      const merged = mergeActivationAuditCoverage(previousAudit?.activation, submittedActivation, {
+        deadTargets,
+        // WI-10006324: retire carried provenance for items the plan has since dropped.
+        ...(currentPlan ? { liveItemIds: currentPlanItemIds(currentPlan.content) } : {}),
+      });
       if (!merged.ok) {
         return { data: {
           ok: false as const,
@@ -499,10 +529,6 @@ export default defineTool({
       const sourceRanges = activation.sourceRanges;
       const mappings = activation.mappings;
 
-      const currentPlan = await getPlanRow(args.slug, {
-        workspaceId,
-        harnessSlug: harnessSlug ?? '',
-      });
       if (dryRun && !currentPlan) {
         return { data: {
           ok: false as const,
@@ -740,6 +766,7 @@ export default defineTool({
             projectionIdentities,
           );
           if (unexpected.length > 0) {
+            const detail = acceptanceBarProjectionConflictDetail(unexpected);
             return { data: {
               ok: false as const,
               slug: args.slug,
@@ -749,9 +776,9 @@ export default defineTool({
               error: 'bar_projection_conflict' as const,
               problems: [{
                 code: 'bar_projection_conflict' as const,
-                detail: `stored BAR projection(s) are outside the exact current map: ${unexpected.join(', ')}`,
+                detail,
               }],
-              message: `1 BAR seed problem(s): stored BAR projection(s) are outside the exact current map: ${unexpected.join(', ')}`,
+              message: `1 BAR seed problem(s): ${detail}`,
             } };
           }
           // P-003/P-029: mirror the writer's activation contract-completeness refusal.
@@ -789,6 +816,7 @@ export default defineTool({
           mappings: mappings.length,
           carriedMappings: merged.carriedMappingIds.length,
           carriedMappingIds: merged.carriedMappingIds,
+          ...(merged.retiredTargets.length ? { retiredTargets: merged.retiredTargets } : {}),
           coverageBaseAuditSeq: previousAudit?.auditSeq ?? null,
           sourceRefsResolved: resolutions.length,
           itemProvenance: itemProvenanceResult,
@@ -874,7 +902,11 @@ export default defineTool({
               // Liveness: an empty read is UNKNOWN, and the deriver fails open on it
               // (D-040's rule) — `setSpecClause` is the backstop that refuses a target the
               // plan does not actually have.
-              planItems: await getPlanItemStatuses(args.slug),
+              // WI-10005174: `harnessSlug` is only a candidate here; read the items
+              // of the harness that actually owns the plan.
+              planItems: await getPlanItemStatuses(args.slug, {
+                harnessSlug: await resolvePlanItemHomeHarness(args.slug, harnessSlug),
+              }),
               actorId: resolveAgentIdentity(ctx as Parameters<typeof resolveAgentIdentity>[0]).ownerId,
             },
             setSpecClause,
@@ -924,6 +956,9 @@ export default defineTool({
                  )
                  AND turns.turn_idx BETWEEN ${Math.min(...ranges.map((r) => r.fromTurn))}
                                         AND ${Math.max(...ranges.map((r) => r.toTurn))}
+                 -- D-006: the detector echoes uncited turn text back to the auditor, so a
+                 -- turn another agent recorded inside its disclosure window never enters it.
+                 AND NOT ${restrictedTurnSql(sql, 'turns', [resolveAgentIdentity(ctx as Parameters<typeof resolveAgentIdentity>[0]).ownerId])}
                ORDER BY turns.source_kind, turns.session_id, turns.turn_idx
                LIMIT ${cap}`;
             // Over-fetches across gaps between ranges of the SAME session; detectUnderRead
@@ -1014,6 +1049,7 @@ export default defineTool({
         mappings: mappings.length,
         carriedMappings: merged.carriedMappingIds.length,
         carriedMappingIds: merged.carriedMappingIds,
+        ...(merged.retiredTargets.length ? { retiredTargets: merged.retiredTargets } : {}),
         coverageBaseAuditSeq: previousAudit?.auditSeq ?? null,
         sourceRefsResolved: resolutions.length,
         sourceRefsFromArchive: resolutions.filter((resolution) => resolution.source === 'archive').length,
@@ -1037,7 +1073,11 @@ export default defineTool({
     // The plan's real items. An empty read is ambiguous between "no such plan" and "the
     // index read failed", and BOTH must refuse: validating against an empty list would
     // accept every itemId, which is the opposite of this tool's job.
-    const planItems = await getPlanItemStatuses(args.slug);
+    // WI-10005174: scope to the plan's own harness; a same-slug plan in another harness
+    // would otherwise lend its item ids to this validation.
+    const planItems = await getPlanItemStatuses(args.slug, {
+      harnessSlug: await resolvePlanItemHomeHarness(args.slug, harnessSlug),
+    });
     if (planItems.length === 0) {
       return { data: {
         ok: false as const,

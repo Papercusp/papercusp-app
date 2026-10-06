@@ -16,7 +16,8 @@ import { harnessArg, harnessScopedCtx } from '../_harness-scope';
 import { ctxToPlanSourceOpts } from './_ctx-opts';
 import { getFlag } from '@papercusp/flags/server';
 import { FLAGS } from '@papercusp/flags';
-import { getPlanRow } from './source';
+import { getPlanRow, planItemsForRow } from './source';
+import { isTerminalItemStatus } from '../../fleet-drained-events';
 import { checkPlanStartable } from './plan-start-gate';
 import { armPlanSchedule } from '../../harness/routines/arm-plan-schedule';
 import { bulkContent, mergeIds, runBulk } from '../_bulk';
@@ -53,15 +54,19 @@ export default defineTool({
   args: argsSchema,
   async handler(args, ctx) {
     if (!(await getFlag(FLAGS.SCHEDULED_PLANS, 'system'))) {
+      // Every item is refused, so the envelope is NOT ok: ok is the conjunction of results[].ok
+      // (== counts.failed === 0), never a constant. A hardcoded `ok: true` here let a caller
+      // toast "armed" while every slug was refused (WI-10002111 / R-2).
+      const refused = mergeIds(args.slug, args.slugs);
       return bulkContent({
-        ok: true,
-        results: mergeIds(args.slug, args.slugs).map((slug) => ({
+        ok: refused.length === 0,
+        results: refused.map((slug) => ({
           ok: false,
           slug,
           error: 'feature_disabled',
           detail: 'the papercusp-scheduled-plans flag is off',
         })),
-        counts: { ok: 0, failed: mergeIds(args.slug, args.slugs).length },
+        counts: { ok: 0, failed: refused.length },
       });
     }
     const opts = await ctxToPlanSourceOpts(harnessScopedCtx(args.harness, ctx));
@@ -78,6 +83,27 @@ export default defineTool({
             error: 'not_scheduled',
             detail: 'author a schedule with plans:set-schedule first',
           };
+        }
+        // WI-10004721: every scheduled fire CLONES this plan and promotes its open
+        // items. If every item is already done/dropped (a shipped plan), each fire is
+        // born finished, mints zero work and reads like a healthy run — the
+        // work-queue-admission schedule did that 21 days running after being re-armed
+        // as a "review loop". Refuse at arm time, in front of whoever is arming it.
+        // An operation-backed schedule fires a registered operation instead of
+        // cloning items, so this check does not apply to it (the fire-time guard in
+        // plan-run-action still does). A plan with no items keeps its old behaviour.
+        if (!plan.schedule?.operation) {
+          const items = planItemsForRow(plan);
+          if (items.length > 0 && items.every((item) => isTerminalItemStatus(item.storedStatus))) {
+            return {
+              ok: false as const,
+              slug,
+              error: 'nothing_to_run',
+              detail:
+                `all ${items.length} item(s) are done/dropped, so every fire would clone a finished plan ` +
+                'and mint no work. Reopen or add items, or schedule a template whose items start todo.',
+            };
+          }
         }
         // P-006/P-008 start gate. Arming runs nothing itself, which is exactly why it
         // is checked here: an armed plan whose required inputs are unset would fail in

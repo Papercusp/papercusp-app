@@ -56,6 +56,39 @@ export interface CandidateProposal {
   diffFromParent: string;
   /** Cost of the proposer call, including a response that later fails validation. */
   costUsd: number;
+  /** The reported cost is only a subtotal; keep the reservation open. */
+  costUsdMeasurementMissing?: boolean;
+  unreportedFrames?: number;
+}
+
+/** Native judge/proposer network recovery. Another dispatch is safe here only
+ * after a complete, explicitly measured zero-cost failure. A network error
+ * alone does not establish that inference never ran; preserve unknown spend
+ * for the caller's reservation/settlement path. */
+export function withGymLlmNetworkRetry<A extends unknown[], R>(
+  fn: (...args: A) => Promise<R>,
+  deps: { log: (message: string) => void; sleep?: (ms: number) => Promise<void> },
+): (...args: A) => Promise<R> {
+  const sleep = deps.sleep ?? (async (ms: number) => { await new Promise(resolve => setTimeout(resolve, ms)); });
+  return async (...args: A): Promise<R> => {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try { return await fn(...args); }
+      catch (error) {
+        lastErr = error;
+        const message = error instanceof Error ? error.message : String(error);
+        const usage = error as { costUsd?: unknown; costUsdMeasurementMissing?: unknown; unreportedFrames?: unknown } | null;
+        const measuredZero = usage?.costUsd === 0 &&
+          (usage.costUsdMeasurementMissing === undefined || usage.costUsdMeasurementMissing === false) &&
+          (usage.unreportedFrames === undefined || usage.unreportedFrames === 0);
+        if (!/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(message) ||
+          !measuredZero || attempt === 2) throw error;
+        deps.log(`llm call known-zero network failure (attempt ${attempt + 1}/3): ${message.slice(0, 120)}`);
+        await sleep(2_000 * (attempt + 1));
+      }
+    }
+    throw lastErr;
+  };
 }
 
 /** Read a provider-reported cost from a successful value or a thrown error. */
@@ -67,16 +100,19 @@ export function costUsdOf(value: unknown): number {
   return typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0 ? candidate : 0;
 }
 
-/** Preserve already-burned provider spend when a call fails after dispatch. */
-export function throwWithCostUsd(error: unknown, incurredCostUsd: number): never {
+/** Preserve the known subtotal separately from whether this call's usage is complete.
+ * Validation failures may supply the completed response as their usage evidence. */
+export function throwWithCostUsd(error: unknown, incurredCostUsd: number, usageEvidence: unknown = error): never {
+  const usage = usageEvidence as { costUsd?: unknown; costUsdMeasurementMissing?: unknown; unreportedFrames?: unknown } | null;
+  const measured = typeof usage?.costUsd === 'number' && Number.isFinite(usage.costUsd) && usage.costUsd >= 0;
+  const unreportedFrames = typeof usage?.unreportedFrames === 'number' && usage.unreportedFrames > 0
+    ? usage.unreportedFrames : undefined;
+  const missing = !measured || usage?.costUsdMeasurementMissing === true || unreportedFrames !== undefined;
   const costUsd = costUsdOf(error) + costUsdOf(incurredCostUsd);
-  if (error instanceof Error) {
-    Object.assign(error, { costUsd });
-    throw error;
-  }
-  const wrapped = new Error(String(error));
-  Object.assign(wrapped, { costUsd });
-  throw wrapped;
+  const failure = error instanceof Error ? error : new Error(String(error));
+  Object.assign(failure, { costUsd, ...(missing ? { costUsdMeasurementMissing: true } : {}),
+    ...(unreportedFrames === undefined ? {} : { unreportedFrames }) });
+  throw failure;
 }
 
 export function buildProposerPrompt(input: ProposeInput): { system: string; user: string } {
@@ -178,9 +214,13 @@ export async function proposeCandidate(
     planVariantOverlay(overlay);
 
     const diffFromParent = Object.keys(proposal.promptOverrides).sort().join(', ');
-    return { overlay, rationale: proposal.rationale, diffFromParent, costUsd: costUsdOf(res.costUsd) };
+    const measured = typeof res.costUsd === 'number' && Number.isFinite(res.costUsd) && res.costUsd >= 0;
+    const missing = !measured || res.costUsdMeasurementMissing === true || (res.unreportedFrames ?? 0) > 0;
+    return { overlay, rationale: proposal.rationale, diffFromParent, costUsd: costUsdOf(res.costUsd),
+      ...(missing ? { costUsdMeasurementMissing: true } : {}),
+      ...(res.unreportedFrames === undefined ? {} : { unreportedFrames: res.unreportedFrames }) };
   } catch (error) {
     // The model response may have been billed even when parsing/validation rejects it.
-    throwWithCostUsd(error, res.costUsd);
+    throwWithCostUsd(error, res.costUsd, res);
   }
 }

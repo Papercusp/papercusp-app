@@ -65,6 +65,11 @@
       "types": "./src/execution-details.ts",
       "import": "./src/execution-details.ts",
       "default": "./src/execution-details.ts"
+    },
+    "./console-noise-filter": {
+      "types": "./src/console-noise-filter.ts",
+      "import": "./src/console-noise-filter.ts",
+      "default": "./src/console-noise-filter.ts"
     }
   },
   "scripts": {
@@ -80,6 +85,7 @@
     "msw": "^2.7.0",
     "supertest": "^7.0.0",
     "testcontainers": "^11.0.0",
+    "tsconfck": "^3.1.6",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest-fail-on-console": "^0.7.1"
   },

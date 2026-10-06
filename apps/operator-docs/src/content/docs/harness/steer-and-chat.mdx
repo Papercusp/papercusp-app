@@ -4,17 +4,21 @@
 # Edit the doc with docs:author { overwrite: true } — a hand-edit here is REFUSED by
 # the next projection (it cannot tell your edit from corruption), so it blocks the
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
-title: Steering & chat
-description: Which surface to use to steer running agents — durable messages, role-scoped chats, live coord nudges, turn interruption, and human gates.
+title: "Steering & chat"
+description: "Which surface to use to steer running agents — durable messages, role-scoped chats, live coord nudges, turn interruption, and human gates."
+type: Insight
+discovered: 2026-10-02
+status: active
 documents:
-  - packages/operator-core/lib/agent-tools/messages/send.ts
-  - packages/agent-mcp/src/tools/messages/inbox.ts
-  - packages/operator-core/lib/agent-tools/turn/interrupt.ts
-  - packages/operator-core/lib/agent-tools/agent_chats/chat.ts
+  - "packages/operator-core/lib/agent-tools/messages/send.ts"
+  - "packages/agent-mcp/src/tools/messages/inbox.ts"
+  - "packages/operator-core/lib/agent-tools/turn/interrupt.ts"
+  - "packages/operator-core/lib/agent-tools/agent_chats/chat.ts"
+  - "packages/operator-core/lib/agent-tools/coordination/tools/ask.ts"
 plans:
-  - legacy-docs-audit-revival-2026-06-06
-  - turn-lifecycle-control-2026-06-08
-  - directed-wake-honesty-and-spawn-handoff-2026-06-14
+  - "legacy-docs-audit-revival-2026-06-06"
+  - "turn-lifecycle-control-2026-06-08"
+  - "directed-wake-honesty-and-spawn-handoff-2026-06-14"
 ---
 
 The first-generation harness had one steering surface: a chat box in the
@@ -111,16 +115,19 @@ You cannot interrupt your own turn.
 
 ## Human gates: questions, escalations, approvals
 
-Agents pause for humans through structured gates rather than free chat: a
+Agents request human decisions through structured gates rather than free chat: a
 mid-tool decision card (`ctx.askUser` / `chat:ask_choice`; with the
 `papercusp-inbox-durable-escalations` flag the card is also mirrored to a
 durable coord escalation so it can be answered later from the inbox),
-knowledge-first questions routed by topic (`coord:ask` → a conversation
-answered via `conversations:answer`), pipeline escalations
+durable owner questions via `coord:ask-owner`, pipeline escalations
 (`harness:escalation` surfaces the blocker; resolution re-enters the
 pipeline), and plan items marked `needs-human` (which also block a DONE
 finalization — see [Smoke-test gate](/internal/docs/harness/smoke-test) for
 the gate family).
+
+The owner's Ask-an-agent UI uses `coord:ask` for questions to a named agent.
+It is owner-UI-only; agents contact peers with `coord:send` or
+`coord:message-agent`.
 
 ## Observing without steering
 

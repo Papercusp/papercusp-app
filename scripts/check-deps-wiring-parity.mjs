@@ -841,14 +841,24 @@ const DRILL_VS_PRODUCTION =
  * `submodule-origin-push` leg) calls `runGitSync` against a DISPOSABLE super/sub repo pair it clones
  * under its own temp root, to prove exactly one thing: the `beforePush` owner-challenge fence
  * (`requireHiveEffectAuthority`) gates a submodule-origin push. Production (`git-sync-action.ts`)
- * also wires `loadRoster` (commit attribution from fleet presence) and `refreshLiveLockHoldings`
- * (re-read peers' live file locks before staging). Neither concern exists in the fixture: no peer
- * holds a lock on a temp clone and no fleet roster attributes its commits, so wiring the real
+ * also wires `loadRoster` (commit attribution from fleet presence), `loadMigrationFenceRoster`
+ * (attribution for paths fenced after a managed child repo's migration refusal), and `refreshLiveLockHoldings`
+ * (re-read peers' live file locks before staging). None of these concerns exists in the fixture: no peer
+ * holds a lock on a temp clone, no fleet roster attributes its commits, and no managed migration
+ * reservation owns its disposable child repositories, so wiring the real
  * readers would query the operator DB for state that cannot apply. Omitting them is correct.
  */
 const PHASE_I_FENCE_FIXTURE =
   'adjudicated 2026-09-30: phase-I drill runs git-sync on a disposable temp clone to prove the beforePush ' +
-  'owner-challenge fence; fleet roster attribution and peer live-lock refresh cannot apply there';
+  'owner-challenge fence; fleet roster attribution, managed migration-fence attribution and peer live-lock refresh cannot apply there';
+
+// WI-10006015: these are message-specific overrides, not shared prerequisites.
+// messages.ts uses the supplied body without bodyWithMsgId, and the ordinary
+// coord log append without persistEnvelope. The goal-reference producer needs
+// transactional persistence; fleet cues need their freshly minted id in prose.
+const SEND_MESSAGE_SPECIFIC_OVERRIDES =
+  'adjudicated WI-10006015: ordinary coord sends supply body directly; fleet cues use the default coord-log ' +
+  'append rather than the goal-reference transaction; each callback applies only to its producer';
 
 const PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK =
   'inTransaction runs INSIDE the plan write transaction and exists for applyPlanDrainTransition ' +
@@ -890,6 +900,47 @@ const LIVE_LOCK_IMPORTER_NO_HEAD_FALLBACK =
 const AUDIT_ROW_OWN_WORKSPACE_DEFAULT =
   'intentional (adjudicated 2026-09-30, WI-10004167): omitting workspaceId writes to the process\'s own workspace ' +
   '(desktop-audit.ts:163-165 `activeWorkspaceId()`); only the control-plane relay copy targets another workspace.';
+
+/**
+ * WI-10005393 — `AwsSdkCredentialResolvers.getWebIdentityToken` is consumed ONLY by the
+ * `fromWebToken` branch of `createAwsSdkCredentialProvider` (aws-sdk-client.ts:452-453:
+ * `const mint = resolvers.getWebIdentityToken; if (!mint) throw …`), and that branch is
+ * reachable only from the hosted OIDC method (`planAwsSdkCredentialProvider`,
+ * aws-connection.ts:54+). The two sites below build a provider ONLY for a hosted
+ * `customer-role` source — hosted-aws-auth.ts `customerRoleSource` and
+ * hosted-aws-host-discovery.ts both throw `hosted_provider_delegation_aws_method_not_organization_bound`
+ * for any other method — and a `customer-role` source plans to `fromTemporaryCredentials`
+ * (aws-connection.ts:37-52), never `fromWebToken`. So the minter is unreachable at these
+ * sites, and its absence cannot become a silent no-op: if the plan ever DID reach
+ * `fromWebToken`, `aws_workspace_host_web_identity_token_source_required` would fail LOUD.
+ * The wired site (aws-sdk-client.ts:596) serves every credential method, which is why it
+ * carries the seam. Wiring a minter here would be dead code, not a fix.
+ */
+const CUSTOMER_ROLE_NEVER_WEB_IDENTITY =
+  'WI-10005393 adjudicated: this site builds credentials only for a hosted customer-role source, which plans to fromTemporaryCredentials and never reaches the fromWebToken branch that reads getWebIdentityToken (aws-sdk-client.ts:452); an absent minter there fails loud';
+
+/**
+ * WI-10006261 adjudicated. Outbound dispatch has no failure classifier to feed: the sync
+ * driver maps a reconnect to ProviderSyncFailure{kind:'auth'} (connector-runtime.ts:386)
+ * because that marks the SOURCE as needing reconnection, while an outbound verb simply
+ * returns the refusal. The unwired seam therefore falls to a real, named default —
+ * HostFetchError('token-unavailable', 'source "<id>" must be reconnected (<reason>)')
+ * (source-host-fetch.ts:56-60) — not a silent no-op.
+ */
+const OUTBOUND_RECONNECT_DEFAULT_REFUSAL =
+  'WI-10006261 adjudicated: outbound dispatch has no sync failure classifier; an unwired reconnectRequired throws ' +
+  "HostFetchError('token-unavailable', '…must be reconnected') (source-host-fetch.ts:56-60), a real refusal";
+
+/**
+ * WI-10006261 adjudicated. The connector sync driver's test seam is the WHOLE host fetch
+ * (ConnectorSyncDeps.hostFetchFor, connector-runtime.ts:117), not the raw fetch beneath it;
+ * production leaves fetchImpl unset so createHostFetch uses global fetch
+ * (host-fetch.ts:60 `deps.fetchImpl ?? fetch`). Outbound dispatch wires fetchImpl only
+ * because OutboundDispatchDeps.hostFetchImpl (provider-dispatch.ts:77) is its HTTP-mock seam.
+ */
+const SYNC_FETCH_SEAM_IS_HOSTFETCHFOR =
+  'WI-10006261 adjudicated: sync tests replace the whole host fetch via ConnectorSyncDeps.hostFetchFor ' +
+  '(connector-runtime.ts:117); production fetchImpl defaults to global fetch (host-fetch.ts:60)';
 
 const FAIL_BASELINE = new Map([
   // Historical seed from the measured `--list` run after the WI-1745363 attribution fix:
@@ -949,7 +1000,10 @@ const FAIL_BASELINE = new Map([
   ['BuildScoutCycleDepsOptions|packages/operator-core/lib/scout/register-scout-action.ts|noveltyCorpus', OVERRIDE_WITH_REAL_DEFAULT],
   ['BuildScoutCycleDepsOptions|packages/operator-core/lib/scout/rubric-live-drill.ts|onScoutDraftCreated', DRILL_VS_PRODUCTION],
   ['RunGitSyncOpts|packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts|loadRoster', PHASE_I_FENCE_FIXTURE],
+  ['RunGitSyncOpts|packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts|loadMigrationFenceRoster', PHASE_I_FENCE_FIXTURE],
   ['RunGitSyncOpts|packages/operator-core/lib/sync/pot-git/physical-drill-phase-i.ts|refreshLiveLockHoldings', PHASE_I_FENCE_FIXTURE],
+  ['SendOptions|packages/operator-core/lib/agent-tools/coordination/tools/send.ts|bodyWithMsgId', SEND_MESSAGE_SPECIFIC_OVERRIDES],
+  ['SendOptions|packages/operator-core/lib/agent-tools/fleet_registry/control-core.ts|persistEnvelope', SEND_MESSAGE_SPECIFIC_OVERRIDES],
   ['DesktopAuditDeps|packages/operator-core/lib/workspace-host/hosted-workspace-host-runtime.ts|now', OVERRIDE_WITH_REAL_DEFAULT],
   // 2026-09-30 — WI-10004167 added the control-plane relay copy (hosted-handler.ts), which
   // injects workspaceId and takes the Date.now default for `now` (desktop-audit.ts `deps.now ?? Date.now`).
@@ -983,7 +1037,6 @@ const FAIL_BASELINE = new Map([
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-output-schema.ts|revisionInTransaction', PLAN_REVISION_HOOK_MODES],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-plan-status.ts|revisionInTransaction', PLAN_REVISION_HOOK_MODES],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-status.ts|revisionInTransaction', PLAN_REVISION_HOOK_MODES],
-  ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-template-data.ts|revisionInTransaction', PLAN_REVISION_HOOK_MODES],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-title.ts|revisionInTransaction', PLAN_REVISION_HOOK_MODES],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/start.ts|afterWrite', PLAN_REVISION_HOOK_MODES],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/start.ts|revisionInTransaction', PLAN_REVISION_HOOK_MODES],
@@ -1010,7 +1063,6 @@ const FAIL_BASELINE = new Map([
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-item-phase.ts|inTransaction', PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-now.ts|inTransaction', PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-output-schema.ts|inTransaction', PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK],
-  ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-plan-status.ts|inTransaction', PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-template-data.ts|inTransaction', PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/set-title.ts|inTransaction', PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK],
   ['WithPlanLockOpts|packages/operator-core/lib/agent-tools/plans/start.ts|inTransaction', PLAN_LOCK_DRAIN_ONLY_TRANSACTION_HOOK],
@@ -1028,6 +1080,14 @@ const FAIL_BASELINE = new Map([
   // call site states: a dependency held by a live lock may be changing its EXPORTS,
   // so an old copy at HEAD cannot satisfy the importer's new symbols.
   ['QuarantineImportGuardDeps|packages/operator-core/lib/harness/git-sync/run-git-sync.ts|isResolvableAtHead', LIVE_LOCK_IMPORTER_NO_HEAD_FALLBACK],
+
+  // WI-10005393 — rows taken from the measured `--list` population, not hand-written.
+  ['AwsSdkCredentialResolvers|packages/operator-core/lib/workspace-host/hosted-aws-auth.ts|getWebIdentityToken', CUSTOMER_ROLE_NEVER_WEB_IDENTITY],
+  ['AwsSdkCredentialResolvers|packages/operator-core/lib/workspace-host/hosted-aws-host-discovery.ts|getWebIdentityToken', CUSTOMER_ROLE_NEVER_WEB_IDENTITY],
+
+  // WI-10006261 — the two SourceHostFetchOptions sites (plan generalized-integrations…, D-014.4).
+  ['SourceHostFetchOptions|packages/operator-core/lib/capability-verbs/provider-dispatch.ts|reconnectRequired', OUTBOUND_RECONNECT_DEFAULT_REFUSAL],
+  ['SourceHostFetchOptions|packages/operator-core/lib/providers/connector-runtime.ts|fetchImpl', SYNC_FETCH_SEAM_IS_HOSTFETCHFOR],
 ]);
 
 /**
@@ -1195,7 +1255,8 @@ function main() {
     );
   }
 
-  if (staleBaseline.length > 0) {
+  // JSON mode already includes staleBaseline; prose after it corrupts the document.
+  if (!opts.json && staleBaseline.length > 0) {
     if (opts.includeObservers) {
       // ⚠ DO NOT report these as prunable. `--include-observers` widens the seam set,
       // which changes each finding's `missing` list — and the baseline key is built

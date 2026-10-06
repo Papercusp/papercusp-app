@@ -56,42 +56,11 @@ roles:
       - coord:send
       - "{{SAFE_DOMAIN_TOOL}}"
 
-# The deterministic app submits this reusable operation through blueprint:submit.
-# It targets the existing plan template rather than copying its DAG. The pinned
-# ref makes a receipt replay resolve the same definition even after later edits.
-operations:
-  - id: "{{OPERATION_ID}}"
-    version: "{{OPERATION_VERSION}}"
-    description: >-
-      Run {{PLAN_TEMPLATE_SLUG}} for one typed {{WORK_UNIT_NOUN}} request and
-      return its validated {{CONTRACT_NAME}} output.
-    target:
-      kind: plan
-      template:
-        kind: plan-template
-        ref: "{{PLAN_TEMPLATE_SLUG}}"
-        revision: "{{PLAN_TEMPLATE_REVISION}}"
-        contentHash: "{{PLAN_TEMPLATE_CONTENT_HASH_SHA256}}"
-    inputSchema:
-      type: object
-      properties:
-        "{{OPERATION_INPUT_FIELD}}":
-          type: string
-        provenance:
-          type: object
-        trigger:
-          type: object
-      required:
-        - "{{OPERATION_INPUT_FIELD}}"
-      additionalProperties: false
-    acceptance:
-      resultSchema:
-        type: object
-        properties:
-          "{{OPERATION_RESULT_FIELD}}": {}
-        required:
-          - "{{OPERATION_RESULT_FIELD}}"
-        additionalProperties: false
+# No `operations:` here. The app's agent tasks are blueprint operations declared
+# in the app's ROOT `.papercusp/blueprint.yaml` (materialized from
+# reference/app-root.blueprint.yaml), the only place `blueprint:submit` resolves
+# them (app-agent-tasks-durable-execution-2026-10-06#D-003). The seam-round-trip
+# check fails if an operation reappears in this pots-plane blueprint.
 
 gym:
   collectTrace: work-item-output

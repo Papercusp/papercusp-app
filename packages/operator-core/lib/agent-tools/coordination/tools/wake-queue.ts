@@ -26,7 +26,7 @@ import {
   clearPendingWakes,
   type PendingWake,
 } from '../pending-wakes';
-import { inboxWakeKey } from '../inbox-wake';
+import { inboxWakeKey, MANUAL_WAKE_QUEUE_RELEASE_SOURCE_PREFIX } from '../inbox-wake';
 import { emitAwaitedEvent } from '../../../events/await/engine';
 
 /** A staged wake's display label: its summary, ×count when re-fires coalesced. */
@@ -144,7 +144,7 @@ export default defineTool({
         key: inboxWakeKey(args.agent),
         summary: args.edited ?? union.summary,
         payload: union.payload,
-        source: headline.source ?? undefined,
+        source: MANUAL_WAKE_QUEUE_RELEASE_SOURCE_PREFIX + (headline.source ?? 'coalesced'),
         workspaceId: headline.workspaceId ?? undefined,
       });
       await clearPendingWakes(args.agent);
@@ -200,7 +200,7 @@ export default defineTool({
       key: inboxWakeKey(args.agent),
       summary: args.edited ?? wakeLabel(pw),
       payload: pw.payload,
-      source: pw.source ?? undefined,
+      source: MANUAL_WAKE_QUEUE_RELEASE_SOURCE_PREFIX + (pw.source ?? 'unknown'),
       workspaceId: pw.workspaceId ?? undefined,
     });
     await releasePendingWake(args.id);

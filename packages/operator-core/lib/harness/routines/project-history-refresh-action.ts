@@ -452,4 +452,5 @@ registerSystemAction('project-history-refresh', async (ctx: SystemActionCtx) => 
   } catch (e) {
     console.warn(`[project-history-refresh] health bookkeeping skipped: ${e instanceof Error ? e.message : String(e)}`);
   }
-});
+  // WI-10005745: spawns the tree's own CLI bin (libs/papercusp/packages/cli/bin/papercusp).
+}, { executesIntegrationTreeCode: true });

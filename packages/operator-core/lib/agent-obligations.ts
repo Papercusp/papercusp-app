@@ -41,7 +41,23 @@ export type AgentObligationFamily =
    * — so it is exactly the one a compaction drops without trace, leaving a
    * session parked on a key nobody will ever fire.
    */
-  | 'waiting-on';
+  | 'waiting-on'
+  /**
+   * A consult opened under `latency_contract:'proceed'` whose ASSUMPTION the
+   * originator has not reconciled. 'proceed' lets the agent keep working before
+   * the answer arrives, which incurs a debt: if the answer (or its absence)
+   * contradicts what was assumed, work built on the assumption must be redone.
+   * Until now that debt was an honour-system instruction — no row, no terminal
+   * state, so a compaction or a lapsed consult silently dropped it.
+   */
+  | 'consult-reconciliation'
+  /**
+   * P-005 / D-030 step 6: a fleet this session leads is under-staffed and nothing
+   * will restore it (the headcount governor does not hold it). Rendered on every
+   * wake so a leader loop cannot keep recording quiet wakes over an empty fleet;
+   * clears when the governor holds the fleet, it reaches target, or it winds down.
+   */
+  | 'fleet-staffing';
 export type AgentObligationStatus = 'due' | 'in-progress' | 'blocked' | 'satisfied' | 'not-applicable' | 'unknown';
 export type AgentObligationPriority = 'critical' | 'high' | 'normal' | 'low';
 export type AgentObligationFreshness = 'current' | 'stale' | 'unknown';
@@ -629,6 +645,17 @@ export function evaluateAgentObligationRecoveryBoundary(input: {
   boundary: string;
   phase: 'admission' | 'operation';
   operation: AgentObligationOperation;
+  /**
+   * WI-10004401: the requested operation reaches the boundary AFTER the tool has
+   * normalized its arguments (e.g. fleet:launch-on-plan clamps `name` to a 60-char
+   * slug), while the provider authored its recovery args from the RAW source. An
+   * exact compare of one normalized side against one raw side can never be
+   * satisfied for any value the normalization changes. The tool passes the SAME
+   * normalization it applies itself; it is applied to BOTH sides of every
+   * compared key, so the comparison is between equally-normalized values and a
+   * genuinely different value still refuses.
+   */
+  normalizeArg?: (key: string, value: unknown) => unknown;
 }): AgentObligationBoundaryVerdict {
   const base = evaluateAgentObligationBoundary(input);
   const policy = input.obligation.boundary;
@@ -639,13 +666,14 @@ export function evaluateAgentObligationRecoveryBoundary(input: {
 
   const recovery = input.obligation.action;
   const expectedArgs = recovery?.args ?? {};
+  const normalize = input.normalizeArg ?? ((_key: string, value: unknown) => value);
   const exactRecovery =
     (input.obligation.status === 'due' || input.obligation.status === 'in-progress') &&
     recovery?.tool === input.operation.tool &&
     Object.entries(expectedArgs).every(
       ([key, expected]) =>
         Object.prototype.hasOwnProperty.call(input.operation.args, key) &&
-        stableJson(input.operation.args[key]) === stableJson(expected),
+        stableJson(normalize(key, input.operation.args[key])) === stableJson(normalize(key, expected)),
     );
   if (exactRecovery) {
     return {

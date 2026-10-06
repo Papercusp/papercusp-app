@@ -66,6 +66,38 @@ export function bareWorkItemRefs(ref: string): string[] {
   return refComponents(ref).filter((component) => BARE_WORK_ITEM_ID_RE.test(component));
 }
 
+/** `work-item:done:<id>` — the completion await key of exactly one work-item. */
+const WORK_ITEM_DONE_KEY_RE = /^work-item:done:((?:WI|EI|F)-\d+)$/i;
+
+/**
+ * WI-10005020 (P-002 / R-14) — the work-items a blocker ref depends on, when the ref
+ * names NOTHING ELSE. Every component must be a bare id or a `work-item:done:<id>` key;
+ * any other component (a gate, an owner ask, a qualified condition) makes the ref an
+ * external condition and this returns null.
+ *
+ * A dependency on another work-item has exactly one canonical representation — a
+ * `work_item_deps` `blocks` edge — because only the edge is read by the claim floors,
+ * `plans:items` blockedBy and the dependency traversal, and only the edge treats a
+ * DROPPED referent as settled. An `externalBlockers` row naming the same dependency is
+ * invisible to all of them, and a `work-item:done` key whose referent is dropped never
+ * fires, so the row waits forever (EI-21564741982937381).
+ */
+export function pureWorkItemDependencyReferents(ref: string): string[] | null {
+  const components = refComponents(ref);
+  if (!components.length) return null;
+  const referents: string[] = [];
+  for (const component of components) {
+    if (BARE_WORK_ITEM_ID_RE.test(component)) {
+      referents.push(component.toUpperCase());
+      continue;
+    }
+    const done = WORK_ITEM_DONE_KEY_RE.exec(component);
+    if (!done?.[1]) return null;
+    referents.push(done[1].toUpperCase());
+  }
+  return [...new Set(referents)];
+}
+
 /**
  * Returns a problem when `ref` names one or more work-items and nothing else,
  * or null when the ref is a legitimate external condition.

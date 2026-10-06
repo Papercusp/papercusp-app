@@ -595,9 +595,60 @@ export async function postCommerceOffer(
 // The four calls the doors make
 // ---------------------------------------------------------------------------
 
+/**
+ * agent-economy-flywheel P-016 (D-011): a per-use preflight for an identity
+ * release names the channel that will pay for that release in this workspace.
+ * The pair is recorded locally so the activation gate knows which channel to
+ * re-read. The hosted checkout already succeeded, so a failed local write is
+ * reported, never turned into a checkout failure.
+ */
+export type IdentityFundingBindingOutcome =
+  | { readonly ok: true; readonly skuRef: string; readonly channelId: string }
+  | { readonly ok: false; readonly skuRef: string; readonly channelId: string; readonly detail: string };
+
+export interface CheckoutDoorContext {
+  /** The workspace whose identity activations the preflight channel funds. */
+  readonly workspaceId?: string;
+  /** Who started the checkout; stamped on the binding. */
+  readonly actorId?: string;
+  /** Test seam: the binding writer (production: the harness_shared store). */
+  readonly bindFunding?: (input: {
+    readonly workspaceId: string;
+    readonly skuRef: string;
+    readonly channelId: string;
+    readonly boundBy: string;
+  }) => Promise<void>;
+}
+
 export type CheckoutDoorOutcome =
-  | { readonly ok: true; readonly session: CheckoutSessionSuccess }
+  | {
+      readonly ok: true;
+      readonly session: CheckoutSessionSuccess;
+      readonly fundingBinding?: IdentityFundingBindingOutcome;
+    }
   | { readonly ok: false; readonly code: string; readonly detail: string; readonly status?: number };
+
+export async function bindPreflightFunding(
+  session: PerUseCheckoutPreflightOk,
+  context: CheckoutDoorContext,
+): Promise<IdentityFundingBindingOutcome | undefined> {
+  const { isIdentityReleaseSkuRef } = await import('./identity-per-use-offer');
+  const { releaseRef: skuRef, channelId } = session.channel;
+  if (!context.workspaceId || !isIdentityReleaseSkuRef(skuRef)) return undefined;
+  const bind = context.bindFunding ?? (async (input) => {
+    const [{ getOrgPg }, { bindIdentityReleaseFundingChannel }] = await Promise.all([
+      import('@papercusp/db-org'),
+      import('./identity-release-funding-store'),
+    ]);
+    await bindIdentityReleaseFundingChannel(getOrgPg().sql as never, { ...input, source: 'per-use-checkout' });
+  });
+  try {
+    await bind({ workspaceId: context.workspaceId, skuRef, channelId, boundBy: context.actorId ?? 'cupboard:checkout' });
+    return { ok: true, skuRef, channelId };
+  } catch (error) {
+    return { ok: false, skuRef, channelId, detail: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 /**
  * The single call `cupboard:checkout` makes: authorize locally, then start the
@@ -607,6 +658,7 @@ export type CheckoutDoorOutcome =
 export async function checkoutDoor(
   input: CheckoutDoorInput,
   deps: CheckoutTransportDeps = {},
+  context: CheckoutDoorContext = {},
 ): Promise<CheckoutDoorOutcome> {
   const snapshot = await loadCommerceState();
   const decision: CheckoutDoorDecision = gateCheckout(input, snapshot);
@@ -618,6 +670,10 @@ export async function checkoutDoor(
   const session = await postCheckoutSession(decision.request, transport);
   if (!session.ok) {
     return { ok: false, code: session.error, detail: session.detail ?? '', status: session.status };
+  }
+  if (session.kind === 'microcharge-preflight') {
+    const fundingBinding = await bindPreflightFunding(session, context);
+    if (fundingBinding) return { ok: true, session, fundingBinding };
   }
   return { ok: true, session };
 }

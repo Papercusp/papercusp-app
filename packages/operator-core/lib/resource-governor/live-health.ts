@@ -7,7 +7,7 @@
  * become an admission threshold merely by appearing here.
  */
 
-export const LIVE_HEALTH_SCHEMA_VERSION = 'resource-governor-live-health-v1' as const;
+export const LIVE_HEALTH_SCHEMA_VERSION = 'resource-governor-live-health-v2' as const;
 export const LIVE_HEALTH_FRAGMENT_SCHEMA_VERSION = 'resource-governor-live-health-fragment-v1' as const;
 
 export type LiveHealthPlatform = NodeJS.Platform;
@@ -120,6 +120,38 @@ export const LIVE_HEALTH_SIGNAL_SPECS = {
     freshForMs: 90_000,
     platforms: ['linux'],
     description: 'Linux PSI CPU some avg60: time at least one runnable task waited for CPU.',
+  },
+  'io.psiSomePct': {
+    unit: 'percent',
+    writerKind: 'monitor',
+    windowKind: 'rolling',
+    freshForMs: 90_000,
+    platforms: ['linux'],
+    description: 'Linux PSI I/O some avg60: time at least one task stalled on I/O.',
+  },
+  'io.psiFullPct': {
+    unit: 'percent',
+    writerKind: 'monitor',
+    windowKind: 'rolling',
+    freshForMs: 90_000,
+    platforms: ['linux'],
+    description: 'Linux PSI I/O full avg60: time all non-idle tasks stalled on I/O.',
+  },
+  'io.processReadBytesPerSec': {
+    unit: 'bytes-per-second',
+    writerKind: 'operator',
+    windowKind: 'delta',
+    freshForMs: 15_000,
+    platforms: ['linux'],
+    description: 'Process /proc/<pid>/io read_bytes delta per second; process-scoped storage reads.',
+  },
+  'io.processWriteBytesPerSec': {
+    unit: 'bytes-per-second',
+    writerKind: 'operator',
+    windowKind: 'delta',
+    freshForMs: 15_000,
+    platforms: ['linux'],
+    description: 'Process /proc/<pid>/io write_bytes delta per second; process-scoped storage writes.',
   },
   'scheduler.runnableCount': {
     unit: 'count',

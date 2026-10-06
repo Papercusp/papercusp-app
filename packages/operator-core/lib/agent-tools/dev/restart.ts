@@ -66,10 +66,13 @@
  */
 
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import type { Readable, Writable } from 'node:stream';
+import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { readProcessCgroupPath } from '../../task-manager/cgroup-read';
+import { createTextCollector } from '../../child-output';
 import { promisify } from 'node:util';
 import { defineTool, AGENT_ROLES } from '@papercusp/agent-mcp';
 import { getOrgPg } from '@papercusp/db-org';
@@ -83,7 +86,8 @@ import { acquireWithContentionRetry } from '../locks/contention-retry';
 import { workspaceTxnOptionsForExclusiveWait } from '../locks/resource-acquire-wait';
 import { probeServiceStart, probeSystemdDaemonReloadNeed, type ServiceStartInfo } from './systemd-service-probe';
 import { RESTART_TARGET_UNITS } from './restart-target-units';
-import { preflightRestartTarget } from './restart-preflight';
+import { preflightRestartTarget, prepareStagingSchemaForRestart } from './restart-preflight';
+import { peerInFlightEditsNote, readPeerInFlightEdits, type PeerInFlightEdits } from './restart-peer-edits';
 import {
   checkBgHostQuiesce,
   isQuiesceSensitiveTarget,
@@ -94,11 +98,14 @@ import { DESKTOP_DEV_RESOURCE, resolveDesktopDevListener, restartDesktopDev } fr
 import { activeWorkspaceId } from '../../workspace-registry';
 import { probeHttpReachable, type HttpProbeResult } from '../../escalating-http-probe';
 import { listListeningSockets } from '../../listening-sockets';
+import { integrationTreeRoots } from '../../harness/routines/restricted-tree-skip';
+import { restrictedTreeHoldRefusal, type RestrictedHoldRefusal } from '../testing/restricted-hold-fence';
 import {
   acquireGitSyncRestartBarrier,
   GIT_SYNC_RESTART_BARRIER_DRAIN_SEC,
   checkGateCollision,
   checkGitSyncCollision,
+  checkStagingSyncCollision,
   isGateSensitiveTarget,
   isGitSyncSensitiveTarget,
 } from '../../release/gate-collision-guard';
@@ -122,6 +129,113 @@ const GATEWAY_RESTART_PID_POLL_MS = 250;
  */
 const STAGING_RESTART_OBSERVE_MS = 10_000;
 const STAGING_RESTART_POLL_MS = 250;
+const BG_HOST_RESTART_OBSERVE_MS = 30_000;
+const BG_HOST_RESTART_POLL_MS = 250;
+const STAGING_SYNC_LOCK_HANDOFF_TIMEOUT_MS = 5_000;
+const STAGING_SYNC_LOCK_HANDOFF_READY = 'papercup-staging-sync-lock-acquired';
+
+type StagingRestartHandoff =
+  | { acquired: true; start: () => void; abort: () => void }
+  | {
+      acquired: false;
+      reason: 'lock-busy' | 'handoff-failed';
+      exitCode?: number | null;
+      detail?: string;
+    };
+
+/**
+ * Reserve the staging checkout's read window in the detached systemctl process.
+ * The earlier collision probe is only an observation; staging-sync can acquire
+ * exclusive after it returns. `flock` takes shared+nonblocking after that probe,
+ * reports the acquisition over fd 3, then waits for the parent to release the
+ * one-second systemctl delay over fd 4. Its lock stays held while systemd runs
+ * ExecStartPre, whose bundle read takes the same shared lock.
+ */
+async function prepareStagingRestartHandoff(lockPath: string, restartCmd: string): Promise<StagingRestartHandoff> {
+  const child = spawn(
+    '/usr/bin/flock',
+    [
+      '--shared',
+      '--nonblock',
+      '--conflict-exit-code',
+      '75',
+      lockPath,
+      'sh',
+      '-c',
+      `set -e; printf '${STAGING_SYNC_LOCK_HANDOFF_READY}\\n' >&3; IFS= read -r _ <&4; sleep 1; exec ${restartCmd}`,
+    ],
+    { detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] },
+  );
+  // Node types extra fds as Readable | Writable; fd 3 is our readiness pipe
+  // and fd 4 is the parent's write end.
+  const readyStream = child.stdio[3] as Readable | null | undefined;
+  const startStream = child.stdio[4] as Writable | null | undefined;
+  if (!readyStream || !startStream) {
+    child.kill('SIGTERM');
+    return { acquired: false, reason: 'handoff-failed', detail: 'lock handoff pipes were unavailable' };
+  }
+
+  return await new Promise<StagingRestartHandoff>((resolve) => {
+    let settled = false;
+    const received = createTextCollector(readyStream);
+    const cleanup = (keepStartPipe: boolean) => {
+      clearTimeout(timeout);
+      readyStream.removeAllListeners('data');
+      readyStream.destroy();
+      if (!keepStartPipe) startStream.destroy();
+    };
+    const finish = (result: StagingRestartHandoff) => {
+      if (settled) return;
+      settled = true;
+      cleanup(result.acquired);
+      resolve(result);
+    };
+    const stopChildGroup = () => {
+      if (child.pid === undefined) {
+        child.kill('SIGTERM');
+        return;
+      }
+      try {
+        process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        child.kill('SIGTERM');
+      }
+    };
+    const timeout = setTimeout(() => {
+      finish({ acquired: false, reason: 'handoff-failed', detail: 'timed out waiting for flock acquisition' });
+      stopChildGroup();
+    }, STAGING_SYNC_LOCK_HANDOFF_TIMEOUT_MS);
+
+    readyStream.on('data', () => {
+      // peek(), not text(): text() flushes the decoder and corrupts a character split across chunks.
+      if (!received.peek().includes(STAGING_SYNC_LOCK_HANDOFF_READY)) return;
+      finish({
+        acquired: true,
+        start: () => {
+          if (startStream.destroyed) throw new Error('staging restart handoff was closed before release');
+          startStream.end('go\n');
+          child.unref();
+        },
+        abort: () => {
+          startStream.destroy();
+          stopChildGroup();
+        },
+      });
+    });
+    child.once('close', (exitCode) => {
+      finish({
+        acquired: false,
+        reason: exitCode === 75 ? 'lock-busy' : 'handoff-failed',
+        exitCode,
+      });
+    });
+    // Keep an error listener after acquisition so a later child-process error
+    // cannot become an unhandled EventEmitter error in the operator host.
+    child.on('error', (error) => {
+      finish({ acquired: false, reason: 'handoff-failed', detail: error.message });
+    });
+  });
+}
 type ExecFileP = (
   command: string,
   args: string[],
@@ -297,6 +411,117 @@ export function configureBgHostRestartFreshnessReaderForTests(
   bgHostRestartFreshnessReader = reader;
 }
 
+export type BgHostEnvironmentDropInSnapshot = {
+  path: string;
+  mtimeMs: number;
+  contents: string;
+};
+
+export type BgHostEnvironmentDropInFreshness = {
+  checked: boolean;
+  changedPaths: string[];
+};
+
+const UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS: BgHostEnvironmentDropInFreshness = {
+  checked: false,
+  changedPaths: [],
+};
+
+/**
+ * PURE — identify active Environment= drop-ins whose bytes post-date the exact
+ * current MainPID start time. Comparing only these files avoids treating
+ * unrelated process environment differences (for example PATH) as a stale unit.
+ */
+export function evaluateBgHostEnvironmentDropInFreshness(
+  dropIns: readonly BgHostEnvironmentDropInSnapshot[],
+  startedAtMs: number,
+): BgHostEnvironmentDropInFreshness {
+  if (!Number.isFinite(startedAtMs) || dropIns.some((dropIn) => !Number.isFinite(dropIn.mtimeMs))) {
+    return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+  }
+
+  const changedPaths = dropIns
+    .filter((dropIn) => {
+      if (dropIn.mtimeMs <= startedAtMs) return false;
+      return dropIn.contents.split(/\r?\n/).some((rawLine) => {
+        const line = rawLine.trimStart();
+        return !line.startsWith('#') && /^Environment\s*=/.test(line);
+      });
+    })
+    .map((dropIn) => dropIn.path);
+  return { checked: true, changedPaths };
+}
+
+export type BgHostEnvironmentDropInFreshnessReader = (
+  unit: string,
+  startedAtMs: number,
+) => Promise<BgHostEnvironmentDropInFreshness>;
+
+const defaultBgHostEnvironmentDropInFreshnessReader: BgHostEnvironmentDropInFreshnessReader = async (
+  unit,
+  startedAtMs,
+) => {
+  if (process.platform !== 'linux') return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+  try {
+    const { stdout } = await runExecFile(
+      'systemctl',
+      ['--user', 'show', '-p', 'DropInPaths', unit],
+      { cwd: process.cwd(), timeout: 5000, maxBuffer: 1024 * 1024 },
+    );
+    const dropInLine = stdout.split(/\r?\n/).find((line) => line.startsWith('DropInPaths='));
+    if (dropInLine === undefined) return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+
+    const paths = dropInLine
+      .slice('DropInPaths='.length)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    const snapshots: BgHostEnvironmentDropInSnapshot[] = [];
+    for (const path of paths) {
+      if (!isAbsolute(path)) return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+      const before = statSync(path);
+      if (!before.isFile()) return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+      const contents = readFileSync(path, 'utf8');
+      const after = statSync(path);
+      if (before.mtimeMs !== after.mtimeMs || before.size !== after.size) {
+        return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+      }
+      snapshots.push({ path, mtimeMs: before.mtimeMs, contents });
+    }
+    return evaluateBgHostEnvironmentDropInFreshness(snapshots, startedAtMs);
+  } catch {
+    return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+  }
+};
+
+let bgHostEnvironmentDropInFreshnessReader = defaultBgHostEnvironmentDropInFreshnessReader;
+
+/** Test seam — keep systemctl and filesystem reads out of handler tests. */
+export function configureBgHostEnvironmentDropInFreshnessReaderForTests(
+  reader: BgHostEnvironmentDropInFreshnessReader = defaultBgHostEnvironmentDropInFreshnessReader,
+): void {
+  bgHostEnvironmentDropInFreshnessReader = reader;
+}
+
+async function readBgHostEnvironmentDropInFreshness(
+  unit: string,
+  service: ServiceStartInfo,
+): Promise<BgHostEnvironmentDropInFreshness> {
+  if (
+    !service.ok ||
+    service.mainPid === undefined ||
+    service.mainPid <= 0 ||
+    service.startedAtMs === undefined
+  ) {
+    return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+  }
+  try {
+    return await bgHostEnvironmentDropInFreshnessReader(unit, service.startedAtMs);
+  } catch {
+    return { ...UNKNOWN_BG_HOST_ENVIRONMENT_FRESHNESS };
+  }
+}
+
 /**
  * WI-10003606: bg-host bundles from ITS OWN integration root, which is not the
  * root of the operator serving this tool. dev:restart runs inside the :3070 /
@@ -352,6 +577,27 @@ export function configureBgHostIntegrationRootResolverForTests(
   resolver: BgHostIntegrationRootResolver = defaultBgHostIntegrationRootResolver,
 ): void {
   bgHostIntegrationRootResolver = resolver;
+}
+
+/**
+ * EI-24790218658923698: which files another agent is mid-edit on in the tree the unit
+ * boots from (see restart-peer-edits.ts). Advisory only — fails soft to checked:false.
+ */
+export type PeerInFlightEditsReader = (
+  workingDirectory: string | null,
+  selfOwner: string | null,
+) => Promise<PeerInFlightEdits>;
+
+const defaultPeerInFlightEditsReader: PeerInFlightEditsReader = (workingDirectory, selfOwner) =>
+  readPeerInFlightEdits(workingDirectory, selfOwner);
+
+let peerInFlightEditsReader = defaultPeerInFlightEditsReader;
+
+/** Test seam — tests never read the real lock plane or shell out to git. */
+export function configurePeerInFlightEditsReaderForTests(
+  reader: PeerInFlightEditsReader = defaultPeerInFlightEditsReader,
+): void {
+  peerInFlightEditsReader = reader;
 }
 
 const UNKNOWN_BG_HOST_FRESHNESS: BgHostRestartFreshness = {
@@ -418,6 +664,7 @@ type RestartTarget =
   | 'bg-host'
   | 'embed-sidecar'
   | 'mcp-proxy'
+  | 'mcp-proxy-staging'
   | 'email-sidecar'
   | 'calendar-sidecar'
   | 'desktop-dev';
@@ -436,6 +683,7 @@ const RESTART_TARGET_PORTS: Partial<Record<RestartTarget, number>> = {
   staging: 3170,
   'embed-sidecar': 3384,
   'mcp-proxy': 9071,
+  'mcp-proxy-staging': 9171,
   'email-sidecar': 8791,
   'calendar-sidecar': 8792,
 };
@@ -446,7 +694,12 @@ const RESTART_TARGET_PORTS: Partial<Record<RestartTarget, number>> = {
  * transient startup state; recommending a one-shot MainPID comparison turns
  * that bookkeeping lag into a false failed-restart report.
  */
-export function restartVerificationHint(target: RestartTarget, unit: string, beforePid: number | null): string {
+export function restartVerificationHint(
+  target: RestartTarget,
+  unit: string,
+  beforePid: number | null,
+  beforeNRestarts?: number,
+): string {
   const port = RESTART_TARGET_PORTS[target];
   if (port !== undefined) {
     return (
@@ -463,7 +716,15 @@ export function restartVerificationHint(target: RestartTarget, unit: string, bef
         beforePid ? ` and differs from ${beforePid}` : ''
       }, while checking \`systemctl --user show ${unit} -p ActiveState --value\`. ` +
       `MainPID=0 with ActiveState=activating means still starting, NOT failed — do not trigger a second restart ` +
-      `while this startup poll is in progress.`
+      `while this startup poll is in progress. ` +
+      // EI-24790218658923698: a crash at module import (e.g. an unrepresentable tool args
+      // schema in a peer's uncommitted edit) yields a FRESH, nonzero MainPID that dies
+      // seconds later, so the check above alone passes on a crash-loop. systemd's NRestarts
+      // counts only its own Restart= restarts, so a deliberate restart leaves it unchanged.
+      `Then confirm it STAYS up: ~60s after MainPID appears, re-read \`-p MainPID -p NRestarts\` and expect the same ` +
+      `MainPID and NRestarts still ${typeof beforeNRestarts === 'number' ? beforeNRestarts : 'at its pre-restart value'}. ` +
+      `A climbing NRestarts is a crash-loop: read logs:read { unit: '${unit}', since: '-5min', level: 'err' } for the ` +
+      `boot error, and check peerInFlightEdits (files other agents are mid-edit on) first.`
     );
   }
 
@@ -525,6 +786,14 @@ export const RESTART_TARGETS: Record<
     cooldownResource: 'mcp-proxy-cooldown',
     blastRadius: 'the shared MCP proxy (:9071) — Papercusp tool calls fail until it is back',
   },
+  'mcp-proxy-staging': {
+    unit: RESTART_TARGET_UNITS['mcp-proxy-staging'],
+    // Both proxy instances share one exclusive lock so they cannot be restarted
+    // concurrently. Keep cooldown separate from :9071: restarting that instance
+    // must not falsely coalesce a needed :9171 profile activation (or vice versa).
+    resource: 'mcp-proxy',
+    blastRadius: 'the staging MCP proxy (:9171 → :3170) — pinned staging tool calls fail until it is back',
+  },
   // WI-10001633: app sidecars run tsx from their own checkout with no
   // restart-on-change; this is the sanctioned way to load an edit into them.
   'email-sidecar': {
@@ -562,6 +831,63 @@ const COOLDOWN_SEC: Partial<Record<RestartTarget, number>> = {
   'embed-sidecar': GATEWAY_COOLDOWN_SEC,
   'mcp-proxy': GATEWAY_COOLDOWN_SEC,
 };
+
+/**
+ * Targets that restart network-capable processes directly from Papercusp's
+ * integration checkout. `dev` is intentionally absent: its WorkingDirectory
+ * is the green release checkout even though its unit exports the integration
+ * root for other purposes. The app sidecars use their own repositories, and
+ * `desktop-dev` is a wrapper-owned packaged runtime.
+ */
+const INTEGRATION_TREE_RESTART_TARGETS: ReadonlySet<RestartTarget> = new Set([
+  'staging',
+  'gateway',
+  'bg-host',
+  'embed-sidecar',
+  'mcp-proxy',
+  'mcp-proxy-staging',
+]);
+
+type RestartRestrictedHoldCheck = {
+  checked: boolean;
+  roots: string[];
+  refusal: RestrictedHoldRefusal | null;
+};
+
+function restrictedHoldRootsForRestart(target: RestartTarget, workingDirectory: string): string[] | null {
+  if (!INTEGRATION_TREE_RESTART_TARGETS.has(target)) return null;
+  const normalized = workingDirectory.trim();
+  if (!normalized || normalized === '[not set]') return [];
+
+  // Most integration services run with <checkout>/apps/operator as their
+  // WorkingDirectory. The inference gateway runs from <checkout> itself; feed
+  // the same authoritative unit root through the shared helper in either case.
+  const resolved = resolve(normalized);
+  const operatorWorkingDirectory = /(?:^|[\\/])apps[\\/]operator$/.test(resolved)
+    ? resolved
+    : resolve(resolved, 'apps', 'operator');
+  return integrationTreeRoots({}, operatorWorkingDirectory);
+}
+
+async function checkRestrictedHoldBeforeRestart(
+  target: RestartTarget,
+  workingDirectory: string,
+  unit: string,
+): Promise<RestartRestrictedHoldCheck | null> {
+  const roots = restrictedHoldRootsForRestart(target, workingDirectory);
+  if (roots === null) return null;
+  if (roots.length === 0) {
+    return {
+      checked: false,
+      roots,
+      refusal: {
+        error: 'restricted_hold_state_unknown',
+        hint: `could not determine ${unit} WorkingDirectory; a confirmed restart was refused because restricted-write holds could not be checked`,
+      },
+    };
+  }
+  return { checked: true, roots, refusal: await restrictedTreeHoldRefusal(roots) };
+}
 
 const json = (payload: unknown) => ({
   content: [{ type: 'text' as const, text: JSON.stringify(payload) }],
@@ -604,11 +930,109 @@ export type StagingRestartReadiness = {
   waitedMs: number;
 };
 
+export type BgHostRestartReadiness = {
+  ready: boolean;
+  observed: boolean;
+  outcome: 'ready' | 'starting' | 'failed' | 'not-observed';
+  pidChanged: boolean;
+  observedPid: number | null;
+  activeState: string | null;
+  result: string | null;
+  waitedMs: number;
+};
+
 const gatewayPort = () => Number(process.env.PAPERCUSP_GATEWAY_PORT) || 8788;
 const gatewayHealthUrl = () => `http://127.0.0.1:${gatewayPort()}/healthz`;
 
 function isLiveMainPid(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
+}
+
+/**
+ * Observe the bg-host systemd transition after dev:restart schedules it.
+ * A command launch or an accepted systemd job is not completion: success
+ * requires a known pre-request state, a changed live MainPID, and ActiveState
+ * back at active. Keep the changed PID sticky while systemd finishes starting.
+ */
+export async function waitForBgHostRestartReadiness(
+  before: ServiceStartInfo,
+): Promise<BgHostRestartReadiness> {
+  const startedAt = Date.now();
+  const deadline = startedAt + BG_HOST_RESTART_OBSERVE_MS;
+  const baselineKnown = before.ok && typeof before.mainPid === 'number';
+  let current: ServiceStartInfo | null = null;
+  let changedPid: number | null = null;
+  let observed = false;
+
+  while (Date.now() <= deadline) {
+    try {
+      current = await probeServiceStart(RESTART_TARGET_UNITS['bg-host']);
+    } catch {
+      current = null;
+    }
+    const currentPid = current?.mainPid;
+    if (
+      baselineKnown &&
+      isLiveMainPid(currentPid) &&
+      (!isLiveMainPid(before.mainPid) || currentPid !== before.mainPid)
+    ) {
+      changedPid = currentPid;
+      observed = true;
+    }
+    if (current?.activeState === 'activating' && before.ok && before.activeState !== 'activating') {
+      observed = true;
+    }
+    if (current?.activeState === 'failed') {
+      return {
+        ready: false,
+        observed,
+        outcome: 'failed',
+        pidChanged: changedPid !== null,
+        observedPid: changedPid,
+        activeState: current.activeState,
+        result: current.result ?? null,
+        waitedMs: Date.now() - startedAt,
+      };
+    }
+    if (changedPid !== null && currentPid === changedPid && current?.activeState === 'active') {
+      return {
+        ready: true,
+        observed: true,
+        outcome: 'ready',
+        pidChanged: true,
+        observedPid: changedPid,
+        activeState: current.activeState,
+        result: current.result ?? null,
+        waitedMs: Date.now() - startedAt,
+      };
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(BG_HOST_RESTART_POLL_MS, remainingMs)));
+  }
+
+  return {
+    ready: false,
+    observed,
+    outcome: observed ? 'starting' : 'not-observed',
+    pidChanged: changedPid !== null,
+    observedPid: changedPid,
+    activeState: current?.activeState ?? null,
+    result: current?.result ?? null,
+    waitedMs: Date.now() - startedAt,
+  };
+}
+
+export type BgHostRestartReadinessReader = (before: ServiceStartInfo) => Promise<BgHostRestartReadiness>;
+const defaultBgHostRestartReadinessReader: BgHostRestartReadinessReader = waitForBgHostRestartReadiness;
+let bgHostRestartReadinessReader = defaultBgHostRestartReadinessReader;
+
+/** Test seam: confirmed bg-host restart tests must not wait on or inspect systemd. */
+export function configureBgHostRestartReadinessReaderForTests(
+  reader: BgHostRestartReadinessReader = defaultBgHostRestartReadinessReader,
+): void {
+  bgHostRestartReadinessReader = reader;
 }
 
 /**
@@ -822,69 +1246,103 @@ export function configureStagingRestartReadinessReaderForTests(
  * around injectable/test implementations too. A readiness failure is returned
  * as data so the caller can report "scheduled but not ready" without claiming
  * `restarted:true`.
+ *
+ * WI-10005747 (EI-24792459933326276): a new MainPID is only process-START evidence —
+ * the gateway binds :8788 and answers /healthz moments later. The wait used to probe
+ * the listener ONCE at the instant the PID changed and return `ready:false` on the
+ * first miss (and on one failed /healthz), reporting a false negative for a restart
+ * that succeeded seconds later. The listener + health phases now keep polling to the
+ * SAME deadline as the PID phase; `ready:false` means the budget was spent, not that
+ * the first look was early.
  */
-async function waitForGatewayRestartReadiness(beforePid: number | null): Promise<GatewayRestartReadiness> {
-  const startedAt = Date.now();
-  const deadline = startedAt + GATEWAY_RESTART_PID_WAIT_MS;
-  const previousPidKnown = isLiveMainPid(beforePid);
-  let current: Awaited<ReturnType<typeof probeServiceStart>> | null = null;
+export type GatewayReadinessDeps = {
+  readService: () => Promise<{ mainPid?: number | null } | null | undefined>;
+  probeListener: (pid: number) => Promise<GatewayListenerReadiness>;
+  probeHealth: () => Promise<HttpProbeResult>;
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  waitMs: number;
+  pollMs: number;
+};
 
-  const readCurrent = async (): Promise<Awaited<ReturnType<typeof probeServiceStart>> | null> => {
-    try {
-      return await probeServiceStart(RESTART_TARGET_UNITS.gateway);
-    } catch {
-      return null;
-    }
-  };
-
-  while (Date.now() <= deadline) {
-    current = await readCurrent();
-    const currentPid = current?.mainPid;
-    const pidChanged = isLiveMainPid(currentPid) && (!previousPidKnown || currentPid !== beforePid);
-    if (pidChanged) {
-      const listener = await probeGatewayListenerOwnership(currentPid);
-      if (!listener.ownedByPid) {
-        return {
-          ready: false,
-          pidChanged: true,
-          observedPid: currentPid,
-          listener,
-          health: null,
-          waitedMs: Date.now() - startedAt,
-        };
-      }
-
-      let health: HttpProbeResult;
+function defaultGatewayReadinessDeps(): GatewayReadinessDeps {
+  return {
+    readService: async () => {
       try {
-        health = await probeHttpReachable(gatewayHealthUrl());
-      } catch (error) {
-        health = {
-          reachable: false,
-          detail: error instanceof Error ? error.message : String(error),
-        };
+        return await probeServiceStart(RESTART_TARGET_UNITS.gateway);
+      } catch {
+        return null;
       }
-      return {
-        ready: health.reachable,
-        pidChanged: true,
-        observedPid: currentPid,
-        listener,
-        health,
-        waitedMs: Date.now() - startedAt,
-      };
+    },
+    probeListener: probeGatewayListenerOwnership,
+    probeHealth: async () => {
+      try {
+        return await probeHttpReachable(gatewayHealthUrl());
+      } catch (error) {
+        return { reachable: false, detail: error instanceof Error ? error.message : String(error) };
+      }
+    },
+    now: () => Date.now(),
+    sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    waitMs: GATEWAY_RESTART_PID_WAIT_MS,
+    pollMs: GATEWAY_RESTART_PID_POLL_MS,
+  };
+}
+
+export async function waitForGatewayRestartReadiness(
+  beforePid: number | null,
+  overrides: Partial<GatewayReadinessDeps> = {},
+): Promise<GatewayRestartReadiness> {
+  const deps = { ...defaultGatewayReadinessDeps(), ...overrides };
+  const startedAt = deps.now();
+  const deadline = startedAt + deps.waitMs;
+  const previousPidKnown = isLiveMainPid(beforePid);
+  let lastLivePid: number | null = null;
+  // The replacement PID, once seen, is sticky: a later service read that comes back empty
+  // (fail-soft probe) must not make us forget that the restart already cycled the process.
+  let changedPid: number | null = null;
+  let listener: GatewayListenerReadiness | null = null;
+  let health: HttpProbeResult | null = null;
+
+  while (deps.now() <= deadline) {
+    const current = await deps.readService();
+    const currentPid = current?.mainPid;
+    if (isLiveMainPid(currentPid)) {
+      lastLivePid = currentPid;
+      if (!previousPidKnown || currentPid !== beforePid) changedPid = currentPid;
     }
 
-    const remainingMs = deadline - Date.now();
+    if (changedPid !== null) {
+      listener = await deps.probeListener(changedPid);
+      if (listener.ownedByPid) {
+        health = await deps.probeHealth();
+        if (health.reachable) {
+          return {
+            ready: true,
+            pidChanged: true,
+            observedPid: changedPid,
+            listener,
+            health,
+            waitedMs: deps.now() - startedAt,
+          };
+        }
+      } else {
+        health = null;
+      }
+    }
+
+    const remainingMs = deadline - deps.now();
     if (remainingMs <= 0) break;
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(GATEWAY_RESTART_PID_POLL_MS, remainingMs)));
+    await deps.sleep(Math.min(deps.pollMs, remainingMs));
   }
 
   return {
     ready: false,
-    pidChanged: false,
-    observedPid: isLiveMainPid(current?.mainPid) ? current.mainPid : null,
-    listener: null,
-    health: null,
-    waitedMs: Date.now() - startedAt,
+    pidChanged: changedPid !== null,
+    observedPid: changedPid ?? lastLivePid,
+    listener,
+    health,
+    waitedMs: deps.now() - startedAt,
   };
 }
 
@@ -896,7 +1354,7 @@ async function waitForGatewayRestartReadiness(beforePid: number | null): Promise
  * never throws (mirrors process-kill.ts / flag-audit.ts's canonical
  * full-column shape) — the restart itself must never be blocked on this.
  */
-async function writeRestartAudit(
+  async function writeRestartAudit(
   actor: string,
   details: {
     target: RestartTarget;
@@ -913,16 +1371,39 @@ async function writeRestartAudit(
     /** WI-222053: a real restart that deliberately crossed an in-flight git-sync
      *  operation is attributable from the durable audit row. */
     gitSyncCollision?: { kind: string; overridden: boolean; resources: string[]; pids: number[] } | null;
+    /** target:staging: what papercup-staging-sync's checkout lock read when this
+     *  restart fired (the final pre-signal re-check wins over the first read). */
+    stagingSyncCollision?: { kind: string; lockPath: string; lockHeld: boolean | null } | null;
+    /** The shared lock acquired by the detached command after the final probe. */
+    stagingSyncHandoff?: { lockPath: string; mode: 'shared'; heldThrough: 'systemctl-restart' } | null;
     /** The atomic legacy-resource barrier intentionally left to expire after
      *  systemctl has crossed the delayed handoff. */
     gitSyncBarrier?: { resource: string; expiresAt: string } | null;
     /** The user manager consumed current unit/drop-in bytes before restart. */
     systemdDaemonReloaded: boolean;
+    /** A recent bg-host Environment= drop-in caused a cooldown bypass. */
+    unitEnvironmentDropInChange?: { paths: string[]; mainPidStartedAtMs: number } | null;
     /** WI-2140796: a real restart that deliberately crossed an active bg-host
      *  quiesce (override_quiesce:true) is attributable from the durable audit row. */
     quiesceOverridden?: { marker: QuiesceMarker | null } | null;
+    /** A paired bg-host request/outcome audit record shares this correlation id. */
+    requestId?: string;
+    phase?: 'request' | 'outcome';
+    beforeMainPid?: number | null;
+    restartCommand?: string;
+    restartLauncherPid?: number | null;
+    restartCommandExitCode?: number | null;
+    restartCommandSignal?: string | null;
+    restartCommandError?: string | null;
+    systemdJobAccepted?: boolean;
+    restartObserved?: boolean;
+    restarted?: boolean;
+    observedMainPid?: number | null;
+    observedActiveState?: string | null;
+    observedResult?: string | null;
+    observationWaitedMs?: number;
   },
-): Promise<void> {
+): Promise<boolean> {
   try {
     const { sql } = getOrgPg();
     const id = `restart-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -931,10 +1412,12 @@ async function writeRestartAudit(
        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
       [id, Date.now(), actor, 'dev:restart', details.target, JSON.stringify(details), activeWorkspaceId()],
     );
+    return true;
   } catch (err) {
-    // Best-effort: the restart already fired: never block/fail it on the audit write.
+    // Best-effort: the audit write must never block/fail the restart operation.
 
     console.warn('[dev:restart] audit write failed:', (err as Error)?.message);
+    return false;
   }
 }
 
@@ -955,11 +1438,11 @@ function gitSyncPreflightBlocks(blocked: boolean, drainSec: number): boolean {
 export default defineTool({
   name: 'dev:restart',
   description:
-    'Coordinated restart with drain/coalesce/audit. Targets: "dev" :3070 (default), "staging" :3170, "desktop-dev" :3270, "gateway" :8788, "bg-host" routines/git-sync, "embed-sidecar" :3384, "mcp-proxy" :9071, "email-sidecar", "calendar-sidecar". Dry-run unless confirm:true; restart needs PAPERCUSP_ALLOW_DEV_RESTART=1 or audited authorize:true. Cooldown ~2m; bg-host ~13m.',
+    'Coordinated restart with drain/coalesce/audit. Targets: "dev" :3070 (default), "staging" :3170, "desktop-dev" :3270, "gateway" :8788, "bg-host" routines/git-sync, "embed-sidecar" :3384, "mcp-proxy" :9071, "mcp-proxy-staging" :9171→:3170, "email-sidecar", "calendar-sidecar". Dry-run unless confirm:true; restart needs PAPERCUSP_ALLOW_DEV_RESTART=1 or audited authorize:true. Cooldown ~2m; bg-host ~13m.',
   guidance: {
-    when: 'Load integration-tree edits into long-running hosts (no deploy). desktop-dev uses the verified wrapper-owned :3270 listener (bounded drain, no-native-teardown hard exit, waits for a new listener). Route desktop→"desktop-dev"; inference-gateway→"gateway"; routines/git-sync→"bg-host"; embeddings→"embed-sidecar"; MCP proxy/transport→"mcp-proxy"; shared server→"staging" (probe :3170).',
+    when: 'Load integration-tree edits into long-running hosts (no deploy). desktop-dev recycles the wrapper-owned :3270 listener and waits for a new one. Route desktop→"desktop-dev"; inference-gateway→"gateway"; routines/git-sync→"bg-host"; embeddings→"embed-sidecar"; MCP proxy/transport→"mcp-proxy" (:9071) or "mcp-proxy-staging" (:9171→:3170); shared server→"staging" (probe :3170).',
     notWhen:
-      'Just probing. desktop-dev is only the :3270 Tauri wrapper, not :3070/:3170. Gateway drops in-flight LLM requests fleet-wide; check gateway:status. ⚠ bg-host kills its whole cgroup (spawner, desktop sidecars, pg_dump); its drain cannot reach children (EI-19479764372783341). Never raw systemctl restart; it bypasses drain/debounce (WI-4221). dev/staging/bg-host refuse an in-flight git-sync operation; use override_git_sync_collision:true only when the host is wedged. gateway/bg-host/embed-sidecar refuse during green-checkpoint; use override_gate_collision:true only when needed.',
+      'Probe: service_health. desktop-dev: :3270 only. Gateway restart drops fleet LLM calls. bg-host kills cgroup (spawner, sidecars, pg_dump); drain cannot reach children. No raw systemctl (skips drain/debounce). dev/bg-host refuse git-sync; staging refuses the staging-sync exclusive lock. override_git_sync_collision:true only if wedged. gateway/bg-host/embed-sidecar refuse green-checkpoint; override_gate_collision:true only if blocked.',
     chaining:
       'dry → review holders → { confirm:true, authorize:true, reason:"<why>", target } → restart (or coalesced:true; probe directly). Gateway: status → restart → status.',
     seeAlso: [
@@ -990,6 +1473,7 @@ export default defineTool({
         'bg-host',
         'embed-sidecar',
         'mcp-proxy',
+        'mcp-proxy-staging',
         'email-sidecar',
         'calendar-sidecar',
         'desktop-dev',
@@ -1097,6 +1581,8 @@ export default defineTool({
     const restartCmd =
       target === 'desktop-dev'
         ? 'SIGUSR2 recycle verified desktop-dev listener on :3270 (wait for verified wrapper respawn)'
+        : target === 'bg-host'
+          ? `systemctl --user --no-block restart ${cfg.unit}`
         : `systemctl --user restart ${cfg.unit}`;
     const activationCmd = target === 'desktop-dev' ? restartCmd : `systemctl --user daemon-reload && ${restartCmd}`;
     // EI-13307: per-target, not global — computed up front so both the
@@ -1152,10 +1638,17 @@ export default defineTool({
       const gitSyncPreview = gitSyncSensitive
         ? await checkGitSyncCollision(target, args.override_git_sync_collision === true)
         : null;
+      const stagingSyncPreview =
+        target === 'staging' ? await checkStagingSyncCollision(target) : null;
       // EI-18661647550414959: same reasoning as the gate-collision preview above — the dry
       // run is where the decision is actually made, so "this tree cannot boot" belongs HERE,
       // where it costs nothing, not only in the refusal afterwards.
       const bootPreview = await preflightRestartTarget(target);
+      const restrictedHoldPreview = await checkRestrictedHoldBeforeRestart(
+        target,
+        bootPreview.requestedRoot,
+        bootPreview.unit,
+      );
       // WI-2140796: same reasoning again — a quiesced bg-host is worth knowing about
       // BEFORE the confirmed call, not only in its refusal.
       const quiescePreview = isQuiesceSensitiveTarget(target)
@@ -1173,6 +1666,16 @@ export default defineTool({
           ...(bootPreview.missing.length ? { missing: bootPreview.missing } : {}),
           ...(bootPreview.reason ? { reason: bootPreview.reason } : {}),
         },
+        ...(restrictedHoldPreview
+          ? {
+              restricted_hold: {
+                checked: restrictedHoldPreview.checked,
+                roots: restrictedHoldPreview.roots,
+                would_block: restrictedHoldPreview.refusal !== null,
+                ...(restrictedHoldPreview.refusal ?? {}),
+              },
+            }
+          : {}),
         ...(quiescePreview
           ? {
               quiesce: {
@@ -1201,13 +1704,22 @@ export default defineTool({
               },
             }
           : {}),
+        ...(stagingSyncPreview
+          ? {
+              staging_sync_collision: {
+                kind: stagingSyncPreview.kind,
+                would_block: stagingSyncPreview.blocked,
+                ...stagingSyncPreview.detail,
+              },
+            }
+          : {}),
         note: `Pass confirm:true to acquire exclusive(${cfg.resource}), drain current users, then restart. DISRUPTS all agents.${cooldownNote} confirm:true ALONE is not enough — the real restart also needs the enablement gate: pass authorize:true + a short \`reason\` (≤300 chars) in the same call, or set PAPERCUSP_ALLOW_DEV_RESTART=1 on the operator process. Without it the call is REFUSED outright (ok:false, nothing drained).${
           gitSyncPreview?.blocked
             ? gitSyncDrainSec > 0
               ? ` ℹ A git-sync operation shares this cgroup, but you passed git_sync_drain_sec:${gitSyncDrainSec} — on that path the cgroup preflight is ADVISORY and the workspace-wide \`git-sync\` barrier arbitrates instead (fires hold it only ~5-10s). This preview reserves nothing; the confirmed call can still refuse with drain_timeout, which is transient and side-effect-free — retry rather than abandon.`
               : ` ⚠ ${gitSyncPreview.note} On a merely BUSY host the supported way through is git_sync_drain_sec (up to ${GIT_SYNC_RESTART_BARRIER_DRAIN_SEC}s) — WAIT for the drain. override_git_sync_collision is for a WEDGED host: it SIGKILLs an in-flight commit and strands a peer's uncommitted work.`
             : ''
-        }${preview.blocked ? ` ⚠ ${preview.note}` : ''}${quiescePreview?.blocked ? ` ⚠ ${quiescePreview.note}` : ''}`,
+        }${stagingSyncPreview?.blocked ? ` ⚠ ${stagingSyncPreview.note}` : ''}${preview.blocked ? ` ⚠ ${preview.note}` : ''}${quiescePreview?.blocked ? ` ⚠ ${quiescePreview.note}` : ''}`,
       });
     }
 
@@ -1267,6 +1779,27 @@ export default defineTool({
     // IS the restart must stay restartable via override_boot_integrity. Fails OPEN — an
     // unreadable tree reports checked:false and proceeds, and is NEVER treated as clean.
     const bootIntegrity = target === 'desktop-dev' ? null : await preflightRestartTarget(target);
+    // D-012: this is an execution-boundary fence, not a restart-health override.
+    // It runs before any target-specific preparation, lock, drain, or restart,
+    // and its refusal cannot be overridden by override_boot_integrity.
+    const restrictedHoldCheck = bootIntegrity
+      ? await checkRestrictedHoldBeforeRestart(target, bootIntegrity.requestedRoot, bootIntegrity.unit)
+      : null;
+    if (restrictedHoldCheck?.refusal) {
+      return json({
+        ok: false,
+        target,
+        reason: restrictedHoldCheck.refusal.error,
+        restarted: false,
+        drained: false,
+        restricted_hold: {
+          checked: restrictedHoldCheck.checked,
+          roots: restrictedHoldCheck.roots,
+          ...restrictedHoldCheck.refusal,
+        },
+        note: `Restart REFUSED — NOTHING was done: no lock taken, no drain, ${cfg.unit} left running exactly as it was. ${restrictedHoldCheck.refusal.hint}`,
+      });
+    }
     if (bootIntegrity && !bootIntegrity.ok && args.override_boot_integrity !== true) {
       return json({
         ok: false,
@@ -1287,6 +1820,14 @@ export default defineTool({
           `itself the remedy, re-call with override_boot_integrity:true.`,
       });
     }
+
+    // EI-24790218658923698: a restart boots the unit's WHOLE working tree, including files
+    // another agent is mid-edit on. Advisory, never a refusal (a fleet this size always has
+    // live edit locks), but it names the suspects up front so a host that does not stay up
+    // is diagnosed in one read. Clean deploy checkouts report nothing by construction.
+    const peerInFlightEdits: PeerInFlightEdits | null = bootIntegrity
+      ? await peerInFlightEditsReader(bootIntegrity.requestedRoot || null, ownerId).catch(() => null)
+      : null;
 
     // WI-2140796: refuse to restart bg-host while a P-101 seed cut (or similar) holds
     // it deliberately quiesced (systemd mask + a marker written by
@@ -1341,6 +1882,22 @@ export default defineTool({
       });
     }
 
+    // The staging operator is restarted by a separate sync service. That
+    // service's exclusive flock covers checkout mutation and bundle creation;
+    // refuse before cooldown or drain if it is still in that phase.
+    const stagingSync = target === 'staging' ? await checkStagingSyncCollision(target) : null;
+    if (stagingSync?.blocked) {
+      return json({
+        ok: false,
+        target,
+        reason: `staging_sync_collision_${stagingSync.kind.replace(/-/g, '_')}`,
+        restarted: false,
+        drained: false,
+        staging_sync_collision: { kind: stagingSync.kind, ...stagingSync.detail },
+        note: stagingSync.note,
+      });
+    }
+
     // EI-19385475092979200: refuse a gate-sensitive restart while a green-checkpoint run is in
     // flight (or is within the two-sided window around a scheduled fire). Placed HERE
     // deliberately — after the enablement refusal (which is cheaper and needs no probe) and
@@ -1361,6 +1918,26 @@ export default defineTool({
       });
     }
 
+    // EI-24775758523902834: direct target:staging restarts must apply the
+    // target tree's pending migrations while the current API is still serving.
+    // staging-sync already does this before cutover; without the same step here,
+    // dev:restart stopped the only process that could serve while the schema was
+    // still behind. Keep it after all soft preflights but before cooldown or drain.
+    const stagingSchemaPreparation = stagingSync
+      ? await prepareStagingSchemaForRestart(stagingSync.detail.lockPath)
+      : null;
+    if (stagingSchemaPreparation && !stagingSchemaPreparation.ok) {
+      return json({
+        ok: false,
+        target,
+        reason: stagingSchemaPreparation.reason ?? 'staging_migration_preparation_failed',
+        restarted: false,
+        drained: false,
+        staging_schema_preparation: stagingSchemaPreparation,
+        note: `Restart REFUSED before cooldown or drain — ${stagingSchemaPreparation.note}`,
+      });
+    }
+
     // WI-4221 debounce: for a cooldown-bearing target (staging), try to claim
     // the cooldown marker FIRST, before touching the drain-gate at all. If a
     // peer's real restart already holds it (their restart landed within the
@@ -1376,6 +1953,7 @@ export default defineTool({
       serviceSecondsSinceStart: number | null;
       cooldownSec: number;
     } | null = null;
+    let bgHostEnvironmentDropInDrift: { changedPaths: string[]; startedAtMs: number } | null = null;
     if (enabled && cfg.cooldownResource) {
       const cd = cfg.cooldownResource;
       // EI-21998059463131681: the cooldown marker is the first staging
@@ -1423,6 +2001,16 @@ export default defineTool({
           // into an eager restart — the temporal throttle is also the protection
           // against repeatedly killing in-flight git-sync work.
           const freshness = target === 'bg-host' ? await readBgHostRestartFreshness() : null;
+          const environmentDropInFreshness =
+            target === 'bg-host' ? await readBgHostEnvironmentDropInFreshness(cfg.unit, svc) : null;
+          const environmentDropInChanged =
+            environmentDropInFreshness?.checked === true && environmentDropInFreshness.changedPaths.length > 0;
+          if (environmentDropInChanged && svc.startedAtMs !== undefined) {
+            bgHostEnvironmentDropInDrift = {
+              changedPaths: environmentDropInFreshness.changedPaths,
+              startedAtMs: svc.startedAtMs,
+            };
+          }
           const cooldownRemainingSec = Math.max(0, cooldownSec - ago);
           const freshnessFields = freshness
             ? {
@@ -1437,6 +2025,25 @@ export default defineTool({
                 ...(freshness.newestSourcePath ? { newestSourcePath: freshness.newestSourcePath } : {}),
               }
             : {};
+          const environmentDropInFields = environmentDropInFreshness
+            ? {
+                unitEnvFreshnessVerified: environmentDropInFreshness.checked,
+                unitEnvChangedSinceRestart: environmentDropInFreshness.checked
+                  ? environmentDropInFreshness.changedPaths.length > 0
+                  : null,
+                ...(environmentDropInChanged
+                  ? { unitEnvChangedDropIns: environmentDropInFreshness.changedPaths }
+                  : {}),
+              }
+            : {};
+          const environmentDropInNote =
+            environmentDropInFreshness === null
+              ? ''
+              : !environmentDropInFreshness.checked
+                ? ' Unit Environment= drop-in freshness could NOT be verified; do not assume Environment= edits are loaded.'
+                : environmentDropInChanged
+                  ? ` WARNING: Environment= drop-ins changed after MainPID ${svc.mainPid} started (${environmentDropInFreshness.changedPaths.join(', ')}); retrying under the exclusive restart guard.`
+                  : ' Unit Environment= drop-in freshness checked: no active Environment= drop-in is newer than the MainPID start.';
           const freshnessNote =
             freshness == null
               ? ''
@@ -1447,19 +2054,22 @@ export default defineTool({
                       freshness.newestSourcePath ? ` (newest source: ${freshness.newestSourcePath})` : ''
                     }; the requested edit is NOT loaded. The temporal throttle is preserved; retry after the remaining cooldown (~${cooldownRemainingSec}s) when safe.`
                   : ' Tree/bundle freshness checked: no runtime source is newer than the bundle used by this restart.';
-          return json({
-            ok: true,
-            target,
-            restarted: false,
-            coalesced: true,
-            verified: true,
-            restartedSecondsAgo: ago,
-            mainPid: svc.mainPid ?? null,
-            ...freshnessFields,
-            note: `${cfg.unit} genuinely restarted ~${ago}s ago${
-              holderName ? ` (marker held by ${holderName})` : ''
-            } — verified via systemd (MainPID ${svc.mainPid}). Skipping a redundant restart; probe it directly.${freshnessNote}`,
-          });
+          if (bgHostEnvironmentDropInDrift === null) {
+            return json({
+              ok: true,
+              target,
+              restarted: false,
+              coalesced: true,
+              verified: true,
+              restartedSecondsAgo: ago,
+              mainPid: svc.mainPid ?? null,
+              ...freshnessFields,
+              ...environmentDropInFields,
+              note: `${cfg.unit} genuinely restarted ~${ago}s ago${
+                holderName ? ` (marker held by ${holderName})` : ''
+              } — verified via systemd (MainPID ${svc.mainPid}). Skipping a redundant restart; probe it directly.${freshnessNote}${environmentDropInNote}`,
+            });
+          }
         }
         if (!svc.ok) {
           // Could NOT verify (no systemd / probe failed). Fall back to trusting
@@ -1693,35 +2303,62 @@ export default defineTool({
         // real cycle happened (the restart is detached+delayed, so we cannot
         // confirm it synchronously — but a changed MainPID proves it landed).
         const before = await probeServiceStart(cfg.unit);
-        // Audit BEFORE spawning (mirrors process-kill.ts: a record must exist
-        // even if signaling crashes the process tree). Fire-and-forget — never
-        // blocks the restart.
-        void writeRestartAudit(ownerId, {
-          target,
-          unit: cfg.unit,
-          viaEnv: enabledByEnv,
-          viaAuthorizeArg: enabledByArg,
-          reason: args.reason ?? null,
-          fenceSeq: fence.seq,
-          phantomCoalesceBroken: phantomCoalesceBroken !== null,
-          gateCollision: isGateSensitiveTarget(target)
-            ? { kind: gate.kind, overridden: gate.overridden, runElapsedSec: gate.detail.runElapsedSec }
-            : null,
-          gitSyncCollision: gitSync
-            ? {
-                kind: gitSync.kind,
-                overridden: gitSync.overridden,
-                resources: gitSync.detail.collidingResources,
-                pids: gitSync.detail.collidingPids,
-              }
-            : null,
-          gitSyncBarrier:
-            gitSyncBarrier?.acquired === true
-              ? { resource: gitSyncBarrier.resource, expiresAt: gitSyncBarrier.expiresAt }
-              : null,
-          systemdDaemonReloaded,
-          quiesceOverridden: quiesce?.overridden ? { marker: quiesce.marker } : null,
-        });
+        let environmentDropInFreshnessAtGuard: BgHostEnvironmentDropInFreshness | null = null;
+        if (bgHostEnvironmentDropInDrift !== null) {
+          environmentDropInFreshnessAtGuard = await readBgHostEnvironmentDropInFreshness(cfg.unit, before);
+          if (!environmentDropInFreshnessAtGuard.checked) {
+            await releaseGitSyncBarrierOnAbort();
+            await releaseCooldownOnAbort();
+            return json({
+              ok: false,
+              target,
+              drained: true,
+              restarted: false,
+              reason: 'bg_host_freshness_unverified',
+              unitEnvFreshnessVerified: false,
+              unitEnvChangedSinceRestart: null,
+              note: `Restart REFUSED under the exclusive ${cfg.resource} lease because the current MainPID start or active Environment= drop-ins could not be verified. No restart was scheduled; the drain and git-sync barrier are being released. Retry when the service probe is available.`,
+            });
+          }
+          if (environmentDropInFreshnessAtGuard.changedPaths.length === 0) {
+            const currentTreeFreshness = await readBgHostRestartFreshness();
+            if (!currentTreeFreshness.checked) {
+              await releaseGitSyncBarrierOnAbort();
+              await releaseCooldownOnAbort();
+              return json({
+                ok: false,
+                target,
+                drained: true,
+                restarted: false,
+                reason: 'bg_host_freshness_unverified',
+                treeChangedSinceRestart: null,
+                freshnessVerified: false,
+                unitEnvFreshnessVerified: true,
+                unitEnvChangedSinceRestart: false,
+                note: `Restart REFUSED under the exclusive ${cfg.resource} lease because the source/bundle relationship could not be verified after the Environment= drop-in change was rechecked. No restart was scheduled; the drain and git-sync barrier are being released. Retry when freshness can be measured.`,
+              });
+            }
+            if (currentTreeFreshness.treeChangedSinceRestart === false) {
+              await releaseGitSyncBarrierOnAbort();
+              await releaseCooldownOnAbort();
+              return json({
+                ok: true,
+                target,
+                drained: true,
+                restarted: false,
+                coalesced: true,
+                verified: true,
+                restartedSecondsAgo: before.secondsSinceStart ?? null,
+                mainPid: before.mainPid ?? null,
+                treeChangedSinceRestart: false,
+                freshnessVerified: true,
+                unitEnvFreshnessVerified: true,
+                unitEnvChangedSinceRestart: false,
+                note: `${cfg.unit} was rechecked under the exclusive ${cfg.resource} lease: no active Environment= drop-in is newer than MainPID ${before.mainPid} and the bundle includes the current source tree. A peer already applied the requested changes, so no restart was scheduled.`,
+              });
+            }
+          }
+        }
         // Detached + delayed so this response returns before the service dies.
         // systemd latches a unit after it exceeds StartLimitBurst. A plain
         // `restart` is then rejected with "Start request repeated too quickly"
@@ -1736,20 +2373,291 @@ export default defineTool({
           ? `systemctl --user reset-failed ${cfg.unit} && ${restartCmd}`
           : restartCmd;
         const performRestart = async () => {
-          let child;
-          try {
-            child = spawn('sh', ['-c', `sleep 1; ${scheduledRestartCmd}`], {
-              detached: true,
-              stdio: 'ignore',
+          // The first check protects cooldown/drain. Recheck after that work,
+          // immediately before audit+spawn, so a sync that starts in the gap
+          // cannot be interrupted by the staging unit restart.
+          const finalStagingSyncCheck =
+            target === 'staging' ? await checkStagingSyncCollision(target) : null;
+          if (finalStagingSyncCheck?.blocked) {
+            await releaseGitSyncBarrierOnAbort();
+            await releaseCooldownOnAbort();
+            return json({
+              ok: false,
+              target,
+              reason: `staging_sync_collision_${finalStagingSyncCheck.kind.replace(/-/g, '_')}`,
+              restarted: false,
+              drained: true,
+              staging_sync_collision: { kind: finalStagingSyncCheck.kind, ...finalStagingSyncCheck.detail },
+              note:
+                `${finalStagingSyncCheck.note} The staging-server drain has been released; ` +
+                'no restart was scheduled and the cooldown marker was released.',
             });
-          } catch (error) {
-            throw error;
           }
-          child.unref();
-          restartScheduled = true;
+          const stagingLockPath = finalStagingSyncCheck ? finalStagingSyncCheck.detail.lockPath : null;
+          const stagingHandoff =
+            stagingLockPath !== null
+              ? await prepareStagingRestartHandoff(stagingLockPath, scheduledRestartCmd)
+              : null;
+          if (stagingHandoff && !stagingHandoff.acquired) {
+            await releaseGitSyncBarrierOnAbort();
+            await releaseCooldownOnAbort();
+            const collision = stagingHandoff.reason === 'lock-busy';
+            return json({
+              ok: false,
+              target,
+              reason: collision
+                ? 'staging_sync_collision_staging_sync_in_flight'
+                : 'staging_sync_restart_handoff_failed',
+              restarted: false,
+              drained: true,
+              staging_sync_collision: {
+                kind: collision ? 'staging-sync-in-flight' : 'handoff-failed',
+                lockPath: stagingLockPath,
+                lockHeld: collision ? true : null,
+                ...(stagingHandoff.exitCode === undefined ? {} : { exitCode: stagingHandoff.exitCode }),
+                ...(stagingHandoff.detail ? { detail: stagingHandoff.detail } : {}),
+              },
+              note: collision
+                ? `Restart REFUSED — papercup-staging-sync acquired its exclusive checkout lock after the final check (${stagingLockPath}). The staging-server drain has been released; no restart was scheduled and the cooldown marker was released. Retry after the sync completes.`
+                : `Restart REFUSED — the detached command could not acquire and transfer the shared staging-sync lock (${stagingLockPath}). The staging-server drain has been released; no restart was scheduled and the cooldown marker was released.`,
+            });
+          }
+          let requestId: string | null = null;
+          let requestAuditPersisted = true;
+          let restartAuditDetails: Parameters<typeof writeRestartAudit>[1] | null = null;
+          let restartProcess: ReturnType<typeof spawn> | null = null;
+          let restartSpawnError: string | null = null;
+          let restartObservationError: string | null = null;
+          let restartCommandExitCode: number | null = null;
+          let restartCommandSignal: string | null = null;
+          let restartCommandExited = false;
+          // Typed by assertion, not annotation: a `T | null = null` initializer narrows the
+          // variable to `null` in this scope (TS does not see the executor's assignment), so
+          // the synchronous catch below would read it as uncallable (WI-10006260).
+          let restartCommandClosedResolve = null as (() => void) | null;
+          const restartCommandClosed = new Promise<void>((resolve) => {
+            restartCommandClosedResolve = resolve;
+          });
+          try {
+            // The staging child is holding the shared lease and waits on fd 4.
+            // Invoke the audit before releasing that wait, so audit refusal is
+            // never confused with a restart that was actually scheduled.
+            restartAuditDetails = {
+              target,
+              unit: cfg.unit,
+              viaEnv: enabledByEnv,
+              viaAuthorizeArg: enabledByArg,
+              reason: args.reason ?? null,
+              fenceSeq: fence.seq,
+              phantomCoalesceBroken: phantomCoalesceBroken !== null,
+              gateCollision: isGateSensitiveTarget(target)
+                ? { kind: gate.kind, overridden: gate.overridden, runElapsedSec: gate.detail.runElapsedSec }
+                : null,
+              gitSyncCollision: gitSync
+                ? {
+                    kind: gitSync.kind,
+                    overridden: gitSync.overridden,
+                    resources: gitSync.detail.collidingResources,
+                    pids: gitSync.detail.collidingPids,
+                  }
+                : null,
+              stagingSyncCollision: finalStagingSyncCheck
+                ? { kind: finalStagingSyncCheck.kind, ...finalStagingSyncCheck.detail }
+                : stagingSync
+                  ? { kind: stagingSync.kind, ...stagingSync.detail }
+                  : null,
+              stagingSyncHandoff:
+                stagingHandoff && stagingLockPath !== null
+                ? {
+                    lockPath: stagingLockPath,
+                    mode: 'shared',
+                    heldThrough: 'systemctl-restart',
+                  }
+                : null,
+              gitSyncBarrier:
+                gitSyncBarrier?.acquired === true
+                  ? { resource: gitSyncBarrier.resource, expiresAt: gitSyncBarrier.expiresAt }
+                : null,
+              systemdDaemonReloaded,
+              ...(bgHostEnvironmentDropInDrift
+                ? {
+                    unitEnvironmentDropInChange: {
+                      paths: bgHostEnvironmentDropInDrift.changedPaths,
+                      mainPidStartedAtMs: bgHostEnvironmentDropInDrift.startedAtMs,
+                    },
+                  }
+                : {}),
+              quiesceOverridden: quiesce?.overridden ? { marker: quiesce.marker } : null,
+            };
+            if (target === 'bg-host') {
+              requestId = randomUUID();
+              requestAuditPersisted = await writeRestartAudit(ownerId, {
+                ...restartAuditDetails,
+                requestId,
+                phase: 'request',
+                beforeMainPid: before.mainPid ?? null,
+                restartCommand: scheduledRestartCmd,
+              });
+            } else {
+              void writeRestartAudit(ownerId, restartAuditDetails);
+            }
+            if (stagingHandoff?.acquired) {
+              restartScheduled = true;
+              stagingHandoff.start();
+            } else {
+              const child = spawn('sh', ['-c', `sleep 1; ${scheduledRestartCmd}`], {
+                detached: true,
+                stdio: 'ignore',
+              });
+              restartProcess = child;
+              if (target === 'bg-host') {
+                child.once('error', (error) => {
+                  restartSpawnError = error.message;
+                  restartCommandExited = true;
+                  restartCommandClosedResolve?.();
+                });
+                child.once('close', (code, signal) => {
+                  restartCommandExitCode = code;
+                  restartCommandSignal = signal;
+                  restartCommandExited = true;
+                  restartCommandClosedResolve?.();
+                });
+              }
+              child.unref();
+              restartScheduled = true;
+            }
+          } catch (error) {
+            restartScheduled = false;
+            if (stagingHandoff?.acquired) stagingHandoff.abort();
+            if (target === 'bg-host') {
+              restartSpawnError = error instanceof Error ? error.message : String(error);
+              restartCommandExited = true;
+              restartCommandClosedResolve?.();
+            } else {
+              throw error;
+            }
+          }
           const gatewayReadiness =
             target === 'gateway' ? await waitForGatewayRestartReadiness(before.mainPid ?? null) : null;
           const stagingReadiness = target === 'staging' ? await stagingRestartReadinessReader(before) : null;
+          let bgHostReadiness: BgHostRestartReadiness | null = null;
+          if (target === 'bg-host') {
+            if (restartSpawnError) {
+              bgHostReadiness = {
+                ready: false,
+                observed: false,
+                outcome: 'not-observed',
+                pidChanged: false,
+                observedPid: null,
+                activeState: null,
+                result: null,
+                waitedMs: 0,
+              };
+            } else {
+              try {
+                bgHostReadiness = await bgHostRestartReadinessReader(before);
+              } catch (error) {
+                restartObservationError = error instanceof Error ? error.message : String(error);
+                bgHostReadiness = {
+                  ready: false,
+                  observed: false,
+                  outcome: 'not-observed',
+                  pidChanged: false,
+                  observedPid: null,
+                  activeState: null,
+                  result: null,
+                  waitedMs: 0,
+                };
+              }
+            }
+            if (restartProcess && !restartCommandExited) {
+              await Promise.race([
+                restartCommandClosed,
+                new Promise<void>((resolve) => setTimeout(resolve, 250)),
+              ]);
+            }
+            const systemdJobAccepted = restartCommandExitCode === 0 && restartSpawnError === null;
+            const bgHostRestarted = bgHostReadiness.ready && systemdJobAccepted;
+            const outcomeAuditPersisted = await writeRestartAudit(ownerId, {
+              ...(restartAuditDetails ?? { target, unit: cfg.unit, viaEnv: enabledByEnv, viaAuthorizeArg: enabledByArg,
+                reason: args.reason ?? null, fenceSeq: fence.seq, phantomCoalesceBroken: phantomCoalesceBroken !== null,
+                systemdDaemonReloaded }),
+              requestId: requestId ?? 'request-id-unavailable',
+              phase: 'outcome',
+              beforeMainPid: before.mainPid ?? null,
+              restartCommand: scheduledRestartCmd,
+              restartLauncherPid: restartProcess?.pid ?? null,
+              restartCommandExitCode,
+              restartCommandSignal,
+              restartCommandError: restartSpawnError,
+              systemdJobAccepted,
+              restartObserved: bgHostReadiness.observed,
+              restarted: bgHostRestarted,
+              observedMainPid: bgHostReadiness.observedPid,
+              observedActiveState: bgHostReadiness.activeState,
+              observedResult: bgHostReadiness.result,
+              observationWaitedMs: bgHostReadiness.waitedMs,
+            });
+            const restartWasScheduled = restartProcess !== null && restartSpawnError === null;
+            const restartNote = bgHostRestarted
+              ? 'bg-host restart transition observed at active MainPID ' + bgHostReadiness.observedPid +
+                ' after ' + bgHostReadiness.waitedMs + 'ms.'
+              : restartSpawnError
+                ? 'bg-host restart command could not be started: ' + restartSpawnError
+                : restartObservationError
+                  ? 'bg-host systemd outcome could not be measured: ' + restartObservationError
+                  : !systemdJobAccepted
+                    ? 'bg-host restart command did not confirm systemd job acceptance (exit code ' +
+                      (restartCommandExitCode === null ? 'unknown' : restartCommandExitCode) +
+                      '); do not report it as restarted.'
+                    : 'bg-host restart was scheduled, but a changed active MainPID was not observed; do not report it as restarted.';
+            return json({
+              ok: bgHostRestarted,
+              target,
+              drained: true,
+              restarted: bgHostRestarted,
+              restartScheduled: restartWasScheduled,
+              systemdJobAccepted,
+              restartObserved: bgHostReadiness.observed,
+              restartRequestId: requestId,
+              restartReadiness: bgHostReadiness,
+              restartedFromPid: before.mainPid ?? null,
+              enabledVia: enabledByEnv ? 'env' : 'authorize_arg',
+              audited: requestAuditPersisted && outcomeAuditPersisted,
+              requestAuditPersisted,
+              outcomeAuditPersisted,
+              systemdDaemonReloaded,
+              ...(environmentDropInFreshnessAtGuard
+                ? {
+                    unitEnvFreshnessVerified: environmentDropInFreshnessAtGuard.checked,
+                    unitEnvChangedSinceRestart: environmentDropInFreshnessAtGuard.changedPaths.length > 0,
+                    ...(environmentDropInFreshnessAtGuard.changedPaths.length > 0
+                      ? { unitEnvChangedDropIns: environmentDropInFreshnessAtGuard.changedPaths }
+                      : {}),
+                  }
+                : {}),
+              ...(phantomCoalesceBroken ? { phantomCoalesceBroken } : {}),
+              ...(resetFailedBeforeRestart ? { resetFailedBeforeRestart: true } : {}),
+              ...(gate.overridden ? { gateCollisionOverridden: { kind: gate.kind, ...gate.detail } } : {}),
+              ...(gitSync?.overridden ? { gitSyncCollisionOverridden: { kind: gitSync.kind, ...gitSync.detail } } : {}),
+              ...(quiesce?.overridden ? { quiesceOverridden: { marker: quiesce.marker } } : {}),
+              ...(peerInFlightEdits?.checked && peerInFlightEdits.total > 0 ? { peerInFlightEdits } : {}),
+              ...(restartSpawnError
+                ? { reason: 'bg_host_restart_command_spawn_failed' }
+                : !bgHostRestarted
+                  ? { reason: 'bg_host_restart_not_observed' }
+                  : {}),
+              verifyWith: restartVerificationHint(target, cfg.unit, before.mainPid ?? null, before.nRestarts),
+              note: restartNote +
+                (environmentDropInFreshnessAtGuard?.changedPaths.length
+                  ? ` — restarted to load the newer Environment= drop-in(s): ${environmentDropInFreshnessAtGuard.changedPaths.join(', ')}.`
+                  : bgHostEnvironmentDropInDrift
+                    ? ' — the Environment= drop-in change was rechecked under the exclusive lease; a peer loaded it while this request drained, and this restart is for the still-stale runtime tree.'
+                    : '') +
+                ' bg-host restart freezes cross-machine peer-log rails ~13min while the substrate rejoins — see EI-13317.' +
+                peerInFlightEditsNote(peerInFlightEdits, cfg.unit),
+            });
+          }
           if (gatewayReadiness && !gatewayReadiness.ready) {
             return json({
               ok: false,
@@ -1812,6 +2720,15 @@ export default defineTool({
             enabledVia: enabledByEnv ? 'env' : 'authorize_arg',
             audited: true,
             systemdDaemonReloaded,
+            ...(environmentDropInFreshnessAtGuard
+              ? {
+                  unitEnvFreshnessVerified: environmentDropInFreshnessAtGuard.checked,
+                  unitEnvChangedSinceRestart: environmentDropInFreshnessAtGuard.changedPaths.length > 0,
+                  ...(environmentDropInFreshnessAtGuard.changedPaths.length > 0
+                    ? { unitEnvChangedDropIns: environmentDropInFreshnessAtGuard.changedPaths }
+                    : {}),
+                }
+              : {}),
             ...(phantomCoalesceBroken ? { phantomCoalesceBroken } : {}),
             ...(resetFailedBeforeRestart ? { resetFailedBeforeRestart: true } : {}),
             ...(gate.overridden ? { gateCollisionOverridden: { kind: gate.kind, ...gate.detail } } : {}),
@@ -1828,11 +2745,22 @@ export default defineTool({
               : {}),
             ...(gatewayReadiness ? { gatewayReadiness } : {}),
             ...(stagingReadiness ? { stagingReadiness } : {}),
+            ...(peerInFlightEdits?.checked && peerInFlightEdits.total > 0 ? { peerInFlightEdits } : {}),
+            ...(stagingSchemaPreparation
+              ? {
+                  staging_schema_preparation: {
+                    prepared: true,
+                    integrationRoot: stagingSchemaPreparation.integrationRoot,
+                    sqlDir: stagingSchemaPreparation.sqlDir,
+                    applied: stagingSchemaPreparation.applied,
+                  },
+                }
+              : {}),
             verifyWith: gatewayReadiness
               ? `GET ${gatewayHealthUrl()} after a NEW MainPID (observed ${gatewayReadiness.observedPid}; bounded wait ~${
                   GATEWAY_RESTART_PID_WAIT_MS / 1000
                 }s)`
-              : restartVerificationHint(target, cfg.unit, before.mainPid ?? null),
+              : restartVerificationHint(target, cfg.unit, before.mainPid ?? null, before.nRestarts),
             note: gatewayReadiness
               ? `Gateway restart completed: MainPID changed to ${gatewayReadiness.observedPid}; ${gatewayHealthUrl()} responded ${
                   gatewayReadiness.health?.detail ?? 'successfully'
@@ -1851,11 +2779,13 @@ export default defineTool({
                     phantomCoalesceBroken
                       ? ' — this BROKE a phantom coalesce marker (the service had NOT actually restarted despite the marker being held)'
                       : ''
-                  } — this connection will drop as the operator restarts.${
-                    target === 'bg-host'
-                      ? ' bg-host restart freezes cross-machine peer-log rails ~13min while the substrate rejoins — see EI-13317.'
-                      : ''
-                  }${gitSync?.overridden || gitSync?.kind === 'probe-failed' || gitSync?.kind === 'operation-in-flight-unknown' ? ` ⚠ ${gitSync.note}` : ''}${gate.overridden || gate.kind === 'probe-failed' ? ` ⚠ ${gate.note}` : ''}${quiesce?.overridden ? ` ⚠ ${quiesce.note}` : ''}`,
+                  }${
+                    environmentDropInFreshnessAtGuard?.changedPaths.length
+                      ? ` — restarted to load the newer Environment= drop-in(s): ${environmentDropInFreshnessAtGuard.changedPaths.join(', ')}`
+                      : bgHostEnvironmentDropInDrift
+                        ? ' — the Environment= drop-in change was rechecked under the exclusive lease; a peer loaded it while this request drained, and this restart is for the still-stale runtime tree'
+                        : ''
+                  } — this connection will drop as the operator restarts.${gitSync?.overridden || gitSync?.kind === 'probe-failed' || gitSync?.kind === 'operation-in-flight-unknown' ? ` ⚠ ${gitSync.note}` : ''}${gate.overridden || gate.kind === 'probe-failed' ? ` ⚠ ${gate.note}` : ''}${quiesce?.overridden ? ` ⚠ ${quiesce.note}` : ''}${peerInFlightEditsNote(peerInFlightEdits, cfg.unit)}`,
           });
         };
         if (target === 'staging') {

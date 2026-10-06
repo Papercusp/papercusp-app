@@ -39,6 +39,24 @@ type Pending = {
   reject: (err: Error) => void;
 };
 
+/**
+ * Error a request handler throws to control the JSON-RPC error it replies
+ * with. Any other thrown value replies `-32000` with its message.
+ */
+export class JsonRpcHandlerError extends Error {
+  constructor(
+    readonly code: number,
+    message: string,
+    readonly data?: unknown,
+  ) {
+    super(message);
+    this.name = 'JsonRpcHandlerError';
+  }
+}
+
+/** Handles one daemon→host request; its resolved value is the reply `result`. */
+export type JsonRpcRequestHandler = (params: unknown) => unknown | Promise<unknown>;
+
 export class JsonRpcBridge {
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -46,6 +64,7 @@ export class JsonRpcBridge {
   private closed = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private notifHandlers: Array<(n: JsonRpcNotification) => void> = [];
+  private requestHandlers = new Map<string, JsonRpcRequestHandler>();
 
   constructor(
     private stdout: Readable,
@@ -59,6 +78,15 @@ export class JsonRpcBridge {
 
   onNotification(fn: (n: JsonRpcNotification) => void): void {
     this.notifHandlers.push(fn);
+  }
+
+  /**
+   * Serve a daemon→host request `method`. A request for a method with no
+   * handler replies `-32601`, so a daemon can never reach a host capability
+   * the host did not deliberately expose.
+   */
+  onRequest(method: string, handler: JsonRpcRequestHandler): void {
+    this.requestHandlers.set(method, handler);
   }
 
   async call<T = unknown>(method: string, params?: unknown, timeoutMs = 30_000): Promise<T> {
@@ -100,6 +128,25 @@ export class JsonRpcBridge {
     this.pending.clear();
   }
 
+  private async serveRequest(req: JsonRpcRequest): Promise<void> {
+    const handler = this.requestHandlers.get(req.method);
+    let reply: JsonRpcResponse;
+    if (!handler) {
+      reply = { jsonrpc: '2.0', id: req.id, error: { code: -32601, message: `method not found: ${req.method}` } };
+    } else {
+      try {
+        const result = await handler(req.params);
+        reply = { jsonrpc: '2.0', id: req.id, result: result ?? null };
+      } catch (e: unknown) {
+        reply =
+          e instanceof JsonRpcHandlerError
+            ? { jsonrpc: '2.0', id: req.id, error: { code: e.code, message: e.message, data: e.data } }
+            : { jsonrpc: '2.0', id: req.id, error: { code: -32000, message: e instanceof Error ? e.message : String(e) } };
+      }
+    }
+    if (!this.closed) this.write(reply);
+  }
+
   private write(msg: object): void {
     try {
       this.stdin.write(`${JSON.stringify(msg)}\n`);
@@ -115,15 +162,20 @@ export class JsonRpcBridge {
       const line = this.buf.slice(0, nl);
       this.buf = this.buf.slice(nl + 1);
       if (!line.trim()) continue;
-      let msg: JsonRpcResponse | JsonRpcNotification;
+      let msg: JsonRpcResponse | JsonRpcNotification | JsonRpcRequest;
       try {
-        msg = JSON.parse(line) as JsonRpcResponse | JsonRpcNotification;
+        msg = JSON.parse(line) as JsonRpcResponse | JsonRpcNotification | JsonRpcRequest;
       } catch {
         // Garbage on stdout; don't crash the bridge — log via stderr
         // path is supervisor's job.
         continue;
       }
-      if ('id' in msg && msg.id != null) {
+      if (msg === null || typeof msg !== 'object') continue;
+      if ('method' in msg && typeof msg.method === 'string' && 'id' in msg && msg.id != null) {
+        // A daemon→host REQUEST (both id and method). Before P-002 this
+        // shape was mistaken for a reply and silently dropped.
+        void this.serveRequest(msg as JsonRpcRequest);
+      } else if ('id' in msg && msg.id != null) {
         const p = this.pending.get(msg.id);
         if (!p) continue; // stale reply
         this.pending.delete(msg.id);

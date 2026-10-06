@@ -18,12 +18,15 @@ import { AlertTriangle, Cloud, RefreshCw, Trash2 } from "lucide-react";
 import { parseAsString, parseAsStringEnum, useQueryState } from "nuqs";
 import { toast } from "sonner";
 import { useSyncMutate, useSyncQuery } from "@papercusp/sync";
+import { readHostedBrowserApiMarker } from "@/lib/hosted-browser-api";
+import { CloudTutorialCompanion, CloudTutorialPreparedEntry } from "@/lib/onboarding/cloud-tutorial-companion";
 import { Button } from "@/app/harness/Button";
 import { Modal } from "@/app/harness/Modal";
 import { RadioGroup } from "@/app/harness/RadioGroup";
 import { TextInput } from "@/app/harness/TextInput";
+import { Select } from "@/app/harness/Select";
 import { WorkspaceRail } from "./WorkspaceRail";
-import { ConnectStage, EMPTY_CONNECT_DRAFT, type ConnectDraft } from "./ConnectStage";
+import { ConnectStage, EMPTY_CONNECT_DRAFT, connectionActionFromDraft, type ConnectDraft } from "./ConnectStage";
 import { ConfigureStage } from "./ConfigureStage";
 import { HOST_TABS, OperateStage, type HostTab } from "./OperateStage";
 import { Field } from "./stage-primitives";
@@ -99,6 +102,7 @@ export default function CloudWorkspacesPage() {
     parseAsStringEnum<StepId>(["connect", "configure", "operate"]),
   );
   const [hostParam, setHostParam] = useQueryState("host", parseAsString);
+  const [tutorialPath, setTutorialPath] = useQueryState("tutorial", parseAsStringEnum(["beginner", "advanced"]));
   const [tabParam, setTabParam] = useQueryState(
     "tab",
     parseAsStringEnum<HostTab>([...HOST_TABS]).withDefault("overview"),
@@ -154,10 +158,22 @@ export default function CloudWorkspacesPage() {
   const [connectDraft, setConnectDraft] =
     useState<ConnectDraft>(EMPTY_CONNECT_DRAFT);
   const [destroyConfirm, setDestroyConfirm] = useState("");
+  const [restoreSource, setRestoreSource] = useState<WorkspaceHostControlRow | null>(null);
+  const [restoreName, setRestoreName] = useState("");
+  const [restoreSnapshotId, setRestoreSnapshotId] = useState("");
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const inFlightKeysRef = useRef(new Set<string>());
+  const [boundHost, setBoundHost] = useState<{ hostId: string; workspaceId: string } | null>(null);
+  const onWorkspaceBound = useCallback((hostId: string, workspaceId: string | null) => setBoundHost(current => workspaceId === null ? current?.hostId === hostId ? null : current : current?.hostId === hostId && current.workspaceId === workspaceId ? current : { hostId, workspaceId }), []);
+  const [configurationReview, setConfigurationReview] = useState<{ kind: "draft" | "host"; hostId: string; key: string } | null>(null);
+  useEffect(() => {
+    const reset = () => { setConfigurationReview(null); setBoundHost(null); };
+    window.addEventListener("workspacechange", reset);
+    window.addEventListener("papercusp:session-changed", reset);
+    return () => { window.removeEventListener("workspacechange", reset); window.removeEventListener("papercusp:session-changed", reset); };
+  }, []);
   const uncertainValidationsRef = useRef(new Map<string, string | undefined>());
 
   // The origin scheduler can stop waiting at 20 seconds while the server keeps
@@ -298,6 +314,14 @@ export default function CloudWorkspacesPage() {
     ],
   );
   const canProvision = canProvisionFrom(checks);
+  const tutorialHost = workspaces.find(row => row.id === hostParam) ?? null;
+  const hostReviewKey = (row: WorkspaceHostControlRow) => JSON.stringify([row.id, row.connectionId, row.scopeLabel, row.region, row.size, row.image, row.diskGiB, row.network, row.estimatedMonthlyUsd]);
+  const draftReviewKey = JSON.stringify([selectedConnection?.id, nameParam, selectedScope?.id, selectedRegion?.id, selectedZone, selectedSize?.id, selectedImage?.id, selectedNetwork?.id, diskParam]);
+  const reviewDraftConfiguration = () => { if (canProvision) setConfigurationReview({ kind: "draft", hostId: workspaceHostIdFromName(nameParam), key: draftReviewKey }); };
+  const configurationReviewed = Boolean(configurationReview && (configurationReview.kind === "host"
+    ? tutorialHost && configurationReview.hostId === tutorialHost.id && configurationReview.key === hostReviewKey(tutorialHost)
+    : configurationReview.key === draftReviewKey && (!tutorialHost || configurationReview.hostId === tutorialHost.id)));
+  const configurationValid = tutorialHost ? Boolean(tutorialHost.region && tutorialHost.size && tutorialHost.image && tutorialHost.network && tutorialHost.diskGiB > 0) : canProvision;
   const estimatedMonthlyUsd = estimateMonthlyUsd(
     selectedSize,
     diskGiB,
@@ -385,16 +409,11 @@ export default function CloudWorkspacesPage() {
 
   const handleConnect = useCallback(
     (target: ProviderTarget) => {
+      const request = connectionActionFromDraft(target, connectDraft);
+      if (!request) return;
       void perform(
         "connect",
-        {
-          action: "connect",
-          target,
-          label: connectDraft.label.trim(),
-          credentialRef: connectDraft.credentialRef.trim(),
-          projectId: connectDraft.projectId.trim(),
-          serviceAccountEmail: connectDraft.serviceAccountEmail.trim(),
-        },
+        request,
         `${connectDraft.label.trim()} connected`,
       ).then((ok) => {
         if (ok) closeConnectPanel();
@@ -418,7 +437,7 @@ export default function CloudWorkspacesPage() {
     if (
       !canProvision ||
       !selectedConnection ||
-      selectedConnection.target !== "gcp" ||
+      (selectedConnection.target !== "gcp" && selectedConnection.target !== "aws") ||
       !selectedScope ||
       !selectedRegion ||
       !selectedZone ||
@@ -440,8 +459,8 @@ export default function CloudWorkspacesPage() {
          * data{volumeGiB,encrypted} / provider{network{mode}}. */
         desired: {
           hostId: workspaceHostIdFromName(nameParam),
-          target: "gcp",
-          scope: { kind: "project", id: selectedScope.id },
+          target: selectedConnection.target,
+          scope: { kind: selectedConnection.target === "aws" ? "account" : "project", id: selectedScope.id },
           region: selectedRegion.id,
           zone: selectedZone,
           size: selectedSize.id,
@@ -452,7 +471,9 @@ export default function CloudWorkspacesPage() {
               : {}),
           },
           data: { volumeGiB: diskGiB, encrypted: true },
-          provider: { network: { mode: "managed" } },
+          provider: selectedConnection.target === "aws"
+            ? { subnetId: selectedNetwork.id }
+            : { network: { mode: "managed" } },
         },
       },
       `Provisioning ${nameParam.trim()}`,
@@ -477,7 +498,13 @@ export default function CloudWorkspacesPage() {
       workspace: WorkspaceHostControlRow,
       action: Exclude<LifecycleAction, "destroy">,
     ) => {
-      const gerund: Record<Exclude<LifecycleAction, "destroy">, string> = {
+      if (action === "restore") {
+        setRestoreSource(workspace);
+        setRestoreName(`${workspace.name}-restored`);
+        setRestoreSnapshotId(workspace.resources?.find((resource) => resource.kind === "snapshot" && resource.state === "applied" && resource.providerId)?.providerId ?? "");
+        return;
+      }
+      const gerund: Record<Exclude<LifecycleAction, "destroy" | "restore">, string> = {
         start: "Starting",
         stop: "Stopping",
         repair: "Repairing",
@@ -497,6 +524,21 @@ export default function CloudWorkspacesPage() {
     void setDisposition("snapshot");
     setDestroyConfirm("");
   }, [setDestroyId, setDisposition]);
+
+  const restoreSnapshots = restoreSource?.resources?.filter((resource) =>
+    resource.kind === "snapshot" && resource.state === "applied" && resource.providerId) ?? [];
+  const restoreHostId = workspaceHostIdFromName(restoreName);
+  const canRestore = Boolean(restoreSource && (restoreSource.target === "gcp" || restoreSource.target === "aws") &&
+    restoreName.trim() && restoreHostId !== restoreSource.id && !workspaces.some((host) => host.id === restoreHostId) &&
+    restoreSnapshots.some((snapshot) => snapshot.providerId === restoreSnapshotId));
+  const handleRestore = () => {
+    if (!canRestore || !restoreSource || (restoreSource.target !== "gcp" && restoreSource.target !== "aws")) return;
+    void perform(`restore:${restoreSource.id}`, {
+      action: "restore", workspaceId: restoreSource.id, name: restoreName.trim(),
+      snapshot: { target: restoreSource.target, hostId: restoreSource.id, providerId: restoreSnapshotId },
+      desired: { hostId: restoreHostId },
+    }, `Restoring ${restoreName.trim()}`).then((ok) => { if (ok) setRestoreSource(null); });
+  };
 
   const backupReady =
     disposition !== "backup" ||
@@ -528,6 +570,8 @@ export default function CloudWorkspacesPage() {
   }, [backupReady, closeDestroyModal, confirmationReady, destroyWorkspace, disposition, perform]);
 
   /* ── Render ─────────────────────────────────────────────────────────────── */
+
+  const hostedTutorial = readHostedBrowserApiMarker();
 
   return (
     <div className={styles.page}>
@@ -584,6 +628,16 @@ export default function CloudWorkspacesPage() {
         </section>
       ) : null}
 
+      {hostedTutorial && tutorialPath !== "advanced" && <CloudTutorialPreparedEntry workspaces={workspaces}
+        loading={control.loading} error={control.error}
+        onSelect={id => {
+          const row = workspaces.find(value => value.id === id);
+          if (control.loading || control.error || row?.desiredState !== "running" || row.observedState !== "running" || row.health?.status !== "healthy") return;
+          void setTutorialPath("beginner"); void setHostParam(id); void setStepParam("operate"); void setTabParam("cost");
+        }}
+        onAdvanced={() => { void setTutorialPath("advanced"); void setStepParam("connect"); void setConnectTarget("gcp"); }} />}
+      {hostedTutorial && tutorialPath === "advanced" && <Button variant="ghost" onClick={() => void setTutorialPath("beginner")}>Use a prepared workspace instead</Button>}
+      <div className={hostedTutorial ? styles.withGuide : undefined}>
       <div className={styles.shell}>
         <WorkspaceRail
           model={rail}
@@ -647,6 +701,7 @@ export default function CloudWorkspacesPage() {
               onImageChange={(value) => void setImageParam(value)}
               onNetworkChange={(value) => void setNetworkParam(value)}
               onProvision={handleProvision}
+              onReviewConfiguration={hostedTutorial ? reviewDraftConfiguration : undefined}
               onOpenConnect={() => {
                 void setStepParam("connect");
                 void setConnectTarget("gcp");
@@ -666,9 +721,27 @@ export default function CloudWorkspacesPage() {
               onLifecycle={handleLifecycle}
               onDestroy={(workspaceId) => void setDestroyId(workspaceId)}
               onGoToConfigure={() => void setStepParam("configure")}
+              onWorkspaceBound={onWorkspaceBound}
+              onReviewConfiguration={hostedTutorial ? id => { const row = workspaces.find(value => value.id === id); if (row) setConfigurationReview({ kind: "host", hostId: id, key: hostReviewKey(row) }); } : undefined}
             />
           ) : null}
         </div>
+      </div>
+
+      {hostedTutorial && <CloudTutorialCompanion
+        version={tutorialPath === "beginner" ? 2 : 1}
+        selectionKey={`${hostedTutorial.controlPlaneWorkspaceId}:${hostParam ?? ""}`}
+        connection={tutorialHost ? connections.find(row => row.id === tutorialHost.connectionId) ?? null : selectedConnection}
+        workspace={tutorialHost} boundWorkspaceId={boundHost?.hostId === tutorialHost?.id ? boundHost?.workspaceId ?? null : null}
+        configurationValid={configurationValid} configurationReviewed={configurationReviewed}
+        controlLoading={control.loading} controlError={control.error}
+        onCheckAgain={() => void control.invalidate?.()}
+        onShowStep={(step) => {
+          void setStepParam(step === "connection" ? "connect" : step === "configuration" && !tutorialHost ? "configure" : "operate");
+          if (step === "configuration" && tutorialHost) void setTabParam("cost");
+          if (step === "connection") void setConnectTarget("gcp");
+        }}
+      />}
       </div>
 
       <Modal
@@ -751,6 +824,23 @@ export default function CloudWorkspacesPage() {
             >
               <Trash2 size={14} aria-hidden="true" /> Confirm destroy
             </Button>
+          </div>
+        </div>
+      </Modal>
+      <Modal open={Boolean(restoreSource)} onOpenChange={(open) => { if (!open) setRestoreSource(null); }} title={`Restore ${restoreSource?.name ?? "workspace"}`}>
+        <div className={styles.modalBody}>
+          <p>Create a separate host from a durable snapshot. The source host stays available; its provider configuration is reused.</p>
+          <Field label="Restored workspace name"><TextInput value={restoreName} aria-label="Restored workspace name"
+            onChange={(event) => setRestoreName(event.target.value)} /></Field>
+          <Field label="Recovery snapshot" hint={!restoreSnapshots.length ? "Create a snapshot before restoring." : "Only durable snapshots registered to this host are available."}>
+            {(hintId) => <Select value={restoreSnapshotId} ariaLabel="Recovery snapshot" describedBy={hintId}
+              options={restoreSnapshots.map((snapshot) => ({ value: snapshot.providerId!, label: snapshot.providerId! }))}
+              onChange={setRestoreSnapshotId} />}
+          </Field>
+          <p role="status">{canRestore ? "Ready to restore to a separate host." : "Choose a durable snapshot and a name that creates a new host."}</p>
+          <div className={styles.modalActions}>
+            <Button variant="ghost" onClick={() => setRestoreSource(null)}>Cancel</Button>
+            <Button variant="primary" disabled={!canRestore || busyKeys.has(`restore:${restoreSource?.id ?? ""}`)} onClick={handleRestore}>Restore workspace</Button>
           </div>
         </div>
       </Modal>

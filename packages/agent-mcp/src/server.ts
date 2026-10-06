@@ -93,7 +93,12 @@ interface ValidationIssue {
   readonly path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }>;
   readonly code?: string;
   readonly origin?: string;
-  readonly maximum?: number;
+  /**
+   * Zod v4 types `$ZodIssueTooBig.maximum` as `number | bigint` (a `z.bigint().max()`
+   * bound). Declaring it narrower makes `r.error.issues` unassignable to this type
+   * (WI-10004468); the renderers below already narrow with `typeof === 'number'`.
+   */
+  readonly maximum?: number | bigint;
   /** Zod v4 `unrecognized_keys`: names of the offending object keys. */
   readonly keys?: ReadonlyArray<PropertyKey>;
   /**
@@ -191,12 +196,16 @@ export function formatInvalidArgs(issues: ReadonlyArray<ValidationIssue>, input:
       ),
     ];
 
-    // An `invalid_union` carries its real diagnosis in nested per-branch issues;
-    // surface the branch that located an actual field instead of "Invalid input".
-    // Bounded recursion so a union of unions cannot spin.
+    // An `invalid_union` usually carries its actionable diagnosis in nested
+    // per-branch issues; surface the branch that located an actual field instead
+    // of the union's generic "Invalid input". Preserve an explicit union-level
+    // message when the schema author supplied one. Bounded recursion so a union
+    // of unions cannot spin.
     if (depth < 4) {
       const branch = bestUnionBranch(issue);
-      if (branch) return branch.flatMap((sub) => render(sub, segs, depth + 1));
+      if (branch && issue.message === 'Invalid input') {
+        return branch.flatMap((sub) => render(sub, segs, depth + 1));
+      }
     }
 
     const path = segs.map((s) => String(s)).join('.');
@@ -274,7 +283,13 @@ export async function dispatch(opts: DispatchOptions): Promise<DispatchResult> {
   if (!principal) {
     return { ok: false, error: { code: 'invalid_bearer', message: 'Bearer token did not resolve to a principal' } };
   }
-  if (!principal.capabilities.has(tool.capability)) {
+  if (principal.allowedTools !== undefined && !principal.allowedTools.has(tool.name)) {
+    return {
+      ok: false,
+      error: { code: 'authorization_denied', message: `Principal ${principal.slug} is not allowed to call tool "${tool.name}"` },
+    };
+  }
+  if (!principal.capabilities.has(tool.capability) && !principal.capabilities.has('*')) {
     return {
       ok: false,
       error: {
@@ -502,6 +517,7 @@ export async function listResources(auth: ResourceAuth): Promise<ListResourcesRe
   if (!principal) {
     return { ok: false, error: { code: 'invalid_bearer', message: 'Bearer did not resolve to a principal' } };
   }
+  if (principal.allowedTools !== undefined) return { ok: true, resources: [] };
 
   const visible = getResourceCatalog().filter((r) =>
     principal.capabilities.has('*') || principal.capabilities.has(r.capability),
@@ -567,6 +583,12 @@ export async function readResource(opts: ReadResourceOptions): Promise<ReadResou
     if (!principal) {
       return { ok: false, error: { code: 'invalid_bearer', message: 'Bearer did not resolve to a principal' } };
     }
+    if (principal.allowedTools !== undefined) {
+      return {
+        ok: false,
+        error: { code: 'tool_scope_only', message: 'This principal is scoped to its exact MCP tool allowlist' },
+      };
+    }
     return readScratchResource(opts.uri, principal);
   }
 
@@ -579,6 +601,12 @@ export async function readResource(opts: ReadResourceOptions): Promise<ReadResou
   );
   if (!principal) {
     return { ok: false, error: { code: 'invalid_bearer', message: 'Bearer did not resolve to a principal' } };
+  }
+  if (principal.allowedTools !== undefined) {
+    return {
+      ok: false,
+      error: { code: 'tool_scope_only', message: 'This principal is scoped to its exact MCP tool allowlist' },
+    };
   }
   if (!principal.capabilities.has('*') && !principal.capabilities.has(matched.def.capability)) {
     return {
@@ -646,8 +674,9 @@ export async function listPrompts(bearer: string): Promise<ListPromptsResult> {
   if (!principal) {
     return { ok: false, error: { code: 'invalid_bearer', message: 'Bearer did not resolve to a principal' } };
   }
+  if (principal.allowedTools !== undefined) return { ok: true, prompts: [] };
   const visible = getPromptCatalog().filter(
-    (p) => !p.capability || principal.capabilities.has(p.capability),
+    (p) => !p.capability || principal.capabilities.has(p.capability) || principal.capabilities.has('*'),
   );
   return {
     ok: true,
@@ -669,7 +698,13 @@ export async function getPrompt(opts: GetPromptOptions): Promise<GetPromptResult
   if (!principal) {
     return { ok: false, error: { code: 'invalid_bearer', message: 'Bearer did not resolve to a principal' } };
   }
-  if (def.capability && !principal.capabilities.has(def.capability)) {
+  if (principal.allowedTools !== undefined) {
+    return {
+      ok: false,
+      error: { code: 'tool_scope_only', message: 'This principal is scoped to its exact MCP tool allowlist' },
+    };
+  }
+  if (def.capability && !principal.capabilities.has(def.capability) && !principal.capabilities.has('*')) {
     return {
       ok: false,
       error: {
@@ -737,7 +772,11 @@ export async function startServer(opts: StartServerOptions = {}): Promise<void> 
     const catalog = getCatalog();
     const tools = await Promise.all(
       catalog
-      .filter((t) => !principal || principal.capabilities.has(t.capability))
+      .filter((t) =>
+        !principal ||
+        ((principal.allowedTools === undefined || principal.allowedTools.has(t.name)) &&
+          (principal.capabilities.has(t.capability) || principal.capabilities.has('*'))),
+      )
       .map(async (t) => {
         // GUARDED conversion, never a raw z.toJSONSchema (EI-10996 / WI-4596).
         // This runs inside the tools/list map, so an unrepresentable args schema

@@ -27,6 +27,7 @@
  * approves it. Enforced server-side by the worker; surfaced here.
  */
 import { publishListingToCupboard } from './publish-listing';
+import { buildSelfDescribingPublishExtras } from './self-describing-release';
 import { parseGithubRemote, fetchGithubRepoMeta } from './resolve-repo-coords';
 import { sanitizePlanForTemplate, type PlanTemplateExport } from './plan-template-serialize';
 import { writePlanTemplateDir, type WrittenPlanTemplate } from './plan-template-store';
@@ -165,7 +166,18 @@ export async function publishPlanToCupboard(
     return { ok: false, status: 422, error: `could not resolve GitHub repo ${parsed.owner}/${parsed.repo}` };
   }
 
+  const releaseBuild = await buildSelfDescribingPublishExtras({
+    listingKind: 'plan',
+    listingRef: ref,
+    dir: written.dir,
+    ...(input.version ? { version: input.version } : {}),
+  });
+  if (!releaseBuild.ok) {
+    return { ok: false, status: releaseBuild.status, error: releaseBuild.error, detail: releaseBuild.detail };
+  }
+
   const result = await publishListingToCupboard({
+    ...releaseBuild.extras,
     listing_kind: 'plan',
     listing_ref: ref,
     ...(typeof input.project_ref === 'string' ? { project_ref: input.project_ref } : {}),

@@ -84,7 +84,9 @@ export function classifyClaimSkip(
         ? ' — and has NEVER fired. An active, due routine that no tick can claim is unreachable, ' +
           'not contended: its handler has never run and will not run until this is fixed.'
         : ' — it last fired at ' +
-          input.lastFiredAt!.toISOString() +
+          // WI-10005062: tolerate a string — a raw timestamptz once reached here, and this
+          // classifier's throw aborted routinesTick dispatch for every later due routine.
+          new Date(input.lastFiredAt as Date | string).toISOString() +
           ' and has been skipped by every tick since.'),
   };
 }

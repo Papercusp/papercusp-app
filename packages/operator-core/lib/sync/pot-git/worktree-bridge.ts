@@ -43,7 +43,7 @@ import type { Duplex } from 'node:stream';
 import { type RunGit, defaultRunGit, deviceNamespaceKey } from './storage';
 import { fetchPeerNamespace } from './fetch-transport';
 import { fetchCoalescerKey, withFetchCoalescing } from './fetch-coalescer';
-import { STAGING_REF } from './integrator';
+import { STAGING_REF, mergeTree } from './integrator';
 import {
   type AcceptStagingAdvanceOpts,
   type EpochSeq,
@@ -107,8 +107,9 @@ export interface WorktreeBridgeConfig {
    * With `allowedDevices` (a member SET), ALSO set `maxGrantedEpoch` (WI-1560,
    * see AcceptStagingAdvanceOpts) — the ADMITTED-member variant of the same
    * poisoning is otherwise still open: any member key passes the set gate and
-   * can claim an arbitrary epoch. Cap it at the last verified G-0 handoff
-   * grant (`adoptHandoffToken(...).nextEpoch`) / the lease epoch.
+   * can claim an arbitrary epoch. Cap it at the lease epoch. (Production no
+   * longer publishes per-advance handoff tokens — WI-10005753 / git-live
+   * D-055 — so `adoptHandoffToken(...).nextEpoch` is a legacy-only source.)
    */
   accept: AcceptStagingAdvanceOpts;
   runGit?: RunGit;
@@ -226,7 +227,18 @@ async function fetchMirrorRefIntoWorktree(
 /** Result of {@link catchUpWorktreeToWatermark}: `current` is the cheap
  *  steady-state answer (the worktree already contains the watermark), so the
  *  caller can tell "nothing to retry" from a real advance attempt. */
-export type WorktreeCatchUpResult = { outcome: 'current'; to: string } | WorktreeAdvanceResult;
+export type WorktreeCatchUpResult =
+  | { outcome: 'current'; to: string }
+  | (WorktreeAdvanceResult & {
+      /** Set only on `diverged-manual` (WI-10006476 / plan
+       *  agent-capacity-and-cost-gcp-2026-09-30 D-055): the paths a 3-way merge of
+       *  the local head with the hive head conflicts on. `[]` = the merge is clean,
+       *  so the integrator will merge this member's head itself and the divergence
+       *  is transient. Absent = not probed, or the probe failed (see `detail`). A
+       *  non-empty list is the state that never resolves on its own: the
+       *  integrator parks the member head, and this ff-only worktree cannot follow. */
+      conflictPaths?: string[];
+    });
 
 /**
  * WI-10003772 — the deferred-advance retry sweep. `handleStagingAdvance`
@@ -277,7 +289,14 @@ export async function catchUpWorktreeToWatermark(
       });
       if (fetchError !== null) return { outcome: 'error', from: null, to: stagingSha, detail: fetchError };
     }
-    return advanceWorktree(worktreePath, stagingSha, { runGit });
+    const advanced = await advanceWorktree(worktreePath, stagingSha, { runGit });
+    if (advanced.outcome !== 'diverged-manual' || advanced.from === null) return advanced;
+    // D-055: name what keeps this member diverged. Same merge the integrator runs,
+    // so a conflict here is (up to the member's last publish) the park there.
+    const probe = await mergeTree(worktreePath, advanced.from, stagingSha, runGit);
+    if ('tree' in probe) return { ...advanced, conflictPaths: [] };
+    if ('conflict' in probe) return { ...advanced, conflictPaths: [...probe.paths].sort() };
+    return { ...advanced, detail: `${advanced.detail ?? 'diverged'}; conflict probe failed: ${probe.error}` };
   } catch (e) {
     return { outcome: 'error', from: null, to: stagingSha, detail: e instanceof Error ? e.message : String(e) };
   }

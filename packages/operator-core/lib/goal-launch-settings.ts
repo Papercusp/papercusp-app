@@ -49,18 +49,19 @@
  * reporting success. A ceiling that IS read and IS exceeded refuses, hard.
  *
  * THE BUDGET IS A THIRD CEILING (goal-mode-design-intent-hardening-2026-08-16
- * P-006, flag GOAL_BUDGET_LAUNCH_GATE). `goals.budget_cents` binds against the
- * PLATFORM spend snapshot (`goals.metadata.spentCents`, written only by the
- * goal-spend-rollup tick — D-003) and refuses further launches once spent ≥
- * budget, with a per-goal-deduped owner escalation. It lives in this resolver
- * for the same D-001 reason the agent ceilings do: every launch door already
- * honors `refusal`, so the budget binds everywhere with no per-door obligation.
- * It follows the same fail-open rule — a budget that cannot be read, or that
- * has no platform snapshot yet, is reported degraded, never guessed at.
+ * P-006, flag GOAL_BUDGET_LAUNCH_GATE). `goals.budget_cents` binds against
+ * goal-attributed priced usage in its declared window (D-011). A fresh
+ * platform snapshot may supply that figure; absent, stale, or untrusted
+ * snapshots trigger a live rollup. An unmeasured rollup refuses launch and per-turn inference,
+ * with a per-goal-deduped owner escalation for launch refusal. It lives in
+ * this resolver because every launch door already honors `refusal`.
  */
 import { z } from 'zod';
 import type { Sql } from 'postgres';
-import { getOrgPg } from '@papercusp/db-org';
+import { getOrgPg, GOAL_SPEND_SNAPSHOT_SOURCE } from '@papercusp/db-org';
+// Pure plan-status grammar (zero I/O) — the one definition of "terminal plan",
+// shared with plans:set-plan-status. Used by the pot-owner worklist count.
+import { TERMINAL_PLAN_STATUSES, resolveEffectiveStatusForItems, type ItemStatus } from '@papercusp/plan-parser';
 // Re-exported below for the public surface; imported here because this module
 // uses both internally (the schema's role enum + the resolver signatures).
 import {
@@ -79,17 +80,26 @@ import {
 import { FLEET_TYPES } from './agent-fleets-store';
 import { GOAL_KICKOFF_REQUIRED_READS } from './goals/kickoff-evidence';
 import {
+  evaluateInteractiveUsageFreshness,
+  isInteractiveUsageUnmeasuredReason,
+} from './interactive-usage/freshness';
+import {
   buildGoalOwnerReportDraft,
+  GOAL_OWNER_REPORT_HEADING_LIST,
   type GoalOwnerReportDraft,
   type GoalOwnerReportDraftInput,
 } from './goal-owner-report';
+import { openOwnerWallPredicateSql, ownerWallActionSql } from './goal-owner-report-truth';
 import type { GoalOwnerReportObligation } from './system-health/goal-owner-report-watchdog';
-import { claimSpecFilterPositivelyTargets, validateClaimSpec } from './scheduler/claim-spec';
+import { claimSpecFilterAdmitsTarget, claimSpecFilterPositivelyTargets, validateClaimSpec } from './scheduler/claim-spec';
 // Type-only: the placement compiler reads a closure VERDICT, it never resolves
 // one. Keeping this erased leaves the acceptance gate out of the portfolio
 // read's runtime graph.
 import type { PlanClosureState, PlanClosureVerdict } from './goals/plan-closure';
 import type { GoalHolderFirstTurnAttestation } from './goals/holder-attestation';
+// Type-only: erased at runtime, so it cannot close the cycle REFUSAL_SCOPES
+// documents. The value is reached through a dynamic import at launch time.
+import type { GoalSpendRollup } from './goals/spend-rollup';
 
 function pg(sql?: Sql): Sql {
   return sql ?? getOrgPg().sql;
@@ -208,6 +218,71 @@ export const UNLIMITED_CEILING = 'unlimited' as const;
 
 /** A stored ceiling: a hard number, or the explicit opt-out. */
 export type GoalCeiling = number | typeof UNLIMITED_CEILING;
+
+/**
+ * The smallest ceilings under which an auto-minted drain fleet can hold a WORKER
+ * (EI-24556293106348130).
+ *
+ * A started goal with a drain fleet runs three agents before any work is claimed:
+ * the goal holder, the fleet's delegated leader, and one drain worker. All three
+ * carry the goal's `session_briefs.goal_id`, so `goalHeadcount` counts all three
+ * toward `maxAgents`; the leader's presence carries the fleet slug, so it counts
+ * toward `maxPerFleet` too. The worker is launched LAST, so a ceiling below this
+ * floor refuses exactly the one agent that does the work, and the fleet runs with
+ * a live leader and zero workers. The watchdog then reports `drain-fleet-dead`
+ * while the leader is visibly live, and its own replacement launch is refused by
+ * the same ceiling.
+ *
+ * Measured before this floor existed: every goal-drain fleet started with
+ * `maxAgents: 2, maxPerFleet: 1` (4 of 4, 2026-09-26 and 2026-09-29) ran with
+ * zero workers; every fleet started at or above this floor (16 of 16) got its
+ * worker within 16s.
+ */
+export const DRAIN_FLEET_MIN_CEILINGS = {
+  maxAgents: 3,
+  maxPerFleet: 2,
+} as const;
+
+/**
+ * The start-door refusal for ceilings that cannot hold a drain fleet's worker, or
+ * null when they can. A MESSAGE, not a boolean, for the same reason as
+ * `goalHolderPolicyProblem`: every door surfaces it verbatim, and two doors with
+ * their own copies would drift until the looser one became the way in.
+ *
+ * Call it ONLY where a drain fleet will be minted — a sole-member goal runs the
+ * goal agent alone and is not bound by this floor. A door that offers another way
+ * out (goals:start's sole-member contract) appends it; this text names only the
+ * remedy every door shares. `unlimited` always passes, and an unset ceiling
+ * resolves to `GOAL_LAUNCH_DEFAULTS`, which clears it.
+ */
+export function drainFleetTopologyProblem(
+  // Structural, not `GoalLaunchSettings`: goals:start-from-package carries a
+  // package's settings as an untyped record, and the floor must bind there too.
+  settings: { maxAgents?: unknown; maxPerFleet?: unknown } | null | undefined,
+): string | null {
+  const asCeiling = (v: unknown): GoalCeiling | undefined =>
+    v === UNLIMITED_CEILING || (typeof v === 'number' && Number.isFinite(v)) ? (v as GoalCeiling) : undefined;
+  const maxAgents = resolveCeiling(asCeiling(settings?.maxAgents), GOAL_LAUNCH_DEFAULTS.maxAgents);
+  const maxPerFleet = resolveCeiling(asCeiling(settings?.maxPerFleet), GOAL_LAUNCH_DEFAULTS.maxPerFleet);
+  const short: string[] = [];
+  if (maxAgents != null && maxAgents < DRAIN_FLEET_MIN_CEILINGS.maxAgents) {
+    short.push(
+      `maxAgents=${maxAgents} (needs at least ${DRAIN_FLEET_MIN_CEILINGS.maxAgents}: holder + drain leader + one drain worker)`,
+    );
+  }
+  if (maxPerFleet != null && maxPerFleet < DRAIN_FLEET_MIN_CEILINGS.maxPerFleet) {
+    short.push(
+      `maxPerFleet=${maxPerFleet} (needs at least ${DRAIN_FLEET_MIN_CEILINGS.maxPerFleet}: drain leader + one drain worker)`,
+    );
+  }
+  if (short.length === 0) return null;
+  return (
+    `launch ceilings too low for this goal's drain fleet: ${short.join('; ')}. ` +
+    `The holder and the drain leader launch first, so these ceilings would refuse the only agent that ` +
+    `claims work, leaving a leader-only fleet the watchdog reports dead. Nothing was created or saved. ` +
+    `Raise the ceiling(s), or set them to '${UNLIMITED_CEILING}'.`
+  );
+}
 
 const ceilingSchema = z
   .union([z.number().int().positive().max(1000), z.literal(UNLIMITED_CEILING)])
@@ -539,7 +614,7 @@ export interface GoalLaunchRefusal {
 /**
  * Population labels for {@link GoalLaunchRefusal.currentScope}.
  *
- * ⚠ `BUDGET_POT` deliberately DUPLICATES `GOAL_SPEND_POT_SCOPE` from
+ * ⚠ `BUDGET_LINEAGE` deliberately DUPLICATES `GOAL_SPEND_LINEAGE_SCOPE` from
  * `./goals/spend-rollup` rather than importing it. That module reaches
  * `@papercusp/agent-mcp`, which imports THIS file, so the import would close a
  * runtime cycle. Duplication is the lesser evil here, but only because it is
@@ -548,8 +623,12 @@ export interface GoalLaunchRefusal {
  * derived.
  */
 export const REFUSAL_SCOPES = {
-  /** Mirrors GOAL_SPEND_POT_SCOPE — see the cycle note above. */
-  BUDGET_POT: 'inside-goal-pots:authoritative',
+  /**
+   * Mirrors GOAL_SPEND_LINEAGE_SCOPE — see the cycle note above. The goal's
+   * write-time-attributed spend over its budget window (D-011), the one figure
+   * the snapshot, this gate and the breach check share.
+   */
+  BUDGET_LINEAGE: 'attributed-by-lineage:authoritative',
   /**
    * The value carried no provenance marker, so its population is UNKNOWN. Not a
    * synonym for the pot scope: the gate's SELECT filters on nothing, so an
@@ -559,55 +638,61 @@ export const REFUSAL_SCOPES = {
    */
   BUDGET_UNVERIFIED: 'unverified-provenance:unmarked-snapshot',
   /**
-   * NOTHING was measured (WI-10002052 / D-004). Distinct from BUDGET_UNVERIFIED,
+   * NOTHING could be measured (WI-10002052). Distinct from BUDGET_UNVERIFIED,
    * which labels a number whose POPULATION is unknown: here there is no number at
-   * all, because the pot leg is an INNER JOIN on goal_pots and a goal with zero
-   * attached pots yields no measurement to scope. The refusal carries
-   * `current: null` and this label says why — so a reader is never invited to
-   * infer that the goal spent nothing.
+   * all, because the goal's window holds attributed samples the ledger could not
+   * price, so any total would be a floor. The refusal carries `current: null`
+   * and this label says why — so a reader is never invited to infer that the
+   * goal spent nothing.
    */
-  BUDGET_UNMEASURABLE: 'unmeasurable:no-pot-leg-measurement',
+  BUDGET_UNMEASURABLE: 'unmeasurable:unpriced-lineage-samples',
+  /**
+   * NOTHING could be measured because the authoritative stream is EMPTY while
+   * the goal's diagnostic legs (its pots, its holder sessions) carry usage in the
+   * same window: spend happened that write-time attribution never stamped. The
+   * exact failure the stewardship-remediation plan was opened for (0 attributed
+   * samples beside 21,444 cents on the session ledger), so it is refused, never
+   * read as "nothing spent".
+   */
+  BUDGET_UNATTRIBUTED: 'unmeasurable:unattributed-goal-samples',
+  /** No priced goal spend can be inferred from an empty measurement (D-011). */
+  BUDGET_NO_SAMPLES: 'unmeasurable:no-lineage-samples',
+  /** The launch-time measurement itself failed, so there is no figure to judge. */
+  BUDGET_MEASUREMENT_FAILED: 'unmeasurable:measurement-failed',
   LIVE_AGENTS_IN_GOAL: 'live-agents-in-goal',
   LIVE_AGENTS_IN_FLEET: 'live-agents-in-fleet',
 } as const;
 
 /**
- * The population a stored `spentCents` actually describes, judged from the
- * marker beside it rather than assumed. Both known writers
- * (`spend-rollup.ts`'s tick and `goals:update`'s verified rollup) persist a
- * pot-leg figure; anything unmarked is reported as unverified instead of being
- * granted their standing.
- */
-/**
- * WI-10002052 / D-004: decide whether a goal carries PRICED, goal-tagged spend
- * that the authoritative pot leg did not measure.
+ * WI-10002052 / D-011: does the snapshot say this goal SPENT in its window but
+ * the spend could not be measured?
  *
- * Reads the diagnostic session leg for EXISTENCE only (`> 0`), never as a
- * quantity — see {@link GoalBudgetTruth.unmeasuredPricedSpend} for why the cents
- * deliberately do not travel with this answer.
+ * The rollup writes `spentCents: null` for two different reasons and names
+ * which one in `spentCentsUnmeasuredReason`. Only `unpriced-lineage-samples` is
+ * a hole: attributed samples exist but some carry no price, so the true total is
+ * unknown and failing open would let a launch past a ceiling nobody can check.
+ * `no-lineage-samples` only says the write-time-attributed stream is empty. That
+ * is not proof nothing was spent (attribution can miss a goal's sessions), so the
+ * launch gate does not admit on it: it measures every leg at launch and refuses
+ * while the authoritative spend remains unmeasured (D-011 clause 3).
  *
- * Returns false whenever `spentCents` is non-null: if the pot leg measured, the
- * gate has an authoritative number and this signal has no business overriding
- * it. So this can only ever ADD a refusal where the gate previously failed
- * open; it can never suppress or soften an existing measured refusal.
+ * Returns false whenever `spentCents` is non-null, so a stale reason can never
+ * contradict a live measurement.
  */
-export function hasUnmeasuredPricedSpend(breakdown: unknown, spentCents: number | null): boolean {
-  // A measured goal is not an unmeasured one. Guard first so a stale breakdown
-  // can never contradict a live measurement.
+export function hasUnmeasuredPricedSpend(unmeasuredReason: unknown, spentCents: number | null): boolean {
   if (spentCents != null) return false;
-  if (!breakdown || typeof breakdown !== 'object' || Array.isArray(breakdown)) return false;
-  const b = breakdown as Record<string, unknown>;
-  // Both must hold: cents alone could be a rounding artifact, samples alone
-  // could be entirely unpriced. Together they mean real priced spend exists.
-  const cents = Number(b.sessionCents);
-  const samples = Number(b.sessionSamples);
-  return Number.isFinite(cents) && cents > 0 && Number.isFinite(samples) && samples > 0;
+  return unmeasuredReason === 'unpriced-lineage-samples';
 }
 
+/**
+ * The population a stored `spentCents` actually describes, judged from the
+ * marker beside it rather than assumed. The spend-rollup tick is the only
+ * writer (D-003) and stamps GOAL_SPEND_SNAPSHOT_SOURCE; anything else, including
+ * the retired pot-rollup markers, is reported as unverified instead of being
+ * granted its standing.
+ */
 export function budgetSpendScope(source: string | null): string {
-  return source === 'goal-pots-rollup' || source === 'goal-spend-tick'
-    ? REFUSAL_SCOPES.BUDGET_POT
-    : REFUSAL_SCOPES.BUDGET_UNVERIFIED;
+  return source === GOAL_SPEND_SNAPSHOT_SOURCE ? REFUSAL_SCOPES.BUDGET_LINEAGE : REFUSAL_SCOPES.BUDGET_UNVERIFIED;
 }
 
 /**
@@ -624,27 +709,19 @@ export interface GoalBudgetTruth {
   budgetCents: number | null;
   spentCents: number | null;
   /**
-   * WI-10002052 / D-004: does this goal demonstrably carry PRICED, goal-tagged
-   * spend that the pot leg could not measure?
+   * WI-10002052 / D-011: did this goal spend in its window in a way that could
+   * not be priced?
    *
-   * This is an EXISTENCE signal and nothing more. It exists because a null
-   * `spentCents` conflates two populations the gate must treat oppositely:
-   *   - a goal that has simply never been ticked (nothing spent yet) — fail open
-   *     is harmless, nothing is being let past a ceiling; and
-   *   - a POT-LESS goal whose spend is real, priced and tagged, but structurally
-   *     invisible to `goalSpend()` (an INNER JOIN on goal_pots). Failing open
-   *     there means the ceiling never binds for that goal, ever.
+   * An EXISTENCE signal. It exists because a null `spentCents` covers two
+   * populations the gate must treat oppositely:
+   *   - nothing attributed in the window (or no tick yet): failing open is
+   *     harmless, nothing is being let past a ceiling; and
+   *   - attributed samples WITHOUT a price: the total is unknown, so failing
+   *     open would let launches past a ceiling that cannot be checked.
    *
-   * ⚠ DELIBERATELY A BOOLEAN, NOT THE CENTS. The session leg it is derived from
-   * is marked diagnostic-only at the writer (`spend-rollup.ts`) and "must never
-   * be read as the authoritative spend snapshot or a terminal-control input".
-   * Carrying the number here would put the tempting value in the gate's hand and
-   * invite `sessionCents >= budgetCents`, which would breach that invariant and
-   * silently change what the ceiling measures. D-004 clause 3 forbids folding
-   * the session leg into the authoritative total without explicitly amending the
-   * invariant; this does not fold it — the gate learns only THAT unmeasured
-   * priced spend exists, never HOW MUCH, and so refuses as unmeasurable rather
-   * than pretending to a figure it may not use.
+   * ⚠ DELIBERATELY A BOOLEAN, NOT THE PRICED FLOOR. A floor below the ceiling
+   * says nothing about headroom, so carrying it here would invite exactly the
+   * comparison that makes a partial measurement look like a pass.
    */
   unmeasuredPricedSpend: boolean;
   spentCentsAt: string | null;
@@ -661,6 +738,9 @@ export interface GoalBudgetTruth {
    * unless the marker travels with the cents. It now does.
    */
   spentCentsSource: string | null;
+  /** Freshness recorded with the snapshot, re-evaluated against the current clock. */
+  interactiveUsageFreshnessStatus: 'fresh' | 'stale' | 'unavailable' | null;
+  interactiveUsageLastIngestedAtMs: number | null;
 }
 
 export type GoalPlanPlacementState =
@@ -669,6 +749,17 @@ export type GoalPlanPlacementState =
   | 'independently-led'
   | 'working'
   | 'blocked'
+  /**
+   * WI-10005657: every remaining dependency-free item of the plan is `needs-human`
+   * (the structural exit a plan Decision / steward uses to reserve work to the
+   * owner or a solo route). Nothing is launchable — a fleet cannot resolve an
+   * owner wall — so this is a CONSISTENT, no-action state, never `blocked`.
+   *
+   * ⚠ Do not fold this back into `blocked`/`resolve-plan-blockers`: that
+   * collapse is what made the obligation re-mandate `fleet:launch-on-plan` (and
+   * its watchdog twin re-wake the holder) for a plan only the owner can advance.
+   */
+  | 'owner-walled'
   /**
    * Administratively complete — every item done/dropped, or the status says so —
    * but closure is NOT evidenced (P-026 / D-012). The plan STAYS in the worklist.
@@ -711,6 +802,11 @@ export interface GoalPlanPlacementToolCall {
  */
 export interface GoalPlanPlacement {
   state: GoalPlanPlacementState;
+  /**
+   * WI-10005657: present exactly when `state === 'owner-walled'` — the
+   * needs-human frontier items the plan is waiting on. Omitted otherwise.
+   */
+  wall?: { kind: 'owner'; itemIds: string[] };
   fleet: {
     slug: string;
     controlState: string | null;
@@ -720,6 +816,8 @@ export interface GoalPlanPlacement {
     target: number | null;
     /** Measured positive plan/plan_item targeting, not ownership authority. */
     planScoped?: boolean;
+    /** Some OR arm admits the plan/plan_item (D-033); gates placement, never credits pickup on its own. */
+    planAdmitted?: boolean;
   } | null;
   activeLane: {
     itemId: string;
@@ -813,7 +911,9 @@ export interface GoalPortfolioBrief {
     blocked: number;
     needsHuman: number;
     claimable: number | null;
-    claimabilityScope: 'issue-family' | 'none' | 'unknown';
+    /** 'not-requested' = the caller opted out of the per-id floor count
+     *  (`claimability: 'skip'`); claimable is null, never a measured 0. */
+    claimabilityScope: 'issue-family' | 'none' | 'unknown' | 'not-requested';
   };
   launch: {
     settings: GoalLaunchSettings | null;
@@ -852,7 +952,7 @@ export interface GoalOperatingInputs {
   status: 'ready' | 'incomplete' | 'blocked';
   canExecute: boolean;
   budgetWindow: 'undeclared' | 'lifetime' | 'rolling';
-  spendCoverage: 'no-ceiling' | 'measured-pot' | 'not-yet-measured' | 'unmeasurable' | 'unverified';
+  spendCoverage: 'no-ceiling' | 'measured' | 'not-yet-measured' | 'unmeasurable' | 'unverified';
   issues: Array<{
     code:
       | 'missing-kill-criterion'
@@ -881,6 +981,15 @@ export interface GoalLadderHealth {
     action: string;
   }>;
   checked: { pots: number; plans: number; workItems: number };
+  /**
+   * Worklist work-items that carry no `goal_id` stamp but are owned by another machine
+   * (`origin = 'remote'`). Federation owns those rows: a local field edit is refused and the
+   * attribution backfill deliberately skips them, so NO local verb can stamp one. Counting them as
+   * `unstamped-work-item` made the ladder `incomplete` forever for a defect the local goal holder
+   * cannot repair (WI-10005269). They are surfaced here as an explicit, non-blocking note — the
+   * owning machine stamps them — never silently dropped and never an actionable issue.
+   */
+  remoteOwned: string[];
 }
 
 /** Compile only from the canonical goal, tripwire and spend fields already read. */
@@ -924,8 +1033,8 @@ export function evaluateGoalOperatingInputs(args: {
     } else if (args.spentCents == null) {
       spendCoverage = 'not-yet-measured';
       add('spend-not-yet-measured', false, 'Check the first goal spend rollup before claiming measured headroom.');
-    } else if (budgetSpendScope(args.spentCentsSource) === REFUSAL_SCOPES.BUDGET_POT) {
-      spendCoverage = 'measured-pot';
+    } else if (budgetSpendScope(args.spentCentsSource) === REFUSAL_SCOPES.BUDGET_LINEAGE) {
+      spendCoverage = 'measured';
     } else {
       spendCoverage = 'unverified';
       add('spend-provenance-unverified', requiredForOutcome, 'Repair the spend provenance marker before relying on the ceiling.');
@@ -987,15 +1096,20 @@ export function evaluateGoalLadderHealth(args: {
   goalId: string;
   pots: GoalPortfolioBrief['pots'];
   plans: Array<{ ref: string; harness: string | null; goalId: string | null; exists: boolean }>;
-  workItems: Array<{ id: string; harness: string | null; planSlug: string | null; goalId: string | null }>;
+  workItems: Array<{
+    id: string; harness: string | null; planSlug: string | null; goalId: string | null;
+    /** `harness_shared.work_items.origin`; `'remote'` rows are federation-owned (see `remoteOwned`). */
+    origin?: string | null;
+  }>;
   unreadable?: boolean;
 }): GoalLadderHealth {
   const issues: GoalLadderHealth['issues'] = [];
+  const remoteOwned: string[] = [];
   const add = (code: GoalLadderHealth['issues'][number]['code'], ref: string, action: string) =>
     issues.push({ code, ref, action });
   if (args.unreadable) {
     add('ladder-unreadable', args.goalId, 'Re-read the canonical goal, pot, plan and work-item records.');
-    return { status: 'unknown', issues, checked: { pots: 0, plans: 0, workItems: 0 } };
+    return { status: 'unknown', issues, checked: { pots: 0, plans: 0, workItems: 0 }, remoteOwned };
   }
   if (args.pots.length === 0) add('missing-pot-link', args.goalId, 'Attach a pot with goals:attach-pot.');
   if (args.pots.length > 0 && !args.pots.some((pot) => pot.role === 'owner')) {
@@ -1016,7 +1130,8 @@ export function evaluateGoalLadderHealth(args: {
     }
   }
   for (const item of args.workItems) {
-    if (!item.goalId) add('unstamped-work-item', item.id, 'Repair the canonical work-item goal_id stamp.');
+    if (!item.goalId && item.origin === 'remote') remoteOwned.push(item.id);
+    else if (!item.goalId) add('unstamped-work-item', item.id, 'Repair the canonical work-item goal_id stamp.');
     else if (item.goalId !== args.goalId) add('work-item-goal-mismatch', item.id, 'Review the item attribution; do not reparent it silently.');
     if (item.harness && !args.pots.some((pot) => pot.harness === item.harness)) {
       add('missing-pot-link', item.id, 'Attach the work-item pot to this goal.');
@@ -1025,6 +1140,7 @@ export function evaluateGoalLadderHealth(args: {
   return {
     status: issues.length ? 'incomplete' : 'healthy', issues,
     checked: { pots: args.pots.length, plans: args.plans.length, workItems: args.workItems.length },
+    remoteOwned,
   };
 }
 
@@ -1055,6 +1171,14 @@ export function compileGoalPlanPlacement(args: {
    * closed" are the two readings this item exists to keep apart.
    */
   closure?: Pick<PlanClosureVerdict, 'state' | 'evidenceSatisfied' | 'reason' | 'legs'> | null;
+  /**
+   * WI-10005657: the plan's dependency-free frontier, when it consists ONLY of
+   * `needs-human` items. The caller (parsePortfolioWorklist) owns the frontier
+   * derivation; empty/omitted means "not owner-walled". Consulted only when the
+   * plan would otherwise compile as `blocked` for lack of a launchable item, so
+   * it can never hide a live lane, a fleet, or a startable todo.
+   */
+  ownerWalledItemIds?: readonly string[];
 }): GoalPlanPlacement {
   const source = portfolioObject(args.source) ?? {};
   const nowMs = (args.now ?? new Date()).getTime();
@@ -1085,6 +1209,10 @@ export function compileGoalPlanPlacement(args: {
     claimSpecFilterPositivelyTargets(claimSpec.spec!.view.filter, 'plan', args.plan.slug) ||
     (args.actionableItemId !== null && claimSpecFilterPositivelyTargets(claimSpec.spec!.view.filter, 'plan_item', args.actionableItemId))
   );
+  const planAdmitted = claimSpec.ok && Boolean(claimSpec.spec) && (
+    claimSpecFilterAdmitsTarget(claimSpec.spec!.view.filter, 'plan', args.plan.slug) ||
+    (args.actionableItemId !== null && claimSpecFilterAdmitsTarget(claimSpec.spec!.view.filter, 'plan_item', args.actionableItemId))
+  );
   const holderIdentityMeasured = Array.isArray(source.goalHolderOwnerIds);
   const goalHolderOwnerIds = portfolioArray(source.goalHolderOwnerIds).map(String);
   const fleet =
@@ -1097,6 +1225,7 @@ export function compileGoalPlanPlacement(args: {
           liveMembers: portfolioNumber(fleetRaw.liveMembers),
             target: fleetRaw.target == null ? null : portfolioNumber(fleetRaw.target),
             planScoped,
+            planAdmitted,
         }
       : null;
   const transactionRaw = portfolioJsonObject(fleetRaw?.launchTransaction);
@@ -1113,6 +1242,27 @@ export function compileGoalPlanPlacement(args: {
         nextAction: portfolioString(recoveryRaw?.nextAction),
       }
     : null;
+
+  // EI-25157449632977265: a partial receipt can describe historical worker
+  // attestation gaps after every requested process was opened and verified.
+  // Measured empty physical recovery lets CURRENT leadership/admission/member
+  // claim evidence below decide placement; it never upgrades the immutable
+  // transaction or treats live-member count as worker accountability. Inspect
+  // the raw arrays: portfolioArray would turn an absent measurement into [].
+  const requestedMemberIds = transactionRaw?.requestedMemberIds;
+  const openedMemberIds = transactionRaw?.openedMemberIds;
+  const verifiedMemberIds = transactionRaw?.verifiedMemberIds;
+  const partialLaunchPhysicallyComplete =
+    transactionState === 'partial' &&
+    Array.isArray(recoveryRaw?.retryOwnerIds) && recoveryRaw.retryOwnerIds.length === 0 &&
+    Array.isArray(transactionRaw?.failed) && transactionRaw.failed.length === 0 &&
+    (transactionRaw.unconfirmedMemberIds === undefined ||
+      (Array.isArray(transactionRaw.unconfirmedMemberIds) && transactionRaw.unconfirmedMemberIds.length === 0)) &&
+    Array.isArray(requestedMemberIds) && requestedMemberIds.length > 0 &&
+    Array.isArray(openedMemberIds) && Array.isArray(verifiedMemberIds) &&
+    requestedMemberIds.every((ownerId) =>
+      typeof ownerId === 'string' && ownerId.trim().length > 0 &&
+      openedMemberIds.includes(ownerId) && verifiedMemberIds.includes(ownerId));
 
   const normalizedStatus = args.status?.trim().toLowerCase() ?? '';
   const normalizedItems = args.itemStatuses.map((status) => status.trim().toLowerCase());
@@ -1137,6 +1287,7 @@ export function compileGoalPlanPlacement(args: {
   // compiler; only an approved/active plan may emit a fleet launch call.
   const planStartable = normalizedStatus === 'ready' || normalizedStatus === 'active' || normalizedStatus === 'started';
   const blocked = !administrativelyComplete && args.actionableItemId == null;
+  const ownerWalledItemIds = args.ownerWalledItemIds ?? [];
   const planHarness = args.plan.harness?.trim() || null;
   const planSlug = args.plan.slug.trim();
   const planIdentityProblem =
@@ -1189,10 +1340,28 @@ export function compileGoalPlanPlacement(args: {
     state = 'blocked';
     action = 'resolve-plan-blockers';
     reason = `The plan is ${normalizedStatus || 'unresolved'} and cannot launch until its lifecycle/start gate is satisfied.`;
+  } else if (blocked && ownerWalledItemIds.length > 0) {
+    // Not `blocked`: no agent can resolve it, so reporting it as a repairable
+    // blocker is what kept re-mandating a fleet launch the plan cannot accept.
+    state = 'owner-walled';
+    action = 'none';
+    reason =
+      `Every remaining dependency-free item (${ownerWalledItemIds.join(', ')}) is needs-human: ` +
+      'only the owner can advance this plan. Do not launch a fleet or spawn a leader for it; ' +
+      'report the wall in the owner report and move on to launchable plans.';
   } else if (blocked) {
     state = 'blocked';
     action = 'resolve-plan-blockers';
     reason = 'The plan has non-terminal work but no dependency-free todo item.';
+  } else if (!fleet && activeLane && !goalHolderOwnerIds.includes(activeLane.ownerId)) {
+    state = 'blocked';
+    action = 'reconcile-plan-lane-holder';
+    const holder = activeLane.ownerFleet
+      ? `${activeLane.ownerId} in fleet ${activeLane.ownerFleet}`
+      : activeLane.ownerId;
+    reason =
+      `The ${activeLane.itemId} lease is held by ${holder}, outside the GOAL holders, and no plan-scoped fleet ` +
+      `exists for ${args.plan.slug}; reconcile that lease and do not launch a duplicate fleet.`;
   } else if (!activeLane && !fleet) {
     state = 'unplaced';
     action = 'launch-plan-fleet';
@@ -1204,7 +1373,8 @@ export function compileGoalPlanPlacement(args: {
     state = 'admitting';
     action = 'launch-spawned-leader';
     reason = `The ${activeLane!.itemId} lease is held; launch its independently led fleet with leader:'spawn'.`;
-  } else if (launchTransaction?.state === 'launching' || launchTransaction?.state === 'partial') {
+  } else if (launchTransaction?.state === 'launching' ||
+    (launchTransaction?.state === 'partial' && !partialLaunchPhysicallyComplete)) {
     state = 'admitting';
     action = 'resume-partial-launch';
     reason =
@@ -1217,7 +1387,7 @@ export function compileGoalPlanPlacement(args: {
     state = 'blocked';
     action = 'reconcile-plan-lane-holder';
     reason = `Verify active, independent leadership for ${fleet.slug}; a GOAL steward or unmeasured holder identity cannot certify delegated execution. Preserve any fleet pause and repair through its existing authority.`;
-  } else if (!planScoped) {
+  } else if (!planAdmitted) {
     state = 'blocked';
     action = 'reconcile-plan-lane-holder';
     reason = `Restore a valid positive plan/plan_item claim filter for ${fleet.slug} before crediting member pickup; do not create a replacement fleet.`;
@@ -1246,6 +1416,7 @@ export function compileGoalPlanPlacement(args: {
 
   return {
     state,
+    ...(state === 'owner-walled' ? { wall: { kind: 'owner' as const, itemIds: [...ownerWalledItemIds] } } : {}),
     fleet,
     activeLane,
     launchTransaction,
@@ -1306,11 +1477,34 @@ function parsePortfolioWorklist(
       else if (status === 'done' || status === 'dropped') counts.done += 1;
       else counts.todo += 1;
     }
-    const nextRow = items.find((item) => {
-      const status = portfolioString(item.status) ?? 'todo';
-      const blockedBy = portfolioArray(item.blockedBy).map(String).filter(Boolean);
-      return status === 'todo' && blockedBy.length === 0;
-    });
+    // Dependency-free means every blocked-by edge has RESOLVED (done/dropped), the
+    // same rule promotion and the claim floor apply. Reading the raw edge list
+    // instead kept a plan whose next todo waited only on finished work compiling
+    // as `blocked` forever, so placement could never offer it.
+    const { items: resolvedItems } = resolveEffectiveStatusForItems(items.map((item, index) => ({
+      id: portfolioString(item.id) ?? `#${index}`,
+      text: portfolioString(item.text) ?? '',
+      storedStatus: (portfolioString(item.status) ?? 'todo') as ItemStatus,
+      importance: 'normal',
+      blockedBy: portfolioArray(item.blockedBy).map(String).filter(Boolean),
+      decisionRefs: [],
+      phase: portfolioString(item.phase),
+      lineNumber: 0,
+      rawLine: '',
+    })));
+    const nextIndex = resolvedItems.findIndex((item) =>
+      item.effectiveStatus === 'todo' && item.unresolvedBlockers.length === 0 && !item.needsHuman);
+    const nextRow = nextIndex >= 0 ? items[nextIndex] : undefined;
+    // WI-10005657: the dependency-free frontier — every non-terminal item whose
+    // blockers have all resolved. When it is NON-EMPTY and made ONLY of
+    // needs-human items, nothing an agent or fleet can do advances the plan; it
+    // is owner-walled. A frontier that also holds a todo/wip/stored-blocked item
+    // is NOT a wall (`needsHuman` items beside it are merely one of several
+    // open fronts), so only the all-needs-human case is passed through.
+    const frontier = resolvedItems.filter((item) =>
+      item.storedStatus !== 'done' && item.storedStatus !== 'dropped' && item.unresolvedBlockers.length === 0);
+    const ownerWalledItemIds =
+      frontier.length > 0 && frontier.every((item) => item.needsHuman) ? frontier.map((item) => item.id) : [];
     // A WIP item is the fleet's current lane. Only fall through to the next
     // dependency-free todo when nothing is already underway; otherwise a live
     // WIP lease would be hidden behind the subsequent todo and compile as a
@@ -1321,7 +1515,7 @@ function parsePortfolioWorklist(
           id: portfolioString(nextRow.id) ?? 'unknown',
           text: portfolioString(nextRow.text) ?? '',
           phase: portfolioString(nextRow.phase),
-          blockedBy: portfolioArray(nextRow.blockedBy).map(String).filter(Boolean),
+          blockedBy: resolvedItems[nextIndex].unresolvedBlockers,
         }
       : null;
     return [
@@ -1343,6 +1537,7 @@ function parsePortfolioWorklist(
           source: row.placement,
           now,
           closure: closures?.get(slug) ?? null,
+          ownerWalledItemIds,
         }),
       },
     ];
@@ -1372,6 +1567,7 @@ export function renderGoalPortfolioBrief(brief: GoalPortfolioBrief): string {
   const priorities = brief.priorities.length
     ? brief.priorities.map((p, i) => `${i + 1}. ${p}`).join('\n')
     : '1. Re-read the goal before any write.';
+  const ownerWalledPlans = brief.worklist.filter((plan) => plan.placement.state === 'owner-walled');
   const mandatoryPlacement = brief.worklist.find((plan) => plan.placement.reconciliation.toolCall !== null);
   const mandatoryToolCall = mandatoryPlacement?.placement.reconciliation.toolCall ?? null;
   return [
@@ -1379,12 +1575,17 @@ export function renderGoalPortfolioBrief(brief: GoalPortfolioBrief): string {
     `Goal: ${brief.goal.status ?? 'unknown'}; worklist: ${plans}`,
     `Pots: ${brief.pots.map((p) => `${p.harness}:${p.role}[kill=${p.killCriterion ?? 'missing'}]`).join(', ') || 'none'}`,
     ...(brief.attribution
-      ? [`Attribution ladder: ${brief.attribution.status}; checked=${brief.attribution.checked.pots} pot links/${brief.attribution.checked.plans} plans/${brief.attribution.checked.workItems} work items; issues=${brief.attribution.issues.map((issue) => `${issue.code}(${issue.ref})`).join(', ') || 'none'}`]
+      ? [`Attribution ladder: ${brief.attribution.status}; checked=${brief.attribution.checked.pots} pot links/${brief.attribution.checked.plans} plans/${brief.attribution.checked.workItems} work items; issues=${brief.attribution.issues.map((issue) => `${issue.code}(${issue.ref})`).join(', ') || 'none'}${brief.attribution.remoteOwned.length ? `; remote-owned (non-blocking, owning machine stamps)=${brief.attribution.remoteOwned.join(', ')}` : ''}`]
       : []),
     `Drain fleet: ${brief.drainFleet.slug ?? 'not declared'}; live=${brief.drainFleet.live ?? 'unknown'}; working=${brief.drainFleet.working ?? 'unknown'}; control=${brief.drainFleet.controlState ?? 'unknown'}`,
     `Queue: total=${brief.queue.total}; terminal=${brief.queue.terminal}; in-flight=${brief.queue.inFlight}; blocked=${brief.queue.blocked}; needs-human=${brief.queue.needsHuman}; claimable=${brief.queue.claimable ?? 'unknown'} (${brief.queue.claimabilityScope})`,
     `Launch: intendedParallelPlanFleets=${brief.launch.intendedParallelPlanFleets ?? brief.launch.settings?.intendedParallelPlanFleets ?? 'undeclared'}; headcount=${brief.launch.headcount.total}; maxAgents=${brief.launch.ceilings.maxAgents ?? 'unlimited'}; maxPerFleet=${brief.launch.ceilings.maxPerFleet ?? 'unlimited'}`,
     `Independent plan-lane placement candidates: ${brief.worklist.filter((p) => p.placement.reconciliation.action === 'launch-plan-fleet').map((p) => p.ref).join(', ') || 'none'}. Verify exact admission, then place admissible lanes concurrently to the chosen width; ceilings are limits, not targets.`,
+    // WI-10005657: a plan only the owner can advance is named explicitly rather
+    // than left to read as an unplaced/blocked plan awaiting a launch.
+    ...(ownerWalledPlans.length
+      ? [`OWNER-WALLED placement (not launchable — a fleet cannot resolve it; carry into the owner report, never launch): ${ownerWalledPlans.map((p) => `${p.ref} (${p.placement.wall?.itemIds.join(', ') ?? 'needs-human'})`).join('; ')}.`]
+      : []),
     // P-004: NAME THE POPULATION. This line lands in the kickoff of every agent
     // that works the goal, which makes it the most-read rendering of this number
     // anywhere — and `spent=` unqualified reads as what the goal has cost. It is
@@ -1402,7 +1603,7 @@ export function renderGoalPortfolioBrief(brief: GoalPortfolioBrief): string {
       ? [
           `Owner report cadence: ${brief.reporting.cadence?.obligation ?? 'unknown'}; due=${brief.reporting.cadence?.dueAt ?? 'unknown'}.`,
           `Owner report evidence: movement-truncated=${brief.reporting.movementTruncated}; killed-truncated=${brief.reporting.killedTruncated}; unread terminal artifacts=${brief.reporting.draft.unreadArtifacts.join(', ') || 'none'}.`,
-          'OWNER REPORT DRAFT — read each named terminal artifact before claiming its completion; then report the four fields on an owner-facing rail:',
+          'OWNER REPORT DRAFT — provisional snapshot, not a send-ready report; read each named terminal artifact after its recorded update, then refresh after this pass’s actions before sending:',
           brief.reporting.draft.text,
         ]
       : ['Owner report evidence unavailable; re-read the canonical goal portfolio before reporting.']),
@@ -1411,8 +1612,8 @@ export function renderGoalPortfolioBrief(brief: GoalPortfolioBrief): string {
       : []),
     ...(brief.degradedReasons.length ? [`DEGRADED — ${brief.degradedReasons.join('; ')}`] : []),
     'GOAL KICKOFF EVIDENCE — REQUIRED BEFORE ANY PORTFOLIO MUTATION',
-    `In the current GOAL window, successfully run ${GOAL_KICKOFF_REQUIRED_READS.join(', ')} on the goal's terms; then send an owner-facing report AFTER those reads (coord:send to ["human"] or coord:escalate) that names the exact goal id "${brief.goal.id}".`,
-    'Only after those reads and the owner-facing report may you create, launch, or place portfolio work.',
+    `Before any portfolio mutation, successfully run ${GOAL_KICKOFF_REQUIRED_READS.join(', ')} against goal "${brief.goal.id}" and use those current reads to choose this pass’s actions.`,
+    'This portfolio snapshot and its owner-report draft predate this pass’s actions; do not send them as the final report.',
     ...(mandatoryPlacement && mandatoryToolCall
       ? [
           'MANDATORY NEXT PLAN PLACEMENT',
@@ -1425,6 +1626,12 @@ export function renderGoalPortfolioBrief(brief: GoalPortfolioBrief): string {
       : []),
     'CURRENT ACTION PRIORITIES',
     priorities,
+    'POST-ACTION OWNER REPORT — REQUIRED AFTER THE PASS ACTIONS',
+    `After all selected actions have returned, fetch goals:get again for exact goal id "${brief.goal.id}". Send the report from that post-action response’s reporting.draft and use its assembledAt as the portfolio read time.`,
+    'MOVED must include only actions with a successful result already returned, plus every goal-scoped work item that reached a terminal state after the previous report watermark. Do not report planned, queued, admission-pending, refused, or not-yet-run actions as moved.',
+    'Read every named terminal artifact after its recorded update. If movement or killed evidence is truncated, degraded, or still unread, finish the missing reads or state the exact coverage gap.',
+    'COST comes from the refreshed canonical spend evidence: preserve its figure, coverage, source, measured-at timestamp, and assembled/read-at timestamp. When refreshed evidence says coverage=measured, do not describe spend as unmeasured; when it is unknown or unmeasured, preserve that uncertainty and never infer zero.',
+    `Only after that final refresh, send ${GOAL_OWNER_REPORT_HEADING_LIST} to ["human"] with coord:send or use coord:escalate, naming exact goal id "${brief.goal.id}".`,
     'This snapshot is orientation, not write authority: refresh the targeted canonical read immediately before each mutation.',
   ].join('\n');
 }
@@ -1450,30 +1657,49 @@ export function renderGoalPortfolioBrief(brief: GoalPortfolioBrief): string {
 async function resolveWorklistClosures(
   slugs: readonly string[],
   degradedReasons: string[],
+  scope: { workspaceId: string; sql: Sql; now?: Date },
 ): Promise<Map<string, PlanClosureVerdict>> {
   const closures = new Map<string, PlanClosureVerdict>();
   if (slugs.length === 0) return closures;
 
-  const [{ evaluatePlanAcceptanceGate }, { resolvePlanClosure }] = await Promise.all([
-    import('./plan-acceptance-gate'),
+  const [{ readPlanClosureObservations, refreshPlanClosureObservations }, { resolvePlanClosure }] = await Promise.all([
+    import('./goals/plan-closure-observations'),
     import('./goals/plan-closure'),
   ]);
 
-  await Promise.all(
-    slugs.map(async (planSlug) => {
-      try {
-        const gate = await evaluatePlanAcceptanceGate(planSlug);
-        closures.set(planSlug, resolvePlanClosure({ planSlug, status: 'read', gate }));
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        degradedReasons.push(`closure read failed for ${planSlug}: ${detail}`);
-        closures.set(
-          planSlug,
-          resolvePlanClosure({ planSlug, status: 'unreadable', failure: { code: 'gate-unreadable', detail } }),
-        );
-      }
-    }),
-  );
+  // D-032: this read serves the gate's PERSISTED verdict and never runs the gate
+  // inline. A stale or absent verdict is `gate-not-evaluated` — the plan stays at
+  // awaiting-closure, exactly as before it was measured — and a background
+  // re-evaluation refreshes it. That is an expected transition, not a degraded read.
+  let observations: Awaited<ReturnType<typeof readPlanClosureObservations>>;
+  try {
+    observations = await readPlanClosureObservations({ workspaceId: scope.workspaceId, planSlugs: slugs, sql: scope.sql, now: scope.now });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    for (const planSlug of slugs) {
+      degradedReasons.push(`closure read failed for ${planSlug}: ${detail}`);
+      closures.set(
+        planSlug,
+        resolvePlanClosure({ planSlug, status: 'unreadable', failure: { code: 'gate-unreadable', detail } }),
+      );
+    }
+    return closures;
+  }
+  const refresh: string[] = [];
+  for (const planSlug of slugs) {
+    const observation = observations.get(planSlug);
+    if (observation?.status === 'fresh') {
+      closures.set(planSlug, resolvePlanClosure({ planSlug, status: 'read', gate: observation.gate }));
+      continue;
+    }
+    const detail = observation?.detail ?? `no closure observation was read for '${planSlug}'`;
+    if (observation?.status !== 'ambiguous') refresh.push(planSlug);
+    closures.set(
+      planSlug,
+      resolvePlanClosure({ planSlug, status: 'unreadable', failure: { code: 'gate-not-evaluated', detail } }),
+    );
+  }
+  refreshPlanClosureObservations(refresh);
   return closures;
 }
 
@@ -1486,6 +1712,13 @@ export async function readGoalPortfolioBrief(args: {
   now?: Date;
   /** Exact full-artifact reads from the caller's current session, never inferred from this projection. */
   reportArtifactReads?: GoalOwnerReportDraftInput['artifactReads'];
+  /**
+   * 'skip' omits the per-id claim-floor count behind `queue.claimable`. That
+   * count scales with the goal's open issue rows (333 on 60d3a8 cost ~1.1s)
+   * and alone pushed this read past the obligation reader's 900ms budget, so
+   * a caller that never reads the count must not pay for it. Default 'count'.
+   */
+  claimability?: 'count' | 'skip';
   launch?: {
     goalBrief: GoalLaunchBrief;
     settings: GoalLaunchSettings | null;
@@ -1713,7 +1946,8 @@ export async function readGoalPortfolioBrief(args: {
                 ) plans) AS plans,
              (SELECT COALESCE(jsonb_agg(jsonb_build_object(
                        'id', wi.feature_id, 'harness', wi.harness_slug,
-                       'planSlug', wi.source_plan_slug, 'goalId', wi.goal_id
+                       'planSlug', wi.source_plan_slug, 'goalId', wi.goal_id,
+                       'origin', wi.origin
                      ) ORDER BY wi.feature_id), '[]'::jsonb)
                 FROM harness_shared.work_items wi
                WHERE wi.workspace_id = g.workspace_id
@@ -1789,15 +2023,13 @@ export async function readGoalPortfolioBrief(args: {
                 ) movement) AS report_movements,
              (SELECT COALESCE(jsonb_agg(jsonb_build_object(
                        'ref', wall.feature_id,
-                       'action', COALESCE(NULLIF(wall.payload->>'ownerAction', ''),
-                         NULLIF(wall.payload->>'ownerAsk', ''), 'open this work item for the exact owner action'))
+                       -- P-005: the owner ask lives on the set_blocker record for every
+                       -- live wall; ownerAction/ownerAsk alone left all of them unnamed.
+                       'action', COALESCE(${ownerWallActionSql(sql)}, 'open this work item for the exact owner action'))
                        ORDER BY wall.feature_id), '[]'::jsonb)
                FROM harness_shared.work_items wall
                WHERE wall.workspace_id = g.workspace_id AND wall.goal_id = g.id
-                 AND wall.status <> ALL(ARRAY['done','passed','resolved','closed','deprecated','dropped']::text[])
-                 AND (wall.status IN ('needs-human', 'needs_human') OR wall.needs_human_review
-                   OR COALESCE((wall.payload->>'needsOwnerAction')::boolean, false)
-                   OR COALESCE((wall.payload->>'needsHuman')::boolean, false))) AS owner_walls,
+                 AND ${openOwnerWallPredicateSql(sql)}) AS owner_walls,
              (SELECT COALESCE(jsonb_agg(jsonb_build_object(
                        'ref', stopped.ref, 'criterion', stopped.criterion,
                        'atMs', stopped.at_ms) ORDER BY stopped.at_ms DESC), '[]'::jsonb)
@@ -1845,10 +2077,11 @@ export async function readGoalPortfolioBrief(args: {
     const candidates = portfolioArray(queueRaw.issueCandidates)
       .map(portfolioObject)
       .filter((candidate): candidate is Record<string, unknown> => candidate !== null);
+    const skipClaimability = args.claimability === 'skip';
     let claimable: number | null = candidates.length === 0 ? 0 : null;
     let claimabilityScope: GoalPortfolioBrief['queue']['claimabilityScope'] =
-      candidates.length === 0 ? 'none' : 'unknown';
-    if (candidates.length > 0) {
+      candidates.length === 0 ? 'none' : skipClaimability ? 'not-requested' : 'unknown';
+    if (candidates.length > 0 && !skipClaimability) {
       try {
         const { explainIssueClaimFloors } = await import('./work-items');
         let admissible = 0;
@@ -1882,6 +2115,7 @@ export async function readGoalPortfolioBrief(args: {
     const closures = await resolveWorklistClosures(
       firstPass.filter((plan) => plan.placement.state === 'awaiting-closure').map((plan) => plan.slug),
       degradedReasons,
+      { workspaceId: args.workspaceId, sql, now: args.now },
     );
     const worklist = closures.size > 0 ? parsePortfolioWorklist(row.plans, assembledAt, closures) : firstPass;
     for (const plan of worklist) {
@@ -1972,6 +2206,7 @@ export async function readGoalPortfolioBrief(args: {
         budgetCents: launch.budget?.budgetCents ?? launch.goalBrief.budgetCents,
         source: launch.budget?.spentCentsSource ?? null,
         coverage: operatingInputs.spendCoverage,
+        measuredAt: launch.budget?.spentCentsAt ?? null,
         unmeasuredPricedSpend: launch.budget?.unmeasuredPricedSpend ?? false,
       },
       ownerWalls,
@@ -2004,7 +2239,8 @@ export async function readGoalPortfolioBrief(args: {
         const id = portfolioString(item?.id);
         if (!item || !id) return [];
         return [{ id, harness: portfolioString(item.harness),
-          planSlug: portfolioString(item.planSlug), goalId: portfolioString(item.goalId) }];
+          planSlug: portfolioString(item.planSlug), goalId: portfolioString(item.goalId),
+          origin: portfolioString(item.origin) }];
       }),
     });
     const priorities: string[] = [];
@@ -2065,6 +2301,8 @@ export async function readGoalPortfolioBrief(args: {
         unmeasuredPricedSpend: launch.budget?.unmeasuredPricedSpend ?? false,
         spentCentsAt: launch.budget?.spentCentsAt ?? null,
         spentCentsSource: launch.budget?.spentCentsSource ?? null,
+        interactiveUsageFreshnessStatus: launch.budget?.interactiveUsageFreshnessStatus ?? null,
+        interactiveUsageLastIngestedAtMs: launch.budget?.interactiveUsageLastIngestedAtMs ?? null,
         budgetWindowSec: launch.goalBrief.budgetWindowSec,
       },
       tripwires,
@@ -2132,6 +2370,8 @@ export async function readGoalPortfolioBrief(args: {
         unmeasuredPricedSpend: launch.budget?.unmeasuredPricedSpend ?? false,
         spentCentsAt: launch.budget?.spentCentsAt ?? null,
         spentCentsSource: launch.budget?.spentCentsSource ?? null,
+        interactiveUsageFreshnessStatus: launch.budget?.interactiveUsageFreshnessStatus ?? null,
+        interactiveUsageLastIngestedAtMs: launch.budget?.interactiveUsageLastIngestedAtMs ?? null,
         budgetWindowSec: launch.goalBrief.budgetWindowSec,
       },
       tripwires: [],
@@ -2191,6 +2431,8 @@ export interface GoalLaunchResolution {
   effective: LaunchProfile;
   ceilings: { maxAgents: number | null; maxPerFleet: number | null };
   headcount: GoalHeadcount;
+  /** The exact count used for admission, including owners and boot-grace rows. Never re-read after spawn. */
+  headcountMeasurement?: GoalHeadcountMeasurement | null;
   /** P-006: the goal's budget ceiling + platform spend snapshot. Null = no goal in scope. */
   budget: GoalBudgetTruth | null;
   /** Non-null when this launch would breach a ceiling. The caller MUST NOT launch. */
@@ -2337,11 +2579,13 @@ export async function readGoalLaunchSettings(
       SELECT title, body, kill_criterion, standing,
              launch_settings, budget_cents, budget_window_sec,
              metadata->'spentCents' AS spent_cents,
-             -- WI-10002052: the breakdown travels so the gate can tell "never ticked"
-             -- from "pot-less goal with real priced spend" — both store spentCents NULL.
-             metadata->'spentCentsBreakdown' AS spent_cents_breakdown,
+             -- WI-10002052 / D-011: the rollup names WHY spentCents is null, so the gate
+             -- can tell "nothing attributed in the window" from "spent, but unpriced".
+             metadata->>'spentCentsUnmeasuredReason' AS spent_cents_unmeasured_reason,
              metadata->>'spentCentsAt' AS spent_cents_at,
              metadata->>'spentCentsSource' AS spent_cents_source,
+             metadata->'spentCentsFreshness'->>'status' AS interactive_usage_freshness_status,
+             metadata->'spentCentsFreshness'->>'lastIngestedAtMs' AS interactive_usage_last_ingested_at_ms,
              metadata->>'drainFleet' AS drain_fleet
         FROM harness_shared.goals WHERE id = ${goalId} LIMIT 1`;
     if (!rows.length) {
@@ -2356,22 +2600,34 @@ export async function readGoalLaunchSettings(
       budget_cents?: unknown;
       budget_window_sec?: unknown;
       spent_cents?: unknown;
-      spent_cents_breakdown?: unknown;
+      spent_cents_unmeasured_reason?: unknown;
       spent_cents_at?: unknown;
       spent_cents_source?: unknown;
+      interactive_usage_freshness_status?: unknown;
+      interactive_usage_last_ingested_at_ms?: unknown;
       drain_fleet?: unknown;
     };
     const parsed = parseGoalLaunchSettings(row.launch_settings, `goal ${goalId} launch_settings`);
     const title = typeof row.title === 'string' && row.title.trim() ? row.title : null;
     const briefError = title ? null : `goal ${goalId} has no usable title for its holder kickoff`;
+    const rawFreshnessStatus = row.interactive_usage_freshness_status;
+    const interactiveUsageFreshnessStatus =
+      rawFreshnessStatus === 'fresh' || rawFreshnessStatus === 'stale' || rawFreshnessStatus === 'unavailable'
+        ? rawFreshnessStatus
+        : null;
     return {
       settings: parsed.settings,
       budget: {
         budgetCents: asFiniteCents(row.budget_cents),
         spentCents: asFiniteCents(row.spent_cents),
-        unmeasuredPricedSpend: hasUnmeasuredPricedSpend(row.spent_cents_breakdown, asFiniteCents(row.spent_cents)),
+        unmeasuredPricedSpend: hasUnmeasuredPricedSpend(
+          row.spent_cents_unmeasured_reason,
+          asFiniteCents(row.spent_cents),
+        ),
         spentCentsAt: typeof row.spent_cents_at === 'string' ? row.spent_cents_at : null,
         spentCentsSource: typeof row.spent_cents_source === 'string' ? row.spent_cents_source : null,
+        interactiveUsageFreshnessStatus,
+        interactiveUsageLastIngestedAtMs: asFiniteNumber(row.interactive_usage_last_ingested_at_ms),
       },
       brief: title
         ? {
@@ -2499,9 +2755,64 @@ export async function readGoalLaunchSettingsForLauncher(args: {
  */
 export interface GoalPotPlacementAuthority {
   allowed: boolean;
-  reason: 'no-active-owner' | 'caller-goal-owns-pot' | 'different-active-goal-owns-pot';
+  reason:
+    | 'no-active-owner'
+    | 'caller-goal-owns-pot'
+    | 'different-active-goal-owns-pot'
+    /** An `owner` edge exists for another ACTIVE goal, but that goal has outlived
+     *  its executable worklist (WI-10004524) — the edge is read as VACANT. */
+    | 'stale-owner-edge-vacant';
   ownerGoalId: string | null;
   ownerGoalTitle: string | null;
+  /**
+   * What the sovereignty read measured about ANOTHER goal's owner edge — present
+   * on the refusal AND on the stale-edge allow, so a steward can tell a stale
+   * owner from a live one without a second query (WI-10004524 acceptance 2).
+   * Absent when there is no other-goal owner to describe.
+   */
+  ownerState?: GoalPotOwnerState;
+}
+
+/**
+ * What decides whether an `owner` edge still confers placement sovereignty.
+ * `holderLiveness` is `'not-checked'` when an earlier leg already settled the
+ * verdict (a live worklist plan keeps the edge; a releasing disposition drops
+ * it) so the presence oracle is only paid for when it can change the answer.
+ */
+export interface GoalPotOwnerState {
+  /** `goals.metadata.disposition`, e.g. `handoff` | `killed` | `achieved`. */
+  disposition: string | null;
+  /** Standing goals pursue an ongoing duty: a recorded disposition alone never
+   *  releases their edge — only a lost holder with no worklist does. */
+  standing: boolean;
+  /** Non-archived, non-terminal plans stamped to the goal or named in its
+   *  `worklist` property. `null` = the count was not read (never read as 0). */
+  liveWorklistPlans: number | null;
+  holderLiveness: 'held' | 'unheld' | 'lost' | 'unknown' | 'not-checked';
+}
+
+/** Dispositions that mean the owner goal has stopped pursuing its pot. `handoff`
+ *  is the one that leaves `status='active'` by design, which is why status alone
+ *  cannot release the edge. */
+export const POT_OWNER_RELEASING_DISPOSITIONS: readonly string[] = ['handoff', 'killed', 'achieved'];
+
+/**
+ * PURE: does this owner edge still hold the pot? An edge is STALE — vacant for
+ * every other goal — only when the owning goal has NO executable worklist AND is
+ * demonstrably not working it: it declared a releasing disposition, or every
+ * holder row it has resolves dead (`lost`).
+ *
+ * CONSERVATIVE on every unknown, because the status quo (refuse) is the safe
+ * failure: an unread worklist count, an unresolved/`unknown` oracle verdict and
+ * `unheld` (a goal created but not yet started has no holder row yet and must
+ * keep the pot it was just given) all leave the edge LIVE.
+ */
+export function potOwnerEdgeIsStale(state: GoalPotOwnerState): boolean {
+  if (state.liveWorklistPlans === null || state.liveWorklistPlans > 0) return false;
+  if (!state.standing && state.disposition && POT_OWNER_RELEASING_DISPOSITIONS.includes(state.disposition)) {
+    return true;
+  }
+  return state.holderLiveness === 'lost';
 }
 
 export async function resolveGoalPotPlacementAuthority(args: {
@@ -2511,8 +2822,43 @@ export async function resolveGoalPotPlacementAuthority(args: {
   sql?: Sql;
 }): Promise<GoalPotPlacementAuthority> {
   const sql = pg(args.sql);
-  const rows = await sql<Array<{ owner_goal_id: string; owner_goal_title: string | null }>>`
-    SELECT gp.goal_id AS owner_goal_id, g.title AS owner_goal_title
+  // The worklist count mirrors the portfolio brief's definition of a goal's
+  // worklist — plans stamped `goal_id` plus the refs in the goal's `worklist`
+  // property (same ref grammar as readGoalPortfolioBrief) — narrowed to plans
+  // that are not archived and not terminal. `TERMINAL_PLAN_STATUSES` comes from
+  // the plan grammar so the vocabulary cannot drift from plans:set-plan-status.
+  const rows = await sql<
+    Array<{
+      owner_goal_id: string;
+      owner_goal_title: string | null;
+      owner_disposition?: string | null;
+      owner_standing?: boolean | null;
+      live_worklist_plans?: number | string | null;
+    }>
+  >`
+    SELECT gp.goal_id AS owner_goal_id, g.title AS owner_goal_title,
+           g.metadata->>'disposition' AS owner_disposition,
+           g.standing AS owner_standing,
+           (SELECT count(*)::int
+              FROM harness_shared.harness_plans hp
+             WHERE hp.workspace_id = g.workspace_id
+               AND NOT COALESCE(hp.archived, false)
+               AND COALESCE(hp.status, '') <> ALL(${[...TERMINAL_PLAN_STATUSES]}::text[])
+               AND (
+                 hp.goal_id = g.id
+                 OR EXISTS (
+                   SELECT 1
+                     FROM jsonb_array_elements_text(
+                            CASE WHEN jsonb_typeof(g.properties->'worklist'->'value') = 'array'
+                                 THEN g.properties->'worklist'->'value' ELSE '[]'::jsonb END
+                          ) wr(ref)
+                    WHERE hp.plan_slug = regexp_replace(wr.ref, '^plan:(?:[^/]+/)?', '')
+                      AND (
+                        position('/' in regexp_replace(wr.ref, '^plan:', '')) = 0
+                        OR hp.harness_slug = split_part(regexp_replace(wr.ref, '^plan:', ''), '/', 1)
+                      )
+                 )
+               )) AS live_worklist_plans
       FROM harness_shared.goal_pots gp
       JOIN harness_shared.goals g
         ON g.workspace_id = gp.workspace_id
@@ -2542,11 +2888,47 @@ export async function resolveGoalPotPlacementAuthority(args: {
       ownerGoalTitle: owner.owner_goal_title,
     };
   }
+  // Another active goal holds the edge. Decide whether it still EARNS it.
+  const worklistCount = owner.live_worklist_plans == null ? null : Number(owner.live_worklist_plans);
+  const ownerState: GoalPotOwnerState = {
+    disposition: owner.owner_disposition ?? null,
+    standing: owner.owner_standing === true,
+    liveWorklistPlans: worklistCount !== null && Number.isFinite(worklistCount) ? worklistCount : null,
+    holderLiveness: 'not-checked',
+  };
+  // Holder liveness is the expensive leg (presence oracle) and only matters when
+  // the cheap legs are inconclusive: no live plan, and no releasing disposition.
+  const dispositionReleases =
+    !ownerState.standing && ownerState.disposition !== null && POT_OWNER_RELEASING_DISPOSITIONS.includes(ownerState.disposition);
+  if (ownerState.liveWorklistPlans === 0 && !dispositionReleases) {
+    try {
+      const { resolveGoalHolders } = await import('./goals/holder');
+      const holders = await resolveGoalHolders(sql, {
+        workspaceId: args.workspaceId,
+        goalId: owner.owner_goal_id,
+      });
+      ownerState.holderLiveness = holders.liveness;
+    } catch {
+      // An unreadable oracle is UNKNOWN, never dead — the edge stays live and the
+      // caller keeps refusing, exactly as before this check existed.
+      ownerState.holderLiveness = 'unknown';
+    }
+  }
+  if (potOwnerEdgeIsStale(ownerState)) {
+    return {
+      allowed: true,
+      reason: 'stale-owner-edge-vacant',
+      ownerGoalId: owner.owner_goal_id,
+      ownerGoalTitle: owner.owner_goal_title,
+      ownerState,
+    };
+  }
   return {
     allowed: false,
     reason: 'different-active-goal-owns-pot',
     ownerGoalId: owner.owner_goal_id,
     ownerGoalTitle: owner.owner_goal_title,
+    ownerState,
   };
 }
 
@@ -2579,12 +2961,49 @@ export async function writeGoalLaunchSettings(
 ): Promise<{ ok: boolean; error: string | null }> {
   if (!goalId) return { ok: false, error: 'goalId is required' };
   let payload: string | null = null;
+  let topologyProblem: string | null = null;
   if (settings != null) {
     const parsed = goalLaunchSettingsSchema.safeParse(settings);
     if (!parsed.success) return { ok: false, error: parsed.error.message };
     payload = JSON.stringify(parsed.data);
+    topologyProblem = drainFleetTopologyProblem(parsed.data);
   }
   try {
+    /* DRAIN-FLEET FLOOR ON UPDATE (WI-10004407, follow-up to EI-24556293106348130).
+       goals:start and goals:start-from-package refuse ceilings below
+       DRAIN_FLEET_MIN_CEILINGS, but a later goals:update could still lower a
+       running goal's ceilings below them. The drain worker is the agent that
+       launches LAST, so it is the one those ceilings refuse: a leader with zero
+       workers, reported as drain-fleet-dead. The floor therefore binds HERE, at
+       the one writer every post-start door goes through.
+
+       Bound only for a goal that HAS a drain fleet (`metadata.drainFleet`). A
+       sole-member goal runs the goal agent alone and is exempt, as it is at the
+       start doors. The read happens only when the new document already fails
+       the predicate, so a compliant write costs no extra round-trip. It runs on
+       the caller's `sql`, so inside goals:update's transaction it sees a
+       drainFleet stamped earlier in the same call. `null` (clear to defaults)
+       always passes, because GOAL_LAUNCH_DEFAULTS clears the floor.
+
+       Its own query rather than readGoalLaunchSettings().drainFleetSlug: that
+       reader turns a failed read into drainFleetSlug:null, which here would let
+       the write through (fail OPEN). This query throws into the catch below, so
+       an unreadable row refuses the write instead. */
+    if (topologyProblem) {
+      const rows = (await pg(sql)`
+        SELECT metadata->>'drainFleet' AS drain_fleet
+          FROM harness_shared.goals
+         WHERE id = ${goalId}`) as unknown as Array<{ drain_fleet: string | null }>;
+      const drainFleet = rows[0]?.drain_fleet ?? null;
+      if (drainFleet) {
+        return {
+          ok: false,
+          error:
+            `${topologyProblem} Goal ${goalId} runs drain fleet ${drainFleet}, so its ceilings must keep ` +
+            `room for the drain worker after start as well as at start.`,
+        };
+      }
+    }
     await pg(sql)`
       UPDATE harness_shared.goals
          SET launch_settings = ${payload}::jsonb, updated_at = now()
@@ -2625,6 +3044,112 @@ export async function declareGoalHolderPolicy(
   return writeGoalLaunchSettings(goalId, { ...(current.settings ?? {}), holder }, sql);
 }
 
+/** One presence-bearing session the headcount SQL counted, with the liveness inputs the oracle needs. */
+interface HeadcountPresenceRow {
+  ownerId: string;
+  inFleet: boolean;
+  heartbeatAt: string | null;
+  host: string | null;
+  pid: number | null;
+  source: string | null;
+}
+
+export interface GoalHeadcountMember {
+  ownerId: string;
+  inFleet: boolean;
+  basis: 'heartbeat' | 'boot-grace' | 'launch-reservation';
+  heartbeatAt: string | null;
+  briefUpdatedAt: string | null;
+}
+
+export interface GoalHeadcountMeasurement {
+  measuredAt: string | null;
+  /** False if the owner aggregate is unavailable or does not reconcile to the count. */
+  populationComplete: boolean;
+  candidate: GoalHeadcount;
+  counted: GoalHeadcountMember[];
+  oracleEndedOwnerIds: string[];
+  excludedOwnerIds: string[];
+}
+
+function parseHeadcountPopulation(raw: unknown): GoalHeadcountMember[] {
+  let parsed = raw;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { return []; }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const row = item as Record<string, unknown>;
+    if (typeof row.ownerId !== 'string' || !row.ownerId ||
+        (row.basis !== 'heartbeat' && row.basis !== 'boot-grace' && row.basis !== 'launch-reservation')) return [];
+    return [{
+      ownerId: row.ownerId,
+      inFleet: row.inFleet === true,
+      basis: row.basis,
+      heartbeatAt: typeof row.heartbeatAt === 'string' ? row.heartbeatAt : null,
+      briefUpdatedAt: typeof row.briefUpdatedAt === 'string' ? row.briefUpdatedAt : null,
+    } satisfies GoalHeadcountMember];
+  });
+}
+
+/**
+ * Tolerant reader for the `presence_rows` json aggregate of `goalHeadcount`'s
+ * query. An absent/malformed aggregate parses to `[]` — i.e. "no row for the
+ * oracle to judge", which leaves the heartbeat count standing (the pre-oracle
+ * behaviour) rather than throwing away a count that was successfully taken.
+ */
+function parseHeadcountPresenceRows(raw: unknown): HeadcountPresenceRow[] {
+  let parsed: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: HeadcountPresenceRow[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.ownerId !== 'string' || row.ownerId === '') continue;
+    out.push({
+      ownerId: row.ownerId,
+      inFleet: row.inFleet === true,
+      heartbeatAt: typeof row.heartbeatAt === 'string' ? row.heartbeatAt : null,
+      host: typeof row.host === 'string' ? row.host : null,
+      pid: typeof row.pid === 'number' ? row.pid : null,
+      source: typeof row.source === 'string' ? row.source : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * The rows the SHARED liveness oracle (`resolveSessionStates`) calls `ended` —
+ * never a re-derivation from heartbeat age, which is process keepalive and not
+ * an agent-liveness verdict (see `goalHeadcount`). Dynamic import for the same
+ * reason as the other heavyweight seams here: this module rides in every launch
+ * path and must not drag the presence tool's dependency graph into its static
+ * graph. A verdict of `null` (not measured) or any other state is NOT excluded.
+ *
+ * `recorded` is deliberately NOT excluded: the oracle defines it as
+ * "authoritatively LIVE per the session log" (presence-wakeability.ts), so
+ * dropping it would under-count live sessions and weaken the ceiling.
+ */
+async function oracleEndedHeadcountRows(rows: HeadcountPresenceRow[]): Promise<HeadcountPresenceRow[]> {
+  if (rows.length === 0) return [];
+  const { resolveSessionStates } = await import('./agent-tools/coordination/liveness-oracle');
+  const verdicts = await resolveSessionStates(
+    rows.map((r) => ({ ownerId: r.ownerId, heartbeatAt: r.heartbeatAt, host: r.host, pid: r.pid, source: r.source })),
+  );
+  return rows.filter((r) => {
+    const state = verdicts.get(r.ownerId)?.sessionState;
+    return state === 'ended';
+  });
+}
+
 /**
  * Live headcounts for a goal, and optionally for one of its fleets.
  *
@@ -2636,44 +3161,209 @@ export async function declareGoalHolderPolicy(
  *
  * A session counts when its heartbeat is fresh, OR when it was launched inside
  * the boot grace and has not yet registered presence. The second leg is what
- * makes a burst of concurrent launches converge instead of every one of them
- * reading zero.
+ * covers bootstrap delay. Concurrent admission additionally reserves the existing
+ * governor receipt under a goal-scoped registration lock (registerGoalLaunch).
+ * Those reservations include fleet attribution before presence exists and stop
+ * counting on cancellation, lease expiry, boot-grace expiry, or newer presence.
+ *
+ * ⚠ A FRESH HEARTBEAT IS NOT LIVENESS (WI-10005672). Heartbeat freshness is
+ * process KEEPALIVE; the one agent-liveness verdict is the shared oracle's
+ * `sessionState`. A session the oracle calls `ended` therefore does not count
+ * even while its last heartbeat is inside the stale window — before
+ * this a goal's relaunch right after its members died was refused or
+ * under-admitted for up to GOAL_HEADCOUNT_STALE_MS although zero agents were
+ * alive. The oracle only SUBTRACTS from the heartbeat count, and only for rows
+ * that have a presence row (a boot-grace row has none to judge): `suspect`,
+ * `draining`, `parked`, `live`, `recorded` (authoritatively live per the session
+ * log) and an unclassifiable (`null`) verdict all keep counting, so the ceiling errs toward over-counting, never toward admitting a
+ * burst. An oracle failure propagates to the caller's fail-open path like any
+ * other count failure ("ceiling not enforced", reported in band).
  */
 export async function goalHeadcount(args: {
   workspaceId: string;
   goalId: string;
   fleetSlug?: string | null;
+  /**
+   * Owner ids that do NOT occupy a seat for THIS count. A respawn is net-zero on
+   * headcount — it replaces one member with one — so the member being replaced
+   * must not be charged against maxAgents/maxPerFleet while its replacement is
+   * being admitted (EI-24909345582884838: the old member was still `live` when the
+   * replacement's ceiling check ran, so a full fleet refused its own respawn after
+   * the SIGTERM had already gone out).
+   */
+  excludeOwnerIds?: readonly string[];
   sql?: Sql;
-}): Promise<{ headcount: GoalHeadcount; error: string | null }> {
+}): Promise<{ headcount: GoalHeadcount; measurement: GoalHeadcountMeasurement | null; error: string | null }> {
   const empty: GoalHeadcount = { total: 0, fleet: args.fleetSlug ? 0 : null };
   if (!args.workspaceId || args.workspaceId === '*' || !args.goalId) {
-    return { headcount: empty, error: null };
+    return { headcount: empty, measurement: null, error: null };
   }
   const staleSecs = Math.max(1, Math.floor(GOAL_HEADCOUNT_STALE_MS / 1000));
   const graceSecs = Math.max(1, Math.floor(GOAL_HEADCOUNT_BOOT_GRACE_MS / 1000));
   try {
+    const fleetKey = args.fleetSlug || '';
+    const excludedOwnerIds = [...new Set((args.excludeOwnerIds ?? []).filter((id) => id.length > 0))];
     const rows = await pg(args.sql)`
+      WITH pending_launches AS (
+        SELECT DISTINCT ON (reservation.owner_id) reservation.*
+        FROM (
+          SELECT
+            coalesce(nullif(wi.payload->'resource_governor'->'metadata'->>'targetOwnerId', ''),
+                     'reservation:' || wi.feature_id) AS owner_id,
+            coalesce(wi.payload->'resource_governor'->'metadata'->>'fleetSlug' = ${fleetKey}, false) AS in_fleet,
+            to_timestamp((wi.payload->'resource_governor'->>'enqueuedAtMs')::double precision / 1000) AS admitted_at
+          FROM harness_shared.work_items wi
+          WHERE wi.workspace_id = ${args.workspaceId}
+            AND wi.payload->'resource_governor'->>'schemaVersion' = '1'
+            AND wi.payload->'resource_governor'->>'namespace' = 'agent-process'
+            AND wi.payload->'resource_governor'->>'admissionClass' = 'agent'
+            AND wi.payload->'resource_governor'->'metadata'->>'goalReservation' = 'true'
+            AND wi.payload->'resource_governor'->'metadata'->>'goalId' = ${args.goalId}
+            AND wi.payload->'resource_governor'->>'state' IN ('leased', 'running')
+            AND CASE WHEN jsonb_typeof(wi.payload->'resource_governor'->'lease'->'expiresAtMs') = 'number'
+                THEN (wi.payload->'resource_governor'->'lease'->>'expiresAtMs')::double precision
+                     > extract(epoch FROM clock_timestamp()) * 1000 ELSE false END
+            AND CASE WHEN jsonb_typeof(wi.payload->'resource_governor'->'enqueuedAtMs') = 'number'
+                THEN (wi.payload->'resource_governor'->>'enqueuedAtMs')::double precision
+                     > extract(epoch FROM clock_timestamp() - ${`${graceSecs} seconds`}::interval) * 1000 ELSE false END
+        ) reservation
+        WHERE reservation.owner_id <> ALL(${excludedOwnerIds}::text[])
+        ORDER BY reservation.owner_id, reservation.admitted_at DESC
+      ), candidates AS (
+        SELECT b.owner_id, coalesce(p.fleet_slug = ${fleetKey}, false) AS in_fleet,
+          CASE WHEN p.owner_id IS NULL THEN 'boot-grace' ELSE 'heartbeat' END AS basis,
+          p.heartbeat_at, b.updated_at AS brief_updated_at, p.host, p.pid, p.source
+        FROM harness_shared.session_briefs b
+        LEFT JOIN harness_shared.coord_presence p ON p.owner_id = b.owner_id
+        WHERE b.workspace_id = ${args.workspaceId}
+          AND b.goal_id = ${args.goalId}
+          AND b.owner_id <> ALL(${excludedOwnerIds}::text[])
+          AND (p.heartbeat_at > now() - ${`${staleSecs} seconds`}::interval
+            OR (p.owner_id IS NULL AND b.updated_at > now() - ${`${graceSecs} seconds`}::interval))
+          AND NOT EXISTS (
+            SELECT 1 FROM pending_launches r WHERE r.owner_id = b.owner_id
+              AND (p.heartbeat_at IS NULL OR r.admitted_at > p.heartbeat_at)
+          )
+        UNION ALL
+        SELECT r.owner_id, r.in_fleet, 'launch-reservation', NULL::timestamptz,
+          r.admitted_at, NULL::text, NULL::integer, NULL::text
+        FROM pending_launches r
+        WHERE NOT EXISTS (
+          SELECT 1 FROM harness_shared.session_briefs b
+          JOIN harness_shared.coord_presence p ON p.owner_id = b.owner_id
+          WHERE b.owner_id = r.owner_id AND b.workspace_id = ${args.workspaceId}
+            AND b.goal_id = ${args.goalId} AND p.heartbeat_at >= r.admitted_at
+            AND p.heartbeat_at > now() - ${`${staleSecs} seconds`}::interval
+        )
+      )
       SELECT
         count(*)::int AS total,
-        count(*) FILTER (WHERE p.fleet_slug = ${args.fleetSlug || ''})::int AS fleet
-      FROM harness_shared.session_briefs b
-      LEFT JOIN harness_shared.coord_presence p ON p.owner_id = b.owner_id
-      WHERE b.workspace_id = ${args.workspaceId}
-        AND b.goal_id = ${args.goalId}
-        AND (
-          p.heartbeat_at > now() - ${`${staleSecs} seconds`}::interval
-          OR (p.owner_id IS NULL AND b.updated_at > now() - ${`${graceSecs} seconds`}::interval)
-        )`;
-    const r = (rows[0] ?? {}) as { total?: unknown; fleet?: unknown };
+        count(*) FILTER (WHERE c.in_fleet)::int AS fleet,
+        now()::text AS measured_at,
+        coalesce(json_agg(json_build_object(
+          'ownerId', c.owner_id,
+          'inFleet', c.in_fleet,
+          'basis', c.basis,
+          'heartbeatAt', c.heartbeat_at,
+          'briefUpdatedAt', c.brief_updated_at
+        )), '[]'::json) AS population_rows,
+        coalesce(
+          json_agg(json_build_object(
+            'ownerId', c.owner_id,
+            'inFleet', c.in_fleet,
+            'heartbeatAt', c.heartbeat_at,
+            'host', c.host,
+            'pid', c.pid,
+            'source', c.source
+          )) FILTER (WHERE c.basis = 'heartbeat'),
+          '[]'::json
+        ) AS presence_rows
+      FROM candidates c`;
+    const r = (rows[0] ?? {}) as {
+      total?: unknown; fleet?: unknown; presence_rows?: unknown;
+      measured_at?: unknown; population_rows?: unknown;
+    };
+    let total = Number(r.total ?? 0);
+    let fleet = Number(r.fleet ?? 0);
+    const candidate = { total, fleet: args.fleetSlug ? fleet : null };
+    const population = parseHeadcountPopulation(r.population_rows);
+    // The heartbeat count above is only an UPPER BOUND; the shared oracle then
+    // removes every presence-bearing row it calls ended. Recorded stays counted.
+    const ended = await oracleEndedHeadcountRows(parseHeadcountPresenceRows(r.presence_rows));
+    const endedIds = new Set(ended.map((row) => row.ownerId));
+    for (const gone of ended) {
+      total -= 1;
+      if (gone.inFleet) fleet -= 1;
+    }
     return {
       headcount: {
-        total: Number(r.total ?? 0),
-        fleet: args.fleetSlug ? Number(r.fleet ?? 0) : null,
+        total: Math.max(0, total),
+        fleet: args.fleetSlug ? Math.max(0, fleet) : null,
+      },
+      measurement: {
+        measuredAt: typeof r.measured_at === 'string' ? r.measured_at : null,
+        populationComplete: r.population_rows != null && typeof r.measured_at === 'string' &&
+          population.length === candidate.total &&
+          new Set(population.map((row) => row.ownerId)).size === candidate.total &&
+          (!args.fleetSlug || population.filter((row) => row.inFleet).length === candidate.fleet),
+        candidate,
+        counted: population.filter((row) => !endedIds.has(row.ownerId)),
+        oracleEndedOwnerIds: [...endedIds],
+        excludedOwnerIds,
       },
       error: null,
     };
   } catch (e) {
-    return { headcount: empty, error: e instanceof Error ? e.message : String(e) };
+    return { headcount: empty, measurement: null, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Serialize the final count with registration of the existing governor receipt.
+ * The receipt reserves goal/fleet seats until bootstrap supplies newer presence,
+ * the spawn cancels, or the existing boot grace expires. No presence is forged.
+ * Only read/lock failures can fail open; a registration/commit failure is never
+ * retried, because its external durable write may already have succeeded.
+ */
+export async function registerGoalLaunch<T>(args: {
+  workspaceId: string;
+  launcherOwnerId: string;
+  targetOwnerId?: string | null;
+  fleetSlug?: string | null;
+  excludeOwnerIds?: readonly string[];
+  sql?: Sql;
+  /** Test seam: production uses the existing complete policy resolver. */
+  resolve?: typeof resolveGoalLaunchForGoal;
+}, register: (goalId: string | null, resolution: GoalLaunchResolution | null, degradedReason: string | null) => Promise<T>): Promise<{
+  value: T | null; resolution: GoalLaunchResolution | null; degradedReason: string | null;
+}> {
+  let goalId: string | null;
+  try {
+    goalId = await resolveGoalContext(args.workspaceId, args.launcherOwnerId, args.sql);
+  } catch (error) {
+    if (isGoalHolderAuthorityError(error)) throw error;
+    const degradedReason = `goal admission registration not enforced — ${error instanceof Error ? error.message : String(error)}`;
+    return { value: await register(null, null, degradedReason), resolution: null, degradedReason };
+  }
+  if (!goalId) return { value: await register(null, null, null), resolution: null, degradedReason: null };
+  let registrationStarted = false;
+  try {
+    return await pg(args.sql).begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`goal-launch:${args.workspaceId}:${goalId}`}, 0))`;
+      const resolution = await (args.resolve ?? resolveGoalLaunchForGoal)({
+        workspaceId: args.workspaceId, launcherOwnerId: args.launcherOwnerId, goalId,
+        fleetSlug: args.fleetSlug, count: 1,
+        excludeOwnerIds: [...(args.excludeOwnerIds ?? []), ...(args.targetOwnerId ? [args.targetOwnerId] : [])],
+        sql: tx as unknown as Sql,
+      });
+      if (resolution.refusal) return { value: null, resolution, degradedReason: null };
+      registrationStarted = true;
+      return { value: await register(goalId, resolution, null), resolution, degradedReason: null };
+    }) as unknown as { value: T | null; resolution: GoalLaunchResolution | null; degradedReason: string | null };
+  } catch (error) {
+    if (registrationStarted || isGoalHolderAuthorityError(error)) throw error;
+    const degradedReason = `goal admission registration not enforced — ${error instanceof Error ? error.message : String(error)}`;
+    return { value: await register(goalId, null, degradedReason), resolution: null, degradedReason };
   }
 }
 
@@ -2706,6 +3396,344 @@ async function budgetLaunchGateEnabled(): Promise<{ enabled: boolean; infraError
  * bumps the one card instead of stacking a new one — the
  * deliverGoalWindDownReport pattern.
  */
+/**
+ * Why a declared ceiling has no figure to judge. Each cause names its own
+ * repair, which is why they are not one message.
+ */
+type BudgetUnmeasurableCause =
+  | 'unpriced-lineage-samples'
+  | 'unattributed-goal-samples'
+  | 'no-lineage-samples'
+  | 'interactive-usage-stale'
+  | 'interactive-usage-unavailable'
+  | 'measurement-failed';
+
+const UNMEASURABLE_SCOPE: Record<BudgetUnmeasurableCause, string> = {
+  'unpriced-lineage-samples': REFUSAL_SCOPES.BUDGET_UNMEASURABLE,
+  'unattributed-goal-samples': REFUSAL_SCOPES.BUDGET_UNATTRIBUTED,
+  'no-lineage-samples': REFUSAL_SCOPES.BUDGET_NO_SAMPLES,
+  'interactive-usage-stale': REFUSAL_SCOPES.BUDGET_MEASUREMENT_FAILED,
+  'interactive-usage-unavailable': REFUSAL_SCOPES.BUDGET_MEASUREMENT_FAILED,
+  'measurement-failed': REFUSAL_SCOPES.BUDGET_MEASUREMENT_FAILED,
+};
+
+/**
+ * WI-10002052 / D-011 clause 3: a ceiling that cannot MEASURE must not silently
+ * fail open. `current: null` is load-bearing: the gate refuses BECAUSE the number
+ * is unknown, and a 0 here would assert the very figure it is refusing over not
+ * having.
+ */
+function budgetUnmeasurableRefusal(args: {
+  goalId: string;
+  budgetCents: number;
+  count: number;
+  cause: BudgetUnmeasurableCause;
+  detail?: string;
+}): GoalLaunchRefusal {
+  const head = `goal ${args.goalId} declares budget_cents=${args.budgetCents}, but its spend CANNOT BE MEASURED: `;
+  const noHeadroom =
+    `do not infer headroom from the missing value or raise/clear the ceiling merely to get a launch admitted. ` +
+    `⚠ Do NOT attach a pot to change this — goal spend is measured from goal-attributed samples, not pots.`;
+  const body =
+    args.cause === 'unpriced-lineage-samples'
+      ? `the platform snapshot (metadata.spentCents) is null because usage samples attributed to this goal in its ` +
+        `budget window carry no price, so any total would only be a floor. Refusing rather than admitting: a ` +
+        `ceiling that fails open on a partial measurement never binds. Repair the pricing of those samples ` +
+        `(the model or provider that produced them has no cost), or wait for them to leave the window; `
+      : args.cause === 'unattributed-goal-samples'
+        ? `no usage in its budget window was attributed to the goal at write time (agent_usage_samples.goal_id), ` +
+          `yet ${args.detail ?? "the goal's pot/session legs carry usage"}. Spend happened that the authoritative ` +
+          `stream never recorded, so any figure would be a floor. Refusing rather than admitting: an empty ` +
+          `authoritative stream beside non-empty goal usage is not "nothing spent". Repair write-time goal ` +
+          `attribution for those sessions, or wait for the samples to leave the window; `
+        : args.cause === 'no-lineage-samples'
+          ? `the launch-time measurement found no goal-attributed, pot, or session usage samples in its budget ` +
+            `window. An empty stream is unmeasured, not a priced zero; refusing rather than admitting without ` +
+            `a figure that can be checked against the ceiling; `
+          : isInteractiveUsageUnmeasuredReason(args.cause)
+            ? `the goal's interactive usage stream is ${args.cause === 'interactive-usage-stale' ? 'stale' : 'unavailable'}` +
+              `${args.detail ? ` (${args.detail})` : ''}, so its priced spend cannot be verified against the ceiling. ` +
+              `Refusing rather than treating an unmeasured total as budget headroom; repair the usage ingestion ` +
+              `or freshness read before retrying; `
+        : `the platform snapshot carries no spend figure, so the gate measured at launch, and that measurement ` +
+          `failed (${args.detail ?? 'unknown error'}). With no figure there is no headroom to judge. Refusing ` +
+          `rather than admitting: a ceiling that fails open whenever its read fails never binds. Retry once the ` +
+          `ledger read succeeds; `;
+  return {
+    reason: 'goal_budget_unmeasurable',
+    limit: args.budgetCents,
+    current: null,
+    requested: args.count,
+    currentScope: UNMEASURABLE_SCOPE[args.cause],
+    message: head + body + noHeadroom,
+  };
+}
+
+function budgetExceededRefusal(args: {
+  goalId: string;
+  budgetCents: number;
+  spentCents: number;
+  count: number;
+  spendScope: string;
+  /** Where the figure came from, rendered after the scope, e.g. ` (platform snapshot at …)`. */
+  measuredAt: string;
+}): GoalLaunchRefusal {
+  return {
+    reason: 'goal_budget_exceeded',
+    limit: args.budgetCents,
+    current: args.spentCents,
+    requested: args.count,
+    currentScope: args.spendScope,
+    message:
+      // NAME THE POPULATION (P-004). The scope travels in the sentence, not
+      // just in the structured field a human reading the refusal never sees.
+      `goal ${args.goalId} has spent ${args.spentCents} of its ${args.budgetCents} cent budget ` +
+      `[measured over ${args.spendScope}` +
+      `${
+        args.spendScope === REFUSAL_SCOPES.BUDGET_UNVERIFIED
+          ? ' — this figure carries no provenance marker, so what it counted is unknown'
+          : ' — usage attributed to this goal within its budget window'
+      }]` +
+      `${args.measuredAt}; further agent/fleet ` +
+      `launches are refused. Review spend and raise budget_cents on the goal, or wind the goal down. ` +
+      `The owner has an open escalation for this (deduped per goal).`,
+  };
+}
+
+/**
+ * D-011 clause 3 at launch time. An absent or stale snapshot is re-measured
+ * with the rollup's OWN function; neither an absent figure nor stale ingestion
+ * is evidence that nothing was spent.
+ *
+ * Dynamic import for the reason REFUSAL_SCOPES documents: a static import of
+ * `./goals/spend-rollup` would close a runtime cycle through `@papercusp/agent-mcp`.
+ */
+async function measureGoalSpendAtLaunch(args: {
+  workspaceId: string;
+  goalId: string;
+  windowSec: number | null;
+  sql?: Sql;
+}): Promise<{ ok: true; rollup: GoalSpendRollup } | { ok: false; error: string }> {
+  try {
+    const { computeGoalSpendRollup } = await import('./goals/spend-rollup');
+    const rollup = await computeGoalSpendRollup(pg(args.sql), {
+      workspaceId: args.workspaceId,
+      goalId: args.goalId,
+      windowSec: args.windowSec,
+    });
+    return { ok: true, rollup };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export type GoalInferenceAdmissionDecision =
+  | {
+      allowed: true;
+      goalId: string | null;
+      reason:
+        | 'no-goal' | 'no-budget' | 'budget-gate-disabled' | 'under-budget';
+    }
+  | {
+      allowed: false;
+      goalId: string;
+      status: 403 | 503;
+      code: string;
+      message: string;
+      budgetCents?: number;
+      spentCents?: number | null;
+      budgetWindowSec?: number | null;
+    };
+
+/** Pure decision for the gateway's pre-spool, per-turn goal budget admission. */
+export function evaluateGoalInferenceBudget(args: {
+  goalId: string;
+  goalStatus: string | null;
+  budgetCents: number | null;
+  budgetWindowSec: number | null;
+  rollup?: GoalSpendRollup | null;
+  measurementError?: string;
+}): GoalInferenceAdmissionDecision {
+  if (!args.goalStatus) {
+    return {
+      allowed: false,
+      goalId: args.goalId,
+      status: 503,
+      code: 'goal_status_unavailable',
+      message: `goal ${args.goalId} status could not be verified; inference is refused before provider dispatch`,
+    };
+  }
+  if (args.goalStatus !== 'active') {
+    return {
+      allowed: false,
+      goalId: args.goalId,
+      status: 403,
+      code: 'goal_inactive',
+      message: `goal ${args.goalId} is ${args.goalStatus}; inference is refused until the goal is active`,
+    };
+  }
+  if (args.budgetCents == null) return { allowed: true, goalId: args.goalId, reason: 'no-budget' };
+
+  const refuseUnmeasured = (
+    cause: BudgetUnmeasurableCause,
+    detail?: string,
+  ): GoalInferenceAdmissionDecision => {
+    const refusal = budgetUnmeasurableRefusal({
+      goalId: args.goalId,
+      budgetCents: args.budgetCents!,
+      count: 1,
+      cause,
+      ...(detail ? { detail } : {}),
+    });
+    return {
+      allowed: false,
+      goalId: args.goalId,
+      status: cause === 'measurement-failed' || isInteractiveUsageUnmeasuredReason(cause) ? 503 : 403,
+      code: 'goal_budget_unmeasurable',
+      message: `${refusal.message} Model inference requests are refused before provider dispatch.`,
+      budgetCents: args.budgetCents!,
+      spentCents: null,
+      budgetWindowSec: args.budgetWindowSec,
+    };
+  };
+
+  if (args.measurementError) return refuseUnmeasured('measurement-failed', args.measurementError);
+  const rollup = args.rollup;
+  if (!rollup) return refuseUnmeasured('measurement-failed', 'the live spend rollup returned no result');
+  if (isInteractiveUsageUnmeasuredReason(rollup.unmeasuredReason)) {
+    return refuseUnmeasured(rollup.unmeasuredReason, rollup.interactiveUsageFreshness.reason);
+  }
+  if (rollup.spentCents != null) {
+    if (rollup.spentCents >= args.budgetCents) {
+      const window = rollup.windowSec == null ? 'the goal lifetime' : `the trailing ${rollup.windowSec}s budget window`;
+      return {
+        allowed: false,
+        goalId: args.goalId,
+        status: 403,
+        code: 'goal_budget_exceeded',
+        message:
+          `goal ${args.goalId} has spent ${rollup.spentCents} of its ${args.budgetCents} cent budget over ${window}; ` +
+          'further model inference requests are refused before provider dispatch',
+        budgetCents: args.budgetCents,
+        spentCents: rollup.spentCents,
+        budgetWindowSec: args.budgetWindowSec,
+      };
+    }
+    return { allowed: true, goalId: args.goalId, reason: 'under-budget' };
+  }
+  if (rollup.unmeasuredReason === 'unpriced-lineage-samples') {
+    return refuseUnmeasured('unpriced-lineage-samples');
+  }
+  if (rollup.samples > 0 || rollup.lineage.samples > 0) {
+    return refuseUnmeasured(
+      'unattributed-goal-samples',
+      `the goal's pot/session legs carry ${rollup.samples} usage sample(s) ` +
+        `(${rollup.pot.samples} pot, ${rollup.session.samples} session)`,
+    );
+  }
+  // D-011 clause 3: empty measurement is still unmeasured, never priced zero.
+  return refuseUnmeasured('no-lineage-samples');
+}
+
+/**
+ * Resolve current goal context and measure its current budget window for every
+ * inference turn. Unlike launch admission, this reads the source ledger rather
+ * than trusting the periodic metadata snapshot.
+ */
+export async function checkGoalInferenceAdmission(args: {
+  workspaceId: string;
+  ownerId: string;
+  sql?: Sql;
+}): Promise<GoalInferenceAdmissionDecision> {
+  let goalId: string | null;
+  try {
+    goalId = await resolveGoalContext(args.workspaceId, args.ownerId, args.sql);
+  } catch (error) {
+    const superseded = isGoalHolderAuthorityError(error) && error.code === 'goal_holder_superseded';
+    return {
+      allowed: false,
+      goalId: isGoalHolderAuthorityError(error) ? error.authority?.goalId ?? 'unknown' : 'unknown',
+      status: superseded ? 403 : 503,
+      code: superseded ? 'goal_holder_superseded' : 'goal_context_unavailable',
+      message: superseded
+        ? 'this session is no longer an authorized goal holder; inference is refused'
+        : 'goal context could not be verified; inference is refused before provider dispatch',
+    };
+  }
+  if (!goalId) return { allowed: true, goalId: null, reason: 'no-goal' };
+
+  let rows: Array<{ status?: unknown; budget_cents?: unknown; budget_window_sec?: unknown }>;
+  try {
+    rows = await pg(args.sql)<Array<{ status?: unknown; budget_cents?: unknown; budget_window_sec?: unknown }>>`
+      SELECT status, budget_cents, budget_window_sec
+        FROM harness_shared.goals
+       WHERE id = ${goalId} AND workspace_id = ${args.workspaceId}
+       LIMIT 1`;
+  } catch {
+    return {
+      allowed: false,
+      goalId,
+      status: 503,
+      code: 'goal_budget_read_unavailable',
+      message: `goal ${goalId} status and budget could not be read; inference is refused before provider dispatch`,
+    };
+  }
+  const row = rows[0];
+  if (!row) {
+    return {
+      allowed: false,
+      goalId,
+      status: 503,
+      code: 'goal_budget_read_unavailable',
+      message: `goal ${goalId} is missing from the current workspace; inference is refused before provider dispatch`,
+    };
+  }
+  const goalStatus = typeof row.status === 'string' ? row.status.trim() || null : null;
+  const budgetCents = asFiniteCents(row.budget_cents);
+  const budgetWindowSec = asFiniteNumber(row.budget_window_sec);
+  if ((row.budget_cents != null && budgetCents == null) || (row.budget_window_sec != null && budgetWindowSec == null)) {
+    return {
+      allowed: false,
+      goalId,
+      status: 503,
+      code: 'goal_budget_read_unavailable',
+      message: `goal ${goalId} budget or window is invalid; inference is refused before provider dispatch`,
+    };
+  }
+  if (!goalStatus || goalStatus !== 'active') {
+    return evaluateGoalInferenceBudget({ goalId, goalStatus, budgetCents, budgetWindowSec });
+  }
+  if (budgetCents == null) return { allowed: true, goalId, reason: 'no-budget' };
+
+  const gate = await budgetLaunchGateEnabled();
+  if (gate.infraError) {
+    return {
+      allowed: false,
+      goalId,
+      status: 503,
+      code: 'goal_budget_gate_unavailable',
+      message: `goal ${goalId} budget enforcement could not be verified; inference is refused before provider dispatch`,
+      budgetCents,
+      budgetWindowSec,
+    };
+  }
+  if (!gate.enabled) return { allowed: true, goalId, reason: 'budget-gate-disabled' };
+
+  const live = await measureGoalSpendAtLaunch({
+    workspaceId: args.workspaceId,
+    goalId,
+    windowSec: budgetWindowSec,
+    sql: args.sql,
+  });
+  return evaluateGoalInferenceBudget({
+    goalId,
+    goalStatus,
+    budgetCents,
+    budgetWindowSec,
+    ...(live.ok ? { rollup: live.rollup } : { measurementError: live.error }),
+  });
+}
+
 function escalateBudgetRefusal(args: {
   workspaceId: string;
   goalId: string;
@@ -2810,6 +3838,11 @@ export async function resolveGoalLaunch(args: {
   fleetSlug?: string | null;
   /** How many agents this launch will start. Default 1. */
   count?: number;
+  /**
+   * Owner ids this launch REPLACES (fleet:respawn-member): excluded from the
+   * ceiling headcount so a respawn is net-zero. See {@link goalHeadcount}.
+   */
+  excludeOwnerIds?: readonly string[];
   requested?: LaunchProfile | null;
   sql?: Sql;
 }): Promise<GoalLaunchResolution> {
@@ -2852,6 +3885,8 @@ export async function resolveGoalLaunchForGoal(args: {
   goalRole?: GoalLaunchRole | null;
   fleetSlug?: string | null;
   count?: number;
+  /** Owner ids this launch replaces — not charged against the ceilings. See {@link goalHeadcount}. */
+  excludeOwnerIds?: readonly string[];
   requested?: LaunchProfile | null;
   sql?: Sql;
   /** Degraded reasons accumulated by a caller before delegating here. */
@@ -2891,16 +3926,15 @@ export async function resolveGoalLaunchForGoal(args: {
   let goalBrief = rawGoalBrief;
   if (settingsError) degradedReasons.push(`launch settings not applied: ${settingsError}`);
 
-  // P-006 (D-001/D-003): goals.budget_cents is a BINDING ceiling over the
-  // platform spend snapshot, checked FIRST — an exhausted budget refuses the
+  // P-006 (D-001/D-011): goals.budget_cents is a BINDING ceiling over the
+  // goal-attributed spend stream, checked FIRST — an exhausted budget refuses the
   // launch regardless of agent headroom, and a formed refusal skips the
   // headcount read entirely. The snapshot is authoritative only when its
   // provenance marker identifies one of the platform writers; a legacy or
-  // otherwise unmarked value is reported degraded and fails OPEN rather than
-  // refusing launches on a population the gate cannot verify. Same fail-open
-  // stance as the agent ceilings (see the module header): a truth this gate
-  // cannot read is reported degraded, never silently enforced and never
-  // silently skipped. `>=` and not `>`: the budget is a ceiling, so a goal
+  // otherwise unmarked value triggers a live rollup rather than deciding from
+  // an unknown population. Measured budget
+  // spend and unmeasured live rollups are binding; the fail-open rule for agent
+  // headcount does not apply to an unmeasured budget. `>=` and not `>`: a goal
   // that has REACHED it is out of budget — an off-by-one here admits one launch
   // past every budget in the workspace.
   let refusal: GoalLaunchRefusal | null = null;
@@ -2909,37 +3943,23 @@ export async function resolveGoalLaunchForGoal(args: {
     if (gate.infraError) {
       degradedReasons.push(`budget ceiling not enforced — flag read failed: ${gate.infraError}`);
     } else if (gate.enabled) {
-      if (budget.spentCents == null && budget.unmeasuredPricedSpend) {
-        // WI-10002052 (D-004 clause 1): a ceiling that cannot MEASURE must not
+      const recordedFreshness = budget.interactiveUsageFreshnessStatus === 'fresh'
+        ? evaluateInteractiveUsageFreshness(budget.interactiveUsageLastIngestedAtMs)
+        : null;
+      const snapshotIsFresh = recordedFreshness?.status === 'fresh';
+      if (budget.spentCents == null && budget.unmeasuredPricedSpend && snapshotIsFresh) {
+        // WI-10002052 / D-011 clause 3: a ceiling that cannot MEASURE must not
         // silently fail open. A null spentCents has two populations behind it,
-        // and only this one is a hole: the goal has priced, goal-tagged spend
-        // that the pot leg structurally cannot see (INNER JOIN on goal_pots,
-        // zero attached pots), so failing open means this ceiling never binds
-        // for this goal — not once, ever. That is not the transient read error
-        // the module header's fail-open stance was written for; it is permanent,
-        // so the asymmetry argument that justifies failing open does not apply.
-        //
-        // `current: null` is load-bearing: the gate refuses BECAUSE the number
-        // is unknown, and a 0 here would assert the very figure it is refusing
-        // over not having.
-        refusal = {
-          reason: 'goal_budget_unmeasurable',
-          limit: budget.budgetCents,
-          current: null,
-          requested: count,
-          currentScope: REFUSAL_SCOPES.BUDGET_UNMEASURABLE,
-          message:
-            `goal ${goalId} declares budget_cents=${budget.budgetCents}, but its spend CANNOT BE MEASURED: the ` +
-            `platform snapshot (metadata.spentCents) is null because the authoritative pot leg is an INNER JOIN ` +
-            `on goal_pots and this goal has no attached pots — while the diagnostic session leg shows that priced, ` +
-            `goal-tagged spend does exist. Refusing rather than admitting: an unmeasurable ceiling that fails open ` +
-            `never binds at all. HOW MUCH has been spent is deliberately not asserted here — the session leg is ` +
-            `diagnostic-only and may not control a ceiling. Repair the authoritative goal spend measurement and ` +
-            `its provenance; do not infer available headroom from the missing value or raise/clear the ceiling ` +
-            `merely to get a launch admitted. Wind the goal down or seek an explicit owner decision if the ` +
-            `existing measurement repair cannot proceed. ⚠ Do NOT attach a pot to make this measurable — that fabricates ` +
-            `measurability without repairing anything, turning this loud refusal into a confident wrong number.`,
-        };
+        // and only this one is a hole: the goal's window holds attributed
+        // samples with no price, so the total is unknown and any figure would
+        // be a floor. Failing open here admits launches past a ceiling nobody
+        // can check, for as long as those samples stay in the window.
+        refusal = budgetUnmeasurableRefusal({
+          goalId,
+          budgetCents: budget.budgetCents,
+          count,
+          cause: 'unpriced-lineage-samples',
+        });
         // Refusing without telling anyone would trade a silent fail-OPEN for a
         // silent fail-CLOSED — the same invisibility defect pointed the other
         // way. Keep the owner informed while the measurement repair is pursued;
@@ -2950,45 +3970,93 @@ export async function resolveGoalLaunchForGoal(args: {
           launcherOwnerId: args.launcherOwnerId,
           refusal,
         });
-      } else if (budget.spentCents == null) {
-        // The other population: no rollup tick has ever run for this goal, and
-        // nothing indicates spend exists. Nothing is being let past a ceiling,
-        // so the original fail-open stance stands unchanged here.
-        degradedReasons.push(
-          `budget ceiling not enforced — goal ${goalId} declares budget_cents=${budget.budgetCents} but has no ` +
-            `platform spend snapshot yet (metadata.spentCents is written by the goal-spend-rollup tick; D-003 ` +
-            `forbids inventing one)`,
-        );
-      } else if (budgetSpendScope(budget.spentCentsSource) !== REFUSAL_SCOPES.BUDGET_POT) {
-        degradedReasons.push(
-          `budget ceiling not enforced — goal ${goalId} has spentCents=${budget.spentCents} but no recognized ` +
-            `platform spend provenance marker (metadata.spentCentsSource must be 'goal-pots-rollup' or ` +
-            `'goal-spend-tick'; D-003 forbids treating an unmarked legacy value as authoritative)`,
-        );
+      } else if (
+        budget.spentCents == null || !snapshotIsFresh ||
+        budgetSpendScope(budget.spentCentsSource) !== REFUSAL_SCOPES.BUDGET_LINEAGE
+      ) {
+        // The other null: no snapshot at all (the rollup has not ticked for this
+        // goal yet), a window whose write-time-attributed stream is empty, or a
+        // snapshot whose interactive-usage watermark is no longer fresh, or a
+        // cached figure without authoritative provenance. None can safely
+        // enforce from cached cents, so re-measure with the rollup's
+        // own function before deciding.
+        const live = await measureGoalSpendAtLaunch({
+          workspaceId: args.workspaceId,
+          goalId,
+          windowSec: rawGoalBrief?.budgetWindowSec ?? null,
+          sql: args.sql,
+        });
+        if (!live.ok) {
+          refusal = budgetUnmeasurableRefusal({
+            goalId,
+            budgetCents: budget.budgetCents,
+            count,
+            cause: 'measurement-failed',
+            detail: live.error,
+          });
+        } else if (isInteractiveUsageUnmeasuredReason(live.rollup.unmeasuredReason)) {
+          refusal = budgetUnmeasurableRefusal({
+            goalId,
+            budgetCents: budget.budgetCents,
+            count,
+            cause: live.rollup.unmeasuredReason,
+            detail: live.rollup.interactiveUsageFreshness.reason,
+          });
+        } else if (live.rollup.spentCents != null) {
+          if (live.rollup.spentCents >= budget.budgetCents) {
+            refusal = budgetExceededRefusal({
+              goalId,
+              budgetCents: budget.budgetCents,
+              spentCents: live.rollup.spentCents,
+              count,
+              spendScope: REFUSAL_SCOPES.BUDGET_LINEAGE,
+              measuredAt: ' (measured at launch; the platform snapshot carried no figure)',
+            });
+          }
+        } else if (live.rollup.unmeasuredReason === 'unpriced-lineage-samples') {
+          refusal = budgetUnmeasurableRefusal({
+            goalId,
+            budgetCents: budget.budgetCents,
+            count,
+            cause: 'unpriced-lineage-samples',
+          });
+        } else if (live.rollup.samples > 0) {
+          refusal = budgetUnmeasurableRefusal({
+            goalId,
+            budgetCents: budget.budgetCents,
+            count,
+            cause: 'unattributed-goal-samples',
+            detail:
+              `the goal's pot/session legs carry ${live.rollup.samples} usage sample(s) in the same window ` +
+              `(${live.rollup.pot.samples} pot, ${live.rollup.session.samples} session)`,
+          });
+        } else {
+          // D-011 clause 3 and accepted R-3: no samples is an unmeasured
+          // figure, not proof of a priced zero or available budget headroom.
+          refusal = budgetUnmeasurableRefusal({
+            goalId,
+            budgetCents: budget.budgetCents,
+            count,
+            cause: 'no-lineage-samples',
+          });
+        }
+        if (refusal) {
+          escalateBudgetRefusal({
+            workspaceId: args.workspaceId,
+            goalId,
+            launcherOwnerId: args.launcherOwnerId,
+            refusal,
+          });
+        }
       } else if (budget.spentCents >= budget.budgetCents) {
-        const spendScope = budgetSpendScope(budget.spentCentsSource);
-        refusal = {
-          reason: 'goal_budget_exceeded',
-          limit: budget.budgetCents,
-          current: budget.spentCents,
-          requested: count,
-          currentScope: spendScope,
-          message:
-            // NAME THE POPULATION (P-004). Unqualified, this line reads as the
-            // goal's total cost. It is the pot subset — which is why the scope
-            // travels in the sentence, not just in the structured field a human
-            // reading the refusal will never see.
-            `goal ${goalId} has spent ${budget.spentCents} of its ${budget.budgetCents} cent budget ` +
-            `[measured over ${spendScope}` +
-            `${
-              spendScope === REFUSAL_SCOPES.BUDGET_UNVERIFIED
-                ? ' — this figure carries no provenance marker, so what it counted is unknown'
-                : "; spend billed OUTSIDE this goal's pots is not in this number"
-            }]` +
-            `${budget.spentCentsAt ? ` (platform snapshot at ${budget.spentCentsAt})` : ''}; further agent/fleet ` +
-            `launches are refused. Review spend and raise budget_cents on the goal, or wind the goal down. ` +
-            `The owner has an open escalation for this (deduped per goal).`,
-        };
+        refusal = budgetExceededRefusal({
+          goalId,
+          budgetCents: budget.budgetCents,
+          spentCents: budget.spentCents,
+          count,
+          spendScope: budgetSpendScope(budget.spentCentsSource),
+          measuredAt: budget.spentCentsAt ? ` (platform snapshot at ${budget.spentCentsAt})` : '',
+        });
         escalateBudgetRefusal({
           workspaceId: args.workspaceId,
           goalId,
@@ -3013,14 +4081,17 @@ export async function resolveGoalLaunchForGoal(args: {
   // goal that has explicitly declared BOTH ceilings unlimited.
   const needsCount = !refusal && (ceilings.maxAgents != null || ceilings.maxPerFleet != null);
   let headcount: GoalHeadcount = { total: 0, fleet: args.fleetSlug ? 0 : null };
+  let headcountMeasurement: GoalHeadcountMeasurement | null = null;
   if (needsCount) {
     const counted = await goalHeadcount({
       workspaceId: args.workspaceId,
       goalId,
       fleetSlug: args.fleetSlug ?? null,
+      excludeOwnerIds: args.excludeOwnerIds,
       sql: args.sql,
     });
     headcount = counted.headcount;
+    headcountMeasurement = counted.measurement;
     if (counted.error) degradedReasons.push(`ceiling not enforced — headcount failed: ${counted.error}`);
   }
 
@@ -3118,6 +4189,7 @@ export async function resolveGoalLaunchForGoal(args: {
     effective,
     ceilings,
     headcount,
+    headcountMeasurement,
     budget,
     refusal,
     degraded: degradedReasons.length > 0,

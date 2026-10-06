@@ -1,6 +1,6 @@
 # Agent identities: architecture review
 
-Owner-requested review for owner, 2026-09-04. Work item: **WI-2144434**. Reviewed plan: **identities-v1-2026-08-30**, including the M1/M2/M3 requirements, design, implementation rulings, integration audit, and current staging source. These are recommendations, not amendments to the active plan. No product source was changed.
+Owner-requested review for Avi, 2026-09-04. Work item: **WI-2144434**. Reviewed plan: **identities-v1-2026-08-30**, including the M1/M2/M3 requirements, design, implementation rulings, integration audit, and current staging source. These are recommendations, not amendments to the active plan. No product source was changed.
 
 **Recommendation: continue the initiative, but use alpha to strengthen the blueprint composition and session activation boundaries before building more distribution infrastructure on them.** The plan has the right direction. Its most valuable result would be a small, explicit compiler and runtime contract shared by every agent surface. Moving existing prompt fragments onto a common loader is a useful migration toward that result, but does not establish it by itself.
 

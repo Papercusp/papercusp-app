@@ -312,7 +312,7 @@ export function isDuplicateMigrationLedgerFailure(stderr: string): boolean {
   return SCHEMA_MIGRATIONS_DUP_KEY_RE.test(stderr);
 }
 
-type PsqlResult = { status: number; stdout: string; stderr: string };
+type PsqlResult = { status: number; stdout: string; stderr: string; signal?: string | null };
 
 type PsqlRunner = (
   cmd: string,
@@ -380,10 +380,16 @@ const runPsql: PsqlRunner = (cmd, args, opts) =>
         try {
           const child = execFile(cmd, args, { encoding: opts.encoding }, (error, stdout, stderr) => {
             const status = error == null ? 0 : typeof error.code === 'number' ? error.code : 1;
+            const diagnostic = stderr.trim()
+              ? stderr
+              : error
+                ? `${error.message}${error.signal ? ` (killed by ${error.signal})` : ''}`
+                : '';
             finish({
               status,
               stdout: stdout ?? '',
-              stderr: stderr ?? error?.message ?? '',
+              stderr: diagnostic,
+              signal: error?.signal ?? null,
             });
           });
           child.stdin?.end(opts.input);
@@ -921,6 +927,7 @@ export default defineTool({
               applied: false,
               exit_code: r.status,
               stderr: (r.stderr ?? '').slice(-2000),
+              signal: r.signal ?? null,
               attempts,
               // EI-18747087108453188: was isLockTimeoutFailure-only, so a deadlock
               // or serialization-failure exhaustion (both now retried above)

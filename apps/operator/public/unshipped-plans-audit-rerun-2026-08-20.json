@@ -318,7 +318,7 @@
         "staleHints": []
       },
       "nowState": "P-001..P-007 done (rubric kind schema + store scoping + linkage + completion gate + 4 class-rubric seeds + docs), verified: lint:tsc green, lint:tool-prompts green, flags tsc green, 164 targeted tests green. P-008 pending the full test:affected sweep now live (pid 1786938, log /tmp/papercusp-affected-tests-1786938-39ecc13d.log; push watcher armed by su-c9283).",
-      "nowNext": "su-c9283: on sweep green flip P-008 done; then once dev:pipeline_position shows the schema live on :3070, rubrics:propose the acceptance rubric FOR this plan (kind acceptance, classRef plan-class-feature-ship) and get a NON-implementer to grade it; then report to owner."
+      "nowNext": "su-c9283: on sweep green flip P-008 done; then once dev:pipeline_position shows the schema live on :3070, rubrics:propose the acceptance rubric FOR this plan (kind acceptance, classRef plan-class-feature-ship) and get a NON-implementer to grade it; then report to Avi."
     },
     {
       "slug": "ambient-semantic-push-2026-07-14",
@@ -460,7 +460,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "APPROVED AND IN EXECUTION. owner approved start-to-finish implementation on 2026-08-13 and required acceptance grading to launch a fresh dedicated headless non-implementer rather than distract an existing peer. The requirements/design spec triad is complete; P-010 and D-006 encode the grader workflow. WI-38399 is being closed, then Phase 1 begins in dependency order. No implementation claim should skip the lossless-foundations ordering.",
+      "nowState": "APPROVED AND IN EXECUTION. Avi approved start-to-finish implementation on 2026-08-13 and required acceptance grading to launch a fresh dedicated headless non-implementer rather than distract an existing peer. The requirements/design spec triad is complete; P-010 and D-006 encode the grader workflow. WI-38399 is being closed, then Phase 1 begins in dependency order. No implementation claim should skip the lossless-foundations ordering.",
       "nowNext": "Close WI-38399 with plan revision 20 evidence; convert and claim P-001; inspect the universal result-door writer and existing overflow-family work before editing."
     },
     {
@@ -810,7 +810,7 @@
         ],
         "staleHints": []
       },
-      "nowState": "ACTIVE - implementation wave launching. P-001 engagement core + P-005 voice-staging + P-006 replay chapters + P-009 chat answers OPEN NOW in parallel. P-002 mockups: leader (su-c18ba) building for owner.",
+      "nowState": "ACTIVE - implementation wave launching. P-001 engagement core + P-005 voice-staging + P-006 replay chapters + P-009 chat answers OPEN NOW in parallel. P-002 mockups: leader (su-c18ba) building for Avi.",
       "nowNext": "P-003/P-004/P-010 open when P-001 lands; P-007 when P-006 lands; P-008 waits on checkout plan P-112 port (D-005). Acceptance rubric authored AFTER implementation, before ship."
     },
     {
@@ -2137,7 +2137,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "GO/NO-GO DELIVERED (2026-07-17 00:37 EDT, plan-drain fleet). VERDICT: GO. Both D-001 gate conditions confirmed: (1) blender cycle-error-rate 3.13% since 20:00 EDT (<5% bar), the other 5 rubric bars already passed per EI-12107; (2) EI-12108 Mug-side fix confirmed holding live — 0 'recovering' placements in production papercusp install, steady real completions (~1/17min). Report posted to WI-4819 + sent to owner via coord:send. All 8 plan items done.",
+      "nowState": "GO/NO-GO DELIVERED (2026-07-17 00:37 EDT, plan-drain fleet). VERDICT: GO. Both D-001 gate conditions confirmed: (1) blender cycle-error-rate 3.13% since 20:00 EDT (<5% bar), the other 5 rubric bars already passed per EI-12107; (2) EI-12108 Mug-side fix confirmed holding live — 0 'recovering' placements in production papercusp install, steady real completions (~1/17min). Report posted to WI-4819 + sent to Avi via coord:send. All 8 plan items done.",
       "nowNext": "Released. No open items — plan complete."
     },
     {
@@ -2470,7 +2470,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "ALL SIX ITEMS COMPLETE + verified. Phase 1 (P-001..P-003, 2026-07-21) shipped work_items:claimable as the authoritative issue-family claimable read (one shared subquery + one all-floors-pass predicate on the SAME aggregateIssueClaimExclusions oracle the scheduler runs, so count/list/scheduler cannot diverge), repointed every guidance surface, and clarified admissibleOnly as a structural pre-filter. Phase 2 (P-004..P-006, 2026-07-25, owner owner greenlit all three) closed the loop: P-004 replaced the dev:pg_query blessing with a 'you want / use / not' pointer table in CLAUDE.md and rewrote the tool's own when/notWhen to 'genuinely ad-hoc/analytic ONLY' (+ budget-free seeAlso); P-005 added plans:list groupBy (11 row-derived dimensions) + aggregateOnly returning groups:[{key,count}] — no new SQL, aggregate computed BEFORE the limit slice with limit NOT pushed into SQL when groupBy is set; P-006 added lint:sql-guidance-justified (GATING in CI) so an agent-facing surface cannot tell an agent ",
+      "nowState": "ALL SIX ITEMS COMPLETE + verified. Phase 1 (P-001..P-003, 2026-07-21) shipped work_items:claimable as the authoritative issue-family claimable read (one shared subquery + one all-floors-pass predicate on the SAME aggregateIssueClaimExclusions oracle the scheduler runs, so count/list/scheduler cannot diverge), repointed every guidance surface, and clarified admissibleOnly as a structural pre-filter. Phase 2 (P-004..P-006, 2026-07-25, owner Avi greenlit all three) closed the loop: P-004 replaced the dev:pg_query blessing with a 'you want / use / not' pointer table in CLAUDE.md and rewrote the tool's own when/notWhen to 'genuinely ad-hoc/analytic ONLY' (+ budget-free seeAlso); P-005 added plans:list groupBy (11 row-derived dimensions) + aggregateOnly returning groups:[{key,count}] — no new SQL, aggregate computed BEFORE the limit slice with limit NOT pushed into SQL when groupBy is set; P-006 added lint:sql-guidance-justified (GATING in CI) so an agent-facing surface cannot tell an agent ",
       "nowNext": "Nothing outstanding on this plan — ready to mark shipped. Two unrelated issues filed en route, both open and NOT blocking: EI-18661727856396907 (test:affected red in the canonical dev tree purely from missing node_modules packages — ollama / @azure/core-util / @typespec/ts-http-runtime — invisible to the green gate, which runs in its own tree) and EI-18661904412177717 (work_items:complete BATCH form silently ignores top-level `state`, leaving completed items wip + claimable)."
     },
     {
@@ -2841,7 +2841,7 @@
         "staleHints": []
       },
       "nowState": "All 4 items built. P-001 (server-observable coord-deafness: coordHook on presence/assignments/leader-brief) + P-002 (psu-launcher CC hook-enrollment verify/repair/banner) done + tests green earlier. P-003 done: long-foreground-exec advisory in pretooluse-bash-resource-gate.sh (Claude Bash only, timeout>120s → soft allow+additionalContext nudging run_in_background; codex shells deliberately skipped; deny gates win) — 129/129, per-backend matrix in coord-mid-turn-delivery insight. P-004 built: delivery-ladder-sweep.ts (directed-only, unread past 5m TTL, LIVE recipient → fires standing inbox-wake; storm cap 1/recipient/10m via own marker messages; batch 50, fail-soft) + FLAGS.COORD_DELIVERY_LADDER default ON + DBOS deliveryLadderSweep tick every 2m (flag-checked, load-shed-guarded) — 18/18 unit green, flags 22/22, tsc +0. test:affected in flight.",
-      "nowNext": "test:affected verdict → flip P-004 done + complete WI-4160 → report to owner with evidence; live-verify coordHook + ladder markers on :3070 once the pipeline ships this commit."
+      "nowNext": "test:affected verdict → flip P-004 done + complete WI-4160 → report to Avi with evidence; live-verify coordHook + ladder markers on :3070 once the pipeline ships this commit."
     },
     {
       "slug": "coupling-signal-liveness-and-lifecycle-2026-08-11",
@@ -3340,7 +3340,7 @@
         "staleHints": []
       },
       "nowState": "Cutting desktop v0.0.12-alpha on 3 platforms in parallel (fleet desktop-v0-0-12, leader su-43803, AUTO mode). MOBILE ANDROID leg DONE ✓ (owner-added: WI-5487 passed — debug APK built + launched on papercusp-test emulator, pairing UI verified; signed release APK/iOS IPA deferred to owner keystore+Apple cert). Desktop legs still building; version bumped 0.0.11→0.0.12 (leader, no re-bump). TWO shared build walls hit + being cleared (see D-004): (a) seed-cut outbox-drain → PAPERCUSP_SEED_REUSE_CORESTORE=1 propagated + reuse-cache gitignored; (b) WI-4419 identity scrub, 2 gates — docs .mdx scan FIXED durably by linux (sha 69597c2e, 0 leaks); source.tar.zst audit (stage-source-tree.sh) owned by windows under P-003 (durable staging-scrub pass, leader-approved). All 3 legs must build from the windows fix sha before packaging.",
-      "nowNext": "Windows (su-1204f) lands the stage-source-tree.sh staging-scrub fix + broadcasts the sha; mac (su-33f6b) + linux (su-9d234) re-sync VM build inputs to it and re-run. Leader collects each leg's artifact + sha256 + VM install/relaunch (sha+version flip to 0.0.12) verdict, reports milestones to owner owner. loop:end when all 3 desktop legs built+VM-verified."
+      "nowNext": "Windows (su-1204f) lands the stage-source-tree.sh staging-scrub fix + broadcasts the sha; mac (su-33f6b) + linux (su-9d234) re-sync VM build inputs to it and re-run. Leader collects each leg's artifact + sha256 + VM install/relaunch (sha+version flip to 0.0.12) verdict, reports milestones to owner Avi. loop:end when all 3 desktop legs built+VM-verified."
     },
     {
       "slug": "deterministic-commit-workitem-attribution-2026-06-22",
@@ -4538,7 +4538,7 @@
         "staleHints": []
       },
       "nowState": "14/15 done — only P-015 (verification pass) open. Visual verification COMPLETE in an isolated headless Tauri shell (verify-tauri-headless.sh): 20 panel cards, 24h strips + overall strip, WARN FOR 24H+ since-chips, live ago-clock, card expansion via nuqs healthPanel with ack UI + data payload + transitions (screenshot /tmp/health-tab-v2.png). History writer live-verified (tick rows written by real ticks; periodic 30s cadence exists only where background workers run — :3070/desktop — and sheds under load; gaps render as null buckets by design). Detour fixed en route: WI-4427 pnpm hijack of shared node_modules (144 symlinked packages, 3.3G store) broke operator-vite builds + no-pnpm-hijack guard fleet-wide — npm restore + purge landed, guard 2/2 green, :3270 SPA 200 confirmed by 71d9f; prevention follow-up WI-4438 filed. All previously-red affected-test suites green in isolation post-purge (EnvSwitcherBar, MugTab, ApiKeyStatus). In flight: test:all:integration sweep (mandated by 585 schem",
-      "nowNext": "su-02434: integration sweep green → flip P-015 + complete WI-4387 → final disclosure report to owner (scope trims, warn-max burn-in, org-pool trap EI-10445, pnpm hijack fix, gate re-fire status)."
+      "nowNext": "su-02434: integration sweep green → flip P-015 + complete WI-4387 → final disclosure report to Avi (scope trims, warn-max burn-in, org-pool trap EI-10445, pnpm hijack fix, gate re-fire status)."
     },
     {
       "slug": "hetzner-restore-2026-07-09",
@@ -4833,7 +4833,7 @@
         "staleHints": []
       },
       "nowState": "ALL 9 ITEMS DONE — the plan is drained. P-004 (the last one) added the dynamic plan filter: a Combobox (the P-003 one, reused per D-002 — a chip per plan would wrap the row several times, slugs are ~44 chars) whose options are derived from the sessions in view, each carrying its own count and the same one-line health note a fleet chip does. Selection is nuqs `hudplan` — an ARRAY param like `hudfleet`, so both filters share one URL contract; `none` is the unbound group. Model: derivePlanRollups + a `plans` build option mirroring `fleets`, and one load-bearing ordering — the options are derived AFTER the fleet filter (that IS \"driven by the fleets currently in view\") but BEFORE the plan filter, so the picker never eats its own list. VERIFICATION: 124/124 unit; tsc clean for every touched file (apps/operator AND apps/operator-vite — vitest is type-blind, and neither workspace is covered by lint:tsc); 3 isolated-instance Tauri drives, owner's window never touched; screenshots /tmp/hud-p004",
-      "nowNext": "Nothing — every item is done. STILL AWAITING THE OWNER (unchanged from P-009, not a blocker): P-009 moved NewSessionLauncher into the tab strip, splitting the launcher cluster P-002 established; keep or revert is owner's call."
+      "nowNext": "Nothing — every item is done. STILL AWAITING THE OWNER (unchanged from P-009, not a blocker): P-009 moved NewSessionLauncher into the tab strip, splitting the launcher cluster P-002 established; keep or revert is Avi's call."
     },
     {
       "slug": "hud-unified-search-filter-2026-08-10",
@@ -5321,7 +5321,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "COMPLETE. All 11 items done + tested green (owner owner AUTO, release-blocking MCP hardening). Ph1 P-001..04, Ph2 P-005/006/007, Ph3 P-008 (pg-restart detector), P-009 (CPU-profile attribution + dev-deploy-state git fan-out 12->6, TTL 3s->10s), P-010 (admission control: operator 429-sheds tools/call under CRITICAL loop pressure; resilient proxy absorbs the 429), P-011 (load-test regression GATE + runbook). tsc net-zero across the whole plan (229 count is pre-existing peer sync-resolver churn, 0 from this work).",
+      "nowState": "COMPLETE. All 11 items done + tested green (owner Avi AUTO, release-blocking MCP hardening). Ph1 P-001..04, Ph2 P-005/006/007, Ph3 P-008 (pg-restart detector), P-009 (CPU-profile attribution + dev-deploy-state git fan-out 12->6, TTL 3s->10s), P-010 (admission control: operator 429-sheds tools/call under CRITICAL loop pressure; resilient proxy absorbs the 429), P-011 (load-test regression GATE + runbook). tsc net-zero across the whole plan (229 count is pre-existing peer sync-resolver churn, 0 from this work).",
       "nowNext": "ONE operational go-live remains (P-010 proxy side): `systemctl --user restart papercup-mcp-proxy` to activate 429-absorption on the live proxy fronting ~59 sessions — deferred (graceful-reconnect by design, but fleet-affecting; no active overload now). Operator-side P-009/P-010 auto-land on :3070 via the pipeline. P-011 is a test, needs no deploy."
     },
     {
@@ -5354,7 +5354,7 @@
         "staleHints": []
       },
       "nowState": "SHIPPED 2026-07-28 — all five items done and verified LIVE, not just unit-green. What is true now: default backend is `hybrid-pg` (was `mem0`); `claude-file` and `hybrid` are unregistered, and a persisted/env value naming either is coerced to the default with a one-time warning (RETIRED_MEMORY_BACKENDS) rather than throwing; `HybridBackend` takes its name from options so the recall canary's flip-reseed guard can tell the two hybrid wirings apart; the stale 'Memory index over capacity' banner and claude-hygiene.ts are deleted, so the operator no longer reads ~/.claude on any live path; the settings memory page now explains each mode and states up front that switching changes ranking, never storage. Verified: `:3170` after dev:restart returns availableBackends ['mem0','noop','hybrid-pg'], no `hygiene` field, backend `hybrid-pg` available; UI driven in a Tauri shell against `:3055` (selector + 'in use' marker + per-mode prose render, banner gone, no error overlay, unknown backends degrade",
-      "nowNext": "Nothing required — plan is complete. Optional follow-up filed separately: ~1,833 orphaned topic files + a 429KB frozen MEMORY-overflow.md remain inert in ~/.claude/projects/-home-builduser/memory/ (already imported to Postgres on 2026-07-13); deleting owner files was deliberately out of scope for a code change and needs owner's say-so."
+      "nowNext": "Nothing required — plan is complete. Optional follow-up filed separately: ~1,833 orphaned topic files + a 429KB frozen MEMORY-overflow.md remain inert in ~/.claude/projects/-home-builduser/memory/ (already imported to Postgres on 2026-07-13); deleting owner files was deliberately out of scope for a code change and needs Avi's say-so."
     },
     {
       "slug": "memory-pg-lexical-own-injection-2026-07-13",
@@ -5482,7 +5482,7 @@
         "staleHints": []
       },
       "nowState": "✅ ALL 4 ITEMS DONE. P-001 icons regenerated+committed (f83af2d, unpushed). P-002 both apps rebuilt with new dark-cup icon — Android (APK+launcher+emulator) and iOS (iPhone16 sim springboard, cold xcframework build on Mac VM; disk reclaimed 654Mi→3.0Gi). P-003 voice \"voice service error\" root cause = operator pref fullAgentEngine='off' (→404), FIXED to 'elevenlabs-conv' (agentId+EL key present; mint HTTP200); verified session connects (logcat \"EL connected\", LiveKit WebRTC, agent audio track subscribed). P-004 papercusp-test AVD launched on owner desktop, re-paired to :3070, pulling live data. FINDING: on the emulator/sim the EL voice session tears down ~2-3s after connect (agent participant leaves) — emulator can't publish a stable mic track (7s connect, heavy frame-drop jank); this is an emulator-perf limit, NOT the service. Real-device test = owner's phone.",
-      "nowNext": "Report complete to owner owner: logo on both apps ✓, voice fixed + how-to-test, Android VM launched ✓, honest voice-testing capability answer (service verified; full conversation needs a real device). Disclose fullAgentEngine desktop side-effect + revert. Plan DONE — no further items."
+      "nowNext": "Report complete to owner Avi: logo on both apps ✓, voice fixed + how-to-test, Android VM launched ✓, honest voice-testing capability answer (service verified; full conversation needs a real device). Disclose fullAgentEngine desktop side-effect + revert. Plan DONE — no further items."
     },
     {
       "slug": "native-terminal-desktop-2026-06-06",
@@ -5582,8 +5582,8 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "RESEARCH COMPLETE and DELIVERED. All 8 items done. Two of the three remaining \"Could not determine\" gaps closed 2026-08-04 (D-012) — **O10:** opencode does NOT roll child-session cost into the parent's displayed total (`session-context-metrics.ts:51`; children excluded at `session-trim.ts`/`event-reducer.ts`), so the subagent firewall's price is invisible where an operator looks, sharpening P-004. **O11:** the \"Code Mode\" cell is **Cloudflare's** feature, not opencode's — its only tree-wide occurrence is a Cloudflare Agents SDK test fixture (`test/fixture/skills/agents-sdk/SKILL.md:152`); no script-executing tool is registered (`tool/registry.ts:1-26`). Two missed mechanisms added: **M8** (skill deferral) and **M9** (`codesearch` `tokensNum`). Tallies reconciled 4→6 mechanisms, 6→8 of 9 gaps. **Repaired 2026-08-04 (WI-10730, D-013).** The previous Next sent owner to Claude artifact `4ddb1a4e` for the 14-item borrow list. That artifact was **DELETED** — absent from the owner's gallery und",
-      "nowNext": "**owner's decision surface — 14 items, 4 tiers, each naming the measurement that would kill it, plus a \"would not borrow\" list.** Read it either way: **artifact (new URL)** https://claude.ai/code/artifact/59121719-f59b-4af7-8bf4-604c83c8afea — or the canonical copy at `/internal/docs/agent-insights/opencode-and-omp-token-reduction-mechanisms#addendum--what-id-borrow-added-on-request-judgment-not-research`. The MDX is authoritative; the artifact is a rendering of it (D-013). **The old `4ddb1a4e` URL is dead — do not cite it.** One research gap remains, the only one needing an instrumented RUN rather than a read: wall-clock cost of an opencode subagent spawn, which is also what gates borrow-item"
+      "nowState": "RESEARCH COMPLETE and DELIVERED. All 8 items done. Two of the three remaining \"Could not determine\" gaps closed 2026-08-04 (D-012) — **O10:** opencode does NOT roll child-session cost into the parent's displayed total (`session-context-metrics.ts:51`; children excluded at `session-trim.ts`/`event-reducer.ts`), so the subagent firewall's price is invisible where an operator looks, sharpening P-004. **O11:** the \"Code Mode\" cell is **Cloudflare's** feature, not opencode's — its only tree-wide occurrence is a Cloudflare Agents SDK test fixture (`test/fixture/skills/agents-sdk/SKILL.md:152`); no script-executing tool is registered (`tool/registry.ts:1-26`). Two missed mechanisms added: **M8** (skill deferral) and **M9** (`codesearch` `tokensNum`). Tallies reconciled 4→6 mechanisms, 6→8 of 9 gaps. **Repaired 2026-08-04 (WI-10730, D-013).** The previous Next sent Avi to Claude artifact `4ddb1a4e` for the 14-item borrow list. That artifact was **DELETED** — absent from the owner's gallery und",
+      "nowNext": "**Avi's decision surface — 14 items, 4 tiers, each naming the measurement that would kill it, plus a \"would not borrow\" list.** Read it either way: **artifact (new URL)** https://claude.ai/code/artifact/59121719-f59b-4af7-8bf4-604c83c8afea — or the canonical copy at `/internal/docs/agent-insights/opencode-and-omp-token-reduction-mechanisms#addendum--what-id-borrow-added-on-request-judgment-not-research`. The MDX is authoritative; the artifact is a rendering of it (D-013). **The old `4ddb1a4e` URL is dead — do not cite it.** One research gap remains, the only one needing an instrumented RUN rather than a read: wall-clock cost of an opencode subagent spawn, which is also what gates borrow-item"
     },
     {
       "slug": "operator-chat-sidebar-revival-2026-07-13",
@@ -5616,7 +5616,7 @@
         "staleHints": []
       },
       "nowState": "15/16 terminal; P-013 verification COMPLETE, flip pending. Live-verified on isolated shell :33750 (display :95, torn down clean): strip+panel render; token swap LIVE — dot ok=rgb(52,211,153)=emerald --good, stripe=rgb(251,191,36)=amber --warn (frost); honeycomb retheme verified via data-theme flip (dotOk #68d391, stripe #d6a64a) then reset. No screenshot (CLI needed --selector; non-blocking). delegated-tasks.integration 6/6 green after console-noise-filter entry. 🚨 URGENT NEW RED [peer:81c1a 22:3XZ]: my operator-hindsight.test.ts is red-pinning the WHOLE green gate (+3 type errors above baseline), blocking 61 commits incl 2 owner-priority fixes — likely TS errors in the new test file (mock typing: appendLine/mock.calls index, or readAckedMsgIds Set generic) caught by the gate's typecheck leg, NOT vitest (it passed 2/2). FIX FIRST on wake: npx tsc or the gate's typecheck on packages/operator-core lib/operator-hindsight.test.ts, repair types, re-verify 2/2, tell 81c1a. Then flip P-013 d",
-      "nowNext": "1) URGENT: fix operator-hindsight.test.ts type errors red-pinning the gate (peer 81c1a msg, WI-4721 sibling); 2) flip P-013 done; 3) final completion report to owner."
+      "nowNext": "1) URGENT: fix operator-hindsight.test.ts type errors red-pinning the gate (peer 81c1a msg, WI-4721 sibling); 2) flip P-013 done; 3) final completion report to Avi."
     },
     {
       "slug": "outage-must-not-be-silent-2026-08-02",
@@ -6536,7 +6536,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "Cohort 40/40 terminal (P-003 done). P-004 (checkpoint/deploy/parity) claimed then set BLOCKED (su-1d995): audit leg clean (no cohort items flagged no-evidence), but the shared papercusp green-checkpoint gate is held 7x reds by WI-5102 (gpt-5.6-luna role-model migration left 17 stale tests + a genuine tier-floor safety regression), unrelated to this cohort. WI-5102 is already escalated to owner owner (blocker msg mro7nmi5, 3 options) — D-004 forbids weakening the safety test to force green, so this is a genuine owner-authority call already in flight, not ours to force.",
+      "nowState": "Cohort 40/40 terminal (P-003 done). P-004 (checkpoint/deploy/parity) claimed then set BLOCKED (su-1d995): audit leg clean (no cohort items flagged no-evidence), but the shared papercusp green-checkpoint gate is held 7x reds by WI-5102 (gpt-5.6-luna role-model migration left 17 stale tests + a genuine tier-floor safety regression), unrelated to this cohort. WI-5102 is already escalated to owner Avi (blocker msg mro7nmi5, 3 options) — D-004 forbids weakening the safety test to force green, so this is a genuine owner-authority call already in flight, not ours to force.",
       "nowNext": "Once WI-5102 is resolved by the owner and the green-checkpoint gate clears, a fleet member should re-claim P-004 and run the deploy+parity leg (fresh checkpoint on latest staging SHA -> deploy :3070 -> verify parity -> wind-down report). Do not force-deploy past the red gate."
     },
     {
@@ -7353,7 +7353,7 @@
         "staleHints": []
       },
       "nowState": "P-001..P-004 CODE COMPLETE, gate pending. Module: operator-core lib/turn-provenance/ (envelope ⟦turn-origin:<o> nonce:<16hex>⟧, per-sid JSONL ledger ~/.papercusp/turn-provenance/ TTL 10m, tagTurnForInjection ledger-first, pure classify — D-002 ledger decides; ~30 boundary tests). Enrolled injectors: wake-executor (tagWakeText, loop-marker⇒loop-fire else wake-pump; warm+cold+resume+plan-run; deps.tagTurn seam; inbox degrade untagged), request-compaction continueNote (self-compaction), compaction-compliance-watchdog (watchdog), psu-launcher.mjs tagKickoffProvenance mirror (fleet-kickoff). Hook: hooks/cc/userpromptsubmit-provenance.sh (python lockstep mirror; live-smoked: owner/verified/spoof/gate all correct; 14 vitest cases) merged via install-standalone-mcp.sh merge_provenance_hook + papercusp-files.ts mergeClaudeHookSettings UserPromptSubmit leg (+CC_HOOK_FILES; claude-hooks.test updated). P-004: SessionStart[source=compact] anchor stamps MACHINE-GENERATED CONTINUATION (interactive-cl",
-      "nowNext": "npm run test:affected (running) → fix any reds, focused re-run of the 6 touched suites → flip P-001..P-004 done + complete WI-4192 → deploy + live-verify one wake envelope on a real session → evidence report to owner."
+      "nowNext": "npm run test:affected (running) → fix any reds, focused re-run of the 6 touched suites → flip P-001..P-004 done + complete WI-4192 → deploy + live-verify one wake envelope on a real session → evidence report to Avi."
     },
     {
       "slug": "tutorial-polish-and-docs-search-2026-07-04",
@@ -7483,7 +7483,7 @@
         "staleHints": []
       },
       "nowState": "ALL 4 PHASES DONE — voice GO for public release on tested surface. P1: 105 files/1015 tests green (0 fail), flags all ON. P2: live TTS 200+WAV, operator-stt accurate, prefs GET/PUT, voice-local-live 7t + playwright voice-live-e2e 5t (both TTS→STT round-trips + error class). P3: isolated Tauri shell — Papercup+Peers+voice-controls mount, __pcVoiceTest seam, /settings/voice navigable, NO console errors. P4: error-class 401/404≠502, mic NotAllowedError→tailored msg, kokoro self-heal live (Restart=always/limit1000/0 deaths 24h), a11y aria-live. Fixed 1 trivial stale comment (LeftSidebar PAPERCUP OFF→ON).",
-      "nowNext": "su-cb434 delivers go/no-go report to owner; residual human-only gate = live mic-hardware acceptance (build plan voice-public-release-readiness-2026-07-12 P-010), de-risked by automated browser mic→whisper round-trip."
+      "nowNext": "su-cb434 delivers go/no-go report to Avi; residual human-only gate = live mic-hardware acceptance (build plan voice-public-release-readiness-2026-07-12 P-010), de-risked by automated browser mic→whisper round-trip."
     },
     {
       "slug": "wake-deaf-pty-host-guard-2026-08-13",
@@ -7646,7 +7646,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "CUTOVER EXECUTED (D-019, 2026-08-02): FLAGS.WORKSPACE_COORDINATION is ON live (pg-override) AND graduated to default-ON in code (dark-list entry removed, flags suite 69/69 green). Build was already complete + verified (D-010). Owner owner attended the flip in-session (WI-605). Per-hive brain code remains the reversible OFF kill-switch (flags:set → false, seconds). One verify caveat: the scout-cycle loop has been dead since 2026-07-27 22:36Z (pre-existing stall, filed WI-6769), so the first workspace-keyed scout tick is still unobserved — Queen/Overwatch surfaces and error-free operation verified at flip time.",
+      "nowState": "CUTOVER EXECUTED (D-019, 2026-08-02): FLAGS.WORKSPACE_COORDINATION is ON live (pg-override) AND graduated to default-ON in code (dark-list entry removed, flags suite 69/69 green). Build was already complete + verified (D-010). Owner Avi attended the flip in-session (WI-605). Per-hive brain code remains the reversible OFF kill-switch (flags:set → false, seconds). One verify caveat: the scout-cycle loop has been dead since 2026-07-27 22:36Z (pre-existing stall, filed WI-6769), so the first workspace-keyed scout tick is still unobserved — Queen/Overwatch surfaces and error-free operation verified at flip time.",
       "nowNext": "After WI-6769 (scout stall) is fixed, confirm the first scout tick carries the K1 workspace-sentinel install_slug; then, after a soak of the ON state, schedule the per-hive-brain code deletion as its own cleanup task. - **P-002** `done` Workspace-scope SCOUT: widen corpus-digest to read ALL the workspace's hives' observations (source-tagged), key scout_ticks/scout_lens_weights by workspace, and route each idea/plan to its source/target hive. Compose per-hive sub-digests to keep ideation focused (mitigate the cross-domain dilution risk). This alone delivers the killer use-case (cross-hive observation → a brain that can act) — the recommended first real move (alternative-b). (su-68782 building"
     },
     {
@@ -7782,8 +7782,8 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "D-009 GATE STILL CLOSED, but the blocking deliverable is DONE. The mockup owner asked for is built, render-verified, and delivered to him for approval (msg mssn2e0h, 07:41Z): /home/builduser/.papercusp/hives/sidestage/mockups/mobile-buyer-orders.html — a self-contained page showing Buyer + Orders as iPhone 15 Pro and Pixel 8 at true device proportions, drawn from the RUNNING web app's real copy, catalog rows and tokens (ivory #FFF8EF / ink #2A1F1A / vermilion #D62B1F), with 8 keyed platform deltas (D1-D8) and 3 layout decisions flagged to owner as overrulable (chat-as-sheet vs third tab; Hold inline vs detail sheet; stage inline vs full-bleed). Scope honoured: 2 tabs only per D-007/D-008. Both fleets notified it exists and that the gate remains closed (msg mssn2e1p, 7 live members). DELIVERY CAVEAT: artifact publishing is unavailable to this session (ANTHROPIC_AUTH_TOKEN takes precedence over a claude.ai login), so it is a local file path rather than a hosted link — flagged to owner as an",
-      "nowNext": "WAIT on owner's approval — it is the single condition that opens D-009. On his YES: emit the gate to both fleets and release the ~6 agents parked on screen layout / navigation / visual structure, with the mockup as the SPEC (not a reference). On any of his three flagged decisions coming back changed: revise the mockup first, then open the gate. Meanwhile lanes work NON-UI only (shared Rust core, API client, test scaffolding) — WI-38624 stays parked with the D-009 reason, NOT needs-human (it needs the mockup, not the owner)."
+      "nowState": "D-009 GATE STILL CLOSED, but the blocking deliverable is DONE. The mockup Avi asked for is built, render-verified, and delivered to him for approval (msg mssn2e0h, 07:41Z): /home/builduser/.papercusp/hives/sidestage/mockups/mobile-buyer-orders.html — a self-contained page showing Buyer + Orders as iPhone 15 Pro and Pixel 8 at true device proportions, drawn from the RUNNING web app's real copy, catalog rows and tokens (ivory #FFF8EF / ink #2A1F1A / vermilion #D62B1F), with 8 keyed platform deltas (D1-D8) and 3 layout decisions flagged to Avi as overrulable (chat-as-sheet vs third tab; Hold inline vs detail sheet; stage inline vs full-bleed). Scope honoured: 2 tabs only per D-007/D-008. Both fleets notified it exists and that the gate remains closed (msg mssn2e1p, 7 live members). DELIVERY CAVEAT: artifact publishing is unavailable to this session (ANTHROPIC_AUTH_TOKEN takes precedence over a claude.ai login), so it is a local file path rather than a hosted link — flagged to Avi as an",
+      "nowNext": "WAIT on Avi's approval — it is the single condition that opens D-009. On his YES: emit the gate to both fleets and release the ~6 agents parked on screen layout / navigation / visual structure, with the mockup as the SPEC (not a reference). On any of his three flagged decisions coming back changed: revise the mockup first, then open the gate. Meanwhile lanes work NON-UI only (shared Rust core, API client, test scaffolding) — WI-38624 stays parked with the D-009 reason, NOT needs-human (it needs the mockup, not the owner)."
     },
     {
       "slug": "sidestage-blocked-items-audit-2026-08-15",
@@ -8021,7 +8021,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "Complete. D-003 records owner’s selection of Concept 02 — Drop Runway. The standalone comparison gallery now annotates that choice in the toolbar, Concept 02 card, and footer; all three UI IR specs remain schema-valid and lint-clean with zero errors/warnings, and fresh desktop/mobile Verdict QA confirmed the accessible selection state, HTTP 200 responses, and no console messages. The owner-local review URL is http://127.0.0.1:41033/; canonical source remains design/sidestage-watch-coming-up-next-mockups-2026-08-14/index.html. No production SideStage UI was changed by this plan.",
+      "nowState": "Complete. D-003 records Avi’s selection of Concept 02 — Drop Runway. The standalone comparison gallery now annotates that choice in the toolbar, Concept 02 card, and footer; all three UI IR specs remain schema-valid and lint-clean with zero errors/warnings, and fresh desktop/mobile Verdict QA confirmed the accessible selection state, HTTP 200 responses, and no console messages. The owner-local review URL is http://127.0.0.1:41033/; canonical source remains design/sidestage-watch-coming-up-next-mockups-2026-08-14/index.html. No production SideStage UI was changed by this plan.",
       "nowNext": "The separately approved Drop Runway production implementation may use D-003 and the canonical gallery as its design basis; this mockup-only plan needs no further edits."
     },
     {
@@ -8347,7 +8347,7 @@
         "staleHints": []
       },
       "nowState": "SHIPPED (14/15 items done) — implemented autonomously under AUTO mode per owner directive [owner 2026-07-19]. All 4 asks done: (1) Inbox scoped to truly-active items via scopeInboxItems (drops the non-decision plan-item backlog + recency-bounds stale activity; keeps decisions/alerts) — this is the 328 fix; (2) occurredAt added to AttentionItem, populated at the reader from each source's real timestamp (m.ts, e.ts, work_items.updated_ts, report createdAt, standing lastSeenAt, gate opened_at, improvement updatedAt, conversation updated_ts, owner-wall derived), rendered as a relative date + abs tooltip; (3) search (?opcq) + data-driven kind facets (?opck) behind a QueueFilterBar-style Filter + design polish; (4) ask-gate-mirror.sh bounce reworded to steer agents to the native AskUserQuestion tool, NOT a raw <ask> tag (the raw-XML-in-TUI root cause). Verified: 50 unit tests pass, operator-core + apps/operator typecheck clean on all changed files (1 pre-existing plans-api baseline error",
-      "nowNext": "P-104 only remaining: run the live in-Tauri visual/count check (launch papercusp-desktop → Inbox tab → confirm All count drops from ~328 to the scoped set + dates/search/facets render). Owner (owner) or next session."
+      "nowNext": "P-104 only remaining: run the live in-Tauri visual/count check (launch papercusp-desktop → Inbox tab → confirm All count drops from ~328 to the scoped set + dates/search/facets render). Owner (Avi) or next session."
     },
     {
       "slug": "memory-write-latency-2026-07-26",
@@ -8381,7 +8381,7 @@
         "staleHints": []
       },
       "nowState": "COMPLETE except one owner decision. Both of the plan's original assumptions were tested and both failed — D-001 (write side) and D-003 (read side) carry the evidence. WRITE SIDE FIXED: embed+store was never the cost; the write path was running a full semantic neighbour search on every write to feed a conflict judge that is a no-op in this operator (no ANTHROPIC_API_KEY). P-007 gates the search on a real consumer, P-008 bounds the query at 512 chars so the cost class cannot return, P-009 ships 10 recurrence guards split by class. Verified: 80/80 memory tests green, lint:tsc --mine clean, and end-to-end through the REAL MCP handler on staging :3170 (ok:true; the anti-silence warn fired in the live journal). MEASURED: 9 interleaved A/B pairs at the p50 1,189-char body → median 2,710ms → 1,583ms, 42% faster, saving range −25…1,831ms (shared-sibling embedder contention rivals the effect in a single pair, hence interleaving). The provisional 500ms p95 target is NOT met and should not be chas",
-      "nowNext": "owner to decide P-010 (needs-human): give conflict-check a real gateway-routed key, or retire it — nothing is blocked on it either way, since the write path no longer pays for it. Production confirmation tracked as WI-6215, which waits on the deploy (green gate currently held by 4 unrelated git-sync console.warn failures)."
+      "nowNext": "Avi to decide P-010 (needs-human): give conflict-check a real gateway-routed key, or retire it — nothing is blocked on it either way, since the write path no longer pays for it. Production confirmation tracked as WI-6215, which waits on the deploy (green gate currently held by 4 unrelated git-sync console.warn failures)."
     },
     {
       "slug": "on-desktop-direct-lan-voice-2026-07-14",
@@ -8586,7 +8586,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "COMPLETE — all 4 legs verified on real machines, report delivered to owner 14:33Z (artifact https://claude.ai/code/artifact/29839958-f3f6-4a51-9d93-59fa1d56faa8). Verdicts: macOS PASS · Linux .deb PASS / AppImage qualified · Windows INSTALL PASS + RUNTIME FAIL · Update path FAIL. Two critical defects found and independently re-verified by the leader: WI-37736 (Windows sidecar dies every launch) and WI-37738 (all pre-07-28 installs permanently stranded from updates). Fleet stood down 14:35Z.",
+      "nowState": "COMPLETE — all 4 legs verified on real machines, report delivered to Avi 14:33Z (artifact https://claude.ai/code/artifact/29839958-f3f6-4a51-9d93-59fa1d56faa8). Verdicts: macOS PASS · Linux .deb PASS / AppImage qualified · Windows INSTALL PASS + RUNTIME FAIL · Update path FAIL. Two critical defects found and independently re-verified by the leader: WI-37736 (Windows sidecar dies every launch) and WI-37738 (all pre-07-28 installs permanently stranded from updates). Fleet stood down 14:35Z.",
       "nowNext": "Nothing further on THIS plan — remediation moved to fix-0014-platform-defects-2026-08-10 under owner directive 'fix the issues for all platforms' (2026-08-10 14:39Z)."
     },
     {
@@ -8623,7 +8623,7 @@
         ]
       },
       "nowState": "ALL release-critical self-drivable work DONE + DEPLOYED (live :3070): P-001/002/003 (voice-IN + settings), Phase-2/3 papercup-fast/deep roles + coord/wake channel (P-006/007/008/013-019), P-004 phrase-gate wake, P-009 local voice provisioning (WI-4449), EI-10795 interactive-priority (a0f5fa56b5), WI-4500 omid self-feedback guard (52398f7ad), WI-4498 SAB/threaded-ort + WI-4598 predicate flip (unit 23/23, voice suite 146/146). The plan's entire self-drivable-to-VERIFIED path is complete. Every remaining item is gated on the owner's microphone or a platform: P-005 (BLOCKED) = custom openWakeWord 'hey papercup' model — SAB technical blocker RESOLVED, but it is efficiency-only behind the working phrase-gate AND its false-accept/reject can only be verified acoustically (same mic gate as WI-4500). P-010 = owner mic-acceptance (=WI-4500, needs-human). P-011 = papercup→papercusp rename residue (disruptive systemd/DB rename parked + brand call WI-4478, owner). P-012 = Windows voice round-trip (p",
-      "nowNext": "OWNER (owner): the sole remaining RELEASE bar is your live mic acceptance — point your app at :3070, hold PTT (or say 'hey papercup') + a command; confirm it REPLIES (not spins forever) and does NOT mis-hear its own TTS as 'omid'. You confirm → su-f69a7 closes P-010 + WI-4500. Parked (not stopped): re-woken on your reply via wakeOnReply + always-armed inbox-wake — no empty loop spinning."
+      "nowNext": "OWNER (Avi): the sole remaining RELEASE bar is your live mic acceptance — point your app at :3070, hold PTT (or say 'hey papercup') + a command; confirm it REPLIES (not spins forever) and does NOT mis-hear its own TTS as 'omid'. You confirm → su-f69a7 closes P-010 + WI-4500. Parked (not stopped): re-woken on your reply via wakeOnReply + always-armed inbox-wake — no empty loop spinning."
     },
     {
       "slug": "windows-public-release-readiness-2026-06-25",
@@ -8692,8 +8692,8 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "SHIPPED ✅ papercusp.com analytics expansion is LIVE. The v1 producer (page.html) violated the BINDING D-1 event contract (invented names); su-15b57 rewrote the CONSUMER (stats.js/admin.html/signups.js) to D-1, su-f6038 fixed the PRODUCER (ft_utm_source→ft_source remap in pcCapture only — access.js signup path intact; engagement_summary→page_active_time; added section_viewed + web_vitals). Leader independently audited (names+props vs stats.js, node --check, build exit 0, bundle) + matched-pair re-deployed via ./deploy.sh. VERIFIED LIVE https://papercusp-com.pages.dev (HTTP 200; live HTML carries demo_video_*/scroll_depth/section_viewed/page_active_time/web_vitals + TOUCH_PROP_MAP; /api/stats 401=alive+gated). Passed: P-002/WI-5426, P-003/WI-5427, P-004/WI-5428, P-005-6/WI-5429-30, P-007/WI-5431, P-009/WI-5433. REMAINING: P-008/WI-5432 OWNER-GATED (owner). CAVEATS: page.html fix deployed but uncommitted in pot working tree (git-sync lagging); PostHog INGESTION health (EI-16702) separate op",
-      "nowNext": "P-008/WI-5432 is owner's decision — do NOT execute autonomously (masked+sampled PostHog session replay privacy tradeoff; Google Search Console domain verify). Non-blocking follow-ups: confirm git-sync commits page.html to the pot repo; confirm PostHog ingestion from a non-SNI-filtered vantage (EI-16702)."
+      "nowState": "SHIPPED ✅ papercusp.com analytics expansion is LIVE. The v1 producer (page.html) violated the BINDING D-1 event contract (invented names); su-15b57 rewrote the CONSUMER (stats.js/admin.html/signups.js) to D-1, su-f6038 fixed the PRODUCER (ft_utm_source→ft_source remap in pcCapture only — access.js signup path intact; engagement_summary→page_active_time; added section_viewed + web_vitals). Leader independently audited (names+props vs stats.js, node --check, build exit 0, bundle) + matched-pair re-deployed via ./deploy.sh. VERIFIED LIVE https://papercusp-com.pages.dev (HTTP 200; live HTML carries demo_video_*/scroll_depth/section_viewed/page_active_time/web_vitals + TOUCH_PROP_MAP; /api/stats 401=alive+gated). Passed: P-002/WI-5426, P-003/WI-5427, P-004/WI-5428, P-005-6/WI-5429-30, P-007/WI-5431, P-009/WI-5433. REMAINING: P-008/WI-5432 OWNER-GATED (Avi). CAVEATS: page.html fix deployed but uncommitted in pot working tree (git-sync lagging); PostHog INGESTION health (EI-16702) separate op",
+      "nowNext": "P-008/WI-5432 is Avi's decision — do NOT execute autonomously (masked+sampled PostHog session replay privacy tradeoff; Google Search Console domain verify). Non-blocking follow-ups: confirm git-sync commits page.html to the pot repo; confirm PostHog ingestion from a non-SNI-filtered vantage (EI-16702)."
     },
     {
       "slug": "all-active-surfaces-data-sync-migration-2026-07-11",
@@ -9434,8 +9434,8 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "[owner 2026-08-13] Directives D-001..D-005 verified against RAW SESSION JSONL (not the search index) — all five trace to real owner turns/dialog picks, none fabricated; full provenance audit on WI-38590 comment 61960. **D-006 + D-007 added** from owner's 2026-08-13 18:51 turn: the audit binds PER PLAN ITEM (each entry carries its own auditedSha/auditedAt + per-citation blob shas), and ship-time re-verification is INCREMENTAL — only items that are new/reopened, text-changed, or whose cited blobs moved get re-audited; empty set = gate passes, no pass demanded. These two also fix a REAL DEFECT found in the written code: coverage is computed against the latest PASS's array, so re-auditing one new item makes the other eleven 'uncovered' and forces a full re-submission — whose cheap workaround is copying stale entries forward under a new sha nobody checked. P-001 done (migration 832 applied, fence_seq 351). P-002/P-004/P-005/P-009 written but now need reworking for D-006/D-007. No migratio",
-      "nowNext": "Await owner's clarification on the citation-kind question, then rework P-002 (AuditItemEntry gains auditedSha/auditedAt/carriedFrom + per-citation blob sha; plans:audit accepts a SUBSET and carries the rest forward itself) and P-004 (getEffectiveItemAudits fold across passes; audit_coverage_stale becomes per-item, names each stale item WITH its reason, and states explicitly that unlisted items carry forward). Also correct migration 832's header comment, whose 'always read as a unit alongside its parent' premise D-006 falsifies."
+      "nowState": "[owner 2026-08-13] Directives D-001..D-005 verified against RAW SESSION JSONL (not the search index) — all five trace to real owner turns/dialog picks, none fabricated; full provenance audit on WI-38590 comment 61960. **D-006 + D-007 added** from Avi's 2026-08-13 18:51 turn: the audit binds PER PLAN ITEM (each entry carries its own auditedSha/auditedAt + per-citation blob shas), and ship-time re-verification is INCREMENTAL — only items that are new/reopened, text-changed, or whose cited blobs moved get re-audited; empty set = gate passes, no pass demanded. These two also fix a REAL DEFECT found in the written code: coverage is computed against the latest PASS's array, so re-auditing one new item makes the other eleven 'uncovered' and forces a full re-submission — whose cheap workaround is copying stale entries forward under a new sha nobody checked. P-001 done (migration 832 applied, fence_seq 351). P-002/P-004/P-005/P-009 written but now need reworking for D-006/D-007. No migratio",
+      "nowNext": "Await Avi's clarification on the citation-kind question, then rework P-002 (AuditItemEntry gains auditedSha/auditedAt/carriedFrom + per-citation blob sha; plans:audit accepts a SUBSET and carries the rest forward itself) and P-004 (getEffectiveItemAudits fold across passes; audit_coverage_stale becomes per-item, names each stale item WITH its reason, and states explicitly that unlisted items carry forward). Also correct migration 832's header comment, whose 'always read as a unit alongside its parent' premise D-006 falsifies."
     },
     {
       "slug": "rem-dream-recombination-2026-08-17",
@@ -9498,7 +9498,7 @@
         "staleHints": []
       },
       "nowState": "Draft under active owner review/discussion — NOT approved for execution. 2026-08-17 updates from the owner discussion: D-001 recorded (manual Start/Pause in the Learning tab; auto-dreaming a SEPARATE default-OFF setting — expensive); P-009/P-010 added (control UI + Analyze-stage Dreams stats section — Analyze placement is the standing recommendation, owner confirm pending on \"Observe vs Analyze vs both\"); Q1 REVISED — owner proposes distilled artifacts (observations/work-items/stats) as the dream substrate instead of full turns; recommendation (distilled-first MVP, cross-TYPE pairing mandatory, raw turns deferred) awaiting owner call. Lower-level design sketch for P-001/P-002/P-003 persisted in \"## Design notes\".",
-      "nowNext": "owner rules on: substrate (Q1 revised), stats placement (Analyze vs both), and overall plan approval; no item goes wip before that."
+      "nowNext": "Avi rules on: substrate (Q1 revised), stats placement (Analyze vs both), and overall plan approval; no item goes wip before that."
     },
     {
       "slug": "repair-frozen-gate-lineage-2026-08-20",
@@ -9793,7 +9793,7 @@
         "staleHints": []
       },
       "nowState": "**13 of 14 items DONE.** Phase 4 (P-010..P-014) closed 2026-08-09 by su-b7a7a — WI-37364..37368 all completed with evidence. Phase 4 delivered: `topics:subscribe` RETIRED; `coord:dispatch` SEEDED onto the live surface (`handoff` signal group) and now emitting a ready pre-filled CALL from `coord:presence` + `plan_items:release` (the seeAlso *mention* it replaces was removed); and the retirement falsifier ARMED as a RATE. ⚠ **P-010's scope was cut 6 verbs → 1 by D-102**, which corrects D-100. A code audit falsified 5 of its 6 proposed retirements — all from one inference error repeated six times: reading a ZERO CALL-COUNT as an ABSENT FUNCTION without checking who else held the door open. `coord:catch-up` is the sole coord:read-tier door to ~98.4% of audience-addressed messages; `watch:create` is the BASE (state:subscribe imports its handler), not a duplicate; `coord:message-agent` is a live HUMAN UI action; `coord:couple` unions into live presence.ts. Those 4 are KEPT; `coord:handoff` i",
-      "nowNext": "**P-007 is the single open item and it needs owner** — but D-102 has substantially pre-answered it: the audit behind P-010 showed 5 of the 7 verbs P-007 asks about are load-bearing and must NOT be retired, so the ruling left is narrower than when it was filed (`coord:dispatch` + `coord:handoff` only, and both are now under a pre-committed 30-day measurement that reports on/after 2026-09-08). ⚠ Two tracked residuals, neither blocking: **WI-37443** — the falsifier is armed but NOT WIRED (`evaluateDispatchAdoption()` has zero callers, so nothing fires on 2026-09-08); **WI-37422** — the retired source file resurrected twice mid-work (byte-identical re-adds ~30min apart, git-sync committing each), "
+      "nowNext": "**P-007 is the single open item and it needs Avi** — but D-102 has substantially pre-answered it: the audit behind P-010 showed 5 of the 7 verbs P-007 asks about are load-bearing and must NOT be retired, so the ruling left is narrower than when it was filed (`coord:dispatch` + `coord:handoff` only, and both are now under a pre-committed 30-day measurement that reports on/after 2026-09-08). ⚠ Two tracked residuals, neither blocking: **WI-37443** — the falsifier is armed but NOT WIRED (`evaluateDispatchAdoption()` has zero callers, so nothing fires on 2026-09-08); **WI-37422** — the retired source file resurrected twice mid-work (byte-identical re-adds ~30min apart, git-sync committing each), "
     },
     {
       "slug": "desktop-build-hardening-tri-platform-2026-07-11",
@@ -9998,7 +9998,7 @@
         "staleHints": []
       },
       "nowState": "Steps (1)-(3) and (5) are SHIPPED and live-verified; the payload work behind (4) is shipped too (tierReason interned, 259,087 -> 187,517 B). **But step (4) itself — ImproveGrid's growing window — is now RULED OUT by D-010, and the plan's goal is BLOCKED on an owner fork.** D-010 measured what D-002/D-007/D-008/D-009 never had: the corpus's GROWTH RATE. The digest's own flow block gives captured7d=156 vs resolved7d=24, net7d=132 — the open set accretes ~18.9 rows/day. That dates every client-side-window lever: today's 13-row headroom is ~0.7 DAYS, and the proposed six-field encode buys ~8.0 DAYS for the cost of decoding six RENDERED fields at every read site. Per the repo's own recorded convention (SYNC_READ_ALLOWLIST coord.plans / WI-7256), a breach that is pure ROW GROWTH is a WINDOWING trigger, not another per-row cut. A growing window is un-windowing. Also inverted: `clampedLimitOpt(500)` (sync-resolver/index.ts:3696) is the GUARD keeping this read in budget, not the obstacle D-009 ",
-      "nowNext": "owner to settle the D-010/D-001 fork (accept server-side filtering for ImproveGrid, or accept that its filters stay window-scoped with honest labels); no agent should start step (4), the six-field encode, or any clamp raise until then."
+      "nowNext": "Avi to settle the D-010/D-001 fork (accept server-side filtering for ImproveGrid, or accept that its filters stay window-scoped with honest labels); no agent should start step (4), the six-field encode, or any clamp raise until then."
     },
     {
       "slug": "presence-coord-unification-2026-07-01",
@@ -11543,7 +11543,7 @@
         "staleHints": []
       },
       "nowState": "[owner 2026-07-13] \"implement all these fixes yourself now from start to finish\" — route 0, su-71d9f8a2 solo, AUTO. ALL 8 ITEMS IMPLEMENTED + TESTED (EI-10946..EI-10952). New: core-spine-inverses.test.ts (7), stale-source.test.ts (8), facts-disclosure.test.ts (9), failure-warning.test.ts (6), duplicate-mention.test.ts (5) — all green; tooldef code-orchestration 91/91 green. Two agent-insights docs written. READING THE CODE CHANGED TWO OF MY OWN FILED FIXES: (1) EI-10952 — I had proposed REJECTING an over-cap fact body; the code shows truncate-not-reject was a DELIBERATE fix (the hard throw cost 7 lost facts in 14d), so rejecting would have re-broken it. Kept truncation, made it DISCLOSE. (2) EI-10946 — root cause is NOT \"the trim is too aggressive\": the 2026-07-05 rebalance cut work_items:update justifying it as \"set_state + comment cover the common cases\", but work_items:comment was never seeded either — the premise was false. Same for facts (assert+list seeded, retract NOT: you c",
-      "nowNext": "Verify the final operator-core sweep is green, then complete EI-10946..EI-10952 with evidence and report to owner."
+      "nowNext": "Verify the final operator-core sweep is green, then complete EI-10946..EI-10952 with evidence and report to Avi."
     },
     {
       "slug": "app-impersonation-e2e-round7-2026-06-30",
@@ -14390,8 +14390,8 @@
         ],
         "staleHints": []
       },
-      "nowState": "Draft awaiting owner review — NOT approved for execution. [owner 2026-08-16, interactive]: (1) do NOT call this feature \"dreaming\" — title renamed to drop the dream-mode branding; the 2026-07-14 session remains provenance only. (2) What owner actually means by dreaming is a DIFFERENT, REM-sleep-modeled mechanism (random fragments of conversation history recombined and presented to an agent for insight elicitation; insights that pass a review step enter the blender corpus) — under implementation discussion now, to become a SEPARATE plan afterward. This plan's scope (generative replay-priced candidates for regret mining) is unchanged and still pending owner's approve/reshape verdict.",
-      "nowNext": "Discuss REM-dreaming implementation with owner (separate plan to follow); independently, await his verdict on this plan before any item goes wip."
+      "nowState": "Draft awaiting owner review — NOT approved for execution. [owner 2026-08-16, interactive]: (1) do NOT call this feature \"dreaming\" — title renamed to drop the dream-mode branding; the 2026-07-14 session remains provenance only. (2) What Avi actually means by dreaming is a DIFFERENT, REM-sleep-modeled mechanism (random fragments of conversation history recombined and presented to an agent for insight elicitation; insights that pass a review step enter the blender corpus) — under implementation discussion now, to become a SEPARATE plan afterward. This plan's scope (generative replay-priced candidates for regret mining) is unchanged and still pending Avi's approve/reshape verdict.",
+      "nowNext": "Discuss REM-dreaming implementation with Avi (separate plan to follow); independently, await his verdict on this plan before any item goes wip."
     },
     {
       "slug": "harness-to-hive-rename-2026-06-29",
@@ -14861,7 +14861,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "TRIM DONE + verified (corestore 2.1G→37.8M, seed 2.1G→113M; restore-fold-verified ≥2937; --sparse wired all 4 build scripts default-ON, git-sync→main; staging seed swapped, backup /home/builduser/papercupai-workspace/.seed-full-backup-20260708-030753). NOW DRIVING 0.0.3 RELEASE: owner owner 2026-07-08 chose UNSIGNED 0.0.3-ALPHA pre-release (no signing; tag desktop-v0.0.3-alpha, Papercusp/papercusp-desktop) + first-boot MUST auto-connect (WI-3360 = CONFIRMED defect, b0fbf lane). #1 BLOCKER: packaged fresh-restore per-op DECRYPT fails → pot 57(bf97d linux)/222(a1a71 mac) — same epoch-key root as WI-3307 (operator serves MINTED key not bundled K1); my trim verify proved DATA present+fold OK but did NOT exercise per-op decrypt at projection (THE gap). Signing/arm64 waived for alpha.",
+      "nowState": "TRIM DONE + verified (corestore 2.1G→37.8M, seed 2.1G→113M; restore-fold-verified ≥2937; --sparse wired all 4 build scripts default-ON, git-sync→main; staging seed swapped, backup /home/builduser/papercupai-workspace/.seed-full-backup-20260708-030753). NOW DRIVING 0.0.3 RELEASE: owner Avi 2026-07-08 chose UNSIGNED 0.0.3-ALPHA pre-release (no signing; tag desktop-v0.0.3-alpha, Papercusp/papercusp-desktop) + first-boot MUST auto-connect (WI-3360 = CONFIRMED defect, b0fbf lane). #1 BLOCKER: packaged fresh-restore per-op DECRYPT fails → pot 57(bf97d linux)/222(a1a71 mac) — same epoch-key root as WI-3307 (operator serves MINTED key not bundled K1); my trim verify proved DATA present+fold OK but did NOT exercise per-op decrypt at projection (THE gap). Signing/arm64 waived for alpha.",
       "nowNext": "bbf8a: drive the #1 blocker — packaged fresh-restore per-op DECRYPT (57/222). Give bf97d the per-op K1 trace (scratchpad/probe-author-epoch.mjs / mac-k1-probe.mjs); confirm whether the operator serves bundled K1 vs a minted key at projection (α owner-branch mint, same class as WI-3307). Then coordinate WI-3360 (b0fbf) auto-connect fix → build + packaged fresh-install-verify (linux/mac/windows) with the trim → publish desktop-v0.0.3-alpha pre-release."
     },
     {
@@ -15134,7 +15134,7 @@
         "staleHints": []
       },
       "nowState": "DRAFT — design proposal awaiting owner approval. NO code written yet (plan-first rule: a plan is not approval to build). This plan realizes [owner 2026-07-14] \"combine both approaches, make a way for standalone products to be distributable in the cupboard even if they are separate apps.\" Grounded against live code: worker listing-kind CHECK lives in `apps/operator-public/migrations/` (six-kind CHECK at 011; a 7th kind = migration 014, CHECK-rebuild precedent 004/006/008/010/011); standalone-app data source = the Tauri updater manifest `latest.json` produced by `@papercusp/tauri-release-kit` (`{ version, platforms: { <os>: { url, signature } }, notes, pub_date }`); the Cupboard UI is `apps/operator/app/cupboard/CupboardClient.tsx` (reused by the shipping operator-vite frontend via `@/app` alias).",
-      "nowNext": "OWNER (owner) — approve the design (esp. D-001..D-004 and the three open questions in D-005), then I build Phase 1. Sequencing note: publishing Oddsmith itself as the first app listing (P-007) depends on Oddsmith's standalone Model-A release being live (kit-as-submodule + signing + release channel — see plan `tauri-release-kit-shared-build-2026-06-25`)."
+      "nowNext": "OWNER (Avi) — approve the design (esp. D-001..D-004 and the three open questions in D-005), then I build Phase 1. Sequencing note: publishing Oddsmith itself as the first app listing (P-007) depends on Oddsmith's standalone Model-A release being live (kit-as-submodule + signing + release channel — see plan `tauri-release-kit-shared-build-2026-06-25`)."
     },
     {
       "slug": "design-simplification-2026-07-09",
@@ -15266,7 +15266,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "DRAFT — plan written, awaiting owner (owner) approval before ANY implementation.",
+      "nowState": "DRAFT — plan written, awaiting owner (Avi) approval before ANY implementation.",
       "nowNext": "On owner approval: execute Phase 1 (P-001..P-006 prompt edits + verify), then Phase 2 (P-007..P-009 filings). Phase 3 (P-010) stays gated until the owner separately green-lights implementing the announced-events feature. Fleet leaders keep hand-sending the same ~9-line tool-usage kickoff to members. Fold that guidance into the canonical prompt layers (su.md base persona, cup.base.md, mug.base.md, generated AUTO-mode section) so every su/cup/mug knows it natively; leaders send only the mission delta. Threads push-over-poll (events:await first) through loop-cadence guidance. Files a feature for ANNOUNCED gate events (events:emit announce:true, latched, discoverable via catalog/orient). Owner-r"
     },
     {
@@ -16909,7 +16909,7 @@
         "staleHints": []
       },
       "nowState": "Draft implementation plan. The existing Papercusp and SideStage mobile repositories have been inspected, and the proposed shape follows the current official-template model: one shared mobile-base aspect, one Android shell aspect, one iPhone shell aspect, and two thin app-scope roots. No template or mobile-app implementation has started.",
-      "nowNext": "owner reviews the proposed architecture and execution route in P-001; after approval, the executing agent starts P-002 with a reproducible baseline of all four current app/platform combinations."
+      "nowNext": "Avi reviews the proposed architecture and execution route in P-001; after approval, the executing agent starts P-002 with a reproducible baseline of all four current app/platform combinations."
     },
     {
       "slug": "papercup-physical-rename-phase5-2026-06-20",
@@ -17332,7 +17332,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "All 7 default-ON flags verified by su-8dc60 (2026-06-29, owner asleep / AUTO). All 7 confirmed ON in PostHog; all declared default-OFF/dark in code (owner deliberately flipped them ON to test). RESULTS: P-002 idle-session-reaper PASS (D-001 — dead reaped/live untouched, 40/40 tests, 0 erroneous reaps over ON window). P-001 idle-session-reaper-terminate (D-002) — selection+safety VERIFIED (live routine runs dry_run:FALSE hourly, target set always 0, never over-terminates; resume + lock-release code-correct); GAP: destructive round-trip never fired live (target always 0), forcing a real SIGKILL is owner-gated. P-003 authority-rpc-signed PASS (D-003 — LIVE :3070 rejected an unsigned envelope as 'unauthenticated', 47/47 tests). P-004 protomux / P-005 eviction-probe / P-006 log-snapshot (D-004/5/6) — single-box SAFETY verified (no-op / no-false-eviction / fold-correctness 38/38 tests), so ON is HARMLESS here; cross-machine legs BLOCKED on the 2-machine rig (the only real federated peer, owner",
+      "nowState": "All 7 default-ON flags verified by su-8dc60 (2026-06-29, owner asleep / AUTO). All 7 confirmed ON in PostHog; all declared default-OFF/dark in code (owner deliberately flipped them ON to test). RESULTS: P-002 idle-session-reaper PASS (D-001 — dead reaped/live untouched, 40/40 tests, 0 erroneous reaps over ON window). P-001 idle-session-reaper-terminate (D-002) — selection+safety VERIFIED (live routine runs dry_run:FALSE hourly, target set always 0, never over-terminates; resume + lock-release code-correct); GAP: destructive round-trip never fired live (target always 0), forcing a real SIGKILL is owner-gated. P-003 authority-rpc-signed PASS (D-003 — LIVE :3070 rejected an unsigned envelope as 'unauthenticated', 47/47 tests). P-004 protomux / P-005 eviction-probe / P-006 log-snapshot (D-004/5/6) — single-box SAFETY verified (no-op / no-false-eviction / fold-correctness 38/38 tests), so ON is HARMLESS here; cross-machine legs BLOCKED on the 2-machine rig (the only real federated peer, Avi",
       "nowNext": "Owner-gated remainders (none autonomously doable): (1) bring Avis-iMac (or any 2nd peer) online for the 2-machine rig to close P-004/P-005/P-006 cross-machine legs; (2) optionally capture the first real idle-terminate's resume in journald to empirically close P-001; (3) substrate-sidecar latency A/B + the benign MaxListeners(>10) cleanup. Two minor findings filed as improvements (test-isolation flake in file-lock-routing-hive.test.ts; sidecar Hyperswarm MaxListeners warning)."
     },
     {
@@ -17491,8 +17491,8 @@
         ],
         "staleHints": []
       },
-      "nowState": "PROPOSED for owner review — planning only. P-010 through P-014 now define the Universal Zero foundation; P-016 consumes the existing identity/isolation plan; P-017 through P-021 sequence public, buyer, seller, operational/streaming cutover and no-bypass cleanup; P-015 is Universal Zero verification. D-005 through D-007 make Rocicorp Zero/@papercusp/sync the universal WEBSOCKETS-first data plane, reuse Restart's guarded contract/operations pattern, and define principal-scoped security plus explicit purpose-built transport exclusions. No Zero implementation, claim, cutover, or execution has started. P-004 remains preserved behind P-001, P-002, P-003, and P-015. P-009 is an untouched, separate existing auction public-release lane and may continue under its own P-008 dependency; this proposal neither blocks nor modifies it.",
-      "nowNext": "owner reviews the Universal Zero scope, security boundary, operations guards, and dependency order. Until owner approves and chooses an execution route, do not start or claim P-010 through P-021 and do not implement Zero. P-009 may continue independently as the existing release lane."
+      "nowState": "PROPOSED for Avi review — planning only. P-010 through P-014 now define the Universal Zero foundation; P-016 consumes the existing identity/isolation plan; P-017 through P-021 sequence public, buyer, seller, operational/streaming cutover and no-bypass cleanup; P-015 is Universal Zero verification. D-005 through D-007 make Rocicorp Zero/@papercusp/sync the universal WEBSOCKETS-first data plane, reuse Restart's guarded contract/operations pattern, and define principal-scoped security plus explicit purpose-built transport exclusions. No Zero implementation, claim, cutover, or execution has started. P-004 remains preserved behind P-001, P-002, P-003, and P-015. P-009 is an untouched, separate existing auction public-release lane and may continue under its own P-008 dependency; this proposal neither blocks nor modifies it.",
+      "nowNext": "Avi reviews the Universal Zero scope, security boundary, operations guards, and dependency order. Until Avi approves and chooses an execution route, do not start or claim P-010 through P-021 and do not implement Zero. P-009 may continue independently as the existing release lane."
     },
     {
       "slug": "sidestage-demo-user-isolation-2026-08-14",
@@ -17648,8 +17648,8 @@
         ],
         "staleHints": []
       },
-      "nowState": "Draft complete for owner's review; no implementation has started and the plan remains draft. It contains 14 items across contract/safety, reusable execution foundation, six real suite conversions, Tests-tab UX, and release proof, plus 6 governing architecture decisions. Verified: plans:lint has 0 errors and 0 warnings; plans:get reports no missing blocker references or dependency cycles. The two SideStage overlap candidates were superseded zero-item rubric templates, while production-readiness-acceptance-2026-06-10 is a distinct 34-item cross-app acceptance inventory, so this new SideStage implementation plan is intentional.",
-      "nowNext": "owner reviews the draft. If approved later, select the execution route and begin P-001; keep the plan unpromoted and do not implement any item before that review."
+      "nowState": "Draft complete for Avi's review; no implementation has started and the plan remains draft. It contains 14 items across contract/safety, reusable execution foundation, six real suite conversions, Tests-tab UX, and release proof, plus 6 governing architecture decisions. Verified: plans:lint has 0 errors and 0 warnings; plans:get reports no missing blocker references or dependency cycles. The two SideStage overlap candidates were superseded zero-item rubric templates, while production-readiness-acceptance-2026-06-10 is a distinct 34-item cross-app acceptance inventory, so this new SideStage implementation plan is intentional.",
+      "nowNext": "Avi reviews the draft. If approved later, select the execution route and begin P-001; keep the plan unpromoted and do not implement any item before that review."
     },
     {
       "slug": "sidestage-stripe-orders-auction-checkout-2026-08-14",
@@ -17687,7 +17687,7 @@
         ],
         "staleHints": []
       },
-      "nowState": "ACTIVE under owner-approved route A and AUTO mode. P-001 is converted to WI-39074 and held by su-bfb8a397-92d4-476f-be09-c17a2259ba8f. No other implementation item is claimed; dependency order remains authoritative.",
+      "nowState": "ACTIVE under Avi-approved route A and AUTO mode. P-001 is converted to WI-39074 and held by su-bfb8a397-92d4-476f-be09-c17a2259ba8f. No other implementation item is claimed; dependency order remains authoritative.",
       "nowNext": "Implement and verify P-001 canonical SideStage-owned payable-order schema/store and migration, then complete it with evidence before taking P-002/P-003."
     },
     {
@@ -17886,7 +17886,7 @@
           "stored status is 'blocked' but every blocked-by dependency (P-001) has already resolved (done/dropped) — effectiveStatus stays 'blocked' because the stored token is sticky (reserved for external blockers) until someone clears it. If this block was purely blocked-by-derived, clear it with plans:set-…"
         ]
       },
-      "nowState": "Active under owner's 2026-08-20 owner-directed AUTO continuation, owned by su-575cab4b [ENDED 22:03]. No agent was active on this plan when resumed. D-020 corrects the stale closure claim: unfinished work pivots from the invalid 0.0.17 source tag (its desktop pin predates the required PAX fix) to the exact frozen 0.0.18 source 7caaed681f34 / desktop 2363b77a. Historical Linux/Windows/macOS installed legs P-003..P-005 remain done evidence; P-001 is now done as the valid source/contract freeze. P-006 is blocked only because the live host desktop owns D-008 canonical ports :3270/:3274; it was not stopped or reused. P-007 is WIP under WI-38603: writer-level dev/release matrix established, and canonical staging now extends the existing Tauri config guard so overlays, capabilities, platform writers, the shared command registry, and debug/release compile forks cannot drift silently. Focused config tests pass 5/5 and the desktop shell suite passes 266/266. Exact 0.0.18 artifact-byte/provenance c",
+      "nowState": "Active under Avi's 2026-08-20 owner-directed AUTO continuation, owned by su-575cab4b [ENDED 22:03]. No agent was active on this plan when resumed. D-020 corrects the stale closure claim: unfinished work pivots from the invalid 0.0.17 source tag (its desktop pin predates the required PAX fix) to the exact frozen 0.0.18 source 7caaed681f34 / desktop 2363b77a. Historical Linux/Windows/macOS installed legs P-003..P-005 remain done evidence; P-001 is now done as the valid source/contract freeze. P-006 is blocked only because the live host desktop owns D-008 canonical ports :3270/:3274; it was not stopped or reused. P-007 is WIP under WI-38603: writer-level dev/release matrix established, and canonical staging now extends the existing Tauri config guard so overlays, capabilities, platform writers, the shared command registry, and debug/release compile forks cannot drift silently. Focused config tests pass 5/5 and the desktop shell suite passes 266/266. Exact 0.0.18 artifact-byte/provenance c",
       "nowNext": "Continue WI-38603 when WI-40069 emits terminal artifact/provenance evidence: compare each platform's sidecar stamp, resource/native-module set, version/source hashes, signing/update flags and installed behavior against the writer ledger; file/fix every mismatch. Re-probe :3270/:3274 each AUTO wake and resume WI-38602 immediately when both are free. After P-006/P-007, synthesize P-008, fix P-009 defects (including WI-39304), run exact final 0.0.18 P-010 matrix, then deliver P-011."
     },
     {
@@ -18514,7 +18514,7 @@
         ],
         "staleHints": []
       },
-      "nowState": "AUTO mode, su-e2cc78d8 solo per owner owner. ALL autonomously-completable work DONE + TESTED. Core revival: the apps largely already worked (P-002 misdiagnosis — public device API verified end-to-end). Fixed the one real server bug (P-005 FCM in-process mint + APNs HTTP/2, dormant). Hardened device-JWT durability (P-001). Phase B monitoring backend shipped: new lib/device-monitoring.ts producers (fail-soft, dep-injected) + GET /device/monitoring route (P-008 fleets/pots, P-009 release gate, P-010 connection health) + P-007 systemAlerts (red-gate + pool-exhaustion) on /device/attention. 47/47 device tests green; operator-core typecheck clean for new files. P-003 Android debug APK built clean (121MB). P-013 branding: 8 user-facing Papercup→Papercusp strings fixed (6 uncommitted edits in papercup-rust-mobile working tree — separate repo, needs manual commit). Runbook: agent-insights/mobile-apps-monitoring-first.mdx. OWNER-GATED (needs-human, surfaced with actionable notes): P-004 iOS build ",
+      "nowState": "AUTO mode, su-e2cc78d8 solo per owner Avi. ALL autonomously-completable work DONE + TESTED. Core revival: the apps largely already worked (P-002 misdiagnosis — public device API verified end-to-end). Fixed the one real server bug (P-005 FCM in-process mint + APNs HTTP/2, dormant). Hardened device-JWT durability (P-001). Phase B monitoring backend shipped: new lib/device-monitoring.ts producers (fail-soft, dep-injected) + GET /device/monitoring route (P-008 fleets/pots, P-009 release gate, P-010 connection health) + P-007 systemAlerts (red-gate + pool-exhaustion) on /device/attention. 47/47 device tests green; operator-core typecheck clean for new files. P-003 Android debug APK built clean (121MB). P-013 branding: 8 user-facing Papercup→Papercusp strings fixed (6 uncommitted edits in papercup-rust-mobile working tree — separate repo, needs manual commit). Runbook: agent-insights/mobile-apps-monitoring-first.mdx. OWNER-GATED (needs-human, surfaced with actionable notes): P-004 iOS build ",
       "nowNext": "Owner decisions: (1) manually commit the 6 papercup-rust-mobile branding edits; (2) act on the needs-human tail (Apple enrollment for iOS push, re-pair phones to verify on-device); (3) greenlight optional P-011/P-012 if wanted. No further autonomous work remains."
     },
     {
@@ -18547,7 +18547,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "P-001..P-004 DONE + tested + wired (su-a2724): the release-readiness pre-flight gate is live in release-local.sh as fail-fast preflights BEFORE the multi-hour builds — (1) migration boot-smoke (from-scratch replay of all migrations, ~15s, catches the 631 crash class); (2) build-set architecture invariant (role set must include server or a real cut ships a dead mac/win GUI). P-004: release-local.sh already IS the single-invocation parallel entrypoint; publish is manual-by-design. The WI-5559 owner-Q this plan filed (should the Windows leg build the Server?) was ANSWERED by WI-5600 (owner owner, angry, 2026-07-20): YES — the Windows GUI is a thin client that can't launch without the Server, so WI-5559's gui-only default was a dead-build regression. WI-5600 reversed it (Windows now builds+publishes gui+server by DEFAULT, spanned server auto-zipped+published), verified + guarded by tests. Plan is COMPLETE except owner-walled P-005.",
+      "nowState": "P-001..P-004 DONE + tested + wired (su-a2724): the release-readiness pre-flight gate is live in release-local.sh as fail-fast preflights BEFORE the multi-hour builds — (1) migration boot-smoke (from-scratch replay of all migrations, ~15s, catches the 631 crash class); (2) build-set architecture invariant (role set must include server or a real cut ships a dead mac/win GUI). P-004: release-local.sh already IS the single-invocation parallel entrypoint; publish is manual-by-design. The WI-5559 owner-Q this plan filed (should the Windows leg build the Server?) was ANSWERED by WI-5600 (owner Avi, angry, 2026-07-20): YES — the Windows GUI is a thin client that can't launch without the Server, so WI-5559's gui-only default was a dead-build regression. WI-5600 reversed it (Windows now builds+publishes gui+server by DEFAULT, spanned server auto-zipped+published), verified + guarded by tests. Plan is COMPLETE except owner-walled P-005.",
       "nowNext": "P-005 (faster mac build host) is needs-human — owner picks bare-metal Mac vs more VM RAM/vCPU vs cross-compile (options in D-002); everything agent-actionable is done."
     },
     {
@@ -19373,7 +19373,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "**OWNER-DIRECTED, SINGLE OWNER.** owner reassigned this plan on 2026-08-13 to `su-01d9dd9a-2783-4f75-91c4-94c0b6a25b8b`, superseding the stale owner pin to `su-1f60f82c` and its successor. Rerank experimentation is explicitly OUT OF SCOPE: another agent is taking `semantic-search-fingerprint-coverage-2026-08-03`; implementation history remains in `local-reranker-gte-modernbert-2026-08-02` and the older `search-core-rerank-adoption-2026-05-30`. Completed here: P-001 through P-005 and P-012. Current lane: P-006, then P-007 through P-011 and P-013 according to their dependencies. Read the existing Decisions before changing behavior; do not re-derive settled findings from logs.",
+      "nowState": "**OWNER-DIRECTED, SINGLE OWNER.** Avi reassigned this plan on 2026-08-13 to `su-01d9dd9a-2783-4f75-91c4-94c0b6a25b8b`, superseding the stale owner pin to `su-1f60f82c` and its successor. Rerank experimentation is explicitly OUT OF SCOPE: another agent is taking `semantic-search-fingerprint-coverage-2026-08-03`; implementation history remains in `local-reranker-gte-modernbert-2026-08-02` and the older `search-core-rerank-adoption-2026-05-30`. Completed here: P-001 through P-005 and P-012. Current lane: P-006, then P-007 through P-011 and P-013 according to their dependencies. Read the existing Decisions before changing behavior; do not re-derive settled findings from logs.",
       "nowNext": "P-006: verify the landed non-pre-empting OMP injection seam in a newly launched OMP session. Prove both sides: context injection is present in tool results, and `Skipped due to pending system advisory` is absent. A run with no injections is not a pass."
     },
     {
@@ -19647,7 +19647,7 @@
         "refs": [],
         "staleHints": []
       },
-      "nowState": "Original seller-Copilot implementation P-001–P-008 is complete and P-009 acceptance residue remains open. owner identified a real reply-tone gap; P-010–P-013 now cover distinct provider-independent semantics, production configuration, regression guards, and end-to-end verification. AUTO execution is active in this session.",
+      "nowState": "Original seller-Copilot implementation P-001–P-008 is complete and P-009 acceptance residue remains open. Avi identified a real reply-tone gap; P-010–P-013 now cover distinct provider-independent semantics, production configuration, regression guards, and end-to-end verification. AUTO execution is active in this session.",
       "nowNext": "Claim and execute P-010 through P-013 while leaving P-009's independent acceptance lane untouched."
     },
     {

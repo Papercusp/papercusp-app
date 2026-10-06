@@ -42,7 +42,9 @@
  * proxy is a pure per-request passthrough — no session state to lose across a restart.
  */
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
+import { parser as createStreamJsonParser } from "stream-json";
 import { normalizeMcpName } from "@papercusp/tooldef";
 import {
   MCP_DATA_PLANE_DEGRADED_AT_HEADER,
@@ -62,6 +64,7 @@ import {
   isBoundedTestingRunStatusArgs,
 } from "@papercusp/operator-core/lib/endpoint-route/routes/transport/mcp-admission";
 import { classifyCapabilityBashEffect } from "@papercusp/operator-core/lib/agent-tools/capability/bash-effect";
+import { foreignLoopbackPeerForSocket } from "@papercusp/operator-core/lib/auth/loopback-peer-trust";
 export {
   CHEAP_REPEATING_BEAT_PATHS,
   isCheapRepeatingBeat,
@@ -259,6 +262,358 @@ function recordProxyFailure(rec: Record<string, unknown>): void {
   }
 }
 
+const MAX_MCP_PROXY_SUCCESS_TOOL_NAMES = 64;
+const MAX_MCP_PROXY_SUCCESS_TOOL_NAME_CHARS = 128;
+const MAX_MCP_PROXY_SUCCESS_STAGE_MS = 10 * 60 * 1000;
+
+type NativeSessionAttribution = {
+  pseudonym: string | null;
+  source: string;
+  trust: string;
+};
+
+function nativeSessionAttribution(
+  headers: http.IncomingHttpHeaders,
+): NativeSessionAttribution {
+  const carrier = headers["x-papercusp-native-session"];
+  if (typeof carrier !== "string") {
+    return {
+      pseudonym: null,
+      source: carrier === undefined ? "absent" : "header:x-papercusp-native-session",
+      trust: carrier === undefined ? "unavailable" : "unusable",
+    };
+  }
+  const nativeSessionId = carrier.trim();
+  if (
+    nativeSessionId.length === 0 ||
+    nativeSessionId.length > MAX_MCP_PROXY_SUCCESS_TOOL_NAME_CHARS ||
+    !/^[A-Za-z0-9._:-]+$/.test(nativeSessionId)
+  ) {
+    return {
+      pseudonym: null,
+      source: "header:x-papercusp-native-session",
+      trust: "unusable",
+    };
+  }
+  return {
+    pseudonym: createHash("sha256")
+      .update(nativeSessionId)
+      .digest("hex")
+      .slice(0, 24),
+    source: "header:x-papercusp-native-session",
+    trust: "unverified-client-assertion",
+  };
+}
+
+function boundedMcpProxyStageMs(value: number): number {
+  return Number.isFinite(value)
+    ? Math.min(MAX_MCP_PROXY_SUCCESS_STAGE_MS, Math.max(0, Math.floor(value)))
+    : 0;
+}
+
+type McpResponseTelemetrySummary = {
+  resultSeen: boolean;
+  errorSeen: boolean;
+  toolsArraySeen: boolean;
+  toolCount: number;
+  toolNames: string[];
+};
+
+type McpResponseTelemetryObserver = {
+  write(chunk: Buffer): void;
+  finish(): Promise<McpResponseTelemetrySummary | null>;
+};
+
+/**
+ * Observe only the small result fields needed for MCP success telemetry. The SAX
+ * parser never assembles descriptions, schemas, or the response body, and the
+ * streamable-HTTP bytes continue through the original pipe untouched.
+ */
+function createMcpResponseTelemetryObserver(
+  contentType: string | string[] | undefined,
+): McpResponseTelemetryObserver {
+  type Frame = {
+    kind: "object" | "array";
+    role: "batch" | "response" | "result" | "tools" | "tool" | "other";
+    pendingKey?: string;
+    nameSeen: boolean;
+  };
+  type NameCapture = { value: string; chars: number };
+
+  const isEventStream = /text\/event-stream/i.test(
+    Array.isArray(contentType) ? contentType.join(",") : (contentType ?? ""),
+  );
+  const parser = createStreamJsonParser.asStream({
+    jsonStreaming: true,
+    packKeys: false,
+    packStrings: false,
+    packNumbers: false,
+  });
+  const decoder = isEventStream ? new StringDecoder("utf8") : null;
+  const frames: Frame[] = [];
+  const toolNames: string[] = [];
+  let resultSeen = false;
+  let errorSeen = false;
+  let toolsArraySeen = false;
+  let toolCount = 0;
+  let failed = false;
+  let finished = false;
+  let settled = false;
+  let inKey = false;
+  let keyBuffer = "";
+  let keyOverflow = false;
+  let activeName: NameCapture | null = null;
+  let sseMode: "prefix" | "data" | "other" = "prefix";
+  let ssePrefix = "";
+  let sseSkipOptionalSpace = false;
+  let sseEventHasData = false;
+  let ssePendingData = "";
+  let resolveCompletion: (
+    summary: McpResponseTelemetrySummary | null,
+  ) => void = () => {};
+  const completion = new Promise<McpResponseTelemetrySummary | null>(
+    (resolve) => {
+      resolveCompletion = resolve;
+    },
+  );
+
+  const settle = (summary: McpResponseTelemetrySummary | null): void => {
+    if (settled) return;
+    settled = true;
+    resolveCompletion(summary);
+  };
+  const fail = (): void => {
+    failed = true;
+    settle(null);
+  };
+  const appendNameChunk = (chunk: string): void => {
+    if (!activeName || activeName.chars >= MAX_MCP_PROXY_SUCCESS_TOOL_NAME_CHARS)
+      return;
+    const printable = chunk.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+    for (const character of printable) {
+      if (activeName.chars >= MAX_MCP_PROXY_SUCCESS_TOOL_NAME_CHARS) break;
+      activeName.value += character;
+      activeName.chars++;
+    }
+  };
+  const valueStarts = new Set([
+    "startObject",
+    "startArray",
+    "startString",
+    "startNumber",
+    "stringValue",
+    "numberValue",
+    "trueValue",
+    "falseValue",
+    "nullValue",
+  ]);
+  const beginValue = (tokenName: string): void => {
+    const parent = frames[frames.length - 1];
+    const key = parent?.kind === "object" ? parent.pendingKey : undefined;
+    if (parent?.kind === "object" && parent.role === "response") {
+      if (key === "result") resultSeen = true;
+      if (key === "error") errorSeen = true;
+    }
+    if (parent?.kind === "array" && parent.role === "tools" && valueStarts.has(tokenName)) {
+      if (toolCount < Number.MAX_SAFE_INTEGER) toolCount++;
+      else failed = true;
+    }
+    if (parent?.kind === "object" && parent.role === "tool" && key === "name") {
+      if (
+        tokenName === "startString" &&
+        !parent.nameSeen &&
+        toolNames.length < MAX_MCP_PROXY_SUCCESS_TOOL_NAMES
+      ) {
+        activeName = { value: "", chars: 0 };
+      }
+      parent.nameSeen = true;
+    }
+    if (parent?.kind === "object") parent.pendingKey = undefined;
+  };
+  const childRole = (
+    kind: "object" | "array",
+    parent: Frame | undefined,
+    key: string | undefined,
+  ): Frame["role"] => {
+    if (!parent) return kind === "array" ? "batch" : "response";
+    if (parent.kind === "array" && parent.role === "batch" && kind === "object")
+      return "response";
+    if (parent.kind === "object" && parent.role === "response" && key === "result" && kind === "object")
+      return "result";
+    if (parent.kind === "object" && parent.role === "result" && key === "tools" && kind === "array") {
+      toolsArraySeen = true;
+      return "tools";
+    }
+    if (parent.kind === "array" && parent.role === "tools" && kind === "object")
+      return "tool";
+    return "other";
+  };
+  parser.on("data", (token: { name: string; value?: unknown }) => {
+    if (failed) return;
+    try {
+      if (token.name === "startKey") {
+        inKey = true;
+        keyBuffer = "";
+        keyOverflow = false;
+        return;
+      }
+      if (token.name === "endKey") {
+        const frame = frames[frames.length - 1];
+        if (frame?.kind === "object")
+          frame.pendingKey = keyOverflow ? "" : keyBuffer;
+        inKey = false;
+        keyBuffer = "";
+        keyOverflow = false;
+        return;
+      }
+      if (token.name === "stringChunk") {
+        const chunk = typeof token.value === "string" ? token.value : "";
+        if (inKey) {
+          if (keyBuffer.length < 16) {
+            const remaining = 16 - keyBuffer.length;
+            keyBuffer += chunk.slice(0, remaining);
+            if (chunk.length > remaining) keyOverflow = true;
+          } else {
+            keyOverflow = true;
+          }
+        } else {
+          appendNameChunk(chunk);
+        }
+        return;
+      }
+      if (token.name === "endString") {
+        if (activeName) {
+          const sanitized = activeName.value.trim();
+          if (
+            sanitized.length > 0 &&
+            toolNames.length < MAX_MCP_PROXY_SUCCESS_TOOL_NAMES
+          )
+            toolNames.push(sanitized);
+          activeName = null;
+        }
+        return;
+      }
+      if (token.name === "startObject" || token.name === "startArray") {
+        const kind = token.name === "startObject" ? "object" : "array";
+        const parent = frames[frames.length - 1];
+        const key = parent?.kind === "object" ? parent.pendingKey : undefined;
+        const role = childRole(kind, parent, key);
+        beginValue(token.name);
+        frames.push({ kind, role, nameSeen: false });
+        return;
+      }
+      if (token.name === "endObject" || token.name === "endArray") {
+        frames.pop();
+        return;
+      }
+      if (
+        token.name === "startString" ||
+        token.name === "startNumber" ||
+        token.name === "stringValue" ||
+        token.name === "numberValue" ||
+        token.name === "trueValue" ||
+        token.name === "falseValue" ||
+        token.name === "nullValue"
+      ) {
+        beginValue(token.name);
+      }
+    } catch {
+      fail();
+    }
+  });
+  parser.on("error", fail);
+  parser.on("end", () => {
+    if (failed) {
+      settle(null);
+      return;
+    }
+    settle({
+      resultSeen,
+      errorSeen,
+      toolsArraySeen,
+      toolCount,
+      toolNames,
+    });
+  });
+
+  const flushSseData = (): void => {
+    if (ssePendingData.length === 0) return;
+    parser.write(ssePendingData);
+    ssePendingData = "";
+  };
+  const appendSseData = (value: string): void => {
+    ssePendingData += value;
+    if (ssePendingData.length >= 1024) flushSseData();
+  };
+  const feedEventStreamText = (text: string): void => {
+    for (const character of text) {
+      if (character === "\r") continue;
+      if (character === "\n") {
+        if (sseMode === "prefix" && ssePrefix.length === 0 && sseEventHasData) {
+          appendSseData("\n");
+          flushSseData();
+          sseEventHasData = false;
+        }
+        sseMode = "prefix";
+        ssePrefix = "";
+        sseSkipOptionalSpace = false;
+        continue;
+      }
+      if (sseMode === "prefix") {
+        ssePrefix += character;
+        if ("data:".startsWith(ssePrefix)) {
+          if (ssePrefix === "data:") {
+            sseMode = "data";
+            if (sseEventHasData) appendSseData("\n");
+            sseEventHasData = true;
+            sseSkipOptionalSpace = true;
+            ssePrefix = "";
+          }
+        } else {
+          sseMode = "other";
+          ssePrefix = "";
+        }
+        continue;
+      }
+      if (sseMode === "data") {
+        if (sseSkipOptionalSpace) {
+          sseSkipOptionalSpace = false;
+          if (character === " ") continue;
+        }
+        appendSseData(character);
+      }
+    }
+  };
+
+  return {
+    write(chunk: Buffer): void {
+      if (failed || finished) return;
+      try {
+        if (decoder) feedEventStreamText(decoder.write(chunk));
+        else parser.write(chunk);
+      } catch {
+        fail();
+      }
+    },
+    finish(): Promise<McpResponseTelemetrySummary | null> {
+      if (!finished) {
+        finished = true;
+        try {
+          if (decoder) {
+            feedEventStreamText(decoder.end());
+            if (sseEventHasData) appendSseData("\n");
+            flushSseData();
+          }
+          parser.end();
+        } catch {
+          fail();
+        }
+      }
+      return completion;
+    },
+  };
+}
+
 export interface McpProxyOptions {
   listenPort: number;
   listenHost?: string;
@@ -413,6 +768,18 @@ export interface McpProxyOptions {
    * `DEFAULT_HEARTBEAT_INTERVAL_MS` (env `PAPERCUSP_MCP_PROXY_HEARTBEAT_MS`); `0` disables.
    */
   heartbeatIntervalMs?: number;
+  /**
+   * WI-10005688 — peer-uid gate for every request, the same one the inference gateway runs
+   * (WI-10003621). The proxy binds 127.0.0.1 and injects the superuser bearer, so on a host
+   * where loopback is shared with another account (a hosted workspace host, a vm-release
+   * Server, or several tenants' Servers on one Linux box) a caller of another uid must be
+   * refused before anything is forwarded. Returns the foreign verdict to refuse, null to
+   * proceed. Default `foreignLoopbackPeerForSocket`: a no-op unless the loopback peer-uid
+   * policy is active, so a single-user host pays no /proc read per connection.
+   */
+  loopbackPeerGate?: (
+    socket: import("node:net").Socket,
+  ) => { uid: number | null; reason: string } | null;
   log?: (s: string) => void;
 }
 
@@ -760,6 +1127,8 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "dev:build_status",
   "dev:migrations",
   "dev:rate_governor_status",
+  // Journal reads have no application side effects; a bounded replay recovers a lost log response.
+  "logs:read",
   // bounded activity ledger reads are safe to replay after a stale socket;
   // admission still reserves only the explicitly scoped form below.
   "activity:tool-log",
@@ -769,9 +1138,8 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "docs:outline",
   "search:fulltext",
   "search:semantic",
-  // session transcript recall is a read-only search; replaying after a stale-socket
-  // reset cannot double-apply a mutation.
-  "sessions:search",
+  // Session reads refresh live transcripts into persistent index state; keep them
+  // outside this pure-read retry allowlist so a reset cannot overlap ingestion.
   // memory recall (search ONLY — remember/forget mutate the store)
   "memory:search",
   // work-item / plan reads
@@ -779,7 +1147,9 @@ export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "work_items:get",
   "work_items:search",
   "work_items:claimable",
-  // Exact rubric+subject audit reads are side-effect-free and safe to replay.
+  // Scorecard reads use seed-free rubric resolution; a missing/malformed rubric stays
+  // unknown instead of entering the first-party lazy-seed writer.
+  "scorecards:get",
   "scorecards:list",
   // The bounded grading preflight is also side-effect-free and safe to replay.
   "scorecards:evaluate",
@@ -845,6 +1215,7 @@ const READ_ONLY_TOOLS_LOOKUP: ReadonlySet<string> = new Set(
 
 const READ_ONLY_TOOLS_INVOKE_NAME = normalizeMcpName("tools:invoke");
 const CAPABILITY_BASH_NAME = normalizeMcpName("capability:bash");
+const RELEASE_CUT_NAME = normalizeMcpName("release:cut");
 
 function forwardedToolName(m: unknown): string | null {
   if (!m || typeof m !== "object") return null;
@@ -899,6 +1270,17 @@ function isReadOnlyToolCall(m: unknown): boolean {
   const name = forwardedToolName(m);
   if (name === null) return false;
   if (READ_ONLY_TOOLS_LOOKUP.has(name)) return true;
+  // release:cut is a mixed-effect tool. Only its status operation reads local
+  // markers/logs and systemd state; every other operation must keep the keyed path.
+  if (name === RELEASE_CUT_NAME) {
+    const args = forwardedToolArgs(m);
+    return (
+      !!args &&
+      typeof args === "object" &&
+      !Array.isArray(args) &&
+      (args as { op?: unknown }).op === "status"
+    );
+  }
   return (
     name === CAPABILITY_BASH_NAME &&
     classifyCapabilityBashEffect(forwardedToolArgs(m)) === "read"
@@ -946,7 +1328,11 @@ export function prepareForward(
   // abort/replay the upstream after the handshake's 8s no-header limit. Keep
   // proxy replay off even when the body has a bootstrap idempotency key: the
   // route's ledger can fail open, so only psu's typed same-key retry may recover.
-  if (opts.requestPath?.split("?")[0]?.replace(/\/+$/, "") === "/api/agent-mcp/console/bootstrap-su") {
+  const requestPath = opts.requestPath?.split("?")[0]?.replace(/\/+$/, "");
+  if (
+    requestPath === "/api/agent-mcp/console/bootstrap-su" ||
+    requestPath === "/api/agent-mcp/console/bootstrap-role"
+  ) {
     return { body, headers, klass: "opaque", hasCodeRunWrapper: false, rpcMethods: [] };
   }
   const msgs = Array.isArray(parsed) ? parsed : [parsed];
@@ -2901,8 +3287,35 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
     });
   };
 
+  const loopbackPeerGate =
+    opts.loopbackPeerGate ?? ((socket: import("node:net").Socket) => foreignLoopbackPeerForSocket(socket));
   const server = http.createServer((req, res) => {
     const receivedAt = Date.now();
+    // The degraded marker describes MCP data-plane health only. REST endpoints
+    // share this listener, but their failures must not affect /api/mcp callers.
+    const isMcpApiRequest = req.url?.split("?")[0] === "/api/mcp";
+    // WI-10005688: refuse a loopback caller of another uid before anything runs or is
+    // forwarded (the proxy injects the superuser bearer, so forwarding would act as us).
+    const foreignPeer = loopbackPeerGate(req.socket);
+    if (foreignPeer) {
+      log(`refused loopback peer uid=${foreignPeer.uid ?? "unknown"} (${foreignPeer.reason})`);
+      record({ kind: "foreign_loopback_peer_refused", uid: foreignPeer.uid, reason: foreignPeer.reason });
+      res.writeHead(403, { "content-type": "application/json", connection: "close" });
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: {
+            code: -32001,
+            message:
+              "mcp-proxy: loopback callers other than the operator service account are refused on this host",
+          },
+          reason: foreignPeer.reason,
+          mcpProxy: true,
+        }),
+      );
+      return;
+    }
     if (req.method === "GET" && req.url === MCP_PROXY_LOCAL_HEALTH_PATH) {
       let target: McpProxyTarget | null = null;
       try {
@@ -4177,7 +4590,7 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
           const traceId = requestTraceId;
           fwd.headers = withDataPlaneDegradedHeader(
             { ...fwd.headers, [MCP_PROXY_TRACE_HEADER]: traceId },
-            lastDataPlaneInstabilityAtMs,
+            isMcpApiRequest ? lastDataPlaneInstabilityAtMs : 0,
           );
           // WI-41042 detector gap: `klass:'idempotent'` folds initialize,
           // tools/list, ping, resources and prompts together. Preserve only the
@@ -4188,29 +4601,37 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
             ...(fwd.rpcMethods.length ? { rpcMethods: fwd.rpcMethods } : {}),
           };
           const isInitialize = fwd.rpcMethods.includes("initialize");
+          const isToolsList = fwd.rpcMethods.includes("tools/list");
           const recordInitializeStage = (
-            outcome: "slow_response" | "timeout_retry" | "timeout_exhausted",
+            outcome:
+              | "success"
+              | "slow_response"
+              | "timeout_retry"
+              | "timeout_exhausted",
             upstreamMs: number,
+            nativeSession?: NativeSessionAttribution,
           ): void => {
-            const totalMs = Date.now() - receivedAt;
+            const totalMs = boundedMcpProxyStageMs(Date.now() - receivedAt);
             if (
               !isInitialize ||
               (outcome === "slow_response" && totalMs < initializeSlowMs)
             )
               return;
             // Privacy boundary: request-specific fields are limited to the proxy-owned trace id,
-            // a finite outcome enum, and stage durations. Never add methods, tool names, args,
-            // headers, URLs, bodies, or error text to this record.
+            // a finite outcome enum, bounded stage durations, and pseudonymous native-session
+            // attribution with an explicit trust label. Never add raw headers, URLs, bodies,
+            // tool names, or error text to this record.
             record({
               kind: "initialize_stage",
               traceId,
               outcome,
               stages: {
-                bodyReadMs: Math.max(0, bodyReadyAt - receivedAt),
-                admissionWaitMs: Math.max(0, admittedAt - bodyReadyAt),
-                upstreamMs: Math.max(0, upstreamMs),
-                totalMs: Math.max(0, totalMs),
+                bodyReadMs: boundedMcpProxyStageMs(bodyReadyAt - receivedAt),
+                admissionWaitMs: boundedMcpProxyStageMs(admittedAt - bodyReadyAt),
+                upstreamMs: boundedMcpProxyStageMs(upstreamMs),
+                totalMs,
               },
+              ...(nativeSession ? { nativeSession } : {}),
             });
           };
           // EI-19294517824914302: a cheap repeating beat fails fast instead of burning the
@@ -4241,7 +4662,7 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
             // must not carry a timestamp that expired while it was queued/backing off.
             fwd.headers = withDataPlaneDegradedHeader(
               fwd.headers,
-              lastDataPlaneInstabilityAtMs,
+              isMcpApiRequest ? lastDataPlaneInstabilityAtMs : 0,
             );
             attempts++;
             const attemptStartedAt = Date.now();
@@ -4358,10 +4779,12 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
                 )
               ) {
                 backpressureRetries++;
-                lastDataPlaneInstabilityAtMs = Date.now();
+                if (isMcpApiRequest) {
+                  lastDataPlaneInstabilityAtMs = Date.now();
+                }
                 fwd.headers = withDataPlaneDegradedHeader(
                   fwd.headers,
-                  lastDataPlaneInstabilityAtMs,
+                  isMcpApiRequest ? lastDataPlaneInstabilityAtMs : 0,
                 );
                 const waitMs = retryAfterMs(
                   ures.headers["retry-after"],
@@ -4384,6 +4807,95 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
                 await new Promise((r) => setTimeout(r, waitMs));
                 continue;
               }
+              if (
+                status >= 200 &&
+                status < 300 &&
+                (isInitialize || isToolsList)
+              ) {
+                try {
+                  const observer = createMcpResponseTelemetryObserver(
+                    ures.headers["content-type"],
+                  );
+                  let responseFinished = false;
+                  let observationFinished = false;
+                  let observation: McpResponseTelemetrySummary | null = null;
+                  let telemetryRecorded = false;
+                  const recordSuccessfulObservation = (): void => {
+                    if (
+                      telemetryRecorded ||
+                      !responseFinished ||
+                      !observationFinished ||
+                      !observation ||
+                      !observation.resultSeen ||
+                      observation.errorSeen
+                    )
+                      return;
+                    const recordInitializeSuccess = isInitialize;
+                    const recordToolsListSuccess =
+                      isToolsList && observation.toolsArraySeen;
+                    if (!recordInitializeSuccess && !recordToolsListSuccess)
+                      return;
+                    telemetryRecorded = true;
+                    const nativeSession = nativeSessionAttribution(req.headers);
+                    const stages = {
+                      bodyReadMs: boundedMcpProxyStageMs(
+                        bodyReadyAt - receivedAt,
+                      ),
+                      admissionWaitMs: boundedMcpProxyStageMs(
+                        admittedAt - bodyReadyAt,
+                      ),
+                      upstreamMs: boundedMcpProxyStageMs(upstreamMs),
+                      totalMs: boundedMcpProxyStageMs(Date.now() - receivedAt),
+                    };
+                    const toolCount = observation.toolCount;
+                    const toolNames = observation.toolNames;
+                    setImmediate(() => {
+                      if (recordInitializeSuccess)
+                        recordInitializeStage(
+                          "success",
+                          upstreamMs,
+                          nativeSession,
+                        );
+                      if (recordToolsListSuccess)
+                        record({
+                          kind: "tools_list_stage",
+                          traceId,
+                          outcome: "success",
+                          toolCount,
+                          toolNames,
+                          stages,
+                          nativeSession,
+                        });
+                    });
+                  };
+                  ures.on("data", (chunk: Buffer) => observer.write(chunk));
+                  ures.once("end", () => {
+                    void observer
+                      .finish()
+                      .then((summary) => {
+                        observation = summary;
+                        observationFinished = true;
+                        recordSuccessfulObservation();
+                      })
+                      .catch(() => {
+                        observation = null;
+                        observationFinished = true;
+                        recordSuccessfulObservation();
+                      });
+                  });
+                  ures.once("error", () => {
+                    observation = null;
+                    observationFinished = true;
+                    recordSuccessfulObservation();
+                  });
+                  res.once("finish", () => {
+                    responseFinished = true;
+                    recordSuccessfulObservation();
+                  });
+                } catch {
+                  // Telemetry setup is best-effort; the original response pipe owns delivery.
+                }
+              }
               res.writeHead(status, ures.headers);
               // WI-35737: an MCP response is an SSE stream that stays open long after headers
               // arrive (and long after this function returns and releases its in-flight slot).
@@ -4403,7 +4915,7 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
                 record({
                   kind: "recovered",
                   method: req.method,
-                  path: req.url,
+                  ...(!(isInitialize || isToolsList) ? { path: req.url } : {}),
                   status,
                   attempts,
                   postConnectRetries,
@@ -4431,10 +4943,12 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
               return;
             }
             last = outcome;
-            lastDataPlaneInstabilityAtMs = Date.now();
+            if (isMcpApiRequest) {
+              lastDataPlaneInstabilityAtMs = Date.now();
+            }
             fwd.headers = withDataPlaneDegradedHeader(
               fwd.headers,
-              lastDataPlaneInstabilityAtMs,
+              isMcpApiRequest ? lastDataPlaneInstabilityAtMs : 0,
             );
             if (!outcome.connected) {
               // Refused / pre-connect: the request provably never reached the selected
@@ -4698,16 +5212,34 @@ export function createMcpProxy(opts: McpProxyOptions): http.Server {
   return server;
 }
 
+/**
+ * The upstream named in the startup log line. Must resolve through the same
+ * option precedence as `resolveTargetCandidates` — the bin entry passes
+ * `resolveTargets` (never `targetPort`), so reading `opts.targetPort` here
+ * logged `127.0.0.1:undefined` (WI-10004334).
+ */
+export function describeMcpProxyTarget(opts: McpProxyOptions): string {
+  if (!opts.resolveTargets && opts.resolveTarget)
+    return "dynamic operator.json target";
+  try {
+    const [primary, ...fallbacks] = resolveTargetCandidates(opts).map(
+      (t) => `${t.host}:${t.port}`,
+    );
+    return fallbacks.length
+      ? `${primary} (fallback ${fallbacks.join(", ")})`
+      : primary!;
+  } catch (err) {
+    return `unresolved target (${(err as Error).message})`;
+  }
+}
+
 /** Start the proxy from env/opts. Returns the listening server. */
 export function startMcpProxy(opts: McpProxyOptions): http.Server {
   const log = opts.log ?? ((s: string) => console.log(`[mcp-proxy] ${s}`));
   const server = createMcpProxy(opts);
   server.listen(opts.listenPort, opts.listenHost ?? "127.0.0.1", () => {
-    const target = opts.resolveTarget
-      ? "dynamic operator.json target"
-      : `${opts.targetHost ?? "127.0.0.1"}:${opts.targetPort}`;
     log(
-      `listening on ${opts.listenHost ?? "127.0.0.1"}:${opts.listenPort} → ${target} ` +
+      `listening on ${opts.listenHost ?? "127.0.0.1"}:${opts.listenPort} → ${describeMcpProxyTarget(opts)} ` +
         `(retry-on-refused window ${opts.retryWindowMs}ms)`,
     );
   });

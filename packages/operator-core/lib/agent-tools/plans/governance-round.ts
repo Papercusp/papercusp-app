@@ -1,6 +1,7 @@
 /** Immutable shared-pot governance round records and deterministic rebuild (P-002). */
 import { createHash } from 'node:crypto';
 import { canonicalJson } from '../../authority/authority-rpc-envelope';
+import type { RefusalContract } from '../../capability-envelope/refusal-contract-types';
 import { evaluatePlanAdmission, type PlanAdmissionPolicy, type PlanVote } from './plan-admission-policy';
 import { reduceGovernanceVotes, type Delegation, type VotingMember, type VotingTally } from './governance-voting';
 
@@ -42,7 +43,8 @@ export interface FinalizationCertificate {
 }
 
 export type GovernanceRoundError = 'invalid-round' | 'duplicate-member' | 'unknown-member' | 'duplicate-event' | 'invalid-sequence' | 'vote-reduction-refused';
-export type RoundResult<T> = { ok: true; value: T } | { ok: false; code: GovernanceRoundError; detail: string };
+/** `refusal` is the lift contract; present on the reducer-refusal abort, which is the fail-closed one. */
+export type RoundResult<T> = { ok: true; value: T } | { ok: false; code: GovernanceRoundError; detail: string; refusal?: RefusalContract };
 
 export function createGovernanceRound(input: Omit<GovernanceRound, 'createdAtMs'> & { createdAtMs: number }): RoundResult<GovernanceRound> {
   if (!input.roundId.trim() || !input.planRevisionHash.trim() || !Number.isSafeInteger(input.policyVersion) || input.policyVersion < 1 || !Number.isFinite(input.createdAtMs)) return { ok: false, code: 'invalid-round', detail: 'round id, plan revision, policy epoch, and timestamp are required' };
@@ -82,7 +84,18 @@ export function finalizeGovernanceRound(input: { round: GovernanceRound; events:
     delegations: input.delegations,
     nowMs: input.nowMs,
   });
-  if (!reduced.ok) return { ok: false, code: 'vote-reduction-refused', detail: `${reduced.code}: ${reduced.detail}` };
+  if (!reduced.ok) {
+    return {
+      ok: false,
+      code: 'vote-reduction-refused',
+      detail: `${reduced.code}: ${reduced.detail}`,
+      refusal: {
+        observed: { reducerCode: reduced.code, roundId: input.round.roundId, roster: String(members.length) },
+        liftsWhen: 'the voting roster and ballots satisfy the weighted reducer (no revoked member voting, current key epochs, acyclic unexpired delegations, strictly advancing sequences, positive finite weights) and finalization is retried',
+        whoCanMakeItTrue: ['owner', 'another-agent'],
+      },
+    };
+  }
   const tally = reduced.value;
 
   const votes: PlanVote[] = input.events.map((e) => ({ memberId: e.memberId, choice: e.choice }));

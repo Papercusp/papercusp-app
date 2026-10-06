@@ -70,7 +70,7 @@ export default defineTool({
   args: z.object({
     unit: z.union([z.string().min(1).max(200), z.array(z.string().min(1).max(200)).min(1).max(10)])
       .optional()
-      .describe("Unit name(s). A bare name is `.service`-suffixed ('papercup-bg-host' → 'papercup-bg-host.service'); '.timer'/'.socket'/'.target' etc are left alone. Several units read as one merged, time-ordered stream."),
+      .describe("Unit name(s). A bare name is `.service`-suffixed ('papercusp-bg-host' → 'papercusp-bg-host.service'); '.timer'/'.socket'/'.target' etc are left alone. Several units read as one merged, time-ordered stream."),
     identifier: z.string().min(1).max(200).optional()
       .describe('Syslog identifier (`journalctl -t`), for entries logged without a unit.'),
     since: z.string().min(1).max(100).optional()
@@ -83,7 +83,7 @@ export default defineTool({
     limit: z.number().int().min(1).max(JOURNAL_READ_MAX_LIMIT).optional()
       .describe(`Max rows returned, newest kept (default ${JOURNAL_READ_DEFAULT_LIMIT}). Collapsed repeats count as ONE row.`),
     scope: z.enum(JOURNAL_SCOPES).optional()
-      .describe("Which journal: 'user' (default, the papercup-* units), 'system' (kernel/OOM records, pgbouncer, systemd-oomd — a DIFFERENT journal, not a filter), or 'all' (everything you can see). If a unit you know exists comes back with unitsUnknown naming it, you are reading the wrong journal."),
+      .describe("Which journal: 'user' (default, the papercusp-* units), 'system' (kernel/OOM records, pgbouncer, systemd-oomd — a DIFFERENT journal, not a filter), or 'all' (everything you can see). If a unit you know exists comes back with unitsUnknown naming it, you are reading the wrong journal."),
   }),
   result: z
     .object({

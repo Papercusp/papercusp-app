@@ -52,6 +52,7 @@
 import type { CursorState } from './agent-tools/coordination/read-cursors';
 import type { ScoredItem } from './harness/improvements/digest';
 import type { Sql } from 'postgres';
+import { agentToolInvocationPredicate } from './agent-tools/sessions/automatic-tool-names';
 import { createHash, randomUUID } from 'node:crypto';
 import { renderCarryBlindWindowLine, type CarryBlindWindow } from './carry-blind-window';
 import { capPreservingOperativeDetailed } from './operative-clause';
@@ -63,7 +64,7 @@ import {
 } from './work-item-dispatch-states';
 import { projectAgentTurnStartObligationBrief, type AgentObligationBrief } from './agent-obligation-reader';
 import { formatAgentObligationLine, type AgentObligation } from './agent-obligations';
-import type { GoalPlacementTurnReceiptDeps } from './goal-placement-turn-receipts';
+import { isGoalPlacementReceiptCandidate, type GoalPlacementTurnReceiptDeps } from './goal-placement-turn-receipts';
 import { trackDetached } from './detached-imports';
 import { withBoundedTimeout } from './bounded-timeout';
 import type { OwnerDirectiveRow } from './owner-directives';
@@ -375,32 +376,24 @@ export function selectOrientationImprovementTriage(
  * read, never by hand-writing a floor query here.
  */
 /**
- * Evidence that this agent's MCP tool surface loaded EMPTY (EI-21308269358666878).
+ * Observed hook activity with no agent-origin calls since the context epoch
+ * (EI-21308269358666878). This is an activity gap, not a registration verdict.
  *
- * A psu session can come up with ZERO papercusp tools and never notice: it keeps
- * heartbeating, presence stays 'live', and it looks healthy to every peer — while
- * being unable to claim, checkpoint, complete, or control its own loop. The tool
- * list is fetched once at MCP connect and never re-listed, so the condition is
- * PERMANENT for that session's life: it cannot self-heal, and retrying inside the
- * session cannot fix it. That is why this warns instead of waiting.
+ * A hook/agent-origin call gap describes observed activity only. Zero
+ * agent-origin calls cannot distinguish a missing client tool list from an idle
+ * or parked session. There is no persisted authoritative client-registration
+ * signal here, so this observation is informational and must not trigger a
+ * restart or heal.
  *
- * The signal is the CALL-ORIGIN SPLIT, not a call count. Hook calls reach the
- * operator over plain HTTP, BYPASSING the agent MCP surface, so they keep flowing
- * while agent-issued calls stop dead. Measured on the confirmed incident
- * (su-b39c3537, sessions cdcdc38c + ed80eafe, 2026-08-24): 355+ hook calls against
- * 0 agent calls, over ~4 hours — a state its own transcript describes as "no
- * papercusp tools registered". That asymmetry also rules out "merely idle": an
- * idle session is not being handed turn-start blocks at all.
+ * ⚠ A raw invocation COUNT does not distinguish these origins: the sanctioned
+ * `scripts/mcp-call.mjs` fallback and the hooks both write rows. The split says
+ * which origin was observed, but not why agent-origin calls are absent.
  *
- * ⚠ A raw invocation COUNT does not work and was tried first: the sanctioned
- * `scripts/mcp-call.mjs` fallback and the hooks both write rows, so a toolless
- * agent still logs plenty of invocations. Only the split separates them.
- *
- * Present ⇒ toolless. `null` is BOTH "healthy" and "cannot tell", deliberately:
- * every unknown degrades to silence, never to a false alarm on a working agent.
+ * Present means only that no agent-origin call was observed after many hooks.
+ * It does not establish the client tool-list registration state.
  */
 export interface OrientationToolSurface {
-  /** Hook-origin calls since the context generation began — proves the operator is reachable. */
+  /** Hook-origin calls since the context generation began. */
   hookCalls: number;
   /** Minutes since the context generation began, so the line can say how long. */
   windowMinutes: number;
@@ -808,37 +801,41 @@ const FACT_DISPLAY_CAP = 2;
 const FACT_KEY_CHARS = 38;
 const IMPROVEMENT_TRIAGE_WINDOW_LIMIT = 100;
 /**
- * Hook-origin calls required before the toolless warning fires (EI-21308269358666878).
+ * Hook-origin calls required before the activity-gap note renders (EI-21308269358666878).
  *
  * MEASURED, not guessed. Among active agent owners with ZERO agent-origin calls since
  * their context epoch, the hook-call distribution has a hard cliff — 355, 96, then 12,
  * 8, 8, 5, 4, 3, 2… — so every threshold in 20..90 selects the same set, and 20 keeps
  * margin above the low-activity noise floor while still firing within a few turns of
- * onset. Live 6h sample: 1 flagged of 243 active agent owners (0.41%).
+ * onset. This is an activity observation, not proof of client registration. Live 6h
+ * sample: 1 flagged of 243 active agent owners (0.41%).
  */
 export const TOOLLESS_HOOK_THRESHOLD = 20;
 
-/** One owner whose call-origin split proves its Papercusp MCP surface loaded
- * empty. Kept beside OrientationToolSurface so every consumer uses the same
- * units, epoch anchor, threshold, and deliberately-unscoped invocation query. */
+/** One owner with hook activity and no observed agent-origin calls since the
+ * context epoch. This does not prove why agent calls are absent. Kept beside
+ * OrientationToolSurface so consumers share the query and its units. */
 export interface OrientationToolSurfaceOwner extends OrientationToolSurface {
   ownerId: string;
 }
 
 /**
- * Read the call-origin split for one or many owners in one bounded SQL shape.
+ * Read the hook/agent activity gap for one or many owners in one bounded SQL shape.
  *
  * This is the shared source of truth for both the turn-start warning and the
  * mcp-dark watchdog's recovery consumer. Keeping the query here prevents the
  * two from drifting on the three load-bearing constraints above: anchor on the
  * current context epoch, require zero agent-origin calls, and NEVER filter by
- * harness/workspace (workspace-global tools legitimately record `*`).
+ * harness/workspace (workspace-global tools legitimately record `*`). The
+ * resulting gap is informational; it does not establish client registration or
+ * a transport failure.
  */
 export async function readOrientationToolSurfaces(
   sql: Sql,
   ownerIds: string[],
 ): Promise<OrientationToolSurfaceOwner[]> {
   if (ownerIds.length === 0) return [];
+  const agentCallPredicate = agentToolInvocationPredicate(sql, 't');
   const rows = await sql<Array<{ owner_id: string; hook_calls: string | number; window_minutes: string | number }>>`
     WITH anchors AS (
       SELECT session_id AS owner_id, bumped_at
@@ -849,10 +846,10 @@ export async function readOrientationToolSurfaces(
         FROM anchors a
        WHERE NOT EXISTS (
                SELECT 1
-                 FROM harness_shared.tool_invocations t
-                WHERE t.coord_owner_id = a.owner_id
+                FROM harness_shared.tool_invocations t
+               WHERE t.coord_owner_id = a.owner_id
                   AND t.invoked_at >= a.bumped_at
-                  AND t.call_origin = 'agent'
+                  AND ${agentCallPredicate}
              )
     )
     SELECT s.owner_id,
@@ -893,75 +890,6 @@ export async function readOrientationToolSurfaces(
  */
 export function hasUndischargedObligations(state: OrientationState): boolean {
   return (state.obligations?.primary.length ?? 0) > 0;
-}
-
-/**
- * The reduced state used when every class is unchanged but an obligation is
- * still undischarged: obligations ONLY.
- *
- * Re-emitting the WHOLE block each turn for one standing row would repeat held
- * items, gates and facts that genuinely have not changed — manufacturing the
- * exact signal decay D-003 withdrew the improvement-triage line for. The item
- * says an obligation ROW renders every turn, not the block, so this keeps the
- * re-injection as narrow as the contract requires.
- *
- * `loopArmed: true` is the QUIET value, not an assertion about the loop: the
- * renderer warns on a loop that is NOT armed, so `false` here would fabricate a
- * "not armed" line on a healthy session every time a directive went unsettled.
- */
-function undischargedObligationsOnly(state: OrientationState): OrientationState {
-  return {
-    held: [],
-    unansweredDirected: 0,
-    unansweredStale: 0,
-    inboxRecent: [],
-    openAsks: null,
-    announcedGates: [],
-    // `[]`, not null: the QUIET value. Empty renders no transition line, which
-    // is right for an obligations-only re-emit — the modes have not changed, so
-    // repeating their attribution would be the signal decay this projection
-    // exists to avoid. null would mean "unreadable", which is a different and
-    // untrue claim on a turn where we simply did not look.
-    modes: [],
-    // `null` is the QUIET value HERE, and — unlike `modes` above — it carries no
-    // "unreadable" claim, because this projection is RENDER-ONLY: composeOrientationBlock
-    // fingerprints the FULL state before building it, so nothing in here reaches a cursor.
-    // There is no empty AuthorityVerdict to use instead (the type is three required
-    // strings, and a blank-valued one would render `- authority: exec  …` on a first
-    // turn), so null — which renders unconditionally nothing — is the honest choice.
-    authorityVerdict: null,
-    // `undefined` is the QUIET value for this class (renders nothing), and is
-    // the honest one here for the same reason as `authorityVerdict: null`
-    // above: this projection did not look, so it must not claim a measured
-    // empty. `{ decisions: [] }` would be the "no new decisions" assertion
-    // D-081 ruling 3 forbids building on anything but a real read.
-    planDecisions: undefined,
-    // `undefined` for the same reason as `planDecisions` directly above: this
-    // projection did not read the lock queue, so it must not claim the
-    // measured-empty `{ held: [], blocked: [], observed: [] }`. That value would
-    // assert "nothing about your locks changed" from a read that never
-    // happened — and, worse than for decisions, it would WRITE an empty
-    // observed-set token, so the next real read would see every standing hold
-    // as new.
-    lockTransitions: undefined,
-    // `[]` — the MEASURED-empty value — is right here, and the asymmetry with
-    // `lockTransitions: undefined` directly above is deliberate, not an
-    // oversight. That field must be `undefined` because it WRITES a watermark
-    // token (`observed`), so a projection claiming measured-empty would erase
-    // the cursor. `coupledPeers` in THIS projection reaches no cursor at all —
-    // it is a render-only view — so the preserve-on-unreadable argument does
-    // not apply, and `[]` both renders nothing and asserts nothing. Same
-    // convention as `modes: []`.
-    coupledPeers: [],
-    loopArmed: true,
-    loopFireWithheld: false,
-    improvementTriage: null,
-    executableFrontier: null,
-    neverDropFacts: [],
-    toolSurface: null,
-    carryBlindWindow: null,
-    obligations: state.obligations,
-  };
 }
 
 /**
@@ -2411,9 +2339,9 @@ export const ORIENTATION_CLASS_REGISTRY: readonly RegisteredOrientationClass[] =
         render: (toolSurface) =>
           toolSurface
             ? [
-                `- 🚨 MCP TOOLS NOT REGISTERED — 0 tool calls in ${toolSurface.windowMinutes}m vs ` +
-                  `${toolSurface.hookCalls} harness beats OK. Tool list loaded EMPTY; it cannot ` +
-                  `self-heal. RESTART THE SESSION (EI-21308269358666878).`,
+                `- No agent-origin MCP calls recorded in ${toolSurface.windowMinutes}m despite ` +
+                  `${toolSurface.hookCalls} harness beats. Tool-list registration is unknown; ` +
+                  `this activity gap alone does not justify a restart.`,
               ]
             : [],
       },
@@ -3252,52 +3180,107 @@ export function composeOrientationBlockWithRows(input: ComposeOrientationBlockIn
   const shown = withoutWithheldDirectiveRows(state, directives.withheld);
   const undischarged = hasUndischargedObligations(shown);
   if (unchanged && !undischarged && !directives.reminder) return { block: '', rows: [] };
-  const renderState = unchanged ? undischargedObligationsOnly(shown) : shown;
 
   const header = `## ${HEADING}`;
   // Rows, not bare lines: identical text, but each carries the class that
   // emitted it, which is what lets the budget loop below report WHICH classes
   // survived. `renderOrientationLines` is this same call with `.map(r => r.text)`.
   // The reminder leads: an owner directive outranks everything else here.
+  //
+  // When every other class is UNCHANGED, the re-emit is narrowed to the
+  // obligations class BY ROW, from the real state. It used to be narrowed by
+  // rendering a hand-built state of "quiet" values (`held: []`, `loopArmed:
+  // true`, …), but a value is only quiet if its class renders nothing for it,
+  // and two did not: `held: []` rendered "holding: nothing — claim before your
+  // first edit" over a session holding four items, and `loopArmed: true`
+  // rendered "engine loop: ARMED" without reading the loop (EI-24811284380539882).
+  // Filtering rows makes every other class silent by construction, including
+  // classes added later.
+  const allRows = projectOrientationRows(shown, 'turn-start', committed);
   const projected: OrientationRow[] = [
     ...(directives.reminder ? [{ classId: 'obligations' as const, order: 0, text: directives.reminder }] : []),
-    ...projectOrientationRows(renderState, 'turn-start', committed),
+    ...(unchanged ? allRows.filter((row) => row.classId === 'obligations') : allRows),
   ];
-  const out: string[] = [header];
+  // Rows whose DELIVERY a receipt measures are paid for before anything else is
+  // packed. Every other row keeps the break-on-first-miss rule below; a reserved
+  // row still lands in its own emission slot, it just cannot be the one that misses.
+  const reserved = reservedOrientationRows(projected, shown, budget - header.length);
+  let reservedCost = [...reserved].reduce((sum, row) => sum + row.text.length + 1, 0);
   const kept: OrientationRow[] = [];
+  const omitted: OrientationRow[] = [];
   let used = header.length;
-  let next = 0;
-  for (; next < projected.length; next += 1) {
-    const row = projected[next]!;
+  for (const row of projected) {
     const cost = row.text.length + 1; // + the newline joining it
-    if (used + cost > budget) break;
-    out.push(row.text);
+    if (reserved.has(row)) {
+      kept.push(row);
+      used += cost;
+      reservedCost -= cost;
+      continue;
+    }
+    if (omitted.length > 0 || used + cost + reservedCost > budget) {
+      omitted.push(row);
+      continue;
+    }
     kept.push(row);
     used += cost;
   }
   // D-027: the break above used to drop every remaining row with no trace, so an
   // agent could not tell "nothing is owed" from "it did not fit". Say what was cut,
   // evicting kept rows from the tail until the marker fits. The marker is not a
-  // class's row: it is never credited as delivery of anything it names.
-  if (next < projected.length) {
-    const omitted = projected.slice(next);
-    const marker = () => {
-      const classes = [...new Set(omitted.map((row) => row.classId))];
-      const named = classes.slice(0, 3).join(', ') + (classes.length > 3 ? `, +${classes.length - 3}` : '');
-      return `- +${omitted.length} orientation rows omitted (${named}) — coord:orient`;
-    };
-    while (kept.length > 0 && used + marker().length + 1 > budget) {
-      const row = kept.pop()!;
-      out.pop();
-      omitted.unshift(row);
-      used -= row.text.length + 1;
+  // class's row: it is never credited as delivery of anything it names. A reserved
+  // row is never evicted for it — that would hand back the cut the reservation paid for.
+  const marker = () => {
+    const classes = [...new Set(omitted.map((row) => row.classId))];
+    const named = classes.slice(0, 3).join(', ') + (classes.length > 3 ? `, +${classes.length - 3}` : '');
+    return `- +${omitted.length} orientation rows omitted (${named}) — coord:orient`;
+  };
+  if (omitted.length > 0) {
+    while (used + marker().length + 1 > budget) {
+      let index = kept.length - 1;
+      while (index >= 0 && reserved.has(kept[index]!)) index -= 1;
+      if (index < 0) break;
+      const [row] = kept.splice(index, 1);
+      omitted.unshift(row!);
+      used -= row!.text.length + 1;
     }
-    if (used + marker().length + 1 <= budget) out.push(marker());
   }
+  const out = [header, ...kept.map((row) => row.text)];
+  if (omitted.length > 0 && used + marker().length + 1 <= budget) out.push(marker());
   // Header alone says nothing — emit only if at least one real line survived.
   // A header-only composition delivered NOTHING, so its rows are dropped too:
   // reporting them as reach would credit a class for a block nobody received.
   return out.length > 1 ? { block: out.join('\n'), rows: kept } : { block: '', rows: [] };
+}
+
+/**
+ * PURE: the projected rows the outer budget must not cut — a due goal plan-placement
+ * action ({@link isGoalPlacementReceiptCandidate}).
+ *
+ * Its receipt is `block.includes(line)` against the FINAL block, so it is only as
+ * reachable as the tightest budget in front of it. Measured live 2026-09-30 (goal
+ * 60d3a8): the sink admitted the row, then this composer dropped it behind three
+ * open-check rows and the same plan's author-repair row, and the holder was never
+ * told to place the plan. Reserved in emission order while they fit on their own
+ * (`room`); a row too long for the whole budget is left to the ordinary rule.
+ */
+function reservedOrientationRows(
+  projected: readonly OrientationRow[],
+  state: OrientationState,
+  room: number,
+): ReadonlySet<OrientationRow> {
+  const lines = (state.obligations?.projection.entries ?? [])
+    .filter(isGoalPlacementReceiptCandidate)
+    .map((row) => formatAgentObligationLine(row, 'action'));
+  const reserved = new Set<OrientationRow>();
+  if (lines.length === 0) return reserved;
+  let cost = 0;
+  for (const row of projected) {
+    if (row.classId !== 'obligations' || !lines.some((line) => row.text.includes(line))) continue;
+    if (cost + row.text.length + 1 > room) continue;
+    reserved.add(row);
+    cost += row.text.length + 1;
+  }
+  return reserved;
 }
 
 /** Fingerprint only obligation content that survived the final outer budget.
@@ -3468,10 +3451,10 @@ export interface OrientationDeps {
   /** KEYS of never-drop standing facts in this agent's scopes (workspace + owner). */
   neverDropFacts: (ownerId: string, workspaceId: string) => Promise<string[]>;
   /**
-   * Evidence that this agent's MCP tool surface loaded EMPTY, or null for
-   * healthy/unreadable. Takes only `ownerId`: the detector deliberately scopes by
-   * NOTHING else (see the default reader for why a workspace/harness predicate
-   * manufactures false positives here).
+   * Observed hook/agent activity gap, or null when no gap meets its evidence
+   * floor. This does not establish client registration. Takes only `ownerId`:
+   * the reader deliberately scopes by NOTHING else (workspace-global tools
+   * legitimately record `*`).
    */
   toolSurface: (ownerId: string) => Promise<OrientationToolSurface | null>;
   /**
@@ -4707,6 +4690,8 @@ export async function buildTurnStartOrientationBlock(input: {
   identityBinder?: typeof import('./agent-identities/source').bindSelectedIdentityOutputs;
   /** Test seam only; production reads the caller's authoritative presence row. */
   identityAssignmentReader?: (ownerId: string) => Promise<SuAssignmentPresence | null>;
+  /** Test seam only; how long a late placement baseline may keep upgrading its staged fallback. */
+  placementBackgroundTimeoutMs?: number;
 }): Promise<TurnStartOrientationDelivery> {
   try {
     const { ownerId, workspaceId } = input;
@@ -4734,14 +4719,35 @@ export async function buildTurnStartOrientationBlock(input: {
       ORIENTATION_CURSOR_SURFACE,
       proof ? { confirmedToken: input.confirmedDeliveryToken ?? null } : undefined,
     ).catch(() => null);
+    const unconfirmedPlacement = progressReceipts && ack?.unconfirmedPending
+      ? ack.unconfirmedPending[progressReceipts.GOAL_PLACEMENT_DELIVERY_KEY]
+      : undefined;
+    if (progressReceipts && unconfirmedPlacement !== undefined) {
+      const reason = input.confirmedDeliveryToken === null
+        ? 'confirmation-token-missing'
+        : 'confirmation-token-mismatch';
+      void trackDetached(progressReceipts.recordGoalPlacementDeliveryOutcome({
+        ownerId, workspaceId, stage: 'confirm', reason, candidate: unconfirmedPlacement,
+      }, input.progressReceiptDeps)).catch(() => {});
+    }
     // A completed plan can leave no new orientation rows. Still settle its
     // previously emitted receipt; an empty next block must not erase evidence.
     if (progressReceipts && ack?.committed?.[progressReceipts.GOAL_PLACEMENT_DELIVERY_KEY]) {
-      void trackDetached(progressReceipts.confirmGoalPlacementDelivery({
-        ownerId, workspaceId, confirmedToken: input.confirmedDeliveryToken,
-        candidate: ack.committed[progressReceipts.GOAL_PLACEMENT_DELIVERY_KEY],
-        brief: state.obligations,
-      }, input.progressReceiptDeps)).catch(() => {});
+      const candidate = ack.committed[progressReceipts.GOAL_PLACEMENT_DELIVERY_KEY];
+      // A confirm that records nothing must say why (WI-10005636): a discarded
+      // reason made a dropped receipt indistinguishable from no opportunity.
+      void trackDetached((async () => {
+        const outcome = await progressReceipts.confirmGoalPlacementDelivery({
+          ownerId, workspaceId, confirmedToken: input.confirmedDeliveryToken,
+          candidate, brief: state.obligations,
+        }, input.progressReceiptDeps).catch((error: unknown) => ({
+          recorded: 0, reason: `confirm-threw:${error instanceof Error ? error.message : String(error)}`,
+        }));
+        if (outcome.recorded > 0) return;
+        await progressReceipts.recordGoalPlacementDeliveryOutcome({
+          ownerId, workspaceId, stage: 'confirm', reason: outcome.reason, candidate,
+        }, input.progressReceiptDeps);
+      })()).catch(() => {});
     }
     if (isEmptyOrientation(state)) return NO_ORIENTATION;
     const composed = composeOrientationBlockWithRows({
@@ -4792,18 +4798,25 @@ export async function buildTurnStartOrientationBlock(input: {
       outputRevision: createHash('sha256').update(block).digest('hex'),
     };
     deliveredFingerprint[TURN_START_IDENTITY_DELIVERY_KEY] = pendingIdentity;
+    let latePlacement: Promise<unknown> | null = null;
     if (progressReceipts && deliveryToken) {
       const rows = progressReceipts.deliveredGoalPlacementRows({ ownerId, workspaceId, brief: state.obligations, block });
       if (rows.length) {
+        // The admission preflight inside prepare costs ~0.4s warm and seconds
+        // cold, so on a live host it rarely fits the hook's budget. Stage a
+        // token-stamped fallback now; the same in-flight prepare upgrades it
+        // by token after staging (below) instead of being thrown away.
+        const preparing = progressReceipts.prepareGoalPlacementDelivery({ ownerId, workspaceId, token: deliveryToken,
+          brief: state.obligations, block }, input.progressReceiptDeps);
         const measured = await withBoundedTimeout(
-          progressReceipts.prepareGoalPlacementDelivery({ ownerId, workspaceId, token: deliveryToken,
-            brief: state.obligations, block }, input.progressReceiptDeps),
+          preparing,
           { fallback: null, timeoutMs: 250, label: 'goal-placement-delivery-baseline' },
         );
         deliveredFingerprint[progressReceipts.GOAL_PLACEMENT_DELIVERY_KEY] = measured.value ?? {
-          version: 1, unavailable: true, rows,
+          version: 1, unavailable: true, token: deliveryToken, rows,
           reason: measured.reason ?? 'native-baseline-unavailable',
         };
+        if (measured.degraded && measured.reason === 'timeout') latePlacement = preparing;
       }
     }
     const staged = await stage(
@@ -4841,6 +4854,38 @@ export async function buildTurnStartOrientationBlock(input: {
         await annotateReadCursorByToken(
           ownerId, ORIENTATION_CURSOR_SURFACE, TURN_START_IDENTITY_DELIVERY_KEY, identityToken, receipt,
         );
+      })()).catch(() => {});
+    }
+    if (staged && latePlacement && progressReceipts && deliveryToken) {
+      // Its offeredAt is taken when prepare finishes, so a late upgrade can
+      // only make a receipt harder to form. A candidate the next ACK already
+      // confirmed as unavailable stays unavailable.
+      const placementKey = progressReceipts.GOAL_PLACEMENT_DELIVERY_KEY;
+      void trackDetached((async () => {
+        const late = await withBoundedTimeout(latePlacement, {
+          fallback: null, timeoutMs: input.placementBackgroundTimeoutMs ?? 8_000,
+          label: 'goal-placement-delivery-background',
+        });
+        if (!late.value) {
+          const reason = late.degraded
+            ? `late-prepare-${late.reason ?? 'degraded'}${late.errorMessage ? `:${late.errorMessage}` : ''}`
+            : 'late-prepare-null';
+          await progressReceipts.recordGoalPlacementDeliveryOutcome({
+            ownerId, workspaceId, stage: 'late-upgrade', reason,
+            candidate: deliveredFingerprint[placementKey],
+          }, input.progressReceiptDeps);
+          return;
+        }
+        const { annotateReadCursorByToken } = await import('./agent-tools/coordination/read-cursors');
+        const annotated = await annotateReadCursorByToken(
+          ownerId, ORIENTATION_CURSOR_SURFACE, placementKey, deliveryToken, late.value,
+        );
+        if (annotated === false) {
+          await progressReceipts.recordGoalPlacementDeliveryOutcome({
+            ownerId, workspaceId, stage: 'late-upgrade', reason: 'late-annotate-not-applied',
+            candidate: late.value,
+          }, input.progressReceiptDeps);
+        }
       })()).catch(() => {});
     }
     // A token whose stage failed names no pending, so confirming it could never

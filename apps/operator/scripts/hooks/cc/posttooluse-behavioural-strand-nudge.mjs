@@ -7,7 +7,8 @@
 // THE TRAP
 //   Adding a CALL to an injected collaborator inside a shared lib changes HOW MANY TIMES
 //   that seam is called. Rewriting a returned or persisted output PROPERTY can change its
-//   runtime value while keeping the object shape and types identical. Every test in another
+//   runtime value while keeping the object shape and types identical. Changing a package.json
+//   scripts.<name> string can also strand a test that pins the command with a regex. Every test in another
 //   workspace that asserts on the call COUNT/ORDER or changed output value —
 //   `toHaveBeenCalledTimes`, `callCount`, `.mock.calls`, exact `invocations.map(...).toEqual([...])`,
 //   `expect(x).not.toHaveBeenCalled()`,
@@ -70,7 +71,11 @@
 //     usually CORRECT. This names the trigger and the command; it never renders a verdict.
 //     Do NOT delete or loosen a downstream count assertion to silence it — that assertion
 //     is load-bearing; if the new count is right, UPDATE it to the new count.
-//   - REUSES the detector: `increasedSeams`, `changedSeamControlFlow`, `repoForPath` and `submodulePaths` are
+//   - REUSES the detector: `increasedSeams`, `changedSeamControlFlow`, `diffOutputValues`,
+//     `diffPackageScriptValues`, `invokedInjectedMembers` (EI-23824032487848760 — an OPTIONAL member of an injected Deps
+//     bundle gained an invoker, which strands PARTIAL test fixtures with no count assertion to
+//     name them; each is optional-chained so an older detector degrades to silence),
+//     `repoForPath` and `submodulePaths` are
 //     dynamically imported from the repo resolved off the edited file's own path. The hook
 //     is INSTALLED to ~/.papercusp/hooks/cc/, detached from any repo, so a static import is
 //     impossible — but re-implementing the seam counting (a TS-AST walk) or the submodule
@@ -95,9 +100,16 @@ const DETECTOR_REL = join('scripts', 'check-behavioural-strands.mjs');
 /** Two full TS parses per fire; a file bigger than this is a bundle, not a hand-written seam. */
 const MAX_BYTES = 400_000;
 
-/** Mirrors the CLI's SOURCE_RE / TEST_RE / EXCLUDED_* — see isCandidateFile. */
-const SOURCE_RE = /\.(?:ts|tsx|mts|cts)$/;
-const TEST_RE = /\.(?:test|spec)\.(?:ts|tsx|mts|mjs|js|jsx)$/;
+/**
+ * Mirrors the CLI's `candidateSkipReason` (SOURCE_RE / DECLARATION_RE / TEST_RE / EXCLUDED_*).
+ * A copy, because this hook decides BEFORE it loads the detector (which loads TypeScript) on
+ * every edit. The hook's test checks isCandidateFile against the detector's function path by
+ * path, so a widening on one side only fails there (WI-10004906 added JS to both).
+ */
+const SOURCE_RE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const PACKAGE_JSON_RE = /(?:^|\/)package\.json$/;
+const DECLARATION_RE = /\.d\.[cm]?ts$/;
+const TEST_RE = /\.(?:test|spec)\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/;
 const EXCLUDED_DIR_RE = /(?:^|\/)(?:dist|build|node_modules|coverage|\.next|\.papercusp)\//;
 const EXCLUDED_ROOT_RE = /^(?:papercup-release|papercup-checkpoint)\//;
 
@@ -152,10 +164,11 @@ async function main() {
  */
 export function isCandidateFile(filePath) {
   const posix = String(filePath).split(sep).join('/');
-  if (!SOURCE_RE.test(posix)) return false;
-  if (posix.endsWith('.d.ts')) return false;
-  if (TEST_RE.test(posix)) return false;
   if (EXCLUDED_DIR_RE.test(posix) || EXCLUDED_ROOT_RE.test(posix)) return false;
+  if (PACKAGE_JSON_RE.test(posix)) return true;
+  if (!SOURCE_RE.test(posix)) return false;
+  if (DECLARATION_RE.test(posix)) return false;
+  if (TEST_RE.test(posix)) return false;
   return true;
 }
 
@@ -178,7 +191,7 @@ export function findRepoRoot(filePath, exists = existsSync) {
 }
 
 /**
- * The advisory text for a set of seam increases. Exported so the test asserts the real string.
+ * The advisory text for detected behavioural strands. Exported so the test asserts the real string.
  *
  * `baseSha` is the ref this hook actually diffed against, in the file's OWNING repo. Passing
  * it turns the prescribed command into a reproduction of THIS comparison rather than a
@@ -186,21 +199,34 @@ export function findRepoRoot(filePath, exists = existsSync) {
  */
 export function formatNudge(relPath, seamsOrTriggers, { baseSha = null, submodule = null } = {}) {
   // Keep the old `(relPath, seams, opts)` shape for installed hooks and third-party callers;
-  // the detector's value-aware form passes `{ seams, values }` as the second argument.
+  // the detector's value-aware form passes its trigger arrays as the second argument.
   const seams = Array.isArray(seamsOrTriggers) ? seamsOrTriggers : seamsOrTriggers?.seams ?? [];
   const controlFlow = Array.isArray(seamsOrTriggers) ? [] : seamsOrTriggers?.controlFlow ?? [];
   const values = Array.isArray(seamsOrTriggers) ? [] : seamsOrTriggers?.values ?? [];
+  const scriptValues = Array.isArray(seamsOrTriggers) ? [] : seamsOrTriggers?.scriptValues ?? [];
+  // EI-23824032487848760: an OPTIONAL member of an injected Deps bundle gained an invoker.
+  const injections = Array.isArray(seamsOrTriggers) ? [] : seamsOrTriggers?.injections ?? [];
   const hasCallTriggers = seams.length > 0;
   const hasControlFlowTriggers = controlFlow.length > 0;
   const hasValueTriggers = values.length > 0;
+  const hasScriptTriggers = scriptValues.length > 0;
+  const hasInjectionTriggers = injections.length > 0;
+  const scriptOnly =
+    hasScriptTriggers && !hasCallTriggers && !hasControlFlowTriggers && !hasValueTriggers && !hasInjectionTriggers;
+  const injectionOnly =
+    hasInjectionTriggers && !hasCallTriggers && !hasControlFlowTriggers && !hasValueTriggers && !hasScriptTriggers;
   const lines = [
-    (hasCallTriggers || hasControlFlowTriggers) && hasValueTriggers
+    scriptOnly
+      ? '⚠ PACKAGE-SCRIPT STRAND RISK — a package.json scripts.<name> value changed; a test may pin its command.'
+      : (hasCallTriggers || hasControlFlowTriggers) && hasValueTriggers
       ? '⚠ BEHAVIOURAL STRAND RISK — a seam call count and an output value changed; downstream assertions may be stale.'
       : hasControlFlowTriggers
         ? '⚠ CONTROL-FLOW STRAND RISK — a dependency call’s invocation eligibility changed; downstream invocation assertions may be stale.'
       : hasValueTriggers
         ? '⚠ OUTPUT-VALUE STRAND — you may have just changed a downstream runtime value contract you cannot see.'
-        : '⚠ SEAM CALL-COUNT INCREASE — you may have just stranded call-count assertions you cannot see.',
+        : injectionOnly
+          ? '⚠ INJECTED-MEMBER STRAND RISK — a new call to an OPTIONAL Deps member may have just stranded test fixtures that build the bundle partially.'
+          : '⚠ SEAM CALL-COUNT INCREASE — you may have just stranded call-count assertions you cannot see.',
     `  ${relPath}`,
   ];
   for (const s of seams) {
@@ -208,6 +234,23 @@ export function formatNudge(relPath, seamsOrTriggers, { baseSha = null, submodul
   }
   for (const change of controlFlow) {
     lines.push(`    • ${change.seam} in ${change.function}  (control-flow eligibility changed)`);
+  }
+  for (const value of scriptValues) {
+    lines.push(`    • ${`scripts[${JSON.stringify(value.property)}]`}  (${value.before} → ${value.after})`);
+  }
+  if (hasInjectionTriggers) {
+    lines.push(
+      '',
+      '  A test FIXTURE that supplies the bundle’s sibling members but NOT the new one now',
+      '  reaches an uninjected dependency: the new call throws, the catch logs, and',
+      '  vitest-fail-on-console fails the test. Such a fixture asserts nothing about the new',
+      '  seam, so no count assertion names it — and it is usually in the SAME workspace.',
+    );
+    for (const inj of injections) {
+      lines.push(
+        `    • ${inj.member} on ${inj.owner}  (invoked ${inj.before}× → ${inj.after}×; siblings: ${(inj.siblings ?? []).join(', ')})`,
+      );
+    }
   }
   if (hasCallTriggers || hasControlFlowTriggers) {
     lines.push(
@@ -228,15 +271,33 @@ export function formatNudge(relPath, seamsOrTriggers, { baseSha = null, submodul
       lines.push(`    • ${value.property}  (${value.before} → ${value.after})`);
     }
   }
-  lines.push(
-    '',
-    '  Neither check you are about to run can see this runtime strand:',
-    '    • lint:tsc  — the TYPES may be unchanged, so it can be clean.',
-    '    • test:affected — its radius is the workspaces your changed PATHS map into; the',
-    '      stranded fixtures are in a DIFFERENT one, so it will not select them.',
-    '  The next thing that notices is the fleet green-checkpoint, hours from now, for everyone.',
-    '',
-  );
+  if (hasScriptTriggers) {
+    lines.push(
+      '',
+      '  A test can pin this command by reading packageJson.scripts["<name>"] or scripts.<name> inside an assertion,',
+      '  including a regex assertion. The detector searches tracked tests for each changed script key, in this workspace too.',
+    );
+  }
+  if (!scriptOnly) {
+    lines.push(
+      '',
+      '  Neither check you are about to run can see this runtime strand:',
+      injectionOnly
+        ? '    • lint:tsc  — the member is OPTIONAL, so a fixture that omits it type-checks.'
+        : '    • lint:tsc  — the TYPES may be unchanged, so it can be clean.',
+      ...(injectionOnly
+        ? [
+            '    • test:affected — it selects by changed PATHS, not by which fixtures build this',
+            '      bundle, so a stranded fixture can sit outside what it runs.',
+          ]
+        : [
+            '    • test:affected — its radius is the workspaces your changed PATHS map into; the',
+            '      stranded fixtures are in a DIFFERENT one, so it will not select them.',
+          ]),
+      '  The next thing that notices is the fleet green-checkpoint, hours from now, for everyone.',
+      '',
+    );
+  }
   if (baseSha) {
     const where = submodule ? ` (resolved in submodule ${submodule}, which owns this file)` : '';
     lines.push(
@@ -271,6 +332,13 @@ export function formatNudge(relPath, seamsOrTriggers, { baseSha = null, submodul
     lines.push(
       '  A value rewrite may be intentional — this is a prompt to verify, not a verdict. Run',
       '  the named tests, then update the expectation only when the new runtime contract is right.',
+    );
+  }
+  if (hasInjectionTriggers) {
+    lines.push(
+      '  The CLI names the partial fixtures (an object literal with the siblings but not the',
+      '  new member). Supply the member in each stranded fixture (e.g. a vi.fn() stub) — do not',
+      '  swallow the throw or loosen the console guard that caught it.',
     );
   }
   return lines.join('\n');
@@ -325,15 +393,23 @@ export async function nudgeFor(filePath, deps = {}) {
   const afterText = readFile(abs);
   if (beforeText === afterText) return null;
 
-  const seams = detector.increasedSeams(beforeText, afterText, relPath) ?? [];
-  const controlFlow = typeof detector.changedSeamControlFlow === 'function'
+  const isPackageManifest = PACKAGE_JSON_RE.test(relPath);
+  const seams = isPackageManifest ? [] : detector.increasedSeams(beforeText, afterText, relPath) ?? [];
+  const controlFlow = !isPackageManifest && typeof detector.changedSeamControlFlow === 'function'
     ? detector.changedSeamControlFlow(beforeText, afterText, relPath) ?? []
     : [];
-  const values = typeof detector.diffOutputValues === 'function'
+  const values = !isPackageManifest && typeof detector.diffOutputValues === 'function'
     ? detector.diffOutputValues(beforeText, afterText, relPath) ?? []
     : [];
-  if (!seams.length && !controlFlow.length && !values.length) return null;
-  return formatNudge(relPath, { seams, controlFlow, values }, { baseSha, submodule });
+  const scriptValues = isPackageManifest && typeof detector.diffPackageScriptValues === 'function'
+    ? detector.diffPackageScriptValues(beforeText, afterText) ?? []
+    : [];
+  // Optional-chained like the siblings above: an installed hook may meet an older detector.
+  const injections = !isPackageManifest && typeof detector.invokedInjectedMembers === 'function'
+    ? detector.invokedInjectedMembers(beforeText, afterText, relPath) ?? []
+    : [];
+  if (!seams.length && !controlFlow.length && !values.length && !scriptValues.length && !injections.length) return null;
+  return formatNudge(relPath, { seams, controlFlow, values, scriptValues, injections }, { baseSha, submodule });
 }
 
 /**
@@ -518,6 +594,36 @@ async function selfTest() {
   });
   await silent('silent for an oversized file', '/repo/packages/x/a.ts', { sizeOf: () => MAX_BYTES + 1 });
 
+  // EI-23824032487848760: a new invoker of an OPTIONAL Deps member fires ALONE — no seam count,
+  // control-flow or value change — and an older detector without the export stays silent.
+  const INJECTIONS = [
+    {
+      member: 'reconcileStrandedLatch',
+      owner: 'WatchdogDeps',
+      source: 'interface',
+      before: 0,
+      after: 1,
+      siblings: ['escalateGiveUp', 'now'],
+    },
+  ];
+  const injected = await nudgeFor(
+    '/repo/packages/x/a.ts',
+    baseDeps({
+      loadDetector: async () => ({
+        ...fakeDetector(),
+        increasedSeams: () => [],
+        invokedInjectedMembers: () => INJECTIONS,
+      }),
+    }),
+  );
+  check('fires on an injected-member invoker alone', typeof injected === 'string');
+  check('names the injected member', injected?.includes('reconcileStrandedLatch'));
+  check('names the sibling join key', injected?.includes('escalateGiveUp, now'));
+  check('uses the injected-member header', injected?.includes('INJECTED-MEMBER STRAND RISK'));
+  await silent('silent when an older detector has no invokedInjectedMembers', '/repo/packages/x/a.ts', {
+    loadDetector: async () => ({ ...fakeDetector(), increasedSeams: () => [] }),
+  });
+
   // Candidate filter — asserted directly, since these short-circuit before any dep runs.
   check('skips .d.ts', !isCandidateFile('packages/x/a.d.ts'));
   check('skips a test file', !isCandidateFile('packages/x/a.test.ts'));
@@ -525,8 +631,16 @@ async function selfTest() {
   check('skips node_modules', !isCandidateFile('packages/x/node_modules/y/a.ts'));
   check('skips dist', !isCandidateFile('packages/x/dist/a.ts'));
   check('skips the release checkout', !isCandidateFile('papercup-release/packages/x/a.ts'));
-  check('skips non-TS', !isCandidateFile('packages/x/a.js'));
+  check('skips .d.mts', !isCandidateFile('scripts/lib/a.d.mts'));
+  check('skips non-source', !isCandidateFile('packages/x/README.md'));
+  check('accepts package manifests', isCandidateFile('package.json'));
+  check('accepts nested package manifests', isCandidateFile('packages/x/package.json'));
+  check('skips manifests under node_modules', !isCandidateFile('node_modules/pkg/package.json'));
   check('accepts .mts', isCandidateFile('packages/x/a.mts'));
+  // JS holds shared seams too — scripts/*.mjs and this hook layer (WI-10004906).
+  check('accepts .js', isCandidateFile('packages/x/a.js'));
+  check('accepts .mjs', isCandidateFile('scripts/lib/a.mjs'));
+  check('skips a .mjs test file', !isCandidateFile('scripts/__tests__/a.test.mjs'));
   check('accepts a submodule source file', isCandidateFile('libs/generic/search/src/hybrid.ts'));
 
   if (failures.length) {

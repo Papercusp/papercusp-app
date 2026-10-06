@@ -510,6 +510,96 @@ impl OperatorInstallFreshness {
     }
 }
 
+/// The sources a pui build is made from: a commit touching none of them cannot
+/// make an installed pui out of date.
+pub const PUI_SOURCE_PATHS: [&str; 3] = ["apps/tui", "apps/pui-zellij-plugin", "apps/pui-companion-proto"];
+
+/// How far a checkout install lags the checkout it was built from (WI-10004322:
+/// Avi judged a 16-day-old `pui` as current, because nothing said otherwise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckoutDrift {
+    /// Commits on the checkout's HEAD, not in the build, that touch pui's sources.
+    pub commits: u64,
+    /// Days from the build's source commit to the newest of those commits.
+    pub days: u64,
+}
+
+impl CheckoutDrift {
+    /// The one line pui shows at launch and `pui doctor` prints; `None` when current.
+    pub fn notice(&self) -> Option<String> {
+        if self.commits == 0 {
+            return None;
+        }
+        let plural = |n: u64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+        let age = if self.days == 0 {
+            String::new()
+        } else {
+            format!(", {} older", plural(self.days, "day"))
+        };
+        Some(format!(
+            "This pui is {} behind your checkout{age}. Update it with {INSTALL_COMMAND}",
+            plural(self.commits, "pui change")
+        ))
+    }
+}
+
+/// Best-effort drift of `installed_sha` behind HEAD of the checkout at
+/// `source_root`, counting only commits that touch [`PUI_SOURCE_PATHS`]. `None`
+/// means unknown (no git, not a worktree, the sha is not in this history) and
+/// callers must stay silent rather than call the install current.
+pub fn checkout_drift(source_root: &str, installed_sha: &str) -> Option<CheckoutDrift> {
+    if source_root.trim().is_empty() || installed_sha.trim().is_empty() {
+        return None;
+    }
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source_root)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let range = format!("{installed_sha}..HEAD");
+    let mut count = vec!["rev-list", "--count", range.as_str(), "--"];
+    count.extend(PUI_SOURCE_PATHS);
+    let commits: u64 = git(&count)?.parse().ok()?;
+    if commits == 0 {
+        return Some(CheckoutDrift { commits, days: 0 });
+    }
+    let mut newest = vec!["log", "-1", "--format=%ct", "HEAD", "--"];
+    newest.extend(PUI_SOURCE_PATHS);
+    let newest: u64 = git(&newest)?.parse().ok()?;
+    let built: u64 = git(&["show", "-s", "--format=%ct", installed_sha])?.parse().ok()?;
+    Some(CheckoutDrift {
+        commits,
+        days: newest.saturating_sub(built) / 86_400,
+    })
+}
+
+/// The launch notice for THIS process: only when it is the checkout install its
+/// manifest names (a release install updates through its own channel, and a
+/// `cargo run` or test binary is not what the user launches), and only when the
+/// manifest records the checkout it came from.
+pub fn launch_drift_notice() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    if install_origin_of(&exe) != InstallOrigin::Checkout {
+        return None;
+    }
+    let manifest_path = default_manifest_path(&exe).ok()?;
+    let manifest = read_manifest(&manifest_path).ok()?;
+    let binary = resolve_manifest_artifact(&manifest_path, &manifest.binary_path, "binary").ok()?;
+    if !same_path(&binary, &exe) {
+        return None;
+    }
+    checkout_drift(manifest.source_root.as_deref()?, BUILD_SHA)?.notice()
+}
+
 /// Best-effort: is `operator_sha` an ancestor of (or equal to) `installed_sha` in
 /// the git history rooted at `source_root`? `Some(true)` means the installed pui
 /// already covers everything the operator's generation does, so a differing sha is
@@ -1196,5 +1286,69 @@ mod tests {
             release_generation_contained(&loose.path().join("bin/pui"), ancestor_operator),
             None
         );
+    }
+
+    /// WI-10004322: drift is measured against real git, counts only commits
+    /// touching pui's own sources, and is unknown (never "current") when git
+    /// cannot answer.
+    #[test]
+    fn checkout_drift_counts_pui_commits_since_the_build() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str], epoch: u64| {
+            let date = format!("@{epoch} +0000");
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_DATE", &date)
+                .output()
+                .expect("git must be on PATH for this test");
+            assert!(output.status.success(), "git {:?} failed", args);
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let commit = |path: &str, body: &str, epoch: u64| {
+            let file = root.join(path);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, body).unwrap();
+            git(&["add", "-A"], epoch);
+            git(&["commit", "--quiet", "-m", body], epoch);
+            git(&["rev-parse", "HEAD"], epoch)
+        };
+        let day = 86_400;
+        let start = 1_790_000_000;
+        git(&["init", "--quiet", "--initial-branch=main"], start);
+        git(&["config", "user.email", "test@example.com"], start);
+        git(&["config", "user.name", "test"], start);
+        let built = commit("apps/tui/src/main.rs", "v1", start);
+        let root_str = root.to_str().unwrap();
+
+        let current = checkout_drift(root_str, &built).expect("git answers");
+        assert_eq!(current, CheckoutDrift { commits: 0, days: 0 });
+        assert_eq!(current.notice(), None);
+
+        // A commit outside pui's sources does not make the install stale.
+        commit("packages/other/file.ts", "elsewhere", start + day);
+        assert_eq!(checkout_drift(root_str, &built).unwrap().commits, 0);
+
+        commit("apps/tui/src/app.rs", "v2", start + 3 * day);
+        commit("apps/pui-zellij-plugin/src/lib.rs", "v3", start + 16 * day);
+        let behind = checkout_drift(root_str, &built).unwrap();
+        assert_eq!(behind, CheckoutDrift { commits: 2, days: 16 });
+        let notice = behind.notice().unwrap();
+        assert!(notice.contains("2 pui changes behind your checkout"), "{notice}");
+        assert!(notice.contains("16 days older"), "{notice}");
+        assert!(notice.contains(INSTALL_COMMAND), "{notice}");
+
+        // One change the same day: singular, no age clause.
+        let one = CheckoutDrift { commits: 1, days: 0 }.notice().unwrap();
+        assert!(one.contains("1 pui change behind") && !one.contains("older"), "{one}");
+
+        // Unknown stays unknown: a sha this history lacks, a non-repo, no root.
+        assert_eq!(checkout_drift(root_str, "0123456789abcdef0123456789abcdef01234567"), None);
+        let no_repo = tempdir().unwrap();
+        assert_eq!(checkout_drift(no_repo.path().to_str().unwrap(), &built), None);
+        assert_eq!(checkout_drift("", &built), None);
     }
 }

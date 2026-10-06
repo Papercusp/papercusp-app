@@ -118,6 +118,8 @@ export interface AcquireResult {
    * {@link CONDITION_BRIDGE_ACTOR} for how this failed silently for real.
    */
   duplicateLeftOpen?: string;
+  /** Why the stand-down settle of {@link duplicateLeftOpen} failed (the refusal's message). */
+  duplicateLeftOpenError?: string;
   /**
    * Set when nothing was written, and WHY:
    *   • `not-actionable`      — the key is not opted in.
@@ -176,19 +178,24 @@ export const CONDITION_BRIDGE_ACTOR = 'system:condition-bridge' as const;
  * feeds a `settled: true` is how a hard, loud, correct rejection became a
  * silent lie for the life of this module.
  */
-async function settleWorkItem(id: string, state: 'done' | 'dropped', opts: { harness?: string; reason: string }): Promise<boolean> {
+async function settleWorkItem(
+  id: string,
+  state: 'done' | 'dropped',
+  opts: { harness?: string; reason: string },
+): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     await setWorkItemState(id, state, {
       harness: opts.harness,
       by: CONDITION_BRIDGE_ACTOR,
       completionRef: opts.reason,
     });
-    return true;
-  } catch {
+    return { ok: true };
+  } catch (err) {
     // Still non-throwing: a failed settle must not abort the sweep (the key
     // release below is the load-bearing half). The difference is that the
-    // failure is now RETURNED instead of discarded.
-    return false;
+    // failure is now RETURNED instead of discarded — including WHY, because a
+    // bare `false` left the cause of a duplicate unrecoverable (WI-10004742).
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -469,7 +476,7 @@ export async function acquireConditionOwner(
     const winner =
       (await findConditionKeyHolder(key, { harnessSlug: harness, workspaceId: spec.workspaceId })) ??
       (await findConditionObject(key, { harnessSlug: harness })).workItem;
-    const droppedOk = await settleWorkItem(item.id, 'dropped', {
+    const dropped = await settleWorkItem(item.id, 'dropped', {
       harness,
       reason: `superseded by ${winner ?? 'the concurrent owner'} — lost the condition-key claim race for '${key}'`,
     });
@@ -478,7 +485,7 @@ export async function acquireConditionOwner(
       workItem: winner,
       created: false,
       lostRaceTo: winner ?? undefined,
-      ...(droppedOk ? {} : { duplicateLeftOpen: item.id }),
+      ...(dropped.ok ? {} : { duplicateLeftOpen: item.id, duplicateLeftOpenError: dropped.error }),
     };
   }
 
@@ -530,6 +537,8 @@ export interface ReleaseResult {
    * to see why, instead of inferring it from `settled: false`.
    */
   settleSkipped?: 'not-bridge-minted';
+  /** Set when `settle` was attempted and REFUSED: the refusal's message (`settled` is false). */
+  settleError?: string;
 }
 
 /**
@@ -584,15 +593,18 @@ export async function releaseConditionOwner(
   // obvious cleanup), and closing it because the CONDITION cleared would destroy a
   // documented finding on a 5-minute cadence — see BRIDGE_MINT_MARKER.
   let settled = false;
+  let settleError: string | undefined;
   let settleSkipped: ReleaseResult['settleSkipped'];
   if (opts.settle) {
     if (await isBridgeMinted(current.workItem, opts.workspaceId)) {
       // `settled` is what the close ACTUALLY did — never an assumption. Asserting
       // it while discarding the outcome is what hid this module's own defect.
-      settled = await settleWorkItem(current.workItem, 'done', {
+      const outcome = await settleWorkItem(current.workItem, 'done', {
         harness,
         reason: opts.reason ?? `condition '${key}' resolved`,
       });
+      settled = outcome.ok;
+      if (!outcome.ok) settleError = outcome.error;
     } else {
       // Release the key below (so the next occurrence mints fresh) but leave the
       // item OPEN. Fails SAFE: an unreadable payload reads as not-bridge-minted, so
@@ -608,7 +620,13 @@ export async function releaseConditionOwner(
      WHERE condition_key = ${key}
        AND (${opts.workspaceId ?? null}::text IS NULL OR workspace_id = ${opts.workspaceId ?? null})`;
 
-  return { conditionKey: key, released: current.workItem, settled, ...(settleSkipped ? { settleSkipped } : {}) };
+  return {
+    conditionKey: key,
+    released: current.workItem,
+    settled,
+    ...(settleSkipped ? { settleSkipped } : {}),
+    ...(settleError ? { settleError } : {}),
+  };
 }
 
 /**

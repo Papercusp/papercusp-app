@@ -21,10 +21,10 @@
  *
  * The agent still needs the message it is supposed to respond to, so the payload
  * moves from PUSH to PULL: {@link readTriggerPlanRunPayload} resolves it
- * server-side from the local table by `planRunId`. That mirrors the write side,
- * which has always worked this way — `gmail:create-draft` takes only
- * `{ planRunId, text }` and resolves recipient, thread, reply headers and the
- * OAuth credential server-side. The read side was the asymmetry; this removes it.
+ * server-side from the local table by `planRunId`. That mirrors the write side:
+ * `mail:reply { planRunId }` takes only the run id plus the reply body and resolves
+ * recipient, thread, reply headers and the provider credential server-side. The
+ * read side was the asymmetry; this removes it.
  */
 
 import type postgres from 'postgres';
@@ -105,7 +105,7 @@ function string(value: unknown): string {
  *
  * Deliberately NOT filtered by source kind — the envelope is source-agnostic, so
  * one reader serves gmail, slack, gcal and every future adapter. The trust
- * boundary is the same one `gmail:create-draft` already relies on: a caller must
+ * boundary is the same one `mail:reply { planRunId }` relies on: a caller must
  * name a `planRunId` that resolves inside its OWN workspace.
  *
  * `status = 'succeeded'` is the correct predicate even though the agent reads

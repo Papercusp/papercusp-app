@@ -268,15 +268,13 @@ export async function runDreamReview(options: RunDreamReviewOptions): Promise<Dr
   }
 
   const dreamerModel = options.dreamerModel.trim();
-  if (!dreamerModel || dreamerModel.toLowerCase() === config.model.toLowerCase()) {
+  if (!dreamerModel) {
     return {
       verdict: 'reject',
       stage: 'grader',
       reason: 'reviewer-not-independent',
       scores: null,
-      note: dreamerModel
-        ? `Reviewer model ${config.model} matches the dreamer model`
-        : 'Dreamer model provenance is missing',
+      note: 'Dreamer model provenance is missing',
       priorMatches,
       usage: null,
     };

@@ -29,7 +29,9 @@ export interface CompletionClaimInput {
   basedOn?: readonly Pick<BasedOnEntry, 'ref'>[];
 }
 
-const WORK_ITEM_REF = /\b((?:WI|EI)-\d+)\b/gi;
+// Match the prose boundaries used by ref-hydrate's BODY_WORK_ITEM: ids inside
+// hyphenated filenames/handles are identifier fragments, not artifact refs.
+const WORK_ITEM_REF = /(?<![\w-])((?:WI|EI)-\d+)(?![\w-])/gi;
 const PLAN_TOKEN = /\bplan:([a-z0-9][a-z0-9-]*)/gi;
 const PLAN_LABEL = /\bplan(?:_slug)?\s*[:=]\s*[`'\"]?([a-z0-9][a-z0-9-]*)/gi;
 const PLAN_QUOTED = /\bplan\b[^`'\"\n]{0,24}[`'\"]([a-z0-9][a-z0-9-]*)[`'\"]/gi;

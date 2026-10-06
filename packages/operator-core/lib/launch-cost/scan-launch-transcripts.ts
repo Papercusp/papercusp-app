@@ -742,9 +742,22 @@ export async function recheckCarryArtifactManifest(
     relativeScriptRoots: manifest.scriptCensus?.relativeTraversal?.rootArtifactIds,
     artifacts: manifest.artifacts.map(({ id, filePath, maxBytes }) => ({ id, filePath, maxBytes })) });
   if (current.sha256 !== sha256) {
-    const changed = current.artifacts.filter((artifact, index) =>
-      canonicalJson(artifact) !== canonicalJson(manifest.artifacts[index])).map(artifact => artifact.id);
-    throw new Error(`carry artifacts changed after manifest freeze (${changed.join(',') || 'manifest metadata'})`);
+    const changed: Array<{ id: string; fields: string[]; before: { sha256: string; identity: string[] };
+      after: { sha256: string; identity: string[] } }> = [];
+    let changedCount = 0;
+    for (const [index, artifact] of current.artifacts.entries()) {
+      const frozen = manifest.artifacts[index];
+      const fields = (['filePath', 'maxBytes', 'resolvedPath', 'bytes', 'sha256', 'identity'] as const)
+        .filter(field => canonicalJson(artifact[field]) !== canonicalJson(frozen[field]));
+      if (!fields.length) continue;
+      changedCount++;
+      if (changed.length < 12) changed.push({ id: artifact.id, fields,
+        before: { sha256: frozen.sha256, identity: frozen.identity },
+        after: { sha256: artifact.sha256, identity: artifact.identity } });
+    }
+    const changedIds = changed.map(artifact => artifact.id);
+    throw new Error(`carry artifacts changed after manifest freeze (${changedIds.join(',') || 'manifest metadata'}; ` +
+      `changedCount=${changedCount}; observations=${JSON.stringify(changed)})`);
   }
 }
 

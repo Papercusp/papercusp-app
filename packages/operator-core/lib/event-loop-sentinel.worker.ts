@@ -43,7 +43,26 @@
  */
 
 import { workerData, parentPort } from 'node:worker_threads';
-import { writeSync, readFileSync, readlinkSync } from 'node:fs';
+import { Session } from 'node:inspector';
+import { join } from 'node:path';
+import {
+  writeSync,
+  readFileSync,
+  readlinkSync,
+  openSync,
+  readSync,
+  closeSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+// EXPLICIT `.ts` EXTENSION IS LOAD-BEARING (see the sentinel import below).
+// prettier-ignore
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — the plain-node Worker requires an explicit .ts specifier; apps/operator does not enable allowImportingTsExtensions.
+import { STALL_PROFILE_DEFAULTS, hotStackFields, shouldCaptureStallProfile, summarizeHotStacks, syncSpawnProducer, type CpuProfileLike, type StallProfileConfig } from './event-loop-stall-profile.ts';
 // EXPLICIT `.ts` EXTENSION IS LOAD-BEARING for the same reason as the import
 // below — this is a worker ENTRY, loaded by Node's native type stripping, which
 // has no extensionless lookup. `proc-thread-cpu.ts` is dependency-free and
@@ -59,6 +78,9 @@ import {
   parseCpuPressureSomeAvg60,
   parseProcDirectoryFd,
   parseProcStat,
+  parseProcSyscallTarget,
+  decodeProcPath,
+  AT_FDCWD,
   type MainThreadActivity,
 } from './proc-thread-cpu.ts';
 // EXPLICIT `.ts` EXTENSION IS LOAD-BEARING — do not "tidy" it away.
@@ -90,6 +112,11 @@ export interface SentinelWorkerData {
   mode: 'kill' | 'observe';
   /** Owning process pid — signalled on a confirmed wedge. */
   pid: number;
+  /**
+   * Bounded in-stall main-thread diagnostic (WI-10004766, WI-10005529). Absent or
+   * null disables it; the host always passes its config.
+   */
+  stallProfile?: StallProfileConfig | null;
 }
 
 /**
@@ -208,6 +235,58 @@ function readMainThreadDirectoryWait(wchan: string | null): Record<string, strin
   }
 }
 
+/** Read a NUL-terminated path at `ptr` in this process's own memory, without crossing a page. */
+function readOwnMemoryPath(ptr: number): string | null {
+  const len = Math.min(512, 4096 - (ptr % 4096));
+  const buf = new Uint8Array(len);
+  let fd: number | null = null;
+  try {
+    fd = openSync(`/proc/${pid}/mem`, 'r');
+    return decodeProcPath(buf, readSync(fd, buf, 0, len, ptr));
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) try { closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
+/**
+ * Name the syscall and FILE behind a D-state main-thread stall (WI-10004754).
+ *
+ * The wait channel alone (`open_last_lookups`, `lookup_slow`,
+ * `jbd2_log_do_checkpoint`) says where the kernel waits, not which call or
+ * file, so four D-state stalls on :3170 on 2026-10-01 (one escalated to a
+ * WEDGE SIGKILL) could not be traced to code. The main thread's syscall line
+ * can: an fd argument resolves through `/proc/<pid>/fd`, a path argument is a
+ * pointer the worker reads from this same process's memory (relative paths are
+ * anchored at their dirfd or the cwd). Re-reading the syscall line afterwards
+ * drops the result if the thread moved on mid-probe, so the kill record never
+ * carries a stale path. Fields: `mainThreadSyscall`, `mainThreadBlockedPath`.
+ */
+function readMainThreadSyscallWait(): Record<string, string> {
+  try {
+    const raw = readFileSync(`/proc/${pid}/task/${pid}/syscall`, 'utf8');
+    const target = parseProcSyscallTarget(raw, process.arch);
+    if (!target) return {};
+    let path: string | null = null;
+    if (target.fd != null) {
+      path = readlinkSync(`/proc/${pid}/fd/${target.fd}`);
+    } else if (target.pathPtr != null) {
+      path = readOwnMemoryPath(target.pathPtr);
+      if (path && !path.startsWith('/') && target.dirFd != null) {
+        const base = readlinkSync(target.dirFd === AT_FDCWD ? `/proc/${pid}/cwd` : `/proc/${pid}/fd/${target.dirFd}`);
+        path = `${base}/${path}`;
+      }
+    }
+    if (readFileSync(`/proc/${pid}/task/${pid}/syscall`, 'utf8') !== raw) return {};
+    const out: Record<string, string> = { mainThreadSyscall: target.name };
+    if (path) out.mainThreadBlockedPath = path.slice(0, 240);
+    return out;
+  } catch {
+    return {}; // transient syscall/fd race, non-Linux, or unreadable procfs
+  }
+}
+
 /**
  * Name the main thread's live children, for the synchronous-subprocess case.
  *
@@ -277,6 +356,7 @@ function mainThreadActivity(): MainThreadActivitySnapshot {
   if (wchan) out.mainThreadWchan = wchan;
   if (cpuPsiSome60 != null) out.mainThreadCpuPsiSome60 = cpuPsiSome60;
   Object.assign(out, readMainThreadDirectoryWait(wchan));
+  if (now?.state === 'D') Object.assign(out, readMainThreadSyscallWait());
   const activity: MainThreadActivity = {
     cpuKind: verdict.kind,
     state: now?.state ?? null,
@@ -298,6 +378,269 @@ function mainThreadActivity(): MainThreadActivitySnapshot {
     out.mainThreadBlockMode = 'sync-subprocess-suspected';
   }
   return { ...activity, fields: out };
+}
+
+/**
+ * IN-STALL CPU PROFILE (WI-10004766, WI-10003454) — which CODE a spinning main
+ * thread was running.
+ *
+ * `mainThreadActivity()` says a stall is `spinning`; nothing said what was
+ * spinning, so every R-state stall ended as "cause unknown". The lag monitor's
+ * profiler cannot help: it runs ON the main thread and cannot start during the
+ * stall it would need to see. This thread can. An inspector Session opened here
+ * with `connectToMainThread()` has its messages serviced by the BLOCKED main
+ * thread through V8 interrupts. Measured 2026-10-01 (node 25.9): `Profiler.start`
+ * answered 95-183 ms after asking, mid-block, for a named JS spin, an 18 s
+ * catastrophic regex, and a JSON.stringify loop, and the hot frame was named in
+ * all three. Inspector interrupts can also answer during a native futex wait
+ * (WI-10005529), so an inspector reply is not proof the loop turns. For parked
+ * threads, evaluate a Promise resolved by a main-loop setImmediate and bound
+ * its reply too. Neither result changes the kill policy.
+ *
+ * Fire-and-forget from the observe tick: the capture's awaits run on this
+ * worker's own loop and never delay an observation, and a failure only logs.
+ * Gotcha (measured): a pending inspector reply does NOT keep a worker alive;
+ * the observe `setInterval` below is what does.
+ */
+const stallProfile: StallProfileConfig | null = data.stallProfile ?? null;
+let stallProfileInFlight = false;
+let stallProfiledThisStall = false;
+let lastStallProfileAtMs: number | null = null;
+/** Echoed on the STALLED / WEDGED lines so a reader knows a profile line exists. */
+let stallProfileState: 'capturing' | 'captured' | 'failed' | 'discarded' | null = null;
+let mainThreadInspectorResponse: 'pending' | 'responsive' | 'not-answered' | 'error' | null = null;
+let mainThreadInspectorResponseMs: number | null = null;
+let mainThreadEventLoopResponse: 'pending' | 'responsive' | 'not-answered' | 'error' | null = null;
+let mainThreadEventLoopResponseMs: number | null = null;
+
+function stallProfileField(): Record<string, string | number> {
+  return {
+    ...(stallProfileState ? { stallProfile: stallProfileState } : {}),
+    ...(mainThreadInspectorResponse ? { mainThreadInspectorResponse } : {}),
+    ...(mainThreadInspectorResponseMs != null ? { mainThreadInspectorResponseMs } : {}),
+    ...(mainThreadEventLoopResponse ? { mainThreadEventLoopResponse } : {}),
+    ...(mainThreadEventLoopResponseMs != null ? { mainThreadEventLoopResponseMs } : {}),
+  };
+}
+
+function inspectorPost(
+  session: Session,
+  method: string,
+  timeoutMs: number,
+  params: Record<string, unknown> = {},
+): Promise<unknown> {
+  return new Promise((resolvePost, rejectPost) => {
+    const timer = setTimeout(
+      () => rejectPost(new Error(`${method} not answered within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    session.post(method, params, (err, result) => {
+      clearTimeout(timer);
+      if (err) rejectPost(err);
+      else resolvePost(result);
+    });
+  });
+}
+
+/** Keep the newest `retain` stall profiles. Only `stall-*.cpuprofile` is touched. */
+function pruneStallProfiles(dir: string, retain: number): void {
+  try {
+    const files = readdirSync(dir)
+      .filter((f) => f.startsWith('stall-') && f.endsWith('.cpuprofile'))
+      .sort();
+    for (let i = 0; i < files.length - Math.max(0, retain); i++) {
+      rmSync(join(dir, files[i]), { force: true });
+    }
+  } catch {
+    /* retention is best-effort */
+  }
+}
+
+async function captureStallProfile(
+  cfg: StallProfileConfig,
+  stalenessAtStartMs: number,
+  cpuKind: string,
+): Promise<void> {
+  const startedAtMs = Date.now();
+  const beatAtStart = Atomics.load(view, 0);
+  let session: Session | null = null;
+  let profilerStarted = false;
+  try {
+    session = new Session();
+    session.connectToMainThread();
+    await inspectorPost(session, 'Profiler.enable', 3_000);
+    mainThreadInspectorResponse = 'responsive';
+    mainThreadInspectorResponseMs = Date.now() - startedAtMs;
+    const discardRecoveredCapture = (): boolean => {
+      if (Atomics.load(view, 0) === beatAtStart) return false;
+      stallProfileState = 'discarded';
+      emit('STALL profile discarded — heartbeat recovered before profiler start', {
+        pid,
+        stalenessAtStartMs,
+        mainThreadActivity: cpuKind,
+        ...stallProfileField(),
+      });
+      return true;
+    };
+    if (discardRecoveredCapture()) return;
+    if (cpuKind === 'parked') {
+      mainThreadEventLoopResponse = 'pending';
+      const probeStartedAtMs = Date.now();
+      const response = await inspectorPost(session, 'Runtime.evaluate', 3_000, {
+        expression: "new Promise(resolve => setImmediate(() => resolve('event-loop-responsive')))",
+        awaitPromise: true,
+        returnByValue: true,
+      }) as { result?: { value?: unknown } };
+      if (response.result?.value !== 'event-loop-responsive') {
+        throw new Error('main event-loop callback probe returned no responsiveness proof');
+      }
+      mainThreadEventLoopResponse = 'responsive';
+      mainThreadEventLoopResponseMs = Date.now() - probeStartedAtMs;
+      if (discardRecoveredCapture()) return;
+    }
+    emit('main thread inspector answered during stale heartbeat', {
+      pid,
+      stalenessAtStartMs,
+      mainThreadActivity: cpuKind,
+      ...stallProfileField(),
+    });
+    // Not a responsiveness probe: start cost scales with heap/code size
+    // (STALL_PROFILE_DEFAULTS.startTimeoutMs). A late start is still useful
+    // while the stall lasts; discardRecoveredCapture() drops it if not.
+    await inspectorPost(session, 'Profiler.start', cfg.startTimeoutMs ?? STALL_PROFILE_DEFAULTS.startTimeoutMs);
+    profilerStarted = true;
+    if (discardRecoveredCapture()) return;
+    await new Promise((r) => setTimeout(r, cfg.captureMs));
+    const stopped = (await inspectorPost(session, 'Profiler.stop', 5_000)) as {
+      profile: CpuProfileLike;
+    };
+    profilerStarted = false;
+    // The heartbeat moving means the loop turned again mid-capture, so the
+    // tail of the profile is post-stall activity rather than the stall.
+    const stallEndedDuringCapture = Atomics.load(view, 0) !== beatAtStart;
+    mkdirSync(cfg.dir, { recursive: true });
+    pruneStallProfiles(cfg.dir, cfg.maxProfiles - 1);
+    const file = join(cfg.dir, `stall-${startedAtMs}-pid${pid}.cpuprofile`);
+    // Write-then-rename: a partial file must never look like a loadable profile.
+    writeFileSync(`${file}.tmp`, JSON.stringify(stopped.profile));
+    renameSync(`${file}.tmp`, file);
+    stallProfileState = 'captured';
+    const summary = summarizeHotStacks(stopped.profile, { top: 3, depth: 6 });
+    const spawn = syncSpawnProducer(summary);
+    emit('main event loop STALL profiled — hot stacks of the blocked main thread', {
+      pid,
+      stalenessAtStartMs,
+      captureMs: cfg.captureMs,
+      mainThreadActivity: cpuKind,
+      ...stallProfileField(),
+      stallEndedDuringCapture,
+      file,
+      ...hotStackFields(summary),
+      ...(spawn ? { syncSpawnProducer: spawn.producer } : {}),
+    });
+    // WI-10005253: hand a sync child-process producer to the main thread, which files it once its
+    // loop turns again (event-loop-sync-spawn-report.ts). The worker itself has no DB access.
+    if (spawn) {
+      parentPort?.postMessage({
+        kind: 'sync-spawn-stall',
+        pid,
+        file,
+        stalenessAtStartMs,
+        mainThreadActivity: cpuKind,
+        ...spawn,
+      });
+    }
+  } catch (err) {
+    stallProfileState = 'failed';
+    if (mainThreadInspectorResponse === 'pending') {
+      mainThreadInspectorResponse = String(err).includes('not answered within') ? 'not-answered' : 'error';
+    }
+    if (mainThreadEventLoopResponse === 'pending') {
+      mainThreadEventLoopResponse = String(err).includes('not answered within') ? 'not-answered' : 'error';
+    }
+    emit('STALL profile capture failed — sentinel unaffected', {
+      pid,
+      stalenessAtStartMs,
+      mainThreadActivity: cpuKind,
+      ...stallProfileField(),
+      error: String(err).slice(0, 200),
+    });
+  } finally {
+    if (session && profilerStarted) {
+      // Recovery after Profiler.start must not leave V8 sampling this host.
+      try { await inspectorPost(session, 'Profiler.stop', 1_000); } catch { /* best effort */ }
+    }
+    try {
+      // Also discards a profile whose start was queued behind a syscall and
+      // answered only after the timeout: the session's profiler dies with it.
+      session?.disconnect();
+    } catch {
+      /* ignore */
+    }
+    stallProfileInFlight = false;
+  }
+}
+
+/**
+ * Called on every observation with the current staleness (0 during the startup
+ * grace, so boot's legitimate synchronous work is never profiled). Below the
+ * threshold it re-arms for the next stall; at or past it, it captures once per
+ * stall when `shouldCaptureStallProfile` agrees. Must run BEFORE the 'ok' branch
+ * re-baselines `healthyCpu`, so the CPU verdict covers the stale window.
+ */
+function maybeStartStallProfile(stalenessMs: number): void {
+  if (!stallProfile) return;
+  if (stalenessMs < stallProfile.afterMs) {
+    stallProfiledThisStall = false;
+    if (!stallProfileInFlight) {
+      stallProfileState = null;
+      mainThreadInspectorResponse = null;
+      mainThreadInspectorResponseMs = null;
+      mainThreadEventLoopResponse = null;
+      mainThreadEventLoopResponseMs = null;
+    }
+    return;
+  }
+  if (stallProfileInFlight || stallProfiledThisStall) return;
+  try {
+    const now = readMainThreadStat();
+    const cpuKind = classifyThreadCpu({
+      baselineTicks: healthyCpu?.ticks ?? null,
+      currentTicks: now?.ticks ?? null,
+      elapsedMs: healthyCpu ? Date.now() - healthyCpu.atMs : 0,
+    }).kind;
+    const nowMs = Date.now();
+    if (
+      !shouldCaptureStallProfile(
+        {
+          stalenessMs,
+          cpuKind,
+          capturedThisStall: stallProfiledThisStall,
+          inFlight: stallProfileInFlight,
+          lastCaptureAtMs: lastStallProfileAtMs,
+          nowMs,
+        },
+        stallProfile,
+      )
+    ) {
+      return;
+    }
+    stallProfileInFlight = true;
+    stallProfiledThisStall = true;
+    lastStallProfileAtMs = nowMs;
+    stallProfileState = 'capturing';
+    mainThreadInspectorResponse = 'pending';
+    mainThreadInspectorResponseMs = null;
+    mainThreadEventLoopResponse = null;
+    mainThreadEventLoopResponseMs = null;
+    void captureStallProfile(stallProfile, stalenessMs, cpuKind);
+  } catch (err) {
+    // A diagnostic must never take down the sentinel.
+    stallProfileInFlight = false;
+    emit('STALL profile trigger threw — sentinel unaffected', {
+      error: String(err).slice(0, 200),
+    });
+  }
 }
 
 let state: LoopSentinelState = initialLoopSentinelState(
@@ -339,6 +682,9 @@ const timer = setInterval(() => {
   switch (action.kind) {
     case 'ok':
     case 'grace': {
+      // A stale-but-sub-warn 'ok' is where the profile starts (~4-6 s into a
+      // stall); grace passes 0 so boot is never profiled. Before re-baselining.
+      maybeStartStallProfile(action.kind === 'ok' ? action.stalenessMs : 0);
       // The loop is turning again — re-arm both one-per-stall latches so the
       // NEXT stall is reported as a fresh event rather than suppressed.
       warnedThisStall = false;
@@ -355,6 +701,7 @@ const timer = setInterval(() => {
     }
 
     case 'warn':
+      maybeStartStallProfile(action.stalenessMs);
       if (!warnedThisStall) {
         warnedThisStall = true;
         emit('main event loop STALLED (not yet actionable)', {
@@ -363,6 +710,7 @@ const timer = setInterval(() => {
           consecutiveStale: action.consecutiveStale,
           ...mainThreadActivity().fields,
           ...lastKnownLag(),
+          ...stallProfileField(),
         });
       }
       return;
@@ -459,6 +807,7 @@ const timer = setInterval(() => {
           reason: action.reason,
           ...activity.fields,
           ...lastKnownLag(),
+          ...stallProfileField(),
         },
       );
       if (mode === 'kill') {

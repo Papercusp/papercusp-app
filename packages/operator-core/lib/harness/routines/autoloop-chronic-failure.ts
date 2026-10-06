@@ -108,6 +108,7 @@ import { getOrgPg } from '@papercusp/db-org';
 import { recentWatchdogFires, claimWatchdogFire } from '../../pot/watchdog';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { SANDBOX_HARNESS_SLUG } from '../../red-queen/types';
+import { gymBudgetFloorUsd, isEligibleAutoloop } from '../../gym/autoloop-tick';
 
 /** Breach threshold (env-overridable; <=0 disables the sweep). */
 export function chronicErrorThreshold(): number {
@@ -163,6 +164,13 @@ export interface AutoloopStateRow {
    *  un-actionable "loop-su-<uuid> red N fires" tickets (28 accumulated). NON-NULL suppresses
    *  escalation; `null`/absent (a fixed system role, the sweep's intended scope) does NOT. */
   routine_target_owner_id?: string | null;
+  /** Matching gym config columns, populated only by the silent-stop query. */
+  gym_autoloop_enabled?: boolean | null;
+  gym_autoloop_status?: string | null;
+  gym_autoloop_budget_usd?: number | null;
+  gym_autoloop_spent_usd?: number | null;
+  /** Base tick eligibility for this harness; unknown is fail-closed for gym-cycle alerts. */
+  gym_cycle_eligible?: boolean;
 }
 
 /** PURE: is this row's error streak a FROZEN watermark rather than a live failure —
@@ -551,7 +559,10 @@ function chronicSweepWillEscalate(
  *  Red Queen drill row; (c) a loop:arm owner loop (owner-witnessed, its own
  *  dead-owner escalation); (d) an already explicitly-paused routine
  *  (`routine_active: false` — the stale-paused-routines alarm's job, not this
- *  one). `null`/absent `last_fired_at` never matches (nothing to measure a
+ *  one); or (e) a `gym-cycle` row without a matching currently eligible gym
+ *  autoloop config. A legitimate no-eligible tick advances the scheduled
+ *  routine heartbeat without advancing this per-harness fire watermark.
+ *  `null`/absent `last_fired_at` never matches (nothing to measure a
  *  silence FROM), and `routine_active: null` (no matching routines row — a
  *  fixed system role with no `loop:arm`-materialized row) is NOT excluded —
  *  fail-open, matching every other predicate in this module. Sorted
@@ -572,6 +583,7 @@ export function selectSilentlyStoppedRoles(
         !isRedQueenDrillRow(r) &&
         !isLoopArmOwnerLoop(r) &&
         r.routine_active !== false &&
+        (r.role !== 'gym-cycle' || r.gym_cycle_eligible === true) &&
         isStaleWatermark(r, now, silentStopMs),
     )
     .sort((a, b) => lastFiredAtMs(a) - lastFiredAtMs(b));
@@ -607,14 +619,36 @@ export async function autoloopSilentStopSweep(): Promise<SilentStopResult[]> {
     const threshold = chronicErrorThreshold();
     const allRows = await sql<AutoloopStateRow[]>`
       SELECT s.harness_slug, s.role, s.consecutive_errors, s.last_status, s.last_fired_at,
-             r.active AS routine_active, r.target_owner_id AS routine_target_owner_id
+             r.active AS routine_active, r.target_owner_id AS routine_target_owner_id,
+             g.enabled AS gym_autoloop_enabled, g.status AS gym_autoloop_status,
+             g.budget_usd AS gym_autoloop_budget_usd, g.spent_usd AS gym_autoloop_spent_usd
         FROM harness_shared.autoloop_state s
    LEFT JOIN harness_shared.routines r
           ON r.name = s.role AND r.workspace_id = s.workspace_id
+   LEFT JOIN harness_shared.gym_autoloop_config g
+          ON s.role = 'gym-cycle' AND g.harness_slug = s.harness_slug AND g.workspace_id = s.workspace_id
        WHERE s.workspace_id = ${workspaceId}
          AND s.last_fired_at IS NOT NULL
          AND s.last_fired_at < now() - make_interval(secs => ${Math.floor(silentStopMs / 1000)})`;
-    const silent = selectSilentlyStoppedRoles(allRows, threshold, { now, silentStopMs });
+    const budgetFloorUsd = gymBudgetFloorUsd();
+    const silent = selectSilentlyStoppedRoles(
+      allRows.map((row) => ({
+        ...row,
+        gym_cycle_eligible:
+          row.role === 'gym-cycle' &&
+          isEligibleAutoloop(
+            {
+              enabled: row.gym_autoloop_enabled === true,
+              status: row.gym_autoloop_status ?? '',
+              budgetUsd: row.gym_autoloop_budget_usd ?? null,
+              spentUsd: row.gym_autoloop_spent_usd ?? 0,
+            },
+            budgetFloorUsd,
+          ),
+      })),
+      threshold,
+      { now, silentStopMs },
+    );
     for (const s of silent) {
       try {
         const source = 'autoloop-silent-stop' as const;

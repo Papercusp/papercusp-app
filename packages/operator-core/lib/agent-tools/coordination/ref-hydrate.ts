@@ -46,6 +46,8 @@ export type HydratableRef =
   | { kind: 'msg'; id: string }
   /** A work-item by id — WI-/EI-/F- families (`WI-123`, `wi:WI-123`). */
   | { kind: 'work-item'; id: string }
+  /** A conversation id (exact or unique prefix, resolved in the caller's workspace). */
+  | { kind: 'conversation'; id: string }
   /** A plan item (`plan:<slug>#P-001`). */
   | { kind: 'plan-item'; slug: string; item: string }
   /** An announced event gate by exact key (`gate:<key>`). */
@@ -89,6 +91,7 @@ export interface HydratedRef {
 }
 
 const WORK_ITEM_ID = /^(?:wi:)?((?:WI|EI|F)-\d+)$/i;
+const CONVERSATION_ID = /^(?:conversation:)?(conv-[a-z0-9][a-z0-9-]*)$/i;
 const PLAN_ITEM = /^plan:([a-z0-9][a-z0-9-]*)#(P-\d{3,})$/i;
 const MSG_REF = /^msg:(\S+)$/i;
 const GATE_REF = /^gate:(\S+)$/;
@@ -109,6 +112,8 @@ export function parseRefToken(token: string): HydratableRef | null {
   if (msg) return { kind: 'msg', id: msg[1] };
   const wi = WORK_ITEM_ID.exec(t);
   if (wi) return { kind: 'work-item', id: wi[1].toUpperCase() };
+  const conversation = CONVERSATION_ID.exec(t);
+  if (conversation) return { kind: 'conversation', id: conversation[1] };
   const pi = PLAN_ITEM.exec(t);
   if (pi) return { kind: 'plan-item', slug: pi[1].toLowerCase(), item: pi[2].toUpperCase() };
   const gate = GATE_REF.exec(t);
@@ -230,6 +235,8 @@ export function canonicalRefKey(ref: HydratableRef): string {
       return `msg:${ref.id}`;
     case 'work-item':
       return `work-item:${ref.id}`;
+    case 'conversation':
+      return `conversation:${ref.id}`;
     case 'plan-item':
       return `plan-item:${ref.slug}#${ref.item}`;
     case 'gate':

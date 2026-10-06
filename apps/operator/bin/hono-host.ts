@@ -39,10 +39,11 @@ import { runBootstrap, waitForBootMigrationGate } from './host-bootstrap';
 import { externalIngressHandler, handler } from './host-handler';
 import { externalIngressPort } from '@papercusp/operator-core/lib/auth/forwarded-request-trust';
 import { configureIngressListener } from '@papercusp/operator-core/lib/own-tunnel/runtime';
+import { markOwnTunnelListenerSeamConfigured } from '@papercusp/operator-core/lib/own-tunnel/service';
 import {
-  markOwnTunnelListenerSeamConfigured,
-  startOwnTunnelReconciler,
-} from '@papercusp/operator-core/lib/own-tunnel/service';
+  httpServingProcessRole,
+  startRemoteAccessReconcilers,
+} from '@papercusp/operator-core/lib/remote-access/boot-reconcilers';
 import { workspacePinWarning } from '@papercusp/operator-core/lib/workspace-pin-guard';
 import { requestOnlyHost } from '@papercusp/operator-core/lib/background-workers';
 import { scheduleTranscriptSearchWarmup } from '@papercusp/operator-core/lib/transcript-search-warmup';
@@ -105,6 +106,7 @@ import {
   stopInvalidationListener,
 } from '@papercusp/operator-core/lib/sync-sse';
 import { ensureFlagChangeListener } from '@papercusp/operator-core/lib/flag-change-listener';
+import { startOperatorStateCacheCoherence } from '@papercusp/operator-core/lib/operator-state-pg';
 import {
   startCluster,
   resolveClusterWorkers,
@@ -116,6 +118,7 @@ import { isBenignHostError } from './host-benign-errors';
 import { applyServerTimeouts } from './host-request-deadline';
 import { pinSubstrateSocketForCluster } from '@papercusp/operator-core/lib/sync/hyperbee/substrate-socket-path';
 import { pinSpawnerSocketForCluster } from '@papercusp/operator-core/lib/fleet/spawner-socket-path';
+import { pinLspDaemonSocketForCluster } from '@papercusp/operator-core/lib/code-intelligence/lsp-daemon-socket';
 import { pinSetupTokenForCluster } from '@papercusp/operator-core/lib/auth-setup-token';
 import { runSubstrateSidecarServer } from '@papercusp/operator-core/lib/sync/hyperbee/substrate-sidecar-server';
 import { runSpawnerSidecarServer } from '@papercusp/operator-core/lib/fleet/spawner-sidecar-server';
@@ -123,6 +126,7 @@ import { markSpawnOffloadHost } from '@papercusp/operator-core/lib/fleet/git-via
 import { runGatewaySidecarMain } from '@papercusp/operator-core/lib/inference-gateway/sidecar-main';
 import { runEmbedSidecarServer } from '@papercusp/operator-core/lib/memory/embed-sidecar-server';
 import { runLiveHealthMonitorMain } from '@papercusp/operator-core/lib/resource-governor/live-health-monitor-main';
+import { runAdmissionPrecheckWorkerFromEnvironment } from '@papercusp/operator-core/lib/release/admission-fix-precheck-managed';
 import { assertMobileJwtSecretDurableForCluster } from '@papercusp/operator-core/lib/device-jwt';
 import { installStdioPeerGuard } from '@papercusp/operator-core/lib/process-supervision/stdio-peer-guard';
 import { notifySystemdReady } from '@papercusp/operator-core/lib/systemd-readiness';
@@ -154,7 +158,7 @@ installFatalDiagnostics();
 // respawn — the all-day :3270 crash-loop that destabilized the substrate
 // primary (2026-07-09, EI-8810). Divert BEFORE any host boot side-effect; each
 // sidecar server keeps the process alive. Mirrors serve.ts main() exactly.
-const sidecarMode: 'substrate' | 'spawner' | 'gateway' | 'embed' | 'resource-health' | null =
+const sidecarMode: 'substrate' | 'spawner' | 'gateway' | 'embed' | 'resource-health' | 'lsp' | 'repair-precheck' | null =
   process.env.PAPERCUSP_SUBSTRATE_SIDECAR_MODE === '1'
     ? 'substrate'
     : process.env.PAPERCUSP_SPAWNER_SIDECAR_MODE === '1'
@@ -163,11 +167,21 @@ const sidecarMode: 'substrate' | 'spawner' | 'gateway' | 'embed' | 'resource-hea
         ? 'gateway'
         : process.env.PAPERCUSP_EMBED_SIDECAR_MODE === '1'
           ? 'embed'
+          : process.env.PAPERCUSP_LSP_DAEMON_MODE === '1'
+            ? 'lsp'
           : process.env.PAPERCUSP_RESOURCE_GOVERNOR_MONITOR_MODE === '1'
             ? 'resource-health'
+            : process.env.PAPERCUSP_REPAIR_PRECHECK_WORKER_MODE === '1'
+              ? 'repair-precheck'
             : null;
 if (sidecarMode === 'substrate') runSubstrateSidecarServer();
 if (sidecarMode === 'spawner') runSpawnerSidecarServer();
+if (sidecarMode === 'lsp') {
+  void import('@papercusp/operator-core/lib/code-intelligence/lsp-daemon-server').then(
+    ({ runLspDaemonServer }) => runLspDaemonServer(),
+    (error) => { console.error('[lsp-daemon] fatal boot:', error); process.exit(1); },
+  );
+}
 if (sidecarMode === 'gateway') {
   runGatewaySidecarMain().catch((e) => {
     console.error('[inference-gateway] fatal:', e);
@@ -180,6 +194,15 @@ if (sidecarMode === 'resource-health') {
     console.error('[resource-governor-health] fatal:', e);
     process.exit(1);
   });
+}
+if (sidecarMode === 'repair-precheck') {
+  void runAdmissionPrecheckWorkerFromEnvironment().then(
+    (code) => { process.exitCode = code; },
+    (error) => {
+      console.error('[release:repair-queue] pre-check worker startup failed', error);
+      process.exitCode = 1;
+    },
+  );
 }
 // WI-10002709: this process (primary AND every cluster worker — each re-evaluates
 // this entry) is a request host whose RSS makes a local fork cost ~240 ms of dead
@@ -285,6 +308,13 @@ function startRequestServers(): void {
   // workers on :3070, exactly ONE holding the LISTEN). Fire-and-forget; the
   // helper retries with backoff and is loud on exhaustion.
   void ensureInvalidationListener();
+
+  // WI-10004071: drop this worker's cached harness_registry / account-pool rows
+  // when a SIBLING worker (or any other process) writes them, instead of serving
+  // the stale row for the cache TTL. Rides the same sync_invalidate LISTEN.
+  void startOperatorStateCacheCoherence().catch((err) => {
+    console.warn('[hono-host] operator-state cache coherence did not start (TTL fallback only):', err);
+  });
 
   // WI-6793: subscribe THIS process to cross-process runtime flag flips
   // (pg_notify from flag-override-store.set). Without it, a `flags:set`
@@ -809,6 +839,7 @@ const substrateSocketWorkerEnv = sidecarMode ? {} : pinSubstrateSocketForCluster
 // 9.5GB, 0.004 cores each. Pinning makes every worker resolve the PRIMARY's path, so
 // the adoption probe in spawnSpawnerSidecar finds the sibling's sidecar and reuses it.
 const spawnerSocketWorkerEnv = sidecarMode ? {} : pinSpawnerSocketForCluster(clusterWorkers);
+const lspSocketWorkerEnv = sidecarMode ? {} : pinLspDaemonSocketForCluster(clusterWorkers);
 // WI-10001497: mint + PRINT the first-time setup code once, here in the primary,
 // BEFORE forking — then hand the same value to every worker via workerEnv. Two
 // defects, one root: the token was module state (per-PROCESS), so each reusePort
@@ -827,6 +858,7 @@ const clusterHandle = sidecarMode ? null : startCluster({
     PAPERCUSP_EXPECTED_OPERATOR_PROCS: String(expectedOperatorProcs),
     ...substrateSocketWorkerEnv,
     ...spawnerSocketWorkerEnv,
+    ...lspSocketWorkerEnv,
     ...setupTokenWorkerEnv,
   },
   onPrimary: () => {
@@ -855,8 +887,11 @@ const clusterHandle = sidecarMode ? null : startCluster({
     // never federating (su-72ce40f2's diagnosis, WI-5441, post 53143).
     void waitForBootMigrationGate().then(() => {
       startRequestServers();
-      // external-app-access P-009: open this process's own-tunnel listener now (idempotent).
-      startOwnTunnelReconciler();
+      // external-app-access P-009 + P-008: open this process's own-tunnel listener now
+      // (idempotent). A single-process host (one HTTP worker, e.g. the desktop app) never
+      // enters the clusterWorkers > 1 primary block below, and it is the host singleton, so
+      // it arms the relay reconciler here too (WI-10004423).
+      startRemoteAccessReconcilers(httpServingProcessRole(clusterHandle));
       // Heartbeat the primary so the cluster-lag-watchdog can detect a SYNCHRONOUS wedge
       // (which freezes the worker-side lag-self-restart too) by heartbeat ABSENCE
       // (EI-1598/1608). DEFAULT-OFF; only meaningful in a forked worker (process.send).
@@ -977,11 +1012,11 @@ if (clusterHandle && clusterHandle.role === 'primary' && clusterWorkers > 1) {
   // the same way; a request-only primary under the dedicated-bg-host topology stays
   // silent here too.
   const bootedHandlesPgPublisher = startBootedHandlesPgPublisher({});
-  // external-app-access P-009: the primary is the process that may own the own-tunnel
-  // connector (cloudflared); request workers arm the same reconciler for their listener.
-  // Idempotent, never throws, and it re-reads the row every few seconds, so a first pass
-  // that runs before boot migrations have applied simply converges on a later tick.
-  startOwnTunnelReconciler();
+  // external-app-access P-009 + P-008 (D-031): the primary may own the own-tunnel connector
+  // (cloudflared) and is the host singleton that dials the opt-in Papercusp relay; request
+  // workers arm only their own-tunnel listener (above). Idempotent, never throws, and a pass
+  // before boot migrations apply converges on a later tick.
+  startRemoteAccessReconcilers('cluster-primary');
   // WI-6594: relay each worker's P-009 stamp declarations to every other worker.
   // The primary is the hub because only it holds a handle to every worker; it also
   // applies each patch locally, since it runs the background machinery whose own

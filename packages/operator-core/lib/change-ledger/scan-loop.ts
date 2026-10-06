@@ -23,6 +23,7 @@
 import { execFile as execFileCb } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import { promisify } from 'node:util';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
@@ -34,7 +35,7 @@ import { PROMPT_SCAN_GIT_ARGS, scanRepoPromptEdits } from './prompt-file-scan';
 // top-level reference here threw at import, poisoned the register-system-actions
 // chain, and killed DBOS routines fleet-wide on the 2026-06-12 05:30 deploy.
 // Never use __dirname in operator-core.
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url); // bundle-safe, unlike a fixed climb (P-016)
 
 /** The live git-log scan against THIS process's repo tree (the serving tree). */
 async function defaultRunGitLog(paths: readonly string[], sinceDays: number): Promise<string> {

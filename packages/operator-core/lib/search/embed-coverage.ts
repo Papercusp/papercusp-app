@@ -49,6 +49,8 @@ import { generated, getOrgPg } from '@papercusp/db-org';
 import { desc, inArray } from 'drizzle-orm';
 import { notifySyncInvalidate } from '../sync-sse';
 import { activeWorkspaceId } from '../workspace-registry';
+import { TOTAL_COVERAGE_FLOOR, RECENT_COVERAGE_FLOOR, MIN_RECENT_SAMPLE } from './coverage-gate';
+export { TOTAL_COVERAGE_FLOOR, RECENT_COVERAGE_FLOOR, MIN_RECENT_SAMPLE } from './coverage-gate';
 import {
   TARGETS,
   eligiblePredicateSql,
@@ -85,25 +87,6 @@ export const RECENT_WINDOW_HOURS = 24;
 export const SETTLED_WINDOW_HOURS = 3;
 /** Rows younger than this are legitimately unembedded — the sweep runs on a 5-min tick. */
 export const SETTLED_GRACE_MINUTES = 15;
-
-/**
- * Floors. Both are deliberately asymmetric, and the asymmetry is the design:
- *
- *  - TOTAL is a slow, backlog-shaped number. It moves over hours and is legitimately
- *    low during a drain, so its floor is loose AND it is suppressed while converging.
- *  - RECENT is a fast, steady-state number. If the write path and the sweep are both
- *    healthy it sits at 100%, so anything below 99% is a real regression, immediately.
- *    This is the signal that catches recurrence, and it is never suppressed.
- */
-export const TOTAL_COVERAGE_FLOOR = 0.95;
-export const RECENT_COVERAGE_FLOOR = 0.99;
-
-/**
- * Below this many eligible rows written in the window, recent coverage is noise: 2 of 3
- * rows is 67% and means nothing. A quiet surface must not be able to alarm on a rounding
- * artifact.
- */
-export const MIN_RECENT_SAMPLE = 20;
 
 /**
  * P-006 tuning. A backlog that grows for ONE interval is a write burst — normal, and
@@ -533,7 +516,7 @@ export function detectCoverageBreaches(inputs: BreachInput[]): CoverageBreach[] 
           `tree: it sweeps to exhaustion under its OWN frozen bodySql and reports "DONE" ` +
           `truthfully, while rows newly eligible under current code are invisible to it. ` +
           `A DEPLOY DOES NOT FIX THAT — check the age of any refill driver and of ` +
-          `papercup-bg-host against the commit time of embed-backfill.ts, and restart the ` +
+          `papercusp-bg-host against the commit time of embed-backfill.ts, and restart the ` +
           `stale one.`,
       });
     }

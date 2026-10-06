@@ -115,13 +115,46 @@ trap cleanup EXIT
 echo "   isolated at $ISO (no ancestor node_modules)"
 echo "   mutable boot state at $STATE (HOME, PGDATA, logs)"
 
+stage_isolated_bundle() {
+  local source="$1" destination="$2"
+  local destination_parent staging_root staging hardlink_err
+
+  [[ ! -e "$destination" ]] || return 1
+  destination_parent="$(dirname "$destination")"
+  staging_root="$(mktemp -d "$destination_parent/.bundle-stage-XXXXXX")" || return 1
+  staging="$staging_root/$(basename "$destination")"
+  hardlink_err="$staging_root/hardlink.err"
+
+  # `cp -al` can fail only after creating a partial destination (for example,
+  # EXDEV across distinct mountpoints backed by the same block device). Never
+  # give that partial tree to `cp -a`: an existing destination makes GNU cp
+  # nest the source below destination/sidecar instead of filling destination.
+  if cp -al "$source" "$staging" 2>"$hardlink_err"; then
+    HARDLINKED=1
+  else
+    HARDLINKED=0
+    echo "   bundle hardlink staging unavailable — real copy (slower)"
+    sed -n '1s/^/   hardlink reason: /p' "$hardlink_err" >&2
+    rm -rf -- "$staging"
+    if ! cp -a "$source" "$staging"; then
+      rm -rf -- "$staging_root"
+      return 1
+    fi
+  fi
+
+  # Publish only a complete staging tree. The private ISO directory and its
+  # staging child share a filesystem, so this rename cannot cross devices.
+  if ! mv -- "$staging" "$destination"; then
+    rm -rf -- "$staging_root"
+    return 1
+  fi
+  rm -rf -- "$staging_root"
+}
+
 HARDLINKED=0
-if cp -al "$SIDECAR" "$ISO/sidecar" 2>/dev/null; then
-  HARDLINKED=1
+stage_isolated_bundle "$SIDECAR" "$ISO/sidecar" || fail "could not stage the bundle"
+if [[ $HARDLINKED -eq 1 ]]; then
   echo "   bundle hardlinked (same device — no copy, no disk)"
-else
-  echo "   bundle on another device — real copy (slower)"
-  cp -a "$SIDECAR" "$ISO/sidecar" || fail "could not stage the bundle"
 fi
 B="$ISO/sidecar"
 B_NODE="$B/bin/$(basename "$NODE_BIN")"   # node or node.exe, inside the isolated copy

@@ -18,9 +18,10 @@
  * for side-effect (belt-and-suspenders + discoverability).
  */
 import { z } from 'zod';
+import { CONTINUITY_PROBE_MAX_PER_WAKE } from '../limits';
 import { normalizeRequirementSections } from '../../requirement-contract';
 import { leadingScaleLabel } from '../../rubric-rating-vocabulary';
-import { SERVING_RUNTIME_IDS } from '../../serving-runtimes';
+import { SERVING_RUNTIME_IDS, RUNTIME_VINTAGE_EVIDENCE_RUNTIME_RE, type RuntimeVintageEvidenceRuntimeId } from '../../serving-runtimes';
 import { registerPlanTemplate, type PlanTemplate } from './template-registry';
 
 /** The template TYPE name — a rubric-template plan's `template:` frontmatter/column. */
@@ -70,7 +71,7 @@ export const rubricCriterionWindowSchema = z
       .min(1)
       .optional()
       .describe(
-        "named watermark the window starts at (required when kind='post-watermark'), e.g. 'bg-host-restart' = the running papercup-bg-host generation start",
+        "named watermark the window starts at (required when kind='post-watermark'), e.g. 'bg-host-restart' = the running papercusp-bg-host generation start",
       ),
   })
   .strict()
@@ -254,13 +255,21 @@ export const rubricCriterionCheckSchema = z.discriminatedUnion('kind', [
       kind: z.literal('probe'),
       probe: z
         .unknown()
+        .optional()
         .describe(
           'an existing typed ContinuityProbe ({ kind:"tool"|"state-cell", schemaRevision, expect, ... }). ' +
             'The rubric template keeps this field dependency-light; the proposal and scorecard write paths ' +
             'validate the live projected-tool/state-cell contract before persisting or executing it.',
         ),
+      all: z.array(z.unknown()).min(1).max(CONTINUITY_PROBE_MAX_PER_WAKE).optional()
+        .describe('ALL of these independently validated read-only probes must pass; mutually exclusive with probe.'),
     })
-    .strict(),
+    .strict()
+    .superRefine((check, ctx) => {
+      if ((check.probe !== undefined) === (check.all !== undefined)) {
+        ctx.addIssue({ code: 'custom', message: 'probe checks require exactly one of probe or non-empty all' });
+      }
+    }),
   z
     .object({
       kind: z.literal('coverage'),
@@ -360,7 +369,16 @@ export type AcceptanceEvidencePlane = z.infer<typeof acceptanceEvidencePlaneSche
  * the ship door check evidence from THAT runtime; an undeclared one is inferred from the
  * BAR's source paths and flagged for review, never silently defaulted to :3070.
  */
-export const acceptanceEvidenceRuntimeSchema = z.enum(SERVING_RUNTIME_IDS);
+export const acceptanceEvidenceRuntimeSchema = z.union([
+  z.enum(SERVING_RUNTIME_IDS),
+  // Tool args must export at host boot: use a representable pattern, never z.custom.
+  // The same pattern validates declarations and advertises their contract to clients.
+  z
+    .string()
+    .regex(RUNTIME_VINTAGE_EVIDENCE_RUNTIME_RE,
+      'Expected runtime-vintage:<workspace>/<unit>@<host> identifying an existing vintage row',
+    ) as unknown as z.ZodType<RuntimeVintageEvidenceRuntimeId>,
+]);
 export type AcceptanceEvidenceRuntime = z.infer<typeof acceptanceEvidenceRuntimeSchema>;
 
 /** Server-owned pin from a subject plan's activation seed to its rubric revision. */
@@ -451,7 +469,7 @@ export const requirementAcceptanceSchema = z
     evidenceRuntime: acceptanceEvidenceRuntimeSchema
       .optional()
       .describe(
-        'deployed/live BARs: the runtime the evidence must be measured on (release-operator is green main; staging-operator, bg-host, gateway, embed-sidecar, psu-pty-host and desktop-shell are not)',
+        'deployed/live BARs: built-in runtime or runtime-vintage:<workspace>/<unit>@<host> from the existing registry; release-operator alone is green main',
       ),
     requiredTestLayers: z.array(z.string().trim().min(1)).min(1).max(50).optional(),
     passRatings: acceptancePassRatingsSchema,
@@ -529,7 +547,7 @@ const rubricCriterionObjectSchema = z
     evidenceRuntime: acceptanceEvidenceRuntimeSchema
       .optional()
       .describe(
-        'acceptance-kind deployed/live BARs only: the runtime whose build the evidence must be measured on; absent ⇒ inferred from source paths and flagged for review, never defaulted to :3070',
+        'acceptance-kind deployed/live BARs: built-in runtime or exact runtime-vintage:<workspace>/<unit>@<host>; absent ⇒ inferred and flagged, never defaulted to :3070',
       ),
     requiredTestLayers: requirementAcceptanceSchema.shape.requiredTestLayers.describe(
       'acceptance-kind only: required proof layers, such as integration or e2e; BAR amendment required to change',
@@ -1142,6 +1160,10 @@ export function isForbiddenMandatoryPassRating(value: string): boolean {
  * scale has a label for evidence that cannot produce a verdict.
  */
 const canonicalRubricTemplateDataAuthoringSchema = rubricTemplateDataSchema.superRefine((d, ctx) => {
+  const probeCount = d.criteria.reduce((n, c) => n + (c.check?.kind === 'probe' ? (c.check.all?.length ?? 1) : 0), 0);
+  if (probeCount > CONTINUITY_PROBE_MAX_PER_WAKE) {
+    ctx.addIssue({ code: 'custom', path: ['criteria'], message: `rubric declares ${probeCount} probes; execution cap is ${CONTINUITY_PROBE_MAX_PER_WAKE}` });
+  }
   if (rubricKindOf(d) !== 'acceptance') return;
 
   if (!d.ratingScale.some(isUnknownRatingEquivalent)) {

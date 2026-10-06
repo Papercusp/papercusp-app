@@ -6,6 +6,7 @@
  * and invoke it in a one-shot process without starting host infrastructure.
  */
 import { parseMcpToolText } from './mcp-result-text';
+import { OUTPUT_ENVELOPE_SCHEMA_VERSION } from '../../../output-envelope';
 
 export type McpCallResult = {
   content: Array<{ type: 'text'; text: string } | Record<string, unknown>>;
@@ -63,12 +64,48 @@ function hasPopulatedMcpResult(result: McpCallResult): boolean {
   if (body.notFound === true || body.not_found === true || body.missing === true) return false;
   if (typeof body.status === 'string' && body.status.replace(/[-\s]/g, '_').toLowerCase() === 'not_found') return false;
   if (typeof body.code === 'string' && body.code.replace(/[-\s]/g, '_').toLowerCase() === 'not_found') return false;
+  const completionReceipt = body.completionReceipt;
+  if (
+    body.ok === true &&
+    completionReceipt &&
+    typeof completionReceipt === 'object' &&
+    !Array.isArray(completionReceipt) &&
+    (completionReceipt as Record<string, unknown>).status === 'recorded' &&
+    typeof (completionReceipt as Record<string, unknown>).effectRef === 'string' &&
+    ((completionReceipt as Record<string, unknown>).effectRef as string).trim().length > 0
+  ) {
+    return true;
+  }
   if (Array.isArray(body.entries) && body.entries.length > 0) return true;
+  // The result door moves large, intact payloads behind a typed reference envelope.
+  // These have no `ok` field, so the generic success-envelope check below would
+  // otherwise call a recoverable populated result empty and attach a misleading
+  // data-plane warning to it.
+  if (
+    body.schemaVersion === OUTPUT_ENVELOPE_SCHEMA_VERSION &&
+    Array.isArray(body.content) &&
+    body.content.length > 0
+  ) {
+    return true;
+  }
   if (
     typeof body.ownerId === 'string' &&
     body.ownerId.trim().length > 0 &&
     typeof body.source === 'string' &&
     body.source.trim().length > 0
+  ) {
+    return true;
+  }
+  // tools:find and testing:runs use populated top-level arrays without the legacy `{ ok: true, ... }` shape.
+  if (Array.isArray(body.hits) && body.hits.length > 0) return true;
+  if (Array.isArray(body.runs) && body.runs.length > 0) return true;
+  // activity:tool-log returns a nonempty row/call count instead of a result array.
+  // Keep zero counts empty so a genuinely empty log still receives the warning.
+  if (
+    ['calls', 'rawRows'].some((key) => {
+      const value = body[key];
+      return typeof value === 'number' && Number.isFinite(value) && value > 0;
+    })
   ) {
     return true;
   }
@@ -83,7 +120,7 @@ function hasPopulatedMcpResult(result: McpCallResult): boolean {
 
   let sawResultField = false;
   let hasPopulatedField = false;
-  for (const key of ['results', 'items', 'data', 'result', 'value', 'presence']) {
+  for (const key of ['results', 'items', 'data', 'result', 'value', 'presence', 'facts', 'hits', 'scorecard']) {
     if (!(key in body)) continue;
     sawResultField = true;
     const value = body[key];

@@ -1,0 +1,14 @@
+# Keep consult preparation on the spawning operator runtime
+URL: /internal/docs/agent-insights/consult-spawn-runtime-mcp-pin
+
+A console operator URL does not pin the child's MCP URL. Consults must pass the existing agentMcpBaseUrl field so session-port preparation and replies use the spawning build.
+
+Consult dispatch reuses `buildConsoleEnvelope`. Its `operatorBaseUrl` field chooses the operator-facing envelope, while an omitted `agentMcpBaseUrl` can default the child's `PAPERCUSP_OPERATOR_URL` to the long-lived live MCP proxy. Therefore a :3170 parent can prepare a session port against older deployed code. Do not diagnose the current source from those old-runtime refusals.
+
+The dispatcher now passes `agentMcpBaseUrl: operatorBaseUrl`, using `resolveSpawnHostOperatorBaseUrl()` once for both fields. Reuse this existing seam; do not add another routing config, bypass exact-source guards, or change the expert's coordination identity. Preserve concrete launcher refusals in `readLaunchLogReason`, including required-target and missing-exact-evidence failures, so an initial terminal exit does not erase the preparation cause.
+
+Verify the fix in three separate steps: run the conventional dispatcher, console-launcher and MCP-base-url tests in the maintained committed snapshot; select the `operator-api` current-build route and confirm the containing :3170 build; then run one justified normal consult with exact source evidence. A successful spawn must have a persisted native kickoff and an independently minted answering owner. Verify its native transcript and typed `consult:reply`; registration alone does not establish a substantive answer or full source-claim continuity.
+
+Evidence for EI-25158565040432475: old trial `conv-muvh21gu-0000-7f5235a6123e481b98d360db2be0f35b` persisted unsupported-target and evidence 0/1 refusals despite indexed Codex evidence and backend-aware staging code. Commit `83f0659a3238a25051dc77352725cd5456954623` passed dispatcher101, console31 and URL22 tests cleanly (ledger20712476/20712475/20712474; no skips). :3170 loaded that exact containing build. Normal trial `conv-muvio65y-0000-f1aa8000e03d45e78c48082936ad9898` ported a Codex source to isolated owner `su-ee05d5f4-6dde-4639-bc4d-430964088d0b`, native session `01a10d15-e040-7750-bf84-732f7aa82a86`, port `0b6d804e-d72c-47cb-99bf-42fc9ebb0117`, and posted substantive answer1157626, subsequently requester-reconciled. The clean log is `/tmp/get-feedback-runtime-pin-clean-83f.log`.
+
+The same trial's Claude ranks failed a different guard: prepared account `auto` resolved to `default` at bootstrap. That residual is independently self-owned as EI-25161224402098219. It is not provider exhaustion and must not be hidden by the successful Codex fallback. The full three-row source/native/claim matrix and shipment remain separate acceptance work.

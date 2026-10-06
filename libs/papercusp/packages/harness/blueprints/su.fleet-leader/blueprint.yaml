@@ -42,5 +42,6 @@ contributions:
     refresh: on-demand
     inputKind: setting
     ref: fleet-leader-brief
-    producerRef: agent-tools/fleet/leader-brief:buildLeaderBrief
+    producerRef: papercusp.fleet-leader-brief@1
+    verb: read
     availability: optional

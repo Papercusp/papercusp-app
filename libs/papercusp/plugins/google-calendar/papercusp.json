@@ -1,0 +1,45 @@
+{
+  "kind": "plugin",
+  "name": "google-calendar",
+  "version": "0.1.0",
+  "papercusp": "^0.1.0",
+  "description": "Google Calendar as a first-party calendar provider: events become calendar-event records (sync-token changes, then an upcoming-event time wheel), and creates and updates run through the provider contract. Synced by the host's connector driver; the plugin only maps the Calendar REST API.",
+  "author": "Papercusp",
+  "license": "MIT",
+  "main": "./index.cjs",
+  "capabilities": [],
+  "tools": [],
+  "provider": {
+    "id": "gcal",
+    "contractVersion": 1,
+    "displayName": "Google Calendar",
+    "datatypes": ["calendar-event"],
+    "capabilities": ["calendar.read", "calendar.write", "sync.adopt"],
+    "oauth": {
+      "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+      "tokenUrl": "https://oauth2.googleapis.com/token",
+      "scopes": [
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events"
+      ],
+      "pkce": true,
+      "clientRegistrationRef": "google",
+      "credentialGroup": "google",
+      "identity": {
+        "url": "https://www.googleapis.com/calendar/v3/calendars/primary",
+        "idField": "id",
+        "displayNameField": "summary"
+      }
+    },
+    "egressHosts": ["www.googleapis.com", "accounts.google.com", "oauth2.googleapis.com"],
+    "configSchema": {
+      "type": "object",
+      "properties": {
+        "capabilityEnabled": { "type": "boolean" },
+        "calendarId": { "type": "string" },
+        "leadMinutes": { "type": "number", "exclusiveMinimum": 0, "maximum": 1440 }
+      },
+      "additionalProperties": true
+    }
+  }
+}

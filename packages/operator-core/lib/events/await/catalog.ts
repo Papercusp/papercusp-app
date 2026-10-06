@@ -544,10 +544,12 @@ export const EVENT_CATALOG: readonly EventCatalogEntry[] = [
       {
         name: 'sha',
         required: false,
-        describe: 'the local commit sha to wait for; omit to wake on the next git-sync commit',
+        describe:
+          'the FULL local commit sha to wait for (a short sha never fires); omit to wake on the next commit of your harness',
       },
     ],
-    describe: 'git-sync committed the tree locally (no claim about bridged origin/staging egress).',
+    describe:
+      'git-sync committed the tree locally (no claim about bridged origin/staging egress). The bare key fires once per git-sync install, submodule installs included, so events:await binds it to the caller harness (EI-24719187042784648).',
     emitter: 'git-sync action (packages/operator-core/lib/harness/git-sync/git-sync-events.ts)',
     exists: true, // P-102: git-sync-action fires `git-sync:committed[:<sha>]` on a synced tick
     replacesPoll: 'dev:pipeline_position (polling "is my edit committed yet")',
@@ -675,6 +677,17 @@ export const EVENT_CATALOG: readonly EventCatalogEntry[] = [
     exists: true,
   },
   {
+    family: 'scorecard-grading-audit',
+    keyTemplate: 'scorecard:grading-audit:<id>',
+    params: [{ name: 'id', required: true, describe: 'the AUDITED scorecard id (not the audit card), e.g. EI-123' }],
+    describe:
+      "A scorecard's grading-integrity audit SETTLED (pending → passed|failed, or an explicit superseding correction). Payload carries `state` and `auditIssueId`, so you can branch on the verdict without re-reading. The audited card is terminal from the moment it was filed, so work-item:status:<id> never fires for this — park here after filing a vetting attestation or spec-adequacy card instead of re-polling scorecards:get.",
+    emitter:
+      'scorecard-emitted-events (packages/operator-core/lib/scorecard-emitted-events.ts) — fired from scorecards:emit when the filed grading-integrity card settles its subject via recordGradingAudit (EI-24852356444105284)',
+    exists: true,
+    replacesPoll: 'polling scorecards:get for gradingAudit.state',
+  },
+  {
     family: 'plan-acceptance-changed',
     keyTemplate: 'plan:acceptance:<slug>',
     params: [{ name: 'slug', required: true, describe: 'the subject plan slug' }],
@@ -695,6 +708,17 @@ export const EVENT_CATALOG: readonly EventCatalogEntry[] = [
       'fleet-drained-events (packages/operator-core/lib/fleet-drained-events.ts) — fired from plans:set-status when a →done flip drains the plan; ALSO fired by fleet-idle-drain.ts (packages/operator-core/lib/scheduler/fleet-idle-drain.ts) on a scheduler:get_next miss when every fleet member is idle (P-006, WI-3763)',
     exists: true, // WI-1830: set-status fires `fleet:drained:<slug>` on the plan-drain edge
     sugar: 'fleet:await-drained',
+  },
+  {
+    family: 'fleet-leader-changed',
+    keyTemplate: 'fleet:leader-changed:<slug>',
+    params: [{ name: 'slug', required: true, describe: 'the fleet slug' }],
+    describe:
+      'The durable registered leader changed after an authorized handoff or a compare-and-swap succession. The payload names the previous and current leader; re-read fleet:status for the current roster and vacancy clock.',
+    emitter:
+      'takeFleetLeadership (packages/operator-core/lib/agent-tools/fleet_registry/take-leadership-core.ts) after the registry write succeeds',
+    exists: true,
+    replacesPoll: 'polling fleet:status for a leader vacancy or handoff',
   },
   // ── Fleet transitions a LEADER reacts to (P-009 / D-008 of
   //    fleet-leadership-continuity-and-actuation-2026-08-01).

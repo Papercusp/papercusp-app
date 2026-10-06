@@ -27,6 +27,7 @@
 import { z } from 'zod';
 import { defineTool, AGENT_ROLES } from '@papercusp/agent-mcp';
 import { resolveAgentIdentity } from '../coordination/identity';
+import { resolveWakeMode } from '../coordination/wake-mode';
 import { injectIntoHost, selfCompactionAvailability } from '../../events/await/psu-pty-discovery';
 import { tagTurnForInjection } from '../../turn-provenance/turn-provenance';
 import { carryProvenanceFields } from '../../carry-surface-provenance-stamp';
@@ -45,6 +46,7 @@ import { releaseOwnerHookFileLocks } from '../locks/release-hook-locks';
 import { readPriorRespawnOutcome, priorRespawnNote } from '../../carry-respawn-outcome';
 import { bumpSessionEpoch } from '../../memory/session-epoch-ledger';
 import { getOrgPg } from '@papercusp/db-org';
+import { clearPendingCarryRespawn, savePendingCarryRespawn } from '../../session-brief';
 import {
   getLoopStatus,
   materializeLoop,
@@ -64,11 +66,13 @@ import { addressContinuationToOwner } from '../../carry-respawn-addressing';
 import {
   readLiveNativeBgTasks,
   renderNativeBgTaskWarning,
+  type NativeBgTaskReport,
 } from '../../native-bg-task-ledger';
 import {
   evaluateFrozenLineageCarryText,
   frozenLineageCarryViolationPayload,
 } from '../../release/frozen-lineage-execution-policy';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
 
 // Preserve the established import surface while sharing the pure guard with
 // loop-turn-outcome and the compaction watchdog.
@@ -387,6 +391,7 @@ function frozenCompactionCarryRefusal(text: string) {
   const verdict = evaluateFrozenLineageCarryText({
     surface: 'compaction-continuation',
     text,
+    target: resolveHomeGateVerdictTarget(),
   });
   const payload = frozenLineageCarryViolationPayload(verdict);
   if (!payload) return null;
@@ -472,6 +477,37 @@ export default defineTool({
   }),
   async handler(args, ctx) {
     const identity = resolveAgentIdentity(ctx);
+    let wakeMode: 'auto' | 'manual';
+    try {
+      wakeMode = await resolveWakeMode(identity.ownerId);
+    } catch {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: false,
+            requested: false,
+            error: 'wake_mode_unavailable',
+            note: 'The current wake mode could not be read, so no carry-respawn was queued.',
+          }),
+        }],
+        isError: true,
+      };
+    }
+    if (wakeMode === 'manual') {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: false,
+            requested: false,
+            error: 'wake_mode_manual',
+            note: 'Carry-respawn is paused by the current manual wake mode. The session remains intact.',
+          }),
+        }],
+        isError: true,
+      };
+    }
     // Check caller-authored hints before ANY fallback can seed them into a cold
     // loop carry-note. A later check covers generated/default carry text too.
     const explicitCarryRefusal = frozenCompactionCarryRefusal(
@@ -769,7 +805,7 @@ export default defineTool({
     const openOwnerQuestion = openOwnerMessageQuestion || openOwnerAskCount > 0;
     const firstPrompt =
       spec.firstPrompt ??
-      (() => {
+      (await (async () => {
         // EI-22131227584499489: `focus`/`continueNote` are free text the
         // CALLING owner wrote itself — nothing else verifies it actually names
         // that owner's own state before it becomes a confident "resume: <text>"
@@ -797,11 +833,12 @@ export default defineTool({
           identity.ownerId,
         );
         try {
-          return tagTurnForInjection({ sid: identity.ownerId, origin: 'self-compaction', text: note }).taggedText;
+          return (await tagTurnForInjection({ sid: identity.ownerId, origin: 'self-compaction', text: note }))
+            .taggedText;
         } catch {
           return note; // provenance must never break a boundary
         }
-      })();
+      })());
     // Only the first prompt is live caller-authored successor input at this
     // boundary. The deterministic system addendum may contain immutable
     // transcript/history prose that names a stale candidate while documenting
@@ -809,6 +846,43 @@ export default defineTool({
     // an executable instruction and can strand compaction permanently.
     const hostCarryRefusal = frozenCompactionCarryRefusal(firstPrompt);
     if (hostCarryRefusal) return hostCarryRefusal;
+    // Persist the exact carry before the host can accept the socket request.
+    // A host may recover this same owner through a fresh bootstrap instead of
+    // its in-place respawn path, so socket-only delivery is not sufficient.
+    let pendingCarryRespawn: Awaited<ReturnType<typeof savePendingCarryRespawn>>;
+    try {
+      pendingCarryRespawn = await savePendingCarryRespawn(identity, {
+        firstPrompt,
+        systemPromptAddendum: spec.systemPromptAddendum,
+      });
+    } catch (error) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: false,
+            requested: false,
+            error: 'carry_persist_failed',
+            note: `The carry-respawn was not sent because its durable continuation could not be saved: ${(error as Error)?.message ?? error}`,
+          }),
+        }],
+        isError: true,
+      };
+    }
+    if (!pendingCarryRespawn) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: false,
+            requested: false,
+            error: 'carry_persist_failed',
+            note: 'The carry-respawn was not sent because its durable continuation could not be saved.',
+          }),
+        }],
+        isError: true,
+      };
+    }
     // EI-19480099650947832: read what happened to this session's PREVIOUS
     // carry-respawn BEFORE injecting this one, so the verdict describes prior
     // history rather than the request we are about to make. `respawn: true` only
@@ -831,6 +905,15 @@ export default defineTool({
       // CARRY_RESPAWN_SOCKET_TIMEOUT_MS's doc comment above.
       CARRY_RESPAWN_SOCKET_TIMEOUT_MS,
     );
+    if (!ok) {
+      // Clear only this attempt. A newer concurrent compaction request owns a
+      // different nonce and must survive this host refusal.
+      try {
+        await clearPendingCarryRespawn(identity.ownerId, pendingCarryRespawn.nonce);
+      } catch {
+        /* short expiry is the backstop if this best-effort cleanup misses */
+      }
+    }
     // EI-18676518990229124 (session-death-claim-release-2026-07-11 P-002 false
     // positive): the cut we just queued will end THIS process under the SAME
     // ownerId and relaunch it in seconds — the killed child's ordinary
@@ -936,14 +1019,16 @@ export default defineTool({
     // idle-gated and fires after this turn ends, so the agent reading this still
     // has time to wait for the job or re-launch it under capability:bash. The
     // liveness claim is an OS-level fd scan, not an inference from the record's
-    // age. Fail-soft — bookkeeping must never block a cut.
-    let nativeBgTasks: ReturnType<typeof readLiveNativeBgTasks> = {
+    // age. Fail-soft — bookkeeping must never block a cut. The scan is async and
+    // deadline-bounded (WI-10005283): it walks all of /proc, so a synchronous
+    // read here stalled this handler's event loop for seconds.
+    let nativeBgTasks: NativeBgTaskReport = {
       live: [],
       unattributed: [],
       degraded: false,
     };
     try {
-      nativeBgTasks = readLiveNativeBgTasks({ sid: identity.ownerId });
+      nativeBgTasks = await readLiveNativeBgTasks({ sid: identity.ownerId });
     } catch {
       /* never block the cut on bg bookkeeping */
     }

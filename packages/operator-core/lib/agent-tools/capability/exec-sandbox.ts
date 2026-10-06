@@ -327,7 +327,7 @@ const EXEC_ENV_ALLOW_EXACT: ReadonlySet<string> = new Set([
  *  actually found leaking — DATABASE_URL, DEFGUARD_API_TOKEN,
  *  ELEVENLABS_WEBHOOK_SECRET, MOBILE_JWT_SECRET,
  *  NEXT_PUBLIC_CHATWOOT_WEBSITE_TOKEN, STARSHIP_SESSION_KEY,
- *  ownerPASSWORD — none match any prefix below). */
+ *  STOREWOLFPASSWORD — none match any prefix below). */
 const EXEC_ENV_ALLOW_PREFIXES: readonly string[] = [
   'LC_', 'XDG_',
   'NPM_CONFIG_', 'npm_config_', 'NPM_',

@@ -53,6 +53,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { nestedCliCached } from './pc_nested_cli.mjs';
 
 // ─── lockstep mirrors of turn-provenance.ts (keep in sync) ─────────────────
 
@@ -139,11 +140,33 @@ export function appendScheduleWakeupLedgerRow(row, dir = turnProvenanceDir()) {
 
 // ─── hook entrypoint ────────────────────────────────────────────────────────
 
+/**
+ * The ledger row this ScheduleWakeup call enrolls, or null when it enrolls nothing.
+ *
+ * WI-10004953: a CLI NESTED inside another agent (a `claude` run from an su's Bash tool,
+ * or under a capability:bash job) inherited that su's PAPERCUSP_SID. Its wake would be
+ * delivered to the NESTED CLI, whose provenance hook skips nested CLIs entirely, so the
+ * row could only ever be matched by the SU's classifier: a real owner turn in the su
+ * that happened to repeat the prompt text would be stamped agent-origin and its directive
+ * lost. A nested CLI enrolls nothing.
+ * @param {{ payload: Record<string, unknown>, env?: NodeJS.ProcessEnv, isNested?: () => boolean }} args
+ */
+export function scheduleWakeupEnrollment({ payload, env = process.env, isNested = nestedCliCached }) {
+  const sid = env.PAPERCUSP_SID || '';
+  if (!sid) return null;
+  if (String(payload?.tool_name || '') !== 'ScheduleWakeup') return null;
+  const input = payload.tool_input || {};
+  if (input.stop === true) return null; // a stop call schedules nothing
+  const prompt = input.prompt;
+  if (typeof prompt !== 'string' || !prompt.trim()) return null;
+  if (isNested()) return null;
+  return ledgerRowForScheduleWakeup({ sid, prompt, delaySeconds: input.delaySeconds });
+}
+
 function main() {
   const allow = () => process.exit(0);
 
-  const sid = process.env.PAPERCUSP_SID || '';
-  if (!sid) return allow();
+  if (!process.env.PAPERCUSP_SID) return allow();
 
   let payload;
   try {
@@ -152,16 +175,9 @@ function main() {
     return allow(); // malformed hook input — never block on it
   }
 
-  if (String(payload.tool_name || '') !== 'ScheduleWakeup') return allow();
-  const input = payload.tool_input || {};
-  if (input.stop === true) return allow(); // a stop call schedules nothing
-
-  const prompt = input.prompt;
-  if (typeof prompt !== 'string' || !prompt.trim()) return allow();
-
   try {
-    const row = ledgerRowForScheduleWakeup({ sid, prompt, delaySeconds: input.delaySeconds });
-    appendScheduleWakeupLedgerRow(row);
+    const row = scheduleWakeupEnrollment({ payload });
+    if (row) appendScheduleWakeupLedgerRow(row);
   } catch {
     /* fail-soft: a ledger-write failure never blocks the schedule itself */
   }

@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   try {
-    await emitSessionCompactedEventAsync(parsed.owner, parsed.focus);
+    await emitSessionCompactedEventAsync(parsed.owner, parsed.focus, { sessionId: parsed.sessionId });
   } catch (e) {
     // Fail-soft: the wake is best-effort; the awaiter's timeout is the backstop.
     console.error(

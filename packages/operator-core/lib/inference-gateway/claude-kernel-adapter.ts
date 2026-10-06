@@ -62,6 +62,9 @@
  *     round-robin. The already-resolved account arrives as `initialAccount`, so a
  *     double-advance is structurally impossible rather than merely avoided.
  */
+import { describeFetchError } from '../loopback-fetch';
+import { claudeAttemptHeaders } from './credential-store';
+import { presentedSecretsFromHeaders, scrubbedErrorBody } from './error-body-scrub';
 import type { GatewayTransportId } from './provider-adapters';
 import type { AccountPool, ActiveAccount } from './provider-contracts';
 import {
@@ -115,6 +118,10 @@ export type ClaudeFailureKind =
   | 'usage-cap'
   /** 403 org/subscription disqualification → pause the account, rotate. */
   | 'org-disallowed'
+  /** Credit exhaustion (402 billing_error, 400 API usage limit, 429 enforced spend
+   *  limit) — a billing WALL, never a transient: pause the account to its reset and
+   *  rotate immediately (plan anthropic-credits-gateway-2026-09-30 D-004). */
+  | 'credit-wall'
   /** Per-IP edge throttle (no window headers) → sibling egress IP first, else rotate. */
   | 'bare-429'
   /** A window/`retry-after` 429 → rotate after a backoff; never a sibling-IP retry. */
@@ -191,6 +198,8 @@ export interface ClaudeFetchInit {
   method: string;
   headers: Record<string, string>;
   body: Uint8Array | null;
+  /** Account whose resolved credential is present in these exact headers. */
+  diagnosticAccountId: string;
   signal: AbortSignal;
   dispatcher: unknown;
 }
@@ -206,7 +215,8 @@ export interface ClaudeAdapterOptions {
   pool?: AccountPool;
   upstreamUrl: string;
   method: string;
-  /** Headers minus auth; `authorization` is layered on per attempt. */
+  /** Headers minus auth; the credential header and the OAuth beta are layered on per attempt
+   *  by `claudeAttemptHeaders`, according to the attempt account's auth mode. */
   baseHeaders: Record<string, string>;
   body: Uint8Array | null;
   /**
@@ -406,7 +416,7 @@ export function createClaudeKernelAdapter(opts: ClaudeAdapterOptions): ClaudeKer
    * destination may still be inside the same sub-minute burst window.
    */
   const rotateDelayFor = (kind: ClaudeFailureKind | null, status: number | null): number => {
-    if (kind === 'usage-cap' || kind === 'org-disallowed') return 0;
+    if (kind === 'usage-cap' || kind === 'org-disallowed' || kind === 'credit-wall') return 0;
     return status === 429 ? opts.transientBackoffMs : 0;
   };
 
@@ -548,7 +558,10 @@ export function createClaudeKernelAdapter(opts: ClaudeAdapterOptions): ClaudeKer
       return {
         url: opts.upstreamUrl,
         method: opts.method,
-        headers: { ...opts.baseHeaders, authorization: `Bearer ${token}` },
+        // P-006: the credential SHAPE follows the account this attempt landed on, so a rotation
+        // from a subscription account to a Console API-key account switches Bearer+oauth-beta
+        // for x-api-key mid-request. An account with no recorded mode is a subscription account.
+        headers: claudeAttemptHeaders(opts.baseHeaders, account.authMode ?? 'oauth', token),
         body: opts.body,
         accountId: account.accountId,
         dispatcher,
@@ -565,17 +578,22 @@ export function createClaudeKernelAdapter(opts: ClaudeAdapterOptions): ClaudeKer
           method: prepared.method,
           headers: prepared.headers,
           body: prepared.body,
+          diagnosticAccountId: prepared.accountId,
           signal: context.signal,
           dispatcher: prepared.dispatcher,
         });
       } catch (error) {
+        // A trusted policy refusal at fetch is already classified. Rewriting it
+        // as a retryable network failure would retry a refused reservation and
+        // penalize a provider account that received no request.
+        if (error instanceof GatewayRequestKernelError) throw error;
         // A raw throw normalizes to retryable:FALSE, which would silently disable
         // the transport-failure branch of selectReattempt — one of this lane's
         // three same-account retries (gateway.ts:4212, the sibling-egress rotate).
         // The live handler treats a transport failure as recoverable, so mark it.
         throw new GatewayRequestKernelError(
-          `inference-gateway: claude upstream failed: ${(error as Error).message}`,
-          { code: 'upstream-error', outcome: 'upstream-error', status: 502, retryable: true },
+          `inference-gateway: claude upstream failed: ${describeFetchError(error)}`,
+          { code: 'upstream-error', outcome: 'upstream-error', status: 502, retryable: true, cause: error },
         );
       }
       const headers = headersToObject(response.headers);
@@ -614,6 +632,9 @@ export function createClaudeKernelAdapter(opts: ClaudeAdapterOptions): ClaudeKer
         peekedBody = Buffer.from(head).toString('utf8');
         classification = opts.classifyResponse({ status: response.status, headers, body: peekedBody });
       }
+      // P-005 R-5 / WI-10004561: whatever of an upstream error body reaches the caller has its
+      // credentials scrubbed, including the exact credential this attempt presented.
+      if (response.status >= 400 && body) body = scrubbedErrorBody(body, presentedSecretsFromHeaders(prepared.headers));
 
       return {
         status: response.status,

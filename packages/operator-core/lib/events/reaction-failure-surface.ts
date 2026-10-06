@@ -19,7 +19,7 @@
  * failing to report that must not become a second, louder failure.
  */
 
-import type { ReactionFailure } from '@papercusp/event-reaction';
+import { reactionContributor, type ReactionFailure } from '@papercusp/event-reaction';
 import { countRecentReactionFailures, recordBudgetDenial, recordReactionFailure } from './reaction-dedup';
 import type { ToolInvocationEvent } from './types';
 
@@ -140,7 +140,10 @@ export async function surfaceReactionFailure(
     return;
   }
 
-  const contributor = failure.rule.source ?? null;
+  // The SAME key the engine budgets on: null for a first-party rule, whose
+  // `source` is only a provenance label (WI-10005204). The ledger's partial
+  // contributor index and its "first-party NULL bucket" both assume this.
+  const contributor = reactionContributor(failure.rule);
 
   // A budget denial is NOT a dispatch failure, and every step below assumes it
   // is: it would record `status='failed'`, classify the budget's own prose as

@@ -241,14 +241,13 @@ export function schemaCallConstraintAnnotation(
     .map(({ path, constraint }) => {
       const firstPath = firstPathByConstraint.get(constraint);
       firstPathByConstraint.set(constraint, firstPath ?? path);
-      // Compact discovery has a hard result budget. Repeating a long
-      // validator-owned rule at an equivalent alias wastes that budget while
-      // hiding callable fields later in the schema. Keep every path visible,
-      // but reference the first full rule for repeated verbose constraints.
-      if (options.compact && firstPath && constraint.length >= 200) {
-        return `constraint:${path} (same as constraint:${firstPath})`;
-      }
-      return `constraint:${path} (${constraint})`;
+      const full = `constraint:${path} (${constraint})`;
+      const repeated = firstPath ? `constraint:${path} (same as constraint:${firstPath})` : '';
+      // Compact discovery has a hard result budget. Repeating a validator rule
+      // at an equivalent alias wastes that budget while hiding callable fields
+      // later in the schema. Keep every path visible, but use the reference
+      // whenever it is shorter than repeating the rule, regardless of length.
+      return options.compact && repeated && repeated.length < full.length ? repeated : full;
     })
     .join('; ');
 }
@@ -504,16 +503,26 @@ export function renderSchemaBounds(nodes: readonly unknown[]): string {
 
   const lower = findBound('minimum', 'exclusiveMinimum', ['minLength', 'minItems']);
   const upper = findBound('maximum', 'exclusiveMaximum', ['maxLength', 'maxItems']);
+  // Soft text caps are advisory metadata, not validation bounds. Keep them
+  // distinct from the hard JSON Schema limit so discovery does not imply that
+  // the larger backstop is the intended carry-row size.
+  const softMaxLength =
+    records
+      .map((node) => numberValue(node['x-soft-maxLength']))
+      .find((value): value is number => value !== null) ?? null;
   const lowerText = lower ? `${lower.exclusive ? '>' : ''}${lower.value}` : '';
   const upperText = upper ? `${upper.exclusive ? '<' : ''}${upper.value}` : '';
 
-  return lower && upper
+  const rendered = lower && upper
     ? `${lowerText}-${upperText}`
     : upper
       ? `${upper.exclusive ? '<' : '≤'}${upper.value}`
       : lower
         ? `${lower.exclusive ? '>' : '≥'}${lower.value}`
         : '';
+  if (softMaxLength === null) return rendered;
+  const softText = `soft cap ≤${softMaxLength}`;
+  return rendered ? `${rendered} (${softText})` : softText;
 }
 
 function scalarSchemaValues(raw: unknown): Array<string | number | boolean | null> | null {
@@ -653,6 +662,15 @@ export function unionConditionalHint(branches: readonly UnionSchemaBranch[]): st
     }
     if (allValues.size < 2) continue;
 
+    const relationGroups = new Map<
+      string,
+      {
+        targets: string[];
+        requiredCondition: string | null;
+        forbiddenCondition: string;
+      }
+    >();
+
     for (const target of targetNames) {
       if (target === discriminator) continue;
       const statuses = new Map<string, 'required' | 'optional' | 'forbidden'>();
@@ -688,38 +706,52 @@ export function unionConditionalHint(branches: readonly UnionSchemaBranch[]): st
 
       if (!valid || statuses.size !== allValues.size || forbiddenValues.size === 0) continue;
 
+      let requiredCondition: string | null = null;
+      let forbiddenCondition: string | null = null;
+
       // Preserve the established two-sided form when every branch is either
       // required or forbidden. It is more informative than a one-sided
       // prohibition and keeps the existing compact contract stable.
       if (requiredValues.size > 0 && optionalValues.size === 0) {
         const requiredList = [...requiredValues.values()];
         const forbiddenList = [...forbiddenValues.values()];
-        const requiredCondition =
+        requiredCondition =
           requiredList.length === 1 && forbiddenList.length > 0
             ? unionConditionText(discriminator, requiredList)
             : forbiddenList.length === 1 && requiredList.length > 0
               ? unionConditionText(discriminator, forbiddenList, true)
               : unionConditionText(discriminator, requiredList);
-        const forbiddenCondition =
+        forbiddenCondition =
           requiredList.length === 1 && forbiddenList.length > 0
             ? unionConditionText(discriminator, requiredList, true)
             : forbiddenList.length === 1 && requiredList.length > 0
               ? unionConditionText(discriminator, forbiddenList)
               : unionConditionText(discriminator, forbiddenList);
         if (!requiredCondition || !forbiddenCondition) continue;
-
-        const relation = `when ${requiredCondition} => ${target} required; when ${forbiddenCondition} => ${target} forbidden`;
-        const candidate = relations.length > 0 ? `${relations.join('; ')}; ${relation}` : relation;
-        if (candidate.length > UNION_CONDITIONAL_HINT_MAX_CHARS) continue;
-        relations.push(relation);
-        if (relations.length >= UNION_CONDITIONAL_HINT_MAX_RELATIONS) return relations.join('; ');
-        continue;
+      } else {
+        forbiddenCondition = unionConditionText(discriminator, [...forbiddenValues.values()]);
+        if (!forbiddenCondition) continue;
       }
 
-      const forbiddenList = [...forbiddenValues.values()];
-      const forbiddenCondition = unionConditionText(discriminator, forbiddenList);
-      if (!forbiddenCondition) continue;
-      const relation = `when ${forbiddenCondition} => ${target} forbidden`;
+      // Group fields with the same branch-status vector before the compact
+      // character cap. Otherwise a single discriminator with several parallel
+      // fields can silently lose its later constraints (for example, owner-turn
+      // `quote` after `turnRef`) even though the shared rule text is identical.
+      const signature = JSON.stringify({
+        required: [...requiredValues.keys()].sort(),
+        optional: [...optionalValues.keys()].sort(),
+        forbidden: [...forbiddenValues.keys()].sort(),
+      });
+      const group = relationGroups.get(signature);
+      if (group) group.targets.push(target);
+      else relationGroups.set(signature, { targets: [target], requiredCondition, forbiddenCondition });
+    }
+
+    for (const group of relationGroups.values()) {
+      const targets = group.targets.join(',');
+      const relation = group.requiredCondition
+        ? `when ${group.requiredCondition} => ${targets} required; when ${group.forbiddenCondition} => ${targets} forbidden`
+        : `when ${group.forbiddenCondition} => ${targets} forbidden`;
       const candidate = relations.length > 0 ? `${relations.join('; ')}; ${relation}` : relation;
       if (candidate.length > UNION_CONDITIONAL_HINT_MAX_CHARS) continue;
       relations.push(relation);

@@ -1,147 +1,80 @@
 ---
-title: Harness snapshots
-description: Frozen tarballs of harness state — capture, restore, share, retract.
+title: Snapshots and backups
+description: Understand workspace backups, project snapshots and safe recovery before changing data.
+documents:
+  - packages/operator-core/lib/agent-tools/backup/snapshot_create.ts
+  - packages/operator-core/lib/agent-tools/backup/restore.ts
+  - packages/operator-core/lib/agent-tools/backup/restore-clone.ts
 ---
 
-A **harness snapshot** is the frozen state of one specific harness at a
-moment in time: the project files, the `.papercusp/` directory, the
-plugin enablement set with their (redacted) configs, and the database
-rows that belong to this harness. Snapshots are how you save your work,
-share a working setup with someone else, or roll back a mission to a
-known-good point.
+A snapshot records state at a point in time. Before relying on one, establish
+**what it contains, where it is stored, and how it will be restored**.
 
-Templates are *recipes*. Snapshots are *frozen instances*. You install
-a template to start fresh; you instantiate a snapshot to fork an
-existing harness's state.
+## Choose the right recovery mechanism
 
-## When to use a snapshot
+These are different operations:
 
-- **Save mid-mission progress** before a risky change (e.g. switching
-  the agent model, replanning, large prompt edits).
-- **Share a working harness** with a teammate so they can pick up where
-  you left off.
-- **Publish an example** to the marketplace that demonstrates a
-  finished mission with all its decisions, validations, and outputs
-  intact.
-- **Hand off** between machines or between operators.
+| Mechanism | Purpose | What to check |
+| --- | --- | --- |
+| Source-control history | Recover committed project source | Which repository and revision contain the work |
+| Workspace backup | Recover workspace state before a risky operation | Included paths/data, snapshot receipt and restore procedure |
+| Portable project snapshot | Capture or move a supported project's state | Whether your installation exposes that workflow and what is excluded |
+| Cloud-machine snapshot | Recover a hosted machine or disk | Provider, workspace host, storage and lifecycle permissions |
 
-## Lifecycle
+Do not treat these as interchangeable. In particular, a saved agent
+conversation, a plan marked done, or a source commit does not prove the
+workspace database is backed up.
 
-Five buttons on the snapshots page (`/snapshots` in the operator UI):
+## Before a risky change
 
-| Button | What it does |
-|---|---|
-| **save snapshot** | Capture the current harness's state to a `.tar.gz` in `<project>/.papercusp/snapshots/`. Surfaced from the harness toolbar. |
-| **Instantiate** | Fork a snapshot into a new project directory. Slug-rewrites the harness name to avoid collision. |
-| **Publish** | Upload the tarball to the marketplace under a chosen slug + version. |
-| **Retract** | Pull a published version back: `deprecate` (warn), `withdraw` (refuse new installs), or `yank` (specific version only). |
-| **Delete** | Remove the local tarball + `.published.json` sidecar. Marketplace copies are unaffected. |
+Ask the agent to identify the appropriate backup operation and confirm the
+restore scope. The maintained `backup:snapshot_create` tool creates a
+**workspace backup** before destructive work; it is not a generic portable
+harness export or a marketplace publish command.
 
-> *(Screenshot: the /snapshots page showing the action buttons + a
-> published snapshot with the "↗ published" badge.)*
+Have the agent record:
 
-## What's in a snapshot
+1. The workspace and data being protected.
+2. The snapshot or backup receipt.
+3. Whether creation finished successfully or is still running.
+4. The exact restore operation and its consequences.
+5. How recovery will be verified.
 
-The capture pipeline tars these by default:
+“Backup started” is not “backup complete.” A still-running receipt must be
+reconciled before you rely on it.
 
-```
-<project-root>/
-├── .papercusp/                       (everything except logs/, pi-sessions/, screenshots/)
-├── source/                         (project source — .git excluded unless --include-git)
-└── state/
-    ├── db.sql.gz                   (Postgres dump scoped to this harness)
-    ├── shared-*.csv                (cross-harness rows that belong to this slug)
-    └── harness/proposals/, …       (any reviewer-touched files)
-```
+## Restore carefully
 
-It explicitly **excludes**:
+A restore may overwrite newer state or stop a running service. Verify the
+target, preserve work created since the snapshot, and confirm the operation
+before replacing live data. When a safe clone/preview restore is available,
+use it to test recovery first.
 
-- `.env`, `*.pem`, secrets denylist matches (always)
-- `.git/` (opt-in via `--include-git`)
-- `node_modules/`, `__pycache__/`, `.venv/`, build outputs (re-derivable)
-- `pi-sessions/`, `screenshots/`, `pending-reviews/` (per-machine ephemeral)
-- `audit_log.csv` (cross-harness, would leak other harnesses)
+After restoring, inspect the project's actual state and run its normal
+verification. Do not assume a successful restore receipt means the app's
+behavior is correct.
 
-## Plugin configs are redacted
+## Practice recovery before an emergency
 
-When the snapshot captures plugin configs, every field declared with
-`ui:widget: "password"` in the plugin's `uiSchema` is replaced with
-`[REDACTED]`. So Cloudflare tokens, GitHub PATs, Slack webhook URLs,
-and similar never ship. The recipient enters their own when they
-instantiate.
+Ask which paths and databases are included, which are excluded, and where the
+backup is stored. Compare its completion time with the latest work that must
+be protected. An old successful backup is not proof that today's changes are
+safe.
 
-If you need to ship a plugin secret along with the snapshot (rare —
-this is usually a smell), use a CI/CD secret store and inject it
-post-install rather than capturing it.
+Where a clone restore is supported, restore into the separate destination,
+inspect representative files and records, and run the project's normal
+checks. Record that observed recovery result before replacing the live
+workspace. Do not test a restore by overwriting production without approval.
 
-## Authoring workflow
+## Sharing is a separate decision
 
-```bash
-# 1. Save locally from the operator UI ("save snapshot" in the toolbar).
-#    Or via the CLI:
-papercusp snapshot publish <harness-slug> --name "milestone-1"
+Not every backup is portable, secret-redacted or safe to publish. Do not share
+workspace backups simply because template/plugin listings are available in the
+Cupboard. Check the supported snapshot workflow, included secrets, private
+source/data and destination before any export or publication.
 
-# 2. Test the round-trip — instantiate into a scratch project, verify
-#    everything still works.
-papercusp snapshot fork @you/my-snapshot --as scratch-test
+If a snapshot/export option is absent in your installation, ask for the
+supported backup route instead of following an unverified CLI example.
 
-# 3. Publish to the marketplace.
-papercusp snapshot publish-id <snapshot-id> --slug @you/my-snapshot --version 1.0.0
-```
-
-The operator UI does steps 1 and 3 with one click each; the CLI is
-useful for scripted captures (e.g., a cron job that snapshots a
-long-running harness daily).
-
-## Submitting to the marketplace
-
-Snapshots publish to the same marketplace as templates and plugins.
-First publish under `@your-handle/...` triggers GitHub-OAuth, the same
-flow described in the [Templates page](/docs/harness-templates#submitting-to-the-marketplace).
-
-After publish:
-
-- Listed under [Snapshots](https://papercuspai.com/marketplace?kind=snapshot).
-- Anyone can `papercusp snapshot fork @you/my-snapshot` to instantiate
-  their own copy.
-- Detail page shows the harness lineage, plugin set, and capture metadata.
-
-## Retract / unpublish
-
-If you need to pull a published snapshot — say it accidentally
-contained data it shouldn't — three escalating options:
-
-| Action | Effect |
-|---|---|
-| `deprecate` | Stays installable; warns on `papercusp install`. |
-| `withdraw` | Refuses new installs. Existing installs keep working. |
-| `yank` | Removes a specific version from the marketplace entirely. |
-
-Run from the operator UI's snapshot page (the **Retract** button) or
-the CLI:
-
-```bash
-papercusp retract @you/my-snapshot --action yank --version 1.0.0-ts1234567 \
-  --reason "leaked test data; rotated key; please use 1.0.1"
-```
-
-## Tips
-
-- **Name snapshots meaningfully**. Default names are timestamps; a
-  human-readable name like `milestone-1-passing` saves you confusion
-  later.
-- **Use the description field**. It surfaces in the marketplace listing
-  and on the snapshot's detail page.
-- **Before publishing**, run a `papercusp doctor --snapshot <id>` to
-  re-check redactions; the redaction pipeline runs at capture time but
-  it's cheap to verify before broadcasting.
-- **One snapshot per state, not per timestamp**. If you snapshot daily,
-  use `papercusp snapshot delete` to prune old ones — they're cheap on
-  disk but accumulate.
-
-## See also
-
-- [Using the app](/docs/using-the-app) — the basic save / instantiate /
-  publish flow with screenshots.
-- [Harness templates](/docs/harness-templates) — for shareable
-  *configurations* (vs frozen state).
+See [Workspaces and agents](/docs/workspaces-and-agents) and
+[Troubleshooting](/docs/troubleshooting).

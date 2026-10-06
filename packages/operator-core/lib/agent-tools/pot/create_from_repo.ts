@@ -66,6 +66,12 @@ export default defineTool({
       .regex(/^[a-z0-9][a-z0-9-]*$/)
       .optional()
       .describe("P-009 into-pot mode: add the repo as a member of this EXISTING kind:'hive' home instead of standing up a new pot (no new identity/listing; the existing listing re-publishes with the new member)."),
+    integrationMode: z
+      .enum(['direct', 'review'])
+      .optional()
+      .describe(
+        "Where should the agents' work go? 'direct' (default) = straight into the repo, agents commit directly. 'review' = into a working copy (a fork) of the repo; their combined work reaches the repo only through PRs you or a reviewer approve. 'review' needs a detected test suite; a refusal is reported on result.integrationMode and never fails the create. Ignored with intoPot.",
+      ),
     workspace: z.string().max(120).optional().describe('Workspace id (default: active workspace).'),
   }),
   async handler(args, ctx) {
@@ -94,6 +100,7 @@ export default defineTool({
       ...(args.parentDir ? { parentDir: args.parentDir } : {}),
       ...(args.force !== undefined ? { force: args.force } : {}),
       ...(args.intoPot ? { intoPot: args.intoPot } : {}),
+      ...(args.integrationMode ? { integrationMode: args.integrationMode } : {}),
       workspaceId,
     });
     return text(res as unknown as Record<string, unknown>);

@@ -182,14 +182,30 @@ export function partialGuidanceDescription(description: string | undefined): str
 /**
  * Character ceiling for the SUMMARY tier's lead sentence.
  *
- * ⚠ THIS VALUE IS A MEASUREMENT, NOT A STYLE PREFERENCE — it is the largest
- * tested cap that fits the 100,000 B trimmed-mode budget (D-009). Measured by
+ * ⚠ THIS VALUE IS A MEASUREMENT, NOT A STYLE PREFERENCE. Tune it against the
+ * 100,000 B trimmed-mode budget, independently of hard-rail text. Measured by
  * `SUMMARY_CAP_SWEEP` in `scripts/gen-tool-delivery.ts`, which re-prices the
  * whole catalog and re-resolves the delivery map at each candidate:
  *
  *     2026-09-25, 907-tool catalog before this cap change:
- *     cap=80  full=1 compact=63 spent= 99,977 fits ← chosen
+ *     cap=80  full=1 compact=63 spent= 99,977 fits
  *     cap=100 full=0 compact=63 spent=100,176 OVER by 176
+ *
+ *     2026-10-01, 927-tool catalog (floor tools grew; WI-10004576):
+ *     cap=80  full=0 compact=63 spent=100,161 OVER by 161  (floors ALONE exceed the budget)
+ *     cap=70  full=0 compact=64 spent= 99,992 fits ← chosen (8 B headroom)
+ *     cap=64  full=0 compact=63 spent= 99,977 fits
+ *     Cost of 80 → 70: 39 of 63 floor leads lose their last ~10 chars, and the two floor rails
+ *     that were already word-truncated at 80 (facts:assert, mode:set) lose ~10 more trailing
+ *     chars — their leading imperative is intact. Every other rail (incl. tools:invoke's
+ *     colon-names rail, ~68 chars) ships whole.
+ *     Headroom is THIN by construction: the next floor-tool schema growth of ≥8 B re-trips
+ *     psu-launcher.test.ts (budgetOverrun must be 0) — re-run the sweep, do not nudge this by feel.
+ *
+ *     2026-10-06, 946-tool catalog (WI-10006184): the shared70-char cap measured
+ *     100,242 B for63 mandatory tools. A60-char selection lead with the previous
+ *     70-char rail cap retained all floors plus one extra tool at99,970 B.
+ *     The generator sweep now varies selection prose without shortening rails.
  *
  * THE TRADE, stated because it is real: pricing prose into the tier costs 8
  * advertised seats (71 → 63). That is the right direction — a tool advertised
@@ -198,7 +214,11 @@ export function partialGuidanceDescription(description: string | undefined): str
  * reachable through `tools:find`. Re-run the sweep after any catalog change
  * before editing this number by hand.
  */
-export const SUMMARY_LEAD_MAX_CHARS = 80;
+export const SUMMARY_LEAD_MAX_CHARS = 60;
+
+// WI-10006184: shortening selection prose must not shorten already-delivered
+// rules (notably tools:invoke's colon-name rule). Keep the previous rail cap.
+const SUMMARY_RAIL_MAX_CHARS = 70;
 
 /** Truncate at a word boundary, marking the cut so a reader knows prose is missing. */
 function truncateAtWord(text: string, maxChars: number): string {
@@ -236,14 +256,15 @@ export function summaryGuidanceDescription(
     '';
 
   const rails: string[] = [];
+  const railMaxChars = Math.max(maxChars, SUMMARY_RAIL_MAX_CHARS);
   for (const section of sections) {
     for (const sentence of splitSentences(section.body)) {
-      if (isSafetyClause(sentence)) rails.push(truncateAtWord(sentence, maxChars));
+      if (isSafetyClause(sentence)) rails.push(truncateAtWord(sentence, railMaxChars));
     }
   }
 
   const leadSentence = splitSentences(primary)[0] ?? '';
-  const lead = truncateAtWord(leadSentence, maxChars);
+  const lead = truncateAtWord(leadSentence, isSafetyClause(leadSentence) ? railMaxChars : maxChars);
 
   // De-duplicate: a lead that is itself a rail must not be emitted twice.
   const out = [lead, ...rails.filter((r) => r !== lead)].filter((s) => s.length > 0);

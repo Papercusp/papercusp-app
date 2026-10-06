@@ -34,6 +34,7 @@ import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { lockedPackageKeyResolver, releaseMinification } from './bundle-psu-dependencies.mjs';
 
 const fail = (message) => {
   console.error(`bundle-psu: ERROR: ${message}`);
@@ -132,9 +133,15 @@ const lockBytes = tree.read('package-lock.json') ?? fail(`${SHA} has no package-
 const LOCK = JSON.parse(lockBytes.toString('utf8')).packages ?? fail('package-lock.json has no packages map');
 const operatorManifest = JSON.parse((tree.read('apps/operator/package.json')
   ?? fail(`${SHA} has no apps/operator/package.json`)).toString('utf8'));
-if (typeof operatorManifest.version !== 'string' || !operatorManifest.version) {
-  fail(`apps/operator/package.json at ${SHA} has no version`);
+if (typeof operatorManifest.name !== 'string' || !operatorManifest.name) {
+  fail(`apps/operator/package.json at ${SHA} has no name`);
 }
+const puiCargoManifest = (tree.read('apps/tui/Cargo.toml')
+  ?? fail(`${SHA} has no apps/tui/Cargo.toml`)).toString('utf8');
+const puiPackageSection = puiCargoManifest.split(/^\[package\]\s*$/m)[1]
+  ?.split(/^\[[^\]]+\]\s*$/m, 1)[0];
+const puiVersion = puiPackageSection?.match(/^version\s*=\s*"([^"]+)"\s*$/m)?.[1];
+if (!puiVersion) fail(`apps/tui/Cargo.toml at ${SHA} has no [package].version`);
 const posix = (p) => p.split(path.sep).join('/');
 const repoRel = (abs) => {
   const rel = path.relative(ROOT, abs);
@@ -142,10 +149,18 @@ const repoRel = (abs) => {
   return posix(rel);
 };
 const readJson = (file) => JSON.parse(readFileSync(file, 'utf8'));
+// Installed npm packages may be linked into an immutable checkout from its
+// shared dependency generation. First-party source still uses strict repoRel.
+const packageKey = lockedPackageKeyResolver(ROOT, LOCK);
 
 /** An installed package must be the version the committed lock pins at that exact install path. */
 function lockedVersion(dir) {
-  const key = repoRel(dir);
+  let key;
+  try {
+    key = packageKey(dir);
+  } catch (error) {
+    fail(error.message);
+  }
   const installed = readJson(path.join(dir, 'package.json'));
   const locked = LOCK[key];
   if (!locked) fail(`${key} (${installed.name}@${installed.version}) is not in package-lock.json at ${SHA}`);
@@ -163,7 +178,7 @@ const esbuild = requireFromRoot('esbuild');
 // ── the committed-source loader ─────────────────────────────────────────────
 const LOADERS = { '.ts': 'ts', '.mts': 'ts', '.cts': 'ts', '.tsx': 'tsx', '.js': 'js', '.mjs': 'js', '.cjs': 'js', '.jsx': 'jsx', '.json': 'json' };
 const NODE_MODULES = `${path.sep}node_modules${path.sep}`;
-const firstParty = new Set(['apps/operator/package.json']);
+const firstParty = new Set(['apps/operator/package.json', 'apps/tui/Cargo.toml']);
 const npmDirs = new Set();
 
 const committedSource = {
@@ -196,7 +211,7 @@ await esbuild.build({
   absWorkingDir: path.join(ROOT, 'apps/operator'),
   entryPoints: [path.join(ROOT, 'apps/operator/scripts/psu-launcher.mjs')],
   bundle: true, platform: 'node', format: 'esm', target: 'node22',
-  minifyWhitespace: true, minifySyntax: true,
+  ...releaseMinification,
   outfile: path.join(OUT, 'psu.mjs'),
   banner: { js: HOST_BANNER },
   external: ['@lydell/*'],
@@ -206,14 +221,14 @@ await esbuild.build({
 // Preserve the package identity the launcher's --version reads when the source
 // checkout and build environment are absent. Do not ship source dependencies.
 writeFileSync(path.join(OUT, 'package.json'), `${JSON.stringify({
-  name: operatorManifest.name, version: operatorManifest.version, type: 'module', private: true,
+  name: operatorManifest.name, version: puiVersion, type: 'module', private: true,
 }, null, 2)}\n`);
 
 const { nativeBuilds } = await import(pathToFileURL(path.resolve(args['native-builds'])).href);
 if (typeof nativeBuilds !== 'function') fail(`${args['native-builds']} does not export nativeBuilds(root, outDir)`);
 const nativeOutputs = [];
 for (const options of nativeBuilds(`${ROOT}/`, `${OUT}/`)) {
-  await esbuild.build({ ...options, absWorkingDir: ROOT, plugins: [committedSource] });
+  await esbuild.build({ ...options, ...releaseMinification, absWorkingDir: ROOT, plugins: [committedSource] });
   nativeOutputs.push(path.basename(options.outfile));
 }
 for (const name of ['native-client.cjs', 'native-extension.mjs']) {

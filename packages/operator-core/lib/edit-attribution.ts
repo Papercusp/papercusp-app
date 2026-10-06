@@ -40,6 +40,8 @@ export interface RecordEditAttributionInput {
   goalRef?: string;
   sessionId?: string;
   contributor?: string;
+  /** Dispatcher call id for duplicate-safe server-side edit capture. */
+  dispatchCallId?: string;
 }
 
 /**
@@ -47,7 +49,10 @@ export interface RecordEditAttributionInput {
  * exact canonical work-item from a supplied goal pointer, or from the legacy active
  * claim when no pointer exists, then writes one row per file. Never throws.
  */
-export async function recordEditAttribution(input: RecordEditAttributionInput): Promise<void> {
+export async function recordEditAttribution(
+  input: RecordEditAttributionInput,
+  opts: { strict?: boolean } = {},
+): Promise<void> {
   try {
     const files = (input.files ?? []).filter(Boolean);
     if (files.length === 0 || !input.agentId || !input.repoRoot) return;
@@ -132,15 +137,31 @@ export async function recordEditAttribution(input: RecordEditAttributionInput): 
     await sql`
       INSERT INTO harness_shared.edit_attribution_ledger
         (repo_root, file, agent_id, session_id, contributor, workspace_id,
-         harness_slug, work_item_id, plan_slug, intent, acquired_via)
+         harness_slug, work_item_id, plan_slug, intent, acquired_via, dispatch_call_id)
       SELECT ${input.repoRoot}, f, ${input.agentId}, ${input.sessionId ?? null},
              ${input.contributor ?? null}, ${input.workspaceId ?? null},
-             ${harnessSlug}, ${workItemId}, ${planSlug}, ${intent}, ${acquiredVia}
+             ${harnessSlug}, ${workItemId}, ${planSlug}, ${intent}, ${acquiredVia},
+             ${input.dispatchCallId ?? null}
         FROM unnest(${files}::text[]) AS f
+      ON CONFLICT DO NOTHING
     `;
-  } catch {
-    // best-effort: edit attribution must NEVER break the lock path.
+  } catch (error) {
+    // best-effort: edit attribution must NEVER break the lock path — except for the
+    // one caller that needs the row to exist (strict, below).
+    if (opts.strict) throw error;
   }
+}
+
+/**
+ * The same write, but it THROWS when the insert fails instead of swallowing it.
+ * Plan personal-data-reader-set-labels-2026-10-01 P-014 (WI-10005571): for an owner
+ * holding an active personal disclosure, this row is what holds the edited path out
+ * of git-sync (personal-vault/git-sync-hold.ts), so locks:release writes it BEFORE
+ * releasing and keeps the lock when the write fails. Every other caller stays
+ * best-effort.
+ */
+export async function recordEditAttributionStrict(input: RecordEditAttributionInput): Promise<void> {
+  await recordEditAttribution(input, { strict: true });
 }
 
 /** One agent's attributed edits in a repo, as git-sync reads them back (P-003). Shaped to

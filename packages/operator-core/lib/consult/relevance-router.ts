@@ -59,6 +59,7 @@
  * reaches memory/configure, which opens PG at import time).
  */
 import type { Sql } from 'postgres';
+import { D006_TRANSCRIPT_RULE, restrictedOwnerSql, restrictedTranscriptSummary } from '../personal-vault/transcript-exclusion';
 import {
   proseProfilePredicateSql,
   type ProseProfileSelection,
@@ -196,6 +197,8 @@ export interface RoutingCandidate {
 
 export interface RoutingSnapshot {
   query: string;
+  /** Set by consultation creation; absent on legacy rows, never inferred. */
+  deliveryIntent?: 'dispatch' | 'retrieval-only';
   /**
    * The stage-1 floor actually applied, against `candidate.relevance` (D-001).
    * Deliberately NOT named `floor`: the retired field of that name gated the
@@ -211,6 +214,13 @@ export interface RoutingSnapshot {
   recencyHalfLifeDays: number;
   candidates: RoutingCandidate[];
   computedAt: string;
+  /**
+   * D-006 / P-013: transcript turns dropped because their owner has held a
+   * personal-data disclosure (personal-vault/transcript-exclusion.ts). The
+   * answer session forks a routed expert's whole transcript, so such an expert
+   * is never routable; counted here rather than silently dropped.
+   */
+  withheld?: { restricted_turns: number; restricted_owners: number; rule: string };
   /** Set when the instrument itself was degraded — 'embed-unavailable' means
    * similarity could not be measured at all (≠ measured and found nothing). */
   degraded?: 'embed-unavailable';
@@ -380,6 +390,8 @@ export interface ConsultRouteParams {
    * do" must be reachable, D-003). */
   requesterId: string;
   question: string;
+  /** Optional exact durable subject whose transcript mentions may justify this route. */
+  subjectRef?: string | null;
   /** Additional owners excluded from candidacy — D-007(7) manual cascade: a
    * decliner is excluded on the requester's re-call, never auto-cascaded. */
   excludeOwners?: string[];
@@ -432,6 +444,13 @@ export function extractPathTokens(question: string, cap = 4): string[] {
     if (seen.size >= cap) break;
   }
   return [...seen];
+}
+
+/** Build a case-insensitive whole-reference matcher for transcript evidence.
+ * Slug punctuation stays inside the token, so a suffixed slug is not exact. */
+function exactSubjectMentionPattern(subjectRef: string): string {
+  const escaped = subjectRef.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&');
+  return '(^|[^[:alnum:]_.-])' + escaped + '($|[^[:alnum:]_.-])';
 }
 
 const clamp01 = (n: number): number => (n < 0 ? 0 : n > 1 ? 1 : n);
@@ -604,6 +623,28 @@ function annotateLiveness(
  * three bounded SQL reads; returns the D-008 snapshot for the caller to
  * persist into consult_state.routing.
  */
+/**
+ * D-006 / P-013: an expert who has ever held a personal-data disclosure is not
+ * a routable transcript source (the answer session forks its WHOLE transcript).
+ * Both routing queries exclude such experts in SQL (`restrictedOwnerSql`), so
+ * they never take a candidate slot. The count reported for them covers every
+ * such expert and does not depend on the question — a per-question count would
+ * confirm a guess about a restricted transcript's content. Throws
+ * `disclosure_ledger_unavailable` when the ledger cannot be read: a consult is
+ * refused, never routed unfiltered.
+ */
+async function restrictedExpertsWithheld(
+  sql: unknown,
+  params: Pick<ConsultRouteParams, 'workspaceId' | 'requesterId' | 'excludeOwners'>,
+): Promise<RoutingSnapshot['withheld']> {
+  const summary = await restrictedTranscriptSummary(sql as Sql, {
+    workspaceId: params.workspaceId,
+    excludeOwners: [params.requesterId, ...(params.excludeOwners ?? [])],
+  });
+  if (summary.owners === 0) return undefined;
+  return { restricted_turns: summary.turns, restricted_owners: summary.owners, rule: D006_TRANSCRIPT_RULE };
+}
+
 export async function routeConsult(
   params: ConsultRouteParams,
   deps: ConsultRouteDeps,
@@ -622,6 +663,8 @@ export async function routeConsult(
   const maxQualified = params.maxQualified ?? 3;
   const turnLimit = params.turnLimit ?? 200;
   const evidencePerOwner = params.evidencePerOwner ?? 3;
+  const subjectRef = params.subjectRef?.trim() || null;
+  const subjectPattern = subjectRef ? exactSubjectMentionPattern(subjectRef) : null;
 
   const base: Omit<RoutingSnapshot, 'candidates'> = {
     query: params.question,
@@ -633,6 +676,9 @@ export async function routeConsult(
   };
 
   const sql = deps.getSql();
+  const withheld = await restrictedExpertsWithheld(sql, params);
+  if (withheld) base.withheld = withheld;
+  const notRestricted = (sql as unknown as Sql)`NOT ${restrictedOwnerSql(sql as unknown as Sql, 'session_turns')}`;
   const vec = deps.embed && deps.embeddingProfile
     ? await deps.embed(params.question).catch(() => null)
     : null;
@@ -661,6 +707,8 @@ export async function routeConsult(
            AND owner <> ALL(${[params.requesterId, ...(params.excludeOwners ?? [])]}::text[])
            AND (turn_origin_verdict IS NULL OR turn_origin_verdict NOT IN ('agent-injected', 'machine-surface'))
            AND text_tsv @@ plainto_tsquery('english', ${params.question})
+           AND (${subjectPattern}::text IS NULL OR COALESCE(text, '') ~* ${subjectPattern})
+           AND ${notRestricted}
       ORDER BY "lexicalRank" DESC, COALESCE(ts, ingested_at) DESC
          LIMIT ${turnLimit}
       `) as unknown as Array<{
@@ -771,7 +819,7 @@ export async function routeConsult(
   //      over-filtering starves the router.
   //    - withIterativeScan: without it the HNSW scan stops at hnsw.ef_search
   //      and silently under-returns (WI-37603).
-  const turnRows = (await withIterativeScan(sql as never, (s) => (s as unknown as Sql)`
+  const fetchedTurnRows = (await withIterativeScan(sql as never, (s) => (s as unknown as Sql)`
     SELECT owner, session_id, turn_idx,
            COALESCE(ts, ingested_at) AS ts,
            1 - (text_embedding <=> ${qVec}::vector) AS sim
@@ -782,6 +830,8 @@ export async function routeConsult(
        AND owner IS NOT NULL
        AND owner <> ALL(${[params.requesterId, ...(params.excludeOwners ?? [])]}::text[])
        AND (turn_origin_verdict IS NULL OR turn_origin_verdict NOT IN ('agent-injected', 'machine-surface'))
+       AND (${subjectPattern}::text IS NULL OR COALESCE(text, '') ~* ${subjectPattern})
+       AND ${notRestricted}
   ORDER BY text_embedding <=> ${qVec}::vector
      LIMIT ${turnLimit}
   `)) as unknown as Array<{
@@ -791,6 +841,7 @@ export async function routeConsult(
     ts: string | Date | null;
     sim: number;
   }>;
+  const turnRows = fetchedTurnRows;
 
   if (turnRows.length === 0) {
     return {

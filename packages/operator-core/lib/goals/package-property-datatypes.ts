@@ -69,6 +69,8 @@ export async function ensurePlanRefListDatatype(
       '(`plan:<slug>` or `plan:<harness>/<slug>`). List order is priority. ' +
       "The type of a goal's `worklist` property (work-on-everything-goal-2026-08-23 P-025).",
     tier: 'first-class',
+    // P-008 / D-013 §3: a plan-ref list is entity state, never work.
+    nature: 'record',
     payloadSchema: planRefListPayloadSchema(),
     createdBy: 'goal-package-seed',
   });

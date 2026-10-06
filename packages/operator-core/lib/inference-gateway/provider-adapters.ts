@@ -12,6 +12,8 @@ export type GatewayWireProtocol = 'anthropic-messages' | 'openai-responses' | 'o
 export type GatewayUpstreamRoute = 'anthropic-api' | 'openai-api' | 'chatgpt-codex' | 'local-registry';
 /** Credential + I/O mechanism for one attempt. */
 export type GatewayTransportId = 'bearer-http' | 'oauth-http' | 'cli-exec' | 'local-http';
+/** Internal contract: the caller cannot accept a silently removed output limit. */
+export const REQUIRE_OUTPUT_TOKEN_LIMIT_HEADER = 'x-papercusp-require-output-token-limit';
 /** Existing gateway handlers used as the first strangler executors. These are
  * static, compiled bindings — never runtime plugin names. */
 export type GatewayLegacyExecutorId =
@@ -38,6 +40,8 @@ export interface GatewayTransportDescriptor {
   upstreams: readonly GatewayUpstreamRoute[];
   streaming: boolean;
   nonStreaming: boolean;
+  /** Absent means unverified, so a required output limit fails closed. */
+  enforcesOutputTokenLimit?: boolean;
   /** Legacy handler that currently realizes this strategy while P-010 moves
    * shared invariants into the request kernel one at a time. */
   legacyExecutor: GatewayLegacyExecutorId;
@@ -102,6 +106,7 @@ export interface GatewayLaneCapabilityRequest {
   modelDiscovery: GatewayModelCatalogPolicy;
   retryPolicy: GatewayRetryPolicyId;
   accountPin: GatewayAccountPinMode;
+  requireOutputTokenLimit?: boolean;
 }
 
 export interface GatewayLaneConformanceCase extends GatewayLaneCapabilityRequest {
@@ -207,6 +212,7 @@ export function makeGatewayLaneRegistry(opts: {
           streaming: true,
           nonStreaming: true,
           legacyExecutor: 'proxyOpenAi',
+          enforcesOutputTokenLimit: true,
         },
         {
           id: 'oauth-http',
@@ -331,6 +337,9 @@ export function assertGatewayLaneCapability(
       'auth-mode',
       `transport '${transport.id}' requires '${transport.auth}', not '${request.auth}'`,
     );
+  }
+  if (request.requireOutputTokenLimit && transport.enforcesOutputTokenLimit !== true) {
+    capabilityFailure(lane, 'output-token-limit', `transport '${transport.id}' cannot enforce an output token limit`);
   }
   if (!transport.upstreams.includes(request.upstream)) {
     capabilityFailure(

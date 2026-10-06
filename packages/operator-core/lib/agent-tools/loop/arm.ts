@@ -25,9 +25,10 @@ import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
 import { COORD_ROLES } from '../coordination/roles';
 import { resolveAgentIdentity, resolveSelfLiteral } from '../coordination/identity';
+import { resolveWakeMode } from '../coordination/wake-mode';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { resolvePotHomeSlug } from '../../pot/wake';
-import { resolveHomePotSlug } from '../pot/_resolve';
+import { operatorHomeHarnessSlug } from '../../harness/operator-home-harness';
 import { isParkedNextFire } from '@papercusp/db-org';
 import {
   materializeLoop,
@@ -59,10 +60,12 @@ import {
 } from '../../external-condition-reachability';
 import { softText, clampText } from '../limits';
 import { refreshControlAnchorAfterMutation } from '../coordination/control-anchor';
+import { attestLoopControlConsumerView } from '../coordination/control-anchor-consumer-view';
 import { getSessionBrief } from '../../session-brief';
 import { lintCarrySurfaceProvenance } from '../../carry-surface-provenance-lint';
 import { acceptancePlaneAdvisoryForWait, mainWaitPlanReviewForWait } from '../../acceptance-runtime-wait-guard';
 import { getLoopCarryNoteWithMeta } from '../../carry-note';
+import { selfCompactionAvailability } from '../../events/await/psu-pty-discovery';
 import {
   admitMonitorArm,
   monitorPredicateDedupRefusal,
@@ -732,6 +735,51 @@ export default defineTool({
         isError: true,
       };
     }
+    // EI-24188436415268799 — an owner-directed graceful pause sets the effective
+    // wake mode to `manual` and ends the current engine loop. Without checking the
+    // target's mode here, a later loop:arm call can recreate that loop while the
+    // pause is still in force; wake-mode would only stage its future wake after the
+    // routine had already been re-armed. Refuse before any routine, claim, or wake
+    // mutation. If the pause state cannot be read, fail closed for the same reason.
+    let targetWakeMode: 'auto' | 'manual';
+    try {
+      targetWakeMode = await resolveWakeMode(ownerId);
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: false,
+              error: 'wake_mode_unavailable',
+              ownerId,
+              message:
+                `Refusing to arm a loop for ${ownerId}: the effective wake mode could not be verified ` +
+                `(${error instanceof Error ? error.message : String(error)}). No loop or wake was created.`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    if (targetWakeMode === 'manual') {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: false,
+              error: 'wake_mode_manual',
+              ownerId,
+              message:
+                `Refusing to arm a loop for ${ownerId} while the effective wake mode is manual. ` +
+                'Restore auto with coord:wake-mode before intentionally resuming loop scheduling.',
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
     // Read the active loop before resolving mode. A retune commonly omits mode and
     // monitor because it is changing only cadence/carry; defaulting that omission to
     // 'work' silently converts a fleet-leader monitor into a work loop. Explicit mode
@@ -945,19 +993,15 @@ export default defineTool({
       }
     }
     // A wildcard operator session means "this workspace", not "whatever harness
-    // the last session brief happened to retain". Resolve the formal workspace
-    // home before consulting the populate-once brief; the latter can be stale
-    // after a Codex member is relaunched into a different harness (EI-212804...).
+    // the last session brief happened to retain" or the first registered Pot.
+    // resolveHomePotSlug() is the Pot steering default and falls back to registry
+    // order; loop work must instead use the canonical operator-home pointer
+    // (PAPERCUSP_POT_HOME_SLUG, defaulting to papercusp).
+    // Resolve that operator home before consulting the populate-once brief; the
+    // latter can be stale after a Codex member is relaunched into a different
+    // harness (EI-212804...).
     if (onlyWorkspaceScope && !harness) {
-      try {
-        const home = await resolveHomePotSlug(workspaceId);
-        if (home) harness = resolvePotHomeSlug(home, undefined);
-      } catch {
-        // Home-pot discovery is a convenience for workspace-scoped callers. If
-        // the registry is temporarily unreadable, preserve the older env/ctx
-        // fallback and let the existing no_harness response explain the gap.
-        harness = null;
-      }
+      harness = resolvePotHomeSlug(operatorHomeHarnessSlug(), undefined);
     }
     // EI-20211399000978706: retain the durable coord:orient/declare-intent
     // scope as a fallback for workspaces without a formal home pot. Explicit
@@ -1453,6 +1497,33 @@ export default defineTool({
       }
     }
 
+    // EI-24899961156406639 — a COLD loop only sheds context when a live psu-pty host can
+    // carry-respawn the session. Without one a cold wake may resume the SAME transcript or
+    // park inbox-only, so `carry:'cold'` silently fails to deliver the fresh context it
+    // promises (the continuation gate's old over-ceiling remedy; see EI-24836531791426051).
+    // Read the SHARED predicate `session:request-compaction` and the continuation gate use,
+    // so this warning, that refusal and that advice cannot drift apart. Warn-only, never a
+    // refusal: headless fleet members arm cold by design and the carry-note path still works
+    // for them. Fail-soft, like the carry-note check above.
+    let coldCarryNoHostWarning: string | null = null;
+    if (carry === 'cold') {
+      try {
+        const availability = selfCompactionAvailability(ownerId);
+        if (!availability.available) {
+          coldCarryNoHostWarning =
+            `This loop is armed COLD, but this session has no live psu-pty host able to carry-respawn it ` +
+            `(${availability.reason}), so a cold wake is NOT guaranteed to start on a fresh context — it may ` +
+            `resume this same transcript or park as inbox-only, and session:request-compaction would refuse. ` +
+            `Do not rely on carry:'cold' to shed context here; the compaction watchdog is the only backstop for an ` +
+            `over-ceiling session. Relaunch through a managed psu-pty host (psu) before relying on cold carry, or arm warm.`;
+        }
+      } catch (e) {
+        console.warn(
+          `[loop:arm] cold-carry host check failed (loop still armed): ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+
     // EI-21526226279199560 — persist the declared blocker STRUCTURALLY, alongside the
     // frozen premise already prepended to `kickoff` above. The premise is what the wake
     // re-READS; this record is what the wake can re-RESOLVE, which is the difference
@@ -1510,6 +1581,14 @@ export default defineTool({
       actorId: identity.ownerId,
       source: 'loop:arm',
     });
+    // WI-10005199 (EI-23770243810745552): the `routines` loop row is the WRITE target, but the
+    // wake-source verdict reads the projected `control_state->loop`, and that refresh is
+    // fail-soft (null on timeout while the arm stays committed). Attest the read the consumer
+    // will actually do, against what materializeLoop PERSISTED. Exception-only.
+    const controlConsumerView = attestLoopControlConsumerView(
+      { active: true, intervalSec: loop.intervalSec ?? intervalSec },
+      control,
+    );
 
     // WI-655 — wake-reachability is INTRINSIC to arming a loop, not a separate step.
     // (1) ARM the standing inbox-wake watch right here, so a loop is wakeable the instant
@@ -1580,6 +1659,8 @@ export default defineTool({
     const acceptancePlaneAdvisory = await acceptancePlaneAdvisoryForWait({ ownerId, goal });
     // EI-21542193720279374 part (b) — see the coldNoCarryNoteWarning computation above.
     const coldCarryNoteWarningText = coldNoCarryNoteWarning ? ` ⚠ ${coldNoCarryNoteWarning}` : '';
+    // EI-24899961156406639 — see the coldCarryNoHostWarning computation above.
+    const coldCarryNoHostWarningText = coldCarryNoHostWarning ? ` ⚠ ${coldCarryNoHostWarning}` : '';
     // EI-18792078711601844: a RE-ARM that PRESERVED the prior loop's carry gets
     // an explicit disclosure, so an omitted carry is never mistaken for a fresh
     // default. Fresh arms are warm and need no exceptional lifecycle warning.
@@ -1615,6 +1696,7 @@ export default defineTool({
       claimNote +
       warningNote +
       coldCarryNoteWarningText +
+      coldCarryNoHostWarningText +
       carryResolutionNote +
       monitorPushNote;
 
@@ -1665,10 +1747,12 @@ export default defineTool({
               workItem: claimedWorkItem,
               controlGeneration: control?.generation ?? null,
             },
+            ...(controlConsumerView.divergedFromWrite ? { controlConsumerView } : {}),
             workItemClaim,
             reachability: reachabilityOut,
             unboundedWarmLoopWarning,
             coldNoCarryNoteWarning,
+            coldCarryNoHostWarning,
             priorLoopOverwrite: overwriteNote,
             // acceptance-runtime-plane P-003: a loop whose goal waits on main/:3070/a deploy,
             // armed by an agent whose held live acceptance bars run elsewhere. Advisory only.

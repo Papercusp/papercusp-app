@@ -59,6 +59,9 @@ src-tauri/resources/papercup-runtime.tar.gz.tmp.*
 # >100MB ones can't push (GitHub hard cap) and the 50–99MB ones bloat every
 # clone forever. Provision the seed out-of-band; git must not carry it.)
 src-tauri/seed/
+# Precomputed doc_sections vectors (ship-precomputed-doc-vectors-2026-10-01) —
+# written by the release cut, never committed; build.rs leaves a placeholder.
+src-tauri/doc-vector-seed/
 
 # Node
 node_modules/

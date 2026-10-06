@@ -21,11 +21,19 @@
  * `runDecaySweep` is the thin PG glue with the usual injectable deps.
  */
 
-import { mergeIssuePayload, commentIssue, type EngineerIssue } from '../../issues-engineer';
+import {
+  mergeIssuePayload,
+  commentIssue,
+  projectAllIssuesForBoundedRead,
+  type EngineerIssue,
+} from '../../issues-engineer';
 import { trackDetached } from '../../detached-imports';
 import type { ThreadPostRow } from '@papercusp/coordination/capabilities';
 import type { ImprovementCandidate } from './policy';
-import { readImprovementItems } from './read-items';
+import {
+  projectImprovementItemsForBoundedRead,
+  type ProjectImprovementDeps,
+} from './read-items';
 import { dedupSignature, recurrenceGroupKey } from './digest';
 import { checkDecayOutcome, type IdeaLifecyclePayload } from './lifecycle';
 
@@ -59,7 +67,7 @@ function lifecycleStateOf(c: ImprovementCandidate): IdeaLifecyclePayload | null 
  * Pure sweep planner. `all` should span ALL states (open + resolved + closed) so
  * post-resolution recurrence is visible.
  */
-export function planDecaySweep(all: ImprovementCandidate[], opts: PlanDecayOpts = {}): DecayAction[] {
+export function planDecaySweep(all: readonly ImprovementCandidate[], opts: PlanDecayOpts = {}): DecayAction[] {
   const nowMs = opts.nowMs ?? Date.now();
   const maxActions = opts.maxActions ?? DEFAULT_MAX_ACTIONS_PER_SWEEP;
   if (maxActions <= 0) return [];
@@ -138,18 +146,27 @@ export interface DecaySweepResult {
   initialized: number;
 }
 
+export interface DecaySweepPlan {
+  scanned: number;
+  actions: DecayAction[];
+}
+
 /** Injectable dependency seam (unit tests run without PG). */
 export interface DecaySweepDeps {
-  readItems: () => Promise<ImprovementCandidate[]>;
+  /**
+   * Whole-population read with a bounded projection. A recency-limited list cannot
+   * decide whether mature fixes have stayed quiet or regressed.
+   */
+  projectIssues: ProjectImprovementDeps['projectIssues'];
   mergeIssuePayload: (id: string, patch: Record<string, unknown>) => Promise<EngineerIssue | null>;
   commentIssue: (id: string, body: string, authorId?: string) => Promise<ThreadPostRow | null>;
 }
 
 const defaultDeps: DecaySweepDeps = {
-  // P-008: this sweep reads only lifecycle fields (state / updatedAt / payload), never
-  // `candidate.body` — the only `body` here is the WRITE param of commentIssue above.
-  // So it takes the body-less projection: 1607 kB -> 389 kB per 500-row read.
-  readItems: () => readImprovementItems({ includeBody: false }),
+  // Use the existing whole-corpus bounded reader: `readImprovementItems` defaults to
+  // the newest 500 rows, which silently hides older resolved candidates. The planner
+  // consumes payload lifecycle fields, but never candidate.body.
+  projectIssues: projectAllIssuesForBoundedRead,
   mergeIssuePayload,
   commentIssue,
 };
@@ -159,11 +176,20 @@ export async function runDecaySweep(
   opts: PlanDecayOpts = {},
   deps: DecaySweepDeps = defaultDeps,
 ): Promise<DecaySweepResult> {
-  const all = await deps.readItems();
-  const actions = planDecaySweep(all, opts);
-  const result: DecaySweepResult = { scanned: all.length, verified: 0, recurred: 0, initialized: 0 };
+  const [plan] = await projectImprovementItemsForBoundedRead(
+    { includeBody: false },
+    {
+      // Keep the full population inside the projector; only this one-row summary
+      // leaves the bounded read seam.
+      maxRows: 1,
+      project: (all) => [{ scanned: all.length, actions: planDecaySweep(all, opts) }],
+    },
+    { projectIssues: deps.projectIssues },
+  );
+  if (!plan) throw new Error('runDecaySweep: whole-corpus projection returned no plan');
+  const result: DecaySweepResult = { scanned: plan.scanned, verified: 0, recurred: 0, initialized: 0 };
 
-  for (const a of actions) {
+  for (const a of plan.actions) {
     await deps.mergeIssuePayload(a.id, { ideaLifecycle: a.lifecycle });
     if (a.kind === 'verified') {
       result.verified += 1;

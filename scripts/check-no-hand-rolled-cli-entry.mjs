@@ -54,7 +54,6 @@ const SKIP_DIRS = new Set([
  */
 export const ALLOW_COUNTS = new Map([
   ['apps/operator/bin/serve.ts|path-to-file-url', 2],
-  ['apps/operator/bin/spawner-sidecar.ts|path-to-file-url', 2],
   ['apps/operator/bin/substrate-sidecar.ts|path-to-file-url', 2],
   ['apps/operator/scripts/hooks/cc/pretooluse-schedule-wakeup-provenance.mjs|file-template', 1],
   ['apps/operator/scripts/onboard-launcher.mjs|file-url-to-path', 1],
@@ -115,7 +114,6 @@ export const ALLOW_COUNTS = new Map([
   ['scripts/lint-tsc-workspaces.mjs|path-to-file-url', 1],
   ['scripts/lint-tsc.mjs|path-to-file-url', 1],
   ['scripts/load-claude-md-doc-parts.mjs|file-template', 1],
-  ['scripts/npm-install-safe.mjs|file-template', 1],
   ['scripts/proc-guard.mjs|file-template', 1],
   ['scripts/project-doc-parts.mjs|file-template', 1],
   ['scripts/refill-prose-vectors-727.mjs|path-to-file-url', 1],
@@ -154,7 +152,6 @@ export const ALLOW_COUNTS = new Map([
   ['scripts/check-vitest-config-enrollment.mjs|file-url-to-path', 1],
   ['scripts/content-lint-runner.mjs|file-url-to-path', 1],
   ['scripts/gen-declarations.ts|file-url-to-path', 1],
-  ['scripts/next-migration.mjs|file-url-to-path', 1],
   ['scripts/test-files.mjs|file-url-to-path', 1],
   ['scripts/workspace-test.mjs|file-url-to-path', 1],
 ]);

@@ -49,6 +49,10 @@ export interface AckResult {
   /** True when no committed state exists yet — the caller must receive a full
    *  snapshot, not a delta. */
   baseline: boolean;
+  /** In ACK-ON-PROOF mode, the pending state whose token was not confirmed.
+   *  It was discarded from storage and is returned only so the owning surface
+   *  can attribute the unconfirmed delivery; it never becomes the diff floor. */
+  unconfirmedPending?: CursorState;
 }
 
 /**
@@ -133,26 +137,46 @@ class PgReadCursorStore implements ReadCursorStore {
     // delivery is re-diffed from the old floor rather than retried verbatim.
     const proof = confirmation !== undefined;
     const token = confirmation?.confirmedToken ?? null;
-    const rows = await sql<Array<{ committed: CursorState | null }>>`
-      INSERT INTO harness_shared.coord_read_cursors
-             (workspace_id, owner_id, surface, committed, pending, pending_at, updated_at)
-      VALUES (${ws}, ${ownerId}, ${surface}, NULL, NULL, now(), now())
-      ON CONFLICT (workspace_id, owner_id, surface) DO UPDATE
-         SET committed  = CASE
-                            WHEN NOT ${proof}::boolean
-                              THEN COALESCE(harness_shared.coord_read_cursors.pending,
-                                            harness_shared.coord_read_cursors.committed)
-                            WHEN harness_shared.coord_read_cursors.pending ->> ${DELIVERY_TOKEN_KEY}::text
-                                 = ${token}::text
-                              THEN harness_shared.coord_read_cursors.pending
-                            ELSE harness_shared.coord_read_cursors.committed
-                          END - ${DELIVERY_TOKEN_KEY}::text,
-             pending    = NULL,
-             updated_at = now()
-      RETURNING committed
+    const rows = await sql<Array<{ committed: CursorState | null; unconfirmed_pending: CursorState | null }>>`
+      WITH old AS MATERIALIZED (
+        SELECT pending
+          FROM harness_shared.coord_read_cursors
+         WHERE workspace_id = ${ws} AND owner_id = ${ownerId} AND surface = ${surface}
+      ), up AS (
+        INSERT INTO harness_shared.coord_read_cursors
+               (workspace_id, owner_id, surface, committed, pending, pending_at, updated_at)
+        VALUES (${ws}, ${ownerId}, ${surface}, NULL, NULL, now(), now())
+        ON CONFLICT (workspace_id, owner_id, surface) DO UPDATE
+           SET committed  = CASE
+                              WHEN NOT ${proof}::boolean
+                                THEN COALESCE(harness_shared.coord_read_cursors.pending,
+                                              harness_shared.coord_read_cursors.committed)
+                              WHEN harness_shared.coord_read_cursors.pending ->> ${DELIVERY_TOKEN_KEY}::text
+                                   = ${token}::text
+                                THEN harness_shared.coord_read_cursors.pending
+                              ELSE harness_shared.coord_read_cursors.committed
+                            END - ${DELIVERY_TOKEN_KEY}::text,
+               pending    = NULL,
+               updated_at = now()
+        RETURNING committed
+      )
+      SELECT up.committed,
+             CASE WHEN ${proof}::boolean
+                        AND old.pending IS NOT NULL
+                        AND old.pending ->> ${DELIVERY_TOKEN_KEY}::text IS DISTINCT FROM ${token}::text
+                  THEN old.pending - ${DELIVERY_TOKEN_KEY}::text
+                  ELSE NULL
+             END AS unconfirmed_pending
+        FROM up
+        LEFT JOIN old ON true
     `;
     const committed = rows[0]?.committed ?? null;
-    return { committed, baseline: committed === null };
+    const unconfirmedPending = rows[0]?.unconfirmed_pending ?? null;
+    return {
+      committed,
+      baseline: committed === null,
+      ...(unconfirmedPending === null ? {} : { unconfirmedPending }),
+    };
   }
 
   async stage(ownerId: string, surface: string, next: CursorState): Promise<void> {
@@ -217,17 +241,24 @@ export class InMemoryReadCursorStore implements ReadCursorStore {
   async ackAndRead(ownerId: string, surface: string, confirmation?: AckConfirmation): Promise<AckResult> {
     const key = `${ownerId}\0${surface}`;
     const row = this.rows.get(key) ?? { committed: null, pending: null };
+    const confirmedPending = row.pending !== null && confirmation !== undefined &&
+      confirmation.confirmedToken !== null && row.pending[DELIVERY_TOKEN_KEY] === confirmation.confirmedToken;
+    const unconfirmedPending = confirmation !== undefined && row.pending !== null && !confirmedPending
+      ? withoutDeliveryToken(row.pending)
+      : null;
     const promoted =
       confirmation === undefined
         ? (row.pending ?? row.committed)
-        : row.pending !== null &&
-            confirmation.confirmedToken !== null &&
-            row.pending[DELIVERY_TOKEN_KEY] === confirmation.confirmedToken
+        : confirmedPending
           ? row.pending
           : row.committed;
     const committed = promoted === null ? null : withoutDeliveryToken(promoted);
     this.rows.set(key, { committed, pending: null });
-    return { committed, baseline: committed === null };
+    return {
+      committed,
+      baseline: committed === null,
+      ...(unconfirmedPending === null ? {} : { unconfirmedPending }),
+    };
   }
   async stage(ownerId: string, surface: string, next: CursorState): Promise<void> {
     const key = `${ownerId}\0${surface}`;

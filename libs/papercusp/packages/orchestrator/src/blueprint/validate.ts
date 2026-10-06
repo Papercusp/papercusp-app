@@ -20,7 +20,7 @@
  * tester/test-writer/monitor verbs kept for switch parity) that don't block.
  */
 import type { Blueprint } from './schema.js';
-import { finalizeEntryRole } from './schema.js';
+import { CAPABILITY_CLASS_EXACT_REF, finalizeEntryRole } from './schema.js';
 import { dataConditionSchema } from '@papercusp/rules';
 import { CHILD_BLUEPRINT_PARAM_RE, isChildBlueprintParam } from './resolve-child.js';
 import { RESERVED_LAYERS, SLOT_IDS, slotSpec } from './slots.js';
@@ -529,7 +529,7 @@ export function validateIdentityDeclarations(
 
   const g = bp.grants;
   if (g) {
-    const exactRef = /^[a-z0-9][a-z0-9.-]*@[0-9A-Za-z][0-9A-Za-z._+-]*$/;
+    const exactRef = CAPABILITY_CLASS_EXACT_REF;
     const required = g.requires ?? [];
     const optional = g.optional ?? [];
     const requiredSet = new Set<string>();

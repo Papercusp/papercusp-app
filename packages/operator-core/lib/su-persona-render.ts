@@ -265,6 +265,8 @@ export interface SuLaunchSpecRecord {
   /** Whether the server's boot-time engine-loop auto-arm actually took — picks
    *  which AUTO activation the mode section carries. Never assume true. */
   loopArmed: boolean;
+  /** Current launch posture. Optional for v1 rows written before this field existed. */
+  headless?: boolean;
   fleet: { slug: string | null; role: string | null } | null;
   /** Resolved launch binding and the last artifact/state receipts (P-008). */
   stack?: string[];
@@ -497,6 +499,7 @@ export function parseSuLaunchSpecRecord(raw: unknown): SuLaunchSpecRecord | null
     autoMode: r.autoMode === true,
     drainMode: r.drainMode === true,
     loopArmed: r.loopArmed === true,
+    ...(typeof r.headless === 'boolean' ? { headless: r.headless } : {}),
     fleet:
       r.fleet && typeof r.fleet === 'object'
         ? {
@@ -628,6 +631,8 @@ export async function rebuildSuLaunchArtifact(
     harnessSlug: record.harnessSlug,
     role: 'su',
     stack: spec.stack,
+    // WI-10004747: the rebuilt persona composes the su static layers; record them.
+    impliedStack: 'su-static',
     compositionRootId: selectedResolution?.compositionRootId ?? null,
     stateRevision: precedence.watermark,
     state: {

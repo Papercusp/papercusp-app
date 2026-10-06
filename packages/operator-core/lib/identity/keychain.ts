@@ -49,6 +49,7 @@ import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir, hostname as getHostname, userInfo } from 'node:os';
 import { promisify } from 'node:util';
+import { pinModuleState } from '@papercusp/module-singleton';
 
 // Lazy promisify — import-safe in the operator-vite SPA bundle (node:util is
 // browser-stubbed; a top-level promisify() call crashes at import → blank page).
@@ -153,6 +154,8 @@ function cloneLoadResult(r: KeychainResult<Buffer>): KeychainResult<Buffer> {
 function invalidateLoadCache(serviceName: string, keychainId: string): void {
   cacheEpoch += 1;
   loadCache.delete(loadCacheKey(serviceName, keychainId));
+  // A store/delete changes which tiers hold the id; never serve a pre-mutation probe.
+  probeTiersMemo.entries.delete(loadCacheKey(serviceName, keychainId));
 }
 
 // ─── public API ──────────────────────────────────────────────────────────────
@@ -272,6 +275,54 @@ export async function keychainDelete(
 
 // ─── secret-tool (Linux / libsecret) ─────────────────────────────────────────
 
+/** Per-site kill-switch for secret-tool's sidecar route (`0` = force a local spawn). */
+export const SECRET_TOOL_SIDECAR_VAR = 'PAPERCUSP_SECRET_TOOL_SPAWN_SIDECAR';
+
+/** Options a host-installed secret-tool executor receives (`execFileViaSidecar`'s shape). */
+export interface SecretToolExecOpts {
+  timeoutMs: number;
+  subsystem: string;
+  sidecarVar: string;
+}
+
+/** A host-installed `secret-tool <args>` runner — see {@link configureKeychainSecretToolExec}. */
+export type SecretToolExec = (args: string[], opts: SecretToolExecOpts) => Promise<{ stdout: string }>;
+
+const secretToolExecSeam = pinModuleState(
+  '@papercusp/operator-core.identity.keychain.secret-tool-exec',
+  () => ({ exec: null as SecretToolExec | null }),
+);
+
+/**
+ * Install (or clear, with `null`) the executor secret-tool lookups/clears run through. The
+ * host wires the spawner-sidecar route here via `installKeychainSidecarExec`
+ * (`fleet/keychain-sidecar-exec.ts`) — WI-10004975: the boot-time keychain probe's
+ * secret-tool lookups were ~34% of a 13 GB bg-host's spawn samples, and a local fork costs
+ * time proportional to the parent's RSS.
+ *
+ * ⛔ INJECTED, never imported — not even with a lazy `import()`. This module is reached from
+ * esbuild-bundled runtime workers (`snapshot-fold.worker.ts` → hive-epoch-crypto-impl → here),
+ * and esbuild INLINES a literal dynamic import: the sidecar module's graph (task-manager →
+ * DBOS → testcontainers, ~11.9k inputs) failed the worker bundle and kept bg-host from
+ * starting on 2026-10-01 21:01Z. `runtime-worker-bundle-graph.test.ts` guards the class.
+ */
+export function configureKeychainSecretToolExec(exec: SecretToolExec | null): void {
+  secretToolExecSeam.exec = exec;
+}
+
+/**
+ * `secret-tool <args>` (lookup / clear — never `store`, which needs stdin the sidecar exec
+ * does not carry). Runs through the host-installed executor when one is configured, else
+ * this module's own `execFile`; a missing binary surfaces as ENOENT below either way.
+ */
+async function runSecretTool(args: string[]): Promise<{ stdout: string }> {
+  const exec = secretToolExecSeam.exec;
+  if (exec) {
+    return exec(args, { timeoutMs: 5000, subsystem: 'keychain-secret-tool', sidecarVar: SECRET_TOOL_SIDECAR_VAR });
+  }
+  return execFile('secret-tool', args, { timeout: 5000 });
+}
+
 async function trySecretTool(
   op: 'store' | 'load' | 'delete',
   id: string,
@@ -290,19 +341,11 @@ async function trySecretTool(
       return '';
     }
     if (op === 'load') {
-      const { stdout } = await execFile('secret-tool', [
-        'lookup',
-        'service', serviceName,
-        'account', id,
-      ], { timeout: 5000 });
+      const { stdout } = await runSecretTool(['lookup', 'service', serviceName, 'account', id]);
       return stdout.trim();
     }
     if (op === 'delete') {
-      await execFile('secret-tool', [
-        'clear',
-        'service', serviceName,
-        'account', id,
-      ], { timeout: 5000 });
+      await runSecretTool(['clear', 'service', serviceName, 'account', id]);
       return '';
     }
     return null;
@@ -658,4 +701,41 @@ export async function keychainProbeTiers(
   }
   const mirrorsDiverged = decrypted.length > 1 && decrypted.some((d) => !d.equals(decrypted[0]));
   return { secretTool, securityCli, file, mirrorsDiverged };
+}
+
+export type KeychainProbeTiers = Awaited<ReturnType<typeof keychainProbeTiers>>;
+
+/** How long one {@link keychainProbeTiersCached} answer is reused for the same id. */
+export const PROBE_TIERS_TTL_MS = 10 * 60_000;
+
+const probeTiersMemo = pinModuleState(
+  '@papercusp/operator-core.identity.keychain.probe-tiers-memo',
+  () => ({ entries: new Map<string, { atMs: number; value: Promise<KeychainProbeTiers> }>() }),
+);
+
+/**
+ * {@link keychainProbeTiers}, answered at most once per {@link PROBE_TIERS_TTL_MS} per
+ * (serviceName, keychainId), single-flight. For the epoch-boot DIAGNOSTIC
+ * (hive-epoch-boot-deps), which re-ran the full probe per harness on every rekey refresh:
+ * on a 13 GB bg-host those secret-tool spawns were ~34% of main-thread spawn samples
+ * (WI-10004975). The probe never mutates, and a store/delete clears the entry
+ * (invalidateLoadCache), so a cached answer is stale only by an OUT-OF-PROCESS change,
+ * bounded by the TTL. The uncached primitive stays available for callers that need now.
+ */
+export function keychainProbeTiersCached(
+  keychainId: string,
+  serviceName: string = SERVICE_NAME,
+  nowMs: number = Date.now(),
+): Promise<KeychainProbeTiers> {
+  const key = loadCacheKey(serviceName, keychainId);
+  const hit = probeTiersMemo.entries.get(key);
+  if (hit && nowMs - hit.atMs < PROBE_TIERS_TTL_MS) return hit.value;
+  const value = keychainProbeTiers(keychainId, serviceName);
+  probeTiersMemo.entries.set(key, { atMs: nowMs, value });
+  return value;
+}
+
+/** Test-only: forget every memoized probe. */
+export function resetKeychainProbeTiersCacheForTest(): void {
+  probeTiersMemo.entries.clear();
 }

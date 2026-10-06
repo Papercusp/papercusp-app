@@ -27,11 +27,24 @@ export function classifyPtyHostEvent(kind: string): PtyHostEventClass {
     kind === 'discovery-reasserted' ||
     kind === 'owner-composer-wedge-cleared' ||
     kind === 'launch-kickoff-turn-start-retry' ||
+    // WI-10004943: a fresh Codex child stuck at Starting was replaced and the
+    // kickoff re-delivered. The replacement's outcome is a separate event
+    // (launch-kickoff-fresh-child-failed counts as failure via the suffix rule).
+    kind === 'launch-kickoff-fresh-child-retry' ||
+    // EI-24818010361425604: a same-host respawn replaced the child mid-kickoff
+    // and the kickoff is re-delivered to the successor. Like the fresh-child
+    // retry above, the redelivery itself is recovery evidence.
+    kind === 'launch-kickoff-respawn-redelivery' ||
     kind === 'launch-kickoff-model-turn-retry-result' ||
     kind === 'submit-verify-human-input-retry' ||
     kind === 'respawn-carry-fresh-epoch-retry' ||
     kind === 'respawn-carry-turn-start-retry' ||
+    // WI-10005472: a headless Claude child whose composer paint was never seen
+    // fell back to the ordinary busy gate instead of dropping its carry/kickoff.
+    kind === 'headless-claude-composer-unseen-ordinary-gate' ||
     kind === 'operator-pin-healed' ||
+    // The same heal, resolved by routing through the staging proxy instead.
+    kind === 'operator-pin-routed' ||
     kind === 'owner-composer-cleared-on-respawn' ||
     kind === 'inject-mutex-force-released' ||
     kind === 'mcp-reconnect-completed' ||
@@ -60,7 +73,16 @@ export function classifyPtyHostEvent(kind: string): PtyHostEventClass {
     // A slow Codex composer paste still inside the kickoff delivery deadline.
     // Its terminal outcome is recorded separately as `-confirmed` (routine) or
     // `-unconfirmed` (failure), so counting this as a failure double-counts.
-    kind === 'launch-kickoff-marker-echo-pending'
+    kind === 'launch-kickoff-marker-echo-pending' ||
+    // The hold and its diagnostic snapshot have separate terminal drop events.
+    // Hold-ended includes successful and interrupted outcomes, so it is not a
+    // failure verdict by itself.
+    kind === 'kickoff-held-for-codex-frame' ||
+    kind === 'kickoff-codex-frame-hold-ended' ||
+    kind === 'codex-starting-stuck-snapshot' ||
+    // An explicitly Starting Codex footer extends the early frame wait only
+    // within the kickoff deadline; the terminal timeout is recorded separately.
+    kind === 'launch-kickoff-backend-frame-wait-extended'
   ) return 'routine';
 
   if (
@@ -76,7 +98,13 @@ export function classifyPtyHostEvent(kind: string): PtyHostEventClass {
     kind === 'turn-deferred-quota-blocked' ||
     kind === 'launch-kickoff-model-turn-absent' ||
     kind === 'launch-role-mcp-unavailable' ||
+    // The carry-respawn sibling of launch-role-mcp-unavailable (computed kind in
+    // psu-pty-host.mjs: result.ok ? 'respawn-carry-mcp-ready' : '...-unavailable').
+    kind === 'respawn-carry-mcp-unavailable' ||
     kind === 'busy-gate-expired' ||
+    kind === 'codex-starting-stuck-early-drop' ||
+    // A respawn whose compaction was never reported to the operator.
+    kind === 'respawn-compaction-unannounced' ||
     /(?:^|-)(?:failed|error|expired|timeout|timed-out|unconfirmed|unverified|exhausted|truncated|dropped|refused|stuck|starvation|suspected|partial)$/.test(kind)
   ) return 'failure';
 

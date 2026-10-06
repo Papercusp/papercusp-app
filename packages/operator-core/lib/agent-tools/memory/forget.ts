@@ -28,7 +28,7 @@ export default defineTool({
   name: 'memory:forget',
   capability: 'memory:write',
   description:
-    'Delete one OR many memory entries by id — pass `id` for one or `ids` for several. Default is a HARD delete (gone for good — the right call for privacy asks). Pass soft:true to instead close the memory\'s validity window (temporal-lite): it drops out of recall but stays retrievable via include_superseded / as_of on memory:search. Returns { ok, results:[{ ok, id, error? }], counts } — correlate each result by its id, not by position; a not-found / timed-out id comes back as that item\'s { ok:false } without failing the rest.',
+    'Delete memories by `id` or `ids`. Default is a permanent hard delete (the privacy-safe choice). Set soft:true to end the validity window: the entry leaves recall but remains available through include_superseded / as_of on memory:search. Returns { ok, results, counts }; match each result by id. After a hard-delete timeout, it checks the row: absence returns ok:true with reconciledAfterTimeout:true; unknown status returns { ok:false, reason:\'timeout_unknown\' }—check before retrying.',
   guidance: {
     when:
       'When the user explicitly says "forget X" / "don\'t remember that anymore" / "that\'s wrong, drop it". Pass every id to drop at once via `ids`. Use soft:true when the fact STOPPED BEING TRUE but its history has value ("we no longer use gemma") — hard-delete (the default) when the user wants it GONE (privacy). Always inform the user out loud ("Removed that from memory").',
@@ -58,8 +58,8 @@ export default defineTool({
   // (memory-taxonomy-and-debt-followups P-004).
   args: z
     .object({
-      id: z.string().min(1).optional().describe('a single memory id (n=1 shorthand for ids:[id])'),
-      ids: z.array(z.string().min(1)).min(1).max(200).optional().describe('memory ids to delete (1–200)'),
+      id: z.string().uuid('Memory ID must be a valid UUID').optional().describe('a single memory UUID (n=1 shorthand for ids:[id])'),
+      ids: z.array(z.string().uuid('Memory ID must be a valid UUID')).min(1).max(200).optional().describe('memory UUIDs to delete (1–200)'),
       soft: z
         .boolean()
         .optional()
@@ -101,6 +101,7 @@ export default defineTool({
     const env = await runBulk(
       ids,
       async (id) => {
+        let reconciledAfterTimeout = false;
         try {
           // Snapshot + journal purge happen BEFORE either removal. A timed-out
           // write can have landed canonically while its journal row remained
@@ -132,7 +133,28 @@ export default defineTool({
               };
             }
           } else {
-            await withMemoryToolTimeout(backend.forget(id), 'memory:forget forget');
+            try {
+              await withMemoryToolTimeout(backend.forget(id), 'memory:forget forget');
+            } catch (err) {
+              if (!(err instanceof MemoryTimeoutError)) throw err;
+              // The timeout races the caller's wait; it cannot cancel a native or
+              // SQL delete that may already have committed. Reconcile against the
+              // canonical row before reporting a failure callers might retry.
+              try {
+                const after = await withMemoryToolTimeout(
+                  backend.get(id),
+                  'memory:forget timeout reconciliation',
+                );
+                if (after !== null) {
+                  return { ok: false as const, id, reason: 'timeout_unknown' as const };
+                }
+                reconciledAfterTimeout = true;
+              } catch {
+                return { ok: false as const, id, reason: 'timeout_unknown' as const };
+              }
+              // The read confirms the hard-delete target is absent; continue
+              // through the success path so feedback and cache invalidation run.
+            }
           }
         } catch (err) {
           if (err instanceof MemoryTimeoutError) {
@@ -148,7 +170,12 @@ export default defineTool({
             recordFeedback({ memId: id, userId: AGENT_TOOL_ACTOR_ID, action: 'delete' }),
           )
           .catch(() => { /* best-effort */ });
-        return { ok: true as const, id, ...(invalidateEntry ? { soft: true as const } : {}) };
+        return {
+          ok: true as const,
+          id,
+          ...(reconciledAfterTimeout ? { reconciledAfterTimeout: true as const } : {}),
+          ...(invalidateEntry ? { soft: true as const } : {}),
+        };
       },
       { keyOf: (id) => ({ id }) },
     );

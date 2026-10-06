@@ -260,6 +260,14 @@ function CriterionCheck({ check }: { check: RubricCriterionCheck }) {
       </section>
     );
   }
+  if (check.kind === "probe") {
+    const probes = check.all ?? [check.probe];
+    return <section className="pc-rubric-definition__check" aria-label="Platform probe check">
+      <h5>{check.all ? "Every platform probe must pass" : "Platform probe"}</h5>
+      <p>Each read is validated and executed by the platform. Missing or incomplete evidence prevents a passing grade.</p>
+      <pre>{JSON.stringify(probes, null, 2)}</pre>
+    </section>;
+  }
   if (check.kind === "requirements") {
     return (
       <section

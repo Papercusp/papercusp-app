@@ -52,6 +52,7 @@
 
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { getOrgPg } from '@papercusp/db-org';
 import { activeWorkspaceId } from '../workspace-registry';
 import { sharedKnowledgePacksRoot } from './load-packs';
@@ -137,6 +138,10 @@ interface CandidateRow {
   decision_note: string | null;
   pack_id: string | null;
   pack_item_id: string | null;
+  workspace_id: string | null;
+  target_identity_id: string | null;
+  target_pack_id: string | null;
+  source_memory_id: string | null;
 }
 
 function tsToIso(v: Date | string | null): string | undefined {
@@ -175,6 +180,10 @@ function rowToCandidate(r: CandidateRow): KnowledgePackCandidate {
     ...(r.decision_note ? { decisionNote: r.decision_note } : {}),
     ...(r.pack_id ? { packId: r.pack_id } : {}),
     ...(r.pack_item_id ? { packItemId: r.pack_item_id } : {}),
+    ...(r.workspace_id ? { workspaceId: r.workspace_id } : {}),
+    ...(r.target_identity_id ? { targetIdentityId: r.target_identity_id } : {}),
+    ...(r.target_pack_id ? { targetPackId: r.target_pack_id } : {}),
+    ...(r.source_memory_id ? { sourceMemoryId: r.source_memory_id } : {}),
   };
 }
 
@@ -198,6 +207,7 @@ export interface StageCandidateInput {
   sourceItemIds?: string[];
   kind?: LearningKind;
   createdBy?: string;
+  identityTarget?: { workspaceId: string; identityId: string; packId: string; memoryId: string };
 }
 
 export type StageCandidateResult =
@@ -215,11 +225,35 @@ export async function stageKnowledgePackCandidate(
 ): Promise<StageCandidateResult> {
   const { sql } = getOrgPg();
 
+  if (input.identityTarget) {
+    const target = input.identityTarget;
+    // A per-target lock makes the cap exact under concurrent explicit proposals.
+    return sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${JSON.stringify(['identity-candidate', target.workspaceId, target.identityId, target.packId])}))`;
+      const existing = await tx`SELECT id FROM harness_shared.knowledge_pack_candidates WHERE signature = ${input.signature}`;
+      if (existing.length) return { staged: false as const, reason: 'duplicate-signature' as const };
+      const [{ count }] = await tx`SELECT count(*)::text AS count FROM harness_shared.knowledge_pack_candidates
+        WHERE status = 'pending' AND workspace_id = ${target.workspaceId}
+          AND target_identity_id = ${target.identityId} AND target_pack_id = ${target.packId}`;
+      const storedCap = await import('./config').then((m) => m.readKnowledgePackSettings())
+        .then((s) => s.pendingCandidateCap).catch(() => undefined);
+      if (Number(count) >= pendingCandidateCap(storedCap)) return { staged: false as const, reason: 'pending-cap' as const };
+      const rows = await tx`INSERT INTO harness_shared.knowledge_pack_candidates
+        (signature, title, draft_text, kind, created_by, workspace_id, target_identity_id, target_pack_id, source_memory_id)
+        VALUES (${input.signature}, ${truncateCandidateTitle(input.title)}, ${input.draftText}, ${input.kind ?? 'feedback'},
+          ${input.createdBy ?? 'identity-memory'}, ${target.workspaceId}, ${target.identityId}, ${target.packId}, ${target.memoryId})
+        ON CONFLICT ON CONSTRAINT knowledge_pack_candidates_signature_uniq DO NOTHING RETURNING id`;
+      if (!rows.length) return { staged: false as const, reason: 'duplicate-signature' as const };
+      invalidate(['knowledgePacks.candidates']);
+      return { staged: true as const, id: String(rows[0]!.id) };
+    });
+  }
+
   // Pending cap + structural dedup are GLOBAL now (learnings are workspace-agnostic
   // capabilities, P-002) — the queue is fleet-wide, the signature unique fleet-wide.
   const [{ count }] = await sql<[{ count: string }]>`
     SELECT count(*)::text AS count FROM harness_shared.knowledge_pack_candidates
-    WHERE status = 'pending'`;
+    WHERE status = 'pending' AND workspace_id IS NULL`;
   // knowledge-pack-settings P-002: the stored cap (memory settings page) wins
   // over the env var; fail-open to env/default if the settings read breaks.
   const storedCap = await import('./config')
@@ -282,11 +316,13 @@ export async function stageKnowledgePackCandidate(
  * ──────────────────────────────────────────────────────────────────────── */
 
 export async function listKnowledgePackCandidates(
-  opts: { status?: CandidateStatus; decidedBy?: string; limit?: number } = {},
+  opts: { status?: CandidateStatus; decidedBy?: string; limit?: number; workspaceId?: string; identityId?: string; fleetOnly?: boolean } = {},
 ): Promise<KnowledgePackCandidate[]> {
   const { sql } = getOrgPg();
   const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
   const clauses = [
+    ...(opts.fleetOnly || !opts.workspaceId ? [sql`workspace_id IS NULL`] : [sql`(workspace_id IS NULL OR workspace_id = ${opts.workspaceId})`]),
+    ...(opts.identityId ? [sql`target_identity_id = ${opts.identityId}`] : []),
     ...(opts.status ? [sql`status = ${opts.status}`] : []),
     // `decidedBy` narrows to one decider's calls (e.g. the auto-adopt sweep's
     // machine identity) — the recent-auto-adoptions strip's read (WI-5414).
@@ -406,9 +442,10 @@ export function renderCandidateLearningFile(opts: {
   scopes: string[];
   recurrenceCount: number;
   sourceItemIds: string[];
+  identityProposal?: boolean;
 }): string {
   const appliesTo = opts.appliesTo.length > 0 ? opts.appliesTo : ['any'];
-  const provenance =
+  const provenance = opts.identityProposal ? 'Provenance: explicitly proposed from an identity lesson and adopted after review.' :
     `Provenance: recurred ${opts.recurrenceCount}× across the fleet ` +
     '— adopted from the fleet candidate queue.';
   return [
@@ -503,8 +540,9 @@ export async function materializeCandidateIntoPack(
     scopes: string[];
     recurrenceCount: number;
     sourceItemIds: string[];
+    identityProposal?: boolean;
   },
-  io: { packsRoot?: string; identityEntries?: IdentityEntries } = {},
+  io: { packsRoot?: string; identityEntries?: IdentityEntries; target?: { dir: string; packId: string; sourcePath: string } } = {},
 ): Promise<{ packId: string; packItemId: string; packVersion: string }> {
   // P-009 — gate BEFORE any filesystem write, so a refusal leaves no partial
   // pack and no bumped manifest version behind.
@@ -518,15 +556,23 @@ export async function materializeCandidateIntoPack(
 
   // P-005 (plan D-005): the SHARED workspace-independent root — candidates are
   // fleet-global, so their pack must not fragment across per-workspace roots.
-  const dir = join(io.packsRoot ?? sharedKnowledgePacksRoot(), FLEET_LESSONS_PACK_ID);
+  const dir = io.target?.dir ?? join(io.packsRoot ?? sharedKnowledgePacksRoot(), FLEET_LESSONS_PACK_ID);
   await fs.mkdir(dir, { recursive: true });
 
   let manifest: KnowledgePackManifest = FLEET_LESSONS_MANIFEST;
+  let originalManifest: Record<string, unknown> | undefined;
+  let originalManifestSource: string | undefined;
   try {
     const raw = await fs.readFile(join(dir, 'manifest.yaml'), 'utf8');
     const parsed = parseManifest(raw);
+    if (io.target && (!parsed.manifest || parsed.manifest.id !== io.target.packId)) throw new Error('Invalid identity pack manifest.');
     if (parsed.manifest) manifest = parsed.manifest;
-  } catch {
+    if (io.target) {
+      originalManifest = parseYaml(raw) as Record<string, unknown>;
+      originalManifestSource = raw;
+    }
+  } catch (error) {
+    if (io.target) throw error;
     /* first adoption — the default manifest above */
   }
 
@@ -537,24 +583,53 @@ export async function materializeCandidateIntoPack(
   );
   const itemId = candidateItemId(opts.title, taken);
   const version = bumpPatchVersion(manifest.version);
+  // Read and prepare the authored pin before writing any pack content. A local
+  // edit invalidates its prior attestation; publishing signs the new source.
+  let nextIdentitySource: string | undefined;
+  let originalIdentitySource: string | undefined;
+  if (io.target) {
+    originalIdentitySource = await fs.readFile(io.target.sourcePath, 'utf8');
+    const raw = parseYaml(originalIdentitySource) as Record<string, unknown>;
+    if (Array.isArray(raw.bundles)) {
+      for (const bundle of raw.bundles) {
+        if (bundle.kind === 'knowledge-pack' && bundle.ref === io.target.packId && bundle.version) bundle.version = version;
+      }
+    }
+    delete raw.attestation;
+    nextIdentitySource = stringifyYaml(raw);
+  }
 
-  await fs.writeFile(
-    join(dir, `${itemId}.md`),
-    renderCandidateLearningFile({ ...opts, itemId }),
-    'utf8',
-  );
   // Stamp the OKF version on write when the on-disk manifest predates the field.
   // The fleet-lessons pack lives in the SHARED root (~/.papercusp/...), i.e. OUTSIDE
   // the repo, so the P-004 codemod that edited the three builtin manifests cannot
   // reach it — without this it would stay un-stamped indefinitely.
   const okfVersion = manifest.okfVersion ?? OKF_VERSION;
-  await fs.writeFile(
-    join(dir, 'manifest.yaml'),
-    renderManifest({ ...manifest, version, okfVersion }),
-    'utf8',
-  );
-
-  return { packId: FLEET_LESSONS_PACK_ID, packItemId: itemId, packVersion: version };
+  const itemPath = join(dir, `${itemId}.md`);
+  try {
+    await fs.writeFile(itemPath, renderCandidateLearningFile({ ...opts, itemId }), 'utf8');
+    await fs.writeFile(
+      join(dir, 'manifest.yaml'),
+      originalManifest ? stringifyYaml({ ...originalManifest, version, okf_version: okfVersion }) : renderManifest({ ...manifest, version, okfVersion }),
+      'utf8',
+    );
+    if (io.target && nextIdentitySource) {
+      await fs.writeFile(io.target.sourcePath, nextIdentitySource, 'utf8');
+    }
+  } catch (error) {
+    // The candidate remains pending on an IO error. Restore authored bytes so
+    // retry cannot duplicate a lesson or advance only one of the version pins.
+    if (io.target && originalManifestSource && originalIdentitySource) {
+      const restored = await Promise.allSettled([
+        fs.writeFile(join(dir, 'manifest.yaml'), originalManifestSource, 'utf8'),
+        fs.writeFile(io.target.sourcePath, originalIdentitySource, 'utf8'),
+        fs.rm(itemPath, { force: true }),
+      ]);
+      const failures = restored.filter((result) => result.status === 'rejected');
+      if (failures.length) throw new AggregateError([error, ...failures.map((result) => result.reason)], 'Identity adoption failed and authored-file rollback was incomplete.');
+    }
+    throw error;
+  }
+  return { packId: io.target?.packId ?? FLEET_LESSONS_PACK_ID, packItemId: itemId, packVersion: version };
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -577,6 +652,8 @@ export interface DecideCandidateInput {
   workspaceId?: string;
   /** Test override of the installed packs root. */
   packsRoot?: string;
+  /** Internal transaction recursion, never exposed as a tool argument. */
+  candidateSql?: ReturnType<typeof getOrgPg>['sql'];
   /** Test override of the transfer bar (lib/transfer/pack-bar). */
   transferBar?: (q: {
     workspaceId: string;
@@ -595,7 +672,7 @@ export type DecideCandidateResult =
        * gate and retrying cannot help, so a sweeping caller must dismiss rather
        * than leave it pending. Every other reason here is potentially transient.
        */
-      reason: 'not_found' | 'not_pending' | 'pack_write_failed' | 'transfer_bar' | 'admission_gate';
+      reason: 'not_found' | 'not_pending' | 'pack_write_failed' | 'transfer_bar' | 'admission_gate' | 'immutable_identity_pack' | 'identity_unavailable' | 'identity_pack_required' | 'explicit_review_required';
       error?: string;
     };
 
@@ -615,16 +692,29 @@ export type DecideCandidateResult =
 export async function decideKnowledgePackCandidate(
   input: DecideCandidateInput,
 ): Promise<DecideCandidateResult> {
-  const { sql } = getOrgPg();
+  const sql = input.candidateSql ?? getOrgPg().sql;
   const ws = input.workspaceId ?? activeWorkspaceId();
 
   const rows = await sql<CandidateRow[]>`
     SELECT * FROM harness_shared.knowledge_pack_candidates
-    WHERE id = ${input.id}`;
+    WHERE id = ${input.id} AND (workspace_id IS NULL OR workspace_id = ${ws})
+    ${input.candidateSql ? sql`FOR UPDATE` : sql``}`;
   const row = rows[0];
   if (!row) return { ok: false, reason: 'not_found' };
   if (row.status !== 'pending') return { ok: false, reason: 'not_pending' };
   const candidate = rowToCandidate(row);
+
+  if (candidate.workspaceId) {
+    if (input.by === AUTO_ADOPT_REVIEWER) return { ok: false, reason: 'explicit_review_required' };
+    if (!input.candidateSql) {
+      return sql.begin(async (tx) => {
+        // The locally authored target is shared by proposing workspaces. Lock
+        // the pack itself, rather than a workspace-specific candidate queue.
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${JSON.stringify(['identity-pack', candidate.targetIdentityId, candidate.targetPackId])}))`;
+        return decideKnowledgePackCandidate({ ...input, candidateSql: tx as unknown as typeof sql });
+      });
+    }
+  }
 
   if (input.action === 'dismiss') {
     await sql`
@@ -650,6 +740,11 @@ export async function decideKnowledgePackCandidate(
 
   let written: { packId: string; packItemId: string; packVersion: string };
   try {
+    let target: { dir: string; packId: string; sourcePath: string } | undefined;
+    if (candidate.targetIdentityId && candidate.targetPackId) {
+      const { resolveWritableIdentityPack } = await import('./identity-learning');
+      target = { ...await resolveWritableIdentityPack(candidate.targetIdentityId, candidate.targetPackId), packId: candidate.targetPackId };
+    }
     written = await materializeCandidateIntoPack(
       {
         title: input.title?.trim() || candidate.title,
@@ -660,10 +755,13 @@ export async function decideKnowledgePackCandidate(
         scopes: candidate.scopes,
         recurrenceCount: candidate.recurrenceCount,
         sourceItemIds: candidate.sourceItemIds,
+        ...(target ? { identityProposal: true } : {}),
       },
-      { ...(input.packsRoot ? { packsRoot: input.packsRoot } : {}) },
+      { ...(input.packsRoot ? { packsRoot: input.packsRoot } : {}), ...(target ? { target } : {}) },
     );
   } catch (e) {
+    const { IdentityLearningRefused } = await import('./identity-learning');
+    if (e instanceof IdentityLearningRefused) return { ok: false, reason: e.reason as 'immutable_identity_pack', error: e.message };
     // P-009: separate the deterministic refusal from a transient write failure —
     // the caller's retry policy depends on which one this is.
     if (e instanceof PackAdmissionRefused) {
@@ -923,7 +1021,8 @@ export async function autoAdoptPendingCandidates(
   const result: AutoAdoptSweepResult = { reviewed: 0, adopted: 0, dismissed: 0, failed: 0 };
   if (maxPerRun === 0) return result;
 
-  const pending = (await list({ status: 'pending', limit: maxPerRun })).slice(0, maxPerRun);
+  const pending = (await list({ status: 'pending', limit: maxPerRun, fleetOnly: true }))
+    .filter((candidate) => !candidate.targetIdentityId).slice(0, maxPerRun);
   for (const candidate of pending) {
     result.reviewed += 1;
     let verdict: AutoReviewVerdict;

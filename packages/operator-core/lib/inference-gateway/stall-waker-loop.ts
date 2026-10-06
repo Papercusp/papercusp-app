@@ -43,7 +43,7 @@ const accountWorkspaceCache = new Map<string, string>();
  * on boot-start is the registry's first entry ('default'). `accountStatus('default')` does not
  * contain another workspace's accounts, so the lookup MISSED for every real stall on this box and
  * fell into the unknown-account fallback (`return true`) — waking bees onto usage-walled accounts
- * no matter what the pool knew (the aviowner.com false "rate limit recovered" wakes, 2026-07-07).
+ * no matter what the pool knew (the avistorewolf.com false "rate limit recovered" wakes, 2026-07-07).
  * Own workspace first, then every other registry workspace; deps injectable for unit tests.
  */
 export async function findAccountRow(
@@ -182,7 +182,7 @@ export function createStallWakerDeps(workspaceId: string): StallWakerDeps {
       // (3) ...and the account itself must be able to SERVE: pause clear AND usage headroom.
       //     `available` is usage-aware as of WI-3310 (`!accountFull`): a weekly-usage-exhausted
       //     account whose bounded (≤6h) rate pause lapsed used to read available:true here, so the
-      //     waker fired "rate limit recovered on aviowner.com" wakes for DAYS while the 7d
+      //     waker fired "rate limit recovered on avistorewolf.com" wakes for DAYS while the 7d
       //     window sat at 100% — the rate limit and the usage limit are different meters, and pause
       //     expiry is not usage recovery. When the account is usage-walled we log the REAL reset
       //     (once per account per wall, not per 20s tick) so the multi-day hold is visible, and hold.

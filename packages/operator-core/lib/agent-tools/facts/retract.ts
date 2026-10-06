@@ -34,7 +34,7 @@ export default defineTool({
     ref: z.string().max(120).optional().describe('Alias for scopeRef (EI-7371) — prefer scopeRef.'),
     harness: z.string().max(120).optional().describe('Alias for scopeRef when scope:"harness" (EI-7371) — prefer scopeRef.'),
     key: z.string().min(1).max(120),
-    reason: z.string().min(1).max(500).describe('Why this fact stopped being true — retained in the 30-day audit trail.'),
+    reason: z.string().min(1).max(500).describe('Why this fact stopped being true, ≤500 chars (longer is refused) — retained in the 30-day audit trail.'),
   }),
   async handler(args, ctx) {
     const { resolveAgentIdentity } = await import('../coordination/identity');

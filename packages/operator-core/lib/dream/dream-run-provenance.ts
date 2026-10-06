@@ -94,8 +94,9 @@ export function newDreamCapabilityRun(input: BeginCapabilityRunInput): DreamCapa
     manifestHash: capabilityHash(JSON.stringify(parsed)),
     manifestRevision: parsed.revision,
   });
-  if (header.dreamerModel.toLowerCase() === header.reviewerModel.toLowerCase())
-    throw new Error('Dream reviewer must use a different model');
+  // The workspace background-model policy permits generation and review to
+  // share a model identity. Their prompt versions and phase-tagged call records
+  // remain separate evidence in the capability run.
   return { ...header, schemaVersion: DREAM_CAPABILITY_RUN_VERSION, sampling: null, calls: [], artifactId: null };
 }
 

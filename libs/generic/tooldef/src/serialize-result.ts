@@ -35,6 +35,7 @@ import {
   type ResultFormat,
 } from '@papercusp/result-encoding';
 import type { ToolResponse } from './types';
+import { renderDenominatorText, resolveDenominator } from './denominator';
 import type { UnifiedToolContext } from './tool-projection';
 import type { DeltaNegotiation } from './delta-protocol';
 
@@ -228,6 +229,22 @@ function tryTier3Read(
  * appended verbatim after the text item (parity with the legacy wrappers).
  */
 export function serializeToolResponse(
+  response: ToolResponse,
+  opts: SerializeFormatOpts,
+): SerializedToolResult {
+  const out = serializeToolResponseBody(response, opts);
+  // D-041: a handler-computed base-rate stamp rides the SAME rendering as
+  // guidance.denominator, on every body path (full, delta, not_modified).
+  const d = response.data !== undefined && response.data !== null
+    ? resolveDenominator(response.denominator, { content: [] }, undefined, undefined)
+    : null;
+  if (!d) return out;
+  out._meta = { ...(out._meta ?? {}), _denominator: d };
+  out.content = [...out.content, { type: 'text', text: renderDenominatorText(d) }];
+  return out;
+}
+
+function serializeToolResponseBody(
   response: ToolResponse,
   opts: SerializeFormatOpts,
 ): SerializedToolResult {

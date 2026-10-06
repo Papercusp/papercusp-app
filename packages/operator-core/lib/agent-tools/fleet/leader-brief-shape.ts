@@ -494,11 +494,13 @@ function compactSummary(value: unknown, ultra = false): unknown {
     'laneless_idle',
     'dormant',
     'spinning',
+    'stalled_item',
     'throttled',
     'repeated_recovery',
     'darkFleetAlert',
     'fleetExecutionCollapseAlert',
     'fleetHeadcountVsExecutableFrontierAlert',
+    'fleetUnderStaffedAlert',
     'leaderBlockerStallAlert',
     'customInvariantAlert',
     'unowned_criticals',
@@ -607,6 +609,25 @@ function compactSummary(value: unknown, ultra = false): unknown {
   if (headcount && 'basis' in headcount) headcount.basis = compactHeadcountBasis(headcount.basis);
   if (headcount) out.headcount = headcount;
 
+  // P-007 / R-17: the silent members `headcount.current` left out must survive
+  // shaping, or a leader reads an under-strength fleet with no names to act on.
+  const silentMembers = source.silentMembers;
+  if (silentMembers && typeof silentMembers === 'object' && !Array.isArray(silentMembers)) {
+    const sm = silentMembers as Record<string, unknown>;
+    if (sm.status === 'measured' && Array.isArray(sm.ownerIds)) {
+      const ids = sm.ownerIds.filter((id): id is string => typeof id === 'string');
+      out.silentMembers = {
+        status: 'measured',
+        ownerIds: ids.slice(0, 8),
+        ...(ids.length > 8 ? { ownerIdsTruncated: ids.length } : {}),
+        thresholdMs: sm.thresholdMs,
+        paused: sm.paused,
+      };
+    } else if (sm.status === 'unknown') {
+      out.silentMembers = { status: 'unknown', reason: sm.reason };
+    }
+  }
+
   // WI-2034563: policy-parked capacity must survive shaping and sit BESIDE headcount.
   // Shaped away, a leader reads `underStrength` with nothing saying the missing seats
   // are alive and parked by their own directive — which is exactly the reading that
@@ -684,6 +705,13 @@ function compactMember(value: unknown): unknown {
     ) ?? {};
   if (source.idleVerdict && typeof source.idleVerdict === 'object') {
     out.idleVerdict = pick(source.idleVerdict, ['cause', 'reason'], 160) ?? source.idleVerdict;
+  }
+  // P-004/R-4: the stalled-item rotation verdict is the actionable fact on this row —
+  // keep its identity, age, ready count and required action under shaping.
+  if (source.stalledItem && typeof source.stalledItem === 'object') {
+    out.stalledItem =
+      pick(source.stalledItem, ['item', 'noAdvanceMin', 'advancedAt', 'readyWaiting', 'requiredAction'], 400) ??
+      source.stalledItem;
   }
   if (source.doing && typeof source.doing === 'object') {
     out.doing = pick(source.doing, ['id', 'title', 'status', 'activity'], 140) ?? source.doing;
@@ -1198,7 +1226,12 @@ export function shapeLeaderBrief(data: unknown, tier: LeaderBriefPayloadTier): u
     },
   };
   // P-010/P-011: keep fleet-level detector evidence at the emergency tier too.
-  for (const alert of ['darkFleetAlert', 'fleetExecutionCollapseAlert', 'fleetHeadcountVsExecutableFrontierAlert']) {
+  for (const alert of [
+    'darkFleetAlert',
+    'fleetExecutionCollapseAlert',
+    'fleetHeadcountVsExecutableFrontierAlert',
+    'fleetUnderStaffedAlert',
+  ]) {
     const reasonKey = `${alert}Reason`;
     const falsifierKey = `${alert}Falsifier`;
     if (source[reasonKey] !== undefined) {

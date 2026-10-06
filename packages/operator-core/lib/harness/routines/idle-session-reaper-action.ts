@@ -16,7 +16,7 @@
 import { registerSystemAction, type SystemActionCtx } from './system-actions';
 import { readCoordLivenessConfig } from '../../coord-liveness-config';
 import { gatherOnDesktopSessions, listOpenWindows } from '../../desktop-window-liveness';
-import { listLiveHosts } from '../../events/await/psu-pty-discovery';
+import { listLiveHostsAsync } from '../../events/await/psu-pty-discovery';
 import {
   runIdleSessionReap,
   runWorkItemLeaseReap,
@@ -38,7 +38,7 @@ registerSystemAction('idle-session-reaper', async (ctx: SystemActionCtx) => {
   // hosts but ZERO protected owners. Surface it loudly every sweep.
   try {
     const [onDesktop, windows] = await Promise.all([gatherOnDesktopSessions(), listOpenWindows()]);
-    const hosts = listLiveHosts();
+    const hosts = await listLiveHostsAsync();
     console.log(
       `[idle-session-reaper] on-desktop exemption: ${onDesktop.owners.size} owner(s) protected ` +
         `(${windows.length} open window(s), ${hosts.length} live psu host(s))`,

@@ -4,6 +4,8 @@ import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { getSessionUserOrDefault } from '../../auth';
 import { authorizePersonalAccess } from '../../personal-vault/authorization';
 import { replyToCanonicalChat } from '../../capability-verbs/chat';
+import { DisclosureRefused, disclosureRefusalData } from '../../personal-vault/disclosure-ledger';
+import { disclosureSubject } from '../_disclosure-subject';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 
 export default defineTool({
@@ -33,12 +35,18 @@ export default defineTool({
     const user = await getSessionUserOrDefault();
     const auth = await authorizePersonalAccess(ctx.tx!, ctx, workspaceId, user.id, ['personal:slack']);
     if (!auth.allowed) return { data: { allowed: false, refusal: auth.reason } };
-    const result = await replyToCanonicalChat(ctx.tx as unknown as postgres.Sql, {
-      workspaceId,
-      userId: user.id,
-      messageId: args.messageId,
-      text: args.text,
-    });
-    return { data: { ok: true, ...result } };
+    try {
+      const result = await replyToCanonicalChat(ctx.tx as unknown as postgres.Sql, {
+        workspaceId,
+        userId: user.id,
+        messageId: args.messageId,
+        text: args.text,
+        agentOwnerId: disclosureSubject(ctx),
+      });
+      return { data: { ok: true, ...result } };
+    } catch (error) {
+      if (error instanceof DisclosureRefused) return { data: disclosureRefusalData(error) };
+      throw error;
+    }
   },
 });

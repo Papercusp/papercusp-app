@@ -63,7 +63,7 @@ export default defineTool({
       status: r.status,
     }));
     return {
-      content: [{ type: 'text', text: JSON.stringify({ ok: true, count: recipes.length, recipes }) }],
+      data: { ok: true, count: recipes.length, recipes },
     };
   },
 });

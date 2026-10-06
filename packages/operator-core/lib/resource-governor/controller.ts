@@ -156,6 +156,7 @@ function demandWeight(resource: HealthResource, demand: ResourceDemand | undefin
       return finiteNonNegative(demand?.databaseConnections);
     case 'provider':
       return finiteNonNegative(demand?.providerRequests);
+    case 'io':
     case 'service':
     case 'queue':
     case 'governor':
@@ -168,7 +169,7 @@ function aggregateSamples(samples: readonly ControllerClassSample[]): Aggregated
   for (const sample of samples) {
     const current = byClass.get(sample.admissionClass) ?? {
       inFlight: 0,
-      weights: { cpu: 0, memory: 0, database: 0, service: 0, provider: 0, queue: 0, governor: 0 },
+      weights: { cpu: 0, io: 0, memory: 0, database: 0, service: 0, provider: 0, queue: 0, governor: 0 },
     };
     const inFlight = sample.inFlight === undefined ? 1 : Math.max(0, Math.floor(finiteNonNegative(sample.inFlight)));
     current.inFlight += inFlight;

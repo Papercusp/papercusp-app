@@ -11,7 +11,7 @@
  * dropdowns, input focus, etc.) survives.
  */
 
-import { useRef, useState, type ReactNode, type CSSProperties } from 'react';
+import { useRef, useState, type ReactNode, type CSSProperties, type Ref } from 'react';
 import * as Collapsible from '@radix-ui/react-collapsible';
 
 interface LazyDetailsProps {
@@ -27,6 +27,8 @@ interface LazyDetailsProps {
   className?: string;
   /** Class passed to the Collapsible trigger. */
   summaryClassName?: string;
+  /** Let a caller restore focus to this disclosure after closing a companion. */
+  summaryRef?: Ref<HTMLButtonElement>;
 }
 
 export function LazyDetails({
@@ -37,6 +39,7 @@ export function LazyDetails({
   summaryStyle,
   className,
   summaryClassName,
+  summaryRef,
 }: LazyDetailsProps) {
   const [opened, setOpened] = useState(defaultOpen);
   const ref = useRef<HTMLDivElement>(null);
@@ -50,7 +53,7 @@ export function LazyDetails({
         if (open && !opened) setOpened(true);
       }}
     >
-      <Collapsible.Trigger className={summaryClassName} style={summaryStyle}>{summary}</Collapsible.Trigger>
+      <Collapsible.Trigger ref={summaryRef} className={summaryClassName} style={summaryStyle}>{summary}</Collapsible.Trigger>
       {/* forceMount: keep the Content wrapper mounted across collapse so the
           `opened` gate (not Radix's unmount-on-close) governs child lifetime —
           children mount on first open and STAY mounted across later collapses,

@@ -8,7 +8,7 @@ import { papercuspRoot } from '../../../papercusp-root';
 import { defineTool } from '@papercusp/agent-mcp';
 
 const HIDDEN_PLUGIN_BASENAMES = new Set([
-  'notion-export', 'slack-notifier', 'jira-sync',
+  'notion-export', 'slack-notifier',
 ]);
 
 // Reserved by the CLI's lock-resolve node:test fixtures. Those tests used to

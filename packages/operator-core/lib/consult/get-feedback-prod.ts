@@ -10,9 +10,9 @@ export async function getFeedbackProd(
     filterRoute?: (route: Awaited<ReturnType<GetFeedbackDeps['route']>>) => Promise<Awaited<ReturnType<GetFeedbackDeps['route']>>>;
     /**
      * D-002: let a caller that only wants RETRIEVAL prevent any launch side
-     * effect. Absent/true binds the fork/convert dispatcher; false leaves the
-     * delivery seam reporting zero, which the core reports honestly as
-     * `no_available_responder`.
+     * effect. Absent/true binds the fork/convert dispatcher; false returns the
+     * ranked retrieval menu without entering the dispatch/cascade path. The
+     * core reports `retrieval_only`, never a failed launch.
      *
      * (Named `allowRevival` before the dispatcher replaced revive-in-place; the
      * question it answers — "may this consult start a process?" — is unchanged.)
@@ -51,7 +51,7 @@ export async function getFeedbackProd(
   const embeddingProfile = resolved
     ? resolveProseProfileSelection(resolved.mode, resolved.profile)
     : null;
-  return getFeedbackCore(request, {
+  return getFeedbackCore({ ...request, allowDispatch: !dispatchDisabled }, {
     getSql: () => getOrgPg().sql,
     route: async (params) => {
       const routed = await routeConsult({
@@ -70,7 +70,7 @@ export async function getFeedbackProd(
         getLiveness: async (ownerIds) => {
           const [verdicts, pausedOwners] = await Promise.all([
             resolveSessionStates(ownerIds.map((ownerId) => ({ ownerId })), {
-              hydratePerId: true,
+              hydrateBatch: true,
               psuHostPositiveAuthority: true,
             }),
             listLoopStanddownOwners(getOrgPg().sql, { workspaceId: request.workspaceId }),

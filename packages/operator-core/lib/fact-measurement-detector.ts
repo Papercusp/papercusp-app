@@ -136,6 +136,13 @@ export interface FactAbsenceSignal {
   context: string;
 }
 
+function isAbsenceClauseBoundary(text: string, index: number): boolean {
+  const char = text[index];
+  if (char === '\n' || char === ';') return true;
+  if (char !== '.' && char !== '!' && char !== '?') return false;
+  return index + 1 >= text.length || /\s/.test(text[index + 1]);
+}
+
 /**
  * PURE. Find negation tokens stated alongside existence-claim language.
  *
@@ -156,9 +163,23 @@ export function detectFactAbsenceClaims(text: unknown): FactAbsenceSignal[] {
       anchors.lastIndex += 1;
       continue;
     }
-    const start = Math.max(0, match.index - ABSENCE_CONTEXT_WINDOW);
-    const end = Math.min(haystack.length, match.index + match[0].length + ABSENCE_CONTEXT_WINDOW);
-    const contextMatch = EXISTENCE_CONTEXT.exec(haystack.slice(start, end));
+    const windowStart = Math.max(0, match.index - ABSENCE_CONTEXT_WINDOW);
+    const windowEnd = Math.min(haystack.length, match.index + match[0].length + ABSENCE_CONTEXT_WINDOW);
+    let clauseStart = windowStart;
+    for (let index = match.index - 1; index >= windowStart; index -= 1) {
+      if (isAbsenceClauseBoundary(haystack, index)) {
+        clauseStart = index + 1;
+        break;
+      }
+    }
+    let clauseEnd = windowEnd;
+    for (let index = match.index + match[0].length; index < windowEnd; index += 1) {
+      if (isAbsenceClauseBoundary(haystack, index)) {
+        clauseEnd = index;
+        break;
+      }
+    }
+    const contextMatch = EXISTENCE_CONTEXT.exec(haystack.slice(clauseStart, clauseEnd));
     if (!contextMatch) continue;
 
     const signal: FactAbsenceSignal = {

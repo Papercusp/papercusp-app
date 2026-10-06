@@ -1,0 +1,1491 @@
+{
+  "audit": "WI-10004874",
+  "sourceHead": "8cfe6fd85b042b7f97c6f5a2cedaa495d1cfbf40",
+  "dateUtc": "2026-10-01",
+  "limits": [
+    "Moving shared runtime; rolling windows captured at different read times.",
+    "Selected tool and route groups, not complete traffic census.",
+    "Statement deltas are aggregate execution time, not CPU time.",
+    "Journal tails capped at 1500 lines per unit; counts overlap.",
+    "PSS, RSS and cgroup memory are different measurements.",
+    "No controlled load, leak soak, new native cohort, restore or fault injection."
+  ],
+  "pgHotQueries": {
+    "requestedWindowSec": 15,
+    "limit": 8,
+    "sample": {
+      "startedAt": "2026-10-01T13:50:34.463Z",
+      "endedAt": "2026-10-01T13:50:49.651Z",
+      "actualWindowSec": 15.188,
+      "firstSnapshotStatements": 4971,
+      "secondSnapshotStatements": 4977,
+      "matchedStatements": 4976,
+      "activeStatements": 785,
+      "zeroCallStatements": 4191,
+      "filter": null,
+      "capPressure": {
+        "entryCount": 9963,
+        "capMax": 10000,
+        "occupancyPct": 99.6,
+        "deallocBefore": 495,
+        "deallocAfter": 495,
+        "deallocDuringWindow": 0,
+        "evictedDuringWindow": false
+      }
+    },
+    "hot": [
+      {
+        "queryId": "2849258127946461939",
+        "query": "WITH q AS ( SELECT replace(plainto_tsquery($1, $2)::text, $3, $4)::tsquery AS orq, string_to_array(replace(plainto_tsquery($5, $6)::text, $7, $8), $9) AS lexemes ), df AS ( SELECT l, (SELECT count(*) FROM ( SELECT $10 FROM harness_shared.s…",
+        "topLevel": true,
+        "inWindow": {
+          "execMs": 10012.715,
+          "calls": "17",
+          "callsPerSec": 1.1193,
+          "msPerCall": 588.983,
+          "rows": "174",
+          "rowsPerCall": 10.235
+        },
+        "lifetime": {
+          "execMs": 29449330.181,
+          "calls": "58404",
+          "msPerCall": 504.235,
+          "rows": "1145197",
+          "rowsPerCall": 19.608,
+          "statsSince": "2026-09-29T19:35:27.934Z"
+        },
+        "stale": false,
+        "zeroCallVerdict": null,
+        "statisticalPower": null,
+        "newEntry": false,
+        "vanished": false,
+        "counterReset": false
+      },
+      {
+        "queryId": "3056926748572364537",
+        "query": "WITH ranked AS MATERIALIZED ( SELECT id, valid_at, invalid_at, superseded_by, created_at, (CASE WHEN nm LIKE $2 THEN $35 WHEN ds LIKE $2 THEN $36 WHEN dt LIKE $2 THEN $37 ELSE $38 END + CASE WHEN nm LIKE $3 THEN $39 WHEN ds LIKE $3 THEN $4…",
+        "topLevel": true,
+        "inWindow": {
+          "execMs": 8105.645,
+          "calls": "32",
+          "callsPerSec": 2.1069,
+          "msPerCall": 253.301,
+          "rows": "1152",
+          "rowsPerCall": 36
+        },
+        "lifetime": {
+          "execMs": 25643040.562,
+          "calls": "152959",
+          "msPerCall": 167.646,
+          "rows": "5379443",
+          "rowsPerCall": 35.169,
+          "statsSince": "2026-09-29T19:38:27.298Z"
+        },
+        "stale": false,
+        "zeroCallVerdict": null,
+        "statisticalPower": null,
+        "newEntry": false,
+        "vanished": false,
+        "counterReset": false
+      },
+      {
+        "queryId": "-2442231371504820178",
+        "query": "SELECT feature_id AS work_item_id, item_kind, status, updated_ts, payload ->> $1 AS claim_hold, payload->$2->>$3 AS plan_slug, payload->$4->>$5 AS item_id FROM harness_shared.work_items WHERE payload->$6 IS NOT NULL AND payload->$7->>$8 IS…",
+        "topLevel": true,
+        "inWindow": {
+          "execMs": 6738.066,
+          "calls": "4",
+          "callsPerSec": 0.2634,
+          "msPerCall": 1684.517,
+          "rows": "31132",
+          "rowsPerCall": 7783
+        },
+        "lifetime": {
+          "execMs": 9151799.991,
+          "calls": "7091",
+          "msPerCall": 1290.622,
+          "rows": "54340782",
+          "rowsPerCall": 7663.345,
+          "statsSince": "2026-09-29T19:35:33.607Z"
+        },
+        "stale": false,
+        "zeroCallVerdict": null,
+        "statisticalPower": null,
+        "newEntry": false,
+        "vanished": false,
+        "counterReset": false
+      },
+      {
+        "queryId": "-3381764550232685681",
+        "query": "WITH q AS ( SELECT plainto_tsquery($1, $2) AS andq ) SELECT source_kind, session_id, turn_idx, speaker, owner, harness_slug, ts, text, $3 AS coverage, ts_rank_cd(text_tsv, q.andq) AS rank, $4 AS highlight FROM harness_shared.session_turns …",
+        "topLevel": true,
+        "inWindow": {
+          "execMs": 4755.863,
+          "calls": "29",
+          "callsPerSec": 1.9094,
+          "msPerCall": 163.995,
+          "rows": "1020",
+          "rowsPerCall": 35.172
+        },
+        "lifetime": {
+          "execMs": 13622955.296,
+          "calls": "112395",
+          "msPerCall": 121.206,
+          "rows": "3870994",
+          "rowsPerCall": 34.441,
+          "statsSince": "2026-09-29T19:35:27.590Z"
+        },
+        "_partial": true
+      },
+      {
+        "id": "(truncated)",
+        "kind": "projection-truncation",
+        "type": "projection-truncation",
+        "_truncated": true,
+        "omittedCount": 4,
+        "shownCount": 4,
+        "renderedCount": 8,
+        "note": "[TRUNCATED +4 more item(s) — header count includes this marker; showing 4 of 8 rendered input entries — renderedCount is NOT the query population; see _projection.cursor]"
+      }
+    ],
+    "_partial": true,
+    "_projection": {
+      "kind": "bounded-payload",
+      "truncated": true,
+      "tier": "trimmed",
+      "forced": true,
+      "originalChars": 8490,
+      "returnedChars": 4830,
+      "omittedCount": 12,
+      "omitted": [],
+      "cursor": {
+        "kind": "scratch-page",
+        "tool": "capability:read",
+        "args": {
+          "file_path": "~/.papercusp/scratch/papercusp-workspace/tools:invoke/48aaadab-cc3f-4cb9-9abc-1b459c8f3e9c/result-door-1790862649859.md",
+          "byte_offset": 0,
+          "byte_limit": 3072
+        },
+        "maxByteLimit": 4096,
+        "uri": "papercusp://scratch/papercusp-workspace/tools:invoke/48aaadab-cc3f-4cb9-9abc-1b459c8f3e9c/result-door-1790862649859.md",
+        "dataEncoding": "base64",
+        "bodyOffsetInPayload": 1035,
+        "bodyOffsetInFile": 1586
+      },
+      "next": "Use capability:read with _projection.cursor.args; file_path is an encoded scratch-reference, not JSON. For each page, validate response.data as canonical base64 and decoded.length===byte_length; follow next_cursor; parse JSON only at eof:true + next_cursor:null. recover spill; JSON starts after cursor.bodyOffsetInPayload in response.data. ⓘ Get only what you need in ONE call instead of paging this spill: `projection: { pick: [\"results[].id\",\"results[].state\"] }`. This body is JSON on 5 line(s), so `pick` is what reduces it — the `pipe` line-operators are all-or-nothing here (a no-match returns an EMPTY body, which reads like a filter that worked). `projection` also accepts a JSON STRING.",
+      "omittedSamplesDropped": true
+    },
+    "_dataPlaneMayBeDegraded": "⚠ DATA PLANE MAY BE DEGRADED: this session's local MCP proxy observed an upstream retry or connection failure at 2026-10-01T13:50:21.666Z. During this short warning window, an unexpected empty/not-found result may be a transport symptom rather than authoritative absence. Retry or verify independently before concluding that data is missing."
+  },
+  "pgHealth": {
+    "version": "PostgreSQL 18.4 (Ubuntu 18.4-1.pgdg24.04+1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit",
+    "totalConnections": 152,
+    "activeConnections": 18,
+    "idleConnections": 125,
+    "maxConnections": 512,
+    "serverWideConnections": 177,
+    "saturationPct": 34.6,
+    "byApplication": [
+      {
+        "name": "pcusp:org-admin:p2262767",
+        "count": 21
+      },
+      {
+        "name": "(unset)",
+        "count": 21
+      },
+      {
+        "name": "pcusp:org-admin:p4099092",
+        "count": 8
+      },
+      {
+        "name": "pcusp:org-admin:p3197735",
+        "count": 7
+      },
+      {
+        "name": "pcusp:org-admin:p3197681",
+        "count": 7
+      },
+      {
+        "name": "pcusp:org-admin:p3218649",
+        "count": 6
+      },
+      {
+        "id": "(truncated)",
+        "kind": "projection-truncation",
+        "type": "projection-truncation",
+        "_truncated": true,
+        "omittedCount": 14,
+        "shownCount": 6,
+        "renderedCount": 20,
+        "note": "[TRUNCATED +14 more item(s) — header count includes this marker; showing 6 of 20 rendered input entries — renderedCount is NOT the query population; see _projection.cursor]"
+      }
+    ],
+    "postmasterStartMs": 1790861699120,
+    "processDiagnostics": {
+      "source": "current-process",
+      "pid": 3197735,
+      "capturedAt": "2026-10-01T13:50:27.662Z",
+      "coverage": "completed-results-in-selected-pools-only",
+      "timing": "query-build-to-terminal-not-acquisition",
+      "queryIdentity": [
+        "source.processInstanceId",
+        "source.poolInstanceId",
+        "connectionId",
+        "queryId"
+      ],
+      "resultLimitPerPool": 4,
+      "limitations": "Only completed results in the named pools of this process are observed; in-flight queries, other pools and processes are not covered. An empty ring does not prove an idle database or connectivity. dropped counts ring eviction; omittedRetained counts retained results outside this response window. Evi…[TRUNCATED +382 chars — see _projection.cursor]",
+      "pools": [
+        {
+          "results": [
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            }
+          ],
+          "pool": "org-app",
+          "capacity": 32,
+          "totalRecorded": 5877,
+          "dropped": 5845,
+          "observed": true,
+          "retained": 32,
+          "omittedRetained": 28
+        },
+        {
+          "results": [
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            }
+          ],
+          "pool": "org-admin",
+          "capacity": 32,
+          "totalRecorded": 69266,
+          "dropped": 69234,
+          "observed": true,
+          "retained": 32,
+          "omittedRetained": 28
+        },
+        {
+          "results": [
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            },
+            {
+              "status": "ok",
+              "_partial": true,
+              "_omitted": "[omitted: 13 non-identity field(s) at projection depth limit: pool, source, connectionId, queryId, backendPid, queryFamily, +7 more — recover: see _projection.cursor]"
+            }
+          ],
+          "pool": "org-admin-lossless-bigint",
+          "capacity": 32,
+          "totalRecorded": 16,
+          "dropped": 0,
+          "observed": true,
+          "retained": 16,
+          "omittedRetained": 12
+        }
+      ]
+    },
+    "_projection": {
+      "kind": "bounded-payload",
+      "truncated": true,
+      "tier": "trimmed",
+      "forced": true,
+      "originalChars": 7942,
+      "returnedChars": 5962,
+      "omittedCount": 174,
+      "omitted": [],
+      "cursor": {
+        "kind": "scratch-page",
+        "tool": "capability:read",
+        "args": {
+          "file_path": "~/.papercusp/scratch/papercusp-workspace/tools:invoke/3a1159f2-0e63-4e8c-a508-fa2e6782858d/result-door-1790862627671.md",
+          "byte_offset": 0,
+          "byte_limit": 3072
+        },
+        "maxByteLimit": 4096,
+        "uri": "papercusp://scratch/papercusp-workspace/tools:invoke/3a1159f2-0e63-4e8c-a508-fa2e6782858d/result-door-1790862627671.md",
+        "dataEncoding": "base64",
+        "bodyOffsetInPayload": 1864,
+        "bodyOffsetInFile": 2608
+      },
+      "next": "Use capability:read with _projection.cursor.args; file_path is an encoded scratch-reference, not JSON. For each page, validate response.data as canonical base64 and decoded.length===byte_length; follow next_cursor; parse JSON only at eof:true + next_cursor:null. recover spill; JSON starts after cursor.bodyOffsetInPayload in response.data. ⓘ Get only what you need in ONE call instead of paging this spill: `projection: { pick: [\"results[].id\",\"results[].state\"] }`. This body is JSON on 5 line(s), so `pick` is what reduces it — the `pipe` line-operators are all-or-nothing here (a no-match returns an EMPTY body, which reads like a filter that worked). `projection` also accepts a JSON STRING.",
+      "omittedSamplesDropped": true
+    },
+    "_dataPlaneMayBeDegraded": "⚠ DATA PLANE MAY BE DEGRADED: this session's local MCP proxy observed an upstream retry or connection failure at 2026-10-01T13:50:21.666Z. During this short warning window, an unexpected empty/not-found result may be a transport symptom rather than authoritative absence. Retry or verify independently before concluding that data is missing."
+  },
+  "toolTelemetry": {
+    "count": 20,
+    "poll_suspects": [
+      {
+        "tool_name": "activity:report",
+        "call_count": 7336,
+        "calls_per_hour": 7336,
+        "callers": 168,
+        "calls_per_caller_per_hour": 44,
+        "total_bytes": 21962933,
+        "reason": "7336 calls/hr sustained over 1h by 168 caller(s) (~44/hr each) — polling-shaped; expect an SSE/event subscription or a cached read instead (EI-7029)"
+      }
+    ],
+    "entries": [
+      {
+        "tool_name": "activity:report",
+        "call_count": 7336,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 92,
+        "p95_ms": 1232,
+        "total_bytes": 21962933,
+        "avg_bytes": 2994,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 168,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "tools:find",
+        "call_count": 1988,
+        "error_count": 1,
+        "refused_count": 0,
+        "p50_ms": 149,
+        "p95_ms": 1373,
+        "total_bytes": 9398606,
+        "avg_bytes": 4730,
+        "repeat_within_spawn": 21,
+        "distinct_callers": 96,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "work_items:get",
+        "call_count": 974,
+        "error_count": 4,
+        "refused_count": 0,
+        "p50_ms": 51,
+        "p95_ms": 8379,
+        "total_bytes": 34687777,
+        "avg_bytes": 35761,
+        "repeat_within_spawn": 53,
+        "distinct_callers": 116,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "capability:bash",
+        "call_count": 861,
+        "error_count": 0,
+        "refused_count": 2,
+        "p50_ms": 416,
+        "p95_ms": 19319,
+        "total_bytes": 1955601,
+        "avg_bytes": 2271,
+        "repeat_within_spawn": 26,
+        "distinct_callers": 41,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "locks:check_command",
+        "call_count": 848,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 18,
+        "p95_ms": 599,
+        "total_bytes": 612620,
+        "avg_bytes": 722,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 50,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "facts:list",
+        "call_count": 802,
+        "error_count": 3,
+        "refused_count": 0,
+        "p50_ms": 50,
+        "p95_ms": 477,
+        "total_bytes": 4218261,
+        "avg_bytes": 5279,
+        "repeat_within_spawn": 43,
+        "distinct_callers": 49,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "coord:glance",
+        "call_count": 638,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 79,
+        "p95_ms": 2785,
+        "total_bytes": 1007740,
+        "avg_bytes": 1580,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 149,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "locks:acquire",
+        "call_count": 623,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 27,
+        "p95_ms": 492,
+        "total_bytes": 671809,
+        "avg_bytes": 1078,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 51,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "locks:release",
+        "call_count": 433,
+        "error_count": 1,
+        "refused_count": 0,
+        "p50_ms": 22,
+        "p95_ms": 553,
+        "total_bytes": 286344,
+        "avg_bytes": 663,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 52,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "dev:pg_query",
+        "call_count": 419,
+        "error_count": 7,
+        "refused_count": 67,
+        "p50_ms": 74,
+        "p95_ms": 1790,
+        "total_bytes": 11156298,
+        "avg_bytes": 27078,
+        "repeat_within_spawn": 80,
+        "distinct_callers": 42,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "scorecards:get",
+        "call_count": 372,
+        "error_count": 2,
+        "refused_count": 0,
+        "p50_ms": 16,
+        "p95_ms": 79,
+        "total_bytes": 1598112,
+        "avg_bytes": 4319,
+        "repeat_within_spawn": 291,
+        "distinct_callers": 18,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "work_items:checkpoint",
+        "call_count": 318,
+        "error_count": 3,
+        "refused_count": 0,
+        "p50_ms": 164,
+        "p95_ms": 2321,
+        "total_bytes": 391132,
+        "avg_bytes": 1242,
+        "repeat_within_spawn": 6,
+        "distinct_callers": 91,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "loop:checkpoint",
+        "call_count": 297,
+        "error_count": 9,
+        "refused_count": 18,
+        "p50_ms": 261,
+        "p95_ms": 3226,
+        "total_bytes": 595624,
+        "avg_bytes": 2068,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 92,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "coord:emit",
+        "call_count": 296,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 32,
+        "p95_ms": 284,
+        "total_bytes": 48726,
+        "avg_bytes": 165,
+        "repeat_within_spawn": 295,
+        "distinct_callers": 92,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "coord:inbox",
+        "call_count": 273,
+        "error_count": 1,
+        "refused_count": 0,
+        "p50_ms": 772,
+        "p95_ms": 7074,
+        "total_bytes": 7099884,
+        "avg_bytes": 26103,
+        "repeat_within_spawn": 1,
+        "distinct_callers": 101,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "loop:status",
+        "call_count": 251,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 127,
+        "p95_ms": 1250,
+        "total_bytes": 1524943,
+        "avg_bytes": 6075,
+        "repeat_within_spawn": 26,
+        "distinct_callers": 90,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "coord:whoami",
+        "call_count": 240,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 15,
+        "p95_ms": 470,
+        "total_bytes": 83686,
+        "avg_bytes": 349,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 90,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "sessions:ingest-gate-event",
+        "call_count": 228,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 18,
+        "p95_ms": 1097,
+        "total_bytes": 49886,
+        "avg_bytes": 219,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 79,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "journal:record-turn",
+        "call_count": 226,
+        "error_count": 0,
+        "refused_count": 0,
+        "p50_ms": 152,
+        "p95_ms": 3484,
+        "total_bytes": 189074,
+        "avg_bytes": 837,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 79,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      },
+      {
+        "tool_name": "session:request-compaction",
+        "call_count": 204,
+        "error_count": 0,
+        "refused_count": 9,
+        "p50_ms": 897,
+        "p95_ms": 4596,
+        "total_bytes": 306583,
+        "avg_bytes": 1503,
+        "repeat_within_spawn": 0,
+        "distinct_callers": 82,
+        "workspaces": [
+          "papercusp-workspace"
+        ]
+      }
+    ]
+  },
+  "actualHotSql": {
+    "mode": "query",
+    "rowCount": 3,
+    "truncated": false,
+    "fields": [
+      "queryid",
+      "query"
+    ],
+    "elapsedMs": 587,
+    "rows": [
+      {
+        "queryid": "2849258127946461939",
+        "query": "WITH q AS (\n        SELECT replace(plainto_tsquery($1, $2)::text, $3, $4)::tsquery       AS orq,\n               string_to_array(replace(plainto_tsquery($5, $6)::text, $7, $8), $9) AS lexemes\n               \n      ), df AS (\n        SELECT l, (SELECT count(*) FROM (\n                     SELECT $10 FROM harness_shared.session_turns d\n                      WHERE d.text_tsv @@ l::tsquery\n                      LIMIT $11\n                   ) capped) AS n\n          FROM q, unnest(q.lexemes) AS l\n      ), ranked AS (\n        SELECT l, n,\n               row_number() OVER (ORDER BY n ASC, l ASC) AS rn,\n               COALESCE(sum(n) OVER (ORDER BY n ASC, l ASC\n                                     ROWS BETWEEN UNBOUNDED PRECEDING AND $12 PRECEDING), $13) AS prior\n          FROM df\n      ), anchor AS (\n        -- The rarest lexeme ALWAYS anchors (rn = 1), so this can never admit\n        -- fewer rows than the pre-WI-9273 argmin; every additional lexeme is\n        -- taken in ascending-df order while the cumulative df stays inside the\n        -- budget. A SATURATED lexeme (n = DF_PROBE_CAP) is excluded unless it is\n        -- the argmin: its true df is unknown and may be 10× the cap, so\n        -- anchoring on it would make the budget a fiction.\n        SELECT string_agg(l, $14 ORDER BY n ASC, l ASC)::tsquery AS a\n          FROM ranked\n         WHERE rn = $15\n            OR (n < $16 AND prior + n <= $17)\n      )\n      SELECT source_kind, session_id, turn_idx, speaker, owner, harness_slug, ts, text,\n             (SELECT count(*) FROM unnest(q.lexemes) AS cl WHERE text_tsv @@ cl::tsquery) AS coverage,\n             ts_rank_cd(text_tsv, q.orq) AS rank,\n             $18 AS highlight\n        FROM harness_shared.session_turns , q, anchor\n       WHERE \n          (workspace_id = $19 OR workspace_id = $20)\n      AND ($21::text IS NULL OR harness_slug = $22)\n      AND ($23::text[] IS NULL OR owner = ANY($24::text[]))\n      AND ($25::text IS NULL OR speaker = $26)\n      AND ($27::text IS NULL OR turn_origin_verdict = $28)\n      AND ($29::boolean IS NULL OR NOT $30 OR turn_origin_verdict IN ($31 /*, ... */))\n      AND ($32::boolean IS NULL OR NOT $33 OR turn_origin_verdict = ANY($34::tex"
+      },
+      {
+        "queryid": "3056926748572364537",
+        "query": "WITH ranked AS MATERIALIZED (\n           SELECT id, valid_at, invalid_at, superseded_by, created_at,\n                  (CASE WHEN nm LIKE $2 THEN $35 WHEN ds LIKE $2 THEN $36 WHEN dt LIKE $2 THEN $37 ELSE $38 END + CASE WHEN nm LIKE $3 THEN $39 WHEN ds LIKE $3 THEN $40 WHEN dt LIKE $3 THEN $41 ELSE $42 END + CASE WHEN nm LIKE $4 THEN $43 WHEN ds LIKE $4 THEN $44 WHEN dt LIKE $4 THEN $45 ELSE $46 END + CASE WHEN nm LIKE $5 THEN $47 WHEN ds LIKE $5 THEN $48 WHEN dt LIKE $5 THEN $49 ELSE $50 END + CASE WHEN nm LIKE $6 THEN $51 WHEN ds LIKE $6 THEN $52 WHEN dt LIKE $6 THEN $53 ELSE $54 END + CASE WHEN nm LIKE $7 THEN $55 WHEN ds LIKE $7 THEN $56 WHEN dt LIKE $7 THEN $57 ELSE $58 END + CASE WHEN nm LIKE $8 THEN $59 WHEN ds LIKE $8 THEN $60 WHEN dt LIKE $8 THEN $61 ELSE $62 END + CASE WHEN nm LIKE $9 THEN $63 WHEN ds LIKE $9 THEN $64 WHEN dt LIKE $9 THEN $65 ELSE $66 END + CASE WHEN nm LIKE $10 THEN $67 WHEN ds LIKE $10 THEN $68 WHEN dt LIKE $10 THEN $69 ELSE $70 END + CASE WHEN nm LIKE $11 THEN $71 WHEN ds LIKE $11 THEN $72 WHEN dt LIKE $11 THEN $73 ELSE $74 END + CASE WHEN nm LIKE $12 THEN $75 WHEN ds LIKE $12 THEN $76 WHEN dt LIKE $12 THEN $77 ELSE $78 END + CASE WHEN nm LIKE $13 THEN $79 WHEN ds LIKE $13 THEN $80 WHEN dt LIKE $13 THEN $81 ELSE $82 END + CASE WHEN nm LIKE $14 THEN $83 WHEN ds LIKE $14 THEN $84 WHEN dt LIKE $14 THEN $85 ELSE $86 END + CASE WHEN nm LIKE $15 THEN $87 WHEN ds LIKE $15 THEN $88 WHEN dt LIKE $15 THEN $89 ELSE $90 END + CASE WHEN nm LIKE $16 THEN $91 WHEN ds LIKE $16 THEN $92 WHEN dt LIKE $16 THEN $93 ELSE $94 END + CASE WHEN nm LIKE $17 THEN $95 WHEN ds LIKE $17 THEN $96 WHEN dt LIKE $17 THEN $97 ELSE $98 END + CASE WHEN nm LIKE $18 THEN $99 WHEN ds LIKE $18 THEN $100 WHEN dt LIKE $18 THEN $101 ELSE $102 END + CASE WHEN nm LIKE $19 THEN $103 WHEN ds LIKE $19 THEN $104 WHEN dt LIKE $19 THEN $105 ELSE $106 END + CASE WHEN nm LIKE $20 THEN $107 WHEN ds LIKE $20 THEN $108 WHEN dt LIKE $20 THEN $109 ELSE $110 END + CASE WHEN nm LIKE $21 THEN $111 WHEN ds LIKE $21 THEN $112 WHEN dt LIKE $21 THEN $113 ELSE $114 END + CASE WHEN nm LIKE $22 THEN $115 WHEN ds LIKE $22 THEN $116 WHEN dt LIKE $22 THEN $117 ELSE $118 END + CASE WHEN nm LIKE $23 THEN "
+      },
+      {
+        "queryid": "-2442231371504820178",
+        "query": "SELECT feature_id AS work_item_id, item_kind, status, updated_ts,\n               payload ->> $1 AS claim_hold,\n               payload->$2->>$3 AS plan_slug,\n               payload->$4->>$5  AS item_id\n          FROM harness_shared.work_items\n         WHERE payload->$6 IS NOT NULL\n           AND payload->$7->>$8 IS NOT NULL\n           AND payload->$9->>$10  IS NOT NULL"
+      }
+    ]
+  },
+  "routes": {
+    "advisory": "⚠ population-narrowing query shape: this SQL uses HAVING; zero rows means no group matched the HAVING predicate, not that the underlying population is empty. Re-run without the narrowing clause before making an absence claim, or report the result as a bounded subset rather than a census. (EI-22433765987075358).",
+    "mode": "query",
+    "rowCount": 12,
+    "truncated": false,
+    "fields": [
+      "route",
+      "recorded",
+      "error_timeout",
+      "p50_ms",
+      "p95_ms",
+      "max_ms"
+    ],
+    "elapsedMs": 602,
+    "rows": [
+      {
+        "route": "/api/agent-mcp/console/bootstrap-su/options",
+        "recorded": "29",
+        "error_timeout": "0",
+        "p50_ms": "4161.0",
+        "p95_ms": "7041.0",
+        "max_ms": 8988
+      },
+      {
+        "route": "/api/agent-mcp/turn-start-memory",
+        "recorded": "434",
+        "error_timeout": "0",
+        "p50_ms": "1474.5",
+        "p95_ms": "4458.7",
+        "max_ms": 21375
+      },
+      {
+        "route": "/api/adv/sessions/ensure-codex-home",
+        "recorded": "107",
+        "error_timeout": "0",
+        "p50_ms": "462.0",
+        "p95_ms": "3639.6",
+        "max_ms": 6561
+      },
+      {
+        "route": "/api/agent-mcp/console/bootstrap-su/persona-refresh",
+        "recorded": "65",
+        "error_timeout": "0",
+        "p50_ms": "1290.0",
+        "p95_ms": "3529.2",
+        "max_ms": 4953
+      },
+      {
+        "route": "/api/agent-mcp/console/bootstrap-role",
+        "recorded": "19",
+        "error_timeout": "0",
+        "p50_ms": "665.0",
+        "p95_ms": "2283.1",
+        "max_ms": 2500
+      },
+      {
+        "route": "/api/agent-mcp/console/bootstrap-su",
+        "recorded": "31",
+        "error_timeout": "0",
+        "p50_ms": "581.0",
+        "p95_ms": "2248.0",
+        "max_ms": 3247
+      },
+      {
+        "route": "/api/admin/owner-presence/touch",
+        "recorded": "104",
+        "error_timeout": "0",
+        "p50_ms": "6.0",
+        "p95_ms": "2087.7",
+        "max_ms": 3735
+      },
+      {
+        "route": "/api/agent-mcp/mid-turn-context",
+        "recorded": "12265",
+        "error_timeout": "0",
+        "p50_ms": "11.0",
+        "p95_ms": "1959.8",
+        "max_ms": 62282
+      },
+      {
+        "route": "/api/updates/manifest",
+        "recorded": "14",
+        "error_timeout": "0",
+        "p50_ms": "460.5",
+        "p95_ms": "1806.0",
+        "max_ms": 1817
+      },
+      {
+        "route": "/api/adv/sessions/resumable",
+        "recorded": "56",
+        "error_timeout": "0",
+        "p50_ms": "491.0",
+        "p95_ms": "1076.0",
+        "max_ms": 3822
+      },
+      {
+        "route": "/api/desktop/dev-operators",
+        "recorded": "92",
+        "error_timeout": "0",
+        "p50_ms": "35.0",
+        "p95_ms": "730.4",
+        "max_ms": 1403
+      },
+      {
+        "route": "/api/agent-mcp/context-epoch-bump",
+        "recorded": "112",
+        "error_timeout": "0",
+        "p50_ms": "6.0",
+        "p95_ms": "720.6",
+        "max_ms": 2185
+      }
+    ]
+  },
+  "backendPerfHistory": {
+    "advisory": "⚠ population-narrowing query shape: this SQL uses LIMIT; zero rows from the bounded query do not establish that the underlying population is empty. Re-run without the narrowing clause before making an absence claim, or report the result as a bounded subset rather than a census. (EI-22433765987075358).",
+    "mode": "query",
+    "rowCount": 4,
+    "truncated": false,
+    "fields": [
+      "captured_at",
+      "loop_lag_p95_ms",
+      "conn_saturation_pct",
+      "breached"
+    ],
+    "elapsedMs": 4,
+    "rows": [
+      {
+        "captured_at": "2026-10-01 13:51:44.829153+00",
+        "loop_lag_p95_ms": 65.6,
+        "conn_saturation_pct": 42.8,
+        "breached": []
+      },
+      {
+        "captured_at": "2026-10-01 13:36:18.38139+00",
+        "loop_lag_p95_ms": 228.5,
+        "conn_saturation_pct": 28.5,
+        "breached": []
+      },
+      {
+        "captured_at": "2026-10-01 13:18:21.93707+00",
+        "loop_lag_p95_ms": 262.3,
+        "conn_saturation_pct": 46.5,
+        "breached": []
+      },
+      {
+        "captured_at": "2026-10-01 13:15:42.163877+00",
+        "loop_lag_p95_ms": 98.8,
+        "conn_saturation_pct": 53.7,
+        "breached": [
+          {
+            "tier": "warn",
+            "value": 297.4797240002081,
+            "budget": 250,
+            "metric": "sidecar-git-read-p50"
+          }
+        ]
+      }
+    ]
+  },
+  "desktopPerfHistory": {
+    "advisory": "⚠ population-narrowing query shape: this SQL uses LIMIT; zero rows from the bounded query do not establish that the underlying population is empty. Re-run without the narrowing clause before making an absence claim, or report the result as a bounded subset rather than a census. (EI-22433765987075358).",
+    "mode": "query",
+    "rowCount": 2,
+    "truncated": false,
+    "fields": [
+      "id",
+      "workspace_id",
+      "measured_at",
+      "source",
+      "status",
+      "build_sha",
+      "git_sha",
+      "measures"
+    ],
+    "elapsedMs": 47,
+    "rows": [
+      {
+        "id": "perfrun-1790859661956-5p1e18",
+        "workspace_id": "papercusp-workspace",
+        "measured_at": "2026-10-01 13:01:01.956+00",
+        "source": "wdio",
+        "status": "fail",
+        "build_sha": null,
+        "git_sha": null,
+        "measures": [
+          {
+            "ok": true,
+            "key": "build:packaged-binary-mtime-ms",
+            "unit": "count",
+            "value": 1790856875620,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-some-avg10-pct:start",
+            "unit": "count",
+            "value": 0.81,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-full-avg10-pct:start",
+            "unit": "count",
+            "value": 0,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:loadavg1-not-authoritative:start",
+            "unit": "count",
+            "value": 130.58,
+            "budget": null
+          },
+          {
+            "ok": false,
+            "key": "web-vital:FCP",
+            "unit": "ms",
+            "value": 5635,
+            "budget": 3000
+          },
+          {
+            "ok": false,
+            "key": "web-vital:LCP",
+            "unit": "ms",
+            "value": 10251,
+            "budget": 4000
+          },
+          {
+            "ok": false,
+            "key": "plan-popup-load-errors",
+            "unit": "count",
+            "value": 2,
+            "budget": 0
+          },
+          {
+            "ok": false,
+            "key": "interaction:plan-popup-open",
+            "unit": "ms",
+            "value": 1517,
+            "budget": 1500
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:styles-ready",
+            "unit": "ms",
+            "value": 1480,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:detail-mounted",
+            "unit": "ms",
+            "value": 40,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:content-ready",
+            "unit": "ms",
+            "value": 1470,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:popup-render-started",
+            "unit": "ms",
+            "value": 9,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:detail-render-started",
+            "unit": "ms",
+            "value": 28,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:popup-module-ready",
+            "unit": "ms",
+            "value": 8,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:response-ready",
+            "unit": "ms",
+            "value": 1411,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:renderer-ready",
+            "unit": "ms",
+            "value": 1482,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:popup-url-update-queued",
+            "unit": "ms",
+            "value": 0,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:preview-rendered",
+            "unit": "ms",
+            "value": 1501,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:response-headers",
+            "unit": "ms",
+            "value": 1119,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:popup-module-requested",
+            "unit": "ms",
+            "value": 8,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:request-started",
+            "unit": "ms",
+            "value": 40,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "plan-popup-open:phase:data-ready",
+            "unit": "ms",
+            "value": 1470,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-some-avg10-pct:end",
+            "unit": "count",
+            "value": 5.17,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-full-avg10-pct:end",
+            "unit": "count",
+            "value": 0,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:loadavg1-not-authoritative:end",
+            "unit": "count",
+            "value": 122.38,
+            "budget": null
+          }
+        ]
+      },
+      {
+        "id": "perfrun-1790855229804-grhzmx",
+        "workspace_id": "papercusp-workspace",
+        "measured_at": "2026-10-01 11:47:09.804+00",
+        "source": "wdio",
+        "status": "fail",
+        "build_sha": null,
+        "git_sha": null,
+        "measures": [
+          {
+            "ok": true,
+            "key": "build:packaged-binary-mtime-ms",
+            "unit": "count",
+            "value": 1790852507150,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-some-avg10-pct:start",
+            "unit": "count",
+            "value": 0.44,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-full-avg10-pct:start",
+            "unit": "count",
+            "value": 0,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:loadavg1-not-authoritative:start",
+            "unit": "count",
+            "value": 180.65,
+            "budget": null
+          },
+          {
+            "ok": false,
+            "key": "web-vital:FCP",
+            "unit": "ms",
+            "value": 11105,
+            "budget": 3000
+          },
+          {
+            "ok": false,
+            "key": "web-vital:LCP",
+            "unit": "ms",
+            "value": 13989,
+            "budget": 4000
+          },
+          {
+            "ok": false,
+            "key": "plan-popup-load-errors",
+            "unit": "count",
+            "value": 2,
+            "budget": 0
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-some-avg10-pct:end",
+            "unit": "count",
+            "value": 0.19,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:psi-cpu-full-avg10-pct:end",
+            "unit": "count",
+            "value": 0,
+            "budget": null
+          },
+          {
+            "ok": true,
+            "key": "host:loadavg1-not-authoritative:end",
+            "unit": "count",
+            "value": 149.32,
+            "budget": null
+          }
+        ]
+      }
+    ]
+  },
+  "serviceMemoryPss": {
+    "services": [
+      {
+        "unit": "papercusp-dev-api.service",
+        "MainPID": "3194993",
+        "NRestarts": "6",
+        "ControlGroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/papercusp-dev-api.service",
+        "MemoryCurrent": "16703991808",
+        "CPUUsageNSec": "6864516646000",
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "processes": 19,
+        "rssMiB": 16060.9,
+        "pssMiB": 15390,
+        "swapMiB": 0
+      },
+      {
+        "unit": "papercusp-staging-api.service",
+        "MainPID": "468742",
+        "NRestarts": "0",
+        "ControlGroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/papercusp-staging-api.service",
+        "MemoryCurrent": "2467291136",
+        "CPUUsageNSec": "67809907000",
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "processes": 3,
+        "rssMiB": 1689,
+        "pssMiB": 1544.6,
+        "swapMiB": 0
+      },
+      {
+        "unit": "papercusp-bg-host.service",
+        "MainPID": "4099092",
+        "NRestarts": "0",
+        "ControlGroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/papercusp-bg-host.service",
+        "MemoryCurrent": "4729524224",
+        "CPUUsageNSec": "946551736000",
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "processes": 2,
+        "rssMiB": 3119.4,
+        "pssMiB": 3030.9,
+        "swapMiB": 0
+      },
+      {
+        "unit": "papercup-mcp-proxy.service",
+        "MainPID": "4410",
+        "NRestarts": "0",
+        "ControlGroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/papercup-mcp-proxy.service",
+        "MemoryCurrent": "243359744",
+        "CPUUsageNSec": "2329971501000",
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "processes": 6,
+        "rssMiB": 346.3,
+        "pssMiB": 204.7,
+        "swapMiB": 0
+      },
+      {
+        "unit": "papercup-inference-gateway.service",
+        "MainPID": "2261958",
+        "NRestarts": "0",
+        "ControlGroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/papercup-inference-gateway.service",
+        "MemoryCurrent": "696156160",
+        "CPUUsageNSec": "6628906451000",
+        "LoadState": "loaded",
+        "ActiveState": "active",
+        "processes": 5,
+        "rssMiB": 785,
+        "pssMiB": 626.8,
+        "swapMiB": 242.2
+      }
+    ]
+  },
+  "journalCategories": {
+    "window": "trailing 1h bounded tails",
+    "tails": [
+      {
+        "unit": "papercusp-dev-api.service",
+        "retainedLines": 1500,
+        "cappedAt1500": true,
+        "counts": {
+          "loop_lag": 37,
+          "timeout": 57,
+          "connection_refused": 0,
+          "oom": 0,
+          "retrieval_degraded": 244,
+          "db_error": 0,
+          "routine_shed": 35,
+          "read_merge": 0,
+          "bootstrap": 0
+        },
+        "firstEpochUs": "1790862448256311",
+        "lastEpochUs": "1790863015396915"
+      },
+      {
+        "unit": "papercusp-staging-api.service",
+        "retainedLines": 1500,
+        "cappedAt1500": true,
+        "counts": {
+          "loop_lag": 5,
+          "timeout": 16,
+          "connection_refused": 0,
+          "oom": 0,
+          "retrieval_degraded": 21,
+          "db_error": 0,
+          "routine_shed": 2,
+          "read_merge": 0,
+          "bootstrap": 0
+        },
+        "firstEpochUs": "1790862761467595",
+        "lastEpochUs": "1790863016370176"
+      },
+      {
+        "unit": "papercusp-bg-host.service",
+        "retainedLines": 1500,
+        "cappedAt1500": true,
+        "counts": {
+          "loop_lag": 11,
+          "timeout": 23,
+          "connection_refused": 0,
+          "oom": 0,
+          "retrieval_degraded": 10,
+          "db_error": 3,
+          "routine_shed": 4,
+          "read_merge": 0,
+          "bootstrap": 0
+        },
+        "firstEpochUs": "1790862661200921",
+        "lastEpochUs": "1790863016447473"
+      },
+      {
+        "unit": "papercup-mcp-proxy.service",
+        "retainedLines": 1500,
+        "cappedAt1500": true,
+        "counts": {
+          "loop_lag": 0,
+          "timeout": 0,
+          "connection_refused": 54,
+          "oom": 0,
+          "retrieval_degraded": 0,
+          "db_error": 0,
+          "routine_shed": 0,
+          "read_merge": 0,
+          "bootstrap": 1
+        },
+        "firstEpochUs": "1790861704806814",
+        "lastEpochUs": "1790863016370408"
+      },
+      {
+        "unit": "papercup-inference-gateway.service",
+        "retainedLines": 1500,
+        "cappedAt1500": true,
+        "counts": {
+          "loop_lag": 0,
+          "timeout": 0,
+          "connection_refused": 0,
+          "oom": 0,
+          "retrieval_degraded": 0,
+          "db_error": 0,
+          "routine_shed": 0,
+          "read_merge": 0,
+          "bootstrap": 0
+        },
+        "firstEpochUs": "1790862056699940",
+        "lastEpochUs": "1790863017551725"
+      }
+    ],
+    "limits": "message categories overlap; retained lines are not independent incidents or full-window totals"
+  },
+  "remainingRemediation": {
+    "slug": "papercusp-log-performance-remediation-2026-09-23",
+    "storedStatus": "ready",
+    "effectiveLiveItems": [
+      "P-006",
+      "P-007",
+      "P-008",
+      "P-009"
+    ],
+    "source": "plans:get read in this audit; five of nine items terminal at read time. Direct work-item read found P-007 linked WI-10002829 wip despite plan item's todo projection."
+  },
+  "recallOutcomes": {
+    "mode": "query",
+    "rowCount": 9,
+    "truncated": false,
+    "fields": [
+      "surface",
+      "corpus_outcome",
+      "samples",
+      "degraded_label"
+    ],
+    "elapsedMs": 83,
+    "rows": [
+      {
+        "surface": "initialize",
+        "corpus_outcome": "ok",
+        "samples": "522",
+        "degraded_label": "520"
+      },
+      {
+        "surface": "initialize",
+        "corpus_outcome": "not-recorded",
+        "samples": "16",
+        "degraded_label": "0"
+      },
+      {
+        "surface": "mid-turn",
+        "corpus_outcome": "ok",
+        "samples": "3011",
+        "degraded_label": "2267"
+      },
+      {
+        "surface": "mid-turn",
+        "corpus_outcome": "timed-out",
+        "samples": "327",
+        "degraded_label": "0"
+      },
+      {
+        "surface": "mid-turn",
+        "corpus_outcome": "not-recorded",
+        "samples": "81",
+        "degraded_label": "0"
+      },
+      {
+        "surface": "mid-turn",
+        "corpus_outcome": "no-query",
+        "samples": "25",
+        "degraded_label": "0"
+      },
+      {
+        "surface": "turn-start",
+        "corpus_outcome": "ok",
+        "samples": "331",
+        "degraded_label": "257"
+      },
+      {
+        "surface": "turn-start",
+        "corpus_outcome": "timed-out",
+        "samples": "35",
+        "degraded_label": "0"
+      },
+      {
+        "surface": "turn-start",
+        "corpus_outcome": "not-recorded",
+        "samples": "8",
+        "degraded_label": "0"
+      }
+    ]
+  },
+  "backup": {
+    "snapshots": [
+      {
+        "id": 78048,
+        "kopiaSnapshotId": "4434d762b3d05f1c0fb37ac65958833d",
+        "workspaceId": "papercusp-workspace",
+        "startedAt": "2026-10-01T11:39:28.910Z",
+        "finishedAt": "2026-10-01T11:40:05.832Z",
+        "status": "ok",
+        "dbDumpOk": true,
+        "triggerReason": "pre_destructive",
+        "triggerContext": {
+          "note": "Before applying armed migration 1294. It adds five STORED generated projections to harness_shared.work_items and rewrites the ~460 MiB heap; checked table total size ~3.39 GiB including indexes. Preserve rollback point for the schema change."
+        },
+        "bytesAdded": 0,
+        "bytesTotal": 19584568056,
+        "sources": [
+          "~/.papercusp-workspaces/papercusp-workspace"
+        ],
+        "error": null
+      },
+      {
+        "id": 78041,
+        "kopiaSnapshotId": "af682ed51018659b66a3a3cc87222583",
+        "workspaceId": "papercusp-workspace",
+        "startedAt": "2026-10-01T09:30:25.548Z",
+        "finishedAt": "2026-10-01T09:43:15.268Z",
+        "status": "ok",
+        "dbDumpOk": true,
+        "triggerReason": "pre-deploy",
+        "triggerContext": {
+          "op": "release-deploy",
+          "reason": "pre-deploy f52b2457"
+        },
+        "bytesAdded": 0,
+        "bytesTotal": 19572610432,
+        "sources": [
+          "~/.papercusp-workspaces/papercusp-workspace"
+        ],
+        "error": null
+      },
+      {
+        "id": 78032,
+        "kopiaSnapshotId": "fbbc31b1f0626c2d448403190fcbe23d",
+        "workspaceId": "papercusp-workspace",
+        "startedAt": "2026-10-01T06:35:29.733Z",
+        "finishedAt": "2026-10-01T06:35:55.811Z",
+        "status": "ok",
+        "dbDumpOk": true,
+        "triggerReason": "pre_destructive",
+        "triggerContext": {
+          "note": "WI-10004637: before arming migration 1287-dedupe-claude-transcript-usage-copies, which deletes ~824.5k duplicate harness_shared.agent_usage_samples rows (one provider message counted once per transcript copy) and rekeys ~222.5k survivors. Dry run (rolled back) 2026-10-01 06:34Z: msg rows 1,048,463 -> 225,866; msg cost $133,477 -> $29,921."
+        },
+        "bytesAdded": 0,
+        "bytesTotal": 19574978142,
+        "sources": [
+          "~/.papercusp-workspaces/papercusp-workspace"
+        ],
+        "error": null
+      }
+    ],
+    "liveBackupSessions": []
+  },
+  "coverageFollowup": "WI-10004889",
+  "memoryFollowup": "WI-10004890",
+  "serviceCpuWindow": {
+    "windowSec": 10.04,
+    "mainPidsStable": true,
+    "release": {
+      "memoryGiB": 10.8,
+      "memoryDeltaMiB": -50.6,
+      "cpuOneCorePct": 119.5
+    },
+    "staging": {
+      "memoryGiB": 2.68,
+      "memoryDeltaMiB": 212.3,
+      "cpuOneCorePct": 65.6
+    },
+    "bgHost": {
+      "memoryGiB": 4.22,
+      "memoryDeltaMiB": -242.9,
+      "cpuOneCorePct": 158.5
+    },
+    "source": "Bounded code:run service-cgroup sample in this session; CPUUsageNSec deltas. Short window does not prove leak or latency causality."
+  },
+  "hostPressureSnapshot": {
+    "cpuCount": 128,
+    "memoryGiB": 251.5,
+    "availableGiB": 55.7,
+    "cpuPsiSomeAvg10Pct": 3.44,
+    "memoryPsiFullAvg10Pct": 4.56,
+    "ioPsiFullAvg10Pct": 8.1,
+    "source": "/proc read in bounded code:run, approx 13:52 UTC; pressure presence does not establish cause of a particular API latency."
+  }
+}

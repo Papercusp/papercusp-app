@@ -189,7 +189,7 @@ urllib = _UrllibNamespace()
 
 operator_url, token_path, agent_id, hook_dir = sys.argv[1:5]
 sys.path.insert(0, hook_dir)
-from mcp_response import read_hook_payload, read_token_file  # noqa: E402
+from mcp_response import read_hook_payload, read_token_file, with_native_session  # noqa: E402
 raw = read_hook_payload()
 token = read_token_file(token_path)
 
@@ -252,6 +252,48 @@ def _session_key():
     if not (isinstance(sid, str) and sid):
         sid = agent_id
     return re.sub(r'[^A-Za-z0-9_.-]', '_', str(sid))[:120]
+
+
+# NESTED-CLI POLICY (WI-10004953): this gate acts AS the su for a CLI nested inside it (a
+# `claude -p` from an su's Bash tool, or under a capability:bash job, inherits the su's
+# PAPERCUSP_SID). That is deliberate for ENFORCEMENT, as with the lock hooks: the nested
+# CLI runs commands on the su's behalf, so the su's own exclusive must not gate it and
+# its background jobs are the su's. The one exception is the say-once advisory seen-set
+# below: an advisory shown to the NESTED model was never seen by the su, so recording it
+# under the su's key would suppress that advisory for the su for a day and log a
+# delivery the su never received. The seen-set alone is keyed on the nested CLI's own
+# native session id.
+_ADVISORY_KEY = []
+
+
+def _nested_cli():
+    """The cached nested-CLI verdict (pc_nested_cli.sh); any failure answers False."""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ['bash', os.path.join(hook_dir, 'pc_nested_cli.sh')],
+            env={**os.environ, 'PC_NESTED_CLI_START_PID': str(os.getppid())},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _advisory_session_key():
+    """The say-once seen-set key: the su's key, or the nested CLI's own native session."""
+    if _ADVISORY_KEY:
+        return _ADVISORY_KEY[0]
+    key = _session_key()
+    try:
+        native = payload.get('session_id')
+        if os.environ.get('PAPERCUSP_SID') and isinstance(native, str) and native and _nested_cli():
+            key = re.sub(r'[^A-Za-z0-9_.-]', '_', 'nested-' + native)[:120]
+    except Exception:
+        pass
+    _ADVISORY_KEY.append(key)
+    return key
 
 
 def _advisory_class_key(text):
@@ -348,7 +390,7 @@ def _claim_advisory(key):
     try:
         base = _advisory_seen_dir()
         os.makedirs(base, exist_ok=True)
-        path = os.path.join(base, _session_key())
+        path = os.path.join(base, _advisory_session_key())
         fresh = True  # no seen-set yet, or one old enough to have lapsed
         try:
             if time.time() - os.path.getmtime(path) <= _ADVISORY_SEEN_TTL_SEC:
@@ -380,13 +422,14 @@ def _record_delivery(key):
         arguments = {
             'kind': 'lifecycle',
             'owner': agent_id,
-            'session_id': _session_key(),
+            'session_id': _advisory_session_key(),
             'status': 'advisory',
             'summary': 'advisory delivered (say-once): ' + key,
         }
         harness_slug = os.environ.get('PAPERCUSP_HARNESS_SLUG')
         if harness_slug:
             arguments['harness_slug'] = harness_slug
+        native_session_id = payload.get('session_id') or os.environ.get('PAPERCUSP_NATIVE_SESSION_ID') or ''
         body = json.dumps({
             'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
             'params': {
@@ -396,8 +439,11 @@ def _record_delivery(key):
             },
         }).encode()
         req = urllib.request.Request(
-            operator_url.rstrip('/') + '/api/mcp?superuser=1&origin=hook&client='
-            + urllib.parse.quote(agent_id, safe=''),
+            with_native_session(
+                operator_url.rstrip('/') + '/api/mcp?superuser=1&origin=hook&client='
+                + urllib.parse.quote(agent_id, safe=''),
+                native_session_id,
+            ),
             data=body,
             headers={
                 'Authorization': 'Bearer ' + token,
@@ -3408,7 +3454,16 @@ def _fa_operands(argv, argflags):
     while j < len(argv):
         a = argv[j]
         if a == '--':
-            operands.extend(argv[j + 1:])
+            # The -- token ends option parsing, not shell redirection parsing.
+            # Keep collecting operands until a shell redirect token; otherwise
+            # grep -- PATTERN PATH 2>/dev/null leaves the fd digit 2 looking
+            # like another path to stat.
+            for tail_token in argv[j + 1:]:
+                if tail_token and all(c in '<>&' for c in tail_token):
+                    if operands and operands[-1].isdigit():
+                        operands.pop()
+                    break
+                operands.append(tail_token)
             break
         # A redirect ends the operand list; a bare fd digit belongs to it
         # (`grep -rn foo . 2>/dev/null` tokenizes the `2` as a word).
@@ -3711,6 +3766,150 @@ try:
                               else ' (resolved to `%s`)' % _fa_shown[:200]),
                 ))
             break
+except SystemExit:
+    raise  # deny() exits through here — never swallow the verdict
+except Exception:
+    pass  # a parse fault must never wedge a Bash call (fail-open)
+
+# ── FIFO-read hang guard (EI-24862273512503301) ──────────────────────────────
+# Claude Code RE-OPENS a path after a Bash command reads it (its file-read
+# tracking), AFTER the command has returned and OUTSIDE the Bash timeout.
+# open(2) of a FIFO blocks until a writer attaches. Measured 2026-10-02 in the
+# J5 outage drill (WI-10005395): a `cat` of a FIFO returned while its writer
+# was attached, the writer then closed, and Claude Code's re-open sat in the
+# kernel (wchan wait_for_partner) — the tool result never came back, and no
+# timeout covers that wait, so the session hung until it was killed.
+#
+# Deterministic and narrow. Judged: a LITERAL operand of a known reader command
+# at command position that `stat` (which never opens it) reports as a FIFO at
+# the moment of the call. Not judged:
+#   * redirect targets (`< fifo`): the SHELL opens those, not the reader, and
+#     the client re-open was only measured for named operands;
+#   * /dev, /proc, /sys: they resolve against THIS hook process — whose stdin
+#     IS a pipe — not against the command's shell, so judging them here would
+#     deny `cat /dev/stdin` for the hook's own reasons;
+#   * anything the hook cannot resolve ($VAR, globs, `~user`, a relative path
+#     with no stated cwd) — fail open, never guess;
+#   * Codex shells: the re-open is a Claude Code behaviour.
+_FF_DENY = (
+    'FIFO-read hang guard (EI-24862273512503301): `{cmd}` reads `{path}`, which '
+    'is a FIFO (named pipe). Claude Code RE-OPENS a path after a Bash command '
+    'reads it (file-read tracking) — after the command has returned and outside '
+    'the Bash timeout — and open(2) of a FIFO blocks until a writer attaches. '
+    'Once the writer has closed, that re-open never returns (wchan '
+    'wait_for_partner) and the tool result hangs until the session is killed. '
+    'Measured 2026-10-02 in the J5 outage drill (WI-10005395). Use a REGULAR '
+    'FILE as the channel instead: create it with `: > f`, have the writer '
+    'APPEND to it, and read it with `cat f` (or follow it in the background with '
+    '`tail -n +1 -f f | consumer`). To inspect the pipe itself, `ls -l`, `stat` '
+    'and `[ -p f ]` do not open it and are not gated.'
+)
+_FF_READERS = frozenset((
+    'cat', 'tac', 'head', 'tail', 'less', 'more', 'nl', 'wc', 'sed', 'awk',
+    'gawk', 'mawk', 'grep', 'egrep', 'fgrep', 'rg', 'cut', 'sort', 'uniq', 'od',
+    'xxd', 'hexdump', 'strings', 'base64', 'jq', 'diff', 'cmp', 'md5sum',
+    'sha1sum', 'sha256sum', 'sha512sum',
+))
+# Prefix commands that run their argument as the real command.
+_FF_WRAPPERS = frozenset(('sudo', 'command', 'nohup', 'time', 'exec', 'stdbuf'))
+_FF_PREFILTER = re.compile(
+    r'(?:^|[\s;&|(`])(?:[\w./-]*/)?(?:%s)(?=\s|$)'
+    % '|'.join(sorted(_FF_READERS, key=len, reverse=True)))
+_FF_UNRESOLVABLE = '$`*?[]{}'      # `~/` is expanded below; `~user` is refused
+_FF_HOOK_RELATIVE = ('/dev', '/proc', '/sys')
+
+
+def _ff_under_hook_relative(path):
+    return any(path == r or path.startswith(r + '/') for r in _FF_HOOK_RELATIVE)
+
+
+def _ff_fifo_operand(p, cwd):
+    """Return the resolved path when the literal operand *p* is a FIFO, else None."""
+    if (not p or p == '-' or p.startswith('-') or len(p) > 400
+            or any(c in p for c in _FF_UNRESOLVABLE)):
+        return None
+    if p == '~' or p.startswith('~/'):
+        p = os.path.expanduser(p)
+    elif p.startswith('~'):
+        return None
+    if not os.path.isabs(p):
+        if cwd is None:
+            return None
+        p = os.path.join(cwd, p)
+    full = os.path.normpath(p)
+    if _ff_under_hook_relative(full):
+        return None
+    try:
+        st = os.stat(full)          # stat never opens the file, so cannot block
+    except (OSError, ValueError):
+        return None
+    if not _ff_stat.S_ISFIFO(st.st_mode):
+        return None
+    if _ff_under_hook_relative(os.path.realpath(full)):
+        return None
+    return full
+
+
+try:
+    import stat as _ff_stat
+    if (tool_name.lower() == 'bash' and isinstance(command, str)
+            and len(command) <= 20000 and _FF_PREFILTER.search(command)):
+        _ff_tokens = _fa_shell_tokens(command)
+        # A subshell reorders what a `cd` applies to; after one, judge only
+        # absolute paths rather than resolve a relative one against a guess.
+        _ff_subshell = '(' in _ff_tokens or ')' in _ff_tokens
+        _ff_cwd = payload.get('cwd')
+        _ff_cwd = os.path.realpath(_ff_cwd) if _ff_cwd else None
+        if _ff_cwd is not None and not os.path.isdir(_ff_cwd):
+            _ff_cwd = None
+        _ff_segments, _ff_cur = [], []
+        for _t in _ff_tokens:
+            if _t in _FA_SEPARATORS or _t in ('(', ')'):
+                _ff_segments.append(_ff_cur)
+                _ff_cur = []
+            else:
+                _ff_cur.append(_t)
+        _ff_segments.append(_ff_cur)
+        for _ff_toks in _ff_segments:
+            _ff_i = 0
+            while (_ff_i < len(_ff_toks)
+                   and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', _ff_toks[_ff_i])):
+                _ff_i += 1
+            _ff_argv = _ff_toks[_ff_i:]
+            # Peel `sudo -E cat f`, `stdbuf -oL cat f`, `command cat f`.
+            while _ff_argv and _ff_argv[0].rsplit('/', 1)[-1] in _FF_WRAPPERS:
+                _ff_argv = _ff_argv[1:]
+                while _ff_argv and _ff_argv[0].startswith('-'):
+                    _ff_argv = _ff_argv[1:]
+            if not _ff_argv:
+                continue
+            _ff_name = _ff_argv[0].rsplit('/', 1)[-1]
+            if _ff_name == 'cd':
+                _ff_tgt = _ff_argv[1] if len(_ff_argv) > 1 else None
+                if (_ff_subshell or _ff_tgt is None
+                        or any(c in _ff_tgt for c in _FF_UNRESOLVABLE + '~')):
+                    _ff_cwd = None
+                    continue
+                _ff_next = (_ff_tgt if os.path.isabs(_ff_tgt)
+                            else os.path.join(_ff_cwd, _ff_tgt) if _ff_cwd
+                            else None)
+                _ff_cwd = (os.path.realpath(_ff_next)
+                           if _ff_next and os.path.isdir(_ff_next) else None)
+                continue
+            if _ff_name not in _FF_READERS:
+                continue
+            _ff_skip_next = False
+            for _ff_a in _ff_argv[1:]:
+                if _ff_skip_next:           # a redirect's target or delimiter
+                    _ff_skip_next = False
+                    continue
+                if _ff_a and all(c in '<>&' for c in _ff_a):
+                    _ff_skip_next = True
+                    continue
+                _ff_hit = _ff_fifo_operand(_ff_a, _ff_cwd)
+                if _ff_hit:
+                    deny(_FF_DENY.format(cmd=' '.join(_ff_argv)[:160],
+                                         path=_ff_hit[:200]))
 except SystemExit:
     raise  # deny() exits through here — never swallow the verdict
 except Exception:
@@ -4971,13 +5170,27 @@ def _is_tracked_path(canon, rel):
         return False
     try:
         import subprocess
-        return subprocess.run(
+        if subprocess.run(
             ['git', '-C', canon, 'ls-files', '--error-unmatch', '--', rel],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
             check=False,
-        ).returncode == 0
+        ).returncode == 0:
+            return True
+        # WI-10005009: git-sync rewrites .git/index every sweep, and a half-written
+        # index answers "not tracked" for a tracked path, byte-for-byte like an
+        # untracked one. Here that is the UNSAFE direction (a tracked mutation slips
+        # past the gate), so ask HEAD's tree, which cannot be torn, before believing it.
+        head = subprocess.run(
+            ['git', '-C', canon, '--literal-pathspecs', 'ls-tree', '-z',
+             '--name-only', 'HEAD', '--', rel],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        return head.returncode == 0 and len(head.stdout) > 0
     except Exception:
         return False
 
@@ -5618,18 +5831,97 @@ def _has_computed_write_path(body):
 # tracked (last assignment anywhere in the body wins, the same top-to-bottom
 # approximation `_payload_literal_tree_path`'s direct-literal scan already
 # relies on) — an accepted, documented approximation, not a claim of soundness.
+# EI-24345357866084290: retain only statement-boundary assignments whose path
+# expression can be reduced to quoted strings, already-known variables,
+# process.env.HOME, and path.join. The whole write argument is resolved too, so
+# a known out-of-tree prefix is never split into a repo-relative basename.
 _SIMPLE_ASSIGN_RE = re.compile(
-    r'(?:^|[\n;])[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(["\'])((?:(?!\2)[^\\]|\\.)*)\2'
+    r'(?:^|[\n;])[ \t]*(?:(?:const|let|var)[ \t]+)?'
+    r'([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*([^;\n]*)'
 )
 _BARE_IDENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_STATIC_PATH_JOIN_RE = re.compile(r'(?:(?:path|os\.path)\.)join\s*\((.*)\)$')
+
+
+def _split_static_expression(expr, delimiter):
+    """Split on a delimiter outside strings and nested brackets."""
+    parts = []
+    start = 0
+    depth = 0
+    quote = None
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        if quote:
+            if ch == '\\' and i + 1 < len(expr):
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in ('"', "'"):
+            quote = ch
+        elif ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif ch == delimiter and depth == 0:
+            parts.append(expr[start:i].strip())
+            start = i + 1
+        i += 1
+    parts.append(expr[start:].strip())
+    return parts
+
+
+def _static_path_expression(expr, variables, depth=0):
+    """Evaluate literal path pieces, known variables, HOME, and path.join."""
+    if expr is None or depth > 8 or len(expr) > 2000:
+        return None
+    expr = expr.strip()
+    if not expr:
+        return None
+
+    _literal = _QUOTED_LITERAL_RE.fullmatch(expr)
+    if _literal:
+        value = _literal.group(1) if _literal.group(1) is not None else _literal.group(2)
+        # Escapes need language-specific decoding; leave them to the
+        # existing literal scanner instead of guessing at their value.
+        return None if '\\' in value else value
+
+    if expr == 'process.env.HOME':
+        return os.environ.get('HOME') or os.path.expanduser('~')
+    if _BARE_IDENT_RE.fullmatch(expr):
+        return variables.get(expr)
+
+    _parts = _split_static_expression(expr, '+')
+    if len(_parts) > 1:
+        _values = [_static_path_expression(part, variables, depth + 1) for part in _parts]
+        if all(value is not None for value in _values):
+            return ''.join(_values)
+        return None
+
+    _join = _STATIC_PATH_JOIN_RE.fullmatch(expr)
+    if _join:
+        _args = _split_static_expression(_join.group(1), ',')
+        _values = [_static_path_expression(arg, variables, depth + 1) for arg in _args]
+        if _values and all(value is not None for value in _values):
+            return os.path.join(*_values)
+    return None
 
 
 def _literal_var_assignments(body):
-    """{ varName: literalValue } for simple `VAR = 'literal'` assignments in
-    `body` — last assignment wins (top-to-bottom scan order)."""
+    """{ varName: literalValue } for simple assignments in the body.
+
+    Last assignment wins (top-to-bottom scan order). Static path expressions
+    are reduced to one value; unsupported expressions are omitted, not guessed.
+    """
     out = {}
     for _m in _SIMPLE_ASSIGN_RE.finditer(body):
-        out[_m.group(1)] = _m.group(3)
+        _name = _m.group(1)
+        _value = _static_path_expression(_m.group(2), out)
+        if _value is None:
+            out.pop(_name, None)
+        else:
+            out[_name] = _value
     return out
 
 
@@ -5677,6 +5969,17 @@ def _payload_literal_tree_path(body, canon, cwd):
                     if (resolved and (resolved == canon or resolved.startswith(canon + os.sep))
                             and not _is_sanctioned_scratch(resolved, canon)):
                         return cand
+        _static_target = _static_path_expression(_first_arg, _var_literals or {})
+        if _static_target is None and _var_literals is None:
+            _var_literals = _literal_var_assignments(body)
+            _static_target = _static_path_expression(_first_arg, _var_literals)
+        if _static_target is not None:
+            if _looks_like_path_candidate(_static_target):
+                resolved = _resolve_write_target(_static_target, cwd)
+                if (resolved and (resolved == canon or resolved.startswith(canon + os.sep))
+                        and not _is_sanctioned_scratch(resolved, canon)):
+                    return _static_target
+            continue  # resolve the whole known expression, never its pieces
         for _m in _QUOTED_LITERAL_RE.finditer(_first_arg):
             raw = _m.group(1) if _m.group(1) is not None else _m.group(2)
             if any(ch in raw for ch in ('$', '`', '{', '}')):

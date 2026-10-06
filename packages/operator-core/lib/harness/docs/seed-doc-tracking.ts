@@ -45,7 +45,7 @@ export async function seedHarnessDocTracking(opts: {
   try {
     const paths = await resolveHarnessDocPaths(opts.harnessSlug);
     if (!paths) return { seeded: false, reason: 'no_docs_root' };
-    const docIds = await listDocBodies(paths.docsRoot);
+    const docIds = await listDocBodies(paths.sources ? paths : paths.docsRoot);
     if (docIds.length === 0) return { seeded: false, reason: 'no_docs', total: 0 };
     const workspaceId = await resolveWorkspaceForHarness(opts.harnessSlug, opts.workspaceId);
     let registered = 0;

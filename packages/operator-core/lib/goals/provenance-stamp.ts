@@ -92,3 +92,72 @@ export async function stampGoalProvenance(
   `;
   return goalId;
 }
+
+/**
+ * The goal a PLAN PROMOTION should attribute its minted work-items to
+ * (WI-10005696).
+ *
+ * `plans:start` / `fleet:launch-on-plan`'s failsafe / scheduled plan runs mint a plan's
+ * lanes through `promotePlanItems` → `upsertConditionWorkItem`, a rail that never touched
+ * `stampGoalProvenance` (that runs only from `work_items:create`, `improvements:capture` and
+ * the convert-at-pickup path). Measured 2026-09-20 under goal 60d3a8: every promoted
+ * `WI-10002034..37` carried `goal_id = NULL`, so the goal's own goal-fenced drain claim spec
+ * (`{ field:'goal', op:'=' }` matches POSITIVELY — a NULL row is excluded, never wildcarded)
+ * could not see the work its own plan had just created.
+ *
+ * Precedence, both legs stamped provenance and neither an argument:
+ *   1. the PLAN's own `harness_plans.goal_id` (migration 791) — the goal the plan was
+ *      authored under, and the more specific attribution of the two;
+ *   2. otherwise the PROMOTER's resolved goal context (`resolveGoalContext`), which covers
+ *      a plan that was never stamped but is being started by a goal agent (or one it spawned).
+ * `null` when neither applies — the common, correct outcome for non-goal work.
+ */
+export async function resolvePlanPromotionGoal(args: {
+  workspaceId: string | undefined;
+  harnessSlug: string;
+  planSlug: string;
+  ownerId: string | undefined;
+}): Promise<string | null> {
+  const { workspaceId, harnessSlug, planSlug, ownerId } = args;
+  if (!workspaceId || workspaceId === '*') return null;
+  const { sql } = getOrgPg();
+  const rows = await sql<Array<{ goal_id: string | null }>>`
+    SELECT goal_id
+      FROM harness_shared.harness_plans
+     WHERE workspace_id = ${workspaceId}
+       AND harness_slug = ${harnessSlug}
+       AND plan_slug    = ${planSlug}
+     LIMIT 1
+  `;
+  const planGoal = Array.isArray(rows) ? (rows[0]?.goal_id ?? null) : null;
+  if (planGoal) return planGoal;
+  return ownerId ? resolveGoalContext(workspaceId, ownerId) : null;
+}
+
+/**
+ * Stamp ONE promoted work-item with an ALREADY-RESOLVED goal (the value
+ * {@link resolvePlanPromotionGoal} returned for the whole promotion). Same never-clobber
+ * rule as {@link stampGoalProvenance} — `AND goal_id IS NULL`, so first attribution wins and
+ * an adopted/replayed row is healed without being re-parented. Returns whether a row changed.
+ */
+export async function stampPromotedGoal(
+  item: GoalProvenanceSubject,
+  workspaceId: string,
+  goalId: string | null,
+): Promise<boolean> {
+  if (!goalId || !workspaceId || workspaceId === '*') return false;
+  const { sql } = getOrgPg();
+  const harness = item.harness ?? null;
+  const rows = await sql<Array<{ feature_id: string }>>`
+    UPDATE harness_shared.work_items
+       SET goal_id = ${goalId}
+     WHERE feature_id = ${item.id}
+       AND CASE
+             WHEN ${harness}::text IS NULL THEN workspace_id = ${workspaceId}
+             ELSE harness_slug = ${harness}::text
+           END
+       AND goal_id IS NULL
+    RETURNING feature_id
+  `;
+  return Array.isArray(rows) && rows.length > 0;
+}

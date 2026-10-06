@@ -34,6 +34,7 @@ import { getOrgPg } from '@papercusp/db-org';
 import { issuesScopeWorkspace } from '../../issues-engineer';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { ALL_TERMINAL_STATUSES } from '../../work-item-blocking';
+import { observationLaneExclusionSql } from '../../work-items';
 import { withIterativeScan } from '@papercusp/search';
 import type { EmbedderProfileSpec } from '@papercusp/memory';
 
@@ -235,6 +236,7 @@ export async function queryCandidatesReal(
       FROM harness_shared.work_items
      WHERE workspace_id = ANY(${workspaces}::text[])
        AND embedding IS NOT NULL
+       AND ${observationLaneExclusionSql(scanSql, 'payload')}
        AND ${proseProfilePredicateSql(scanSql, selection, 'embedding_profile', 'embedding_mode')}
        AND (status IS NULL OR NOT (status = ANY(${terminal}::text[])))
        AND ${harness ? scanSql`harness_slug = ${harness}` : scanSql`TRUE`}

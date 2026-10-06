@@ -81,12 +81,30 @@ export type OnReactionFailure<TEvent, TFire = string> = (
   failure: ReactionFailure<TEvent, TFire>,
 ) => void | Promise<void>;
 
+/**
+ * The budget key for a rule: who CONTRIBUTED it, or `null` for a first-party rule.
+ *
+ * A rule is contributed exactly when it is capability-scoped (`capability` set —
+ * every plugin and standalone install path sets one). Its key is its `source`,
+ * falling back to its id so a contributed rule is never silently unbudgeted.
+ *
+ * `source` ALONE is not a contributor: it is a provenance label that first-party
+ * rules carry too (`'events-file'`, `'emits:coord:handoff'`, `'lifecycle-rules'`).
+ * Keying on it put every same-label built-in into one shared throttle bucket and
+ * made the host count its ledger on every built-in fire — measured 2026-10-01 at
+ * ~157 count queries/s from the cache-tag ECA rule alone (WI-10005204).
+ */
+export function reactionContributor<TEvent, TFire>(rule: ReactionRule<TEvent, TFire>): string | null {
+  if (!rule.capability) return null;
+  return rule.source ?? `rule:${rule.id}`;
+}
+
 /** What the budget port is asked about: one contributor's reaction, about to fire. */
 export interface FireBudgetRequest<TEvent, TFire = string> {
   /**
-   * The rule's contributor — `ReactionRule.source`, or `null` for a first-party
-   * built-in. The budget KEY. A host that budgets `null` lumps every built-in
-   * into one shared bucket and throttles itself; budget named contributors.
+   * The rule's contributor — {@link reactionContributor}: `null` for a first-party
+   * rule. The budget KEY. A host that budgets `null` lumps every built-in into one
+   * shared bucket and throttles itself; budget named contributors only.
    */
   contributor: string | null;
   rule: ReactionRule<TEvent, TFire>;
@@ -189,7 +207,7 @@ export async function scheduleReaction<TEvent, TFire = string>(opts: {
     if (budget) {
       let decision: FireBudgetDecision;
       try {
-        decision = await budget({ contributor: rule.source ?? null, rule, fire, event, cause });
+        decision = await budget({ contributor: reactionContributor(rule), rule, fire, event, cause });
       } catch (budgetErr) {
         // FAIL OPEN: a broken budget backend must not stop every reaction.
         log?.(`fire budget for ${rule.id} threw; allowing the reaction: ${errMsg(budgetErr)}`);

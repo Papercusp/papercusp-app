@@ -68,6 +68,8 @@ export interface ReadLearningLoopHealthOpts {
   /** An active loop that has not fired within this many days is "stale" (default 3). */
   staleAfterDays?: number;
   nowMs?: number;
+  /** Optional bg-host process start time. The scheduled escalation sweep opts in; reads do not. */
+  processStartedAtMs?: number;
 }
 
 /**
@@ -118,7 +120,8 @@ export async function readLearningLoopHealth(
   ];
   const rows = (await sql`
     SELECT install_slug, name, active, last_fired_at, next_fire_at,
-           metadata->'pause'->>'reviewBy' AS pause_review_by
+           metadata->'pause'->>'reviewBy' AS pause_review_by,
+           metadata->'lastPause'->>'resumedAtMs' AS last_pause_resumed_at_ms
       FROM harness_shared.routines
      WHERE workspace_id = ${workspaceId}
        AND install_slug IN ${sql([SINGLETON_HOST_SLUG, operatorHomeHarnessSlug()])}
@@ -129,6 +132,7 @@ export async function readLearningLoopHealth(
     last_fired_at: Date | string | null;
     next_fire_at: Date | string | null;
     pause_review_by: string | null;
+    last_pause_resumed_at_ms: string | null;
   }[];
 
   const routines: LearningRoutineRow[] = rows.map((r) => ({
@@ -142,6 +146,8 @@ export async function readLearningLoopHealth(
     // should-be-on-but-dark, so a stale reviewBy left on an ACTIVE row can never matter, but
     // we still pass through only what's actually persisted, not what's currently relevant.
     pauseReviewBy: r.pause_review_by ?? null,
+    lastPauseResumedAtMs:
+      r.last_pause_resumed_at_ms == null ? null : Number(r.last_pause_resumed_at_ms),
   }));
 
   // origin='scout' (migration 571): su-ideate ticks share this ledger but are
@@ -163,6 +169,7 @@ export async function readLearningLoopHealth(
 
   return computeLearningLoopHealth(LEARNING_SINGLETONS, routines, {
     nowMs: opts.nowMs ?? Date.now(),
+    ...(opts.processStartedAtMs === undefined ? {} : { processStartedAtMs: opts.processStartedAtMs }),
     staleAfterDays: opts.staleAfterDays,
     homeSlug: operatorHomeHarnessSlug(),
     expectedMaterialized: (id) => platformLoopsOn || !isPlatformImprovementLoop(id),

@@ -109,11 +109,28 @@ export function observeSidecarExit(snapshot: SidecarContainment, fs: LifetimeFs 
   }
 }
 
+/** How long to keep re-observing a `populated` scope after a signal was sent. The kernel
+ * clears `cgroup.events` `populated` (and systemd removes the scope) only AFTER the
+ * signalled tasks are torn down and reaped, so the first read after a successful SIGKILL
+ * can still say `populated` (measured WI-10004743: `killScopeUnit` reported "verified
+ * empty" yet the very next `observeSidecarExit` read `populated`; `exited` came ~50ms
+ * later). A single immediate re-read therefore turned an in-progress teardown into
+ * "exit unverified". Bounded, so a scope that genuinely cannot die still returns false. */
+export const SIDECAR_REAP_SETTLE_MS = 2_000;
+const SIDECAR_REAP_POLL_MS = 25;
+
 /** A successful signal is only progress. Resolve true solely on a fresh kernel
- * exit observation, including when a failed kill raced normal scope teardown. */
+ * exit observation, including when a failed kill raced normal scope teardown. The
+ * observation is re-read for up to `settleMs` while the scope is still `populated`,
+ * because exit lags the signal; `unknown`/`alive` are never waited out. */
 export async function reapDeadSidecar(
   snapshot: SidecarContainment,
-  deps: { fs?: LifetimeFs; kill?: (scopeUnit: string) => Promise<unknown> } = {},
+  deps: {
+    fs?: LifetimeFs;
+    kill?: (scopeUnit: string) => Promise<unknown>;
+    settleMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<boolean> {
   const state = observeSidecarExit(snapshot, deps.fs);
   if (state === 'exited') return true;
@@ -127,5 +144,12 @@ export async function reapDeadSidecar(
   } catch {
     // A failed signal must still be followed by positive observation.
   }
-  return observeSidecarExit(snapshot, deps.fs) === 'exited';
+  const settleMs = deps.settleMs ?? SIDECAR_REAP_SETTLE_MS;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let observed = observeSidecarExit(snapshot, deps.fs);
+  for (let waited = 0; observed === 'populated' && waited < settleMs; waited += SIDECAR_REAP_POLL_MS) {
+    await sleep(SIDECAR_REAP_POLL_MS);
+    observed = observeSidecarExit(snapshot, deps.fs);
+  }
+  return observed === 'exited';
 }

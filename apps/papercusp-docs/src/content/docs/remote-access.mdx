@@ -1,0 +1,58 @@
+---
+title: Remote access
+description: Connect outside apps to a workspace using scoped access instead of exposing the whole operator.
+documents:
+  - packages/operator-core/lib/agent-tools/access/create.ts
+  - packages/operator-core/lib/agent-tools/access/list.ts
+---
+
+Remote access lets an outside app call a Papercusp workspace. Configure it on
+the computer running Papercusp under **Settings → Remote access**. Do not
+publish your operator's ordinary administration port as a shortcut.
+
+## Choose the connection route
+
+- **Hosted workspace:** use its portal-provided workspace/app address.
+- **Your own tunnel:** connect through the supported external-ingress
+  listener. This listener deliberately exposes a limited set of integration
+  endpoints rather than the whole app.
+- **Papercusp relay:** opt in through the relay setup and approve the
+  connection in the portal. Traffic passes through Papercusp's servers; read
+  the consent notice before enabling it.
+
+Availability depends on the installation. Use the exact address and client
+configuration shown by setup, not a development port or someone else's
+workspace identifier.
+
+## Give each app limited access
+
+Use **Connect an app**, supported OAuth, or a scoped service key. Select only
+the tools and projects it needs. A connected app's key is not your owner/admin
+credential.
+
+MCP clients can use the server's supported MCP URL and authorization flow.
+Different connection routes expose different endpoint sets; a tunnel is not
+equivalent to the hosted portal's plain HTTP tool surface.
+
+Store secrets in the app's secure configuration. Never publish a key in a
+repository, a public issue or an agent transcript.
+
+## Pause, rotate, revoke
+
+The **Remote access** switch is the workspace-level kill switch. Turning it
+off refuses connected-app access without deleting keys. Individual keys can
+also be paused, rotated or revoked using the controls provided by setup.
+
+Rotation and revocation have different consequences: rotation allows you to
+move an app to a new secret; revocation ends that key's access. Inspect the
+control's confirmation and resulting state.
+
+## When a call fails
+
+An offline computer cannot serve remote work. Check its connection before
+retrying. A permission refusal means the app's scope or authorization needs
+review; a rate-limit response should be handled using its retry guidance.
+Do not replace a limited app key with an owner token to make a refusal vanish.
+
+For help, include the route, non-secret app identifier, status/error and time
+in a **Support** request. See [Troubleshooting](/docs/troubleshooting).

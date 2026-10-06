@@ -108,9 +108,21 @@ export const cleanupManifest = defineTool({
     }
 
     const currentById = new Map(scan.map((finding) => [finding.findingId, finding]));
+    const policy = run.automationPolicy
+      ? normalizeBulkAutomationPolicy(run.automationPolicy)
+      : null;
     const wanted = args.includeReported ? rows : rows.filter((row) => row.outcome === 'pending');
     const findings = wanted.map((row) => {
       const current = currentById.get(row.findingId);
+      const policyEligibility = current && policy
+        ? bulkAutomationEligibility(
+            policy,
+            row.confidenceLevel ?? (row.confidence === 'provable' ? 'high' : 'medium'),
+          )
+        : null;
+      const policyBlockedBy = policyEligibility && !policyEligibility.allowed
+        ? policyEligibility.reason ?? 'confidence-policy'
+        : null;
       return {
         ...row,
         disposition: row.disposition,
@@ -122,8 +134,10 @@ export const cleanupManifest = defineTool({
         responsibility: row.responsibility,
         confidenceLevel: row.confidenceLevel,
         retryCondition: row.retryCondition,
-        autoApply: current?.autoApply === true,
-        autoApplyBlockedBy: current ? current.autoApplyBlockedBy : 'stale-finding',
+        autoApply: current?.autoApply === true && policyEligibility?.allowed !== false,
+        autoApplyBlockedBy: current
+          ? policyBlockedBy ?? current.autoApplyBlockedBy
+          : 'stale-finding',
         current: Boolean(current),
       };
     });

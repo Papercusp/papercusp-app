@@ -61,6 +61,16 @@ pub fn answer_summary(
     let Some(payload) = payload else {
         return "Answered".to_string();
     };
+    // pui-chat-first-ux D-028: a tool approval's three answers, by option id.
+    if card.approval.is_some() {
+        let picks = payload.get("picks").and_then(|p| p.as_array());
+        match picks.map(|p| p.iter().filter_map(|id| id.as_str()).collect::<Vec<_>>()).as_deref() {
+            Some(["yes"]) => return "Approved".to_string(),
+            Some(["always"]) => return "Approved for this session".to_string(),
+            Some(["no"]) => return "Declined".to_string(),
+            _ => {}
+        }
+    }
     if let Some(picks) = payload.get("picks").and_then(|p| p.as_array()) {
         let labels: Vec<String> = picks
             .iter()
@@ -203,9 +213,23 @@ pub struct OpenCard {
     pub fallback_text: Option<String>,
     /// The wire `details` field: shown only behind the details toggle.
     pub details: Option<String>,
+    /// The wire `approval` field: present on a tool-approval card, drawn the
+    /// way Claude Code draws its permission prompt (D-028).
+    pub approval: Option<CardApproval>,
     pub allow_decline: bool,
     pub report: Option<Report>,
     pub created_at: f64,
+}
+
+/// A tool-approval card's parts (wire `CardApproval`, pui-chat-first-ux D-028):
+/// the call's row title (`Update(calc.js)`), the question about it, and the
+/// change itself, shown once between them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CardApproval {
+    pub title: String,
+    pub question: String,
+    #[serde(default)]
+    pub body: Vec<String>,
 }
 
 impl OpenCard {
@@ -213,6 +237,11 @@ impl OpenCard {
     /// a tool approval's raw arguments under its readable prompt.
     pub fn details(&self) -> Option<&str> {
         self.details.as_deref()
+    }
+
+    /// The option with this id, when the card offers it.
+    pub fn option(&self, id: &str) -> Option<&CardOption> {
+        self.presentation.options().iter().find(|o| o.id == id)
     }
 }
 
@@ -283,6 +312,10 @@ fn parse_open_card(
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .map(str::to_string);
+    let approval = v
+        .get("approval")
+        .and_then(|a| serde_json::from_value::<CardApproval>(a.clone()).ok())
+        .filter(|a| !a.title.trim().is_empty() && !a.question.trim().is_empty());
     // Default true (matches the server: only an explicit `false` hides decline).
     let allow_decline = v
         .get("allowDecline")
@@ -300,6 +333,7 @@ fn parse_open_card(
         presentation,
         fallback_text,
         details,
+        approval,
         allow_decline,
         report,
         created_at,
@@ -560,6 +594,27 @@ impl CardState {
 
     pub fn has_card(&self) -> bool {
         !self.cards.is_empty()
+    }
+
+    /// Whether an open card is the approval for a tool call titled `title`
+    /// (its prompt opens `Allow <title>?`). pui-chat-first-ux P-020: that card
+    /// carries the call's diff, so the transcript row need not repeat it.
+    pub fn asks_about(&self, title: &str) -> bool {
+        let question = format!("Allow {title}?");
+        self.cards.iter().any(|card| {
+            card.approval.as_ref().is_some_and(|a| a.title.trim() == title)
+                || card.prompt.lines().next().map(str::trim) == Some(question.as_str())
+        })
+    }
+
+    /// D-028: the answer `id` (`yes` / `always` / `no`) on the focused tool
+    /// approval, when it is one and offers that answer. Esc picks `no` and
+    /// Shift+Tab picks `always`, the keys Claude Code uses.
+    pub fn approval_pick(&self, id: &str) -> Option<CardResponse> {
+        let head = self.cards.first()?;
+        head.approval.as_ref()?;
+        head.option(id)
+            .map(|o| CardResponse::SubmitPicks(vec![o.id.clone()]))
     }
 
     /// Whether option index `i` is toggled (checkbox cards).
@@ -961,10 +1016,51 @@ mod tests {
             },
             fallback_text: None,
             details: None,
+            approval: None,
             allow_decline: true,
             report: None,
             created_at: 1.0,
         }
+    }
+
+    /// A D-028 tool approval as the server sends it.
+    fn tool_approval_card(cid: &str) -> OpenCard {
+        let raw = serde_json::json!({
+            "correlationId": cid, "prompt": "Do you want to make this edit to calc.js?\n- a\n+ b",
+            "approval": { "title": "Update(calc.js)", "question": "Do you want to make this edit to calc.js?",
+                "body": ["- a", "+ b"] },
+            "presentation": { "kind": "radio", "options": [
+                { "id": "yes", "label": "Yes" },
+                { "id": "always", "label": "Yes, and allow all edits this session" },
+                { "id": "no", "label": "No, and tell Claude what to do instead" }] }
+        });
+        parse_open_card(&raw, "r", None).expect("approval card parses")
+    }
+
+    #[test]
+    fn a_tool_approval_parses_its_parts_and_answers_by_id() {
+        let card = tool_approval_card("a");
+        let approval = card.approval.clone().expect("approval parts");
+        assert_eq!(approval.title, "Update(calc.js)");
+        assert_eq!(approval.body, vec!["- a".to_string(), "+ b".to_string()]);
+        let picks = |id: &str| serde_json::json!({ "picks": [id] });
+        assert_eq!(answer_summary(&card, "submit", Some(&picks("yes"))), "Approved");
+        assert_eq!(
+            answer_summary(&card, "submit", Some(&picks("always"))),
+            "Approved for this session"
+        );
+        assert_eq!(answer_summary(&card, "submit", Some(&picks("no"))), "Declined");
+
+        let mut s = CardState::new();
+        s.apply_snapshot(SnapshotEnvelope { run_id: "r".into(), workspace_id: None, version: 1, cards: vec![card] });
+        assert!(s.asks_about("Update(calc.js)"));
+        assert_eq!(s.approval_pick("no"), Some(CardResponse::SubmitPicks(vec!["no".into()])));
+        assert_eq!(s.approval_pick("always"), Some(CardResponse::SubmitPicks(vec!["always".into()])));
+        // An ordinary choice card is not an approval: Esc stays a skip there.
+        let mut plain = CardState::new();
+        plain.apply_snapshot(SnapshotEnvelope { run_id: "r".into(), workspace_id: None, version: 1,
+            cards: vec![approval_card("p")] });
+        assert_eq!(plain.approval_pick("no"), None);
     }
 
     #[test]

@@ -15,7 +15,7 @@
  * expensive git `-L`/`log` confirm runs only for docs the tick could have moved.
  */
 
-import { minimatch } from 'minimatch';
+import { Minimatch } from 'minimatch';
 import { checkDocDrift, type DriftResult } from './drift';
 import type { GitRunner, FeatureCommitLookup, SubjectRef } from './subject-ref';
 import {
@@ -113,20 +113,82 @@ export async function recomputeDocStatus(
 
 /** Does any changed path fall under any anchor (glob-aware reverse-index match)? */
 export function anchorMatchesChanged(anchorPaths: string[], changedPaths: string[]): boolean {
-  if (!anchorPaths.length || !changedPaths.length) return false;
-  for (const anchor of anchorPaths) {
-    const a = anchor.replace(/\/+$/, '');
-    if (!a) continue;
-    const isGlob = /[*?[\]{}()!+@]/.test(a);
-    // A concrete dir/file anchor also matches files UNDER it (a/b → a/b/**).
-    const patterns = isGlob ? [a] : [a, `${a}/**`];
-    for (const changed of changedPaths) {
-      for (const pat of patterns) {
-        if (minimatch(changed, pat, { dot: true })) return true;
-      }
+  return createAnchorMatcher(changedPaths)(anchorPaths);
+}
+
+const GLOB_CHARS = /[*?[\]{}()!+@]/;
+
+/** A changed path whose minimatch SUBJECT split is exactly its `/` segments. */
+function isPlainSubject(p: string): boolean {
+  return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+}
+
+/** A concrete anchor whose `[a, a/**]` minimatch semantics (dot:true) reduce to
+ * "equals a changed path, or is a directory ancestor of one". Anything minimatch
+ * could read differently (escapes, `#` comments, empty/./.. segments) is excluded
+ * and keeps the minimatch route. */
+function isPlainAnchor(a: string): boolean {
+  return !GLOB_CHARS.test(a) && !a.includes('\\') && !a.startsWith('#') && isPlainSubject(a);
+}
+
+/**
+ * Build the anchor matcher for ONE set of changed paths, once per sweep
+ * (WI-10005353). `anchorMatchesChanged` used to call `minimatch()` for every
+ * doc × anchor × pattern × changed path, compiling a new Minimatch each time; a
+ * doc whose anchors match nothing paid the whole product. On bg-host's main
+ * thread a 1k–25k-path git-sync tick against ~4k anchors spun for 184 s until
+ * the event-loop sentinel SIGKILLed the host.
+ *
+ * Plain anchors (nearly all of them) are now O(1) lookups in an index of the
+ * changed paths and their ancestor directories. Glob and irregular anchors keep
+ * exact minimatch semantics, with each distinct pattern compiled once.
+ */
+export function createAnchorMatcher(changedPaths: string[]): (anchorPaths: string[]) => boolean {
+  const exact = new Set<string>();
+  const ancestors = new Set<string>();
+  const irregular: string[] = [];
+  for (const changed of changedPaths) {
+    if (!isPlainSubject(changed)) {
+      irregular.push(changed);
+      continue;
+    }
+    exact.add(changed);
+    for (let i = changed.indexOf('/'); i !== -1; i = changed.indexOf('/', i + 1)) {
+      ancestors.add(changed.slice(0, i));
     }
   }
-  return false;
+  const compiled = new Map<string, Minimatch>();
+  const matches = (pattern: string, changed: string): boolean => {
+    let mm = compiled.get(pattern);
+    if (!mm) {
+      mm = new Minimatch(pattern, { dot: true });
+      compiled.set(pattern, mm);
+    }
+    return mm.match(changed);
+  };
+
+  return (anchorPaths) => {
+    if (!anchorPaths.length || !changedPaths.length) return false;
+    for (const anchor of anchorPaths) {
+      const a = anchor.replace(/\/+$/, '');
+      if (!a) continue;
+      // A concrete dir/file anchor also matches files UNDER it (a/b → a/b/**).
+      const patterns = GLOB_CHARS.test(a) ? [a] : [a, `${a}/**`];
+      if (isPlainAnchor(a)) {
+        if (exact.has(a) || ancestors.has(a)) return true;
+        for (const changed of irregular) {
+          if (patterns.some((pat) => matches(pat, changed))) return true;
+        }
+        continue;
+      }
+      for (const pat of patterns) {
+        for (const changed of changedPaths) {
+          if (matches(pat, changed)) return true;
+        }
+      }
+    }
+    return false;
+  };
 }
 
 /**
@@ -219,10 +281,12 @@ export async function sweepHarnessDocs(opts: SweepOpts): Promise<SweepResult> {
 
   // Prefilter: with changed paths, only touch docs whose anchors the tick could
   // have moved (cheap reverse-index intersection). Without, recompute all anchored.
+  // The matcher indexes the changed paths ONCE for every doc (WI-10005353).
+  const anchorsChanged = opts.changedPaths ? createAnchorMatcher(opts.changedPaths) : null;
   const candidates = all.filter((d) => {
     if (!d.subjectRef || d.subjectRef.length === 0) return false; // untracked → skip
-    if (!opts.changedPaths) return true;
-    if (anchorMatchesChanged(d.anchorPaths, opts.changedPaths)) return true;
+    if (!anchorsChanged) return true;
+    if (anchorsChanged(d.anchorPaths)) return true;
     // Retry leg (mig 386): also re-consider an ALREADY-flagged doc whose steward
     // never healed it and that is now due for another dispatch — even if THIS tick
     // didn't touch its anchor. The retry CLOCK, not the current diff, gates it; the

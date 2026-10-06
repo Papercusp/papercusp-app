@@ -226,7 +226,10 @@ export function resolveGoalHoldersFromRows(
       sessionState: v?.sessionState ?? null,
       selfWake: v?.selfWake ?? null,
       heartbeatFresh: v ? v.heartbeatFresh : null,
-      live: v ? holderCountsAsAlive(v) : null,
+      // The oracle preserves failed reads in-band. A present UNKNOWN verdict
+      // carries no positive liveness evidence, just like an omitted verdict.
+      live: v && v.sessionState != null && v.signalMissing !== true
+        ? holderCountsAsAlive(v) : null,
     };
   });
   const elected = [...holders].sort((a, b) => {

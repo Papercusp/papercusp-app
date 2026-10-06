@@ -96,8 +96,10 @@ async function releaseFixtureMutex(lockClient: postgres.Sql): Promise<void> {
  * Re-point the coordination modules at the injected baseline DB + hand back an
  * admin client. Call once in `beforeAll`.
  */
-export async function setupBaselineCoordFixture(): Promise<BaselineCoordFixture> {
-  const dsn = inject('baselineSchemaDsn');
+export async function setupBaselineCoordFixture(
+  opts: { /** A caller-owned migrated test DB for suites needing isolated global/default rows. */ dsn?: string } = {},
+): Promise<BaselineCoordFixture> {
+  const dsn = opts.dsn ?? inject('baselineSchemaDsn');
 
   // EI-2627: globalSetup's own health check (EI-2433) ran once, potentially
   // minutes before this beforeAll — long enough on a heavily-loaded fleet box

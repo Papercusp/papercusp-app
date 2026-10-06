@@ -485,9 +485,14 @@ export async function releaseDeployStalenessSweep(opts: {
       thresholdMs: thresholdSec * 1_000,
     });
     if (!verdict.stale) {
-      // EI-16537: retract a page raised by an earlier pass — a no-op (and silent) unless
-      // this watchdog actually alarmed, so a routinely-healthy pipeline still says nothing.
-      const recovered = await clearDeployStalenessAlarm({ installSlug, now });
+      // EI-16537: "not stale" includes transient states such as deploy-in-flight and
+      // gate-red; those do not prove that :3070 has caught up to the green pin. Retract
+      // the page only when the measured live-to-pin gap is exactly zero. A positive or
+      // unknown gap keeps the existing alarm latched until the pin is actually live.
+      const recovered =
+        status.deploy.deployedBehindGreenPin === 0
+          ? await clearDeployStalenessAlarm({ installSlug, now })
+          : false;
       return { outcome: 'healthy', verdict, reason: verdict.reason, recovered };
     }
 

@@ -101,6 +101,13 @@ find "$(dirname "$DEST")" -maxdepth 1 -name "$DEST_OLD_GLOB" -mmin "+$DEST_OLD_G
 # to reap on a LATER run, not this one.
 if [[ -d "$DEST" ]]; then
   mv "$DEST" "$DEST_OLD"
+  # WI-10004327: rename(2) KEEPS a directory's mtime, so the swapped-out tree
+  # carries the OLD build's mtime, not the swap-out time. Without this stamp
+  # the -mmin grace sweep (above, and in any concurrent run) sees a tree
+  # swapped out this instant as long-stale and reaps it out from under an
+  # in-flight reader, which is exactly what the grace period exists to prevent.
+  # Measured: docs.old.3438785 had mtime 09-28 22:17Z but ctime 09-30 07:48Z.
+  touch "$DEST_OLD"
 fi
 mv "$DEST_TMP" "$DEST"
 
@@ -121,11 +128,27 @@ mv "$DEST_TMP" "$DEST"
 # then removes only this run's own swap-out. Fails safe: if the reaper is killed
 # with its process group, the tree simply survives to be reaped by the
 # start-of-run sweep above, i.e. exactly today's behaviour, never worse.
+#
+# WI-10004327: a setsid'd sleeper escapes the process GROUP but not the build's
+# CGROUP, and a systemd unit launcher kills its whole cgroup when the build
+# exits (capability:bash runs each command as a pc-*.service with
+# KillMode=control-group). Measured 2026-09-30: the sleeper's unit cgroup was
+# gone ~10s into its 120s sleep and the swapped-out tree survived. That is how
+# a 350 MB docs.old.<pid> sat in public/ for hours and was copied into dist and
+# release trees. So schedule the reap as a transient USER TIMER: it runs in the
+# systemd user manager, outside the build's cgroup, and outlives the build. Fall
+# back to the detached sleeper only where there is no user manager (CI,
+# containers), where no unit teardown exists to kill it.
 if [[ -d "$DEST_OLD" ]]; then
   DEST_OLD_ABS="$(cd "$(dirname "$DEST_OLD")" && pwd)/$(basename "$DEST_OLD")"
-  setsid nohup sh -c 'sleep "$1"; rm -rf -- "$2"' _ \
-    "$((DEST_OLD_GRACE_MIN * 60))" "$DEST_OLD_ABS" \
-    </dev/null >/dev/null 2>&1 &
+  REAP_AFTER_SEC="$((DEST_OLD_GRACE_MIN * 60))"
+  if ! systemd-run --user --quiet --collect --on-active="${REAP_AFTER_SEC}s" \
+      --description="postbuild-copy reap $DEST_OLD_ABS" \
+      "$(command -v rm)" -rf -- "$DEST_OLD_ABS" </dev/null >/dev/null 2>&1; then
+    setsid nohup sh -c 'sleep "$1"; rm -rf -- "$2"' _ \
+      "$REAP_AFTER_SEC" "$DEST_OLD_ABS" \
+      </dev/null >/dev/null 2>&1 &
+  fi
 fi
 
 echo "postbuild-copy: $(find "$DEST" -type f | wc -l | tr -d ' ') files → $DEST"

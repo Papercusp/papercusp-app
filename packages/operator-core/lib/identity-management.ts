@@ -479,13 +479,25 @@ async function nudgeOwner(
     delivery === 'relaunch-with-carry'
       ? 'A domain/client identity change is ready and requires a fresh context. Finish the atomic step in hand, checkpoint current work, then call session:request-compaction at the clean boundary. The successor will rebuild from the new explicit identity stack; do not treat the desired identity as applied before that acknowledgement.'
       : 'A soft identity stack change is ready. Continue normally; the control transition attached to this turn carries the validated layer and the host acknowledgement records when it becomes applied.';
-  let data = message;
-  try {
-    data = tagTurnForInjection({ sid: ownerId, origin: 'coord-inject:identity-management', text: message }).taggedText;
-  } catch {
-    /* a provenance write must not hide the delivery failure */
+  // tagTurnForInjection returns an envelope even when the ledger write fails
+  // (the hook then classifies the turn as unverified). If it throws before it
+  // can make that envelope, do not send raw machine text that defaults to owner.
+  const tagged = await tagTurnForInjection({
+    sid: ownerId,
+    origin: 'coord-inject:identity-management',
+    text: message,
+  }).then(
+    (turn) => ({ ok: true as const, data: turn.taggedText }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  if (!tagged.ok) {
+    const detail = tagged.error instanceof Error ? tagged.error.message : String(tagged.error);
+    return {
+      queued: false,
+      reason: `turn-provenance tagging failed; nudge was not delivered${detail ? `: ${detail}` : ''}`,
+    };
   }
-  const queued = await injectIntoHost(host.sock, { mode: 'turn', data, ownerId });
+  const queued = await injectIntoHost(host.sock, { mode: 'turn', data: tagged.data, ownerId });
   return {
     queued,
     reason: queued ? null : 'the session host refused the delivery nudge; retry after the session is idle',
@@ -537,6 +549,17 @@ export async function mutateIdentityStack(input: IdentityMutationInput): Promise
       activation: activationFromControl(row.control_state),
       nudge: { queued: false, reason: null },
     };
+  }
+  // agent-economy-flywheel P-016 (D-011): attach, switch and rollback activate the
+  // resulting stack, so a priced Cupboard identity release needs funds behind it.
+  // A detach only removes layers and never activates one, so it is never refused.
+  if (input.action !== 'detach') {
+    const { assertIdentityActivationFunded } = await import('./cupboard/identity-activation-gate-io');
+    await assertIdentityActivationFunded({
+      stack: rebuilt.artifact.stack,
+      repoDir: repoDir ?? undefined,
+      workspaceId: input.workspaceId,
+    });
   }
   await provisionLaunchIdentityResources(rebuilt.artifact, sql, { ownerId: input.ownerId });
   const nextRecord: SuLaunchSpecRecord = {

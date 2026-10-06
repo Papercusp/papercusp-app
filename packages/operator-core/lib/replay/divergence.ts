@@ -7,6 +7,10 @@
  * differ, never which is better.
  */
 
+import { captureSourceHash } from '@papercusp/eval-battery';
+
+export const REPLAY_DIVERGENCE_SOURCE_HASH = captureSourceHash(import.meta.url);
+
 export interface DivergenceSignals {
   /** Jaccard similarity of the lowercase token sets (1 = same vocabulary). */
   tokenJaccard: number;

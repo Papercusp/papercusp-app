@@ -275,7 +275,7 @@ point at their retired locations; do not expect to find them live under
 
 ## Migration story
 
-Existing plugins (cloudflare-pages, github-repo, jira-sync, linear-sync, etc.)
+Existing plugins (cloudflare-pages, github-repo, etc.)
 keep working without changes — fields without flags fall through the
 pattern-based redactor as today. Plugin authors *opt in* to explicit flags
 when they update their schemas.
@@ -283,19 +283,15 @@ when they update their schemas.
 For papercusp's reference plugins, we'd update their schemas in the same PR
 that introduces share-semantics:
 
-| Plugin           | Field               | Current behavior                        | New flag                                                                    |
-| ---------------- | ------------------- | --------------------------------------- | --------------------------------------------------------------------------- |
-| github-repo      | `github_token`      | redacted (matches `/token/`)            | `secret: true, oauth: {provider: github, scopes: [repo]}`                   |
-| github-repo      | `owner`             | leaks                                   | `shareable: false`                                                          |
-| github-repo      | `repo`              | leaks (becomes harness slug for forker) | (default — shareable)                                                       |
-| cloudflare-pages | `accountId`         | leaks                                   | `shareable: false`                                                          |
-| cloudflare-pages | `projectName`       | leaks                                   | `shareable: false`                                                          |
-| cloudflare-pages | `branch`            | leaks                                   | (default — shareable)                                                       |
-| linear-sync      | `LINEAR_API_KEY`    | redacted (matches `/key/`)              | `secret: true, oauth: {provider: linear, scopes: [...]}` (when OAuth ships) |
-| linear-sync      | `defaultTeamKey`    | leaks                                   | `shareable: false`                                                          |
-| jira-sync        | `JIRA_API_TOKEN`    | redacted                                | `secret: true`                                                              |
-| jira-sync        | `JIRA_BASE_URL`     | leaks                                   | `shareable: false` (the publisher's atlassian.net is theirs)                |
-| slack-notifier   | `SLACK_WEBHOOK_URL` | leaks                                   | `secret: true` (webhook URL contains the secret token)                      |
+| Plugin           | Field               | Current behavior                        | New flag                                                  |
+| ---------------- | ------------------- | --------------------------------------- | --------------------------------------------------------- |
+| github-repo      | `github_token`      | redacted (matches `/token/`)            | `secret: true, oauth: {provider: github, scopes: [repo]}` |
+| github-repo      | `owner`             | leaks                                   | `shareable: false`                                        |
+| github-repo      | `repo`              | leaks (becomes harness slug for forker) | (default — shareable)                                     |
+| cloudflare-pages | `accountId`         | leaks                                   | `shareable: false`                                        |
+| cloudflare-pages | `projectName`       | leaks                                   | `shareable: false`                                        |
+| cloudflare-pages | `branch`            | leaks                                   | (default — shareable)                                     |
+| slack-notifier   | `SLACK_WEBHOOK_URL` | leaks                                   | `secret: true` (webhook URL contains the secret token)    |
 
 ## Schema evolution
 

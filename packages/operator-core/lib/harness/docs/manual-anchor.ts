@@ -12,7 +12,7 @@ import { existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { repoHeadSha, runGit } from './git-runner';
 import { resolveHarnessDocPaths } from './harness-repo';
-import { readDocBody } from './doc-fs';
+import { readDocBody, docFilePath } from './doc-fs';
 import { makeFeatureCommitLookup } from './feature-commits';
 import { parseDocumentsField, resolveAllAnchorPaths, frontmatterDocuments, type SubjectRef } from './subject-ref';
 import { upsertDocRecord, getDocRecord, verifyDoc, type HarnessDocRecord } from './doc-record';
@@ -86,6 +86,9 @@ export async function anchorManualDoc(input: AnchorManualDocInput): Promise<Anch
   const paths = await resolveHarnessDocPaths(input.harnessSlug);
   if (!paths) return { ok: false, error: 'unknown_harness' };
   const { repoRoot, docsRoot } = paths;
+  if (paths.sources?.[docId.split('/')[0]] && input.content !== undefined) {
+    return { ok: false, error: 'file_authoritative_source — edit the canonical source file, then re-anchor' };
+  }
   // A harness's docs live in its workspace — derive it (never a silent 'default'); the
   // path check above already validated the harness, so this resolves (P-002 / D-003).
   const workspaceId = await resolveWorkspaceForHarness(input.harnessSlug, input.workspaceId);
@@ -95,7 +98,7 @@ export async function anchorManualDoc(input: AnchorManualDocInput): Promise<Anch
     // Prefer the caller's canonical prose over the file. Under PG-canonical authoring the
     // row is written BEFORE the file exists, so reading disk here would infer from a
     // missing file and anchor nothing — the doc would ship silently untracked.
-    const body = input.content ?? (await readDocBody(docsRoot, docId));
+    const body = input.content ?? (await readDocBody(paths.sources ? paths : docsRoot, docId));
     if (body) {
       documents = frontmatterDocuments(body);
       if (documents == null) {
@@ -118,7 +121,7 @@ export async function anchorManualDoc(input: AnchorManualDocInput): Promise<Anch
           // self-mention as a permanent anchor — confirmed live on
           // docs/archive/signal-fusion-activation-A-D.md (oddsmith), whose anchor set
           // came to include its own path after a re-verification note quoted it.
-          const selfRepoRelPath = relative(repoRoot, join(docsRoot, docId)).split(sep).join('/');
+          const selfRepoRelPath = relative(repoRoot, docFilePath(paths, docId) ?? join(docsRoot, docId)).split(sep).join('/');
           const real = inferred
             .flatMap((r) => (r.kind === 'path' ? r.globs : []))
             .filter((g) => g !== selfRepoRelPath && existsSync(join(repoRoot, g)));

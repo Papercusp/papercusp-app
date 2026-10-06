@@ -23,6 +23,7 @@
 
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { readProcessIdentity } from '../process-identity';
+import { redactSensitiveText } from '../sensitive-text';
 import {
   buildTaskScopeArgvWithTransport,
   SCOPE_LAUNCH_FAILURE_RE,
@@ -38,6 +39,7 @@ import {
   type CgroupFs,
 } from './cgroup-read';
 import { isTaskManagerEnabled } from './enabled';
+import { onTaskKillRequested } from './kill-notify';
 import { inspectTaskUnitTerminals, resetFailedTaskUnit } from './scope-terminal-state';
 import { closeTask, markSpawned, registerTask } from './store';
 import {
@@ -112,6 +114,24 @@ export function markManagedSpawnTeardown(child: ManagedSpawnHandle): () => void 
  */
 export const SCOPE_HANDOFF_GRACE_MS = 250;
 export const SCOPE_HANDOFF_RECHECK_MS = 25;
+
+/** A missing ledger write must not gate the child, but it also must not become permanent. */
+const LEDGER_REGISTRATION_RETRY_BASE_MS = 1_000;
+const LEDGER_REGISTRATION_RETRY_MAX_MS = 30_000;
+const MAX_LEDGER_REGISTRATION_FAILURES = 8;
+
+function errorMessage(error: unknown): string {
+  return redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(0, 500);
+}
+
+function rememberLedgerRegistrationFailure(failures: string[], error: unknown): string {
+  const message = errorMessage(error);
+  failures.push(message);
+  if (failures.length > MAX_LEDGER_REGISTRATION_FAILURES) {
+    failures.splice(1, failures.length - MAX_LEDGER_REGISTRATION_FAILURES);
+  }
+  return message;
+}
 
 // ── systemd availability probe ──────────────────────────────────────────────
 
@@ -294,18 +314,21 @@ export async function managedSpawn(
   // SO via `confinementSkippedReason` rather than pretending it was accounted.
   let row: TaskRow;
   let ledgered = true;
+  let registrationAttempts = 1;
+  const registrationFailures: string[] = [];
+  const registerOptions = {
+    taskId,
+    workspaceId: opts.workspaceId,
+    reserveScope: scopeOk,
+  };
   try {
-    row = await registerTask(argvSpec, {
-      taskId,
-      workspaceId: opts.workspaceId,
-      reserveScope: scopeOk,
-    });
+    row = await registerTask(argvSpec, registerOptions);
   } catch (e) {
     ledgered = false;
-    const why = `ledger register failed: ${(e as Error).message}`;
+    const why = `ledger register failed: ${rememberLedgerRegistrationFailure(registrationFailures, e)}`;
     skippedReason = skippedReason ? `${skippedReason}; ${why}` : why;
     console.warn(`[managed-spawn] ${why} — spawning UNLEDGERED (task ${taskId})`);
-    row = unledgeredRow(taskId, argvSpec, opts.workspaceId, null);
+    row = unledgeredRow(taskId, argvSpec, opts.workspaceId, null, why);
   }
 
   const scopeUnit = scopeOk ? scopeUnitForTask(taskId) : null;
@@ -406,24 +429,115 @@ export async function managedSpawn(
   // The child is ALREADY RUNNING by here, so a throw out of `markSpawned` would
   // be the worst of both worlds: the caller sees a failed spawn and abandons a
   // live process nobody is holding. Record what we can, degrade to unaccounted.
-  if (ledgered) {
+  const spawnedFacts = {
+    pid,
+    processIdentity: pid ? readProcessIdentity(pid) : null,
+    scopeUnit,
+    cgroupPath: scopeCgroupPath ?? (pid ? readProcessCgroupPath(pid, fs) : null),
+    confined: scopeOk,
+  };
+  const markSpawnedRow = async (): Promise<void> => {
     try {
-      await markSpawned(taskId, {
-        pid,
-        processIdentity: pid ? readProcessIdentity(pid) : null,
-        scopeUnit,
-        cgroupPath: scopeCgroupPath ?? (pid ? readProcessCgroupPath(pid, fs) : null),
-        confined: scopeOk,
-      });
+      await markSpawned(taskId, spawnedFacts);
     } catch (e) {
       console.warn(
-        `[managed-spawn] ledger markSpawned failed for task ${taskId} (pid ${pid ?? '?'}): ${(e as Error).message} — ` +
+        `[managed-spawn] ledger markSpawned failed for task ${taskId} (pid ${pid ?? '?'}): ${errorMessage(e)} — ` +
           'the process IS running; its row stays `pending` for the reconciler.',
       );
     }
-  }
+  };
 
-  wireExit(child, taskId, scopeOk, scopeUnit, scopeCgroupPath, fs);
+  // Recover a failed pre-spawn registration independently from the caller's
+  // launch path. The retry keeps the original id/scope so registerTask can adopt
+  // the reconciler's exact unaccounted placeholder. If the child exits first,
+  // retain its terminal write until registration succeeds, then mark + close it.
+  const pendingCloseWrites: Array<() => Promise<void>> = [];
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryIndex = 0;
+  let recoveryInFlight: Promise<boolean> | null = null;
+
+  const scheduleRegistrationRetry = (): void => {
+    if (ledgered || retryTimer) return;
+    const exponent = Math.min(retryIndex, 10);
+    const delayMs = Math.min(LEDGER_REGISTRATION_RETRY_BASE_MS * 2 ** exponent, LEDGER_REGISTRATION_RETRY_MAX_MS);
+    retryIndex += 1;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void attemptRegistrationRecovery();
+    }, delayMs);
+    retryTimer.unref?.();
+  };
+
+  const attemptRegistrationRecovery = async (): Promise<boolean> => {
+    if (ledgered) return true;
+    if (recoveryInFlight) return recoveryInFlight;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+
+    recoveryInFlight = (async () => {
+      registrationAttempts += 1;
+      const recoverySpec: TaskSpec = {
+        ...argvSpec,
+        detail: {
+          ...(argvSpec.detail ?? {}),
+          managedSpawnRegistrationRecovery: {
+            firstFailure: registrationFailures[0] ?? 'unknown registration failure',
+            failures: [...registrationFailures],
+            attempts: registrationAttempts,
+            recoveredAt: new Date().toISOString(),
+          },
+        },
+      };
+
+      try {
+        row = await registerTask(recoverySpec, registerOptions);
+      } catch (e) {
+        const message = rememberLedgerRegistrationFailure(registrationFailures, e);
+        if (pendingCloseWrites.length > 0) {
+          console.warn(
+            `[managed-spawn] final ledger registration retry failed for task ${taskId}: ${message} — ` +
+              'the terminal write remains queued for the next retry.',
+          );
+        }
+        scheduleRegistrationRetry();
+        return false;
+      }
+
+      await markSpawnedRow();
+      ledgered = true;
+      console.info(`[managed-spawn] ledger registration recovered for task ${taskId} after ${registrationAttempts} attempt(s)`);
+      for (const write of pendingCloseWrites.splice(0)) {
+        try {
+          await write();
+        } catch (e) {
+          console.warn(`[managed-spawn] queued closeTask after ledger recovery failed for task ${taskId}: ${errorMessage(e)}`);
+        }
+      }
+      return true;
+    })();
+
+    try {
+      return await recoveryInFlight;
+    } finally {
+      recoveryInFlight = null;
+    }
+  };
+
+  const persistCloseWhenRegistered = async (write: () => Promise<void>): Promise<void> => {
+    if (ledgered) {
+      await write();
+      return;
+    }
+    pendingCloseWrites.push(write);
+    await attemptRegistrationRecovery();
+  };
+
+  if (ledgered) await markSpawnedRow();
+  else scheduleRegistrationRetry();
+
+  wireExit(child, taskId, scopeOk, scopeUnit, scopeCgroupPath, fs, persistCloseWhenRegistered);
 
   return {
     taskId,
@@ -443,7 +557,13 @@ export async function managedSpawn(
  * that is off. `state: 'running'` is the honest reading: the process really is
  * running, we simply are not keeping a ledger of it.
  */
-function unledgeredRow(taskId: string, spec: TaskSpec, workspaceId: string | undefined, pid: number | null): TaskRow {
+function unledgeredRow(
+  taskId: string,
+  spec: TaskSpec,
+  workspaceId: string | undefined,
+  pid: number | null,
+  reason = 'papercusp-task-manager off',
+): TaskRow {
   const now = new Date().toISOString();
   return {
     ...spec,
@@ -458,7 +578,7 @@ function unledgeredRow(taskId: string, spec: TaskSpec, workspaceId: string | und
     state: 'running',
     startedAt: now,
     lastSeenAt: now,
-    detail: { unledgered: true, reason: 'papercusp-task-manager off' },
+    detail: { unledgered: true, reason },
   };
 }
 
@@ -497,8 +617,22 @@ function wireExit(
   scopeUnit: string | null,
   scopeCgroupPath: string | null,
   fs: CgroupFs,
+  persistClose: (write: () => Promise<void>) => Promise<void>,
 ): void {
   let closed = false;
+  // WI-10004434: a kill made through task-manager control (killTask /
+  // processes:kill) is deliberate by definition, so it marks this handle as an
+  // intentional teardown the same way markManagedSpawnTeardown does. The
+  // notification fires synchronously BEFORE the signal is sent, so the mark is
+  // in place when the client exits. Without it every caller had to remember to
+  // mark its own kill: su-session-stdio-peer's close() did not, and a real omp
+  // that outlived the 5s stdin-EOF grace turned its deliberate SIGKILL into an
+  // "abnormal client exit" warning that failed the exact-resume acceptance.
+  const stopKillNotify = onTaskKillRequested((killedTaskId) => {
+    if (killedTaskId === taskId) intentionalTeardownChildren.add(child);
+  });
+  child.once('exit', stopKillNotify);
+  child.once('error', stopKillNotify);
   const close = (state: 'exited' | 'killed', code: number | null, reason: string | null): void => {
     if (closed) return;
     closed = true;
@@ -513,8 +647,10 @@ function wireExit(
           ? candidate
           : null;
       const outcome = { state, exitCode: code, exitReason: reason };
-      await closeTask(taskId, terminal ? { ...outcome, terminalProvenance: terminal } : outcome);
-      if (terminal) await resetFailedTaskUnit(terminal);
+      await persistClose(async () => {
+        await closeTask(taskId, terminal ? { ...outcome, terminalProvenance: terminal } : outcome);
+        if (terminal) await resetFailedTaskUnit(terminal);
+      });
     })().catch(() => {
       // A persistence failure leaves a retained failed unit available for the
       // reconciler's next tick. A close that merely loses the race is fine:

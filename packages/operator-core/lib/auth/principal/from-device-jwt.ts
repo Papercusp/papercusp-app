@@ -14,9 +14,8 @@
  * the credential identifies a device, not a form-factor.
  *
  * Async + revocation-aware: a revoked device must not resolve to a valid
- * principal. The `.catch(() => false)` fail-open on a transient PG error
- * matches the legacy `deviceAuth()` middleware exactly — a DB hiccup must
- * not lock out every paired device.
+ * principal. A failed revocation-store read also cannot produce a principal:
+ * without authoritative revocation state, the device is not verified.
  */
 
 import type { Principal } from '@papercusp/agent-mcp';
@@ -30,8 +29,9 @@ export async function principalFromDeviceJwt(headers: Headers): Promise<Principa
   if (!token) return null;
   const claims = verifyDeviceToken(token);
   if (!claims) return null;
-  // Revocation check — parity with the legacy `deviceAuth()` middleware.
-  if (await isRevoked(claims.sub).catch(() => false)) return null;
+  // Do not turn an unavailable revocation store into "not revoked". Let the
+  // error stop the resolver chain so another identity path cannot take over.
+  if (await isRevoked(claims.sub)) return null;
   return {
     kind: 'device',
     slug: claims.sub,

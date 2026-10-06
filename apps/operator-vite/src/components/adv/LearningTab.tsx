@@ -2804,7 +2804,12 @@ function ImproveGrid({
     {
       key: "item",
       header: "Item",
-      width: 1.1,
+      // A FLOOR under the fraction (WI-10006513): a bare `1.1fr` shrank this
+      // column to 132px on a 1536px-wide window, and the cell's `overflow:
+      // hidden` cropped the last digits off every 19-character work-item id —
+      // the distinguishing end of the id, with no ellipsis to say so. 160px
+      // fits the id plus the cell's 10px padding each side.
+      width: "minmax(160px, 1.1fr)",
       toCopyText: (r) =>
         r.item?.id ??
         (r.idea ? (ctx.railMetaMap[r.idea.rail]?.label ?? r.idea.rail) : ""),
@@ -2920,7 +2925,9 @@ function ImproveGrid({
     {
       key: "age",
       header: "Age",
-      width: 0.7,
+      // A floor under the fr share: at 1024px the bare 0.7fr track fell below
+      // "just now" (44px) and the cell clipped it (WI-10006513).
+      width: "minmax(64px, 0.7fr)",
       toCopyText: (r) =>
         r.item
           ? ageLabel(r.item.ageDays)
@@ -2956,7 +2963,11 @@ function ImproveGrid({
     {
       key: "grade",
       header: "Grade",
-      width: 1.6,
+      // Floor = the capped chip (12em) + gap + the 22px note button, so the
+      // note button is never pushed out of the cell when narrow windows take
+      // width from the fr tracks; the ellipsizing title column gives way
+      // instead (WI-10006513).
+      width: "minmax(176px, 1.6fr)",
       toCopyText: (r) => {
         const eff = r.idea ? ctx.effectiveGrade(r.idea) : null;
         return eff
@@ -2985,7 +2996,7 @@ function ImproveGrid({
                     : `Graded by ${graderLabel(eff.gradedBy, ctx.brainWord)}`
                 }
               >
-                ★{eff.grade} · {graderLabel(eff.gradedBy, ctx.brainWord)}
+                ★{eff.grade} · {graderChipLabel(eff.gradedBy, ctx.brainWord)}
               </span>
             ) : null}
             <Popover
@@ -3437,7 +3448,7 @@ function LoopRowView({
                     : `Graded by ${graderLabel(eff.gradedBy, ctx.brainWord)}`
                 }
               >
-                ★{eff.grade} · {graderLabel(eff.gradedBy, ctx.brainWord)}
+                ★{eff.grade} · {graderChipLabel(eff.gradedBy, ctx.brainWord)}
               </span>
             ) : null}
             <Popover
@@ -5386,6 +5397,17 @@ const graderLabel = (gradedBy: string, brainWord: string): string =>
     : gradedBy === "auto-grader"
       ? brainWord
       : gradedBy;
+
+/** The grade CHIP's short form of `graderLabel`. A peer agent grade carries
+    the grader's full session id (`su-2f324ce6-c2d6-…`, ~40 chars), which made
+    the nowrap chip ~250px and pushed the row's note button out of its cell at
+    1366px (WI-10006513). The chip shows the presence-style short id
+    (`su-2f324`); the full id stays in the chip's title. */
+export const graderChipLabel = (gradedBy: string, brainWord: string): string => {
+  const label = graderLabel(gradedBy, brainWord);
+  const agent = /^([a-z]+)-([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f-]+$/i.exec(label);
+  return agent ? `${agent[1]}-${agent[2].slice(0, 5)}` : label;
+};
 
 /** The tool-proxy response envelope varies (the parsed result | {result} | MCP
     content text) — unwrap whichever the dispatcher returns. */
@@ -8027,7 +8049,10 @@ export function LearningStyles() {
       .pc-learning__star.is-on { color: #fbbf24; }
       .pc-learning__star:hover { color: #fcd34d; }
       .pc-learning__star:disabled { opacity: 0.5; cursor: default; }
-      .pc-learning__gradechip { display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px; font-size: 10px; font-weight: 700; border-radius: 999px; border: 1px solid rgba(251, 191, 36, 0.5); color: #fbbf24; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      /* Block-level (not inline-flex) so text-overflow can ellipsize: a long
+         grader label must never push the note button out of the cell
+         (WI-10006513). The full label is in the chip's title. */
+      .pc-learning__gradechip { display: inline-block; vertical-align: middle; max-width: 12em; overflow: hidden; text-overflow: ellipsis; padding: 1px 7px; font-size: 10px; font-weight: 700; border-radius: 999px; border: 1px solid rgba(251, 191, 36, 0.5); color: #fbbf24; white-space: nowrap; font-variant-numeric: tabular-nums; }
       .pc-learning__notebtn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; min-height: 22px; background: none; border: 1px solid var(--border, rgba(125, 211, 252, 0.18)); border-radius: 6px; color: var(--fg-mute, #7f9bb4); cursor: pointer; }
       .pc-learning__notebtn:hover { color: var(--fg-dim, #b9d4e8); border-color: var(--border-strong, rgba(125, 211, 252, 0.32)); }
       .pc-learning__gradepanel { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 7px; margin-top: 7px; padding-top: 9px; border-top: 1px dashed var(--border, rgba(125, 211, 252, 0.2)); cursor: default; }

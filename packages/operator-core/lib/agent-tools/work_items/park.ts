@@ -17,18 +17,42 @@
 import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { resolveAgentIdentity } from '../coordination/identity';
+import { disclosureSubject } from '../_disclosure-subject';
 import { COORD_ROLES } from '../coordination/roles';
 import { sendMessage } from '../coordination/messages';
-import { setWorkItemCheckpoint } from '../../work-item-checkpoint';
+import { setWorkItemCheckpointWithPrior } from '../../work-item-checkpoint';
+import {
+  CHECKPOINT_BODY_CAP_CHARS,
+  mergeCarryRows,
+  splitCarryNoteChecks,
+  splitCarryNoteWalls,
+  withCarryNoteChecks,
+  withCarryNoteWalls,
+} from '../../carry-note';
 import { releaseWorkItem } from '../../work-items';
 import { lookupWorkItem } from './_lookup';
 import { resolveConcreteWorkspaceId } from '../../workspace-registry';
+
+/**
+ * WI-10004456: park used to REPLACE the whole checkpoint, destroying the history and
+ * carried check/wall rows that work_items:checkpoint preserves. Append the update to
+ * the prior narrative and merge the structured rows, composed against the locked prior.
+ */
+function appendParkCheckpoint(prior: string | null, update: string): string {
+  const rows = mergeCarryRows({ priorNote: prior, baseNote: update, hasNoteWrite: true, mode: 'merge' });
+  if (rows.droppedChecks.length || rows.droppedWalls.length) {
+    throw new Error('Parking would drop carried checkpoint rows; checkpoint unchanged and claim retained');
+  }
+  const priorBody = splitCarryNoteWalls(splitCarryNoteChecks(prior).body).body;
+  const body = priorBody ? `${priorBody}\n\n---\n\n${rows.narrativeBody}` : rows.narrativeBody;
+  return withCarryNoteWalls(withCarryNoteChecks(body, rows.checks), rows.walls);
+}
 
 export default defineTool({
   name: 'work_items:park',
   profile: 'engineer',
   description:
-    'Park a work-item to resume later: writes the resume CHECKPOINT, releases your claim, and broadcasts a one-line ' +
+    'Park a work-item to resume later: appends the resume CHECKPOINT, releases your claim, and broadcasts a one-line ' +
     'note — one verb for the checkpoint→release→announce dance. { id, checkpoint, reason, harness? }. The item stays ' +
     'claimable (state untouched); the checkpoint is re-injected on the next pickup (yours or a successor’s).',
   guidance: {
@@ -53,7 +77,7 @@ export default defineTool({
       .string()
       .min(20)
       .max(32000)
-      .describe('the COMPLETE resume state (done / left / approach / gotchas) — a successor continues from this alone'),
+      .describe('resume update (done / left / approach / gotchas), appended to the existing checkpoint'),
     reason: z.string().min(1).max(500).describe('why you are parking it — broadcast to peers in the park note'),
     harness: z.string().max(80).optional().describe('harness the item lives under (else resolved from the item)'),
   }),
@@ -102,10 +126,37 @@ export default defineTool({
     const harness: string | null = item ? item.harness ?? null : hintHarness ?? null;
     // EI-8824: same wildcard-workspace bug as work_items:checkpoint — c.workspaceId
     // is '*' for an unscoped superuser session and must never be persisted literally.
-    const stored = await setWorkItemCheckpoint(
+    const { stored, priorLength, blockedReason } = await setWorkItemCheckpointWithPrior(
       { harness, workItemId: args.id, workspaceId: resolveConcreteWorkspaceId(c.workspaceId) },
       args.checkpoint,
+      {
+        latestUpdate: args.checkpoint,
+        // Compose against the authoritative locked prior, never a racy pre-read.
+        guard: (prior) => {
+          const merged = appendParkCheckpoint(prior, args.checkpoint);
+          return merged.length > CHECKPOINT_BODY_CAP_CHARS ? 'checkpoint_capacity_exceeded' : null;
+        },
+        transform: (prior) => appendParkCheckpoint(prior, args.checkpoint),
+        // P-012 / D-006: a parker holding a restricted disclosure stores a sealed stub.
+        writerOwnerId: disclosureSubject(c),
+      },
     );
+    if (blockedReason) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: false,
+              id: args.id,
+              priorLength,
+              error: blockedReason,
+              note: 'Checkpoint unchanged and claim retained; compact the checkpoint explicitly before parking.',
+            }),
+          },
+        ],
+      };
+    }
     const released = await releaseWorkItem(args.id, {
       harness: harness ?? undefined,
       releasingOwnerId: ident.ownerId,
@@ -129,6 +180,7 @@ export default defineTool({
             ok: true,
             id: args.id,
             harness,
+            priorLength,
             checkpointChars: stored?.length ?? 0,
             released: Boolean(released),
             noted,

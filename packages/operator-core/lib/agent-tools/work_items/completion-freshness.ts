@@ -11,11 +11,14 @@ import { createHash } from 'node:crypto';
 import * as nodePath from 'node:path';
 import { detectPapercupRoot } from '../../harness/register-papercusp';
 import { hasValidGitEntry } from '../locks/valid-git-entry';
+import { pinModuleState } from '@papercusp/module-singleton';
+import { gitRefContains, type GitStdoutRead } from '../../git-ref-contains';
 import { streamGitFields, type GitSpawnOptions } from './untouched-paths';
 import type {
   CompletionSettlementManifest,
   CompletionTreeStamp,
   CompletionTreeContentIdentity,
+  CompletionGitIgnoreStatus,
   CompletionVerificationEvidence,
 } from '../../coord-lifecycle/records';
 
@@ -65,16 +68,30 @@ export function completionSettlementManifest(
   // but omit them from the settlement receipt and its normalized path set.
   const repoBackedIdentity = stamp.contentIdentity.filter((identity) => identity.outOfRepoArtifact !== true);
   if (repoBackedIdentity.length === 0) return undefined;
+  const defaultRoot = nodePath.resolve(stamp.repositoryRoot);
   const contentIdentity = [...repoBackedIdentity]
-    .map((identity) => ({ ...identity, path: identity.path.replaceAll('\\', '/') }))
-    .sort((a, b) => a.path.localeCompare(b.path));
-  const normalizedPaths = [...new Set(contentIdentity.map(({ path }) => path))];
+    .map((identity) => ({
+      ...identity,
+      path: identity.path.replaceAll('\\', '/'),
+      ...(identity.repositoryRoot ? { repositoryRoot: nodePath.resolve(identity.repositoryRoot) } : {}),
+    }))
+    .sort((a, b) => {
+      const rootOrder = (a.repositoryRoot ?? defaultRoot).localeCompare(b.repositoryRoot ?? defaultRoot);
+      if (rootOrder !== 0) return rootOrder;
+      const pathOrder = a.path.localeCompare(b.path);
+      if (pathOrder !== 0) return pathOrder;
+      return (a.headSha ?? stamp.headSha).localeCompare(b.headSha ?? stamp.headSha);
+    });
+  // Keep one normalized path for each content-identity entry. A plain Set used to
+  // collapse equal relative names from sibling checkouts, making the receipt unable
+  // to represent both path identities even though the tree stamp already had them.
+  const normalizedPaths = contentIdentity.map(({ path }) => path);
   if (normalizedPaths.length === 0) return undefined;
   return {
     version: 1,
     generation,
     evidenceHash: createHash('sha256').update(canonicalEvidence(evidence)).digest('hex'),
-    repositoryRoot: nodePath.resolve(stamp.repositoryRoot),
+    repositoryRoot: defaultRoot,
     headSha: stamp.headSha,
     normalizedPaths,
     contentIdentity,
@@ -101,6 +118,14 @@ export interface CompletionTreeStampProbe {
     | ReadonlyMap<string, HeadBlobResolution>
     | undefined
     | Promise<ReadonlyMap<string, HeadBlobResolution> | undefined>;
+  /** Injectable best-effort ignore probe; production uses one bounded Git status read. */
+  gitIgnoreStatusProbe?: (
+    repoRoot: string,
+    paths: readonly string[],
+  ) =>
+    | ReadonlyMap<string, CompletionGitIgnoreStatus>
+    | undefined
+    | Promise<ReadonlyMap<string, CompletionGitIgnoreStatus> | undefined>;
 }
 
 /**
@@ -147,6 +172,30 @@ function gitBlobSha(bytes: Uint8Array, shaLength: number): string {
   return createHash(algorithm).update(header).update(bytes).digest('hex');
 }
 
+/**
+ * WI-10004711: the CURRENT working-tree blob of one declared path, hashed exactly the
+ * way the close-time identity was (`contentIdentity` above: raw bytes, no clean filter),
+ * so a settlement reader compares like with like.
+ *
+ * `null` = the path is not in the working tree. `undefined` = this reader could not
+ * answer (path escapes the root, not a regular readable file) — never a verdict.
+ */
+export function completionWorkingTreeBlobSha(
+  repoRoot: string,
+  rawPath: string,
+  shaLength: number,
+): string | null | undefined {
+  const path = normalizedRepoPath(repoRoot, rawPath);
+  if (!path || path !== rawPath) return undefined;
+  const abs = nodePath.join(repoRoot, path);
+  if (!existsSync(abs)) return null;
+  try {
+    return gitBlobSha(readFileSync(abs), shaLength);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Read exact commit blob identities through the shared nonblocking Git stream. */
 export async function completionHeadBlobMap(
   repoRoot: string,
@@ -176,7 +225,12 @@ export async function completionHeadBlobMap(
         (field) => {
           if (field) fields.push(field);
         },
-        { ...opts, timeoutMs: opts.timeoutMs ?? 5000 },
+        // WI-10005340: this is the settlement reconciler's main per-row lookup, issued
+        // once or twice for every candidate on every git-sync pass. Forked locally it
+        // blocked bg-host's main thread ~86 ms per call (178 of ~236 forks in a 300 s
+        // trace). The read never stops early and already keeps every field, so the
+        // sidecar's buffered stdout changes nothing about what is returned.
+        { ...opts, timeoutMs: opts.timeoutMs ?? 5000, preferSidecar: true },
       );
       return outcome === 'complete' ? fields : undefined;
     };
@@ -271,45 +325,100 @@ type CompletionHistoryLocation = {
 };
 
 /**
- * Resolve a declared path to the repository and commit that own it at one
- * superproject commit. Gitlinks are read from that commit's tree, not from the
- * checkout's possibly stale .gitmodules or working tree.
+ * EI-24821039535031884: the answer of {@link completionBlobHistoryContains}.
+ * - `true` / `false`: git MEASURED the range (found / definitively not found).
+ * - `undefined`: the proof is impossible for a reason that will not change on
+ *   retry (malformed input, a path that does not normalize, from/to resolving to
+ *   different repositories, git refusing the read). Callers persist it as residue.
+ * - `'unmeasured'`: a git read hit its deadline, or the pass was aborted. Nothing
+ *   was learned about the path, so callers must retry instead of persisting a
+ *   verdict. Recording a timeout as `identity-unavailable` is the defect class
+ *   EI-24807349327024992 removed for the exact-tree lookup.
  */
-async function completionHistoryLocation(
-  repoRoot: string,
-  commitSha: string,
-  path: string,
-  opts: GitSpawnOptions,
-): Promise<CompletionHistoryLocation | undefined> {
-  if (opts.signal?.aborted) return undefined;
-  const root = nodePath.resolve(repoRoot);
-  const prefixes = path
-    .split('/')
-    .slice(0, -1)
-    .map((_, index, segments) => segments.slice(0, index + 1).join('/'));
-  if (prefixes.length === 0) return { repositoryRoot: root, commitSha, path };
+export type CompletionBlobHistoryVerdict = boolean | 'unmeasured' | undefined;
 
+/** Ancestor directories of a repo-relative path, outermost first: 'a/b/c.ts' gives ['a', 'a/b']. */
+function ancestorPrefixes(path: string): string[] {
+  const segments = path.split('/');
+  return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join('/'));
+}
+
+/**
+ * Which of `prefixes` are gitlinks at one commit: prefix to the pinned submodule commit,
+ * or null when the prefix is a tree, a blob, or absent there. `'unmeasured'` means the read
+ * timed out (or the pass aborted); undefined is a deterministic refusal.
+ */
+type GitlinkPrefixRead = ReadonlyMap<string, string | null> | 'unmeasured' | undefined;
+type GitlinkPrefixReader = (
+  root: string,
+  commitSha: string,
+  prefixes: readonly string[],
+  opts: GitSpawnOptions,
+) => Promise<GitlinkPrefixRead>;
+
+/** One non-recursive ls-tree answers every requested prefix at once. */
+async function readGitlinkPrefixes(
+  root: string,
+  commitSha: string,
+  prefixes: readonly string[],
+  opts: GitSpawnOptions,
+): Promise<GitlinkPrefixRead> {
   const entries: string[] = [];
   const outcome = await streamGitFields(
     ['-C', root, 'ls-tree', '-z', commitSha, '--', ...prefixes.map((prefix) => ':(literal)' + prefix)],
     (entry) => {
       if (entry) entries.push(entry);
     },
-    { ...opts, timeoutMs: opts.timeoutMs ?? 5000 },
+    // One entry per requested prefix: bounded output, so the sidecar can run it.
+    // The settlement reconciler issues these on every git-sync pass from bg-host
+    // (~8/s traced 2026-10-01, ~54 ms of frozen loop per local fork).
+    { ...opts, timeoutMs: opts.timeoutMs ?? 5000, preferSidecar: true },
   );
-  if (outcome !== 'complete' || opts.signal?.aborted) return undefined;
-
-  let bestPrefix: string | undefined;
-  let bestSha: string | undefined;
+  if (opts.signal?.aborted || outcome === 'timeout') return 'unmeasured';
+  if (outcome !== 'complete') return undefined;
+  const gitlinks = new Map<string, string | null>(prefixes.map((prefix) => [prefix, null]));
   for (const entry of entries) {
     const tab = entry.indexOf('\t');
     if (tab < 0) continue;
     const [mode, type, sha] = entry.slice(0, tab).split(/\s+/);
-    const candidate = entry.slice(tab + 1);
+    const name = entry.slice(tab + 1);
     if (mode !== '160000' || type !== 'commit' || !sha || !OBJECT_SHA_RE.test(sha)) continue;
-    if (!path.startsWith(candidate + '/')) continue;
-    if (bestPrefix && bestPrefix.length >= candidate.length) continue;
-    bestPrefix = candidate;
+    // A gitlink that is an ancestor of a requested path is itself one of the requested
+    // prefixes, so entries outside the request can be ignored.
+    if (gitlinks.has(name)) gitlinks.set(name, sha);
+  }
+  return gitlinks;
+}
+
+/**
+ * Resolve a declared path to the repository and commit that own it at one
+ * superproject commit. Gitlinks are read from that commit's tree, not from the
+ * checkout's possibly stale .gitmodules or working tree. `'unmeasured'` means an
+ * ls-tree read timed out (or the pass aborted); undefined is a deterministic refusal.
+ */
+async function completionHistoryLocation(
+  repoRoot: string,
+  commitSha: string,
+  path: string,
+  opts: GitSpawnOptions,
+  readGitlinks: GitlinkPrefixReader = readGitlinkPrefixes,
+): Promise<CompletionHistoryLocation | 'unmeasured' | undefined> {
+  if (opts.signal?.aborted) return 'unmeasured';
+  const root = nodePath.resolve(repoRoot);
+  const prefixes = ancestorPrefixes(path);
+  if (prefixes.length === 0) return { repositoryRoot: root, commitSha, path };
+
+  const gitlinks = await readGitlinks(root, commitSha, prefixes, opts);
+  if (opts.signal?.aborted || gitlinks === 'unmeasured') return 'unmeasured';
+  if (!gitlinks) return undefined;
+
+  // Prefixes run outermost first, so the last gitlink seen is the deepest one.
+  let bestPrefix: string | undefined;
+  let bestSha: string | undefined;
+  for (const prefix of prefixes) {
+    const sha = gitlinks.get(prefix);
+    if (!sha) continue;
+    bestPrefix = prefix;
     bestSha = sha;
   }
   if (!bestPrefix || !bestSha) return { repositoryRoot: root, commitSha, path };
@@ -318,7 +427,7 @@ async function completionHistoryLocation(
   if (!nestedRoot.startsWith(root + nodePath.sep)) return undefined;
   const nestedPath = path.slice(bestPrefix.length + 1);
   if (!nestedPath) return undefined;
-  return completionHistoryLocation(nestedRoot, bestSha, nestedPath, opts);
+  return completionHistoryLocation(nestedRoot, bestSha, nestedPath, opts, readGitlinks);
 }
 
 /**
@@ -326,9 +435,11 @@ async function completionHistoryLocation(
  * observed HEAD and the emitted commit. The location is resolved at both ends
  * so a superproject file can never prove a submodule blob (or vice versa).
  *
- * Returns undefined when Git cannot answer; callers must preserve residue in
- * that case. Successful empty history is a definitive false, which keeps ODB
- * only and same-blob-at-another-path content from becoming settlement proof.
+ * Returns undefined when the proof is impossible (callers preserve residue) and
+ * `'unmeasured'` when a git read timed out (callers retry; see
+ * {@link CompletionBlobHistoryVerdict}). Successful empty history is a
+ * definitive false, which keeps ODB only and same-blob-at-another-path content
+ * from becoming settlement proof.
  */
 export async function completionBlobHistoryContains(
   repoRoot: string,
@@ -337,24 +448,587 @@ export async function completionBlobHistoryContains(
   rawPath: string,
   blobSha: string,
   opts: GitSpawnOptions = {},
-): Promise<boolean | undefined> {
-  if (
-    opts.signal?.aborted
-    || !SHA_RE.test(fromHeadSha)
-    || !SHA_RE.test(toCommitSha)
-    || !OBJECT_SHA_RE.test(blobSha)
-  ) {
+): Promise<CompletionBlobHistoryVerdict> {
+  return blobHistoryContains(readGitlinkPrefixes, repoRoot, fromHeadSha, toCommitSha, rawPath, blobSha, opts);
+}
+
+/**
+ * WI-10005357: a {@link completionBlobHistoryContains} whose gitlink reads are shared.
+ *
+ * Every settlement row in one git-sync pass is checked against the SAME emitted commit,
+ * and a row's declared paths share directories. Resolving each path on its own cost one
+ * `ls-tree` per path per side (plus one per submodule level): ~655 of ~843 git execs in a
+ * traced 90 s pass (2026-10-02), each a governed sidecar read, so no pass ever finished.
+ *
+ * The answer for a prefix depends only on (repository, commit, prefix), and a commit is
+ * immutable, so one reader per pass memoizes it. Concurrent rows share an in-flight read.
+ * A `'unmeasured'` answer (timeout or abort) is never kept, so a later ask retries it.
+ */
+export interface CompletionBlobHistoryReader {
+  /** Same contract as {@link completionBlobHistoryContains}. */
+  readonly contains: typeof completionBlobHistoryContains;
+  /**
+   * Announce paths that a later `contains` may resolve at this commit. Nothing is read
+   * here: the first read at the commit folds in every announced path's prefixes, so a
+   * row's paths (or a whole pass's paths at the emitted commit) cost one ls-tree, not one
+   * each. Announced paths that resolve into a submodule are announced there too.
+   */
+  hint(repoRoot: string, commitSha: string, paths: readonly string[]): void;
+  /**
+   * WI-10005380: announce (path, close-time blob) pairs that a later `contains` from
+   * `fromHeadSha` may ask about. Nothing is read here: the first history search over a
+   * range folds in every announced pair whose next search is that same range, so a pass
+   * costs about one `git log` per distinct range instead of one per (row, path).
+   */
+  hintBlobs(repoRoot: string, fromHeadSha: string, entries: ReadonlyArray<{ path: string; blobSha: string }>): void;
+  /** How many gitlink ls-tree reads this reader has issued. */
+  gitlinkReads(): number;
+  /** How many history `git log` reads this reader has issued. */
+  historyReads(): number;
+  /** WI-10005524: how many `merge-base` reads re-proved a kept match at a later commit. */
+  ancestryReads(): number;
+}
+
+/**
+ * WI-10005380: how far history has already been searched for a (path, close-time blob),
+ * kept ACROSS settlement passes.
+ *
+ * A row that cannot settle is re-checked on every rotation (527 of 555 candidates,
+ * measured 2026-09-30), and each check used to search its whole `closeHead..emitted`
+ * range again in its own exec: 4,632 `git log --find-object` execs in 10 min
+ * (2026-10-02, after WI-10005357).
+ *
+ * A NO-MATCH (`searchedThrough`) says "no commit reachable from W and not from the
+ * close-time commit has this blob at this path". It stays exact for any later commit T,
+ * ancestor or not, because from..T = (from..W) ∪ (T ^W ^from); the next search covers
+ * only the second part.
+ *
+ * WI-10005524: a MATCH (`foundThrough`) is kept too. It says "the exact per-pair search
+ * over from..W found the blob". A row with one matched path and another residual path
+ * stays unsettled, so without this its match was re-proved by a per-pair `git log` on
+ * every rotation (~1,198 execs / 10 min, measured 2026-10-02). It is exact for a later T
+ * only when W is an ancestor of T (the matching commit stays reachable from T, and it is
+ * still not reachable from `from`), so the reader proves that with one `merge-base` per
+ * (repository, W, T) shared by the whole pass, and searches again when it cannot (a
+ * submodule gitlink can move to a non-descendant commit).
+ */
+type CompletionHistoryAt = {
+  /** Where the pair resolved at its close-time HEAD (fixed for that commit). */
+  readonly repositoryRoot: string;
+  readonly fromCommitSha: string;
+  readonly path: string;
+};
+export type CompletionHistorySearched =
+  | (CompletionHistoryAt & {
+      /** The commit, in that repository, through which a full-history search found no match. */
+      readonly searchedThrough: string;
+      readonly foundThrough?: undefined;
+    })
+  | (CompletionHistoryAt & {
+      /** The commit, in that repository, through which the exact per-pair search found a match. */
+      readonly foundThrough: string;
+      readonly searchedThrough?: undefined;
+    });
+
+export interface CompletionHistorySearchMemo {
+  get(key: string): CompletionHistorySearched | undefined;
+  set(key: string, value: CompletionHistorySearched): void;
+}
+
+/** Least-recently-used, bounded: the working set is the ~1k unsettled (path, blob) pairs. */
+export function createCompletionHistorySearchMemo(capacity = 20_000): CompletionHistorySearchMemo {
+  const entries = new Map<string, CompletionHistorySearched>();
+  return {
+    get(key) {
+      const value = entries.get(key);
+      if (value) {
+        entries.delete(key);
+        entries.set(key, value);
+      }
+      return value;
+    },
+    set(key, value) {
+      entries.delete(key);
+      entries.set(key, value);
+      for (const oldest of entries.keys()) {
+        if (entries.size <= capacity) break;
+        entries.delete(oldest);
+      }
+    },
+  };
+}
+
+/** A pair's memo key, as the reader builds it. Roots, paths and shas never contain NUL. */
+export function completionHistoryPairKey(root: string, fromHeadSha: string, path: string, blobSha: string): string {
+  return [root, fromHeadSha, path, blobSha].join('\0');
+}
+
+/** WI-10005560: one kept verdict with its pair spelled out, as a store holds it. */
+export type CompletionHistoryMemoRecord = {
+  readonly repositoryRoot: string;
+  readonly fromHeadSha: string;
+  readonly path: string;
+  readonly blobSha: string;
+  readonly value: CompletionHistorySearched;
+};
+
+export interface CompletionHistoryMemoStore {
+  /** The most recently written records, newest first, at most `limit`. */
+  load(limit: number): Promise<ReadonlyArray<CompletionHistoryMemoRecord>>;
+  /** Upserts each record by its pair; the last write wins. */
+  save(records: ReadonlyArray<CompletionHistoryMemoRecord>): Promise<void>;
+}
+
+export interface PersistedCompletionHistorySearchMemo extends CompletionHistorySearchMemo {
+  /** Loads the stored verdicts once per process. A failed load rejects and is retried by the next call. */
+  hydrate(): Promise<number>;
+  /** Writes every verdict set since the last flush and returns how many. A failed write keeps them pending. */
+  flush(): Promise<number>;
+}
+
+/**
+ * WI-10005560: the memo above, kept across restarts. bg-host restarts about every 33 min,
+ * and an in-process memo made the first rotation after each boot re-search every pair over
+ * its whole range (6,440 per-pair `git log` execs in the first 10 min vs 1,024 warm,
+ * measured 2026-10-02). Every kept verdict is exact over its own commit range, so an older
+ * stored verdict is still true, just less advanced, and last-writer-wins needs no locking.
+ */
+export function createPersistedCompletionHistorySearchMemo(
+  store: CompletionHistoryMemoStore,
+  base: CompletionHistorySearchMemo = createCompletionHistorySearchMemo(),
+  limit = 20_000,
+): PersistedCompletionHistorySearchMemo {
+  const pending = new Map<string, CompletionHistoryMemoRecord>();
+  let hydration: Promise<number> | null = null;
+  return {
+    get: (key) => base.get(key),
+    set(key, value) {
+      base.set(key, value);
+      const parts = key.split('\0');
+      if (parts.length !== 4) return;
+      const [repositoryRoot = '', fromHeadSha = '', path = '', blobSha = ''] = parts;
+      pending.delete(key);
+      pending.set(key, { repositoryRoot, fromHeadSha, path, blobSha, value });
+      // A store that keeps failing must not grow this without bound: drop the oldest.
+      for (const oldest of pending.keys()) {
+        if (pending.size <= limit) break;
+        pending.delete(oldest);
+      }
+    },
+    hydrate() {
+      hydration ??= store.load(limit).then(
+        (records) => {
+          let loaded = 0;
+          // Oldest first, so the newest records end up most recently used.
+          for (let index = records.length - 1; index >= 0; index -= 1) {
+            const record = records[index];
+            if (!record) continue;
+            const key = completionHistoryPairKey(record.repositoryRoot, record.fromHeadSha, record.path, record.blobSha);
+            // A verdict this process already holds is at least as recent as the stored one.
+            if (pending.has(key) || base.get(key) !== undefined) continue;
+            base.set(key, record.value);
+            loaded += 1;
+          }
+          return loaded;
+        },
+        (error: unknown) => {
+          hydration = null;
+          throw error;
+        },
+      );
+      return hydration;
+    },
+    async flush() {
+      if (pending.size === 0) return 0;
+      const batch = [...pending.entries()];
+      pending.clear();
+      try {
+        await store.save(batch.map(([, record]) => record));
+        return batch.length;
+      } catch (error) {
+        // Re-queue what no later set() replaced, so the next flush retries it.
+        for (const [key, record] of batch) if (!pending.has(key)) pending.set(key, record);
+        throw error;
+      }
+    },
+  };
+}
+
+/** The process-wide memo every pass's reader shares by default. */
+const historySearchState = pinModuleState('@papercusp/operator-core.completion-history-search', () => ({
+  memo: createCompletionHistorySearchMemo(),
+  /** WI-10005560: per-scope persistence over the same process memo. */
+  persisted: new Map<string, PersistedCompletionHistorySearchMemo>(),
+}));
+
+/**
+ * WI-10005560: the process memo, persisted through `store` for `scope` (a workspace). One
+ * per scope per process, so hydration runs once and every pass flushes what it learned.
+ */
+export function persistedCompletionHistorySearchMemo(
+  scope: string,
+  store: () => CompletionHistoryMemoStore,
+): PersistedCompletionHistorySearchMemo {
+  let memo = historySearchState.persisted.get(scope);
+  if (!memo) {
+    memo = createPersistedCompletionHistorySearchMemo(store(), historySearchState.memo);
+    historySearchState.persisted.set(scope, memo);
+  }
+  return memo;
+}
+
+/** Pairs per batched history search: bounds argv and the per-field matching loop. */
+const HISTORY_SEARCH_BATCH = 256;
+
+export function createCompletionBlobHistoryReader(
+  readGitlinks: GitlinkPrefixReader = readGitlinkPrefixes,
+  memo: CompletionHistorySearchMemo = historySearchState.memo,
+): CompletionBlobHistoryReader {
+  type Answer = string | null | 'unmeasured' | undefined;
+  const keyOf = (root: string, commitSha: string) => root + '\0' + commitSha;
+  /** (root, commit) → prefix → its answer, settled or in flight. */
+  const answers = new Map<string, Map<string, Promise<Answer>>>();
+  /** (root, commit) → paths announced through hint(). */
+  const announced = new Map<string, Set<string>>();
+  let reads = 0;
+
+  const announce = (root: string, commitSha: string, paths: Iterable<string>) => {
+    const key = keyOf(root, commitSha);
+    const set = announced.get(key) ?? new Set<string>();
+    for (const path of paths) set.add(path);
+    announced.set(key, set);
+  };
+
+  /** Announce, one level down, every announced path that lives under a gitlink just read. */
+  const propagate = (root: string, commitSha: string, gitlinks: ReadonlyMap<string, string | null>) => {
+    const paths = announced.get(keyOf(root, commitSha));
+    if (!paths) return;
+    const nested = new Map<string, { root: string; sha: string; paths: string[] }>();
+    for (const path of paths) {
+      let prefix: string | undefined;
+      for (const candidate of ancestorPrefixes(path)) if (gitlinks.get(candidate)) prefix = candidate;
+      if (!prefix) continue;
+      const sha = gitlinks.get(prefix)!;
+      const nestedRoot = nodePath.resolve(root, prefix);
+      if (!nestedRoot.startsWith(root + nodePath.sep)) continue;
+      const group = nested.get(keyOf(nestedRoot, sha)) ?? { root: nestedRoot, sha, paths: [] };
+      group.paths.push(path.slice(prefix.length + 1));
+      nested.set(keyOf(nestedRoot, sha), group);
+    }
+    for (const group of nested.values()) announce(group.root, group.sha, group.paths);
+  };
+
+  const sharedRead: GitlinkPrefixReader = async (root, commitSha, prefixes, opts) => {
+    const key = keyOf(root, commitSha);
+    let table = answers.get(key);
+    if (!table) {
+      table = new Map();
+      answers.set(key, table);
+    }
+    const known = table;
+    if (prefixes.some((prefix) => !known.has(prefix))) {
+      const own = prefixes.filter((prefix) => !known.has(prefix));
+      const ownSet = new Set(own);
+      const wanted = new Set(own);
+      for (const path of announced.get(key) ?? []) {
+        for (const prefix of ancestorPrefixes(path)) if (!known.has(prefix)) wanted.add(prefix);
+      }
+      const batch = [...wanted];
+      const readOnce = (list: readonly string[]): Promise<GitlinkPrefixRead> => {
+        reads += 1;
+        return readGitlinks(root, commitSha, list, opts).then(
+          (result) => {
+            if (result && result !== 'unmeasured') propagate(root, commitSha, result);
+            return result;
+          },
+          // A reader that throws measured nothing; retry rather than persist residue.
+          (): GitlinkPrefixRead => 'unmeasured',
+        );
+      };
+      const batchRead = readOnce(batch);
+      // git refuses the WHOLE ls-tree when any one pathspec is bad (e.g. a declared path
+      // outside the repository exits 128), so a failed batch that carried announced extras
+      // says nothing about the caller's own prefixes: re-read those alone. Another row's
+      // bad path must never change this path's answer.
+      const ownRead =
+        batch.length > own.length
+          ? batchRead.then((result) => (result === undefined ? readOnce(own) : result))
+          : batchRead;
+      for (const prefix of batch) {
+        const extra = !ownSet.has(prefix);
+        const answer = (extra ? batchRead : ownRead).then((result): Answer =>
+          result === 'unmeasured' || result === undefined ? result : (result.get(prefix) ?? null),
+        );
+        known.set(prefix, answer);
+        void answer.then((value) => {
+          // Keep only measured answers. An announced extra from a failed batch was never
+          // asked for on its own, so its refusal is not kept either.
+          const keep = value !== 'unmeasured' && !(extra && value === undefined);
+          if (!keep && known.get(prefix) === answer) known.delete(prefix);
+        });
+      }
+    }
+    const settled = await Promise.all(prefixes.map((prefix) => known.get(prefix)!));
+    if (settled.includes('unmeasured')) return 'unmeasured';
+    if (settled.includes(undefined)) return undefined;
+    return new Map(prefixes.map((prefix, index) => [prefix, settled[index] as string | null]));
+  };
+
+  type Pair = { root: string; fromHeadSha: string; path: string; blobSha: string; id: string };
+  /** A pair's next search: the range `to ^lower` in one repository. */
+  type Span = { pair: Pair; from: CompletionHistoryLocation; to: CompletionHistoryLocation; lower: string };
+  /** A pair the batched search did not see is `false`; one it saw still needs the exact check. */
+  type Search = {
+    members: ReadonlyMap<string, Span>;
+    answers: ReadonlyMap<string, false | 'seen'> | 'timeout' | 'failed';
+  };
+  const pairOf = (root: string, fromHeadSha: string, path: string, blobSha: string): Pair => ({
+    root,
+    fromHeadSha,
+    path,
+    blobSha,
+    id: completionHistoryPairKey(root, fromHeadSha, path, blobSha),
+  });
+  const announcedPairs = new Map<string, Pair>();
+  /** Range → its batched search, kept for the pass so a member asked later reuses it. */
+  const searches = new Map<string, Promise<Search>>();
+  let historyReadCount = 0;
+  /**
+   * WI-10005524: (repository, W, T) → whether W is an ancestor-or-equal of T, for the pass.
+   * Every kept match moves its `foundThrough` to the commit it was last proven at, so a
+   * pass needs about one read per repository, shared by every matched pair. A failed read
+   * (null) is not kept: it measured nothing, and the pair is searched instead.
+   */
+  const descents = new Map<string, Promise<boolean | null>>();
+  let ancestryReadCount = 0;
+  const descends = (root: string, ancestor: string, descendant: string, opts: GitSpawnOptions) => {
+    const key = [root, ancestor, descendant].join('\0');
+    let pending = descents.get(key);
+    if (!pending) {
+      ancestryReadCount += 1;
+      const read = commitContains(root, descendant, ancestor, opts);
+      pending = read;
+      descents.set(key, read);
+      void read.then((answer) => {
+        if (answer === null && descents.get(key) === read) descents.delete(key);
+      });
+    }
+    return pending;
+  };
+  /** Keep an exact per-pair verdict across passes: a match through T, or a no-match through T. */
+  const remember = (pair: Pair, span: Span, found: boolean) => {
+    const at = { repositoryRoot: span.from.repositoryRoot, fromCommitSha: span.from.commitSha, path: span.from.path };
+    memo.set(pair.id, found ? { ...at, foundThrough: span.to.commitSha } : { ...at, searchedThrough: span.to.commitSha });
+  };
+
+  const spanOf = async (
+    pair: Pair,
+    toCommitSha: string,
+    opts: GitSpawnOptions,
+  ): Promise<Span | 'unmeasured' | undefined> => {
+    const searched = memo.get(pair.id);
+    const from = searched
+      ? { repositoryRoot: searched.repositoryRoot, commitSha: searched.fromCommitSha, path: searched.path }
+      : await completionHistoryLocation(pair.root, pair.fromHeadSha, pair.path, opts, sharedRead);
+    if (from === 'unmeasured' || opts.signal?.aborted) return 'unmeasured';
+    const to = await completionHistoryLocation(pair.root, toCommitSha, pair.path, opts, sharedRead);
+    if (to === 'unmeasured' || opts.signal?.aborted) return 'unmeasured';
+    if (!from || !to) return undefined;
+    if (from.repositoryRoot !== to.repositoryRoot || from.path !== to.path) return undefined;
+    return { pair, from, to, lower: searched?.searchedThrough ?? from.commitSha };
+  };
+  const rangeKey = (span: Span) => [span.to.repositoryRoot, span.to.commitSha, span.lower].join('\0');
+
+  /** `self` plus every announced pair whose next search is the same range. */
+  const membersFor = async (self: Span, toCommitSha: string, opts: GitSpawnOptions) => {
+    const key = rangeKey(self);
+    const members = new Map<string, Span>([[self.pair.id, self]]);
+    const candidates = [...announcedPairs.values()].filter((pair) => {
+      if (pair.id === self.pair.id || pair.root !== self.pair.root) return false;
+      // A cheap pre-filter; spanOf decides. A fresh pair's range starts at its own
+      // close-time commit, so only pairs closed at the same HEAD can share it.
+      const searched = memo.get(pair.id)?.searchedThrough;
+      return searched !== undefined ? searched === self.lower : pair.fromHeadSha === self.pair.fromHeadSha;
+    });
+    for (const span of await Promise.all(candidates.map((pair) => spanOf(pair, toCommitSha, opts)))) {
+      if (span && span !== 'unmeasured' && rangeKey(span) === key) members.set(span.pair.id, span);
+    }
+    return members;
+  };
+
+  const search = async (members: ReadonlyMap<string, Span>, opts: GitSpawnOptions): Promise<Search> => {
+    const spans = [...members.values()];
+    const answers = new Map<string, false | 'seen'>();
+    for (let start = 0; start < spans.length; start += HISTORY_SEARCH_BATCH) {
+      const chunk = spans.slice(start, start + HISTORY_SEARCH_BATCH);
+      const first = chunk[0];
+      if (!first) break;
+      historyReadCount += 1;
+      const seen = await historyLogSees(
+        first.to.repositoryRoot,
+        first.to.commitSha,
+        first.lower,
+        chunk.map((span) => ({ path: span.to.path, blobSha: span.pair.blobSha })),
+        opts,
+      );
+      if (seen === 'timeout' || seen === 'failed') return { members, answers: seen };
+      chunk.forEach((span, index) => {
+        if (seen.has(index)) {
+          answers.set(span.pair.id, 'seen');
+          return;
+        }
+        answers.set(span.pair.id, false);
+        memo.set(span.pair.id, {
+          repositoryRoot: span.from.repositoryRoot,
+          fromCommitSha: span.from.commitSha,
+          path: span.from.path,
+          searchedThrough: span.to.commitSha,
+        });
+      });
+    }
+    return { members, answers };
+  };
+
+  const contains: CompletionBlobHistoryReader['contains'] = async (
+    repoRoot,
+    fromHeadSha,
+    toCommitSha,
+    rawPath,
+    blobSha,
+    opts = {},
+  ) => {
+    if (opts.signal?.aborted) return 'unmeasured';
+    if (!SHA_RE.test(fromHeadSha) || !SHA_RE.test(toCommitSha) || !OBJECT_SHA_RE.test(blobSha)) return undefined;
+    const path = normalizedRepoPath(repoRoot, rawPath);
+    if (!path || path !== rawPath) return undefined;
+    const pair = pairOf(nodePath.resolve(repoRoot), fromHeadSha, path, blobSha);
+    const kept = memo.get(pair.id);
+    if (kept?.foundThrough !== undefined) {
+      // WI-10005524: a match found through W still holds at T when W is an ancestor of T.
+      const to = await completionHistoryLocation(pair.root, toCommitSha, path, opts, sharedRead);
+      if (to === 'unmeasured' || opts.signal?.aborted) return 'unmeasured';
+      if (to && to.repositoryRoot === kept.repositoryRoot && to.path === kept.path) {
+        const still =
+          to.commitSha === kept.foundThrough || (await descends(to.repositoryRoot, kept.foundThrough, to.commitSha, opts));
+        if (opts.signal?.aborted) return 'unmeasured';
+        if (still === true) {
+          if (to.commitSha !== kept.foundThrough) memo.set(pair.id, { ...kept, foundThrough: to.commitSha });
+          return true;
+        }
+      }
+      // Not provably reachable from T (or not measured): search the whole range below.
+    }
+    const span = await spanOf(pair, toCommitSha, opts);
+    if (span === 'unmeasured' || opts.signal?.aborted) return 'unmeasured';
+    if (!span) return undefined;
+    // from === to, or nothing landed since the last no-match: there is nothing to search.
+    if (span.lower === span.to.commitSha) return false;
+    const key = rangeKey(span);
+    const shared = searches.get(key);
+    let done = shared ? await shared : undefined;
+    if (!done?.members.has(span.pair.id)) {
+      const own = membersFor(span, toCommitSha, opts).then((members) => search(members, opts));
+      searches.set(key, own);
+      done = await own;
+    }
+    if (opts.signal?.aborted) return 'unmeasured';
+    if (done.answers === 'timeout' && done.members.size === 1) return 'unmeasured';
+    if (done.answers !== 'timeout' && done.answers !== 'failed' && done.answers.get(span.pair.id) === false) {
+      return false;
+    }
+    // Seen in the range, or the shared search measured nothing: the per-pair check decides.
+    historyReadCount += 1;
+    const verdict = await historyLogFinds(span.from, span.to, blobSha, opts);
+    // Both answers are exact over from..to, so keep them: a match is re-proved by one shared
+    // ancestry read next pass instead of a per-pair search, and a "seen" candidate that the
+    // exact check rejects is not searched over the same range again.
+    if (verdict === true || verdict === false) remember(span.pair, span, verdict);
+    return verdict;
+  };
+
+  return {
+    contains,
+    hintBlobs: (repoRoot, fromHeadSha, entries) => {
+      if (!SHA_RE.test(fromHeadSha)) return;
+      const root = nodePath.resolve(repoRoot);
+      for (const { path, blobSha } of entries) {
+        if (!OBJECT_SHA_RE.test(blobSha) || normalizedRepoPath(root, path) !== path) continue;
+        const pair = pairOf(root, fromHeadSha, path, blobSha);
+        announcedPairs.set(pair.id, pair);
+      }
+    },
+    historyReads: () => historyReadCount,
+    ancestryReads: () => ancestryReadCount,
+    hint: (repoRoot, commitSha, paths) => {
+      if (!SHA_RE.test(commitSha)) return;
+      // Only paths contains() itself would accept: a declared non-file ref ('/reports/…',
+      // an absolute path) would otherwise make git refuse the batch for every row.
+      const root = nodePath.resolve(repoRoot);
+      announce(root, commitSha, paths.filter((path) => normalizedRepoPath(root, path) === path));
+    },
+    gitlinkReads: () => reads,
+  };
+}
+
+async function blobHistoryContains(
+  readGitlinks: GitlinkPrefixReader,
+  repoRoot: string,
+  fromHeadSha: string,
+  toCommitSha: string,
+  rawPath: string,
+  blobSha: string,
+  opts: GitSpawnOptions,
+): Promise<CompletionBlobHistoryVerdict> {
+  if (opts.signal?.aborted) return 'unmeasured';
+  if (!SHA_RE.test(fromHeadSha) || !SHA_RE.test(toCommitSha) || !OBJECT_SHA_RE.test(blobSha)) {
     return undefined;
   }
   const path = normalizedRepoPath(repoRoot, rawPath);
   if (!path || path !== rawPath) return undefined;
 
-  const from = await completionHistoryLocation(repoRoot, fromHeadSha, path, opts);
-  const to = await completionHistoryLocation(repoRoot, toCommitSha, path, opts);
-  if (opts.signal?.aborted || !from || !to) return undefined;
+  const from = await completionHistoryLocation(repoRoot, fromHeadSha, path, opts, readGitlinks);
+  if (from === 'unmeasured' || opts.signal?.aborted) return 'unmeasured';
+  const to = await completionHistoryLocation(repoRoot, toCommitSha, path, opts, readGitlinks);
+  if (to === 'unmeasured' || opts.signal?.aborted) return 'unmeasured';
+  if (!from || !to) return undefined;
   if (from.repositoryRoot !== to.repositoryRoot || from.path !== to.path) return undefined;
   if (from.commitSha === to.commitSha) return false;
+  return historyLogFinds(from, to, blobSha, opts);
+}
 
+/**
+ * WI-10005524: is `ancestor` an ancestor-or-equal of `descendant` in one repository?
+ * {@link gitRefContains} reads it from `git merge-base` stdout (a stdout-only read cannot
+ * tell `--is-ancestor`'s exit 1 from a failure). null = the read measured nothing.
+ */
+function commitContains(
+  repositoryRoot: string,
+  descendant: string,
+  ancestor: string,
+  opts: GitSpawnOptions,
+): Promise<boolean | null> {
+  const read: GitStdoutRead = async (args) => {
+    let out = '';
+    const outcome = await streamGitFields(
+      ['-C', repositoryRoot, ...args],
+      (field) => {
+        out += field;
+      },
+      // Bounded one-line output, so the sidecar can run it (see the ls-tree read above).
+      { ...opts, timeoutMs: opts.timeoutMs ?? 5000, preferSidecar: true },
+    );
+    return outcome === 'complete' && !opts.signal?.aborted ? out.trim() : null;
+  };
+  return gitRefContains(read, descendant, ancestor);
+}
+
+/** The exact history check for one (path, blob) over `from..to`, in one location. */
+async function historyLogFinds(
+  from: CompletionHistoryLocation,
+  to: CompletionHistoryLocation,
+  blobSha: string,
+  opts: GitSpawnOptions,
+): Promise<CompletionBlobHistoryVerdict> {
   let found = false;
   const outcome = await streamGitFields(
     [
@@ -373,10 +1047,80 @@ export async function completionBlobHistoryContains(
       found = true;
       return true;
     },
-    { ...opts, timeoutMs: opts.timeoutMs ?? 5000 },
+    // One path over a closed commit range: bounded output, so the early stop is
+    // not load-bearing and the sidecar can run it (see the ls-tree read above).
+    { ...opts, timeoutMs: opts.timeoutMs ?? 5000, preferSidecar: true },
   );
-  if (opts.signal?.aborted || outcome !== 'complete') return undefined;
+  if (opts.signal?.aborted || outcome === 'timeout') return 'unmeasured';
+  if (outcome !== 'complete') return undefined;
   return found;
+}
+
+/**
+ * One batched history search for many (path, blob) pairs over the same range
+ * `to ^lower` in one repository: which pairs it saw, or the stream outcome when
+ * it did not complete.
+ *
+ * It visits every commit in the range: `--find-object` already turns history
+ * simplification off (a merge side the path-limited walk would prune is still walked,
+ * as in the per-pair check), and `--full-history` states that, because the cross-pass
+ * memo is exact only if no commit in a searched range was skipped. A pair it does not
+ * see is not in the range. A pair it does see is only a candidate (its range may reach
+ * behind the pair's own close-time commit); the caller confirms it with
+ * {@link historyLogFinds}, the per-pair check itself.
+ *
+ * A filepair is credited to a pair when its path is the pair's path (or under it, as
+ * a `:(literal)` pathspec matches) and either side is the pair's blob: the rule
+ * `--find-object` itself applies, so several objects can share one search.
+ */
+async function historyLogSees(
+  repositoryRoot: string,
+  toCommitSha: string,
+  lowerSha: string,
+  pairs: ReadonlyArray<{ path: string; blobSha: string }>,
+  opts: GitSpawnOptions,
+): Promise<ReadonlySet<number> | 'timeout' | 'failed'> {
+  const seen = new Set<number>();
+  let filepair: { old: string; new: string } | undefined;
+  const outcome = await streamGitFields(
+    [
+      '-C',
+      repositoryRoot,
+      'log',
+      '--full-history',
+      '--format=%x01%H',
+      '--raw',
+      '--no-abbrev',
+      '--no-renames',
+      '-z',
+      ...[...new Set(pairs.map((pair) => pair.blobSha))].map((sha) => '--find-object=' + sha),
+      toCommitSha,
+      '^' + lowerSha,
+      '--',
+      ...[...new Set(pairs.map((pair) => pair.path))].map((path) => ':(literal)' + path),
+    ],
+    // -z raw: a commit header field ('\x01<sha>'), then per filepair a meta field
+    // (':<mode> <mode> <old> <new> <status>', after a newline) and a path field.
+    (field) => {
+      if (filepair) {
+        const { old, new: next } = filepair;
+        filepair = undefined;
+        pairs.forEach((pair, index) => {
+          const underPath = field === pair.path || field.startsWith(pair.path + '/');
+          if (underPath && (pair.blobSha === old || pair.blobSha === next)) seen.add(index);
+        });
+        return;
+      }
+      const meta = field.replace(/^\n+/, '');
+      if (!meta.startsWith(':')) return;
+      const [, , old = '', next = ''] = meta.slice(1).split(' ');
+      filepair = { old, new: next };
+    },
+    { ...opts, timeoutMs: opts.timeoutMs ?? 5000, preferSidecar: true },
+  );
+  if (outcome === 'timeout') return 'timeout';
+  if (outcome !== 'complete') return 'failed';
+  return seen;
 }
 
 async function contentIdentity(
@@ -410,7 +1154,7 @@ async function contentIdentity(
         return undefined;
       }
     });
-  return paths.map((path) => {
+  const identity = paths.map((path) => {
     const bytes = readBytes(nodePath.join(repositoryRoot, path));
     const resolution = head.get(path);
     const deletion = deletedSet.has(path);
@@ -423,6 +1167,67 @@ async function contentIdentity(
       ...(resolution?.status === 'unresolvable' ? { headBlobUnresolvable: resolution.reason } : {}),
     };
   });
+  const ignoreCandidates = identity
+    .filter(
+      (entry) =>
+        entry.workingTreeBlobSha !== null &&
+        entry.headBlobSha === null &&
+        !entry.headBlobUnresolvable &&
+        (entry as CompletionTreeContentIdentityWithDeletion).deletion !== true,
+    )
+    .map((entry) => entry.path);
+  if (ignoreCandidates.length === 0) return identity;
+
+  // One bounded read for all present paths absent from HEAD. Any timeout, failure,
+  // omitted status, or path beyond the cap stays explicitly unknown.
+  const statuses = await (probe.gitIgnoreStatusProbe ?? completionGitIgnoreStatusMap)(
+    repositoryRoot,
+    ignoreCandidates.slice(0, MAX_PATHS_PROBED),
+  );
+  const candidateSet = new Set(ignoreCandidates);
+  return identity.map((entry) =>
+    candidateSet.has(entry.path)
+      ? { ...entry, gitIgnoreStatus: statuses?.get(entry.path) ?? 'unknown' }
+      : entry,
+  );
+}
+
+/**
+ * Resolve ignore state for a bounded set of working-tree files absent from HEAD.
+ * --ignored=matching reports ignored (!!) and ordinary untracked paths for
+ * explicit literal pathspecs. Missing output is not evidence of being unignored.
+ */
+async function completionGitIgnoreStatusMap(
+  repoRoot: string,
+  paths: readonly string[],
+): Promise<ReadonlyMap<string, CompletionGitIgnoreStatus> | undefined> {
+  const boundedPaths = paths.slice(0, MAX_PATHS_PROBED);
+  if (boundedPaths.length === 0) return new Map();
+  const requested = new Set(boundedPaths);
+  const statuses = new Map<string, CompletionGitIgnoreStatus>();
+  const outcome = await streamGitFields(
+    [
+      '-C',
+      repoRoot,
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--ignored=matching',
+      '--untracked-files=all',
+      '--',
+      ...boundedPaths.map((path) => ':(literal)' + path),
+    ],
+    (field) => {
+      if (field.length < 4 || field[2] !== ' ') return;
+      const path = field.slice(3);
+      if (!requested.has(path)) return;
+      const status: CompletionGitIgnoreStatus = field.slice(0, 2) === '!!' ? 'ignored' : 'not-ignored';
+      const previous = statuses.get(path);
+      statuses.set(path, previous && previous !== status ? 'unknown' : status);
+    },
+    { timeoutMs: 5000, preferSidecar: true },
+  );
+  return outcome === 'complete' ? statuses : undefined;
 }
 
 /**
@@ -471,6 +1276,8 @@ export type UnprovenContentIdentityReason =
   | 'content-mismatch'
   | 'absent-from-both'
   | 'absent-from-working-tree'
+  | 'gitignored-path'
+  | 'gitignore-status-unknown'
   | 'gitignored-scratch-path'
   | 'gitignored-tmp-path'
   | 'deletion-present-in-working-tree'
@@ -479,7 +1286,7 @@ export type UnprovenContentIdentityReason =
 export type UnprovenContentIdentityRow = {
   path: string;
   reason: UnprovenContentIdentityReason;
-  settles: 'sweep' | 'never';
+  settles: 'sweep' | 'never' | 'unknown';
 };
 
 /**
@@ -502,10 +1309,17 @@ export function describeUnprovenContentIdentity(
     subset.map((row) => `\`${row.path}\` (${row.reason})`).join('; ');
   const willSettle = rows.filter((row) => row.settles === 'sweep');
   const neverSettles = rows.filter((row) => row.settles === 'never');
+  const unknown = rows.filter((row) => row.settles === 'unknown');
   const total = declaredPathCount > 0 ? declaredPathCount : rows.length;
   const head = `Content identity was not proven for ${rows.length} of ${total} declared \`filesChanged\` path(s): ${render(rows)}. `;
   const neverRemedy = neverSettles
     .map((row) => {
+      if (row.reason === 'gitignored-path') {
+        return (
+          "'" + row.path + "' is ignored by Git, so the ordinary git add -A sweep will omit it. " +
+          "Remove it from filesChanged or cite durable storage instead."
+        );
+      }
       const rendered = `\`${row.path}\` (${row.reason})`;
       if (row.reason === 'gitignored-scratch-path' || row.reason === 'gitignored-tmp-path') {
         const prefix = row.reason === 'gitignored-scratch-path' ? '.papercusp/scratch/' : '.papercusp/tmp/ or .papercusp/tmp-*';
@@ -521,6 +1335,30 @@ export function describeUnprovenContentIdentity(
       );
     })
     .join(' ');
+  if (unknown.length > 0) {
+    const unknownRemedy = unknown
+      .map(
+        (row) =>
+          "'" +
+          row.path +
+          "' has unknown Git ignore status because the bounded git status probe did not produce a complete result. " +
+          "If Git ignores it, ordinary git add -A will omit it; otherwise a later sweep may settle it. " +
+          "Verify the ignore rules before relying on automatic settlement.",
+      )
+      .join(' ');
+    const knownSweep =
+      willSettle.length > 0
+        ? render(willSettle) +
+          ' will be checked automatically by the git-sync completion-settlement reconciler on the next sweep.'
+        : '';
+    return (
+      head +
+      'WAITING IS UNVERIFIED — ' +
+      unknownRemedy +
+      (knownSweep ? ' ' + knownSweep : '') +
+      (neverRemedy ? ' ' + neverRemedy : '')
+    );
+  }
   if (neverSettles.length === 0) {
     return (
       head +
@@ -529,7 +1367,8 @@ export function describeUnprovenContentIdentity(
       `logical change routinely lands across TWO ticks. The git-sync completion-settlement reconciler checks the ` +
       `recorded settlement manifest automatically after each emitted commit and upgrades this close to ` +
       `\`committed\` when those exact blobs land. Do not re-call \`work_items:complete\`, re-verify work that is ` +
-      `already correct, or re-word the evidence.`
+      `already correct, or re-word the evidence.` +
+      SUPERSEDED_BEFORE_COMMIT_EXCEPTION
     );
   }
   if (willSettle.length === 0) {
@@ -539,8 +1378,43 @@ export function describeUnprovenContentIdentity(
     head +
     `MIXED — only one half is worth waiting on. ${render(willSettle)} will be checked automatically by the ` +
     `git-sync completion-settlement reconciler on the next sweep, ` +
-    `but ${neverRemedy} Waiting alone leaves this close \`proposed\` indefinitely.`
+    `but ${neverRemedy} Waiting alone leaves this close \`proposed\` indefinitely.` +
+    SUPERSEDED_BEFORE_COMMIT_EXCEPTION
   );
+}
+
+/**
+ * WI-10004711: the one way "waiting settles this" turns false AFTER the close. The verdict
+ * is right when issued; it is falsified only if a path is edited again before git-sync
+ * captures the closed blob. The reconciler detects that and messages the closer, so the
+ * advice names that message as the signal instead of an unconditional "never re-send".
+ */
+const SUPERSEDED_BEFORE_COMMIT_EXCEPTION =
+  ` One exception: if one of those path(s) is edited again before git-sync commits it, the content you ` +
+  `closed with never lands. The settlement reconciler then records \`superseded-before-commit\` and sends ` +
+  `you a coord message; only then, re-check the path and re-send \`work_items:complete\` for this id.`;
+
+type GitignoredContentIdentityReason = Extract<
+  UnprovenContentIdentityReason,
+  'gitignored-path' | 'gitignored-scratch-path' | 'gitignored-tmp-path'
+>;
+
+function legacyGitignoredContentIdentityReason(
+  path: string,
+): Exclude<GitignoredContentIdentityReason, 'gitignored-path'> | undefined {
+  const normalizedPath = path.replaceAll('\\', '/').replace(/^\.\/+/, '');
+  if (normalizedPath.startsWith(DOCUMENTED_GITIGNORED_SCRATCH_PREFIX)) return 'gitignored-scratch-path';
+  if (
+    normalizedPath.startsWith(DOCUMENTED_GITIGNORED_TMP_PREFIX) ||
+    normalizedPath.startsWith(DOCUMENTED_GITIGNORED_TMP_ROOT_PREFIX)
+  ) {
+    return 'gitignored-tmp-path';
+  }
+  return undefined;
+}
+
+function gitignoredContentIdentityReason(path: string): GitignoredContentIdentityReason {
+  return legacyGitignoredContentIdentityReason(path) ?? 'gitignored-path';
 }
 
 export function unprovenContentIdentityPaths(
@@ -570,30 +1444,29 @@ export function unprovenContentIdentityPaths(
         : [{ path: entry.path, reason: 'content-mismatch' as const, settles: 'sweep' as const }];
     }
     if (inTree && !inHead) {
-      const normalizedPath = entry.path.replaceAll('\\', '/').replace(/^\.\/+/, '');
-      if (normalizedPath.startsWith(DOCUMENTED_GITIGNORED_SCRATCH_PREFIX)) {
-        return [{ path: entry.path, reason: 'gitignored-scratch-path', settles: 'never' as const }];
+      if (entry.gitIgnoreStatus === 'ignored') {
+        return [{ path: entry.path, reason: gitignoredContentIdentityReason(entry.path), settles: 'never' as const }];
       }
-      if (
-        normalizedPath.startsWith(DOCUMENTED_GITIGNORED_TMP_PREFIX) ||
-        normalizedPath.startsWith(DOCUMENTED_GITIGNORED_TMP_ROOT_PREFIX)
-      ) {
-        return [{ path: entry.path, reason: 'gitignored-tmp-path', settles: 'never' as const }];
+      if (entry.gitIgnoreStatus === 'unknown') {
+        return [{ path: entry.path, reason: 'gitignore-status-unknown', settles: 'unknown' as const }];
+      }
+      if (entry.gitIgnoreStatus === 'not-ignored') {
+        return [{ path: entry.path, reason: 'missing-from-commit' as const, settles: 'sweep' as const }];
+      }
+      const legacyIgnoredReason = legacyGitignoredContentIdentityReason(entry.path);
+      if (legacyIgnoredReason) {
+        return [{ path: entry.path, reason: legacyIgnoredReason, settles: 'never' as const }];
       }
       return [{ path: entry.path, reason: 'missing-from-commit' as const, settles: 'sweep' as const }];
     }
     if (!inTree && inHead) {
       return [{ path: entry.path, reason: 'absent-from-working-tree' as const, settles: 'never' as const }];
     }
-    const normalizedPath = entry.path.replaceAll('\\', '/').replace(/^\.\/+/, '');
-    if (normalizedPath.startsWith(DOCUMENTED_GITIGNORED_SCRATCH_PREFIX)) {
-      return [{ path: entry.path, reason: 'gitignored-scratch-path', settles: 'never' as const }];
-    }
-    if (
-      normalizedPath.startsWith(DOCUMENTED_GITIGNORED_TMP_PREFIX) ||
-      normalizedPath.startsWith(DOCUMENTED_GITIGNORED_TMP_ROOT_PREFIX)
-    ) {
-      return [{ path: entry.path, reason: 'gitignored-tmp-path', settles: 'never' as const }];
+    if (entry.gitIgnoreStatus === undefined) {
+      const legacyIgnoredReason = legacyGitignoredContentIdentityReason(entry.path);
+      if (legacyIgnoredReason) {
+        return [{ path: entry.path, reason: legacyIgnoredReason, settles: 'never' as const }];
+      }
     }
     return [{ path: entry.path, reason: 'absent-from-both' as const, settles: 'never' as const }];
   });

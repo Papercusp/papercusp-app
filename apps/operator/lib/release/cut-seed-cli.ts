@@ -81,12 +81,25 @@
  *                          epoch key still in the keychain (load-only — a missing one is warned, never
  *                          minted), so ops sealed under past epochs decrypt too. Ships the hive READABLE
  *                          — deliberate, flag-gated. Needs an epoch context (--workspace-id or --epoch).
+ *   --redact-findings / --redact-finding-digests
+ *                          refused: the projection sees sealed content, not plaintext credentials.
+ *   --uuid-idempotency-drop-plans FILE --uuid-idempotency-drop-plans-sha256 HASH
+ *                          D-166 private source-bound whole-row drops. Requires a fresh filtered
+ *                          cut with --skip-corestore-refresh, so source lengths cannot be changed.
+ *   --export-uuid-idempotency-census DIR --store-dir FROZEN_STORE
+ *   --uuid-source-manifest FILE --uuid-source-manifest-sha256 HASH
+ *   --uuid-epoch-keys FILE --uuid-epoch-keys-sha256 HASH
+ *                          Read-only export of the exact manifest's canonical source rows;
+ *                          the private assembler opens every original envelope independently.
+ *                          Use an authorized source correction, then cut a fresh corestore.
  *   --json                 print the manifest + size report as JSON
  */
 
 import { resolve, join, dirname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '@papercusp/operator-core/lib/module-repo-root';
 import { constants, existsSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import {
@@ -97,9 +110,11 @@ import {
   planHostnameNeutralization,
   buildNeutralizedChildEnv,
 } from './seed-hostname-neutralization.js';
-import { assertStagedSeedCarriesNoIdentity, SEED_REAL_HOSTNAME_ENV } from './seed-identity-guard.js';
-import { rm, readFile, writeFile, rename, cp, readdir, mkdir, mkdtemp } from 'node:fs/promises';
+import { assertStagedSeedCarriesNoIdentity, releaseSeedRedactionValues, SEED_REAL_HOSTNAME_ENV } from './seed-identity-guard.js';
+export { mergeReleaseSeedRedactionValues } from './seed-identity-guard.js';
+import { rm, readFile, writeFile, rename, cp, readdir, mkdir, mkdtemp, lstat, realpath } from 'node:fs/promises';
 import Corestore from 'corestore';
+import { captureSeedUuidOriginalSpan, exportSeedUuidIdempotencySource, readSeedFrozenExecution } from '@papercusp/operator-core/lib/sync/hyperbee/seed-provider-corestore';
 import type postgres from 'postgres';
 import { getOrgPg } from '@papercusp/db-org';
 import {
@@ -224,34 +239,249 @@ export async function withCutSeedSingleton<T>(input: {
 }
 
 /**
- * Keep the seed projection's scrub list in lockstep with the final desktop audit.
+ * Resolve the release literal set whenever the finished seed contains a corestore,
+ * whether that corestore is cut fresh or grafted from `--reuse-corestore`.
  *
- * The audit runs inside the UTS-neutralized child, so its live hostname probe sees
- * `papercusp-build`, not the real build-box hostname. The parent deliberately passes
- * that real value through {@link SEED_REAL_HOSTNAME_ENV}; retain it explicitly or the
- * projection can redact the username while leaving the hostname in content prose.
+ * The reuse path deliberately sets `wantCorestore=false` because it must not open the
+ * live store.  Using `corestore?.redactValues` as the later staged-byte guard's input
+ * therefore silently reduced that guard to the five build-box literals and let a stale
+ * snapshot carrying an owner organization name reach the Windows packaging gate.  Keep
+ * selection in one pure, tested branch and feed its result to BOTH the fresh projection
+ * and the post-graft guard.
  */
-export function mergeReleaseSeedRedactionValues(output: string, realHostname?: string): readonly string[] {
-  return [...new Set([
-    realHostname?.trim(),
-    ...output
-      .split(/\r?\n/)
-      .map((line) => line.split('\t', 1)[0]?.trim()),
-  ].filter((value): value is string => !!value && value.length >= 3))];
+export function resolveReleaseSeedRedactionValuesForCut(input: {
+  readonly wantCorestore: boolean;
+  readonly reuseCorestoreDir?: string;
+  readonly load: () => readonly string[];
+}): readonly string[] {
+  return input.wantCorestore || input.reuseCorestoreDir ? input.load() : [];
 }
 
-function releaseSeedRedactionValues(root: string): readonly string[] {
-  const audit = join(root, 'papercusp-desktop', 'bin', 'audit-release-bundle.py');
-  const result = spawnSync('python3', [audit, '--identity-literals'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  if (result.status !== 0) {
-    const detail = typeof result.stderr === 'string' ? result.stderr.trim() : '';
-    throw new Error(`[cut-seed] could not resolve release identity literals from ${audit}${detail ? `: ${detail}` : ''}`);
+/** WI-10005568: reuse the provider's literal projection without putting a credential
+ * in argv, source, or logs. Approval selects exact finding digests; the private scan
+ * must still match its report, plaintext source and detector config identities. */
+export async function readSeedFindingRedactions(
+  reportPath: string,
+  digests: readonly string[],
+  configPath: string,
+): Promise<readonly string[]> {
+  const refused = () => new Error('seed credential redaction evidence invalid');
+  const wanted = new Set(digests);
+  if (!wanted.size || wanted.size !== digests.length || digests.some((d) => !/^[0-9a-f]{64}$/.test(d))) {
+    throw refused();
   }
-  const output = result.stdout ?? '';
-  return mergeReleaseSeedRedactionValues(output, process.env[SEED_REAL_HOSTNAME_ENV]);
+  const hashFile = async (file: string) => {
+    const hash = createHash('sha256');
+    for await (const chunk of createReadStream(file)) hash.update(chunk);
+    return hash.digest('hex');
+  };
+  const privateFile = async (file: string) => {
+    const [info, parent] = await Promise.all([lstat(file), lstat(dirname(file))]);
+    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) ||
+        !parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077) ||
+        await realpath(file) !== resolve(file)) throw refused();
+  };
+  try {
+    if (!reportPath.endsWith('.json')) throw refused();
+    const metaPath = reportPath.replace(/\.json$/, '.meta.json');
+    await Promise.all([privateFile(reportPath), privateFile(metaPath)]);
+    const [reportText, metaText] = await Promise.all([readFile(reportPath, 'utf8'), readFile(metaPath, 'utf8')]);
+    const rows: unknown = JSON.parse(reportText);
+    const meta = JSON.parse(metaText) as { scannerExit?: number; findings?: number; reportSha256?: string;
+      identity?: { blobSha256?: string; configSha256?: string } };
+    if (!Array.isArray(rows) || rows.length !== meta.findings || ![0, 1].includes(meta.scannerExit ?? -1) ||
+        createHash('sha256').update(reportText).digest('hex') !== meta.reportSha256 ||
+        await hashFile(configPath) !== meta.identity?.configSha256) throw refused();
+    const found = new Set<string>();
+    const literals = new Set<string>();
+    const sources = new Set<string>();
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object') throw refused();
+      const row = raw as Record<string, unknown>;
+      const fields = [row.RuleID, row.Match, row.Secret];
+      if (fields.some((v) => typeof v !== 'string' || v === 'REDACTED')) throw refused();
+      if (typeof row.File !== 'string') throw refused();
+      sources.add(row.File);
+      const digest = createHash('sha256').update(JSON.stringify(fields)).digest('hex');
+      if (wanted.has(digest)) {
+        if ((row.Secret as string).length < 12) throw refused();
+        found.add(digest);
+        literals.add((row.Secret as string).trim());
+      }
+    }
+    if (found.size !== wanted.size || sources.size !== 1) throw refused();
+    const source = [...sources][0];
+    await privateFile(source);
+    if (await hashFile(source) !== meta.identity?.blobSha256) throw refused();
+    return [...literals];
+  } catch {
+    // Parsing and filesystem errors must not echo any private report content.
+    throw refused();
+  }
+}
+
+/** D-166: transport a private assembler result without logging values or private bindings.
+ * Hash/shape checks are preflight; the provider checks the actual source rows and lengths.
+ * This reader does not establish census completeness, source authentication or candidate GO. */
+export async function readSeedUuidIdempotencyDropPlans(
+  file: string, sha256: string, redactValues?: readonly string[],
+): Promise<NonNullable<CorestoreCutSpec['uuidIdempotencyDropPlans']>> {
+  const refused = () => new Error('UUID row-drop plan input invalid (values omitted)');
+  try {
+    const [info, parent] = await Promise.all([lstat(file), lstat(dirname(file))]);
+    if (!/^[0-9a-f]{64}$/.test(sha256) || !info.isFile() || info.isSymbolicLink() || (info.mode & 0o077)
+        || !parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077)
+        || await realpath(file) !== resolve(file)) throw refused();
+    const bytes = await readFile(file);
+    if (createHash('sha256').update(bytes).digest('hex') !== sha256) throw refused();
+    const value = JSON.parse(bytes.toString('utf8'));
+    if (value?.schema !== 'papercusp-uuid-idempotency-row-drop-plan-set-v1'
+        || value.reviewRef !== 'p2p-public-release-endgame-2026-09-01#D-166'
+        || !Array.isArray(value.plans) || value.sourceAuthentication !== 'original-envelope-aead'
+        || value.sourceSignatureAndCoverage !== 'requires-independent-hypercore-export-validation'
+        || !value.privateSourceBindings || !value.counts) throw refused();
+    if (redactValues) {
+      const literalsSha256 = createHash('sha256').update(JSON.stringify(redactValues)).digest('hex');
+      const excludedTablesSha256 = createHash('sha256').update(JSON.stringify([...SEED_EXCLUDED_TABLES].sort())).digest('hex');
+      const sources = value.privateSourceBindings.sources;
+      if (!Array.isArray(sources) || !sources.length || sources.some(source =>
+        source.privacyProjectionContext?.schema !== 'papercusp-seed-privacy-projection-v1'
+        || source.privacyProjectionContext.literalsSha256 !== literalsSha256
+        || source.privacyProjectionContext.excludedTablesSha256 !== excludedTablesSha256)) throw refused();
+    }
+    const keys = new Set<string>();
+    for (const plan of value.plans) {
+      if (plan?.schema !== 'papercusp-uuid-idempotency-row-drop-plan-v1'
+          || plan.reviewRef !== value.reviewRef || typeof plan.sourceKeyHex !== 'string'
+          || !/^[0-9a-f]{64}$/.test(plan.sourceKeyHex) || keys.has(plan.sourceKeyHex)
+          || !Number.isSafeInteger(plan.sourceLength) || plan.sourceLength <= 0
+          || !Array.isArray(plan.rows) || (!plan.rows.length && !plan.sourceInput)) throw refused();
+      keys.add(plan.sourceKeyHex);
+    }
+    // Keep every D174 census core bound even when it has no UUID drops. Otherwise
+    // the ordinary producer could choose a different input for that core silently.
+    const sources = value.privateSourceBindings.sources;
+    if (Array.isArray(sources) && sources.some(source => source.sourceInput)) {
+      if (sources.length !== value.plans.length || sources.some(source => {
+        const plan = value.plans.find((plan: { sourceKeyHex?: string }) => plan.sourceKeyHex === source.sourceKeyHex);
+        return !source.sourceInput?.executionBinding || !plan || plan.sourceLength !== source.sourceLength
+          || JSON.stringify(plan.sourceInput) !== JSON.stringify(source.sourceInput);
+      })) throw refused();
+    }
+    return value.plans;
+  } catch { throw refused(); }
+}
+
+/** Read-only D166 census from a manifest-bound frozen Corestore. This never opens the
+ * live writer, refreshes history, or replaces an existing export. Independent GO must
+ * reproduce the export against the actual frozen source and final candidate. */
+export async function exportSeedUuidIdempotencyCensus(input: {
+  storeDir: string; manifestPath?: string; manifestSha256?: string; potId?: string;
+  epochKeysPath: string; epochKeysSha256: string; outputDir: string;
+  redactValues?: readonly string[];
+  /** D-176 creates an original proof-built replica here; never a storage copy. */
+  captureOriginalSpan?: boolean;
+}, deps: { readFrozenExecution?: typeof readSeedFrozenExecution } = {}): Promise<string> {
+  // Dependency injection is internal to the library; the CLI always uses the
+  // real clean-checkout reader. A fixture may supply its own frozen environment.
+  const readExecution = deps.readFrozenExecution ?? readSeedFrozenExecution;
+  const executionBinding = await readExecution();
+  if (!(await lstat(input.storeDir)).isDirectory()) throw new Error('UUID frozen source store missing');
+  let manifestPath = input.manifestPath;
+  let manifestSha256 = input.manifestSha256;
+  let potId = input.potId;
+  let coreKeys: string[] | undefined;
+  let coreLengths: Record<string, unknown> = {};
+  if (manifestPath || manifestSha256) {
+    if (!manifestPath || !manifestSha256) throw new Error('UUID source manifest binding incomplete');
+    const manifestBytes = await readFile(manifestPath);
+    if (!/^[0-9a-f]{64}$/.test(manifestSha256)
+        || createHash('sha256').update(manifestBytes).digest('hex') !== manifestSha256) {
+      throw new Error('UUID source manifest binding changed');
+    }
+    const manifest = decodeManifest(manifestBytes.toString('utf8'));
+    if (potId && potId !== manifest.potId) throw new Error('UUID source pot binding changed');
+    potId = manifest.potId;
+    const entries = manifest.stores.filter(entry => entry.kind === 'corestore');
+    if (entries.length !== 1) throw new Error('UUID source must contain exactly one Corestore entry');
+    const meta = entries[0]!.meta as { coreKeys?: unknown; coreLengths?: Record<string, unknown> };
+    const lengths = meta?.coreLengths;
+    if (!Array.isArray(meta?.coreKeys) || !meta.coreKeys.length
+        || new Set(meta.coreKeys).size !== meta.coreKeys.length || !lengths
+        || meta.coreKeys.some(key => typeof key !== 'string' || !/^[0-9a-f]{64}$/.test(key)
+          || !Number.isSafeInteger(lengths[key]) || (lengths[key] as number) <= 0)) {
+      throw new Error('UUID source core coverage incomplete');
+    }
+    coreKeys = meta.coreKeys as string[];
+    coreLengths = lengths;
+  } else if (!input.captureOriginalSpan || !potId) {
+    throw new Error('UUID source requires a bound manifest or original capture with an explicit pot');
+  }
+  const store = new Corestore(input.storeDir, { readOnly: true, wait: false });
+  try {
+    await store.ready();
+    if (!coreKeys) {
+      // Exactly the release producer's default source population, on this ONE
+      // held original view. Never substitute an already projected seed's keys.
+      coreKeys = await enumerateOwnStoreCoreKeys(store);
+      if (coreKeys.length !== 1) throw new Error('UUID original own-log selection incomplete');
+      for (const key of coreKeys) {
+        const core = store.get({ key: Buffer.from(key, 'hex'), valueEncoding: 'json' }) as { ready(): Promise<void>; length: number };
+        await core.ready();
+        if (!Number.isSafeInteger(core.length) || core.length <= 0) throw new Error('UUID original own-log head missing');
+        coreLengths[key] = core.length;
+      }
+    }
+    const sources = [];
+    const foldNow = Date.now();
+    let replicaDir: string | undefined;
+    if (input.captureOriginalSpan) {
+      if (coreKeys.length !== 1) throw new Error('UUID original span capture currently requires one manifest-bound core');
+      replicaDir = join(input.outputDir, 'original-signed-span');
+    }
+    for (const [index, key] of coreKeys.entries()) {
+      const exported = await exportSeedUuidIdempotencySource({ sourceStore: store,
+        sourceKeyHex: key, sourceLength: coreLengths[key] as number,
+        outputDir: input.outputDir, segment: `segment-${String(index + 1).padStart(6, '0')}.blob`,
+        redactValues: input.redactValues, now: foldNow, executionBinding });
+      if (replicaDir) {
+        const capture = await captureSeedUuidOriginalSpan({ sourceStore: store, sourceKeyHex: key,
+          sourceInput: exported.sourceInput, replicaDir });
+        const replica = new Corestore(replicaDir, { readOnly: true, wait: false });
+        try {
+          await replica.ready();
+          const verified = await exportSeedUuidIdempotencySource({ sourceStore: replica,
+            sourceKeyHex: key, sourceLength: exported.sourceLength, outputDir: input.outputDir,
+            segment: 'segment-000002.blob', redactValues: input.redactValues, now: foldNow, executionBinding });
+          if (JSON.stringify(verified.sourceInput) !== JSON.stringify(exported.sourceInput)
+              || capture.proofInventorySha256 !== verified.sourceInput.proofInventorySha256) {
+            throw new Error('UUID original replica census binding mismatch');
+          }
+          sources.push(verified);
+        } finally { await replica.close(); }
+      } else sources.push(exported);
+    }
+    const configPath = join(input.outputDir, 'uuid-census.private.json');
+    if (JSON.stringify(await readExecution()) !== JSON.stringify(executionBinding)) {
+      throw new Error('UUID frozen execution changed during census');
+    }
+    if (!manifestPath) {
+      // Private source-population descriptor, not a shipped SeedManifest or a
+      // fabricated physical-store hash. Each head was actually signature-verified.
+      manifestPath = join(input.outputDir, 'original-source-manifest.private.json');
+      const bytes = JSON.stringify({ schema: 'papercusp-original-signed-source-span-v1', potId,
+        sourceSelection: 'enumerateOwnStoreCoreKeys', stores: [{ kind: 'corestore', meta: {
+          coreKeys, coreLengths, sourceHeads: Object.fromEntries(sources.map(source =>
+            [source.sourceKeyHex, source.sourceInput.sourceHead])) } }] });
+      await writeFile(manifestPath, bytes, { mode: 0o600, flag: 'wx' });
+      manifestSha256 = createHash('sha256').update(bytes).digest('hex');
+    }
+    await writeFile(configPath, JSON.stringify({ reviewRef: 'p2p-public-release-endgame-2026-09-01#D-166',
+      potId, sourceManifestPath: manifestPath, sourceManifestSha256: manifestSha256,
+      epochKeysPath: input.epochKeysPath, epochKeysSha256: input.epochKeysSha256, sources,
+      ...(replicaDir ? { originalSpanReplicaDir: replicaDir } : {}) }), { mode: 0o600, flag: 'wx' });
+    return configPath;
+  } finally { await store.close(); }
 }
 
 export interface PickGitEncryptionInput {
@@ -1288,9 +1518,7 @@ export async function withSeedOutput<T>(
 }
 
 function resolveWorkspaceRoot(): string {
-  // Mirrors role-codex-home.ts. From apps/operator/lib/release → up to the repo root.
-  const here = dirname(fileURLToPath(import.meta.url));
-  return process.env.PAPERCUSP_WORKSPACE_ROOT || resolve(here, '..', '..', '..', '..');
+  return process.env.PAPERCUSP_WORKSPACE_ROOT || moduleRepoRoot(import.meta.url);
 }
 
 /**
@@ -1379,6 +1607,36 @@ export function parseHeadSnapshotTimeoutMs(args: Args, env: NodeJS.ProcessEnv = 
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+  if ('export-uuid-idempotency-census' in args) {
+    const fields = ['store-dir', 'uuid-epoch-keys', 'uuid-epoch-keys-sha256', 'export-uuid-idempotency-census'] as const;
+    if (fields.some(name => !str(args, name))) throw new Error('UUID source export requires exact frozen store, manifest/hash, epoch-keys/hash and a private output directory');
+    const config = await exportSeedUuidIdempotencyCensus({ storeDir: str(args, 'store-dir')!,
+      manifestPath: str(args, 'uuid-source-manifest'), manifestSha256: str(args, 'uuid-source-manifest-sha256'),
+      potId: str(args, 'hive') ?? DEFAULT_HIVE,
+      epochKeysPath: str(args, 'uuid-epoch-keys')!, epochKeysSha256: str(args, 'uuid-epoch-keys-sha256')!,
+      outputDir: str(args, 'export-uuid-idempotency-census')!,
+      redactValues: releaseSeedRedactionValues(resolveWorkspaceRoot()),
+      captureOriginalSpan: args['capture-original-span'] === true });
+    console.log(JSON.stringify({ schema: 'papercusp-uuid-idempotency-source-export-v1', configPath: config }));
+    return;
+  }
+  // WI-10005568: a validated plaintext finding does not make the projection able
+  // to inspect its source envelope. Refuse before opening/refreshing any store;
+  // otherwise the cut can appear successful while carrying the same credential.
+  if ('redact-findings' in args || 'redact-finding-digests' in args) {
+    throw new Error('seed finding export redaction is unsupported for sealed content; correct the authorized source and cut a fresh corestore');
+  }
+  let uuidIdempotencyDropPlans: CorestoreCutSpec['uuidIdempotencyDropPlans'];
+  let uuidPlanInput: { file: string; hash: string } | undefined;
+  if ('uuid-idempotency-drop-plans' in args || 'uuid-idempotency-drop-plans-sha256' in args) {
+    const file = str(args, 'uuid-idempotency-drop-plans');
+    const hash = str(args, 'uuid-idempotency-drop-plans-sha256');
+    if (!file || !hash || args['skip-corestore-refresh'] !== true
+        || 'reuse-corestore' in args || args['no-corestore'] === true) {
+      throw new Error('UUID row-drop plans require an exact private file/hash and a fresh cut with --skip-corestore-refresh');
+    }
+    uuidPlanInput = { file, hash };
+  }
   const root = resolveWorkspaceRoot();
   const hive = str(args, 'hive') ?? DEFAULT_HIVE;
   const repo = str(args, 'repo') ?? root;
@@ -1396,6 +1654,13 @@ async function main(): Promise<void> {
   const reuseCorestoreDir = reuseCorestoreRaw ? resolve(reuseCorestoreRaw) : undefined;
   const emitEpochKey = args['emit-epoch-key'] === true;
   const wantCorestore = args['no-corestore'] !== true && !reuseCorestoreDir;
+  const releaseRedactionValues = [...resolveReleaseSeedRedactionValuesForCut({
+    wantCorestore,
+    ...(reuseCorestoreDir ? { reuseCorestoreDir } : {}),
+    load: () => releaseSeedRedactionValues(root),
+  })];
+  if (uuidPlanInput) uuidIdempotencyDropPlans = await readSeedUuidIdempotencyDropPlans(
+    uuidPlanInput.file, uuidPlanInput.hash, releaseRedactionValues);
   const asJson = args['json'] === true;
 
   // P-004 sparse cut: ship only [snapshotIndex,len) of each core (drops the ~2GB history
@@ -1621,7 +1886,8 @@ async function main(): Promise<void> {
       // owner's private author log. The provider mints a fresh read-only snapshot core,
       // redacts email-shaped values, and leaves the live source log untouched.
       filtered: true,
-      redactValues: releaseSeedRedactionValues(root),
+      redactValues: releaseRedactionValues,
+      ...(uuidIdempotencyDropPlans ? { uuidIdempotencyDropPlans } : {}),
       onProgress: createFilteredSeedProgressReporter(),
     };
   }
@@ -1686,7 +1952,7 @@ async function main(): Promise<void> {
       await assertStagedSeedCarriesNoIdentity({
         dir: outDir,
         neutralHostname: process.env.PAPERCUSP_SEED_BUILD_HOSTNAME || DEFAULT_NEUTRAL_BUILD_HOSTNAME,
-        extraLiterals: corestore?.redactValues ?? [],
+        extraLiterals: releaseRedactionValues,
       });
 
       // WI-3232 --emit-epoch-key: write the bundled key so the pot decrypts OFFLINE.

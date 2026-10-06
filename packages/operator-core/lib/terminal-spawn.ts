@@ -26,8 +26,8 @@
  * before reaching here on other platforms (mirrors console-launch.ts).
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { standardToolDirs } from './tool-path';
 import { createTextCollector } from './child-output';
 import { LINUX_TERMINALS_FLAT } from './linux-terminals';
@@ -203,6 +203,60 @@ export function scrubTerminalContextEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessE
   return out;
 }
 
+/**
+ * The main worktree of a LINKED git worktree, read from its `.git` pointer file
+ * (`gitdir: <main>/.git/worktrees/<name>`). Any other root comes back unchanged:
+ * a main worktree (`.git` is a directory), a submodule checkout
+ * (`gitdir: …/.git/modules/<name>`), a non-repository, or an unreadable path.
+ * No git process is started: this runs on the operator's main thread at every
+ * agent launch, where a synchronous `git` call has wedged :3170 before
+ * (WI-10005315).
+ */
+export function mainWorktreeOf(
+  root: string,
+  readGitPointer: (path: string) => string = (path) => readFileSync(path, 'utf8'),
+): string {
+  let pointer: string;
+  try {
+    pointer = readGitPointer(join(root, '.git'));
+  } catch {
+    return root; // `.git` is a directory (EISDIR) or absent: not a linked worktree
+  }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(pointer);
+  if (!match) return root;
+  const worktreeGitDir = resolve(root, match[1]);
+  const worktreesDir = dirname(worktreeGitDir);
+  const commonGitDir = dirname(worktreesDir);
+  if (basename(worktreesDir) !== 'worktrees' || basename(commonGitDir) !== '.git') return root;
+  return dirname(commonGitDir);
+}
+
+/**
+ * The operator's environment as an agent child should inherit it (WI-10005320).
+ *
+ * `PAPERCUSP_INTEGRATION_ROOT` names the tree the OPERATOR serves. On :3070 and
+ * bg-host that is the canonical working tree. On :3170 it is the staging
+ * generation: a linked worktree that staging-sync replaces on every advance.
+ * An agent launched from :3170 used to inherit that generation path, so it ran
+ * any root-resolved script against a superseded build. It also pinned the ~3G
+ * generation on / against pruning for its whole lifetime: 4 generations, 33
+ * processes, measured 2026-10-02. A linked-worktree value is mapped back to its
+ * main worktree, which is the tree agents actually work in.
+ *
+ * Apply this to the INHERITED base only, before merging a launch envelope. A
+ * launch that deliberately pins an isolation worktree keeps its explicit value.
+ * Pure: returns a copy.
+ */
+export function agentInheritedOperatorEnv(
+  env: NodeJS.ProcessEnv,
+  readGitPointer?: (path: string) => string,
+): NodeJS.ProcessEnv {
+  const out = { ...env };
+  const root = out.PAPERCUSP_INTEGRATION_ROOT?.trim();
+  if (root) out.PAPERCUSP_INTEGRATION_ROOT = mainWorktreeOf(root, readGitPointer);
+  return out;
+}
+
 export interface SpawnInTerminalOpts {
   /** Shell one-liner run inside `bash -lc` in the new terminal window. */
   oneliner: string;
@@ -337,7 +391,7 @@ export async function spawnInTerminal(opts: SpawnInTerminalOpts): Promise<SpawnI
       // the window owns those.
       stdio: ['ignore', 'ignore', 'pipe'],
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
-      env: scrubTerminalContextEnv(opts.env ?? process.env),
+      env: scrubTerminalContextEnv(opts.env ?? agentInheritedOperatorEnv(process.env)),
     });
     child.unref();
     const pid = child.pid;

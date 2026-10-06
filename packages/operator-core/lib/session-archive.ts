@@ -244,8 +244,8 @@ export interface SessionArchiveStore {
 
 const WS_DEFAULT = 'default';
 /** Bounds: a "session" that trips these is malformed input, not an archive job. */
-const MAX_FILES_PER_SESSION = 64;
-const MAX_TOTAL_RAW_BYTES = 256 * 1024 * 1024;
+export const SESSION_ARCHIVE_MAX_FILES = 64;
+export const SESSION_ARCHIVE_MAX_TOTAL_RAW_BYTES = 256 * 1024 * 1024;
 
 // ── collectors (pure FS; exported for tests + the P-006 reconciler) ─────────
 
@@ -461,9 +461,9 @@ export async function archiveSession(
   const none = { fileCount: 0, bytesRaw: 0, bytesStored: 0 };
   const collected = await collectSessionFiles(ref);
   if (!collected.length) return { ok: false, reason: 'no_files', ...none };
-  if (collected.length > MAX_FILES_PER_SESSION) return { ok: false, reason: 'too_many_files', ...none };
+  if (collected.length > SESSION_ARCHIVE_MAX_FILES) return { ok: false, reason: 'too_many_files', ...none };
   const totalRaw = collected.reduce((s, f) => s + f.bytes, 0);
-  if (totalRaw > MAX_TOTAL_RAW_BYTES) return { ok: false, reason: 'too_large', ...none };
+  if (totalRaw > SESSION_ARCHIVE_MAX_TOTAL_RAW_BYTES) return { ok: false, reason: 'too_large', ...none };
 
   // Writers key every row under WS_DEFAULT, unconditionally. The ref carries no
   // workspace: a ref-supplied one could mint a row no reader is able to address.

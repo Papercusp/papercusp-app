@@ -1,0 +1,131 @@
+diff --git a/node_modules/@anthropic-ai/sdk/client.js b/node_modules/@anthropic-ai/sdk/client.js
+index 9d48b0b..421541b 100644
+--- a/node_modules/@anthropic-ai/sdk/client.js
++++ b/node_modules/@anthropic-ai/sdk/client.js
+@@ -591,7 +591,27 @@
+             clearTimeout(timeout);
+         }
+     }
++    // PAPERCUSP PATCH (WI-10004615): the delay the server asked for, in ms (`retry-after-ms`,
++    // then `retry-after` as seconds or an HTTP date), or undefined when it named none.
++    papercuspRequestedRetryDelayMs(headers) {
++        const ms = parseFloat(headers?.get('retry-after-ms') ?? '');
++        if (!Number.isNaN(ms))
++            return ms;
++        const raw = headers?.get('retry-after');
++        if (!raw)
++            return undefined;
++        const seconds = parseFloat(raw);
++        return Number.isNaN(seconds) ? Date.parse(raw) - Date.now() : seconds * 1000;
++    }
+     async shouldRetry(response, options) {
++        // PAPERCUSP PATCH (WI-10004615): never wait out a server-requested delay longer than 60 s
++        // inside the SDK. This version honours `retry-after` uncapped with a wait that ignored the
++        // AbortSignal, so a usage-window 429 (measured: retry-after 8286) froze in-process LLM
++        // calls for 2h18m past their own deadlines. Surface the error instead; the caller's retry
++        // ladder / governor can see the reset and its own deadline and decide.
++        const requestedDelayMs = this.papercuspRequestedRetryDelayMs(response.headers);
++        if (requestedDelayMs !== undefined && requestedDelayMs > 60 * 1000)
++            return false;
+         // Reactive refresh: on a 401 from a request that used the token cache,
+         // invalidate and retry once. Only fires when this specific request was
+         // bearer-authenticated (not when an apiKey was used) and only once per
+@@ -654,7 +674,7 @@
+             const maxRetries = options.maxRetries ?? this.maxRetries;
+             timeoutMillis = this.calculateDefaultRetryTimeoutMillis(retriesRemaining, maxRetries);
+         }
+-        await (0, sleep_1.sleep)(timeoutMillis);
++        await (0, sleep_1.sleep)(timeoutMillis, options.signal); // PAPERCUSP PATCH (WI-10004615)
+         return this.makeRequest(options, retriesRemaining - 1, requestLogID);
+     }
+     calculateDefaultRetryTimeoutMillis(retriesRemaining, maxRetries) {
+diff --git a/node_modules/@anthropic-ai/sdk/client.mjs b/node_modules/@anthropic-ai/sdk/client.mjs
+index c4dd285..e623ec5 100644
+--- a/node_modules/@anthropic-ai/sdk/client.mjs
++++ b/node_modules/@anthropic-ai/sdk/client.mjs
+@@ -588,7 +588,27 @@
+             clearTimeout(timeout);
+         }
+     }
++    // PAPERCUSP PATCH (WI-10004615): the delay the server asked for, in ms (`retry-after-ms`,
++    // then `retry-after` as seconds or an HTTP date), or undefined when it named none.
++    papercuspRequestedRetryDelayMs(headers) {
++        const ms = parseFloat(headers?.get('retry-after-ms') ?? '');
++        if (!Number.isNaN(ms))
++            return ms;
++        const raw = headers?.get('retry-after');
++        if (!raw)
++            return undefined;
++        const seconds = parseFloat(raw);
++        return Number.isNaN(seconds) ? Date.parse(raw) - Date.now() : seconds * 1000;
++    }
+     async shouldRetry(response, options) {
++        // PAPERCUSP PATCH (WI-10004615): never wait out a server-requested delay longer than 60 s
++        // inside the SDK. This version honours `retry-after` uncapped with a wait that ignored the
++        // AbortSignal, so a usage-window 429 (measured: retry-after 8286) froze in-process LLM
++        // calls for 2h18m past their own deadlines. Surface the error instead; the caller's retry
++        // ladder / governor can see the reset and its own deadline and decide.
++        const requestedDelayMs = this.papercuspRequestedRetryDelayMs(response.headers);
++        if (requestedDelayMs !== undefined && requestedDelayMs > 60 * 1000)
++            return false;
+         // Reactive refresh: on a 401 from a request that used the token cache,
+         // invalidate and retry once. Only fires when this specific request was
+         // bearer-authenticated (not when an apiKey was used) and only once per
+@@ -651,7 +671,7 @@
+             const maxRetries = options.maxRetries ?? this.maxRetries;
+             timeoutMillis = this.calculateDefaultRetryTimeoutMillis(retriesRemaining, maxRetries);
+         }
+-        await sleep(timeoutMillis);
++        await sleep(timeoutMillis, options.signal); // PAPERCUSP PATCH (WI-10004615)
+         return this.makeRequest(options, retriesRemaining - 1, requestLogID);
+     }
+     calculateDefaultRetryTimeoutMillis(retriesRemaining, maxRetries) {
+diff --git a/node_modules/@anthropic-ai/sdk/internal/utils/sleep.js b/node_modules/@anthropic-ai/sdk/internal/utils/sleep.js
+index 45d1e13..0865f4e 100644
+--- a/node_modules/@anthropic-ai/sdk/internal/utils/sleep.js
++++ b/node_modules/@anthropic-ai/sdk/internal/utils/sleep.js
+@@ -2,6 +2,19 @@
+ // File generated from our OpenAPI spec by Stainless. See CONTRIBUTING.md for details.
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.sleep = void 0;
+-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
++// PAPERCUSP PATCH (WI-10004615): the retry wait observes the request's AbortSignal. It resolves
++// early on abort and makeRequest's own `options.signal?.aborted` check then throws
++// APIUserAbortError, so a caller's deadline is honoured during a retry wait too.
++const sleep = (ms, signal) => new Promise((resolve) => {
++    if (signal?.aborted)
++        return resolve();
++    const done = () => {
++        clearTimeout(timer);
++        signal?.removeEventListener?.('abort', done);
++        resolve();
++    };
++    const timer = setTimeout(done, ms);
++    signal?.addEventListener?.('abort', done, { once: true });
++});
+ exports.sleep = sleep;
+ //# sourceMappingURL=sleep.js.map
+\ No newline at end of file
+diff --git a/node_modules/@anthropic-ai/sdk/internal/utils/sleep.mjs b/node_modules/@anthropic-ai/sdk/internal/utils/sleep.mjs
+index 784954a..496d7a8 100644
+--- a/node_modules/@anthropic-ai/sdk/internal/utils/sleep.mjs
++++ b/node_modules/@anthropic-ai/sdk/internal/utils/sleep.mjs
+@@ -1,3 +1,16 @@
+ // File generated from our OpenAPI spec by Stainless. See CONTRIBUTING.md for details.
+-export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
++// PAPERCUSP PATCH (WI-10004615): the retry wait observes the request's AbortSignal. It resolves
++// early on abort and makeRequest's own `options.signal?.aborted` check then throws
++// APIUserAbortError, so a caller's deadline is honoured during a retry wait too.
++export const sleep = (ms, signal) => new Promise((resolve) => {
++    if (signal?.aborted)
++        return resolve();
++    const done = () => {
++        clearTimeout(timer);
++        signal?.removeEventListener?.('abort', done);
++        resolve();
++    };
++    const timer = setTimeout(done, ms);
++    signal?.addEventListener?.('abort', done, { once: true });
++});
+ //# sourceMappingURL=sleep.mjs.map
+\ No newline at end of file

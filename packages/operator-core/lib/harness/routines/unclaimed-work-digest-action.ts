@@ -18,6 +18,11 @@ import { registerSystemAction, type SystemActionCtx } from './system-actions';
 import { sendMessage } from '../../agent-tools/coordination/messages';
 import type { AgentIdentity } from '../../agent-tools/coordination/identity';
 import { listWorkItems } from '../../work-items';
+import {
+  DEFAULT_STRANDED_APP_TASK_BOUND_HOURS,
+  productionStrandedAppTaskGuardDeps,
+  runStrandedAppTaskGuard,
+} from '../../stranded-app-tasks';
 
 /** Coord identity for the digest broadcast (mirrors the human-queue-digest pattern). */
 const UNCLAIMED_DIGEST_IDENTITY: AgentIdentity = {
@@ -72,10 +77,42 @@ export function composeUnclaimedWorkDigest(
   return { summary, body };
 }
 
+/**
+ * Stranded app-task guard (app-agent-tasks-durable-execution-2026-10-06 P-005). The digest
+ * above covers ONE harness, which is exactly how 129 never-claimed email tasks in the `email`
+ * harness went unseen for weeks. This pass covers the routine's whole WORKSPACE, but only
+ * app-created rows (trigger binding or blueprint-operation root) past a bound, and files one
+ * accountable flag per (harness, kind) instead of broadcasting. Fail-soft: a guard failure
+ * must not cost the digest, and vice versa. Config: `stranded_after_hours` (default 6).
+ */
+async function runStrandedGuard(ctx: SystemActionCtx): Promise<Record<string, unknown>> {
+  const cfg = ctx.triggerConfig ?? {};
+  const raw = Number(cfg.stranded_after_hours);
+  const boundHours = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_STRANDED_APP_TASK_BOUND_HOURS;
+  try {
+    const result = await runStrandedAppTaskGuard(
+      productionStrandedAppTaskGuardDeps({ workspaceId: ctx.workspaceId, flagHarness: ctx.installSlug, boundHours }),
+      { boundHours },
+    );
+    console.log(
+      `[unclaimed-work-digest] stranded-app-task guard: ${result.strandedTasks} stranded task(s) in ` +
+        `${result.groups} group(s), ${result.flagged.length} flagged, ${result.settled.length} settled, ` +
+        `${result.errors.length} error(s)`,
+    );
+    return { boundHours, ...result };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    console.warn('[unclaimed-work-digest] stranded-app-task guard failed:', error);
+    return { boundHours, error };
+  }
+}
+
 registerSystemAction('unclaimed-work-digest', async (ctx: SystemActionCtx) => {
   const cfg = ctx.triggerConfig ?? {};
   const topN = Number.isFinite(Number(cfg.top_n)) && Number(cfg.top_n) > 0 ? Number(cfg.top_n) : DEFAULT_TOP_N;
   const harness = typeof cfg.harness === 'string' && cfg.harness.length > 0 ? cfg.harness : DEFAULT_HARNESS;
+
+  const strandedAppTasks = await runStrandedGuard(ctx);
 
   // work-item-status-full-unify P-007: unclaimed CLAIMABLE work is at the unified token
   // 'open' now (was 'todo'); listWorkItems matches status EXACTLY, so 'todo' → empty digest.
@@ -87,7 +124,7 @@ registerSystemAction('unclaimed-work-digest', async (ctx: SystemActionCtx) => {
   const composed = composeUnclaimedWorkDigest(unclaimed, { topN, harness });
   if (!composed) {
     console.log(`[unclaimed-work-digest] ${harness}: no unclaimed work-items — nothing to post`);
-    return;
+    return { diagnostics: { strandedAppTasks } };
   }
 
   // Fleet-broadcast rail — every live agent's coord:feed / coord:orient sees it.
@@ -98,4 +135,5 @@ registerSystemAction('unclaimed-work-digest', async (ctx: SystemActionCtx) => {
   }
 
   console.log(`[unclaimed-work-digest] ${composed.summary}`);
+  return { diagnostics: { strandedAppTasks } };
 });

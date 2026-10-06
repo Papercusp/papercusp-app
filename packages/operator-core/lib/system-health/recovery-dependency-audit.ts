@@ -651,6 +651,22 @@ export const RECOVERY_MECHANISMS: readonly RecoveryMechanism[] = [
     note: 'Runs the cold-boot drill on cadence.',
   },
 
+  // ── Remote access (external-app-access) ──────────────────────────────────────────
+  {
+    name: 'own-tunnel-reconciler',
+    file: 'packages/operator-core/lib/own-tunnel/service.ts',
+    executor: 'operator-in-process-timer',
+    recovers: ['external-process'],
+    note: 'Makes this process match the remote_access_own_tunnel row: opens the external-ingress listener and (re)starts the cloudflared connector. cloudflared is a separate process, so its death is the failure this recovers, and the in-process timer does not depend on it.',
+  },
+  {
+    name: 'portal-relay-reconciler',
+    file: 'packages/operator-core/lib/remote-access/relay-opt-in.ts',
+    executor: 'operator-in-process-timer',
+    recovers: [],
+    note: 'Makes this process match the remote_access_portal_relay row: (re)links the outbound relay connector. The connector is an in-process outbound link to the portal, so a dropped link is not a substrate component this timer rides.',
+  },
+
   // ── Work-item queue / claim layer ────────────────────────────────────────────────
   {
     name: 'unservable-critical-watchdog',

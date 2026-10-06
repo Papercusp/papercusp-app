@@ -35,7 +35,7 @@ import { writeWatermark } from '../coordination/watermarks';
 import { isWorkspaceContended } from '../locks/contention-retry';
 import { releaseAllWorkItemLeasesForOwner } from '../../work-item-lease-release';
 import { consumeRespawnExpected } from '../../carry-respawn-marker';
-import { recentContextResetWake } from '../../session-reset-continuation';
+import { isWakeResumeTurn, recentContextResetWake } from '../../session-reset-continuation';
 import {
   NATIVE_SESSION_ID_RE,
   classifyOwnerNativeSession,
@@ -85,6 +85,9 @@ type ActivityReportResult = Awaited<ReturnType<typeof recordActivity>> & {
   /** `foreign` (WI-10003957): the ending native session is not the owner's bound
    *  incarnation — a nested CLI that inherited PAPERCUSP_SID. Never reaped. */
   session_end_disposition?: 'terminal' | 'continuation' | 'foreign';
+  /** WI-10005679: a terminal SessionEnd that KEPT the standing inbox-wake,
+   *  because it ended a one-turn wake resume, not the session itself. */
+  inbox_wake_retained?: 'wake-resume-turn';
 };
 
 export default defineTool({
@@ -145,6 +148,9 @@ export default defineTool({
     session_id: z.string().max(256).optional(),
     /** The stable adv_sessions row id, when the launcher can carry it. */
     adv_session_id: z.coerce.number().int().positive().optional(),
+    /** PAPERCUSP_WAKE_DELIVERY_ID: set only on a child the wake executor spawned
+     *  as a one-turn resume. Verified against the delivery ledger (WI-10005679). */
+    wake_delivery_id: z.coerce.number().int().positive().optional(),
     /** The harness the worker is in (its cwd's repo), when known. */
     harness_slug: z.string().max(256).optional(),
     /** Override the derived kind; otherwise inferred (todos > tool > lifecycle). */
@@ -277,14 +283,15 @@ export default defineTool({
     // turn-lifecycle-control P-003/P-004: a session's lifecycle transition is the
     // universal, client-agnostic moment to (un)arm its inbox-wake watch — so EVERY
     // psu/Queen-launched agent is wakeable WITHOUT having to call coord:await-inbox
-    // (D-001). Idempotent upsert / cancel; never let it break the report.
+    // (D-001). Idempotent upsert / cancel; never let it break the report. SessionEnd
+    // cancellation is deferred until continuation classification below: a resumed
+    // same-owner loop may not receive another SessionStart before its next wake.
     const phase = args.kind === 'lifecycle' ? lifecyclePhase(args.summary) : null;
-    // Judge sessions are deliberately admitted only to narrow evidence/reply
-    // tools, so they cannot consume the broad coord inbox that the standing
-    // inbox-wake would deliver. The role is carried by the child hooks from the
-    // trusted role-scoped launch env; exact-match only keeps ordinary roles on
-    // the existing always-arm/self-heal path.
-    const isJudge = args.role?.trim() === 'judge';
+    // WI-10005679: judges are armed like every other tracked session. The
+    // former judge exclusion assumed a judge could not consume its coord
+    // inbox; WI-10005678 gave it its bare-id directed inbox, and the launch
+    // path (capability:launch-agent) already armed judges anyway, so the
+    // exclusion only disabled SessionStart re-arm and self-heal.
     // WI-10003957: every lifecycle effect below is keyed on the OWNER, but the
     // report comes from whichever native CLI fired the hook. PAPERCUSP_SID is
     // inherited by every descendant of an su, so a nested CLI (a test's
@@ -318,9 +325,7 @@ export default defineTool({
           // presence snapshot ONCE. Independent best-effort (its own catch) so an
           // inbox-wake hiccup never skips it, and vice-versa.
           await writeWatermark(owner, { snapshot_rebootstrap_pending: true }).catch(() => {});
-          if (!isJudge) {
-            await armInboxWake({ ownerId: owner, workspaceId: ctx.principal?.workspaceId });
-          }
+          await armInboxWake({ ownerId: owner, workspaceId: ctx.principal?.workspaceId });
           // WI-37420: a COLD loop wake delivered over psu-socket-reset types
           // `/clear` into the LIVE pty (session-reset-continuation.ts) — the CLI
           // child mints a brand-new native session id for that in-place reset
@@ -361,8 +366,6 @@ export default defineTool({
               );
             });
           }
-        } else if (!foreignSession) {
-          await cancelInboxWake(owner, ctx.principal?.workspaceId); // D-003: cancel on clean end
         }
       } catch (e) {
         console.warn(
@@ -455,6 +458,39 @@ export default defineTool({
           );
         } else {
           result.session_end_disposition = 'terminal';
+          // D-003: only a terminal SessionEnd retires the standing watch. A
+          // carry-respawn, context reset, or active warm loop continues under the
+          // same owner id; canceling before the classifier runs strands that
+          // continuation with no wake route when it does not get a fresh
+          // SessionStart before its next inbox event.
+          //
+          // WI-10005679: ...except when this end closes a one-turn wake RESUME.
+          // The executor resumed the session FROM this watch, and the `-p` child
+          // exits when its turn settles. Retiring the watch here left every
+          // later send to that owner `recipient_alive_not_wakeable` (measured on
+          // a recruited judge that could not be asked a follow-up). Release of
+          // leases/locks below is unchanged. A ledger read error keeps the cancel.
+          const wakeResumeTurn = await isWakeResumeTurn(owner, args.wake_delivery_id).catch((e) => {
+            console.warn(
+              `[activity:report] wake-resume check for ${owner} failed, retiring the inbox-wake as a terminal end: ${e instanceof Error ? e.message : e}`,
+            );
+            return false;
+          });
+          if (wakeResumeTurn) {
+            result.inbox_wake_retained = 'wake-resume-turn';
+            console.log(
+              `[activity:report] inbox-wake KEPT for ${owner}: this SessionEnd closes the one-turn resume started by wake delivery ` +
+                `${args.wake_delivery_id}; the session stays resumable (WI-10005679)`,
+            );
+          } else {
+            try {
+              await cancelInboxWake(owner, ctx.principal?.workspaceId);
+            } catch (e) {
+              console.warn(
+                `[activity:report] inbox-wake end for ${owner} failed: ${e instanceof Error ? e.message : e}`,
+              );
+            }
+          }
           // session-death-claim-release-2026-07-11 P-002 (the FAST PATH): the
           // SAME SessionEnd/Stop lifecycle event that already fires on every
           // psu session (hooks/cc/lifecycle-report.sh → THIS call, unchanged)
@@ -511,7 +547,7 @@ export default defineTool({
           }
         }
       }
-    } else if (args.kind !== 'lifecycle' && !isJudge) {
+    } else if (args.kind !== 'lifecycle') {
       // SELF-HEAL (launch-wakeability): a genuine non-lifecycle report is a native
       // tool call from a running session. If that session's SessionStart arm was lost
       // (the detached, fail-open lifecycle hook POST can drop at launch — leaving a

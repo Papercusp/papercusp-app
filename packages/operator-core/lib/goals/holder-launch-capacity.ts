@@ -24,6 +24,16 @@
  *
  * Pure over `AccountStatusRow[]`; the one I/O door (`assessGoalHolderLaunch
  * CapacityForGoal`) folds the goal's launch settings and reads the live rows.
+ *
+ * WI-10005904 (measured 2026-10-03 05:24–05:29Z): the owner's account SESSION
+ * OVERRIDE is part of "could a launch reach the model". The override was
+ * `forcedAccounts: ['ownerhandle_codex']`, so the launch door (bootstrap-su's
+ * `--account auto` resolution) refused every claude holder at boot — "no
+ * allowed claude account is available in the pool" — while this module, blind
+ * to the override, read "2 of 9 claude accounts can serve". Six boot deaths
+ * filled the hourly rate cap and paused the goal. The override now narrows the
+ * candidates with the SAME predicate (`applyAccountOverride`), and an override
+ * that leaves no allowed account is a measured `session-override` deferral.
  */
 import type { AccountProvider } from '../deployment/account-pool';
 import {
@@ -32,6 +42,13 @@ import {
   type AccountStatusRow,
   type ProviderPoolVerdict,
 } from '../deployment/account-pool-store';
+import {
+  applyAccountOverride,
+  DEFAULT_ACCOUNT_OVERRIDE,
+  getAccountOverride,
+  isOverrideEmpty,
+  type AccountSessionOverride,
+} from '../deployment/account-session-override';
 import { foldLaunchProfile, type GoalLaunchSettings, type LaunchProfile } from '../goal-launch-settings';
 
 /** Launch-profile `account` values that mean "resolve from the pool at launch time". */
@@ -50,7 +67,12 @@ export interface GoalHolderLaunchTarget {
   agent: string | null;
 }
 
-export type GoalHolderLaunchCapacityBinding = 'usage-wall' | 'rate-pause';
+/**
+ * What makes a deferred launch certain to die. `session-override` is the owner's
+ * account steer leaving no allowed account for the holder's provider (or
+ * excluding its pin): it never lifts on its own, so it escalates at once.
+ */
+export type GoalHolderLaunchCapacityBinding = 'usage-wall' | 'rate-pause' | 'session-override';
 
 export type GoalHolderLaunchCapacityVerdict =
   | { kind: 'clear'; target: GoalHolderLaunchTarget; reason: string }
@@ -97,11 +119,17 @@ export function holderLaunchTargetForSettings(
  * and unable to serve. Any stale row, unregistered pin, or unmapped provider is
  * `unknown` and lets the launch proceed — this guard exists to stop launches
  * that are CERTAIN to die, never to withhold recovery on a guess.
+ *
+ * `override` is the workspace's account session override. It is applied with
+ * the launch door's own predicate BEFORE any freshness rule, because the door
+ * refuses an excluded account without reading status at all: an override that
+ * leaves no allowed candidate is a certain boot death, never `unknown`.
  */
 export function assessGoalHolderLaunchCapacity(
   rows: readonly AccountStatusRow[],
   target: GoalHolderLaunchTarget,
   now: number = Date.now(),
+  override: AccountSessionOverride = DEFAULT_ACCOUNT_OVERRIDE,
 ): GoalHolderLaunchCapacityVerdict {
   if (!target.provider) {
     return {
@@ -126,6 +154,31 @@ export function assessGoalHolderLaunchCapacity(
   }
   if (candidates.length === 0) {
     return { kind: 'unknown', target, reason: `no '${provider}' accounts registered — the launch door decides` };
+  }
+  if (!isOverrideEmpty(override)) {
+    const allowed = new Set(applyAccountOverride(candidates.map((r) => r.id), override));
+    if (allowed.size === 0) {
+      const registered = poolVerdictByProvider(candidates, now).find((p) => p.provider === provider);
+      if (registered) {
+        const steer =
+          `forced: ${override.forcedAccounts.join(', ') || 'none'}; excluded: ${override.excludeAccounts.join(', ') || 'none'}`;
+        const subject = target.accountId
+          ? `pinned account '${target.accountId}'`
+          : `every '${provider}' account (${candidates.length} registered)`;
+        return {
+          kind: 'deferred',
+          target,
+          binding: 'session-override',
+          untilMs: null,
+          accountIds: candidates.map((r) => r.id),
+          reason:
+            `the account session override (${steer}) disallows ${subject}, so the launch door refuses ` +
+            `the holder at boot ("--account ${target.accountId ?? 'auto'} could not be honored")`,
+          pool: registered,
+        };
+      }
+    }
+    candidates = candidates.filter((r) => allowed.has(r.id));
   }
   const pool = poolVerdictByProvider(candidates, now).find((p) => p.provider === provider);
   if (!pool) {
@@ -169,17 +222,24 @@ export function assessGoalHolderLaunchCapacity(
 export interface GoalHolderLaunchCapacityDeps {
   /** Live `accounts:status` rows for the workspace (test seam). */
   readAccountStatus: (workspaceId: string) => Promise<readonly AccountStatusRow[]>;
+  /**
+   * The workspace's account session override — the same row the launch door
+   * (bootstrap-su) reads. Optional so a caller that omits it judges as before.
+   */
+  readAccountOverride?: (workspaceId: string) => Promise<AccountSessionOverride>;
   now: () => number;
 }
 
 const DEFAULT_CAPACITY_DEPS: GoalHolderLaunchCapacityDeps = {
   readAccountStatus: async (workspaceId) => await accountStatus(workspaceId),
+  readAccountOverride: async (workspaceId) => await getAccountOverride(workspaceId),
   now: Date.now,
 };
 
 /**
  * The I/O door: fold the goal's holder-role launch profile (the same fold the
- * launch itself applies) and judge it against the workspace's live account rows.
+ * launch itself applies) and judge it against the workspace's live account rows
+ * and account session override.
  */
 export async function assessGoalHolderLaunchCapacityForGoal(
   goal: { workspaceId: string; launchSettings?: GoalLaunchSettings | null },
@@ -187,7 +247,41 @@ export async function assessGoalHolderLaunchCapacityForGoal(
 ): Promise<GoalHolderLaunchCapacityVerdict> {
   const target = holderLaunchTargetForSettings(goal.launchSettings);
   const rows = await deps.readAccountStatus(goal.workspaceId);
-  return assessGoalHolderLaunchCapacity(rows, target, deps.now());
+  let override = DEFAULT_ACCOUNT_OVERRIDE;
+  if (deps.readAccountOverride) {
+    try {
+      override = await deps.readAccountOverride(goal.workspaceId);
+    } catch (error) {
+      // An unreadable override is not evidence of a restriction: judge the rows
+      // alone (the pre-WI-10005904 behaviour) rather than defer on a guess.
+      console.warn(
+        `[holder-launch-capacity] account override read failed for ${goal.workspaceId} (judging without it): ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return assessGoalHolderLaunchCapacity(rows, target, deps.now(), override);
+}
+
+/**
+ * WI-10005904 backstop: the launch door's refusal of the holder's account
+ * route, as it appears in a launch error (the boot-receipt scan folds the
+ * member's log tail into it): `--account <x> could not be honored: …`. The
+ * holder process exits before its first turn, so the death says nothing about
+ * the goal or its holder — only that this route cannot launch right now.
+ * Returns the bounded refusal line, or null when the error carries no such line.
+ */
+const ACCOUNT_UNHONORED_RE = /--account \S+ could not be honored/i;
+
+export function holderLaunchAccountUnhonored(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  if (!message) return null;
+  // eslint-disable-next-line no-control-regex
+  const lines = message.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').split(/\r?\n/);
+  const line = lines.find((l) => ACCOUNT_UNHONORED_RE.test(l));
+  if (line == null) return null;
+  const at = line.search(ACCOUNT_UNHONORED_RE);
+  return line.slice(at).replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
 /** Human-readable "until" for logs and escalations. */

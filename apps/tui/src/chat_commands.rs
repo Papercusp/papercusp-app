@@ -24,6 +24,13 @@ pub struct SlashCommand {
 pub enum SlashKind {
     Help,
     Resume,
+    Clear,
+    Model,
+    Effort,
+    Backend,
+    Status,
+    Compact,
+    Approvals,
     Details,
     Expand,
     Copy,
@@ -42,6 +49,47 @@ pub const COMMANDS: &[SlashCommand] = &[
         name: "resume",
         summary: "Switch to another conversation (Ctrl+S)",
         kind: SlashKind::Resume,
+    },
+    // pui-chat-first-ux P-027 (G-4): Claude Code's and Codex's /clear.
+    SlashCommand {
+        name: "clear",
+        summary: "Start a new conversation (this one stays in /resume)",
+        kind: SlashKind::Clear,
+    },
+    // pui-chat-first-ux P-026: both apply from the next turn of a running
+    // conversation, or set the model a new one starts on.
+    SlashCommand {
+        name: "model",
+        summary: "Switch the model, from the next turn",
+        kind: SlashKind::Model,
+    },
+    SlashCommand {
+        name: "effort",
+        summary: "Set the reasoning effort, from the next turn",
+        kind: SlashKind::Effort,
+    },
+    // pui-chat-first-ux P-025: in chat-first Esc stays in the message box
+    // (P-027), so the `b` key never reaches the backend picker. This is the
+    // only way a bare `pui` user starts a Codex or OMP conversation.
+    SlashCommand {
+        name: "backend",
+        summary: "Engine for a new conversation: Claude, Codex or OMP",
+        kind: SlashKind::Backend,
+    },
+    SlashCommand {
+        name: "status",
+        summary: "Model, account and engine this conversation runs on",
+        kind: SlashKind::Status,
+    },
+    SlashCommand {
+        name: "compact",
+        summary: "Summarize the conversation to free up context (Claude)",
+        kind: SlashKind::Compact,
+    },
+    SlashCommand {
+        name: "approvals",
+        summary: "Ask, auto-edit or read-only; applies from the next message (Shift+Tab)",
+        kind: SlashKind::Approvals,
     },
     SlashCommand {
         name: "expand",
@@ -138,7 +186,10 @@ mod tests {
         let all: Vec<_> = matching("").iter().map(|c| c.name).collect();
         assert_eq!(all, COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>());
         let e: Vec<_> = matching("e").iter().map(|c| c.name).collect();
-        assert_eq!(e, vec!["expand", "exit"]);
+        assert_eq!(e, vec!["effort", "expand", "exit"]);
+        let ex: Vec<_> = matching("ex").iter().map(|c| c.name).collect();
+        assert_eq!(ex, vec!["expand", "exit"]);
+        assert_eq!(matching("mo")[0].kind, SlashKind::Model);
         assert!(matching("zzz").is_empty());
         assert_eq!(matching("HE")[0].name, "help", "case-insensitive");
     }
@@ -146,9 +197,9 @@ mod tests {
     #[test]
     fn resolve_prefers_the_exact_name_then_the_highlighted_row() {
         assert_eq!(resolve("exit", 0).map(|c| c.kind), Some(SlashKind::Exit));
-        assert_eq!(resolve("e", 1).map(|c| c.kind), Some(SlashKind::Exit));
+        assert_eq!(resolve("ex", 1).map(|c| c.kind), Some(SlashKind::Exit));
         assert_eq!(
-            resolve("e", 9).map(|c| c.kind),
+            resolve("ex", 9).map(|c| c.kind),
             Some(SlashKind::Exit),
             "clamped"
         );
@@ -171,6 +222,19 @@ mod tests {
         );
         let exit = COMMANDS.iter().find(|c| c.kind == SlashKind::Exit).unwrap();
         assert!(exit.summary.contains("end"), "the menu says /exit ends it");
+    }
+
+    #[test]
+    fn backend_is_reachable_from_the_menu() {
+        assert_eq!(
+            resolve("backend", 0).map(|c| c.kind),
+            Some(SlashKind::Backend)
+        );
+        assert_eq!(
+            resolve("b", 0).map(|c| c.kind),
+            Some(SlashKind::Backend),
+            "the only command starting with b"
+        );
     }
 
     #[test]

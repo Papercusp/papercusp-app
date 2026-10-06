@@ -128,6 +128,8 @@ export interface BulkRunItem {
   responsibility?: BulkResponsibility | null;
   confidenceLevel?: BulkConfidence | null;
   retryCondition?: string | null;
+  /** P-004 decision projected by the shared bulk-run store. */
+  intakeDecision?: import('@papercusp/operator-core/lib/attention/bulk-dispositions').BulkIntakeDecision | null;
   revertHandle?: Record<string, unknown> | null;
   reversalWindowUntil?: string | null;
   revertedAt?: string | null;

@@ -22,7 +22,14 @@
  *
  * Never-throws + deadline-bounded (default 2s, env-tunable): a recall outage
  * or slow embed must never fail — or materially delay — a claim.
+ *
+ * Never-throws is NOT never-tells (WI-10004121): every null carries a typed
+ * reason (`buildClaimRecallResult`), per-reason counts are readable in-process
+ * (`readClaimRecallOutcomeStats`), and a deadline or error emits a throttled
+ * warn. Before this, a deadline expiry and a thrown import were
+ * indistinguishable from "no memory matched" in every artifact.
  */
+import { pinModuleState } from '@papercusp/module-singleton';
 import { resolveLaunchProfile, buildLaunchMemoryBlock } from './launch-profile';
 import { dominantHarness } from './compact-reprime';
 import { activeWorkspaceId } from '../workspace-registry';
@@ -172,13 +179,128 @@ async function resolveMemoryUserId(explicit: string | null | undefined): Promise
 }
 
 /**
- * Build the claim-time recall block for just-claimed item(s). Returns null on
- * no material, no hits past the admission floors, timeout, or ANY failure.
+ * Why a claim-time recall produced (or did not produce) a block.
+ *   - `ok`         — a block was returned.
+ *   - `no-queries` — no claimed item had a title/id to query with.
+ *   - `no-hits`    — the admission pipeline ran to completion and returned no
+ *                    block (nothing past the floors, or its own fail-soft).
+ *   - `deadline`   — the recall did not settle within `deadlineMs`.
+ *   - `error`      — the recall chain threw (`errorClass` / `errorMessage`).
  */
-export async function buildClaimRecallBlock(input: ClaimRecallInput): Promise<string | null> {
+export type ClaimRecallReason = 'ok' | 'no-queries' | 'no-hits' | 'deadline' | 'error';
+
+export const CLAIM_RECALL_REASONS: readonly ClaimRecallReason[] = [
+  'ok',
+  'no-queries',
+  'no-hits',
+  'deadline',
+  'error',
+];
+
+export interface ClaimRecallOutcome {
+  reason: ClaimRecallReason;
+  /** Wall time spent in the recall, including a deadline wait. */
+  elapsedMs: number;
+  /** The deadline in force for this call (0 = unbounded). */
+  deadlineMs: number;
+  port: string;
+  errorClass?: string;
+  errorMessage?: string;
+}
+
+export interface ClaimRecallResult {
+  block: string | null;
+  outcome: ClaimRecallOutcome;
+}
+
+export interface ClaimRecallOutcomeStats {
+  counts: Record<ClaimRecallReason, number>;
+  /** The most recent `deadline` or `error` outcome, with when it happened. */
+  lastFailure: (ClaimRecallOutcome & { at: string }) | null;
+}
+
+const OUTCOME_WARN_WINDOW_MS = 5 * 60_000;
+const ERROR_MESSAGE_MAX_CHARS = 300;
+
+const outcomeState = pinModuleState('@papercusp/operator-core.claim-recall-outcomes', () => ({
+  counts: Object.fromEntries(CLAIM_RECALL_REASONS.map((r) => [r, 0])) as Record<ClaimRecallReason, number>,
+  lastFailure: null as (ClaimRecallOutcome & { at: string }) | null,
+  warnedAt: 0,
+  sinceWarn: 0,
+  warnOptedInByTest: false,
+}));
+
+/** In-process per-reason counts since boot (or the last test reset). */
+export function readClaimRecallOutcomeStats(): ClaimRecallOutcomeStats {
+  return {
+    counts: { ...outcomeState.counts },
+    lastFailure: outcomeState.lastFailure ? { ...outcomeState.lastFailure } : null,
+  };
+}
+
+/**
+ * Test hook: zero the counters and the warn throttle. Passing
+ * `{ optInToWarn: true }` makes the warn fire under the test runner (it is
+ * silent there by default for the same reason as injection.ts's corpus warn:
+ * `vitest-fail-on-console` turns a stray warn into a failure in every suite
+ * that transitively claims a work-item).
+ */
+export function _resetClaimRecallOutcomeStatsForTests(opts: { optInToWarn?: boolean } = {}): void {
+  for (const r of CLAIM_RECALL_REASONS) outcomeState.counts[r] = 0;
+  outcomeState.lastFailure = null;
+  outcomeState.warnedAt = 0;
+  outcomeState.sinceWarn = 0;
+  outcomeState.warnOptedInByTest = opts.optInToWarn === true;
+}
+
+const warnSuppressedByTestRunner = (): boolean =>
+  Boolean(process.env.VITEST || process.env.NODE_ENV === 'test') && !outcomeState.warnOptedInByTest;
+
+function noteOutcome(outcome: ClaimRecallOutcome): void {
+  outcomeState.counts[outcome.reason] += 1;
+  if (outcome.reason !== 'deadline' && outcome.reason !== 'error') return;
+  outcomeState.lastFailure = { ...outcome, at: new Date().toISOString() };
+  if (warnSuppressedByTestRunner()) return;
+  outcomeState.sinceWarn += 1;
+  const now = Date.now();
+  if (now - outcomeState.warnedAt < OUTCOME_WARN_WINDOW_MS) return;
+  const alsoSuppressed = outcomeState.sinceWarn - 1;
+  const detail =
+    outcome.reason === 'deadline'
+      ? `deadlineMs=${outcome.deadlineMs}`
+      : `class=${outcome.errorClass ?? 'unknown'} message=${JSON.stringify(outcome.errorMessage ?? '')}`;
+  console.warn(
+    `[claim-recall] recall returned no block: reason=${outcome.reason} port=${outcome.port} ` +
+      `elapsedMs=${outcome.elapsedMs} ${detail}` +
+      (alsoSuppressed > 0 ? ` — +${alsoSuppressed} more deadline/error nulls since last warn` : '') +
+      `; re-warns at most once/${OUTCOME_WARN_WINDOW_MS / 60_000}min`,
+  );
+  outcomeState.warnedAt = now;
+  outcomeState.sinceWarn = 0;
+}
+
+const TIMED_OUT = Symbol('claim-recall-timed-out');
+
+/**
+ * Build the claim-time recall block for just-claimed item(s), with the typed
+ * reason it is (or is not) there. Never throws.
+ */
+export async function buildClaimRecallResult(input: ClaimRecallInput): Promise<ClaimRecallResult> {
+  const started = Date.now();
+  const deadlineMs = input.deadlineMs ?? DEFAULT_DEADLINE_MS;
+  const port = input.port ?? 'claim';
+  const finish = (
+    block: string | null,
+    reason: ClaimRecallReason,
+    extra: Pick<ClaimRecallOutcome, 'errorClass' | 'errorMessage'> = {},
+  ): ClaimRecallResult => {
+    const outcome: ClaimRecallOutcome = { reason, elapsedMs: Date.now() - started, deadlineMs, port, ...extra };
+    noteOutcome(outcome);
+    return { block, outcome };
+  };
   try {
     const queries = input.items.map(claimRecallQueryOf).filter((q) => q.length > 0);
-    if (queries.length === 0) return null;
+    if (queries.length === 0) return finish(null, 'no-queries');
     const workspaceId = input.workspaceId?.trim() || activeWorkspaceId();
     const profile = resolveLaunchProfile({
       harnessSlug: dominantHarness(
@@ -187,8 +309,8 @@ export async function buildClaimRecallBlock(input: ClaimRecallInput): Promise<st
       claimedItemTitles: queries,
       planNow: input.planNow ?? null,
     });
-    const block = await withDeadline(
-      input.deadlineMs ?? DEFAULT_DEADLINE_MS,
+    const raw = await withDeadline<string | null | typeof TIMED_OUT>(
+      deadlineMs,
       async () =>
         buildLaunchMemoryBlock({
           profile,
@@ -196,15 +318,28 @@ export async function buildClaimRecallBlock(input: ClaimRecallInput): Promise<st
           userId: await resolveMemoryUserId(input.userId),
           budgetChars: CLAIM_RECALL_BUDGET_CHARS,
           limit: 4,
-          ...(input.sessionId
-            ? { session: { sessionId: input.sessionId, port: input.port ?? 'claim' } }
-            : {}),
+          ...(input.sessionId ? { session: { sessionId: input.sessionId, port } } : {}),
           heading: input.heading ?? CLAIM_RECALL_HEADING,
         }),
-      () => null,
+      () => TIMED_OUT,
     );
-    return boundClaimRecallBlock(block);
-  } catch {
-    return null; // never-throws: recall must never fail a claim
+    if (raw === TIMED_OUT) return finish(null, 'deadline');
+    const block = boundClaimRecallBlock(raw);
+    return finish(block, block ? 'ok' : 'no-hits');
+  } catch (err) {
+    // never-throws: recall must never fail a claim — but it must say why.
+    return finish(null, 'error', {
+      errorClass: err instanceof Error ? err.constructor.name : typeof err,
+      errorMessage: (err instanceof Error ? err.message : String(err)).slice(0, ERROR_MESSAGE_MAX_CHARS),
+    });
   }
+}
+
+/**
+ * Build the claim-time recall block for just-claimed item(s). Returns null on
+ * no material, no hits past the admission floors, timeout, or ANY failure —
+ * `buildClaimRecallResult` carries the reason.
+ */
+export async function buildClaimRecallBlock(input: ClaimRecallInput): Promise<string | null> {
+  return (await buildClaimRecallResult(input)).block;
 }

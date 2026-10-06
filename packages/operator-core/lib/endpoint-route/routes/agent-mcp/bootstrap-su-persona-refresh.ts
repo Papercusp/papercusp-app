@@ -31,7 +31,10 @@
  * so the failure is diagnosable instead of silent.
  */
 import { defineTool } from '@papercusp/agent-mcp';
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+// ASYNC fs only (WI-10005227): this handler runs on bg-host's event loop, and a sync
+// rename over an existing ~150 KB file blocked it 567 ms on ext4 (journal wait +
+// auto_da_alloc data flush). fs/promises moves that wait to the libuv threadpool.
+import { chmod, mkdir, rename, writeFile } from 'node:fs/promises';
 import { readSuLaunchSpecByOwner, recordSuLaunchSpec } from '../../../adv-sessions';
 import { isSuAgent } from '../../../su-agents';
 import { launchContextDir } from '../../../su-launch-context';
@@ -98,11 +101,11 @@ const personaRefresh = defineTool({
       // known-good — rewriting it in place would destroy the fallback at exactly the
       // moment a bad render made the fallback necessary.
       const promptFile = suPersonaRefreshPathFor(coordOwnerId);
-      mkdirSync(launchContextDir(), { recursive: true });
+      await mkdir(launchContextDir(), { recursive: true });
       const tmp = `${promptFile}.tmp-${process.pid}`;
-      writeFileSync(tmp, promptText, { mode: 0o600 });
-      chmodSync(tmp, 0o600);
-      renameSync(tmp, promptFile);
+      await writeFile(tmp, promptText, { mode: 0o600 });
+      await chmod(tmp, 0o600);
+      await rename(tmp, promptFile);
 
       // P-009: a carry-respawn is a new host-delivery attempt even when the
       // content hashes happen to be unchanged. Persist the current immutable

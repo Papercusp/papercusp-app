@@ -25,6 +25,8 @@ import { PgConversationStore } from '../agent-tools/coordination/conversations-s
 import { restorePlanItemStatusForCompensation } from '../agent-tools/plans/set-status';
 import { reopenRejectedTriageForCompensation } from '../harness/improvements/triage-core';
 import { getWorkItem, mergeWorkItemPayload, setWorkItemState } from '../work-items';
+import { INTAKE_APPLY_ACTION_ID } from './bulk-dispositions';
+import { compensateIntakeDecision, sqlIntakeCompensationStore } from './intake-compensation';
 
 function field(handle: RevertHandle, key: string): string | null {
   const value = handle[key];
@@ -43,6 +45,8 @@ export interface AttentionBulkReversalDependencies {
   restorePlanItemStatus: typeof restorePlanItemStatusForCompensation;
   reopenImprovement: typeof reopenRejectedTriageForCompensation;
   restoreWorkItemOwnerGate: typeof restoreWorkItemOwnerGateForCompensation;
+  /** P-009 — the inverse of an applied intake decision (attention/intake-compensation.ts). */
+  compensateIntake: typeof compensateIntakeDecision;
 }
 
 const DEFAULT_DEPS: AttentionBulkReversalDependencies = {
@@ -64,6 +68,7 @@ const DEFAULT_DEPS: AttentionBulkReversalDependencies = {
   restorePlanItemStatus: restorePlanItemStatusForCompensation,
   reopenImprovement: reopenRejectedTriageForCompensation,
   restoreWorkItemOwnerGate: restoreWorkItemOwnerGateForCompensation,
+  compensateIntake: compensateIntakeDecision,
 };
 
 const OWNER_GATE_KEYS = ['needsHuman', 'needsOwnerAction'] as const;
@@ -247,6 +252,22 @@ export async function compensateAttentionBulkRunItem(
       throw new Error(`plan item ${slug}#${planItemId} could not restore: ${restored}`);
     }
     note = `restored plan item ${slug}#${planItemId} to ${priorStatus}`;
+  } else if (sourceKind === 'improvement' && item.actionId === INTAKE_APPLY_ACTION_ID) {
+    // P-009 (D-019): an applied intake decision is inverted by its own module,
+    // inside this transaction, so a thrown step rolls the whole undo back.
+    const issueId = field({ kind: '', ...item.ref }, 'issueId');
+    if (!issueId) throw new Error('intake compensation missing issueId');
+    const result = await deps.compensateIntake(
+      {
+        sourceId: issueId,
+        harnessSlug: field({ kind: '', ...item.ref }, 'harnessSlug'),
+        runId: item.runId,
+        itemId: item.itemId,
+        decision: item.intakeDecision ?? null,
+      },
+      sqlIntakeCompensationStore(sql, workspaceId),
+    );
+    note = result.note;
   } else if (sourceKind === 'improvement') {
     const issueId = field({ kind: '', ...item.ref }, 'issueId');
     if (!issueId) throw new Error('improvement compensation missing issueId');

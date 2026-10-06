@@ -37,6 +37,8 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
+import ts from 'typescript';
+
 import { describeUnscanned, listTrackedFiles } from './lib/tracked-files.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -100,18 +102,50 @@ export function stripComments(text) {
 
 const DROP_RE = /\bDROP\s+DATABASE\b/i;
 const FORCE_RE = /\bWITH\s*\(\s*FORCE\s*\)/i;
+const SQL_EXECUTOR_NAMES = new Set(['unsafe', 'query', 'execute', 'exec']);
+const SQL_TAG_NAMES = new Set(['sql']);
 
 /**
- * A leading test TITLE (`describe('…')` / `it(…)` / `test.each(…)(…)`) names the rule it
- * guards — it is prose, not a statement, so a test called "a cancelled DROP DATABASE
- * never leaks…" would otherwise trip this guard (WI-10003582). Only the title string is
- * blanked; anything else on the line is still scanned, so an unforced statement that
- * shares a line with a title is still reported.
+ * Read the name at the end of a call/tag expression (for example `db.unsafe` or `sql`).
  */
-// `(?:\([^()'"`]*\))?` admits one curried table argument (`test.each(cases)("title", …)`).
-const TEST_TITLE_RE = /^(\s*(?:describe|it|test)(?:\.\w+)*(?:\([^()'"`]*\))?\(\s*)(['"`])((?:\\.|(?!\2)[^\\])*)\2/;
-export function withoutTestTitle(line) {
-  return line.replace(TEST_TITLE_RE, (_match, head, quote) => `${head}${quote}${quote}`);
+function expressionName(expression) {
+  if (ts.isIdentifier(expression)) return expression.text.toLowerCase();
+  if (ts.isPropertyAccessExpression(expression)) return expression.name.text.toLowerCase();
+  if (ts.isElementAccessExpression(expression) && ts.isStringLiteral(expression.argumentExpression)) {
+    return expression.argumentExpression.text.toLowerCase();
+  }
+  return null;
+}
+
+/**
+ * Blank everything except arguments to SQL execution calls and SQL tagged templates.
+ * This keeps SQL literals visible to the guard while excluding descriptive data such
+ * as DBOS cleanup step names and status tuples.
+ */
+function executableSqlText(text, fileName) {
+  const scriptKind = /\.(?:mjs|cjs)$/.test(fileName) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+  const sourceFile = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind);
+  const ranges = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node) && SQL_EXECUTOR_NAMES.has(expressionName(node.expression))) {
+      const query = node.arguments[0];
+      if (query) ranges.push([query.getStart(sourceFile), query.end]);
+    }
+    if (ts.isTaggedTemplateExpression(node) && SQL_TAG_NAMES.has(expressionName(node.tag))) {
+      ranges.push([node.template.getStart(sourceFile), node.template.end]);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
+  const searchable = text.split('');
+  for (let i = 0; i < searchable.length; i++) {
+    if (text[i] !== '\n' && text[i] !== '\r') searchable[i] = ' ';
+  }
+  for (const [start, end] of ranges) {
+    for (let i = start; i < end; i++) searchable[i] = text[i];
+  }
+  return searchable.join('');
 }
 
 /**
@@ -125,15 +159,17 @@ export function withoutTestTitle(line) {
  *
  * Pure (text -> findings) so it is unit-testable without touching git or the fs.
  */
-export function findUnforcedDrops(text) {
-  const lines = stripComments(text).split('\n');
+export function findUnforcedDrops(text, fileName = 'input.ts') {
+  if (!DROP_RE.test(text)) return [];
+  const lines = executableSqlText(text, fileName).split('\n');
+  const originalLines = text.split('\n');
   const findings = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = withoutTestTitle(lines[i]);
+    const line = lines[i];
     if (!DROP_RE.test(line)) continue;
     const window = line + '\n' + (lines[i + 1] ?? '');
     if (FORCE_RE.test(window)) continue;
-    findings.push({ line: i + 1, text: lines[i].trim() });
+    findings.push({ line: i + 1, text: originalLines[i].trim() });
   }
   return findings;
 }
@@ -152,7 +188,7 @@ export function findOffenders() {
     } catch {
       continue;
     }
-    const hits = findUnforcedDrops(text);
+    const hits = findUnforcedDrops(text, f);
     if (hits.length > 0) offenders.push({ file: f, hits });
   }
   return { offenders, unscanned };

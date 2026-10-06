@@ -11,9 +11,11 @@
 import { z } from 'zod';
 import { defineTool, SU_ROLES, isOperatorConfigWriteRole } from '@papercusp/agent-mcp';
 import { getOrgPg } from '@papercusp/db-org';
+import type { AbortCompletionContext, AbortCompletionReceipt, ToolResult } from '@papercusp/tooldef';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { operatorHomeHarnessSlug } from '../../harness/operator-home-harness';
-import { trackDetached } from '../../detached-imports';
+import { getTask } from '../../task-manager/store';
+import { newTaskId } from '../../task-manager/types';
 import {
   applyFrozenCandidateRepairQueueTransition,
   readFrozenCandidateRepairQueueState,
@@ -27,6 +29,7 @@ import { isPidAlive } from '../../release/in-flight-candidate';
 import {
   describeUnreadableFrozenCandidateRepairQueue,
   diagnoseFrozenCandidateRepairQueue,
+  frozenRepairHeadAwaitsVerification,
   markFrozenRepairAdmitted,
   normalizeRepoPath,
   type FrozenCandidateRepairQueue,
@@ -39,29 +42,34 @@ import {
   recordFrozenRepairEdit,
   type FrozenRepairEditLedgerRow,
 } from '../../release/frozen-repair-edit-ledger';
+import { summarizeForeignHunks, type HunkExactSuccess } from '../../release/hunk-exact-admission';
+import { integrationBranch } from '../../release/judged-sha-containment';
+import { realAdmissionGit } from '../../release/repair-head-admission';
+// WI-10005223: every admission git sequence below runs on the admission worker thread, never
+// on the operator main thread (a single admit measured up to 61.8s of blocked event loop).
 import {
-  buildCommittedPatchSource,
-  buildHunkExactSource,
-  summarizeForeignHunks,
-  type HunkExactSuccess,
-} from '../../release/hunk-exact-admission';
-import { containmentForPaths, integrationBranch } from '../../release/judged-sha-containment';
-import { importCompletenessPreflight } from '../../release/admission-import-completeness';
+  AdmissionOffthreadTimeoutError,
+  AdmissionOffthreadTimeoutUnavailableError,
+  runAdmissionJob,
+} from '../../release/admission-offthread';
+import type { AdmissionJobKind, AdmissionJobOf } from '../../release/admission-jobs';
+import { createAdmissionStepClock } from '../../release/admission-step-clock';
 import {
-  chainAdmissionPreflights,
-  lockfileManifestConsistencyPreflight,
-} from '../../release/admission-lockfile-consistency';
-import { admitPathsOntoRepairHead, realAdmissionGit, retractAdmission } from '../../release/repair-head-admission';
-import {
-  createCheckpointTreeFixPrecheckRunner,
+  ADMISSION_PRECHECK_PER_FILE_BUDGET_MS,
+  ADMISSION_PRECHECK_SETUP_BUDGET_MS,
   evaluateFixPrecheck,
   precheckPopulation,
   resolveCanonicalIntegrationRoot,
   type FixPrecheckPopulation,
-  type FixPrecheckProgress,
   type FixPrecheckVerdict,
 } from '../../release/admission-fix-precheck';
+import {
+  settleAdmissionPrecheck,
+  startAdmissionPrecheckWorker,
+  type AdmissionPrecheckWorkerInput,
+} from '../../release/admission-fix-precheck-managed';
 import { checkpointRootMirror } from '../../release-checkpoint-launch';
+import { scheduleRepairAutoVerify } from '../../release/repair-auto-verify';
 import {
   describeDependencyPrediction,
   isDependencyInputPath,
@@ -72,10 +80,72 @@ import { claimRepairManifestLeg, renderAdmitCommand } from '../../release/repair
 import { readIdentity } from '../locks/identity';
 import { readGateOwnership, shouldStandDownForLivePeer } from '../../coord/gate-ownership';
 import { executeWithGateActionReceipt } from '../../release/gate-action-receipt';
+import { asRecord, completedResultPayload } from '../abort-completion-payload';
 
 const json = (payload: unknown) => ({ data: payload });
 const target = () => ({ workspaceId: activeWorkspaceId(), installSlug: operatorHomeHarnessSlug() });
+
+/**
+ * A completed `release:repair-queue` call can outlive dispatch's deadline after it has
+ * committed a queue or edit-ledger write. Surface only the durable identity returned by
+ * that exact operation; a success-shaped response without one is not proof of persistence.
+ */
+export function repairQueueAbortCompletionReceipt(
+  _args: unknown,
+  result: ToolResult,
+  context: AbortCompletionContext,
+): AbortCompletionReceipt {
+  if (context.toolName !== 'release:repair-queue' || !context.callId.trim()) {
+    return {
+      status: 'recovery-incomplete',
+      reason: 'release:repair-queue receipt did not receive the dispatch attempt identity',
+      failures: ['missing-attempt-identity'],
+    };
+  }
+  const payload = completedResultPayload(result);
+  if (!payload) {
+    return {
+      status: 'recovery-incomplete',
+      reason: 'release:repair-queue result did not contain a parseable completion payload',
+      failures: ['missing-result-payload'],
+    };
+  }
+
+  const completionReceipt = asRecord(payload.completionReceipt);
+  const effectRef = typeof completionReceipt?.effectRef === 'string' ? completionReceipt.effectRef.trim() : '';
+  if (completionReceipt?.status === 'recorded' && effectRef.startsWith('release:repair-queue:')) {
+    return { status: 'recorded', effectRef };
+  }
+  if (completionReceipt?.status === 'not-recorded') {
+    return {
+      status: 'not-recorded',
+      ...(typeof completionReceipt.reason === 'string' ? { reason: completionReceipt.reason } : {}),
+    };
+  }
+
+  const op = payload.op;
+  if (
+    op === 'get' ||
+    payload.dryRun === true ||
+    payload.alreadyClear === true ||
+    payload.verdict === 'no-frozen-queue' ||
+    (payload.pending === true && payload.verdict === 'precheck-running') ||
+    (op === 'record-edit' && payload.recorded === true && payload.inserted === false) ||
+    (op === 'retire' && payload.retired === false && payload.casMiss === true) ||
+    (payload.refused === true && payload.effectMayHaveRun === false)
+  ) {
+    return { status: 'not-recorded', reason: 'completed response proves this attempt made no repair-queue write' };
+  }
+
+  return {
+    status: 'recovery-incomplete',
+    reason: 'release:repair-queue result did not prove whether its write committed',
+    failures: [effectRef ? 'invalid-completion-receipt' : 'missing-completion-receipt'],
+  };
+}
 const FULL_COMMIT_SHA = /^[0-9a-f]{40,64}$/;
+// Stay ahead of the observed 300s MCP client deadline. This applies to read-only previews only.
+const ADMISSION_PREVIEW_JOB_TIMEOUT_MS = 4 * 60 * 1000;
 const queueIdentityFields = {
   /** The frozen queue snapshot the caller read before building this admission. */
   expectedCandidate: z
@@ -119,6 +189,71 @@ function readQueueIdentity(args: QueueIdentityArgs): QueueIdentity | null {
     expectedUpdatedAtMs: args.expectedUpdatedAtMs!,
   };
 }
+
+async function emitRetiredUnjudgedRepairHeadTerminal(
+  queue: FrozenCandidateRepairQueue,
+  pipeline: string,
+): Promise<{
+  status: 'emitted' | 'partial' | 'failed';
+  sha: string;
+  emittedKeys: string[];
+  failedKeys: string[];
+}> {
+  const summary = `${pipeline} frozen repair head ${queue.repairHead.slice(0, 8)} was retired before verification; no verdict rendered`;
+  const payload = {
+    sha: queue.repairHead,
+    from: queue.candidate,
+    pipeline,
+    reason: 'repair-queue-retired-before-verification',
+    summary,
+    runId: null,
+  };
+  const cancelSiblingKeysFor = [
+    'release:green',
+    `release:green:${pipeline}`,
+    'green-checkpoint:red',
+    `green-checkpoint:red:${pipeline}`,
+    'green-checkpoint:held',
+    `green-checkpoint:held:${pipeline}`,
+  ];
+  const keys = ['green-checkpoint:inconclusive', `green-checkpoint:inconclusive:${pipeline}`];
+  const emittedKeys: string[] = [];
+  const failedKeys: string[] = [];
+
+  try {
+    const { emitAwaitedEvent } = await import('../../events/await/engine');
+    for (const key of keys) {
+      try {
+        await emitAwaitedEvent({
+          key,
+          summary,
+          payload,
+          source: 'release:repair-queue-retire',
+          cancelSiblingKeysFor,
+        });
+        emittedKeys.push(key);
+      } catch (error) {
+        failedKeys.push(key);
+        console.warn(
+          `[release:repair-queue] inconclusive retire wake failed for ${queue.repairHead} on ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  } catch (error) {
+    failedKeys.push(...keys);
+    console.warn(
+      `[release:repair-queue] inconclusive retire wake setup failed for ${queue.repairHead}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  return {
+    status: failedKeys.length === 0 ? 'emitted' : emittedKeys.length > 0 ? 'partial' : 'failed',
+    sha: queue.repairHead,
+    emittedKeys,
+    failedKeys,
+  };
+}
+
 const argsSchema = z.preprocess(
   (value) => {
     // The read branch has no arguments. Treat an omitted op on an otherwise
@@ -168,7 +303,7 @@ const argsSchema = z.preprocess(
         /** P-006 (R6, D-002): opt OUT of the admission pre-check for a deliberate wide admission. Requires `precheckReason`; recorded on the ledger entry. */
         skipPrecheck: z.boolean().optional(),
         precheckReason: z.string().min(8).max(2000).optional(),
-        /** Retry a terminal failed pre-check for the same immutable built commit. A running one is never duplicated. */
+        /** Retry a terminal failed or deferred pre-check for the same immutable built commit. A running one is never duplicated. */
         retryPrecheck: z.boolean().optional(),
       }),
       z.object({
@@ -430,21 +565,47 @@ async function inspectQueue() {
   let queue = read.status === 'value' ? read.queue : null;
   let ledger: { status: string; reconciled: number; detail: string } | null = null;
   if (queue) ({ queue, ledger } = await reconcileQueueRowWithLineage(queueTarget, queue));
-  // R6 runs in this host's process, not a persistent worker. A normal service restart
-  // kills its setup/test child and its in-memory finalizer. The marker must not keep
-  // advertising "running" until the entire per-file timeout budget expires.
+  // New R6 runs live in task-manager scopes and persist progress/verdict by operationId.
+  // The launcher host PID is only the pre-spawn race guard; after the task row exists,
+  // replacing that host must not cancel or fail an active pre-check.
   const pending = queue?.admissionPrecheck;
-  if (queue && pending?.status === 'running' && pending.runnerPidIdentity && pending.runnerPid) {
-    const alive = isPidAlive(pending.runnerPid);
-    const observedIdentity = alive === true ? checkpointPidIdentity(pending.runnerPid) : null;
-    if (alive === false || (observedIdentity !== null && observedIdentity !== pending.runnerPidIdentity)) {
-      const detail =
-        `R6 pre-check host process ${pending.runnerPid} ended or was replaced before settling ` +
-        `${pending.operationId}; no test verdict exists for ${pending.builtCommit.slice(0, 12)}. ` +
-        'The admission remains fail-closed; retryPrecheck:true starts a fresh measurement.';
+  if (queue && pending?.status === 'running') {
+    let managedTask: Awaited<ReturnType<typeof getTask>> | null = null;
+    let taskReadError: unknown;
+    if (pending.runnerTaskId) {
+      try {
+        managedTask = await getTask(pending.runnerTaskId);
+      } catch (err) {
+        taskReadError = err;
+      }
+    }
+    if (taskReadError) {
+      ledger = {
+        status: 'precheck-task-read-failed',
+        reconciled: 0,
+        detail: `Could not inspect managed runner ${pending.runnerTaskId}: ${String(taskReadError)}`,
+      };
+    }
+
+    const managedTaskLive = managedTask?.state === 'pending' || managedTask?.state === 'running';
+    const managedTaskEnded = Boolean(managedTask && !managedTaskLive);
+    let launcherHostDead = false;
+    if (!managedTask && !taskReadError && pending.runnerPidIdentity && pending.runnerPid) {
+      const alive = isPidAlive(pending.runnerPid);
+      const observedIdentity = alive === true ? checkpointPidIdentity(pending.runnerPid) : null;
+      launcherHostDead = alive === false || (observedIdentity !== null && observedIdentity !== pending.runnerPidIdentity);
+    }
+    const runnerLost = !taskReadError && (managedTaskEnded || launcherHostDead);
+    if (runnerLost) {
+      const detail = managedTaskEnded
+        ? `Managed R6 pre-check task ${pending.runnerTaskId} ended as ${managedTask!.state} ` +
+          `(exit=${managedTask!.exitCode ?? 'unknown'}${managedTask!.exitReason ? `, reason=${managedTask!.exitReason}` : ''}) ` +
+          `before persisting a verdict for ${pending.builtCommit.slice(0, 12)}.`
+        : `R6 pre-check launcher host process ${pending.runnerPid} ended or was replaced before ` +
+          `managed task ${pending.runnerTaskId ?? '(legacy runner)'} was registered; no verdict exists for ${pending.builtCommit.slice(0, 12)}.`;
       const verdict = evaluateFixPrecheck(
         precheckPopulation({ signature: queue.signature, admittedPaths: pending.files }),
-        { ran: false, reason: 'runner-failed', detail },
+        { ran: false, reason: 'runner-failed', detail: `${detail} The admission remains fail-closed; retryPrecheck:true starts a fresh measurement.` },
       );
       try {
         await settleAdmissionPrecheck(queueTarget, pending.operationId, verdict);
@@ -454,7 +615,7 @@ async function inspectQueue() {
         ledger = {
           status: 'precheck-reconcile-failed',
           reconciled: 0,
-          detail: `Could not persist host-restart failure for ${pending.operationId}: ${String(err)}`,
+          detail: `Could not persist managed-runner failure for ${pending.operationId}: ${String(err)}`,
         };
       }
     }
@@ -508,8 +669,8 @@ function precheckRecordOf(
   };
 }
 
-const ADMISSION_PRECHECK_SETUP_BUDGET_MS = 20 * 60_000;
-const ADMISSION_PRECHECK_PER_FILE_BUDGET_MS = 10 * 60_000;
+// Setup and per-file budgets are imported from the runner (admission-fix-precheck.ts) so
+// this deadline can never drift from the budgets the runner actually enforces (WI-10006014).
 const ADMISSION_PRECHECK_SETTLEMENT_BUDGET_MS = 60_000;
 
 function sameAdmissionPrecheck(
@@ -554,30 +715,6 @@ function admissionPrecheckDeadline(startedAtMs: number, files: readonly string[]
   );
 }
 
-async function settleAdmissionPrecheck(
-  queueTarget: ReturnType<typeof target>,
-  operationId: string,
-  verdict: FixPrecheckVerdict,
-): Promise<void> {
-  const settledAtMs = Date.now();
-  await applyFrozenCandidateRepairQueueTransition(queueTarget, (fresh) => {
-    const current = fresh.admissionPrecheck;
-    if (!current || current.operationId !== operationId || current.status !== 'running') return fresh;
-    const { dispatchReservation, ...rest } = fresh;
-    return {
-      ...rest,
-      ...(dispatchReservation?.token === operationId ? {} : { dispatchReservation }),
-      admissionPrecheck: {
-        ...current,
-        status: verdict.ok ? (verdict.ran ? 'passed' : 'deferred') : 'failed',
-        verdict,
-        updatedAtMs: settledAtMs,
-      },
-      updatedAtMs: Math.max(fresh.updatedAtMs + 1, settledAtMs),
-    };
-  });
-}
-
 async function recordAudit(actor: string, details: Record<string, unknown>): Promise<boolean> {
   try {
     const id = `repair-queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -606,6 +743,7 @@ export default defineTool({
   description:
     'Inspect, admit paths onto, claim a manifest leg, or retire the frozen repair queue. Workspace-global; omit harness/workspace. `admit{paths,...}` is the only door for a gate-red fix on judged lineage: it replays exactly the named integration-branch paths onto repairHead as one proved commit; `wholeBlob:true, sourceCommit:<ancestor SHA>` pins a reviewed source against later staging drift. Dry-run unless `confirm:true`. A confirmed admission with R6 test files first returns an observable `precheck-running` operation; no background leg publishes. `converge` aliases `admit`; `retire` is an exact-identity CAS and dry-run unless confirmed.',
   capability: 'operator:write',
+  abortCompletionReceipt: repairQueueAbortCompletionReceipt,
   effectForCall: (args) => {
     const op = (args as { op?: unknown }).op;
     return op === undefined ||
@@ -626,7 +764,7 @@ export default defineTool({
     chaining:
       '`get` → dry-run `admit{paths, expectedCandidate, expectedRepairHead, expectedUpdatedAtMs}` → verify proof → repeat with `confirm:true`. If staging may move between preview and confirmation, use `wholeBlob:true, sourceCommit:<reviewed integration ancestor SHA>, reason`. If R6 returns `precheck-running`, read it via `get`, then repeat with refreshed identity after pass; retry only a terminal failed pre-check. For missed hook capture, `patchCommit:<full SHA>, reason` replays that commit’s named-path delta. Retire only when `get` proves `retireAllowed` and pass its exact identity.',
     returns:
-      '{ ok, op, verdict?, repairQueueRead?, admitted?, precheckOperation?, dryRun?, judgedSha?, nextAction?, containment?, proof? }. Read `nextAction`; mutations report verdict plus proof/containment and retire uses CAS.',
+      '{ ok, op, verdict?, repairQueueRead?, admitted?, precheckOperation?, dryRun?, judgedSha?, nextAction?, containment?, proof?, inconclusiveTerminal? }. Read `nextAction`; a successful retire of an unjudged repairHead emits the exact-SHA inconclusive terminal and reports its wake status.',
     seeAlso: ['release:deploy', 'dev:pipeline_position', 'release:trace'],
   },
   args: argsSchema,
@@ -666,10 +804,33 @@ export default defineTool({
       refused: z.boolean().optional(),
       casMiss: z.boolean().optional(),
       current: z.unknown().nullable().optional(),
+      completionReceipt: z.object({
+        status: z.enum(['recorded', 'not-recorded', 'recovery-incomplete']),
+        effectRef: z.string().optional(),
+        reason: z.string().optional(),
+        failures: z.array(z.string()).optional(),
+      }).optional(),
+      inconclusiveTerminal: z.object({
+        status: z.enum(['emitted', 'partial', 'failed']),
+        sha: z.string(),
+        emittedKeys: z.array(z.string()),
+        failedKeys: z.array(z.string()),
+      }).optional(),
     })
     .passthrough(),
   async handler(args, ctx) {
-    const inspected = await inspectQueue();
+    // WI-10005695: admit/converge report per-step timings (response `timings`) and log a step
+    // that is still running after 30s, so a call whose client gives up is still localizable.
+    const clock =
+      args.op === 'admit' || args.op === 'converge'
+        ? createAdmissionStepClock({
+            context:
+              `op=${args.op} paths=${Array.isArray(args.paths) ? args.paths.length : 0} ` +
+              `dryRun=${args.confirm !== true} wholeBlob=${args.wholeBlob === true}`,
+          })
+      : null;
+    try {
+    const inspected = clock ? await clock.step('inspect-queue', () => inspectQueue()) : await inspectQueue();
     const compactRead =
       inspected.read.status === 'value'
         ? { status: 'value' as const, schemaVersion: inspected.read.queue.schemaVersion }
@@ -850,6 +1011,12 @@ export default defineTool({
         ok: true,
         recorded: true,
         inserted: outcome.inserted,
+        ...(outcome.inserted && outcome.id !== null
+          ? { completionReceipt: {
+              status: 'recorded',
+              effectRef: `release:repair-queue:record-edit:${outcome.id}`,
+            } }
+          : {}),
         oversize: outcome.oversize,
         ledgerId: outcome.id,
         path: outcome.path,
@@ -876,6 +1043,12 @@ export default defineTool({
         repairQueue: inspected.diagnostic,
         repairQueueRead: compactRead,
         callerAuthorization,
+        // WI-10005695: a GETTER on purpose. Every admit response spreads `...base`, and a
+        // spread reads the getter at that moment, so each response carries the timings of
+        // every step that settled before it was built, with no per-return wiring.
+        get timings() {
+          return clock?.summary() ?? null;
+        },
       };
       if (!queue) {
         return json({
@@ -890,8 +1063,22 @@ export default defineTool({
           ...base,
         });
       }
-      const containmentAt = (judgedSha: string) =>
-        paths.length ? containmentForPaths(paths, judgedSha, root, undefined, branch) : null;
+      // WI-10005695: every slow step below runs through `step`, so the response and the
+      // journal both name where an admit spent its time.
+      const step = <T,>(name: string, run: () => Promise<T>): Promise<T> => (clock ? clock.step(name, run) : run());
+      const runJob = <K extends AdmissionJobKind>(name: string, job: AdmissionJobOf<K>) =>
+        step(name, () =>
+          runAdmissionJob(
+            job,
+            args.op === 'admit' && args.confirm !== true
+              ? { timeoutMs: ADMISSION_PREVIEW_JOB_TIMEOUT_MS, stepName: name }
+              : undefined,
+          ),
+        );
+      const containmentAt = async (judgedSha: string) =>
+        paths.length
+          ? runJob('containment', { kind: 'containment', paths, judgedSha, root, branch })
+          : null;
       if (paths.length === 0) {
         return json({
           ok: false,
@@ -931,7 +1118,7 @@ export default defineTool({
             updatedAtMs: queue.updatedAtMs,
           },
           expectedQueueIdentity,
-          containment: containmentAt(queue.repairHead),
+          containment: await containmentAt(queue.repairHead),
           ...base,
         });
       }
@@ -1017,12 +1204,14 @@ export default defineTool({
       let ledgerRows: FrozenRepairEditLedgerRow[] = [];
       let ledgerReadError: string | null = null;
       try {
-        ledgerRows = await readFrozenRepairEditLedger(getOrgPg().sql, {
-          workspaceId: inspected.target.workspaceId,
-          installSlug: inspected.target.installSlug,
-          candidate: queue.candidate,
-          paths,
-        });
+        ledgerRows = await step('ledger-read', () =>
+          readFrozenRepairEditLedger(getOrgPg().sql, {
+            workspaceId: inspected.target.workspaceId,
+            installSlug: inspected.target.installSlug,
+            candidate: queue.candidate,
+            paths,
+          }),
+        );
       } catch (err) {
         ledgerReadError = (err as Error).message;
       }
@@ -1031,14 +1220,18 @@ export default defineTool({
       let patch: FrozenRepairAdmission['patch'];
       let foreign: ReturnType<typeof summarizeForeignHunks> = { count: 0, agents: [], byPath: {} };
       if (args.patchCommit !== undefined) {
-        const built = buildCommittedPatchSource({
-          root,
-          repairHead: queue.repairHead,
-          patchCommit: args.patchCommit,
-          integrationRef: branch,
-          paths,
-          reason: args.reason!,
-        });
+        const patchCommit = args.patchCommit;
+        const built = await runJob('committed-patch', {
+            kind: 'committed-patch',
+            input: {
+              root,
+              repairHead: queue.repairHead,
+              patchCommit,
+              integrationRef: branch,
+              paths,
+              reason: args.reason!,
+            },
+          });
         if (!built.ok) {
           return json({
             ...base,
@@ -1067,13 +1260,18 @@ export default defineTool({
             detail:
               "wholeBlob:true admits staging's whole blob of each path, which may carry other agents' concurrent work (D-008) — say why that is safe in `reason` (≥ 8 chars). Prefer the default hunk-exact admission, or includeHunksFrom:[<agent>] for a shared fix.",
             judgedSha: queue.repairHead,
-            containment: containmentAt(queue.repairHead),
+            containment: await containmentAt(queue.repairHead),
             mode,
             ...base,
           });
         }
         if (args.sourceCommit !== undefined) {
-          const resolved = realAdmissionGit(['rev-parse', '--verify', `${args.sourceCommit}^{commit}`], { cwd: root });
+          const sourceCommitArg = args.sourceCommit;
+          const resolved = await runJob('source-commit-resolve', {
+              kind: 'git',
+              argv: ['rev-parse', '--verify', `${sourceCommitArg}^{commit}`],
+              cwd: root,
+            });
           const resolvedSha = resolved.stdout.trim();
           if (resolved.status !== 0 || !FULL_COMMIT_SHA.test(resolvedSha)) {
             return json({
@@ -1089,7 +1287,11 @@ export default defineTool({
               ...base,
             });
           }
-          const ancestor = realAdmissionGit(['merge-base', '--is-ancestor', resolvedSha, branch], { cwd: root });
+          const ancestor = await runJob('source-commit-ancestry', {
+              kind: 'git',
+              argv: ['merge-base', '--is-ancestor', resolvedSha, branch],
+              cwd: root,
+            });
           if (ancestor.status !== 0) {
             return json({
               ok: false,
@@ -1121,21 +1323,24 @@ export default defineTool({
             reason: 'ledger-unavailable',
             detail: `the edit ledger could not be read (${ledgerReadError}) — hunk-exact admission cannot tell your hunks from a peer's. Retry, or admit explicitly with wholeBlob:true and a reason.`,
             judgedSha: queue.repairHead,
-            containment: containmentAt(queue.repairHead),
+            containment: await containmentAt(queue.repairHead),
             mode,
             ...base,
           });
         }
-        const built = buildHunkExactSource({
-          root,
-          candidate: queue.candidate,
-          repairHead: queue.repairHead,
-          paths,
-          ledger: ledgerRows,
-          actor: identity.ownerId,
-          includeHunksFrom,
-          nowMs: Date.now(),
-        });
+        const built = await runJob('hunk-exact', {
+            kind: 'hunk-exact',
+            input: {
+              root,
+              candidate: queue.candidate,
+              repairHead: queue.repairHead,
+              paths,
+              ledger: ledgerRows,
+              actor: identity.ownerId,
+              includeHunksFrom,
+              nowMs: Date.now(),
+            },
+          });
         if (!built.ok) {
           return json({
             ok: false,
@@ -1151,7 +1356,7 @@ export default defineTool({
             ...(built.step ? { step: built.step } : {}),
             exits: built.exits,
             judgedSha: queue.repairHead,
-            containment: containmentAt(queue.repairHead),
+            containment: await containmentAt(queue.repairHead),
             mode,
             ...base,
           });
@@ -1184,58 +1389,59 @@ export default defineTool({
           detail:
             'skipPrecheck:true opts a confirmed admission OUT of the R6 pre-check (the built commit is not measured before publication) — say why that is safe in `precheckReason` (≥ 8 chars); it is recorded on the ledger entry.',
           judgedSha: queue.repairHead,
-          containment: containmentAt(queue.repairHead),
+          containment: await containmentAt(queue.repairHead),
           mode,
         });
       }
       const precheckApplies = !dryRun && !skipPrecheck && population.files.length > 0;
       const buildAdmission = (dry: boolean) =>
-        admitPathsOntoRepairHead({
-          root,
-          candidate: queue.candidate,
-          repairHead: queue.repairHead,
-          paths,
-          source: {
-            ref: sourceRef,
-            ...(wholeBlob && args.sourceCommit !== undefined ? { recordAsRef: branch } : {}),
+        runJob(dry ? 'build-proof' : 'publish', {
+          kind: 'admit',
+          input: {
+            root,
+            candidate: queue.candidate,
+            repairHead: queue.repairHead,
+            paths,
+            source: {
+              ref: sourceRef,
+              ...(wholeBlob && args.sourceCommit !== undefined ? { recordAsRef: branch } : {}),
+            },
+            actor: identity.ownerId,
+            reason: args.reason,
+            nowMs: Date.now(),
+            dryRun: dry,
           },
-          actor: identity.ownerId,
-          reason: args.reason,
-          nowMs: Date.now(),
-          dryRun: dry,
           // P-004: the proved commit must resolve every relative import of every admitted TS/JS
           // file, or the door refuses `admission-incomplete` naming the sibling to admit. The
-          // The pinned whole-blob source is consulted when supplied; other modes preserve the
+          // pinned whole-blob source is consulted when supplied; other modes preserve the
           // integration branch as the suggestion source. Nothing is admitted on the caller's behalf.
           // WI-10004232: and a lockfile workspace entry it moves must still agree with its manifest,
-          // or npm install rewrites the lock and the promoted pin can never certify.
-          preflight: chainAdmissionPreflights(
-            importCompletenessPreflight({
-              root,
-              probeRef: wholeBlob && args.sourceCommit !== undefined ? sourceRef : branch,
-              ...(wholeBlob ? { enforceSourceCohort: true } : {}),
-            }),
-            lockfileManifestConsistencyPreflight({
-              root,
-              probeRef: wholeBlob && args.sourceCommit !== undefined ? sourceRef : branch,
-            }),
-          ),
+          // or npm install rewrites the lock and the promoted pin can never certify. Both checks
+          // are rebuilt from this spec on the worker thread (admissionPreflightFromSpec).
+          preflight: {
+            probeRef: wholeBlob && args.sourceCommit !== undefined ? sourceRef : branch,
+            ...(wholeBlob ? { enforceSourceCohort: true as const } : {}),
+          },
         });
       // Build the immutable candidate first. Publication is the effect boundary,
       // and must happen only while the condition claim row is locked below.
-      let outcome = buildAdmission(true);
+      let outcome = await buildAdmission(true);
       // WI-10004151 part 2: an admitted lockfile/patch moves repairHead onto dependency inputs
       // the gate must materialise (`--ensure-ref`) before it can judge anything. Ask the SAME
       // script now whether that would succeed, so a lock no installed tree can produce is
       // refused here instead of parking verification an hour later. `unknown` never refuses.
       const dependencyPaths = paths.filter(isDependencyInputPath);
+      // A const, so the closure below keeps the narrowing (`outcome` is a reassigned `let`).
+      const provedCommit = outcome.ok ? outcome.commit : null;
       const dependencyGeneration: DependencyGenerationPrediction | null =
-        outcome.ok && dependencyPaths.length > 0
-          ? await predictDependencyGeneration({
-              integrationRoot: resolveCanonicalIntegrationRoot(root),
-              ref: outcome.commit,
-              paths: dependencyPaths,
-            })
+        provedCommit !== null && dependencyPaths.length > 0
+          ? await step('dependency-prediction', () =>
+              predictDependencyGeneration({
+                integrationRoot: resolveCanonicalIntegrationRoot(root),
+                ref: provedCommit,
+                paths: dependencyPaths,
+              }),
+            )
           : null;
       const dependencyNote = dependencyGeneration ? describeDependencyPrediction(dependencyGeneration) : null;
       if (outcome.ok && dependencyGeneration?.verdict === 'refused' && !dryRun && !skipPrecheck) {
@@ -1251,7 +1457,7 @@ export default defineTool({
           dependencyGeneration,
           builtCommit: outcome.commit,
           judgedSha: queue.repairHead,
-          containment: containmentAt(queue.repairHead),
+          containment: await containmentAt(queue.repairHead),
           mode,
           note:
             'Nothing was published. The gate could never materialise these dependency inputs, so verification would park. ' +
@@ -1301,7 +1507,8 @@ export default defineTool({
         if (
           (matchingPrecheck?.status === 'passed' && matchingPrecheck.verdict?.ok === true && matchingPrecheck.verdict.ran) ||
           (matchingPrecheck?.status === 'deferred' && matchingPrecheck.verdict?.ok === true &&
-            !matchingPrecheck.verdict.ran && matchingPrecheck.verdict.reason === 'checkpoint-tree-busy')
+            !matchingPrecheck.verdict.ran && matchingPrecheck.verdict.reason === 'checkpoint-tree-busy' &&
+            args.retryPrecheck !== true)
         ) {
           precheck = matchingPrecheck.verdict;
         } else if (
@@ -1312,6 +1519,7 @@ export default defineTool({
           precheck = matchingPrecheck.verdict;
         } else {
           const startedAtMs = Date.now();
+          const runnerTaskId = newTaskId(startedAtMs);
           const runnerPidIdentity = checkpointPidIdentity(process.pid);
           const operationId =
             `repair-precheck-${queue.candidate.slice(0, 12)}-${builtCommit.slice(0, 12)}-` +
@@ -1329,6 +1537,7 @@ export default defineTool({
             actor: identity.ownerId,
             runnerPid: process.pid,
             ...(runnerPidIdentity ? { runnerPidIdentity } : {}),
+            runnerTaskId,
             startedAtMs,
             updatedAtMs: startedAtMs,
             expiresAtMs: admissionPrecheckDeadline(startedAtMs, population.files),
@@ -1350,9 +1559,11 @@ export default defineTool({
             updatedAtMs: Math.max(queue.updatedAtMs + 1, startedAtMs),
           };
           try {
-            await writeFrozenCandidateRepairQueue(inspected.target, pendingQueue, {
-              expectedUpdatedAtMs: queue.updatedAtMs,
-            });
+            await step('precheck-marker-write', () =>
+              writeFrozenCandidateRepairQueue(inspected.target, pendingQueue, {
+                expectedUpdatedAtMs: queue.updatedAtMs,
+              }),
+            );
           } catch (err) {
             return json({
               ...base,
@@ -1368,66 +1579,62 @@ export default defineTool({
               judgedSha: queue.repairHead,
             });
           }
-          const runner = createCheckpointTreeFixPrecheckRunner({
+          const workerInput: AdmissionPrecheckWorkerInput = {
+            operationId,
+            taskId: runnerTaskId,
+            queueTarget: inspected.target,
             integrationRoot: precheckRoot,
             checkpointRoot: checkpointRootMirror(precheckRoot),
-          });
-          const persistPrecheckProgress = async (progress: FixPrecheckProgress): Promise<void> => {
-            await applyFrozenCandidateRepairQueueTransition(inspected.target, (fresh) => {
-              const current = fresh.admissionPrecheck;
-              if (!current || current.operationId !== operationId || current.status !== 'running') return fresh;
-              const updatedAtMs = Math.max(fresh.updatedAtMs + 1, progress.heartbeatAtMs);
-              return {
-                ...fresh,
-                updatedAtMs,
-                admissionPrecheck: {
-                  ...current,
-                  currentFile: progress.currentFile,
-                  completedCount: progress.completedCount,
-                  totalCount: progress.totalCount,
-                  heartbeatAtMs: progress.heartbeatAtMs,
-                  updatedAtMs,
-                },
-              };
-            });
+            expiresAtMs: operation.expiresAtMs,
           };
-          void trackDetached(
-            (async () => {
-              let run: Awaited<ReturnType<typeof runner>>;
-              try {
-                run = await runner({
-                  commit: builtCommit,
-                  files: population.files,
-                  onProgress: persistPrecheckProgress,
-                });
-              } catch (err) {
-                run = { ran: false, reason: 'runner-failed', detail: (err as Error).message };
-              }
-              await settleAdmissionPrecheck(inspected.target, operationId, evaluateFixPrecheck(population, run));
-            })(),
-          ).catch((err) => {
-            console.error(`[release:repair-queue] detached pre-check ${operationId} failed to settle`, err);
-          });
-          return json({
-            ...base,
-            ok: true,
-            admitted: false,
-            pending: true,
-            dryRun: false,
-            verdict: 'precheck-running',
-            judgedSha: queue.repairHead,
-            builtCommit,
-            precheckOperation: operation,
-            currentQueueIdentity: {
-              candidate: pendingQueue.candidate,
-              repairHead: pendingQueue.repairHead,
-              updatedAtMs: pendingQueue.updatedAtMs,
-            },
-            note:
-              'R6 pre-check launched after its durable marker was written. NOTHING publishes in the background. Re-read op:get; after status=passed or status=deferred (checkpoint-tree-busy), repeat this confirmed admit with the refreshed exact queue identity' +
-              (wholeBlob ? ` and wholeBlob:true, sourceCommit:'${operation.sourceCommit}'` : '') +
-              '.',
-          });
+          let launchFailure: string | null = null;
+          try {
+            const managed = await startAdmissionPrecheckWorker(workerInput);
+            if (!managed.confined) {
+              launchFailure =
+                `managed R6 runner was not placed in a host-independent task scope` +
+                (managed.confinementSkippedReason ? ` (${managed.confinementSkippedReason})` : '');
+            }
+          } catch (err) {
+            launchFailure = err instanceof Error ? err.message : String(err);
+          }
+          if (launchFailure) {
+            precheck = evaluateFixPrecheck(population, {
+              ran: false,
+              reason: 'runner-failed',
+              detail: `Could not launch host-independent managed R6 pre-check ${operationId}: ${launchFailure}`,
+            });
+            try {
+              await settleAdmissionPrecheck(inspected.target, operationId, precheck);
+            } catch (err) {
+              console.error(`[release:repair-queue] failed to persist managed pre-check launch failure ${operationId}`, err);
+            }
+          } else {
+            return json({
+              ...base,
+              ok: true,
+              admitted: false,
+              pending: true,
+              dryRun: false,
+              verdict: 'precheck-running',
+              judgedSha: queue.repairHead,
+              builtCommit,
+              precheckOperation: operation,
+              completionReceipt: {
+                status: 'recorded',
+                effectRef: `release:repair-queue:admit-precheck:${operationId}`,
+              },
+              currentQueueIdentity: {
+                candidate: pendingQueue.candidate,
+                repairHead: pendingQueue.repairHead,
+                updatedAtMs: pendingQueue.updatedAtMs,
+              },
+              note:
+                'R6 pre-check launched as a managed task after its durable marker was written. Its progress and verdict are persisted by operationId and survive serving-host replacement. NOTHING publishes in the background. Re-read op:get; after status=passed or status=deferred (checkpoint-tree-busy), repeat this confirmed admit with the refreshed exact queue identity' +
+                (wholeBlob ? ` and wholeBlob:true, sourceCommit:'${operation.sourceCommit}'` : '') +
+                '.',
+            });
+          }
         }
         if (!precheck.ok) {
           return json({
@@ -1443,7 +1650,7 @@ export default defineTool({
             precheckResults: precheck.ran ? precheck.results : [],
             builtCommit,
             judgedSha: queue.repairHead,
-            containment: containmentAt(queue.repairHead),
+            containment: await containmentAt(queue.repairHead),
             mode,
             note: precheck.ran
               ? 'R6: nothing was published — the admission commit was built and measured but the lineage ref did not move. ' +
@@ -1514,7 +1721,7 @@ export default defineTool({
             verdict: 'already-admitted',
             detail: outcome.detail,
             judgedSha: queue.repairHead,
-            containment: containmentAt(queue.repairHead),
+            containment: await containmentAt(queue.repairHead),
             ...base,
           });
         }
@@ -1541,7 +1748,7 @@ export default defineTool({
               }
             : {}),
           judgedSha: queue.repairHead,
-          containment: containmentAt(queue.repairHead),
+          containment: await containmentAt(queue.repairHead),
           ...base,
         });
       }
@@ -1575,7 +1782,7 @@ export default defineTool({
           proof,
           precheck: precheckEntry,
           ...(dependencyGeneration ? { dependencyGeneration } : {}),
-          containment: containmentAt(queue.repairHead),
+          containment: await containmentAt(queue.repairHead),
           note:
             `Pass confirm:true to publish admission ${outcome.commit.slice(0, 12)} onto ${outcome.lineageRef} ` +
             'and advance repairHead to it (phase ready-to-verify). The immutable candidate is never touched; ' +
@@ -1593,11 +1800,9 @@ export default defineTool({
       try {
         next = markFrozenRepairAdmitted(queue, entry);
       } catch (err) {
-        const retracted = retractAdmission({
-          root,
-          candidate: queue.candidate,
-          published: outcome.commit,
-          previousRepairHead: queue.repairHead,
+        const retracted = await runAdmissionJob({
+          kind: 'retract',
+          input: { root, candidate: queue.candidate, published: outcome.commit, previousRepairHead: queue.repairHead },
         });
         return json({
           ok: false,
@@ -1607,7 +1812,7 @@ export default defineTool({
           reason: 'lineage-ref-moved',
           detail: `${(err as Error).message}${retracted ? ' (lineage ref retracted)' : ' (lineage ref could NOT be retracted — it is at the unrecorded admission; re-read the queue)'}`,
           judgedSha: queue.repairHead,
-          containment: containmentAt(queue.repairHead),
+          containment: await containmentAt(queue.repairHead),
           ...base,
         });
       }
@@ -1627,11 +1832,9 @@ export default defineTool({
       }
       let retracted: boolean | null = null;
       if (!persisted) {
-        retracted = retractAdmission({
-          root,
-          candidate: queue.candidate,
-          published: outcome.commit,
-          previousRepairHead: queue.repairHead,
+        retracted = await runAdmissionJob({
+          kind: 'retract',
+          input: { root, candidate: queue.candidate, published: outcome.commit, previousRepairHead: queue.repairHead },
         });
       }
       const auditRecorded = await recordAudit(identity.ownerId, {
@@ -1658,6 +1861,15 @@ export default defineTool({
       const judgedSha = persisted ? outcome.commit : queue.repairHead;
       stampActionEffect({ status: persisted ? 'repair-head-published' : 'publish-failed',
         persisted, retracted, from: queue.repairHead, to: outcome.commit, auditRecorded });
+      // D-131: a persisted admit schedules a debounced, durable verify of the head it published.
+      // Never throws; a scheduling failure falls back to the D-127 manual path and is reported.
+      const autoVerify = persisted
+        ? await scheduleRepairAutoVerify({
+            candidate: queue.candidate,
+            repairHead: outcome.commit,
+            admittedAtMs: Date.now(),
+          })
+        : null;
       return json({
         ok: persisted,
         admitted: persisted,
@@ -1671,19 +1883,30 @@ export default defineTool({
         ...provenance,
         precheck: precheckEntry,
         ...(dependencyGeneration ? { dependencyGeneration } : {}),
-        containment: containmentAt(judgedSha),
+        containment: await containmentAt(judgedSha),
         persisted,
         auditRecorded,
         ...base,
+        ...(persisted && effectReceipt
+          ? { completionReceipt: {
+              status: 'recorded',
+              effectRef: `release:repair-queue:admit:${effectReceipt.receiptId}`,
+            } }
+          : {}),
         ...(patch ? { source: { ref: sourceRef, root } } : {}),
         repairQueue: persisted
           ? diagnoseFrozenCandidateRepairQueue(next, { nowMs: Date.now(), fixerAlive: inspected.fixerAlive })
           : inspected.diagnostic,
+        ...(autoVerify ? { autoVerify } : {}),
         ...(persisted
           ? {
               nextAction:
-                `repairHead is ${outcome.commit.slice(0, 12)} (phase ${next.phase}); the gate re-verifies at that head on its next tick. ` +
-                'Do NOT fire release:checkpoint-run and do NOT retire.' +
+                `repairHead is ${outcome.commit.slice(0, 12)} (phase ${next.phase}). ` +
+                (autoVerify?.scheduled
+                  ? `An auto-verify of that head is scheduled after a ${Math.round(autoVerify.quietMs / 60_000)}-min quiet window (D-131); a further admit restarts the window. ` +
+                    'Do NOT fire release:checkpoint-run unless you mean to skip the window, and do NOT retire.'
+                  : `Auto-verify was NOT scheduled (${autoVerify && !autoVerify.scheduled ? autoVerify.reason : 'unknown'}); ` +
+                    'the gate re-verifies at that head on its next tick. Do NOT fire release:checkpoint-run until your batch is complete (D-127), and do NOT retire.') +
                 (precheckEntry.ran
                   ? ` R6 pre-check ran at the built commit: ${precheckEntry.fixes?.length ?? 0} signature red(s) fixed, ${precheckEntry.failing?.length ?? 0} still failing, ${precheckEntry.unmeasured?.length ?? 0} unmeasured.`
                   : precheckEntry.reason === 'checkpoint-tree-busy'
@@ -1858,6 +2081,12 @@ export default defineTool({
         persisted,
         auditRecorded,
         ...base,
+        ...(persisted && effectReceipt
+          ? { completionReceipt: {
+              status: 'recorded',
+              effectRef: `release:repair-queue:claim-leg:${effectReceipt.receiptId}`,
+            } }
+          : {}),
         repairQueue: persisted
           ? diagnoseFrozenCandidateRepairQueue(next, { nowMs: Date.now(), fixerAlive: inspected.fixerAlive })
           : inspected.diagnostic,
@@ -1984,6 +2213,10 @@ export default defineTool({
       retired: result.retired,
       casMiss,
     });
+    const inconclusiveTerminal =
+      result.retired && frozenRepairHeadAwaitsVerification(inspected.queue)
+        ? await emitRetiredUnjudgedRepairHeadTerminal(inspected.queue, inspected.target.installSlug)
+        : undefined;
     stampActionEffect({ status: result.retired ? 'queue-retired' : 'cas-miss',
       retired: result.retired, casMiss, auditRecorded });
     // A CAS miss is a storage outcome, not a liveness refusal. The nested `current`
@@ -1997,7 +2230,14 @@ export default defineTool({
       reason: casMiss ? 'cas-miss' : undefined,
       target: inspected.target,
       auditRecorded,
+      ...(result.retired && effectReceipt
+        ? { completionReceipt: {
+            status: 'recorded',
+            effectRef: `release:repair-queue:retire:${effectReceipt.receiptId}`,
+          } }
+        : {}),
       current: currentDiagnostic,
+      ...(inconclusiveTerminal ? { inconclusiveTerminal } : {}),
       // WI-1105109 [owner 2026-08-30, OWNER-interactive]: "make sure another agent
       // uses the frozen candidate system next and doesn't retire it like you did".
       //
@@ -2012,5 +2252,41 @@ export default defineTool({
         ? 'The next scheduled green-checkpoint run RE-FREEZES a candidate on its own — retiring does not stall the gate, so nothing needs firing to restart it. Do NOT call release:checkpoint-run to make the gate move: it always cuts a FRESH candidate at the current tip, which is the pre-D-001 re-cut-at-tip treadmill D-007 diagnosed (each cut re-admits the whole sweep and imports breakage faster than fixes land). To land a fix on the judged lineage, use release:repair-queue { op: "admit", paths: [...] }.'
         : undefined,
     });
+    } catch (err) {
+      if (args.op === 'admit' && args.confirm !== true && err instanceof AdmissionOffthreadTimeoutError) {
+        return json({
+          ok: false,
+          op: 'admit',
+          admitted: false,
+          refused: true,
+          dryRun: true,
+          verdict: 'timeout',
+          reason: 'admission-preview-timeout',
+          mode: args.wholeBlob === true ? 'whole-blob' : 'hunk-exact',
+          timedOutStep: err.stepName ?? err.jobKind,
+          timeoutMs: err.timeoutMs,
+          detail:
+            `The read-only preview exceeded ${err.timeoutMs}ms in ${err.stepName ?? err.jobKind}. ` +
+            'The admission worker is being stopped; no lineage ref or repair-queue row was written. ' +
+            'Retry with a smaller path set or investigate the named step.',
+          timings: clock?.summary() ?? null,
+        });
+      }
+      if (args.op === 'admit' && args.confirm !== true && err instanceof AdmissionOffthreadTimeoutUnavailableError) {
+        return json({
+          ok: false,
+          op: 'admit',
+          admitted: false,
+          refused: true,
+          dryRun: true,
+          verdict: 'refused',
+          reason: 'admission-preview-timeout-unavailable',
+          mode: args.wholeBlob === true ? 'whole-blob' : 'hunk-exact',
+          detail: err.message,
+          timings: clock?.summary() ?? null,
+        });
+      }
+      throw err;
+    }
   },
 });

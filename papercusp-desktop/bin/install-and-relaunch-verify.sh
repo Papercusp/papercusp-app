@@ -71,7 +71,8 @@
 #                                  strict codesign for BOTH roles, then relaunch.
 #                                  Does not copy/replace apps; reported explicitly.
 #   --relaunch-cmd CMD             relaunch command (must NOT terminate the operator)
-#   --flip-timeout SEC             how long to wait for the flip (default 180)
+#   --flip-timeout SEC             how long to wait for the post-install health flip (default 180)
+#   --baseline-timeout SEC         how long to wait for a healthy pre-update operator (default 900)
 #   --install-timeout SEC          budget for the installer step (default 900);
 #                                  a timeout FAILS the run (installer may still
 #                                  be running detached on the VM — no relaunch)
@@ -110,6 +111,7 @@ SERVER_INSTALL_CMD=""
 RELAUNCH_CMD=""
 OPJSON_PATH=""
 FLIP_TIMEOUT="${FLIP_TIMEOUT:-180}"
+BASELINE_TIMEOUT="${BASELINE_TIMEOUT:-900}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 # 300s proved too short live (0.0.8: the 479M GUI installer needs ~5min; the
 # 3.4GB Server payload far more) — and a timeout-killed ssh leaves the VM-side
@@ -146,6 +148,7 @@ while [[ $# -gt 0 ]]; do
     --verify-installed-mac) VERIFY_INSTALLED_MAC=1; shift ;;
     --relaunch-cmd) RELAUNCH_CMD="${2:-}"; shift 2 ;;
     --flip-timeout) FLIP_TIMEOUT="${2:-}"; shift 2 ;;
+    --baseline-timeout) BASELINE_TIMEOUT="${2:-}"; shift 2 ;;
     --install-timeout) INSTALL_TIMEOUT="${2:-}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL="${2:-}"; shift 2 ;;
     --smoke-receipt-tag) SMOKE_RECEIPT_TAG="${2:-}"; shift 2 ;;
@@ -366,15 +369,11 @@ linux_endpoint() {
 }
 DERIVED_LINUX_ENDPOINT=0
 case "$PLATFORM" in
-  windows)
-    SSH_PORT="${SSH_PORT:-2223}"
-    SSH_KEY="${SSH_KEY:-$HOME/.ssh/papercup-vm-win}"
-    SSH_HOST="${SSH_HOST:-user@127.0.0.1}"
-    ;;
-  mac)
-    SSH_PORT="${SSH_PORT:-2222}"
-    SSH_KEY="${SSH_KEY:-$HOME/.ssh/papercup-vm-mac}"
-    SSH_HOST="${SSH_HOST:-${MAC_VM_SSH_HOST:-macuser@127.0.0.1}}"
+  windows|mac)
+    # One source with bin/smoke-target-preflight.sh (WI-10004346).
+    # shellcheck source=lib/smoke-endpoints.sh
+    source "$HERE/lib/smoke-endpoints.sh"
+    smoke_endpoint_defaults "$PLATFORM"
     ;;
   linux)
     if [[ -z "$SSH_PORT" || -z "$SSH_KEY" || -z "$SSH_HOST" ]]; then
@@ -644,11 +643,11 @@ discover_port() { op_exec cat "$OPJSON_PATH" | json_num port; }
 # Retry a few times: a single `wsl --exec` flap (transient, empty output) must
 # not abort the whole verify as "no healthy pre-update operator".
 read_health() {
-  local _port="$1" _body="" _i
-  for _i in 1 2 3; do
+  local _port="$1" _attempts="${2:-3}" _body="" _i
+  for ((_i = 1; _i <= _attempts; _i++)); do
     _body="$(op_exec curl -sS -m 5 "http://127.0.0.1:$_port/api/health")"
     [[ -n "$_body" ]] && break
-    sleep 2
+    (( _i < _attempts )) && sleep 2
   done
   printf '%s' "$_body"
 }
@@ -682,52 +681,9 @@ fi
 # alter that supervisor here: fixture repair must precede a NEW honest baseline,
 # and this verifier must not stop an operator to manufacture the update flip.
 if [[ "$PLATFORM" == "mac" ]]; then
-  MAC_PREFLIGHT_CMD="$(cat <<'MAC_PREFLIGHT'
-set -eu
-# PAPERCUSP_NATIVE_MAC_PREFLIGHT
-console_user="$(stat -f %Su /dev/console)"
-login_user="$(id -un)"
-login_uid="$(id -u)"
-if [ "$console_user" = root ] || [ "$console_user" = loginwindow ] || [ "$console_user" != "$login_user" ]; then
-  echo "macOS native preflight: SSH user must own the logged-in GUI console" >&2
-  exit 2
-fi
-if ! launchctl print "gui/$login_uid" >/dev/null 2>&1; then
-  echo "macOS native preflight: logged-in GUI launch domain is unavailable" >&2
-  exit 2
-fi
-if launchctl print system/com.papercusp.server >/dev/null 2>&1; then
-  echo "macOS native preflight: competing system/com.papercusp.server is loaded; repair test supervision and establish a genuine native pre-update baseline before retrying" >&2
-  exit 2
-fi
-# `open -n` bypasses LaunchServices reuse, NOT Tauri's per-role singleton.
-# A live old shell rejects the candidate before its --ensure can run. Do not
-# quit that Server here: normal quit tears down its owned operator, fabricating
-# the stale-operator replacement this test is meant to prove. Prepare a genuine
-# older bundled runtime via the supported detached/headless launch first.
-native_shells="$(ps -axo pid=,comm=)" || {
-  echo "macOS native preflight: cannot inspect native single-instance shells" >&2
-  exit 2
-}
-while read -r native_pid executable; do
-  case "$executable" in
-    */Papercusp\ Server.app*/Contents/MacOS/papercusp-desktop|*/Papercusp\ GUI.app*/Contents/MacOS/papercusp-desktop)
-      native_args="$(ps -p "$native_pid" -o args=)" || {
-        echo "macOS native preflight: native process changed during inspection; retry the baseline check" >&2
-        exit 2
-      }
-      if [ "$native_args" = "$executable --headless-service" ]; then
-        # This supported service branch runs BEFORE Tauri's singleton plugin.
-        continue
-      fi
-      echo "macOS native preflight: a native Papercusp shell holds the single-instance lock; prepare a headless older bundled-runtime baseline before retrying (no operator termination inside acceptance)" >&2
-      exit 2
-      ;;
-  esac
-done <<< "$native_shells"
-printf 'PAPERCUSP_NATIVE_MAC_PREFLIGHT_OK\n'
-MAC_PREFLIGHT
-)"
+  # The remote predicate body lives in ONE file shared with
+  # bin/smoke-target-preflight.sh (the pre-build target check, WI-10004346).
+  MAC_PREFLIGHT_CMD="$(cat "$HERE/lib/mac-native-preflight.sh")"
   MAC_PREFLIGHT_OUT=""
   MAC_PREFLIGHT_RC=0
   MAC_PREFLIGHT_OUT="$(timeout 30 "${SSH[@]}" "$MAC_PREFLIGHT_CMD" 2>&1 | tr -d '\r\0')" || MAC_PREFLIGHT_RC=$?
@@ -738,21 +694,48 @@ MAC_PREFLIGHT
 fi
 
 # ── 1. BEFORE snapshot ──────────────────────────────────────────────────────
-PORT_BEFORE="$(discover_port)"
+BASELINE_STARTED="$(date +%s)"
+BASELINE_DEADLINE=$((BASELINE_STARTED + BASELINE_TIMEOUT))
+BASELINE_ATTEMPT=0
+BASELINE_PROGRESS_AT=0
+PORT_BEFORE=""
+BODY_BEFORE=""
 SHA_BEFORE=""; VERSION_BEFORE=""
-if [[ -n "$PORT_BEFORE" ]]; then
-  BODY_BEFORE="$(read_health "$PORT_BEFORE")"
-  SHA_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str sha)"
-  VERSION_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str version)"
-fi
-if [[ -z "$PORT_BEFORE" ]]; then
-  echo "no healthy pre-update operator (no operator.json port found) — nothing to update in place" >&2
-  exit 2
-fi
-if [[ -z "$SHA_BEFORE" && -z "$VERSION_BEFORE" ]]; then
-  echo "pre-update operator on port $PORT_BEFORE reports neither sha nor version — cannot establish an update baseline" >&2
-  exit 2
-fi
+while :; do
+  BASELINE_ATTEMPT=$((BASELINE_ATTEMPT + 1))
+  PORT_BEFORE="$(discover_port)"
+  if [[ -n "$PORT_BEFORE" ]]; then
+    # The outer readiness loop owns retries here; one empty WSL/API response
+    # must not consume three hidden waits or overrun the shared baseline budget.
+    BODY_BEFORE="$(read_health "$PORT_BEFORE" 1)"
+    SHA_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str sha)"
+    VERSION_BEFORE="$(printf '%s' "$BODY_BEFORE" | json_str version)"
+    if [[ -n "$SHA_BEFORE" || -n "$VERSION_BEFORE" ]]; then
+      break
+    fi
+  fi
+
+  BASELINE_NOW="$(date +%s)"
+  if [[ "$BASELINE_NOW" -ge "$BASELINE_DEADLINE" ]]; then
+    if [[ -z "$PORT_BEFORE" ]]; then
+      echo "no healthy pre-update operator after ${BASELINE_TIMEOUT}s ($BASELINE_ATTEMPT attempts; operator.json did not provide a port) — no artifacts were pushed" >&2
+    else
+      echo "no healthy pre-update operator after ${BASELINE_TIMEOUT}s ($BASELINE_ATTEMPT attempts; health on port $PORT_BEFORE reports neither sha nor version) — no artifacts were pushed" >&2
+    fi
+    exit 2
+  fi
+
+  if (( BASELINE_PROGRESS_AT == 0 || BASELINE_NOW - BASELINE_PROGRESS_AT >= 30 )); then
+    BASELINE_ELAPSED=$((BASELINE_NOW - BASELINE_STARTED))
+    if [[ -z "$PORT_BEFORE" ]]; then
+      echo "waiting for pre-update operator baseline: operator.json has no port yet ($BASELINE_ELAPSED s/${BASELINE_TIMEOUT}s)" >&2
+    else
+      echo "waiting for pre-update operator baseline: health at port $PORT_BEFORE has neither sha nor version ($BASELINE_ELAPSED s/${BASELINE_TIMEOUT}s)" >&2
+    fi
+    BASELINE_PROGRESS_AT="$BASELINE_NOW"
+  fi
+  sleep "$POLL_INTERVAL"
+done
 if [[ -n "$SHA_BEFORE" && "$SHA_BEFORE" == "$EXPECTED_SHA" ]]; then
   echo "pre-update operator already reports the target sha $EXPECTED_SHA — nothing to flip (stale target or already-updated)" >&2
   exit 2

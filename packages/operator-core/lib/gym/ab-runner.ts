@@ -25,10 +25,11 @@ import { runBattery, type BatteryCell, type Subject } from '@papercusp/eval-batt
 import type { GymScore, JudgeLlmCall } from './judge';
 import { rubricHash, type GymJudgeRubric } from './judge-scoring';
 import type { VariantOverlay } from './variant-overlay';
-import type { VariantComparisonRow } from './store';
+import type { GymRunParams, VariantComparisonRow } from './store';
 import type { RatePauseDeps } from './rate-pause';
 import type { GymTaskCorpus } from './task-corpus';
 import type { GymOracleSpec } from './gym-runner';
+import type { HarnessPipelineSpend } from '../harness-insights/load-spend';
 
 export interface AbVariant {
   variantId: string;
@@ -88,6 +89,8 @@ export interface AbRunHandle {
   outcome: string;
   /** Cost of the harness pipeline run (its agent spawns). */
   pipelineUsd: number;
+  /** Canonical native receipts; omitted by older injected/custom runners. */
+  pipelineSpend?: HarnessPipelineSpend;
   /** Deterministic signals measured while running the task's oracle. */
   deterministicSignals?: Record<string, unknown>;
 }
@@ -103,6 +106,8 @@ export interface AbStore {
     repeat: number;
     harnessSlug: string;
     workflowId: string;
+    /** Available runner/rubric declarations; omit when unknown. */
+    params?: GymRunParams;
   }): Promise<void>;
   finishRun(runId: string, fields: { terminalState: string; deterministicSignals: unknown; traceRef?: string }): Promise<void>;
   recordScore(runId: string, score: GymScore): Promise<void>;
@@ -139,7 +144,10 @@ export interface AbRunOutcome {
   d3: number;
   composite: number;
   pipelineUsd: number;
+  pipelineSpend?: HarnessPipelineSpend;
   judgeUsd: number;
+  /** False means judgeUsd is only the known lower bound. */
+  judgeCostMeasured?: boolean;
   /**
    * RB-006: disposition of this run's EVALUATION. `'scored'` (default/absent) = judged
    * normally; `'rate_limited'` = the judge turn stayed rate-limited past our bounded pause, so
@@ -163,7 +171,7 @@ export interface AbResult {
   outcomes: AbRunOutcome[];
   /** Per-(variant,task) judge-composite variance + the derived ε/δ/min-repeats (D-013). */
   perTaskVariance: PerTaskVariance[];
-  cost: { totalUsd: number; meanRunUsd: number; perVariant: Record<string, number> };
+  cost: { totalUsd: number; meanRunUsd: number; perVariant: Record<string, number>; costMeasured?: boolean };
   /** A-vs-B per-task composite + signed delta (variant[0] = A/baseline, variant[1] = B). */
   comparison: VariantComparisonRow[];
   rubricHash: string;
@@ -208,7 +216,7 @@ export async function runAbEvaluation(config: AbConfig, deps: AbDeps): Promise<A
   }
 
   const results = await runBattery<AbRunInput, AbRunHandle>(
-    { cells, rubric: config.rubric, maxDistillChars: config.maxDistillChars },
+    { cells, rubric: config.rubric, maxDistillChars: config.maxDistillChars, stopOnUnmeasuredJudgeCost: true },
     {
       subject,
       llmCall: deps.llmCall,
@@ -225,6 +233,14 @@ export async function runAbEvaluation(config: AbConfig, deps: AbDeps): Promise<A
             repeat: cell.repeat,
             harnessSlug: handle.harnessSlug,
             workflowId: handle.workflowID,
+            params: {
+              harnessCommit: cell.harnessCommit,
+              substrateCommit: cell.task.repoCommit,
+              judgeModel: config.rubric.model,
+              judgeTemp: config.rubric.temperature,
+              weights: config.rubric.weights,
+              rubricHash: rh,
+            },
           }),
         onFinish: ({ runId, handle, distilled }) =>
           deps.store.finishRun(runId, {
@@ -240,7 +256,8 @@ export async function runAbEvaluation(config: AbConfig, deps: AbDeps): Promise<A
   // Map the engine's per-cell results → the gym's AbRunOutcome shape. A non-'scored'
   // cell (rate_limited / errored) carries no real composite (zeros) + its error.
   const outcomes: AbRunOutcome[] = results.map((r) => {
-    const base = { variantId: r.cell.variant.variantId, taskId: r.cell.task.taskId, repeat: r.cell.repeat, runId: r.runId };
+    const base = { variantId: r.cell.variant.variantId, taskId: r.cell.task.taskId, repeat: r.cell.repeat, runId: r.runId, judgeCostMeasured: r.judgeCostMeasured,
+      ...(r.handle?.pipelineSpend ? { pipelineSpend: r.handle.pipelineSpend } : {}) };
     if (r.status === 'scored' && r.score) {
       return {
         ...base,
@@ -251,7 +268,7 @@ export async function runAbEvaluation(config: AbConfig, deps: AbDeps): Promise<A
         d3: r.score.d3,
         composite: r.score.composite,
         pipelineUsd: r.handle!.pipelineUsd,
-        judgeUsd: r.score.costUsd,
+        judgeUsd: r.judgeCostUsd,
         status: 'scored' as const,
       };
     }
@@ -264,7 +281,7 @@ export async function runAbEvaluation(config: AbConfig, deps: AbDeps): Promise<A
       d3: 0,
       composite: 0,
       pipelineUsd: r.handle?.pipelineUsd ?? 0,
-      judgeUsd: 0,
+      judgeUsd: r.judgeCostUsd,
       status: r.status,
       error: r.error,
     };
@@ -294,12 +311,13 @@ export async function runAbEvaluation(config: AbConfig, deps: AbDeps): Promise<A
   // 3. A-vs-B comparison (variant[0] = A/baseline, variant[1] = B/candidate when present).
   const a = config.variants[0]?.variantId;
   const b = config.variants[1]?.variantId ?? a;
-  const comparison = a ? await deps.store.comparison(a, b, rh) : [];
+  const costMeasured = results.every((r) => r.judgeCostMeasured && r.handle?.pipelineSpend?.measured !== false);
+  const comparison = a && costMeasured ? await deps.store.comparison(a, b, rh) : [];
 
   return {
     outcomes,
     perTaskVariance,
-    cost: { totalUsd, meanRunUsd: meanRunCostUsd(runCosts), perVariant },
+    cost: { totalUsd, meanRunUsd: meanRunCostUsd(runCosts), perVariant, costMeasured },
     comparison,
     rubricHash: rh,
   };

@@ -1,5 +1,5 @@
 import { defineTool } from '@papercusp/agent-mcp';
-import { appendExternalChatTurn } from '../../../agent-chats-data';
+import { appendExternalChatTurn, deleteExternalChatTurns } from '../../../agent-chats-data';
 import { acquireAgentChatLock, releaseAgentChatLock } from '../../../agent-chat-lock';
 import { activeWorkspaceId } from '../../../workspace-registry';
 
@@ -72,4 +72,48 @@ export const externalTurnRoute = defineTool({
   },
 });
 
-export default [externalTurnRoute];
+/**
+ * Retention/deletion counterpart of the bridge (WI-10006406, D-022).
+ *
+ * The Phone sidecar calls this before it deletes a call's own content, so the
+ * mirrored copy cannot outlive the 30-day retention window or an owner's
+ * delete. Loopback-only like the append route, and it takes the same chat
+ * lock so it cannot race a `/messages` whole-transcript rewrite.
+ */
+export const deleteExternalTurnsRoute = defineTool({
+  method: 'DELETE',
+  path: '/harness/:slug/agent-chats/:chatId/external-turns',
+  auth: 'loopback',
+  async handler(req, ctx) {
+    let body: { source?: unknown; roomName?: unknown };
+    try {
+      body = await req.json();
+    } catch {
+      return Response.json({ error: 'invalid JSON body' }, { status: 400 });
+    }
+    if (body.source !== 'phone-livekit') {
+      return Response.json({ error: 'source must be phone-livekit' }, { status: 400 });
+    }
+    if (typeof body.roomName !== 'string') {
+      return Response.json({ error: 'roomName is required' }, { status: 400 });
+    }
+    const lock = await acquireAgentChatLock(ctx.params.chatId, activeWorkspaceId());
+    if (!lock) {
+      return Response.json({ error: 'chat already has an in-flight transcript write' }, { status: 409 });
+    }
+    try {
+      const result = await deleteExternalChatTurns({
+        slug: ctx.params.slug,
+        chatId: ctx.params.chatId,
+        source: 'phone-livekit',
+        roomName: body.roomName,
+      });
+      if (!result.ok) return Response.json({ error: result.error }, { status: result.status });
+      return Response.json({ ok: true, removed: result.data.removed });
+    } finally {
+      await releaseAgentChatLock(lock);
+    }
+  },
+});
+
+export default [externalTurnRoute, deleteExternalTurnsRoute];

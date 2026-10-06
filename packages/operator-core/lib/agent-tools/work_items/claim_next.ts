@@ -12,9 +12,13 @@ import { z } from 'zod';
 import { defineTool } from '@papercusp/agent-mcp';
 import { FLAGS } from '@papercusp/flags';
 import { getFlag } from '@papercusp/flags/server';
-import { resolveAgentIdentity, resolveSelfLiteral } from '../coordination/identity';
+import { resolveAgentIdentity } from '../coordination/identity';
+import { resolveExplicitAgentOwnerId } from '../coordination/recipient-resolve';
 import { COORD_ROLES } from '../coordination/roles';
-import { CLAIM_STATES_ALLOWLIST, claimNextWorkItem, releaseWorkItem, diagnoseClaimNextMiss } from '../../work-items';
+// The allowlist comes from its leaf: the args schema below reads it at module-eval time,
+// which the `../../work-items` re-export cannot serve inside that module's import cycle.
+import { CLAIM_STATES_ALLOWLIST } from '../../scheduler/claim-states';
+import { claimNextWorkItem, releaseWorkItem, diagnoseClaimNextMiss } from '../../work-items';
 import { workItemClaimLeaseEnabled, leaseClaimedWorkItem } from '../../work-item-claim-lease-wiring';
 import { workItemRedundancyEnabled } from '../../work-item-redundancy';
 import { localSwarmId } from '../../fleet/swarm-identity';
@@ -109,10 +113,23 @@ export default defineTool({
   }),
   async handler(args, ctx) {
     const ident = resolveAgentIdentity(ctx);
-    // EI-9274: resolve a literal `'self'` assignee the same as an omitted one (both →
-    // the caller) — previously stored verbatim, producing an unmatchable, permanently
-    // orphaned claim (WI-3881).
-    const assignee = resolveSelfLiteral(args.assignee, ident.ownerId) ?? ident.ownerId;
+    const requestedAssignee = args.assignee ?? ident.ownerId;
+    const assigneeResolution = await resolveExplicitAgentOwnerId(
+      requestedAssignee,
+      ident.ownerId,
+      ident.workspaceId,
+    );
+    if (!assigneeResolution.ok) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({ ok: false, error: assigneeResolution.code, hint: assigneeResolution.message }),
+          },
+        ],
+      };
+    }
+    const assignee = assigneeResolution.ownerId;
     // workspace-work-scope-policy-2026-09-04 P-006: a pull from an out-of-scope harness is
     // refused before any SKIP-LOCKED claim runs (held, never deleted; ledgered). No policy ⇒
     // one cached read, byte-identical behaviour.
@@ -209,7 +226,7 @@ export default defineTool({
         // it (the admission gate only refuses the ensuing claim), burning a full
         // session-resume cycle on a pull this member is forbidden to make anyway.
         // Mirrors the same-purpose cancel on a successful claim below.
-        const claimableAwaitsCancelled = await cancelClaimableAwaits(assignee).catch(() => 0);
+        const claimableAwaitsCancelled = await cancelClaimableAwaits(assignee, { includeStanding: true }).catch(() => 0);
         const miss = fleetScopedMiss(reconciliation.scope, reconciliation.quarantinedIds, {
           pausedReason: pause.reason,
           claimableAwaitsCancelled,
@@ -695,8 +712,8 @@ export default defineTool({
         'workItem' in claimed
           ? { ok: true as const, workItem: claimed.workItem, claimedUnder: claimed.claimedUnder }
           : { ok: true as const, workItem: claimed };
-      // EI-10541: idle -> working transition — cancel this agent's stale `work-item:claimable`
-      // idle-park await(s) (best-effort, see cancelClaimableAwaits). Mutually exclusive with holding a claim.
+      // EI-10541: idle -> working transition — cancel this agent's stale one-shot claimable wake
+      // (best-effort, see cancelClaimableAwaits); reusable standing watches remain armed.
       await cancelClaimableAwaits(assignee).catch(() => 0);
       const memory = await recallFor([wiOf(claimed)]);
       const [
@@ -766,7 +783,7 @@ export default defineTool({
       const miss = await missResult();
       return { content: [{ type: 'text' as const, text: JSON.stringify({ ...miss, claimed }) }] };
     }
-    // EI-10541: claimed >=1 item — cancel this agent's stale `work-item:claimable` idle-park await(s).
+    // EI-10541: claimed >=1 item — cancel this agent's stale one-shot claimable wake wait(s).
     await cancelClaimableAwaits(assignee).catch(() => 0);
     const memory = await recallFor(claimed.map((c) => wiOf(c)));
     // EI-19387745408924340: attach each claimed item's governing plan decisions, same as

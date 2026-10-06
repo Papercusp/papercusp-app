@@ -26,6 +26,7 @@
  * PENDING until an operator approves it. Enforced server-side by the worker.
  */
 import { publishListingToCupboard } from './publish-listing';
+import { buildSelfDescribingPublishExtras } from './self-describing-release';
 import { parseGithubRemote, fetchGithubRepoMeta } from './resolve-repo-coords';
 import {
   writeGoalPackageDir,
@@ -311,7 +312,18 @@ export async function publishGoalToCupboard(
     return { ok: false, status: 422, error: `could not resolve GitHub repo ${parsed.owner}/${parsed.repo}` };
   }
 
+  const releaseBuild = await buildSelfDescribingPublishExtras({
+    listingKind: 'goal',
+    listingRef: ref,
+    dir: written.dir,
+    ...(input.version ? { version: input.version } : {}),
+  });
+  if (!releaseBuild.ok) {
+    return { ok: false, status: releaseBuild.status, error: releaseBuild.error, detail: releaseBuild.detail };
+  }
+
   const result = await publishListingToCupboard({
+    ...releaseBuild.extras,
     listing_kind: 'goal',
     listing_ref: ref,
     ...(typeof input.project_ref === 'string' ? { project_ref: input.project_ref } : {}),

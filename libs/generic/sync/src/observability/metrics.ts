@@ -157,6 +157,15 @@ export interface SyncMetricsSnapshot {
    */
   ipcAssertTimedOut?: boolean;
   ipcAssertLastClient?: string | null;
+  /** Last 64 attempts on the query clock; null phases distinguish import from invoke waits. */
+  ipcAssertion?: Array<{ startedAtMs: number; importReadyAtMs: number | null;
+    invokeStartedAtMs: number | null; invokeCompletedAtMs: number | null;
+    completedAtMs: number | null; client: string | null; error?: string;
+    nativeStartedAtMs?: number; nativeDurationMs?: number;
+    renderer?: { unit: 'ms'; clock: 'performance.now'; intervalMs: number;
+      startedAtMs: number; lastObservedAtMs: number; timerTicks: number; maxGapMs: number;
+      gaps: Array<{ startedAtMs: number; completedAtMs: number; durationMs: number }>;
+      stoppedAtMs: number | null; stopReason: 'reply' | 'deadline' | null } }>;
   sse: {
     /** ms since the current connection opened, or null when disconnected. */
     connectedSinceMs: number | null;
@@ -227,6 +236,7 @@ interface MetricsState {
   invalidationsBySseName: Map<string, number>;
   ipcAssertTimedOut: boolean | undefined;
   ipcAssertLastClient: string | null;
+  ipcAssertion: NonNullable<SyncMetricsSnapshot['ipcAssertion']>;
   transport: {
     requests: number;
     failures: number;
@@ -273,6 +283,7 @@ const state: MetricsState = {
   invalidationsBySseName: new Map(),
   ipcAssertTimedOut: undefined,
   ipcAssertLastClient: null,
+  ipcAssertion: [],
   transport: freshTransport(),
   byQuery: new Map(),
   recent: [],
@@ -436,6 +447,63 @@ export const syncMetrics = {
     state.ipcAssertTimedOut = true;
     state.ipcAssertLastClient = lastClient;
   },
+  /** Separate dynamic-import and shell-invoke phases on the queries' performance.now clock. */
+  beginIpcAssertion() {
+    const sample: NonNullable<SyncMetricsSnapshot['ipcAssertion']>[number] = {
+      startedAtMs: now(), importReadyAtMs: null, invokeStartedAtMs: null,
+      invokeCompletedAtMs: null, completedAtMs: null, client: null,
+    };
+    state.ipcAssertion.push(sample);
+    if (state.ipcAssertion.length > 64) state.ipcAssertion.shift();
+    return Object.assign((client: string | null, error?: string) => {
+      if (sample.completedAtMs !== null) return;
+      sample.completedAtMs = now();
+      sample.client = client;
+      if (error !== undefined) sample.error = error.slice(0, 500);
+    }, {
+      mark(stage: 'importReady' | 'invokeStarted' | 'invokeCompleted'): void {
+        const key = `${stage}AtMs` as const;
+        // Preserve the first observation and never mutate a completed attempt.
+        if (sample.completedAtMs === null && sample[key] === null) sample[key] = now();
+      },
+      recordNative(startedAtMs: number, durationMs: number): void {
+        if (sample.completedAtMs !== null || sample.nativeStartedAtMs !== undefined) return;
+        if (!Number.isFinite(startedAtMs) || startedAtMs < 0 ||
+            !Number.isFinite(durationMs) || durationMs < 0) return;
+        sample.nativeStartedAtMs = startedAtMs;
+        sample.nativeDurationMs = durationMs;
+      },
+      startRenderer(intervalMs: number): void {
+        if (sample.completedAtMs !== null || sample.renderer ||
+            !Number.isFinite(intervalMs) || intervalMs <= 0) return;
+        const at = now();
+        sample.renderer = { unit: 'ms', clock: 'performance.now', intervalMs,
+          startedAtMs: at, lastObservedAtMs: at, timerTicks: 0, maxGapMs: 0,
+          gaps: [], stoppedAtMs: null, stopReason: null };
+      },
+      observeRenderer(reason: 'timer' | 'reply' | 'deadline'): void {
+        const renderer = sample.renderer;
+        if (!renderer || renderer.stoppedAtMs !== null || sample.completedAtMs !== null) return;
+        const at = now();
+        const durationMs = at - renderer.lastObservedAtMs;
+        if (!Number.isFinite(durationMs) || durationMs < 0) return;
+        // This observes timer execution, not CPU work. A gap may also mean
+        // renderer scheduling/suspension; responsive ticks during a slow
+        // native reply distinguish that delivery path from such a gap.
+        renderer.maxGapMs = Math.max(renderer.maxGapMs, durationMs);
+        if (durationMs >= renderer.intervalMs * 2) {
+          renderer.gaps.push({ startedAtMs: renderer.lastObservedAtMs, completedAtMs: at, durationMs });
+          if (renderer.gaps.length > 8) renderer.gaps.shift();
+        }
+        renderer.lastObservedAtMs = at;
+        if (reason === 'timer') renderer.timerTicks++;
+        else {
+          renderer.stoppedAtMs = at;
+          renderer.stopReason = reason;
+        }
+      },
+    });
+  },
   /**
    * Record one freshness stage. All accepted values are explicitly milliseconds;
    * invalid writer values are counted and dropped rather than becoming plausible
@@ -545,6 +613,10 @@ export const syncMetrics = {
     }
     return {
       takenAtMs: now(),
+      ...(state.ipcAssertion.length ? { ipcAssertion: state.ipcAssertion.map((sample) => ({ ...sample,
+        ...(sample.renderer ? { renderer: { ...sample.renderer,
+          gaps: sample.renderer.gaps.map((gap) => ({ ...gap })) } } : {}),
+      })) } : {}),
       ...(state.ipcAssertTimedOut === undefined
         ? {}
         : {
@@ -595,6 +667,7 @@ export const syncMetrics = {
     state.invalidationsBySseName.clear();
     state.ipcAssertTimedOut = undefined;
     state.ipcAssertLastClient = null;
+    state.ipcAssertion.length = 0;
     state.transport = freshTransport();
     state.byQuery.clear();
     state.recent.length = 0;

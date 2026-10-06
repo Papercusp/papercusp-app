@@ -242,7 +242,7 @@ async function readHeldWorkItems(sql: Sql, ws: string, owner: string): Promise<H
        -- the reserved payload marker rather than trusting the outer status
        -- projection.
        AND NOT jsonb_exists(COALESCE(payload, '{}'::jsonb), 'resource_governor')
-     ORDER BY taken_at DESC NULLS LAST
+     ORDER BY work_items.taken_at DESC NULLS LAST
      LIMIT ${GOAL_LEG_CAP}`;
   return rows.filter((r) => r.id).map((r) => ({ id: r.id, takenAt: r.taken_at }));
 }
@@ -328,7 +328,7 @@ async function readFleetMission(sql: Sql, ws: string, owner: string): Promise<He
       FROM harness_shared.fleet_membership_events
      WHERE workspace_id = ${ws}
        AND owner_id = ${owner}
-     ORDER BY at DESC, id DESC
+     ORDER BY fleet_membership_events.at DESC, id DESC
      LIMIT 1`;
   const r = rows[0];
   if (!r?.fleet_slug || r.event === 'leave') return null;

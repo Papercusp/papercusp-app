@@ -34,8 +34,8 @@ import {
 } from './audit-anchors';
 import { pgClientFields } from './mem0-connection';
 import { detectPapercupRoot } from '../harness/register-papercusp';
-import { fileURLToPath } from 'node:url';
 import { isCliEntry } from '../util/cli-entry';
+import { moduleRepoRoot } from '../module-repo-root';
 
 interface CliOptions {
   dryRun: boolean;
@@ -45,14 +45,12 @@ interface CliOptions {
 function parseArgs(argv: string[]): CliOptions {
   const dryRun = argv.includes('--dry-run');
   // Repo root: detect the papercup checkout (markers: apps/operator + libs/papercusp
-  // package.json), falling back to the path relative to THIS file. This file lives at
-  // packages/operator-core/lib/memory/ → FOUR levels up is the repo root. (The old
-  // `..×3` calc was a stale carry-over from when the CLI lived at apps/operator/bin/;
-  // it resolved to `…/packages` and made the fileChecker stat anchors against the
-  // wrong root — every file anchor false-flagged.) operator-core is "type":"module",
-  // so `__dirname` isn't defined under ESM — derive the dir from import.meta.url.
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const repoRoot = detectPapercupRoot() ?? path.resolve(here, '..', '..', '..', '..');
+  // package.json), falling back to the checkout containing THIS file. The fallback walks
+  // to `.git` rather than counting `..` levels: a fixed climb has been wrong twice — once
+  // when the CLI moved (the old `..×3` resolved to `…/packages` and false-flagged every
+  // file anchor), and again inside the esbuild host bundle, where import.meta.url is the
+  // bundle's URL (P-016; see module-repo-root.ts).
+  const repoRoot = detectPapercupRoot() ?? moduleRepoRoot(import.meta.url);
   return { dryRun, repoRoot };
 }
 

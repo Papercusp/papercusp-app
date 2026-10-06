@@ -13,7 +13,7 @@
  * Usage: npm run test:file -- path/to/a.test.ts [path/to/b.test.ts] [<vitest args>]
  * Vitest args may follow the file list directly or after an explicit `--` separator.
  */
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -65,7 +65,7 @@ export { testsExecutedFrom, testsSkippedFrom };
 
 export function unscopedFocusedRunWarning(env = process.env) {
   if (env.PAPERCUSP_TEST_RUN_HARNESS?.trim()) return null;
-  return 'Focused test run is unscoped: its test_runs IDs cannot be bound as harness-scoped proof. Set PAPERCUSP_TEST_RUN_HARNESS to the target harness (papercusp for this repo).';
+  return 'Focused runner has no explicit PAPERCUSP_TEST_RUN_HARNESS. Test-ledger scope is unverified here; check the authoritative testing:runs row before binding proof, or set PAPERCUSP_TEST_RUN_HARNESS to the target harness (papercusp for this repo).';
 }
 
 /**
@@ -80,11 +80,19 @@ export function classifyGovernedAdmissionFailure(error) {
 }
 import {
   TEST_FILE_EXIT_FAILED,
+  TEST_FILE_EXIT_FINALIZATION_ERROR,
   TEST_FILE_EXIT_NOT_MEASURED,
   TEST_FILE_EXIT_PASSED,
   TEST_FILE_EXIT_TEMPFAIL,
 } from './lib/test-file-exit-codes.mjs';
 import { peekFsMutexSync } from './lib/fs-mutex.mjs';
+import { formatMutationProbeWindow, readMutationProbeWindow } from './lib/mutation-probe-window.mjs';
+import {
+  formatRestrictedHoldRefusal,
+  RESTRICTED_HOLD_PREFLIGHT_ADMITTED_BY_ROUTER,
+  RESTRICTED_HOLD_PREFLIGHT_ENV,
+  runRestrictedHoldPreflight,
+} from './lib/restricted-hold-preflight.mjs';
 import { repoLockName } from './npm-install-safe.mjs';
 import { ensurePapercuspTmpdir } from '../libs/test-config/src/tmpdir-guard.ts';
 
@@ -764,7 +772,9 @@ const MID_INSTALL_HINT =
  * Widen the TRIGGER rather than write a new detector (the fix `install:safe`
  * already holds is `scripts/lib/fs-mutex.mjs`'s named mutex): peek it — a
  * non-blocking read, never an acquire — immediately BEFORE each vitest spawn
- * point, and print a hint UP FRONT when it is held. This turns a silent hang
+ * point, and print a phase-aware hint UP FRONT when it is held. A writer first
+ * reserves the lock while draining admitted readers; that reservation alone
+ * does not mean its install callback has started. This turns a silent hang
  * into a stated wait: the message is already flushed to stdout the moment the
  * (possibly-hanging) spawnSync call begins, so it survives even if the outer
  * caller kills this process on its own timeout.
@@ -778,10 +788,26 @@ export function warnIfInstallInFlight(label) {
   }
   if (!peek.held) return;
   const owner = peek.owner ?? {};
-  const heldSince = owner.startedAt ? ` since ${owner.startedAt}` : '';
   const pidInfo = owner.pid ? ` (pid ${owner.pid}${owner.host ? `@${owner.host}` : ''})` : '';
+  if (owner.phase === 'draining-readers') {
+    const reservedSince = owner.acquiredAt ? ` since ${owner.acquiredAt}` : '';
+    console.error(
+      `TEST_FILE_INSTALL_DRAINING_READERS install writer${pidInfo} reserved${reservedSince} — ` +
+        `${label}: admitted readers can continue; the install callback has not started.`,
+    );
+    return;
+  }
+  if (owner.phase !== 'running') {
+    const reservedSince = owner.acquiredAt ? ` since ${owner.acquiredAt}` : '';
+    console.error(
+      `TEST_FILE_INSTALL_MUTEX_HELD install writer${pidInfo} reserved${reservedSince} — ` +
+        `${label}: writer phase is unknown; lock presence does not establish an active install.`,
+    );
+    return;
+  }
+  const runningSince = owner.runningAt ? ` since ${owner.runningAt}` : '';
   console.error(
-    `TEST_FILE_MID_INSTALL_SUSPECTED an \`npm install\` is in flight${pidInfo}${heldSince} — ` +
+    `TEST_FILE_MID_INSTALL_SUSPECTED an \`npm install\` is in flight${pidInfo}${runningSince} — ` +
       `${label} may HANG (not fail) until it completes — see EI-19304880034803985 / EI-18662389554660036. ` +
       'Check locks:list / `ps aux | grep "npm install"`, then retry once it finishes.',
   );
@@ -1258,10 +1284,9 @@ export function formatFailedAssertionDiagnostics(failures) {
 /**
  * Whether the caller already chose a reporter or a report path.
  *
- * Injection is only safe when they chose NEITHER. A caller that named a reporter has an opinion
- * about stdout's format (`testing:run` passes `--reporter=json`, and its whole contract is that
- * stdout IS the report), and one that named an `--outputFile` already has a report this runner
- * reads. Widening past that would rewrite output somebody is parsing.
+ * Machine/custom reporters own stdout's format (`testing:run` passes `--reporter=json`), and a
+ * caller-supplied `--outputFile` already supplies the report this runner reads. The injection
+ * helper can safely add a private report alongside explicitly selected human reporters.
  */
 export function callerChoseReporting(vitestArgs) {
   const args = vitestArgs ?? [];
@@ -1284,8 +1309,8 @@ export function callerChoseReporting(vitestArgs) {
  * The workspace config still supplies the source-map importDurations settings. Missing reporter
  * files in a partial/foreign checkout must not turn this diagnostic injection into a load error.
  *
- * Returns the args unchanged when the caller already chose reporting, so this can be applied
- * unconditionally at the call site.
+ * Preserve explicit human reporters; leave machine/custom reporters and caller-owned report
+ * paths unchanged. Human formatting alone must not disable assertion receipts or the ledger.
  *
  * @param {string[]} vitestArgs
  * @param {string | null} reportPath
@@ -1294,7 +1319,19 @@ export function callerChoseReporting(vitestArgs) {
  */
 export function withInjectedJsonReport(vitestArgs, reportPath, { repoRoot = REPO_ROOT, env = process.env } = {}) {
   const args = vitestArgs ?? [];
-  if (!reportPath || callerChoseReporting(args)) return { args, injectedReportPath: null };
+  if (!reportPath) return { args, injectedReportPath: null };
+  const humanReporters = new Set(['default', 'verbose', 'dot']);
+  const selectedReporters = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--outputFile' || args[i].startsWith('--outputFile=')) {
+      return { args, injectedReportPath: null };
+    }
+    if (args[i] === '--reporter') selectedReporters.push(args[++i]);
+    else if (args[i].startsWith('--reporter=')) selectedReporters.push(args[i].slice('--reporter='.length));
+  }
+  if (selectedReporters.some((reporter) => !humanReporters.has(reporter))) {
+    return { args, injectedReportPath: null };
+  }
   const evidenceReporters = [];
   const adminReporter = join(repoRoot, 'libs/test-config/src/admin-test-runs-reporter.ts');
   if (env.PAPERCUSP_DISABLE_TEST_RUNS_REPORTER !== '1' && existsSync(adminReporter)) {
@@ -1305,7 +1342,7 @@ export function withInjectedJsonReport(vitestArgs, reportPath, { repoRoot = REPO
     evidenceReporters.push(`--reporter=${sourceMapReporter}`);
   }
   return {
-    args: [...args, '--reporter=default', '--reporter=json', ...evidenceReporters, `--outputFile=${reportPath}`],
+    args: [...args, ...(selectedReporters.length ? [] : ['--reporter=default']), '--reporter=json', ...evidenceReporters, `--outputFile=${reportPath}`],
     injectedReportPath: reportPath,
   };
 }
@@ -1407,6 +1444,7 @@ export function aggregateGroupResults(groupResults) {
   const matched = groupResults.reduce((sum, g) => sum + g.matched, 0);
   const executed = groupResults.reduce((sum, g) => sum + g.executed, 0);
   const launchError = groupResults.some((g) => g.launchError);
+  const anyFinalizationError = groupResults.some((g) => g.finalizationError);
   // A governed admission refusal is a typed NOT-MEASURED outcome, not a route
   // error. Keep the type only when every launch-error group carries it: a
   // mixture of an admission refusal and an ordinary launch failure cannot be
@@ -1462,6 +1500,7 @@ export function aggregateGroupResults(groupResults) {
     anyFailed,
     launchError,
     governedAdmissionFailureKind,
+    anyFinalizationError,
     anyTimedOut,
   };
 }
@@ -2178,11 +2217,19 @@ function defaultKillOwnedProcess(child, signal, ownsProcessGroup) {
 /**
  * Can `systemd-run --user` reach the caller's user manager from this child env? It connects over
  * the session bus, which systemd locates through XDG_RUNTIME_DIR (`$XDG_RUNTIME_DIR/bus`) or an
- * explicit DBUS_SESSION_BUS_ADDRESS. With neither present it exits 1 BEFORE the command runs —
+ * explicit DBUS_SESSION_BUS_ADDRESS. A private XDG runtime directory alone is not a bus:
+ * isolated background tests deliberately create one without exposing the live user session.
+ * With neither a bus socket nor an explicit address it exits 1 BEFORE the command runs —
  * indistinguishable from the test file failing, and with no output at all.
  */
 export function userBusReachable(env = process.env) {
-  return Boolean(env && (env.XDG_RUNTIME_DIR || env.DBUS_SESSION_BUS_ADDRESS));
+  if (env?.DBUS_SESSION_BUS_ADDRESS) return true;
+  if (!env?.XDG_RUNTIME_DIR) return false;
+  try {
+    return statSync(join(env.XDG_RUNTIME_DIR, 'bus')).isSocket();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2243,6 +2290,51 @@ export function resolveTestChildLauncher({
       : args;
   const launcher = systemd ? 'systemd-run' : setsidPath ? 'setsid' : 'direct';
   return { launcher, ownsProcessGroup, spawnCommand, spawnArgs, scopeUnit: ownedScope };
+}
+
+/** Share outcome retention across the asynchronous Vitest and synchronous Node:test routes. */
+export async function runGovernedTestFileProcess(governedProcessImpl, options, runChild) {
+  let childResult;
+  let childCompleted = false;
+  try {
+    return await governedProcessImpl(options, (...args) => {
+      return Promise.resolve(runChild(...args)).then((result) => {
+        childResult = result;
+        childCompleted = true;
+        return result;
+      });
+    });
+  } catch (cause) {
+    const error = new Error(cause instanceof Error ? cause.message : String(cause), { cause });
+    // Admission, execution and receipt finalization share one promise. Once
+    // the child returned, a later rejection cannot erase its measured outcome
+    // or justify running the child again (WI-10004947).
+    if (childCompleted) {
+      error.code = 'GOVERNED_FINALIZATION_FAILED';
+      return { ...childResult, governedFinalizationError: error };
+    }
+    const kind = classifyGovernedAdmissionFailure(cause);
+    return {
+      status: null,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      error: Object.assign(error, { code: 'GOVERNED_ADMISSION_FAILED', governedAdmissionFailureKind: kind }),
+      timedOut: false,
+      actualDemand: options.demand,
+      governedAdmissionError: true,
+      governedAdmissionFailureKind: kind,
+    };
+  }
+}
+
+function printTestFinalizationError(result) {
+  const error = result.governedFinalizationError;
+  if (!error) return;
+  console.error(
+    `TEST_FILE_FINALIZATION_ERROR detail=${JSON.stringify(error.message)} ` +
+      `origin=${JSON.stringify(error.cause?.stack ?? error.stack)} — child outcome retained; no automatic rerun`,
+  );
 }
 
 /**
@@ -2551,20 +2643,7 @@ export function runCapturedTestProcess(command, args, options = {}) {
     env,
     settle: classifyGovernedTestProcessOutcome,
   };
-  return governedProcessImpl(governedOptions, runChild).catch((error) => ({
-    status: null,
-    signal: null,
-    stdout: '',
-    stderr: '',
-    error: Object.assign(new Error(error instanceof Error ? error.message : String(error)), {
-      code: 'GOVERNED_ADMISSION_FAILED',
-      governedAdmissionFailureKind: classifyGovernedAdmissionFailure(error),
-    }),
-    timedOut: false,
-    actualDemand: plannedDemand,
-    governedAdmissionError: true,
-    governedAdmissionFailureKind: classifyGovernedAdmissionFailure(error),
-  }));
+  return runGovernedTestFileProcess(governedProcessImpl, governedOptions, runChild);
 }
 
 /**
@@ -2647,6 +2726,7 @@ export async function main(
   {
     runCapturedTestProcessImpl = runCapturedTestProcess,
     runVitestListImpl = runVitestList,
+    restrictedHoldPreflightImpl = runRestrictedHoldPreflight,
   } = {},
 ) {
   let cleanupPreemptReadyMarker = null;
@@ -2767,6 +2847,28 @@ export async function main(
   // to say which state it was describing — that partial log is exactly the one that gets pasted.
   const provenanceBefore = snapshotProvenance(routes.map((route) => route.absolute));
   console.log(formatProvenanceBanner(provenanceBefore, 'pre-run'));
+  // EI-18750303030034478: an in-tree mutation probe deliberately breaks a tracked file for the length
+  // of its guard run, and a red read from that mutant looks exactly like a regression in YOUR change.
+  // Diagnostic only: one stderr line, never a verdict input (see scripts/lib/mutation-probe-window.mjs).
+  const probeWindowBefore = readMutationProbeWindow(REPO_ROOT);
+  if (probeWindowBefore) console.error(formatMutationProbeWindow(probeWindowBefore, REPO_ROOT));
+  // WI-10005713 (D-012 / R-11): a session holding an active personal disclosure has no network,
+  // but a test or source it WROTE would run here with the network. Refuse before ANY test process
+  // starts — the same restrictedHoldRefusal testing:run applies in-process (it marks the child env
+  // so this does not run twice). Fail-closed: an unreadable census refuses too.
+  if (!dry) {
+    const restrictedHold = restrictedHoldPreflightImpl({ repoRoot: REPO_ROOT, files: routes.map((route) => route.absolute) });
+    if (restrictedHold.verdict === 'refuse') {
+      console.error(formatRestrictedHoldRefusal(restrictedHold));
+      return TEST_FILE_EXIT_NOT_MEASURED;
+    }
+    // WI-10005724: every vitest this router starts inherits process.env, and its root preflight
+    // (libs/test-config host-preflight globalSetup) would otherwise repeat the same ~2s census.
+    // Only a real admit marks it; a skip means an enclosing root already set (or owns) the marker.
+    if (restrictedHold.verdict === 'admit') {
+      process.env[RESTRICTED_HOLD_PREFLIGHT_ENV] = RESTRICTED_HOLD_PREFLIGHT_ADMITTED_BY_ROUTER;
+    }
+  }
   // EI-13535: every group runs UNCONDITIONALLY — a mismatch or failure in one workspace's group
   // must never abandon the OTHER groups a multi-workspace request spans (see aggregateGroupResults
   // doc for the full incident). Each iteration always records its outcome and moves on; the final
@@ -2795,7 +2897,7 @@ export async function main(
         fileDescriptors: 16 + Math.max(1, exact.length),
       });
       const nodeIdentity = `${process.pid}:${randomUUID()}:${cwdLabel}:${exact.join('\0')}`;
-      const result = await runGovernedTestProcess({
+      const result = await runGovernedTestFileProcess(runGovernedTestProcess, {
         workspaceId: process.env.PAPERCUSP_WORKSPACE_ID ?? process.env.PAPERCUSP_WORKSPACE,
         namespace: 'test-files-node-process',
         owner: `test-files:${cwdLabel}:${process.pid}`,
@@ -2814,23 +2916,13 @@ export async function main(
           maxBuffer: 256 * 1024 * 1024,
         });
         return { ...child, actualDemand: nodeDemand };
-      }).catch((error) => ({
-        status: null,
-        signal: null,
-        stdout: '',
-        stderr: '',
-        error: Object.assign(new Error(error instanceof Error ? error.message : String(error)), {
-          code: 'GOVERNED_ADMISSION_FAILED',
-          governedAdmissionFailureKind: classifyGovernedAdmissionFailure(error),
-        }),
-        governedAdmissionError: true,
-        governedAdmissionFailureKind: classifyGovernedAdmissionFailure(error),
-      }));
+      });
       if (result.stdout) process.stdout.write(result.stdout);
       if (result.stderr) process.stderr.write(result.stderr);
+      printTestFinalizationError(result);
       if (result.error) {
         if (result.governedAdmissionError) {
-          console.error(`TEST_FILE_ADMISSION_ERROR kind=${result.governedAdmissionFailureKind ?? 'undetermined'} detail=${JSON.stringify(result.error.message)}`);
+          console.error(`TEST_FILE_ADMISSION_ERROR kind=${result.governedAdmissionFailureKind ?? 'undetermined'} detail=${JSON.stringify(result.error.message)} origin=${JSON.stringify(result.error.cause?.stack ?? result.error.stack)}`);
         } else {
           console.error(formatRouteError(`(group cwd=${cwdLabel}) could not launch Node:test: ${result.error.message}`));
         }
@@ -2848,6 +2940,7 @@ export async function main(
         unmatchedCount: 0,
         failed: groupFailed,
         launchError: Boolean(result.error),
+        finalizationError: Boolean(result.governedFinalizationError),
         ...(result.governedAdmissionError
           ? { governedAdmissionFailureKind: result.governedAdmissionFailureKind ?? 'undetermined' }
           : {}),
@@ -3037,6 +3130,7 @@ export async function main(
     const visibleStderr = suppressInjectedJsonReportNotice(result.stderr ?? '', injectedReportPath);
     if (visibleStdout) process.stdout.write(visibleStdout);
     if (visibleStderr) process.stderr.write(visibleStderr);
+    printTestFinalizationError(result);
     if (result.timedOut) {
       console.error(
         `TEST_FILE_WATCHDOG cwd=${cwdLabel} files=${JSON.stringify(exact)} ` +
@@ -3057,7 +3151,7 @@ export async function main(
     }
     if (result.error) {
       if (result.governedAdmissionError) {
-        console.error(`TEST_FILE_ADMISSION_ERROR kind=${result.governedAdmissionFailureKind ?? 'undetermined'} detail=${JSON.stringify(result.error.message)}`);
+        console.error(`TEST_FILE_ADMISSION_ERROR kind=${result.governedAdmissionFailureKind ?? 'undetermined'} detail=${JSON.stringify(result.error.message)} origin=${JSON.stringify(result.error.cause?.stack ?? result.error.stack)}`);
       } else {
         console.error(formatRouteError(`(group cwd=${cwdLabel}) could not launch Vitest: ${result.error.message}`));
         if (looksLikeMidInstallCorruption(result.error.message)) {
@@ -3143,6 +3237,7 @@ export async function main(
           );
           if (detailResult.stdout) process.stdout.write(detailResult.stdout);
           if (detailResult.stderr) process.stderr.write(detailResult.stderr);
+          printTestFinalizationError(detailResult);
           if (detailResult.timedOut) {
             console.error(
               `TEST_FILE_DETAIL_RECOVERY_TIMEOUT cwd=${cwdLabel} file=${JSON.stringify(file)} ` +
@@ -3189,6 +3284,7 @@ export async function main(
       unmatchedCount: 0,
       failed: groupFailed,
       launchError: false,
+      finalizationError: Boolean(result.governedFinalizationError),
       // EI-21902345477441137: distinct from `failed` — a reaped run produced no verdict at all,
       // so it must never contribute to `anyFailed` (that would be the exact bug this fixes) nor
       // silently read as a clean pass (that would hide a genuine resource-limit problem).
@@ -3257,6 +3353,9 @@ export async function main(
   const driftMarker = formatProvenanceDrift(provenanceDiff);
   if (driftMarker) console.error(driftMarker);
   console.log(formatProvenanceBanner(provenanceAfter, 'post-run'));
+  // Re-read AFTER the run: a probe that opened its window mid-run is the case the pre-run read missed.
+  const probeWindowAfter = readMutationProbeWindow(REPO_ROOT);
+  if (probeWindowAfter) console.error(formatMutationProbeWindow(probeWindowAfter, REPO_ROOT));
 
   // The invariant the line below now carries. Unreachable today — a zero/partial match is refused
   // per-group above, and `executed` is derived from that matched set — which is precisely why it
@@ -3433,8 +3532,10 @@ export async function main(
       : 'unknown';
   console.log(
     `TEST_FILE_RESULT requested=${summary.requested} executed=${summary.executed} matched=${summary.matched} ` +
-      `status=${status} ${provenanceResultFields(provenanceBefore, provenanceDiff)} skippedTests=${skippedField}`,
+      `status=${status} ${provenanceResultFields(provenanceBefore, provenanceDiff)} skippedTests=${skippedField}` +
+      (summary.anyFinalizationError ? ' finalizationError=true' : ''),
   );
+  if (summary.anyFinalizationError) return TEST_FILE_EXIT_FINALIZATION_ERROR;
   return summary.anyFailed ? TEST_FILE_EXIT_FAILED : TEST_FILE_EXIT_PASSED;
   } finally {
     cleanupPreemptMarkers();

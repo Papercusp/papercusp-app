@@ -37,6 +37,7 @@ import { verifyEd25519 } from '../identity/ed25519';
 import { canonicalJson } from '../authority/authority-rpc-envelope';
 import type { BudgetAxis, BudgetEnvelope, BudgetUnit } from './offer-budget';
 import { resolveBillingAuthority, type BillingContext } from './billing-matrix';
+import type { RefusalContract } from '../capability-envelope/refusal-contract-types';
 
 /* ─────────────────────────────────────────────────────────────────────────
  * The signed objects
@@ -179,6 +180,12 @@ export type PoolAssignmentVerdict =
       readonly code: PoolAssignmentRefusalCode;
       /** The exact link that failed — carried verbatim into a P-004 refusal receipt (D-004). */
       readonly detail: string;
+      /**
+       * WI-10005197: what would LIFT this refusal. Present on the constraint refusals a
+       * lender can actually act on (today: `fleet_not_allowed`); crypto/attestation refusals
+       * are not liftable by editing a grant, so they carry none.
+       */
+      readonly refusal?: RefusalContract;
     };
 
 function decodeSig(b64: string): Buffer | null {
@@ -289,6 +296,14 @@ export function verifyPoolAssignment(input: PoolAssignmentVerifyInput): PoolAssi
       ok: false,
       code: 'fleet_not_allowed',
       detail: `fleet '${a.fleetSlug}' is not in the grant's allowed set [${g.allowedFleets.join(', ') || '(none)'}] (empty ⇒ no fleet is permitted).`,
+      refusal: {
+        observed: { fleetSlug: a.fleetSlug, allowedFleetCount: String(g.allowedFleets.length), poolId: g.poolId },
+        liftsWhen:
+          'the assignment\'s fleet is in the grant\'s allowedFleets. An empty allowedFleets permits NO fleet, so a ' +
+          'grant lending to a fleet must list it. Retrying the same draw cannot lift it: the HOST owner re-issues the ' +
+          'grant with that fleet added (a new grantEpoch), or the pool assigns the draw to an already-allowed fleet',
+        whoCanMakeItTrue: ['owner', 'another-agent'],
+      },
     };
   }
 

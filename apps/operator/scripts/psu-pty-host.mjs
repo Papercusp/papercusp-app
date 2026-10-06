@@ -41,7 +41,7 @@
 import { createRequire } from 'node:module';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants as osConstants, homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 // Keep the interactive bootstrap independent of operator packages while using
@@ -58,6 +58,7 @@ import {
   unlinkSync,
   existsSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   chmodSync,
   renameSync,
@@ -95,6 +96,7 @@ const HOST_SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 /** This script's own path — the file whose LOADED contents this process runs.
  *  Separate from HOST_SCRIPT_DIR because WI-38292 needs the file, not the dir. */
 const HOST_SCRIPT_PATH = fileURLToPath(import.meta.url);
+const LAUNCHER_SCRIPT_PATH = join(HOST_SCRIPT_DIR, 'psu-launcher.mjs');
 
 /** WI-38292: sha256 of a host script ON DISK, or null when unreadable.
  *  `path` is overridable so the staleness guard below can be proven falsifiable
@@ -116,16 +118,63 @@ export function hashHostScript(path = HOST_SCRIPT_PATH) {
  *  describes the code actually executing after the file on disk moves on. */
 export const LOADED_HOST_CODE_VERSION = hashHostScript();
 
-/** WI-38292: is this host executing code older than what is on disk?
- *  `stale` is true ONLY when both hashes are known and differ — an unreadable file
+/**
+ * Persist only this closed classification of the operator target. The full URL can
+ * contain credentials, paths, or query tokens and is never host-event evidence.
+ *
+ * @param {EnvironmentMap} [env]
+ * @returns {'direct-3170'|'other'|'unset'}
+ */
+export function operatorPinEvidence(env = process.env) {
+  const raw = typeof env?.PAPERCUSP_OPERATOR_URL === 'string'
+    ? env.PAPERCUSP_OPERATOR_URL.trim()
+    : '';
+  if (!raw) return 'unset';
+  try {
+    const url = new URL(raw);
+    const loopback = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(url.hostname);
+    const path = url.pathname.replace(/\/+$/, '') || '/';
+    if (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      loopback &&
+      url.port === '3170' &&
+      ['/', '/api/mcp'].includes(path)
+    ) {
+      return 'direct-3170';
+    }
+  } catch {
+    // An invalid or non-local target is deliberately reduced to the fixed enum.
+  }
+  return 'other';
+}
+
+// The launcher supplies the long-lived carry/model callbacks. Replacing only
+// that sibling leaves this process on its old callbacks until it also adopts.
+const LOADED_LAUNCHER_CODE_VERSION = hashHostScript(LAUNCHER_SCRIPT_PATH);
+
+/** WI-38292: is this host or its launcher executing code older than disk?
+ *  `stale` is true when either component's known hashes differ — an unreadable file
  *  degrades to "not stale" so a transient fs error can never turn a working respawn
  *  path into a warning storm. Pure + exported for tests. */
 export function hostCodeStaleness({
   loaded = LOADED_HOST_CODE_VERSION,
   path = HOST_SCRIPT_PATH,
+  launcherLoaded = LOADED_LAUNCHER_CODE_VERSION,
+  launcherPath = LAUNCHER_SCRIPT_PATH,
 } = {}) {
   const onDisk = hashHostScript(path);
-  return { stale: Boolean(loaded && onDisk && loaded !== onDisk), loaded, onDisk };
+  const launcherOnDisk = hashHostScript(launcherPath);
+  const launcher = {
+    stale: Boolean(launcherLoaded && launcherOnDisk && launcherLoaded !== launcherOnDisk),
+    loaded: launcherLoaded,
+    onDisk: launcherOnDisk,
+  };
+  return {
+    stale: Boolean(loaded && onDisk && loaded !== onDisk) || launcher.stale,
+    loaded,
+    onDisk,
+    launcher,
+  };
 }
 
 /** WI-38292: the exit code that asks the psu shim's re-exec loop to re-run the
@@ -353,7 +402,7 @@ const KICKOFF_PROOF_TOKEN_RE = /^[a-f0-9]{48}$/i;
  *
  * @param {{persisted?: boolean, nativeRef?: string | null, reason?: string | null}} proof
  * @param {EnvironmentMap} [env]
- * @returns {{published: boolean, reason?: string}}
+ * @returns {{published: boolean, reason?: string, errorMessage?: string, errorCode?: string | null}}
  */
 export function publishKickoffProofReceipt(proof, env = process.env) {
   const rawPath = env?.[KICKOFF_PROOF_PATH_ENV];
@@ -446,8 +495,13 @@ export function publishKickoffProofReceipt(proof, env = process.env) {
     renameSync(tempPath, path);
     tempPath = null;
     return { published: true };
-  } catch {
-    return { published: false, reason: 'kickoff-proof-receipt-publish-failed' };
+  } catch (error) {
+    return {
+      published: false,
+      reason: 'kickoff-proof-receipt-publish-failed',
+      errorMessage: String(error?.message ?? error).slice(0, 500),
+      errorCode: typeof error?.code === 'string' ? error.code : null,
+    };
   } finally {
     if (tempFd != null) {
       try { closeSync(tempFd); } catch { /* best-effort */ }
@@ -549,12 +603,23 @@ const KICKOFF_MARKER_ECHO_POLL_MS = 25;
  * Confirm a fresh Codex kickoff reached the visible composer before Enter can
  * submit it. A backend frame proves the TUI rendered; child.write only proves
  * the host attempted input. Neither proves the composer accepted the marker.
+ *
+ * @param {{
+ *   read?: () => unknown,
+ *   text?: string,
+ *   timeoutMs?: number,
+ *   pollMs?: number,
+ *   headLossGraceMs?: number,
+ *   shouldCancel?: () => boolean,
+ *   onPending?: (state: { elapsedMs: number, observedChars: number, markerTailSeen: boolean }) => void,
+ * }} [options]
  */
-async function waitForPtyTextEcho({
+export async function waitForPtyTextEcho({
   read,
   text,
   timeoutMs = KICKOFF_MARKER_ECHO_TIMEOUT_MS,
   pollMs = KICKOFF_MARKER_ECHO_POLL_MS,
+  headLossGraceMs = KICKOFF_MARKER_ECHO_TIMEOUT_MS,
   shouldCancel = () => false,
   onPending = () => {},
 } = {}) {
@@ -567,15 +632,31 @@ async function waitForPtyTextEcho({
   let observedChars = 0;
   let markerTailSeen = false;
   let pendingReported = false;
+  let visible = '';
   while (true) {
     if (shouldCancel()) return { echoed: false, cancelled: true, elapsedMs: Date.now() - startedAt };
-    const visible = stripAnsi(String(read() ?? '')).replace(/[\r\n]/g, '');
+    visible = stripAnsi(String(read() ?? '')).replace(/[\r\n]/g, '');
     observedChars = Math.max(observedChars, visible.length);
     markerTailSeen ||= visible.includes(expected.slice(-12));
     if (visible.includes(expected)) {
       return { echoed: true, elapsedMs: Date.now() - startedAt, observedChars, markerTailSeen };
     }
+    // WI-10005331: a composer that word-wraps the marker at its only space renders
+    // every other byte in order; waiting cannot bring the break space back.
+    const markerWhitespaceLost = composerEchoMarkerWhitespaceLoss(expected, visible);
+    if (markerWhitespaceLost != null) {
+      return { echoed: true, markerWhitespaceLost, elapsedMs: Date.now() - startedAt, observedChars, markerTailSeen };
+    }
     const elapsedMs = Date.now() - startedAt;
+    // WI-10005331: the exact proof gets the first grace window. After it, a marker
+    // that lost only its head is this kickoff's own echo; waiting cannot complete it.
+    // The post-submit native proof already accepts the same loss (WI-10002745).
+    if (elapsedMs >= headLossGraceMs) {
+      const markerHeadLost = composerEchoMarkerHeadLoss(expected, visible);
+      if (markerHeadLost != null) {
+        return { echoed: true, markerHeadLost, elapsedMs, observedChars, markerTailSeen };
+      }
+    }
     if (!pendingReported && elapsedMs >= KICKOFF_MARKER_ECHO_TIMEOUT_MS) {
       pendingReported = true;
       onPending({ elapsedMs, observedChars, markerTailSeen });
@@ -584,7 +665,16 @@ async function waitForPtyTextEcho({
     if (remainingMs <= 0) break;
     await new Promise((resolve) => setTimeout(resolve, Math.min(Math.max(1, Number(pollMs) || 1), remainingMs)));
   }
-  return { echoed: false, reason: 'timeout', elapsedMs: Date.now() - startedAt, observedChars, markerTailSeen };
+  return {
+    echoed: false,
+    reason: 'timeout',
+    elapsedMs: Date.now() - startedAt,
+    observedChars,
+    markerTailSeen,
+    // Bounded evidence of WHICH bytes were missing: head loss, a dropped middle
+    // byte and a composer that never rendered the marker need different fixes.
+    visibleTail: visible.slice(-80),
+  };
 }
 
 /**
@@ -649,8 +739,28 @@ function nativeTranscriptRoot(agent, env, home) {
 // alphabet. `coord-inject:owner` is valid; a narrower host-only parser falsely
 // reports its native carry as missing provenance.
 const LEADING_TURN_ORIGIN_RE = /^⟦turn-origin:[A-Za-z0-9:._@-]+ nonce:[a-f0-9]{8,64}⟧$/;
+
+/** WI-10005628: Claude Code stores a large bracketed paste in its native transcript
+ * as `\n\n<pasted_content id="3e9a">\n⟦turn-origin:…⟧\n…\n</pasted_content id="3e9a">\n`.
+ * Every scripted kickoff typed through the PTY arrives in that wrapper, so the
+ * first line is empty and the marker proof never matched: the host declared the
+ * kickoff unverified and killed a child that was already working (54 kills on
+ * 2026-10-02 from 16:00Z, freshly elected goal holders among them). Same grammar
+ * as the canonical PASTE_WRAPPER_SOURCE in
+ * packages/operator-core/lib/turn-provenance/envelope-grammar.ts (WI-10002461),
+ * pinned by envelope-grammar-cross-language.test.ts. WHOLE-PROMPT ONLY: words
+ * outside the paste leave the text unchanged. */
+const PASTE_WRAPPER_RE = /^\s*<pasted_content id="([A-Za-z0-9_-]{1,64})">\r?\n?([\s\S]*?)\r?\n?<\/pasted_content id="\1">\s*$/;
+
+/** The pasted text when `text` is entirely one Claude Code paste block; otherwise `text`. */
+export function unwrapWholePaste(text) {
+  const value = String(text ?? '');
+  const m = PASTE_WRAPPER_RE.exec(value);
+  return m ? m[2] : value;
+}
+
 export function leadingTurnOriginMarker(text) {
-  const firstLine = String(text ?? '').replace(/\r\n?/g, '\n').split('\n', 1)[0].trim();
+  const firstLine = unwrapWholePaste(text).replace(/\r\n?/g, '\n').split('\n', 1)[0].trim();
   return LEADING_TURN_ORIGIN_RE.test(firstLine)
     ? firstLine
     : null;
@@ -735,17 +845,126 @@ export function truncatedTurnOriginMarkerLoss(
   return null;
 }
 
-/** The smallest truncation of `marker` that starts any string in `row`
- * (walked to a bounded depth), or null. */
-function truncatedMarkerLossInRow(marker, row, depth = 0) {
-  if (typeof row === 'string') return truncatedTurnOriginMarkerLoss(marker, row);
-  if (!row || typeof row !== 'object' || depth > 8) return null;
-  let best = null;
-  for (const value of Array.isArray(row) ? row : Object.values(row)) {
-    const lost = truncatedMarkerLossInRow(marker, value, depth + 1);
-    if (lost != null && (best == null || lost < best)) best = lost;
+/** WI-10005331: the pre-submit composer echo loses leading marker bytes the same
+ * way the native transcript does (WI-10002745). Measured 2026-10-02: Codex resolver
+ * su-df88c37b echoed 49 of 50 marker characters with the tail visible, the exact
+ * proof could never match, and the host waited ~557s and then dropped the kickoff,
+ * so inbox-resolve run bulk-bf4040d6 failed with every item undecided.
+ *
+ * Returns how many leading characters of `marker` were lost when `visible` holds a
+ * proper suffix of it that keeps at least `minNonceChars` nonce characters and the
+ * closing bracket; otherwise null (including when the exact marker is present, which
+ * the exact proof owns). Unlike truncatedTurnOriginMarkerLoss the suffix may sit
+ * anywhere in `visible`: the echo tap holds only output written after this kickoff's
+ * own write, so its leading bytes are composer chrome rather than a transcript row
+ * that could quote another injection, and the nonce tail is this injection's own
+ * random value. The suffix must start the text or follow chrome: when the nearest
+ * preceding non-space character could belong to a marker, the echo is either another
+ * nonce that shares this tail or a marker that lost a MIDDLE byte (which the
+ * post-submit proof rejects), so it is refused. Pure and exported for tests. */
+export function composerEchoMarkerHeadLoss(
+  marker,
+  visible,
+  { minNonceChars = TRUNCATED_MARKER_MIN_NONCE_CHARS } = {},
+) {
+  const exact = String(marker ?? '');
+  if (!LEADING_TURN_ORIGIN_RE.test(exact)) return null;
+  const text = String(visible ?? '');
+  if (text.includes(exact)) return null;
+  const minSuffixLength = minNonceChars + 1; // nonce tail + closing bracket
+  for (let lost = 1; lost <= exact.length - minSuffixLength; lost++) {
+    const suffix = exact.slice(lost);
+    for (let at = text.indexOf(suffix); at !== -1; at = text.indexOf(suffix, at + 1)) {
+      const before = text.slice(0, at).trimEnd();
+      if (!before || !/[⟦⟧A-Za-z0-9:._@-]$/u.test(before)) return lost;
+    }
   }
-  return best;
+  return null;
+}
+
+/** WI-10005331: the composer word-wraps a long kickoff, and a wrap that lands on the
+ * marker's only space renders the two halves on separate rows with the break space
+ * omitted. The echo tap strips ANSI and row breaks, so the visible text holds every
+ * other marker byte in order. Measured 2026-10-02 15:11:07Z on a host already running
+ * the head-loss fix: visibleTail `⟦turn-origin:fleet-kickoffnonce:b413517be82f7380⟧`
+ * (49 of 50 characters, the space missing), and the kickoff was dropped after ~586s.
+ *
+ * Returns how many of `marker`'s whitespace characters are missing when `visible`
+ * holds the marker with only its whitespace changed (dropped, or padded to the row
+ * end, which counts 0 lost); otherwise null, including when the exact marker is
+ * present (the exact proof owns that case). Only turn-origin markers qualify: their
+ * random nonce keeps the whitespace-insensitive match specific to this injection.
+ * Any non-whitespace loss (a dropped head or middle byte) does not match. Pure and
+ * exported for tests. */
+export function composerEchoMarkerWhitespaceLoss(marker, visible) {
+  const exact = String(marker ?? '');
+  if (!LEADING_TURN_ORIGIN_RE.test(exact)) return null;
+  const text = String(visible ?? '');
+  if (text.includes(exact)) return null;
+  const pattern = exact
+    .split(/\s+/u)
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('\\s*');
+  const match = new RegExp(pattern, 'u').exec(text);
+  if (!match) return null;
+  const whitespaceIn = (value) => (value.match(/\s/gu) ?? []).length;
+  return Math.max(0, whitespaceIn(exact) - whitespaceIn(match[0]));
+}
+
+/** Read the user-message content from Claude, Codex, or OMP native row shapes. */
+function nativeUserPromptContent(row) {
+  const payload = row?.payload && typeof row.payload === 'object' ? row.payload : null;
+  let content;
+  if (row?.type === 'user' && row?.message?.role === 'user') content = row.message.content;
+  else if (row?.type === 'response_item' && payload?.type === 'message' && payload?.role === 'user') {
+    content = payload.content;
+  } else if (row?.type === 'message' && row?.role === 'user') content = row.content;
+  else if (row?.message?.role === 'user') content = row.message.content;
+  else return null;
+  if (Array.isArray(content)) {
+    // Claude resume writes interrupted tool results as fresh user rows.
+    // Tool output must neither end the first-task scan nor certify a marker;
+    // genuine user text in a mixed row still owns that prompt's proof barrier.
+    const promptBlocks = content.filter((block) => block?.type !== 'tool_result');
+    return promptBlocks.length ? promptBlocks : null;
+  }
+  return content;
+}
+
+/** Flatten native user text blocks without reading metadata or assistant rows. */
+function nativeUserPromptText(content, depth = 0) {
+  if (typeof content === 'string') return content;
+  if (!content || typeof content !== 'object' || depth > 8) return '';
+  if (Array.isArray(content)) return content.map((part) => nativeUserPromptText(part, depth + 1)).join('');
+  if (typeof content.text === 'string') return content.text;
+  if (typeof content.content === 'string' || Array.isArray(content.content)) {
+    return nativeUserPromptText(content.content, depth + 1);
+  }
+  return '';
+}
+
+/** Codex stores its injected AGENTS.md launch context as a user row before the
+ * first task prompt. It is setup context, not a submitted task turn. */
+/** WI-10005628: Claude Code records a local slash command typed before the kickoff
+ * (the host's `/mcp` reconnect, `/clear`, …) as user rows ahead of the first task
+ * prompt: an `isMeta` `<local-command-caveat>` row, then `<command-name>/mcp…` and
+ * `<local-command-stdout>…`. They are not task turns. Treating the caveat as "the
+ * first fresh task prompt" ended the scan before the real kickoff row (measured
+ * su-fbcd9de3 20:11:08Z: the auditor was working 7s later and was still killed). */
+const CLAUDE_LOCAL_COMMAND_ROW_RE =
+  /^\s*<(?:local-command-caveat|command-name|command-message|command-args|local-command-stdout|local-command-stderr)>/;
+function isClaudeLocalCommandRow(row, text) {
+  return row?.isMeta === true || CLAUDE_LOCAL_COMMAND_ROW_RE.test(String(text ?? ''));
+}
+
+function isNativeLaunchContextPrompt(text, agent) {
+  const normalized = String(text ?? '').replace(/\r\n?/g, '\n').trim();
+  if (normalized.startsWith('# AGENTS.md instructions\n')) return true;
+  // WI-10006270: Codex resume writes a separate environment setup user row
+  // after AGENTS.md and before the kickoff. It must not end the first-task
+  // proof scan. Only a complete standalone block is setup; owner text around
+  // the tags, incomplete blocks, and other backends remain task prompts.
+  return agent === 'codex' && /^<environment_context>\n[\s\S]*\n<\/environment_context>$/.test(normalized);
 }
 
 /** The ONE native-transcript scan behind marker and exact-prompt proofs.
@@ -803,19 +1022,28 @@ function scanNativeTranscriptMarker({
         const st = statSync(path);
         if (st.size < (markerBytes?.length ?? 1) || st.size > 64 * 1024 * 1024) continue;
         const body = readFileSync(path, 'utf8');
+        let firstFreshTruncatedProof = null;
         for (const line of body.split(/\r?\n/)) {
-          if (needle && !line.includes(needle)) continue;
           let row;
           try { row = JSON.parse(line); }
           catch { continue; }
+          let userPromptText = null;
           if (expectedPrompt) {
             if (row?.type !== 'user' || row?.message?.role !== 'user' ||
-                typeof row?.message?.content !== 'string' ||
-                row.message.content.replace(/\r\n?/g, '\n').trimEnd() !== expectedPrompt) continue;
+                typeof row?.message?.content !== 'string') continue;
+            // WI-10005628: a long typed prompt lands wrapped in a paste block.
+            const nativePrompt = row.message.content.replace(/\r\n?/g, '\n').trimEnd();
+            if (nativePrompt !== expectedPrompt &&
+                unwrapWholePaste(nativePrompt).trimEnd() !== expectedPrompt) continue;
+          } else {
+            const userContent = nativeUserPromptContent(row);
+            if (userContent == null) continue;
+            userPromptText = nativeUserPromptText(userContent);
+            if (isNativeLaunchContextPrompt(userPromptText, agent)) continue;
+            if (isClaudeLocalCommandRow(row, userPromptText)) continue;
           }
-          const lostChars = expectedPrompt ? 0 : (allowTruncated ? truncatedMarkerLossInRow(marker, row) : 0);
-          if (lostChars == null) continue;
           const rawTimestamp = row?.timestamp ?? row?.time ?? row?.createdAt ?? row?.created_at;
+          let rowIsFresh = false;
           if (rawTimestamp != null) {
             let rowTimestampMs = typeof rawTimestamp === 'number'
               ? rawTimestamp
@@ -823,16 +1051,44 @@ function scanNativeTranscriptMarker({
             if (Number.isFinite(rowTimestampMs) && rowTimestampMs > 0 && rowTimestampMs < 10_000_000_000) {
               rowTimestampMs *= 1_000; // numeric Unix seconds
             }
-            if (Number.isFinite(rowTimestampMs) && rowTimestampMs >= sinceMs) return { nativeRef: path, lostChars };
+            if (Number.isFinite(rowTimestampMs) && rowTimestampMs > 0) rowIsFresh = rowTimestampMs >= sinceMs;
             // An explicitly old or malformed row must never fall back to the
             // file's mtime; a later metadata append cannot refresh its proof.
+            else continue;
+          } else {
+            // Legacy native rows without their own timestamp are usable only when
+            // the transcript itself was created after this injection began.
+            rowIsFresh = Number.isFinite(st.birthtimeMs) && st.birthtimeMs >= sinceMs;
+          }
+          if (!rowIsFresh) continue;
+          if (expectedPrompt) return { nativeRef: path, lostChars: 0 };
+
+          // The first fresh task prompt is the primary proof. If its marker lost
+          // its head but kept this injection's nonce, only the immediately
+          // following fresh user prompt may upgrade that degraded proof with
+          // the exact marker. Any other prompt closes that upgrade window, so a
+          // later unrelated user turn cannot certify this injection.
+          const promptMarker = leadingTurnOriginMarker(userPromptText);
+          // Managed session ports prove a checksum line in the submitted seed,
+          // distinct from its leading turn-origin marker. Keep this within the
+          // same first fresh user prompt and native-id fence; arbitrary text,
+          // inline quotations and later user/assistant echoes are not proof.
+          if (/^\[PAPERCUSP SESSION PORT CHECKSUM [a-f0-9]{64}\]$/.test(marker) &&
+              unwrapWholePaste(userPromptText).replace(/\r\n?/g, '\n')
+                .split('\n').some((line) => line.trim() === marker)) {
+            return { nativeRef: path, lostChars: 0 };
+          }
+          if (promptMarker === marker) return { nativeRef: path, lostChars: 0 };
+          const lostChars = truncatedTurnOriginMarkerLoss(marker, unwrapWholePaste(userPromptText));
+          if (lostChars != null) {
+            if (firstFreshTruncatedProof) return allowTruncated ? firstFreshTruncatedProof : null;
+            firstFreshTruncatedProof = { nativeRef: path, lostChars };
             continue;
           }
-          // Legacy native rows without their own timestamp are usable only when
-          // the transcript itself was created after this injection began. An
-          // existing transcript's mtime can move for unrelated row types.
-          if (Number.isFinite(st.birthtimeMs) && st.birthtimeMs >= sinceMs) return { nativeRef: path, lostChars };
+          if (firstFreshTruncatedProof) return allowTruncated ? firstFreshTruncatedProof : null;
+          break;
         }
+        if (allowTruncated && firstFreshTruncatedProof) return firstFreshTruncatedProof;
       } catch {
         /* a concurrently-rotated transcript is simply not proof yet */
       }
@@ -1017,10 +1273,11 @@ export function nativeTurnVerifierSupport(agent, env = process.env) {
   return { supported: true, reason: null };
 }
 
-/** Read a bounded, complete tail from one transcript under the backend's
- * isolated root. This is shared by the turn-boundary and launch-activity
- * probes so neither can accidentally certify another live session. */
-function readIsolatedNativeTranscriptRows({ agent, env = process.env, transcriptPath, home = homedir() }) {
+/** Open one transcript under the backend's isolated root, behind the shared
+ * containment, symlink and regular-file guards. Both native readers below go
+ * through this, so neither can accidentally certify another live session.
+ * Returns an open fd the caller MUST close, or null. */
+function openIsolatedNativeTranscript({ agent, env = process.env, transcriptPath, home = homedir() }) {
   if (!nativeTurnVerifierSupport(agent, env).supported || !transcriptPath) return null;
   let fd;
   try {
@@ -1032,59 +1289,230 @@ function readIsolatedNativeTranscriptRows({ agent, env = process.env, transcript
     if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel) || !path.endsWith('.jsonl')) return null;
     fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const info = fstatSync(fd);
-    if (!info.isFile() || info.size === 0) return null;
+    if (!info.isFile() || info.size === 0) {
+      closeSync(fd);
+      return null;
+    }
+    return { fd, info };
+  } catch {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+    return null;
+  }
+}
+
+/** Read a bounded, complete TAIL from one isolated transcript. Used by the
+ * turn-boundary probe, which only needs the newest rows. */
+function readIsolatedNativeTranscriptWindow(options) {
+  const opened = openIsolatedNativeTranscript(options);
+  if (!opened) return null;
+  const { fd, info } = opened;
+  try {
     const length = Math.min(info.size, NATIVE_TURN_TAIL_BYTES);
     const bytes = Buffer.alloc(length);
     const read = readSync(fd, bytes, 0, length, info.size - length);
-    let tail = bytes.subarray(0, read).toString('utf8');
-    if (!tail.endsWith('\n')) return null; // the newest record is still being written
-    if (info.size > length) tail = tail.slice(tail.indexOf('\n') + 1);
-    return tail.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+    let tailBytes = bytes.subarray(0, read);
+    if (!tailBytes.length || tailBytes[tailBytes.length - 1] !== 0x0a) return null; // newest row is being written
+    if (info.size > length) {
+      const firstNewline = tailBytes.indexOf(0x0a);
+      if (firstNewline < 0) return null; // the first complete row is outside the bounded window
+      tailBytes = tailBytes.subarray(firstNewline + 1);
+    }
+    const rows = [];
+    let cursor = 0;
+    while (cursor < tailBytes.length) {
+      const newline = tailBytes.indexOf(0x0a, cursor);
+      if (newline < 0) return null;
+      const line = tailBytes.subarray(cursor, newline).toString('utf8');
+      if (line.trim()) rows.push(JSON.parse(line));
+      cursor = newline + 1;
+    }
+    return rows;
   } catch {
     return null;
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    closeSync(fd);
   }
+}
+
+/** Read parsed rows from the bounded native tail window. */
+function readIsolatedNativeTranscriptRows(options) {
+  return readIsolatedNativeTranscriptWindow(options);
+}
+
+/** WI-10004982: how far one launch-activity probe call reads FORWARD. It
+ * matches the 64 MiB cap of the marker proof scan, so any transcript whose
+ * marker the proof could find is one this probe can also read from the start. */
+export const NATIVE_KICKOFF_SCAN_BYTES = 64 * 1024 * 1024;
+
+/** Read COMPLETE rows FORWARD from a row boundary of one isolated transcript.
+ * `fromOffset` must be 0 or the end offset of an earlier complete row; the
+ * byte before it is checked to be a newline, so a stale or wrong offset is
+ * refused rather than parsed mid-row. A trailing row still being written is
+ * left out (it is not evidence yet) and `nextOffset` stops before it. Lines
+ * are returned unparsed so a caller can prefilter cheaply. */
+function readIsolatedNativeTranscriptForward({
+  agent,
+  env = process.env,
+  transcriptPath,
+  home = homedir(),
+  fromOffset = 0,
+  maxBytes = NATIVE_KICKOFF_SCAN_BYTES,
+}) {
+  if (!Number.isSafeInteger(fromOffset) || fromOffset < 0 || !(maxBytes > 0)) return null;
+  const opened = openIsolatedNativeTranscript({ agent, env, transcriptPath, home });
+  if (!opened) return null;
+  const { fd, info } = opened;
+  try {
+    if (fromOffset > info.size) return null; // the file shrank under the anchor
+    const lead = fromOffset > 0 ? 1 : 0;
+    const start = fromOffset - lead;
+    const length = Math.min(info.size - start, maxBytes + lead);
+    const bytes = Buffer.alloc(length);
+    const view = bytes.subarray(0, readSync(fd, bytes, 0, length, start));
+    if (lead && view[0] !== 0x0a) return null; // not a row boundary
+    const lines = [];
+    let cursor = lead;
+    while (cursor < view.length) {
+      const newline = view.indexOf(0x0a, cursor);
+      if (newline < 0) break; // still being written, or past the bound
+      const text = view.subarray(cursor, newline).toString('utf8');
+      if (text.trim()) lines.push({ text, startOffset: start + cursor, endOffset: start + newline + 1 });
+      cursor = newline + 1;
+    }
+    return { lines, fileIdentity: `${info.dev}:${info.ino}`, size: info.size, nextOffset: start + cursor };
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Is this native row the kickoff PROMPT itself?
+ *
+ * WI-10004982: for claude this must be the real `type:'user'` prompt row.
+ * Claude also copies the prompt into other rows: `last-prompt` bookkeeping
+ * rows (measured on transcript 98404f60: rows 14, 21 and 34, written before
+ * AND after the reply) and a `queue-operation` row when the prompt is queued
+ * behind a running turn. Binding to a queued copy would count the PREVIOUS
+ * turn's assistant row as this kickoff's activity. Codex keeps the original
+ * any-row match, because no codex copy written after the turn is measured. */
+export function kickoffMarkerPromptRow(agent, row, markerText) {
+  if (!markerText) return false;
+  if (agent === 'claude') {
+    if (row?.type !== 'user' || row.isMeta) return false;
+    const content = row.message?.content;
+    if (typeof content === 'string') return content.includes(markerText);
+    if (!Array.isArray(content) || content.some((block) => block?.type === 'tool_result')) return false;
+    return content.some((block) => typeof block?.text === 'string' && block.text.includes(markerText));
+  }
+  try { return JSON.stringify(row).includes(markerText); }
+  catch { return false; }
+}
+
+/** Does this native row prove the model started working? */
+function kickoffModelActivityRow(agent, row) {
+  if (agent === 'codex') {
+    if (row?.type === 'event_msg' &&
+      ['task_started', 'task_complete', 'turn_completed'].includes(row.payload?.type)) {
+      return true;
+    }
+    return row?.type === 'response_item' && row.payload?.type === 'message' && row.payload?.role === 'assistant';
+  }
+  return row?.type === 'assistant';
 }
 
 /** A plain launch's marker proves submission. A native task-start or assistant
  * row AFTER that exact marker proves model activity, including a short turn
  * that completed before the marker scan returned. PTY output is not used as
- * execution proof when this isolated transcript is available. */
-function nativeKickoffTurnActivityAfterMarker({
+ * execution proof when this isolated transcript is available.
+ *
+ * WI-10004982: this reads FORWARD from the prompt row. It used to read only
+ * the last 256 KiB, but a fresh Claude session writes rows far larger than
+ * that right after the reply (measured: `instructions` 276 KB, then
+ * `prompt_snapshot` rows of 168 KB and 258 KB). The window then started PAST
+ * the reply, bound to a later `last-prompt` copy of the marker, saw no
+ * assistant row, and the host re-sent the kickoff 40 s later as a duplicate
+ * turn. Now the first call scans from the file start to the first real prompt
+ * row and records it in `anchor`. Later calls re-check that exact row, then read
+ * only the bytes not yet scanned (`anchor.scannedEndOffset`), so the cost stays
+ * flat as the transcript grows.
+ *
+ * A `started:true` answer does not advance the cursor, so repeated calls keep
+ * answering true. Every unreadable or inconsistent case returns
+ * `available:false`, which keeps the existing retry path.
+ *
+ * @typedef {{fileIdentity: string | null, markerStartOffset: number | null,
+ *   markerEndOffset: number | null, scannedEndOffset: number | null}} KickoffMarkerAnchor
+ * @param {{agent?: string, env?: EnvironmentMap, transcriptPath?: string | null,
+ *   marker?: string | null, markerLostChars?: number, anchor?: KickoffMarkerAnchor | null,
+ *   home?: string, maxScanBytes?: number}} options
+ * @returns {{available: boolean, started: boolean}} */
+export function nativeKickoffTurnActivityAfterMarker({
   agent,
   env = process.env,
   transcriptPath,
   marker,
   markerLostChars = 0,
+  anchor = null,
   home = homedir(),
+  maxScanBytes = NATIVE_KICKOFF_SCAN_BYTES,
 }) {
-  if (!['codex', 'claude'].includes(agent) || !marker) return { available: false, started: false };
-  const rows = readIsolatedNativeTranscriptRows({ agent, env, transcriptPath, home });
-  if (!rows) return { available: false, started: false };
+  const unavailable = { available: false, started: false };
+  if (!['codex', 'claude'].includes(agent) || !marker) return unavailable;
   const markerText = markerLostChars > 0 ? marker.slice(markerLostChars) : marker;
-  let markerSeen = false;
-  for (const row of rows) {
-    if (!markerSeen) {
-      let serialized;
-      try { serialized = JSON.stringify(row); }
-      catch { return { available: false, started: false }; }
-      if (serialized.includes(markerText)) markerSeen = true;
-      continue;
-    }
-    if (agent === 'codex') {
-      if (row?.type === 'event_msg' &&
-        ['task_started', 'task_complete', 'turn_completed'].includes(row.payload?.type)) {
-        return { available: true, started: true };
+  // The nonce tail is ASCII, so it prefilters raw lines no matter how the
+  // backend escaped the brackets; the parsed row is then checked exactly.
+  const prefilter = /([0-9a-f]{8,})⟧$/i.exec(markerText)?.[1] ?? markerText;
+  const readOptions = { agent, env, transcriptPath, home };
+  try {
+    if (anchor?.fileIdentity) {
+      const { markerStartOffset, markerEndOffset } = anchor;
+      if (!Number.isSafeInteger(markerStartOffset) || !Number.isSafeInteger(markerEndOffset) ||
+          markerEndOffset <= markerStartOffset) {
+        return unavailable;
       }
-      if (row?.type === 'response_item' && row.payload?.type === 'message' && row.payload?.role === 'assistant') {
-        return { available: true, started: true };
+      // Refuse unless the same file still holds the same prompt row.
+      const head = readIsolatedNativeTranscriptForward({
+        ...readOptions, fromOffset: markerStartOffset, maxBytes: markerEndOffset - markerStartOffset,
+      });
+      if (!head || head.fileIdentity !== anchor.fileIdentity || head.lines.length !== 1 ||
+          head.lines[0].endOffset !== markerEndOffset ||
+          !kickoffMarkerPromptRow(agent, JSON.parse(head.lines[0].text), markerText)) {
+        return unavailable;
       }
-    } else if (row?.type === 'assistant') {
-      return { available: true, started: true };
+      const from = Math.max(markerEndOffset, Number.isSafeInteger(anchor.scannedEndOffset) ? anchor.scannedEndOffset : 0);
+      const rest = readIsolatedNativeTranscriptForward({ ...readOptions, fromOffset: from, maxBytes: maxScanBytes });
+      if (!rest || rest.fileIdentity !== anchor.fileIdentity) return unavailable;
+      for (const line of rest.lines) {
+        if (kickoffModelActivityRow(agent, JSON.parse(line.text))) return { available: true, started: true };
+      }
+      anchor.scannedEndOffset = rest.nextOffset;
+      return { available: true, started: false };
     }
+
+    const scan = readIsolatedNativeTranscriptForward({ ...readOptions, fromOffset: 0, maxBytes: maxScanBytes });
+    if (!scan) return unavailable;
+    const markerIndex = scan.lines.findIndex(({ text }) =>
+      text.includes(prefilter) && kickoffMarkerPromptRow(agent, JSON.parse(text), markerText));
+    if (markerIndex < 0) return unavailable;
+    const markerLine = scan.lines[markerIndex];
+    if (anchor) {
+      anchor.fileIdentity = scan.fileIdentity;
+      anchor.markerStartOffset = markerLine.startOffset;
+      anchor.markerEndOffset = markerLine.endOffset;
+      anchor.scannedEndOffset = null;
+    }
+    for (const line of scan.lines.slice(markerIndex + 1)) {
+      if (kickoffModelActivityRow(agent, JSON.parse(line.text))) return { available: true, started: true };
+    }
+    if (anchor) anchor.scannedEndOffset = scan.nextOffset;
+    return { available: true, started: false };
+  } catch {
+    // A malformed complete row is not evidence either way.
+    return unavailable;
   }
-  return { available: markerSeen, started: false };
 }
 
 /** A queued kickoff retry may wait behind the original turn. At the final
@@ -1493,7 +1921,13 @@ export function shouldRetryCarryOnFreshEpoch({
   if (drillId || retryCount >= maxRetries) return false;
   if (reason === 'never-settled' ||
       reason === 'no-startup-ready-marker' ||
-      reason === 'no-startup-ready-marker-last-resort-failed') return true;
+      reason === 'no-startup-ready-marker-last-resort-failed' ||
+      // A restart can outlast both bounded /mcp attempts on this child. The
+      // fresh epoch reuses the same shared verifier rather than adding a loop.
+      reason === 'carry-mcp-unavailable' ||
+      // WI-10005106: a Codex child stuck at its `Starting` footer is a per-child
+      // state; a fresh child usually boots in seconds.
+      reason === 'codex-startup-still-starting') return true;
   return reason === 'turn-start-unverified' &&
     (proofReason === 'native-turn-marker-timeout' || proofReason === 'native-turn-prompt-timeout');
 }
@@ -1625,10 +2059,151 @@ const RECYCLE_CARRY_INJECT_BUDGET_MS =
  *  requeue when an attempt defers fast. */
 const RECYCLE_CARRY_RETRY_BACKOFF_MS =
   Number(process.env.PAPERCUSP_PSU_PTY_RECYCLE_CARRY_BACKOFF_MS) || 3_000;
-/** Native transcript proof can lag a freshly painted TUI even after the
- *  verifier's raw-CR retry. Give the carry one fresh child epoch to retry the
- *  whole submission before recording a terminal drop. This is intentionally
- *  bounded: a persistent backend/transcript failure must remain loud. */
+/** WI-10004943 (d): hard ceiling on how long a fresh Codex LAUNCH KICKOFF is held
+ *  past its ordinary budget while the Codex footer positively reads `Starting`.
+ *  The footer means the TUI is alive and its composer is still unavailable (MCP
+ *  servers booting), so dropping the kickoff at the 600s budget threw the session's
+ *  first turn away and left it idle at its prompt. Measured in production: the
+ *  footer read `Starting` for 10-20 minutes before the session frame appeared.
+ *  30 minutes covers that with margin. Measured from the start of the kickoff
+ *  attempt, not from the end of the ordinary budget. Env-overridable. */
+const CODEX_STARTING_KICKOFF_HOLD_CEILING_MS =
+  Number(process.env.PAPERCUSP_PSU_PTY_CODEX_STARTING_HOLD_CEILING_MS) || 1_800_000;
+/** WI-10005106: how long a recycle CARRY child may sit at the Codex `Starting`
+ *  footer before the host stops waiting on it and retries the carry on a fresh
+ *  child epoch (only while such a retry remains; the last attempt holds like a
+ *  launch kickoff instead). Measured 2026-10-01 from ~/.papercusp/psu-pty event
+ *  logs: over 3,368 Codex boots, footer-to-frame was p50 3s, p99 296s; of the 41
+ *  boots slower than 120s, 28 were slower than 600s, so a child that is still
+ *  `Starting` after a few minutes is usually stuck. A fresh successor booted at
+ *  p50 1s, p90 3s (42 of 43 under 300s). Every one of the 59 carry/kickoff drops
+ *  had at least 3 other sessions' Codex children booting in under 60s inside the
+ *  same window, so the stuck state belongs to the child, not to a shared outage:
+ *  replacing the child fixes it, while waiting cost 10-50 minutes. Env-overridable. */
+const CODEX_CARRY_STARTING_STUCK_MS =
+  Number(process.env.PAPERCUSP_PSU_PTY_CODEX_CARRY_STARTING_STUCK_MS) || 180_000;
+/** WI-10004943: how many times a plain fresh Codex LAUNCH KICKOFF may replace a
+ *  child still at the `Starting` footer after CODEX_CARRY_STARTING_STUCK_MS (the
+ *  same measured threshold, same env override) before its last attempt falls back
+ *  to the (d) hold. Measured 2026-10-01: the hold alone rescued 0 of 3 stuck
+ *  launches in 36h (all still `Starting` at the hold ceiling), while a fresh child
+ *  boots in seconds (see CODEX_CARRY_STARTING_STUCK_MS). Per-host override:
+ *  PAPERCUSP_PSU_PTY_CODEX_LAUNCH_STARTING_RETRIES; `0` turns the replacement off. */
+const CODEX_LAUNCH_STARTING_FRESH_CHILD_RETRIES = 1;
+
+/** WI-10004943: the per-host retry budget for a launch kickoff's fresh-child
+ *  replacement. A missing, empty, or malformed value keeps the default; an explicit
+ *  integer >= 0 wins, so `0` is the kill switch. Pure; exported for tests.
+ * @param {unknown} value
+ * @param {number} [fallback]
+ */
+export function codexLaunchStartingRetryMax(value, fallback = CODEX_LAUNCH_STARTING_FRESH_CHILD_RETRIES) {
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : fallback;
+}
+
+/** WI-10004943: should an undelivered launch kickoff be retried on a fresh child?
+ *  Only a plain fresh Codex launch qualifies: a managed kickoff (session-port seed)
+ *  has a native-transcript proof that owns its own timeout and child kill, and a
+ *  resume/fork may already be running a turn. Only the stuck `Starting` footer
+ *  qualifies, because that state belongs to the child: every measured drop had other
+ *  sessions' Codex children booting in under 60s alongside it. Pure; exported for tests.
+ * @param {object} [opts]
+ * @param {string} [opts.agent]
+ * @param {string} [opts.reason]
+ * @param {boolean} [opts.managedKickoff]
+ * @param {boolean} [opts.isResume]
+ * @param {number} [opts.retryCount]
+ * @param {number} [opts.maxRetries]
+ */
+export function shouldRetryLaunchKickoffOnFreshChild({
+  agent = '',
+  reason = '',
+  managedKickoff = false,
+  isResume = false,
+  retryCount = 0,
+  maxRetries = 0,
+} = {}) {
+  if (managedKickoff || isResume || retryCount >= maxRetries) return false;
+  if (String(agent ?? '').trim().toLowerCase() !== 'codex') return false;
+  return reason === 'codex-startup-still-starting';
+}
+
+/** EI-24818010361425604: how many times one launch kickoff may follow its owner
+ *  into the successor of a same-host respawn. One: a successor that is itself
+ *  replaced before its kickoff lands is a respawn loop, not a delivery problem. */
+export const LAUNCH_KICKOFF_RESPAWN_REDELIVERY_MAX = 1;
+
+/** EI-24818010361425604: should an undelivered launch kickoff be re-delivered to
+ *  the successor of a same-host respawn? `superseded` means THIS host replaced the
+ *  child the kickoff targeted (a managed carry-respawn, a loop recycle) while the
+ *  kickoff was in flight. The owner continues in the successor, so the kickoff
+ *  belongs there; publishing `kickoff-not-submitted:superseded` instead makes the
+ *  launching parent kill the task, successor included. Measured 2026-10-02
+ *  20:44Z: a resumed Codex thread's first turn tripped native auto-compaction,
+ *  the PreCompact bridge turned it into a managed carry-respawn 1s after the
+ *  kickoff was written, and capability:launch-agent stopped the healthy successor.
+ *  A host that is tearing down has no successor, and a managed kickoff's native
+ *  transcript proof owns its own verdict and child kill. Pure; exported for tests.
+ * @param {object} [opts]
+ * @param {string} [opts.reason]
+ * @param {boolean} [opts.managedKickoff]
+ * @param {boolean} [opts.hostShuttingDown]
+ * @param {number} [opts.redeliveries]
+ * @param {number} [opts.maxRedeliveries]
+ */
+export function shouldRedeliverLaunchKickoffAfterRespawn({
+  reason = '',
+  managedKickoff = false,
+  hostShuttingDown = false,
+  redeliveries = 0,
+  maxRedeliveries = LAUNCH_KICKOFF_RESPAWN_REDELIVERY_MAX,
+} = {}) {
+  if (managedKickoff || hostShuttingDown) return false;
+  if (redeliveries >= maxRedeliveries) return false;
+  return reason === 'superseded';
+}
+
+/** WI-10004943: the Codex `Starting` options for one launch-kickoff attempt. While a
+ *  fresh-child retry remains, give up early on a child still at `Starting` after
+ *  `stuckMs` so the host can replace it (the WI-10005106 carry remedy). The last
+ *  attempt, and any launch that cannot be retried, keeps the (d) hold for the frame.
+ *  Pure; exported for tests.
+ * @param {object} [opts]
+ * @param {string} [opts.agent]
+ * @param {boolean} [opts.managedKickoff]
+ * @param {boolean} [opts.isResume]
+ * @param {number} [opts.retryCount]
+ * @param {number} [opts.maxRetries]
+ * @param {number} [opts.stuckMs]
+ * @param {number} [opts.holdCeilingMs]
+ */
+export function launchKickoffCodexStartingOptions({
+  agent = '',
+  managedKickoff = false,
+  isResume = false,
+  retryCount = 0,
+  maxRetries = 0,
+  stuckMs = CODEX_CARRY_STARTING_STUCK_MS,
+  holdCeilingMs = CODEX_STARTING_KICKOFF_HOLD_CEILING_MS,
+} = {}) {
+  const retryRemains = shouldRetryLaunchKickoffOnFreshChild({
+    agent,
+    managedKickoff,
+    isResume,
+    retryCount,
+    maxRetries,
+    reason: 'codex-startup-still-starting',
+  });
+  return retryRemains
+    ? { codexStartingStuckMs: stuckMs }
+    : { codexStartingHoldCeilingMs: holdCeilingMs };
+}
+/** Native transcript proof or MCP readiness can lag a freshly painted TUI.
+ * Give the carry one fresh child epoch to retry the whole submission before
+ * recording a terminal drop. Each epoch uses the existing bounded two-attempt
+ * MCP verifier; persistent failures remain loud. */
 const CARRY_PROOF_RETRY_MAX = 1;
 /** A backend readiness marker is the strongest proof that its composer exists,
  * but it is not a permanent liveness dependency. UI chrome changes across CLI
@@ -1735,6 +2310,13 @@ export function eventLogPathForOwner(ownerId, dir = PSU_PTY_DIR) {
 /** Size cap for the per-owner event log — front-truncated (oldest rows dropped)
  *  on breach, same spirit as the turn-provenance ledger compaction. */
 const EVENT_LOG_MAX_BYTES = 256 * 1024;
+
+/** The persona-refresh `reason` the operator returns when a restart would activate a
+ *  priced Cupboard identity that has no funds behind it and cannot be dropped from the
+ *  stack (agent-economy-flywheel P-016, D-012). The respawn is refused on it, never
+ *  fail-soft. Mirrors IDENTITY_ACTIVATION_REFUSED_REASON in
+ *  packages/operator-core/lib/cupboard/identity-activation-restart.ts. */
+export const IDENTITY_ACTIVATION_REFUSED_REASON = 'identity-activation-refused';
 
 /** Append one durable host-event row ({ ts, kind, ...extra }) for `ownerId`.
  *  FAIL-SOFT by contract: an event-log write must never break the session —
@@ -1897,6 +2479,336 @@ export function startCodexStartupProcessTrace({
     timer.unref?.();
   }
   return stop;
+}
+
+/* WI-10004943 (b): evidence for WHY a Codex child sits at its `Starting` footer.
+ * Codex starts a fresh CODEX_HOME/log/codex-tui.log at every launch (measured
+ * 2026-10-01: in every su-codex-home, log/'s mtime equals the file's first
+ * line), so the stuck child's own log is destroyed by the very respawn that
+ * replaces it, and the 30s startup trace ends long before a 180-600s stall is
+ * declared. Snapshot the evidence at the drop instead: the log tail plus the
+ * child's process tree, where Codex's MCP servers live, with each process's
+ * state and kernel wait channel. Host events reach a shared store, so every
+ * string is bounded and credential-shaped values are redacted. */
+const SNAPSHOT_SECRET_KEY = '[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[-_]?key|authorization|cookie|credential)[A-Za-z0-9_.-]*';
+const SNAPSHOT_SECRET_FLAG_RE = new RegExp(`^--?${SNAPSHOT_SECRET_KEY}$`, 'i');
+const SNAPSHOT_SECRET_PAIR_RE = new RegExp(`(${SNAPSHOT_SECRET_KEY})(\\s*[=:]\\s*)("[^"]*"|'[^']*'|[^\\s,;&"']+)`, 'gi');
+
+export function redactSnapshotText(text, maxChars = 240) {
+  const s = String(text ?? '')
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 <redacted>')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, '<redacted>')
+    .replace(SNAPSHOT_SECRET_PAIR_RE, '$1$2<redacted>');
+  return s.length > maxChars ? `${s.slice(0, maxChars)}…` : s;
+}
+
+/** argv -> one bounded, redacted string. A credential-named flag also redacts
+ * the separate argument that follows it (`--token abc`). */
+export function redactSnapshotArgv(argv, { maxArgs = 6, maxChars = 200 } = {}) {
+  const out = [];
+  let redactNext = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (out.length >= maxArgs) {
+      out.push(`…+${argv.length - i}`);
+      break;
+    }
+    const arg = String(argv[i]);
+    if (redactNext) {
+      out.push('<redacted>');
+      redactNext = false;
+      continue;
+    }
+    if (SNAPSHOT_SECRET_FLAG_RE.test(arg)) redactNext = true;
+    out.push(redactSnapshotText(arg, 120));
+  }
+  return redactSnapshotText(out.join(' '), maxChars);
+}
+
+function readProcText(readFile, path) {
+  try {
+    return String(readFile(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+const PROC_NET_TCP_STATES = {
+  '01': 'ESTABLISHED', '02': 'SYN_SENT', '03': 'SYN_RECV', '04': 'FIN_WAIT1',
+  '05': 'FIN_WAIT2', '06': 'TIME_WAIT', '07': 'CLOSE', '08': 'CLOSE_WAIT',
+  '09': 'LAST_ACK', '0A': 'LISTEN', '0B': 'CLOSING',
+};
+
+/** Decode a /proc/net/tcp{,6} address ("0100007F:23C3") to "127.0.0.1:9155".
+ * The kernel prints each 32-bit word in host (little-endian) byte order.
+ * @param {string} value */
+export function decodeProcNetAddress(value) {
+  const [hex = '', portHex = ''] = String(value).split(':');
+  const port = Number.parseInt(portHex, 16);
+  /** @param {string} w */
+  const wordBytes = (w) => [w.slice(6, 8), w.slice(4, 6), w.slice(2, 4), w.slice(0, 2)].map((b) => Number.parseInt(b, 16));
+  if (/^[0-9A-Fa-f]{8}$/.test(hex)) return `${wordBytes(hex).join('.')}:${port}`;
+  if (/^[0-9A-Fa-f]{32}$/.test(hex)) {
+    const bytes = [0, 8, 16, 24].flatMap((i) => wordBytes(hex.slice(i, i + 8)));
+    if (bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 255 && bytes[11] === 255) {
+      return `${bytes.slice(12).join('.')}:${port}`;
+    }
+    const groups = [];
+    for (let i = 0; i < 16; i += 2) groups.push(((bytes[i] << 8) | bytes[i + 1]).toString(16));
+    return `[${groups.join(':')}]:${port}`;
+  }
+  return String(value).slice(0, 64);
+}
+
+/**
+ * Socket inventory of one process (WI-10005178): which TCP peers it holds, in what
+ * state, plus a unix-socket count. A Codex child stuck at "Starting" logs nothing
+ * and is recycled within minutes, so the snapshot is the only place this evidence
+ * can be caught. Reads the process's fd links and its OWN network namespace's
+ * /proc/<pid>/net tables, parsed once per namespace via `netCache`. Never throws;
+ * null when the fd list is unreadable.
+ * @param {number} pid
+ * @param {{ readFile?: SnapshotReadFile, readDir?: SnapshotReadDir, readLink?: (path: string) => unknown, netCache?: Map<string, { tcp: Map<string, { remote: string, state: string }>, unix: Set<string> }>, maxTcp?: number }} [options]
+ */
+export function collectProcSockets(pid, {
+  readFile = readFileSync,
+  readDir = readdirSync,
+  readLink = readlinkSync,
+  netCache = new Map(),
+  maxTcp = 8,
+} = {}) {
+  let fds;
+  try {
+    fds = readDir(`/proc/${pid}/fd`).map(String);
+  } catch {
+    return null;
+  }
+  const inodes = new Set();
+  for (const fd of fds) {
+    let target;
+    try {
+      target = String(readLink(`/proc/${pid}/fd/${fd}`));
+    } catch {
+      continue;
+    }
+    const match = /^socket:\[(\d+)\]$/.exec(target);
+    if (match) inodes.add(match[1]);
+  }
+  if (inodes.size === 0) return { total: 0, tcp: [], unix: 0, other: 0 };
+  let nsKey = `pid:${pid}`;
+  try {
+    nsKey = String(readLink(`/proc/${pid}/ns/net`));
+  } catch {
+    // Unknown namespace: parse this process's tables uncached.
+  }
+  let tables = netCache.get(nsKey);
+  if (!tables) {
+    tables = { tcp: new Map(), unix: new Set() };
+    for (const name of ['tcp', 'tcp6']) {
+      const text = readProcText(readFile, `/proc/${pid}/net/${name}`) ?? '';
+      for (const line of text.split('\n').slice(1)) {
+        const cols = line.trim().split(/\s+/);
+        if (cols.length < 10) continue;
+        tables.tcp.set(cols[9], {
+          remote: decodeProcNetAddress(cols[2]),
+          state: PROC_NET_TCP_STATES[cols[3]] ?? cols[3],
+        });
+      }
+    }
+    const unixText = readProcText(readFile, `/proc/${pid}/net/unix`) ?? '';
+    for (const line of unixText.split('\n').slice(1)) {
+      const cols = line.trim().split(/\s+/);
+      if (cols.length >= 7) tables.unix.add(cols[6]);
+    }
+    netCache.set(nsKey, tables);
+  }
+  /** @type {Map<string, { remote: string, state: string, count: number }>} */
+  const tcp = new Map();
+  let tcpCount = 0;
+  let unix = 0;
+  for (const inode of inodes) {
+    const entry = tables.tcp.get(inode);
+    if (entry) {
+      tcpCount += 1;
+      const key = `${entry.remote} ${entry.state}`;
+      const prior = tcp.get(key);
+      if (prior) prior.count += 1;
+      else tcp.set(key, { ...entry, count: 1 });
+    } else if (tables.unix.has(inode)) {
+      unix += 1;
+    }
+  }
+  const peers = [...tcp.values()].sort((a, b) => b.count - a.count);
+  return {
+    total: inodes.size,
+    tcp: peers.slice(0, maxTcp),
+    ...(peers.length > maxTcp ? { tcpTruncated: peers.length - maxTcp } : {}),
+    unix,
+    other: inodes.size - tcpCount - unix,
+  };
+}
+
+/** Walk the descendants of `rootPid` breadth-first. Children are read from
+ * EVERY thread's /proc/PID/task/TID/children: the kernel lists a child under the
+ * thread that forked it, and Codex (a multithreaded Rust runtime) forks its MCP
+ * servers from worker threads, so the main thread's list alone is empty
+ * (measured on a live Codex: 156 threads, main-thread children empty, three
+ * worker threads holding all of them). */
+/** @typedef {(path: string, encoding: 'utf8') => string | Buffer} SnapshotReadFile */
+/** @typedef {(path: string) => ReadonlyArray<unknown>} SnapshotReadDir */
+/** @typedef {(path: string, maxBytes: number) => ({ text: string, size: number, truncatedHead: boolean } | null)} SnapshotReadTail */
+/** @typedef {{ path: string, present: false } | { path: string, present: true, bytes: number, totalLinesInTail: number, lastTs: string | null, tail: string[] }} CodexTuiLogTail */
+
+/**
+ * @param {number | undefined} rootPid
+ * @param {{ readFile?: SnapshotReadFile, readDir?: SnapshotReadDir, readLink?: (path: string) => unknown, maxDepth?: number, maxProcs?: number }} [options]
+ */
+export function collectCodexStuckProcessTree(rootPid, {
+  readFile = readFileSync,
+  readDir = readdirSync,
+  readLink = readlinkSync,
+  maxDepth = 5,
+  maxProcs = 20,
+} = {}) {
+  const procs = [];
+  const netCache = new Map();
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return { procs, truncated: false };
+  const queue = [{ pid: rootPid, ppid: null, depth: 0 }];
+  const seen = new Set();
+  let truncated = false;
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || seen.has(current.pid)) continue;
+    seen.add(current.pid);
+    if (procs.length >= maxProcs) {
+      truncated = true;
+      break;
+    }
+    const stat = readProcText(readFile, `/proc/${current.pid}/stat`);
+    if (stat === null) continue;
+    const open = stat.indexOf('(');
+    const close = stat.lastIndexOf(')');
+    if (open < 0 || close < open) continue;
+    const wchan = readProcText(readFile, `/proc/${current.pid}/wchan`)?.trim() ?? null;
+    const cmdline = readProcText(readFile, `/proc/${current.pid}/cmdline`);
+    let threads = null;
+    let tids = [String(current.pid)];
+    try {
+      const listed = readDir(`/proc/${current.pid}/task`).map(String).filter((t) => /^\d+$/.test(t));
+      if (listed.length > 0) {
+        tids = listed;
+        threads = listed.length;
+      }
+    } catch {
+      // Fall back to the main thread's own child list.
+    }
+    procs.push({
+      pid: current.pid,
+      ppid: current.ppid,
+      depth: current.depth,
+      comm: stat.slice(open + 1, close).slice(0, 64),
+      state: stat.slice(close + 2).trim().split(/\s+/)[0] || null,
+      wchan: wchan && wchan !== '0' ? wchan.slice(0, 64) : null,
+      threads,
+      cmd: cmdline ? redactSnapshotArgv(cmdline.split('\0').filter(Boolean)) : null,
+      sockets: collectProcSockets(current.pid, { readFile, readDir, readLink, netCache }),
+    });
+    if (current.depth >= maxDepth) continue;
+    for (const tid of tids) {
+      const children = readProcText(readFile, `/proc/${current.pid}/task/${tid}/children`) ?? '';
+      for (const token of children.trim().split(/\s+/)) {
+        const childPid = Number(token);
+        if (Number.isInteger(childPid) && childPid > 0 && !seen.has(childPid)) {
+          queue.push({ pid: childPid, ppid: current.pid, depth: current.depth + 1 });
+        }
+      }
+    }
+  }
+  return { procs, truncated };
+}
+
+/** Last `maxBytes` of a file as utf8 text, or null when it cannot be read.
+ * @param {string} path
+ * @param {number} maxBytes
+ * @returns {{ text: string, size: number, truncatedHead: boolean } | null}
+ */
+export function readFileTail(path, maxBytes) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, Math.max(0, maxBytes));
+    const buffer = Buffer.alloc(length);
+    const read = readSync(fd, buffer, 0, length, size - length);
+    return { text: buffer.subarray(0, read).toString('utf8'), size, truncatedHead: size > length };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+const CODEX_LOG_TS_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/;
+
+/** The tail of the CURRENT child's codex-tui.log, which covers only this
+ * child's startup because Codex starts the file fresh at launch.
+ * @param {string | undefined} codexHome
+ * @param {{ readTail?: SnapshotReadTail, maxLines?: number, maxLineChars?: number, maxBytes?: number }} [options]
+ * @returns {CodexTuiLogTail | null}
+ */
+export function readCodexTuiLogTail(codexHome, {
+  readTail = readFileTail,
+  maxLines = 30,
+  maxLineChars = 240,
+  maxBytes = 64 * 1024,
+} = {}) {
+  if (!codexHome) return null;
+  const path = join(String(codexHome), 'log', 'codex-tui.log');
+  const raw = readTail(path, maxBytes);
+  if (!raw) return { path, present: false };
+  const lines = stripAnsi(String(raw.text)).split('\n').filter((line) => line.trim());
+  // A tail cut mid-file starts with a partial line.
+  if (raw.truncatedHead) lines.shift();
+  const tail = lines.slice(-maxLines).map((line) => redactSnapshotText(line, maxLineChars));
+  const lastTs = [...lines].reverse().map((line) => line.match(CODEX_LOG_TS_RE)?.[1]).find(Boolean) ?? null;
+  return { path, present: true, bytes: raw.size, totalLinesInTail: lines.length, lastTs, tail };
+}
+
+/** One bounded, never-throwing snapshot of a Codex child stuck at `Starting`.
+ * @param {{ rootPid?: number, codexHome?: string, platform?: string, readFile?: SnapshotReadFile, readDir?: SnapshotReadDir, readLink?: (path: string) => unknown, readTail?: SnapshotReadTail, startupOutput?: string, screenDims?: { rows?: number, cols?: number } }} [options]
+ */
+export function collectCodexStartingStuckSnapshot({
+  rootPid,
+  codexHome,
+  platform = process.platform,
+  readFile = readFileSync,
+  readDir = readdirSync,
+  readLink = readlinkSync,
+  readTail = readFileTail,
+  // WI-10005178: the pty output the `Starting` verdict was read from.
+  startupOutput,
+  // The child's PTY size, so the footer is read off the same grid it painted.
+  screenDims,
+} = {}) {
+  try {
+    const tree = platform === 'linux'
+      ? collectCodexStuckProcessTree(rootPid, { readFile, readDir, readLink })
+      : { procs: [], truncated: false };
+    return {
+      rootPid: Number.isInteger(rootPid) ? rootPid : null,
+      procs: tree.procs,
+      procsTruncated: tree.truncated,
+      log: readCodexTuiLogTail(codexHome, { readTail }),
+      footer: codexStartingFooterEvidence(startupOutput, { dims: screenDims }),
+    };
+  } catch (error) {
+    return { rootPid: Number.isInteger(rootPid) ? rootPid : null, error: hostErrorEvidence(error) };
+  }
 }
 
 /** Small, non-secret error identity for durable host events. Exception messages can
@@ -2358,6 +3270,51 @@ export function reportOwnerHumanTurn(now = Date.now()) {
 }
 
 /**
+ * Read the effective per-agent wake mode through the loopback admin coord
+ * read-only verb. A missing route, failed request, or malformed response is
+ * deliberately `null`: carry-rearm must retain its payload unless the server
+ * confirms that automatic wakes are enabled.
+ */
+export async function readEffectiveWakeMode(
+  ownerId,
+  { env = process.env, fetchImpl = globalThis.fetch, timeoutMs = 1500 } = {},
+) {
+  const agent = typeof ownerId === 'string' ? ownerId.trim() : '';
+  if (!agent || typeof fetchImpl !== 'function') return null;
+  const rawBase = typeof env?.PAPERCUSP_OPERATOR_URL === 'string'
+    ? env.PAPERCUSP_OPERATOR_URL.trim()
+    : '';
+  let url;
+  try {
+    url = new URL('/api/admin/coord/wake-mode', rawBase || 'http://127.0.0.1:3270').toString();
+  } catch {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || 1500));
+  if (typeof timeout.unref === 'function') timeout.unref();
+  try {
+    const response = await fetchImpl(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // The admin route rejects mode/reason writes on this read-only verb.
+      body: JSON.stringify({ agent }),
+      signal: controller.signal,
+    });
+    if (!response?.ok) return null;
+    const result = await response.json();
+    return result?.ok === true && (result.mode === 'auto' || result.mode === 'manual')
+      ? result.mode
+      : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * The mid-keystroke idle gate (P-013). `touch()` on every stdin byte records
  * activity; `waitIdle()` resolves once `idleMs` of quiet has elapsed (or the cap
  * is hit). Pure-ish (uses timers + an injectable clock for tests).
@@ -2801,6 +3758,197 @@ export function makeOwnerComposerGate({ capMs = DEFAULT_IDLE_WAIT_CAP_MS, now = 
 }
 
 /**
+ * psu-process-free-parking-2026-10-06 P-016: how long a Claude child must sit
+ * idle at its prompt before the host PARKS it (SIGKILLs the CLI to free its
+ * ~215 MB while the host, socket and terminal stay up; D-002). 15 minutes:
+ * long enough that an attended session the owner is reading is not parked
+ * under them, short enough that an idle fleet sheds its CLI memory. A park
+ * costs no tokens inside the 1h prompt-cache TTL and ~1 s of wake latency
+ * (D-018/D-025 of agent-capacity-and-cost-gcp-2026-09-30).
+ */
+export const DEFAULT_PARK_IDLE_MS = 15 * 60_000;
+
+/**
+ * Resolve the park threshold from PAPERCUSP_PSU_PARK_IDLE_MS. Unset/blank or
+ * unparseable falls back to the default (the feature ships ON); an explicit
+ * `0` is the kill-switch. Pure; exported for tests.
+ * @param {Record<string, string | undefined>} [env]
+ */
+export function parkIdleMsFromEnv(env = process.env) {
+  const raw = env?.PAPERCUSP_PSU_PARK_IDLE_MS;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return DEFAULT_PARK_IDLE_MS;
+  const n = Number(String(raw).trim());
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_PARK_IDLE_MS;
+  return Math.floor(n);
+}
+
+/**
+ * Count the live descendant processes of `rootPid` from /proc (one ppid map
+ * built from every /proc/<pid>/stat, then a walk down from the root). The park
+ * policy refuses while the CLI has ANY descendant: a running background shell,
+ * an in-flight hook or a stdio MCP server is work a SIGKILL of the tree would
+ * destroy. Returns null when the count cannot be taken (no /proc, unreadable
+ * root), and the policy FAILS CLOSED on null. Exported for tests (procRoot and
+ * the fs readers are injectable).
+ * @param {number} rootPid
+ * @param {{ procRoot?: string, readdir?: (p: string) => string[], readFile?: (p: string, enc: 'utf8') => string }} [opts]
+ * @returns {number | null}
+ */
+export function countProcessDescendants(
+  rootPid,
+  { procRoot = '/proc', readdir = readdirSync, readFile = readFileSync } = {},
+) {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return null;
+  let entries;
+  try {
+    entries = readdir(procRoot);
+  } catch {
+    return null;
+  }
+  const childrenOf = new Map();
+  let sawRoot = false;
+  for (const name of entries) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat;
+    try {
+      stat = readFile(`${procRoot}/${name}/stat`, 'utf8');
+    } catch {
+      continue; // exited between readdir and read — not a descendant any more
+    }
+    // `pid (comm) state ppid …` — comm may contain spaces or ')', so split
+    // after the LAST ')'.
+    const close = stat.lastIndexOf(')');
+    if (close < 0) continue;
+    const fields = stat.slice(close + 2).split(' ');
+    const ppid = Number(fields[1]);
+    const pid = Number(name);
+    if (pid === rootPid) sawRoot = true;
+    if (!Number.isInteger(ppid)) continue;
+    if (!childrenOf.has(ppid)) childrenOf.set(ppid, []);
+    childrenOf.get(ppid).push(pid);
+  }
+  if (!sawRoot) return null;
+  let count = 0;
+  const stack = [...(childrenOf.get(rootPid) ?? [])];
+  const seen = new Set();
+  while (stack.length) {
+    const pid = stack.pop();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    count++;
+    for (const kid of childrenOf.get(pid) ?? []) stack.push(kid);
+  }
+  return count;
+}
+
+/**
+ * psu-process-free-parking-2026-10-06 P-016: should the host park its child
+ * NOW? Every refusal names its reason (reported on the host event so "why
+ * didn't it park" is a read, not a guess). Ordered cheapest-first; the caller
+ * only pays for the /proc descendant walk when every other gate passed (pass a
+ * `descendants` thunk). Pure; exported for tests.
+ *
+ * @param {{
+ *   idleMs: number,
+ *   agent?: string | null,
+ *   now: number,
+ *   lastActivityAt: number,
+ *   childPromptReady: boolean,
+ *   parked?: boolean,
+ *   busy?: boolean,
+ *   quotaBlocked?: boolean,
+ *   composerPending?: boolean,
+ *   resumable?: boolean,
+ *   descendants: () => number | null,
+ * }} input
+ * @returns {{ park: boolean, reason: string, idleForMs?: number, descendants?: number | null }}
+ */
+export function parkVerdict({
+  idleMs,
+  agent = null,
+  now,
+  lastActivityAt,
+  childPromptReady,
+  parked = false,
+  busy = false,
+  quotaBlocked = false,
+  composerPending = false,
+  resumable = true,
+  descendants,
+}) {
+  if (!(Number.isFinite(idleMs) && idleMs > 0)) return { park: false, reason: 'disabled' };
+  if (String(agent ?? '').trim().toLowerCase() !== 'claude') {
+    return { park: false, reason: 'agent-not-parkable' };
+  }
+  if (parked) return { park: false, reason: 'already-parked' };
+  if (busy) return { park: false, reason: 'busy' };
+  // D-005: a quota-walled Claude TUI can hold a submission it auto-continues at
+  // the reset ("continuing automatically at 1pm"). That pending turn lives only
+  // in the CLI's memory, so a SIGKILL would drop it silently. Stay resident
+  // until the wall clears; the reset turn then runs and the child parks after.
+  if (quotaBlocked) return { park: false, reason: 'quota-wait' };
+  if (!resumable) return { park: false, reason: 'no-resumable-session-id' };
+  if (!childPromptReady) return { park: false, reason: 'prompt-not-ready' };
+  if (composerPending) return { park: false, reason: 'composer-pending' };
+  const idleForMs = Math.max(0, now - (Number(lastActivityAt) || 0));
+  if (idleForMs < idleMs) return { park: false, reason: 'not-idle-long-enough', idleForMs };
+  const n = typeof descendants === 'function' ? descendants() : null;
+  if (n === null || n === undefined) {
+    return { park: false, reason: 'descendants-unknown', idleForMs, descendants: null };
+  }
+  if (n > 0) return { park: false, reason: 'child-has-descendants', idleForMs, descendants: n };
+  return { park: true, reason: 'idle', idleForMs, descendants: 0 };
+}
+
+/**
+ * psu-process-free-parking P-017: the id of the newest top-level Claude
+ * transcript in a PER-SESSION config dir (`<configDir>/projects/<cwd>/<id>.jsonl`).
+ * An in-TUI `/clear` starts a new conversation under a new id that the launch
+ * argv never learns, so resuming the argv's id alone could revive the wrong
+ * conversation. Only trusted when the config dir is this session's isolation
+ * dir (its path names `ownerId`): in a shared dir the newest file can belong to
+ * another session. Returns null when it cannot tell. Exported for tests.
+ * @param {string | null | undefined} configDir
+ * @param {{ ownerId?: string | null, readdir?: (p: string) => string[], stat?: (p: string) => { mtimeMs: number, isFile: () => boolean } }} [opts]
+ * @returns {{ id: string, mtimeMs: number } | null}
+ */
+export function newestSessionTranscriptId(
+  configDir,
+  { ownerId = null, readdir = readdirSync, stat = statSync } = {},
+) {
+  if (!configDir || !ownerId || !String(configDir).includes(String(ownerId))) return null;
+  const projects = `${configDir}/projects`;
+  let dirs;
+  try {
+    dirs = readdir(projects);
+  } catch {
+    return null;
+  }
+  /** @type {{ id: string, mtimeMs: number } | null} */
+  let best = null;
+  for (const dir of dirs) {
+    let files;
+    try {
+      files = readdir(`${projects}/${dir}`);
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      if (!file.endsWith('.jsonl')) continue;
+      let st;
+      try {
+        st = stat(`${projects}/${dir}/${file}`);
+      } catch {
+        continue;
+      }
+      if (!st.isFile()) continue;
+      if (!best || st.mtimeMs > best.mtimeMs) best = { id: file.slice(0, -'.jsonl'.length), mtimeMs: st.mtimeMs };
+    }
+  }
+  return best;
+}
+
+/**
  * Session activity tracker (agent-liveness-heartbeat-hardening-2026-06-12
  * P-006): the OUTPUT-side sibling of makeIdleGate. The pty stream is a true
  * mid-turn signal — a generating agent repaints its TUI constantly — so
@@ -3112,6 +4260,13 @@ export function makeCarryRearmController({
   // Age may not expire a production continuation. Epoch supersession MUST:
   // an obsolete request must neither suppress wakes nor replace its successor.
   isSuperseded = (_msg) => false,
+  // Production carry-respawns are admitted only when the effective per-owner
+  // wake mode is explicitly `auto`. Null/throws fail closed and leave the carry
+  // pending for a paced re-read; non-carry wake modes keep their own delivery
+  // policy and are not gated here.
+  readWakeMode = async () => 'auto',
+  wakeModeRetryMs = 30_000,
+  waitWakeModeRetry = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
 }) {
   const pending = new Set();
   // EI-18681914950138372: a SEPARATE tracking set, covering the carry-respawn's
@@ -3145,8 +4300,19 @@ export function makeCarryRearmController({
    * reported 'duplicate'/'superseded' by the other and never delivered —
    * re-creating the exact drop this item removes, disguised as correct dedupe.
    * Drills still dedupe per drillId, which is already unique.
-   */
+  */
   const rearmModeOf = (msg) => String(msg?.mode || 'carry-respawn');
+  const carryWakeModePauseReason = async (msg) => {
+    if (rearmModeOf(msg) !== 'carry-respawn') return null;
+    let currentMode = null;
+    try {
+      currentMode = await readWakeMode(msg);
+    } catch {
+      // Unreadable mode is not evidence of auto; preserve the pending carry.
+    }
+    if (currentMode === 'auto') return null;
+    return currentMode === 'manual' ? 'wake-mode-manual' : 'wake-mode-unavailable';
+  };
   const keyFor = (msg) => {
     const drillId = String(msg?.drillId || '');
     return drillId || `${NON_DRILL_REARM_KEY}:${rearmModeOf(msg)}`;
@@ -3156,16 +4322,40 @@ export function makeCarryRearmController({
     onSettlement(messages, outcome);
   };
   return {
-    /** Live count of carry-respawns either awaiting their first delivery
-     *  attempt's outcome OR a re-armed retry (diagnostics/tests, and the input
-     *  to shouldDeferWakeForPendingRespawn). */
-    pendingCount() {
-      return pending.size + inFlight.size;
+    /** Live count of accepted first attempts and re-armed retries.
+     *  Filter carry-respawn for wake arbitration: the controller also owns
+     *  turn retries, which must never suppress themselves as pending carries.
+     *  @param {string | null} [mode]
+     */
+    pendingCount(mode = null) {
+      if (mode == null) return pending.size + inFlight.size;
+      return [...pending].filter((key) => rearmModeOf(latest.get(key)) === mode).length +
+        [...inFlight].filter((msg) => rearmModeOf(msg) === mode).length;
     },
     /** Whether a message is still owned by the detached re-arm loop. */
     isPendingMessage(msg) {
       const key = keyFor(msg);
       return pendingMessages.get(key)?.has(msg) === true;
+    },
+    /**
+     * Refresh an already-queued retry only when the same delivery is still the
+     * current payload. A later distinct delivery may have superseded it, so a
+     * delayed duplicate of the older id must never roll the re-arm backwards.
+     * Keep the original receipt time: retrying the delivery updates its snapshot,
+     * not its age or ordering against a newer host generation.
+     */
+    refreshPendingMessage(msg) {
+      const key = keyFor(msg);
+      const deliveryId = String(msg?.deliveryId ?? '');
+      if (!deliveryId || !pending.has(key)) return false;
+      const current = latest.get(key);
+      if (String(current?.deliveryId ?? '') !== deliveryId) return false;
+      latest.set(key, {
+        ...current,
+        ...msg,
+        receivedAtMs: current.receivedAtMs,
+      });
+      return true;
     },
     /** EI-18681914950138372: call the MOMENT a carry-respawn control message is
      *  accepted by the host, before it enters its own busy-gate wait — marks it
@@ -3291,6 +4481,7 @@ export function makeCarryRearmController({
             // the freshest carry document is always the right one to deliver.
             const current = latest.get(key) ?? msg;
             let deferred = false;
+            let wakeModePauseReason = null;
             try {
               // Check BEFORE waiting on the successor's output. Otherwise an
               // obsolete retry can retain pending wake suppression indefinitely.
@@ -3314,23 +4505,35 @@ export function makeCarryRearmController({
                 }
                 deferReason = 'busy-gate-expired';
               }
-              const atPrompt = await waitAtPrompt(capMs, current);
-              if (dropSuperseded(latest.get(key) ?? current)) return;
-              // The owner may have started composing during the prompt wait.
-              if (hasPendingOwnerInput()) {
-                // Re-enter through the composer wait AND a fresh prompt check.
-                // Enter may have started a new owner turn: the prompt proof we
-                // observed before that input is no longer a safe cut boundary.
-                deferReason = 'owner-input-cap';
-                await yieldAfterDefer();
-                continue;
+              // Check immediately before and after the potentially long prompt
+              // wait. A manual flip or a failed read pauses this retry without
+              // consuming the carry or holding the inject mutex.
+              let atPrompt = null;
+              wakeModePauseReason = await carryWakeModePauseReason(current);
+              if (wakeModePauseReason) deferReason = wakeModePauseReason;
+              if (!wakeModePauseReason) {
+                atPrompt = await waitAtPrompt(capMs, current);
+                if (dropSuperseded(latest.get(key) ?? current)) return;
+                // The owner may have started composing during the prompt wait.
+                if (hasPendingOwnerInput()) {
+                  // Re-enter through the composer wait AND a fresh prompt check.
+                  // Enter may have started a new owner turn: the prompt proof we
+                  // observed before that input is no longer a safe cut boundary.
+                  deferReason = 'owner-input-cap';
+                  await yieldAfterDefer();
+                  continue;
+                }
+                if (Number.isFinite(atPrompt?.maxQuietForMs) && atPrompt.maxQuietForMs > observedMaxQuietMs) {
+                  observedMaxQuietMs = atPrompt.maxQuietForMs;
+                }
+                wakeModePauseReason = await carryWakeModePauseReason(latest.get(key) ?? current);
+                if (wakeModePauseReason) deferReason = wakeModePauseReason;
               }
-              deferred = !!atPrompt.deferred;
-              deferReason = 'busy-gate-expired';
-              if (Number.isFinite(atPrompt?.maxQuietForMs) && atPrompt.maxQuietForMs > observedMaxQuietMs) {
-                observedMaxQuietMs = atPrompt.maxQuietForMs;
+              if (!wakeModePauseReason) {
+                deferred = !!atPrompt?.deferred;
+                deferReason = 'busy-gate-expired';
               }
-              if (!deferred) {
+              if (!wakeModePauseReason && !deferred) {
                 // EI-19480099650947832: re-read ONCE MORE at the delivery point.
                 // `current` was read before the wait, and a supersede can land at
                 // ANY await — including the one we just returned from. This is
@@ -3384,6 +4587,19 @@ export function makeCarryRearmController({
               // across the re-poll, or this session's wakes would wedge for the
               // whole (potentially many-window) wait.
               release();
+            }
+            if (wakeModePauseReason) {
+              // Do not spin on an unavailable admin read or stage a carry that
+              // was already accepted. Release first, then re-read at a paced
+              // interval so owner wakes can still acquire the shared mutex.
+              try {
+                await waitWakeModeRetry(wakeModeRetryMs, wakeModePauseReason);
+              } catch {
+                // A test/custom waiter failure must not turn a pause into a
+                // terminal drop; preserve the payload and retain the cadence.
+                await new Promise((resolve) => setTimeout(resolve, wakeModeRetryMs));
+              }
+              continue;
             }
             // Deferred: the agent stayed mid-turn past the cap. Production
             // carries continue to the next window; drills fall out after their
@@ -3626,6 +4842,53 @@ export function submitVerificationFailureReason(result) {
   return null;
 }
 
+/** WI-10004926: human text for each startup-turn drop reason, printed inside
+ *  the parentheses of the `<label> DROPPED for <owner> (...)` stderr receipt.
+ *  `submit-verification-aborted-<why>` is handled by prefix in
+ *  describeStartupTurnDropReason; any other unmapped reason is still NAMED
+ *  (WI-10004919: an unnamed reason hid a 75s frame-budget drop behind the
+ *  generic text). */
+export const STARTUP_TURN_DROP_REASON_TEXT = Object.freeze({
+  'no-startup-ready-marker-last-resort-failed':
+    'the child never emitted its startup-ready marker AND the last-resort attempt found no prompt',
+  'no-startup-ready-marker': 'the child never emitted its startup-ready marker',
+  'kickoff-marker-echo-unconfirmed': 'the exact Codex kickoff marker never appeared in the composer echo',
+  'submit-verification-exhausted': 'submit verification exhausted without observing output after a resubmit',
+  'fresh-child-owner-input': 'the owner used the fresh child before its carry prompt was submitted',
+  'resume-compaction-timeout':
+    'Claude resume compaction recovery timed out before a standalone composer prompt appeared',
+  'codex-backend-frame-not-observed':
+    'the Codex session frame, a Ready footer or model header, never appeared in its backend-frame budget',
+  'codex-startup-still-starting': 'the Codex footer still read Starting, MCP servers booting, at the kickoff deadline',
+  'never-settled': 'the child never settled to its prompt',
+});
+
+/** @param {string} dropReason @returns {string} */
+export function describeStartupTurnDropReason(dropReason) {
+  const reason = String(dropReason ?? '');
+  if (Object.hasOwn(STARTUP_TURN_DROP_REASON_TEXT, reason)) return STARTUP_TURN_DROP_REASON_TEXT[reason];
+  if (reason.startsWith('submit-verification-aborted-')) {
+    return `submit verification aborted (${reason.slice('submit-verification-aborted-'.length)})`;
+  }
+  return `the child never settled to its prompt [reason ${reason}]`;
+}
+
+/** WI-10004926: the ONE writer of the startup-turn drop receipt.
+ *  packages/operator-core/lib/acceptance-grader.ts parses this exact line with
+ *  `$`-anchored regexes (LAUNCHER_QUOTA_KICKOFF_DROP_RE,
+ *  LAUNCHER_KICKOFF_DROP_RE). Keep the parenthesised tail
+ *  `within <N>ms over <N> attempt(s))` LAST. Anything appended inside or after
+ *  it silently stops grader drop detection;
+ *  apps/operator/lib/psu-pty-host-drop-line-contract.test.ts pins this.
+ *  @param {{ label: string, ownerId: string, dropReason: string, budgetMs: number, attempts: number }} drop
+ *  @returns {string} */
+export function formatStartupTurnDroppedLine({ label, ownerId, dropReason, budgetMs, attempts }) {
+  return (
+    `psu-pty-host: ${label} DROPPED for ${ownerId} (${describeStartupTurnDropReason(dropReason)} ` +
+    `within ${budgetMs}ms over ${attempts} attempt(s))\n`
+  );
+}
+
 /** WI-1386682 (1): does this pty screen text show Claude Code's OWN
  *  usage-wall copy (weekly or 5-hour)? This is the missing half of
  *  WI-1378748's fix — that item stopped a wake exhaustion from being
@@ -3659,6 +4922,8 @@ const CLAUDE_QUOTA_LIMIT_BANNER_PATTERNS = [
   /weekly limit/i,
   /5-hour limit/i,
   /usage limit/i,
+  // Captured gateway 429 from the routed BAR reviewer (EI-24930415587482619).
+  /usage credits are required for long context requests/i,
   /you'?ve reached your fable(?:\s+\d+(?:\.\d+)?)?\s+limit\b/i,
   /\blimit\b[^\n]{0,60}\breset(?:s|ting)?\b/i,
 ];
@@ -4890,7 +6155,10 @@ export function makeClaudeResumeCompactionRecoveryStateMachine({
   const clock = typeof now === 'function' ? now : () => Date.now();
   const detectionWindowMs = positiveNumber(startupMs, CLAUDE_RESUME_COMPACTION_STARTUP_MS);
   const recoveryWindowMs = positiveNumber(recoveryMs, CLAUDE_RESUME_COMPACTION_RECOVERY_MS);
-  const startedAt = clock();
+  // Host setup can precede the child's first PTY frame by an unbounded amount
+  // under startup delay. Start the bounded menu-detection window with observed
+  // child output, so a late first frame still gets inspected before expiry.
+  let detectionStartedAt = null;
   let phase = enabled ? 'watching' : 'disabled';
   let recoveryStartedAt = 0;
   let observed = '';
@@ -4911,7 +6179,11 @@ export function makeClaudeResumeCompactionRecoveryStateMachine({
   });
 
   const expireIfNeeded = (at = clock()) => {
-    if (phase === 'watching' && at - startedAt >= detectionWindowMs) {
+    if (
+      phase === 'watching' &&
+      detectionStartedAt !== null &&
+      at - detectionStartedAt >= detectionWindowMs
+    ) {
       phase = 'watch-expired';
       observed = '';
       return snapshot('expired');
@@ -4925,6 +6197,7 @@ export function makeClaudeResumeCompactionRecoveryStateMachine({
   };
 
   const observe = (chunk, at = clock()) => {
+    if (phase === 'watching' && detectionStartedAt === null) detectionStartedAt = at;
     const expiration = expireIfNeeded(at);
     if (expiration.action === 'expired') return expiration;
     if (phase === 'disabled' || phase === 'watch-expired' || phase === 'ready' || phase === 'timed-out') {
@@ -4977,8 +6250,10 @@ export function makeClaudeResumeCompactionRecoveryStateMachine({
     recoveryStarted: () => recoveryStartedAt > 0,
     status: () => ({
       ...snapshot(),
-      startedAt,
-      detectionExpiresAt: startedAt + detectionWindowMs,
+      // EI-25217214806027261: this read an unbound `startedAt` (ReferenceError on every
+      // status() call); the machine's own clock is detectionStartedAt.
+      startedAt: detectionStartedAt,
+      detectionExpiresAt: detectionStartedAt === null ? null : detectionStartedAt + detectionWindowMs,
       recoveryExpiresAt: recoveryStartedAt ? recoveryStartedAt + recoveryWindowMs : null,
       bufferedChars: observed.length,
     }),
@@ -5072,29 +6347,346 @@ export function makeScrollbackGuard() {
  * footer while MCP servers are still booting, so only a non-Starting status
  * counts as the composer being installed. */
 const CODEX_STATUS_FOOTER_RE = /([A-Za-z]+)\s*·[^·\n]{0,120}·\s*Context\s+\d{1,3}%\s+left/g;
-function codexReadyStatusFooterObserved(visible) {
+function codexStatusFooterState(visible) {
+  const status = [...String(visible ?? '').matchAll(CODEX_STATUS_FOOTER_RE)]
+    .at(-1)?.[1]?.toLowerCase() ?? null;
+  if (status === null) return null;
+  // ANSI cursor motion is stripped from scrollback, so a footer repainted over
+  // existing composer text may be flattened into a token such as "anythingReady".
+  if (status.endsWith('starting')) return 'starting';
+  if (status.endsWith('ready')) return 'ready';
+  return status;
+}
+function codexReadyStatusFooterObserved(output, dims) {
   // Codex v0.157 can leave the header at `model: loading` even after the
   // session is ready. The footer is the positive, post-model-choice signal;
   // its `Starting` form is painted while MCP startup is still in flight.
-  return [...visible.matchAll(CODEX_STATUS_FOOTER_RE)]
-    .some((match) => /ready$/i.test(match[1]));
+  return codexFooterStateFromOutput(output, dims) === 'ready';
+}
+
+/** WI-10005178: a minimal synchronous VT screen model, for reading TUI chrome as
+ * the terminal SHOWS it. stripAnsi() flattens a byte stream, which is wrong for a
+ * differential renderer: Codex (ratatui) repaints only the cells that changed and
+ * positions each run with CUP. Measured 2026-10-02T02:03Z and 02:16Z on recycle
+ * children (su-46569c12, su-3b465e67, codex-starting-stuck-snapshot rawTail): the
+ * footer went from `Starting · GPT-6-Luna max · Context 100% left` to Ready as
+ * `ESC[14;3H Re ESC[14;6H dy …`, skipping the unchanged `a`. The flattened
+ * stream's last COMPLETE footer was still `Starting`, so a ready child was judged
+ * stuck and dropped after ~3 minutes. Replaying the cursor motion onto a grid
+ * gives back `Ready · …`.
+ *
+ * Covers the motion, erase, insert/delete and scroll subset a TUI uses, plus the
+ * alternate screen. SGR, modes, OSC/DCS strings and terminal queries change no
+ * cells and are skipped. A code point is one cell, except the common East Asian
+ * wide and emoji ranges (two); combining marks are dropped. Returns one string
+ * per row with trailing blanks trimmed. Pure and exported for tests. */
+const TERMINAL_WIDE_RE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1f300}-\u{1f64f}\u{1f900}-\u{1f9ff}\u{20000}-\u{3fffd}]/u;
+const TERMINAL_ZERO_WIDTH_RE = /[̀-ͯ​-‏⃐-⃿︀-️]/u;
+const TERMINAL_CSI_RE = /\x1b\[([0-?]*)([ -/]*)([@-~])/y;
+export function renderTerminalScreen(output, { rows = 24, cols = 80 } = {}) {
+  const R = Math.max(1, Math.min(500, Math.floor(Number(rows)) || 24));
+  const C = Math.max(1, Math.min(1000, Math.floor(Number(cols)) || 80));
+  const blankRow = () => new Array(C).fill(' ');
+  const blankScreen = () => Array.from({ length: R }, blankRow);
+  let screen = blankScreen();
+  let row = 0;
+  let col = 0;
+  let top = 0;
+  let bottom = R - 1;
+  let wrapPending = false;
+  let saved = { row: 0, col: 0 };
+  let mainScreen = null;
+  const clampRow = (r) => Math.min(R - 1, Math.max(0, r));
+  const clampCol = (c) => Math.min(C - 1, Math.max(0, c));
+  const scrollUp = (n, from = top, to = bottom) => {
+    for (let k = 0; k < Math.min(n, to - from + 1); k += 1) {
+      screen.splice(from, 1);
+      screen.splice(to, 0, blankRow());
+    }
+  };
+  const scrollDown = (n, from = top, to = bottom) => {
+    for (let k = 0; k < Math.min(n, to - from + 1); k += 1) {
+      screen.splice(to, 1);
+      screen.splice(from, 0, blankRow());
+    }
+  };
+  const lineFeed = () => {
+    if (row === bottom) scrollUp(1);
+    else row = clampRow(row + 1);
+  };
+  const eraseCells = (r, from, to) => {
+    for (let c = Math.max(0, from); c <= Math.min(C - 1, to); c += 1) screen[r][c] = ' ';
+  };
+  const put = (ch, width) => {
+    if (wrapPending) {
+      col = 0;
+      lineFeed();
+      wrapPending = false;
+    }
+    if (width === 2 && col === C - 1) {
+      screen[row][col] = ' ';
+      col = 0;
+      lineFeed();
+    }
+    screen[row][col] = ch;
+    if (width === 2 && col + 1 < C) screen[row][col + 1] = '';
+    const end = col + width - 1;
+    if (end >= C - 1) {
+      col = C - 1;
+      wrapPending = true;
+    } else {
+      col = end + 1;
+    }
+  };
+  const s = String(output ?? '');
+  let i = 0;
+  while (i < s.length) {
+    const code = s.codePointAt(i);
+    if (code === 0x1b) {
+      const next = s[i + 1];
+      if (next === undefined) break;
+      if (next === '[') {
+        TERMINAL_CSI_RE.lastIndex = i;
+        const m = TERMINAL_CSI_RE.exec(s);
+        if (!m) {
+          i += 2;
+          continue;
+        }
+        i = TERMINAL_CSI_RE.lastIndex;
+        const [, params, intermediates, final] = m;
+        if (intermediates) continue; // e.g. DECSCUSR `ESC[0 q`: no cell changes
+        if (/^[<=>?]/.test(params)) {
+          // Private modes touch no cells, except switching to/from the alternate screen.
+          if (params[0] === '?' && (final === 'h' || final === 'l')
+            && params.slice(1).split(';').some((p) => p === '1049' || p === '1047' || p === '47')) {
+            if (final === 'h' && !mainScreen) {
+              mainScreen = { screen, row, col, top, bottom };
+              screen = blankScreen();
+              top = 0;
+              bottom = R - 1;
+            } else if (final === 'l' && mainScreen) {
+              ({ screen, row, col, top, bottom } = mainScreen);
+              mainScreen = null;
+            }
+            wrapPending = false;
+          }
+          continue;
+        }
+        if (final === 'm') continue; // SGR
+        const ps = params.split(';').map((p) => (/^\d+$/.test(p) ? Number(p) : null));
+        const n = (k) => (ps[k] > 0 ? ps[k] : 1);
+        const mode = ps[0] ?? 0;
+        wrapPending = false;
+        switch (final) {
+          case 'H': case 'f': row = clampRow(n(0) - 1); col = clampCol(n(1) - 1); break;
+          case 'A': row = clampRow(row - n(0)); break;
+          case 'B': case 'e': row = clampRow(row + n(0)); break;
+          case 'C': case 'a': col = clampCol(col + n(0)); break;
+          case 'D': col = clampCol(col - n(0)); break;
+          case 'E': row = clampRow(row + n(0)); col = 0; break;
+          case 'F': row = clampRow(row - n(0)); col = 0; break;
+          case 'G': case '`': col = clampCol(n(0) - 1); break;
+          case 'd': row = clampRow(n(0) - 1); break;
+          case 'J':
+            if (mode === 0) {
+              eraseCells(row, col, C - 1);
+              for (let r = row + 1; r < R; r += 1) eraseCells(r, 0, C - 1);
+            } else if (mode === 1) {
+              eraseCells(row, 0, col);
+              for (let r = 0; r < row; r += 1) eraseCells(r, 0, C - 1);
+            } else {
+              for (let r = 0; r < R; r += 1) eraseCells(r, 0, C - 1);
+            }
+            break;
+          case 'K':
+            if (mode === 0) eraseCells(row, col, C - 1);
+            else if (mode === 1) eraseCells(row, 0, col);
+            else eraseCells(row, 0, C - 1);
+            break;
+          case 'X': eraseCells(row, col, col + n(0) - 1); break;
+          case '@': {
+            const cells = screen[row];
+            cells.splice(col, 0, ...new Array(Math.min(n(0), C - col)).fill(' '));
+            cells.length = C;
+            break;
+          }
+          case 'P': {
+            const cells = screen[row];
+            const k = Math.min(n(0), C - col);
+            cells.splice(col, k);
+            cells.push(...new Array(k).fill(' '));
+            break;
+          }
+          case 'L': if (row >= top && row <= bottom) { scrollDown(n(0), row, bottom); col = 0; } break;
+          case 'M': if (row >= top && row <= bottom) { scrollUp(n(0), row, bottom); col = 0; } break;
+          case 'S': scrollUp(n(0)); break;
+          case 'T': if (ps.length <= 1) scrollDown(n(0)); break; // the 5-param form is mouse tracking
+          case 'r': {
+            const t = Math.min(n(0), R) - 1;
+            const b = ps[1] > 0 ? Math.min(ps[1], R) - 1 : R - 1;
+            if (t < b) {
+              top = t;
+              bottom = b;
+            } else {
+              top = 0;
+              bottom = R - 1;
+            }
+            row = 0;
+            col = 0;
+            break;
+          }
+          case 's': if (!params) saved = { row, col }; break;
+          case 'u': if (!params) ({ row, col } = saved); break;
+          default: break; // queries (`6n`, `c`) and anything else that paints nothing
+        }
+        continue;
+      }
+      if (next === ']' || next === 'P' || next === '_' || next === '^' || next === 'X') {
+        // OSC ends at BEL or ST; DCS, APC, PM and SOS end at ST.
+        let j = i + 2;
+        while (j < s.length) {
+          if (next === ']' && s[j] === '\x07') { j += 1; break; }
+          if (s[j] === '\x1b' && s[j + 1] === '\\') { j += 2; break; }
+          j += 1;
+        }
+        i = j;
+        continue;
+      }
+      if (next === '7') saved = { row, col };
+      else if (next === '8') ({ row, col } = saved);
+      else if (next === 'M') {
+        if (row === top) scrollDown(1);
+        else row = clampRow(row - 1);
+      } else if (next === 'D') lineFeed();
+      else if (next === 'E') { col = 0; lineFeed(); }
+      else if (next === 'c') {
+        screen = blankScreen();
+        row = 0;
+        col = 0;
+        top = 0;
+        bottom = R - 1;
+        saved = { row: 0, col: 0 };
+        mainScreen = null;
+      }
+      if ('78MDEc'.includes(next)) wrapPending = false;
+      // `ESC ( B`, `ESC # 8` and other intermediate forms carry one more byte.
+      i += /[ -/]/.test(next) ? 3 : 2;
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f) {
+      if (code === 0x0d) {
+        col = 0;
+        wrapPending = false;
+      } else if (code === 0x0a || code === 0x0b || code === 0x0c) {
+        lineFeed();
+        wrapPending = false;
+      } else if (code === 0x08) {
+        col = Math.max(0, col - 1);
+        wrapPending = false;
+      } else if (code === 0x09) {
+        col = Math.min(C - 1, (Math.floor(col / 8) + 1) * 8);
+      }
+      i += 1;
+      continue;
+    }
+    const ch = String.fromCodePoint(code);
+    i += ch.length;
+    // C1 controls and combining marks occupy no cell.
+    if ((code >= 0x80 && code < 0xa0) || TERMINAL_ZERO_WIDTH_RE.test(ch)) continue;
+    put(ch, TERMINAL_WIDE_RE.test(ch) ? 2 : 1);
+  }
+  return screen.map((cells) => cells.join('').replace(/ +$/, ''));
+}
+
+/** WI-10005178: the Codex footer state as the terminal shows it. The rendered
+ * screen decides; the flattened stream is only the fallback for a screen that
+ * holds no complete footer (the bounded startup buffer trimmed the full paint and
+ * left only cell diffs), the one case the screen cannot decide. Pass the child's
+ * PTY size: a CUP beyond the rendered grid is clamped onto the wrong cell.
+ * @param {unknown} output
+ * @param {{ rows?: number, cols?: number }} [dims]
+ * @returns {string | null} */
+export function codexFooterStateFromOutput(output, dims) {
+  const raw = String(output ?? '');
+  return codexStatusFooterState(renderTerminalScreen(raw, dims).join('\n'))
+    ?? codexStatusFooterState(stripAnsi(raw));
+}
+
+/** WI-10005178: the screen text a `codex-startup-still-starting` verdict was read
+ * from. Measured 2026-10-02T01:40-01:44Z (su-6a2603be, codex home session-32862):
+ * the dropped child's own codex-tui.log shows session init, MCP resolution and the
+ * model websocket warmup all complete within ~6s of spawn, yet the host judged its
+ * footer `Starting` for 3m16s. Two readings fit that (WI-10004943 H1/H2): Codex
+ * genuinely kept painting `Starting` (an MCP server still booting, e.g. the
+ * OAuth-only `tsenta`), or a partial repaint wrote only the new status word so the
+ * last COMPLETE footer the regex can match is a stale `Starting`. This evidence
+ * separates them: `readyAfterLastFooter` true with state `starting` is the stale-read
+ * signature; `mcpLines` names a server Codex was still waiting on. Bounded and
+ * redacted, because host events reach a shared store. */
+export function codexStartingFooterEvidence(output, { maxMatches = 4, tailChars = 600, maxLineChars = 160, dims } = {}) {
+  if (typeof output !== 'string') return null;
+  const visible = stripAnsi(output);
+  // Resolved 2026-10-02 (H2): `state` is now the screen-rendered verdict the host
+  // acts on; `streamState` keeps the flattened-stream reading it replaced.
+  const footerRow = new RegExp(CODEX_STATUS_FOOTER_RE.source);
+  const screenFooter = renderTerminalScreen(output, dims).findLast((r) => footerRow.test(r)) ?? null;
+  const matches = [...visible.matchAll(CODEX_STATUS_FOOTER_RE)];
+  const last = matches.at(-1) ?? null;
+  const afterLast = last ? visible.slice(last.index + last[0].length) : visible;
+  const line = (text) => redactSnapshotText(String(text).replace(/\s+/g, ' ').trim(), maxLineChars);
+  // Control bytes made visible so a cursor-positioned partial repaint can be read.
+  const visibleControls = (text) => Array.from(text, (ch) => {
+    const code = ch.charCodeAt(0);
+    if (code === 0x1b) return '⎋';
+    if (code === 0x0a) return '\n';
+    return code < 0x20 || code === 0x7f ? `^${String.fromCharCode(code ^ 0x40)}` : ch;
+  }).join('');
+  return {
+    state: codexFooterStateFromOutput(output, dims),
+    streamState: codexStatusFooterState(visible),
+    screenFooter: screenFooter === null ? null : line(screenFooter),
+    footerMatchCount: matches.length,
+    lastMatches: matches.slice(-maxMatches).map((m) => ({
+      status: m[1],
+      fromEnd: visible.length - m.index,
+      text: line(m[0]),
+    })),
+    readyAfterLastFooter: /ready/i.test(afterLast),
+    startingAfterLastFooter: /starting/i.test(afterLast),
+    mcpLines: visible.split(/\r\n|\r|\n/).filter((l) => /\bMCP\b/i.test(l)).slice(-3).map(line),
+    visibleChars: visible.length,
+    rawTail: redactSnapshotText(visibleControls(output.slice(-tailChars)), tailChars * 2),
+  };
 }
 export function headlessClaudeKickoffReadiness({
   enabled = false,
   requireInitialOutput = false,
   promptReady = false,
+  onboardingExpired = false,
 } = {}) {
   if (!enabled || !requireInitialOutput) return 'ordinary-gate';
-  return promptReady ? 'composer-ready' : 'wait-for-composer';
+  if (promptReady) return 'composer-ready';
+  // WI-10005472: the onboarding watcher saw neither a theme/security wizard nor
+  // the composer for its whole startup window. That is the signature of a child
+  // whose startup paint landed before this host's listener attached (the class
+  // the startupMarkerMissing last resort documents): the TUI sits healthy at a
+  // composer the byte stream never showed. Waiting longer cannot change that, so
+  // defer to the ordinary busy gate, exactly as the next wake inject would.
+  // Measured 2026-10-01/02: 24 of 24 headless-claude-composer-not-ready carry
+  // drops had onboarding expired; 0 of 1775 delivered carries did.
+  return onboardingExpired ? 'composer-unseen-ordinary-gate' : 'wait-for-composer';
 }
 
-export function startupOutputReady(agent, output) {
+/** @param {*} agent @param {*} output
+ *  @param {{ rows?: number, cols?: number }} [dims] the child's PTY size (WI-10005178) */
+export function startupOutputReady(agent, output, dims) {
   const visible = stripAnsi(output);
   const normalized = String(agent ?? '').toLowerCase();
   if (normalized === 'omp') return /\bomp\s+v\d/i.test(visible);
   if (normalized === 'codex') {
-    if (/\d{1,3}%\s*context left/i.test(visible)) return true;
-    return codexReadyStatusFooterObserved(visible);
+    const footerState = codexFooterStateFromOutput(output, dims);
+    if (footerState !== null) return footerState === 'ready';
+    return /\d{1,3}%\s*context left/i.test(visible);
   }
   if (normalized === 'claude') return freshChildPromptReady(normalized, output);
   return String(output ?? '').length > 0;
@@ -5137,12 +6729,12 @@ export function codexTuiStartObserved(output) {
  * has already trimmed away: the whole buffer then counts as post-probe.
  * Pure and exported for tests. */
 const CODEX_SESSION_MODEL_RE = /model:\s+(?!loading\b)[^\s│]/;
-export function codexSessionFrameObserved(output, { probeAlreadySeen = false } = {}) {
+export function codexSessionFrameObserved(output, { probeAlreadySeen = false, dims } = {}) {
   const raw = String(output ?? '');
   const probeAt = raw.lastIndexOf('\x1b[6n');
   if (probeAt < 0 && !probeAlreadySeen) return false;
-  const visible = stripAnsi(probeAt < 0 ? raw : raw.slice(probeAt + '\x1b[6n'.length));
-  return CODEX_SESSION_MODEL_RE.test(visible) || codexReadyStatusFooterObserved(visible);
+  const afterProbe = probeAt < 0 ? raw : raw.slice(probeAt + '\x1b[6n'.length);
+  return CODEX_SESSION_MODEL_RE.test(stripAnsi(afterProbe)) || codexReadyStatusFooterObserved(afterProbe, dims);
 }
 
 /** If the Codex first frame is never observed (a future Codex that stops
@@ -5840,6 +7432,21 @@ export function makeDeliveryDedup({ ttlMs = DELIVERY_DEDUP_TTL_MS, now = Date.no
   };
 }
 
+/** Decide how the detached host pipeline settles one delivery ID.
+ * A busy-gate deferral remains pending only when the re-arm controller still
+ * owns that exact delivery; folded IDs that the re-arm does not own stay
+ * retryable. */
+export function deliveryDedupSettlement(deliveryOutcome, rearmOwnsDelivery = false) {
+  if (
+    deliveryOutcome?.ok === true &&
+    (deliveryOutcome.reason === 'delivered' || deliveryOutcome.reason === 'quota-recovery-delivered')
+  ) {
+    return 'completed';
+  }
+  if (deliveryOutcome?.reason === 'deferred-busy-gate' && rearmOwnsDelivery) return 'pending';
+  return 'clear';
+}
+
 /**
  * A minimal FIFO async mutex serializing the GATED-inject critical section within
  * a single host (EI-8822). Each control-socket connection runs its OWN async
@@ -6325,6 +7932,98 @@ export function submitVerifyQuietMs(env = process.env) {
  *  the same path works from the staging AND release checkouts. */
 export const SESSION_COMPACTED_EMIT_ENTRY = join(HOST_SCRIPT_DIR, 'emit-session-compacted.ts');
 
+/** EI-24961854655864836: authenticate the successor before submitting its work.
+ * A failed first report may confirm through the launcher's existing durable retry.
+ * The bounded wait never treats submission/transcript proof as identity authority.
+ * @param {{nativeId?: string | null, readNativeId?: () => string | null,
+ * report?: (id: string, options: {onConfirmed: (id?: string) => void}) => any,
+ * isCurrent?: () => boolean, timeoutMs?: number, pollMs?: number,
+ * alreadyConfirmed?: boolean}} options
+ */
+export async function waitForRespawnBinding({
+  nativeId = null, readNativeId = () => null, report = () => false,
+  isCurrent = () => true, timeoutMs = 2_000, pollMs = 50, alreadyConfirmed = false,
+}) {
+  const deadline = Date.now() + timeoutMs;
+  let confirmed = alreadyConfirmed && Boolean(nativeId);
+  let reporting = false;
+  while (isCurrent()) {
+    if (!nativeId) {
+      try { nativeId = readNativeId(); } catch { /* next bounded startup check */ }
+    }
+    if (nativeId && !reporting && !confirmed) {
+      reporting = true;
+      const expectedId = nativeId;
+      const onConfirmed = (id = expectedId) => {
+        if (id === expectedId && isCurrent()) confirmed = true;
+      };
+      void Promise.resolve().then(() => isCurrent() ? report(expectedId, { onConfirmed }) : false)
+        .then((ok) => { if (ok === true) onConfirmed(); }, () => {});
+    }
+    if (confirmed) return { ok: true, nativeId, reason: 'successor-reanchor-confirmed' };
+    const left = deadline - Date.now();
+    if (left <= 0) return {
+      ok: false, nativeId,
+      reason: nativeId ? 'successor-reanchor-unconfirmed' : 'successor-native-id-missing',
+    };
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, left)));
+  }
+  return { ok: false, nativeId, reason: 'superseded' };
+}
+
+/**
+ * Complete the existing carry lifecycle after native delivery and mapping are
+ * proven. Codex assigns its id at startup: use the exact isolated rollout from
+ * native proof, never "latest" (which can still be the critical predecessor).
+ * @param {{ownerId: string, agent?: string, nativeId?: string | null,
+ *   proof?: {persisted?: boolean, nativeRef?: string | null} | null,
+ *   alreadyReported?: boolean,
+ *   report?: (nativeId: string, options: {onConfirmed: () => void}) => any,
+ *   isCurrent?: () => boolean,
+ *   emit?: typeof fireSessionCompactedEvent, timeoutMs?: number}} options
+ */
+export async function announceVerifiedCarryRespawn({
+  ownerId, agent, nativeId = null, proof = null, alreadyReported = false,
+  report = () => false, emit = fireSessionCompactedEvent, timeoutMs = 2_000,
+  isCurrent = () => true,
+}) {
+  if (!proof?.persisted) return { announced: false, nativeId, reason: 'native-turn-unverified' };
+  if (!nativeId && agent === 'codex' && proof.nativeRef) {
+    nativeId = /^rollout-.*-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\.jsonl$/i
+      .exec(basename(proof.nativeRef))?.[1] ?? null;
+  }
+  if (!ownerId || !nativeId) return { announced: false, nativeId, reason: 'successor-native-id-missing' };
+  let reported = alreadyReported;
+  let announced = false;
+  const announce = () => {
+    if (announced || !isCurrent()) return;
+    emit(ownerId, 'carry-respawn', { nativeId });
+    announced = true;
+  };
+  const onConfirmed = () => {
+    reported = true;
+    try { announce(); } catch { /* fail-soft even after the foreground wait */ }
+  };
+  let timer;
+  try {
+    if (!reported) {
+      const confirmed = await Promise.race([
+        Promise.resolve().then(() => report(nativeId, { onConfirmed })),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+      ]) === true;
+      reported ||= confirmed;
+    }
+    if (!reported) return { announced: false, nativeId, reason: 'successor-reanchor-unconfirmed' };
+    if (!isCurrent()) return { announced: false, nativeId, reason: 'successor-carry-superseded' };
+    announce();
+    return { announced: true, nativeId, reason: 'native-turn-and-reanchor-verified' };
+  } catch {
+    return { announced: false, nativeId, reason: 'successor-reanchor-or-emit-failed' };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Fire the server-side `session:compacted:<owner>` event (event-await-discoverability
  * P-103) after a server-requested compaction COMPLETES, so a peer can
@@ -6455,6 +8154,9 @@ export function injectTurn(sock, text, ownerId) {
 
 /**
  * EI-24091823697677465: heal a DEAD loopback operator pin before an in-place respawn.
+ * Direct :3170 pins also route proactively through the same-build staging proxy (:9171),
+ * including explicit pins. The ordinary launcher already applies this rule, but an
+ * in-place carry-respawn reuses this host's environment and bypasses that resolver.
  *
  * The in-place respawn below re-spawns the CLI with THIS host's env, so whatever
  * PAPERCUSP_OPERATOR_URL the session was launched with rides into every successor
@@ -6467,9 +8169,10 @@ export function injectTurn(sock, text, ownerId) {
  * Only launcher-managed URLs may heal, using the existing provenance marker shared
  * with ptool. An explicit target stays authoritative even when its server is down:
  * a refusal does not authorize moving a current-build session to stable code.
- * A managed pin is replaced only when it REFUSES the connection. A slow or erroring
- * operator stays authoritative. The replacement is the local MCP proxy, and only when it
- * answers /api/health. Mutates `env` in place and returns `{ from, to }` when it
+ * A managed pin is replaced only when it refuses connections or its /api/mcp route
+ * is confirmed missing. A slow/erroring service and a live MCP endpoint stay
+ * authoritative. The replacement is the local MCP proxy, and it must answer both
+ * /api/health and /api/mcp. Mutates `env` in place and returns `{ from, to }` when it
  * healed, otherwise null. Never throws.
  *
  * @param {EnvironmentMap} env
@@ -6477,7 +8180,6 @@ export function injectTurn(sock, text, ownerId) {
  */
 export async function healDeadOperatorPin(env, { fetchImpl = fetch, timeoutMs = 3_000 } = {}) {
   try {
-    if (env.PAPERCUSP_OPERATOR_URL_PROVENANCE !== 'psu-launcher') return null;
     const pinned = String(env.PAPERCUSP_OPERATOR_URL || '').trim().replace(/\/+$/, '');
     if (!pinned || env.PAPERCUSP_MCP_PROXY === '0') return null;
     let pinnedUrl;
@@ -6487,14 +8189,69 @@ export async function healDeadOperatorPin(env, { fetchImpl = fetch, timeoutMs = 
       return null;
     }
     if (!['127.0.0.1', 'localhost', '[::1]', '::1'].includes(pinnedUrl.hostname)) return null;
+    const stagingProxyPort =
+      Number(env.PAPERCUSP_MCP_STAGING_PROXY_PORT) > 0
+        ? Number(env.PAPERCUSP_MCP_STAGING_PROXY_PORT)
+        : 9171;
+    const isStagingProxy = pinnedUrl.port === String(stagingProxyPort);
+    if (isStagingProxy) return null; // preserve the same-build, fail-closed staging route
+
+    const isDirectStagingPin =
+      ['127.0.0.1', 'localhost'].includes(pinnedUrl.hostname) &&
+      pinnedUrl.port === '3170' &&
+      ['', '/', '/api/mcp'].includes(pinnedUrl.pathname.replace(/\/+$/, '') || '/');
+    if (
+      isDirectStagingPin &&
+      env.PAPERCUSP_MCP_STAGING_PROXY !== '0'
+    ) {
+      const stagingProxy = `http://127.0.0.1:${stagingProxyPort}`;
+      // WI-10004511: probe the PROXY's own liveness, not `/api/health`. The proxy
+      // forwards `/api/health` to :3170, so that probe fails during the staging
+      // restart this reroute exists for. The launcher's resolveOperatorTarget probes
+      // `/__mcp_proxy_health` too (defaultMcpProxyProbe), so both paths now agree.
+      // `/api/health` is kept as a fallback for a proxy without the liveness route.
+      const proxyAnswers = async (path) => {
+        try {
+          const h = await fetchImpl(`${stagingProxy}${path}`, {
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+          return Boolean(h?.ok);
+        } catch {
+          return false;
+        }
+      };
+      try {
+        if (
+          (await proxyAnswers('/__mcp_proxy_health')) ||
+          (await proxyAnswers('/api/health'))
+        ) {
+          env.PAPERCUSP_OPERATOR_URL = stagingProxy;
+          // Keep the same-build staging route authoritative across later respawns;
+          // the stable :9071 proxy may serve a different build.
+          delete env.PAPERCUSP_OPERATOR_URL_PROVENANCE;
+          return { from: pinned, to: stagingProxy, route: 'staging-proxy' };
+        }
+      } catch {
+        /* preserve the direct staging pin if its same-build proxy is unavailable */
+      }
+    }
+
+    if (env.PAPERCUSP_OPERATOR_URL_PROVENANCE !== 'psu-launcher') return null;
     const proxyPort =
       Number(env.PAPERCUSP_MCP_PROXY_PORT) > 0 ? Number(env.PAPERCUSP_MCP_PROXY_PORT) : 9071;
     if (pinnedUrl.port === String(proxyPort)) return null;
     const proxy = `http://127.0.0.1:${proxyPort}`;
 
     let refused = false;
+    let pinAnsweredHealth = false;
     try {
-      await fetchImpl(`${pinned}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
+      const health = await fetchImpl(`${pinned}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
+      pinAnsweredHealth = true;
+      try {
+        await health?.body?.cancel?.();
+      } catch {
+        /* a small health response is already sufficient */
+      }
     } catch (err) {
       // undici reports a refused connect as TypeError('fetch failed') whose cause
       // carries the socket errno. A timeout surfaces as AbortError/TimeoutError and
@@ -6502,11 +8259,50 @@ export async function healDeadOperatorPin(env, { fetchImpl = fetch, timeoutMs = 
       const code = err?.cause?.code ?? err?.code;
       refused = code === 'ECONNREFUSED' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH';
     }
-    if (!refused) return null;
+    let mcpRouteMissing = false;
+    if (!refused && pinAnsweredHealth) {
+      try {
+        // A stale launcher URL can point at a healthy HTTP service that is not
+        // the operator. GET is side-effect free: a real Streamable HTTP endpoint
+        // may answer 405 (or open its event stream), while a missing route is 404.
+        const route = await fetchImpl(`${pinned}/api/mcp`, {
+          method: 'GET',
+          headers: { accept: 'text/event-stream' },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        mcpRouteMissing = route?.status === 404;
+        try {
+          await route?.body?.cancel?.();
+        } catch {
+          /* releasing a probe stream must not alter the route verdict */
+        }
+      } catch (err) {
+        const code = err?.cause?.code ?? err?.code;
+        refused = code === 'ECONNREFUSED' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH';
+      }
+    }
+    if (!refused && !mcpRouteMissing) return null;
 
     try {
       const h = await fetchImpl(`${proxy}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
       if (!h?.ok) return null;
+      try {
+        await h.body?.cancel?.();
+      } catch {
+        /* a small health response is already sufficient */
+      }
+      const mcp = await fetchImpl(`${proxy}/api/mcp`, {
+        method: 'GET',
+        headers: { accept: 'text/event-stream' },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const proxyMcpRouteExists = mcp?.status !== 404;
+      try {
+        await mcp?.body?.cancel?.();
+      } catch {
+        /* releasing a probe stream must not alter the route verdict */
+      }
+      if (!proxyMcpRouteExists) return null;
     } catch {
       return null;
     }
@@ -6515,7 +8311,9 @@ export async function healDeadOperatorPin(env, { fetchImpl = fetch, timeoutMs = 
     // rediscover (psu-launcher.mjs OPERATOR_URL_PROVENANCE_ENV; a literal because the
     // host cannot import the launcher without an import cycle).
     env.PAPERCUSP_OPERATOR_URL_PROVENANCE = 'psu-launcher';
-    return { from: pinned, to: proxy };
+    return mcpRouteMissing
+      ? { from: pinned, to: proxy, route: 'mcp-route-missing' }
+      : { from: pinned, to: proxy };
   } catch {
     return null;
   }
@@ -6579,15 +8377,21 @@ export function resolveAgentPtyTarget({ command, args, env, cwd }, deps = {}) {
  * @param {string} [o.kickoffFile]      server-owned session-port seed (never a CLI arg)
  * @param {{renderedHash?: string}} [o.sessionPort] { renderedHash } for the managed seed
  * @param {(proof:any)=>Promise<void>} [o.onKickoffPersisted] lifecycle acknowledgement
+ * @param {{nativeId?:string|null}|null} [o.adoptedCarryRespawn] host-code adoption of a carry;
+ *   its kickoff must prove the late native id and re-anchor before it announces completion
  * @param {object} [o.signalSource]      process-like on/off signal source (tests)
  * @param {()=>object} [o.reapScopeResidue] exact-session-cgroup cleanup (tests)
  * @param {string} [o.normalizedLogPath] optional headless grep-safe log path; normally
  *   supplied through {@link HEADLESS_NORMALIZED_LOG_ENV} in `o.env`
- * @param {(args:string[])=>any} [o.mintRecycleArgs] mint argv for an ordinary recycle
- * @param {(args:string[])=>any} [o.mintCarryRespawnArgs] mint argv for a carry respawn
+ * @param {(args:string[], options:{agent?:string, personaFile?:string|null})=>any} [o.mintRecycleArgs] mint argv for an ordinary recycle
+ * @param {(args:string[], options:{systemPromptAddendum:string, ownerId:string, agent?:string, personaFile?:string|null, codexHome?:string})=>any} [o.mintCarryRespawnArgs] mint argv for a carry respawn
+ * @param {(args:string[], options:{agent?:string})=>({args:string[], nativeId:string}|null)} [o.mintParkResumeArgs]
+ *   mint the argv that resumes a parked child (null = not resumable, never park)
  * @param {()=>Promise<any>} [o.ensureCodexHome] repair the per-session Codex home before a carry mint
  * @param {()=>Promise<any>} [o.refreshPersonaFile] refresh the rendered persona before respawn
  * @param {(...args:any[])=>any} [o.onRespawn] lifecycle callback after a respawn
+ * @param {((pid:number)=>string|null)|null} [o.resolveRespawnNativeId] startup native identity of the exact PTY child
+ * @param {typeof fireSessionCompactedEvent} [o.emitCompacted] verified carry completion bridge (tests)
  * @param {((...args:any[])=>any) | null} [o.onReexec] handoff callback for host re-exec
  * @param {()=>any} [o.hostCodeStalenessFn] injectable loaded-vs-disk probe
  * @param {(env: EnvironmentMap)=>Promise<{from:string,to:string}|null>} [o.healOperatorPin]
@@ -6595,6 +8399,7 @@ export function resolveAgentPtyTarget({ command, args, env, cwd }, deps = {}) {
  * @param {()=>number} [o.parentPidFn] injectable parent-pid probe
  * @param {number} [o.activityPersistMs] discovery activity refresh interval
  * @param {number} [o.nativePersistenceTimeoutMs] managed kickoff persistence deadline
+ * @param {(...args:any[])=>any} [o.mcpReconnectMacro] injectable carry MCP reconnect macro
  */
 export function hostThroughPty(o) {
   const {
@@ -6611,6 +8416,11 @@ export function hostThroughPty(o) {
     // standalone host + existing tests behavior-identical (same args, no anchor).
     mintRecycleArgs = (a) => ({ args: a, nativeId: null }),
     mintCarryRespawnArgs = (a) => mintRecycleArgs(a),
+    // psu-process-free-parking-2026-10-06 P-017: the argv that resumes a PARKED
+    // child as the same conversation (launcher: mintParkResumeArgs). The default
+    // returns null, i.e. "not resumable", so a host the launcher did not wire
+    // never parks.
+    mintParkResumeArgs = () => null,
     // The launcher owns the authenticated operator repair route. Invoke it at
     // the carry boundary so an archived Codex home cannot make every successor
     // attempt fail before minting its AGENTS.md prompt.
@@ -6626,6 +8436,8 @@ export function hostThroughPty(o) {
       reason: "not-wired",
     }),
     onRespawn = () => {},
+    resolveRespawnNativeId = null,
+    emitCompacted = fireSessionCompactedEvent,
     // WI-38292: hand the session to a FRESH launcher process instead of respawning
     // the CLI child inside this stale one. Injected like the mints, and for a
     // second reason beyond launcher-agnosticism: only the launcher knows whether
@@ -6656,11 +8468,13 @@ export function hostThroughPty(o) {
     kickoff = null,
     kickoffFile = null,
     sessionPort = null,
+    adoptedCarryRespawn = null,
     onKickoffPersisted = async () => {},
     onSpawn = () => {},
     nativePersistenceTimeoutMs = Number(
       env.PAPERCUSP_SESSION_PORT_PERSIST_TIMEOUT_MS,
     ) || 30_000,
+    mcpReconnectMacro = runMcpReconnectMacro,
     signalSource = process,
     reapScopeResidue = reapDetachedPtyScopeResidue,
   } = o;
@@ -6680,13 +8494,35 @@ export function hostThroughPty(o) {
   const carryProofRetryMax = Number.isFinite(configuredCarryProofRetryMax) && configuredCarryProofRetryMax >= 0
     ? Math.floor(configuredCarryProofRetryMax)
     : CARRY_PROOF_RETRY_MAX;
+  const publishKickoffProof = (proof) => {
+    const result = publishKickoffProofReceipt(proof, env);
+    if (!result.published && result.reason !== 'kickoff-proof-request-missing') {
+      appendHostEvent(ownerId, 'kickoff-proof-receipt-publication-failed', {
+        persisted: proof.persisted === true,
+        reason: result.reason,
+        errorMessage: result.errorMessage ?? null,
+        errorCode: result.errorCode ?? null,
+      });
+    }
+    return result;
+  };
   let managedKickoffDisposition = null;
   const acknowledgeManagedKickoff = (proof) => {
     if (!managedKickoff) return Promise.resolve();
     if (!managedKickoffDisposition) {
       // First terminal outcome wins. Child exit and persistence verification can
       // race; sharing one promise prevents delivered→failed double transitions.
-      managedKickoffDisposition = Promise.resolve().then(() => onKickoffPersisted(proof));
+      managedKickoffDisposition = Promise.resolve().then(() => {
+        // The detached parent consumes this receipt; the session-port HTTP ack
+        // alone cannot prove delivery to it. Publish before that potentially slow
+        // ack, under the same first-terminal guard as the child-exit failure.
+        publishKickoffProof({
+          persisted: proof.persisted === true,
+          nativeRef: proof.persisted === true ? proof.nativeRef ?? null : null,
+          reason: proof.persisted === true ? null : proof.error ?? 'session-port-kickoff-not-persisted',
+        });
+        return onKickoffPersisted(proof);
+      });
     }
     return managedKickoffDisposition;
   };
@@ -6772,13 +8608,19 @@ export function hostThroughPty(o) {
   // argv (every respawn mints from it), so it cannot say whether the current
   // child carries a persona flag; coldResetModeForAgent needs exactly that.
   let liveChildArgs = args;
+  // WI-10005178: the child's PTY size, so its cursor-positioned output can be
+  // replayed onto the same grid (renderTerminalScreen). onResize keeps the child
+  // at these dims too.
+  const childScreenDims = () => ({
+    cols: sanePtyDim(stdout.columns, 80, 1000),
+    rows: sanePtyDim(stdout.rows, 24, 500),
+  });
   const spawnChild = (spawnArgs = args) => {
     liveChildArgs = spawnArgs;
     const target = resolveAgentPtyTarget({ command, args: spawnArgs, env, cwd });
     return pty.spawn(target.command, target.args, {
       name: ptyName,
-      cols: sanePtyDim(stdout.columns, 80, 1000),
-      rows: sanePtyDim(stdout.rows, 24, 500),
+      ...childScreenDims(),
       cwd,
       env: target.env,
     });
@@ -6790,6 +8632,18 @@ export function hostThroughPty(o) {
     appendHostEvent(ownerId, 'pty-spawn-failed', { command, ...hostErrorEvidence(e) });
     process.stderr.write(`psu: failed to spawn '${command}' under a pty: ${e.message}\n`);
     throw e;
+  }
+  if (adoptedCarryRespawn) {
+    appendHostEvent(ownerId, 'host-code-adoption-child-started', {
+      mode: 'carry-respawn',
+      nativeId: adoptedCarryRespawn.nativeId ?? null,
+      agent: env.PAPERCUSP_AGENT ?? null,
+      kickoffPresent: typeof kickoff === 'string' && kickoff.length > 0,
+      kickoffBytes: typeof kickoff === 'string' ? Buffer.byteLength(kickoff, 'utf8') : 0,
+      argsCount: Array.isArray(liveChildArgs) ? liveChildArgs.length : null,
+      kickoffFilePresent: Boolean(kickoffFile),
+      childPid: Number.isInteger(child.pid) ? child.pid : null,
+    });
   }
   let stopStartupTrace = startCodexStartupProcessTrace({
     agent: env.PAPERCUSP_AGENT, ownerId, pid: child.pid,
@@ -6818,6 +8672,9 @@ export function hostThroughPty(o) {
   // request is an idempotent ok instead of a second kill. Unlike `recycling` this is
   // terminal — nothing clears it, because the host is on its way out.
   let shuttingDown = false;
+  // WI-10004943 (d): set by cleanup() once the host has torn down, so a kickoff
+  // HELD for a Codex frame (minutes) stops waiting instead of polling a dead host.
+  let hostCleanedUp = false;
   // EI-18665672258948707: the moment (Date.now()) THIS host last successfully
   // spawned a fresh child via recycleChild — the supersession clock a queued
   // carry-respawn is checked against right before delivery (isCarryRespawnSuperseded).
@@ -6939,6 +8796,9 @@ export function hostThroughPty(o) {
   // per-child choice watcher until a real turn is submitted, not merely until
   // the first ready frame is painted.
   let activeHeadlessCodexModelChoice = null;
+  // WI-10005472: the current child's onboarding watcher, so the kickoff gate can
+  // tell "composer not seen YET" from "composer never seen in the whole window".
+  let activeHeadlessClaudeOnboarding = null;
   let childStartupFirstOutputAt = 0;
   // EI-24141825238362808: the child's own bracketed-paste mode, tracked over ALL
   // output (not only startup) so turn text is framed only while the TUI has it on.
@@ -7118,6 +8978,10 @@ export function hostThroughPty(o) {
     }
     return true;
   };
+  // psu-process-free-parking-2026-10-06 P-017: the park policy rides this
+  // existing tick (D-002: no new timer). Assigned once the park machinery below
+  // exists; a no-op until then.
+  let parkTick = () => {};
   const activityTimer = setInterval(() => {
     let ownKey = true;
     try {
@@ -7129,6 +8993,11 @@ export function hostThroughPty(o) {
     if (ownKey && (snap.lastActivityAt ?? 0) > lastPersisted) {
       lastPersisted = snap.lastActivityAt ?? 0;
       writeMeta();
+    }
+    try {
+      parkTick();
+    } catch {
+      /* a park decision must never break the activity persist */
     }
   }, activityPersistMs);
   if (typeof activityTimer.unref === 'function') activityTimer.unref();
@@ -7256,6 +9125,28 @@ export function hostThroughPty(o) {
   // native-boundary probe rejects any older task_complete record, preventing a
   // previous turn from certifying a new turn that has only just been submitted.
   let lastMachineTurnSubmittedAtMs = 0;
+  // WI-10004943: when the first machine turn write into THIS child STARTED.
+  // backend-session-frame-observed reports the gap to it, which separates a
+  // Codex that became ready on its own (frame long after any write, or before
+  // one) from a frame that the typed input itself provoked (frame within
+  // moments of a write made while the footer still read `Starting`).
+  let lastMachineTurnWriteStartedAtMs = 0;
+  // WI-10004943: what the host could see at the instant a machine turn began
+  // writing. Without it, a turn that lands after a 20-minute `Starting` footer
+  // cannot tell "the write waited for readiness" from "the write caused it":
+  // the deciding facts are computed here and were previously discarded.
+  const turnWriteContext = (writeStartedAt) => {
+    const context = {
+      writeStartedAt: new Date(writeStartedAt).toISOString(),
+      msSinceBackendFirstFrame: childBackendFirstFrameAt > 0
+        ? writeStartedAt - childBackendFirstFrameAt
+        : null,
+    };
+    if (String(env.PAPERCUSP_AGENT ?? '').trim().toLowerCase() === 'codex') {
+      context.codexFooterAtWrite = codexFooterStateFromOutput(childStartupOutput, childScreenDims());
+    }
+    return context;
+  };
   let queuedOwnerInput = [];
   // Mid-turn inject gate (coord-wake-mid-turn-2026-06-30): reads the SAME
   // lastOutputAt the activity tracker records on every `child.onData` below, so a
@@ -7319,6 +9210,8 @@ export function hostThroughPty(o) {
       terminateOnExhaustion = submitExhaustionTerminatesHost(label),
       text = '',
       submittedAtMs = Date.now(),
+      // WI-10004943: turnWriteContext() captured when the write STARTED.
+      writeContext = null,
     } = {},
   ) => {
     const marker = leadingTurnOriginMarker(text);
@@ -7438,6 +9331,7 @@ export function hostThroughPty(o) {
         // R-1(c)'s attempts > 1 detector is otherwise vacuous for turn delivery.
         attempts: 1 + result.resubmits,
         ...(result.confirmed ? { confirmed: result.confirmed } : {}),
+        ...(writeContext ? { write: writeContext } : {}),
       });
     }
     return result;
@@ -7474,10 +9368,22 @@ export function hostThroughPty(o) {
     freshChildOwnerInputGeneration = null,
     abortBeforeWrite = null,
     prepareBeforeWrite = null,
+    // WI-10004943 (d): when set (ms, measured from this call), a kickoff whose
+    // budget expires while the Codex footer still reads `Starting` is HELD for
+    // the session frame up to this ceiling instead of being dropped.
+    codexStartingHoldCeilingMs = null,
+    // WI-10005106: when set (ms, measured from this call), give up EARLY on a
+    // child whose Codex footer still reads `Starting` at this point, with the
+    // ordinary `codex-startup-still-starting` drop. For a caller that can retry
+    // on a fresh child epoch (the recycle carry-note), so a stuck child is
+    // replaced in minutes instead of being waited on for the whole budget.
+    codexStartingStuckMs = null,
   }) => {
     if (!text) return { delivered: false, reason: 'no-text', attempts: 0 };
     const injectChild = child; // bail if a newer recycle supersedes this one
-    const deadline = Date.now() + budgetMs;
+    const injectStartedAt = Date.now();
+    // Mutable only by the WI-10004943 Codex `Starting` hold below.
+    let deadline = injectStartedAt + budgetMs;
     let attempts = 0;
     let dropReason = 'never-settled';
     const freshChildWasInterrupted = () =>
@@ -7490,14 +9396,106 @@ export function hostThroughPty(o) {
       String(env.PAPERCUSP_AGENT ?? '').trim().toLowerCase() === 'codex';
     const startupReadinessProven = () =>
       codexMarkerKickoffRequiresFrame() ? childBackendFirstFrameAt > 0 : childStartupReady;
+    const codexStartupExplicitlyStarting = () =>
+      String(env.PAPERCUSP_AGENT ?? '').trim().toLowerCase() === 'codex' &&
+      codexFooterStateFromOutput(childStartupOutput, childScreenDims()) === 'starting';
     const startupFallbackCanAuthorize = () =>
-      !codexMarkerKickoffRequiresFrame() && childStartupFallbackElapsed();
+      !codexMarkerKickoffRequiresFrame() &&
+      !codexStartupExplicitlyStarting() &&
+      childStartupFallbackElapsed();
+    // WI-10005106: the `Starting` stuck threshold (see codexStartingStuckMs).
+    // Only a positive `Starting` footer on the SAME child counts; a child that
+    // never painted a footer keeps the ordinary budget and drop reasons.
+    const codexStartingStuckAt =
+      Number(codexStartingStuckMs) > 0 ? injectStartedAt + Number(codexStartingStuckMs) : 0;
+    let codexStartingStuckReported = false;
+    const codexStartingStuck = () => {
+      if (
+        codexStartingStuckAt <= 0 ||
+        !requireInitialOutput ||
+        codexStartingHeldAt > 0 ||
+        Date.now() < codexStartingStuckAt ||
+        child !== injectChild ||
+        freshChildWasInterrupted() ||
+        !codexStartupExplicitlyStarting()
+      ) {
+        return false;
+      }
+      if (!codexStartingStuckReported) {
+        codexStartingStuckReported = true;
+        appendHostEvent(ownerId, 'codex-starting-stuck-early-drop', {
+          label,
+          elapsedMs: Math.max(0, Date.now() - injectStartedAt),
+          stuckMs: Number(codexStartingStuckMs),
+          budgetMs,
+        });
+      }
+      return true;
+    };
+    let codexFrameWaitExtendedReported = false;
     const codexBackendFrameWaitExpired = () => {
       if (!codexMarkerKickoffRequiresFrame() || childBackendFirstFrameAt > 0) return false;
       const waitStartedAt = childBackendTuiStartedAt || childStartupFirstOutputAt;
-      return waitStartedAt > 0 &&
+      const budgetSpent = waitStartedAt > 0 &&
         Date.now() - waitStartedAt >= startupMarkerFallbackMs *
           (CODEX_TUI_START_UNOBSERVED_FALLBACK_MULTIPLIER + 1);
+      // WI-10004919: this budget exists for a frame that is NEVER observed (a
+      // Codex that stops painting it, or bytes that beat the listener). A footer
+      // that positively reads `Starting` is the opposite case: the TUI is alive
+      // and still booting its MCP servers. Measured: v0.159.3 sat in `Starting`
+      // for 86.2s, the 75s budget dropped the kickoff 11s before the Ready frame,
+      // and the resolver idled at its prompt until the run watchdog stranded it.
+      // Keep waiting under the kickoff's own deadline; if it is still Starting
+      // there, the drop reason is `codex-startup-still-starting`.
+      if (budgetSpent && codexStartupExplicitlyStarting()) {
+        if (!codexFrameWaitExtendedReported) {
+          codexFrameWaitExtendedReported = true;
+          appendHostEvent(ownerId, 'launch-kickoff-backend-frame-wait-extended', {
+            reason: 'codex-footer-starting',
+            elapsedMs: Math.max(0, Date.now() - waitStartedAt),
+            remainingMs: Math.max(0, deadline - Date.now()),
+          });
+        }
+        return false;
+      }
+      return budgetSpent;
+    };
+    // WI-10004943 (d): the ordinary budget expired, but the Codex footer still
+    // positively reads `Starting`, so the TUI is alive and its composer is not
+    // available yet. Dropping here discarded the session's first turn, and it
+    // then idled at its prompt (production: `Starting` for 10-20 minutes, then
+    // the frame). HOLD instead: extend the deadline once, to the caller's
+    // ceiling. The hold is self-limiting: once the footer leaves `Starting`
+    // without a frame, codexBackendFrameWaitExpired() ends the wait with the
+    // ordinary `codex-backend-frame-not-observed` drop, and owner input ends it
+    // through freshChildWasInterrupted().
+    const holdCeilingAt =
+      Number(codexStartingHoldCeilingMs) > 0
+        ? injectStartedAt + Math.max(budgetMs, Number(codexStartingHoldCeilingMs))
+        : 0;
+    let codexStartingHeldAt = 0;
+    const holdForCodexStartingFooter = () => {
+      if (
+        codexStartingHeldAt > 0 ||
+        holdCeilingAt <= 0 ||
+        !requireInitialOutput ||
+        Date.now() >= holdCeilingAt ||
+        child !== injectChild ||
+        freshChildWasInterrupted() ||
+        !codexStartupExplicitlyStarting()
+      ) {
+        return false;
+      }
+      codexStartingHeldAt = Date.now();
+      deadline = holdCeilingAt;
+      appendHostEvent(ownerId, 'kickoff-held-for-codex-frame', {
+        label,
+        budgetMs,
+        holdCeilingMs: holdCeilingAt - injectStartedAt,
+        elapsedMs: codexStartingHeldAt - injectStartedAt,
+        remainingMs: Math.max(0, holdCeilingAt - codexStartingHeldAt),
+      });
+      return true;
     };
     try {
       // A scripted resume/port begins this task before wireChildData() is
@@ -7511,7 +9509,9 @@ export function hostThroughPty(o) {
         !freshChildWasInterrupted() &&
         !startupFallbackCanAuthorize() &&
         !codexBackendFrameWaitExpired() &&
-        Date.now() < deadline
+        !codexStartingStuck() &&
+        !(codexStartingHeldAt > 0 && hostCleanedUp) &&
+        (Date.now() < deadline || holdForCodexStartingFooter())
       ) {
         const recoveryState = claudeResumeCompaction.tick();
         if (recoveryState.timedOut) {
@@ -7520,6 +9520,26 @@ export function hostThroughPty(o) {
           break;
         }
         await new Promise((r) => setTimeout(r, Math.min(25, Math.max(1, deadline - Date.now()))));
+      }
+      if (codexStartingHeldAt > 0) {
+        const frameObserved = startupReadinessProven();
+        appendHostEvent(ownerId, 'kickoff-codex-frame-hold-ended', {
+          label,
+          outcome: frameObserved
+            ? 'frame-observed'
+            : hostCleanedUp
+              ? 'host-ended'
+              : freshChildWasInterrupted()
+              ? 'owner-input'
+              : codexStartupExplicitlyStarting()
+                ? 'ceiling-still-starting'
+                : 'footer-left-starting',
+          heldMs: Math.max(0, Date.now() - codexStartingHeldAt),
+        });
+        // Released by the frame: give delivery a fresh ordinary budget, never
+        // past the ceiling. Every other outcome drops below as before.
+        if (frameObserved) deadline = Math.min(holdCeilingAt, Date.now() + budgetMs);
+        else if (hostCleanedUp) return { delivered: false, reason: 'host-ended', attempts };
       }
       // The inner delivery loop below owns the common drop/diagnostic path. Do
       // not return or break from this outer try block when the recovery machine
@@ -7548,9 +9568,17 @@ export function hostThroughPty(o) {
         requireInitialOutput && !startupReadinessProven() && !startupFallbackReady;
       if (startupMarkerMissing) dropReason = 'no-startup-ready-marker';
       let lastResortSpent = false;
+      let composerUnseenFallbackRecorded = false;
       // eslint-disable-next-line no-constant-condition
       while (true) {
         if (startupMarkerMissing) {
+          // A bounded last resort is for a MISSED readiness marker. It must
+          // not overrule Codex's explicit Starting footer, which says its
+          // composer is still unavailable.
+          if (codexStartupExplicitlyStarting()) {
+            dropReason = 'codex-startup-still-starting';
+            break;
+          }
           if (lastResortSpent) {
             dropReason = 'no-startup-ready-marker-last-resort-failed';
             break;
@@ -7589,7 +9617,16 @@ export function hostThroughPty(o) {
           enabled: headlessClaudeOnboardingEnabled(env),
           requireInitialOutput,
           promptReady: childPromptReady,
+          onboardingExpired: activeHeadlessClaudeOnboarding?.status().expired === true,
         });
+        if (claudeKickoffReadiness === 'composer-unseen-ordinary-gate' && !composerUnseenFallbackRecorded) {
+          composerUnseenFallbackRecorded = true;
+          appendHostEvent(ownerId, 'headless-claude-composer-unseen-ordinary-gate', {
+            label,
+            attempts,
+            startupOutputChars: childStartupOutput.length,
+          });
+        }
         const freshPromptReady = freshChildOwnerInputGeneration !== null &&
           (codexMarkerKickoffRequiresFrame()
             ? childBackendFirstFrameAt > 0
@@ -7644,15 +9681,18 @@ export function hostThroughPty(o) {
             return { delivered: false, reason: 'first-turn-started', attempts };
           }
           if (prepareBeforeWrite) {
-            const prepared = await prepareBeforeWrite();
+            const prepared = await prepareBeforeWrite({ deadline });
             if (!prepared.ok) {
               return { delivered: false, reason: prepared.reason ?? 'prewrite-rejected', attempts };
             }
             if (child !== injectChild) return { delivered: false, reason: 'superseded', attempts };
+            if (freshChildWasInterrupted()) return { delivered: false, reason: 'fresh-child-owner-input', attempts };
           }
           // The text is the first step; later steps are delayed submit CRs, so
           // readiness is captured now, not after them.
           const turnWriteStartedAt = Date.now();
+          lastMachineTurnWriteStartedAtMs = turnWriteStartedAt;
+          const kickoffWriteContext = turnWriteContext(turnWriteStartedAt);
           const turnWriteAuthorizedBy = codexMarkerKickoffRequiresFrame()
             ? 'backend-session-frame'
             : childPromptReady
@@ -7740,6 +9780,7 @@ export function hostThroughPty(o) {
                 reason: echoProof.reason,
                 observedChars: echoProof.observedChars,
                 markerTailSeen: echoProof.markerTailSeen,
+                visibleTail: echoProof.visibleTail ?? null,
                 budgetMs: Math.max(0, deadline - turnWriteStartedAt),
               });
               markerEchoFailureReason = 'kickoff-marker-echo-unconfirmed';
@@ -7749,6 +9790,11 @@ export function hostThroughPty(o) {
               appendHostEvent(ownerId, 'launch-kickoff-marker-echo-confirmed', {
                 elapsedMs: echoProof.elapsedMs,
                 markerChars: marker.length,
+                // WI-10005331: non-null when only a head-truncated marker echoed.
+                markerHeadLost: echoProof.markerHeadLost ?? null,
+                // WI-10005331: non-null when the marker echoed with only its
+                // whitespace changed (a composer wrap at the marker's space).
+                markerWhitespaceLost: echoProof.markerWhitespaceLost ?? null,
               });
             }
           }
@@ -7779,6 +9825,9 @@ export function hostThroughPty(o) {
                 : null,
               promptReady: childPromptReady,
               startupReady: childStartupReady,
+              ...(kickoffWriteContext.codexFooterAtWrite !== undefined
+                ? { codexFooterAtWrite: kickoffWriteContext.codexFooterAtWrite }
+                : {}),
             });
           }
           if (child !== injectChild) {
@@ -7788,6 +9837,7 @@ export function hostThroughPty(o) {
             terminateOnExhaustion: terminateOnSubmitVerifyExhaustion,
             text,
             submittedAtMs: turnWriteStartedAt,
+            writeContext: kickoffWriteContext,
           });
           if (child !== injectChild) {
             return { delivered: false, reason: 'superseded', attempts };
@@ -7838,6 +9888,7 @@ export function hostThroughPty(o) {
               terminateOnExhaustion: terminateOnSubmitVerifyExhaustion,
               text,
               submittedAtMs: turnWriteStartedAt,
+              writeContext: kickoffWriteContext,
             });
           }
           if (child !== injectChild) {
@@ -7873,47 +9924,81 @@ export function hostThroughPty(o) {
       /* an unexpected inject error still falls through to the drop trace */
     }
     if (child !== injectChild) return { delivered: false, reason: 'superseded', attempts };
+    if (dropReason === 'codex-startup-still-starting') {
+      // WI-10004943 (b): capture what the stuck child was waiting on while it is
+      // still alive. The respawn this drop leads to starts a fresh codex-tui.log
+      // in the same CODEX_HOME, so this is the last chance to see its log.
+      try {
+        const snapshot = collectCodexStartingStuckSnapshot({
+          rootPid: child?.pid,
+          codexHome: env.CODEX_HOME,
+          startupOutput: childStartupOutput,
+          screenDims: childScreenDims(),
+        });
+        appendHostEvent(ownerId, 'codex-starting-stuck-snapshot', { label, ...snapshot });
+      } catch {
+        /* diagnostic only */
+      }
+    }
     try {
       onDrop();
     } catch {
       /* the drop trace must never break the session */
     }
+    // WI-10004943: an early `Starting` drop is armed only for a caller that
+    // replaces the child and retries (the carry's fresh epoch, the launch
+    // kickoff's fresh child), so it is not terminal. It must not print the
+    // DROPPED receipt: the acceptance grader treats `launch kickoff DROPPED`
+    // with no first-turn progress as a dead judge, and would retire one whose
+    // retry is about to land. A caller whose retry cannot run prints it.
+    const earlyStuck = codexStartingStuckReported && dropReason === 'codex-startup-still-starting';
     appendHostEvent(ownerId, 'startup-turn-dropped', {
       label,
       reason: dropReason,
       attempts,
       budgetMs,
+      ...(earlyStuck ? { earlyStuck: true } : {}),
     });
+    if (!earlyStuck) writeStartupTurnDroppedLine({ label, dropReason, budgetMs, attempts });
+    return { delivered: false, reason: dropReason, attempts, ...(earlyStuck ? { earlyStuck: true } : {}) };
+  };
+
+  // WI-10004926: the ONE writer of the parsed DROPPED receipt, pinned to the
+  // acceptance-grader parser by apps/operator/lib/psu-pty-host-drop-line-contract.test.ts.
+  // WI-10004943 adds a caller: a launch kickoff whose fresh-child retry cannot run.
+  const writeStartupTurnDroppedLine = ({ label, dropReason, budgetMs, attempts }) => {
     try {
-      process.stderr.write(
-        `psu-pty-host: ${label} DROPPED for ${ownerId} (${
-          dropReason === 'no-startup-ready-marker-last-resort-failed'
-            ? 'the child never emitted its startup-ready marker AND the last-resort attempt found no prompt'
-            : dropReason === 'no-startup-ready-marker'
-              ? 'the child never emitted its startup-ready marker'
-                : dropReason === 'kickoff-marker-echo-unconfirmed'
-                  ? 'the exact Codex kickoff marker never appeared in the composer echo'
-                  : dropReason === 'submit-verification-exhausted'
-                    ? 'submit verification exhausted without observing output after a resubmit'
-                : dropReason.startsWith('submit-verification-aborted-')
-                  ? `submit verification aborted (${dropReason.slice('submit-verification-aborted-'.length)})`
-                    : dropReason === 'fresh-child-owner-input'
-                      ? 'the owner used the fresh child before its carry prompt was submitted'
-                      : dropReason === 'resume-compaction-timeout'
-                        ? 'Claude resume compaction recovery timed out before a standalone composer prompt appeared'
-              : 'the child never settled to its prompt'
-        } ` +
-          `within ${budgetMs}ms over ${attempts} attempt(s))\n`,
-      );
+      process.stderr.write(formatStartupTurnDroppedLine({ label, ownerId, dropReason, budgetMs, attempts }));
     } catch {
       /* never let a diagnostic write break the host */
     }
-    return { delivered: false, reason: dropReason, attempts };
   };
 
   // Scripted fresh launches and resumes share the managed first-turn seam;
   // prompts stay out of argv. Only a fresh Codex thread can use startup proof
   // instead of output silence. Resume/fork may already be running a turn.
+  let launchKickoffSettled = !launchKickoff;
+  let confirmedCarryChild = null;
+  let confirmedCarryNativeId = null;
+  const prepareCarryBinding = async (nativeId, deadline, alreadyConfirmed = false) => {
+    const target = child;
+    const result = await waitForRespawnBinding({
+      nativeId,
+      readNativeId: () => resolveRespawnNativeId?.(target.pid) ?? null,
+      report: onRespawn,
+      isCurrent: () => child === target && !hostCleanedUp && !shuttingDown,
+      alreadyConfirmed: alreadyConfirmed || (confirmedCarryChild === target && confirmedCarryNativeId === nativeId),
+      timeoutMs: Math.max(0, deadline - Date.now()),
+    });
+    appendHostEvent(ownerId, result.ok ? 'respawn-binding-confirmed' : 'respawn-binding-unconfirmed', {
+      nativeId: result.nativeId, reason: result.reason,
+    });
+    if (result.ok) {
+      confirmedCarryChild = target;
+      confirmedCarryNativeId = result.nativeId;
+    }
+    return result;
+  };
   if (launchKickoff) {
     const requireRoleMcp = headlessRoleKickoffRequiresMcp({
       agent: env.PAPERCUSP_AGENT,
@@ -7928,15 +10013,47 @@ export function hostThroughPty(o) {
       Boolean(leadingTurnOriginMarker(launchKickoff));
     void (async () => {
       const label = managedKickoff ? 'session-port seed' : 'launch kickoff';
-      const r = await injectTurnAtPrompt({
+      const isResumeLaunch = args.some((arg) => arg === 'resume' || arg === 'fork');
+      const kickoffBudgetMs = headlessClaudeOnboardingEnabled(env)
+        ? Math.min(recycleCarryInjectBudgetMs, HEADLESS_CLAUDE_KICKOFF_READY_TIMEOUT_MS)
+        : recycleCarryInjectBudgetMs;
+      // WI-10004943: a plain fresh Codex launch whose child is still at the
+      // `Starting` footer after the stuck threshold gets a fresh child and the
+      // same kickoff (the WI-10005106 carry remedy). The (d) hold alone rescued
+      // 0 of 3 such launches; the last attempt still holds.
+      const freshChildRetry = {
+        agent: env.PAPERCUSP_AGENT,
+        managedKickoff: Boolean(managedKickoff),
+        isResume: isResumeLaunch,
+        maxRetries: codexLaunchStartingRetryMax(env.PAPERCUSP_PSU_PTY_CODEX_LAUNCH_STARTING_RETRIES),
+      };
+      let freshChildRetries = 0;
+      const injectLaunchKickoff = () => injectTurnAtPrompt({
         text: launchKickoff,
         label,
-        ...(headlessClaudeOnboardingEnabled(env)
-          ? { budgetMs: Math.min(recycleCarryInjectBudgetMs, HEADLESS_CLAUDE_KICKOFF_READY_TIMEOUT_MS) }
-          : {}),
+        budgetMs: kickoffBudgetMs,
         requireInitialOutput: true,
         verifyKickoffMarkerEcho,
-        prepareBeforeWrite: requireRoleMcp ? async () => {
+        ...launchKickoffCodexStartingOptions({
+          ...freshChildRetry,
+          retryCount: freshChildRetries,
+          stuckMs: positiveNumber(
+            env.PAPERCUSP_PSU_PTY_CODEX_CARRY_STARTING_STUCK_MS,
+            CODEX_CARRY_STARTING_STUCK_MS,
+          ),
+          // WI-10004943 (d): hold, don't drop, while the Codex footer reads Starting.
+          holdCeilingMs: positiveNumber(
+            env.PAPERCUSP_PSU_PTY_CODEX_STARTING_HOLD_CEILING_MS,
+            CODEX_STARTING_KICKOFF_HOLD_CEILING_MS,
+          ),
+        }),
+        prepareBeforeWrite: async ({ deadline }) => {
+          if (adoptedCarryRespawn && (adoptedCarryRespawn.nativeId || resolveRespawnNativeId)) {
+            const binding = await prepareCarryBinding(adoptedCarryRespawn.nativeId, deadline);
+            if (!binding.ok) return binding;
+            adoptedCarryRespawn.nativeId = binding.nativeId;
+          }
+          if (!requireRoleMcp) return { ok: true };
           const tap = makeOutputTap();
           try {
             const result = await verifyHeadlessRoleMcp(() => runMcpReconnectMacro({
@@ -7954,9 +10071,10 @@ export function hostThroughPty(o) {
           } finally {
             tap.close();
           }
-        } : null,
-        freshChildOwnerInputGeneration: env.PAPERCUSP_AGENT === 'codex' &&
-          !args.some((arg) => arg === 'resume' || arg === 'fork')
+        },
+        // Read per attempt, so a replacement child is judged against the owner
+        // input generation current at its own kickoff.
+        freshChildOwnerInputGeneration: env.PAPERCUSP_AGENT === 'codex' && !isResumeLaunch
           ? ownerInputGeneration
           : null,
         // The managed kickoff's native transcript proof owns its failure
@@ -7964,17 +10082,93 @@ export function hostThroughPty(o) {
         // down the host before that proof can observe a late marker.
         terminateOnSubmitVerifyExhaustion: !managedKickoff,
       });
+      let r = await injectLaunchKickoff();
+      while (
+        !r.delivered &&
+        shouldRetryLaunchKickoffOnFreshChild({ ...freshChildRetry, reason: r.reason, retryCount: freshChildRetries })
+      ) {
+        freshChildRetries += 1;
+        appendHostEvent(ownerId, 'launch-kickoff-fresh-child-retry', {
+          label,
+          reason: r.reason,
+          attempt: freshChildRetries,
+          maxRetries: freshChildRetry.maxRetries,
+        });
+        let replaced;
+        if (hostCleanedUp || shuttingDown) {
+          replaced = { spawned: false, reason: 'host-shutting-down' };
+        } else {
+          try {
+            replaced = await recycleChild('', { freshChildOnly: true });
+          } catch (error) {
+            replaced = { spawned: false, reason: `threw:${String(error?.message ?? error).slice(0, 120)}` };
+          }
+        }
+        if (!replaced?.spawned) {
+          appendHostEvent(ownerId, 'launch-kickoff-fresh-child-failed', {
+            label,
+            reason: replaced?.reason ?? 'no-recycle-result',
+            attempt: freshChildRetries,
+          });
+          // The early drop skipped the parsed DROPPED receipt on the promise of
+          // this retry. The retry cannot run, so the drop is terminal after all.
+          if (r.earlyStuck) {
+            writeStartupTurnDroppedLine({ label, dropReason: r.reason, budgetMs: kickoffBudgetMs, attempts: r.attempts });
+          }
+          break;
+        }
+        r = await injectLaunchKickoff();
+      }
+      // EI-24818010361425604: a same-host respawn replaced the child while this
+      // kickoff was in flight, so the owner now lives in the successor. Wait on
+      // the inject mutex (a gated respawn holds it through kill + spawn + carry
+      // inject, so the carry turn lands first), then give the successor the
+      // kickoff. A duplicate is possible when the carry tail already quoted the
+      // kickoff; losing it, and having the parent kill the successor over a
+      // terminal negative receipt, is the failure this replaces.
+      let respawnRedeliveries = 0;
+      while (
+        !r.delivered &&
+        shouldRedeliverLaunchKickoffAfterRespawn({
+          reason: r.reason,
+          managedKickoff: Boolean(managedKickoff),
+          hostShuttingDown: hostCleanedUp || shuttingDown,
+          redeliveries: respawnRedeliveries,
+        })
+      ) {
+        respawnRedeliveries += 1;
+        appendHostEvent(ownerId, 'launch-kickoff-respawn-redelivery', {
+          label,
+          attempt: respawnRedeliveries,
+          maxRedeliveries: LAUNCH_KICKOFF_RESPAWN_REDELIVERY_MAX,
+        });
+        let releaseInject = null;
+        try {
+          releaseInject = await injectMutex.acquire();
+        } catch {
+          // Never block the redelivery on the mutex itself; the injector's own
+          // prompt and busy gates still order it after the carry turn.
+          releaseInject = null;
+        }
+        try {
+          r = hostCleanedUp || shuttingDown
+            ? { delivered: false, reason: 'host-shutting-down', attempts: 0 }
+            : await injectLaunchKickoff();
+        } finally {
+          releaseInject?.();
+        }
+      }
       if (!managedKickoff) {
         if (!r.delivered) {
           // An opted-in detached caller must receive a terminal negative receipt
           // even when the PTY submission never started. Otherwise the parent
           // waits out its proof window and cannot distinguish "not submitted"
           // from a host that died before it could report.
-          publishKickoffProofReceipt({
+          publishKickoffProof({
             persisted: false,
             nativeRef: null,
             reason: `kickoff-not-submitted:${r.reason ?? 'unknown'}`,
-          }, env);
+          });
           return;
         }
         let proof;
@@ -8014,11 +10208,11 @@ export function hostThroughPty(o) {
         // Publish the native transcript verdict before any caller-facing
         // handling. The detached parent owns the placeholder and uses this
         // receipt as the only authority for whether its kickoff ran.
-        publishKickoffProofReceipt({
+        publishKickoffProof({
           persisted: proof.persisted === true,
           nativeRef: proof.nativeRef ?? null,
           reason: proof.persisted ? null : proof.reason,
-        }, env);
+        });
         if (!proof.persisted) {
           const proofUnavailable =
             proof.reason === 'missing-leading-turn-origin' ||
@@ -8048,12 +10242,45 @@ export function hostThroughPty(o) {
           }
           return;
         }
+        if (adoptedCarryRespawn) {
+          const adoptedCarryChild = child;
+          const adoptedAnnouncement = await announceVerifiedCarryRespawn({
+            ownerId,
+            agent: env.PAPERCUSP_AGENT,
+            nativeId: adoptedCarryRespawn.nativeId ?? null,
+            proof,
+            alreadyReported: confirmedCarryChild === adoptedCarryChild,
+            report: onRespawn,
+            emit: emitCompacted,
+            timeoutMs: respawnReportTimeoutMs,
+            isCurrent: () => child === adoptedCarryChild && !recycling && !shuttingDown && !hostCleanedUp,
+          });
+          const adoptedNativeId = adoptedAnnouncement.nativeId ?? adoptedCarryRespawn.nativeId ?? null;
+          appendHostEvent(ownerId, 'respawn-carry-delivered', {
+            mode: 'carry-respawn',
+            nativeId: adoptedNativeId,
+            outputSeen: childStartupOutput.length > 0,
+            turnStartVerified: true,
+            nativeRef: proof.nativeRef ?? null,
+            adopted: true,
+          });
+          if (!adoptedAnnouncement.announced) {
+            appendHostEvent(ownerId, 'respawn-compaction-unannounced', {
+              nativeId: adoptedNativeId,
+              reason: adoptedAnnouncement.reason,
+              adopted: true,
+            });
+          }
+        }
         // The marker proves submission, not execution. When an isolated native
         // transcript is available, only a task-start/assistant row after this
         // marker proves the turn ran; PTY output may have arrived before marker
         // proof returned and must not become a late sampling baseline.
         const readLastOutputAt = () => activity.snapshot().lastOutputAt ?? 0;
         const kickoffMarker = leadingTurnOriginMarker(launchKickoff);
+        const kickoffMarkerAnchor = {
+          fileIdentity: null, markerStartOffset: null, markerEndOffset: null, scannedEndOffset: null,
+        };
         const nativeTurnActivity = kickoffMarker && proof.nativeRef &&
           nativeTurnVerifierSupport(env.PAPERCUSP_AGENT, env).supported
           ? () => nativeKickoffTurnActivityAfterMarker({
@@ -8062,6 +10289,7 @@ export function hostThroughPty(o) {
               transcriptPath: proof.nativeRef,
               marker: kickoffMarker,
               markerLostChars: proof.markerTruncated?.lostChars ?? 0,
+              anchor: kickoffMarkerAnchor,
             })
           : null;
         const configuredPollMs = Number(env.PAPERCUSP_PSU_PTY_KICKOFF_TURN_POLL_MS);
@@ -8186,15 +10414,19 @@ export function hostThroughPty(o) {
     })().catch((error) => {
       appendHostEvent(ownerId, 'managed-kickoff-failed', hostErrorEvidence(error));
       if (!managedKickoff) {
-        publishKickoffProofReceipt({
+        publishKickoffProof({
           persisted: false,
           nativeRef: null,
           reason: 'launch-kickoff-error',
-        }, env);
+        });
       }
       try { process.stderr.write(`psu: managed kickoff failed: ${error?.message ?? error}\n`); }
       catch { /* diagnostics are best-effort */ }
       try { child.kill(); } catch { /* already exited */ }
+    }).finally(() => {
+      // psu-process-free-parking P-017: a park must never cut off a first
+      // prompt that is still waiting to be typed.
+      launchKickoffSettled = true;
     });
   }
 
@@ -8341,6 +10573,15 @@ export function hostThroughPty(o) {
           promptAlreadyVerified: true,
           terminateOnSubmitVerifyExhaustion: false,
           submitVerificationRequired: true,
+          prepareBeforeWrite: async () => {
+            if (shouldDeferWakeForPendingRespawn(mode, carryRearm.pendingCount('carry-respawn'))) {
+              appendHostEvent(ownerId, 'wake-turn-deferred-for-pending-respawn', {
+                reason: 'carry-respawn-pending', phase: 'pre-write', rearmed: true,
+              });
+              return { ok: false, reason: 'carry-respawn-pending' };
+            }
+            return { ok: true };
+          },
         });
       }
       return recycleChild(message?.data, {
@@ -8369,6 +10610,324 @@ export function hostThroughPty(o) {
     isSuperseded: (msg) =>
       isCarryRespawnSuperseded(msg.receivedAtMs, lastRespawnAtMs),
   });
+
+  // ── Process-free parking (psu-process-free-parking-2026-10-06 P-017) ───────
+  // An idle Claude child is SIGKILLed to free its memory while this host, its
+  // control socket, discovery file and terminal stay up (D-002). The first
+  // owner keystroke, control-socket delivery or recycle brings it back on the
+  // SAME conversation (mintParkResumeArgs). While parked, `child` is a stand-in
+  // with no pid: nothing can signal a recycled pid, and killing the stand-in
+  // ends the session through the ordinary child-exit path (so shutdown, a
+  // host signal and an orphaned terminal all behave exactly as with a live
+  // child).
+  const parkIdleMs = parkIdleMsFromEnv(env);
+  const parkResumeWaitMs = positiveNumber(env.PAPERCUSP_PSU_PARK_RESUME_WAIT_MS, 60_000);
+  let parked = false;
+  /** @type {Promise<boolean> | null} */
+  let parkPromise = null;
+  /** @type {Promise<{ unparked: boolean, reason: string }> | null} */
+  let unparkPromise = null;
+  let parkedAtMs = 0;
+  let lastUnparkAtMs = 0;
+  /** @type {{ args: string[], nativeId: string } | null} */
+  let parkResume = null;
+  let deliveriesInFlight = 0;
+  let lastParkDeferReason = null;
+  /** Owner keystrokes typed while parked, replayed once the resumed prompt is up. */
+  const heldOwnerInput = [];
+  let heldOwnerInputBytes = 0;
+  const HELD_OWNER_INPUT_CAP_BYTES = 4096;
+  const parkInProgress = () => parked || parkPromise !== null || unparkPromise !== null;
+  const makeParkedChild = () => {
+    const listeners = [];
+    let exitEvent = null;
+    const fire = (fn) => setImmediate(() => {
+      try {
+        fn(exitEvent);
+      } catch {
+        /* a listener must never break another */
+      }
+    });
+    return {
+      pid: undefined,
+      write() {},
+      resize() {},
+      onData() {
+        return { dispose() {} };
+      },
+      onExit(fn) {
+        if (exitEvent) fire(fn);
+        else listeners.push(fn);
+        return { dispose() {} };
+      },
+      // Asynchronous like node-pty's own exit event, so a teardown that records
+      // its signal before killing (WI-38054) still wins the race.
+      kill(signal = 'SIGHUP') {
+        if (exitEvent) return;
+        exitEvent = {
+          exitCode: 0,
+          signal: typeof signal === 'string' ? (osConstants.signals[signal] ?? 0) : Number(signal) || 0,
+        };
+        for (const fn of listeners.splice(0)) fire(fn);
+      },
+    };
+  };
+  const mintResumeForPark = () => {
+    try {
+      const configDir = env.CLAUDE_CONFIG_DIR || null;
+      const newest = newestSessionTranscriptId(configDir, { ownerId });
+      const base = mintParkResumeArgs(liveChildArgs, { agent: env.PAPERCUSP_AGENT });
+      if (!base || !Array.isArray(base.args) || !base.nativeId) return null;
+      if (newest && newest.id !== base.nativeId) {
+        const switched = mintParkResumeArgs(liveChildArgs, {
+          agent: env.PAPERCUSP_AGENT,
+          nativeId: newest.id,
+        });
+        if (switched && Array.isArray(switched.args) && switched.nativeId) {
+          return { ...switched, switchedFrom: base.nativeId };
+        }
+      }
+      return base;
+    } catch {
+      return null;
+    }
+  };
+  const clearParkedState = (trigger, extra = {}) => {
+    const parkedForMs = parkedAtMs ? Date.now() - parkedAtMs : null;
+    parked = false;
+    parkedAtMs = 0;
+    parkResume = null;
+    lastUnparkAtMs = Date.now();
+    baseMeta.parked = false;
+    baseMeta.parkedAt = null;
+    return { trigger, parkedForMs, ...extra };
+  };
+  const parkChild = async (verdict) => {
+    const resume = mintResumeForPark();
+    if (!resume) return false;
+    const parkedChild = child;
+    const childPid = Number.isInteger(parkedChild?.pid) ? parkedChild.pid : null;
+    // `recycling` makes the child-exit handler ignore THIS kill: a park is not
+    // the session ending, and the operator must never see it as one (D-002).
+    recycling = true;
+    try {
+      stopStartupTrace('park');
+      const dead = new Promise((res) => {
+        try {
+          parkedChild.onExit(() => res(true));
+        } catch {
+          res(true);
+        }
+      });
+      killPtyProcessTree(parkedChild, 'SIGKILL');
+      const exited = await Promise.race([
+        dead,
+        new Promise((res) => setTimeout(() => res(false), RECYCLE_FORCE_KILL_WAIT_MS * 5)),
+      ]);
+      if (normalizedLog) normalizedLog.flush();
+      childStartupOutput = '';
+      childStartupReady = false;
+      childPromptReady = false;
+      childStartupFirstOutputAt = 0;
+      childBracketedPaste = false;
+      childBracketedPasteTail = '';
+      childBackendTuiStartedAt = 0;
+      childBackendFirstFrameAt = 0;
+      lastMachineTurnWriteStartedAtMs = 0;
+      quotaBlockDetector.reset();
+      ownerComposerGate.markSubmitted();
+      child = makeParkedChild();
+      wireChildExit();
+      parked = true;
+      parkedAtMs = Date.now();
+      parkResume = resume;
+      baseMeta.parked = true;
+      baseMeta.parkedAt = parkedAtMs;
+      // A dead pid is recycled within hours here; never advertise one.
+      baseMeta.ptyPid = null;
+      writeMeta();
+      try {
+        // The killed TUI left its terminal modes (mouse reporting, bracketed
+        // paste) armed; reset them so a mouse move is not read as a keystroke.
+        if (bridgeTty) {
+          const handoff = respawnTerminalHandoffBytes({
+            rows: sanePtyDim(stdout.rows, 0, 500) || undefined,
+            separator: false,
+          });
+          if (handoff) stdout.write(handoff);
+        }
+        stdout.write(
+          `\r\n[psu] Agent parked after ${Math.round((verdict.idleForMs ?? parkIdleMs) / 60_000)} min idle ` +
+            `to free memory. Type, or send it a message, to resume the same conversation.\r\n`,
+        );
+      } catch {
+        /* the notice is advisory */
+      }
+      appendHostEvent(ownerId, 'child-parked', {
+        idleForMs: verdict.idleForMs ?? null,
+        childPid,
+        exited,
+        nativeId: resume.nativeId,
+        switchedFrom: resume.switchedFrom ?? null,
+      });
+      return true;
+    } finally {
+      recycling = false;
+    }
+  };
+  parkTick = () => {
+    if (parkInProgress() || hostCleanedUp || shuttingDown || recycling) return;
+    const now = Date.now();
+    const snap = activity.snapshot();
+    const lastActivityAt = Math.max(
+      snap.lastActivityAt ?? 0,
+      lastRespawnAtMs,
+      lastUnparkAtMs,
+      baseMeta.startedAt ?? 0,
+    );
+    const busy =
+      deliveriesInFlight > 0 ||
+      machineTurnActive ||
+      carryRearm.pendingCount() > 0 ||
+      !launchKickoffSettled;
+    const verdict = parkVerdict({
+      idleMs: parkIdleMs,
+      agent: env.PAPERCUSP_AGENT,
+      now,
+      lastActivityAt,
+      childPromptReady,
+      parked,
+      busy,
+      quotaBlocked: quotaBlockDetector.isBlocked(),
+      composerPending: ownerComposerGate.hasPending(),
+      // Only pay for the transcript-dir scan once the child is idle enough to
+      // park; before that the verdict refuses on idleness anyway.
+      resumable: now - lastActivityAt >= parkIdleMs ? mintResumeForPark() !== null : true,
+      descendants: () => countProcessDescendants(child?.pid),
+    });
+    if (!verdict.park) {
+      // Report WHY an idle child was not parked, once per reason change, so
+      // "why is this idle agent still holding memory" is a read, not a guess.
+      const idleFor = now - lastActivityAt;
+      if (
+        parkIdleMs > 0 &&
+        idleFor >= parkIdleMs &&
+        verdict.reason !== lastParkDeferReason &&
+        !['disabled', 'agent-not-parkable', 'already-parked', 'not-idle-long-enough'].includes(verdict.reason)
+      ) {
+        appendHostEvent(ownerId, 'child-park-deferred', {
+          reason: verdict.reason,
+          idleForMs: idleFor,
+          descendants: verdict.descendants ?? null,
+        });
+      }
+      lastParkDeferReason = verdict.reason;
+      return;
+    }
+    lastParkDeferReason = null;
+    parkPromise = parkChild(verdict)
+      .catch((error) => {
+        appendHostEvent(ownerId, 'child-park-failed', hostErrorEvidence(error));
+        return false;
+      })
+      .finally(() => {
+        parkPromise = null;
+      });
+  };
+  /**
+   * Bring a parked child back on the same conversation. Single-flight: every
+   * trigger that arrives while a resume is in progress shares it. Resolves once
+   * the resumed TUI shows its prompt (or the wait cap passes — the delivery
+   * gates downstream still guard the write).
+   * @param {string} trigger
+   */
+  const unparkChild = (trigger) => {
+    if (unparkPromise) return unparkPromise;
+    if (!parked && !parkPromise) return Promise.resolve({ unparked: false, reason: 'not-parked' });
+    unparkPromise = (async () => {
+      const startedAt = Date.now();
+      try {
+        if (parkPromise) await parkPromise;
+        if (!parked) return { unparked: false, reason: 'not-parked' };
+        if (hostCleanedUp || shuttingDown) return { unparked: false, reason: 'host-ending' };
+        const resume = parkResume;
+        if (!resume) {
+          appendHostEvent(ownerId, 'child-unpark-failed', { trigger, reason: 'no-resume-args' });
+          return { unparked: false, reason: 'no-resume-args' };
+        }
+        let resumed;
+        try {
+          resumed = spawnChild(resume.args);
+        } catch (error) {
+          appendHostEvent(ownerId, 'child-unpark-failed', {
+            trigger,
+            reason: 'spawn-failed',
+            ...hostErrorEvidence(error),
+          });
+          return { unparked: false, reason: 'spawn-failed' };
+        }
+        child = resumed;
+        stopStartupTrace = startCodexStartupProcessTrace({
+          agent: env.PAPERCUSP_AGENT, ownerId, pid: child.pid,
+        });
+        const details = clearParkedState(trigger, { nativeId: resume.nativeId });
+        baseMeta.ptyPid = child.pid;
+        writeMeta();
+        wireChildData();
+        wireChildExit();
+        activity.touchOutput();
+        const deadline = Date.now() + parkResumeWaitMs;
+        while (!childPromptReady && child === resumed && !hostCleanedUp && Date.now() < deadline) {
+          await new Promise((res) => setTimeout(res, 100));
+        }
+        appendHostEvent(ownerId, 'child-unparked', {
+          ...details,
+          childPid: Number.isInteger(resumed.pid) ? resumed.pid : null,
+          promptReady: childPromptReady,
+          latencyMs: Date.now() - startedAt,
+        });
+        if (child === resumed && heldOwnerInput.length) {
+          const replay = heldOwnerInput.splice(0);
+          heldOwnerInputBytes = 0;
+          for (const chunk of replay) forwardOwnerInput(chunk);
+        }
+        return { unparked: true, reason: 'resumed' };
+      } finally {
+        unparkPromise = null;
+      }
+    })();
+    return unparkPromise;
+  };
+  /** Owner bytes typed while parked: keep the real keystrokes for replay, drop
+   *  the terminal's own replies (they answered the dead TUI), and resume. */
+  const holdOwnerInputWhileParked = (input, ownerTyped) => {
+    if (!ownerTyped) return;
+    const bytes = Buffer.byteLength(input, 'utf8');
+    if (heldOwnerInputBytes + bytes <= HELD_OWNER_INPUT_CAP_BYTES) {
+      heldOwnerInput.push(input);
+      heldOwnerInputBytes += bytes;
+    }
+    if (!unparkPromise) {
+      try {
+        stdout.write('\r\n[psu] Resuming the agent…\r\n');
+      } catch {
+        /* advisory */
+      }
+    }
+    void unparkChild('owner-input');
+  };
+  /** Every control-socket delivery resumes a parked child before its gates run
+   *  (never refused: the host accepted it, WI-10005134), and counts as busy so
+   *  the policy cannot park the child out from under it. */
+  const deliverAfterUnpark = async (mode, run) => {
+    deliveriesInFlight++;
+    try {
+      if (mode !== 'osc' && parkInProgress()) await unparkChild(`control:${mode}`);
+      return await run();
+    } finally {
+      deliveriesInFlight--;
+    }
+  };
 
   // Control socket: a connector writes one v1 envelope (or legacy raw bytes);
   // we inject it into the pty (a wake turn / a force-interrupt control byte).
@@ -8515,12 +11074,17 @@ export function hostThroughPty(o) {
           pendingLoopKey != null
             ? turnCoalescer.refresh(pendingLoopKey, msg.data, pendingLoopMetadata)
             : false;
+        const refreshedPendingCarryRespawn =
+          duplicateState === 'pending' && msg.mode === 'carry-respawn' && !msg.drillId
+            ? carryRearm.refreshPendingMessage(msg)
+            : false;
         const duplicateReason =
           duplicateState === 'pending' ? 'pending-delivery-id' : 'duplicate-delivery-id';
         appendHostEvent(ownerId, 'duplicate-delivery-id', {
           state: duplicateState,
           mode: msg.mode,
           refreshedPendingTurn,
+          refreshedPendingCarryRespawn,
         });
         try {
           writeHostDiagnostic(
@@ -8614,7 +11178,7 @@ export function hostThroughPty(o) {
       // loop's next attempt have the idle window uncontested. Scoped to
       // `mode:'turn'` only — reset/recycle/mcp-reconnect stay unaffected;
       // they are already explicit operator/owner actions, not routine wakes.
-      if (shouldDeferWakeForPendingRespawn(msg.mode, carryRearm.pendingCount())) {
+      if (shouldDeferWakeForPendingRespawn(msg.mode, carryRearm.pendingCount('carry-respawn'))) {
         const dropExtra = { reason: 'carry-respawn-pending' };
         appendHostEvent(ownerId, 'wake-turn-deferred-for-pending-respawn', dropExtra);
         // This is an internal delivery-ordering decision, not an agent-facing
@@ -9200,16 +11764,25 @@ export function hostThroughPty(o) {
         // new line after the envelope is written but before its CR, recreating
         // the same interleaving this composer gate prevents at the front door.
         const machineTurn = bridgeTty && (msg.mode === 'turn' || msg.mode === 'reset');
-        if (machineTurn) {
-          if (ownerComposerGate.hasPending()) {
-            // WI-38257: a staged line that has stopped tracking a person must not be
-            // able to defer wakes forever. Checked BEFORE the wait, because the wait
-            // is what burns the cap — that is where the 112s of dead agent came from.
-            if (!breakComposerWedgeIfConfirmed()) {
-              const clear = await ownerComposerGate.waitClear();
-              if (clear.deferred) return deferForOwnerInput(clear.reason || 'owner-input-cap');
-            }
+        if (machineTurn && ownerComposerGate.hasPending()) {
+          // WI-38257: a staged line that has stopped tracking a person must not be
+          // able to defer wakes forever. Check before spending the wait budget.
+          if (!breakComposerWedgeIfConfirmed()) {
+            const clear = await ownerComposerGate.waitClear();
+            if (clear.deferred) return deferForOwnerInput(clear.reason || 'owner-input-cap');
           }
+        }
+        // EI-23247679868236430: admission happened before any mutex/gate wait.
+        // A carry can become pending during those waits; recheck at the final
+        // boundary before writing bytes or latching the owner-input lease.
+        if (shouldDeferWakeForPendingRespawn(msg.mode, carryRearm.pendingCount('carry-respawn'))) {
+          claimCoalesced();
+          appendHostEvent(ownerId, 'wake-turn-deferred-for-pending-respawn', {
+            reason: 'carry-respawn-pending', phase: 'pre-write',
+          });
+          return { ok: false, reason: 'deferred-carry-respawn-pending' };
+        }
+        if (machineTurn) {
           machineTurnActive = true;
           queuedOwnerInput = [];
         }
@@ -9236,6 +11809,12 @@ export function hostThroughPty(o) {
         // and the human has to press Enter.
         let machineTurnSubmitted = false;
         const turnWriteStartedAt = Date.now();
+        // WI-10004943: snapshot BEFORE the first byte, so a frame the write
+        // provokes cannot be mistaken for readiness that preceded it.
+        const injectWriteContext = msg.mode === 'turn' || msg.mode === 'reset'
+          ? turnWriteContext(turnWriteStartedAt)
+          : null;
+        if (injectWriteContext) lastMachineTurnWriteStartedAtMs = turnWriteStartedAt;
         try {
           for (const step of controlWritesForAgent(deliver, env.PAPERCUSP_AGENT, env, {
             bracketedPaste: childBracketedPaste,
@@ -9296,6 +11875,7 @@ export function hostThroughPty(o) {
           void verifySubmitted(`${msg.mode} inject`, {
             text: deliver.data,
             submittedAtMs: turnWriteStartedAt,
+            writeContext: injectWriteContext,
           })
             .catch(() => {})
             .finally(() => {
@@ -9341,23 +11921,21 @@ export function hostThroughPty(o) {
       // its own try/catch/finally above already handles every expected outcome
       // and durably records it; this outer .catch exists only so a genuinely
       // unexpected throw can never surface as an unhandled promise rejection.
-      void runGatedDelivery()
+      void deliverAfterUnpark(msg.mode, runGatedDelivery)
         .then((deliveryOutcome) => {
           if (!coalescedDeliveryIds.size) return;
           for (const deliveryId of coalescedDeliveryIds) {
-            if (
-              deliveryOutcome?.ok === true &&
-              (deliveryOutcome.reason === "delivered" ||
-                deliveryOutcome.reason === "quota-recovery-delivered")
-            ) {
+            const rearmOwnsDelivery =
+              deliveryId === msg.deliveryId &&
+              deliveryOutcome?.reason === 'deferred-busy-gate' &&
+              carryRearm.isPendingMessage(msg);
+            const settlement = deliveryDedupSettlement(deliveryOutcome, rearmOwnsDelivery);
+            if (settlement === 'completed') {
               deliveryDedup.markCompleted(deliveryId);
-            } else if (
-              msg.mode === "carry-respawn" &&
-              deliveryOutcome?.reason === "deferred-busy-gate"
-            ) {
-              // carryRearm.schedule() owns a live retry outside this promise; keep
-              // the ID pending so a client retry cannot race that re-arm.
-              if (carryRearm.isPendingMessage(msg)) deliveryDedup.markPending(deliveryId);
+            } else if (settlement === 'pending') {
+              // carryRearm owns the original ID outside this promise. Keep it
+              // pending so a client retry cannot race the turn or carry re-arm.
+              deliveryDedup.markPending(deliveryId);
             } else {
               deliveryDedup.clearPending(deliveryId);
             }
@@ -9479,6 +12057,7 @@ export function hostThroughPty(o) {
       enabled: headlessClaudeOnboardingEnabled(env),
       startupMs: headlessClaudeOnboardingStartupMs(env),
     });
+    activeHeadlessClaudeOnboarding = headlessClaudeOnboarding;
     const headlessCodexModelChoice = makeHeadlessCodexModelChoiceStateMachine({
       enabled: headlessCodexModelChoiceEnabled(env),
     });
@@ -9558,12 +12137,18 @@ export function hostThroughPty(o) {
       if (
         childBackendTuiStartedAt &&
         !childBackendFirstFrameAt &&
-        codexSessionFrameObserved(childStartupOutput, { probeAlreadySeen: true })
+        codexSessionFrameObserved(childStartupOutput, { probeAlreadySeen: true, dims: childScreenDims() })
       ) {
         childBackendFirstFrameAt = Date.now();
         appendHostEvent(ownerId, 'backend-session-frame-observed', {
           agent: 'codex',
           msAfterTuiStart: childBackendFirstFrameAt - childBackendTuiStartedAt,
+          // WI-10004943: null = no machine turn was ever written before the
+          // frame. A small value means the frame may have been PROVOKED by
+          // that write rather than signalling readiness on its own.
+          msSinceMachineTurnWriteStarted: lastMachineTurnWriteStartedAtMs > 0
+            ? childBackendFirstFrameAt - lastMachineTurnWriteStartedAtMs
+            : null,
         });
       }
       const onboarding = headlessClaudeOnboarding.observe(raw);
@@ -9614,7 +12199,7 @@ export function hostThroughPty(o) {
         // identified theme screen turns readiness off until its Security screen
         // receives the second CR; otherwise every healthy launch would wait for
         // the full expiry window even when no wizard is present.
-        childStartupReady = startupOutputReady(env.PAPERCUSP_AGENT, childStartupOutput);
+        childStartupReady = startupOutputReady(env.PAPERCUSP_AGENT, childStartupOutput, childScreenDims());
       }
       // Codex can paint a composer before the model offer. Submission, above,
       // disarms the watcher; a ready frame alone does not.
@@ -9719,7 +12304,8 @@ export function hostThroughPty(o) {
     if (freshChildOwnerInterruptionDetector.sawOwnerInput(input)) {
       ownerInputGeneration++;
     }
-    if (ownerInputDetector.sawOwnerInput(input)) {
+    const ownerTyped = ownerInputDetector.sawOwnerInput(input);
+    if (ownerTyped) {
       idleGate.touch();
       activity.touchInput();
       // owner-presence-human-turn-signal-2026-07-11 P-003: a real human keystroke into
@@ -9728,6 +12314,17 @@ export function hostThroughPty(o) {
       // reports. Socket-injected agent wakes bypass stdin, so they never reach here.
       if (bridgeTty) reportOwnerHumanTurn();
     }
+    // psu-process-free-parking P-017: no child to type into while parked —
+    // hold the keystrokes, resume, and replay them at the resumed prompt.
+    if (parkInProgress()) {
+      holdOwnerInputWhileParked(input, ownerTyped);
+      return;
+    }
+    forwardOwnerInput(input);
+  };
+  /** Owner bytes → the child (or the post-submit queue while a machine turn
+   *  owns the line). Shared by the live bridge and the parked-input replay. */
+  function forwardOwnerInput(input) {
     if (bridgeTty) {
       if (machineTurnActive) {
         // The machine turn owns the current text→CR gap. Replay these bytes only
@@ -9743,7 +12340,7 @@ export function hostThroughPty(o) {
     } catch {
       /* ignore */
     }
-  };
+  }
   stdin.on('data', onStdin);
 
   // terminal resize (SIGWINCH) -> pty resize
@@ -9781,6 +12378,7 @@ export function hostThroughPty(o) {
     const cleanup = (code, signal = null) => {
       if (cleaned) return;
       cleaned = true;
+      hostCleanedUp = true;
       stopStartupTrace('host-cleanup');
       const endedSignal = signal ?? teardownSignal;
       // A PTY leader can exit before its descendants. Reap the group while its
@@ -10030,6 +12628,9 @@ export function hostThroughPty(o) {
         sessionClass = '',
         quotaRecovery = null,
         carryProofRetryCount = 0,
+        // WI-10004943: spawn a fresh child on the launch argv and return without
+        // a first prompt; the launch closure re-delivers its own kickoff.
+        freshChildOnly = false,
       } = {},
     ) => {
       const settleQuotaRecovery = (delivered, reason, extra = {}) => {
@@ -10054,7 +12655,11 @@ export function hostThroughPty(o) {
       // carry-respawn (no drillId) completely invisible in the per-owner event log
       // — the P-018 successor-kill loop left ZERO durable trace outside journalctl.
       // Non-drill respawns now always leave generic respawned/failed/carry rows.
-      const respawnMode = systemPromptAddendum ? 'carry-respawn' : 'recycle';
+      const respawnMode = systemPromptAddendum
+        ? 'carry-respawn'
+        : freshChildOnly
+          ? 'launch-fresh-child'
+          : 'recycle';
       // WI-38292: a respawn replaces the CLI child but NOT this host process, so a
       // host fix committed after this process booted stays inert here — the live
       // reproduction was a continuation fix (d351ee3084) that a running host simply
@@ -10091,14 +12696,19 @@ export function hostThroughPty(o) {
             mode: respawnMode,
             loaded: hostCode.loaded,
             onDisk: hostCode.onDisk,
+            launcher: hostCode.launcher ?? null,
+            // Store the closed enum only. The direct target URL may carry credentials.
+            operatorPin: operatorPinEvidence(env),
             // ADDITIVE — absent on rows written by older hosts, so a reader must
             // treat `undefined` as "not recorded", never as false.
             adoptable,
-            willAdopt: adoptable && !quotaRecovery,
+            willAdopt: adoptable && !quotaRecovery && !freshChildOnly,
             notAdoptingReason: adoptable
               ? quotaRecovery
                 ? 'quota-recovery'
-                : null
+                : freshChildOnly
+                  ? 'launch-fresh-child'
+                  : null
               : bridgeTty
                 ? 'interactive-tty'
                 : !onReexec
@@ -10163,8 +12773,34 @@ export function hostThroughPty(o) {
           reason: personaRefreshReason,
         });
       }
+      // agent-economy-flywheel P-016 (decision D-012): the ONE refresh failure that is
+      // not fail-soft. The operator refused to activate a priced Cupboard identity it
+      // could neither fund nor drop from the stack. Booting the successor on the
+      // inherited render would activate that identity again, so the respawn is
+      // abandoned before anything is killed and the current session stays alive.
+      if (personaRefreshReason === IDENTITY_ACTIVATION_REFUSED_REASON) {
+        appendHostEvent(ownerId, 'respawn-failed', {
+          mode: respawnMode,
+          reason: IDENTITY_ACTIVATION_REFUSED_REASON,
+        });
+        try {
+          if (!recycleChild.identityActivationRefusedWarned) {
+            recycleChild.identityActivationRefusedWarned = true;
+            process.stderr.write(
+              `psu-pty-host: carry-respawn refused for ${ownerId}: a priced Cupboard identity on this ` +
+                `session has no funds behind it. Fund it or detach it, then respawn ` +
+                `(further refusals logged to the event log only)\n`,
+            );
+          }
+        } catch {
+          /* diagnostic only */
+        }
+        recycling = false;
+        return settleQuotaRecovery(false, IDENTITY_ACTIVATION_REFUSED_REASON);
+      }
       let recycleArgs;
       let nativeId;
+      let respawnReported = false;
       let launchContextPath = null;
       let freshChildOwnerInputGeneration = null;
       try {
@@ -10261,7 +12897,10 @@ export function hostThroughPty(o) {
       // never fires the session-compacted event. Reformatting it silently turns that
       // guard's indexOf into -1, which reads as the guard passing rather than failing.
       const allowInteractive = interactiveAdoptionOptIn();
-      if (!quotaRecovery && shouldAdoptHostCode({ onReexec, reexecCode, bridgeTty, allowInteractive })) {
+      // A launch fresh child (WI-10004943) stays in-process too: the launch closure
+      // that asked for it still owes the kickoff and its proof receipt, and a
+      // re-exec would end that closure before either is published.
+      if (!quotaRecovery && shouldAdoptHostCode({ onReexec, reexecCode, bridgeTty, allowInteractive }) && !freshChildOnly) {
         let hostCode = { stale: false };
         try {
           hostCode = hostCodeStalenessFn();
@@ -10291,6 +12930,13 @@ export function hostThroughPty(o) {
             mode: respawnMode,
             command,
             args: recycleArgs,
+            // EI-23076695727837648: the first turn is NOT in recycleArgs. The
+            // in-process path injects carryText after spawn (injectTurnAtPrompt),
+            // and this predecessor exits before it would. Without this field the
+            // successor boots on the carry document and then sits idle until an
+            // unrelated loop fire or wake (measured 3-48 min, 11 of 11 adoptions
+            // on one goal holder). The launcher successor seeds it as its kickoff.
+            firstTurnText: typeof carryText === 'string' && carryText.length > 0 ? carryText : null,
             cwd,
             nativeId: nativeId ?? null,
             advSessionId: advSessionId ?? env.PAPERCUSP_ADV_SESSION_ID ?? null,
@@ -10308,6 +12954,7 @@ export function hostThroughPty(o) {
             },
             loaded: hostCode.loaded,
             onDisk: hostCode.onDisk,
+            launcher: hostCode.launcher ?? null,
             drillId: drillId || null,
             sessionClass: sessionClass || null,
           });
@@ -10316,8 +12963,12 @@ export function hostThroughPty(o) {
               mode: respawnMode,
               loaded: hostCode.loaded,
               onDisk: hostCode.onDisk,
+              launcher: hostCode.launcher ?? null,
               handoffPath,
               nativeId: nativeId ?? null,
+              firstTurnPresent: typeof carryText === 'string' && carryText.length > 0,
+              firstTurnBytes: typeof carryText === 'string' ? Buffer.byteLength(carryText, 'utf8') : 0,
+              handoffArgumentCount: Array.isArray(recycleArgs) ? recycleArgs.length : null,
             });
             // The launcher successor owns the adoption report and the
             // session-compacted event. Do not announce from this predecessor:
@@ -10391,6 +13042,7 @@ export function hostThroughPty(o) {
         childBracketedPasteTail = '';
         childBackendTuiStartedAt = 0;
         childBackendFirstFrameAt = 0;
+        lastMachineTurnWriteStartedAtMs = 0;
         // WI-1386682 (1): a fresh child has no screen history and cannot
         // inherit the old child's wall.
         quotaBlockDetector.reset();
@@ -10436,7 +13088,16 @@ export function hostThroughPty(o) {
         try {
           const healed = await healOperatorPin(env);
           if (healed) {
-            appendHostEvent(ownerId, 'operator-pin-healed', { ...healed, mode: respawnMode });
+            appendHostEvent(
+              ownerId,
+              healed.route === 'staging-proxy' ? 'operator-pin-routed' : 'operator-pin-healed',
+              {
+                from: operatorPinEvidence({ PAPERCUSP_OPERATOR_URL: healed.from }),
+                to: operatorPinEvidence({ PAPERCUSP_OPERATOR_URL: healed.to }),
+                ...(healed.route === 'staging-proxy' ? { route: 'staging-proxy' } : {}),
+                mode: respawnMode,
+              },
+            );
           }
         } catch {
           /* keep the old pin — the respawn itself matters more */
@@ -10445,6 +13106,16 @@ export function hostThroughPty(o) {
         stopStartupTrace = startCodexStartupProcessTrace({
           agent: env.PAPERCUSP_AGENT, ownerId, pid: child.pid,
         });
+        // P-017: a recycle that reaches a PARKED host had no live child to kill
+        // (the stand-in exited at once); the fresh child ends the park.
+        if (parked) {
+          heldOwnerInput.length = 0;
+          heldOwnerInputBytes = 0;
+          appendHostEvent(ownerId, 'child-unparked', {
+            ...clearParkedState('recycle', { nativeId: nativeId ?? null }),
+            childPid: Number.isInteger(child.pid) ? child.pid : null,
+          });
+        }
         // Re-anchor the fresh native id → coord ownerId so a LATER untracked
         // resume still recovers this identity (else the 2026-07-02 orphaning bug
         // recurs). The launcher callback also repairs the authoritative
@@ -10455,7 +13126,9 @@ export function hostThroughPty(o) {
           let reportTimer;
           let reportTimedOut = false;
           try {
-            const report = Promise.resolve().then(() => onRespawn(nativeId));
+            const report = Promise.resolve().then(() => onRespawn(nativeId)).then((confirmed) => {
+              if (!reportTimedOut) respawnReported = confirmed === true;
+            });
             await Promise.race([
               report,
               new Promise((resolve) => {
@@ -10590,15 +13263,13 @@ export function hostThroughPty(o) {
           personaRefreshed: Boolean(personaFile),
         });
       }
-      // P-022: session:compacted:<owner> used to fire from the /compact handler's
-      // completion path; with native compaction retired, a successful
-      // carry-respawn IS this member's context cut — fire the same event here so
-      // peers' `events:await { event: "session:compacted:<owner>" }` stays a live
-      // surface instead of a key nothing emits anymore.
-      if (respawnMode === 'carry-respawn') {
-        fireSessionCompactedEvent(ownerId, 'carry-respawn', { nativeId });
-      }
+      // Spawn is not a completed carry. Codex has no minted native id yet
+      // and can stay at Starting without accepting its carry. Announcing here
+      // refreshed the predecessor's estimate and woke peers before delivery.
       recycling = false;
+      // WI-10004943: a launch fresh child has no carry. Report the spawn; the
+      // launch closure delivers its kickoff and publishes the proof receipt.
+      if (freshChildOnly) return { delivered: false, reason: 'fresh-child-spawned', spawned: true };
       if (!carryText) {
         if (drillId) {
           const dropExtra = {
@@ -10633,9 +13304,66 @@ export function hostThroughPty(o) {
         // Apply the same backend-aware boot proof as a scripted resume/port.
         requireInitialOutput: true,
         freshChildOwnerInputGeneration,
+        // WI-10005106: a child stuck at the Codex `Starting` footer is replaced
+        // early while a fresh-epoch retry remains; the LAST attempt holds for the
+        // frame instead (the WI-10004943 (d) launch-kickoff behaviour), because
+        // dropping it there leaves the session idle without its carry.
+        ...(!drillId && carryProofRetryCount < carryProofRetryMax
+          ? {
+              codexStartingStuckMs: positiveNumber(
+                env.PAPERCUSP_PSU_PTY_CODEX_CARRY_STARTING_STUCK_MS,
+                CODEX_CARRY_STARTING_STUCK_MS,
+              ),
+            }
+          : !drillId
+            ? {
+                codexStartingHoldCeilingMs: positiveNumber(
+                  env.PAPERCUSP_PSU_PTY_CODEX_STARTING_HOLD_CEILING_MS,
+                  CODEX_STARTING_KICKOFF_HOLD_CEILING_MS,
+                ),
+              }
+            : {}),
         // Decide whether a failed fresh epoch is retryable before recording a
         // terminal carry drop; a retry must not increment the drop counter.
         onDrop: () => {},
+        // A recycled Claude su session can arrive while the native Papercusp
+        // MCP endpoint is still reconnecting. Keep the carry out of the composer
+        // until the closed-loop reconnect check proves papercusp-su ready.
+        prepareBeforeWrite: async ({ deadline }) => {
+          if (respawnMode === 'carry-respawn' && (nativeId || resolveRespawnNativeId)) {
+            const binding = await prepareCarryBinding(nativeId, deadline, respawnReported);
+            if (!binding.ok) return binding;
+            nativeId = binding.nativeId;
+            respawnReported = true;
+          }
+          if (!(respawnMode === 'carry-respawn' &&
+          String(env.PAPERCUSP_AGENT ?? '').trim().toLowerCase() === 'claude' &&
+          sessionClass === 'claude-su')) return { ok: true };
+          const tap = makeOutputTap();
+          try {
+            const result = await verifyHeadlessRoleMcp(() => mcpReconnectMacro({
+              serverName: 'papercusp-su',
+              write: (bytes) => child.write(bytes),
+              readTap: tap.read,
+              resetTap: tap.reset,
+            }));
+            appendHostEvent(
+              ownerId,
+              result.ok ? 'respawn-carry-mcp-ready' : 'respawn-carry-mcp-unavailable',
+              {
+                mode: respawnMode,
+                nativeId: nativeId ?? null,
+                serverName: 'papercusp-su',
+                step: result.step,
+                attempts: result.attempts,
+                detail: result.detail,
+              },
+            );
+            return { ok: result.ok, reason: 'carry-mcp-unavailable' };
+          } finally {
+            tap.close();
+          }
+        },
       });
       const retryOnFreshEpoch = (reason, proofReason = null) => {
         if (!shouldRetryCarryOnFreshEpoch({
@@ -10729,6 +13457,21 @@ export function hostThroughPty(o) {
           } catch {
             /* diagnostic only */
           }
+        }
+      }
+      if (respawnMode === 'carry-respawn' && !drillId && carryResult.delivered) {
+        const carryChild = child;
+        const announcement = await announceVerifiedCarryRespawn({
+          ownerId, agent: env.PAPERCUSP_AGENT, nativeId, proof: turnStartProof,
+          alreadyReported: respawnReported, report: onRespawn, emit: emitCompacted,
+          timeoutMs: respawnReportTimeoutMs,
+          isCurrent: () => child === carryChild && !recycling && !shuttingDown && !cleaned,
+        });
+        if (announcement.nativeId) nativeId = announcement.nativeId;
+        if (!announcement.announced) {
+          appendHostEvent(ownerId, 'respawn-compaction-unannounced', {
+            nativeId: nativeId ?? null, reason: announcement.reason,
+          });
         }
       }
       if (!carryResult.delivered) recordCarryDrop();

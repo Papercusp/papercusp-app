@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 import { resolveAgentIdentity } from '../coordination/identity';
+import { restrictedTurnSql } from '../../personal-vault/transcript-exclusion';
 import { isSessionShapedOwnerId } from '../coordination/dead-session-recipient-guidance';
 import {
   knownOwnerIdSet,
@@ -747,8 +748,12 @@ export default defineTool({
       const automaticToolPredicate = automaticToolInvocationPredicate(tx);
       const agentToolPredicate = agentToolInvocationPredicate(tx);
 
+      // Each branch renders ts as TEXT, so the merge must order by the instant
+      // (u.ts::timestamptz), not the text: text carries the session's UTC offset and
+      // misorders across a DST fall-back hour (WI-10004628). A set-operation ORDER BY
+      // accepts only output names, hence the derived table.
       const rows = await tx<TimelineEntry[]>`
-      (
+      SELECT * FROM ((
         SELECT 'turn' AS kind, COALESCE(ts, ingested_at)::text AS ts,
                CONCAT(${SESSION_TURN_REF_PREFIX}::text, source_kind, ':', session_id, ':', turn_idx) AS ref,
                '[' || speaker || '] ' || left(text, 300) AS text,
@@ -761,6 +766,8 @@ export default defineTool({
            AND COALESCE(ts, ingested_at) >= ${since}::timestamptz
            AND COALESCE(ts, ingested_at) < ${until}::timestamptz
            AND (${kinds}::text[] IS NULL OR 'turn' = ANY(${kinds}::text[]))
+           -- D-006 reader rule (WI-10005570): another agent's disclosure-window turns never reach a timeline.
+           AND NOT ${restrictedTurnSql(tx as unknown as Parameters<typeof restrictedTurnSql>[0], 'session_turns', [identity.ownerId]) as never}
            AND ${args.tool ?? null}::text IS NULL
            AND ${args.status ?? null}::text IS NULL
            AND ${args.goalRef ?? null}::text IS NULL
@@ -803,9 +810,9 @@ export default defineTool({
            AND ${args.status ?? null}::text IS NULL
            AND ${args.goalRef ?? null}::text IS NULL
            AND (${includeAuto} OR COALESCE(body->>'auto', 'false') <> 'true')
-         ORDER BY ts DESC LIMIT ${fetchLimit}
-      )
-      ORDER BY ts DESC
+         ORDER BY coord_event_log.ts DESC LIMIT ${fetchLimit}
+      )) u
+      ORDER BY u.ts::timestamptz DESC
       LIMIT ${fetchLimit}
     `;
 

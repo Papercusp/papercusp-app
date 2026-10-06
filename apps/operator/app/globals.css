@@ -21932,6 +21932,34 @@ body:has(.operator-panel) {
   color: var(--muted);
   font-size: 11.5px;
 }
+.report-block-goal-detail,
+.report-block-goal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.report-block-goal-detail > .pc-btn {
+  align-self: flex-start;
+}
+.report-block-goal-as-of {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.report-block-goal-body {
+  margin: 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 70vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-1);
+  color: var(--fg);
+  font: inherit;
+}
 .report-block-items {
   list-style: none;
   margin: 2px 0 0 0;

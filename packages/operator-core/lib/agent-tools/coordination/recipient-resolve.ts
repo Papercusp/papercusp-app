@@ -15,7 +15,6 @@
 
 import { listPresence } from './presence';
 import { listRecordedLiveSessions } from '../../adv-sessions';
-import { shortHandle } from '../../coord-schema';
 import { PRESENCE_STALE_MS } from '@papercusp/coordination/presence';
 import { listLiveSessionPresence } from '../../sync/hyperbee/session-presence-store';
 import { listRunningNurseryAliasRows } from './nursery-alias-liveness';
@@ -37,30 +36,20 @@ export interface RecipientResolution {
   ambiguous: { id: string; matches: string[] }[];
 }
 
-/**
- * A resumed PSU session can mint a new full `su-<uuid>` owner id while keeping
- * the five-character handle shown in coord injections. A copied full id from
- * before that respawn therefore no longer matches by prefix or substring, but
- * its handle still identifies the current session. Keep this fallback narrow:
- * short, human-readable ids and arbitrary typos must retain their existing
- * unknown behavior.
- */
-function staleSuSessionHandle(id: string): string | null {
-  if (!/^su-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-    return null;
-  }
-  return shortHandle(id);
-}
+export type ExplicitAgentOwnerResolution =
+  | { ok: true; ownerId: string }
+  | {
+      ok: false;
+      code: 'assignee_empty' | 'assignee_not_agent' | 'assignee_unknown' | 'assignee_ambiguous';
+      message: string;
+      candidates?: string[];
+    };
 
-/** Find current owner ids for a concrete recipient, including the stable
- * handle fallback for a stale full PSU session id. */
+/** Find current owner IDs for a concrete recipient using its supplied prefix
+ * or short-handle substring. A stale full ID is not proof of a successor. */
 function matchingOwnerIds(id: string, knownOwnerIds: readonly string[]): string[] {
   let matches = knownOwnerIds.filter((k) => k.startsWith(id));
   if (matches.length === 0) matches = knownOwnerIds.filter((k) => k.includes(id));
-  if (matches.length === 0) {
-    const handle = staleSuSessionHandle(id);
-    if (handle) matches = knownOwnerIds.filter((k) => k.includes(handle));
-  }
   return matches;
 }
 
@@ -260,8 +249,56 @@ export async function resolveRecipients(
   return resolveRecipientsAgainst(to, knownOwnerIds);
 }
 
+/** Resolve one work-item assignee against the same unified roster as coord:send,
+ *  but fail closed when no roster is available. Placement cannot safely inherit
+ *  resolveRecipients' intentional send-path fail-open behavior: an unverified
+ *  owner would strand a real claim. The caller itself is known from the request
+ *  identity and does not need a roster read. */
+export async function resolveExplicitAgentOwnerId(
+  raw: string,
+  callerOwnerId: string,
+  workspaceId?: string | null,
+): Promise<ExplicitAgentOwnerResolution> {
+  const input = raw.trim();
+  if (!input) {
+    return { ok: false, code: 'assignee_empty', message: 'Assignee must name a known agent ownerId.' };
+  }
+  if (input === 'self' || input === callerOwnerId) return { ok: true, ownerId: callerOwnerId };
+  if (isSelectorOrWildcard(input)) {
+    return {
+      ok: false,
+      code: 'assignee_not_agent',
+      message: `Assignee '${input}' is a selector or wildcard, not one concrete agent ownerId.`,
+    };
+  }
+
+  let knownOwnerIds: string[] = [];
+  try {
+    knownOwnerIds = await readKnownOwnerIds(workspaceId);
+  } catch {
+    // A roster read failure is not evidence that the supplied id is a valid owner.
+    // The assignment boundary must refuse instead of persisting a phantom holder.
+  }
+  const resolution = resolveRecipientsAgainst([input], knownOwnerIds);
+  if (resolution.resolved.length === 1) return { ok: true, ownerId: resolution.resolved[0]! };
+  const ambiguous = resolution.ambiguous[0];
+  if (ambiguous) {
+    return {
+      ok: false,
+      code: 'assignee_ambiguous',
+      message: `Assignee '${input}' matches more than one agent ownerId (${ambiguous.matches.join(', ')}). Pass the full ownerId.`,
+      candidates: ambiguous.matches,
+    };
+  }
+  return {
+    ok: false,
+    code: 'assignee_unknown',
+    message: `Assignee '${input}' does not resolve to a known workspace ownerId; no work-item claim was made. Pass a current full ownerId from coord:presence.`,
+  };
+}
+
 /** PURE best-effort core: rewrite each entry to its FULL ownerId when a unique
- *  prefix matches, otherwise leave it UNCHANGED (the silent twin of
+ *  prefix or caller-supplied short-handle substring matches, otherwise leave it UNCHANGED (the silent twin of
  *  resolveRecipientsAgainst — for the shared message/wake layers where a hard
  *  fail would break federation + broadcasts). selector/wildcard, exact match,
  *  ambiguous, and unknown all pass through untouched; only a unique prefix is

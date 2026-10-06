@@ -11,6 +11,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/mirror-tree.sh
+source scripts/lib/mirror-tree.sh
 
 # require.resolve('pkg/package.json') fails for packages without ./package.json
 # in their exports map (onnxruntime-web is one), and an empty pipeline trips
@@ -35,15 +37,18 @@ fi
 
 DEST="public/wake-runtime"
 mkdir -p "$DEST"
-cp "$SRC"/*.wasm "$DEST/" 2>/dev/null || true
-cp "$SRC"/ort.bundle.min.mjs "$DEST/" 2>/dev/null || true
+# Unlink before copying so a hard-linked release tree keeps its own bytes.
+# Mirror only files the installed ORT version actually includes.
+for asset in "$SRC"/*.wasm "$SRC"/ort.bundle.min.mjs "$SRC"/ort-wasm-simd-threaded*.mjs; do
+  [ -f "$asset" ] || continue
+  mirror_copy_unlinked "$asset" "$DEST/$(basename "$asset")"
+done
 # The threaded backend's JS loader modules. ort.bundle.min.mjs DYNAMICALLY
 # imports `ort-wasm-simd-threaded.<variant>.mjs` (jsep/jspi/asyncify/plain) to
 # instantiate the multi-threaded wasm — WITHOUT them onnxruntime-web fails with
 # "Importing a module script failed → no available backend found", which silently
 # broke openWakeWord + Silero VAD in the desktop webview (WI-4498). Copying only
 # *.wasm + ort.bundle.min.mjs (the old behavior) left these out.
-cp "$SRC"/ort-wasm-simd-threaded*.mjs "$DEST/" 2>/dev/null || true
 
 # Guard (recurrence): the jsep loader is what ort requests by default, so its
 # absence is exactly the silent-break above. Fail loudly rather than ship a

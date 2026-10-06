@@ -41,6 +41,7 @@ export default defineTool({
         .describe(
           'Which connected account to draft in, by its address. REQUIRED once the owner has connected more than one — a create-shaped draft has no thread to inherit the account from, so with several connected the call is refused rather than guessed, and the refusal names what is connected.',
         ),
+      sourceId: z.string().uuid().optional().describe('The connected mail source to draft in; an alternative to from.'),
       attachments: z
         .array(z.object({ path: z.string().trim().min(1).max(4_096) }).strict())
         .max(10)
@@ -81,6 +82,7 @@ export default defineTool({
         text: args.text,
         provenance: toProvenance(args.addressee),
         from: args.from,
+        sourceId: args.sourceId ?? null,
         attachments: args.attachments,
         draftId: args.draftId,
         allowUndeliverable: args.allowUndeliverable,

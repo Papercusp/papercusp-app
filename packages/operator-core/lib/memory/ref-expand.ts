@@ -45,10 +45,31 @@ const REF_PAT = /\b((?:WI|EI|F|D)-\d{2,20})\b/g;
  *  turn one write into dozens of store lookups. */
 export const MAX_REFS = 6;
 
+/** A reference is optional embedding context; it must not hold a memory write
+ * behind a slow or wedged work-item store lookup. */
+export const REF_RESOLVE_TIMEOUT_MS = 2_500;
+
 const APPENDIX_PREFIX = '\n\n[refs] ';
 
 /** Resolve one ref id to its title, or null if it doesn't resolve. */
 export type RefResolver = (id: string) => Promise<{ id: string; title: string } | null>;
+
+async function resolveWithinBudget(resolve: RefResolver, id: string): Promise<{ id: string; title: string } | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout(null), REF_RESOLVE_TIMEOUT_MS);
+  });
+  try {
+    // RefResolver has no cancellation contract. Racing still releases the
+    // caller's write path when the store stalls; a late resolver result is
+    // ignored and the clean-text embedding remains the fallback.
+    return await Promise.race([Promise.resolve().then(() => resolve(id)), timeout]);
+  } catch {
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /** Distinct work-item-class refs in `text`, in first-seen order, capped at MAX_REFS. */
 export function extractRefs(text: string): string[] {
@@ -74,7 +95,7 @@ export function buildEmbedText(
 }
 
 /**
- * Extract refs from `text`, resolve their titles (in parallel, bounded), and
+ * Extract refs from `text`, resolve their titles (in parallel, each bounded), and
  * build the enriched embed-text. Returns `undefined` when the body has no refs,
  * none resolve, or the enriched text would equal the original. BEST-EFFORT:
  * never throws (each resolve is individually guarded, and the whole pass is
@@ -87,7 +108,7 @@ export async function expandRefsForEmbed(
   try {
     const ids = extractRefs(text);
     if (ids.length === 0) return undefined;
-    const hits = await Promise.all(ids.map((id) => resolve(id).catch(() => null)));
+    const hits = await Promise.all(ids.map((id) => resolveWithinBudget(resolve, id)));
     const resolved = hits.flatMap((h, i) =>
       h && typeof h.title === 'string' && h.title.trim().length > 0
         ? [{ id: h.id || ids[i], title: h.title }]

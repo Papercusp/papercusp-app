@@ -612,6 +612,28 @@ export const identityLeakDetector: ContentDetector = {
   repoScope: 'superproject-only',
 };
 
+/**
+ * Shell output accidentally redirected into an extensionless root filename
+ * (EI-23381057036304308). Requiring both a colon and whitespace keeps this
+ * narrow to status/report-like names; submodules have their own legitimate
+ * root-level files and normal documents carry an extension.
+ */
+export const rootRedirectArtifactDetector: ContentDetector = {
+  key: 'root-redirect-artifact',
+  glob: '<superproject-root extensionless filename containing colon + whitespace>',
+  matches: (file) =>
+    !file.includes('/') &&
+    !file.startsWith('.') &&
+    !file.includes('.') &&
+    file.includes(':') &&
+    /\s/.test(file),
+  detect: (file) =>
+    `Root-level shell output artifact filename "${file}" has no extension and resembles redirected command output. ` +
+    'Delete accidental output or move it to ignored scratch; intentional root files should use a descriptive extension.',
+  fixerRole: CONTENT_FIXER_ROLE,
+  repoScope: 'superproject-only',
+};
+
 export const DEFAULT_CONTENT_DETECTORS: ContentDetector[] = [
   // Ordered FIRST: a file carrying a credential shape is the one offence here whose
   // cost is unbounded and unrecoverable (a permanent egress freeze) rather than a
@@ -645,4 +667,5 @@ export const DEFAULT_CONTENT_DETECTORS: ContentDetector[] = [
   // sweep committed, not an INVALID file. Scoped to test/spec files only, so it
   // never overlaps the detectors above on ordinary source.
   focusedTestDetector,
+  rootRedirectArtifactDetector,
 ];

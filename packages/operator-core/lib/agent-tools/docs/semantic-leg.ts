@@ -22,11 +22,12 @@
  */
 
 import { getOrgPg } from '@papercusp/db-org';
-import type { Embedder, Listing, SearchSourceParams } from '@papercusp/search';
+import type { Embedder, Listing, PgHandle, SearchSourceParams } from '@papercusp/search';
 
 // The prose column width contract — ONE source, not a restated `384` (D-005 §5).
 import { fitsProseColumns, resolveProseProfileIdSelection } from '../../search/prose-vector-dims';
 import { sectionAnchorBase, withIterativeScan } from '@papercusp/search';
+import { boundedOrgTxn } from '../../pg-bounded-txn';
 
 /** Over-fetch factor: several sections of one page can crowd the top-k; fetch
  *  extra rows so page-level dedupe still fills `limit` distinct pages. */
@@ -54,6 +55,7 @@ export interface DocSemanticDeps {
     sourceKey: string,
     limit: number,
     identity?: SearchSourceParams['embeddingProfile'],
+    signal?: AbortSignal,
   ) => Promise<DocSemanticHit[]>;
 }
 
@@ -63,6 +65,7 @@ async function querySectionsReal(
   sourceKey: string,
   limit: number,
   identity?: SearchSourceParams['embeddingProfile'],
+  signal?: AbortSignal,
 ): Promise<DocSemanticHit[]> {
   const selection = identity
     ? resolveProseProfileIdSelection(identity.profileId, identity.legacyMode)
@@ -79,7 +82,7 @@ async function querySectionsReal(
   // small surface next to a big one gets 0-1 rows back. Measured 2026-09-30 on
   // harness:papercusp (1,425 of ~18.7K rows): LIMIT 72 returned 1 row off vs 72
   // with relaxed_order, and 6 of 10 long harness docs lost their section.
-  const rows = await withIterativeScan(sql, (sql) => sql<
+  const rows = await withIterativeScan(sql, (txSql) => txSql<
     Array<{ slug: string; anchor: string; title: string; url: string; excerpt: string; similarity: number }>
   >`
     SELECT slug, anchor, title, url, left(content, 240) AS excerpt,
@@ -92,7 +95,10 @@ async function querySectionsReal(
                 AND embedding_profile IS NULL
                 AND embedding_mode = ${selection.legacyMode ?? mode}))
      ORDER BY embedding <=> ${vecLit}::vector
-     LIMIT ${limit}`);
+     LIMIT ${limit}`, {
+    runReadOnlyTransaction: <T>(body: (tx: PgHandle) => Promise<T>) =>
+      boundedOrgTxn((tx) => body(tx as unknown as PgHandle), { signal, readOnly: true }),
+  });
   return rows.map((r) => ({
     ...r,
     // A continuation chunk is a STORAGE row; the caller gets the heading it
@@ -205,12 +211,12 @@ export function docSectionsRanker(
   deps?: DocSemanticDeps,
 ): (p: SearchSourceParams & { qVec: string }) => Promise<Listing> {
   const querySections = (deps ?? realDocSemanticDeps).querySections;
-  return async ({ query: _query, limit, qVec, embeddingProfile }): Promise<Listing> => {
+  return async ({ query: _query, limit, qVec, embeddingProfile, signal }): Promise<Listing> => {
     // The engine hands over the qVec it already embedded; parse it back to the
     // number[] this store's query helper takes. (One embed per search, shared
     // across every source — which is exactly why the engine owns it.)
     const vec = qVec.slice(1, -1).split(',').map(Number);
-    const rows = await querySections(vec, embeddingMode, sourceKey, limit * OVERFETCH, embeddingProfile);
+    const rows = await querySections(vec, embeddingMode, sourceKey, limit * OVERFETCH, embeddingProfile, signal);
     // Rows arrive distance-ordered; keep each page's best section.
     const bySlug = new Map<string, DocSemanticHit>();
     for (const r of rows) if (!bySlug.has(r.slug)) bySlug.set(r.slug, r);

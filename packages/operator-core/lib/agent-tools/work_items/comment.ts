@@ -178,6 +178,8 @@ export default defineTool({
         const post = await commentWorkItem(it.id, it.body, ident.ownerId, {
           harness: it.harness ?? args.harness,
           ...(workspaceId ? { workspaceId } : {}),
+          // P-012 / D-006: a writer holding a restricted disclosure posts a sealed stub.
+          writerOwnerId: ident.ownerId,
         });
         if (!post) return { ok: false as const, id: it.id, error: `work_item '${it.id}' not found` };
         let hint: string | undefined;

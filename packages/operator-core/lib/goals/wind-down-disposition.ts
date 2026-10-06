@@ -100,6 +100,20 @@ export async function activeGoalForOwner(opts: {
 }
 
 /**
+ * EI-24732367604234855: 'killed' is TERMINAL (goals.status='killed',
+ * actionable:false) and nothing reverts it on resume, so an agent that is only
+ * PAUSING — an owner system-wide pause, a hold — must not pick it just to get
+ * past this gate. A paused goal is not 'active', so `activeGoalForOwner` returns
+ * null and loop:end then needs no disposition at all. Named in the refusal
+ * because that is the one place the pausing agent is guaranteed to read.
+ */
+export const PAUSE_NOT_KILL_HINT =
+  "Only PAUSING (e.g. an owner system-wide pause), not stopping the goal? Do NOT pick 'killed' — it is " +
+  "terminal and a resume does not revert it. Run `goals:update { status:'paused', reason }` first (it " +
+  `disarms the goal's loops), then end the loop with no disposition; resume with ` +
+  "`goals:update { status:'active', reason }`.";
+
+/**
  * PURE: the refusal both gates return when a goal-mode owner winds down with no
  * disposition. Exported (and pinned by the guard test) because the acceptance
  * criterion is about the WORDS: the refusal must name the missing arg
@@ -117,7 +131,8 @@ export function buildDispositionRefusal(opts: {
       `REFUSED — this owner is in GOAL mode and goal ${opts.goalId} (“${opts.goalTitle}”) is still active. ` +
       `${opts.action} requires a \`disposition\`: 'achieved' (the goal is done), 'killed' (deliberately stopped), ` +
       `or 'handoff' (someone else continues — pass handoffTo). Retry with disposition set; ` +
-      `the wind-down report to the owner is generated for you.`,
+      `the wind-down report to the owner is generated for you. ` +
+      PAUSE_NOT_KILL_HINT,
     goalId: opts.goalId,
     dispositions: GOAL_DISPOSITIONS,
   };

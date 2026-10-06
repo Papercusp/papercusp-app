@@ -45,9 +45,12 @@ import * as path from 'node:path';
 import { pinModuleState } from '@papercusp/module-singleton';
 
 import { isSidecarEnabledFromEnv } from '../process-supervision/sidecar-spawn-shared';
+import { isReadOnlyGitBatchExec } from '../git-batch';
 import { SPAWNER_SOCKET_ENV, resolveSpawnerSocketPath } from './spawner-socket-path';
 import type { SpawnerCallOpts } from './spawner-ipc-client';
 import { reapDeadSidecar, sidecarContainmentCurrent, type SidecarContainment } from './sidecar-exec-lifetime';
+import { recordSidecarExecLatency } from './sidecar-read-only-git';
+import type { ProcessExecCallerLabel } from './sidecar-exec-process';
 
 /** The shape every `RunGit` seam in the repo returns. */
 export interface GitRunResult {
@@ -401,8 +404,22 @@ function noteSidecarSuccess(): void {
  * the circuit breaker above.
  */
 export function noteSidecarFallback(subsystem: string, e: unknown, nowMs: number = Date.now()): void {
+  recordSidecarFallback(subsystem, e, nowMs, true);
+}
+
+/** Count a read-only batch deadline fallback without treating it as sidecar failure. */
+export function noteSidecarDeadlineFallback(subsystem: string, e: unknown, nowMs: number = Date.now()): void {
+  recordSidecarFallback(subsystem, e, nowMs, false);
+}
+
+function recordSidecarFallback(
+  subsystem: string,
+  e: unknown,
+  nowMs: number,
+  tripBreaker: boolean,
+): void {
   const reason = e instanceof Error ? e.message : String(e);
-  if (!(e instanceof SidecarCircuitOpenError)) {
+  if (tripBreaker && !(e instanceof SidecarCircuitOpenError)) {
     const b = __sidecarBreaker;
     b.consecutiveFailures += 1;
     b.probeStartedAtMs = null;
@@ -440,7 +457,7 @@ export function noteSidecarFallback(subsystem: string, e: unknown, nowMs: number
     breaker.state === 'closed'
       ? ''
       : ` [circuit ${breaker.state}: ${breaker.shortCircuited} call(s) skipped the sidecar, trips=${breaker.trips}]`;
-  console.warn(`[${subsystem}] spawner-sidecar git unavailable, using local spawn${since}${breakerNote}: ${reason}`);
+  console.warn(`[${subsystem}] spawner-sidecar fallback to local execution${since}${breakerNote}: ${reason}`);
 }
 
 /**
@@ -528,6 +545,7 @@ export async function runCommandViaSpawnerSidecar(
   let fence: { serverGeneration: string; connectionId: string } | undefined;
   let containment: SidecarContainment | undefined;
   let requestId: number | undefined;
+  let clientConnectionId: string | undefined;
   let cancelSent = false;
   const onAbort = (): void => {
     if (requestId === undefined || cancelSent) return;
@@ -550,11 +568,13 @@ export async function runCommandViaSpawnerSidecar(
       }
       if (opts.signal?.aborted) return aborted();
     }
+    const execStartedAt = performance.now();
     const res = await client.call<GitRunResult>(
       'process:exec',
       {
         command,
         args,
+        callerLabel: 'git-via-sidecar.runCommandViaSpawnerSidecar' satisfies ProcessExecCallerLabel,
         cwd: opts.cwd,
         env: opts.env,
         timeoutMs: opts.timeoutMs,
@@ -564,15 +584,41 @@ export async function runCommandViaSpawnerSidecar(
       {
         timeoutMs: opts.timeoutMs + 35_000,
         onOutputActivity: opts.onProgress,
-        onRequestId: (id) => {
+        onRequestId: (id, connectionId) => {
           requestId = id;
+          clientConnectionId = connectionId;
           if (opts.signal?.aborted) onAbort();
         },
       },
     );
     noteSidecarSuccess();
+    // WI-10004674: per-read wall latency, kept for read-only git only. Measured HERE
+    // (the client sees every exec) — NOT from the receipt ledger, which after the
+    // lazy-receipt fix holds only the slow reads and so cannot give a per-read p50.
+    // One verified dev-deploy batch is one sidecar read-latency sample. Treat it
+    // as a `git log` read so the shared reader still observes bounded batch calls.
+    const latencyParams = isReadOnlyGitBatchExec({ command, args })
+      ? { command: 'git', args: ['log'] }
+      : { command, args };
+    recordSidecarExecLatency(latencyParams, performance.now() - execStartedAt);
     return res;
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorCode = (error as NodeJS.ErrnoException | null)?.code;
+    const timedOut = /^RPC request timeout: /.test(errorMessage);
+    const isTransportFault = Boolean(errorCode) || timedOut || /^(Socket error:|Sidecar socket |Sidecar connection |Connection timeout dialing)/.test(errorMessage);
+    if (requestId !== undefined && isTransportFault) {
+      console.warn('[spawner-process-exec-fault]', {
+        event: timedOut ? 'rpc-timeout' : 'transport-error',
+        clientConnectionId: clientConnectionId ?? null,
+        serverGeneration: fence?.serverGeneration ?? null,
+        connectionId: fence?.connectionId ?? null,
+        requestId,
+        method: 'process:exec',
+        errorCode: errorCode ?? null,
+        errorName: error instanceof Error ? error.name : null,
+      });
+    }
     // Before dispatch a rejection is safe for local fallback. Afterwards keep
     // the caller's repository lease until this exact execution cannot run.
     if (!isolated || !fence || !containment || requestId === undefined) throw error;
@@ -611,6 +657,112 @@ export async function runCommandViaSpawnerSidecar(
 /** True when a sidecar `process:exec` result is the sidecar's own fault, not the child's exit. */
 export function isSidecarInfrastructureFault(res: { code: number; stderr: string }): boolean {
   return res.code === -1 && res.stderr.startsWith('spawner sidecar ');
+}
+
+/** The shape `util.promisify(execFile)` rejects with, which callers already inspect. */
+export interface ExecFileLikeError extends Error {
+  code: number | string | undefined;
+  stdout: string;
+  stderr: string;
+}
+
+export interface ExecFileViaSidecarOptions {
+  /** Kill timeout in ms — the same meaning as execFile's `timeout`. */
+  timeoutMs: number;
+  /**
+   * {@link noteSidecarFallback} label. One per call site, so the fallback census names
+   * WHICH caller is paying the local fork cost rather than an anonymous total.
+   */
+  subsystem: string;
+  /** Per-site override for {@link gitSidecarEnabled} (`0` forces local). */
+  sidecarVar?: string;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  /** Local-path only: execFile's `maxBuffer`. The sidecar applies its own output bound. */
+  maxBuffer?: number;
+}
+
+export interface ExecFileViaSidecarDeps {
+  sidecarEnabled?: () => boolean;
+  viaSidecar?: typeof runCommandViaSpawnerSidecar;
+  local?: (
+    command: string,
+    args: string[],
+    options: { timeout: number; cwd?: string; env?: NodeJS.ProcessEnv; maxBuffer?: number },
+  ) => Promise<{ stdout: string; stderr?: string }>;
+}
+
+async function defaultLocalExecFile(
+  command: string,
+  args: string[],
+  options: { timeout: number; cwd?: string; env?: NodeJS.ProcessEnv; maxBuffer?: number },
+): Promise<{ stdout: string; stderr: string }> {
+  // Lazy: keeps this module import-safe where node:child_process is stubbed.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { stdout, stderr } = await promisify(execFile)(command, args, { ...options, encoding: 'utf8' });
+  return { stdout: String(stdout), stderr: String(stderr) };
+}
+
+/**
+ * Run one short subprocess with `util.promisify(execFile)` semantics — resolve
+ * `{ stdout, stderr }` on exit 0, REJECT with an error carrying `.code` / `.stdout` /
+ * `.stderr` otherwise — forked by the spawner sidecar wherever this host has one.
+ *
+ * Why (WI-10004975): fork cost scales with the PARENT's RSS (measured on this box:
+ * 2 ms at 0 GB, ~100 ms at 1 GB, ~270 ms at 4 GB of the synchronous spawn), and a
+ * 13 GB bg-host spent 33–73% of its main-thread samples in native spawn for short
+ * diagnostic commands (secret-tool, systemctl, journalctl, gitnexus cypher). The
+ * sidecar is small, so its fork is cheap and the caller pays a socket round-trip.
+ *
+ * This is the one shared seam (lifted from systemd-service-probe's execProbeCommand,
+ * WI-10002709). A transport failure or a sidecar-infrastructure fault falls back to the
+ * local spawn and is COUNTED under `subsystem` (feeding the circuit breaker too), so a
+ * sick sidecar degrades latency, never the command's answer.
+ */
+export async function execFileViaSidecar(
+  command: string,
+  args: string[],
+  opts: ExecFileViaSidecarOptions,
+  deps: ExecFileViaSidecarDeps = {},
+): Promise<{ stdout: string; stderr: string }> {
+  const sidecarEnabled = deps.sidecarEnabled ?? (() => gitSidecarEnabled(opts.sidecarVar));
+  if (sidecarEnabled()) {
+    let res: GitRunResult | null = null;
+    try {
+      res = await (deps.viaSidecar ?? runCommandViaSpawnerSidecar)(command, args, {
+        timeoutMs: opts.timeoutMs,
+        ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        ...(opts.env !== undefined ? { env: opts.env } : {}),
+      });
+    } catch (e) {
+      noteSidecarFallback(opts.subsystem, e);
+    }
+    if (res && isSidecarInfrastructureFault(res)) {
+      noteSidecarFallback(opts.subsystem, new Error(res.stderr));
+      res = null;
+    }
+    if (res) {
+      if (res.code !== 0) {
+        const err = new Error(
+          `Command failed: ${command} ${args.join(' ')} exited ${res.code} (via spawner sidecar)\n${res.stderr}`,
+        ) as ExecFileLikeError;
+        err.code = res.code;
+        err.stdout = res.stdout;
+        err.stderr = res.stderr;
+        throw err;
+      }
+      return { stdout: res.stdout, stderr: res.stderr };
+    }
+  }
+  const local = deps.local ?? defaultLocalExecFile;
+  const { stdout, stderr } = await local(command, args, {
+    timeout: opts.timeoutMs,
+    ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+    ...(opts.env !== undefined ? { env: opts.env } : {}),
+    ...(opts.maxBuffer !== undefined ? { maxBuffer: opts.maxBuffer } : {}),
+  });
+  return { stdout, stderr: stderr ?? '' };
 }
 
 /**
@@ -704,7 +856,16 @@ export async function runGitStdinViaSpawnerSidecar(
       stdoutBytes?: number;
     }>(
       'process:exec',
-      { command: 'git', args, cwd, env, timeoutMs, stdinPath, stdoutPath },
+      {
+        command: 'git',
+        args,
+        callerLabel: 'git-via-sidecar.runGitStdinViaSpawnerSidecar' satisfies ProcessExecCallerLabel,
+        cwd,
+        env,
+        timeoutMs,
+        stdinPath,
+        stdoutPath,
+      },
       { timeoutMs: timeoutMs + 35_000 },
     );
     const stdout = await fsp.readFile(stdoutPath);

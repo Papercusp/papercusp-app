@@ -1,4 +1,5 @@
 import nodeCluster from 'node:cluster';
+import { pinModuleState } from '@papercusp/module-singleton';
 
 /**
  * background-workers.ts — the ONE evaluation of the EI-126 rule: should THIS
@@ -179,4 +180,89 @@ export function isSubstrateOwnerProcess(opts?: {
 }): boolean {
   const isPrimary = opts?.isPrimary ?? nodeCluster.isPrimary;
   return isPrimary && !requestOnlyHost(opts?.env ?? process.env);
+}
+
+/**
+ * WI-10006280: is THIS process an operator HOST, as opposed to a process that
+ * merely IMPORTS the tool registry?
+ *
+ * `agent-tools/index.ts` boot-starts the await sweeper, the predicate-watch
+ * poller and the interest-watch sweeper. Those loops claim and EXECUTE other
+ * agents' wake deliveries. As unconditional module-scope effects they started in
+ * every process that imported the registry: a scratch tsx driver (measured
+ * 2026-10-06, its log carried `[wake-budget] delivery #439485 for su-b9ccbf0d…`
+ * and four more foreign deliveries) and the gen-tool-catalog / tool-weight /
+ * gen-doc-tool-catalog / gen-tool-delivery build scripts. (Vitest workers were
+ * spared only because `managedSetInterval` is inert inside a Vitest worker.) A
+ * short-lived process that claims a delivery and exits kills it mid-flight, and
+ * a resume it spawned dies with its cgroup.
+ *
+ * None of the env predicates above can answer this. `backgroundWorkersEnabled()`
+ * is false in exactly the processes that DO run these loops today: the :3070
+ * request workers and :3170 carry PAPERCUSP_BACKGROUND_WORKERS=0, and the
+ * registry reaches them lazily on their first MCP request. Gating on it would
+ * silence the sweepers fleet-wide. And no env var is set in a host but absent in
+ * a script that sources the same `.env.local`.
+ *
+ * So the host DECLARES itself: `runBootstrap()` (apps/operator/bin/host-bootstrap.ts)
+ * calls `declareOperatorHostProcess()` first. Every operator host runs it: the
+ * hono-host primary, every clustered request worker (`onWorker`), bg-host (a
+ * hono-host bundle) and the desktop's serve.ts. Import-time loops register
+ * through `whenOperatorHostProcess()`. If the host already declared, they start
+ * now. Otherwise they queue until it does, which covers a registry imported
+ * before boot. In a process that never declares (a script, a build generator,
+ * a vitest worker), they never start.
+ *
+ * Explicit LAZY starts (an `events:await` registration calling
+ * `startAwaitSweeper()`) are unaffected: a process that registers an await has
+ * asked for the sweeper.
+ */
+const OPERATOR_HOST_STATE = pinModuleState('@papercusp/operator-core.operator-host-process', () => ({
+  declared: false,
+  pending: [] as Array<{ name: string; start: () => void }>,
+}));
+
+function runHostStart(name: string, start: () => void): void {
+  try {
+    start();
+  } catch (e) {
+    // Never block host boot: a missing table (pre-migration) must not wedge it.
+    console.warn(`[host] ${name} failed to start (non-fatal): ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+/** Declare THIS process an operator host and run every queued host-only start. Idempotent. */
+export function declareOperatorHostProcess(): void {
+  if (OPERATOR_HOST_STATE.declared) return;
+  OPERATOR_HOST_STATE.declared = true;
+  for (const { name, start } of OPERATOR_HOST_STATE.pending.splice(0)) runHostStart(name, start);
+}
+
+/** True once `declareOperatorHostProcess()` ran in this process. */
+export function isOperatorHostProcess(): boolean {
+  return OPERATOR_HOST_STATE.declared;
+}
+
+/**
+ * Run `start` only in an operator host: now if the host has declared itself,
+ * else when it does. In a process that never declares (scripts, build
+ * generators, vitest workers) it never runs.
+ */
+export function whenOperatorHostProcess(name: string, start: () => void): void {
+  if (OPERATOR_HOST_STATE.declared) {
+    runHostStart(name, start);
+    return;
+  }
+  OPERATOR_HOST_STATE.pending.push({ name, start });
+}
+
+/** Test seam: forget the declaration and any queued starts. */
+export function __resetOperatorHostProcessForTests(): void {
+  OPERATOR_HOST_STATE.declared = false;
+  OPERATOR_HOST_STATE.pending.length = 0;
+}
+
+/** Test seam: names of host-only starts queued and not yet run. */
+export function __pendingOperatorHostStartsForTests(): string[] {
+  return OPERATOR_HOST_STATE.pending.map((p) => p.name);
 }

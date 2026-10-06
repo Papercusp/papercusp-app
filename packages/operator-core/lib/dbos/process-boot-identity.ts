@@ -14,14 +14,45 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { execFileViaSidecar } from '../fleet/git-via-sidecar';
+
+/** One short `git` read in this process's checkout: resolves stdout, rejects on a non-zero exit. */
+export type GitRead = (args: string[]) => Promise<string>;
 
 let pexec: ((...args: any[]) => Promise<any>) | undefined;
-const runExecFile = (...args: any[]) => (pexec ??= promisify(execFile) as any)(...args);
+
+/**
+ * Local fork, used ONLY for the boot sample. That read runs while the DBOS bootstrap
+ * module graph evaluates: the process is still small (fork cost scales with the
+ * parent's RSS) and no spawner sidecar exists yet. Routing it through the sidecar would
+ * spawn one as a module-load side effect and delay the earliest-seam sample.
+ */
+const gitReadLocal: GitRead = async (args) => {
+  const { stdout } = await (pexec ??= promisify(execFile) as any)('git', args, { timeout: 5_000 });
+  return String(stdout);
+};
+
+/**
+ * Refresh reads, made by watchdog sweeps on a long-running host (WI-10005424).
+ * Measured 2026-10-02 09:26Z: on an 11.7 GB bg-host each main-thread fork took
+ * 256-512 ms, and `staleRoutineExecutorSweep` and `hostCodeStalenessFromLedgerSweep`
+ * each paid one here for `git rev-parse HEAD`. The sidecar forks cheaply; a sick
+ * sidecar falls back to a counted local fork. `cwd` is explicit because the
+ * sidecar's own working directory is not this process's checkout.
+ */
+const gitReadViaSidecar: GitRead = async (args) => {
+  const { stdout } = await execFileViaSidecar('git', args, {
+    timeoutMs: 5_000,
+    subsystem: 'process-boot-identity',
+    cwd: process.cwd(),
+  });
+  return stdout;
+};
 
 /** Best-effort current checkout HEAD resolver shared by boot and refresh reads. */
-export async function resolveCurrentHeadCommit(): Promise<string | null> {
+export async function resolveCurrentHeadCommit(read: GitRead = gitReadViaSidecar): Promise<string | null> {
   try {
-    const { stdout } = await runExecFile('git', ['rev-parse', 'HEAD'], { timeout: 5_000 });
+    const stdout = await read(['rev-parse', 'HEAD']);
     const sha = stdout.trim();
     return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
   } catch {
@@ -63,9 +94,7 @@ export async function resolveCommitsBehind(
   if (!bootCommit || !currentCommit || !sha.test(bootCommit) || !sha.test(currentCommit)) return null;
   if (bootCommit === currentCommit) return 0;
   try {
-    const { stdout } = await runExecFile('git', ['rev-list', '--count', `${bootCommit}..${currentCommit}`], {
-      timeout: 5_000,
-    });
+    const stdout = await gitReadViaSidecar(['rev-list', '--count', `${bootCommit}..${currentCommit}`]);
     const n = Number(stdout.trim());
     return Number.isInteger(n) && n >= 0 ? n : null;
   } catch {
@@ -121,11 +150,14 @@ export async function resolveRoutineCodeDrift(
     // --no-renames on purpose: a moved file must report as D+A, because under its
     // NEW path it is genuinely absent from the booted module graph. A rename status
     // would hide that behind a similarity score and lose the severe case.
-    const { stdout } = await runExecFile(
-      'git',
-      ['diff', '--name-status', '--no-renames', `${bootCommit}..${currentCommit}`, '--', ROUTINE_SOURCE_PREFIX],
-      { timeout: 5_000 },
-    );
+    const stdout = await gitReadViaSidecar([
+      'diff',
+      '--name-status',
+      '--no-renames',
+      `${bootCommit}..${currentCommit}`,
+      '--',
+      ROUTINE_SOURCE_PREFIX,
+    ]);
     const changed: string[] = [];
     const addedSinceBoot: string[] = [];
     for (const line of String(stdout).split('\n')) {
@@ -164,7 +196,8 @@ export function captureProcessBootIdentity(opts: {
   const uptimeSec = opts.uptimeSec ?? process.uptime();
   return {
     bootTimeMs: nowMs - Math.floor(uptimeSec * 1000),
-    bootCommit: (opts.resolveCommit ?? resolveCurrentHeadCommit)(),
+    // Boot sample forks locally on purpose; see gitReadLocal.
+    bootCommit: (opts.resolveCommit ?? (() => resolveCurrentHeadCommit(gitReadLocal)))(),
   };
 }
 

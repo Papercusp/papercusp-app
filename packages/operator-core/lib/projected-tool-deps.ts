@@ -55,6 +55,7 @@ import { isRecoveryDoorCall } from './capability-envelope/recovery-door';
 // Dependency-free leaf, like recovery-door: building the lazy launch-record
 // handle must not statically import the identity port it is handed to.
 import { lazyIdentityLaunchRecord, type LoadedIdentityLaunchRecord } from './capability-envelope/lazy-launch-record';
+import { selectNarrowedLaunchSpecBody } from './capability-envelope/identity-receipt-narrowing';
 // Type-only: the identity gate itself is reached by DYNAMIC import (see the resolver).
 import type { IdentityLaunchAuditStamp } from './capability-envelope/identity-grants-port';
 import { checkAuditModeMutationGuard } from './capability-envelope/audit-mode-guard';
@@ -222,6 +223,8 @@ interface OperatorKernelState extends KernelContextState {
   identityLaunchRecord?: unknown;
   /** Selected adv_sessions row identity/version for immutable artifact replay. */
   identityLaunchRecordVersion?: { sessionId: string; rowVersion: string };
+  /** How the server selected that row; a fallback is not caller attribution. */
+  identityLaunchRecordSelection?: 'caller-row' | 'owner-workspace-fallback';
   /** The control anchor exists, but its owning adv_sessions row does not. */
   identityLaunchRecordMissing?: boolean;
   authorityUnavailable?: boolean;
@@ -244,15 +247,16 @@ async function loadIdentityLaunchRecord(
   advSessionId: number | string | null,
   ownerId: string,
   workspaceId: string,
+  receipts?: readonly unknown[],
 ): Promise<LoadedIdentityLaunchRecord | null> {
   if (advSessionId == null) return null;
   const { sql } = getOrgPg();
-  const rows = await sql<Array<{ launch_spec: unknown; launch_spec_xmin: string | null }>>`
-    SELECT s.launch_spec, s.xmin::text AS launch_spec_xmin
-      FROM harness_shared.adv_sessions s
-     WHERE s.id = ${advSessionId} AND s.coord_owner_id = ${ownerId} AND s.workspace_id = ${workspaceId}
-     LIMIT 1
-  `;
+  // WI-10004801: identityHistory is narrowed to the requested receipts in
+  // PostgreSQL — the retained history is most of a 13 MB record, and parsing it
+  // on every cache miss is what spiked worker heaps (#1155).
+  const rows = await selectNarrowedLaunchSpecBody(sql, {
+    advSessionId, ownerId, workspaceId, revisions: receipts ?? null,
+  });
   const row = rows[0];
   return row ? { record: row.launch_spec, rowVersion: row.launch_spec_xmin ?? null } : null;
 }
@@ -340,6 +344,17 @@ export async function readControlAnchorKernelState(
         : null;
   if (!workspaceId) return null;
 
+  // A native MCP caller may carry the exact adv_sessions row that the host
+  // verified for its native CLI session. Without it, owner/workspace selection
+  // can choose a re-armed dead predecessor whose started_at was refreshed.
+  const requestedAdvSessionId = request.ctx.advSessionId;
+  const callerAdvSessionId =
+    typeof requestedAdvSessionId === 'number' &&
+    Number.isSafeInteger(requestedAdvSessionId) &&
+    requestedAdvSessionId > 0
+      ? requestedAdvSessionId
+      : null;
+
   const { sql } = getOrgPg();
   // WI-10002721: the hot read carries the launch record's HEADER only — its
   // type and the two top-level fields the identity gate keys and checks on —
@@ -354,7 +369,7 @@ export async function readControlAnchorKernelState(
   // moves xmin — so the last header seen for this (owner, workspace) is passed
   // back in, and the CASE guards skip the detoast while the newest row is still
   // that exact (id, xmin) (measured: 16 buffers, 0.12ms).
-  const memoKey = JSON.stringify([ownerId, workspaceId]);
+  const memoKey = JSON.stringify([ownerId, workspaceId, callerAdvSessionId]);
   const knownHeader = launchHeaderMemo.get(memoKey);
   const knownId = knownHeader?.sessionId ?? null;
   const knownXmin = knownHeader?.rowVersion ?? null;
@@ -414,6 +429,7 @@ export async function readControlAnchorKernelState(
                       ELSE s.launch_spec->'acceptedOperation' END AS launch_spec_accepted_operation
             FROM harness_shared.adv_sessions s
            WHERE s.coord_owner_id = ${ownerId} AND s.workspace_id = ${workspaceId}
+             AND (${callerAdvSessionId}::bigint IS NULL OR s.id = ${callerAdvSessionId})
            ORDER BY (s.ended_at IS NULL AND s.ended_by IS NULL) DESC, s.started_at DESC, s.id DESC
            LIMIT 1
         ) a ON true
@@ -425,6 +441,17 @@ export async function readControlAnchorKernelState(
     // a missing migration nor a failed join is evidence of a legacy session.
     controlReadFailed = true;
     stateRow = undefined;
+  }
+  if (callerAdvSessionId !== null) {
+    const selectedAdvSessionId =
+      stateRow?.adv_session_id == null ? null : String(stateRow.adv_session_id);
+    if (selectedAdvSessionId !== String(callerAdvSessionId)) {
+      // A verified caller row that vanished (or no longer matches this owner
+      // and workspace) is unavailable authority. Do not fall through to the
+      // legacy missing-row recovery path or another session's launch record.
+      controlReadFailed = true;
+      stateRow = undefined;
+    }
   }
 
   let powerUserRevoked = false;
@@ -498,12 +525,13 @@ export async function readControlAnchorKernelState(
           harnessSlug: launchHeader.harnessSlug,
           hasAcceptedOperation: launchHeader.hasAcceptedOperation,
           acceptedOperation: launchHeader.acceptedOperation,
-          load: () => loadIdentityLaunchRecord(launchSessionId, ownerId, workspaceId),
+          load: (receipts) => loadIdentityLaunchRecord(launchSessionId, ownerId, workspaceId, receipts),
         }) } : {}),
     ...(stateRow?.adv_session_id != null && stateRow.adv_session_xmin != null
       ? { identityLaunchRecordVersion: {
           sessionId: String(stateRow.adv_session_id), rowVersion: String(stateRow.adv_session_xmin),
-        } } : {}),
+        }, identityLaunchRecordSelection: callerAdvSessionId !== null
+          ? 'caller-row' as const : 'owner-workspace-fallback' as const } : {}),
     ...(activation ? { activation } : {}),
     ...(activation?.applied ? { appliedRevision: activation.applied } : {}),
     ...(generation ? { policyRevision: `control:${generation}` } : {}),
@@ -695,6 +723,25 @@ export const controlAnchorKernelResolver: KernelEnforcementPort = async (request
     : first;
 };
 
+function auditLaunchRowSelection(
+  verdict: KernelEnforcementResult,
+  state: OperatorKernelState | null,
+): KernelEnforcementResult {
+  const record = verdict.serverAudit?.identityLaunchRecord;
+  if (!state?.identityLaunchRecordSelection || !record || typeof record !== 'object' || Array.isArray(record)) {
+    return verdict;
+  }
+  // Extend the stamp for the record actually evaluated (including its loaded
+  // xmin). Never substitute a presented owner or tool argument for this source.
+  return {
+    ...verdict,
+    serverAudit: {
+      ...verdict.serverAudit,
+      identityLaunchRecord: { ...record, selection: state.identityLaunchRecordSelection },
+    },
+  };
+}
+
 async function resolveControlAnchorKernelOnce(
   request: KernelEnforcementRequest,
   onStaleArtifact?: (heal: StaleArtifactHeal) => void,
@@ -727,7 +774,7 @@ async function resolveControlAnchorKernelOnce(
           const heal = staleArtifactHealFor(state);
           if (heal) onStaleArtifact(heal);
         }
-        return grants;
+        return auditLaunchRowSelection(grants, state);
       }
     } catch {
       // The generic optional port catches throws as unavailable/allow. This
@@ -764,9 +811,10 @@ async function resolveControlAnchorKernelOnce(
       return operatorKernelDenial('policy-unavailable', 'identity policy evaluation unavailable; no effect authorized');
     }
   }
-  return ungoverned.stamp
+  const resolved = ungoverned.stamp
     ? { ...verdict, serverAudit: { ...verdict.serverAudit, identityLaunchRecord: ungoverned.stamp } }
     : verdict;
+  return auditLaunchRowSelection(resolved, state);
 };
 
 /** Install the DB-backed resolver exactly once at the host's bootstrap seam. */

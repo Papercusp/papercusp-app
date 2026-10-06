@@ -135,6 +135,15 @@ export function applySecretAllowances(
  * 'result27=key14', the same fragment under a new temp-var index), and exactly ONE is new.
  * The generic-api-key entry names it and where it comes from.
  *
+ * RE-MEASURED 2026-10-06 for the 0.0.21-p318r62b bundle, the first one scanned on AWS
+ * (WI-10006421): the AMI scan's bundled census was 34 (2 gcp-api-key + 31 generic-api-key in
+ * serve.mjs + 1 generic-api-key in the vendored Monaco editor), and gitleaks 8.30.1 run
+ * directly over that release root's serve.mjs and Monaco file reproduced 31 + 1 to the unit.
+ * Every one of the 32 matches was read with its surrounding text. serve.mjs: the 20 tokenizer
+ * vocabulary matches and the PostHog / invite-token pair are unchanged; one minified fragment
+ * left ('EMPTY_SET3=new') and two arrived ('result30=key16', 'SESSION_PORT_TOKEN_ESTIMATOR'),
+ * both named in the entry below. The Monaco match is a new entry of its own.
+ *
  * ⛔ SHRINK-ONLY IN SPIRIT: adding an entry means a new unexplained secret appeared in content
  * we ship. That is a finding to investigate first and justify second, never a line to append
  * to make a red gate green.
@@ -156,20 +165,24 @@ export const WORKSPACE_HOST_SECRET_ALLOWANCES: readonly ImageScanSecretAllowance
   {
     rule: 'generic-api-key',
     filePattern: '*/serve.mjs',
-    maxFindings: 30,
+    maxFindings: 31,
     reason:
       'The bundled server is a single ~57MB minified file, and gitleaks\' generic-api-key rule is ' +
-      'entropy-based, so it matches high-entropy NON-secret text. All 30 were read individually: ' +
+      'entropy-based, so it matches high-entropy NON-secret text. All 31 were read individually: ' +
       '20 are base64-encoded tokenizer vocabulary (decoding the matches gives ordinary words in ' +
       'several languages — " Canaveral", " subreddit", " richten", " gerçekle", Arabic script, ' +
-      '"UITextFiel"); 8 are minified JS source fragments (matches begin "e4.sortKey===v", ' +
-      '"EMPTY_SET3=new", "consumed=await", "this.signature", "parent=keyOfRow", "result27=key14", ' +
-      'and — the only finding r19 genuinely added — "verdictFns=await", which is the minified form ' +
-      'of `const verdictFns = await import(...)` at packages/operator-core/lib/harness/routines/' +
-      'release-actions.ts:1026. gitleaks flags it because the ADJACENT minified token ends ' +
-      '"...signWithDeviceKey,", so the rule\'s `key`-keyword proximity check captures the next ' +
-      'assignment; the captured text is an identifier and the `await` operator, carrying no value ' +
-      'at all, let alone a credential); 1 is POSTHOG_PUBLIC_DEFAULTS.projectKey ' +
+      '"UITextFiel"); 9 are minified JS source fragments (matches begin "sortKey3=e8.sortKey" twice, ' +
+      '"consumed=await", "this.signature", "parent=keyOfRow", "result27=key14", "verdictFns=await" — ' +
+      'the minified form of `const verdictFns = await import(...)` in packages/operator-core/lib/' +
+      'harness/routines/release-actions.ts; gitleaks flags it because the ADJACENT minified token ' +
+      'ends "...signWithDeviceKey,", so the rule\'s `key`-keyword proximity check captures the next ' +
+      'assignment, an identifier and the `await` operator with no value at all — and, added by the ' +
+      '0.0.21 bundle, "result30=key16", which is `case"key":result30=key16;break` inside a minified ' +
+      'key/value iterator, and "SESSION_PORT_TOKEN_ESTIMATOR", which is the declaration of the ' +
+      'constant `SESSION_PORT_TOKEN_ESTIMATOR = \'utf8-byte-upper-bound-v1\'` from packages/' +
+      'operator-core/lib/session-port/types.ts, a version label for a token-count estimator. The ' +
+      '0.0.21 bundle no longer produces the earlier "EMPTY_SET3=new" match); 1 is ' +
+      'POSTHOG_PUBLIC_DEFAULTS.projectKey ' +
       'from posthog-public-defaults.ts, a PostHog write-only ingestion key designed to ship in ' +
       'clients; and 1 is CANONICAL_INVITE_SECRET from harness/canonical-hive-invite.ts, which that ' +
       'file documents as a DISCOVERY TOKEN deliberately committed under dogfood-silent-canonical-' +
@@ -177,5 +190,17 @@ export const WORKSPACE_HOST_SECRET_ALLOWANCES: readonly ImageScanSecretAllowance
       'gated by GitHub repo permissions and the owner-signed admission allowlist, and the hive ' +
       'PRIVATE key is explicitly kept out of that file. maxFindings pins the count so a genuinely ' +
       'new secret landing in serve.mjs still denies rather than hiding among these.',
+  },
+  {
+    rule: 'generic-api-key',
+    filePattern: '*/spa/monaco/vs/editor-*.js',
+    maxFindings: 1,
+    reason:
+      'Upstream monaco-editor code, vendored unmodified: the file is byte-for-byte the published ' +
+      'package\'s node_modules/monaco-editor/min/vs/editor-<hash>.js. The match is minified glyph-' +
+      'cache source, `this._glyphMap=new l.NKeyMap,this._glyphInOrderSet=new Set`; the `Key` inside ' +
+      'the class name NKeyMap trips the rule\'s keyword proximity check, which then captures the next ' +
+      'assignment. The captured text is two identifiers and `new`, with no value of any kind. The ' +
+      'filename hash changes when Monaco is upgraded, so the pattern keeps the directory and prefix.',
   },
 ]);

@@ -314,7 +314,19 @@ export async function resolveWorkItemBehaviorContract(
     ? `link one with plans:bind-spec-evidence, or promote a new clause with plans:set-specs.`
     : `This item has no source plan. Use the harness ad-hoc scope \`${ADHOC_WORK_ITEM_SPEC_SCOPE}\`: ` +
       `author an item-local clause with plans:set-specs while omitting \`slug\` and ${adhocPlanItemArg}, ` +
-      `then bind this work item and its proof with plans:bind-spec-evidence while also omitting \`slug\`.`;
+      `then bind this work item and its proof with plans:bind-spec-evidence while also omitting \`slug\`. ` +
+      // EI-23820598120293502: naming the two verbs and the one arg to OMIT still cost a closer
+      // five corrective round-trips, because neither verb's WRAPPER key nor required keys were
+      // named. State only the structural facts that were each measured to be guessed wrong
+      // (an OBJECT not an array under `spec`; `binding`, not loose top-level args) and point at
+      // the schema for the closed enums, which are the part that drifts if copied here.
+      `Shapes: plans:set-specs takes ONE object under \`spec\` (not an array) with at least specId, ` +
+      `expectedRevision (0 to create), planItemId, behavior, behaviorClass and lifecycleStatus; ` +
+      `plans:bind-spec-evidence takes ONE object under \`binding\` with at least workItemId, specId, ` +
+      `specRevision, evidenceKind and evidenceRef, plus exactly one of \`measurement\` ` +
+      `({ schemaVersion: 1, kind, sourcePaths, ... }) or \`sourceFingerprint\` (or the ledger form ` +
+      `{ workItemId, specId, fromTestRun } that derives the rest from a test_runs row). Read the exact ` +
+      `enum values with tools:find before the first call.`;
   return {
     workItemId: workItem.id,
     groups,

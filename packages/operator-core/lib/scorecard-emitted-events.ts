@@ -34,6 +34,19 @@
  * a rubric necessarily exists, and needs one stable plan-level material-change key.
  * Both are hints only; every waking consumer re-runs the canonical gate.
  *
+ * GRADING-AUDIT SETTLEMENT (EI-24852356444105284). A scorecard's own work-item is terminal
+ * the moment it is filed, so `work-item:status:<id>` never fires when its grading-integrity
+ * audit later settles — and before this key nothing else did either: an author waiting on
+ * a vetting attestation's or spec-adequacy card's audit verdict could only re-poll
+ * `scorecards:get`. The audit settles at exactly one point — `scorecards:emit` filing the
+ * grading-integrity card and `recordGradingAudit` stamping the subject — and that is the
+ * SAME chokepoint this module already fires from, so the settled key rides the existing
+ * call as `opts.settledAudit` rather than a second emitter:
+ *
+ *   events:await { event: "scorecard:grading-audit:<audited scorecard id>" }
+ *
+ * The key names the AUDITED card (the id the waiter already holds), not the audit card.
+ *
  * Fire-and-forget and fail-soft: a failed emit NEVER breaks the scorecard write. The card is
  * the durable truth; the event is only the push notification for it.
  */
@@ -44,6 +57,25 @@ import { planAcceptanceChangedKey } from './agent-obligations';
 /** The awaitable key for "a scorecard was filed against this rubric". */
 export function scorecardEmittedKey(rubricRef: string): string {
   return `scorecard:emitted:${rubricRef}`;
+}
+
+/** The awaitable key for "this scorecard's grading-integrity audit settled". */
+export function scorecardGradingAuditKey(issueId: string): string {
+  return `scorecard:grading-audit:${issueId}`;
+}
+
+/** What a `scorecard:grading-audit:<id>` waiter receives — the verdict, so it need not
+ *  re-read the card just to branch on passed vs failed. */
+export interface ScorecardGradingAuditSettledPayload {
+  /** The AUDITED scorecard (the id in the key). */
+  issueId: string;
+  state: 'passed' | 'failed';
+  /** The grading-integrity card that carries the verdict and its failing criteria. */
+  auditIssueId: string;
+  auditor: string | null;
+  auditedAt: string | null;
+  /** grading-integrity revision the verdict was rendered against. */
+  rubricRevision: number | null;
 }
 
 /** What a waking awaiter receives — shaped so `payload_filter` can express the real
@@ -90,12 +122,17 @@ export interface ScorecardEmittedEventsDeps {
 
 /**
  * Fire `scorecard:emitted:<rubricRef>` and, for a plan subject, the shared
- * `plan:acceptance:<slug>` change key. Awaiter-only (no `to` push). Never throws —
+ * `plan:acceptance:<slug>` change key. When the filed card is a grading-integrity
+ * audit that SETTLED its subject, pass `settledAudit` to also fire
+ * `scorecard:grading-audit:<audited id>`. Awaiter-only (no `to` push). Never throws —
  * a failed emit must not fail the scorecard write that already succeeded.
  */
 export async function emitScorecardEmitted(
   payload: ScorecardEmittedPayload,
-  opts: { workspaceId?: string } & ScorecardEmittedEventsDeps = {},
+  opts: {
+    workspaceId?: string;
+    settledAudit?: ScorecardGradingAuditSettledPayload;
+  } & ScorecardEmittedEventsDeps = {},
 ): Promise<void> {
   const emit = opts.emit ?? emitAwaitedEvent;
   const subject = payload.subjectRef ? ` on ${payload.subjectRef}` : '';
@@ -114,6 +151,17 @@ export async function emitScorecardEmitted(
             key: planAcceptanceChangedKey(payload.subjectRef),
             payload,
             summary: `plan acceptance evidence changed: scorecard ${payload.issueId} filed against ${payload.rubricRef}`,
+            source: payload.createdBy ?? 'scorecards:emit',
+            ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+          },
+        ]
+      : []),
+    ...(opts.settledAudit
+      ? [
+          {
+            key: scorecardGradingAuditKey(opts.settledAudit.issueId),
+            payload: opts.settledAudit,
+            summary: `grading audit of scorecard ${opts.settledAudit.issueId} ${opts.settledAudit.state} (audit card ${opts.settledAudit.auditIssueId} by ${opts.settledAudit.auditor ?? 'unknown'})`,
             source: payload.createdBy ?? 'scorecards:emit',
             ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
           },

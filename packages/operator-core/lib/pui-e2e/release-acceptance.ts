@@ -17,10 +17,11 @@
  */
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 
-// ESM package: the release CLI runs this under tsx, where `__dirname` is undefined.
-export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+// Walk to the checkout, not a fixed `..` climb: that climb is wrong inside the esbuild host
+// bundle, where import.meta.url is the bundle's URL (P-016). See module-repo-root.ts.
+export const REPO_ROOT = moduleRepoRoot(import.meta.url);
 export const UX_CONTRACT = path.join(REPO_ROOT, 'apps/tui/PUBLIC_RELEASE_UX.md');
 export const ACCEPTANCE_MATRIX = path.join(REPO_ROOT, 'apps/tui/release/acceptance-matrix.json');
 

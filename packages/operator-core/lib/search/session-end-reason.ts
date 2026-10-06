@@ -102,6 +102,11 @@ const MODEL_ERROR_LOOSE_RE = /rate.?limit(?:ed)?\b|\b429\b/i;
 
 /** The full `model_error` signature = MACHINE ∪ LOOSE, derived so the halves cannot drift. */
 const MODEL_ERROR_RE = new RegExp(`${MODEL_ERROR_MACHINE_RE.source}|${MODEL_ERROR_LOOSE_RE.source}`, 'i');
+// Blind callers may accept only a provider-shaped usage-limit opening. The broad
+// `limit … resets` clause below remains useful for a known session tail, but it
+// also matches a provider sentence quoted later in ordinary assistant prose.
+const USAGE_LIMIT_MACHINE_RE =
+  /^(?:(?:you(?:'|’)ve hit your|you have hit your|you have exceeded your|hit your) (?:session|usage|weekly|monthly|daily) limit|usage limit reached|quota exceeded)\b/i;
 
 const PATTERNS: readonly Pattern[] = [
   { reason: 'auth_wall', re: /organization has disabled|subscription access.*disabled|disabled Claude subscription|use an Anthropic API key instead|ask your admin to enable|\b402\b[^\n]{0,120}\binsufficient credits\b|\binsufficient credits\b[^\n]{0,120}\b402\b/i },
@@ -126,6 +131,19 @@ const PATTERNS: readonly Pattern[] = [
 export function isMachineModelErrorText(text: string | null | undefined): boolean {
   const t = (text ?? '').trim();
   return t.length > 0 && MODEL_ERROR_MACHINE_RE.test(t);
+}
+
+/**
+ * Does this text START with a provider-shaped usage-limit signature?
+ *
+ * `classifySessionEnd` deliberately keeps the broader `limit … resets` pattern
+ * for classifying a known terminal session tail. A blind scan of assistant prose
+ * must use this narrower check so quoting that provider message does not look like
+ * a provider kill.
+ */
+export function isMachineUsageLimitText(text: string | null | undefined): boolean {
+  const t = (text ?? '').trim();
+  return t.length > 0 && USAGE_LIMIT_MACHINE_RE.test(t);
 }
 
 export interface ClassifySessionEndInput {
@@ -192,10 +210,10 @@ export function classifySessionEnd(input: ClassifySessionEndInput): SessionEndCl
  * intentionally broad for classifying a session ALREADY KNOWN to be dead, but far too
  * loose to scan blind — "discussed the rate limit fix" would trip it) and `context_limit`
  * (phrases like "context window exceeded" are plausible in ordinary dev conversation
- * about the very bug being fixed). `auth_wall` and `usage_limit` are the two used here:
- * both are precise, imperative-mood phrases ("hit your session limit", "organization has
- * disabled…") a normal turn discussing the topic essentially never produces verbatim.
- * See resume-turn-outcome.ts's `classifyResumeTurnExit`, the caller this exists for.
+ * about the very bug being fixed). `auth_wall` and provider-shaped `usage_limit` are the
+ * two used here; the broad reset phrase remains exclusive to known session tails because
+ * ordinary prose can quote it. See resume-turn-outcome.ts's `classifyResumeTurnExit`, the
+ * caller this exists for.
  */
 export function classifyWedgeText(
   text: string | null | undefined,
@@ -204,6 +222,7 @@ export function classifyWedgeText(
   if (!t) return null;
   for (const p of PATTERNS) {
     if (p.reason !== 'auth_wall' && p.reason !== 'usage_limit') continue;
+    if (p.reason === 'usage_limit' && !isMachineUsageLimitText(t)) continue;
     const m = p.re.exec(t);
     if (m) {
       const at = Math.max(0, m.index - 20);

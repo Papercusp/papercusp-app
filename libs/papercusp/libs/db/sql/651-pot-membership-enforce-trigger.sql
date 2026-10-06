@@ -1,6 +1,6 @@
 -- 651-pot-membership-enforce-trigger.sql
 --
--- Owner directive (VERIFIED — owner, interactive, 2026-07-20 11:21, sess a5e7a6e8):
+-- Owner directive (VERIFIED — Avi, interactive, 2026-07-20 11:21, sess a5e7a6e8):
 -- "AUDIT ALL WORK ITEMS THEY SHOULD ALL BE PART OF A REAL POT ... WE ADDED
 -- SOMETHING TO ENFORCE WORK ITEMS TO BE PART OF A REAL POT, RIGHT?"
 -- Plan: pot-membership-enforcement-2026-07-20 (P-006 — the DB-layer backstop).

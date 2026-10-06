@@ -3,7 +3,12 @@ import type { CompletionVerificationEvidence } from '../coord-lifecycle/records'
 /** Source files whose correctness a test run says nothing about. */
 const TYPECHECKED_SOURCE_RE = /\.(?:[cm]?ts|tsx)$/i;
 /** Any mention of a real type check, in the caller's OWN evidence prose. */
-const TYPECHECK_MENTION_RE = /\b(?:tsc|typecheck|type-check|lint:tsc|build:typecheck|typescript\s+(?:type\s+)?check)\b/i;
+// Evidence commonly says "typechecks" (plural); requiring a word boundary immediately
+// after "typecheck" silently missed that trailing s and produced a false warning.
+// Compact checkpoint prose may attach the measured scope count ("build:typecheck10").
+// Accept a following digit while still rejecting unrelated words like "typechecker".
+const TYPECHECK_MENTION_RE =
+  /\b(?:tsc|typechecks?|type-checks?|lint:tsc|build:typechecks?|typescript\s+(?:type\s+)?checks?)(?=\b|\d)/i;
 
 /**
  * A passing unit/integration run proves behaviour, not TypeScript correctness.

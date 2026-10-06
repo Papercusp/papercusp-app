@@ -25,10 +25,15 @@ import { homedir, hostname as osHostname } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
+  AWS_CLI_PROFILE_PATTERN,
+  AWS_EC2_INSTANCE_ID_PATTERN,
+  AWS_REGION_PATTERN,
+  buildAwsSsmProxyCommand,
   buildOpenSshControlMasterCommand,
   buildOpenSshPtySessionCommand,
   reserveLoopbackPort,
 } from "../../../packages/operator-core/lib/workspace-host/local-connection-manager.ts";
+import { parseHostedPsuCustomerArgv } from "../../../packages/operator-core/lib/workspace-host/hosted-psu-argv.mjs";
 
 export const PSU_CONNECTION_STORE_VERSION = "psu-connection-profiles-v1";
 export const DEFAULT_REMOTE_OPERATOR_PORT = 3070;
@@ -55,9 +60,12 @@ const VALUE_FLAGS = new Map([
   ["--connect", "selection"],
   ["--connect-program", "program"],
   ["--connect-add-gcp-iap", "addName"],
+  ["--connect-add-aws-ssm", "addAwsName"],
   ["--connect-remove", "removeName"],
   ["--connect-project", "projectId"],
   ["--connect-zone", "zone"],
+  ["--connect-region", "region"],
+  ["--connect-aws-profile", "awsProfile"],
   ["--connect-instance", "instanceName"],
   ["--connect-user", "sshUser"],
   ["--connect-login", "loginOrigin"],
@@ -96,9 +104,12 @@ export function parsePsuConnectionArgs(argv) {
     selection: null,
     list: false,
     addName: null,
+    addAwsName: null,
     removeName: null,
     projectId: null,
     zone: null,
+    region: null,
+    awsProfile: null,
     instanceName: null,
     sshUser: null,
     login: false,
@@ -155,13 +166,14 @@ export function parsePsuConnectionArgs(argv) {
   const actions = [
     transport.list,
     Boolean(transport.addName),
+    Boolean(transport.addAwsName),
     Boolean(transport.removeName),
     transport.login,
     transport.logout,
   ].filter(Boolean).length;
   if (actions > 1)
     throw new Error(
-      "Choose only one of --connect-list, --connect-add-gcp-iap, --connect-remove, --connect-login, or --connect-logout",
+      "Choose only one of --connect-list, --connect-add-gcp-iap, --connect-add-aws-ssm, --connect-remove, --connect-login, or --connect-logout",
     );
   // `--connect-login --connect` (bare) is the one maintenance+connect pairing:
   // sign in, then open the program on the new sign-in's workspace. PUI's
@@ -183,17 +195,24 @@ export function parsePsuConnectionArgs(argv) {
       `--connect-program must be one of ${[...CONNECT_PROGRAMS].join(", ")}`,
     );
   }
+  // Each provider's fields belong to its own add command, so a GCP zone can
+  // never silently ride into an AWS profile or the other way round.
+  if (!transport.addName && [transport.projectId, transport.zone].some(Boolean)) {
+    throw new Error("--connect-project/zone require --connect-add-gcp-iap");
+  }
+  if (
+    !transport.addAwsName &&
+    [transport.region, transport.awsProfile].some(Boolean)
+  ) {
+    throw new Error("--connect-region/aws-profile require --connect-add-aws-ssm");
+  }
   if (
     !transport.addName &&
-    [
-      transport.projectId,
-      transport.zone,
-      transport.instanceName,
-      transport.sshUser,
-    ].some(Boolean)
+    !transport.addAwsName &&
+    [transport.instanceName, transport.sshUser].some(Boolean)
   ) {
     throw new Error(
-      "--connect-project/zone/instance/user require --connect-add-gcp-iap",
+      "--connect-instance/user require --connect-add-gcp-iap or --connect-add-aws-ssm",
     );
   }
 
@@ -254,6 +273,66 @@ export function normalizeGcpIapProfile(input) {
     ],
     constraints: [
       "No public IP",
+      "Interactive control transport; bulk transfer requires an explicit alternate path",
+      "SSH host keys are verified by the local OpenSSH configuration",
+    ],
+    reconnect: "recreate",
+    audited: true,
+  };
+}
+
+/**
+ * Your own EC2 instance, reached by OpenSSH over an AWS Systems Manager
+ * Session Manager tunnel — the AWS twin of the GCP IAP profile
+ * (aws-byoc-gcp-parity-2026-10-01 P-009). Like IAP it needs no public IP and
+ * no inbound port: the SSH stream rides an SSM session to port 22.
+ */
+export function normalizeAwsSsmProfile(input) {
+  const name = requiredValue(
+    input.name,
+    "Connection profile name",
+    PROFILE_NAME_RE,
+  );
+  const region = requiredValue(input.region, "AWS region", AWS_REGION_PATTERN);
+  const instanceId = requiredValue(
+    input.instanceId,
+    "EC2 instance id",
+    AWS_EC2_INSTANCE_ID_PATTERN,
+  );
+  const sshUser = requiredValue(input.sshUser, "SSH user", SSH_USER_RE);
+  const awsProfile =
+    input.awsProfile == null
+      ? null
+      : requiredValue(input.awsProfile, "AWS CLI profile", AWS_CLI_PROFILE_PATTERN);
+  const query = new URLSearchParams({ region, instance: instanceId });
+  if (awsProfile) query.set("profile", awsProfile);
+
+  return {
+    name,
+    kind: "aws-ssm-ssh",
+    region,
+    instanceId,
+    sshUser,
+    ...(awsProfile ? { awsProfile } : {}),
+    endpoint: `aws-ssm-ssh://${instanceId}?${query.toString()}`,
+    target: `${sshUser}@${instanceId}`,
+    remoteOperatorPort: DEFAULT_REMOTE_OPERATOR_PORT,
+    supportedClientPlatforms: ["linux", "macos", "windows"],
+    features: {
+      command: true,
+      pty: true,
+      tcpForward: true,
+      fileTransfer: true,
+    },
+    prerequisites: [
+      "OpenSSH client",
+      "AWS CLI v2",
+      "AWS Session Manager plugin",
+      "ssm:StartSession on the instance with the AWS-StartSSHSession document",
+      "Your SSH public key authorized for the SSH user on the instance",
+    ],
+    constraints: [
+      "No public IP or inbound SSH port: SSH rides an SSM Session Manager tunnel",
       "Interactive control transport; bulk transfer requires an explicit alternate path",
       "SSH host keys are verified by the local OpenSSH configuration",
     ],
@@ -398,6 +477,7 @@ export function normalizeHostedProfile(input) {
 
 function validateStoredProfile(value) {
   if (value?.kind === "gcp-iap-ssh") return normalizeGcpIapProfile(value);
+  if (value?.kind === "aws-ssm-ssh") return normalizeAwsSsmProfile(value);
   if (value?.kind === "papercusp-hosted") return normalizeHostedProfile(value);
   throw new Error(
     `Unsupported saved psu connection kind '${value?.kind ?? "missing"}'`,
@@ -479,16 +559,48 @@ function platformName(platform) {
   return platform;
 }
 
-function gcpIapExtraArgs(profile) {
-  return [
-    "-o",
-    `ProxyCommand=gcloud compute start-iap-tunnel ${profile.instanceName} 22 --listen-on-stdin --project=${profile.projectId} --zone=${profile.zone}`,
-  ];
+/**
+ * Per machine-profile kind: the OpenSSH routing option, the local programs it
+ * needs, and the provider words for a failure the user has to fix.
+ */
+const MACHINE_TRANSPORTS = {
+  "gcp-iap-ssh": {
+    extraArgs: (profile) => [
+      "-o",
+      `ProxyCommand=gcloud compute start-iap-tunnel ${profile.instanceName} 22 --listen-on-stdin --project=${profile.projectId} --zone=${profile.zone}`,
+    ],
+    commands: ["ssh", "gcloud"],
+    tunnel: "IAP",
+    verify: "known_hosts, OS Login, and IAP permission",
+  },
+  "aws-ssm-ssh": {
+    // `%h` is the SSH destination host, which the profile makes the instance id.
+    extraArgs: (profile) => [
+      "-o",
+      `ProxyCommand=${buildAwsSsmProxyCommand({
+        region: profile.region,
+        ...(profile.awsProfile ? { awsProfile: profile.awsProfile } : {}),
+      })}`,
+    ],
+    commands: ["ssh", "aws", "session-manager-plugin"],
+    tunnel: "SSM",
+    verify:
+      "known_hosts, that your SSH key is authorized for the SSH user on the instance, and that your AWS credentials allow ssm:StartSession with AWS-StartSSHSession",
+  },
+};
+
+function machineTransport(profile) {
+  const transport = MACHINE_TRANSPORTS[profile.kind];
+  if (!transport)
+    throw new Error(`Connection '${profile.name}' has no SSH transport (${profile.kind})`);
+  return transport;
 }
 
 export function describePsuConnectionProfile(profile) {
   if (profile.kind === "papercusp-hosted")
     return `${profile.name} — Papercusp cloud workspaces at ${profile.origin}${profile.organizationName ? ` for ${profile.organizationName}` : ""}`;
+  if (profile.kind === "aws-ssm-ssh")
+    return `${profile.name} — AWS SSM ${profile.region}/${profile.instanceId} as ${profile.sshUser}${profile.awsProfile ? ` (AWS profile ${profile.awsProfile})` : ""}`;
   return `${profile.name} — GCP IAP ${profile.projectId}/${profile.zone}/${profile.instanceName} as ${profile.sshUser}`;
 }
 
@@ -608,16 +720,36 @@ function defaultOpenBrowser(url) {
  * Resolves when the socket closes; `exit` is set only if the remote shell ended,
  * and `bound` only once the relay bound this socket to a shell on the machine —
  * without it there is no shell to resume.
+ *
+ * `expectKind: 'psu'` (D-002) asks the machine to start psu itself. Then `bound`
+ * waits for `pty.ready`, since before it nothing runs on the machine, and
+ * `kindUnavailable` says why the machine did not start psu, so the caller can
+ * fall back to the interim shell line: `degraded` (the relay bound a different
+ * kind), `unknown` (the host answered `channel_kind_unknown`) or `unanswered`
+ * (no `pty.ready` in `readyTimeoutMs` — a host older than that answer says nothing).
  */
-function defaultOpenHostedTerminal({ socketUrl, initialInput, notice }) {
-  const stdin = process.stdin;
-  const stdout = process.stdout;
+export function defaultOpenHostedTerminal({
+  socketUrl,
+  initialInput,
+  notice,
+  expectKind = null,
+  readyTimeoutMs = HOSTED_PSU_READY_TIMEOUT_MS,
+  stdin = process.stdin,
+  stdout = process.stdout,
+}) {
   const socket = new WebSocket(socketUrl);
   return new Promise((resolve) => {
     let role = null;
     let exit = null;
     let resumed = false;
     let bound = false;
+    let ready = false;
+    let kindUnavailable = null;
+    let readyTimer = null;
+    const giveUpOnKind = (why) => {
+      kindUnavailable = why;
+      socket.close(1000, `${expectKind}_kind_${why}`);
+    };
     const send = (message) => {
       if (socket.readyState === WebSocket.OPEN)
         socket.send(JSON.stringify(message));
@@ -657,6 +789,8 @@ function defaultOpenHostedTerminal({ socketUrl, initialInput, notice }) {
       process.on("SIGWINCH", onResize);
       process.on("SIGTERM", onLocalHangup);
       process.on("SIGHUP", onLocalHangup);
+      if (expectKind)
+        readyTimer = setTimeout(() => giveUpOnKind("unanswered"), readyTimeoutMs);
     });
     socket.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
@@ -668,8 +802,14 @@ function defaultOpenHostedTerminal({ socketUrl, initialInput, notice }) {
       }
       switch (message?.type) {
         case "session.bound":
+          // An older relay binds every unknown kind as a shell; typing nothing into
+          // it would leave the customer at a blank prompt.
+          if (expectKind && message.kind !== expectKind) {
+            giveUpOnKind("degraded");
+            return;
+          }
           role = message.role;
-          bound = true;
+          if (!expectKind) bound = true;
           return;
         case "session.role":
           role = message.role;
@@ -679,11 +819,14 @@ function defaultOpenHostedTerminal({ socketUrl, initialInput, notice }) {
             );
           return;
         case "pty.ready":
+          clearTimeout(readyTimer);
           role = message.role;
           bound = true;
+          ready = true;
           resumed = message.resumed === true;
           onResize();
-          if (resumed) notice("psu: resumed your detached shell");
+          if (resumed)
+            notice(expectKind ? "psu: back in your running psu" : "psu: resumed your detached shell");
           else if (initialInput)
             send({
               type: "pty.input",
@@ -711,8 +854,19 @@ function defaultOpenHostedTerminal({ socketUrl, initialInput, notice }) {
     // An error is always followed by close, which is where this settles.
     socket.addEventListener("error", () => {});
     socket.addEventListener("close", (event) => {
+      clearTimeout(readyTimer);
       cleanup();
-      resolve({ exit, resumed, bound, closeCode: event.code, closeReason: event.reason });
+      if (expectKind && !ready && !kindUnavailable &&
+          event.code === HOSTED_CLOSE_HOST_CLOSED && event.reason === "channel_kind_unknown")
+        kindUnavailable = "unknown";
+      resolve({
+        exit,
+        resumed,
+        bound,
+        closeCode: event.code,
+        closeReason: event.reason,
+        ...(kindUnavailable ? { kindUnavailable } : {}),
+      });
     });
   });
 }
@@ -764,7 +918,7 @@ function assertProfileUsable(profile, deps) {
     );
   }
   if (profile.kind === "papercusp-hosted") return;
-  for (const command of ["ssh", "gcloud"]) {
+  for (const command of machineTransport(profile).commands) {
     if (!deps.commandAvailable(command)) {
       throw new Error(
         `Connection '${profile.name}' requires '${command}' on the local PATH`,
@@ -817,7 +971,7 @@ async function establishForward(profile, deps) {
       localPort,
       remoteOperatorPort: profile.remoteOperatorPort,
       controlPersistSeconds: 60,
-      extraArgs: gcpIapExtraArgs(profile),
+      extraArgs: machineTransport(profile).extraArgs(profile),
     });
     const result = await deps.runCommand(
       master.command,
@@ -826,7 +980,7 @@ async function establishForward(profile, deps) {
     );
     if (result.code !== 0) {
       throw new Error(
-        `Could not establish '${profile.name}'. OpenSSH host-key and authentication policy is authoritative; inspect the error above and verify known_hosts, OS Login, and IAP permission.`,
+        `Could not establish '${profile.name}'. OpenSSH host-key and authentication policy is authoritative; inspect the error above and verify ${machineTransport(profile).verify}.`,
       );
     }
   }
@@ -868,6 +1022,14 @@ function hostedSessionKey(profile, workspaceId, argv, program = "psu") {
  */
 const HOSTED_CLOSE_CONNECTOR_UNAVAILABLE = 4411;
 const HOSTED_CLOSE_CONNECTOR_DISCONNECTED = 4412;
+/** The relay's close when the host itself ended the channel; the reason is the host's. */
+const HOSTED_CLOSE_HOST_CLOSED = 4000;
+/**
+ * How long to wait for the machine to start psu (D-002) before treating its host as older than
+ * the psu kind. A host that knows the kind answers at once, with `pty.ready` or
+ * `channel_kind_unknown`; only a host older than both says nothing at all.
+ */
+export const HOSTED_PSU_READY_TIMEOUT_MS = 15_000;
 
 const HOSTED_ERROR_GUIDANCE = {
   cli_token_required: "psu is not signed in",
@@ -1091,6 +1253,35 @@ async function awaitHostedLink(profile, workspace, budget, deps) {
   );
 }
 
+/**
+ * The line psu types into the shell on a hosted workspace. Papercusp-hosted
+ * machines do not install psu for the workspace account yet (WI-10003949), and
+ * a bare `exec` of a missing program exits 127 and closes the connection. So
+ * the program is started only when the shell finds it; otherwise the shell says
+ * so and stays open. The terminal echoes this line up to three times before it
+ * runs, so it clears the screen first. The trailing CR is the Enter key: the
+ * remote terminal turns it into a newline.
+ */
+export function hostedForwardInput(program, forwardedArgv) {
+  const start = `exec env PAPERCUSP_PSU_CONNECTION_FORWARDED=1 ${program}${forwardedArgv
+    .map((cell) => ` ${shellQuote(cell)}`)
+    .join("")}`;
+  const missing = `${program} cannot start on this cloud workspace yet, so you are in its shell. Start agents from New Session in the portal; type exit to leave.`;
+  return `printf '\\033[H\\033[2J'; command -v ${program} >/dev/null && ${start}; printf '%s\\n' ${shellQuote(missing)}\r`;
+}
+
+/** Why a cloud workspace will not start psu with these arguments, in the customer's terms. */
+export function hostedPsuArgvRefusal(reason) {
+  const allowed = "--agent, --model, --label, --no-picker, --resume and --fork";
+  const [kind, flag] = String(reason ?? "").split(":");
+  const what =
+    kind === "flag_not_allowed" ? `${flag} is not available there`
+      : kind === "flag_needs_value" ? `${flag} needs a value`
+        : kind === "flag_value_refused" ? `that ${flag} value is not accepted there`
+          : "these arguments are not accepted there";
+  return `psu on a Papercusp cloud workspace takes only ${allowed}; ${what}.`;
+}
+
 async function runHostedConnection(profile, workspaceId, forwardedArgv, transport, pickerAllowed, deps) {
   const budget = { polls: HOSTED_RECONNECT_POLLS };
   const workspaces = await listHostedWorkspaces(profile, deps);
@@ -1137,9 +1328,15 @@ async function runHostedConnection(profile, workspaceId, forwardedArgv, transpor
   const session =
     transport.sessionKey ??
     hostedSessionKey(profile, workspace.id, forwardedArgv, program);
-  const initialInput = `exec env PAPERCUSP_PSU_CONNECTION_FORWARDED=1 ${program}${forwardedArgv
-    .map((cell) => ` ${shellQuote(cell)}`)
-    .join("")}\r`;
+  const initialInput = hostedForwardInput(program, forwardedArgv);
+  // D-002: the machine starts psu itself, so nothing is typed into a shell. Its arguments are
+  // held to the same allowlist the cloud and the host apply; saying so here names the flag
+  // instead of a refusal code. pui keeps the shell line.
+  let startsPsu = program === "psu";
+  if (startsPsu) {
+    const checked = parseHostedPsuCustomerArgv(forwardedArgv);
+    if (!checked.ok) throw new Error(hostedPsuArgvRefusal(checked.reason));
+  }
   // Each pass mints a fresh single-use ticket; the same session key means a
   // retry lands on the same shell if one was already started.
   for (;;) {
@@ -1147,10 +1344,12 @@ async function runHostedConnection(profile, workspaceId, forwardedArgv, transpor
       deps,
       profile,
       `/hosted/cli/workspaces/${encodeURIComponent(workspace.id)}/terminal`,
-      { method: "POST", body: { session } },
+      { method: "POST", body: startsPsu ? { session, program: "psu", argv: forwardedArgv } : { session } },
     );
     const openError = opened.payload?.error;
     const openCode = typeof openError === "string" ? openError : openError?.code;
+    if (opened.status === 400 && openCode === "psu_argv_refused")
+      throw new Error(hostedPsuArgvRefusal(openError?.reason));
     if (opened.status === 409 && openCode === "workspace_not_reachable") {
       // The link dropped between the listing and the ticket.
       workspace = await awaitHostedLink(
@@ -1177,16 +1376,33 @@ async function runHostedConnection(profile, workspaceId, forwardedArgv, transpor
     }
     if (!ticket || !HOSTED_TICKET_RE.test(ticket))
       throw new Error(`The Papercusp cloud returned an unusable session for ${workspace.id}`);
+    // An older cloud ignores `program` and mints a shell ticket; its reply does not say `psu`.
+    // That ticket is the interim path, so use it with the shell line.
+    if (startsPsu && opened.payload.program !== "psu") startsPsu = false;
     const socketUrl = new URL("/api/hosted/connectors/socket", profile.origin);
     socketUrl.protocol = socketUrl.protocol === "http:" ? "ws:" : "wss:";
     socketUrl.searchParams.set("ticket", ticket);
+    if (startsPsu) {
+      socketUrl.searchParams.set("kind", "psu");
+      socketUrl.searchParams.set("argv", JSON.stringify(forwardedArgv));
+    }
 
     deps.notice(`psu: connected to ${describeHostedWorkspace(profile, workspace, deps.now())}`);
     const result = await deps.openHostedTerminal({
       socketUrl: socketUrl.toString(),
-      initialInput,
+      initialInput: startsPsu ? null : initialInput,
       notice: deps.notice,
+      ...(startsPsu ? { expectKind: "psu" } : {}),
     });
+    if (startsPsu && result.kindUnavailable) {
+      // The machine's host predates D-002 (or this relay does): fall back to its shell, never
+      // to a process of the machine's own service account (D-002 rule 5).
+      deps.notice(
+        `psu: ${workspace.id} cannot start psu for you yet (${result.kindUnavailable}); opening its shell instead`,
+      );
+      startsPsu = false;
+      continue;
+    }
     if (result.exit) return { handled: true, argv: forwardedArgv, exitCode: result.exit.code ?? 1 };
     const reason = result.closeReason ? ` (${result.closeReason})` : "";
     const linkLost =
@@ -1194,10 +1410,11 @@ async function runHostedConnection(profile, workspaceId, forwardedArgv, transpor
       result.closeCode === HOSTED_CLOSE_CONNECTOR_DISCONNECTED;
     if (result.bound) {
       const resume = `${program} --connect=${profile.name}/${workspace.id} --connect-session=${opened.payload.session ?? session}`;
+      const running = startsPsu ? "psu keeps running" : "Your shell stays alive";
       throw new Error(
         linkLost
-          ? `The workspace machine's link to Papercusp cloud dropped${reason}. Your shell stays alive on the machine for a while: once it reconnects, run ${resume} to resume it.`
-          : `The connection to ${workspace.id} closed${reason}. Your shell stays alive on the machine for a while: run ${resume} to resume it.`,
+          ? `The workspace machine's link to Papercusp cloud dropped${reason}. ${running} on the machine for a while: once it reconnects, run ${resume} to resume it.`
+          : `The connection to ${workspace.id} closed${reason}. ${running} on the machine for a while: run ${resume} to resume it.`,
       );
     }
     // No shell was started, so there is nothing to resume. A lost link before
@@ -1376,14 +1593,22 @@ export async function runPsuConnectionFrontController(argv, overrides = {}) {
     deps.output(`Signed out of ${describePsuConnectionProfile(profile)}`);
     return { handled: true, argv: forwardedArgv, exitCode: 0 };
   }
-  if (transport.addName) {
-    const profile = normalizeGcpIapProfile({
-      name: transport.addName,
-      projectId: transport.projectId,
-      zone: transport.zone,
-      instanceName: transport.instanceName,
-      sshUser: transport.sshUser,
-    });
+  if (transport.addName || transport.addAwsName) {
+    const profile = transport.addAwsName
+      ? normalizeAwsSsmProfile({
+          name: transport.addAwsName,
+          region: transport.region,
+          instanceId: transport.instanceName,
+          sshUser: transport.sshUser,
+          awsProfile: transport.awsProfile,
+        })
+      : normalizeGcpIapProfile({
+          name: transport.addName,
+          projectId: transport.projectId,
+          zone: transport.zone,
+          instanceName: transport.instanceName,
+          sshUser: transport.sshUser,
+        });
     if (store.profiles.some((saved) => saved.name === profile.name)) {
       throw new Error(
         `Connection profile '${profile.name}' already exists; remove it before replacing it`,
@@ -1495,7 +1720,7 @@ export async function runPsuConnectionFrontController(argv, overrides = {}) {
       throw new Error(`Remote psu transport ended on ${result.signal}`);
     if (result.code === 255) {
       throw new Error(
-        `Remote psu transport failed. The tmux session remains reattachable; retry ${transport.program} --connect=${profile.name} after correcting the OpenSSH/IAP error above.`,
+        `Remote psu transport failed. The tmux session remains reattachable; retry ${transport.program} --connect=${profile.name} after correcting the OpenSSH/${machineTransport(profile).tunnel} error above.`,
       );
     }
     return { handled: true, argv: forwardedArgv, exitCode: result.code ?? 1 };

@@ -22,6 +22,8 @@ import {
   BASELINE_ID,
   compareArms,
   runBattery,
+  captureSourceHash,
+  EVAL_BATTERY_SOURCE_HASHES,
   rubricHash,
   type BatteryCell,
   type BatteryRubric,
@@ -32,8 +34,8 @@ import {
   type Subject,
 } from '@papercusp/eval-battery';
 import { LEARNING_MODEL_SPEC } from '../learning/model-policy';
-import { divergenceSignals, type DivergenceSignals } from './divergence';
-import { cutTranscript, intentFromTranscript, renderTurns } from './transcript';
+import { divergenceSignals, REPLAY_DIVERGENCE_SOURCE_HASH, type DivergenceSignals } from './divergence';
+import { cutTranscript, intentFromTranscript, renderTurns, REPLAY_TRANSCRIPT_SOURCE_HASH } from './transcript';
 import {
   replayCaseRef,
   type ReplayCase,
@@ -43,6 +45,9 @@ import {
   type ReplayStore,
   type ReplayVariant,
 } from './types';
+
+/** Original native load receipt; unsupported or unobserved loaders stay unknown. */
+export const REPLAY_BATTERY_SOURCE_HASH = captureSourceHash(import.meta.url);
 
 /** The zero-cost historical anchor: echoes the original continuation. */
 export const REPLAY_BASELINE_VARIANT: ReplayVariant = {
@@ -118,6 +123,9 @@ export interface ReplayBatteryConfig {
   variants: ReplayVariant[];
   cases: ReplayCase[];
   repeats: number;
+  /** Historical echo is the default. Matched comparisons re-run the baseline
+   * through the same student as challengers, with the same context and rubric. */
+  baselineMode?: 'historical' | 'matched';
   rubric?: BatteryRubric;
   /** Judge-trace budget (default 24_000 chars). */
   maxDistillChars?: number;
@@ -170,12 +178,17 @@ export interface ReplayVariantAggregate {
 
 export interface ReplayBatteryResult {
   batteryId: string;
+  /** Modules reported by the battery that actually ran, not its caller's
+   * imported default. A custom battery may omit its execution receipt. */
+  loadedCode?: Readonly<Record<string, string | null>>;
   outcomes: ReplayOutcome[];
   perVariant: ReplayVariantAggregate[];
   /** Baseline-vs-candidates ranking (compareArms semantics); null when the
    *  config carries no baseline variant or no candidates. */
   comparison: Omit<CompareSelectResult, 'scenarioId'> | null;
   totalCostUsd: number;
+  /** False means totalCostUsd is only the known lower bound; do not settle it as complete spend. */
+  costMeasured: boolean;
   rubricHash: string;
   /** True when the spend cap refused at least one cell. */
   budgetExhausted: boolean;
@@ -200,7 +213,9 @@ export async function runReplayBattery(
   // accumulated runner+judge spend reaches the cap (one in-flight cell may
   // overshoot it — a cutoff, not a precise limiter).
   let spentUsd = 0;
+  let judgeChargeUnknown = false;
   const guard = () => {
+    if (judgeChargeUnknown) throw new Error('replay judge charge unmeasured — remaining cells refused before spending');
     if (config.maxSpendUsd !== undefined && spentUsd >= config.maxSpendUsd) {
       throw new ReplayBudgetExceededError(spentUsd, config.maxSpendUsd);
     }
@@ -211,7 +226,7 @@ export async function runReplayBattery(
       guard();
       // The historical baseline is the original continuation, echoed at zero
       // cost — the judge scores what actually happened as the anchor.
-      if (cell.variant.variantId === BASELINE_ID && cell.replayCase.kind === 'historical') {
+      if (config.baselineMode !== 'matched' && cell.variant.variantId === BASELINE_ID && cell.replayCase.kind === 'historical') {
         return {
           outputText: continuationTextForCase(cell.replayCase, maxDistillChars) ?? '',
           costUsd: 0,
@@ -271,7 +286,20 @@ export async function runReplayBattery(
     { cells, rubric, maxDistillChars },
     {
       subject,
-      llmCall: deps.llmCall,
+      llmCall: async (opts) => {
+        let reply;
+        try {
+          reply = await deps.llmCall(opts);
+        } catch (error) {
+          const cost = (error as { costUsd?: unknown } | null)?.costUsd;
+          if (typeof cost === 'number' && Number.isFinite(cost) && cost >= 0) spentUsd += cost;
+          else judgeChargeUnknown = true;
+          throw error;
+        }
+        if (Number.isFinite(reply.costUsd) && reply.costUsd >= 0) spentUsd += reply.costUsd;
+        else judgeChargeUnknown = true;
+        return reply;
+      },
       now: deps.now,
       ...(deps.sleep ? { sleep: deps.sleep } : {}),
       ...(deps.ratePauseHooks ? { ratePauseHooks: deps.ratePauseHooks } : {}),
@@ -294,7 +322,6 @@ export async function runReplayBattery(
           });
         },
         onScore: ({ runId, score }) => {
-          spentUsd += score.costUsd;
           return deps.store?.recordScore(runId, {
             d1: score.d1,
             d2: score.d2,
@@ -340,7 +367,7 @@ export async function runReplayBattery(
         d2: r.score.d2,
         d3: r.score.d3,
         composite: r.score.composite,
-        judgeUsd: r.score.costUsd,
+        judgeUsd: r.judgeCostUsd,
       };
     }
     return {
@@ -350,7 +377,7 @@ export async function runReplayBattery(
       d2: 0,
       d3: 0,
       composite: 0,
-      judgeUsd: 0,
+      judgeUsd: r.judgeCostUsd,
       ...(r.error !== undefined ? { error: r.error } : {}),
     };
   });
@@ -396,7 +423,13 @@ export async function runReplayBattery(
     perVariant,
     comparison,
     totalCostUsd: outcomes.reduce((s, o) => s + o.runUsd + o.judgeUsd, 0),
+    costMeasured: results.every((r) => r.judgeCostMeasured &&
+      (r.handle != null ? Number.isFinite(r.handle.costUsd) && r.handle.costUsd >= 0
+        : r.error?.includes('replay budget cap reached') === true)),
     rubricHash: rubricHash(rubric),
     budgetExhausted,
+    loadedCode: { replayBattery: REPLAY_BATTERY_SOURCE_HASH,
+      transcript: REPLAY_TRANSCRIPT_SOURCE_HASH, divergence: REPLAY_DIVERGENCE_SOURCE_HASH,
+      ...EVAL_BATTERY_SOURCE_HASHES },
   };
 }

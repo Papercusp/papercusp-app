@@ -46,7 +46,9 @@ import {
   type HostedProviderDelegationAdapter,
   type HostedProviderDelegationRecord,
 } from '../workspace-host/hosted-provider-delegation';
-import { gcpDelegationOrganization, resolveHostedGcpAuth } from '../workspace-host/hosted-gcp-auth';
+import { resolveHostedGcpAuth } from '../workspace-host/hosted-gcp-auth';
+import { awsProviderDelegationAdapter } from '../workspace-host/hosted-aws-auth';
+import { hostedDelegationOrganization } from '../workspace-host/hosted-delegation-organization';
 import { papercuspHostingGrantEffective } from '../workspace-host/hosted-gcp-hosting';
 import { HostedSessionCookieCodec } from '../auth/hosted-session';
 import { createWorkspaceHostProvisioningClient } from '../dbos/workspace-host-provision-client';
@@ -77,6 +79,10 @@ export const HOSTED_RUNTIME_MOUNTED_ROUTE_KEYS = [
   'POST /hosted/browser/workspace-hosts/action',
   'POST /hosted/browser/onboarding/first-workspace',
   'POST /hosted/browser/onboarding/select-workspace',
+  'GET /hosted/browser/onboarding/tutorial-progress',
+  'POST /hosted/browser/onboarding/tutorial-progress',
+  'POST /hosted/browser/onboarding/tutorial-help',
+  'POST /hosted/browser/onboarding/tutorial-speech',
   'POST /hosted/workspaces/:workspaceId/connectors/enroll',
   'POST /hosted/workspaces/:workspaceId/connectors/rotate',
   'POST /hosted/workspaces/:workspaceId/connectors/revoke',
@@ -96,6 +102,10 @@ export const HOSTED_RUNTIME_MOUNTED_ROUTE_KEYS = [
   'GET /hosted/cli/workspaces',
   'POST /hosted/cli/workspaces/:workspaceId/terminal',
   'POST /hosted/cli/logout',
+  // EAA P-008 (D-031): a local install links to the portal relay by the same device grant.
+  'POST /hosted/relay/device/code',
+  'POST /hosted/relay/device/token',
+  'POST /hosted/relay/unlink',
   'GET /hosted/auth/sign-in',
   'GET /hosted/auth/callback',
   'POST /hosted/auth/logout',
@@ -279,7 +289,7 @@ function routeKey(route: { method: string; path: string }): string {
 }
 
 export function productionProviderDelegationAdapters(): Readonly<Record<'gcp' | 'aws' | 'azure', HostedProviderDelegationAdapter>> {
-  const unavailable = (provider: 'aws' | 'azure'): HostedProviderDelegationAdapter => ({
+  const unavailable = (provider: 'azure'): HostedProviderDelegationAdapter => ({
     async verify() { throw new Error(`hosted_provider_delegation_${provider}_adapter_unavailable`); },
     async revoke(record) {
       return { evidenceRef: `delegation://${record.workspaceId}/${record.connectionId}/${record.generation}/revoked` };
@@ -313,7 +323,10 @@ export function productionProviderDelegationAdapters(): Readonly<Record<'gcp' | 
       return { evidenceRef: `delegation://${record.workspaceId}/${record.connectionId}/${record.generation}/revoked` };
     },
   };
-  return { gcp, aws: unavailable('aws'), azure: unavailable('azure') };
+  // AWS walks the real chain: control plane -> the org's own role -> the customer's role
+  // with the org's ExternalId, then proves the customer role refuses it WITHOUT the ExternalId
+  // (aws-byoc-gcp-parity P-008, D-001, D-007).
+  return { gcp, aws: awsProviderDelegationAdapter(), azure: unavailable('azure') };
 }
 
 function tenantServerContext(principal: HostedPrincipal): VerifiedTenantServerContext {
@@ -373,7 +386,8 @@ export async function createHostedRuntime(
   };
   const connectorGateway = new HostedWorkspaceConnectorGateway(new PostgresHostedWorkspaceConnectorStore(runService));
   const delegationAdapters = dependencies.providerDelegationAdapters ?? productionProviderDelegationAdapters();
-  const delegationOrganization = dependencies.delegationOrganization ?? gcpDelegationOrganization;
+  const delegationOrganization = dependencies.delegationOrganization
+    ?? ((organizationId: string) => hostedDelegationOrganization(organizationId));
   const providerDelegationManager = (principal: HostedPrincipal) =>
     new HostedProviderDelegationManager(
       new PostgresHostedProviderDelegationStore(
@@ -410,6 +424,21 @@ export async function createHostedRuntime(
   // The first-workspace door (D-384) is the one browser leaf that runs OUTSIDE the tenant
   // runner: it is the bootstrap that creates the tenant's first binding. Its gate defaults
   // closed — an empty organization set admits nobody.
+  // ONE enqueuer for every hosted provision this process starts: the first-workspace door AND
+  // the browser provision route (a retry of a failed first build). This process never runs DBOS,
+  // so without it the browser route forwards the raw body to the controller and loses the
+  // server-derived actor and D-015 bring-up (measured: canary host-0f9b1ba8db30d143becc130a
+  // retries r2..r6 all reached the workflow with neither).
+  // The same client also enqueues lifecycle actions and destroy for the browser action route
+  // (WI-10005363): forwarding those raw lost the actor and answered a false 504.
+  const dbosClient = configuration.provisioningDbosAppVersion
+    ? createWorkspaceHostProvisioningClient({
+        systemDatabaseUrl: getHarnessAdminUrlWithSource().url,
+        appVersion: configuration.provisioningDbosAppVersion,
+      })
+    : undefined;
+  const provisioning = dependencies.hostedBrowser?.provisioning ?? dbosClient;
+  const operations = dependencies.hostedBrowser?.operations ?? dbosClient;
   const firstWorkspace = dependencies.hostedBrowser?.firstWorkspace ?? createHostedFirstWorkspace(
     createHostedFirstWorkspaceDependencies({
       controlPlaneWorkspaceId: configuration.controlPlaneWorkspaceId,
@@ -417,14 +446,7 @@ export async function createHostedRuntime(
       delegationAdapters,
       delegationOrganization,
       enabledOrganizations: configuration.firstWorkspaceOrganizations ?? new Set(),
-      ...(configuration.provisioningDbosAppVersion
-        ? {
-            provisioning: createWorkspaceHostProvisioningClient({
-              systemDatabaseUrl: getHarnessAdminUrlWithSource().url,
-              appVersion: configuration.provisioningDbosAppVersion,
-            }),
-          }
-        : {}),
+      ...(provisioning ? { provisioning } : {}),
       ...(dependencies.hostedBrowser?.provisioningAvailable
         ? { provisioningAvailable: dependencies.hostedBrowser.provisioningAvailable }
         : {}),
@@ -442,6 +464,8 @@ export async function createHostedRuntime(
       ...(dependencies.hostedBrowser ?? {}),
       runTenant: dependencies.hostedBrowser?.runTenant ?? runTenant,
       firstWorkspace,
+      ...(provisioning ? { provisioning } : {}),
+      ...(operations ? { operations } : {}),
       issueSessionCookie:
         dependencies.hostedBrowser?.issueSessionCookie ??
         ((sessionId, expiresAt) => sessionCookies.serialize(sessionId, expiresAt, new Date())),

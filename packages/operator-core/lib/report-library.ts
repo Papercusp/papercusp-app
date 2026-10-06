@@ -42,8 +42,12 @@
  *
  * Server-only.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type postgres from 'postgres';
+import {
+  parseGoalOwnerReportSnapshot, serializeGoalOwnerReportSnapshot,
+  type GoalOwnerReportSnapshotV1,
+} from '@papercusp/chat-protocol';
 
 /**
  * Hard cap on a stored markdown body (R-1). An over-cap body is REFUSED with its
@@ -95,6 +99,8 @@ export interface PublishReportInput {
   title: string;
   summary?: string;
   bodyMd?: string;
+  /** Optional typed metadata on this existing immutable report row. */
+  goalOwnerReport?: GoalOwnerReportSnapshotV1;
   kind?: ReportKind;
   subject?: ReportSubject;
   visibility?: ReportVisibility;
@@ -111,6 +117,8 @@ export interface ReportRecord {
   title: string;
   summary: string;
   bodyMd: string;
+  bodySha256: string;
+  goalOwnerReport: GoalOwnerReportSnapshotV1 | null;
   kind: ReportKind;
   subject: { kind: ReportSubjectKind; ref: string | null; label: string | null };
   origin: { harnessSlug: string | null; authorOwnerId: string | null; authorSessionRef: string | null };
@@ -159,6 +167,7 @@ interface DbRow {
   title: string;
   summary: string;
   body_md: string;
+  goal_owner_report: GoalOwnerReportSnapshotV1 | null;
   kind: string;
   subject_kind: string;
   subject_ref: string | null;
@@ -186,6 +195,8 @@ function mapRow(row: DbRow): ReportRecord {
     title: row.title,
     summary: row.summary ?? '',
     bodyMd: row.body_md ?? '',
+    bodySha256: reportBodySha256(row.body_md ?? ''),
+    goalOwnerReport: row.goal_owner_report ?? null,
     kind: row.kind as ReportKind,
     subject: {
       kind: row.subject_kind as ReportSubjectKind,
@@ -214,7 +225,11 @@ const SELECT_COLS = `
   subject_kind, subject_ref, subject_label,
   origin_harness_slug, author_owner_id, author_session_ref,
   visibility, supersedes_report_id, lineage_id, source, tags,
-  published_at, updated_at, retired_at`;
+  published_at, updated_at, retired_at, goal_owner_report`;
+
+/** SHA-256 of the exact persisted UTF-8 body; no trimming or normalization. */
+export const reportBodySha256 = (bodyMd: string): string =>
+  createHash('sha256').update(bodyMd, 'utf8').digest('hex');
 
 const clampLimit = (limit?: number): number =>
   Math.max(1, Math.min(Math.trunc(limit ?? 50), 200));
@@ -288,13 +303,23 @@ export async function publishReport(
   if (!title) throw new Error('report title is required');
   if (!input.workspaceId) throw new Error('report workspaceId is required');
 
-  const bodyMd = input.bodyMd ?? '';
+  const snapshot = input.goalOwnerReport === undefined ? null : parseGoalOwnerReportSnapshot(input.goalOwnerReport);
+  if (input.goalOwnerReport !== undefined && !snapshot) throw new Error('invalid report goalOwnerReport');
+  if (snapshot && snapshot.workspaceId !== input.workspaceId) throw new Error('invalid report snapshot workspaceId');
+  if (snapshot && input.subject && (input.subject.kind !== 'goal' || input.subject.ref !== snapshot.goalId)) {
+    throw new Error('invalid report snapshot subject');
+  }
+  const canonicalBody = snapshot ? serializeGoalOwnerReportSnapshot(snapshot) : null;
+  if (canonicalBody !== null && input.bodyMd !== undefined && input.bodyMd !== canonicalBody) {
+    throw new Error('invalid report snapshot bodyMd: must match the canonical serialization');
+  }
+  const bodyMd = canonicalBody ?? input.bodyMd ?? '';
   const bytes = Buffer.byteLength(bodyMd, 'utf8');
   if (bytes > REPORT_BODY_MAX_BYTES) throw new ReportBodyTooLargeError(bytes);
 
   const kind = requireOneOf(input.kind, REPORT_KINDS, 'audit', 'kind');
   const visibility = requireOneOf(input.visibility, REPORT_VISIBILITIES, 'owner', 'visibility');
-  const subject = normalizeSubject(input.subject);
+  const subject = normalizeSubject(snapshot ? { ...input.subject, kind: 'goal', ref: snapshot.goalId } : input.subject);
 
   const reportId = `rpt_${randomUUID()}`;
   let lineageId = reportId;
@@ -320,12 +345,13 @@ export async function publishReport(
       workspace_id, report_id, title, summary, body_md, kind,
       subject_kind, subject_ref, subject_label,
       origin_harness_slug, author_owner_id, author_session_ref,
-      visibility, supersedes_report_id, lineage_id, source, tags
+      visibility, supersedes_report_id, lineage_id, source, tags, goal_owner_report
     ) VALUES (
       ${input.workspaceId}, ${reportId}, ${title}, ${input.summary?.trim() ?? ''}, ${bodyMd}, ${kind},
       ${subject.kind}, ${subject.ref}, ${subject.label},
       ${origin.harnessSlug ?? null}, ${origin.authorOwnerId ?? null}, ${origin.authorSessionRef ?? null},
-      ${visibility}, ${supersedes}, ${lineageId}, ${input.source ?? 'agent'}, ${input.tags ?? []}::text[]
+      ${visibility}, ${supersedes}, ${lineageId}, ${input.source ?? 'agent'}, ${input.tags ?? []}::text[],
+      ${snapshot === null ? null : sql.json(snapshot as unknown as postgres.JSONValue)}
     )
     RETURNING ${sql.unsafe(SELECT_COLS)}`;
   return mapRow(row);

@@ -16,7 +16,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
-import os from "node:os";
 import path from "node:path";
 import {
   assertPrivateIpcFixture,
@@ -24,7 +23,9 @@ import {
   desktopPerfRunPayload,
   hasRunOutcomeMeasure,
   operatorBaseUrl,
+  prepareMeasures,
   readMeasures,
+  readPublisherToken,
   recordBinaryIdentity,
   readBuildIdentity,
   recordHostPressure,
@@ -32,6 +33,9 @@ import {
   type PrivateIpcFixture,
 } from "./perf-report";
 import { SPEC_TIMEOUT_MS } from "./app-mount";
+import { startNativeProcessProbe, stopNativeProcessProbe } from './native-process-probe';
+
+let nativeProcessProbe: ChildProcess | null = null;
 
 /**
  * Allocate a free ephemeral TCP port from the OS: bind to :0, read back what
@@ -333,6 +337,9 @@ let tauriDriver: ChildProcess | null = null;
  * ever reach processes THIS run started.
  */
 function reapDriverTree(): void {
+  // Abrupt launcher exits cannot leave a diagnostic child sampling forever.
+  nativeProcessProbe?.kill('SIGTERM');
+  nativeProcessProbe = null;
   const pid = tauriDriver?.pid;
   tauriDriver = null;
   if (!pid) return;
@@ -474,14 +481,13 @@ async function publishMeasures(): Promise<void> {
 
   // The ingest route requires a trusted bearer; the superuser token is the local
   // operator credential (resolves to trust:'trusted' — packages/agent-mcp/src/auth.ts).
-  const tokenPath = path.join(os.homedir(), ".papercusp", "superuser-token");
   let token: string;
   try {
-    token = readFileSync(tokenPath, "utf8").trim();
-  } catch {
+    token = readPublisherToken();
+  } catch (error) {
     // eslint-disable-next-line no-console
     console.error(
-      `[perf-report] cannot publish ${measures.length} measure(s): no readable token at ${tokenPath}`,
+      `[perf-report] cannot publish ${measures.length} measure(s): no readable scoped operator token: ${String(error)}`,
     );
     return;
   }
@@ -532,7 +538,7 @@ async function publishMeasures(): Promise<void> {
         `(${failing.length} over budget): ${JSON.stringify(await res.json().catch(() => ({})))}`,
     );
     // Only clear once the operator has durably accepted them — a failed publish
-    // leaves the file so the next run's onPrepare reset is the deliberate discard.
+    // retains this run's isolated file for recovery, never a later run's input.
     resetMeasures();
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -596,14 +602,20 @@ export const config: WebdriverIO.Config = {
   // resolveDriverPort's doc comment for why that — not mutating `config`
   // in-place — is what actually reaches worker processes).
   async onPrepare() {
-    // Reset FIRST. WDIO still calls onComplete when a later preflight throws; if
-    // stale measures survive until then, its host-pressure stamp can make an old
-    // crashed run look like a fresh green one.
+    // Allocate this launcher's collection FIRST, then reset only its file. WDIO
+    // still calls onComplete after preflight failure; it must never publish or
+    // delete an overlapping launcher's outcomes (including the same profile).
+    const collectionPath = prepareMeasures();
+    // eslint-disable-next-line no-console
+    console.log(`[perf-report] measure collection ${collectionPath}`);
     resetMeasures();
     initialPrivateIpcFixture = null;
     assertNativeWebDriverAvailable();
     assertInstallationComplete();
     initialPrivateIpcFixture = assertPrivateIpcFixture();
+    // A named acceptance run requires a receipt. Reject a missing scoped key
+    // before booting the native app or measuring an unpublishable sample.
+    if (process.env.PAPERCUSP_PERF_RUN_ID?.trim()) readPublisherToken();
     // Announce WHAT is being measured, with its age. This is the detector that was
     // missing: the resolver silently fell back to a six-week-old in-tree debug
     // binary for this suite's entire existence (see cargoTargetDir), and nothing in
@@ -662,6 +674,12 @@ export const config: WebdriverIO.Config = {
       detached: true,
     });
     bindDriverReaper();
+    const nativeTraceFile = process.env.PAPERCUSP_PERF_NATIVE_TRACE_FILE;
+    if (nativeTraceFile) {
+      if (!tauriDriver.pid) throw new Error('Native diagnostic driver did not start');
+      nativeProcessProbe = startNativeProcessProbe(tauriDriver.pid, TAURI_APP_PATH, nativeTraceFile,
+        process.env.PAPERCUSP_PERF_NATIVE_STACKS === '1');
+    }
   },
   // Publish BEFORE killing the driver so a publish hang can't leave tauri-driver
   // orphaned; the kill is in a finally for the same reason.
@@ -673,6 +691,8 @@ export const config: WebdriverIO.Config = {
       recordHostPressure("end");
       await publishMeasures();
     } finally {
+      await stopNativeProcessProbe(nativeProcessProbe);
+      nativeProcessProbe = null;
       reapDriverTree();
     }
   },

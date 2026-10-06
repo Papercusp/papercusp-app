@@ -26,6 +26,12 @@ import { ensureHarnessStatusSweep } from '@papercusp/operator-core/lib/harness-s
 import { ensureHostedWorkspaceHostRuntime } from '@papercusp/operator-core/lib/workspace-host/hosted-workspace-host-runtime';
 import { startEventLoopLagMonitor } from '@papercusp/operator-core/lib/event-loop-lag-monitor';
 import { isVmReleaseDistribution } from '@papercusp/operator-core/lib/vm-release-runtime-policy';
+import {
+  MCP_PROXY_TENANT_SERVICE,
+  loopbackPortHeldByForeignUid,
+  pinTenantLoopbackPort,
+  pinTenantLoopbackPorts,
+} from '@papercusp/operator-core/lib/process-supervision/tenant-loopback-port';
 // ensureWaveAdvanceSweep — RETIRED (P-044): the 30s wave-advance poll is no longer
 // started; all-waves-up-front promotion + the dispatch frontier replace it.
 import { registerAllExpirables } from '@papercusp/operator-core/lib/expirable-registrations';
@@ -33,6 +39,7 @@ import { setLaunchBlueprintResolver, installedAwareLaunchResolver } from '@paper
 import {
   backgroundWorkersEnabled,
   dbosLaunchesHere,
+  declareOperatorHostProcess,
   requestOnlyHost,
   utilityHostEnabled,
 } from '@papercusp/operator-core/lib/background-workers';
@@ -135,7 +142,17 @@ function startPackagedMcpProxy(): void {
     stop: stopPackagedMcpProxy,
   });
 
+  // WI-10005481: on a host shared by several Linux users, :9071 may be ANOTHER tenant's
+  // proxy. Pin this tenant's port first (moves PAPERCUSP_MCP_PROXY_PORT/BASE for every
+  // later reader and child), and never adopt a healthy proxy another uid owns.
+  pinTenantLoopbackPort(MCP_PROXY_TENANT_SERVICE);
   const port = Number(process.env.PAPERCUSP_MCP_PROXY_PORT || 9071);
+  if (loopbackPortHeldByForeignUid(port)) {
+    console.error(
+      `[host] packaged MCP proxy: :${port} belongs to another user — not adopting it and not starting one (WI-10005481)`,
+    );
+    return;
+  }
   void (async () => {
     if (BOOTSTRAP_STATE.packagedMcpProxyShutdownRequested) return;
     if (await packagedMcpProxyAlive(port)) return;
@@ -299,7 +316,7 @@ export async function waitForBootMigrationGate(timeoutMs = 20_000): Promise<void
       async () => {
         const { applyPendingMigrationsAtBoot } = await import('@papercusp/operator-core/lib/db-boot-migrate');
         const migrationAttempt = await withBoundedTimeout(
-          () => applyPendingMigrationsAtBoot(),
+          (signal) => applyPendingMigrationsAtBoot(signal),
           {
             fallback: null,
             timeoutMs,
@@ -357,8 +374,25 @@ const CPU_WORKER_BREAKER_IDENTITY = {
 };
 
 export function runBootstrap(): void {
+  // WI-10006280: declare THIS process an operator host before anything else. Every
+  // host runs this (hono-host primary, each clustered request worker via onWorker,
+  // bg-host, the desktop's serve.ts), and it is what releases the wake-delivery
+  // loops `agent-tools/index.ts` queues through `whenOperatorHostProcess`. A script
+  // that only imports the registry never calls it, so it never sweeps. Idempotent.
+  declareOperatorHostProcess();
   if (BOOTSTRAP_STATE.ran) return;
   BOOTSTRAP_STATE.ran = true;
+
+  // WI-10005481 / WI-10005586: decide this tenant's gateway, MCP-proxy and voice-WS ports
+  // by listener ownership BEFORE anything can spawn an agent or bind a voice listener, so
+  // no agent env carries a port another Linux user owns and tenants past the 8th still get
+  // voice. Synchronous (/proc read), idempotent, a no-op when the defaults are free or ours.
+  // Never fatal: a failure leaves the pre-fix defaults in place.
+  try {
+    pinTenantLoopbackPorts();
+  } catch (err) {
+    console.warn('[host] tenant loopback port pin failed (non-fatal):', err instanceof Error ? err.message : err);
+  }
 
   // Request-only hosts serve the HTTP/tool plane but do not own the host-wide
   // warmers, voice transports, or credential refreshers. Keep this predicate

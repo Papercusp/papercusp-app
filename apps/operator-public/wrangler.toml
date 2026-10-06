@@ -57,6 +57,20 @@ main = "src/index.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+# P-007 (cupboard-release-pipeline-content-trust-2026-09-16, plan Decision D-010).
+# The Worker runs the TypeScript compiler (tooldef `checkScript`, via content-pin.ts) to compute a
+# recipe's authority server-side. typescript.js reads the CJS globals `__filename` / `__dirname`
+# at init (getNodeSystem -> isFileSystemCaseSensitive); this Worker bundle is ESM and has neither,
+# so without these defines the compiler throws `ReferenceError: __filename is not defined` and
+# parse-check silently degrades to a REGEX scan that misses destructured calls
+# (`const { coord } = tools; coord.send()`). Each value is a JS string LITERAL (hence the escaped
+# quotes). Guarded by src/__tests__/wrangler-typescript-defines.test.ts; ensureParseCheckReady()
+# now throws instead of degrading if these are ever dropped. Needs Workers Paid (the cold compiler
+# import is ~360 ms CPU — see D-010 CAVEAT).
+[define]
+__filename = "\"/typescript.js\""
+__dirname = "\"/\""
+
 [vars]
 ENVIRONMENT = "production"
 CUPBOARD_HOST = "cupboard.papercusp.com"

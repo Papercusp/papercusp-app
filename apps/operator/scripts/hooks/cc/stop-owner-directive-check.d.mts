@@ -4,13 +4,16 @@
 // apps/operator/scripts/hooks/cc/stop-owner-directive-check.mjs and regenerate.
 /**
  * The block reason for this Stop, or null to let the turn end.
- * @param {{ hook: Record<string, unknown>, env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch }} input
+ * @param {{ hook: Record<string, unknown>, env?: NodeJS.ProcessEnv, fetchImpl?: typeof fetch, isNested?: () => boolean }} input
  * @returns {Promise<string | null>}
  */
-export function evaluateStop({ hook, env, fetchImpl }: {
+export function evaluateStop({ hook, env, fetchImpl, isNested, }: {
     hook: Record<string, unknown>;
     env?: NodeJS.ProcessEnv;
     fetchImpl?: typeof fetch;
+    isNested?: () => boolean;
 }): Promise<string | null>;
+export { nestedCliCached };
 /** Hard wall on the operator call; past it the turn ends unchecked. */
 export const CHECK_TIMEOUT_MS: 2500;
+import { nestedCliCached } from './pc_nested_cli.mjs';

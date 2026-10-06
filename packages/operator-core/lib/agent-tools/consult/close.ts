@@ -43,7 +43,7 @@ export default defineTool({
         .describe("'answered' = structured answer below; 'cant_help' = honest can't-help with reason; 'graduate' = the consult outgrew its bounds (D-004) — mints a shared work item, requires reason."),
       answer: hardText(8000).optional().describe('The settled answer (required for outcome=answered).'),
       confidence: z.number().min(0).max(1).optional().describe('Confidence in the answer, 0..1 (answered only).'),
-      evidence: z.array(evidenceRef).max(16).optional().describe('Transcript grounding [{ session_id, turn_idx, note? }].'),
+      evidence: z.array(evidenceRef).max(16).optional().describe('Transcript grounding [{ session_id, turn_idx, note? }] — an ARRAY of transcript-turn tuples, never prose or tool-probe output. If your evidence is not a transcript turn, OMIT this field; never fabricate session_id/turn_idx.'),
       reason: hardText(2000).optional().describe("Why (required for outcome=cant_help and outcome=graduate — for graduate: why the question outgrew the consult)."),
     })
     .refine((a) => (a.outcome === 'answered' ? Boolean(a.answer?.trim()) : Boolean(a.reason?.trim())), {

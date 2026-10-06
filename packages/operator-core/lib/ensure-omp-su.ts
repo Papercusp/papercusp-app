@@ -23,7 +23,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, basename, delimiter } from 'node:path';
-import { execFile } from 'node:child_process';
 
 function dlog(msg: string): void {
   process.stderr.write(`[ensure-omp-su] ${msg}\n`);
@@ -49,49 +48,6 @@ function resolveOnPath(bin: string): string | null {
     }
   }
   return null;
-}
-
-function isOnPath(bin: string): boolean {
-  return resolveOnPath(bin) !== null;
-}
-
-function runOmpConfig(args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    // `execFile` captures output by default; the callback intentionally ignores it.
-    // Its typed options do not support `stdio` (unlike `spawn`), so passing that
-    // runtime-only option made the operator typecheck red without changing behavior.
-    execFile('omp', args, (error) => {
-      if (error) reject(error);
-      else resolve();
-    });
-  });
-}
-
-async function setOmpConfig(key: string, value: string): Promise<void> {
-  if (!isOnPath('omp')) return;
-  try {
-    // This helper runs during operator startup. `execFileSync` here used to
-    // freeze the HTTP event loop once per key while OMP loaded its config; five
-    // sequential writes were enough to leave accepted connections queued on
-    // :3170 even though systemd still reported the process active. Keep the
-    // writes ordered, but let libuv wait for each child off the main thread.
-    await runOmpConfig(['config', 'set', key, value]);
-    dlog(`OMP config ${key}=${value}`);
-  } catch (e) {
-    dlog(`OMP config ${key} failed: ${(e as Error).message}`);
-  }
-}
-
-async function ensureOmpHindsightConfig(): Promise<void> {
-  const hindsightUrl =
-    process.env.PAPERCUSP_HINDSIGHT_API_URL ??
-    process.env.HINDSIGHT_API_URL ??
-    'http://localhost:8888';
-  await setOmpConfig('memory.backend', 'hindsight');
-  await setOmpConfig('hindsight.apiUrl', hindsightUrl);
-  await setOmpConfig('hindsight.scoping', 'per-project-tagged');
-  await setOmpConfig('hindsight.autoRecall', 'true');
-  await setOmpConfig('hindsight.autoRetain', 'true');
 }
 
 // NOTE (eval-disable scoping, 2026-07-04 / WI-2382): the `eval` builtin doom-loop fix for weak
@@ -247,12 +203,11 @@ async function ensurePapercuspBootstrap(): Promise<void> {
 }
 
 
-// Cache the completion of the heavy bootstrap for the process
-// lifetime. The original implementation reset `inFlight = null` in a
-// `finally` block, defeating the single-flight pattern: every console
-// launch re-ran ~5s of work (4× synchronous `omp config set` shellouts
-// + file copies). Bootstrap is idempotent at server-startup scope, so
-// caching the resolved promise is the right shape.
+// Cache the completion of the heavy bootstrap for the process lifetime. The
+// original implementation reset `inFlight = null` in a `finally` block,
+// defeating the single-flight pattern and repeating file copies + OMP
+// integration on every console launch. Bootstrap is idempotent at
+// server-startup scope, so caching the resolved promise is the right shape.
 let completed: Promise<void> | null = null;
 
 export async function ensureOmpSuInstalled(): Promise<void> {
@@ -269,8 +224,10 @@ export async function ensureOmpSuInstalled(): Promise<void> {
     // on Windows via WSL. It's macOS ('darwin') this guard actually skips.
     if (process.platform !== 'linux') return;
 
+    // OMP settings are owned by installOmpIntegration() above. Keeping a second
+    // direct `execFile('omp', ...)` path here can resolve `omp` to the psu shim
+    // on hosted PATHs and launch an interactive psu session during host startup.
     await ensurePapercuspBootstrap();
-    await ensureOmpHindsightConfig();
 
     // Skip if the bootstrap files are already in place — fast path on reboot.
     const { playbookPath: playbookDest, coordPath: coordDest } =

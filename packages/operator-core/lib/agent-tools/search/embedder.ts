@@ -55,7 +55,8 @@ import { modeTargetDims } from '../../search/prose-vector-dims';
 const OPENAI_EMBEDDER_MODEL = 'text-embedding-3-small';
 
 function buildAdmissionGovernedOpenAiEmbedder(key: string): Embedder {
-  return async (text: string) => {
+  return async (text: string, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
     // BENCH lane of the shared embed-TPM admission governor
     // (watchdog-and-exposed-systems-improvement-2026-06-18 P-002). This is the high-volume
     // path that exhausted the org TPM and starved memory. Acquire a governed slot; a SHED
@@ -66,6 +67,7 @@ function buildAdmissionGovernedOpenAiEmbedder(key: string): Embedder {
     const slot = await adm.acquire(text, 'bench');
     if (slot === null) throw new Error('openai_embed_shed'); // admission shed → engine falls to BM25
     try {
+      signal?.throwIfAborted();
       const r = await fetch('https://api.openai.com/v1/embeddings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
@@ -74,13 +76,16 @@ function buildAdmissionGovernedOpenAiEmbedder(key: string): Embedder {
           input: text,
           dimensions: modeTargetDims('openai'),
         }),
+        signal,
       });
+      signal?.throwIfAborted();
       adm.recordResponse(headersToRecord(r.headers)); // learn the live limit / pause on remaining=0
       if (!r.ok) {
         if (r.status === 429) adm.penalize({ retryAfterMs: retryAfterMs(headersToRecord(r.headers)) });
         throw new Error(`openai_embed_${r.status}`);
       }
       const j = (await r.json()) as { data: Array<{ embedding: number[] }> };
+      signal?.throwIfAborted();
       return j.data[0].embedding;
     } finally {
       slot.release();
@@ -186,6 +191,7 @@ function cachedQueryEmbed(mode: string, dims: number, embed: Embedder): Embedder
     }
   };
   return (text: string, signal?: AbortSignal) => {
+    if (signal?.aborted) return Promise.reject(signal.reason);
     const key = `${mode}:${dims}:${normalizeEmbeddingText(text)}`;
     const now = Date.now();
     const hit = queryEmbedCache.get(key);
@@ -201,6 +207,7 @@ function cachedQueryEmbed(mode: string, dims: number, embed: Embedder): Embedder
       // must not cancel work another caller still needs. Cache only the
       // completed deterministic vector, after its caller still owns it.
       return p.then((vector) => {
+        signal.throwIfAborted();
         const completed = Promise.resolve(vector);
         queryEmbedCache.set(key, { at: Date.now(), p: completed });
         trim();

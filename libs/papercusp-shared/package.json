@@ -29,7 +29,7 @@
     "./*.css": "./src/*.css"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.81.0",
+    "@anthropic-ai/sdk": "^0.93.0",
     "@papercusp/grid-core": "*",
     "@papercusp/model-pricing": "*",
     "@papercusp/module-singleton": "*"

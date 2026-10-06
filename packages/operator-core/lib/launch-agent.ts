@@ -51,6 +51,13 @@ export const OWNER_LAUNCH_HEADLESS = true;
 export interface LaunchAgentOpts extends LaunchOpts {
   /** Exact GOAL subject bootstrap must attest before the first agent turn. */
   goalBootstrapSubject?: string | null;
+  /**
+   * WI-10004787: the ownerId this launch is made on behalf of (psu
+   * `--launched-by`). bootstrap-su inherits that owner's goal context from it,
+   * so a server-side launcher acting FOR an agent must set it; a human launch
+   * from the GUI leaves it unset.
+   */
+  launchedBy?: string | null;
   /** Selected identity layers from the existing blueprint stack. */
   stack?: readonly string[] | null;
   /** Exact source hash shown in the GUI picker; bootstrap rechecks it. */
@@ -334,6 +341,7 @@ export async function launchAgent(opts: LaunchAgentOpts): Promise<LaunchAgentRes
     kickoff: opts.kickoff ?? null,
     kickoff_prompt: opts.kickoffPrompt ?? null,
     ...(opts.goalBootstrapSubject ? { goal_bootstrap_subject: opts.goalBootstrapSubject } : {}),
+    ...(opts.launchedBy ? { launched_by: opts.launchedBy } : {}),
     defer_spawn: opts.deferSpawn ?? false,
     attached_engine: opts.attachedEngine ?? false,
     // WI-6321 — psu parity. Null-safe: an omitted option keeps the previous

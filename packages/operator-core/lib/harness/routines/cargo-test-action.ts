@@ -126,4 +126,5 @@ registerSystemAction('cargo-test', async (ctx: SystemActionCtx) => {
       console.log(`[cargo-test] ${manifestRel}: ${(r.stdout || '').trim().split('\n').slice(-1)[0]}`);
     }
   }
-});
+  // WI-10005745: `cargo test` compiles and runs tree Rust (incl. build.rs) — skipped while writes are held.
+}, { executesIntegrationTreeCode: true });

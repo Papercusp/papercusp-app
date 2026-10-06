@@ -17,14 +17,15 @@
  * → safe to splice into the DROP SCHEMA identifier.
  */
 import { execFile as execFileCb } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { readFileSync, rm as rmCb, unlinkSync } from 'node:fs';
-import { basename } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, rm as rmCb, rmSync, unlinkSync } from 'node:fs';
+import { basename, isAbsolute, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import type { Sql } from 'postgres';
-import { buildSubstrateCloneCommands } from './clone';
-import type { GymRunnerPorts } from './gym-runner';
+import { buildSubstrateCloneCommands, isPinnedCommit } from './clone';
+import type { GymOracleRun, GymRunnerPorts } from './gym-runner';
 import type { TestResult } from './signals';
 
 const execFileP = promisify(execFileCb);
@@ -34,19 +35,32 @@ const SAFE_SLUG = /^[a-z0-9]+$/;
 
 /** Parse one Vitest JSON report into the per-test evidence the gym signal core consumes. */
 export function parseVitestOracleResults(jsonText: string): TestResult[] {
-  let parsed: { testResults?: Array<{ assertionResults?: Array<{ status?: string; fullName?: string; title?: string }> }> };
+  let parsed: { testResults?: Array<{ name?: string; status?: string; assertionResults?: Array<{ status?: string; fullName?: string; title?: string }> }> };
   try {
     parsed = JSON.parse(jsonText) as typeof parsed;
   } catch {
     return [];
   }
   const out: TestResult[] = [];
-  for (const file of Array.isArray(parsed.testResults) ? parsed.testResults : []) {
+  for (const file of Array.isArray(parsed?.testResults) ? parsed.testResults : []) {
+    if (!Array.isArray(file?.assertionResults) || file.assertionResults.length === 0) {
+      // Collection/setup errors are not an empty passing test population.
+      out.push({ name: '', passed: false, executed: false, ...(file?.name ? { file: file.name } : {}) });
+      continue;
+    }
     for (const assertion of Array.isArray(file?.assertionResults) ? file.assertionResults : []) {
       const name = (assertion.fullName ?? assertion.title ?? '').trim();
-      if (!name) continue;
-      if (assertion.status === 'passed') out.push({ name, passed: true });
-      else if (assertion.status === 'failed') out.push({ name, passed: false });
+      const fileIdentity = file.name ? { file: file.name } : {};
+      if (assertion.status === 'passed' || assertion.status === 'failed') {
+        out.push({ name, passed: assertion.status === 'passed', ...fileIdentity });
+      } else {
+        out.push({ name, passed: false, executed: false, ...fileIdentity });
+      }
+    }
+    // Vitest's file status includes hook/setup errors that need not correspond
+    // to a failed assertion. Keep that gap even when the assertions passed.
+    if (file.status === 'failed' && !file.assertionResults.some((t) => t.status === 'failed')) {
+      out.push({ name: '', passed: false, executed: false, ...(file.name ? { file: file.name } : {}) });
     }
   }
   return out;
@@ -147,7 +161,7 @@ export interface GymRunnerPortsConfig {
   execCapture?: (
     cmd: string,
     args: string[],
-    options: { cwd: string; timeout: number; maxBuffer: number },
+    options: { cwd: string; timeout: number; maxBuffer: number; env?: NodeJS.ProcessEnv },
   ) => Promise<{ stdout: string; stderr: string }>;
   rm?: (path: string) => Promise<void>;
 }
@@ -157,7 +171,7 @@ export function createGymRunnerPorts(cfg: GymRunnerPortsConfig): GymRunnerPorts 
   const exec = cfg.exec ?? (async (cmd: string, args: string[]) => { await execFileP(cmd, args); });
   const execCapture =
     cfg.execCapture ??
-    (async (cmd: string, args: string[], options: { cwd: string; timeout: number; maxBuffer: number }) =>
+    (async (cmd: string, args: string[], options: { cwd: string; timeout: number; maxBuffer: number; env?: NodeJS.ProcessEnv }) =>
       (await execFileP(cmd, args, options)) as { stdout: string; stderr: string });
   const rm = cfg.rm ?? (async (p: string) => { await rmP(p, { recursive: true, force: true }); });
   const sql = cfg.gymSql;
@@ -257,24 +271,156 @@ export function createGymRunnerPorts(cfg: GymRunnerPortsConfig): GymRunnerPorts 
       return { workflowStatus: wf[0]?.status ?? 'PENDING', featureStatus: feat[0]?.status ?? null };
     },
 
-    async runOracle({ clonePath, testPath }) {
+    async runOracle({ clonePath, testPath, pinCommit, implPath }) {
+      // Keep the old standalone result shape when no oracle pin was requested.
+      // The runner always requests a pin and requires this actual IO receipt.
+      const safeRepoPath = (path: string): boolean => path.length > 0 && !isAbsolute(path) &&
+        !path.split('/').some((part) => part === '..' || part === '.') && !path.includes('\\');
+      const fileHash = (path: string): string | null => {
+        if (!safeRepoPath(path)) return null;
+        try { return createHash('sha256').update(readFileSync(join(clonePath, path))).digest('hex'); }
+        catch { return null; }
+      };
+      const referenceHash = async (path: string): Promise<string | null> => {
+        if (!pinCommit || !isPinnedCommit(pinCommit) || !safeRepoPath(path)) return null;
+        try {
+          const blob = await execCapture('git', ['show', `${pinCommit}:${path}`],
+            { cwd: clonePath, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
+          return createHash('sha256').update(blob.stdout).digest('hex');
+        } catch { return null; } // unavailable immutable source stays unknown
+      };
+      const pinned = await referenceHash(testPath);
+      const manifestPinned = await referenceHash('package.json');
+      const manifestBefore = fileHash('package.json');
+      const before = fileHash(testPath);
+      const implementationBefore = implPath ? fileHash(implPath) : null;
       const reportPath = `${tmpdir()}/papercusp-gym-oracle-${randomBytes(12).toString('hex')}.json`;
+      const sourceReportPath = `${reportPath}.sources.json`;
+      const loaderReportPath = `${sourceReportPath}.committed-loads.jsonl`;
+      const sourceReporter = join(clonePath, 'libs/test-config/src/executed-source-map-reporter.ts');
+      const hasSourceReporter = existsSync(sourceReporter);
+      const configLoadCapture = join(clonePath, 'libs/test-config/src/executed-config-load-capture.ts');
+      const hasConfigLoadCapture = existsSync(configLoadCapture);
+      const command = ['npm', 'run', 'test:file', '--', testPath, '--', '--reporter=json', `--outputFile=${reportPath}`];
+      // Reuse framework collection-time fingerprints. A source map is diagnostic
+      // even for a failing or dirty oracle; it must never create reusable passes.
+      if (hasSourceReporter) command.push(`--reporter=${sourceReporter}`);
+      let exitCode: number | null = null;
+      let signal: string | null = null;
       try {
         await execCapture(
-          'npm',
-          ['run', 'test:file', '--', testPath, '--', '--reporter=json', `--outputFile=${reportPath}`],
-          { cwd: clonePath, timeout: 120_000, maxBuffer: 16 * 1024 * 1024 },
+          command[0], command.slice(1),
+          { cwd: clonePath, timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
+            env: { ...process.env, PC_EXECUTED_SOURCE_MAP_WORKSPACE: 'gym-oracle',
+              // The router's existing loader emits intermediate return receipts.
+              // Preserve them separately from final worker/module observations.
+              PAPERCUSP_COMMITTED_SOURCE_AUDIT: loaderReportPath,
+              ...(hasConfigLoadCapture ? { PC_EXECUTED_SOURCE_MAP_PRELOAD: '1',
+                PC_EXECUTED_SOURCE_MAP_ROOT: clonePath,
+                NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(configLoadCapture).href}` } : {}),
+              PC_EXECUTED_SOURCE_MAP_OUT: sourceReportPath, PC_EXECUTED_SOURCE_MAP_NO_PERSIST: '1' } },
         );
-      } catch {
+        exitCode = 0;
+      } catch (error) {
         // A failing oracle still writes a JSON report; parse it below. If it did
-        // not, the caller records deterministic evidence as not measured.
+        // not, the caller records deterministic evidence as not measured. Keep
+        // command failure separate from the assertion report's statuses.
+        if (error !== null && typeof error === 'object') {
+          if ('code' in error && typeof error.code === 'number' && Number.isInteger(error.code)) exitCode = error.code;
+          if ('signal' in error && typeof error.signal === 'string') signal = error.signal;
+        }
       }
       try {
-        return parseVitestOracleResults(readFileSync(reportPath, 'utf8'));
+        const report = readFileSync(reportPath, 'utf8');
+        const results = parseVitestOracleResults(report).map((t) =>
+          t.file ? { ...t, file: (isAbsolute(t.file) ? relative(clonePath, t.file) : t.file).split('\\').join('/') } : t);
+        let sourceReport: string | null = null;
+        let modules: NonNullable<NonNullable<GymOracleRun['execution']>['workerSources']>['modules'] = [];
+        let configEvidence: NonNullable<NonNullable<GymOracleRun['execution']>['configSources']>['evidence'] = null;
+        let configLoaded: NonNullable<NonNullable<GymOracleRun['execution']>['configSources']>['loaded'] = null;
+        let mainProcessEvidence: NonNullable<NonNullable<GymOracleRun['execution']>['mainProcessSources']>['evidence'] = null;
+        // Keep the raw report even if it is malformed; do not rebuild original
+        // module hashes from a later checkout when the reporter is unavailable.
+        try { sourceReport = readFileSync(sourceReportPath, 'utf8'); } catch { /* unknown */ }
+        try {
+          const parsed = sourceReport && JSON.parse(sourceReport);
+          if (Array.isArray(parsed?.diagnostics)) modules = parsed.diagnostics;
+          if (parsed?.configSources && typeof parsed.configSources === 'object') configEvidence = parsed.configSources;
+          if (parsed?.configLoadedSources && typeof parsed.configLoadedSources === 'object') configLoaded = parsed.configLoadedSources;
+          if (parsed?.mainProcessLoadedSources && typeof parsed.mainProcessLoadedSources === 'object') mainProcessEvidence = parsed.mainProcessLoadedSources;
+        } catch { /* retain malformed raw source report */ }
+        const sourcePaths = new Set(modules.flatMap((module) =>
+          Array.isArray(module?.sourceEvidence?.sources) ? module.sourceEvidence.sources
+            .filter((source) => typeof source?.path === 'string').map((source) => source.path) : []));
+        const referenceSources: Array<{ path: string; sha256: string | null }> = [];
+        for (const path of [...sourcePaths].sort()) {
+          referenceSources.push({ path, sha256: path === testPath ? pinned : await referenceHash(path) });
+        }
+        const configReferenceSources: Array<{ path: string; sha256: string | null }> = [];
+        const configPaths = new Set(Array.isArray(configEvidence?.sources) ? configEvidence.sources
+          .filter(source => typeof source?.path === 'string').map(source => source.path) : []);
+        for (const path of [...configPaths].sort()) {
+          configReferenceSources.push({ path, sha256: await referenceHash(path) });
+        }
+        const mainProcessReferenceSources: Array<{ path: string; sha256: string | null }> = [];
+        const mainProcessPaths = new Set(Array.isArray(mainProcessEvidence?.sources) ? mainProcessEvidence.sources
+          .filter(source => typeof source?.path === 'string').map(source => source.path) : []);
+        for (const path of [...mainProcessPaths].sort()) {
+          mainProcessReferenceSources.push({ path, sha256: await referenceHash(path) });
+        }
+        const manifestAfter = fileHash('package.json');
+        const manifestUnknown = [manifestPinned, manifestBefore, manifestAfter].some((hash) => hash === null);
+        let commandProcessReport: string | null = null;
+        let loaderReport: string | null = null;
+        let commandProcesses: NonNullable<NonNullable<GymOracleRun['execution']>['commandProcessSources']>['processes'] = [];
+        const commandProcessUnresolved = ['node-process-descendant-population-unmeasured',
+          'node-preload-self-unmeasured', 'node-external-native-runtime-unmeasured',
+          'committed-source-loader-chain-not-closed'];
+        try { loaderReport = readFileSync(loaderReportPath, 'utf8'); } catch { /* unknown */ }
+        if (!loaderReport) commandProcessUnresolved.push('oracle-committed-source-load-unmeasured');
+        try {
+          const raw = readdirSync(`${sourceReportPath}.processes`).sort().map(file =>
+            readFileSync(join(`${sourceReportPath}.processes`, file), 'utf8'));
+          commandProcessReport = raw.join('\n');
+          commandProcesses = raw.map(text => JSON.parse(text));
+          if (commandProcesses.length === 0) commandProcessUnresolved.push('oracle-command-process-load-unmeasured');
+        } catch { commandProcessUnresolved.push('oracle-command-process-load-unmeasured'); }
+        const commandProcessReferenceSources: Array<{ path: string; sha256: string | null }> = [];
+        const commandPaths = new Set(commandProcesses.flatMap(process => Array.isArray(process?.sources) ?
+          process.sources.filter(source => typeof source?.path === 'string').map(source => source.path) : []));
+        for (const path of [...commandPaths].sort()) {
+          commandProcessReferenceSources.push({ path, sha256: await referenceHash(path) });
+        }
+        return pinCommit ? { results, testPath, pinCommit,
+          sourceHashes: { pinned, before, after: fileHash(testPath) },
+          implementation: implPath ? { path: implPath, before: implementationBefore, after: fileHash(implPath) } : null,
+          execution: { command, cwd: clonePath, report, exitCode, signal,
+            npmManifest: { path: 'package.json', sourceHashes: {
+              pinned: manifestPinned, before: manifestBefore, after: manifestAfter,
+            } },
+            workerSources: { report: sourceReport, modules, reference: { pinCommit, sources: referenceSources } },
+            configSources: { evidence: configEvidence, loaded: configLoaded, reference: { pinCommit, sources: configReferenceSources } },
+            mainProcessSources: { evidence: mainProcessEvidence, reference: { pinCommit, sources: mainProcessReferenceSources } },
+            commandProcessSources: { report: commandProcessReport, loaderReport, processes: commandProcesses,
+              reference: { pinCommit, sources: commandProcessReferenceSources }, unresolved: commandProcessUnresolved },
+            unresolved: ['oracle-dependencies-outside-worker-vite-scope', 'test-command-runtime', 'pipeline-runtime',
+              ...(!mainProcessEvidence || mainProcessEvidence.status === 'unknown' ? ['oracle-main-process-load-unmeasured'] : []),
+              ...(mainProcessReferenceSources.some(source => source.sha256 === null) ? ['oracle-main-process-reference-unavailable'] : []),
+              ...(!configLoaded || configLoaded.status === 'unknown' ? ['oracle-config-original-load-unmeasured'] : []),
+              ...(!configEvidence || configReferenceSources.length === 0 ? ['oracle-config-snapshot-evidence-unavailable'] : []),
+              ...(configReferenceSources.some(source => source.sha256 === null) ? ['oracle-config-reference-unavailable'] : []),
+              ...(manifestUnknown ? ['oracle-npm-manifest-evidence-unavailable'] :
+                manifestBefore !== manifestPinned || manifestAfter !== manifestPinned ? ['oracle-npm-manifest-changed'] : []),
+              ...(referenceSources.some((source) => source.sha256 === null) ? ['oracle-worker-source-reference-unavailable'] : []),
+              ...(!sourceReport || modules.length === 0 ? ['oracle-worker-source-evidence-unavailable'] : [])] },
+        } : results;
       } catch {
         return undefined;
       } finally {
         try { unlinkSync(reportPath); } catch { /* best effort */ }
+        try { unlinkSync(sourceReportPath); } catch { /* best effort */ }
+        try { unlinkSync(loaderReportPath); } catch { /* best effort */ }
+        try { rmSync(`${sourceReportPath}.processes`, { recursive: true, force: true }); } catch { /* best effort */ }
       }
     },
 

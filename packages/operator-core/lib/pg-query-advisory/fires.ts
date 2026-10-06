@@ -94,6 +94,7 @@ export const SQL_SHAPE_ADVISORY_LABELS = [
   'event-fire-window',
   'silent-null-path',
   'jsonb-typeof-negation',
+  'json-null-arrow',
   'unused-cte',
   'population-narrowing',
   // The success path substitutes the EXECUTED partition into this same slot,

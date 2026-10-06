@@ -38,6 +38,11 @@ import { summarizeForcedPast } from '../../../agent-tools/plans/forced-past-stam
 import { deriveIndexFromContent } from '../../../agent-tools/plans/derive-index';
 import { writePlanIndexRows } from '../../../agent-tools/plans/plan-index-rows';
 import { withPlanDependencyAdmissionTransaction } from '../../../agent-tools/plans/plan-dependency-admission-transaction';
+import {
+  FEDERATED_RECOMPOSE_REVISION_AUTHOR,
+  recordSystemPlanRevisionInTransaction,
+  type PlanRevisionSql,
+} from '../../../agent-tools/plans/revisions';
 
 /** The federated subset of a harness_plan_parts row (the wire shape). */
 export interface PlanPartWireRow {
@@ -267,6 +272,23 @@ function defaultRecomposeSink(opts: HarnessPlanPartsProjectionOpts) {
             { workspaceId: opts.workspaceId, harnessSlug: opts.harnessSlug, planSlug },
             deriveIndexFromContent(content),
           );
+          // WI-10006275: a recompose that changed the bytes is a plan write, so it
+          // records a revision on this node's spine in the same transaction (the
+          // bytes and the revision commit together). Without it a federated rollback
+          // (WI-10004610 / WI-10003946) left live bytes matching an old revision with
+          // no row, invisible to plans:revisions / plans:audit. plan_revisions is not
+          // federated, so this never duplicates the origin node's own revision.
+          await recordSystemPlanRevisionInTransaction(tx as unknown as PlanRevisionSql, {
+            workspaceId: opts.workspaceId,
+            harnessSlug: opts.harnessSlug,
+            planSlug,
+            content,
+            contentHash,
+            rationale:
+              `federated per-part recompose (origin=${provenance?.origin ?? 'unknown'}, ` +
+              `writer=${provenance?.authorPubkey || 'unknown'}, fed_ts=${fedTs ?? 'none'})`,
+            authorId: FEDERATED_RECOMPOSE_REVISION_AUTHOR,
+          });
         }
       },
     );

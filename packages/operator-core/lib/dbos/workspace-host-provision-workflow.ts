@@ -45,11 +45,13 @@ import {
 } from '../workspace-host/provisioning-runner';
 import {
   runWorkspaceHostLifecycle,
+  validateWorkspaceHostLifecycleRequest,
   type RunWorkspaceHostLifecycleInput,
 } from '../workspace-host/lifecycle-runner';
 import {
   readWorkspaceHostDestroyTarget,
   recordWorkspaceHostOperationTerminalFailure,
+  WorkspaceHostControllerFenceError,
 } from '../workspace-host/observability-store';
 import {
   WORKSPACE_HOST_ADMISSION_WINDOW_MS,
@@ -73,7 +75,9 @@ export interface StartWorkspaceHostProvisioningInput {
   actorId?: string;
   /**
    * D-401: set up the machine once it is built (initialize -> desktop pack -> workspace active).
-   * Only the Papercusp-hosted first-workspace door sets this; see `hosted-bring-up.ts`.
+   * Only the hosted doors set this: first-workspace for every GCP host, and the hosted provision
+   * route for a host whose customer workspace is still 'provisioning' (aws-byoc-gcp-parity
+   * D-015); see `hosted-bring-up.ts`.
    */
   bringUp?: WorkspaceHostBringUp;
 }
@@ -273,7 +277,8 @@ function isExistingHostLifecycle(input: WorkspaceHostWorkflowInput): input is Wo
  * D-407: an upgrade recreates the machine on a new boot disk and a repair re-runs its bootstrap,
  * so both invalidate what the bring-up installed -- the desktop pack and the connector's credential
  * with it. A host that was brought up for a Papercusp-hosted workspace (it holds a live connector
- * enrollment) is brought up again under the same operation; a BYOC host is left to its owner, as
+ * enrollment, which a portal BYOC host also holds since aws-byoc-gcp-parity D-015) is brought up
+ * again under the same operation; a desktop/local BYOC host is left to its owner, as
  * before. `restore` builds a DIFFERENT host, which this does not cover.
  */
 async function bringUpHostedHostAgain(input: WorkspaceHostLifecycleWorkflowInput): Promise<void> {
@@ -502,6 +507,37 @@ export function workspaceHostProvisioningEnqueueRequest(input: StartWorkspaceHos
   return { workflowInput, workflowId: keys.workflowId, deduplicationId: keys.deduplicationId };
 }
 
+/**
+ * The durable enqueue request for a lifecycle action on an existing host (stop, start, snapshot,
+ * repair, upgrade, restore, ...). Shared by the in-process start and the DBOS client, exactly as
+ * {@link workspaceHostProvisioningEnqueueRequest} is for provision, so a hosted action enqueued
+ * from a process without DBOS is the same workflow, with the same keys, as an in-process one.
+ * Request-shape errors throw here, before anything is enqueued.
+ */
+export function workspaceHostLifecycleEnqueueRequest(input: StartWorkspaceHostLifecycleInput): {
+  workflowInput: WorkspaceHostLifecycleWorkflowInput;
+  workflowId: string;
+  deduplicationId: string;
+} {
+  validateWorkspaceHostLifecycleRequest(input);
+  const operationId = input.operationId ?? randomUUID();
+  const workflowInput: WorkspaceHostLifecycleWorkflowInput = { ...input, operationId };
+  const keys = workspaceHostWorkflowKeys({ workspaceId: input.workspaceId, hostId: input.hostId, operationId });
+  return { workflowInput, workflowId: keys.workflowId, deduplicationId: keys.deduplicationId };
+}
+
+/** The durable enqueue request for a destroy; see {@link workspaceHostLifecycleEnqueueRequest}. */
+export function workspaceHostDestroyEnqueueRequest(input: StartWorkspaceHostDestroyInput): {
+  workflowInput: WorkspaceHostDestroyWorkflowInput;
+  workflowId: string;
+  deduplicationId: string;
+} {
+  const operationId = input.operationId ?? randomUUID();
+  const workflowInput: WorkspaceHostDestroyWorkflowInput = { ...input, action: 'destroy', operationId };
+  const keys = workspaceHostWorkflowKeys({ workspaceId: input.workspaceId, hostId: input.hostId, operationId });
+  return { workflowInput, workflowId: keys.workflowId, deduplicationId: keys.deduplicationId };
+}
+
 export class WorkspaceHostProvisioningConflictError extends Error {
   constructor(readonly hostId: string) {
     super(`Workspace host '${hostId}' already has a provisioning operation in progress`);
@@ -527,14 +563,30 @@ function serializedProvisioningProblems(error: unknown, expectedName: string): r
   return candidate.problems;
 }
 
+/**
+ * WI-10005474: a request reusing the operationId of a workflow that already ended in a fence
+ * refusal (WI-10005312) re-admits that SAME workflow, so `getResult` rethrows its stored error at
+ * once. Only the validated shape (fence name + non-empty host id) is restored.
+ */
+function serializedControllerFenceHostId(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const candidate = error as { name?: unknown; hostId?: unknown };
+  if (candidate.name !== 'WorkspaceHostControllerFenceError') return null;
+  return typeof candidate.hostId === 'string' && candidate.hostId.length > 0 ? candidate.hostId : null;
+}
+
 function rehydrateWorkspaceHostProvisioningError(error: unknown): unknown {
   if (
     error instanceof WorkspaceHostProvisioningRequestError ||
     error instanceof WorkspaceHostProvisioningConnectionError ||
-    error instanceof WorkspaceHostProvisioningTransientError
+    error instanceof WorkspaceHostProvisioningTransientError ||
+    error instanceof WorkspaceHostControllerFenceError
   ) {
     return error;
   }
+
+  const fenceHostId = serializedControllerFenceHostId(error);
+  if (fenceHostId) return new WorkspaceHostControllerFenceError(fenceHostId);
 
   const requestProblems = serializedProvisioningProblems(error, 'WorkspaceHostProvisioningRequestError');
   if (requestProblems) return new WorkspaceHostProvisioningRequestError(requestProblems);
@@ -590,8 +642,8 @@ export async function startWorkspaceHostProvisioningWorkflow(
     // DBOS serializes workflow errors through serialize-error. That preserves
     // name + enumerable fields, but deliberately rebuilds a plain Error and
     // therefore erases the custom prototype that the route uses for typed HTTP
-    // mapping. Rehydrate only the two validated terminal shapes at this durable
-    // boundary; unrelated/transient errors retain their original identity.
+    // mapping. Rehydrate only the validated typed shapes at this durable
+    // boundary; unrelated errors retain their original identity.
     throw rehydrateWorkspaceHostProvisioningError(error);
   }
 }
@@ -599,18 +651,16 @@ export async function startWorkspaceHostProvisioningWorkflow(
 export async function startWorkspaceHostDestroyWorkflow(
   input: StartWorkspaceHostDestroyInput,
 ): Promise<WorkspaceHostDestroyWorkflowResult | WorkspaceHostOperationAcceptance> {
-  const operationId = input.operationId ?? randomUUID();
-  const workflowInput: WorkspaceHostDestroyWorkflowInput = { ...input, action: 'destroy', operationId };
-  const keys = workspaceHostWorkflowKeys({ workspaceId: input.workspaceId, hostId: input.hostId, operationId });
+  const request = workspaceHostDestroyEnqueueRequest(input);
   try {
     await DBOS.startWorkflow(workspaceHostProvisioningWorkflow, {
-      workflowID: keys.workflowId,
+      workflowID: request.workflowId,
       queueName: workspaceHostProvisioningQueue.name,
-      enqueueOptions: { deduplicationID: keys.deduplicationId },
-    })(workflowInput);
-    return await settleWithinAdmissionWindow<WorkspaceHostDestroyWorkflowResult>(keys.workflowId, {
+      enqueueOptions: { deduplicationID: request.deduplicationId },
+    })(request.workflowInput);
+    return await settleWithinAdmissionWindow<WorkspaceHostDestroyWorkflowResult>(request.workflowId, {
       status: 'accepted',
-      operationId,
+      operationId: request.workflowInput.operationId,
       hostId: input.hostId,
     });
   } catch (error) {
@@ -624,18 +674,18 @@ export async function startWorkspaceHostDestroyWorkflow(
 export async function startWorkspaceHostLifecycleWorkflow(
   input: StartWorkspaceHostLifecycleInput,
 ): Promise<WorkspaceHostProvisioningResult | WorkspaceHostOperationAcceptance> {
-  const operationId = input.operationId ?? randomUUID();
-  const workflowInput: WorkspaceHostLifecycleWorkflowInput = { ...input, operationId };
-  const keys = workspaceHostWorkflowKeys({ workspaceId: input.workspaceId, hostId: input.hostId, operationId });
+  // Reject request-shape errors before DBOS binds the operationId to a workflow result. A corrected
+  // retry with the same ID must remain admissible after an invalid request.
+  const request = workspaceHostLifecycleEnqueueRequest(input);
   try {
     await DBOS.startWorkflow(workspaceHostProvisioningWorkflow, {
-      workflowID: keys.workflowId,
+      workflowID: request.workflowId,
       queueName: workspaceHostProvisioningQueue.name,
-      enqueueOptions: { deduplicationID: keys.deduplicationId },
-    })(workflowInput);
-    return await settleWithinAdmissionWindow<WorkspaceHostProvisioningResult>(keys.workflowId, {
+      enqueueOptions: { deduplicationID: request.deduplicationId },
+    })(request.workflowInput);
+    return await settleWithinAdmissionWindow<WorkspaceHostProvisioningResult>(request.workflowId, {
       status: 'accepted',
-      operationId,
+      operationId: request.workflowInput.operationId,
       hostId: input.hostId,
     });
   } catch (error) {
@@ -644,6 +694,38 @@ export async function startWorkspaceHostLifecycleWorkflow(
     }
     throw rehydrateWorkspaceHostProvisioningError(error);
   }
+}
+
+/**
+ * Durably enqueue a lifecycle operation and return at once, without waiting out the admission
+ * window. For a caller that is itself a DBOS workflow (the standing-health pass restarting a
+ * reclaimed spot host, WI-10005210): it must start the child at the workflow layer and must not
+ * block on the child's result. A host another operation already holds raises
+ * `WorkspaceHostProvisioningConflictError`, exactly as the admitting route does.
+ */
+export async function enqueueWorkspaceHostLifecycleWorkflow(
+  input: StartWorkspaceHostLifecycleInput & { operationId: string },
+): Promise<WorkspaceHostOperationAcceptance> {
+  validateWorkspaceHostLifecycleRequest(input);
+  const workflowInput: WorkspaceHostLifecycleWorkflowInput = input;
+  const keys = workspaceHostWorkflowKeys({
+    workspaceId: input.workspaceId,
+    hostId: input.hostId,
+    operationId: input.operationId,
+  });
+  try {
+    await DBOS.startWorkflow(workspaceHostProvisioningWorkflow, {
+      workflowID: keys.workflowId,
+      queueName: workspaceHostProvisioningQueue.name,
+      enqueueOptions: { deduplicationID: keys.deduplicationId },
+    })(workflowInput);
+  } catch (error) {
+    if (isWorkspaceHostProvisioningDedupConflict(error)) {
+      throw new WorkspaceHostProvisioningConflictError(input.hostId);
+    }
+    throw rehydrateWorkspaceHostProvisioningError(error);
+  }
+  return { status: 'accepted', operationId: input.operationId, hostId: input.hostId };
 }
 
 export class WorkspaceHostOperationIdentityConflictError extends Error {

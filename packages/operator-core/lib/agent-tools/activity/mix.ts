@@ -13,6 +13,7 @@ import { AGENT_ROLES, defineTool } from '@papercusp/agent-mcp';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 import { automaticToolInvocationPredicate, dispatchWrapperExclusionPredicate } from '../sessions/automatic-tool-names';
 import { resolveAgentIdentity } from '../coordination/identity';
+import { bashCanMutate, capabilityBashCommand } from './bash-mutation';
 
 export type ActivityMixMode =
   | 'owner-comms'
@@ -186,6 +187,19 @@ export function activityMode(call: ActivityCall): ActivityMixMode {
     tool.startsWith('issues:') ||
     tool.startsWith('improvements:')
   ) return 'record-durably';
+  // EI-23749240882032210: `implement` means the holder changed something, but this used to
+  // be a blanket `capability:*` prefix match — so a holder that only ever ran read-only
+  // shell (grep / sed -n / ls) scored a nonzero implement share while writing no code
+  // (measured: su-6aab097a, 2026-09-19T23:59Z–2026-09-20T03:04Z, all 14 agent-origin
+  // capability:bash calls were read-only; the 108 locks:check_command rows were
+  // call_origin='hook' and already excluded as automatic, so they were NOT the cause).
+  // The dispatcher's own classifier (classifyCapabilityBashEffect) was tried first and does NOT
+  // fix the measured case — it is a replay-safety allowlist that rejects `grep`, `cd` and any
+  // redirect — so bashCanMutate is an attribution-purpose layer over the same per-command
+  // decision. Unknown or compound shell is "can mutate" => implement, so this only moves
+  // provably non-writing calls out of `implement`, never hides a write.
+  if (tool === 'capability:read') return 'investigate';
+  if (tool === 'capability:bash' && !bashCanMutate(capabilityBashCommand(call.args))) return 'investigate';
   if (
     tool === 'locks:check_command' ||
     tool.startsWith('capability:') ||

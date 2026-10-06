@@ -18,6 +18,46 @@ export function isQuickPanelWindow(): boolean {
 }
 
 /**
+ * Keyboard events do not bubble out of an iframe. Bind each loaded Docs window
+ * as well as the panel itself, including after a result navigates away from the
+ * search page. Run after the embedded page's own handlers so Escape can first
+ * leave an answer or another local interaction without dismissing the panel.
+ */
+export function bindQuickPanelEscape(
+  document: Document,
+  frame: HTMLIFrameElement | null,
+  dismiss: () => void,
+): () => void {
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    event.preventDefault();
+    dismiss();
+  };
+  const parent = document.defaultView;
+  parent?.addEventListener('keydown', onKey);
+  let child: Window | null = null;
+  const onLoad = () => {
+    child?.removeEventListener('keydown', onKey);
+    child = null;
+    // contentDocument is null for cross-origin frames. A navigation must never
+    // let an inaccessible document break the parent window's dismissal handler.
+    try {
+      child = frame?.contentDocument?.defaultView ?? null;
+      child?.addEventListener('keydown', onKey);
+    } catch {
+      child = null;
+    }
+  };
+  frame?.addEventListener('load', onLoad);
+  onLoad();
+  return () => {
+    parent?.removeEventListener('keydown', onKey);
+    child?.removeEventListener('keydown', onKey);
+    frame?.removeEventListener('load', onLoad);
+  };
+}
+
+/**
  * Should a navigation FROM the Quick Panel window be handed off to the main app
  * instead of run in place? Returns the app-relative `path+search+hash` to open
  * in the main window, or null when the navigation should proceed normally —
@@ -43,8 +83,7 @@ export function resolveQuickPanelHandoff(
   } catch {
     return null;
   }
-  if (!(next.protocol === 'http:' || next.protocol === 'https:')) return null;
-  if (next.origin !== current.origin) return null;
+  if (!sameAppOrigin(next, current)) return null;
   if (isChromelessPath(next.pathname)) return null;
   return `${next.pathname}${next.search}${next.hash}`;
 }
@@ -91,12 +130,23 @@ function targetChangesWorkspace(parsed: URL, currentWorkspaceId: string | undefi
   return !!nextWs && nextWs !== currentWorkspaceId;
 }
 
+function sameAppOrigin(next: URL, current: URL): boolean {
+  if (next.protocol === 'http:' || next.protocol === 'https:') {
+    return next.origin === current.origin;
+  }
+  // Linux/macOS custom-protocol URLs have opaque (`null`) URL.origin values.
+  // Compare the trusted desktop authority explicitly rather than equating two
+  // null origins, which would also admit other schemes or arbitrary hosts.
+  return [next, current].every((url) =>
+    url.protocol === 'papercusp:' && url.host === 'localhost' && !url.username && !url.password,
+  );
+}
+
 export function shouldSoftNavigate(target: string, currentHref = window.location.href): boolean {
   try {
     const current = new URL(currentHref, currentHref);
     const next = new URL(target, currentHref);
-    if (!(next.protocol === 'http:' || next.protocol === 'https:')) return false;
-    return next.origin === current.origin;
+    return sameAppOrigin(next, current);
   } catch {
     return false;
   }
@@ -111,7 +161,8 @@ export function resolveClientNavigation(
   let parsed: URL;
   try {
     parsed = new URL(target, currentHref);
-    if (!(parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+    const current = new URL(currentHref, currentHref);
+    if (!(parsed.protocol === 'http:' || parsed.protocol === 'https:') && !sameAppOrigin(parsed, current)) {
       return { mode: 'none', href: null, replace };
     }
   } catch {

@@ -1,6 +1,6 @@
 -- 649-pot-membership-backfill.sql
 --
--- Owner directive (VERIFIED — owner, interactive, 2026-07-20 11:21, sess a5e7a6e8):
+-- Owner directive (VERIFIED — Avi, interactive, 2026-07-20 11:21, sess a5e7a6e8):
 -- "papercusp-workspace ISNT A POT ... THOSE WERE SUPPOSED TO BE MOVED TO
 -- PAPERCUSP ... AUDIT ALL WORK ITEMS THEY SHOULD ALL BE PART OF A REAL POT."
 -- Plan: pot-membership-enforcement-2026-07-20 (P-003). Enforcement (validate a

@@ -50,11 +50,12 @@ import { activeWorkspaceId } from '../workspace-registry';
 import { setMode } from '../modes/store';
 import { getOrgPg } from '@papercusp/db-org';
 import { readGoalHistoryContext } from '../prior-attempt-context';
+import { isHarnessInScope, primeWorkScopePolicy } from '../work-scope-policy';
 
 export interface AutoStartGoalInput {
   /** Workspace to file the goal under (default: the active workspace). */
   workspaceId?: string;
-  /** Concrete harness, or Scout's workspace sentinel (resolved to its registered home Pot). */
+  /** Scout source harness, or its workspace sentinel; an out-of-scope hive is re-homed for execution. */
   harnessSlug: string;
   /** The outcome, stated so its achievement is checkable. */
   title: string;
@@ -64,8 +65,8 @@ export interface AutoStartGoalInput {
   killCriterion: string;
   /** REQUIRED (D-005): the drafted spend ceiling in cents. */
   budgetCents: number;
-  /** The routed proposal this goal came from — stamped as provenance metadata. */
-  proposalId?: string;
+  /** Stable Scout route identity; required so retries cannot mint duplicate goals. */
+  proposalId: string;
   /** Who caused this start (an ownerId, or the rail's own stamp). */
   launchedBy?: string | null;
   /** Prerequisite refs (goal ids / bare WI-/EI- issue ids) this goal is blocked by (P-004). */
@@ -92,6 +93,8 @@ export interface AutoStartGoalResult {
   startBlockedOverride: string | null;
   /** Fail-soft legs that degraded without stopping the start (drain fleet / member). */
   warnings: string[];
+  /** True when this route reused a goal already created for the same proposal. */
+  reusedExistingGoal?: boolean;
 }
 
 /**
@@ -102,24 +105,47 @@ export interface AutoStartGoalResult {
  * nobody is pursuing (the exact failure `goals:start`'s header documents).
  */
 export async function autoStartGoal(input: AutoStartGoalInput): Promise<AutoStartGoalResult> {
+  const proposalId = typeof input.proposalId === 'string' ? input.proposalId.trim() : '';
+  if (!proposalId) throw new Error('an auto-created Scout goal must carry proposalId for idempotency (nothing created)');
+
   const workspaceId = input.workspaceId ?? activeWorkspaceId();
   if (!workspaceId) throw new Error('no concrete workspace in scope — a goal cannot be filed workspace-less');
   const sourceScope = input.harnessSlug?.trim();
   if (!sourceScope) throw new Error('no harness in scope — goals are filed against an install_slug');
   let installSlug = sourceScope;
-  if (sourceScope === workspaceId) {
-    // EI-22762141222831537: Scout's install key can be a workspace sentinel,
-    // but a GOAL's install_slug must remain a real Pot for subsequent restarts.
-    // Resolve through the existing home-Pot policy BEFORE any goal/mode writes,
-    // validating even an env-selected home against this workspace's registry.
-    // A genuinely registered same-named harness is not a sentinel.
+  // Prime first: an unprimed policy cache fails OPEN for ~60s after boot.
+  await primeWorkScopePolicy();
+  const sourceInScope = isHarnessInScope(sourceScope);
+  if (sourceScope === workspaceId || !sourceInScope) {
     const { loadHarnessRegistry } = await import('../harness-registry');
     const registry = await loadHarnessRegistry(workspaceId);
-    if (!registry.projects.some((project) => project.slug === sourceScope)) {
+    const sourceProject = registry.projects.find((project) => project.slug === sourceScope);
+    const workspaceSentinel = sourceScope === workspaceId && !sourceProject;
+    const outOfScopeHive = !sourceInScope && sourceProject?.harness_kind === 'hive';
+
+    // EI-22762141222831537: Scout's install key can be a workspace sentinel,
+    // but a GOAL's install_slug must remain a real Pot for subsequent restarts.
+    // Also re-home a registered source hive outside work-scope: its spawned
+    // holder is confined to that hive and cannot later place work or launch a
+    // fleet into the workspace's allowed home Pot. Keep registered, in-scope
+    // harnesses concrete; do not silently broaden those caller choices.
+    if (!workspaceSentinel && !outOfScopeHive && !sourceInScope) {
+      throw new Error(
+        `out-of-scope Scout source '${sourceScope}' is not a registered hive — nothing created or launched`,
+      );
+    }
+    if (workspaceSentinel || outOfScopeHive) {
+      // Resolve through the existing home-Pot policy BEFORE any goal/mode
+      // writes, validating even an env-selected home against this workspace's
+      // registry and active execution scope.
       const { resolveHomePotSlug } = await import('../agent-tools/pot/_resolve');
       const home = await resolveHomePotSlug(workspaceId);
-      if (!home || !registry.projects.some((project) => project.slug === home && project.harness_kind === 'hive')) {
-        throw new Error('workspace Scout goal has no registered home Pot — nothing created or launched');
+      if (
+        !home ||
+        !registry.projects.some((project) => project.slug === home && project.harness_kind === 'hive') ||
+        !isHarnessInScope(home)
+      ) {
+        throw new Error('workspace Scout goal has no registered home Pot in work-scope — nothing created or launched');
       }
       installSlug = home;
     }
@@ -133,7 +159,60 @@ export async function autoStartGoal(input: AutoStartGoalInput): Promise<AutoStar
     throw new Error('an auto-created goal must carry a non-negative budgetCents ceiling (D-005)');
   }
 
-  const sql = getOrgPg().sql as unknown as GoalSqlTag;
+  // `routedProposalId` already lives on goals.metadata, so use it as the
+  // idempotency key. The session advisory lock spans the goal insert, mode
+  // stamp, optional drain-fleet creation, and holder spawn; a transaction lock
+  // would release before the external spawn and allow a concurrent retry to
+  // create a second steward.
+  const poolSql = getOrgPg().sql;
+  const reserved = await poolSql.reserve();
+  const sql = reserved as unknown as GoalSqlTag;
+  const proposalLockKey = `scout-goal-auto-start:${workspaceId}:${proposalId}`;
+  let lockAttempted = false;
+  try {
+    // This dedicated connection may need to wait for the first start to finish.
+    await reserved`SET lock_timeout = 0`;
+    await reserved`SET statement_timeout = 0`;
+    // Mark before awaiting: if PostgreSQL acquires the lock but its response is
+    // lost, finally still attempts the matching unlock. Unlocking an unheld key
+    // is harmless.
+    lockAttempted = true;
+    await reserved`SELECT pg_advisory_lock(hashtextextended(${proposalLockKey}, 0))`;
+
+    const existingGoals = await reserved<Array<{
+      id: string;
+      status: string;
+      metadata: Record<string, unknown> | null;
+    }>>`
+      SELECT id, status, metadata
+        FROM harness_shared.goals
+       WHERE workspace_id = ${workspaceId}
+         AND metadata->>'routedProposalId' = ${proposalId}
+         AND status NOT IN ('achieved', 'killed')
+       ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                created_at DESC,
+                id ASC
+       LIMIT 1
+    `;
+    const existing = existingGoals[0];
+    if (existing) {
+      const existingOwnerId =
+        typeof existing.metadata?.agentOwnerId === 'string' ? existing.metadata.agentOwnerId.trim() : '';
+      if (!existingOwnerId) {
+        throw new Error(
+          `routed proposal ${proposalId} already has goal ${existing.id}, but no holder identity is recorded; refusing a duplicate start`,
+        );
+      }
+      return {
+        goalId: existing.id,
+        agentOwnerId: existingOwnerId,
+        drainFleet: null,
+        startBlockedOverride: null,
+        warnings: [`routed proposal ${proposalId} already has goal ${existing.id}; reused without launching another holder`],
+        reusedExistingGoal: true,
+      };
+    }
+
   const id = goalId(input.title);
   // PRE-PIN the agent's coord identity so the mode stamp can name it before it
   // exists (the same minting goals:start and /api/adv/launch-su do).
@@ -163,7 +242,7 @@ export async function autoStartGoal(input: AutoStartGoalInput): Promise<AutoStar
       startedBy: launchedBy,
       agentOwnerId: ownerId,
       ...(sourceScope !== installSlug ? { scoutSourceScope: sourceScope } : {}),
-      ...(input.proposalId ? { routedProposalId: input.proposalId } : {}),
+      routedProposalId: proposalId,
     },
     // The holder policy, DECLARED rather than inherited
     // (goal-live-holder-guarantee-2026-08-18 P-003, D-008). The tool doors
@@ -250,6 +329,7 @@ export async function autoStartGoal(input: AutoStartGoalInput): Promise<AutoStar
     try {
       const minted = await mintDrainFleetForGoal({
         workspaceId,
+        harnessSlug: installSlug,
         goalId: id,
         goalTitle: input.title,
         agentOwnerId: ownerId,
@@ -400,5 +480,12 @@ export async function autoStartGoal(input: AutoStartGoalInput): Promise<AutoStar
     drainFleet: drainFleet?.slug ?? null,
     startBlockedOverride,
     warnings,
+    reusedExistingGoal: false,
   };
+  } finally {
+    if (lockAttempted) {
+      await reserved`SELECT pg_advisory_unlock(hashtextextended(${proposalLockKey}, 0))`.catch(() => {});
+    }
+    reserved.release();
+  }
 }

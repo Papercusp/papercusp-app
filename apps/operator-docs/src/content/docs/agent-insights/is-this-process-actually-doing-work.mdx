@@ -4,11 +4,11 @@
 # Edit the doc with docs:author { overwrite: true } — a hand-edit here is REFUSED by
 # the next projection (it cannot tell your edit from corruption), so it blocks the
 # whole corpus instead of shipping. See agent-insights/authoring-docs-pg-canonical.
-title: "Is this process actually doing work? The cgroup CPU delta, and two false-idle traps"
-description: "How to measure whether a long-running process is burning CPU right now — a two-sample delta over its cgroup — the two hand-rolled /proc methods that report a confident FALSE IDLE, and how to attribute that CPU to code when ptrace and perf are both closed."
-type: insight
+title: "Is this process doing work? Cgroup CPU deltas and PID namespace traps"
+description: "Use two-sample cgroup CPU deltas, avoid false-idle /proc probes, and interpret liveness readings from PID-namespaced shells and proxied loopback."
+type: Insight
 discovered: 2026-08-26
-tags: ["diagnostics", "processes", "cgroups", "cpu", "false-idle", "task-manager", "strace", "profiling"]
+tags: ["diagnostics", "processes", "cgroups", "cpu", "false-idle", "task-manager", "strace", "profiling", "pid-namespace", "liveness", "process-lifecycle", "network-proxy"]
 status: active
 documents:
   - "packages/operator-core/lib/task-manager/**"
@@ -76,8 +76,25 @@ field 8 is the state column, so misreading it yields a whole column of `S` that 
 A liveness/progress heartbeat emitted by the process being judged cannot report main-thread
 saturation. `await` yields to the microtask queue, not the event loop, so a saturated Node main
 thread stops every `setInterval`/`setTimeout` while still looking perfectly asynchronous. The
-beat goes missing exactly when it is the thing you need. Observe from OUTSIDE (`/proc`), where
-a saturated process cannot suppress its own signal.
+beat goes missing exactly when it is the thing you need. Use a host-side reader such as `processes:list` for liveness; a shell may not share the host PID namespace.
+
+## PID-namespace readings can look like process death
+
+`capability:bash` may run in a separate PID namespace from the operator. A host PID missing from `/proc/<pid>` therefore means it is invisible to that shell's namespace; `ENOENT` does not establish that it exited.
+
+A `cgroup.procs` file containing only `0` means at least one process exists in the cgroup but is invisible in the reader's PID namespace. It does not mean the cgroup is empty, and `0` is not a process ID. `pids.current` counts kernel tasks, including threads, rather than task-manager process rows.
+
+`capability:bash` loopback traffic is proxied. A request to an unused port can return HTTP 502 rather than `ECONNREFUSED` (`curl` exit 7); the 502 comes from the proxy path and proves neither that the target answered nor that it is absent. Do not turn any of these shell readings into a death verdict.
+
+When diagnosing a bash-side probe, report `readlink /proc/self/ns/pid`, the visible numeric /proc PID count, and `$$` in the same call. If `$$` is tiny or only a few PIDs are visible, treat every `/proc/<host-pid>` absence from that call as namespace-blind and discard it; these local readings calibrate the shell but do not prove host absence.
+
+For current host-side liveness, use `processes:list` with an exact `scopeUnit` and `live:true`, and inspect only `live.exactScopeUnitMatches` entries with kind "unaccounted". An empty exact-scope read is not proof. Require a known-present same-kind unaccounted control from an unfiltered live census. Read the control twice and confirm `tasks[].ageSec` advances by elapsed wall time so one transient scan cannot pose as the control.
+
+The live summary uses explicit `Count` and `PidCount` suffixes for numeric values: `live.aliveCount` and `live.unaccountedCount` are numbers, while `live.unaccountedGroups` is the group array. The unfiltered census is usable only when `live.degraded=false`, `live.ownedTruncated=false`, and `live.foreignTruncated=false`; `live.unaccountedCount` must equal `live.unaccountedGroups.length`, and `live.unaccountedPidCount` must equal the PIDs listed in the complete groups. Any missing or inconsistent field leaves absence unknown. On the host, non-zero `pids.current` and the count of `cgroup.procs` entries can corroborate cgroup presence; under the shell namespace, ignore the PID values themselves.
+
+`unaccounted` describes bookkeeping, not abandonment. In particular, `confined:false` does not prove abandonment: a sidecar may legitimately lack a managed owner row. A kill verdict needs positive evidence of abandonment, such as a dead spawner and a stale rig; `unaccounted` alone is insufficient.
+
+Use `dev:listening_ports` when the question is whether a specific host port is bound. A lifecycle candidate's `processLifecycleCandidate.liveness` is a timestamped host observation: `present` means the healthy task-reconcile scan saw it at `observedAt`; it is not proof that the process is present now. `unknown` means no such safe observation was established and does not mean dead.
 
 ## It IS burning CPU — now what is it burning it ON?
 

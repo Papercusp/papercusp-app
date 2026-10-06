@@ -24,7 +24,6 @@ import {
   googleWorkspaceOAuthField,
   googleWorkspaceSourceAccountId,
 } from '../../../external-triggers/google-workspace';
-import { googleGmailBackfillState } from '../../../external-triggers/google-gmail';
 import {
   FACEBOOK_PERSONAL_VAULT_OAUTH_PLUGIN,
   FACEBOOK_PERSONAL_VAULT_SOURCE_KINDS,
@@ -317,9 +316,24 @@ function googleCapabilities(
   });
 }
 
+/**
+ * Initial-backfill progress, read from a provider cursor's optional
+ * `backfill: { status, messages }` block (the Gmail provider writes one). It is
+ * display-only and provider-neutral: any provider that keeps that block gets the
+ * same progress line, and a cursor without one reports nothing.
+ */
+function cursorBackfillProgress(cursor: Record<string, unknown>): SafeIntegrationSource['backfill'] {
+  const raw = cursor.backfill;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const state = raw as Record<string, unknown>;
+  const status = state.status === 'complete' || state.status === 'throttled' ? state.status : 'pending';
+  const messages = typeof state.messages === 'number' && Number.isInteger(state.messages) && state.messages >= 0 ? state.messages : 0;
+  return { status, messages };
+}
+
 function safeSources(owned: OwnedExternalTriggerSourceRow[]): SafeIntegrationSource[] {
   return owned.map((source) => {
-    const backfill = source.kind === 'gmail' ? googleGmailBackfillState(source) : null;
+    const backfill = cursorBackfillProgress(source.cursor ?? {});
     return {
       kind: source.kind,
       providerAccountId: source.providerAccountId,
@@ -327,7 +341,7 @@ function safeSources(owned: OwnedExternalTriggerSourceRow[]): SafeIntegrationSou
       lastConnectedAt: source.lastConnectedAt,
       lastSyncAt: safeLastSyncAt(source),
       lastError: source.status === 'degraded' || source.status === 'error' ? source.lastError : null,
-      backfill: backfill ? { status: backfill.status, messages: backfill.messages } : null,
+      backfill,
     };
   });
 }

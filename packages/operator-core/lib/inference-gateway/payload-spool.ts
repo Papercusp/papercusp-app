@@ -18,9 +18,12 @@
  * retried request carrying an identical body hashes to the same key and dedupes
  * onto the same row, so a retry cannot spawn a second stored payload.
  */
+import { createHash } from 'node:crypto';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { getOrgPg } from '@papercusp/db-org';
 import {
   HEX_SHA256_RE,
+  contentDefinedChunks,
   getContentAddressed,
   memoryBlobStore,
   putContentAddressed,
@@ -110,6 +113,37 @@ export const DEFAULT_PAYLOAD_SPOOL_LEGACY_GRACE_MS = 2 * 60 * 60 * 1000;
  * would measure the wrong dimension entirely.
  */
 export const DEFAULT_PAYLOAD_SPOOL_PINNED_GRACE_MS = 2 * 60 * 60 * 1000;
+/**
+ * How long an UNREFERENCED body chunk is kept for reuse: thirty minutes (D-017).
+ *
+ * Bodies are stored as content-defined chunks in gateway_payload_chunks, because
+ * each agent turn re-sends its whole conversation: measured 2026-10-01, the median
+ * turn was 95.7% chunks already stored by an earlier turn. A chunk is kept while any
+ * manifest row references it. This grace additionally keeps it after the last
+ * manifest is swept, so a conversation that pauses between turns still dedupes.
+ *
+ * It is also the race fence between a writer and the sweep. A writer that finds a
+ * chunk fresher than half this grace reuses it without touching the row, and the
+ * sweep only deletes a chunk idle for the full grace, so a reused chunk cannot be
+ * deleted before the writer's manifest lands. A writer refreshes `last_ref_at` only
+ * on an older chunk, so a hot conversation updates almost no chunk rows.
+ */
+export const DEFAULT_PAYLOAD_CHUNK_GRACE_MS = 30 * 60 * 1000;
+/** Target average body-chunk size. 8 kB measured best for the live spool (D-017). */
+export const PAYLOAD_CHUNK_AVG_BYTES = 8192;
+
+interface EncodedChunk {
+  readonly hex: string;
+  readonly raw: Uint8Array;
+}
+
+/** Split a body into content-defined chunks, each addressed by its own sha256. */
+function chunkBody(bytes: Buffer): EncodedChunk[] {
+  return contentDefinedChunks(bytes, { avgSize: PAYLOAD_CHUNK_AVG_BYTES }).map((raw) => ({
+    hex: createHash('sha256').update(raw).digest('hex'),
+    raw,
+  }));
+}
 
 export interface GatewayPayloadSpoolOptions {
   /** Storage backend. Defaults to the Postgres-backed store. */
@@ -253,6 +287,8 @@ export interface PgGatewayPayloadStoreOptions {
   readonly legacyGraceMs?: number;
   /** Idle window after which an expired but still-REFERENCED payload is reclaimed anyway. */
   readonly pinnedGraceMs?: number;
+  /** How long an unreferenced body chunk is kept for reuse (D-017). */
+  readonly chunkGraceMs?: number;
   readonly now?: () => number;
   /** Injectable for tests; production defaults to the shared EI-1720 backoffs/sleep. */
   readonly contentionBackoffsMs?: readonly number[];
@@ -269,6 +305,7 @@ export class PgGatewayPayloadStore implements BlobStore<{ body: Uint8Array; size
   readonly #ttlMs: number;
   readonly #legacyGraceMs: number;
   readonly #pinnedGraceMs: number;
+  readonly #chunkGraceMs: number;
   readonly #now: () => number;
   readonly #contentionBackoffsMs: readonly number[] | undefined;
   readonly #contentionSleep: ((ms: number) => Promise<void>) | undefined;
@@ -290,6 +327,10 @@ export class PgGatewayPayloadStore implements BlobStore<{ body: Uint8Array; size
       options.pinnedGraceMs === undefined || !Number.isFinite(options.pinnedGraceMs)
         ? DEFAULT_PAYLOAD_SPOOL_PINNED_GRACE_MS
         : Math.max(0, options.pinnedGraceMs);
+    this.#chunkGraceMs =
+      options.chunkGraceMs === undefined || !Number.isFinite(options.chunkGraceMs)
+        ? DEFAULT_PAYLOAD_CHUNK_GRACE_MS
+        : Math.max(0, options.chunkGraceMs);
     this.#now = options.now ?? (() => Date.now());
     this.#contentionBackoffsMs = options.contentionBackoffsMs;
     this.#contentionSleep = options.contentionSleep;
@@ -320,23 +361,67 @@ export class PgGatewayPayloadStore implements BlobStore<{ body: Uint8Array; size
   async put(key: string, body: ArrayBuffer | Uint8Array, opts?: { contentType?: string }): Promise<void> {
     const bytes = body instanceof Uint8Array ? Buffer.from(body) : Buffer.from(new Uint8Array(body));
     const expiresAt = this.#ttlMs > 0 ? new Date(this.#now() + this.#ttlMs) : null;
+    const chunks = chunkBody(bytes);
+    const orderedHex = chunks.map((chunk) => chunk.hex);
+    const distinct = [...new Map(chunks.map((chunk) => [chunk.hex, chunk])).values()];
+    const refreshAfterMs = Math.floor(this.#chunkGraceMs / 2);
     // EI-21880026143110293: a bulk-load/VACUUM window on this table can push the
     // write past pg's lock_timeout/statement_timeout (55P03/57014) with nothing
-    // committed. The insert is safe to retry as-is: the key is the content hash
-    // and ON CONFLICT DO NOTHING makes a retry after a prior silent commit a
-    // no-op, not a duplicate. Reuses the shared EI-1720 primitive rather than a
+    // committed. The whole sequence is safe to retry as-is: keys are content
+    // hashes, the chunk insert upserts and the manifest insert is ON CONFLICT DO
+    // NOTHING, so a retry after a prior silent commit is a no-op, not a duplicate. Reuses the shared EI-1720 primitive rather than a
     // second backoff loop — same bug class, one layer down (the git-sync file-lock
     // read and the resource-governor admission write already hit this and were
     // fixed the same way).
     try {
       await acquireWithContentionRetry(
-        () =>
-          this.#sql`
-          INSERT INTO harness_shared.gateway_payload_blobs
-            (workspace_id, blob_key, bytes, byte_length, content_type, expires_at)
-          VALUES
-            (${this.#workspaceId}, ${key}, ${bytes}, ${bytes.byteLength}, ${opts?.contentType ?? null}, ${expiresAt})
-          ON CONFLICT (workspace_id, blob_key) DO NOTHING`,
+        async () => {
+          // D-017. No transaction is needed: a chunk this writer reuses is either one it
+          // just refreshed or one fresher than half the grace, and the sweep only deletes
+          // chunks idle for the full grace. A manifest that fails to land leaves orphan
+          // chunks, which the sweep reclaims after the grace.
+          const present = await this.#sql<{ h: string }[]>`
+            WITH want AS (
+              SELECT DISTINCT decode(t.h, 'hex') AS chunk_hash
+                FROM unnest(${distinct.map((chunk) => chunk.hex)}::text[]) AS t(h)
+            ), refreshed AS (
+              UPDATE harness_shared.gateway_payload_chunks AS c
+                 SET last_ref_at = now()
+                FROM want
+               WHERE c.workspace_id = ${this.#workspaceId}
+                 AND c.chunk_hash = want.chunk_hash
+                 AND c.last_ref_at < now() - (${refreshAfterMs} * interval '1 millisecond')
+              RETURNING c.chunk_hash
+            )
+            SELECT encode(chunk_hash, 'hex') AS h FROM refreshed
+            UNION ALL
+            SELECT encode(c.chunk_hash, 'hex') AS h
+              FROM harness_shared.gateway_payload_chunks AS c
+              JOIN want ON c.chunk_hash = want.chunk_hash
+             WHERE c.workspace_id = ${this.#workspaceId}
+               AND c.last_ref_at >= now() - (${refreshAfterMs} * interval '1 millisecond')`;
+          const stored = new Set(present.map((row) => row.h));
+          const missing = distinct.filter((chunk) => !stored.has(chunk.hex));
+          if (missing.length > 0) {
+            await this.#sql`
+              INSERT INTO harness_shared.gateway_payload_chunks
+                (workspace_id, chunk_hash, bytes, raw_length)
+              SELECT ${this.#workspaceId}, decode(t.h, 'hex'), decode(t.z, 'base64'), t.n
+                FROM unnest(
+                  ${missing.map((chunk) => chunk.hex)}::text[],
+                  ${missing.map((chunk) => zstdCompressSync(chunk.raw).toString('base64'))}::text[],
+                  ${missing.map((chunk) => chunk.raw.byteLength)}::int[]
+                ) AS t(h, z, n)
+              ON CONFLICT (workspace_id, chunk_hash) DO UPDATE SET last_ref_at = now()`;
+          }
+          await this.#sql`
+            INSERT INTO harness_shared.gateway_payload_blobs
+              (workspace_id, blob_key, bytes, byte_length, content_type, expires_at, chunk_hashes)
+            SELECT ${this.#workspaceId}, ${key}, ''::bytea, ${bytes.byteLength}, ${opts?.contentType ?? null},
+                   ${expiresAt}::timestamptz, array_agg(decode(t.h, 'hex') ORDER BY t.ord)
+              FROM unnest(${orderedHex}::text[]) WITH ORDINALITY AS t(h, ord)
+            ON CONFLICT (workspace_id, blob_key) DO NOTHING`;
+        },
         {
           ...(this.#contentionBackoffsMs ? { backoffsMs: this.#contentionBackoffsMs } : {}),
           ...(this.#contentionSleep ? { sleep: this.#contentionSleep } : {}),
@@ -355,15 +440,41 @@ export class PgGatewayPayloadStore implements BlobStore<{ body: Uint8Array; size
   }
 
   async get(key: string): Promise<{ body: Uint8Array; size: number } | null> {
-    const rows = await this.#sql<{ bytes: Buffer; byte_length: string | number }[]>`
+    const rows = await this.#sql<{ bytes: Buffer | null; byte_length: string | number; chunked: boolean }[]>`
       UPDATE harness_shared.gateway_payload_blobs
          SET last_accessed_at = now()
        WHERE workspace_id = ${this.#workspaceId}
          AND blob_key = ${key}
-      RETURNING bytes, byte_length`;
+      RETURNING CASE WHEN chunk_hashes IS NULL THEN bytes END AS bytes,
+                byte_length,
+                chunk_hashes IS NOT NULL AS chunked`;
     const row = rows[0];
     if (!row) return null;
-    return { body: new Uint8Array(row.bytes), size: Number(row.byte_length) };
+    const size = Number(row.byte_length);
+    if (!row.chunked) return { body: new Uint8Array(row.bytes ?? Buffer.alloc(0)), size };
+    // D-017: reassemble from chunks, in manifest order.
+    const parts = await this.#sql<{ bytes: Buffer | null }[]>`
+      SELECT c.bytes
+        FROM harness_shared.gateway_payload_blobs AS b
+       CROSS JOIN LATERAL unnest(b.chunk_hashes) WITH ORDINALITY AS u(chunk_hash, ord)
+        LEFT JOIN harness_shared.gateway_payload_chunks AS c
+          ON c.workspace_id = b.workspace_id
+         AND c.chunk_hash = u.chunk_hash
+       WHERE b.workspace_id = ${this.#workspaceId}
+         AND b.blob_key = ${key}
+       ORDER BY u.ord`;
+    // The manifest was swept between the two reads: it no longer resolves.
+    if (parts.length === 0) return null;
+    // A live manifest whose chunk is gone breaks the sweep's reference invariant.
+    // That is corruption, never a quiet "not found".
+    if (parts.some((part) => part.bytes === null)) {
+      throw new PayloadSpoolPersistenceError(`gateway payload ${key} references a chunk that is no longer stored`);
+    }
+    const reassembled = Buffer.concat(parts.map((part) => zstdDecompressSync(part.bytes!)));
+    if (reassembled.byteLength !== size || createHash('sha256').update(reassembled).digest('hex') !== key) {
+      throw new PayloadSpoolPersistenceError(`gateway payload ${key} reassembled to bytes that do not match its hash`);
+    }
+    return { body: new Uint8Array(reassembled), size };
   }
 
   async delete(key: string): Promise<void> {
@@ -531,6 +642,42 @@ export class PgGatewayPayloadStore implements BlobStore<{ body: Uint8Array; size
           ORDER BY ranked.sweep_rank
        )
       RETURNING blob_key`;
+    await this.#sweepChunks(batchLimit);
+    return rows.length;
+  }
+
+  /**
+   * D-017: reclaim body chunks no manifest references and no writer has used for
+   * the full chunk grace. The reference check reads the manifest table as of this
+   * statement's snapshot. A writer that commits a manifest afterwards either refreshed
+   * the chunk's `last_ref_at` (the DELETE re-checks that column on the newest row
+   * version under READ COMMITTED, so the refresh wins) or reused a chunk fresher than
+   * half the grace, which this predicate cannot select. Bounded by `limit` rows;
+   * chunks average a few kB compressed, so a pass deletes at most a few MB.
+   */
+  async #sweepChunks(limit: number): Promise<number> {
+    const rows = await this.#sql<{ chunk_hash: Buffer }[]>`
+      WITH referenced AS (
+        SELECT DISTINCT u.chunk_hash
+          FROM harness_shared.gateway_payload_blobs AS b
+         CROSS JOIN LATERAL unnest(b.chunk_hashes) AS u(chunk_hash)
+         WHERE b.workspace_id = ${this.#workspaceId}
+           AND b.chunk_hashes IS NOT NULL
+      ), victims AS (
+        SELECT c.chunk_hash
+          FROM harness_shared.gateway_payload_chunks AS c
+         WHERE c.workspace_id = ${this.#workspaceId}
+           AND c.last_ref_at <= now() - (${this.#chunkGraceMs} * interval '1 millisecond')
+           AND NOT EXISTS (SELECT 1 FROM referenced AS r WHERE r.chunk_hash = c.chunk_hash)
+         ORDER BY c.last_ref_at, c.chunk_hash
+         LIMIT ${limit}
+      )
+      DELETE FROM harness_shared.gateway_payload_chunks AS c
+       USING victims
+       WHERE c.workspace_id = ${this.#workspaceId}
+         AND c.chunk_hash = victims.chunk_hash
+         AND c.last_ref_at <= now() - (${this.#chunkGraceMs} * interval '1 millisecond')
+      RETURNING c.chunk_hash`;
     return rows.length;
   }
 }

@@ -36,11 +36,18 @@ const isExcluded = (f) =>
   f.startsWith('_retired/') || f.includes('/_retired/') || f.includes('/node_modules/') || f.includes('/dist/');
 
 function main() {
+  // Explicit repo-relative paths (`node scripts/check-shell-syntax.mjs a.sh b.sh`)
+  // narrow the scan to just those files. The entrypoint test uses this to prove
+  // the plain-Node import resolves without paying for a whole-tree scan, which
+  // ran past its 30s spawn timeout under gate load (WI-10004913). With no
+  // arguments the guard scans the whole tree as before.
+  const explicit = process.argv.slice(2).filter((a) => !a.startsWith('-'));
   // WI-6730: enumerate via the shared helper, which recurses into submodules. A
   // bare `git ls-files` does not — it emits one gitlink entry per submodule — so
   // this guard never parsed a single .sh inside any of the 39, and printed ✓
   // regardless. `unscanned` is reported below rather than silently dropped.
-  const { files: tracked, unscanned } = listTrackedFiles(ROOT);
+  const { files: tracked, unscanned } =
+    explicit.length > 0 ? { files: explicit, unscanned: [] } : listTrackedFiles(ROOT);
 
   const offenders = [];
   for (const f of tracked) {

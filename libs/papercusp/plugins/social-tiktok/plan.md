@@ -30,7 +30,7 @@ no write verbs for the platform at all. See "Not in scope".
 
 - `trigger.event` — always `post`. TikTok has exactly one inbound event, because a
   new upload is the only thing the Display API lets us observe.
-- `trigger.payload` — the canonical `social-post` document the TikTok adapter
+- the event payload — not embedded in the plan inputs; fetch it with `triggers:read-payload { planRunId: payload.plan_run.runId }` and read its `payload` field, the canonical `social-post` document the TikTok adapter
   normalized. `id` and `text` are always present; `url`, `occurredAt` and `media`
   are present when TikTok supplies them.
 - `trigger.dedupeKey` — stable across identical passes, so a redelivery of the same
@@ -43,7 +43,7 @@ reporting an empty summary as a fault.
 
 ## Steps
 
-1. Read `trigger.payload`. Use ONLY fields that are actually present on it — an
+1. Call `triggers:read-payload { planRunId: payload.plan_run.runId }` and read its `payload`. Use ONLY fields that are actually present on it — an
    absent field means TikTok did not supply one, not that you should go looking for
    it elsewhere.
 2. Summarize the event in your completion, in one or two lines: the platform, the

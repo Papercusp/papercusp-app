@@ -31,9 +31,9 @@ export type SavedFleetLaunchSpecSource =
   | typeof LEGACY_FLEET_LAUNCH_SPEC_SOURCE;
 
 /**
- * Canonical headcount rows require a plan, while a legacy member may have
- * been launched through the planless capability:launch-agent door. Keep that
- * distinction local to recovery rather than weakening FleetHeadcountConfig.
+ * A saved launch config may lack a plan: a legacy member launched through the
+ * planless capability:launch-agent door, or (R-8) a pure claim-spec drain fleet
+ * whose canonical headcount row now records no plan either.
  */
 export type SavedFleetLaunchConfig = Omit<FleetHeadcountConfig, 'plan'> & { plan?: string };
 

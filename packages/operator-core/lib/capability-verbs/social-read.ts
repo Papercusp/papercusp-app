@@ -48,6 +48,8 @@ import {
   type SocialPostRef,
   type SocialVisibility,
 } from './social';
+import type { DocumentLabel } from '../personal-vault/disclosure-labels';
+import { discloseDocuments } from '../personal-vault/disclosure-ledger';
 import { socialDeleteToken } from './social-delete';
 import { string, type CanonicalDocument } from './resolve';
 
@@ -300,8 +302,8 @@ function viewFromDocument(doc: CanonicalDocument, row: SocialPlatformRow, postId
  */
 export async function readSocialPost(
   sql: postgres.Sql | postgres.TransactionSql,
-  params: { workspaceId: string; userId: string; postId: string },
-): Promise<SocialPostView> {
+  params: { workspaceId: string; userId: string; postId: string; agentOwnerId: string | null },
+): Promise<SocialPostView & { privacy: DocumentLabel | null }> {
   const resolved = await resolveSocialPost(sql, {
     workspaceId: params.workspaceId,
     userId: params.userId,
@@ -311,7 +313,17 @@ export async function readSocialPost(
   // ref we hand back is anchored to what was actually found.
   const minted = mintSocialPostRef(resolved.doc.source, resolved.doc.externalId);
   if (!minted.ok) throw new Error(`social_read_ref_unmintable:${minted.reason}: ${minted.detail}`);
-  return viewFromDocument(resolved.doc, resolved.row, minted.postId);
+  // Reader-set labels (P-008): the post reaches the agent only with its
+  // disclosure row, exactly as a personal:search result does.
+  const disclosed = await discloseDocuments(sql, {
+    workspaceId: params.workspaceId,
+    userId: params.userId,
+    agentOwnerId: params.agentOwnerId,
+    documents: [{ id: resolved.doc.id, source: resolved.doc.source, participants: resolved.doc.participants, metadata: resolved.doc.payload }],
+    via: 'social:read',
+  });
+  if (disclosed.withheld) throw new Error('social_read_withheld: restricted post and no attributable agent identity');
+  return { ...viewFromDocument(resolved.doc, resolved.row, minted.postId), privacy: disclosed.documents[0]?.privacy ?? null };
 }
 
 /* -------------------------------------------------------------------------- */

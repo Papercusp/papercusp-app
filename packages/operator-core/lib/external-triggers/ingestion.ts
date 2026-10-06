@@ -91,6 +91,13 @@ function assertKeySegments(source: string, event: string): void {
  */
 export const PENDING_DELIVERY_LEASE_SECONDS = 15 * 60;
 
+/** The sink whose ledger row carries the event payload (see claimDelivery). */
+export const PAYLOAD_BEARING_SINK_KIND = 'event-bus';
+
+export function storesDeliveryPayload(sink: Pick<ExternalTriggerSink, 'kind'>): boolean {
+  return sink.kind === PAYLOAD_BEARING_SINK_KIND;
+}
+
 function sinkIdentity(sink: Pick<ExternalTriggerSink, 'kind' | 'ref'>): string {
   return `${required(sink.kind, 'sink_kind')}\u0000${required(sink.ref, 'sink_ref')}`;
 }
@@ -100,7 +107,11 @@ async function claimDelivery(
   event: CanonicalExternalEvent,
   sink: Pick<ExternalTriggerSink, 'kind' | 'ref'>,
 ): Promise<{ row: DeliveryRow; shouldDeliver: boolean }> {
-  const payload = JSON.stringify(event.payload);
+  // The payload is stored ONCE per event, on the event-bus row (WI-10004921): that is
+  // the row trigger_runs.delivery_id points at and the only one anything reads back.
+  // Every other sink row is pure dedupe/outcome ledger — a retry re-delivers the
+  // in-memory event, never a stored copy — so storing it there quadrupled the table.
+  const payload = storesDeliveryPayload(sink) ? JSON.stringify(event.payload) : null;
   const inserted = await sql<DeliveryRow[]>`
     INSERT INTO harness_shared.trigger_deliveries
       (workspace_id, source_id, dedupe_key, datatype_id, event_key, payload,

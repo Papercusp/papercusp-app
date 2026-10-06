@@ -432,6 +432,60 @@ export function selectEndedLeaseOwners(
   return rows.filter((row) => verdicts.get(row.owner)?.sessionState === 'ended');
 }
 
+/**
+ * WI-10004631 — share the ended-lease-owner scan across concurrent lease calls.
+ *
+ * Every `leaseReceipt` / `leaseNext` used to run its own scan before its
+ * transaction: the active-lease read plus a liveness resolution over EVERY
+ * active lease owner. Only one caller per workspace then wins the reconcile
+ * try-lock, so the other callers' scans were discarded. In a process with a
+ * small pool (the spawner sidecar runs `PAPERCUSP_DB_POOL_MAX=2`), a burst of
+ * N process:exec calls queued N full scans behind two connections, which is
+ * how a 20-call git-sync burst stretched into multi-second convoys.
+ *
+ * Concurrent callers for the same namespace now join the scan already in
+ * flight; its result is at most one scan old, which the reconcile UPDATE
+ * already tolerates (it re-checks state and lease id before requeueing).
+ * `reuseMs > 0` additionally reuses a settled scan for that long. That is
+ * opt-in, and the production composition site enables it. Explicit
+ * reconciliation calls bypass this class and always read fresh state.
+ */
+export class EndedLeaseOwnerScanCoalescer {
+  private readonly inFlight = new Map<string, Promise<QueueLeaseOwnerObservation[]>>();
+  private readonly settled = new Map<string, { readonly atMs: number; readonly owners: QueueLeaseOwnerObservation[] }>();
+  private readonly reuseMs: number;
+
+  constructor(reuseMs = 0) {
+    this.reuseMs = Number.isFinite(reuseMs) && reuseMs > 0 ? reuseMs : 0;
+  }
+
+  scan(
+    namespace: string | null,
+    nowMs: number,
+    compute: () => Promise<QueueLeaseOwnerObservation[]>,
+  ): Promise<QueueLeaseOwnerObservation[]> {
+    const key = namespace ?? '\u0000all-namespaces';
+    if (this.reuseMs > 0) {
+      const hit = this.settled.get(key);
+      // A clock that moved backwards is a miss, never an indefinite reuse.
+      if (hit && nowMs >= hit.atMs && nowMs - hit.atMs < this.reuseMs) return Promise.resolve(hit.owners);
+    }
+    const pending = this.inFlight.get(key);
+    if (pending) return pending;
+    const run = (async () => {
+      try {
+        const owners = await compute();
+        if (this.reuseMs > 0) this.settled.set(key, { atMs: nowMs, owners });
+        return owners;
+      } finally {
+        this.inFlight.delete(key);
+      }
+    })();
+    this.inFlight.set(key, run);
+    return run;
+  }
+}
+
 function jsonObject(value: unknown): Record<string, unknown> | null {
   let current = value;
   for (let i = 0; i < 2 && typeof current === 'string'; i += 1) {
@@ -517,8 +571,9 @@ function storedFromRow(row: QueueDbRow): StoredAdmissionRecord {
   return { receiptId: row.feature_id, record };
 }
 
-function requestDigest(request: NormalizedAdmissionRequest): string {
-  return createHash('sha256').update(admissionRequestFingerprint(request)).digest('hex');
+function requestDigest(request: NormalizedAdmissionRequest,
+  options: { includeGoalAdmissionSnapshot?: boolean } = {}): string {
+  return createHash('sha256').update(admissionRequestFingerprint(request, options)).digest('hex');
 }
 
 function nextDecision(
@@ -735,7 +790,19 @@ export class WorkItemAdmissionQueueDriver implements AdmissionDriver {
       });
     }
     if (stored.record.requestFingerprint !== candidate.requestFingerprint) {
-      throw new AdmissionIdempotencyConflictError(request.idempotencyKey);
+      // Earlier agent receipts fingerprinted the observation too. Reconstruct
+      // that identity using ONLY the stored snapshot; all semantic pins still
+      // come from this request, so changing a target/goal/fleet remains a conflict.
+      const storedSnapshot = stored.record.metadata.goalAdmission;
+      const legacyFingerprint = request.admissionClass === 'agent' && typeof storedSnapshot === 'string'
+        ? requestDigest({ ...request, metadata: Object.fromEntries(Object.entries({
+          ...request.metadata, goalAdmission: storedSnapshot,
+        }).sort(([a], [b]) => a.localeCompare(b))) },
+          { includeGoalAdmissionSnapshot: true })
+        : null;
+      if (stored.record.requestFingerprint !== legacyFingerprint) {
+        throw new AdmissionIdempotencyConflictError(request.idempotencyKey);
+      }
     }
     return {
       kind: 'queued',
@@ -936,6 +1003,12 @@ export interface PgWorkItemAdmissionQueueStoreOptions {
   readonly abandonAfterMs?: number;
   /** Injectable shared liveness oracle for owner-death lease reclamation. */
   readonly resolveSessionStatesFn?: ResolveSessionStates;
+  /**
+   * Reuse a settled ended-lease-owner scan on the lease hot path for this many ms
+   * (see EndedLeaseOwnerScanCoalescer). Default 0: concurrent callers still share
+   * an in-flight scan, but sequential callers each read fresh state.
+   */
+  readonly endedLeaseOwnerReuseMs?: number;
 }
 
 /** PostgreSQL implementation backed solely by the canonical work_items table. */
@@ -944,8 +1017,10 @@ export class PgWorkItemAdmissionQueueStore implements DurableAdmissionQueueStore
   private readonly workspaceId: string;
   private readonly abandonAfterMs: number;
   private readonly resolveSessionStatesFn: ResolveSessionStates | undefined;
+  private readonly endedOwnerScans: EndedLeaseOwnerScanCoalescer;
 
   constructor(options: PgWorkItemAdmissionQueueStoreOptions = {}) {
+    this.endedOwnerScans = new EndedLeaseOwnerScanCoalescer(options.endedLeaseOwnerReuseMs);
     this.sql = options.sql ?? getOrgPg().sql;
     this.workspaceId = options.workspaceId?.trim() || activeWorkspaceId();
     this.abandonAfterMs =
@@ -1027,6 +1102,11 @@ export class PgWorkItemAdmissionQueueStore implements DurableAdmissionQueueStore
     return this.readQueuePopulation(nowMs, observationWindowMs);
   }
 
+  /** Lease hot path: concurrent callers share one scan (WI-10004631). */
+  private hotPathEndedLeaseOwners(namespace: string | null, nowMs: number): Promise<QueueLeaseOwnerObservation[]> {
+    return this.endedOwnerScans.scan(namespace, nowMs, () => this.endedLeaseOwners(namespace, nowMs));
+  }
+
   private async endedLeaseOwners(namespace: string | null, nowMs = Date.now()): Promise<QueueLeaseOwnerObservation[]> {
     let active: QueueLeaseOwnerObservation[];
     try {
@@ -1046,7 +1126,9 @@ export class PgWorkItemAdmissionQueueStore implements DurableAdmissionQueueStore
     try {
       const verdicts = await resolve(
         owners.map((ownerId) => ({ ownerId })),
-        { hydratePerId: true, nowMs },
+        // One owner-filtered presence read for the whole roster (WI-10004631);
+        // per-id hydration issued one point read per active lease owner.
+        { hydrateBatch: true, nowMs },
       );
       return selectEndedLeaseOwners(active, verdicts);
     } catch (error) {
@@ -1428,7 +1510,7 @@ export class PgWorkItemAdmissionQueueStore implements DurableAdmissionQueueStore
     // Liveness is read before entering the mutation transaction. The transaction
     // below only compares these captured identities while updating, so a renewed
     // or reassigned lease cannot be reclaimed from a stale verdict.
-    const endedLeaseOwners = await this.endedLeaseOwners(namespace, nowMs);
+    const endedLeaseOwners = await this.hotPathEndedLeaseOwners(namespace, nowMs);
     return this.transaction(async (tx) => {
       await this.reconcileExpiredRows(tx, namespace, nowMs, endedLeaseOwners);
 
@@ -1570,7 +1652,7 @@ export class PgWorkItemAdmissionQueueStore implements DurableAdmissionQueueStore
     ttlMs: number,
     nowMs: number,
   ): Promise<QueueMutationResult | null> {
-    const endedLeaseOwners = await this.endedLeaseOwners(namespace, nowMs);
+    const endedLeaseOwners = await this.hotPathEndedLeaseOwners(namespace, nowMs);
     return this.transaction(async (tx) => {
       await this.reconcileExpiredRows(tx, namespace, nowMs, endedLeaseOwners);
       const row = await this.findReceiptRow(tx, receiptId, true);

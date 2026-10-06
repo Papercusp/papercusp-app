@@ -2,7 +2,8 @@
  * Jev admission bench CLI (plan jev-decision-model-integration-2026-09-29, P-004).
  *
  *   npx tsx packages/operator-core/lib/memory/bench/jev-admission-cli.ts \
- *     [--encoding state|instructions] [--floor-c 0.52] [--thresholds 0.3,0.4,…] \
+ *     [--encoding state|instructions] [--variant v1|v2-content|substance|score|pair] \
+ *     [--floor-c 0.52] [--thresholds 0.3,0.4,…] \
  *     [--fresh] [--no-rerank] [--concurrency 4] [--keep]
  *
  * Seeds ONE isolated bench store (hybrid-pg, the production backend) with the
@@ -44,19 +45,24 @@ import { decisionModelLedgerStats } from '../../decision-model-ledger';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { pushSearchFloors } from '../injection';
 import { ensureJevDecisionClient, JEV_MEMORY_TIMEOUT_MS, readJevApiKey } from '../jev-settings';
+import { llmCall } from '../../llm-testing/llm-client';
+import { DOC_CHARS, JUDGE_AGREEMENT_MODEL, JUDGE_AGREEMENT_RUBRIC_VERSION, judgeRelevance, RELEVANCE_PASS_BAR } from '../../search/bench/judge-agreement';
+import { createCachedJudge } from '../../search/bench/judge-cache';
 import { loadCorpusFixture } from './corpus';
-import { loadGoldSetFixture } from './gold-set';
+import { GOLD_SET_FIXTURE_VERSION, GOLD_SET_FIXTURE_VERSIONS, loadGoldSetFixture } from './gold-set';
 import {
   ADMISSION_THRESHOLDS,
   ARM_C_FLOOR,
   admissionRubricVersion,
-  buildAdmissionRequest,
   evaluateFilterArm,
   gradeDocId,
+  judgeAdmission,
+  negativeJudgePairs,
   parseAdmissionEncoding,
+  parseAdmissionVariant,
   readCachedScores,
   renderAdmissionMarkdown,
-  scoresFromDecision,
+  scoresFromJudgement,
   summarizeArm,
   writeCachedScores,
   type AdmissionEncoding,
@@ -76,6 +82,7 @@ function argValue(flag: string): string | undefined {
 }
 
 const encoding: AdmissionEncoding = parseAdmissionEncoding(argValue('--encoding'));
+const variant = parseAdmissionVariant(argValue('--variant'));
 const floorC = argValue('--floor-c') ? Number(argValue('--floor-c')) : ARM_C_FLOOR;
 const thresholds =
   argValue('--thresholds')?.split(',').map(Number).filter((n) => Number.isFinite(n) && n >= 0 && n <= 1) ?? [...ADMISSION_THRESHOLDS];
@@ -83,6 +90,16 @@ const fresh = process.argv.includes('--fresh');
 const withRerank = !process.argv.includes('--no-rerank');
 const concurrency = argValue('--concurrency') ? Math.max(1, Number.parseInt(argValue('--concurrency')!, 10)) : 4;
 const keep = process.argv.includes('--keep');
+// Which frozen gold set to replay. v2 = v1 + 60 near-miss hard negatives (P-002);
+// the default stays v1 so earlier reports remain comparable run-for-run.
+const goldVersion = argValue('--gold') ?? GOLD_SET_FIXTURE_VERSION;
+if (!(GOLD_SET_FIXTURE_VERSIONS as readonly string[]).includes(goldVersion)) {
+  console.error(`--gold ${goldVersion} is not a gold-set fixture version (${GOLD_SET_FIXTURE_VERSIONS.join(', ')})`);
+  process.exit(2);
+}
+// LLM-grade every floor-surviving hard-negative pair with the search-relevance
+// rubric, so a mislabeled "off-topic" question is caught before it scores a variant.
+const judgeNegatives = process.argv.includes('--judge-negatives');
 // Arm D's stage bound. NOT the Jev push budget: run 3 (2026-09-30) passed 400 ms
 // to the local scorer and its gate shed all 123 calls, so the arm measured
 // nothing. Default to the bound production prose search gives the same engine.
@@ -132,12 +149,14 @@ if (!jevKey) {
 }
 
 const corpus = loadCorpusFixture();
-const gold = loadGoldSetFixture().queries;
+const gold = loadGoldSetFixture(goldVersion).queries;
 const workspaceId = activeWorkspaceId();
 const runId = `jev-admission-${randomUUID()}`;
 const sql = getOrgPg().sql as unknown as GradeCacheSql;
 const warn = (m: string) => console.warn(`[jev-admission] ${m}`);
 const client = ensureJevDecisionClient();
+/** Live Jev requests sent (a cached query sends none; a `pair` query sends one per candidate). */
+let liveJevCalls = 0;
 
 async function cachedOr(
   scope: GradeCacheScope,
@@ -164,20 +183,20 @@ async function jevScores(outcomes: readonly QueryOutcome[], floor: number): Prom
   const scope: GradeCacheScope = {
     workspaceId,
     judgeModel: `typesafe/${JEV_PINNED_MODEL}`,
-    rubricVersion: admissionRubricVersion(encoding, floor),
+    rubricVersion: admissionRubricVersion(encoding, floor, variant),
   };
   return mapPool(outcomes, concurrency, async (o, i) => {
     const cands = o.candidates ?? [];
     if (cands.length === 0) return undefined; // nothing admitted, nothing to judge, no call
     const query = gold[i].query;
-    return cachedOr(scope, query, cands, o.queryId, async () => {
-      const { request, questionIds } = buildAdmissionRequest(query, cands, encoding);
-      const outcome = await client.decide(request, {
-        consumer: 'memory-bench',
-        subjectIds: cands.map(gradeDocId),
-      });
-      return scoresFromDecision(outcome, questionIds);
-    });
+    return cachedOr(scope, query, cands, o.queryId, async () =>
+      scoresFromJudgement(
+        await judgeAdmission(query, cands, encoding, variant, (request, call) => {
+          liveJevCalls += 1;
+          return client.decide(request, { consumer: 'memory-bench', subjectIds: call.candidates.map((ci) => gradeDocId(cands[ci])) });
+        }),
+      ),
+    );
   });
 }
 
@@ -280,6 +299,42 @@ try {
     throw new Error('arm A retrieved nothing for every positive query — the replay is broken, refusing to report');
   }
 
+  let negativeJudge = 'skipped (pass --judge-negatives)';
+  const negativeGrades: { queryId: string; docId: string; relevance: number }[] = [];
+  if (judgeNegatives) {
+    const pairs = negativeJudgePairs([baseline, runC.perQuery]);
+    const queryText = new Map(gold.map((q) => [q.id, q.query]));
+    const cache = createCachedJudge({
+      sql: getOrgPg().sql as unknown as Parameters<typeof createCachedJudge>[0]['sql'],
+      workspaceId,
+      judgeModel: JUDGE_AGREEMENT_MODEL,
+      rubricVersion: JUDGE_AGREEMENT_RUBRIC_VERSION,
+      runId,
+      inner: (input) => judgeRelevance(input, llmCall, JUDGE_AGREEMENT_MODEL),
+      onWarn: (m) => console.warn(`[jev-admission] ${m}`),
+    });
+    log(`LLM judge (${JUDGE_AGREEMENT_MODEL}) over ${pairs.length} floor-surviving hard-negative pairs…`);
+    let failed = 0;
+    let firstError: string | null = null;
+    await mapPool(pairs, concurrency, async (p) => {
+      try {
+        const v = await cache.judge({ pairId: `${p.queryId}|${p.docId}`, query: queryText.get(p.queryId) ?? '', docId: p.docId, docText: p.text.slice(0, DOC_CHARS) });
+        negativeGrades.push({ queryId: p.queryId, docId: p.docId, relevance: v.relevance });
+      } catch (e) {
+        failed += 1;
+        firstError ??= e instanceof Error ? e.message : String(e);
+      }
+    });
+    const relevant = negativeGrades.filter((g) => g.relevance >= RELEVANCE_PASS_BAR);
+    negativeJudge =
+      `${JUDGE_AGREEMENT_MODEL}, rubric ${JUDGE_AGREEMENT_RUBRIC_VERSION}, pass bar ${RELEVANCE_PASS_BAR}; ` +
+      `${negativeGrades.length}/${pairs.length} graded, ${relevant.length} judged relevant` +
+      (relevant.length > 0 ? ` (MISLABELED: ${relevant.map((g) => `${g.queryId}→${g.docId}=${g.relevance}`).join(', ')})` : '') +
+      (failed > 0 ? `; ${failed} FAILED (first: ${firstError})` : '') +
+      `; ${cache.summary()}`;
+    log(`negative judge: ${negativeJudge}`);
+  }
+
   log(`arm B: Jev over floor-${floorA} candidates (${encoding} encoding${fresh ? ', fresh' : ''})…`);
   const scoresB = await jevScores(baseline, floorA);
   log(`arm C: Jev over floor-${floorC} candidates…`);
@@ -307,8 +362,8 @@ try {
   ];
 
   // The ledger writer is fire-and-forget by design; give it a bounded moment so
-  // the row count this report quotes is the real one.
-  const liveJevCalls = [...scoresB, ...scoresC].filter((s) => s && !s.cached).length;
+  // the row count this report quotes is the real one. `liveJevCalls` counts requests,
+  // not queries: a `pair` query writes one ledger row per candidate.
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const st = decisionModelLedgerStats();
@@ -324,13 +379,15 @@ try {
       runId,
       backend: 'hybrid-pg (isolated bench schema)',
       corpus: corpus.length,
-      gold: gold.length,
+      gold: `${gold.length} (gold-set.${goldVersion})`,
       hardNegatives: gold.filter((q) => q.expected.length === 0).length,
+      negativeJudge,
       pushContract: `fusion ${pushFloors.fusionMode}, lexical bar ${pushFloors.minLexScore ?? 'backend default'}`,
       floors: `A/B/D ${floorA}, C ${floorC}`,
       replayLimit: REPLAY_LIMIT,
       jevModel: JEV_PINNED_MODEL,
       encoding,
+      variant,
       filterTimeoutMs: JEV_MEMORY_TIMEOUT_MS,
       thresholds,
       cacheReads: fresh ? 'bypassed (--fresh)' : 'on',
@@ -365,6 +422,7 @@ try {
     JSON.stringify(
       {
         report,
+        negativeGrades,
         perQuery: [
           ...perQuery('B', baseline, scoresB),
           ...perQuery('C', runC.perQuery, scoresC),

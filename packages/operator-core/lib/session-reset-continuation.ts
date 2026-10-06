@@ -130,3 +130,52 @@ export async function recentContextResetWake(
   const at = row.at instanceof Date ? row.at : new Date(row.at);
   return { channel: row.channel, at, ageMs: Math.max(0, (opts.nowMs ?? Date.now()) - at.getTime()) };
 }
+
+/**
+ * Wake channels that start a ONE-TURN resume (`--resume <id> -p`) of an exited
+ * session: the wake executor's channel 2, headless or in a managed pty. That
+ * child exits when its single turn settles, so its SessionEnd is how `-p`
+ * works, not a deliberate end of the session (WI-10005679).
+ *
+ * Both legs build the same env block, which carries PAPERCUSP_WAKE_DELIVERY_ID
+ * (wake-executor.ts), and that id is what `isWakeResumeTurn` verifies.
+ */
+export const WAKE_RESUME_TURN_CHANNELS = [
+  'resume',
+  'resume-headless',
+] as const satisfies readonly WakeChannel[];
+
+/**
+ * Is the SessionEnd we are handling the end of a one-turn wake resume?
+ *
+ * WI-10005679: such a child ended because `-p` ends, not because anyone ended
+ * the session. The session was resumable before the turn (its standing
+ * inbox-wake is what the executor resumed it from) and is exactly as
+ * resumable after it. Treating that end as terminal retired the watch, so
+ * every later coord:send to a recruited judge reported
+ * `recipient_alive_not_wakeable`.
+ *
+ * Only a REAL ledger row counts: `deliveryId` comes from the child's env via
+ * the lifecycle hook, so it must name a delivery to THIS owner on a one-turn
+ * resume channel. No time window is applied. The id is bound to this one
+ * process, and a resumed turn may legitimately run for a long time. THROWS on
+ * a PG failure; callers treat a throw as "not a resume turn" and keep
+ * today's cancel.
+ */
+export async function isWakeResumeTurn(
+  ownerId: string,
+  deliveryId: number | null | undefined,
+  opts: { sql?: Sql } = {},
+): Promise<boolean> {
+  if (!ownerId?.trim()) return false;
+  if (deliveryId == null || !Number.isSafeInteger(deliveryId) || deliveryId <= 0) return false;
+  const sql = opts.sql ?? getOrgPg().sql;
+  const rows = await sql<Array<{ one: number }>>`
+    SELECT 1 AS one
+      FROM harness_shared.event_wake_deliveries w
+     WHERE w.id = ${deliveryId}
+       AND w.subscriber_id = ${ownerId}
+       AND w.channel = ANY(${[...WAKE_RESUME_TURN_CHANNELS]}::text[])
+     LIMIT 1`;
+  return rows.length > 0;
+}

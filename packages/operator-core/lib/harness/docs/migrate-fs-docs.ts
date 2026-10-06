@@ -44,12 +44,12 @@ export async function ingestHarnessDocs(harnessSlug: string, opts: IngestOpts = 
   // path check above already validated the harness, so this resolves (P-002 / D-003).
   const workspaceId = await resolveWorkspaceForHarness(harnessSlug, opts.workspaceId);
 
-  const files = await listDocBodies(paths.docsRoot);
+  const files = await listDocBodies(paths.sources ? paths : paths.docsRoot);
   const anchored: string[] = [];
   const skipped: string[] = [];
 
   for (const docId of files) {
-    const body = await readDocBody(paths.docsRoot, docId);
+    const body = await readDocBody(paths.sources ? paths : paths.docsRoot, docId);
     if (body == null) {
       skipped.push(docId);
       continue;

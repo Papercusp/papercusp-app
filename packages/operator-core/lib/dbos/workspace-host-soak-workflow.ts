@@ -23,7 +23,7 @@ import {
   type WorkspaceHostSoakSubject,
 } from '../workspace-host/soak';
 import { readWorkspaceHostSoak, recordWorkspaceHostSoakSample } from '../workspace-host/soak-store';
-import { resolveGcpWorkspaceHostSoakSeams } from '../workspace-host/soak-gcp';
+import { resolveWorkspaceHostSoakSeams } from '../workspace-host/soak-seams';
 import type { WorkspaceHostReleaseBinding } from '../workspace-host/release-stage-receipt';
 import { beginWorkspaceHostSoakReceipt, settleWorkspaceHostSoakReceipt } from '../workspace-host/soak-receipt';
 import { idempotentRegisterWorkflow, idempotentWorkflowQueue } from './idempotent-register-workflow';
@@ -150,7 +150,7 @@ function dbosRuntime(): WorkspaceHostSoakRuntime {
     step: (name, fn) => DBOS.runStep(fn, { name, retriesAllowed: true, maxAttempts: 3, intervalSeconds: 5 }),
     sleep: (ms) => DBOS.sleep(ms),
     now: () => Date.now(),
-    resolveSeams: (input) => resolveGcpWorkspaceHostSoakSeams(input),
+    resolveSeams: (input) => resolveWorkspaceHostSoakSeams(input),
     recordSample: recordWorkspaceHostSoakSample,
     readSoak: readWorkspaceHostSoak,
     beginReceipt: beginWorkspaceHostSoakReceipt,

@@ -23,7 +23,7 @@
  * Hence: the output physically cannot exceed the budget. It degrades by dropping the
  * lowest-priority parts and leaving a POINTER to them, and it reports what it cut.
  */
-import { readFileSync, writeFileSync, existsSync, lstatSync, unlinkSync, readlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, lstatSync, unlinkSync, readlinkSync, symlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
@@ -1214,6 +1214,9 @@ Options:
   --context-tokens=<count>                     context window used for the budget
   --chars-per-token=<count>                    budget chars/token (default: 4)
   --accept-canonicalized-drift=<client>:<sha>  acknowledge reviewed file drift
+  --allow-over                                 with --write: land the files even when a
+                                               launch-prose ceiling is exceeded (default:
+                                               roll the write back and exit 1)
   --audience=<token,…>                         PREVIEW the guide a wearer whose stack
                                                expands to these tokens receives
                                                (blueprint:<id> | slot:<slot> | role:<role>);
@@ -1475,8 +1478,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`  budget         ${fmt(budget)} chars  (context ${fmt(contextTokens)} × ${MEMORY_WARN_CONTEXT_FRACTION} × ${charsPerToken} chars/token, floor ${fmt(MEMORY_WARN_FLOOR_CHARS)})`);
 
     /** Per-client projection records for this run — see writeProjectionRecords. */
-    const records = {};
+    let records = {};
     let primaryText = null;
+    /** Files this run wrote, with their prior bytes — the rollback set for the launch-prose gate. */
+    const writtenThisRun = [];
 
     for (const spec of CLIENTS) {
       const out = projectClient(parts, { ...spec, docId, budget });
@@ -1600,6 +1605,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         // The symlink is retired here, not by hand, so each client genuinely owns its
         // file. Unlinking first matters: writeFileSync THROUGH a symlink would write
         // the other client's file instead.
+        // Remember exactly what was here so the launch-prose gate below can put it back.
+        writtenThisRun.push({
+          path,
+          file: spec.file,
+          prevText: onDisk,
+          prevSymlinkTarget: isSymlink ? readlinkSync(path) : null,
+        });
         if (isSymlink) unlinkSync(path);
         writeFileSync(path, out.text, 'utf8');
         records[spec.client] = projectionRecord({ file: spec.file, text: out.text });
@@ -1615,7 +1627,36 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       }
     }
 
-    if (write && canonicalRowsSafe) {
+    // WI-10004682 — the launch-prose gate. The lint ceilings (scripts/launch-prose-budget-
+    // baseline.json) are on the WRITTEN files, a different budget from the projection cut set
+    // reported above, and the su-playbook renders embed CLAUDE.md verbatim (so they are the
+    // tighter surfaces). The guide re-breached them three times in three days, each found hours
+    // later at the gate. The lint measures files on disk, so this is a post-write check; an OVER
+    // reading rolls this run's file writes back (and skips the records/cache) unless --allow-over.
+    let launchProseRolledBack = false;
+    if (write && canonicalRowsSafe && writtenThisRun.length > 0) {
+      const gate = runLaunchProseProjectionGate();
+      if (gate === 'over') {
+        if (argv.includes('--allow-over')) {
+          console.log('\n  ⚠ launch-prose ceiling exceeded — ACKNOWLEDGED via --allow-over; the files stay written.');
+          console.log('    Raise the surface ceiling in scripts/launch-prose-budget-baseline.json WITH a note, or trim prose.');
+        } else {
+          rollBackWrittenFiles(writtenThisRun);
+          launchProseRolledBack = true;
+          failed = true;
+          records = {};
+          primaryText = null;
+          console.error(
+            '\n  ✗ REFUSED: this projection pushes a launch-prose surface over its ceiling (see the OVER rows above).' +
+              `\n    Rolled back ${writtenThisRun.map((w) => w.file).join(', ')} to the prior bytes; nothing was recorded or cached.` +
+              '\n    Trim prose or raise that surface ceiling in scripts/launch-prose-budget-baseline.json WITH a note,' +
+              '\n    then re-run (or re-run with --allow-over to land it knowingly).',
+          );
+        }
+      }
+    }
+
+    if (write && canonicalRowsSafe && !launchProseRolledBack) {
       // Per client, and merged — so a client that was refused keeps its old record
       // rather than having it dropped by its sibling's successful run. Gating this on a
       // GLOBAL failure flag is what made the original drift COMPOUND: one refusal threw
@@ -1630,6 +1671,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         await writeCache(client, docId, primaryText, sourceShaSeed(doc));
         console.log(`  ✓ cached the ${CLIENTS[0].file} composition on harness_docs.content`);
       }
+    } else if (write && launchProseRolledBack) {
+      console.error('\n  ✗ NOT recording projection metadata/cache: the launch-prose gate rolled the files back.');
     } else if (write) {
       console.error(`\n  ✗ NOT recording projection metadata/cache: canonical doc-part identity check failed.`);
     }
@@ -1648,6 +1691,48 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     failed = !verifyDocClaims();
   }
   process.exit(failed ? 1 : 0);
+}
+
+/**
+ * Run the launch-prose projection gate (scripts/check-launch-prose-budget.ts --projection-gate)
+ * against the files this run just wrote. Returns 'ok' | 'over' | 'unchecked'.
+ *
+ * 'unchecked' (the instrument failed, exit 2 / spawn error) is deliberately NOT 'ok' and NOT a
+ * block: a broken measurement must read as "not checked" loudly, never as a pass, but it also
+ * must not hold a projection hostage (the gate suite still runs the lint at the candidate).
+ * The child inherits stdio so its per-surface `launch-prose headroom: N B` rows reach the author.
+ */
+export function runLaunchProseProjectionGate({ spawn = spawnSync, root = ROOT } = {}) {
+  console.log('\n  launch-prose ceilings (lint:launch-prose-budget, projection-governed surfaces):');
+  const res = spawn(
+    process.execPath,
+    ['--import', 'tsx', 'scripts/check-launch-prose-budget.ts', '--projection-gate'],
+    { cwd: root, stdio: 'inherit', timeout: 180_000 },
+  );
+  if (res.status === 0) return 'ok';
+  if (res.status === 1) return 'over';
+  console.error(
+    `  ⚠ launch-prose NOT checked (instrument failed: ${res.error?.message ?? `exit ${res.status ?? res.signal}`}) — this is NOT a pass.` +
+      '\n    Run `npm run lint:launch-prose-budget` by hand before relying on this projection.',
+  );
+  return 'unchecked';
+}
+
+/** Restore each file this run wrote to its prior bytes (or prior symlink, or absence). */
+export function rollBackWrittenFiles(written) {
+  for (const w of written) {
+    try {
+      try {
+        unlinkSync(w.path);
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+      }
+      if (w.prevSymlinkTarget !== null) symlinkSync(w.prevSymlinkTarget, w.path);
+      else if (w.prevText !== null) writeFileSync(w.path, w.prevText, 'utf8');
+    } catch (e) {
+      console.error(`  ✗ ROLLBACK of ${w.file} FAILED: ${e.message} — restore it by hand (git diff ${w.file}).`);
+    }
+  }
 }
 
 /**

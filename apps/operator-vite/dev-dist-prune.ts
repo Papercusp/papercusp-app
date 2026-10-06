@@ -26,7 +26,7 @@
  * in isolation; the plugin is the thin disk glue around it (verified live).
  */
 import type { Plugin } from 'vite';
-import { readdir, stat, unlink } from 'node:fs/promises';
+import { readdir, rm, stat, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 /** A file in `dist/assets/` reduced to what the age policy needs. */
@@ -163,6 +163,65 @@ export function devDistPrunePlugin(opts: { ttlMs?: number } = {}): Plugin {
           // already gone / locked — best effort
         }
       }
+    },
+  };
+}
+
+// ── docs swap leftovers in dist (WI-10004327) ───────────────────────────────
+// operator-docs' postbuild-copy.sh publishes `public/internal/docs` by staging
+// into `docs.tmp.<pid>` and swapping the old tree out to `docs.old.<pid>`,
+// which it reaps after a grace period. Vite copies publicDir into outDir
+// WHOLESALE (vite:prepare-out-dir, at renderStart), so any leftover present at
+// build time lands in dist. In the retain regime (emptyOutDir:false) nothing
+// ever removes it, so each one accumulates at ~350 MB. Measured 2026-09-30:
+// dist/internal/docs.old.2520515 still sat in dist two days after its public/
+// source was reaped. These dirs are never live content (the live tree is
+// `internal/docs`), so prune them from dist after EVERY build, in both
+// regimes: a clean-empty build re-copies them from public/ too.
+
+/** A postbuild-copy swap dir: `docs.old.<pid>` or `docs.tmp.<pid>`. */
+const DOCS_SWAP_LEFTOVER_RE = /^docs\.(old|tmp)\.\d+$/;
+
+/** Pure: the entry names of `<outDir>/internal` that are swap leftovers. */
+export function selectDocsSwapLeftovers(names: readonly string[]): string[] {
+  return names.filter((name) => DOCS_SWAP_LEFTOVER_RE.test(name)).sort();
+}
+
+/** Remove swap leftovers from `internalDir`; returns the names removed. */
+export async function pruneDocsSwapLeftovers(internalDir: string): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(internalDir);
+  } catch {
+    return []; // no internal/ in this outDir, so nothing to prune
+  }
+  const removed: string[] = [];
+  for (const name of selectDocsSwapLeftovers(entries)) {
+    try {
+      await rm(join(internalDir, name), { recursive: true, force: true });
+      removed.push(name);
+    } catch {
+      // locked / concurrently removed: best effort, the next build retries
+    }
+  }
+  return removed;
+}
+
+/**
+ * Vite plugin: after every build (one-shot, watch, retain or clean), prune
+ * `internal/docs.{old,tmp}.<pid>` copies from outDir. Register it
+ * unconditionally in vite.config.ts.
+ */
+export function distDocsSwapLeftoverPrunePlugin(): Plugin {
+  let internalDir = '';
+  return {
+    name: 'papercusp-dist-docs-swap-leftover-prune',
+    apply: 'build',
+    configResolved(config) {
+      internalDir = resolve(config.root, config.build.outDir, 'internal');
+    },
+    async writeBundle() {
+      await pruneDocsSwapLeftovers(internalDir);
     },
   };
 }

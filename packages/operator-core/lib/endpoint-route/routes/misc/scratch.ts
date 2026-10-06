@@ -17,6 +17,7 @@ import {
   SCRATCH_SCHEME,
 } from '../../../scratch-uri';
 import { activeWorkspaceId } from '../../../workspace-registry';
+import type { RefusalContract } from '../../../capability-envelope/identity-refusal-contract';
 import { defineTool } from '@papercusp/agent-mcp';
 import {
   authorizeScratchReference,
@@ -86,6 +87,14 @@ export default defineTool({
           error: {
             code: 'forbidden_cross_workspace',
             message: `scratch URI references workspace "${parts.workspaceId}"; operator's active workspace is "${ws}"`,
+            refusal: {
+              observed: { uriWorkspaceId: parts.workspaceId, activeWorkspaceId: ws },
+              liftsWhen:
+                'the scratch URI names the operator\'s ACTIVE workspace (uriWorkspaceId === activeWorkspaceId). Fetch ' +
+                'the scratch file through an operator whose active workspace is the URI\'s workspace, or re-mint the ' +
+                'URI from a session in the active workspace — scratch is never served across workspaces',
+              whoCanMakeItTrue: ['self', 'owner'],
+            } satisfies RefusalContract,
           },
         }),
         { status: 403, headers: { 'content-type': 'application/json' } },

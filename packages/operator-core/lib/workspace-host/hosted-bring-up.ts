@@ -9,9 +9,14 @@
  * (D-250 holds). So the chain is: initialize (local-inference agent only) -> desktop pack ->
  * mark the customer workspace `active`.
  *
- * WHO MAY ASK FOR IT. Only the Papercusp-hosted first-workspace door sets a bring-up. It is an
- * explicit field on the provisioning input, never inferred from the spec, so an ordinary
- * provision (BYOC, the loopback route, the canary) still ends at the machine exactly as before.
+ * WHO MAY ASK FOR IT. Only the hosted (app.papercusp.com) doors set a bring-up: first-workspace,
+ * for every GCP and AWS host whether it runs in Papercusp's project/account or the customer's own
+ * (an AWS host is reached over SSM, as the connection's own role — never ambient), and the hosted
+ * provision route, for the bound host of a customer workspace still 'provisioning' (a retry of a
+ * failed first build). A portal customer has no controller and no initialize route of their own,
+ * so without it their workspace never leaves 'provisioning' (aws-byoc-gcp-parity D-015). It is an
+ * explicit field on the provisioning input, never inferred from the spec, so a desktop/local
+ * provision (the loopback route, the canary) still ends at the machine exactly as before.
  *
  * EVERY FIELD IS DERIVED ON THE SERVER. The initialization request below is built from the
  * host's own desired spec; nothing a browser sent reaches it.
@@ -69,6 +74,41 @@ export function workspaceHostBringUpOperationIds(provisionOperationId: string): 
 }
 
 /**
+ * The machine's own cloud identity, as a workload: a GCP VM's service account in its project, or an
+ * EC2 instance's instance profile in its account (aws-byoc-gcp-parity D-015 rule 3). Either way the
+ * instance metadata service answers it on the machine, so nothing is delivered to disk.
+ */
+const HOSTED_BRING_UP_SCOPE_KINDS: Readonly<Record<string, string>> = { gcp: 'project', aws: 'account' };
+
+/**
+ * Whether a provider has a hosted bring-up. Both doors (first-workspace, the hosted provision route)
+ * ask this table instead of naming clouds themselves, so adding a cloud is one entry here.
+ */
+export function hostedBringUpSupportsProvider(provider: string): boolean {
+  return Object.hasOwn(HOSTED_BRING_UP_SCOPE_KINDS, provider);
+}
+
+/** Whether this host's target AND scope have a hosted bring-up. */
+export function hostedBringUpSupportsHost(desired: WorkspaceHostDesiredSpec): boolean {
+  const target = String(desired.target);
+  return hostedBringUpSupportsProvider(target) && HOSTED_BRING_UP_SCOPE_KINDS[target] === desired.scope.kind;
+}
+
+function hostedBringUpWorkload(desired: WorkspaceHostDesiredSpec): {
+  provider: string;
+  scopeId: string;
+  workloadId: string;
+} {
+  if (!hostedBringUpSupportsHost(desired)) {
+    throw new Error(
+      `hosted bring-up supports GCP project and AWS account hosts only (host ${desired.hostId}, ` +
+        `target ${String(desired.target)}, scope ${String(desired.scope.kind)})`,
+    );
+  }
+  return { provider: String(desired.target), scopeId: desired.scope.id, workloadId: desired.hostId };
+}
+
+/**
  * The initialization request for a freshly built hosted machine: an empty workspace and the
  * machine's own cloud identity (the instance metadata server answers it; nothing is delivered
  * to disk). A first build is the first binding, so the generation is 1.
@@ -81,10 +121,7 @@ export function hostedBringUpInitialization(input: {
   requestedAgents: readonly WorkspaceHostCanaryAgent[];
 }): WorkspaceHostInitializationAdmission {
   const { desired } = input;
-  if (desired.target !== 'gcp' || desired.scope.kind !== 'project') {
-    throw new Error(`hosted bring-up supports GCP project hosts only (host ${desired.hostId})`);
-  }
-  const workload = { provider: 'gcp', scopeId: desired.scope.id, workloadId: desired.hostId };
+  const workload = hostedBringUpWorkload(desired);
   const generation = 1;
   return {
     contractVersion: WORKSPACE_HOST_INITIALIZATION_CONTRACT_VERSION,
@@ -160,14 +197,22 @@ export function hostedConnectorRouteLabel(hostId: string): string {
 
 /**
  * D-407: the customer workspace a host was brought up for, read from its unrevoked connector
- * enrollment -- the persisted proof that the host carries a hosted bring-up. A host with none
- * (BYOC) returns null. Only the bring-up enrolls connectors, so a caller never has to say it.
+ * enrollment -- the persisted proof that the host carries a hosted bring-up. Only the bring-up
+ * enrolls connectors, so a caller never has to say it.
+ *
+ * aws-byoc-gcp-parity D-016 (c): a portal host whose provision succeeded but whose bring-up never
+ * completed has no connector yet, so it falls back to its `customer_workspaces` binding -- but only
+ * while that portal workspace is still 'provisioning'. That is the one state in which the
+ * empty-source initialize is safe: the workspace has never served, so there is nothing for it to
+ * overwrite. This is what lets `repair` recover such a host; without it the workspace stays
+ * 'provisioning' forever (measured on host-0f9b1ba8db30d143becc130a). A desktop/local BYOC host has
+ * neither binding and returns null.
  */
 export async function readHostedBringUpBinding(input: {
   controlPlaneWorkspaceId: string;
   hostId: string;
 }): Promise<{ customerWorkspaceId: string } | null> {
-  return withHostedServiceContext(async (sql) => {
+  const enrolled = await withHostedServiceContext(async (sql) => {
     const rows = await sql<Array<{ customer_workspace_id: string }>>`
       SELECT DISTINCT customer_workspace_id
         FROM papercusp_auth.hosted_workspace_connectors
@@ -180,6 +225,24 @@ export async function readHostedBringUpBinding(input: {
     }
     return rows[0] ? { customerWorkspaceId: rows[0].customer_workspace_id } : null;
   });
+  if (enrolled) return enrolled;
+
+  const pending = await withWorkspace(input.controlPlaneWorkspaceId, async (query) =>
+    query<Array<{ id: string }>>`
+      SELECT id
+        FROM harness_shared.customer_workspaces
+       WHERE workspace_id = ${input.controlPlaneWorkspaceId}
+         AND workspace_host_id = ${input.hostId}
+         AND kind = 'hosted'
+         AND state = 'provisioning'
+       ORDER BY id
+       LIMIT 2
+    `,
+  );
+  if (pending.length > 1) {
+    throw new Error(`host ${input.hostId} is bound to ${pending.length} provisioning customer workspaces`);
+  }
+  return pending[0] ? { customerWorkspaceId: pending[0].id } : null;
 }
 
 export async function revokeHostedWorkspaceConnectorsForDestroyedHost(input: {

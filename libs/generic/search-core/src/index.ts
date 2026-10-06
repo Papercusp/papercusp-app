@@ -78,3 +78,14 @@ export {
   type ChunkingDecisionRule,
   type ChunkingDecision,
 } from './retrieval-bench';
+
+// Width sweep — rank-based recall of text past an embed-prefix cut, per width (moved from
+// papercusp's turn-truncation-width instrument; corpus and embedder injected).
+export {
+  runWidthSweep,
+  type WidthSweepDoc,
+  type WidthSweepChunkArm,
+  type WidthSweepInput,
+  type WidthSweepArm,
+  type WidthSweepResult,
+} from './width-sweep';

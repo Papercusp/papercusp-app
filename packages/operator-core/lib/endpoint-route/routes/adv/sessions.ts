@@ -15,6 +15,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { defineTool } from '@papercusp/agent-mcp';
 import type { SearchFilters, RecencyRank, MatchProvenance } from '@papercusp/search';
+import type { TranscriptTurnHit } from '../../../adv-session-search';
 import { createQueryEmbedderWarmup } from '../../../search/query-embedder-warmup';
 import { fitsProseColumns } from '../../../search/prose-vector-dims';
 import { closeWindowId } from '../../../adv-session-windows';
@@ -42,6 +43,7 @@ import {
   dedupeEndedAgainstActive,
   pendingLaunchesToRosterEntries,
   startingLaunchesToRosterEntries,
+  readStartingLaunchLogHints,
   dedupeStartingAgainstActive,
 } from '../../../adv-roster';
 // Pure recency-param parsing (WI-5097) + the pure id-search half (WI-37204 —
@@ -58,6 +60,8 @@ import { gatherOnDesktopSessions } from '../../../desktop-window-liveness';
 import { setOnDesktopWindowsCache, type WindowsDesktopWindow } from '../../../windows-desktop-windows';
 import { readOmpConfig } from '../../../omp-config';
 import { SESSION_PORT_PROTOCOL_VERSION, SESSION_PORT_TRANSFORM_VERSION } from '../../../session-port/types';
+import { evidenceIncarnationOwnedBy } from '../../../session-port/source';
+export { evidenceIncarnationOwnedBy } from '../../../session-port/source';
 import { normalizeSuContextSize } from '../../../su-context-size.mjs';
 import {
   classifySessionPortFailure,
@@ -155,7 +159,7 @@ async function startRematerializeJob({
           import('@papercusp/orchestrator/session-launch-dirs'),
         ]);
         if (sessionClaudeConfigDir(stamp.owner) === stamp.session_root) {
-          ensureInteractiveClaudeConfig({ sid: stamp.owner });
+          await ensureInteractiveClaudeConfig({ sid: stamp.owner });
         }
       } catch (e) {
         console.warn(`[rematerialize] interactive-config seed failed for ${sessionId}: ${(e as Error)?.message ?? e}`);
@@ -180,6 +184,7 @@ type SessionPortRequestBody = {
   targetBackend?: unknown;
   targetModel?: unknown;
   targetAccount?: unknown;
+  targetOwnerId?: unknown;
   contextSize?: unknown;
   launchContext?: unknown;
   expectedSourceHash?: unknown;
@@ -193,37 +198,6 @@ function json(body: unknown, status = 200): Response {
 
 /** A claude/codex native session uuid — the only shape `/adv/sessions/resumable?sessionId=` resolves. */
 const RESUMABLE_NATIVE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * WI-10003198: the transcript a session port reads, when the consult's evidence
- * names an EARLIER incarnation of the tracked source rather than its row's
- * current native session.
- *
- * A carry-respawn rewrites its owner's adv_sessions row in place (same row id,
- * new session_id), so every earlier incarnation has no row of its own — and the
- * router routinely picks exactly those, because they hold the matched turns.
- * The port used to refuse them outright ("must name this exact source
- * session"). An earlier incarnation belongs to the row when session_turns
- * records the row's coord owner as that session's latest owner — the same
- * bridge resolveResumeTarget uses — and then the port reads THAT transcript.
- * Anything else is still refused.
- */
-export async function evidenceIncarnationOwnedBy(
-  sql: import('postgres').Sql,
-  sourceRow: { coordOwnerId: string | null },
-  sessionId: string,
-): Promise<boolean> {
-  if (!sourceRow.coordOwnerId) return false;
-  const [latest] = await sql<Array<{ owner: string }>>`
-    SELECT t.owner
-      FROM harness_shared.session_turns t
-     WHERE t.session_id = ${sessionId}
-       AND t.owner IS NOT NULL
-     ORDER BY t.ingested_at DESC
-     LIMIT 1
-  `;
-  return latest?.owner === sourceRow.coordOwnerId;
-}
 
 function sessionPortProtocolError(version: unknown, transformVersion: unknown): Response | null {
   if (version === SESSION_PORT_PROTOCOL_VERSION && transformVersion === SESSION_PORT_TRANSFORM_VERSION) return null;
@@ -252,8 +226,8 @@ async function resolveSessionPortInspection(req: Request, body: SessionPortReque
     return { response: json({ ok: false, error: 'sourceAdvSessionId must be a positive integer' }, 400) } as const;
   }
   const targetBackend = body.targetBackend;
-  if (targetBackend !== 'codex' && targetBackend !== 'omp') {
-    return { response: json({ ok: false, error: 'V1 targetBackend must be codex|omp' }, 400) } as const;
+  if (targetBackend !== 'claude' && targetBackend !== 'codex' && targetBackend !== 'omp') {
+    return { response: json({ ok: false, error: 'targetBackend must be claude|codex|omp' }, 400) } as const;
   }
   const normalizedContextSize = normalizeSuContextSize(body.contextSize);
   if (!normalizedContextSize.ok) {
@@ -274,11 +248,13 @@ async function resolveSessionPortInspection(req: Request, body: SessionPortReque
   await store.assertSessionPortStorageReady();
   const trackedRow = await getAdvSessionInWorkspace(sourceAdvSessionId, workspaceId);
   if (!trackedRow) return { response: json({ ok: false, error: 'tracked source session not found in target workspace' }, 404) } as const;
+  service.resolveSessionPortTargetOwner(trackedRow.coordOwnerId ?? '', body.targetOwnerId);
   // The row whose transcript this port reads. Normally the tracked row itself;
   // for an evidence span in an earlier carry-respawn incarnation, the same row
   // re-pointed at that incarnation's native session (see
   // evidenceIncarnationOwnedBy). Identity, workspace and plan stay the row's.
-  let sourceRow = trackedRow;
+  const sourceNativeId = trackedRow.agent === 'omp' ? trackedRow.ompThreadId ?? trackedRow.sessionId : trackedRow.sessionId;
+  let sourceRow = { ...trackedRow, sessionId: sourceNativeId };
   let evidenceSpan: import('../../../session-port/service').SessionPortEvidenceSpan | undefined;
   if (body.consultEvidenceSpan != null) {
     const raw = body.consultEvidenceSpan;
@@ -295,7 +271,7 @@ async function resolveSessionPortInspection(req: Request, body: SessionPortReque
       return { response: json({ ok: false, error: 'consultEvidenceSpan must name this exact source session, 1–12 valid turn indices, and a context window from 0–8' }, 400) } as const;
     }
     const { sql } = getOrgPg();
-    if (sessionId !== trackedRow.sessionId) {
+    if (sessionId !== sourceNativeId) {
       if (!RESUMABLE_NATIVE_SESSION_ID_RE.test(sessionId) ||
           !(await evidenceIncarnationOwnedBy(sql as unknown as import('postgres').Sql, trackedRow, sessionId))) {
         return {
@@ -307,13 +283,13 @@ async function resolveSessionPortInspection(req: Request, body: SessionPortReque
           }, 400),
         } as const;
       }
-      sourceRow = { ...trackedRow, sessionId };
+      sourceRow = { ...trackedRow, sessionId, ...(trackedRow.agent === 'omp' ? { ompThreadId: sessionId } : {}) };
     }
     const indexed = await sql<Array<{ turn_idx: number; timestamp: string | Date | null; speaker: string; text: string }>>`
       SELECT t.turn_idx, t.ts AS timestamp, t.speaker, t.text
         FROM harness_shared.session_turns t
        WHERE (t.workspace_id = ${workspaceId} OR t.workspace_id = 'default')
-         AND t.source_kind = 'claude'
+         AND t.source_kind = ${sourceRow.agent}
          AND t.session_id = ${sessionId}
          AND t.turn_idx = ANY(${turnIndices as number[]}::int[])
     `;
@@ -365,9 +341,10 @@ async function resolveSessionPortInspection(req: Request, body: SessionPortReque
     home: os.homedir(),
   });
   if (budget.level === 'refuse') throw new Error('target launch prompt already exhausts the selected context window');
-  const stableSource = await service.acquireTrackedClaudeSource(sourceRow);
+  const stableSource = await service.acquireTrackedSessionSource(sourceRow);
   const modelProvider = targetBackend === 'codex'
     ? 'openai'
+    : targetBackend === 'claude' ? 'anthropic'
     : (targetModel?.includes('/') ? targetModel.split('/')[0] : 'omp-configured-provider');
   const inspection = service.inspectAcquiredSessionPort({
     sourceRow,
@@ -381,6 +358,7 @@ async function resolveSessionPortInspection(req: Request, body: SessionPortReque
       availableInputTokens: budget.availableInputTokens,
       contextSize,
       launchContextHash: createHash('sha256').update(launchContextText).digest('hex'),
+      ...(body.targetOwnerId === undefined ? {} : { ownerId: body.targetOwnerId as string }),
     },
     currentInstruction: typeof body.currentInstruction === 'string' ? body.currentInstruction : null,
     ...(evidenceSpan ? { evidenceSpan } : {}),
@@ -966,7 +944,7 @@ const searchTranscripts = defineTool({
     const stageTimingsMs: Record<string, number> = {};
     const mark = (label: string) => { stageTimingsMs[label] = Date.now() - t0; };
 
-    const [{ runHybridSearch, hitProvenance }, { SEARCH_SOURCES }, { rerankCandidateCount, rerankPageHead }, { parseTurnRef }, { activeWorkspaceId }, { getOrgPg }] =
+    const [{ runHybridSearch }, { SEARCH_SOURCES }, { rerankCandidateCount, rerankPageHead }, { parseTurnRef }, { activeWorkspaceId }, { getOrgPg }] =
       await Promise.all([
         import('@papercusp/search'),
         import('../../../agent-tools/search/sources'),
@@ -984,6 +962,8 @@ const searchTranscripts = defineTool({
       ownerVisiblePage, OWNER_VISIBILITY_DECIDING_PREFIX_CHARS, ownerVisibleCandidateCount,
     } = await import('../../../adv-session-search');
     const { advSessionsByTranscriptHandles } = await import('../../../adv-sessions');
+    const { retrieveSessionTurnLiteralTiers, composeSessionTurnTiers, tieredHitToWire, SESSION_TURN_LITERAL_POLICY } =
+      await import('../../../agent-tools/search/session-turn-literal');
 
     /* `?includeMachineTurns=1` opts OUT of the owner-visibility filter — for
        debugging a wake or a hook wall, where the plumbing IS the thing you are
@@ -1023,6 +1003,31 @@ const searchTranscripts = defineTool({
     const embedder = selectedEmbedder.embedder;
     mark('embedAcquire'); // selection is synchronous; warmup continues in background
     const embedTimeoutMs = Number(process.env.PAPERCUSP_TRANSCRIPT_EMBED_BUDGET_MS) || 4000;
+    /* EXACT + FUZZY literal tiers (plan session-transcript-exact-fuzzy-search-2026-09-14 P-004;
+       D-001 precedence, D-003 bounded branches, D-005 readiness/degrade). The hybrid engine
+       tokenizes, so a literal INSIDE a lexeme (`furnishedfinder` in `www.furnishedfinder.com`) or a
+       one-letter typo never reaches it; these two index-backed tiers do, and they are composed AHEAD
+       of the hybrid remainder below. Started NOW, concurrent with embed + search — it depends on
+       nothing the engine produces (same reasoning as the roster hoist, WI-4734). Each tier carries
+       its own hard deadline (exact 2s; fuzzy 1s expand + 2s resolve), so no signal is threaded in.
+
+       ⚠ `filters` is passed through UNCHANGED (since/until/plan owners) but `ownerCandidates` is NOT
+       added: OWNER_CANDIDATE_TURN_VERDICTS would also drop every ASSISTANT turn in SQL, while the
+       owner-visibility rule is applied post-hydration by `ownerVisiblePage` and deliberately fails
+       open (adv-session-search.ts must not have it restated in SQL). Machine-turn drops are
+       disclosed through `hiddenMachineHits`.
+
+       Fail-soft: the retrieval function already degrades per tier; this catch only covers an
+       unexpected throw so the hybrid results always still serve. */
+    const workspaceId = activeWorkspaceId();
+    const literalP = retrieveSessionTurnLiteralTiers(sql, { workspaceId, query: q, scopeFilter: null, filters }).catch(
+      (err: unknown): Awaited<ReturnType<typeof retrieveSessionTurnLiteralTiers>> => {
+        const failed = { status: 'error' as const, returned: 0, elapsedMs: 0, error: (err as Error)?.message ?? String(err) };
+        return { exact: [], fuzzy: [], receipt: { policy: SESSION_TURN_LITERAL_POLICY, exact: failed, fuzzy: failed } };
+      },
+    );
+    // The route's aborted-catch path may return before `literalP` is awaited below.
+    literalP.catch(() => {});
     // The route watchdog's signal is threaded into the engine so a timed-out
     // search stops running instead of grinding all sources to completion
     // after the 408 already went out (2026-07-09 incident: 34–69s server
@@ -1032,7 +1037,7 @@ const searchTranscripts = defineTool({
       caller: 'adv:sessions-search',
       sql,
       query: q,
-      workspaceId: activeWorkspaceId(),
+      workspaceId,
       scopeFilter: null,
       // Retrieve a POOL, not the page. Two independent over-fetches want a
       // say here and the budget is the larger of them:
@@ -1107,6 +1112,10 @@ const searchTranscripts = defineTool({
       sourceKind: string; sessionId: string; turnIdx: number;
       excerpt: string; highlight: string; score: number;
       matchedBy?: MatchProvenance; lexicalScore?: number; semanticScore?: number;
+      // P-004 tier wire fields (see TranscriptTurnHit): the winning precedence tier, the other
+      // tiers that also found the turn, the literal a deep-link must anchor on, the fuzzy match.
+      tier?: TranscriptTurnHit['tier']; alsoMatchedBy?: TranscriptTurnHit['alsoMatchedBy'];
+      focusTerm?: string; fuzzy?: TranscriptTurnHit['fuzzy'];
       ts?: string | null; speaker?: string | null; owner?: string | null;
       // WI-37883 — hydrated below, read only by filterOwnerVisibleTurnHits and
       // then STRIPPED before the rollup (`groups` is serialized hit-for-hit).
@@ -1118,25 +1127,26 @@ const searchTranscripts = defineTool({
     // ⚠ `ordered`, NOT `results` — post-Stage-B the ARRAY ORDER is the relevance
     // order and `score` is only the retrieval score it was reranked out of.
     // groupHitsBySession preserves this order for exactly that reason.
-    for (const r of ordered) {
-      const ref = parseTurnRef(r.source_id);
-      if (!ref) continue;
-      // P-004: classify WHY this turn matched, here — the engine's ranker
-      // names ('bm25' / 'embeddings') stay engine-side and the wire carries a
-      // stable, self-describing verdict instead of raw internals every client
-      // would have to re-interpret. A vector-only hit matched no query term,
-      // so its `highlight` is the head of the turn rather than the match, and
-      // the card MUST say so instead of presenting it as one.
-      turnHits.push({
-        sourceKind: ref.sourceKind,
-        sessionId: ref.sessionId,
-        turnIdx: ref.turnIdx,
-        excerpt: r.excerpt,
-        highlight: r.highlight,
-        score: r.score,
-        ...hitProvenance(r),
-      });
-    }
+    /* EXACT > FUZZY > the hybrid remainder (D-001/D-006), composed here so everything
+       DOWNSTREAM — hydration, owner-visibility, rollup, classify — is unchanged and sees one
+       homogeneous list. The hybrid order (`ordered`, post-Stage-B) is kept inside the remainder;
+       `composeSessionTurnTiers` classifies WHY each hybrid turn matched through the same
+       `hitProvenance` this loop used to call (the engine's ranker names stay engine-side, and a
+       vector-only hit's `highlight` is the head of the turn, not the match — the card must say
+       so). A literal-only turn carries `matchedBy: 'unknown'` ("no claim") with `tier` as the real
+       claim. `maxPerSession`: this endpoint pages by SESSION CARD, and the engine's groupBy gave
+       the hybrid pool one hit per session — an uncapped literal tier could otherwise spend the whole
+       page on one chatty session. */
+    const literal = await literalP;
+    mark('literalTiers');
+    const composed = composeSessionTurnTiers({
+      exact: literal.exact,
+      fuzzy: literal.fuzzy,
+      hybrid: ordered,
+      limit: Math.max(hitLimit, candidateBudget),
+      maxPerSession: 2,
+    });
+    for (const c of composed.hits) turnHits.push(tieredHitToWire(c));
 
     // Hydrate per-turn metadata (ts/speaker/owner) — ts anchors the deep-link
     // into the transcript viewer; owner matches claude isolation transcripts to
@@ -1278,6 +1288,16 @@ const searchTranscripts = defineTool({
            least N", never as a total. */
         hiddenMachineHits: page.hidden,
         sessions,
+        /* P-004 receipt: what the literal tiers did for THIS query (ran / skipped + why /
+           deadline / error), what they returned, and what composition kept — so "why did exact
+           not appear" is a read, not a guess (D-005: a tier whose index is absent is skipped, never
+           a seq scan). Ignorable by clients, like `_stageTimingsMs`. */
+        _tiers: {
+          exact: literal.receipt.exact,
+          fuzzy: literal.receipt.fuzzy,
+          counts: composed.counts,
+          sessionCapped: composed.sessionCapped,
+        },
         _stageTimingsMs: stageTimingsMs,
       }),
       { status: 200, headers: JSON_HEADERS },
@@ -1429,7 +1449,7 @@ const ensureClaudeConfig = defineTool({
       });
     }
     const { ensureInteractiveClaudeConfig } = await import('../../../interactive-claude-config');
-    const { configDir, repaired } = ensureInteractiveClaudeConfig({ sid: owner });
+    const { configDir, repaired } = await ensureInteractiveClaudeConfig({ sid: owner });
     return new Response(JSON.stringify({ ok: true, owner, configDir, repaired }), {
       status: 200,
       headers: JSON_HEADERS,
@@ -1473,7 +1493,13 @@ const ensureCodexHome = defineTool({
   path: '/adv/sessions/ensure-codex-home',
   auth: 'loopback',
   async handler(req) {
-    let body: { owner?: unknown; advSessionId?: unknown; requireGatewayProvider?: unknown; model?: unknown } = {};
+    let body: {
+      owner?: unknown;
+      advSessionId?: unknown;
+      requireGatewayProvider?: unknown;
+      model?: unknown;
+      headless?: unknown;
+    } = {};
     try {
       const text = await req.text();
       if (text.trim()) body = JSON.parse(text);
@@ -1538,11 +1564,18 @@ const ensureCodexHome = defineTool({
     // throws before it can restore a missing home or prompt.
     const requestedModel = typeof body.model === 'string' ? body.model.trim() : '';
     const repairModel = requestedModel ? resolveCodexModel(requestedModel) : record.model ?? CODEX_DEFAULT_MODEL;
+    const repairHeadless = typeof body.headless === 'boolean'
+      ? body.headless
+      : typeof record.headless === 'boolean'
+        ? record.headless
+        : sessionRow?.launchArgv?.includes('--headless') === true;
     const repairRecord = requestedModel || !record.model ? {
       ...record,
       model: repairModel,
       modelSource: requestedModel ? 'inherited' as const : 'configured-default' as const,
     } : record;
+    const modelChanged = repairRecord.model !== record.model ||
+      repairRecord.modelSource !== record.modelSource;
     const ensureConfig = (mcpUrl: string, promptText: string) => ensureSuCodexHomeConfig({
       sessionKey: advSessionId,
       mcpUrl,
@@ -1551,14 +1584,21 @@ const ensureCodexHome = defineTool({
       token: readSuperuserToken(),
       codexGatewayAuto: body.requireGatewayProvider === true,
       codexGatewayPriority: body.requireGatewayProvider === true ? 'su' : null,
+      headless: repairHeadless,
       trustDir: null, // the home's inherited trust tables already cover the cwd
       projectDir: sessionRow?.cwd,
       promptText,
       recoverMissingHome: sessionRow?.coordOwnerId === owner,
     });
     let rebuilt;
+    // agent-economy-flywheel P-016 (D-012): a repair is a restart. An unfunded
+    // priced identity is dropped from the repaired render (never kept by the
+    // fail-soft paths below) and reported; a refusal that cannot be cured by
+    // dropping stack entries is answered as a typed 402.
+    let identityActivation: { identityActivationRefusal: unknown; removedLayerRefs: readonly string[] } | null = null;
     try {
-      rebuilt = await rebuildSuLaunchArtifact({
+      const { rebuildSuLaunchArtifactFunded } = await import('../../../cupboard/identity-activation-restart');
+      const funded = await rebuildSuLaunchArtifactFunded({
         ownerId: owner,
         operatorBaseUrl: new URL(req.url).origin,
         record: repairRecord,
@@ -1567,12 +1607,39 @@ const ensureCodexHome = defineTool({
           drainMode: record.drainMode,
           loopArmed: record.loopArmed,
         }),
-      });
+      }, { rebuild: rebuildSuLaunchArtifact });
+      rebuilt = funded.rebuilt;
+      if (funded.identityActivationRefusal) {
+        identityActivation = {
+          identityActivationRefusal: funded.identityActivationRefusal,
+          removedLayerRefs: funded.removedLayerRefs,
+        };
+      }
     } catch (error) {
+      const { isIdentityActivationRefusedError } = await import('../../../cupboard/identity-activation-gate');
+      if (isIdentityActivationRefusedError(error)) {
+        return new Response(JSON.stringify({
+          ok: false, owner, advSessionId, error: error.code, detail: error.message, refused: error.refused,
+        }), { status: 402, headers: JSON_HEADERS });
+      }
       const message = error instanceof Error ? error.message : String(error);
       if (!message.startsWith('selected identity ')) throw error;
       const pinned = pinnedSuRecoveryPrompt(repairRecord);
       if (!pinned) throw error;
+      // The pinned bytes are the prior render, so the same gate applies to them
+      // (P-016 D-012). They cannot be degraded, only refused.
+      const { admitIdentityActivation } = await import('../../../cupboard/identity-activation-gate-io');
+      const pinnedAdmission = await admitIdentityActivation({
+        stack: repairRecord.stack ?? [],
+        repoDir: sessionRow?.cwd ?? undefined,
+        workspaceId: record.workspaceId,
+      });
+      if (!pinnedAdmission.ok) {
+        return new Response(JSON.stringify({
+          ok: false, owner, advSessionId, error: pinnedAdmission.code, detail: pinnedAdmission.detail,
+          refused: pinnedAdmission.refused,
+        }), { status: 402, headers: JSON_HEADERS });
+      }
       // Only the MCP connection settings come from a fresh, unselected spec.
       // The instruction bytes come from the verified prior artifact; a source
       // update must never silently apply a new identity during home recovery.
@@ -1584,6 +1651,11 @@ const ensureCodexHome = defineTool({
         model: repairModel, stack: [], modes: [],
       });
       const recovered = ensureConfig(connection.mcpUrl, pinned.promptText);
+      // Model selection is independent of instruction activation. Preserve the
+      // pinned identity while recording the model this resume actually chose.
+      if (modelChanged && !(await recordSuLaunchSpec(advSessionId, owner, repairRecord))) {
+        throw new Error('repaired Codex model receipt was not persisted');
+      }
       return new Response(JSON.stringify({
         ok: true, owner, advSessionId, ...recovered,
         reason: 'pinned-source-stale',
@@ -1591,18 +1663,21 @@ const ensureCodexHome = defineTool({
       }), { status: 200, headers: JSON_HEADERS });
     }
     const r = ensureConfig(rebuilt.spec.mcpUrl, rebuilt.promptText);
-    if (r.promptRepaired) {
+    if (r.promptRepaired || modelChanged) {
       const artifact = rebuilt.artifact;
-      const updatedRecord = {
+      const updatedRecord = r.promptRepaired ? {
         ...repairRecord,
         stack: artifact.stack,
         specificationRevision: artifact.specificationRevision,
         stateRevision: artifact.stateRevision,
         specificationArtifact: artifact.specificationArtifact,
-      };
-      if (!(await recordSuLaunchSpec(null, owner, updatedRecord))) {
+      } : repairRecord;
+      if (!(await recordSuLaunchSpec(advSessionId, owner, updatedRecord))) {
         throw new Error('repaired Codex launch specification receipt was not persisted');
       }
+    }
+    if (r.promptRepaired) {
+      const artifact = rebuilt.artifact;
       await requestSessionIdentityActivation({
         ownerId: owner,
         workspaceId: record.workspaceId,
@@ -1626,6 +1701,7 @@ const ensureCodexHome = defineTool({
         advSessionId,
         ...r,
         ...(persistedRecord ? {} : { recoveredFrom: 'adv-session-row' }),
+        ...(identityActivation ?? {}),
       }),
       {
         status: 200,
@@ -1802,8 +1878,14 @@ const roster = defineTool({
     // THIRD tier. Deliberately not folded into `pending` — the pui panes that
     // tier, and these sessions already own a terminal. Rows whose session has
     // come online are dropped so presence renders it exactly once.
+    // EI-24748208098755918: log diagnostics are read off the event loop first;
+    // the mapper itself does no file I/O.
     const starting = dedupeStartingAgainstActive(
-      startingLaunchesToRosterEntries(startingRows, host),
+      startingLaunchesToRosterEntries(
+        startingRows,
+        host,
+        await readStartingLaunchLogHints(startingRows),
+      ),
       active,
     );
 

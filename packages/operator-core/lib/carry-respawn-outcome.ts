@@ -48,6 +48,21 @@ const RESPAWN_TERMINAL_FAIL = new Set(['respawn-carry-dropped', 'respawn-failed'
 /** Non-terminal: an attempt is still re-polling for an idle window. */
 const RESPAWN_IN_FLIGHT = new Set(['respawn-rearm-queued', 'respawn-rearm-superseded']);
 
+/**
+ * `respawn-carry-dropped {reason:'superseded'}` is the host RETIRING a moot request, not
+ * losing a continuation (WI-10005752). The host decides it with
+ * `isCarryRespawnSuperseded(request.receivedAtMs, lastRespawnAtMs)` (psu-pty-host.mjs):
+ * a respawn already happened AFTER the request arrived, so a newer child exists and
+ * "must retire their pending wake suppression without another cut". The newer child
+ * writes its OWN verdict rows (`respawned` / `respawn-carry-delivered` / a real drop),
+ * so the retirement row adds no loss evidence. It is written LATE (at the stale
+ * re-poll's next attempt), i.e. AFTER the successor's delivery row, which is why a
+ * newest-first scan that trusted it told the successor its own creating respawn had
+ * been "DROPPED just now". Measured 2026-10-03 over 4,263 owner logs: 5,433 such rows
+ * across 558 owners, ~73% written after a delivery with no cut since.
+ */
+const RESPAWN_RETIRED_REASON = 'superseded';
+
 export type PriorRespawnOutcome = 'delivered' | 'dropped' | 'pending' | 'none';
 
 export interface PriorRespawn {
@@ -56,7 +71,9 @@ export interface PriorRespawn {
    * delivery; none = this session has no respawn history. */
   outcome: PriorRespawnOutcome;
   /** The host's own reason string on a drop (busy-gate-expired / carry-stale /
-   *  superseded / rearm-error), when it recorded one. */
+   *  rearm-error / turn-start-unverified), when it recorded one. `superseded` never
+   *  appears here: the host writes it to RETIRE a moot request, which is not a drop
+   *  verdict (see RESPAWN_RETIRED_REASON). */
   reason?: string;
   /** ISO timestamp of the deciding row. */
   ts?: string;
@@ -80,10 +97,19 @@ export function deriveLastRespawnOutcome(
   opts: { now?: number } = {},
 ): PriorRespawn {
   const now = opts.now ?? Date.now();
+  // Set once a retirement row is crossed: the in-flight (`respawn-rearm-*`) rows OLDER than
+  // it belong to the request it retired, so they are retired too — otherwise the same-ms
+  // `respawn-rearm-queued` just before it would read as a fresh `pending` and, once
+  // capMs + grace elapsed, raise a spurious DELAYED banner for a request that no longer exists.
+  let retiringInFlight = false;
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const row = rows[i];
     const kind = String(row?.kind ?? '');
     if (!kind) continue;
+    if (kind === 'respawn-carry-dropped' && row.reason === RESPAWN_RETIRED_REASON) {
+      retiringInFlight = true;
+      continue;
+    }
     let outcome: PriorRespawnOutcome | null = null;
     if (RESPAWN_TERMINAL_FAIL.has(kind)) outcome = 'dropped';
     else if (RESPAWN_TERMINAL_OK.has(kind)) outcome = 'delivered';
@@ -94,6 +120,10 @@ export function deriveLastRespawnOutcome(
     else if (kind === 'respawned' && row.mode === 'carry-respawn') outcome = 'pending';
     else if (RESPAWN_IN_FLIGHT.has(kind)) outcome = 'pending';
     if (!outcome) continue;
+    if (retiringInFlight) {
+      if (RESPAWN_IN_FLIGHT.has(kind)) continue;
+      retiringInFlight = false;
+    }
     const ts = typeof row.ts === 'string' ? row.ts : undefined;
     const parsed = ts ? Date.parse(ts) : NaN;
     const capMs = typeof row.capMs === 'number' && Number.isFinite(row.capMs) ? row.capMs : null;

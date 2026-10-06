@@ -37,6 +37,13 @@
  */
 import { execFile } from 'node:child_process';
 import { managedSetInterval, type ManagedHandle } from '@papercusp/scheduled-registry';
+import {
+  gitSidecarEnabled,
+  isSidecarInfrastructureFault,
+  noteSidecarFallback,
+  runGitViaSpawnerSidecar,
+  type GitRunResult,
+} from '../fleet/git-via-sidecar';
 
 export interface WorktreeInfo {
   /** Absolute worktree path, as reported by `git worktree list --porcelain`. */
@@ -95,13 +102,64 @@ export interface WorktreeCoverageDeps {
   log?: (message: string) => void;
 }
 
-function defaultRunGit(args: string[], cwd: string): Promise<string> {
+function runGitLocal(args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd, timeout: 30_000 }, (err, stdout, stderr) => {
+    execFile('git', args, { cwd, timeout: 30_000, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr?.toString().trim() || err.message));
       else resolve(stdout.toString());
     });
   });
+}
+
+/** Seams for {@link runWatchdogGit}; production uses the real sidecar + local spawn. */
+export interface WatchdogGitSeams {
+  sidecarEnabled?: () => boolean;
+  viaSidecar?: (args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv) => Promise<GitRunResult>;
+  local?: (args: string[], cwd: string, env: NodeJS.ProcessEnv) => Promise<string>;
+  onFallback?: (e: unknown) => void;
+}
+
+/**
+ * The default git runner. On the bg-host it runs git inside the spawner sidecar.
+ * The sibling-checkout pass runs three git calls per checkout across ~50
+ * checkouts, and a fork() from the big host process costs ~200 ms each at
+ * ~12 GB RSS. One pass measured 161 forks and ~32 s of blocked main thread
+ * (WI-10005446, 2026-10-02 11:00:46-11:03:56Z). A sidecar fault falls back to
+ * a local spawn: degraded, never broken. A non-zero git exit rejects exactly
+ * as the local path does.
+ */
+export async function runWatchdogGit(
+  args: string[],
+  cwd: string,
+  seams: WatchdogGitSeams = {},
+): Promise<string> {
+  const env = args[0] === 'status'
+    ? { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+    : process.env;
+  const enabled = seams.sidecarEnabled ?? (() => gitSidecarEnabled('PAPERCUSP_WORKTREE_COVERAGE_SPAWN_SIDECAR'));
+  const onFallback = seams.onFallback ?? ((e: unknown) => noteSidecarFallback('worktree-coverage', e));
+  if (enabled()) {
+    let res: GitRunResult | null = null;
+    try {
+      // Pass THIS process's env: the sidecar otherwise runs git under its own env.
+      res = await (seams.viaSidecar ?? runGitViaSpawnerSidecar)(args, cwd, 30_000, env);
+    } catch (e) {
+      onFallback(e);
+    }
+    if (res && isSidecarInfrastructureFault(res)) {
+      onFallback(new Error(res.stderr));
+      res = null;
+    }
+    if (res) {
+      if (res.code !== 0) throw new Error(res.stderr.trim() || `git ${args[0] ?? ''} exited ${res.code}`);
+      return res.stdout;
+    }
+  }
+  return (seams.local ?? runGitLocal)(args, cwd, env);
+}
+
+function defaultRunGit(args: string[], cwd: string): Promise<string> {
+  return runWatchdogGit(args, cwd);
 }
 
 /** Parse `git worktree list --porcelain` output into the set of absolute worktree paths. */
@@ -240,7 +298,7 @@ export function startWorktreeCoverageWatchdog(
 // the same repo synced normally two directories away. The same blind spot was
 // hiding ~9 more dirty sibling checkouts at the time this was written
 // (papercup-improvement-runner 22 dirty / ~70d, papercusp-desktop 18 / ~67d,
-// owner-central-server 13, owner-Libs 13, ...).
+// storewolf-central-server 13, Storewolf-Libs 13, ...).
 //
 // Coverage is decided by the AUTHORITATIVE signal, never a directory marker: an
 // ACTIVE harness_shared.routines row with target_role='system:git-sync' whose

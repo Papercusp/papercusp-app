@@ -94,6 +94,7 @@ interface CapacityScopeArgs {
 interface ResolvedCapacityScope {
   provider: AccountProvider;
   modelProvider?: AccountProvider;
+  accountProvider?: AccountProvider;
   accountRows?: AccountStatusRow[];
   accountFound?: boolean;
 }
@@ -191,16 +192,17 @@ async function resolveFleetProviders(
 /** Resolve the requested backend before reading either gateway or account-pool capacity. */
 async function resolveCapacityScope(args: CapacityScopeArgs): Promise<ResolvedCapacityScope> {
   const modelProvider = providerForModel(args.model);
+  const accountId = accountPin(args.account);
   let accountRows: AccountStatusRow[] | undefined;
   let accountProvider: AccountProvider | undefined;
 
-  // An account pin is itself enough to select a provider. Reuse this read below so an account-only
-  // Codex request cannot fall through to the legacy Claude default (the incident's failure shape).
-  if (args.account && !args.provider && !modelProvider) {
+  // Validate real pins even when a model/provider is supplied. Auto selects the
+  // routable pool; it cannot select a backend or narrow the pool to an account id.
+  if (accountId) {
     try {
       const { accountStatus } = await import('../../deployment/account-pool-store');
       accountRows = await accountStatus(activeWorkspaceId());
-      accountProvider = accountRows.find((row) => row.id === args.account)?.provider;
+      accountProvider = accountRows.find((row) => row.id === accountId)?.provider;
     } catch {
       // Keep the scope explicit but unknown; the later availability read remains fail-safe.
     }
@@ -209,9 +211,14 @@ async function resolveCapacityScope(args: CapacityScopeArgs): Promise<ResolvedCa
   return {
     provider: args.provider ?? modelProvider ?? accountProvider ?? BEE_PROVIDER,
     modelProvider,
+    accountProvider,
     accountRows,
-    accountFound: args.account ? accountRows?.some((row) => row.id === args.account) : undefined,
+    accountFound: accountId ? accountRows?.some((row) => row.id === accountId) : undefined,
   };
+}
+
+function accountPin(account?: string): string | undefined {
+  return account === 'auto' ? undefined : account;
 }
 
 /**
@@ -238,10 +245,11 @@ export async function readProviderAvailability(
   preloadedRows?: AccountStatusRow[],
 ): Promise<AccountPoolAvailability | undefined> {
   try {
+    const pinnedId = accountPin(accountId);
     const ws = activeWorkspaceId();
     const { accountStatus } = await import('../../deployment/account-pool-store');
     const rows = (preloadedRows ?? (await accountStatus(ws))).filter(
-      (r) => r.provider === provider && (!accountId || r.id === accountId),
+      (r) => r.provider === provider && (!pinnedId || r.id === pinnedId),
     );
     if (rows.length === 0) return undefined;
 
@@ -341,7 +349,7 @@ export async function readProviderAvailability(
       // at all. That mismatch let an unavailable (usage-walled) account's sustainedlyLimited flag get
       // counted against a DIFFERENT, actually-usable account — collapsing `degraded` to true (and the
       // advice to "all N/M usable accounts are sustainedly rate-limited") even when every truly-usable
-      // account was fine. Measured live: usable=1 (avi_owner, sustainedlyLimited:false), yet the bare
+      // account was fine. Measured live: usable=1 (avi_storewolf, sustainedlyLimited:false), yet the bare
       // filter reported sustainedlyLimitedCount=1 because ownerhandle (walled, NOT usable) was sustainedlyLimited
       // — a false "DEGRADED" verdict that was relayed to the owner and had to be retracted.
       sustainedlyLimitedCount: rows.filter(
@@ -562,7 +570,8 @@ export default defineTool({
     .passthrough(),
   async handler(args, ctx) {
     const scope = await resolveCapacityScope(args);
-    const explicitBackend = Boolean(args.provider || args.model || args.account);
+    const pinnedAccount = accountPin(args.account);
+    const explicitBackend = Boolean(args.provider || args.model || pinnedAccount);
     const fleetScope = await resolveFleetScope(args, ctx, !explicitBackend || !!args.fleet);
     const providerSource: ProviderSource = explicitBackend
       ? 'explicit'
@@ -577,12 +586,14 @@ export default defineTool({
       ...fleetPayload,
     };
     const modelProviderMismatch = !!args.provider && !!scope.modelProvider && args.provider !== scope.modelProvider;
-    const accountOnlyScopeUnknown =
-      !!args.account && !args.provider && !scope.modelProvider && scope.accountFound !== true;
-    if (modelProviderMismatch || accountOnlyScopeUnknown) {
+    const accountScopeUnknown = !!pinnedAccount && scope.accountFound !== true;
+    const accountProviderMismatch = !!scope.accountProvider && scope.accountProvider !== scope.provider;
+    if (modelProviderMismatch || accountScopeUnknown || accountProviderMismatch) {
       const reason = modelProviderMismatch
         ? `model '${args.model}' belongs to provider '${scope.modelProvider}', not '${scope.provider}'`
-        : `account '${args.account}' has no measured provider row`;
+        : accountProviderMismatch
+          ? `account '${pinnedAccount}' belongs to provider '${scope.accountProvider}', not '${scope.provider}'`
+          : `account '${pinnedAccount}' has no measured provider row`;
       return {
         content: [
           {

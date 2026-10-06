@@ -37,16 +37,33 @@
  * `git worktree prune` does for that one entry, without touching others), then deletes.
  * Each removal is appended to the shared deletion-audit.tsv the release scripts write.
  */
-import { execFileSync } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
+import { mapWithConcurrency } from './gym/concurrency';
+import { HELPER_FRAME_FN, type HelperSection, nextForkSlot, parseHelperFrames } from './git-batch';
+
+export { type HelperSection, nextForkSlot, parseHelperFrames } from './git-batch';
 
 export const RETENTION_SCHEMA = 'papercusp-release-retention/v1';
 export const RECLAIM_DELETER = 'release:cut-reclaim';
 export const DEFAULT_MIN_IDLE_HOURS = 24;
 const GIT_TIMEOUT_MS = 120_000;
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+/**
+ * The authored-work read is the only git-heavy phase, and it runs inside one MCP call
+ * (release:cut, ~55s request timeout). Serially it cost 54.4s of a 56.0s dry-run on
+ * 2026-10-02 07:02Z: 24 trees, median 2.1s each, under load ~126/128 (EI-24849983022443070).
+ * Trees are independent reads, so they run width-bounded. Within a tree the reads are
+ * batched into `sh` helpers (see runGitHelper): each extra submodule helper costs one more
+ * fork of the large host image, so the submodule pass defaults to a single helper and the
+ * tree width supplies the parallelism.
+ */
+export const AUTHORED_TREE_CONCURRENCY = 4;
+export const AUTHORED_SUBMODULE_CONCURRENCY = 1;
 
 // ---------------------------------------------------------------- parsing (pure)
 
@@ -152,6 +169,21 @@ export function compareVersions(a: string, b: string): number | null {
 /** Either side inside the other — the lease guard's own prefix rule. */
 export function pathsOverlap(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/**
+ * The executor's path rail, independent of the plan: never remove the canonical tree, `/`,
+ * home, or anything that CONTAINS one of them. A tree nested INSIDE the canonical tree (e.g.
+ * `.papercusp/worktrees/desktop-release-0.0.19`) is not refused here — the caller's `.git`-file
+ * and admin-dir rails are what prove it is a registered linked worktree rather than part of
+ * the canonical checkout. (WI-10006139: the rail used {@link pathsOverlap}, which also
+ * matches descendants, so a tree the planner offered as named-only could never be removed.)
+ */
+export function reclaimPathRefusal(real: string, canonicalRoot: string, home: string): string | null {
+  const containsOrIs = (outer: string, inner: string) => outer === '/' || inner === outer || inner.startsWith(`${outer}/`);
+  if (containsOrIs(real, canonicalRoot)) return 'refusing the canonical tree or a path that contains it';
+  if (containsOrIs(real, home)) return 'refusing home or a path that contains it';
+  return null;
 }
 
 export interface StatusEntry {
@@ -394,16 +426,115 @@ export function resolveReclaimTargets(
 
 // ---------------------------------------------------------------- host probes (effectful)
 
-function git(cwd: string, args: string[], timeout = GIT_TIMEOUT_MS): string {
-  return String(
-    execFileSync('git', ['-C', cwd, ...args], {
-      encoding: 'utf8',
-      maxBuffer: GIT_MAX_BUFFER,
-      timeout,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }),
-  );
+// Lazy + memoized, NOT promisified at module scope (EI-10161): under a narrow
+// `vi.mock('node:child_process')` `execFile` is undefined, and an eager `promisify` throws at
+// IMPORT time — crashing every test file that reaches this module, even one that never calls it.
+let execFileAsyncMemo: typeof execFile.__promisify__ | null = null;
+const execFileAsync = ((...args: unknown[]) =>
+  Reflect.apply((execFileAsyncMemo ??= promisify(execFile)), undefined, args)) as typeof execFile.__promisify__;
+
+/**
+ * Every git call in this module runs inside the operator host (release:cut), so it must
+ * never spawn synchronously: a sync spawn freezes the host's main event loop for the child's
+ * whole lifetime. On 2026-10-02 05:30Z the per-tree + per-submodule inspectAuthoredWork pass
+ * held :3170's loop for 24s and the event-loop sentinel SIGKILLed the host (WI-10005315,
+ * owner directive #1155). Guarded by release-cut-reclaim.test.ts ("never blocks the event loop").
+ */
+async function git(cwd: string, args: string[], timeout = GIT_TIMEOUT_MS): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    maxBuffer: GIT_MAX_BUFFER,
+    timeout,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
+  return String(stdout);
+}
+
+/**
+ * Batched git reads (EI-24849983022443070). A child_process spawn costs the operator host
+ * time SYNCHRONOUSLY on its main thread, and the cost grows with the host's RSS: libuv
+ * forks, copying the parent's page tables. Measured 2026-10-02 07:41Z: 9.45 ms per spawn at
+ * 245MB RSS, 162 ms at 1.97GB; :3170 runs at ~1.74GB. One reclaim plan used to spawn git
+ * ~1,900 times directly (24 trees x (4 + 2 per submodule x 38)). Width-bounding could not
+ * hide that, because the fork itself is synchronous, so the dry-run outran release:cut's
+ * 60s budget (83.5s on :3170 after width-bounding, 183s before).
+ *
+ * So each pass over a tree runs in ONE small `sh`: the shell forks the gits from its own
+ * ~2MB image, and the host forks once per helper. Each command's output is followed by a
+ * frame `\0<nonce> <tag> <exit>\0`. The nonce is 128 random bits, so no path or ref name
+ * can forge a frame, and the NUL-delimited porcelain -z bodies pass through unmodified.
+ * On a timeout execFile destroys the pipes before killing the shell, so a git still
+ * writing dies of SIGPIPE.
+ */
+// HELPER_FRAME_FN / parseHelperFrames / nextForkSlot live in ./git-batch (shared fork gate).
+
+/** args: nonce tree canonicalRoot. Tags: status, head, contains, submodules. */
+export const AUTHORED_HEAD_SCRIPT = [
+  'n=$1; t=$2; c=$3',
+  HELPER_FRAME_FN,
+  'git -C "$t" status --porcelain=v2 -z --ignore-submodules=none; f status $?',
+  'h=$(git -C "$t" rev-parse HEAD); r=$?; printf %s "$h"; f head $r',
+  '[ "$r" -eq 0 ] || exit 0',
+  "git -C \"$c\" for-each-ref --count=1 \"--contains=$h\" --format='%(refname)'; f contains $?",
+  'git -C "$t" submodule status --recursive; f submodules $?',
+].join('\n');
+
+/** args: nonce tree canonicalRoot, then (sha, rel) pairs. Tags: status:<i>, present:<i>. */
+export const AUTHORED_SUBMODULES_SCRIPT = [
+  'n=$1; t=$2; c=$3; shift 3; i=0',
+  HELPER_FRAME_FN,
+  'while [ $# -ge 2 ]; do',
+  '  git -C "$t/$2" status --porcelain=v2 -z --ignore-submodules=all; f "status:$i" $?',
+  '  git -C "$c/$2" cat-file -e "$1^{commit}" 2>/dev/null; f "present:$i" $?',
+  '  i=$((i+1)); shift 2',
+  'done',
+].join('\n');
+
+export interface HelperResult {
+  /** the section's output; throws if the section is missing or its command failed */
+  take(tag: string): string;
+  /** the section's exit status; throws only if the section is missing */
+  exitOf(tag: string): number;
+}
+
+export function helperResult(sections: HelperSection[], stderr = ''): HelperResult {
+  const byTag = new Map(sections.map((s) => [s.tag, s]));
+  const get = (tag: string) => {
+    const s = byTag.get(tag);
+    if (!s) throw new Error(`git helper output has no '${tag}' section (helper died early)`);
+    return s;
+  };
+  return {
+    take(tag) {
+      const s = get(tag);
+      if (s.exit !== 0) {
+        const why = stderr.split('\n').find((l) => l.trim()) ?? '';
+        throw new Error(`git ${tag} failed (exit ${s.exit})${why ? `: ${why}` : ''}`);
+      }
+      return s.out;
+    },
+    exitOf: (tag) => get(tag).exit,
+  };
+}
+
+async function runGitHelper(script: string, args: string[], timeout = GIT_TIMEOUT_MS): Promise<HelperResult> {
+  await nextForkSlot();
+  const nonce = randomBytes(16).toString('hex');
+  const { stdout, stderr } = await execFileAsync('sh', ['-c', script, 'release-cut-reclaim', nonce, ...args], {
+    encoding: 'utf8',
+    maxBuffer: GIT_MAX_BUFFER,
+    timeout,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+  });
+  return helperResult(parseHelperFrames(String(stdout), nonce), String(stderr));
+}
+
+/** Split into at most `parts` contiguous, near-equal chunks, preserving order. */
+export function contiguousChunks<T>(items: readonly T[], parts: number): T[][] {
+  const size = Math.ceil(items.length / Math.max(1, Math.floor(parts)));
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message.split('\n')[0] ?? e.message : String(e)).slice(0, 160);
@@ -447,6 +578,32 @@ function mtimeOrNull(p: string): number | null {
   }
 }
 
+/**
+ * Timestamp (ms) of the NEWEST entry in a reflog file, or null when the file is missing,
+ * empty, or its last line is not a reflog entry. A reflog line is
+ * `<old> <new> <name> <email> <epoch-seconds> <tz>\t<message>`; only the tail is read,
+ * since a long-lived reflog can be large.
+ */
+export function lastReflogEntryMs(logPath: string): number | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(logPath, 'r');
+    const size = fs.fstatSync(fd).size;
+    if (size === 0) return null;
+    const len = Math.min(size, 16_384);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString('utf8').split('\n').filter((l) => l.trim() !== '');
+    const last = lines[lines.length - 1];
+    const m = last ? /\s(\d{9,})\s[+-]\d{4}(?:\t|$)/.exec(last.split('\t')[0] ?? '') : null;
+    return m?.[1] ? Number(m[1]) * 1000 : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
 /** `.git` FILE of a linked worktree → its admin dir (`<common>/worktrees/<name>`). */
 export function worktreeAdminDir(worktreePath: string): string | null {
   try {
@@ -482,8 +639,12 @@ export function probeTree(worktreePath: string, rootDev: number | null): TreePro
       createdAtMs = null;
     }
   }
+  // The reflog FILE's mtime is not a checkout signal: `git gc` / `reflog expire` rewrite
+  // every worktree's logs/HEAD in one pass (measured 2026-09-30 06:46:59Z — all 31 trees
+  // got the same mtime and every one read as `recent-checkout`). Use the timestamp of
+  // the newest reflog ENTRY instead, plus HEAD's own mtime (gc never rewrites HEAD).
   const moves = adminDir
-    ? [mtimeOrNull(path.join(adminDir, 'HEAD')), mtimeOrNull(path.join(adminDir, 'logs', 'HEAD'))].filter(
+    ? [mtimeOrNull(path.join(adminDir, 'HEAD')), lastReflogEntryMs(path.join(adminDir, 'logs', 'HEAD'))].filter(
         (x): x is number => x !== null,
       )
     : [];
@@ -517,11 +678,14 @@ export interface HolderTarget {
  * root PID namespace (a nested namespace sees only its own processes — a confident false
  * idle, the trap measured on this box, memory 41104d77).
  */
-export function scanProcHolders(targets: HolderTarget[], procRoot = '/proc'): HolderScan {
+export async function scanProcHolders(targets: HolderTarget[], procRoot = '/proc'): Promise<HolderScan> {
+  // Async on purpose: this walks every fd of every process (tens of thousands of readlinks
+  // on this box). A synchronous /proc walk on the operator main thread measured ~600ms per
+  // pass (WI-10005283); awaiting per process lets the event loop run between them.
   const holders = new Map<string, string[]>();
   let nsNote = '';
   try {
-    const status = fs.readFileSync(path.join(procRoot, 'self', 'status'), 'utf8');
+    const status = await fs.promises.readFile(path.join(procRoot, 'self', 'status'), 'utf8');
     const nspid = /^NSpid:\s*(.+)$/m.exec(status)?.[1]?.trim().split(/\s+/) ?? [];
     if (nspid.length > 1) nsNote = `nested-pid-namespace(${nspid.join('/')})`;
   } catch (e) {
@@ -531,7 +695,7 @@ export function scanProcHolders(targets: HolderTarget[], procRoot = '/proc'): Ho
   const all: HolderTarget[] = [...targets, { key: '\0control', prefixes: [control] }];
   let pids: string[] = [];
   try {
-    pids = fs.readdirSync(procRoot).filter((n) => /^\d+$/.test(n));
+    pids = (await fs.promises.readdir(procRoot)).filter((n) => /^\d+$/.test(n));
   } catch (e) {
     return { verified: false, reason: `proc-unreadable:${errText(e)}`, holders };
   }
@@ -540,17 +704,15 @@ export function scanProcHolders(targets: HolderTarget[], procRoot = '/proc'): Ho
     const base = path.join(procRoot, pid);
     const links = ['cwd', 'root', 'exe'].map((l) => path.join(base, l));
     try {
-      for (const fd of fs.readdirSync(path.join(base, 'fd'))) links.push(path.join(base, 'fd', fd));
+      for (const fd of await fs.promises.readdir(path.join(base, 'fd'))) links.push(path.join(base, 'fd', fd));
     } catch {
       // another user's process or one that just exited — its cwd/root/exe are still tried
     }
-    for (const link of links) {
-      let target: string;
-      try {
-        target = fs.readlinkSync(link);
-      } catch {
-        continue;
-      }
+    const targetsOfLinks = await Promise.all(links.map((l) => fs.promises.readlink(l).catch(() => null)));
+    for (let i = 0; i < links.length; i++) {
+      const link = links[i] as string;
+      const target = targetsOfLinks[i];
+      if (target == null) continue;
       for (const t of all) {
         if (!t.prefixes.some((p) => target === p || target.startsWith(`${p}/`))) continue;
         if (t.key === '\0control') {
@@ -574,11 +736,12 @@ export function scanProcHolders(targets: HolderTarget[], procRoot = '/proc'): Ho
  * Authored work inside a tree, recursively through its submodules. Fails CLOSED: any git
  * error returns ok:false, which the planner turns into a protection.
  */
-export function inspectAuthoredWork(
+export async function inspectAuthoredWork(
   tree: string,
   canonicalRoot: string,
   releaseVersionPaths: readonly string[],
-): AuthoredWork {
+  opts: { submoduleConcurrency?: number } = {},
+): Promise<AuthoredWork> {
   try {
     const authored: string[] = [];
     let machineWritten = 0;
@@ -589,20 +752,50 @@ export function inspectAuthoredWork(
         else authored.push(e.path);
       }
     };
-    judge(parsePorcelainV2(git(tree, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none'])));
-    const head = git(tree, ['rev-parse', 'HEAD']).trim();
-    const containing = git(canonicalRoot, ['for-each-ref', '--count=1', `--contains=${head}`, '--format=%(refname)']).trim();
+    // Pass 1, one helper: the tree's own status, its HEAD, whether a canonical ref contains
+    // that HEAD, and the submodule list (parsed here, so the shell never parses anything).
+    const top = await runGitHelper(AUTHORED_HEAD_SCRIPT, [tree, canonicalRoot]);
+    judge(parsePorcelainV2(top.take('status')));
+    const head = top.take('head').trim();
+    const containing = top.take('contains').trim();
     if (!containing) authored.push(`HEAD ${head.slice(0, 10)} (no ref contains it)`);
-    const subs = git(tree, ['submodule', 'status', '--recursive']);
-    for (const line of subs.split('\n')) {
+    const subs: Array<{ sha: string; rel: string }> = [];
+    for (const line of top.take('submodules').split('\n')) {
       const m = /^([ +\-U])([0-9a-f]{40}) (.+?)(?: \(.*\))?$/.exec(line);
       if (!m || m[1] === '-') continue;
       const [, , sha, rel] = m as unknown as [string, string, string, string];
-      judge(parsePorcelainV2(git(path.join(tree, rel), ['status', '--porcelain=v2', '-z', '--ignore-submodules=all']), rel));
-      try {
-        git(path.join(canonicalRoot, rel), ['cat-file', '-e', `${sha}^{commit}`], 30_000);
-      } catch {
-        authored.push(`${rel}@${sha.slice(0, 10)} (commit absent from canonical checkout)`);
+      subs.push({ sha, rel });
+    }
+    // Pass 2: every submodule's status plus whether its commit exists in the canonical
+    // checkout, in contiguous chunks with one helper each (default one chunk). Results are
+    // judged in submodule order so the outcome is deterministic. A failure is RETURNED, not
+    // thrown, so no sibling helper is left running after this call has decided ok:false.
+    const chunks = contiguousChunks(subs, opts.submoduleConcurrency ?? AUTHORED_SUBMODULE_CONCURRENCY);
+    const reads = await Promise.all(
+      chunks.map(async (chunk) => {
+        try {
+          const r = await runGitHelper(AUTHORED_SUBMODULES_SCRIPT, [
+            tree,
+            canonicalRoot,
+            ...chunk.flatMap(({ sha, rel }) => [sha, rel]),
+          ]);
+          const rows = chunk.map(({ sha, rel }, i) => ({
+            sha,
+            rel,
+            status: r.take(`status:${i}`),
+            present: r.exitOf(`present:${i}`) === 0,
+          }));
+          return { rows, error: null as unknown };
+        } catch (e) {
+          return { rows: [], error: e };
+        }
+      }),
+    );
+    for (const { rows, error } of reads) {
+      if (error !== null) throw error;
+      for (const r of rows) {
+        judge(parsePorcelainV2(r.status, r.rel));
+        if (!r.present) authored.push(`${r.rel}@${r.sha.slice(0, 10)} (commit absent from canonical checkout)`);
       }
     }
     return { ok: true, authored, machineWritten };
@@ -624,11 +817,13 @@ export interface GatherOptions {
   retentionDir?: string;
   minIdleHours?: number;
   nowMs?: number;
-  /** test seams */
-  listWorktrees?: (repoPath: string) => ReclaimWorktree[];
+  /** trees whose authored-work read runs at once (default AUTHORED_TREE_CONCURRENCY) */
+  authoredConcurrency?: number;
+  /** test seams (sync or async; the defaults are async so the host's event loop keeps running) */
+  listWorktrees?: (repoPath: string) => ReclaimWorktree[] | Promise<ReclaimWorktree[]>;
   probe?: (worktreePath: string) => TreeProbe;
-  scanHolders?: (targets: HolderTarget[]) => HolderScan;
-  authoredWork?: (tree: string, canonicalRoot: string) => AuthoredWork;
+  scanHolders?: (targets: HolderTarget[]) => HolderScan | Promise<HolderScan>;
+  authoredWork?: (tree: string, canonicalRoot: string) => AuthoredWork | Promise<AuthoredWork>;
   readLeases?: (dir: string) => { leases: RetentionLease[]; errors: string[] };
 }
 
@@ -640,9 +835,9 @@ export function defaultRetentionDir(): string {
  *  for the trees still standing. */
 export async function gatherCutReclaimPlan(opts: GatherOptions): Promise<ReclaimPlan> {
   const nowMs = opts.nowMs ?? Date.now();
-  const worktrees = (opts.listWorktrees ?? ((r) => parseWorktreePorcelain(git(r, ['worktree', 'list', '--porcelain'], 10_000))))(
-    opts.repoPath,
-  );
+  const worktrees = await (
+    opts.listWorktrees ?? (async (r: string) => parseWorktreePorcelain(await git(r, ['worktree', 'list', '--porcelain'], 10_000)))
+  )(opts.repoPath);
   let rootDev: number | null = null;
   try {
     rootDev = fs.statSync('/').dev;
@@ -663,7 +858,7 @@ export async function gatherCutReclaimPlan(opts: GatherOptions): Promise<Reclaim
     key,
     prefixes: [key, ...(p.realPath && p.realPath !== key ? [p.realPath] : [])],
   }));
-  const holders = (opts.scanHolders ?? scanProcHolders)(holderTargets);
+  const holders = await (opts.scanHolders ?? scanProcHolders)(holderTargets);
   const base = {
     nowMs,
     minIdleHours: opts.minIdleHours ?? DEFAULT_MIN_IDLE_HOURS,
@@ -681,9 +876,15 @@ export async function gatherCutReclaimPlan(opts: GatherOptions): Promise<Reclaim
   if (canonicalRoot) {
     const inspect =
       opts.authoredWork ?? ((tree: string, canon: string) => inspectAuthoredWork(tree, canon, opts.releaseVersionPaths));
-    for (const v of cheap.verdicts) {
-      if (v.reasons.length === 1 && v.reasons[0] === AUTHORED_UNCHECKED) authored.set(v.path, inspect(v.path, canonicalRoot));
-    }
+    const pending = cheap.verdicts
+      .filter((v) => v.reasons.length === 1 && v.reasons[0] === AUTHORED_UNCHECKED)
+      .map((v) => v.path);
+    const results = await mapWithConcurrency(
+      pending,
+      opts.authoredConcurrency ?? AUTHORED_TREE_CONCURRENCY,
+      async (tree) => inspect(tree, canonicalRoot),
+    );
+    pending.forEach((tree, i) => authored.set(tree, results[i] as AuthoredWork));
   }
   return planCutReclaim({ ...base, authored });
 }
@@ -692,9 +893,9 @@ export async function gatherCutReclaimPlan(opts: GatherOptions): Promise<Reclaim
 
 export interface ReclaimExecDeps {
   nowMs?: () => number;
-  scanHolders?: (targets: HolderTarget[]) => HolderScan;
-  archive?: (tree: string, outFile: string) => void;
-  gitCommonDir?: (canonicalRoot: string) => string;
+  scanHolders?: (targets: HolderTarget[]) => HolderScan | Promise<HolderScan>;
+  archive?: (tree: string, outFile: string) => void | Promise<void>;
+  gitCommonDir?: (canonicalRoot: string) => string | Promise<string>;
   rename?: (from: string, to: string) => void;
   unlink?: (p: string) => void;
   rmrf?: (p: string) => Promise<void>;
@@ -711,19 +912,70 @@ export interface ReclaimExecResult {
   ms: number;
 }
 
+/** Run git and STREAM its stdout into `out` (left open), with no size ceiling. The buffered
+ *  {@link git} helper caps stdout at GIT_MAX_BUFFER, which a staged sidecar's binary diff
+ *  (158 MB, WI-10006139) exceeds — so archive output never goes through it. Async, so the
+ *  host event loop keeps running (WI-10005315). */
+function gitStreamInto(cwd: string, args: string[], out: fs.WriteStream, timeout = GIT_TIMEOUT_MS): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', ['-C', cwd, ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (d: string) => {
+      if (stderr.length < 4096) stderr += d;
+    });
+    child.stdout.pipe(out, { end: false });
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`git ${args.join(' ')} in ${cwd} exited ${code ?? signal}: ${stderr.trim()}`));
+    });
+  });
+}
+
 /** Tracked diffs of the superproject and every initialized submodule, so a removal is
- *  recoverable at the patch level. Throws on any failure — the caller refuses removal. */
-export function archiveTreeDiffs(tree: string, outFile: string): void {
-  fs.mkdirSync(path.dirname(outFile), { recursive: true });
-  const parts: string[] = [`# reclaim archive of ${tree} at ${new Date().toISOString()}\n`];
-  parts.push(`## HEAD ${git(tree, ['rev-parse', 'HEAD']).trim()}\n`, git(tree, ['diff', '--binary', 'HEAD']));
-  for (const line of git(tree, ['submodule', 'status', '--recursive']).split('\n')) {
+ *  recoverable at the patch level. Streamed to disk, so a diff of any size archives.
+ *  Throws on any failure (and removes the partial archive) — the caller refuses removal. */
+export async function archiveTreeDiffs(tree: string, outFile: string): Promise<void> {
+  await fs.promises.mkdir(path.dirname(outFile), { recursive: true });
+  const head = (await git(tree, ['rev-parse', 'HEAD'])).trim();
+  const submodules: Array<{ rel: string; sha: string }> = [];
+  for (const line of (await git(tree, ['submodule', 'status', '--recursive'])).split('\n')) {
     const m = /^([ +\-U])([0-9a-f]{40}) (.+?)(?: \(.*\))?$/.exec(line);
     if (!m || m[1] === '-') continue;
-    const rel = m[3] as string;
-    parts.push(`\n## submodule ${rel} ${m[2]}\n`, git(path.join(tree, rel), ['diff', '--binary', 'HEAD']));
+    submodules.push({ rel: m[3] as string, sha: m[2] as string });
   }
-  fs.writeFileSync(outFile, parts.join(''));
+  const out = fs.createWriteStream(outFile);
+  let streamError: Error | null = null;
+  out.on('error', (e) => {
+    streamError = e;
+  });
+  const check = () => {
+    if (streamError) throw streamError;
+  };
+  try {
+    out.write(`# reclaim archive of ${tree} at ${new Date().toISOString()}\n## HEAD ${head}\n`);
+    await gitStreamInto(tree, ['diff', '--binary', 'HEAD'], out);
+    check();
+    for (const { rel, sha } of submodules) {
+      out.write(`\n## submodule ${rel} ${sha}\n`);
+      await gitStreamInto(path.join(tree, rel), ['diff', '--binary', 'HEAD'], out);
+      check();
+    }
+    await new Promise<void>((resolve, reject) => {
+      if (streamError) return reject(streamError);
+      out.once('error', reject);
+      out.end(() => resolve());
+    });
+  } catch (e) {
+    out.destroy();
+    await fs.promises.rm(outFile, { force: true });
+    throw e;
+  }
 }
 
 export async function executeCutReclaim(
@@ -738,7 +990,9 @@ export async function executeCutReclaim(
   const now = deps.nowMs ?? Date.now;
   const commonDir = path.resolve(
     canonicalRoot,
-    (deps.gitCommonDir ?? ((r: string) => git(r, ['rev-parse', '--git-common-dir'], 10_000).trim()))(canonicalRoot),
+    await (deps.gitCommonDir ?? (async (r: string) => (await git(r, ['rev-parse', '--git-common-dir'], 10_000)).trim()))(
+      canonicalRoot,
+    ),
   );
   const archiveDir = deps.archiveDir ?? path.join(defaultRetentionDir(), 'reclaim-archive');
   const auditFile = deps.auditFile ?? path.join(defaultRetentionDir(), 'deletion-audit.tsv');
@@ -762,11 +1016,14 @@ export async function executeCutReclaim(
       done({ removed: false, reason: `admin dir ${adminDir ?? '?'} is not under ${commonDir}/worktrees` });
       continue;
     }
-    if (pathsOverlap(real, canonicalRoot) || real === '/' || real === os.homedir()) {
-      done({ removed: false, reason: 'refusing a path that overlaps the canonical tree or home' });
+    const pathRefusal =
+      reclaimPathRefusal(real, canonicalRoot, os.homedir()) ??
+      (offloaded ? reclaimPathRefusal(v.path, canonicalRoot, os.homedir()) : null);
+    if (pathRefusal) {
+      done({ removed: false, reason: pathRefusal });
       continue;
     }
-    const fresh = (deps.scanHolders ?? scanProcHolders)([
+    const fresh = await (deps.scanHolders ?? scanProcHolders)([
       { key: v.path, prefixes: offloaded ? [v.path, real] : [v.path] },
     ]);
     if (!fresh.verified || (fresh.holders.get(v.path) ?? []).length) {
@@ -779,7 +1036,7 @@ export async function executeCutReclaim(
     const stamp = new Date(now()).toISOString().replace(/[:.]/g, '-');
     const archive = path.join(archiveDir, `${stamp}-${path.basename(v.path)}.patch`);
     try {
-      (deps.archive ?? archiveTreeDiffs)(real, archive);
+      await (deps.archive ?? archiveTreeDiffs)(real, archive);
     } catch (e) {
       done({ removed: false, reason: `archive failed: ${errText(e)}` });
       continue;

@@ -44,6 +44,7 @@ import {
   type ToolExposure,
   type UnifiedToolContext,
 } from './tool-projection';
+import type { BundledDefinitionSite } from './bundle-definition-site';
 import {
   UnauthorizedToolError,
   InvalidInputError,
@@ -170,7 +171,22 @@ function definitionSitePath(file: string): string {
   }
 }
 
-function captureDefinitionSite(): string | null {
+/**
+ * What the stack walk established about a definition site. `path` is the defining
+ * file when it differs from this one. When every captured frame sat in this SAME file
+ * — tooldef and the tool were bundled together, so no file can be told apart from
+ * this one — `path` is null and `bundled` carries the frames' LINES instead, which a
+ * host that can read the bundle resolves to the defining module
+ * (`bundle-definition-site.ts`, P-002 / EI-25176539351759672).
+ */
+interface CapturedDefinitionSite {
+  readonly path: string | null;
+  readonly bundled: BundledDefinitionSite | null;
+}
+
+const NO_DEFINITION_SITE: CapturedDefinitionSite = { path: null, bundled: null };
+
+function captureDefinitionSite(): CapturedDefinitionSite {
   const ErrorAny = Error as unknown as {
     prepareStackTrace?: (err: Error, stack: unknown[]) => unknown;
   };
@@ -181,21 +197,36 @@ function captureDefinitionSite(): string | null {
     // Bounded: we need the nearest few frames, not a full trace. Measured at
     // ~10.6µs per capture, ~8.7ms across a full 820-tool catalog boot.
     Error.stackTraceLimit = 12;
-    const raw = new Error().stack as unknown as Array<{ getFileName?: () => string }>;
-    if (!Array.isArray(raw) || raw.length === 0) return null;
+    const raw = new Error().stack as unknown as Array<{
+      getFileName?: () => string;
+      getLineNumber?: () => number | null;
+    }>;
+    if (!Array.isArray(raw) || raw.length === 0) return NO_DEFINITION_SITE;
     // Frame [0] is this function, so its file IS this file.
     const selfFile = raw[0]?.getFileName?.() ?? null;
+    const selfLines: number[] = [];
     for (const frame of raw) {
       const file = frame?.getFileName?.();
       if (!file) continue;
-      if (selfFile && file === selfFile) continue;
+      if (selfFile && file === selfFile) {
+        const line = frame.getLineNumber?.();
+        if (typeof line === 'number' && line > 0) selfLines.push(line);
+        continue;
+      }
       // Node internals ('node:internal/...') are never a definition site.
       if (file.startsWith('node:')) continue;
-      return definitionSitePath(file);
+      return { path: definitionSitePath(file), bundled: null };
     }
-    return null;
+    // Every frame sat in this one file. Unbundled, that cannot happen for a real caller
+    // (its module is a different file), so this is the bundled shape: hand the frames'
+    // positions to a host that can map them to modules, instead of recording nothing.
+    // At least two frames are needed — frame [0] to identify this module, one more to
+    // leave it.
+    return selfFile && selfLines.length >= 2
+      ? { path: null, bundled: { file: definitionSitePath(selfFile), lines: selfLines } }
+      : NO_DEFINITION_SITE;
   } catch {
-    return null;
+    return NO_DEFINITION_SITE;
   } finally {
     ErrorAny.prepareStackTrace = orig;
     Error.stackTraceLimit = origLimit;
@@ -814,6 +845,25 @@ export function applyHarnessArgAlias(argsJsonSchema: Record<string, unknown>, in
   return { ...rest, harness_slug: harness };
 }
 
+/**
+ * Apply the host's schema-visible argument reshaping before validation.
+ * Tool dispatch and static recipe/code preflight must validate the same value:
+ * positional `{ row }` writes are reconstructed from the curated prompt columns,
+ * and the documented `harness` alias is renamed when the tool declares only
+ * `harness_slug`. Callers peel framework controls such as `payloadTier` and
+ * `projection` before using this helper.
+ */
+export function prepareToolArgsForSchema(
+  name: string,
+  argsJsonSchema: Record<string, unknown>,
+  input: unknown,
+): unknown {
+  return applyHarnessArgAlias(
+    argsJsonSchema,
+    applyPositionalWriteShim(name, argsJsonSchema, stripUndefinedArgKeys(input)),
+  );
+}
+
 const SNAKE_CASE_ARG_KEY = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 const LOWER_CAMEL_ARG_KEY = /^[a-z][A-Za-z0-9]*$/;
 
@@ -1030,6 +1080,27 @@ export const WRITE_CAPABILITIES = new Set<string>([
   'tui:dispatch', // performs a control intent against a running pui workbench
   'operator:converse', // brain turn: spawns agents, records spend, mem0.add, dispatches <spawn>
   'activity:report', // inserts an agent-activity row
+  // WI-10004595: fleet-registry control verbs. Each has its OWN dedicated capability (no
+  // `*:read` sibling shares it — fleet:status / fleet:list are the readers, on their own caps)
+  // and each flips registry control state, membership, leadership or headcount, or spawns/respawns
+  // members. They carried no write suffix, so they inferred 'read' and EXECUTED during a code:run
+  // dryRun "preview". `effect` is a DEFAULT inference, never a verification (see
+  // inferCapabilityEffect) — keep this list and effect-marker-audit.test.ts in lockstep.
+  'fleet:create',
+  'fleet:join',
+  'fleet:leave',
+  'fleet:take-leadership',
+  'fleet:resume',
+  'fleet:pause',
+  'fleet:wind-down',
+  'fleet:supersede',
+  'fleet:headcount-target',
+  'fleet:request_remote_spawn',
+  'fleet:recolor',
+  'fleet:reconfigure-member',
+  'fleet:respawn-member',
+  'coord:mark-terminal', // coord:mark-terminal + coord:focus-window: retitle / activate a live terminal window
+  'testing:run', // testing:run (already explicit effect:'write') + testing:record-run: both write test_runs rows
 ]);
 /**
  * THE effect oracle. Exported (not merely used here) because it is the only
@@ -1054,7 +1125,7 @@ function definePrincipalGatedTool<TArgs extends StandardSchemaV1>(
   input: ToolDefinitionInput<TArgs>,
 ): ToolDefinition<TArgs> {
   const definitionSite = captureDefinitionSite();
-  const name = input.name ?? deriveNameFromCallSite(definitionSite);
+  const name = input.name ?? deriveNameFromCallSite(definitionSite.path);
   if (!name) {
     throw new Error(
       'defineTool: could not derive tool name from call site. ' +
@@ -1163,7 +1234,7 @@ function defineRoleGatedTool<TArgs extends StandardSchemaV1>(
   input: RoleToolDefinitionInput<TArgs>,
 ): RoleToolDefinition<TArgs> {
   const definitionSite = captureDefinitionSite();
-  const name = input.name ?? deriveNameFromCallSite(definitionSite);
+  const name = input.name ?? deriveNameFromCallSite(definitionSite.path);
   if (!name) {
     throw new Error(
       'defineTool: could not derive tool name from call site. ' +
@@ -2918,7 +2989,7 @@ export function toArgsJsonSchema(toolName: string, args: StandardSchemaV1): Reco
 function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
   def: ToolDefinition<TArgs>,
   expose?: ToolExposure,
-  sourceFile?: string | null,
+  definitionSite: CapturedDefinitionSite = NO_DEFINITION_SITE,
 ): void {
   // tasks:list → /api/agent-tools/tasks/list
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
@@ -2984,10 +3055,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
       payloadTierOverride?: string;
       telemetrySurface?: string;
     };
-    const shimmed = applyHarnessArgAlias(
-      rawSchema,
-      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
-    );
+    const shimmed = prepareToolArgsForSchema(def.name, rawSchema, tierlessInput);
     const validated = await standardValidate(def.args, shimmed);
     // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. Zero cost on both
     // ordinary paths: a call that validates never reaches the repair, and a tool with no
@@ -3099,7 +3167,10 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
-    sourceFile: sourceFile ?? undefined,
+    sourceFile: definitionSite.path ?? undefined,
+    // Bundled: the frames' positions, resolved to a module by a host that can read
+    // the bundle (bundle-definition-site.ts). Absent everywhere else.
+    ...(definitionSite.bundled ? { bundledDefinitionSite: definitionSite.bundled } : {}),
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.
@@ -3172,7 +3243,7 @@ function registerLegacyAsProjected<TArgs extends StandardSchemaV1>(
 function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
   def: RoleToolDefinition<TArgs>,
   expose?: ToolExposure,
-  sourceFile?: string | null,
+  definitionSite: CapturedDefinitionSite = NO_DEFINITION_SITE,
 ): void {
   const httpPath = `/api/agent-tools/${def.name.replaceAll(':', '/')}`;
   const rawSchema = toArgsJsonSchema(def.name, def.args);
@@ -3186,10 +3257,7 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     // Framework-reserved per-call tier override is stripped next — BEFORE
     // validation (context-trimming-tiers D-004; not part of any tool's schema).
     const { input: tierlessInput, callTier } = extractPayloadTier(unwrapUnparsedToolInput(input));
-    const shimmed = applyHarnessArgAlias(
-      rawSchema,
-      applyPositionalWriteShim(def.name, rawSchema, stripUndefinedArgKeys(tierlessInput)),
-    );
+    const shimmed = prepareToolArgsForSchema(def.name, rawSchema, tierlessInput);
     const validated = await standardValidate(def.args, shimmed);
     // P-016 / D-104 — auto-correct-and-execute, RE-ENCODINGS only. See the twin in
     // `registerLegacyAsProjected`; both wrappers must carry it, since which one a tool
@@ -3311,7 +3379,10 @@ function registerRoleGatedAsProjected<TArgs extends StandardSchemaV1>(
     description: def.description,
     // Where this tool was defined (absolute, captured from the call stack).
     // Null when the stack was unreadable — never guessed.
-    sourceFile: sourceFile ?? undefined,
+    sourceFile: definitionSite.path ?? undefined,
+    // Bundled: the frames' positions, resolved to a module by a host that can read
+    // the bundle (bundle-definition-site.ts). Absent everywhere else.
+    ...(definitionSite.bundled ? { bundledDefinitionSite: definitionSite.bundled } : {}),
     inputSchema,
     // Keep the complete branch requirements for discovery/introspection while
     // retaining the flattened schema above for strict OpenAI/MCP callers.

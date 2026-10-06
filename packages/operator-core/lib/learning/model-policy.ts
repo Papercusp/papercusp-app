@@ -17,8 +17,13 @@
  * against plan work-queue-admission-and-bulk-dedup-2026-08-24 D-026 — that
  * switch was taken under codex rate-limit exhaustion, and the constraint it
  * answered no longer holds.
+ *
+ * Owner-directed [owner 2026-09-30, directive #1111, WI-10004483]: every
+ * background process (learning / dreaming / bulk plan review / bulk work-queue
+ * review) runs on "chatgpt 6.1 Sol Xhigh" — `gpt-6.1-sol:xhigh`. Same Codex
+ * backend and effort; only the model generation moves.
  */
-export const LEARNING_MODEL_ID = 'gpt-5.6-sol' as const;
+export const LEARNING_MODEL_ID = 'gpt-6.1-sol' as const;
 export const LEARNING_MODEL_EFFORT = 'xhigh' as const;
 export const LEARNING_MODEL_SPEC = `${LEARNING_MODEL_ID}:${LEARNING_MODEL_EFFORT}` as const;
 

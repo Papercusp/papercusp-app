@@ -446,6 +446,35 @@ export interface ListFleetRosterResult {
    * `leaderOwnerId` and null when the requested leader has no presence row.
    */
   leaderEntry?: FleetRosterEntry | null;
+  /**
+   * Liveness evidence for the durable leader, including the important case
+   * where it has no coord_presence row at all. `complete` means the presence,
+   * wakeability and recorded-session legs all completed for this owner; false
+   * must never be interpreted as an absent leader.
+   */
+  leaderLiveness?: {
+    ownerId: string;
+    presenceRow: boolean;
+    recordedLive: boolean | null;
+    sessionState: SessionState | null;
+    complete: boolean;
+  };
+}
+
+/** Select the oldest positively-live su member, with a stable id tie-break. */
+export function oldestLiveFleetMember(
+  members: readonly Pick<FleetRosterEntry, 'agentId' | 'agentRole' | 'fleetRole' | 'sessionState' | 'startedAt'>[],
+  excludedOwnerIds: readonly string[] = [],
+): string | null {
+  const excluded = new Set(excludedOwnerIds);
+  const candidates = members
+    .filter((member) =>
+      member.agentRole === 'su' && member.fleetRole === 'member' &&
+      member.sessionState === 'live' && !excluded.has(member.agentId) && Boolean(member.startedAt))
+    .map((member) => ({ ownerId: member.agentId, startedAtMs: Date.parse(member.startedAt!) }))
+    .filter((member) => Number.isFinite(member.startedAtMs))
+    .sort((a, b) => a.startedAtMs - b.startedAtMs || a.ownerId.localeCompare(b.ownerId));
+  return candidates[0]?.ownerId ?? null;
 }
 
 /**
@@ -495,6 +524,11 @@ export async function listFleetRosterDiagnosed(opts: ListFleetRosterOpts): Promi
     ...new Set([
       ...localIds,
       ...(leaderPresence && !leaderPresence.federated ? [leaderOwnerId as string] : []),
+      // The durable leader can have no presence row while its adv_session is
+      // still live during bootstrap. Query that exact owner through the same
+      // wakeability/recorded legs so absence is never inferred from a missing
+      // row alone.
+      ...(leaderOwnerId && !leaderPresence?.federated ? [leaderOwnerId] : []),
     ]),
   ];
 
@@ -578,10 +612,26 @@ export async function listFleetRosterDiagnosed(opts: ListFleetRosterOpts): Promi
       leaderEntry = null;
     }
   }
+  const leaderRecordedLive =
+    leaderOwnerId != null && !leaderPresence?.federated && !recordedResult.degraded
+      ? recordedResult.value.has(leaderOwnerId)
+      : null;
+  const leaderLiveness = leaderOwnerId == null
+    ? undefined
+    : {
+        ownerId: leaderOwnerId,
+        presenceRow: leaderPresence != null,
+        recordedLive: leaderRecordedLive,
+        sessionState: leaderEntry?.sessionState ?? (leaderRecordedLive ? 'recorded' : null),
+        complete:
+          !leaderPresence?.federated &&
+          !degradedLegs.some((leg) => leg === 'presence' || leg === 'wakeability' || leg === 'recorded'),
+      };
   return {
     entries,
     degradedLegs,
     ...(leaderOwnerId != null ? { leaderEntry } : {}),
+    ...(leaderLiveness ? { leaderLiveness } : {}),
   };
 }
 

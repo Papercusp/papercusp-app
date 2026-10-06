@@ -147,11 +147,18 @@ export class InMemoryCoordLog implements CoordEventLog {
 
   async readEventsBoundedCursor(
     surface: EventSurface,
-    opts: { limit: number; kinds?: string[]; beforeId?: number },
+    opts: { limit: number; kinds?: string[]; beforeId?: number; beforeTs?: string; beforeMsgId?: string },
   ): Promise<CoordLogCursorPage> {
     const all = [...(this.events.get(surface)?.values() ?? [])];
     const kinds = opts.kinds?.filter((k) => typeof k === 'string' && k.trim());
+    const beforeMs = opts.beforeTs ? Date.parse(opts.beforeTs) : null;
     let candidates = kinds && kinds.length ? all.filter((r) => kinds.includes(r.envelope.kind)) : all;
+    if (beforeMs !== null) {
+      candidates = candidates.filter((r) => {
+        const ts = Date.parse(r.envelope.ts);
+        return Number.isFinite(beforeMs) && Number.isFinite(ts) && (opts.beforeMsgId ? ts <= beforeMs : ts < beforeMs);
+      });
+    }
     if (typeof opts.beforeId === 'number') candidates = candidates.filter((r) => r.id < opts.beforeId!);
     candidates = [...candidates].sort((a, b) => b.id - a.id); // newest-first
     const limit = Math.max(1, Math.floor(opts.limit) || 1);
@@ -163,15 +170,28 @@ export class InMemoryCoordLog implements CoordEventLog {
 
   async readLinesBoundedCursor(
     surface: LineSurface,
-    opts: { limit: number; sinceTs?: string; planSlug?: string; kinds?: string[]; beforeId?: number },
+    opts: {
+      limit: number;
+      sinceTs?: string;
+      planSlug?: string;
+      kinds?: string[];
+      beforeId?: number;
+      beforeTs?: string;
+      beforeMsgId?: string;
+    },
   ): Promise<CoordLogCursorPage> {
     const all = this.lines.get(surface) ?? [];
     const kinds = opts.kinds?.filter((k) => typeof k === 'string' && k.trim());
+    const beforeMs = opts.beforeTs ? Date.parse(opts.beforeTs) : null;
     let candidates = all.filter(
       (r) =>
         (!kinds || !kinds.length || kinds.includes(r.envelope.kind)) &&
         (!opts.sinceTs || (typeof r.envelope.ts === 'string' && r.envelope.ts > opts.sinceTs)) &&
         (!opts.planSlug || r.envelope.plan_slug === opts.planSlug) &&
+        (beforeMs === null ||
+          (Number.isFinite(beforeMs) &&
+            Number.isFinite(Date.parse(r.envelope.ts)) &&
+            (opts.beforeMsgId ? Date.parse(r.envelope.ts) <= beforeMs : Date.parse(r.envelope.ts) < beforeMs))) &&
         (typeof opts.beforeId !== 'number' || r.id < opts.beforeId),
     );
     candidates = [...candidates].sort((a, b) => b.id - a.id); // newest-first

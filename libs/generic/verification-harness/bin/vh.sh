@@ -103,6 +103,107 @@ _vh_json_str() {
 _vh_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 _vh_ms() { date -u +%s%3N; }
 
+# Run a shared-checkout reader under mutation-probe admission. The shared lock
+# prevents a probe from publishing/removing its manifest during the read; when
+# a live probe is already active, bwrap overlays the validated original bytes
+# so the reader sees the source tree as it was before the temporary mutant.
+# Usage: vh_probe_admitted_exec <repo-root> -- <command...>
+vh_probe_admitted_exec() {
+  local root="${1:-}"
+  [ "$#" -ge 3 ] || { echo "vh_probe_admitted_exec: expected <repo-root> -- <command...>" >&2; return 2; }
+  shift
+  [ "$1" = "--" ] || { echo "vh_probe_admitted_exec: missing --" >&2; return 2; }
+  shift
+  root="$(realpath -e -- "$root")" || { echo "vh_probe_admitted_exec: missing checkout" >&2; return 2; }
+
+  local key directory lock manifest admission_fd status helper
+  key="$(printf '%s' "$root" | sha256sum | cut -d' ' -f1)" || return 2
+  directory="/tmp/papercusp-mutation-probe-$(id -u)-$key"
+  mkdir -p -m 700 -- "$directory" || { echo "vh_probe_admitted_exec: cannot create admission directory" >&2; return 2; }
+  lock="$directory/admission.lock"
+  manifest="$directory/original.manifest"
+  exec {admission_fd}>"$lock" || { echo "vh_probe_admitted_exec: cannot open admission lock" >&2; return 2; }
+  flock -s "$admission_fd" || {
+    exec {admission_fd}>&-
+    echo "vh_probe_admitted_exec: cannot acquire admission lock" >&2
+    return 2
+  }
+
+  if [ ! -e "$manifest" ]; then
+    if "$@"; then status=0; else status=$?; fi
+    flock -u "$admission_fd" || true
+    exec {admission_fd}>&-
+    return "$status"
+  fi
+
+  helper="$(cd "$VH_LIB_DIR/../../../" 2>/dev/null && pwd -P)/scripts/mutation-probe-admission.sh"
+  [ -f "$helper" ] || {
+    flock -u "$admission_fd" || true
+    exec {admission_fd}>&-
+    echo "mutation-probe admission: shared manifest validator is missing" >&2
+    return 2
+  }
+  # shellcheck source=/dev/null
+  . "$helper" || {
+    flock -u "$admission_fd" || true
+    exec {admission_fd}>&-
+    echo "mutation-probe admission: could not load shared manifest validator" >&2
+    return 2
+  }
+  if ! probe_admission_read_manifest "$root" "$manifest"; then
+    flock -u "$admission_fd" || true
+    exec {admission_fd}>&-
+    echo "mutation-probe admission: invalid original snapshot; refusing source read" >&2
+    return 2
+  fi
+  if probe_admission_owner_alive; then
+    local snapshot_fd
+    if ! exec {snapshot_fd}<"${PROBE_ADMISSION_FIELDS[2]}"; then
+      flock -u "$admission_fd" || true
+      exec {admission_fd}>&-
+      echo "mutation-probe admission: original snapshot unavailable; refusing source read" >&2
+      return 2
+    fi
+    if bwrap --bind / / --proc /proc --dev /dev --bind-try /dev/shm /dev/shm \
+      --ro-bind-data "$snapshot_fd" "${PROBE_ADMISSION_FIELDS[1]}" -- "$@"; then
+      status=0
+    else
+      status=$?
+    fi
+    exec {snapshot_fd}<&-
+    flock -u "$admission_fd" || true
+    exec {admission_fd}>&-
+    return "$status"
+  fi
+
+  # The probe owner died while the manifest remained. Recover only under the
+  # exclusive counterpart of this lock, then re-enter admission in case a new
+  # probe started immediately after recovery.
+  flock -u "$admission_fd" || true
+  if ! flock -x "$admission_fd"; then
+    exec {admission_fd}>&-
+    echo "mutation-probe admission: cannot acquire recovery lock" >&2
+    return 2
+  fi
+  if [ -e "$manifest" ]; then
+    if ! probe_admission_read_manifest "$root" "$manifest"; then
+      flock -u "$admission_fd" || true
+      exec {admission_fd}>&-
+      echo "mutation-probe admission: invalid original snapshot; refusing recovery" >&2
+      return 2
+    fi
+    if ! probe_admission_owner_alive && ! probe_admission_recover_orphan "$root" "$manifest"; then
+      flock -u "$admission_fd" || true
+      exec {admission_fd}>&-
+      echo "mutation-probe admission: orphan recovery failed; refusing source read" >&2
+      return 2
+    fi
+  fi
+  flock -u "$admission_fd" || true
+  exec {admission_fd}>&-
+  vh_probe_admitted_exec "$root" -- "$@"
+}
+
 # _vh_record <phase> <status> <step> <reasonCode> <detail> <startedAt> <endedAt> <elapsedMs> [reusedFromRunId]
 _vh_record() {
   local row="{\"phase\":$(_vh_json_str "$1"),\"status\":$(_vh_json_str "$2")"

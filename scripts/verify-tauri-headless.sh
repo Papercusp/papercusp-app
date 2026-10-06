@@ -170,6 +170,20 @@
 #     source the printed environment from a later agent tool call.
 #
 # ENV OVERRIDES (all optional)
+#   VERIFY_TAURI_REQUIRE_BUILT  repo-relative files/dirs (comma or space
+#                                separated) the frozen SPA MUST contain: the
+#                                paths your change edited (WI-10004972). Before
+#                                freezing, wait until the shared dist's build
+#                                stamp (dist/.vite-rebuild-source-stamp, dated to
+#                                when that build STARTED) is newer than every
+#                                listed path. If it never is, refuse with an
+#                                SPA_STALE_VS_SOURCE line and exit 3. Unset =
+#                                freeze whatever is there (the default) and log
+#                                how many sources are newer than the bundle.
+#   PAPERCUSP_SPA_REQUIRE_BUILT_WAIT_SEC
+#                               max wait for that rebuild (default 2400; one
+#                                measured build took 26 min). Poll interval:
+#                                PAPERCUSP_SPA_REQUIRE_BUILT_POLL_SEC (default 15).
 #   VERIFY_TAURI_ISOLATED_DB    1 = boot a genuinely isolated, throwaway,
 #                                fully-migrated embedded Postgres and WebView
 #                                profile for this run instead of sharing the live
@@ -289,7 +303,8 @@
 #                                (screenshots will be blank white — DOM/eval
 #                                via the bridge still work; agent-e2e.mdx §15.4)
 #   VERIFY_TAURI_PORT_LOCK_DIR  advisory-lock directory for concurrent verifier
-#                               launches (default: $TMPDIR/papercusp-tauri-port-locks)
+#                               launches (default: under the per-user runtime
+#                               directory, with a $HOME/.cache fallback)
 #   VERIFY_TAURI_PORT_STRAGGLER_WAIT
 #                               seconds teardown HOLDS the advisory port lock while
 #                                waiting for THIS run's sidecar to release its
@@ -331,7 +346,8 @@
 #                               directory for per-display advisory locks that
 #                                serialize candidate selection across concurrent
 #                                verifier launchers (default:
-#                                $TMPDIR/papercusp-tauri-display-locks; EI-21617008171422271).
+#                                under the per-user runtime directory, with a
+#                                $HOME/.cache fallback; EI-21617008171422271).
 #   PAPERCUSP_SID                required tracked agent/session identity. The
 #                                verifier refuses to hand back an unattributed
 #                                bridge when this is unset; this is the provenance
@@ -466,6 +482,26 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${PAPERCUSP_REPO_DIR:-${VERIFY_TAURI_ORIGINAL_REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 DESKTOP_DIR="$REPO_DIR/papercusp-desktop"
+# WI-10005763 (D-012): this verifier boots the desktop FROM the live shared tree with network
+# (cargo build.rs, the operator sidecar, the host bundle). Code a session holding an active
+# personal disclosure wrote there must not run that way, so refuse before sourcing any helper or
+# allocating anything. papercusp-desktop/bin/tauri-guarded re-checks at `tauri dev`, closer to
+# launch. The gate skips itself inside a test runner, the release gate, and GitHub Actions.
+# WI-10005802: the gate starts under the committed-source loader, so the gate and the preflight
+# library it imports run their committed (HEAD) bytes: a held write to either cannot run here.
+if ! node --import "$REPO_DIR/scripts/lib/committed-source-loader.mjs" \
+    "$REPO_DIR/scripts/restricted-hold-tree-gate.mjs" --door verify-tauri-headless "$REPO_DIR"; then
+  echo "FATAL: the restricted-write fence refused this verifier launch (see the RESTRICTED_HOLD_REFUSED line above); nothing was booted." >&2
+  exit 1
+fi
+# BASH_SOURCE points at the temporary entry after the source re-exec. Resolve
+# adjacent helpers from the preserved repository, and load their definitions
+# before preparing a runtime so a missing helper cannot waste a full build.
+# shellcheck source=lib/spa-require-built.sh
+if ! . "$REPO_DIR/scripts/lib/spa-require-built.sh"; then
+  echo "FATAL: cannot load $REPO_DIR/scripts/lib/spa-require-built.sh" >&2
+  exit 1
+fi
 # shellcheck source=papercusp-desktop/bin/lib/federation-asserts.sh
 source "$DESKTOP_DIR/bin/lib/federation-asserts.sh"   # reuse fed_pick_free_port
 
@@ -624,6 +660,7 @@ export PATH VERIFY_TAURI_CARGO_BIN VERIFY_TAURI_CARGO_BIN_DIR
 # spends minutes building and booting a verifier. Preflight shell syntax and
 # tauri-agent-tools option ordering while the command is still cheap to reject.
 # The CLI's --pid/--port options belong to a subcommand, not the root command.
+ASSERTION_ENV_MANIFEST_PATH=""
 validate_assertion_command_preflight() {
   [ "${ASSERTION_MODE}" -eq 1 ] || return 0
 
@@ -675,6 +712,15 @@ validate_assertion_command_preflight() {
       [ -n "$syntax_output" ] && printf '%s\n' "$syntax_output" >&2
       return 2
     fi
+    # An assertion can opt in by naming its immutable experiment manifest in
+    # its header. Check every declared environment binding before preparation;
+    # the assertion itself cannot run yet because it needs the owned bridge.
+    local env_manifest
+    env_manifest="$(sed -n '1,12s/^# VERIFY_TAURI_ASSERTION_ENV_MANIFEST=//p' "$source_path")"
+    if [ -n "$env_manifest" ]; then
+      node "$REPO_DIR/scripts/lib/verify-tauri-assertion-env.mjs" "$source_path" "$env_manifest" || return 2
+      ASSERTION_ENV_MANIFEST_PATH="$env_manifest"
+    fi
   fi
 
   [ -n "$source_text" ] || return 0
@@ -688,19 +734,72 @@ validate_assertion_command_preflight() {
     {
       line = $0
       sub(/^[[:space:]]*#.*$/, "", line)
-      has_bad_option = line ~ /tauri-agent-tools[[:space:]]+--(pid|port)([=[:space:]]|$)/
-      has_subcommand = line ~ /[[:space:]](screenshot|info|dom|eval|wait|ipc-monitor|list-windows|page-state|storage|console-monitor|mutations|snapshot|diff|click|type|scroll|select|navigate|invoke|store-inspect|check|probe|app-paths|config|help)([[:space:]]|$)/
-      if (has_bad_option && has_subcommand) {
-        print line
-        exit
+      lines[NR] = line
+    }
+    END {
+      subcommands = "(screenshot|info|dom|eval|wait|ipc-monitor|list-windows|page-state|storage|console-monitor|mutations|snapshot|diff|click|type|scroll|select|navigate|invoke|store-inspect|check|probe)"
+      tool_vars["VERIFY_TAURI_AGENT_TOOLS_BIN"] = 1
+
+      # Existing assertion scripts sometimes bind the executable and verified
+      # PID to local variables first (for example TAT=... and PID=...). Keep
+      # accepting that form only when the aliases come from the verifier-owned
+      # environment values, so a different live bridge cannot be selected.
+      for (i = 1; i <= NR; i++) {
+        line = lines[i]
+        assignment = line
+        sub(/^[[:space:]]*(export|local)[[:space:]]+/, "", assignment)
+        if (assignment ~ /^[A-Za-z_][A-Za-z0-9_]*=/) {
+          name = assignment
+          sub(/=.*/, "", name)
+          if (line ~ /(tauri-agent-tools|VERIFY_TAURI_AGENT_TOOLS_BIN)/) tool_vars[name] = 1
+          if (line ~ /VERIFY_TAURI_PID/) pid_vars[name] = 1
+        }
+      }
+
+      for (i = 1; i <= NR; i++) {
+        line = lines[i]
+        has_bad_option = line ~ /tauri-agent-tools[[:space:]]+--(pid|port)([=[:space:]]|$)/
+        has_subcommand = line ~ ("[[:space:]]" subcommands "([[:space:]]|$)")
+        has_literal_tool = line ~ ("tauri-agent-tools[[:space:]]+" subcommands "([[:space:]]|$)")
+        has_tool_alias = 0
+        for (name in tool_vars) {
+          if (index(line, "$" name) > 0 && has_subcommand) has_tool_alias = 1
+        }
+
+        if (has_bad_option && has_subcommand) {
+          print "option-order:" line
+          exit
+        }
+
+        if (has_literal_tool || has_tool_alias) {
+          has_pinned_pid = line ~ (subcommands "[[:space:]].*--pid[[:space:]]+\"\\$VERIFY_TAURI_PID\"([[:space:]]|$)")
+          for (name in pid_vars) {
+            if (line ~ (subcommands "[[:space:]].*--pid[[:space:]]+\"\\$" name "\"([[:space:]]|$)")) {
+              has_pinned_pid = 1
+            }
+          }
+          if (!has_pinned_pid) {
+            print "unbound-pid:" line
+            exit
+          }
+        }
       }
     }
   ')" || return 2
-  if [ -n "$invalid" ]; then
-    echo "VERIFY_TAURI_ASSERTION_INVALID $source_label: tauri-agent-tools --pid/--port must follow its subcommand (for example, eval --pid ...)" >&2
-    echo "       offending command: $invalid" >&2
-    return 2
-  fi
+  case "$invalid" in
+    option-order:*)
+      invalid="${invalid#option-order:}"
+      echo "VERIFY_TAURI_ASSERTION_INVALID $source_label: tauri-agent-tools --pid/--port must follow its subcommand (for example, eval --pid ...)" >&2
+      echo "       offending command: $invalid" >&2
+      return 2
+      ;;
+    unbound-pid:*)
+      invalid="${invalid#unbound-pid:}"
+      echo "VERIFY_TAURI_ASSERTION_INVALID $source_label: bridge-targeting tauri-agent-tools assertions must pin --pid to \"\$VERIFY_TAURI_PID\" after the subcommand" >&2
+      echo "       offending command: $invalid" >&2
+      return 2
+      ;;
+  esac
 }
 
 validate_assertion_command_preflight || exit $?
@@ -837,6 +936,28 @@ if [ "$ISOLATED_SEED" = "ready" ] && [ "${VERIFY_TAURI_ISOLATED_DB:-0}" != "1" ]
   echo "       Re-run with: VERIFY_TAURI_ISOLATED_DB=1 VERIFY_TAURI_ISOLATED_SEED=ready scripts/verify-tauri-headless.sh ..." >&2
   exit 2
 fi
+
+# R171 reached a reachable shared DB with unapplied, backup-conflicting DDL
+# only after its expensive source/dependency snapshot and host build. Check the
+# exact launch environment first. This SELECT-only probe neither applies DDL
+# nor bypasses the boot migration/backup rendezvous. The isolated mode creates
+# its own fully migrated DB later and has no shared target to inspect here.
+shared_schema_readiness_preflight() {
+  [ "${VERIFY_TAURI_ISOLATED_DB:-0}" != "1" ] || return 0
+  local status=0
+  (
+    cd "$REPO_DIR/apps/operator" || exit 74
+    set -a
+    if [ -f .env.local ]; then . ./.env.local || exit 74; fi
+    set +a
+    timeout --kill-after=1s 8s node "$DESKTOP_DIR/bin/dev-operator-pg-probe.mjs" --repo-root "$REPO_DIR" --require-applied-schema
+  ) || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "VERIFY_TAURI_SHARED_SCHEMA_NOT_READY probe_exit=$status — refusing before source/dependency preparation; no migrations applied. Use the maintained guarded migration path or VERIFY_TAURI_ISOLATED_DB=1 for a disposable DB." >&2
+    return "$status"
+  fi
+}
+shared_schema_readiness_preflight || exit $?
 
 # The dependency snapshot uses hardlinks. A fast /tmp mount may be on another
 # device. Only the operator/dependency snapshot needs the donor filesystem;
@@ -1009,11 +1130,12 @@ snapshot_operator_source() {
     --exclude='.cache'
     --exclude='.pnpm-store'
   )
-  source_bytes="$(LC_ALL=C rsync -an --stats "${source_filters[@]}" "$REPO_DIR/" "$snapshot_root/" |
+  source_bytes="$(vh_probe_admitted_exec "$REPO_DIR" -- rsync -an --stats \
+    "${source_filters[@]}" "$REPO_DIR/" "$snapshot_root/" |
     awk '/^Total file size:/ { gsub(/,/, "", $4); print $4 }')" || return 1
   reserve_verifier_disk "$source_bytes" || return $?
   local snapshot_rc=0
-  rsync -a --delete "${source_filters[@]}" \
+  vh_probe_admitted_exec "$REPO_DIR" -- rsync -a --delete "${source_filters[@]}" \
     "$REPO_DIR/" "$snapshot_root/" || snapshot_rc=$?
   # rsync exit 24 = source files vanished mid-copy. The shared tree is edited live (peers'
   # atomic-write temp files appear and vanish constantly), so that is not a failed snapshot.
@@ -1066,10 +1188,10 @@ build_verifier_operator_host() {
   }
   log "building frozen plain-node operator host (tsx runtime loader excluded)"
   # The dependency graph is a private immutable hardlink snapshot that was
-  # completed under npm-install-safe's donor mutex immediately above. Re-entering
-  # that shared writer lock cannot make these private bytes safer; mark the
-  # already-frozen graph so bundle-host runs only its read/build path.
-  PAPERCUSP_INSTALL_MUTEX_HELD=1 bash "$bundle_script" \
+  # completed under npm-install-safe's donor mutex immediately above. The
+  # bundler's normal guard keys its lease to this private snapshot; it neither
+  # re-enters the donor lock nor grants a blanket exemption to other roots.
+  bash "$bundle_script" \
     bin/hono-host.ts "$OPERATOR_HOST_BUNDLE" || {
       echo "FATAL: could not build the frozen verifier operator host bundle" >&2
       return 1
@@ -1104,6 +1226,12 @@ write_assertion_input_manifest() {
     sha256sum -- "$resolved" >> "$ASSERTION_INPUT_MANIFEST" || return 1
     ASSERTION_INPUT_COUNT=$((ASSERTION_INPUT_COUNT + 1))
   done
+  # The opt-in manifest was checked before preparation. Freeze those same bytes
+  # with the assertion inputs so a later edit cannot change its post-boot claim.
+  if [ -n "$ASSERTION_ENV_MANIFEST_PATH" ]; then
+    sha256sum -- "$ASSERTION_ENV_MANIFEST_PATH" >> "$ASSERTION_INPUT_MANIFEST" || return 1
+    ASSERTION_INPUT_COUNT=$((ASSERTION_INPUT_COUNT + 1))
+  fi
 
   if [ "$ASSERTION_INPUT_COUNT" -gt 0 ]; then
     log "assertion input snapshot captured before boot: $ASSERTION_INPUT_COUNT file-backed argument(s)"
@@ -1376,7 +1504,10 @@ STALE_DISPLAY_MAX_AGE="${VERIFY_TAURI_STALE_DISPLAY_MAX_AGE_SEC:-3600}"
 # initialize GTK on the same display. Hold a per-display kernel flock from the
 # post-selection recheck through teardown. A lock file may remain after a crash;
 # flock ownership is the state, so a stale inode never blocks a later run.
-DISPLAY_LOCK_DIR="${VERIFY_TAURI_DISPLAY_LOCK_DIR:-${TMPDIR:-/tmp}/papercusp-tauri-display-locks}"
+# TMPDIR is private scratch for many verifier launches. Reservation locks must
+# share one stable per-user namespace across those isolated scratch roots.
+TAURI_VERIFIER_LOCK_ROOT="${XDG_RUNTIME_DIR:-${HOME:-/tmp}/.cache}/papercusp-tauri-verifier"
+DISPLAY_LOCK_DIR="${VERIFY_TAURI_DISPLAY_LOCK_DIR:-$TAURI_VERIFIER_LOCK_ROOT/display-locks}"
 DISPLAY_LOCK_FD=""
 DISPLAY_LOCK_PATH=""
 command -v flock >/dev/null 2>&1 || {
@@ -1573,7 +1704,7 @@ PORT_SLOT=$(( (DISPLAY_NUM - 90) % 60 ))
 [ "$PORT_SLOT" -ge 0 ] || PORT_SLOT=$(( PORT_SLOT + 60 ))   # bash % keeps the sign: a forced DISPLAY_NUM < 90 must not go negative
 PORT_BASE=$(( 33700 + PORT_SLOT * 10 ))
 [ "$PORT_BASE" -ge 33700 ] || PORT_BASE=33700   # a caller-forced low DISPLAY_NUM must not underflow into real ports
-PORT_LOCK_DIR="${VERIFY_TAURI_PORT_LOCK_DIR:-${TMPDIR:-/tmp}/papercusp-tauri-port-locks}"
+PORT_LOCK_DIR="${VERIFY_TAURI_PORT_LOCK_DIR:-$TAURI_VERIFIER_LOCK_ROOT/port-locks}"
 
 # pick_and_lock_ports — sets DEV_PORT/PTY_PORT to a fresh, advisory-locked pair,
 # walking PORT_BASE forward past anything already free-but-claimed. Factored out
@@ -1903,7 +2034,50 @@ BOOT_ONLY_ENV_SCRIPT
   }
 }
 
+write_xvfb_stop_script() {
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'EXPECTED_PROVENANCE=%q\n' "$TAURI_LAUNCH_PROVENANCE"
+    printf 'EXPECTED_DISPLAY=%q\n' ":$DISPLAY_NUM"
+    cat <<'XVFB_STOP'
+set -uo pipefail
+
+xvfb_is_owned() {
+  local xvfb_pid="$1" env_p
+  [ -n "$xvfb_pid" ] && [ -r "/proc/$xvfb_pid/environ" ] || return 1
+  env_p="$(tr '\0' '\n' < "/proc/$xvfb_pid/environ" 2>/dev/null || true)"
+  grep -qxF "PAPERCUSP_TAURI_LAUNCH_PROVENANCE=$EXPECTED_PROVENANCE" <<<"$env_p" &&
+    grep -qxF "PAPERCUSP_VERIFY_XVFB_DISPLAY=$EXPECTED_DISPLAY" <<<"$env_p"
+  }
+
+find_owned_xvfb() {
+  local candidate
+  while IFS= read -r candidate; do
+    if xvfb_is_owned "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(pgrep -x Xvfb 2>/dev/null || true)
+  }
+
+xvfb_pid="$(find_owned_xvfb || true)"
+[ -n "$xvfb_pid" ] || exit 0
+xvfb_is_owned "$xvfb_pid" || exit 0
+kill -TERM "$xvfb_pid" 2>/dev/null || exit 0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  xvfb_is_owned "$xvfb_pid" || exit 0
+  sleep 0.2
+done
+if xvfb_is_owned "$xvfb_pid"; then
+  kill -KILL "$xvfb_pid" 2>/dev/null || true
+fi
+XVFB_STOP
+  } > "$WORK/stop-xvfb.sh"
+  chmod +x "$WORK/stop-xvfb.sh"
+}
+
 write_stop_script() {
+  write_xvfb_stop_script
   cat > "$WORK/stop.sh" <<STOP
 #!/usr/bin/env bash
 # EI-20227529270079601 / EI-9748 Route A: stop sibling scopes first so no
@@ -1911,7 +2085,6 @@ write_stop_script() {
 if [ "$VERIFY_SCOPE_ENABLED" = 1 ] && command -v systemctl >/dev/null 2>&1; then
   [ -n "$TAURI_SCOPE_UNIT" ] && systemctl --user stop --no-block "${TAURI_SCOPE_UNIT}.scope" >/dev/null 2>&1 || true
   systemctl --user stop --no-block "${VERIFY_SCOPE_BASE}-openbox.scope" >/dev/null 2>&1 || true
-  systemctl --user stop --no-block "${VERIFY_SCOPE_BASE}-xvfb.scope" >/dev/null 2>&1 || true
 fi
 # EI-11559: do NOT force-kill the port-lock keeper here — killing it releases the
 # advisory flock IMMEDIATELY, while the sidecar (its own process group) still holds
@@ -1944,18 +2117,9 @@ for _p in \$(pgrep -f "$OPERATOR_HOST_PROCESS_RE" 2>/dev/null); do
   kill -9 "\$_p" 2>/dev/null
 done
 [ -n "$OPENBOX_PID" ] && kill -9 $OPENBOX_PID 2>/dev/null
-# EI-18816386093046558: SIGKILL gives Xvfb no chance to unlink /tmp/.X11-unix/X<N>,
-# so EVERY run leaked its own socket (97 had accumulated, the oldest from 07-13).
-# That leak is not cosmetic: the picker above treats a leaked socket as "display
-# taken" (WI-2115, correctly) and walks past it, and PORT_BASE is DERIVED from the
-# display number — so each leak permanently pushed the port range upward. It had
-# reached :173 -> base 34530, and surviving X450 sockets show a past walk to :450
-# -> 37300, well inside other services' ports. SIGTERM first so Xvfb unlinks after
-# itself; SIGKILL only as the fallback; then remove OUR OWN socket unconditionally
-# (we started this server, so this file is unambiguously ours to clean up).
-[ -n "$XVFB_PID" ] && { kill -TERM $XVFB_PID 2>/dev/null; for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 $XVFB_PID 2>/dev/null || break; sleep 0.2; done; kill -9 $XVFB_PID 2>/dev/null; }
-pkill -9 -f "Xvfb :$DISPLAY_NUM " 2>/dev/null
-rm -f "/tmp/.X11-unix/X$DISPLAY_NUM" 2>/dev/null
+# This helper matches this run's provenance and display before each signal.
+# Xvfb removes its own socket and lock during normal SIGTERM shutdown.
+"$WORK/stop-xvfb.sh" || true
 # EI-10387: stop our throwaway isolated-DB postgres (if VERIFY_TAURI_ISOLATED_DB
 # booted one) — SIGTERM lets it shut the postmaster down cleanly before we reap.
 [ -n "$ISOLATED_PG_PID" ] && { kill -TERM "$ISOLATED_PG_PID" 2>/dev/null; sleep 1; kill -9 "$ISOLATED_PG_PID" 2>/dev/null; }
@@ -2106,7 +2270,7 @@ verify_assertion_input_integrity() {
 # teardown() and the SIGTERM/SIGINT handlers below already read those as
 # ambient globals, so a re-run's fresh PIDs are picked up with no other wiring.
 start_display_server() {
-  XVFB_PID="$(start_verify_process "${VERIFY_SCOPE_BASE}-xvfb" "$WORK/xvfb.log" Xvfb ":$DISPLAY_NUM" -screen 0 "${XVFB_SCREEN_W}x${XVFB_SCREEN_H}x24" -nolisten tcp)"
+  XVFB_PID="$(start_verify_process "${VERIFY_SCOPE_BASE}-xvfb" "$WORK/xvfb.log" env "PAPERCUSP_TAURI_LAUNCH_PROVENANCE=$TAURI_LAUNCH_PROVENANCE" "PAPERCUSP_VERIFY_XVFB_DISPLAY=:$DISPLAY_NUM" "DISPLAY=:$DISPLAY_NUM" Xvfb ":$DISPLAY_NUM" -screen 0 "${XVFB_SCREEN_W}x${XVFB_SCREEN_H}x24" -nolisten tcp)"
   sleep 1
   DISPLAY=":$DISPLAY_NUM" xdpyinfo >/dev/null 2>&1 || { echo "FATAL: Xvfb :$DISPLAY_NUM never came up — see $WORK/xvfb.log" >&2; exit 1; }
   OPENBOX_PID="$(start_verify_process "${VERIFY_SCOPE_BASE}-openbox" "$WORK/openbox.log" env DISPLAY=":$DISPLAY_NUM" openbox)"
@@ -2173,8 +2337,25 @@ fi
 SHARED_SPA_DIST="${PAPERCUSP_SHARED_SPA_DIST:-$REPO_DIR/apps/operator-vite/dist}"
 SPA_DIST=""
 if [ -f "$SHARED_SPA_DIST/index.html" ]; then
+  # WI-10004972: quiescence (below) proves the dist stopped CHANGING, not that it
+  # CONTAINS the edit under test. The shared dist is built by the oneshot
+  # papercup-vite-rebuild.timer -> ~/.local/bin/papercup-vite-rebuild.sh (an
+  # `npm run build`, not a `vite build --watch`); one build took 26 min, so a
+  # quiet dist can predate an edit by that whole window and hand back a verdict
+  # about OLD code. VERIFY_TAURI_REQUIRE_BUILT=<repo-relative paths> waits for a
+  # build whose start stamp is newer than every listed path, or refuses
+  # (SPA_STALE_VS_SOURCE, exit 3 — the same "this run cannot exercise your
+  # change" code as the post-boot VERIFY_TAURI_ASSERT_SNAPSHOT_CONTAINS check).
+  # It complements that check: it WAITS before the freeze instead of failing
+  # after a full boot, and it needs no source string that survives
+  # minification. Every run logs how many sources are newer than the bundle.
+  if [ -n "${VERIFY_TAURI_REQUIRE_BUILT:-}" ] \
+    && ! spa_require_built_gate "$SHARED_SPA_DIST" "$REPO_DIR" "$VERIFY_TAURI_REQUIRE_BUILT"; then
+    exit 3
+  fi
+  spa_require_built_note "$SHARED_SPA_DIST" "$REPO_DIR"
   # EI-19382195051346372: wait for QUIESCENCE before freezing. The shared
-  # `vite build --watch` rewrites $SHARED_SPA_DIST/assets every ~3min and
+  # dist's builder rewrites $SHARED_SPA_DIST/assets on every rebuild and
   # RETAINS old hashed chunks (emptyOutDir:false), so a freeze racing a
   # rebuild can copy a MIX of old+new chunks — a snapshot with no single
   # consistent build behind it. From inside the webview that is
@@ -2228,7 +2409,6 @@ if [ -f "$SHARED_SPA_DIST/index.html" ]; then
         break
       fi
       log "FATAL: shared SPA dist did NOT produce a non-empty assets/ bundle within ${QUIESCE_MAX_WAIT_SEC}s — refusing to freeze an incomplete snapshot (index.html exists but its referenced application assets are missing). Re-run after the watcher finishes."
-      rm -rf "$WORK"
       exit 1
     fi
     sleep "$QUIESCE_POLL_SEC"
@@ -2265,6 +2445,12 @@ if [ -f "$SHARED_SPA_DIST/index.html" ]; then
   log "  → edited source AFTER this boot? run: bash \"$WORK/check-freshness.sh\" (\$VERIFY_TAURI_FRESHNESS_CHECK) BEFORE trusting a re-check — it warns loudly if the shared bundle drifted (EI-17134)."
   log "  → waiting for a REBUILD (not just checking one)? do NOT stat one specific hashed asset (e.g. dist/assets/adv-D5qbAjO8.js) — a rebuild emits a NEW content-hash filename, so the file you're watching is orphaned and its mtime is frozen forever; the poll hangs indefinitely (EI-18812301452864060). Compare the newest matching file instead: \`ls -t dist/assets/adv-*.js | head -1\`, or just use check-freshness.sh above."
 else
+  if [ -n "${VERIFY_TAURI_REQUIRE_BUILT:-}" ]; then
+    # WI-10004972: the caller asked for proof the SPA contains its edits, and
+    # there is no built SPA to prove it against.
+    log "SPA_STALE_VS_SOURCE reason=no-dist dist=$SHARED_SPA_DIST — VERIFY_TAURI_REQUIRE_BUILT is set but there is no built SPA here. Refusing."
+    exit 3
+  fi
   log "WARNING: no built SPA at $SHARED_SPA_DIST (operator-vite not built yet) — NOT freezing a"
   log "         snapshot; the sidecar falls through to the shared dist as before. Build"
   log "         operator-vite first for a genuinely isolated (watcher-proof) module server."
@@ -2384,6 +2570,34 @@ const modUrl = pathToFileURL(
 ).href;
 const { startEmbeddedPostgresServer } = await import(modUrl);
 
+// WI-10004558: give this throwaway server the SAME connection ceiling the shipped
+// desktop gives its embedded Postgres (apps/operator/bin/serve.ts passes the
+// resource-profile derivation as extraPostgresSettings). The operator sizes its
+// org pools from that same derivation (connection.ts boundedOrgPoolMax), so a rig
+// left on stock max_connections=100 is exhausted by one operator restart with
+// background workers on (106/100 conns, every blueprint call -32603), a failure
+// the product cannot have. Only the CONNECTION knobs are mirrored: the memory
+// knobs (shared_buffers etc.) scale to the whole host and several rigs share it.
+const RIG_MIRRORED_PG_SETTINGS = ['max_connections', 'superuser_reserved_connections'];
+const profile = await import(
+  pathToFileURL(`${repoDir}/libs/generic/resource-profile/src/index.ts`).href
+);
+const productSettings = profile.databaseTuningToSettings(
+  profile.deriveDatabaseTuning(profile.detectResourceSignals({ embeddedPg: true })),
+);
+const extraPostgresSettings = Object.fromEntries(
+  RIG_MIRRORED_PG_SETTINGS.map((k) => [k, productSettings[k]]),
+);
+for (const k of RIG_MIRRORED_PG_SETTINGS) {
+  if (!extraPostgresSettings[k]) {
+    console.error(`PG_FAILED resource-profile derived no ${k} for the isolated server`);
+    process.exit(1);
+  }
+}
+console.log(
+  `PG_TUNING ${RIG_MIRRORED_PG_SETTINGS.map((k) => `${k}=${extraPostgresSettings[k]}`).join(' ')}`,
+);
+
 let pg = null;
 async function shutdown() {
   try {
@@ -2398,7 +2612,13 @@ process.on('SIGINT', shutdown);
 
 try {
   const port = await freePort();
-  pg = await startEmbeddedPostgresServer({ dataDir, port, dbSqlDir: sqlDir, onLog: () => {} });
+  pg = await startEmbeddedPostgresServer({
+    dataDir,
+    port,
+    dbSqlDir: sqlDir,
+    extraPostgresSettings,
+    onLog: () => {},
+  });
   // Deliberately NOT flushed through `log()` — one grep-able line for the shell.
   console.log(`PG_READY port=${port} admin=${pg.urls.admin} app=${pg.urls.app}`);
 } catch (e) {
@@ -2524,6 +2744,9 @@ OPERATOR_SOURCE_ENV_LINE="PAPERCUSP_DEV_SOURCE_ROOT=\"$OPERATOR_SOURCE_ROOT\" PA
 # reverted on any package reinstall/upgrade — see the note where it's applied), and keeps
 # this rig self-consistent even when the patch is absent/reverted.
 write_and_launch_tauri() {
+  OPERATOR_STARTUP_DIAGNOSTIC_DIR="${VH_RUN_DIR:-$WORK}/phases/boot/operator-startup/attempt-$BOOT_ATTEMPTS"
+  mkdir -p -- "$OPERATOR_STARTUP_DIAGNOSTIC_DIR"
+  OPERATOR_STARTUP_DIAGNOSTIC_COLLECTED=0
   local TAURI_DEV_URL="http://127.0.0.1:$DEV_PORT"
   local TAURI_CONFIG
   # ONE definition of the window shape, shared by both branches below, so they
@@ -2562,6 +2785,7 @@ exec env -u WAYLAND_DISPLAY -u PAPERCUSP_SPAWNER_IPC_SOCKET $ISOLATED_UNSET_LINE
   PAPERCUSP_BIND_HOST=127.0.0.1 \\
   PAPERCUSP_DEV_API_TARGET="$DEV_PORT" PAPERCUSP_NATIVE_TERMINAL="$NATIVE_TERMINAL" \\
   PAPERCUSP_VERIFY_TAURI_DEV_URL="$TAURI_DEV_URL" \\
+  PAPERCUSP_DEV_HOST_DIAGNOSTIC_DIR="$OPERATOR_STARTUP_DIAGNOSTIC_DIR" \\
   PAPERCUSP_CLUSTER=0 PAPERCUSP_CLUSTER_WORKERS=0 \\
   PAPERCUSP_SPAWNER_SIDECAR=0 PAPERCUSP_SPAWNER_SIDECAR_MODE=0 \\
   PAPERCUSP_DEV_DEPLOY_SPAWN_SIDECAR=0 \\
@@ -2610,6 +2834,18 @@ LAUNCH
 # 2 matches on the broken boot (incl. the `-->` source locator via -A1), 0 on two
 # healthy boots.
 RUST_ERR_RE='error\[E[0-9]+\]:|error: could not compile|error: linking with|error: aborting due to'
+collect_operator_startup_diagnostic() {
+  [ "${OPERATOR_STARTUP_DIAGNOSTIC_COLLECTED:-0}" = 0 ] || return 0
+  local node_pid
+  node_pid="$(cat "$OPERATOR_STARTUP_DIAGNOSTIC_DIR/node.pid" 2>/dev/null)" || return 0
+  [[ "$node_pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  # PID reuse, an old attempt and a foreign host must never receive this signal.
+  tr '\0' '\n' < "/proc/$node_pid/cmdline" 2>/dev/null |
+    grep -Fxq -- "$OPERATOR_HOST_BUNDLE" || return 0
+  kill -USR2 "$node_pid" 2>/dev/null || return 0
+  OPERATOR_STARTUP_DIAGNOSTIC_COLLECTED=1
+  log "requested credential-free Node startup report from owned pid=$node_pid; retained at $OPERATOR_STARTUP_DIAGNOSTIC_DIR"
+}
 boot_failure_diag() {
   echo "FATAL: $1" >&2
   local errs
@@ -2700,6 +2936,11 @@ while :; do
   PORT_LOST=0
   DISPLAY_LOST=0
   until desktop_binary_started; do
+    # Capture BEFORE Tauri's fixed 180s frontend deadline kills its child. Once
+    # Cargo starts the binary, this pre-listen diagnostic is no longer needed.
+    if [ "$BUILD_ELAPSED" -ge 60 ] && ! port_is_listening "$DEV_PORT"; then
+      collect_operator_startup_diagnostic
+    fi
     if port_lost_to_squatter; then PORT_LOST=1; break; fi
     # EI-21903832503219853: checked in the SAME position as port_lost_to_squatter
     # (before kill -0) so a desktop binary that died OF a dead/contended display
@@ -2769,16 +3010,13 @@ while :; do
     if [ "$DISPLAY_LOST" = 1 ]; then
       # EI-21903832503219853: re-pick BOTH display and ports — a bare process
       # retry on the SAME display would panic identically, since the display
-      # itself (not the tauri binary) is what died. Tear down Xvfb/openbox for
-      # the dead display the same way teardown() does on final exit (TERM then
-      # KILL for Xvfb so it unlinks its own socket; KILL for openbox), release
-      # its lock so another launcher can reclaim it, then re-run the SAME
-      # pick+boot procedure the initial display selection used.
+      # itself (not the tauri binary) is what died. Stop only this run's Xvfb
+      # using its provenance/display markers, then release the lock and re-pick.
       log "GTK-init panic (attempt $BOOT_ATTEMPTS/$MAX_BOOT_ATTEMPTS) — tearing down display :$DISPLAY_NUM and re-picking a fresh display + ports once. Box contention right now: $(contention_summary)."
       [ -n "$OPENBOX_PID" ] && kill -9 $OPENBOX_PID 2>/dev/null
-      [ -n "$XVFB_PID" ] && { kill -TERM $XVFB_PID 2>/dev/null; for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 $XVFB_PID 2>/dev/null || break; sleep 0.2; done; kill -9 $XVFB_PID 2>/dev/null; }
-      pkill -9 -f "Xvfb :$DISPLAY_NUM " 2>/dev/null
-      rm -f "/tmp/.X11-unix/X$DISPLAY_NUM" "/tmp/.X$DISPLAY_NUM-lock" 2>/dev/null
+      write_xvfb_stop_script
+      "$WORK/stop-xvfb.sh" || true
+      XVFB_PID=""
       display_lock_release
       fed_release_port_locks
       DISPLAY_NUM=$((DISPLAY_NUM + 1))
@@ -3708,9 +3946,9 @@ if [ -n "$SNAPSHOT_NEEDLE" ]; then
           echo "  │  a false negative about PRE-EDIT code — refusing to run the assertion"
           echo "  │  rather than hand you a confident wrong answer (EI-19444780917356384)."
           echo "  │                                                                        │"
-          echo "  │  Fix: wait for the shared build to emit your change, then re-run this"
-          echo "  │  script (the snapshot is frozen at boot — reloading never picks it up)."
-          echo "  │  Watch for the rebuild with: ls -t apps/operator-vite/dist/assets/*.js"
+          echo "  │  Fix: re-run with VERIFY_TAURI_REQUIRE_BUILT=<the paths you edited>;"
+          echo "  │  it waits BEFORE the freeze for a shared build that contains them"
+          echo "  │  (the snapshot is frozen at boot — reloading never picks it up)."
           echo "  └────────────────────────────────────────────────────────────────────────┘"
           echo
         } >&2

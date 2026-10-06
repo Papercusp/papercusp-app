@@ -33,7 +33,11 @@ export interface FailoverPoolOptions {
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
 }
 
-const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+/** How long `onExhausted` parks an account when the exhaustion named no reset (or a reset already past).
+ *  Exported so the gateway bounds a reset-less usage-credits reading by the SAME horizon the park uses
+ *  (plan anthropic-credits-gateway-2026-09-30 D-007/D-008 E1): a `metered: never` account must never
+ *  outlive its park as "still metered" and be refused indefinitely. */
+export const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 
 /** Weight of ONE in-flight request in the load-aware selection key, relative to the [0,1) utilization
  *  term. ≥1 so a single extra concurrent request outranks the ENTIRE utilization range — i.e. among
@@ -96,7 +100,22 @@ export interface AccountLoadInputs {
   burnAction?: AccountBurnAction;
   /** Transport health independent of quota. `unavailable` is out; `degraded` is the flaky bucket. */
   transportHealth?: AccountTransportHealth;
+  /** How this account is billed right now (anthropic-credits-gateway-2026-09-30 P-008, D-003).
+   *  `included` = inside a flat-rate subscription allowance (the default when unknown); `metered` =
+   *  billed per token — an API-key account, or a subscription serving from usage credits. */
+  billing?: AccountBilling;
+  /** The account's metered spend policy. `overflow` (default): metered serves only when no
+   *  included-allowance account can. `never`: while metered, the account is unselectable. */
+  meteredPolicy?: AccountMeteredPolicy;
 }
+
+export type AccountBilling = 'included' | 'metered';
+export type AccountMeteredPolicy = 'overflow' | 'never';
+
+/** Metered (per-token) accounts rank behind EVERY serviceable included-allowance account — including
+ *  a flaky or burn-throttled one — but stay finite, so they serve once every included account is
+ *  out (D-003: included allowance first, metered is overflow). */
+export const METERED_LOAD_BUCKET = 1e7;
 
 /**
  * Load-aware account selection key (LOWER = better) — the shared scoring the gateway uses for BOTH the
@@ -129,7 +148,15 @@ export function accountLoadKey(i: AccountLoadInputs): number {
     capacityUtil = Math.max(capacityUtil, util);
     if (util >= fullAt) capacityExhausted = true;
   }
-  if (i.paused || i.exhausted || capacityExhausted || i.burnAction === 'shed' || i.transportHealth === 'unavailable') {
+  const metered = i.billing === 'metered';
+  if (
+    i.paused ||
+    i.exhausted ||
+    capacityExhausted ||
+    i.burnAction === 'shed' ||
+    i.transportHealth === 'unavailable' ||
+    (metered && i.meteredPolicy === 'never')
+  ) {
     return Infinity;
   }
   const inFlight = Number.isFinite(i.inFlight) ? Math.max(0, i.inFlight as number) : 0;
@@ -137,7 +164,8 @@ export function accountLoadKey(i: AccountLoadInputs): number {
   const util = Math.max(capacityUtil, Math.min(1, Math.max(0, utilRaw)));
   const transportBucket = i.flaky || i.transportHealth === 'degraded' ? FLAKY_LOAD_BUCKET : 0;
   const burnBucket = i.burnAction === 'throttle' ? BURN_THROTTLE_LOAD_BUCKET : 0;
-  return transportBucket + burnBucket + inFlight * ACCOUNT_INFLIGHT_LOAD_WEIGHT + util;
+  const meteredBucket = metered ? METERED_LOAD_BUCKET : 0;
+  return meteredBucket + transportBucket + burnBucket + inFlight * ACCOUNT_INFLIGHT_LOAD_WEIGHT + util;
 }
 
 export function createFailoverPool(entries: readonly ActiveAccount[], opts: FailoverPoolOptions = {}): AccountPool {

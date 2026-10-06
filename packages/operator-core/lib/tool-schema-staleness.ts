@@ -51,8 +51,6 @@
  * success and fails loudly otherwise, so an absence cannot masquerade as a match.
  */
 
-import { projectedToolSourceFile } from '@papercusp/tooldef';
-
 import { getBuildInfo } from './build-info';
 import {
   blobAtCommit,
@@ -65,6 +63,7 @@ import {
 } from './candidate-contains';
 import { realGit } from './git-pipeline-position';
 import { integrationRoot } from './release-deploy-launch';
+import { resolveToolSourceFile } from './tool-source-file';
 
 /** Why a verdict could not be reached. Enumerated, not prose — a caller branches on it. */
 export type StalenessUnknownReason =
@@ -83,7 +82,15 @@ export type StalenessUnknownReason =
    * definitive "no such submodule at that commit". Either way it stays UNKNOWN —
    * absence is never a positive verdict.
    */
-  | 'submodule-pin-unresolved';
+  | 'submodule-pin-unresolved'
+  /**
+   * The path does not exist in the tree ref at all, so its empty `git log` range is not
+   * a measured "no newer commit" — there is nothing there to be current OR stale. The
+   * reads SUCCEEDED (this is distinct from `git-unreadable`); the subject is simply not
+   * a tracked path, and reporting `current` for it would be a confident verdict about
+   * nothing (WI-10002100).
+   */
+  | 'path-absent-from-tree';
 
 export type ToolSchemaStaleness =
   | {
@@ -117,8 +124,12 @@ export type PathStaleness =
   | { state: 'unknown'; relPath: string; reason: StalenessUnknownReason };
 
 export interface ToolSchemaStalenessDeps {
-  /** Resolve a tool name to the absolute file that defined it (tooldef's registry). */
-  sourceFileFor: (toolName: string) => string | null;
+  /**
+   * Resolve a tool name to the absolute file that defined it. Production uses
+   * {@link resolveToolSourceFile}, which also answers inside a bundle (P-002); it is
+   * async because the bundled case reads the bundle once.
+   */
+  sourceFileFor: (toolName: string) => string | null | Promise<string | null>;
   /** The build sha the running process was started from, or null. */
   deployedSha: () => string | null;
   /** Absolute repo root the relative path is computed against, and git runs in. */
@@ -188,9 +199,20 @@ export async function pathStaleness(
     const commits = await git(['log', '--format=%H', ...sinceArgs, `${from}..${to}`, '--', pathArg]);
     if (commits === null) return { state: 'unknown', relPath, reason: 'git-unreadable' };
     const newerCommits = commits.split('\n').map((sha) => sha.trim()).filter(Boolean);
-    return newerCommits.length === 0
-      ? { state: 'current', relPath, deployedSha, treeRef }
-      : { state: 'stale', relPath, deployedSha, treeRef, newerCommits };
+    if (newerCommits.length > 0) return { state: 'stale', relPath, deployedSha, treeRef, newerCommits };
+    // An empty range is only a MEASURED "no newer commit" when the path actually exists
+    // in the tree being compared (WI-10002100). `git log -- <path>` answers '' for a
+    // path that is absent from the tree entirely — a typo, a rename, an untracked file,
+    // a path from another checkout — and that empty string is indistinguishable from
+    // "nothing changed". Probe the path at the tree ref: a deleted-in-range path already
+    // surfaced above as a stale deletion commit, so an absent path with an empty range
+    // was never tracked here at all. `ls-tree` exits 0 with EMPTY output for a missing
+    // path (null only when git itself failed), and lists a directory as one entry, so
+    // this answers for files and directories alike.
+    const present = await git(['ls-tree', to, '--', pathArg]);
+    if (present === null) return { state: 'unknown', relPath, reason: 'git-unreadable' };
+    if (present.trim() === '') return { state: 'unknown', relPath, reason: 'path-absent-from-tree' };
+    return { state: 'current', relPath, deployedSha, treeRef };
   };
 
   // A path INSIDE a submodule is not tracked by the superproject — which holds only a
@@ -296,7 +318,7 @@ export async function toolSchemaStaleness(
 ): Promise<ToolSchemaStaleness> {
   const treeRef = deps.treeRef ?? 'staging';
 
-  const sourceFile = deps.sourceFileFor(toolName);
+  const sourceFile = await deps.sourceFileFor(toolName);
   if (!sourceFile) return { state: 'unknown', reason: 'tool-source-unknown' };
 
   const deployedSha = deps.deployedSha();
@@ -357,7 +379,7 @@ export async function toolFailureStalenessHint(
   try {
     const repoRoot = overrides?.repoRoot ?? integrationRoot();
     const verdict = await toolSchemaStaleness(toolName, {
-      sourceFileFor: overrides?.sourceFileFor ?? projectedToolSourceFile,
+      sourceFileFor: overrides?.sourceFileFor ?? resolveToolSourceFile,
       deployedSha: overrides?.deployedSha ?? (() => getBuildInfo().sha),
       repoRoot,
       git: overrides?.git ?? gitReadForRepo(realGit, repoRoot),

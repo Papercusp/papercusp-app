@@ -389,6 +389,25 @@ export const INTERNAL_MACHINE_DISPATCH_PAYLOAD_CONTEXT = {
 
 /* ── Store ─────────────────────────────────────────────────────────────────── */
 
+/**
+ * Recover a timed-out predicate only for the registrant. Predicate rows are
+ * soft-deactivated by GC, so their original spec remains available to build a
+ * fresh watch. A deduped joiner is not the row owner; do not disclose another
+ * registrant's tool arguments in that caller's timeout wake.
+ */
+export async function getPredicateTimeoutContext(input: {
+  eventKey: string;
+  subscriberId: string;
+}): Promise<PredicateWatchRow | null> {
+  const prefix = 'predicate:';
+  if (!input.eventKey.startsWith(prefix)) return null;
+  const id = input.eventKey.slice(prefix.length);
+  if (!id) return null;
+  const row = await getPredicateWatch(id);
+  if (!row || row.eventKey !== input.eventKey || row.ownerId !== input.subscriberId) return null;
+  return row;
+}
+
 export async function registerPredicateWatch(input: {
   /** Pre-generated id — the caller registers the await on `predicate:<id>` FIRST
    *  (GC safety: a row must never exist without its paired await). */

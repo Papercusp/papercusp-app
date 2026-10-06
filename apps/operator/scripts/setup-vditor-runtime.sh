@@ -148,11 +148,15 @@ cp "$D3_ASSET" "$LOCAL_DEST/d3.min.js"
 cp "$MARKMAP_VIEW_ASSET" "$LOCAL_DEST/markmap-view.min.js"
 cp "$WEBFONTLOADER_ASSET" "$LOCAL_DEST/webfontloader.js"
 
-sed -i \
+# BSD sed (macOS) parses bare -i's next argument as its backup suffix, so
+# `-e` becomes a filename and postinstall fails. An explicit suffix works on
+# both BSD and GNU sed; remove the backup before stamping the mirror.
+sed -i.bak \
   -e 's|https://cdn.jsdelivr.net/npm/d3@6.7.0|/vditor-local/d3.min.js|g' \
   -e 's|https://cdn.jsdelivr.net/npm/markmap-view@0.14.3|/vditor-local/markmap-view.min.js|g' \
   -e 's|https://cdn.jsdelivr.net/npm/webfontloader@1.6.28/webfontloader.js|/vditor-local/webfontloader.js|g' \
   "$MARKMAP"
+rm -f "$MARKMAP.bak"
 
 if grep -qF 'https://cdn.jsdelivr.net/npm/d3@6.7.0' "$MARKMAP" \
   || grep -qF 'https://cdn.jsdelivr.net/npm/markmap-view@0.14.3' "$MARKMAP" \
@@ -163,5 +167,9 @@ fi
 
 printf '%s\n' "$LOCAL_VERSIONS" > "$LOCAL_STAMP"
 
+# $STAMP sits OUTSIDE the rm'd $DEST, so a `>` redirect would truncate the
+# existing inode in place and rewrite every tree that hard-links it (WI-10004321).
+# Unlink first so the new stamp is this tree's own file.
+rm -f "$STAMP"
 echo "$VERSION" > "$STAMP"
 echo "vditor-runtime: mirrored vditor v$VERSION and local markmap assets into $DEST/ ($(du -sh "$DEST" | cut -f1))"

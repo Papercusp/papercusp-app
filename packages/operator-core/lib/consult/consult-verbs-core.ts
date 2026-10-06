@@ -146,7 +146,7 @@ export interface ConsultVerbDeps {
     conversationId: string;
     summary: string;
     body: string;
-  }) => Promise<{ woke: number }>;
+  }) => Promise<{ woke: number; confirmedDead?: boolean }>;
   /**
    * The cascade DELIVERY seam (D-002/D-011) — fork/convert a NEW answering
    * session from the next expert's transcript. Passed to every advanceCascade
@@ -187,7 +187,11 @@ export type ConsultVerbError =
   | { error: 'reason_required' }
   | { error: 'post_failed'; cause: string }
   | { error: 'graduate_unavailable'; hint: string }
-  | { error: 'graduate_failed'; cause: string };
+  | { error: 'graduate_failed'; cause: string }
+  | { error: 'invalid_decision_ref'; hint: string }
+  | { error: 'not_the_requester'; hint: string }
+  | { error: 'not_a_proceed_consult'; latency_contract: string; hint: string }
+  | { error: 'already_reconciled'; reconciliation: unknown; hint: string };
 
 const POSTABLE_STATES = new Set(['awaiting_responder', 'active']);
 
@@ -477,6 +481,12 @@ export interface ConsultReplyResult {
   wake?: {
     attempted: boolean;
     woke: number;
+    /** Present after a zero-count wake attempt; records the confirmed-dead
+     * check and the outcome of the CAS-guarded cascade. */
+    reroute?: {
+      status: 'not_confirmed_dead' | 'advanced' | 'exhausted' | 'raced' | 'unchanged';
+      to: string | null;
+    };
   };
   /** Present on a cascade-advancing perspective reply (D-005): which expert's
    * transcript the next answering session was DISPATCHED from with the
@@ -622,6 +632,8 @@ export async function consultReplyCore(
   }
 
   let woke = 0;
+  let answeringOwnerId: string | null = null;
+  let responderConfirmedDead = false;
   if (willWake && deps.reach && row.responder_id) {
     // D-011: address the session that is ANSWERING, not the expert who was
     // routed. A fork answers under a new coord identity (stamped by dispatch as
@@ -630,6 +642,7 @@ export async function consultReplyCore(
     // consult while the session holding the thread never hears the follow-up.
     const answering =
       selectionFromRouting(row.routing)[row.cascade_cursor]?.answeringOwnerId ?? row.responder_id;
+    answeringOwnerId = answering;
     const r = await deps.reach({
       responder: answering,
       conversationId: req.conversationId,
@@ -641,6 +654,7 @@ export async function consultReplyCore(
         consultResponderVerbMenu({ conversationId: req.conversationId }),
     });
     woke = r.woke;
+    responderConfirmedDead = woke === 0 && r.confirmedDead === true;
   }
 
   // D-005 always-advance: the current responder's perspective advances the
@@ -648,7 +662,11 @@ export async function consultReplyCore(
   // far. The park-key emit above already served a hard-blocked requester
   // (parks on the FIRST reply); the chain continues behind it.
   let cascade: ConsultReplyResult['cascade'];
-  if (isPerspective) {
+  let requesterReroute:
+    | NonNullable<ConsultReplyResult['wake']>['reroute']
+    | undefined = willWake && woke === 0 ? { status: 'not_confirmed_dead', to: null } : undefined;
+  const confirmedDeadFollowup = role === 'requester' && responderConfirmedDead;
+  if (isPerspective || confirmedDeadFollowup) {
     const adv = await advanceCascade(
       {
         workspaceId: req.workspaceId,
@@ -662,8 +680,19 @@ export async function consultReplyCore(
         // Safe narrowing: isPerspective ⇒ role 'responder', and the kind gate
         // above already restricted req.kind to RESPONDER_REPLY_KINDS — the
         // requester-only 'question' cannot reach this branch.
-        event: makeDigestEntry(req.authorId, req.kind as CascadeEventKind, now, req.body),
-        stateOnAdvance: 'active',
+        event: isPerspective
+          ? makeDigestEntry(req.authorId, req.kind as CascadeEventKind, now, req.body)
+          : makeDigestEntry(
+              answeringOwnerId ?? row.responder_id ?? req.authorId,
+              'wake_failed',
+              now,
+              'The answering session was confirmed ended after a requester follow-up.',
+            ),
+        stateOnAdvance: isPerspective
+          ? 'active'
+          : row.state === 'awaiting_responder'
+            ? 'awaiting_responder'
+            : 'active',
         nowIso: now,
       },
       sql,
@@ -679,6 +708,14 @@ export async function consultReplyCore(
         woke: adv.woke,
         ...(adv.refilled ? { refilled: true } : {}),
       };
+      if (confirmedDeadFollowup) {
+        requesterReroute = {
+          status: adv.advanced ? 'advanced' : adv.exhausted ? 'exhausted' : 'unchanged',
+          to: adv.advanced ? adv.next?.ownerId ?? null : null,
+        };
+      }
+    } else if (confirmedDeadFollowup) {
+      requesterReroute = { status: 'raced', to: null };
     }
   }
   const cascadeNote = cascade
@@ -686,6 +723,16 @@ export async function consultReplyCore(
       ? ` Cascade advanced (D-005): an answering session was dispatched from ${cascade.advanced_to}'s transcript with the feedback so far (D-002 — forked/converted, never woken).${cascade.refilled ? ' (min-ANSWERS refill, WI-39861: the menu was extended once — answers collected < selection.min.)' : ''}`
       : ' Cascade menu exhausted — you were the last selectee.'
     : '';
+  const requesterRerouteHint =
+    requesterReroute?.status === 'advanced'
+      ? `; the consult advanced to reviewer ${requesterReroute.to}`
+      : requesterReroute?.status === 'exhausted'
+        ? '; the confirmed-ended responder had no remaining selected reviewer'
+        : requesterReroute?.status === 'raced'
+          ? '; another operation advanced the cascade first'
+          : requesterReroute?.status === 'unchanged'
+            ? '; the cascade did not advance'
+            : '';
 
   const capNow = exchangesUsed >= row.max_exchanges;
   const hint =
@@ -695,7 +742,7 @@ export async function consultReplyCore(
         : req.kind === 'answer'
           ? `Answer posted (exchange ${exchangesUsed}/${row.max_exchanges}); the requester was signaled via ${parkKey(req.conversationId)}. When the thread is settled, close it: consult:close { outcome: 'answered' }.${cascadeNote}`
           : `Posted (exchange ${exchangesUsed}/${row.max_exchanges}); the requester was signaled via ${parkKey(req.conversationId)}.${cascadeNote}`
-      : `Follow-up posted (exchange ${exchangesUsed}/${row.max_exchanges})${willWake ? `; responder ${woke > 0 ? 'woken' : 'pinged'}` : ''}.`;
+      : `Follow-up posted (exchange ${exchangesUsed}/${row.max_exchanges})${willWake ? `; responder ${woke > 0 ? 'woken' : responderConfirmedDead ? 'confirmed ended' : 'pinged'}` : ''}${requesterRerouteHint}.`;
 
   return {
     ok: true,
@@ -709,6 +756,7 @@ export async function consultReplyCore(
           wake: {
             attempted: willWake,
             woke,
+            ...(willWake && woke === 0 && requesterReroute ? { reroute: requesterReroute } : {}),
           },
         }
       : {}),
@@ -860,7 +908,10 @@ export async function consultDeclineCore(
                      answered_by: [...new Set(declineAnswerEvents.map((e) => e.ownerId))],
                    }
                  : {}),
-             } as never)},
+             } as never)}::jsonb
+                       || CASE WHEN (outcome -> 'reconciliation') IS NOT NULL
+                               THEN jsonb_build_object('reconciliation', outcome -> 'reconciliation')
+                               ELSE '{}'::jsonb END,
              closed_at = ${now}::timestamptz,
              updated_at = ${now}::timestamptz
        WHERE workspace_id = ${req.workspaceId} AND conversation_id = ${req.conversationId}
@@ -1040,7 +1091,10 @@ export async function consultCloseCore(
     await tx`
       UPDATE harness_shared.consult_state
          SET state = ${state},
-             outcome = ${tx.json(outcome as never)},
+             outcome = ${tx.json(outcome as never)}::jsonb
+                       || CASE WHEN (outcome -> 'reconciliation') IS NOT NULL
+                               THEN jsonb_build_object('reconciliation', outcome -> 'reconciliation')
+                               ELSE '{}'::jsonb END,
              closed_at = ${now}::timestamptz,
              updated_at = ${now}::timestamptz
        WHERE workspace_id = ${req.workspaceId} AND conversation_id = ${req.conversationId}
@@ -1083,5 +1137,201 @@ export async function consultCloseCore(
         : state === 'graduated'
           ? `Graduated (D-004): the consult outgrew its bounds — shared work item ${graduatedWorkItemId} carries it forward and both participants are subscribed. The consult takes no further posts.`
           : `Closed as can't-help — an honest terminal outcome (D-003), not a failure. The requester proceeds on their own judgment.`,
+  };
+}
+
+// ── consult:reconcile ────────────────────────────────────────────────────────
+// EI-23764501791910357 slice 3. A consult opened under latency_contract:'proceed'
+// hands the requester a PROCEED-NOW-RECONCILE-LATER affordance; the "later" half
+// is an obligation (agent-obligation-reader's consult-reconciliation source: a
+// proceed consult with no `outcome.reconciliation`). THIS verb is the terminal
+// state that clears it — the requester's own disposition of the assumption they
+// proceeded on, written beside the responder's outcome so neither erases the other
+// (close / decline / the expiry sweep all carry `reconciliation` forward).
+
+export const CONSULT_RECONCILIATION_DISPOSITIONS = ['confirmed', 'rescoped', 'reversed', 'moot'] as const;
+export type ConsultReconciliationDisposition = (typeof CONSULT_RECONCILIATION_DISPOSITIONS)[number];
+
+export interface ConsultReconcileRequest {
+  workspaceId: string;
+  authorId: string;
+  conversationId: string;
+  disposition: ConsultReconciliationDisposition;
+  /** What the answer (or its absence) changed — or why nothing did. Required: a bare
+   * `confirmed` with no account is exactly the debt-that-looks-discharged this verb
+   * exists to end. */
+  note: string;
+  /** Optional `<plan-slug>#D-NNN` of the plan Decision recording a rescope/reversal,
+   * so the ruling stays addressable where governing rulings already live. */
+  decisionRef?: string;
+}
+
+export interface ConsultReconciliationRecord {
+  disposition: ConsultReconciliationDisposition;
+  note: string;
+  by: string;
+  at: string;
+  /** The consult's state when it was reconciled — separates "answered, then diffed"
+   * from "reconciled while still open" from "ended with no answer". */
+  consult_state: string;
+  decision_ref?: string;
+}
+
+export interface ConsultReconcileResult {
+  ok: true;
+  conversation_id: string;
+  disposition: ConsultReconciliationDisposition;
+  consult_state: string;
+  recorded_at: string;
+  hint: string;
+}
+
+const DECISION_REF_SHAPE = /^[a-z0-9][a-z0-9-]*#D-\d{3,}$/;
+
+export async function consultReconcileCore(
+  req: ConsultReconcileRequest,
+  deps: Pick<ConsultVerbDeps, 'getSql' | 'now'>,
+): Promise<ConsultReconcileResult | ConsultVerbError> {
+  const sql = deps.getSql();
+  const now = (deps.now ? deps.now() : new Date()).toISOString();
+
+  // Same truncated-ref resolution as reply/decline/close, before any read or write.
+  const normalized = await normalizeConversationRef(sql, req);
+  if ('error' in normalized) return normalized;
+  req = normalized.req;
+
+  const row = await readState(sql, req.workspaceId, req.conversationId);
+  if (!row) return { error: 'not_a_consult' };
+
+  // The debt is the REQUESTER's: they proceeded on the assumption, so only they can
+  // say what the answer did to it. A responder (or any participant) recording it would
+  // clear the requester's obligation without the requester having diffed anything.
+  if (req.authorId !== row.requester_id) {
+    return {
+      error: 'not_the_requester',
+      hint: `Only the requester (${row.requester_id}) can reconcile a proceed-consult — it is their assumption to disposition. Participants can still post/close the thread itself.`,
+    };
+  }
+  if (row.latency_contract !== 'proceed') {
+    return {
+      error: 'not_a_proceed_consult',
+      latency_contract: row.latency_contract,
+      hint: `Only a consult opened under latency_contract:'proceed' carries a reconciliation debt; this one is '${row.latency_contract}' (you blocked on the answer instead of assuming).`,
+    };
+  }
+  const note = req.note?.trim();
+  if (!note) return { error: 'reason_required' };
+  const decisionRef = req.decisionRef?.trim();
+  if (decisionRef && !DECISION_REF_SHAPE.test(decisionRef)) {
+    return {
+      error: 'invalid_decision_ref',
+      hint: `decision_ref must be '<plan-slug>#D-NNN' (the id plans:add-decision returned), got '${decisionRef}'.`,
+    };
+  }
+
+  const record: ConsultReconciliationRecord = {
+    disposition: req.disposition,
+    note,
+    by: req.authorId,
+    at: now,
+    consult_state: row.state,
+    ...(decisionRef ? { decision_ref: decisionRef } : {}),
+  };
+
+  // Terminal + race-safe: the guard is IN the UPDATE, so two concurrent reconciles
+  // cannot both win and a close landing in between cannot be clobbered (the
+  // close/decline/expiry writers carry `reconciliation` forward the other way).
+  const written = (await sql`
+    UPDATE harness_shared.consult_state
+       SET outcome = COALESCE(outcome, '{}'::jsonb)
+                     || jsonb_build_object('reconciliation', ${sql.json(record as never)}::jsonb),
+           updated_at = ${now}::timestamptz
+     WHERE workspace_id = ${req.workspaceId}
+       AND conversation_id = ${req.conversationId}
+       AND requester_id = ${req.authorId}
+       AND (outcome -> 'reconciliation') IS NULL
+    RETURNING conversation_id
+  `) as unknown as Array<{ conversation_id: string }>;
+
+  if (written.length === 0) {
+    // Lost the guard: this requester already recorded it (a repeat or a race).
+    const current = await readState(sql, req.workspaceId, req.conversationId);
+    const existing =
+      current?.outcome && typeof current.outcome === 'object' && !Array.isArray(current.outcome)
+        ? (current.outcome as Record<string, unknown>).reconciliation
+        : undefined;
+    return {
+      error: 'already_reconciled',
+      reconciliation: existing ?? null,
+      hint: 'This consult already has a recorded reconciliation — it is terminal. Nothing was changed.',
+    };
+  }
+
+  return {
+    ok: true,
+    conversation_id: req.conversationId,
+    disposition: req.disposition,
+    consult_state: row.state,
+    recorded_at: now,
+    hint:
+      req.disposition === 'rescoped' || req.disposition === 'reversed'
+        ? `Recorded (${req.disposition}); the obligation is cleared. A ${req.disposition} outcome is a ruling other lanes may need — if you have not already, record it with plans:add-decision and cite it via decision_ref.`
+        : `Recorded (${req.disposition}); the proceed-reconciliation obligation for this consult is cleared.`,
+  };
+}
+
+// ── plans:start override linkage ─────────────────────────────────────────────
+// EI-23764501791910357 slice 3b (WI-10005177). `plans:start`'s consult override
+// (`consulted` + `consult_reason`) is free text; `consult_id` makes the consult the
+// caller proceeded on a STRUCTURED reference. This resolves + validates it — never
+// writes — so the result/ledger can name the consult and say whether a
+// proceed-reconciliation is still owed (the obligation reader surfaces it either way).
+
+export interface ConsultRequestedRefRequest {
+  workspaceId: string;
+  requesterId: string;
+  /** Full conversation id or a unique prefix (same resolution as the consult verbs). */
+  conversationRef: string;
+}
+
+export interface ConsultRequestedRefResult {
+  ok: true;
+  conversation_id: string;
+  consult_state: string;
+  latency_contract: string;
+  /** True when this is a proceed consult with no recorded reconciliation — the debt
+   * `consult:reconcile` clears. */
+  reconciliation_owed: boolean;
+}
+
+export async function consultResolveRequestedConsult(
+  req: ConsultRequestedRefRequest,
+  deps: Pick<ConsultVerbDeps, 'getSql'>,
+): Promise<ConsultRequestedRefResult | ConsultVerbError> {
+  const sql = deps.getSql();
+  const normalized = await normalizeConversationRef(sql, {
+    workspaceId: req.workspaceId,
+    conversationId: req.conversationRef,
+  });
+  if ('error' in normalized) return normalized;
+  const row = await readState(sql, req.workspaceId, normalized.req.conversationId);
+  if (!row) return { error: 'not_a_consult' };
+  if (row.requester_id !== req.requesterId) {
+    return {
+      error: 'not_the_requester',
+      hint: `consult_id must name a consult YOU requested; ${row.conversation_id} was requested by ${row.requester_id}.`,
+    };
+  }
+  const reconciled =
+    row.outcome != null &&
+    typeof row.outcome === 'object' &&
+    !Array.isArray(row.outcome) &&
+    (row.outcome as Record<string, unknown>).reconciliation != null;
+  return {
+    ok: true,
+    conversation_id: row.conversation_id,
+    consult_state: row.state,
+    latency_contract: row.latency_contract,
+    reconciliation_owed: row.latency_contract === 'proceed' && !reconciled,
   };
 }

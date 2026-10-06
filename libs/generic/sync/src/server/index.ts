@@ -29,6 +29,7 @@ export {
 export {
   createInvalidationBus,
   DEFAULT_BRIDGE_COALESCE_WINDOW_MS,
+  MAX_BRIDGE_COALESCE_WINDOW_MS,
   type SyncEvent,
   type ListenSource,
   type NotifySink,

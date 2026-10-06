@@ -81,10 +81,31 @@ export interface WedgeIssueInput {
   nowIso?: string;
 }
 
-export interface WedgeIssueResult {
+export interface PtyHostIssueResult {
   action: 'created' | 'commented' | 'unchanged' | 'failed';
   id?: string;
   reason?: string;
+}
+
+export type WedgeIssueResult = PtyHostIssueResult;
+
+export interface PtyHostMechanismIssueInput {
+  /** Stable class key; sessions and owners are evidence, not the mechanism identity. */
+  mechanism: string;
+  title: string;
+  summary: string;
+  ownerIds: readonly string[];
+  /** Total matching owners when `ownerIds` is a bounded sample. */
+  totalOwners?: number;
+  /** Already-redacted detail lines. Never include a full operator URL or environment dump. */
+  details: readonly string[];
+  /** Digest of the persisted evidence represented by this snapshot. */
+  digest: string;
+  createdBy: string;
+  foundDuring: string;
+  sourcePlanSlug?: string | null;
+  severity?: IssueSeverity;
+  nowIso?: string;
 }
 
 /** Stable digest of the affected population — the throttle's change signal. */
@@ -117,6 +138,118 @@ function buildBody(input: WedgeIssueInput, marker: string): string {
   return lines.join('\n');
 }
 
+export function ptyHostMechanismIssueMarker(mechanism: string): string {
+  return `pty-host-mechanism-key:${mechanism}`;
+}
+
+interface KeyedPtyHostIssueInput {
+  marker: string;
+  title: string;
+  body: string;
+  digest: string;
+  payloadKey: 'ptyHostWedge' | 'ptyHostMechanism';
+  createdBy: string;
+  foundDuring: string;
+  sourcePlanSlug: string | null;
+  severity: IssueSeverity;
+  nowIso: string;
+}
+
+/** Shared marker/digest/pending-admission writer for P-008 keyed PTY mechanisms. */
+async function recordKeyedPtyHostIssue(
+  input: KeyedPtyHostIssueInput,
+  deps: WedgeIssueDeps,
+): Promise<PtyHostIssueResult> {
+  try {
+    const found = await deps.listIssues({ q: input.marker, kinds: ['bug'] });
+    const live = (found ?? []).filter(
+      (i) => !TERMINAL_STATES.has(i.state) && typeof i.body === 'string' && i.body.includes(input.marker),
+    );
+    const lastSeenAt = input.nowIso;
+    const payloadPatch = { [input.payloadKey]: { digest: input.digest, lastSeenAt } };
+
+    if (live.length === 0) {
+      const created = await deps.createIssue({
+        title: input.title,
+        body: input.body,
+        severity: input.severity,
+        kind: 'bug',
+        createdBy: input.createdBy,
+        foundDuring: input.foundDuring,
+        sourcePlanSlug: input.sourcePlanSlug,
+        // Automated detection is unreviewed. Keep it born-pending so the promoter, not the
+        // detector, decides whether this signal belongs in the claimable queue.
+        admission: 'pending',
+      });
+      await deps.mergeIssuePayload(created.id, payloadPatch).catch(() => undefined);
+      return { action: 'created', id: created.id };
+    }
+
+    const item = live[0];
+    const payload = (item.payload as Record<string, { digest?: string }> | null) ?? null;
+    const prior = payload?.[input.payloadKey]?.digest;
+    if (prior === input.digest) {
+      return {
+        action: 'unchanged',
+        id: item.id,
+        reason: input.payloadKey === 'ptyHostWedge' ? 'same-owner-set' : 'same-evidence-digest',
+      };
+    }
+
+    await deps.commentIssue(item.id, input.body, input.createdBy);
+    await deps.mergeIssuePayload(item.id, payloadPatch).catch(() => undefined);
+    return { action: 'commented', id: item.id };
+  } catch (e) {
+    return { action: 'failed', reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * File or update one mechanism-keyed PTY issue using the same P-008 accountable writer as
+ * wake-wedge episodes. The class key remains stable while the bounded evidence digest changes.
+ */
+export async function recordPtyHostMechanismEpisode(
+  input: PtyHostMechanismIssueInput,
+  deps: WedgeIssueDeps,
+): Promise<PtyHostIssueResult> {
+  if (!input.ownerIds.length) return { action: 'unchanged', reason: 'no-affected-hosts' };
+  const marker = ptyHostMechanismIssueMarker(input.mechanism);
+  const totalOwners = input.totalOwners ?? input.ownerIds.length;
+  const details = input.details.slice(0, 25).map((line) => `- ${line}`);
+  const shownOwners = Math.min(input.ownerIds.length, 25);
+  const lines = [
+    marker,
+    '',
+    input.summary,
+    '',
+    `${totalOwners} distinct psu-pty host(s) match this mechanism as of ${input.nowIso ?? new Date().toISOString()}.`,
+    '',
+    'Recent affected hosts (redacted event fields):',
+    ...details,
+    ...(totalOwners > shownOwners
+      ? [`- ${totalOwners - shownOwners} additional host(s) omitted from this bounded detail list.`]
+      : []),
+    '',
+    `This item is maintained automatically by \`${input.foundDuring}\` and keyed by mechanism. ` +
+      'Closing it asserts the mechanism is fixed, not merely that the current sessions have gone away.',
+  ];
+  return recordKeyedPtyHostIssue(
+    {
+      marker,
+      title: input.title,
+      body: lines.join('\n'),
+      digest: input.digest,
+      payloadKey: 'ptyHostMechanism',
+      createdBy: input.createdBy,
+      foundDuring: input.foundDuring,
+      sourcePlanSlug: input.sourcePlanSlug ?? null,
+      severity: input.severity ?? 'minor',
+      nowIso: input.nowIso ?? new Date().toISOString(),
+    },
+    deps,
+  );
+}
+
 /**
  * File or update the durable record for one wedge class.
  *
@@ -128,58 +261,21 @@ export async function recordWedgeEpisode(
   deps: WedgeIssueDeps,
 ): Promise<WedgeIssueResult> {
   if (!input.ownerIds.length) return { action: 'unchanged', reason: 'no-wedged-hosts' };
-
   const marker = wedgeIssueMarker(input.wedgeClass);
-  const digest = wedgeDigest(input.ownerIds);
-
-  try {
-    const found = await deps.listIssues({ q: marker, kinds: ['bug'] });
-    // Belt and braces: `q` is a substring match over title+body, so confirm the marker is
-    // really present rather than trusting a loose hit, and ignore terminal rows — a closed
-    // item is a historical record, and a NEW episode deserves a new, openly-owned one.
-    const live = (found ?? []).filter(
-      (i) => !TERMINAL_STATES.has(i.state) && typeof i.body === 'string' && i.body.includes(marker),
-    );
-
-    if (live.length === 0) {
-      const created = await deps.createIssue({
-        title: `psu-pty hosts cannot receive wakes (${input.wedgeClass} class)`,
-        body: buildBody(input, marker),
-        // `major`, not `critical`: a wedged host is a real outage for that agent, but the
-        // sweep's busy-gate class is explicitly detect-only with unmeasured precision, so
-        // this must not be the severity that wakes someone at night on a maybe.
-        severity: 'major',
-        kind: 'bug',
-        createdBy: 'system:sweep-wedged-pty-hosts',
-        foundDuring: 'sweep-wedged-pty-hosts',
-        sourcePlanSlug: 'psu-pty-turn-boundary-generalization-2026-09-22',
-        // 'pending', not 'auto': this is an automated detector's filing that no human
-        // has reviewed, so the promoter is exactly who should judge it. The same
-        // reasoning that picked `major` over `critical` above applies with more force
-        // here — the busy-gate class is explicitly detect-only with UNMEASURED
-        // precision, so a filing-time bypass would admit unreviewed, possibly-false
-        // episodes straight into the claimable queue. Rides in THIS insert rather than
-        // a post-create update, or the row is claimable in the gap between the two.
-        admission: 'pending',
-      });
-      await deps
-        .mergeIssuePayload(created.id, { ptyHostWedge: { digest, lastSeenAt: input.nowIso ?? new Date().toISOString() } })
-        .catch(() => undefined);
-      return { action: 'created', id: created.id };
-    }
-
-    const item = live[0];
-    const prior = (item.payload as { ptyHostWedge?: { digest?: string } } | null)?.ptyHostWedge?.digest;
-    if (prior === digest) {
-      return { action: 'unchanged', id: item.id, reason: 'same-owner-set' };
-    }
-
-    await deps.commentIssue(item.id, buildBody(input, marker), 'system:sweep-wedged-pty-hosts');
-    await deps
-      .mergeIssuePayload(item.id, { ptyHostWedge: { digest, lastSeenAt: input.nowIso ?? new Date().toISOString() } })
-      .catch(() => undefined);
-    return { action: 'commented', id: item.id };
-  } catch (e) {
-    return { action: 'failed', reason: e instanceof Error ? e.message : String(e) };
-  }
+  return recordKeyedPtyHostIssue(
+    {
+      marker,
+      title: `psu-pty hosts cannot receive wakes (${input.wedgeClass} class)`,
+      body: buildBody(input, marker),
+      digest: wedgeDigest(input.ownerIds),
+      payloadKey: 'ptyHostWedge',
+      createdBy: 'system:sweep-wedged-pty-hosts',
+      foundDuring: 'sweep-wedged-pty-hosts',
+      sourcePlanSlug: 'psu-pty-turn-boundary-generalization-2026-09-22',
+      // `major`, not `critical`: this remains the calibrated P-008 wedge severity.
+      severity: 'major',
+      nowIso: input.nowIso ?? new Date().toISOString(),
+    },
+    deps,
+  );
 }

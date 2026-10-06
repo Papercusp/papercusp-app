@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { compileAgentSpecification, operationFromSpecification, type Blueprint } from '@papercusp/orchestrator/blueprint';
 import { checkAgainstJsonSchema } from '../json-schema-validation';
 import { createWorkItem, getWorkItem, type WorkItem, type WorkItemKind } from '../work-items';
+import { workItemStorageSlug } from '../pot-membership';
 import { canonicalJson } from '../authority/authority-rpc-envelope';
 import { runWithWorkspace } from '../workspace-als';
 import { readBlueprintHashFromPg, readBlueprintSpecificationSnapshot, retainBlueprintSpecificationSnapshot } from './project-to-pg';
@@ -160,21 +161,27 @@ async function findDirectItemByRequest(
   callerId: string,
   key: string,
   fingerprint: string,
+  storageHarness: string,
 ): Promise<WorkItem | null> {
-  return resolveDirectItemRows(await findDirectItemRows(sql, request, callerId, key), request, key, fingerprint);
+  return resolveDirectItemRows(
+    await findDirectItemRows(sql, request, callerId, key, storageHarness), request, key, fingerprint, storageHarness,
+  );
 }
 
-/** The recovery scan alone, so admission can pipeline it (WI-10003631). */
+/** The recovery scan alone, so admission can pipeline it (WI-10003631).
+ * `storageHarness` is where createWorkItem actually stored the item: a pot MEMBER
+ * harness's items live under the pot home slug (WI-10004360). */
 function findDirectItemRows(
   sql: Sql | TransactionSql,
   request: AcceptBlueprintDirectItemInput,
   callerId: string,
   key: string,
+  storageHarness: string,
 ) {
   return sql<Array<{ feature_id: string }>>`
     SELECT feature_id FROM harness_shared.work_items
      WHERE workspace_id = ${request.workspaceId}
-       AND harness_slug = ${request.harnessSlug}
+       AND harness_slug = ${storageHarness}
        AND payload->'blueprintOperation'->>'callerId' = ${callerId}
        AND payload->'blueprintOperation'->>'operationId' = ${request.operationId}
        AND payload->'blueprintOperation'->>'requestKey' = ${key}
@@ -187,10 +194,11 @@ async function resolveDirectItemRows(
   request: AcceptBlueprintDirectItemInput,
   key: string,
   fingerprint: string,
+  storageHarness: string,
 ): Promise<WorkItem | null> {
   if (rows.length > 1) throw new Error('blueprint operation request has multiple canonical work items');
   if (!rows[0]) return null;
-  const item = await getWorkItem(rows[0].feature_id, request.harnessSlug);
+  const item = await getWorkItem(rows[0].feature_id, storageHarness);
   if (!item) throw new Error('blueprint operation accepted work item disappeared');
   const payload =
     item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
@@ -257,6 +265,10 @@ async function acceptBlueprintDirectWorkItemScoped(
   const fingerprint = key ? requestFingerprint(request, input) : undefined;
 
   if (key && fingerprint && callerId) {
+    // WI-10004360: createWorkItem re-homes a pot MEMBER harness's item to the pot home
+    // slug, so every read of the accepted item addresses that slug, not the request's.
+    // Resolved before the transaction so it never holds a second pool connection.
+    const storageHarness = await workItemStorageSlug(request.harnessSlug, request.workspaceId);
     // The one lock covers the receipt and both work-item families. The
     // work-item writer uses its own connection; the payload scan repairs the
     // crash gap after that writer commits but before this transaction commits.
@@ -291,7 +303,7 @@ async function acceptBlueprintDirectWorkItemScoped(
            AND operation_id = ${request.operationId} AND request_key = ${key}
          FOR UPDATE
       `,
-            findDirectItemRows(tx, request, callerId, key),
+            findDirectItemRows(tx, request, callerId, key, storageHarness),
             request.expectedSpecificationRevision
               ? Promise.resolve(null)
               : readBlueprintHashFromPg(tx, request.workspaceId, request.harnessSlug),
@@ -305,7 +317,7 @@ async function acceptBlueprintDirectWorkItemScoped(
             throw new Error('blueprint operation receipt differs from the expected specification revision');
           }
           if (receipt?.target_ref) {
-            const item = await getWorkItem(receipt.target_ref, request.harnessSlug);
+            const item = await getWorkItem(receipt.target_ref, storageHarness);
             if (!item) throw new Error('blueprint operation receipt points to a missing work item');
             const pin = AcceptedOperationPinSchema.parse((item.payload as Record<string, unknown>)?.blueprintOperation);
             if (
@@ -317,7 +329,7 @@ async function acceptBlueprintDirectWorkItemScoped(
             }
             return item;
           }
-          const recovered = await resolveDirectItemRows(recoveredRows, request, key, fingerprint);
+          const recovered = await resolveDirectItemRows(recoveredRows, request, key, fingerprint, storageHarness);
           if (recovered) {
             const pin = AcceptedOperationPinSchema.parse(
               (recovered.payload as Record<string, unknown>)?.blueprintOperation,
@@ -327,7 +339,8 @@ async function acceptBlueprintDirectWorkItemScoped(
             }
             if (receipt) {
               await tx`
-            UPDATE harness_shared.blueprint_operation_invocations SET target_ref = ${recovered.id}, updated_at = now()
+            UPDATE harness_shared.blueprint_operation_invocations
+               SET target_ref = ${recovered.id}, target_harness_slug = ${storageHarness}, updated_at = now()
              WHERE workspace_id = ${request.workspaceId} AND harness_slug = ${request.harnessSlug}
                AND caller_id = ${callerId}
                AND operation_id = ${request.operationId} AND request_key = ${key}
@@ -336,9 +349,9 @@ async function acceptBlueprintDirectWorkItemScoped(
               await tx`
             INSERT INTO harness_shared.blueprint_operation_invocations
               (workspace_id, harness_slug, caller_id, operation_id, request_key, request_fingerprint,
-               specification_revision, target_kind, target_ref)
+               specification_revision, target_kind, target_ref, target_harness_slug)
             VALUES (${request.workspaceId}, ${request.harnessSlug}, ${callerId}, ${request.operationId}, ${key},
-                    ${fingerprint}, ${pin.specificationRevision}, 'work-item', ${recovered.id})
+                    ${fingerprint}, ${pin.specificationRevision}, 'work-item', ${recovered.id}, ${storageHarness})
           `;
             }
             return recovered;
@@ -389,7 +402,8 @@ async function acceptBlueprintDirectWorkItemScoped(
           });
           if (receipt) {
             await tx`
-          UPDATE harness_shared.blueprint_operation_invocations SET target_ref = ${item.id}, updated_at = now()
+          UPDATE harness_shared.blueprint_operation_invocations
+             SET target_ref = ${item.id}, target_harness_slug = ${storageHarness}, updated_at = now()
            WHERE workspace_id = ${request.workspaceId} AND harness_slug = ${request.harnessSlug}
              AND caller_id = ${callerId}
              AND operation_id = ${request.operationId} AND request_key = ${key}
@@ -398,9 +412,9 @@ async function acceptBlueprintDirectWorkItemScoped(
             await tx`
           INSERT INTO harness_shared.blueprint_operation_invocations
             (workspace_id, harness_slug, caller_id, operation_id, request_key, request_fingerprint,
-             specification_revision, target_kind, target_ref)
+             specification_revision, target_kind, target_ref, target_harness_slug)
           VALUES (${request.workspaceId}, ${request.harnessSlug}, ${callerId}, ${request.operationId}, ${key},
-                  ${fingerprint}, ${revision}, 'work-item', ${item.id})
+                  ${fingerprint}, ${revision}, 'work-item', ${item.id}, ${storageHarness})
         `;
           }
           return item;
@@ -696,6 +710,9 @@ async function acceptScheduledBlueprintWorkItemScoped(
     callerId, operationId: '__scheduled_default', key };
   const flightFingerprint = request.allowDefinitionDrift
     ? createHash('sha256').update(canonicalJson(identity)).digest('hex') : fingerprint;
+  // WI-10004562 / D-045: the receipt records where the reserved item is STORED (the pot
+  // home slug for a pot-member target), resolved by the same resolver as the write path.
+  const targetStorageSlug = await workItemStorageSlug(request.targetHarnessSlug, request.workspaceId);
   return withInvocationSingleflight(identity, flightFingerprint, async () => {
     const receipt = await sql.begin(async (tx) => {
       const lockKey = 'blueprint-operation:' + [request.workspaceId, request.installSlug, callerId,
@@ -726,9 +743,10 @@ async function acceptScheduledBlueprintWorkItemScoped(
       const rows = await tx<ScheduledReceiptRow[]>`
         INSERT INTO harness_shared.blueprint_operation_invocations
           (workspace_id, harness_slug, caller_id, operation_id, request_key, request_fingerprint,
-           specification_revision, target_kind, target_ref, request_payload)
+           specification_revision, target_kind, target_ref, request_payload, target_harness_slug)
         VALUES (${request.workspaceId}, ${request.installSlug}, ${callerId}, ${identity.operationId},
-                ${key}, ${fingerprint}, ${revision}, 'work-item', ${targetRef}, ${saved}::text::jsonb)
+                ${key}, ${fingerprint}, ${revision}, 'work-item', ${targetRef}, ${saved}::text::jsonb,
+                ${targetStorageSlug})
         RETURNING id, request_fingerprint, target_kind, target_ref, specification_revision, request_payload
       `;
       return rows[0];
@@ -743,7 +761,10 @@ async function acceptScheduledBlueprintWorkItemScoped(
       const parsed = ScheduledMarkerSchema.safeParse(itemPayload._blueprintScheduled);
       return parsed.success && isDeepStrictEqual(parsed.data, marker) && item.kind === saved.kind;
     };
-    const existing = await getWorkItem(receipt.target_ref, saved.targetHarnessSlug);
+    // WI-10004360: a pot MEMBER target stores its item under the pot home slug; reading by
+    // the member slug missed it and the re-create collided with the existing explicit id.
+    const storageHarness = await workItemStorageSlug(saved.targetHarnessSlug, request.workspaceId);
+    const existing = await getWorkItem(receipt.target_ref, storageHarness);
     if (existing) {
       if (!matchesReceipt(existing)) throw new Error('scheduled blueprint receipt target conflicts with another work item');
       return existing;
@@ -758,7 +779,7 @@ async function acceptScheduledBlueprintWorkItemScoped(
       if (!matchesReceipt(item)) throw new Error('scheduled blueprint created item lost its receipt pin');
       return item;
     } catch (error) {
-      const winner = await getWorkItem(receipt.target_ref, saved.targetHarnessSlug);
+      const winner = await getWorkItem(receipt.target_ref, storageHarness);
       if (winner && matchesReceipt(winner)) return winner;
       throw error;
     }

@@ -41,16 +41,17 @@ export function armToAbVariant(arm: KnobArm): AbVariant {
 /** Normalize a gym AbResult → the common ExperimentRunResult (per-variant mean composite
  *  + the compareArms verdict). */
 export function abResultToExperimentResult(r: AbResult, variants: AbVariant[]): ExperimentRunResult {
+  const costMeasured = r.cost.costMeasured !== false;
   const arms: ExperimentArmResult[] = variants.map((v) => {
     const mine = r.outcomes.filter((o) => o.variantId === v.variantId);
     const scored = mine.filter((o) => o.status === undefined || o.status === 'scored');
     const meanScore = scored.length ? scored.reduce((s, o) => s + o.composite, 0) / scored.length : null;
-    return { id: v.variantId, label: v.label, meanScore, cells: mine.length, scored: scored.length, costUsd: r.cost.perVariant[v.variantId] ?? 0 };
+    return { id: v.variantId, label: v.label, meanScore, cells: mine.length, scored: scored.length, costUsd: r.cost.perVariant[v.variantId] ?? 0, costMeasured: mine.every((o) => o.judgeCostMeasured !== false) };
   });
   const baseline = arms.find((a) => a.id === BASELINE_ID);
   const candidates = arms.filter((a) => a.id !== BASELINE_ID);
   let comparison: Omit<CompareSelectResult, 'scenarioId'> | null = null;
-  if (baseline && candidates.length > 0) {
+  if (costMeasured && baseline && candidates.length > 0) {
     const toArm = (a: ExperimentArmResult): CompareArm => ({
       variantId: a.id,
       metrics: { composite: a.meanScore ?? undefined },
@@ -78,11 +79,12 @@ export function abResultToExperimentResult(r: AbResult, variants: AbVariant[]): 
     comparison,
     winner: comparison?.selected ?? null,
     totalCostUsd: r.cost.totalUsd,
+    costMeasured,
     budgetExhausted: false,
     scorecardScores: {
-      d1: meanDimension('d1'),
-      d2: meanDimension('d2'),
-      d3: meanDimension('d3'),
+      d1: costMeasured ? meanDimension('d1') : null,
+      d2: costMeasured ? meanDimension('d2') : null,
+      d3: costMeasured ? meanDimension('d3') : null,
     },
   };
 }

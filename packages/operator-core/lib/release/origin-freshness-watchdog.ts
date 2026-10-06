@@ -139,6 +139,9 @@ async function revListCount(repoPath: string, from: string, to: string, runGit: 
  *  `readNamespaceRefForDevices` header). Real pots have a handful; this only stops a store
  *  with pathological namespace litter from stalling the loop. */
 const MAX_NAMESPACES_PER_SWEEP = 32;
+/** WI-10004251: a namespace at most this many commits BEHIND canonical is a live, recently
+ *  diverged publisher (integrable by merge), not an abandoned device. */
+export const RECENT_DIVERGENCE_BEHIND_MAX = 200;
 
 /**
  * EI-22702954391733746 — the integrator's backlog across EVERY device namespace, not just
@@ -166,8 +169,11 @@ const MAX_NAMESPACES_PER_SWEEP = 32;
  * device (measured on papercusp: 21 ahead of canonical while 32708 BEHIND it) would hold the
  * backlog permanently above 0 and alarm on any quiet period. Work the integrator could
  * actually integrate is work built ON TOP of canonical — i.e. canonical is an ancestor of it,
- * equivalently `behind === 0` in the symmetric-difference count below. A divergent device
- * fails that test and contributes no signal; a caught-up device passes it with ahead 0.
+ * equivalently `behind === 0` in the symmetric-difference count below — OR a namespace that
+ * diverged only RECENTLY (`behind <= RECENT_DIVERGENCE_BEHIND_MAX`), which the integrator
+ * folds with a merge (WI-10004251: a publisher 2 behind / 397 ahead was dropped and a 22h
+ * freeze read healthy). An abandoned device (thousands behind) contributes no signal; a
+ * caught-up device passes with ahead 0.
  *
  * Controls measured against the live store before this shipped:
  *   healthy state → only the publisher qualifies, ahead 0 ⇒ 0 ⇒ no alarm (negative control)
@@ -218,7 +224,13 @@ export async function integratorBacklogAcrossDevices(
     const behind = Number.parseInt(parts[0], 10);
     const ahead = Number.parseInt(parts[1], 10);
     if (!Number.isFinite(behind) || !Number.isFinite(ahead)) continue;
-    if (behind !== 0) continue; // divergent or stale ⇒ not integrable ⇒ contributes no signal
+    // A RECENTLY diverged namespace is still integrable work (the integrator folds divergent
+    // heads with a merge) — WI-10004251: during the 22h 2026-09-29/30 freeze the only
+    // publisher stood 2 BEHIND frozen canonical and 91→397 ahead, so `behind !== 0` dropped
+    // it, the helper returned null and the stall counter never left 0. An ABANDONED device
+    // is thousands behind (measured 5312..37784 on the same store), so a small `behind`
+    // bound separates the two without re-admitting the abandoned-device noise.
+    if (behind > RECENT_DIVERGENCE_BEHIND_MAX) continue; // abandoned ⇒ contributes no signal
     best = Math.max(best ?? 0, ahead);
   }
   return best;

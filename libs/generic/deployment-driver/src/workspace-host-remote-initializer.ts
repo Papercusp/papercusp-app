@@ -610,12 +610,21 @@ export async function executeWorkspaceHostRemoteInitializerStep(
         // the same secret-isolation rule the evidence itself obeys, while telling the reader
         // whether to look at a credential or at a provider account. WI-2144034: this message
         // previously said only `codex`, and the real cause (an exhausted provider quota) cost two
-        // GCP canaries to rediscover.
+        // GCP canaries to rediscover. The capped stderr byte count distinguishes a silent probe
+        // from one whose unclassified output was deliberately withheld.
         const detail = failed
-          .map(
-            (agent) =>
-              `${agent} (${report.agents[agent]?.failure ?? "not-reported"})`,
-          )
+          .map((agent) => {
+            const evidence = report.agents[agent];
+            const failure = evidence?.failure ?? "not-reported";
+            const stderrBytes = evidence?.stderrByteCount;
+            const stderrDetail =
+              typeof stderrBytes !== "number"
+                ? ""
+                : evidence?.stderrByteCountTruncated
+                  ? `; stderr-bytes-at-least=${stderrBytes}`
+                  : `; stderr-bytes=${stderrBytes}`;
+            return `${agent} (${failure}${stderrDetail})`;
+          })
           .join(", ");
         throw new Error(`agent readiness did not pass for: ${detail}`);
       }

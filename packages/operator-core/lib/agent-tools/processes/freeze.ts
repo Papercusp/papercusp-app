@@ -8,6 +8,14 @@
  * stops the thrash immediately; killing throws away minutes of compute and often
  * has to be redone.
  *
+ * ⚠ Freezing stops CPU, NOT THE CLOCK (EI-24796665684871321). A wall-clock deadline the
+ * task carries — the ledger's `runtimeMaxSec` (`capability:bash` timeout, systemd
+ * RuntimeMaxSec) or a `timeout N` wrapper inside its command — keeps burning while frozen
+ * and trips on thaw. So the result carries `deadline` / `innerTimeouts` / `warnings`
+ * (task-manager/freeze-deadline.ts). It warns rather than refuses: freeze is pressure
+ * relief and a deadline-bearing task is still better frozen than thrashing; the caller
+ * just needs the information to pick freeze vs finish vs kill+rerun.
+ *
  * Gated on `processes:control` rather than `processes:kill`: this is reversible and
  * non-destructive, and putting it behind the never-auto protected set would block
  * precisely the pressure-relief case it exists for. It refuses on an unconfined
@@ -29,10 +37,10 @@ export default defineTool({
   guidance: {
     when: 'Memory or CPU pressure and you want relief WITHOUT throwing away in-flight work — freeze the biggest consumers, let the box recover, then resume. Also useful to hold a task still while you inspect what it did.',
     notWhen:
-      'NOT for ending a task — use `processes:kill`. NOT available for `confined:false` rows (check `processes:list` first). A frozen task still holds its memory: freeze relieves CPU/IO thrash and stops further growth, it does not free RSS.',
+      'NOT for ending a task — use `processes:kill`. NOT available for `confined:false` rows (check `processes:list` first). A frozen task still holds its memory: freeze relieves CPU/IO thrash and stops further growth, it does not free RSS. NOT for a task under a wall-clock deadline: the freezer stops CPU, NOT the clock — `capability:bash` timeout (the ledger `deadline`) and a command\'s own `timeout N` keep burning while frozen and kill the payload on thaw, possibly mid-write. Finish or kill+rerun such a task; read `warnings`.',
     chaining: 'Freeze -> diagnose via `processes:list` -> `processes:freeze { taskId, resume:true }` to let it continue.',
     returns:
-      '{ ok, results:[{ ok, taskId, action, detail | error }], counts } — keyed by taskId. `unsupported` = the task is not cgroup-confined; `not_live` = already ended, or a residue row we do not own.',
+      '{ ok, results:[{ ok, taskId, action, detail | error, deadline?, innerTimeouts?, warnings? }], counts } — keyed by taskId. `unsupported` = the task is not cgroup-confined; `not_live` = already ended, or a residue row we do not own. `deadline` = the ledger wall-clock deadline + seconds left; `innerTimeouts` = GNU `timeout` wrappers read (heuristically) from the command line.',
   },
   args: z
     .object({

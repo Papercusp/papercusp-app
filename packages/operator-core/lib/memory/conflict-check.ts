@@ -37,17 +37,43 @@ export interface NeighborMemory {
   score?: number;
 }
 
+/**
+ * The save-time substance verdict (plan jev-performance-improvements-2026-09-30,
+ * P-010): does the new memory carry concrete information, or does it only claim
+ * its own relevance or importance? Only a judge that was asked `checkSubstance`
+ * and answered it usably reports this; absent means "not checked", never "fine".
+ */
+export interface SubstanceReport {
+  /** P(the memory carries concrete information). */
+  pConcrete: number;
+  /** Whether the judge's threshold makes the memory content-free (refused). */
+  contentFree: boolean;
+  /** Refusal text when content-free, else null. */
+  summary: string | null;
+}
+
 export interface ConflictReport {
   conflicts: Array<{
     memory_id: string;
     summary: string;
   }>;
+  substance?: SubstanceReport;
 }
 
 export type LlmJudge = (input: {
   newText: string;
   neighbors: NeighborMemory[];
+  /** Ask the substance question in the same call (the Jev judge only; others ignore it). */
+  checkSubstance?: boolean;
 }) => Promise<ConflictReport>;
+
+function validSubstance(s: unknown): SubstanceReport | null {
+  if (!s || typeof s !== 'object') return null;
+  const r = s as Partial<SubstanceReport>;
+  if (typeof r.pConcrete !== 'number' || !Number.isFinite(r.pConcrete) || typeof r.contentFree !== 'boolean') return null;
+  if (r.contentFree && (typeof r.summary !== 'string' || r.summary.length === 0)) return null;
+  return { pConcrete: r.pConcrete, contentFree: r.contentFree, summary: typeof r.summary === 'string' ? r.summary : null };
+}
 
 export function conflictCheckEnabled(): boolean {
   return process.env.PAPERCUSP_MEMORY_CONFLICT_CHECK !== 'off';
@@ -61,19 +87,26 @@ export function conflictCheckEnabled(): boolean {
  * Defensive: any failure of the judge (LLM timeout, parse error, etc.)
  * is treated as "no conflict found" so the write proceeds. Conflict
  * check is hygiene, never load-bearing — same posture as dedup.
+ *
+ * `checkSubstance` (P-010) asks the judge the substance question in the same
+ * call, so it runs even with no neighbours. A malformed substance verdict is
+ * dropped, never guessed: the write then proceeds unchecked on that axis.
  */
 export async function checkConflicts(opts: {
   newText: string;
   neighbors: NeighborMemory[];
   judge: LlmJudge;
+  checkSubstance?: boolean;
 }): Promise<ConflictReport> {
   if (!conflictCheckEnabled()) return { conflicts: [] };
-  if (opts.neighbors.length === 0) return { conflicts: [] };
+  const checkSubstance = opts.checkSubstance === true;
+  if (opts.neighbors.length === 0 && !checkSubstance) return { conflicts: [] };
 
   try {
     const result = await opts.judge({
       newText: opts.newText,
       neighbors: opts.neighbors,
+      ...(checkSubstance ? { checkSubstance } : {}),
     });
     if (!result || !Array.isArray(result.conflicts)) {
       return { conflicts: [] };
@@ -85,7 +118,8 @@ export async function checkConflicts(opts: {
         typeof c?.summary === 'string' &&
         c.memory_id.length > 0,
     );
-    return { conflicts: valid };
+    const substance = checkSubstance ? validSubstance(result.substance) : null;
+    return substance ? { conflicts: valid, substance } : { conflicts: valid };
   } catch {
     return { conflicts: [] };
   }

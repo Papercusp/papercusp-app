@@ -87,7 +87,7 @@ import {
 } from '../release/routine-engine-liveness';
 import {
   d026QuiescenceIsActive,
-  readD026QuiescenceEvidence,
+  readD026QuiescenceEvidenceAsync,
   type D026QuiescenceEvidence,
 } from './single-primary-check';
 import {
@@ -1835,8 +1835,11 @@ export async function runLivenessAlarmTick(
   // D-026 evidence is intentionally read only for production/default ticks unless a
   // caller explicitly injects it. A hermetic `readLast` seam must never shell out to
   // systemd, while reader failures remain fail-closed (undefined => blocker path).
+  // Async (jev-memory-timeouts-to-zero-2026-10-01): the sync reader waited on
+  // three systemctl children per tick, freezing this worker 107-237 ms.
   const readD026Quiescence =
-    deps.d026Quiescence ?? (deps.readLast === undefined ? readD026QuiescenceEvidence : null);
+    deps.d026Quiescence ??
+    (deps.readLast === undefined ? () => readD026QuiescenceEvidenceAsync() : null);
   let d026Quiescence: D026QuiescenceEvidence | undefined;
   if (readD026Quiescence) {
     try {
@@ -2331,7 +2334,7 @@ export function startInfraLivenessAlarm(opts: { intervalMs?: number } = {}): { s
       runLivenessAlarmTick(undefined, {
         page: defaultPage,
         pageResolved: defaultPageResolved,
-        d026Quiescence: readD026QuiescenceEvidence,
+        d026Quiescence: () => readD026QuiescenceEvidenceAsync(),
       }).then(
         () => undefined,
         () => undefined,

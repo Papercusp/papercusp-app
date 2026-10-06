@@ -20,12 +20,9 @@ import { getFlag } from '@papercusp/flags/server';
 import { FLAGS } from '@papercusp/flags';
 
 import { guardFileLock, type FileLockCtx } from '../agent-tools/locks/file-lock-guard';
-import {
-  lspDiagnostics,
-  lspRenameWorkspaceEdit,
-  lspResyncDocument,
-} from './lsp-adapter.ts';
-import { isTrustworthyEmpty } from './contracts.ts';
+import { computeLspDaemonRename, countLspDaemonDiagnostics, resyncLspDaemonDocument } from './lsp-daemon-client.ts';
+import { activeWorkspaceId } from '../workspace-registry.ts';
+import { readIdentity } from '../agent-tools/locks/identity.ts';
 import type { ApplyDeps, LockOutcome } from './lsp-apply.ts';
 
 /**
@@ -70,12 +67,9 @@ async function bothFlagsEnabled(): Promise<{ ok: true } | { ok: false; message: 
  * an improvement, which is the most flattering possible way to be wrong about
  * a write that just landed.
  */
-async function diagnosticCount(absPath: string, rootPath: string): Promise<number | null> {
+async function diagnosticCount(absPath: string, rootPath: string, workspaceId: string, actorId: string): Promise<number | null> {
   try {
-    const answer = await lspDiagnostics({ file: absPath, rootPath });
-    if (answer.error) return null;
-    if (answer.sites.length === 0) return isTrustworthyEmpty(answer) ? 0 : null;
-    return answer.sites.length;
+    return await countLspDaemonDiagnostics({ file: absPath, rootPath, workspaceId, actorId });
   } catch {
     return null;
   }
@@ -90,25 +84,33 @@ async function diagnosticCount(absPath: string, rootPath: string): Promise<numbe
  * rather than sitting in a private namespace nobody else takes.
  */
 export function defaultApplyDeps(ctx: FileLockCtx): ApplyDeps {
+  const workspaceId = ctx.workspaceId ?? activeWorkspaceId();
+  const actorId = readIdentity(ctx).ownerId;
   return {
     flagsEnabled: bothFlagsEnabled,
     computeEdit: async (req) => {
-      const r = await lspRenameWorkspaceEdit({
-        file: req.file,
-        line1: req.line1,
-        character: req.character,
-        rootPath: req.rootPath,
-        newName: req.newName,
-      });
-      return r.ok
-        ? {
-            ok: true,
-            edit: r.edit,
-            projectRoot: r.projectRoot,
-            completenessProven: r.completenessProven,
-            completenessWarning: r.completenessWarning,
-          }
-        : { ok: false, error: r.error };
+      try {
+        const r = await computeLspDaemonRename({
+          file: req.file,
+          line1: req.line1,
+          character: req.character,
+          rootPath: req.rootPath,
+          newName: req.newName,
+          workspaceId,
+          actorId,
+        });
+        return r.ok
+          ? {
+              ok: true,
+              edit: r.edit,
+              projectRoot: r.projectRoot,
+              completenessProven: r.completenessProven,
+              completenessWarning: r.completenessWarning,
+            }
+          : { ok: false, error: r.error };
+      } catch (error) {
+        return { ok: false, error: `LSP daemon unavailable: ${error instanceof Error ? error.message : String(error)}` };
+      }
     },
     realpath: realpathSync,
     readText: (p) => readFile(p, 'utf8'),
@@ -133,8 +135,11 @@ export function defaultApplyDeps(ctx: FileLockCtx): ApplyDeps {
         busy: outcome.busy,
       };
     },
-    resync: lspResyncDocument,
-    diagnosticCount,
+    resync: async (absPath, rootPath, newText) => {
+      try { return await resyncLspDaemonDocument({ file: absPath, rootPath, newText, workspaceId, actorId }); }
+      catch { return false; }
+    },
+    diagnosticCount: (absPath, rootPath) => diagnosticCount(absPath, rootPath, workspaceId, actorId),
     now: () => Date.now(),
   };
 }

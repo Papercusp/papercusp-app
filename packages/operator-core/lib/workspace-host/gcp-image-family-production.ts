@@ -57,6 +57,7 @@ import {
   createOperatorWorkspaceHostCredentialMaterialSource,
   type WorkspaceHostCredentialMaterialSource,
 } from './credential-material-source';
+import { resolveSbomGuestToolVersions } from './guest-tool-versions';
 
 const GCP_TARGET = 'gcp';
 const PROJECT_ID = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -1080,7 +1081,13 @@ export async function executeConfiguredGcpImageFamilyRelease(
   options: GcpImageFamilyReleaseCompositionOptions = {},
   execution: GcpImageFamilyReleaseExecutionOptions = {},
 ): Promise<GcpImageFamilyReleaseResult> {
-  const composition = composeGcpImageFamilyReleaseAdapter(connection, options);
+  // WI-10006408: the image is pinned to the request's SBOM-derived guest-tool versions; the
+  // operator file may only restate them.
+  const guestToolVersions = resolveSbomGuestToolVersions(request?.guestToolVersions, options.guestToolVersions);
+  const composition = composeGcpImageFamilyReleaseAdapter(connection, {
+    ...options,
+    ...(guestToolVersions ? { guestToolVersions } : {}),
+  });
   const requestProject = requiredProject(request?.projectId, 'request.projectId');
   if (requestProject !== composition.projectId) {
     throw new Error('GCP image-family release request project does not match the selected connection');

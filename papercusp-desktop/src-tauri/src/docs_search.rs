@@ -165,6 +165,12 @@ pub fn current_shortcut() -> Option<String> {
 /// (main.rs): the MAIN window's live URL when there is one (dev + the GUI
 /// process), else the Server process's spawned-sidecar port. The Server has no
 /// window, so the sidecar-port fallback is what makes the palette work there.
+fn palette_origin_from_ports(latched: Option<u16>, discovered: Option<u16>) -> Option<String> {
+    latched
+        .or(discovered)
+        .map(|port| format!("http://localhost:{port}"))
+}
+
 fn resolve_base(app: &AppHandle) -> Option<String> {
     if let Some(base) = app
         .get_webview_window("main")
@@ -182,8 +188,16 @@ fn resolve_base(app: &AppHandle) -> Option<String> {
         return Some(base);
     }
     let state: tauri::State<crate::SidecarState> = app.state();
-    let guard = state.port.lock().ok()?;
-    (*guard).map(|p| format!("http://localhost:{}", p))
+    let latched = *state.port.lock().ok()?;
+    // The always-on Server can reuse an operator started by its systemd service.
+    // In that case it never owns the serve child and may not latch the port,
+    // even though operator.json already names the live content origin.
+    let discovered = latched
+        .is_none()
+        .then(crate::operator_discovery_port_from_home)
+        .flatten()
+        .filter(|port| crate::operator_http_ready(*port));
+    palette_origin_from_ports(latched, discovered)
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +555,26 @@ pub fn register_shortcut(app: &tauri::App) {
     }
 }
 
+/// Acquire a replacement before releasing the working key. A desktop-owned
+/// accelerator can be refused; that must leave the previous registration intact.
+fn replace_registered_shortcut(
+    old: Option<&str>,
+    new: Option<&str>,
+    register: impl FnOnce(&str) -> Result<(), String>,
+    unregister: impl FnOnce(&str),
+) -> Result<(), String> {
+    if old == new {
+        return Ok(());
+    }
+    if let Some(accel) = new {
+        register(accel)?;
+    }
+    if let Some(prev) = old {
+        unregister(prev);
+    }
+    Ok(())
+}
+
 /// Set the palette shortcut: `Some(accel)` binds that preset, `None` DISABLES the
 /// shortcut entirely. Unregisters the previous accelerator, registers the new one
 /// (if any), and persists the choice. Called from the Server tray's "Docs search
@@ -549,7 +583,8 @@ pub fn register_shortcut(app: &tauri::App) {
 /// Unregisters ONLY the previous docs-search accelerator — never
 /// `unregister_all()`, which would also drop env_switch's dev backstop
 /// shortcuts. Returns `Err` (leaving the persisted value + tray checkmark
-/// unchanged) if `new` isn't an offered preset or fails to register.
+/// unchanged, including the working OS registration) if `new` isn't an offered
+/// preset or fails to register.
 ///
 /// Disabling CANNOT fail: releasing a key grab is not an operation the OS can
 /// refuse, so the user is never stuck with a shortcut they asked to turn off. The
@@ -568,17 +603,18 @@ pub fn set_shortcut(app: &AppHandle, new: Option<&str>) -> Result<(), String> {
     if old.as_deref() == new {
         return Ok(()); // already in that state — no-op
     }
-    if let Some(prev) = old.as_deref() {
-        let _ = app.global_shortcut().unregister(prev);
-    }
+    replace_registered_shortcut(
+        old.as_deref(),
+        new,
+        |accel| install_shortcut(app, accel),
+        |prev| {
+            let _ = app.global_shortcut().unregister(prev);
+        },
+    )?;
     match new {
         Some(accel) => {
-            // Register BEFORE persisting: a key the OS refuses must not be
-            // recorded as the user's active choice (it would come back as a dead
-            // shortcut on every future launch). On failure the previous
-            // accelerator is already unregistered, but the persisted value is
-            // untouched, so a restart restores the last state that actually worked.
-            install_shortcut(app, accel)?;
+            // Registration succeeded before either the previous key or its
+            // persisted choice changed. A refusal needs no restart to recover.
             write_persisted_shortcut(Some(accel));
             println!("[docs-search] shortcut set {old:?} -> {accel}");
         }
@@ -593,6 +629,75 @@ pub fn set_shortcut(app: &AppHandle, new: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_rebind_preserves_the_working_registration() {
+        use std::cell::RefCell;
+        use std::collections::BTreeSet;
+
+        let registered = RefCell::new(BTreeSet::from([
+            "CmdOrCtrl+K".to_string(),
+            "Alt+Space".to_string(),
+        ]));
+        let result = replace_registered_shortcut(
+            Some("CmdOrCtrl+K"),
+            Some("Alt+Space"),
+            |accel| {
+                if registered.borrow_mut().insert(accel.to_string()) {
+                    Ok(())
+                } else {
+                    Err("desktop already owns this key".into())
+                }
+            },
+            |accel| {
+                registered.borrow_mut().remove(accel);
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            registered.into_inner(),
+            BTreeSet::from(["CmdOrCtrl+K".to_string(), "Alt+Space".to_string()])
+        );
+    }
+
+    #[test]
+    fn successful_rebind_acquires_new_key_then_releases_old_key() {
+        use std::cell::RefCell;
+        use std::collections::BTreeSet;
+
+        let registered = RefCell::new(BTreeSet::from(["CmdOrCtrl+K".to_string()]));
+        replace_registered_shortcut(
+            Some("CmdOrCtrl+K"),
+            Some("CmdOrCtrl+Shift+K"),
+            |accel| {
+                assert!(registered.borrow().contains("CmdOrCtrl+K"));
+                registered.borrow_mut().insert(accel.to_string());
+                Ok(())
+            },
+            |accel| {
+                assert!(registered.borrow().contains("CmdOrCtrl+Shift+K"));
+                registered.borrow_mut().remove(accel);
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            registered.into_inner(),
+            BTreeSet::from(["CmdOrCtrl+Shift+K".to_string()])
+        );
+    }
+
+    #[test]
+    fn disabling_releases_only_the_previous_key_without_registering() {
+        let mut released = None;
+        replace_registered_shortcut(
+            Some("CmdOrCtrl+K"),
+            None,
+            |_| panic!("Off must never register a key"),
+            |accel| released = Some(accel.to_string()),
+        )
+        .unwrap();
+        assert_eq!(released.as_deref(), Some("CmdOrCtrl+K"));
+    }
 
     #[test]
     fn presets_are_unique() {
@@ -726,5 +831,18 @@ mod tests {
     #[test]
     fn diagnostic_window_label_is_distinct_from_the_palette() {
         assert_ne!(WINDOW_LABEL, UNAVAILABLE_WINDOW_LABEL);
+    }
+
+    #[test]
+    fn server_palette_uses_operator_discovery_when_its_port_was_not_latched() {
+        assert_eq!(
+            palette_origin_from_ports(None, Some(16582)).as_deref(),
+            Some("http://localhost:16582")
+        );
+        assert_eq!(
+            palette_origin_from_ports(Some(15509), Some(16582)).as_deref(),
+            Some("http://localhost:15509")
+        );
+        assert_eq!(palette_origin_from_ports(None, None), None);
     }
 }

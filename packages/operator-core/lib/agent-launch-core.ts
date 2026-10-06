@@ -17,12 +17,16 @@
  */
 import { z } from 'zod';
 import { getOrgPg } from '@papercusp/db-org';
-import { mapAdvSessionRow, type AdvSessionRow, type AdvSessionEndedBy, type AdvSessionExpectedBinding } from './adv-sessions';
+import { getAdvSession, mapAdvSessionRow, type AdvSessionRow, type AdvSessionEndedBy, type AdvSessionExpectedBinding } from './adv-sessions';
+import { getSessionPort } from './session-port/store';
+import type { SessionBackend, SessionPortContractSummary } from './session-port/types';
 import { findLiveHost, injectIntoHost, type PsuPtyHost } from './events/await/psu-pty-discovery';
 import { fetchSelfWake } from './agent-tools/coordination/presence-selfwake';
 import {
+  accountFromArgv,
   composeLaunchModelSpec,
   flagValueFromArgv,
+  isLaunchAccountValue,
   MIN_COMPACTION_LIMIT_TOKENS,
   modelSpecFromArgv,
   MODEL_EFFORT_LEVELS,
@@ -30,6 +34,7 @@ import {
 } from './agent-config-constants';
 import { resolveCodexModel, resolveCodexModelSelection } from './model-context-budget.mjs';
 import { isSuAgent, SU_AGENTS } from './su-agents';
+import { tagTurnForInjection } from './turn-provenance/turn-provenance';
 
 export type CodexModelSource = 'explicit' | 'inherited' | 'configured-default';
 
@@ -43,9 +48,10 @@ const PSU_TOKEN = /(^|[\s&;|(])psu(\s)/;
  *
  * WHY THE DOOR MATTERS, and why this is not pedantry: `capability:terminal` is the
  * arbitrary-COMMAND door and hardcodes `preferProcessPerWindow: true`, which
- * resolves to xterm. `capability:launch-agent` uses `preferProcessPerWindow:
- * isResume`, so a fresh launch gets the owner's normal emulator. Both doors share
- * ONE spawn path — the divergence is emulator POLICY, not mechanism — but a
+ * resolves to a process-per-window emulator. `capability:launch-agent` keeps
+ * that reliability default unless an explicit `$TERMINAL` preference is set,
+ * so the configured terminal wins for visible launches. Both doors share ONE
+ * spawn path — the divergence is emulator POLICY, not mechanism — but a
  * launch through the wrong door lands in a different window manager, skips the
  * backend preflight (P-002) and the started-verification (P-003), and is exactly
  * how the owner's two failed omp launches happened.
@@ -159,15 +165,18 @@ function boundedLaunchModeText(value: unknown, maxChars: number): string | null 
 }
 
 /** Normalize an untrusted launch-mode value before it reaches argv or JSON. */
-export function normalizeLaunchMode(value: unknown): LaunchMode | null {
+export function normalizeLaunchMode(value: unknown, opts: { fleetRole?: 'member' | 'leader' } = {}): LaunchMode | null {
   if (!value || typeof value !== 'object') return null;
   const input = value as Record<string, unknown>;
   if (input.mode !== 'drain' && input.mode !== 'grade' && input.mode !== 'test') return null;
+  // A new member can participate in the caller's mode, but the caller's
+  // personal mission and owner-directed provenance do not belong to that identity.
+  const member = opts.fleetRole === 'member';
   return {
     mode: input.mode,
-    subject: boundedLaunchModeText(input.subject, LAUNCH_MODE_SUBJECT_MAX_CHARS),
-    instructions: boundedLaunchModeText(input.instructions, LAUNCH_MODE_INSTRUCTIONS_MAX_CHARS),
-    ownerDirected: input.ownerDirected === true,
+    subject: member ? null : boundedLaunchModeText(input.subject, LAUNCH_MODE_SUBJECT_MAX_CHARS),
+    instructions: member ? null : boundedLaunchModeText(input.instructions, LAUNCH_MODE_INSTRUCTIONS_MAX_CHARS),
+    ownerDirected: !member && input.ownerDirected === true,
   };
 }
 
@@ -220,6 +229,8 @@ export interface ResumeTarget {
   model: string | null;
   /** The Codex model-source provenance recorded in launch argv, when present. */
   modelSource: CodexModelSource | null;
+  /** The account route recorded in the source session's launch argv, when present. */
+  account: string | null;
   /** ⚠ Only an end time when {@link endedBy} is `'self'`. Otherwise a sweeper stamped it on
    *  NOTICING the process was gone, so it cannot answer "when did this session end". */
   endedAt: string | null;
@@ -240,15 +251,19 @@ export type ResolveResumeError =
 
 export type ResolveResumeResult = ({ ok: true } & ResumeTarget) | ResolveResumeError;
 
-/** Read the model settings that a resume must carry from the durable launch argv. */
-function resumeModelMetadata(launchArgv: unknown): Pick<ResumeTarget, 'model' | 'modelSource'> {
+/** Read the model and account settings that a resume must carry from launch argv. */
+function resumeLaunchMetadata(
+  launchArgv: unknown,
+): Pick<ResumeTarget, 'model' | 'modelSource' | 'account'> {
   const source = flagValueFromArgv(launchArgv, 'model-source');
+  const account = accountFromArgv(launchArgv);
   return {
     model: modelSpecFromArgv(launchArgv),
     modelSource:
       source === 'explicit' || source === 'inherited' || source === 'configured-default'
         ? source
         : null,
+    account: account && isLaunchAccountValue(account) ? account : null,
   };
 }
 
@@ -351,7 +366,8 @@ export async function resolveResumeTarget(ref: {
       ${
         sessionId
           ? sql`SELECT ${sessionId}::text AS candidate_session_id`
-          : sql`SELECT s.session_id AS candidate_session_id
+          : sql`SELECT CASE WHEN s.agent = 'omp' THEN COALESCE(s.omp_thread_id, s.session_id)
+                            ELSE s.session_id END AS candidate_session_id
                   FROM harness_shared.adv_sessions s
                  WHERE s.coord_owner_id LIKE ${agentId + '%'}
                  ORDER BY s.started_at DESC
@@ -373,6 +389,7 @@ export async function resolveResumeTarget(ref: {
      WHERE ${
        sessionId
          ? sql`session_id = ${sessionId}
+                 OR (agent = 'omp' AND omp_thread_id = ${sessionId})
                  OR coord_owner_id = (SELECT owner FROM indexed_owner)`
          : sql`coord_owner_id LIKE ${agentId + '%'}
                  OR coord_owner_id = (SELECT owner FROM indexed_owner)`
@@ -395,8 +412,8 @@ export async function resolveResumeTarget(ref: {
     };
   }
   const row: AdvSessionRow = mapAdvSessionRow(rows[0]);
-  const nativeSessionId = resolvedNativeSessionId(sessionId, row.sessionId);
-  const modelMetadata = resumeModelMetadata(row.launchArgv);
+  const nativeSessionId = resolvedNativeSessionId(sessionId, row.agent === 'omp' ? row.ompThreadId ?? row.sessionId : row.sessionId);
+  const launchMetadata = resumeLaunchMetadata(row.launchArgv);
   // The psu launcher already supports tracked Codex rows with no native UUID:
   // `psu --resume=<adv row id>` resolves the row, restores its isolated
   // CODEX_HOME, and runs `codex resume --last`. Other backends need a native
@@ -422,7 +439,7 @@ export async function resolveResumeTarget(ref: {
     ownerId: row.coordOwnerId,
     agent: row.agent,
     cwd: row.cwd,
-    ...modelMetadata,
+    ...launchMetadata,
     endedAt: row.endedAt,
     endedBy: row.endedBy,
     live: host != null,
@@ -430,6 +447,7 @@ export async function resolveResumeTarget(ref: {
     binding: row.coordOwnerId && rows[0].binding_started_at ? {
       coordOwnerId: row.coordOwnerId,
       sessionId: row.sessionId,
+      ...(row.agent === 'omp' ? { ompThreadId: row.ompThreadId } : {}),
       startedAt: rows[0].binding_started_at,
     } : null,
   };
@@ -596,12 +614,11 @@ export function buildAgentLaunchCommand(opts: {
     // resuming under the RECORDED id instead produces a row pointing at a
     // session that will never answer to it.
     if (opts.ownerId) {
-      const isConversionLaunch = Boolean(targetAgent && targetAgent !== opts.agent?.trim());
+      const isConversionLaunch = Boolean(targetAgent);
       if (opts.mode !== 'fork' && !isConversionLaunch) {
         throw new Error(
-          'buildAgentLaunchCommand: ownerId pre-pins a NEWLY minted identity — valid on a fork or a ' +
-            'cross-backend conversion, but a same-backend resume re-attaches its recorded coord id and ' +
-            'must not be re-pinned',
+          'buildAgentLaunchCommand: ownerId pre-pins a NEWLY minted identity — valid on a fork or an ' +
+            'explicit session-port target; an ordinary same-backend resume must not be re-pinned',
         );
       }
       parts.push(`--owner-id=${safe('ownerId', opts.ownerId)}`);
@@ -742,6 +759,14 @@ export function defaultLaunchAccountFor(opts: {
 
 export interface MemberLaunchOpts {
   fleetSlug: string;
+  /**
+   * psu --fleet-role: only `'leader'` is emitted; omitted means psu's `--fleet=`
+   * default, `member`. WI-10004449: `fleet:launch-on-plan { leader:'spawn' }` writes
+   * the registry leader only AFTER the spawned process opens, so a bare `--fleet=`
+   * booted the spawned LEADER as a member (member kickoff, member mission, "claim
+   * its next actionable item"), contradicting its own --launch-context leader brief.
+   */
+  fleetRole?: 'leader';
   agent: string;
   harness: string;
   /** psu --plan the member self-pulls on. OPTIONAL (P-003): a pure claim-spec fleet
@@ -1000,6 +1025,8 @@ export function memberLaunchCommand(opts: MemberLaunchOpts): string {
     'psu',
     '--no-picker',
     `--fleet=${identifier('fleet', opts.fleetSlug)}`,
+    // WI-10004449: only a leader declares its role; member argv stays unchanged.
+    ...(opts.fleetRole === 'leader' ? ['--fleet-role=leader'] : []),
     `--agent=${identifier('agent', opts.agent)}`,
     // Pre-pinned coord identity, emitted in the SAME slot buildAgentLaunchCommand
     // uses (after --agent, before --harness) so the two composers stay
@@ -1049,7 +1076,9 @@ export function memberLaunchCommand(opts: MemberLaunchOpts): string {
   if (opts.seat) parts.push(`--seat=${quoteLaunchValue(opts.seat)}`);
   for (const dir of opts.addDir ?? []) if (dir) parts.push(`--add-dir=${quoteLaunchValue(dir)}`);
   if (opts.launchMode) {
-    const launchMode = normalizeLaunchMode(opts.launchMode);
+    const launchMode = normalizeLaunchMode(opts.launchMode, {
+      fleetRole: opts.fleetRole === 'leader' ? 'leader' : 'member',
+    });
     if (launchMode) {
       parts.push(`--mode=${launchMode.mode}`);
       if (launchMode.subject) parts.push(`--mode-subject=${quoteLaunchValue(launchMode.subject)}`);
@@ -1275,6 +1304,10 @@ export async function claimAgentLaunch(opts: {
   workspaceId: string;
   idempotencyKey: string | null | undefined;
   launchedBy?: string | null;
+  /** Stored atomically with a new claim so a replay can verify the request identity. */
+  initialSummary?: Record<string, unknown>;
+  /** Callers whose duplicate-launch safety depends on this ledger can refuse on write failure. */
+  failClosed?: boolean;
   now?: number;
 }): Promise<AgentLaunchClaim> {
   const key = opts.idempotencyKey?.trim();
@@ -1289,11 +1322,14 @@ export async function claimAgentLaunch(opts: {
     const won = await sql<Array<{ idempotency_key: string }>>`
       INSERT INTO harness_shared.agent_launch_idempotency AS existing
         (workspace_id, idempotency_key, launched_at, launched_by, summary)
-      VALUES (${opts.workspaceId}, ${key}, ${now}, ${opts.launchedBy ?? null}, '{}'::jsonb)
+      VALUES (
+        ${opts.workspaceId}, ${key}, ${now}, ${opts.launchedBy ?? null},
+        ${JSON.stringify(opts.initialSummary ?? {})}::text::jsonb
+      )
       ON CONFLICT (workspace_id, idempotency_key) DO UPDATE
          SET launched_at = EXCLUDED.launched_at,
              launched_by = EXCLUDED.launched_by,
-             summary = '{}'::jsonb
+             summary = EXCLUDED.summary
        WHERE existing.launched_at < ${now - AGENT_LAUNCH_EMPTY_CLAIM_LEASE_MS}
          AND (
            existing.summary = '{}'::jsonb
@@ -1324,8 +1360,10 @@ export async function claimAgentLaunch(opts: {
     };
   } catch (e) {
     // The guard is a safety net, not a gate: a ledger outage must not block a
-    // launch the caller actually wants. Warn loudly and proceed unguarded.
+    // launch the caller actually wants. Warn loudly and proceed unguarded unless
+    // this caller explicitly makes the ledger part of its correctness contract.
     console.warn(`[agent-launch] idempotency claim failed (launching unguarded): ${(e as Error)?.message ?? e}`);
+    if (opts.failClosed) throw e;
     return { won: true, priorSummary: null, priorLaunchedAt: null, priorLaunchedBy: null };
   }
 }
@@ -1336,18 +1374,21 @@ export async function recordAgentLaunchResult(opts: {
   workspaceId: string;
   idempotencyKey: string | null | undefined;
   summary: Record<string, unknown>;
-}): Promise<void> {
+}): Promise<boolean> {
   const key = opts.idempotencyKey?.trim();
-  if (!key) return;
+  if (!key) return false;
   try {
     const { sql } = getOrgPg();
-    await sql`
+    const updated = await sql<Array<{ idempotency_key: string }>>`
       UPDATE harness_shared.agent_launch_idempotency
          SET summary = ${JSON.stringify(opts.summary)}::text::jsonb
        WHERE workspace_id = ${opts.workspaceId} AND idempotency_key = ${key}
+      RETURNING idempotency_key
     `;
+    return updated.some((row) => row.idempotency_key === key);
   } catch (e) {
     console.warn(`[agent-launch] idempotency result write failed: ${(e as Error)?.message ?? e}`);
+    return false;
   }
 }
 
@@ -1400,12 +1441,14 @@ export async function injectKickoffAfterResume(
     pollMs = 2_000,
     findHost = findLiveHost,
     inject = injectIntoHost,
+    tagTurn = tagTurnForInjection,
     sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
   }: {
     timeoutMs?: number;
     pollMs?: number;
     findHost?: typeof findLiveHost;
     inject?: typeof injectIntoHost;
+    tagTurn?: typeof tagTurnForInjection;
     sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<{ delivered: boolean; waitedMs: number; error?: string }> {
@@ -1419,7 +1462,8 @@ export async function injectKickoffAfterResume(
       // read as the culprit during WI-2140968 triage. Addressing it removes the
       // trap AND the latent hole: without `ownerId` the host's misdelivery
       // guard abstains, so a stale/mis-resolved socket accepts the turn.
-      const ok = await inject(host.sock, { mode: 'turn', data: kickoff, ownerId });
+      const taggedKickoff = (await tagTurn({ sid: ownerId, origin: 'wake-pump', text: kickoff })).taggedText;
+      const ok = await inject(host.sock, { mode: 'turn', data: taggedKickoff, ownerId });
       return ok
         ? { delivered: true, waitedMs: Date.now() - started }
         : {
@@ -2244,16 +2288,23 @@ export async function verifyResumeStarted(
   ownerId: string,
   {
     expectedSessionId,
+    expectedPort,
     timeoutMs = 30_000,
     pollMs = 1_000,
     findHost = findLiveHost,
+    readAdvSession = getAdvSession,
+    readPort = getSessionPort,
     sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
   }: {
     /** Exact native transcript UUID the new backend process must carry. */
     expectedSessionId?: string | null;
+    /** Explicit conversion only: attest the prepared target rather than the source UUID. */
+    expectedPort?: { sourceAdvSessionId: number; targetBackend: SessionBackend };
     timeoutMs?: number;
     pollMs?: number;
     findHost?: typeof findLiveHost;
+    readAdvSession?: typeof getAdvSession;
+    readPort?: typeof getSessionPort;
     sleep?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<{
@@ -2264,26 +2315,86 @@ export async function verifyResumeStarted(
   mismatch: boolean;
 }> {
   const begun = Date.now();
+  let portExpected: string | null = null;
+  let portActual: string | null = null;
   for (;;) {
     const host = findHost(ownerId);
     if (host) {
       const expected = expectedSessionId?.trim() || null;
       const actual = nativeSessionIdFromHost(host);
-      const mismatch = expected != null && actual !== expected;
-      return {
-        started: !mismatch,
+      if (!expectedPort) {
+        const mismatch = expected != null && actual !== expected;
+        return {
+          started: !mismatch,
+          waitedMs: Date.now() - begun,
+          expectedSessionId: expected,
+          actualSessionId: actual,
+          mismatch,
+        };
+      }
+      // A conversion deliberately creates a new native session. Owner liveness
+      // alone cannot distinguish it from a substituted or unrelated target.
+      // Missing receipts (or an unreadable probe) remain unknown; only a
+      // contradictory binding is an observed mismatch.
+      portActual = actual;
+      let verdict: boolean | null = null;
+      try {
+        const source = await readAdvSession(expectedPort.sourceAdvSessionId);
+        const targetId = Number(host.advSessionId);
+        const target = Number.isSafeInteger(targetId) && targetId > 0
+          ? await readAdvSession(targetId) : null;
+        if (source && target) {
+          const native = target.agent === 'omp' ? target.ompThreadId ?? target.sessionId : target.sessionId;
+          portExpected = native?.trim() || null;
+          const port = target.portId ? await readPort(target.portId, source.workspaceId) : null;
+          if (host.ownerId !== ownerId || source.coordOwnerId !== ownerId || target.coordOwnerId !== ownerId ||
+              target.workspaceId !== source.workspaceId || target.agent !== expectedPort.targetBackend ||
+              target.portSourceAdvSessionId !== expectedPort.sourceAdvSessionId) {
+            verdict = false;
+          } else if (port) {
+            const summary = port.metadata.summary as SessionPortContractSummary | undefined;
+            const proof = port.metadata.persistenceProof as { persisted?: unknown; nativeRef?: unknown; renderedHash?: unknown } | undefined;
+            if (port.sourceAdvSessionId !== expectedPort.sourceAdvSessionId || port.targetAdvSessionId !== target.id ||
+                port.sourceBackend !== source.agent || port.targetBackend !== expectedPort.targetBackend ||
+                port.metadata.sourceCoordOwnerId !== ownerId || port.metadata.targetCoordOwnerId !== ownerId ||
+                (summary && (summary.source.advSessionId !== source.id || summary.source.backend !== source.agent ||
+                  summary.source.workspaceId !== source.workspaceId || (expected != null && summary.source.nativeSessionId !== expected) ||
+                  summary.target.backend !== expectedPort.targetBackend ||
+                  (summary.target.ownerId != null && summary.target.ownerId !== ownerId) ||
+                  summary.hashes.rendered !== port.renderedHash)) ||
+                (portExpected != null && port.metadata.targetNativeSessionId !== portExpected) ||
+                (port.metadata.bootstrapReceiptTargetAdvSessionId != null && port.metadata.bootstrapReceiptTargetAdvSessionId !== target.id) ||
+                (proof?.renderedHash != null && proof.renderedHash !== port.renderedHash) ||
+                (portExpected != null && typeof proof?.nativeRef === 'string' && !proof.nativeRef.endsWith(`${portExpected}.jsonl`)) ||
+                port.status === 'failed' || port.status === 'expired') {
+              verdict = false;
+            } else if (port.status === 'delivered' && target.portStatus === 'delivered' && summary &&
+                       port.metadata.bootstrapReceiptCommitted === true &&
+                       port.metadata.bootstrapReceiptTargetAdvSessionId === target.id &&
+                       typeof port.metadata.bootstrapRequestHash === 'string' && port.metadata.bootstrapRequestHash.length > 0 &&
+                       proof?.persisted === true && typeof proof.nativeRef === 'string' && proof.nativeRef.length > 0 &&
+                       proof.renderedHash === port.renderedHash && portExpected != null) {
+              verdict = actual === portExpected;
+            }
+          }
+        }
+      } catch {
+        // Instrument failure is not evidence that the launched session failed.
+      }
+      if (verdict != null) return {
+        started: verdict,
         waitedMs: Date.now() - begun,
-        expectedSessionId: expected,
+        expectedSessionId: portExpected,
         actualSessionId: actual,
-        mismatch,
+        mismatch: !verdict,
       };
     }
     if (Date.now() - begun + pollMs > timeoutMs) {
       return {
         started: null,
         waitedMs: Date.now() - begun,
-        expectedSessionId: expectedSessionId?.trim() || null,
-        actualSessionId: null,
+        expectedSessionId: expectedPort ? portExpected : expectedSessionId?.trim() || null,
+        actualSessionId: expectedPort ? portActual : null,
         mismatch: false,
       };
     }
@@ -2295,7 +2406,8 @@ export async function verifyResumeStarted(
  * Extract the native transcript UUID from a live backend argv.
  *
  * Codex spells this `codex … resume <uuid>`; Claude/OMP use `--resume <uuid>`,
- * `--resume=<uuid>`, or `--resume-session=<uuid>`. Unknown/missing argv is null,
+ * `--resume=<uuid>`, or `--resume-session=<uuid>`. A prepared Claude conversion
+ * forces its new UUID with `--session-id`. Unknown/missing argv is null,
  * never treated as an implicit match.
  */
 export function nativeSessionIdFromHost(
@@ -2304,10 +2416,10 @@ export function nativeSessionIdFromHost(
   const args = Array.isArray(host?.args) ? host.args.filter((v): v is string => typeof v === 'string') : [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    for (const flag of ['--resume=', '--resume-session=']) {
+    for (const flag of ['--resume=', '--resume-session=', '--session-id=']) {
       if (arg.startsWith(flag) && arg.length > flag.length) return arg.slice(flag.length);
     }
-    if ((arg === '--resume' || arg === '--resume-session') && args[i + 1]) return args[i + 1];
+    if ((arg === '--resume' || arg === '--resume-session' || arg === '--session-id') && args[i + 1]) return args[i + 1];
     if (arg === 'resume' && args[i + 1] && !args[i + 1].startsWith('--')) return args[i + 1];
   }
   return null;

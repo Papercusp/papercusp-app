@@ -50,4 +50,9 @@ export interface KnowledgePackCandidate {
   decisionNote?: string;
   packId?: string;
   packItemId?: string;
+  /** Explicit identity proposals stay workspace-private until reviewed adoption. */
+  workspaceId?: string;
+  targetIdentityId?: string;
+  targetPackId?: string;
+  sourceMemoryId?: string;
 }

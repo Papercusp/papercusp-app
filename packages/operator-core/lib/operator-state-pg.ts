@@ -219,10 +219,24 @@ type StateTable =
 // a process that misses that advisory event, never a second source of truth.
 // Disable entirely with PAPERCUSP_OPSTATE_CACHE_MS=0 (the kill-switch).
 // Encrypted tables are NOT allowlisted (no in-process plaintext caching of secrets).
-const CACHEABLE_STATE_TABLES: ReadonlySet<StateTable> = new Set<StateTable>([
-  'harness_registry',
-  'operator_account_pool',
-]);
+//
+// WI-10004071: the cluster (:3070 runs PAPERCUSP_CLUSTER=16 workers) made the
+// "bounded by the TTL" claim above the ONLY coherence mechanism for a sibling
+// worker, so a create-then-use over MCP (harness:create, then a call that lands
+// on another worker) read a stale registry for up to the TTL. Each cacheable
+// table therefore names the `sync_invalidate` events that mean "another process
+// wrote me"; startOperatorStateCacheCoherence() drops the entry on those events
+// in every worker. The allowlist is DERIVED from this map, so making a table
+// cacheable without naming its coherence events is a type error. The TTL stays
+// as the fail-safe for a missed NOTIFY, never the mechanism.
+type CacheableStateTable = 'harness_registry' | 'operator_account_pool';
+export const OPERATOR_STATE_CACHE_COHERENCE_EVENTS: Readonly<Record<CacheableStateTable, readonly string[]>> = {
+  harness_registry: ['harnessProjects.lite'],
+  operator_account_pool: ['accounts.pool'],
+};
+const CACHEABLE_STATE_TABLES: ReadonlySet<StateTable> = new Set<StateTable>(
+  Object.keys(OPERATOR_STATE_CACHE_COHERENCE_EVENTS) as CacheableStateTable[],
+);
 
 function opStateCacheTtlMs(): number {
   const raw = Number(process.env.PAPERCUSP_OPSTATE_CACHE_MS);
@@ -276,6 +290,52 @@ export function invalidateOperatorStateCache(table: StateTable, ws: string): voi
   opStateCacheMap().delete(opStateCacheKey(table, ws));
 }
 
+/** Drop every workspace's cached entry for `table` (a coherence event carries
+ *  no workspace, so a sibling worker cannot tell which one changed). */
+export function invalidateOperatorStateTable(table: StateTable): void {
+  const prefix = `${table}\x00`;
+  const cache = opStateCacheMap();
+  for (const key of [...cache.keys()]) if (key.startsWith(prefix)) cache.delete(key);
+}
+
+const coherenceState = pinModuleState<{ started: Promise<void> | null }>(
+  '@papercusp/operator-core.opStateCacheCoherence',
+  () => ({ started: null }),
+);
+
+/**
+ * Keep this process's operator-state cache coherent with writes made by OTHER
+ * processes (WI-10004071). Subscribes to the shared `sync_invalidate` bus and
+ * drops a cacheable table's entries when one of its coherence events arrives;
+ * on the initial LISTEN and every reconnect it drops ALL cacheable entries, so
+ * a NOTIFY missed while disconnected cannot leave a stale entry behind.
+ * Idempotent per process; a failed start can be retried.
+ */
+export function startOperatorStateCacheCoherence(): Promise<void> {
+  if (!coherenceState.started) {
+    coherenceState.started = (async () => {
+      const { registerInvalidationListenHook, subscribe } = await import('./sync-sse');
+      registerInvalidationListenHook(() => {
+        for (const table of CACHEABLE_STATE_TABLES) invalidateOperatorStateTable(table);
+      });
+      await subscribe((event) => {
+        for (const [table, names] of Object.entries(OPERATOR_STATE_CACHE_COHERENCE_EVENTS)) {
+          if (names.includes(event.name)) invalidateOperatorStateTable(table as StateTable);
+        }
+      });
+    })().catch((err) => {
+      coherenceState.started = null;
+      throw err;
+    });
+  }
+  return coherenceState.started;
+}
+
+/** Test hook: forget a started coherence subscription (the bus is mocked per suite). */
+export function _resetOperatorStateCacheCoherenceForTests(): void {
+  coherenceState.started = null;
+}
+
 /**
  * Which sync query names each operator-state table's writes must invalidate.
  *
@@ -306,7 +366,7 @@ export const OPERATOR_STATE_SYNC_NAMES: Partial<Record<StateTable, readonly stri
   // WI-2145092: the workspace work-scope policy lives under this row's `workScope` key.
   // The /admin/work-scope pane reads workScope.policy and must learn a set/clear
   // (workspace:work_scope or POST /api/work-scope/*) without a remount.
-  operator_pot_control_policy: ['workScope.policy'],
+  operator_pot_control_policy: ['workScope.policy', 'potIntegration.createQuestion'],
 };
 
 async function notifyOperatorStateSync(table: StateTable): Promise<void> {
@@ -431,16 +491,18 @@ export async function writeOperatorState<T>(
     return;
   }
 
-  await sql`
+  const written = await sql`
     INSERT INTO ${sql(`harness_shared.${table}`)}
       (workspace_id, payload, updated_at)
     VALUES (${ws}, ${JSON.stringify(payload)}::text::jsonb, ${now})
     ON CONFLICT (workspace_id) DO UPDATE
       SET payload = EXCLUDED.payload,
           updated_at = EXCLUDED.updated_at
+    WHERE ${table !== 'operator_account_pool'} OR ${sql(`harness_shared.${table}`)}.payload IS DISTINCT FROM EXCLUDED.payload
+    RETURNING workspace_id
   `;
   invalidateOperatorStateCache(table, ws); // P-004: same-process read-after-write consistency
-  await notifyOperatorStateSync(table);
+  if (table !== 'operator_account_pool' || written.length > 0) await notifyOperatorStateSync(table);
 }
 
 /**
@@ -476,6 +538,7 @@ export async function updateOperatorState<T>(
   const ws = wsOverride ?? activeWorkspaceId();
   const isEncrypted = ENCRYPTED_TABLES.has(table);
   const key = isEncrypted ? getDbEncryptionKey() : null;
+  let changed = true;
 
   const updated = (await sql.begin(async (tx) => {
     // Materialize the row so the FOR UPDATE below has something to lock (see the
@@ -527,18 +590,24 @@ export async function updateOperatorState<T>(
               updated_at = EXCLUDED.updated_at
       `;
     } else {
-      await tx`
+      // Account writers may return an unchanged (but rebuilt/normalized) pool.
+      // Compare JSONB under the existing row lock, so key order and in-place
+      // mutators are handled without dropping concurrent membership changes.
+      const written = await tx`
         INSERT INTO ${tx(`harness_shared.${table}`)}
           (workspace_id, payload, updated_at)
         VALUES (${ws}, ${JSON.stringify(next)}::text::jsonb, ${Date.now()})
         ON CONFLICT (workspace_id) DO UPDATE
           SET payload = EXCLUDED.payload,
               updated_at = EXCLUDED.updated_at
+        WHERE ${table !== 'operator_account_pool'} OR ${tx(`harness_shared.${table}`)}.payload IS DISTINCT FROM EXCLUDED.payload
+        RETURNING workspace_id
       `;
+      changed = table !== 'operator_account_pool' || written.length > 0;
     }
     return next;
   })) as T;
   invalidateOperatorStateCache(table, ws); // P-004: same-process read-after-write consistency
-  await notifyOperatorStateSync(table);
+  if (changed) await notifyOperatorStateSync(table);
   return updated;
 }

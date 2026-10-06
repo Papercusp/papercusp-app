@@ -39,6 +39,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, openSync, readFileSync }
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { moduleRepoRoot } from '../module-repo-root';
 import { randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -55,7 +56,7 @@ import { GYM_JUDGE_RUBRIC_V1 } from './judge-scoring';
 import { spawnGymOperatorWithRetry } from './operator-ready';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = join(__dirname, '../../../..');
+const REPO_ROOT = moduleRepoRoot(import.meta.url);
 const FAKE_WAKE_AGENT = join(__dirname, 'fixtures/fake-wake-agent.mjs');
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

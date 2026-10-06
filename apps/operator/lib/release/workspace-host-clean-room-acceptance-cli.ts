@@ -36,11 +36,56 @@ import {
   GcpWorkspaceHostCleanRoomExecutor,
   type GcpCleanRoomPlacement,
 } from "@papercusp/operator-core/lib/workspace-host/workspace-host-clean-room-executor";
+import type { WorkspaceHostProviderConnection } from "@papercusp/deployment-driver";
+import {
+  composeAwsAmiReleaseAdapter,
+  probeAwsAmiCredential,
+  probeAwsAmiExecutables,
+  type AwsAmiCredentialProbe,
+  type AwsAmiExecutableProbe,
+  type AwsAmiReleaseCompositionOptions,
+} from "@papercusp/operator-core/lib/workspace-host/aws-ami-production";
+import {
+  AwsBootcCleanRoomExecutor,
+  type AwsBootcCleanRoomPlacement,
+} from "@papercusp/operator-core/lib/workspace-host/aws-bootc-clean-room-executor";
+import { coldsnapCompositionOption } from "@papercusp/operator-core/lib/workspace-host/coldsnap-pin";
+import {
+  workspaceHostReleaseSubjectSha256,
+  type WorkspaceHostBootcCloudArtifact,
+} from "@papercusp/operator-core/lib/workspace-host/bootc-bake-manifest";
 
-export interface CleanRoomAcceptanceCliInput {
-  artifact: WorkspaceHostImageArtifact;
-  spec: WorkspaceHostCleanRoomInstallSpec;
-  placement: GcpCleanRoomPlacement;
+/**
+ * AWS placement for a bootc image (WI-10005633): the bake's AWS disk is staged as a transient AMI
+ * in the connection's (publisher) account and booted in the clean account. `releaseSha256` and
+ * `publisherAccountId` are derived — from the artifact and the connection — never supplied.
+ */
+export interface AwsCleanRoomCliPlacement {
+  provider: "aws";
+  region: string;
+  cleanAccount: AwsBootcCleanRoomPlacement["cleanAccount"];
+  bootcArtifact: WorkspaceHostBootcCloudArtifact;
+  architecture: string;
+}
+
+export type CleanRoomAcceptanceCliInput =
+  | {
+      artifact: WorkspaceHostImageArtifact;
+      spec: WorkspaceHostCleanRoomInstallSpec;
+      placement: GcpCleanRoomPlacement;
+    }
+  | {
+      artifact: WorkspaceHostImageArtifact;
+      spec: WorkspaceHostCleanRoomInstallSpec;
+      placement: AwsCleanRoomCliPlacement;
+      /** The persisted publisher-account connection; credentials come only from it. */
+      connection: WorkspaceHostProviderConnection;
+    };
+
+function isAwsInput(
+  input: CleanRoomAcceptanceCliInput,
+): input is Extract<CleanRoomAcceptanceCliInput, { placement: AwsCleanRoomCliPlacement }> {
+  return (input.placement as { provider?: unknown }).provider === "aws";
 }
 
 export interface CleanRoomAcceptanceCliArgs {
@@ -100,6 +145,38 @@ export function parseCleanRoomAcceptanceCliInput(
   if (!isRecord(artifact)) throw new Error("input.artifact must be an object");
   if (!isRecord(spec)) throw new Error("input.spec must be an object");
   if (!isRecord(placement)) throw new Error("input.placement must be an object");
+  if (placement.provider === "aws") {
+    const { connection } = value;
+    if (!isRecord(connection)) throw new Error("input.connection must be an object for an AWS placement");
+    if (connection.target !== "aws") {
+      throw new Error(`input.connection.target must be 'aws', got '${String(connection.target)}'`);
+    }
+    const cleanAccount = placement.cleanAccount;
+    if (!isRecord(cleanAccount)) throw new Error("placement.cleanAccount must be an object");
+    const bootcArtifact = placement.bootcArtifact;
+    if (!isRecord(bootcArtifact) || bootcArtifact.cloud !== "aws" || bootcArtifact.type !== "ami") {
+      throw new Error("placement.bootcArtifact must be the AWS/ami row of the bake manifest");
+    }
+    return {
+      artifact: artifact as unknown as WorkspaceHostImageArtifact,
+      spec: spec as unknown as WorkspaceHostCleanRoomInstallSpec,
+      placement: {
+        provider: "aws",
+        region: requiredString(placement.region, "placement.region"),
+        cleanAccount: {
+          accountId: requiredString(cleanAccount.accountId, "placement.cleanAccount.accountId"),
+          subnetId: requiredString(cleanAccount.subnetId, "placement.cleanAccount.subnetId"),
+          instanceProfileArn: requiredString(
+            cleanAccount.instanceProfileArn,
+            "placement.cleanAccount.instanceProfileArn",
+          ),
+        },
+        bootcArtifact: bootcArtifact as unknown as WorkspaceHostBootcCloudArtifact,
+        architecture: requiredString(placement.architecture ?? spec.architecture, "placement.architecture"),
+      },
+      connection: connection as unknown as WorkspaceHostProviderConnection,
+    };
+  }
 
   return {
     artifact: artifact as unknown as WorkspaceHostImageArtifact,
@@ -133,6 +210,56 @@ export function parseCleanRoomAcceptanceCliInput(
 export const BOOTSTRAP_ACCEPTANCE_EXECUTABLE_ENV =
   "PAPERCUSP_GCP_BOOTSTRAP_ACCEPTANCE_EXECUTABLE";
 
+/** Executable overrides an operator sets in the env; the same names the AWS release CLI reads. */
+export function awsCleanRoomCompositionOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): AwsAmiReleaseCompositionOptions {
+  return {
+    // Override, else the checksum-pinned install (coldsnap-pin.ts), else bare `coldsnap` on PATH.
+    ...coldsnapCompositionOption(env),
+    ...(env.PAPERCUSP_AWS_AMI_SCAN_EXECUTABLE ? { scanExecutable: env.PAPERCUSP_AWS_AMI_SCAN_EXECUTABLE } : {}),
+    ...(env.PAPERCUSP_AWS_AMI_CANARY_EXECUTABLE ? { canaryExecutable: env.PAPERCUSP_AWS_AMI_CANARY_EXECUTABLE } : {}),
+  };
+}
+
+/**
+ * Compose the AWS bootc executor. Both probes are read-only and run first: nothing is uploaded or
+ * billed until the connection resolves to its own account and coldsnap + the canary are present.
+ */
+export async function composeAwsBootcCleanRoomExecutor(
+  input: Extract<CleanRoomAcceptanceCliInput, { placement: AwsCleanRoomCliPlacement }>,
+  options: AwsAmiReleaseCompositionOptions,
+  probes: {
+    credential?: (connection: WorkspaceHostProviderConnection) => Promise<AwsAmiCredentialProbe>;
+    executables?: (options: AwsAmiReleaseCompositionOptions) => Promise<AwsAmiExecutableProbe>;
+  } = {},
+): Promise<AwsBootcCleanRoomExecutor> {
+  const [credential, executables] = await Promise.all([
+    (probes.credential ?? probeAwsAmiCredential)(input.connection),
+    (probes.executables ?? probeAwsAmiExecutables)(options),
+  ]);
+  if (!credential.ok) {
+    throw new Error(
+      `AWS clean-room prerequisite failed: ${credential.error ?? "the connection credential does not resolve to its account"}`,
+    );
+  }
+  // The clean room uploads (coldsnap) and launches (canary); it never runs the scanner.
+  const missing = executables.executables.filter((entry) => !entry.ok && entry.role !== "scan");
+  if (missing.length > 0) {
+    throw new Error(
+      `AWS clean-room prerequisite failed: not executable: ${missing.map((entry) => entry.executable).join(", ")}`,
+    );
+  }
+  return new AwsBootcCleanRoomExecutor(composeAwsAmiReleaseAdapter(input.connection, options), {
+    publisherAccountId: credential.accountId,
+    region: input.placement.region,
+    cleanAccount: input.placement.cleanAccount,
+    bootcArtifact: input.placement.bootcArtifact,
+    architecture: input.placement.architecture,
+    releaseSha256: workspaceHostReleaseSubjectSha256(input.artifact),
+  });
+}
+
 /** Run one already-parsed acceptance request and return the report. */
 export async function runCleanRoomAcceptanceCli(
   input: CleanRoomAcceptanceCliInput,
@@ -140,17 +267,31 @@ export async function runCleanRoomAcceptanceCli(
     repositoryRoot?: string;
     executable?: string;
     executor?: { execute(fixture: never): Promise<{ stdout: string }> };
+    /** AWS only: composition options (executables, repository root) for the release adapter. */
+    aws?: AwsAmiReleaseCompositionOptions;
+    /** AWS only: read-only prerequisite probes; injected by tests. */
+    probes?: {
+      credential?: (connection: WorkspaceHostProviderConnection) => Promise<AwsAmiCredentialProbe>;
+      executables?: (options: AwsAmiReleaseCompositionOptions) => Promise<AwsAmiExecutableProbe>;
+    };
   } = {},
 ): Promise<WorkspaceHostCleanRoomAcceptanceReport> {
-  const executable =
-    options.executable ?? process.env[BOOTSTRAP_ACCEPTANCE_EXECUTABLE_ENV]?.trim();
-  const executor =
-    options.executor ??
-    new GcpWorkspaceHostCleanRoomExecutor({
+  let executor = options.executor;
+  if (!executor && isAwsInput(input)) {
+    executor = await composeAwsBootcCleanRoomExecutor(input, {
+      ...(options.repositoryRoot ? { repositoryRoot: options.repositoryRoot } : {}),
+      ...options.aws,
+    }, options.probes);
+  }
+  if (!executor && !isAwsInput(input)) {
+    const executable =
+      options.executable ?? process.env[BOOTSTRAP_ACCEPTANCE_EXECUTABLE_ENV]?.trim();
+    executor = new GcpWorkspaceHostCleanRoomExecutor({
       ...input.placement,
       ...(executable ? { executable } : {}),
       ...(options.repositoryRoot ? { repositoryRoot: options.repositoryRoot } : {}),
     });
+  }
   return runWorkspaceHostCleanRoomAcceptance(
     input.artifact,
     input.spec,
@@ -172,6 +313,7 @@ async function main(): Promise<void> {
   const input = parseCleanRoomAcceptanceCliInput(parsed);
   const report = await runCleanRoomAcceptanceCli(input, {
     ...(args.repositoryRoot ? { repositoryRoot: args.repositoryRoot } : {}),
+    aws: awsCleanRoomCompositionOptionsFromEnv(),
   });
 
   process.stdout.write(`${JSON.stringify({ cleanRoomReport: report }, null, 2)}\n`);

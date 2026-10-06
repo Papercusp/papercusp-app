@@ -93,6 +93,7 @@ import {
   stopTheLineExclusionSql,
 } from '../work-items-admission';
 import { trackDetached } from '../detached-imports';
+import { agentWorkWhereSql, issueFamilyRouteSql } from '../work-nature/agent-work-predicate';
 import { agentReviewNormalExclusionSql, readAgentReviewState } from '../harness/improvements/agent-review-policy';
 import {
   classifyAuditAge,
@@ -173,6 +174,8 @@ export interface GetNextOpts {
   rigAvailable?: boolean;
   /** Abort the active claim transaction when the scheduler caller's bounded deadline fires. */
   signal?: AbortSignal;
+  /** Diagnostic only: the last entered candidate subphase survives a caller timeout. */
+  onResolutionStep?: (step: string) => void;
 }
 
 export interface GetNextResult {
@@ -1203,6 +1206,11 @@ export function issueClaimCandidateSubquery(
           -- path, and the failure is silent — asserted by
           -- claimability-snapshot-projection-covers-floors.test.ts.
           wi.condition_key,
+          -- P-007 (WI-10004706): floor #16 (implementation readiness + acceptance contract,
+          -- inside agentReviewNormalExclusionSql) derives the intake stage from item_kind,
+          -- title AND summary, and compares created_ts to the enforcement cutover. Same
+          -- pushdown-path rule as wi.lane above.
+          wi.summary,
           wi.goal_id,
           wi.expected_cost_cents,
           wi.tags,
@@ -1220,8 +1228,12 @@ export function issueClaimCandidateSubquery(
   // Keep broad/non-pushed callers unchanged: delta reads need a population wide
   // enough to cover both filters, and unfiltered callers retain their existing
   // SQL shape.
+  // P-009 / D-022: the issue-family ROUTE (which claim mechanism) comes from the one
+  // routing helper, and claimability from the one work predicate (nature/audience +
+  // the observation-lane and needs-owner-action exclusions). Neither is a local list.
   const baseWhere = sql`
-    wi.item_kind IN ('bug', 'change', 'task')
+    ${issueFamilyRouteSql(sql, 'wi')}
+    AND ${agentWorkWhereSql(sql, 'wi')}
     AND wi.workspace_id = ${issueWs}
     AND (wi.harness_slug = ${harness} OR wi.harness_slug = ${operatorScopeSlug})
     AND wi.status = ANY(${states as string[]}::text[])
@@ -2810,9 +2822,36 @@ export async function getNextWorkItem(
   // getNextForBee -> here -> tier 3's claimNextIssueWorkItem), several awaits deep. Falls back
   // to the legacy activeWorkspaceId() when omitted (unchanged behavior for other callers).
   const ws = opts.workspaceId ?? activeWorkspaceId();
+  const resolutionStep = (step: string): void => {
+    try {
+      opts.onResolutionStep?.(step);
+    } catch {
+      // Observability must not change claim admission or strand a committed row.
+    }
+  };
+  resolutionStep('candidate-ready-flag-read');
   const useMaintainedReady = await schedulerMaintainedReadyEnabled();
+  resolutionStep('candidate-worker-binding-read');
   const operationClaims = await import('../blueprint/operation-worker-binding');
-  const operationClaimRead = await operationClaims.readActiveOperationWorkerClaimBinding(ws, bee.assignee);
+  // This authority read ran on the unbounded shared admin pool BEFORE the ladder's
+  // 15s deadline. A queued read could exhaust the public 30s claim watchdog without
+  // entering any of the bounded feature attempts. Use the caller's dedicated claim
+  // pool and bound acquisition + statements; keep the helper's legacy behavior for
+  // all other claim doors that do not opt into error propagation.
+  const operationClaimRead = await boundedOrgTxn(
+    (tx) => operationClaims.readActiveOperationWorkerClaimBinding(ws, bee.assignee, {
+      sql: tx,
+      throwOnError: true,
+    }),
+    {
+      client: sql,
+      signal: opts.signal,
+      readOnly: true,
+      acquireTimeoutMs: CLAIM_ATTEMPT_BUDGET_MS,
+      statementTimeoutMs: CLAIM_ATTEMPT_BUDGET_MS,
+      lockTimeoutMs: CLAIM_ATTEMPT_BUDGET_MS,
+    },
+  );
   if (operationClaimRead.status === 'unavailable') {
     throw new Error(`operation claim authority unavailable: ${operationClaimRead.reason}`);
   }
@@ -2870,11 +2909,18 @@ export async function getNextWorkItem(
   // cross-family priority preclaim and the existing tier-3 fallback use the same
   // issue floors/filter/rank. The feature-side comparator uses the widened feature
   // view because the ladder may fall through tier 2 before tier 3.
-  const widened = widenPastKind(spec.view.filter);
+  // WI-10002617: named fleet filters are hard scope boundaries. Widening past
+  // kind made a feature-only member atomically claim an adjacent issue, only
+  // for getNextForBee to reject and release it. Apply the complete filter before
+  // both issue doors (priority preclaim and tier 3), avoiding that doomed bounce.
+  // Solo callers retain WI-1407's adjacent-family fallback.
+  const widened = opts.fleetSlug ? spec.view.filter : widenPastKind(spec.view.filter);
   const issueKinds = issueKindsForFallback(spec.view.filter);
   const idValues = positiveIdCohortIds(spec.view.filter) ?? undefined;
   const excludeIds = negativeIdExclusions(spec.view.filter);
-  const specFilterSql = compileFilter(sql, stripFeatureOnlyKindLeaves(spec.view.filter));
+  const specFilterSql = compileFilter(sql, opts.fleetSlug
+    ? spec.view.filter
+    : stripFeatureOnlyKindLeaves(spec.view.filter));
   const specOrderSql = compileRank(sql, spec, bee);
   const featurePriorityFilterSql = sql`${compileFilter(sql, widened)} AND
     ${operationClaims.operationWorkerClaimWhereSql(sql, operationClaimRead, {
@@ -2896,6 +2942,7 @@ export async function getNextWorkItem(
       ws,
       {
         client: sql,
+        operationClaimRead,
         signal: opts.signal,
         issueKinds,
         ids: idValues,
@@ -2981,11 +3028,15 @@ export async function getNextWorkItem(
   // feature tiers. Equal/worse priorities return null here and preserve feature-first.
   let claimed: WorkItem | null = null;
   if (hasPriorityRank && (await issueClaimsEnabled())) {
+    resolutionStep('candidate-priority-issue-preclaim');
     claimed = await claimIssue(true);
   }
 
   // Tier 1: the spec's view exactly as authored.
-  if (!claimed) claimed = await attempt(spec.view.filter);
+  if (!claimed) {
+    resolutionStep('candidate-feature-tier-1');
+    claimed = await attempt(spec.view.filter);
+  }
 
   // Tier 2 (fallback-ladder P-005, fleet-backlog-lessons-2026-07-01, WI-1407): a spec that
   // narrowed to one feature-family `kind` and drained it must not exit — widen to the REST
@@ -2994,6 +3045,7 @@ export async function getNextWorkItem(
   // shapes it can simplify safely (a bare leaf or one inside a top-level `all`); when it can't
   // (kind nested in an `any`/`not`), it hands back the SAME node and this tier is a no-op.
   if (!claimed && widened !== spec.view.filter) {
+    resolutionStep('candidate-feature-tier-2');
     claimed = await attempt(widened);
   }
 
@@ -3049,6 +3101,7 @@ export async function getNextWorkItem(
   // spec-violating item (the post-claim check releases and retries) — it only stops the
   // ENTIRE-lane starvation that a merely-inconvenient-to-extract id leaf used to cause.
   if (!claimed && (await schedulerIssuesClaimableEnabled())) {
+    resolutionStep('candidate-issue-tier-3');
     const idValues = positiveIdCohortIds(spec.view.filter) ?? undefined;
     const issueKinds = issueKindsForFallback(spec.view.filter);
     // WI-5258: a positive allowlist (idValues) and a negative exclusion are mutually
@@ -3090,7 +3143,7 @@ export async function getNextWorkItem(
         'caller-budget',
       );
     }
-    const specFilterSql = compileFilter(sql, stripFeatureOnlyKindLeaves(spec.view.filter));
+    // Reuse the same fleet-aware filter as the priority preclaim above.
     // EI-19497592871345016: thread the spec's compiled RANK down too, not just its filter.
     // Tier 3 is the ONLY tier the issue family ever reaches (tiers 1/2 query the
     // feature-family table), so without this every bug/change/task claim ignored spec.rank
@@ -3114,6 +3167,7 @@ export async function getNextWorkItem(
       ws,
       {
         client: sql,
+        operationClaimRead,
         signal: opts.signal,
         issueKinds,
         ids: idValues,
@@ -3125,6 +3179,7 @@ export async function getNextWorkItem(
   }
 
   if (!claimed) return null;
+  resolutionStep('candidate-holder-interests');
   claimed.interestWatch = await armWorkItemHolderInterests(claimed, bee.assignee);
   // Same claimed-event as the legacy claim path (best-effort fanout).
   void trackDetached(import('../work-items-events'))

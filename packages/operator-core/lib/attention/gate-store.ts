@@ -15,8 +15,16 @@ import { getOrgPg } from '@papercusp/db-org';
 import type { TransactionSql } from 'postgres';
 
 export type GateClient = 'claude' | 'omp' | 'codex';
-export type GateKind = 'ask' | 'permission_wait';
-export type GateSource = 'watcher' | 'hook';
+/**
+ * `suppressed_ask` (migration 1339, WI-10005039) is an owner ask the AGENT decided
+ * not to re-send — the "DO NOT ask a 4th time" population. It is registered by the
+ * agent, not observed from a transcript, so it has no live tool_use to wait on: it
+ * stays open until the owner answers or its `decide_by` passes and the default is
+ * applied. It must never be closed `asker_gone` — the asker ending is the NORMAL
+ * state of a suppressed ask, not evidence the question was resolved.
+ */
+export type GateKind = 'ask' | 'permission_wait' | 'suppressed_ask';
+export type GateSource = 'watcher' | 'hook' | 'agent';
 /**
  * Terminal reasons, split by what they REQUIRE to be written (WI-10002067).
  *
@@ -102,16 +110,28 @@ export type OpenGateOutcome = 'opened' | 'already_open';
 export async function openOrTouchGate(input: OpenGateInput): Promise<{ id: string; outcome: OpenGateOutcome }> {
   const { sql } = getOrgPg();
   const optionsJson = input.options ? JSON.stringify(input.options) : null;
+  // decide_by / default_if_unanswered (migration 1185) were declared on this input and READ by
+  // the reaper + plans:attention, but no INSERT ever wrote them — a declared deadline was
+  // silently dropped, so the reaper's `default_applied` rule could never fire from any producer.
+  const decideBy =
+    input.decideBy == null ? null : input.decideBy instanceof Date ? input.decideBy.toISOString() : input.decideBy;
+  const defaultJson = input.defaultIfUnanswered == null ? null : JSON.stringify(input.defaultIfUnanswered);
   const rows = await sql<Array<{ id: string; opened_at: string; touched_opened_at: string }>>`
     INSERT INTO harness_shared.session_pending_gates
-      (workspace_id, session_id, client, kind, ref_id, owner_id, question, options, source, raw_ref, harness_slug)
+      (workspace_id, session_id, client, kind, ref_id, owner_id, question, options, source, raw_ref, harness_slug,
+       decide_by, default_if_unanswered)
     VALUES (
       ${input.workspaceId}, ${input.sessionId}, ${input.client}, ${input.kind}, ${input.refId},
       ${input.ownerId ?? null}, ${input.question ?? null}, ${optionsJson}::text::jsonb,
-      ${input.source}, ${input.rawRef ?? null}, ${input.harnessSlug ?? null}
+      ${input.source}, ${input.rawRef ?? null}, ${input.harnessSlug ?? null},
+      ${decideBy}::text::timestamptz, ${defaultJson}::text::jsonb
     )
     ON CONFLICT (workspace_id, session_id, ref_id) DO UPDATE
-      SET updated_at = now()
+      SET updated_at = now(),
+          -- a re-observation (watcher tick) carries NULLs and must not erase a declared deadline;
+          -- a re-registration that states one refines it.
+          decide_by = COALESCE(EXCLUDED.decide_by, session_pending_gates.decide_by),
+          default_if_unanswered = COALESCE(EXCLUDED.default_if_unanswered, session_pending_gates.default_if_unanswered)
       WHERE session_pending_gates.closed_at IS NULL
     RETURNING id::text AS id, opened_at::text AS opened_at, updated_at::text AS touched_opened_at
   `;
@@ -246,7 +266,8 @@ export async function listPendingGates(filter: {
            COALESCE(g.owner_id, latest_owner.coord_owner_id) AS owner_id,
            g.question, g.options, g.source, g.raw_ref, g.harness_slug,
            g.opened_at::text AS opened_at, g.closed_at::text AS closed_at,
-           g.closed_reason, g.created_at::text AS created_at
+           g.closed_reason, g.created_at::text AS created_at,
+           g.decide_by::text AS decide_by, g.default_if_unanswered AS default_if_unanswered
     FROM harness_shared.session_pending_gates AS g
     LEFT JOIN LATERAL (
       SELECT s.coord_owner_id
@@ -319,7 +340,7 @@ export async function listClosedAskGatesSince(filter: {
       AND kind = 'ask'
       AND closed_at IS NOT NULL
       AND closed_at >= ${filter.sinceIso}
-    ORDER BY closed_at DESC
+    ORDER BY session_pending_gates.closed_at DESC
     LIMIT ${limit}
   `;
   return rows;

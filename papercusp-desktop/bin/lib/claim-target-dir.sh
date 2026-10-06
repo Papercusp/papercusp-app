@@ -255,6 +255,271 @@ __pc_cargo_target_root() {
   papercusp_cargo_metadata_target_dir "$project"
 }
 
+# PRIVATE OVERFLOW SLOTS — reaping and warm reuse (WI-10004764)
+#
+# When every named slot is busy the claim falls back to a private per-pid root
+# (`<shared>-pid<N>`, or `<shared>/.papercusp-target-slots/pid<N>` below a
+# non-writable parent). Nothing ever removed one. Each is a COLD Cargo root of
+# 27-65 GiB, and on this box overflow is routine: on 2026-10-01 the data disk held
+# 131 of them, 774 GiB, and was at 99%. A finished private root is only garbage —
+# so reap it, and let the next overflow launch ADOPT the newest dead one as a warm
+# cache instead of paying another cold build and another 60 GiB of writes.
+#
+# A private root is reapable only when ALL hold:
+#   - no live claimant: its lock (`<lockdir>/pid<N>.lock`, taken by every new
+#     private claim and inherited across `exec` like the named-slot locks) is
+#     free; a LEGACY root with no lock file needs its claiming pid to be gone,
+#     and a live — possibly recycled — pid keeps it (fails toward keeping);
+#   - nothing references it: no process executes from it, runs inside it, or has
+#     CARGO_TARGET_DIR pointing into it (one /proc pass; an unreadable /proc
+#     keeps everything);
+#   - it is idle past PAPERCUSP_DESKTOP_PRIVATE_SLOT_GRACE_SEC (default 1800);
+#   - no release-retention lease covers it (a finished cut's artifacts live in
+#     exactly these roots; the lease expiring is what releases them).
+# Reaping renames the root aside under a lock (atomic, same filesystem), then
+# deletes through release_artifacts_guarded_delete, which re-checks leases and
+# writes the deletion audit. Deletion runs in the background at idle I/O
+# priority so a launch never waits on it; an interrupted deletion leaves a
+# `.reaping-*` dir that the next reaper finishes.
+#
+#   PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP=0      never reap or adopt
+#   PAPERCUSP_DESKTOP_PRIVATE_SLOT_GRACE_SEC   idle time before a dead root is touched
+#   PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_SYNC=1 delete in the foreground (tests, reap-only runs)
+
+# Print "<dir>\t<slot-name>" for every private root under a shared root.
+__pc_private_slot_candidates() {
+  local shared="${1:?shared target root required}" dir name sibling_prefix
+  sibling_prefix="${shared##*/}-"
+  for dir in "${shared}"-pid* "${shared}/.papercusp-target-slots"/pid*; do
+    [[ -d "$dir" && ! -L "$dir" ]] || continue
+    name="${dir##*/}"
+    name="${name#"$sibling_prefix"}"
+    [[ "$name" =~ ^pid[0-9]+(-[0-9]+)?$ ]] || continue
+    printf '%s\t%s\n' "$dir" "$name"
+  done
+}
+
+# 0 when no claimant is alive for this private root.
+__pc_private_slot_unclaimed() {
+  local name="$1" lock pid
+  lock="${__pc_slot_lockdir}/${name}.lock"
+  if [[ -e "$lock" ]]; then
+    # Held by any live process that inherited the claim's descriptor.
+    ( exec 6>>"$lock" && flock -n 6 ) 2>/dev/null || return 1
+    return 0
+  fi
+  pid="${name#pid}"
+  pid="${pid%%-*}"
+  # Legacy root: its claiming pid is the only liveness signal. A pid owned by
+  # another user answers EPERM to kill -0 but still exists in /proc.
+  if kill -0 "$pid" 2>/dev/null || [[ -e "/proc/$pid" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# Newest mtime (epoch seconds) of a root and the Cargo profile dirs inside it.
+__pc_private_slot_last_active() {
+  local dir="$1" newest=0 p t
+  for p in "$dir" "$dir/debug" "$dir/release" "$dir/release/bundle"; do
+    [[ -e "$p" ]] || continue
+    t="$(stat -c %Y -- "$p" 2>/dev/null)" || continue
+    (( t > newest )) && newest="$t"
+  done
+  printf '%s\n' "$newest"
+}
+
+# Read candidate roots on stdin; print those a live process references.
+# Prints every candidate when /proc cannot be read reliably (fails closed).
+__pc_private_slots_referenced() {
+  if [[ ! -d /proc/self ]]; then cat; return 0; fi
+  local status=0
+  node -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const roots = fs.readFileSync(0, "utf8").split("\n").filter(Boolean);
+const real = roots.map((r) => { try { return fs.realpathSync(r); } catch { return path.resolve(r); } });
+const hits = new Set();
+const inside = (p, i) => p === real[i] || p.startsWith(real[i] + path.sep)
+  || p === roots[i] || p.startsWith(roots[i] + path.sep);
+const mark = (p) => { for (let i = 0; i < roots.length; i++) if (inside(p, i)) hits.add(roots[i]); };
+let pids;
+try { pids = fs.readdirSync("/proc"); } catch { process.exit(2); }
+let unknown = false;
+const tolerated = ["ENOENT", "ESRCH", "EACCES", "EPERM"];
+for (const pid of pids) {
+  if (!/^\d+$/.test(pid)) continue;
+  for (const link of ["exe", "cwd"]) {
+    try { mark(fs.readlinkSync(`/proc/${pid}/${link}`).replace(/ \(deleted\)$/, "")); }
+    catch (e) { if (!tolerated.includes(e.code)) unknown = true; }
+  }
+  try {
+    for (const kv of fs.readFileSync(`/proc/${pid}/environ`, "latin1").split("\0")) {
+      if (kv.startsWith("CARGO_TARGET_DIR=")) mark(path.resolve(kv.slice(17) || "/nonexistent"));
+    }
+  } catch (e) { if (!tolerated.includes(e.code)) unknown = true; }
+}
+if (unknown) process.exit(2);
+for (const r of hits) process.stdout.write(r + "\n");
+' || status=$?
+  if [[ "$status" != 0 ]]; then
+    echo "→ private target-slot reference probe unavailable — keeping every private root" >&2
+    return 2
+  fi
+}
+
+# 0 when every Cargo build-script output in this root was generated AT this path.
+#
+# A Cargo root is NOT relocatable. Cargo keeps a finished build script's output
+# when the root moves, because its fingerprint does not change. Build scripts write
+# absolute paths into their OUT_DIR files, and Cargo cannot rewrite those: tauri's
+# `out/tauri-core-*-permission-files` lists every permission .toml by absolute path,
+# and tauri_build reads the list to build the app manifest. A moved root therefore
+# breaks the next `tauri dev` with "failed to read plugin permissions … No such file"
+# (WI-10004841). `root-output` records the OUT_DIR each script ran against, so a
+# root-output outside this root marks a root that was moved. It may only be reaped.
+__pc_private_slot_paths_anchored() {
+  local dir="$1" real f stray
+  local -a outs=()
+  for f in "$dir"/debug/build/*/root-output "$dir"/release/build/*/root-output \
+           "$dir"/*/debug/build/*/root-output "$dir"/*/release/build/*/root-output; do
+    [[ -f "$f" ]] && outs+=("$f")
+  done
+  ((${#outs[@]} > 0)) || return 0
+  real="$(realpath -- "$dir" 2>/dev/null)" || real="$dir"
+  stray="$(printf '%s\0' "${outs[@]}" | xargs -0 grep -L -F -e "$dir/" -e "$real/" -- 2>/dev/null)"
+  [[ -z "$stray" ]]
+}
+
+# Delete roots already renamed aside (`.reaping-*`), through the audited guard.
+__pc_private_slot_delete_renamed() {
+  local shared="$1" dir
+  local -a doomed=()
+  for dir in "${shared%/*}/.${shared##*/}-reaping-"* "${shared}/.papercusp-target-slots"/.reaping-*; do
+    [[ -d "$dir" && ! -L "$dir" ]] && doomed+=("$dir")
+  done
+  ((${#doomed[@]} > 0)) || return 0
+  if [[ "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_SYNC:-0}" == "1" ]]; then
+    PAPERCUSP_RELEASE_DELETER=claim-target-dir.sh release_artifacts_guarded_delete "${doomed[@]}" || true
+    return 0
+  fi
+  (
+    # Drop every inherited descriptor first. The launcher's slot lock (fd 8) and
+    # any caller lock (fd 9, cargo-build-safe) would otherwise stay held for as
+    # long as this deletion runs, and the slot would look busy after its build
+    # had ended.
+    local fd
+    for fd in /proc/"$BASHPID"/fd/*; do
+      fd="${fd##*/}"
+      [[ "$fd" =~ ^[0-9]+$ ]] && ((fd > 2)) && eval "exec ${fd}>&-" 2>/dev/null || true
+    done
+    command -v ionice >/dev/null 2>&1 && { ionice -c3 -p "$BASHPID" 2>/dev/null || true; }
+    renice -n 19 -p "$BASHPID" >/dev/null 2>&1 || true
+    PAPERCUSP_RELEASE_DELETER=claim-target-dir.sh release_artifacts_guarded_delete "${doomed[@]}" || true
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+# __pc_reap_private_target_slots <shared> [adopt-name]
+# Reap dead private roots. With adopt-name (the caller's own per-pid slot name),
+# ADOPT the newest reapable root IN PLACE instead of deleting it: take that root's
+# own lock, keep its path, and set __pc_adopted_private_root to it and
+# __pc_adopted_private_lock_fd to the open, flocked descriptor (the caller moves
+# its claim onto it). Never rename a root to adopt it: a moved Cargo root strands
+# the absolute paths its build scripts wrote (WI-10004841), so a root that an
+# older reaper already moved is reaped, never adopted.
+__pc_reap_private_target_slots() {
+  local shared="${1:?shared target root required}" adopt_name="${2:-}"
+  __pc_adopted_private_root=""
+  __pc_adopted_private_lock_fd=""
+  [[ "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP:-1}" != "0" ]] || return 0
+  command -v flock >/dev/null 2>&1 || return 0
+  # Empty arrays under `set -u` and {fd} allocation need bash >= 4.4.
+  (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4) )) || return 0
+  local grace="${PAPERCUSP_DESKTOP_PRIVATE_SLOT_GRACE_SEC:-1800}"
+  [[ "$grace" =~ ^[0-9]+$ ]] || grace=1800
+
+  local reap_fd
+  exec {reap_fd}>>"${__pc_slot_lockdir}/private-slots.lock" || return 0
+  if ! flock -w 30 "$reap_fd"; then
+    exec {reap_fd}>&-
+    return 0
+  fi
+
+  local now dir name last lease_status reap_lease_tags
+  local -a eligible=()
+  now="$(date +%s)"
+  while IFS=$'\t' read -r dir name; do
+    [[ -n "$dir" ]] || continue
+    __pc_private_slot_unclaimed "$name" || continue
+    last="$(__pc_private_slot_last_active "$dir")"
+    (( now - last >= grace )) || continue
+    # 0 = leased, 2 = unreadable retention marker: both keep the root. ANY lease
+    # keeps a private root (a reaper is no cut, so no own-cut exemption applies);
+    # the tags are captured, not discarded to /dev/null, which the release-artifacts
+    # selftest forbids for every caller in this file.
+    lease_status=0
+    reap_lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" || lease_status=$?
+    (( lease_status == 1 )) || continue
+    eligible+=("$last"$'\t'"$dir"$'\t'"$name")
+  done < <(__pc_private_slot_candidates "$shared")
+
+  local refs="" sorted=""
+  if ((${#eligible[@]} > 0)); then
+    if refs="$(printf '%s\n' "${eligible[@]}" | cut -f2 | __pc_private_slots_referenced)"; then
+      # Newest first, so an adoption takes the warmest cache.
+      sorted="$(printf '%s\n' "${eligible[@]}" | sort -rn)"
+    fi
+  fi
+
+  local stamp target adopted=0 adopt_fd
+  while IFS=$'\t' read -r last dir name; do
+    [[ -n "$dir" ]] || continue
+    if grep -qxF -- "$dir" <<< "$refs"; then continue; fi
+    if [[ "${PAPERCUSP_DESKTOP_PRIVATE_SLOT_REAP_DRY_RUN:-0}" == "1" ]]; then
+      echo "would reap: $dir (idle since $(date -u -d "@$last" +%FT%TZ 2>/dev/null || echo "$last"))"
+      continue
+    fi
+    if [[ -n "$adopt_name" && "$adopted" == 0 ]]; then
+      if ! __pc_private_slot_paths_anchored "$dir"; then
+        echo "→ dead private target slot $dir was relocated (its build-script outputs point elsewhere) — reaping it instead of adopting (WI-10004841)" >&2
+      else
+        # A legacy root has no lock file yet; opening one for append creates it.
+        adopt_fd=""
+        if exec {adopt_fd}>>"${__pc_slot_lockdir}/${name}.lock" && flock -n "$adopt_fd"; then
+          touch -- "$dir" || true
+          PAPERCUSP_RELEASE_DELETER=claim-target-dir.sh release_artifacts_deletion_audit adopt "$dir" "" \
+            "dead private target slot reused in place as a warm cache by $adopt_name" 2>/dev/null || true
+          __pc_adopted_private_root="$dir"
+          __pc_adopted_private_lock_fd="$adopt_fd"
+          adopted=1
+          continue
+        fi
+        # Its lock was taken since the eligibility check: it has a claimant now,
+        # so neither adopt nor reap it.
+        if [[ -n "$adopt_fd" ]]; then exec {adopt_fd}>&-; fi
+        continue
+      fi
+    fi
+    stamp="$(date +%s%N)"
+    if [[ "${dir##*/}" == "$name" ]]; then
+      target="${dir%/*}/.reaping-${name}-${stamp}"
+    else
+      target="${dir%/*}/.${shared##*/}-reaping-${name}-${stamp}"
+    fi
+    if mv -T -- "$dir" "$target" 2>/dev/null; then
+      rm -f -- "${__pc_slot_lockdir}/${name}.lock"
+      PAPERCUSP_RELEASE_DELETER=claim-target-dir.sh release_artifacts_deletion_audit reap "$dir" "" \
+        "dead private target slot (no claimant, unreferenced, idle >= ${grace}s); renamed to $target for deletion" 2>/dev/null || true
+      echo "→ reaped dead private target slot $dir" >&2
+    fi
+  done <<< "$sorted"
+
+  flock -u "$reap_fd" || true
+  exec {reap_fd}>&-
+  __pc_private_slot_delete_renamed "$shared"
+  return 0
+}
+
 __pc_claim_target_dir() {
   # An explicit CARGO_TARGET_DIR is a deliberate choice (a .deb cut on an
   # isolated dir, a test harness) — never second-guess it.
@@ -295,8 +560,33 @@ __pc_claim_target_dir() {
   fi
   mkdir -p "$__pc_slot_lockdir"
 
-  local i dir lockfile preferred_dir lease_tags
+  local i j dir lockfile preferred_dir lease_tags
+  local slot_count=0 own_slot_index_set=','
+  local -a slot_order
+
+  # A resumed cut's own lease identifies where its reusable artifacts live.
+  # Prioritize those roots before ordinary free slots, or the first-free scan
+  # can send a reuse leg to an empty cache even though its artifacts are leased
+  # under a later slot (WI-10003548).
   for ((i = 0; i < slots; i++)); do
+    if ((i == 0)); then dir="$shared"; else dir="${shared}-dev$((i + 1))"; fi
+    if lease_tags="$(release_artifacts_retention_path_is_leased "$dir" 2>/dev/null)" \
+      && release_artifacts_retention_matches_are_own_cut "$lease_tags"; then
+      slot_order[$slot_count]="$i"
+      slot_count=$((slot_count + 1))
+      own_slot_index_set+="$i,"
+    fi
+  done
+  for ((i = 0; i < slots; i++)); do
+    case "$own_slot_index_set" in
+      *,"$i",*) continue ;;
+    esac
+    slot_order[$slot_count]="$i"
+    slot_count=$((slot_count + 1))
+  done
+
+  for ((j = 0; j < slot_count; j++)); do
+    i="${slot_order[$j]}"
     # Slot 0 IS Cargo's configured shared dir. Keep its existing warm cache,
     # and derive every extra slot on the same configured filesystem.
     if ((i == 0)); then dir="$shared"; else dir="${shared}-dev$((i + 1))"; fi
@@ -388,17 +678,43 @@ __pc_claim_target_dir() {
         echo "→ target dir: $dir (slot $i — another desktop instance holds the shared dir; isolating so we cannot corrupt its app-manifest, WI-7101)" >&2
         echo "  first build in this slot is a COLD build; later launches reuse its cache" >&2
       fi
+      __pc_reap_private_target_slots "$shared" || true
       return 0
     fi
     # Someone else holds this slot. Drop our handle and try the next one.
     exec 8>&-
   done
 
-  # Every slot busy. Fall back to a private per-pid dir: a cold build is slow,
-  # but it is CORRECT, and correctness is what this whole file is protecting.
-  # Never fall back to the shared dir — that is precisely the corruption path.
-  local private_target="${shared}-pid$$"
-  private_target="$(__pc_prepare_derived_target_root "$private_target" "$shared" "pid$$")" || {
+  # Every slot busy. Fall back to a private per-pid dir: it is CORRECT, and
+  # correctness is what this whole file is protecting. Never fall back to the
+  # shared dir — that is precisely the corruption path.
+  #
+  # The private root is locked like a named slot (fd 8, inherited across exec), so
+  # the reaper can tell exactly when its last user is gone. A recycled pid whose
+  # earlier private lock is still held by an orphaned descendant gets a unique name.
+  local private_name="pid$$"
+  exec 8>>"${__pc_slot_lockdir}/${private_name}.lock"
+  if ! flock -n 8; then
+    exec 8>&-
+    private_name="pid$$-$(date +%s)"
+    exec 8>>"${__pc_slot_lockdir}/${private_name}.lock"
+    flock -n 8 || true
+  fi
+  # Prefer a dead private root's warm cache over a cold build (WI-10004764).
+  __pc_reap_private_target_slots "$shared" "$private_name" || true
+  if [[ -n "${__pc_adopted_private_root:-}" ]]; then
+    # Move the claim onto the adopted root's own lock: fd 8 is the descriptor the
+    # launch inherits. Re-pointing it releases the per-pid lock, which guards no root.
+    exec 8>&"$__pc_adopted_private_lock_fd"
+    exec {__pc_adopted_private_lock_fd}>&-
+    rm -f -- "${__pc_slot_lockdir}/${private_name}.lock"
+    export CARGO_TARGET_DIR="$__pc_adopted_private_root"
+    echo "⚠ all $slots target-dir slots are busy — reusing a dead private root's warm cache as $CARGO_TARGET_DIR." >&2
+    echo "  Raise PAPERCUSP_DESKTOP_TARGET_SLOTS if this box routinely runs more desktops than that." >&2
+    return 0
+  fi
+  local private_target="${shared}-${private_name}"
+  private_target="$(__pc_prepare_derived_target_root "$private_target" "$shared" "$private_name")" || {
     echo "ERROR: all target-dir slots are busy and no private target root can be prepared safely" >&2
     return 1
   }
@@ -408,4 +724,8 @@ __pc_claim_target_dir() {
   return 0
 }
 
-__pc_claim_target_dir
+# PAPERCUSP_DESKTOP_REAP_ONLY=1 loads the helpers without claiming a slot
+# (bin/reap-private-target-slots.sh).
+if [[ "${PAPERCUSP_DESKTOP_REAP_ONLY:-0}" != "1" ]]; then
+  __pc_claim_target_dir
+fi

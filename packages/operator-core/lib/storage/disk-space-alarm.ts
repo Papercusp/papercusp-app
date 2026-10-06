@@ -17,14 +17,17 @@
  * Read-only — it can never affect the system it watches.
  */
 import { promisify } from 'node:util';
-import { statfs as statfsCb } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { stat as statCb, statfs as statfsCb } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
+import { join } from 'node:path';
 import { generated, getOrgPg } from '@papercusp/db-org';
 import { desc, inArray } from 'drizzle-orm';
 import { escalateAlarm } from '../alarm-attention';
 import { notifySyncInvalidate } from '../sync-sse';
 import { workspacesRoot } from '../workspace-registry';
+import { listDiskRootChildrenAsync, type DiskRootChildScan } from './disk';
 
+const statPath = promisify(statCb);
 const statfs = promisify(statfsCb);
 const GIB = 1024 ** 3;
 const TOAST_RING_BUFFER = 2000;
@@ -104,7 +107,7 @@ export function watchedPaths(): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  const all = [workspacesRoot(), tmpdir(), ...extra];
+  const all = [workspacesRoot(), '/mnt/data', tmpdir(), ...extra];
   return [...new Set(all)]; // dedup identical paths
 }
 
@@ -363,6 +366,8 @@ export function formatDiskAlarmToast(breaches: DiskBreach[]): { level: string; m
 // ── Impure sampling + emit (injectable; never throws) ──────────────────────────
 
 export interface DiskAlarmDeps {
+  /** Bounded consumer attribution, sampled only when a filesystem breaches. */
+  attributeUsage?: () => Promise<DiskRootChildScan>;
   /** Injectable for tests — defaults to a `statfs` probe of watchedPaths(). */
   sample?: () => Promise<DiskSnapshot[]>;
   /** Injectable for tests — defaults to a toast_log row + sync invalidate. */
@@ -439,8 +444,12 @@ export function formatDiskEscalation(
  * so correctness-critical writers can reuse the alarm's statfs interpretation. */
 export async function sampleDiskSnapshots(paths: string[] = watchedPaths()): Promise<DiskSnapshot[]> {
   const out: DiskSnapshot[] = [];
+  const seenDevices = new Set<string>();
   for (const path of paths) {
     try {
+      const fsIdentity = await statPath(path);
+      const device = String(fsIdentity.dev);
+      if (seenDevices.has(device)) continue;
       const fsst = await statfs(path);
       const bsize = Number(fsst.bsize) || 0;
       const blocks = Number(fsst.blocks) || 0;
@@ -458,9 +467,10 @@ export async function sampleDiskSnapshots(paths: string[] = watchedPaths()): Pro
         freeInodes: ffree,
         freeInodesPct: files > 0 ? ffree / files : 0,
       });
+      seenDevices.add(device);
     } catch (err) {
       // A single unreadable path must not sink the whole probe.
-      console.warn(`[disk-space-alarm] statfs(${path}) failed (non-fatal): ${(err as Error)?.message ?? String(err)}`);
+      console.warn(`[disk-space-alarm] stat/statfs(${path}) failed (non-fatal): ${(err as Error)?.message ?? String(err)}`);
     }
   }
   return out;
@@ -509,9 +519,22 @@ export async function runDiskSpaceAlarmOnce(
   }
 
   const breaches = detectLowSpace(snapshots, policy);
+  let attribution = '';
   if (breaches.length > 0) {
     try {
-      await emitToast(formatDiskAlarmToast(breaches));
+      const usage = await (deps.attributeUsage ?? (() => listDiskRootChildrenAsync({
+        roots: [join(homedir(), '.papercusp'), workspacesRoot()],
+        budget: { deadlineMs: Date.now() + 2_000 }, maxChildren: 1_000, followSymlinks: false,
+      })))();
+      const consumers = [...usage.entries].sort((a, b) => b.sizeBytes - a.sizeBytes).slice(0, 5);
+      attribution = `\nDisk consumers (${usage.truncated ? 'partial scan; largest measured' : 'largest measured'}; logical bytes):\n` +
+        consumers.map((c) => `• ${c.path}: ${fmtGiB(c.sizeBytes)}`).join('\n');
+    } catch {
+      attribution = '\nDisk consumer attribution unavailable; free-space breach still applies.';
+    }
+    try {
+      const toast = formatDiskAlarmToast(breaches);
+      await emitToast({ ...toast, description: toast.description + attribution });
     } catch (err) {
       console.warn(`[disk-space-alarm] toast emit failed (non-fatal): ${(err as Error)?.message ?? String(err)}`);
     }
@@ -529,6 +552,7 @@ export async function runDiskSpaceAlarmOnce(
     escalated = await escalateAlarm(
       {
         ...request,
+        body: request.body + attribution,
         cooldownMs: ESCALATE_COOLDOWN_MS,
         source: 'disk-space-alarm',
       },

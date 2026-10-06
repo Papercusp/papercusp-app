@@ -192,6 +192,15 @@ interface SessionSurface {
 
 const sessionSurfaces = new Map<string, SessionSurface>();
 
+interface SessionToolRegistryRevision {
+  /** The projected contract revision the MCP connection last listed or refreshed. */
+  revision: string;
+  /** Last touch (ms) — shares the session surface's lazy lifetime. */
+  touched: number;
+}
+
+const sessionToolRegistryRevisions = new Map<string, SessionToolRegistryRevision>();
+
 /** Idle sessions older than this are swept lazily on the next access. */
 const SESSION_SURFACE_TTL_MS = 6 * 60 * 60 * 1000; // 6h ≫ any single agent session
 /** Hard backstop against unbounded growth (a runaway or key explosion). */
@@ -200,6 +209,7 @@ const SESSION_SURFACE_MAX = 4096;
 /** Exported for tests only — reset the module-scoped store between cases. */
 export function __resetSessionSurfaces(): void {
   sessionSurfaces.clear();
+  sessionToolRegistryRevisions.clear();
 }
 
 function sweepSessionSurfaces(nowMs: number): void {
@@ -215,6 +225,69 @@ function sweepSessionSurfaces(nowMs: number): void {
     if (sessionSurfaces.size <= target) break;
     sessionSurfaces.delete(k);
   }
+}
+
+function sweepSessionToolRegistryRevisions(nowMs: number): void {
+  for (const [sessionKey, entry] of sessionToolRegistryRevisions) {
+    if (nowMs - entry.touched > SESSION_SURFACE_TTL_MS) sessionToolRegistryRevisions.delete(sessionKey);
+  }
+  if (sessionToolRegistryRevisions.size <= SESSION_SURFACE_MAX) return;
+  const entries = [...sessionToolRegistryRevisions.entries()].sort((a, b) => a[1].touched - b[1].touched);
+  const target = Math.floor(SESSION_SURFACE_MAX * 0.9);
+  for (const [sessionKey] of entries) {
+    if (sessionToolRegistryRevisions.size <= target) break;
+    sessionToolRegistryRevisions.delete(sessionKey);
+  }
+}
+
+function isUsableToolRegistryRevision(revision: string): boolean {
+  return revision.length > 0 && revision !== 'unknown';
+}
+
+/** Record the contract revision actually returned by this session's tools/list. */
+export function rememberSessionToolRegistryRevision(
+  sessionKey: string | null | undefined,
+  revision: string,
+  nowMs: number = Date.now(),
+): void {
+  if (!sessionKey || !isUsableToolRegistryRevision(revision)) return;
+  sweepSessionToolRegistryRevisions(nowMs);
+  sessionToolRegistryRevisions.set(sessionKey, { revision, touched: nowMs });
+}
+
+export type SessionToolRegistryRevisionState =
+  | { status: 'unavailable' | 'missing' }
+  | { status: 'current' | 'stale'; revision: string };
+
+/** Inspect a session's real tools/list baseline without seeding or advancing it. */
+export function sessionToolRegistryRevisionState(
+  sessionKey: string | null | undefined,
+  revision: string,
+  nowMs: number = Date.now(),
+): SessionToolRegistryRevisionState {
+  if (!sessionKey || !isUsableToolRegistryRevision(revision)) return { status: 'unavailable' };
+  sweepSessionToolRegistryRevisions(nowMs);
+  const previous = sessionToolRegistryRevisions.get(sessionKey);
+  if (!previous) return { status: 'missing' };
+  previous.touched = nowMs;
+  return previous.revision === revision
+    ? { status: 'current', revision: previous.revision }
+    : { status: 'stale', revision: previous.revision };
+}
+
+/**
+ * Compare the live serving generation with a session's last real tools/list.
+ * An absent baseline is stale and remains absent; only tools/list may seed or
+ * advance it. Notifications tell the client to fetch that list but never count
+ * as proof that it did.
+ */
+export function sessionToolRegistryRevisionChanged(
+  sessionKey: string | null | undefined,
+  revision: string,
+  nowMs: number = Date.now(),
+): boolean {
+  const state = sessionToolRegistryRevisionState(sessionKey, revision, nowMs);
+  return state.status === 'missing' || state.status === 'stale';
 }
 
 /**

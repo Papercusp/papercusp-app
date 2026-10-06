@@ -108,16 +108,19 @@ export interface GatewayCacheObservation {
   shape: 'unobserved' | 'observed' | 'oversized' | 'invalid';
   tools: GatewayCacheFingerprint | null;
   instructions: GatewayCacheFingerprint | null;
+  /** Per-section layout; computed only for an owner's first observed request (see GatewayCacheLayout). */
+  layout: GatewayCacheLayout | null;
 }
 
 const emptyCacheObservation = (): GatewayCacheObservation => ({
   servingAccountId: null, providerRequestId: null, inputTokens: null, cacheReadTokens: null,
   cacheWriteTokens: null, reuse: 'unobserved', missReason: 'unobserved', shape: 'unobserved',
-  tools: null, instructions: null,
+  tools: null, instructions: null, layout: null,
 });
 const cloneCacheObservation = (cache: GatewayCacheObservation): GatewayCacheObservation => ({
   ...cache, tools: cache.tools ? { ...cache.tools } : null,
   instructions: cache.instructions ? { ...cache.instructions } : null,
+  layout: cache.layout ? structuredClone(cache.layout) : null,
 });
 
 /** A 185-request Anthropic sample had tool fields up to ~430KB; 512KiB
@@ -158,6 +161,180 @@ const fingerprintParts = (parts: unknown[]) => {
   const present = parts.filter(part => part !== null && part !== undefined);
   return cacheFingerprint(present.length === 1 ? present[0] : present.length ? present : null);
 };
+
+export type GatewayCacheMarkerTtl = '5m' | '1h' | 'default';
+
+/** One Anthropic `cache_control` breakpoint, by position only - never content. */
+export interface GatewayCacheMarker {
+  section: 'tools' | 'system' | 'messages';
+  /** Tool index, system block index, or message index (per `section`). */
+  index: number;
+  /** Content-block index inside the message; null for tools/system. */
+  block: number | null;
+  ttl: GatewayCacheMarkerTtl;
+}
+
+/**
+ * Bounded, content-free LAYOUT of one Anthropic-shaped request prefix (D-077 / R-10).
+ *
+ * The whole-`instructions` fingerprint above is unique per agent whenever ANY system block
+ * carries per-session text, so it can never show WHICH span of a startup is shared and which is
+ * rewritten. Per-block fingerprints (cache_control stripped, so a marker move never changes a
+ * content hash) plus the marker positions make that answerable from real traffic with no paid
+ * request: equal block hashes across a cohort are the shareable span, a differing first message
+ * is the per-task write no startup sharing can remove. Only counts, hashes and positions - the
+ * same privacy class as the fingerprints - and computed only for an owner's first observed
+ * request so ordinary traffic pays nothing.
+ */
+export interface GatewayLayoutHash {
+  /** First 16 hex chars of the SHA-256 (64 bits: equality across a cohort, never a key). */
+  sha16: string;
+  bytes: number;
+}
+
+export interface GatewayCacheLayout {
+  tools: { count: number; deferred: number };
+  system: { form: 'absent' | 'string' | 'blocks'; blockCount: number; blocks: GatewayLayoutHash[] };
+  messages: {
+    count: number;
+    /** `blocks`: per-content-block hashes of message 0 (first MAX_LAYOUT_SYSTEM_BLOCKS), so the
+     * first block that differs across a cohort - the start of the unshared write - is locatable. */
+    first: { role: string | null; blockCount: number; hash: GatewayLayoutHash; blocks: GatewayLayoutHash[];
+      /** The largest text block of message 0 cut at `<system-reminder>` boundaries (WI-10005042 / D-077):
+       * a provider cache hit can only end on a block boundary, so a shared leading span inside ONE
+       * giant block can never be read. Equal leading `parts` across owners = splittable shared prefix. */
+      segments?: { block: number; parts: GatewayLayoutHash[] } | null } | null;
+  };
+  markers: GatewayCacheMarker[];
+  /** True when markers or system blocks beyond the bound were not recorded. */
+  truncated: boolean;
+}
+
+/** Anthropic allows 4 breakpoints; leave headroom so an over-marked body is still visible. */
+export const MAX_LAYOUT_MARKERS = 8;
+export const MAX_LAYOUT_SYSTEM_BLOCKS = 8;
+/** Per-segment hashes kept for message 0's largest text block (the last one covers the remainder). */
+export const MAX_LAYOUT_SEGMENTS = 10;
+const SEGMENT_BOUNDARY = '<system-reminder>';
+
+/** Cut `text` immediately before each `<system-reminder>` tag; a tail beyond the bound is one segment. */
+export function splitAtSystemReminders(text: string, max = MAX_LAYOUT_SEGMENTS): string[] {
+  const cuts: number[] = [];
+  for (let at = text.indexOf(SEGMENT_BOUNDARY); at !== -1; at = text.indexOf(SEGMENT_BOUNDARY, at + SEGMENT_BOUNDARY.length)) {
+    if (at > 0) cuts.push(at);
+  }
+  if (!cuts.length) return [text];
+  const parts: string[] = [];
+  let start = 0;
+  for (const cut of cuts) {
+    if (parts.length === max - 1) break;
+    parts.push(text.slice(start, cut));
+    start = cut;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/** Compact, bounded block hash for the journal line (the 2KiB line budget is tested). */
+function layoutHash(value: unknown): GatewayLayoutHash | null {
+  const fingerprint = cacheFingerprint(value);
+  return fingerprint ? { sha16: fingerprint.sha256.slice(0, 16), bytes: fingerprint.bytes } : null;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+
+function markerTtl(block: unknown): GatewayCacheMarkerTtl | null {
+  if (!isRecord(block) || !isRecord(block.cache_control)) return null;
+  const ttl = block.cache_control.ttl;
+  return ttl === '5m' || ttl === '1h' ? ttl : 'default';
+}
+
+/** The block as content, without its breakpoint, so moving a marker never changes a hash. */
+function withoutCacheControl(block: unknown): unknown {
+  if (!isRecord(block) || !Object.hasOwn(block, 'cache_control')) return block;
+  const { cache_control: _marker, ...rest } = block;
+  return rest;
+}
+
+/** Segment hashes of message 0's largest text block (a bare string counts as block 0); null when it
+ * has no `<system-reminder>` cut, so rows for a single-span message stay as small as before. */
+function largestTextSegments(content: unknown): { block: number; parts: GatewayLayoutHash[] } | null {
+  const texts: Array<{ block: number; text: string }> = typeof content === 'string'
+    ? [{ block: 0, text: content }]
+    : Array.isArray(content)
+      ? content.flatMap((block, index) => isRecord(block) && block.type === 'text' && typeof block.text === 'string'
+        ? [{ block: index, text: block.text }] : [])
+      : [];
+  const largest = texts.reduce<{ block: number; text: string } | null>(
+    (best, entry) => (!best || entry.text.length > best.text.length ? entry : best), null);
+  if (!largest) return null;
+  const parts = splitAtSystemReminders(largest.text);
+  if (parts.length < 2) return null;
+  return { block: largest.block, parts: parts.flatMap(part => layoutHash(part) ?? []) };
+}
+
+function anthropicCacheLayout(parsed: { tools?: unknown; system?: unknown; messages?: unknown }): GatewayCacheLayout | null {
+  const markers: GatewayCacheMarker[] = [];
+  let truncated = false;
+  const mark = (section: GatewayCacheMarker['section'], index: number, block: number | null, source: unknown) => {
+    const ttl = markerTtl(source);
+    if (ttl === null) return;
+    if (markers.length >= MAX_LAYOUT_MARKERS) { truncated = true; return; }
+    markers.push({ section, index, block, ttl });
+  };
+
+  const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
+  let deferred = 0;
+  tools.forEach((tool, index) => {
+    if (isRecord(tool) && tool.defer_loading === true) deferred++;
+    mark('tools', index, null, tool);
+  });
+
+  let form: GatewayCacheLayout['system']['form'] = 'absent';
+  let systemBlocks: GatewayLayoutHash[] = [];
+  let blockCount = 0;
+  if (typeof parsed.system === 'string') {
+    form = 'string'; blockCount = 1;
+    const hash = layoutHash(parsed.system);
+    if (hash) systemBlocks = [hash];
+  } else if (Array.isArray(parsed.system)) {
+    form = 'blocks'; blockCount = parsed.system.length;
+    if (blockCount > MAX_LAYOUT_SYSTEM_BLOCKS) truncated = true;
+    parsed.system.forEach((block, index) => {
+      mark('system', index, null, block);
+      if (index >= MAX_LAYOUT_SYSTEM_BLOCKS) return;
+      const hash = layoutHash(withoutCacheControl(block));
+      if (hash) systemBlocks.push(hash);
+    });
+  }
+
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  messages.forEach((message, index) => {
+    if (!isRecord(message) || !Array.isArray(message.content)) return;
+    message.content.forEach((block, blockIndex) => mark('messages', index, blockIndex, block));
+  });
+  let first: GatewayCacheLayout['messages']['first'] = null;
+  const head = messages[0];
+  if (isRecord(head)) {
+    const content = Array.isArray(head.content) ? head.content.map(withoutCacheControl) : head.content;
+    const hash = layoutHash({ role: head.role, content });
+    if (hash) {
+      first = { role: typeof head.role === 'string' ? head.role.slice(0, 16) : null,
+        blockCount: Array.isArray(head.content) ? head.content.length : typeof head.content === 'string' ? 1 : 0,
+        hash,
+        blocks: Array.isArray(content)
+          ? content.slice(0, MAX_LAYOUT_SYSTEM_BLOCKS).flatMap(block => layoutHash(block) ?? [])
+          : [],
+        segments: largestTextSegments(content) };
+      if (Array.isArray(content) && content.length > MAX_LAYOUT_SYSTEM_BLOCKS) truncated = true;
+    }
+  }
+
+  if (!tools.length && form === 'absent' && !messages.length) return null;
+  return { tools: { count: tools.length, deferred }, system: { form, blockCount, blocks: systemBlocks },
+    messages: { count: messages.length, first }, markers, truncated };
+}
 
 export interface StartupCacheEvidence {
   /** Observed authorization/tenant cache scope, never an owner-id or requested account pin. */
@@ -217,6 +394,210 @@ export function assessStartupCacheSharing(rows: readonly StartupCacheEvidence[])
     observedWriteRequests: reportedWrites.filter(row => row.cacheWriteTokens! > 0).length,
     readCoverage: reportedReads.length, writeCoverage: reportedWrites.length,
     singleWriteGuaranteed: false as const,
+  };
+}
+
+/** Greppable prefix of the durable startup-evidence journal line. */
+export const STARTUP_CACHE_EVIDENCE_SCHEMA = 'startup-cache-evidence/v1';
+
+/**
+ * Durable, privacy-safe record of an owner's first observed request.
+ *
+ * The 256-row in-process timeline ring spans only minutes on a busy gateway, so the R-10
+ * ten-launch cohort evidence rolled out before it could be evaluated (plan
+ * cache-efficiency-and-accounting-2026-09-23, D-074). One line per first-observed-request-per-owner
+ * lands in the gateway journal (days of retention, zero migration) and carries ONLY bounded
+ * hashes/byte counts, enumerated dimensions and token counts - never request text, headers, URLs
+ * or credentials. It is evidence of what was observed, never a cache key or a promised write.
+ */
+export interface StartupCacheEvidenceRecord {
+  schema: typeof STARTUP_CACHE_EVIDENCE_SCHEMA;
+  requestId: number;
+  ownerId: string;
+  provider: GatewayTelemetryProvider;
+  protocol: GatewayTelemetryProtocol;
+  transport: GatewayTelemetryTransport;
+  model: string | null;
+  authorizationScope: string | null;
+  tools: GatewayCacheFingerprint | null;
+  instructions: GatewayCacheFingerprint | null;
+  /** Additive within v1 (readers ignore unknown keys): per-section hashes + breakpoint positions. */
+  layout: GatewayCacheLayout | null;
+  native: { sessionId: string | null; threadId: string | null };
+  startedAt: number;
+  finalizedAt: number;
+  inputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  reuse: GatewayCacheObservation['reuse'];
+  outcome: GatewayRequestOutcome;
+  finalStatus: number | null;
+}
+
+/** Null unless this is the owner's first request in the bounded ring (gap unknown). */
+export function startupCacheEvidenceRecord(timeline: GatewayRequestTimeline): StartupCacheEvidenceRecord | null {
+  if (timeline.ownerId === null || timeline.previousObservedRequestGapMs !== null) return null;
+  const { cache } = timeline;
+  return {
+    schema: STARTUP_CACHE_EVIDENCE_SCHEMA,
+    requestId: timeline.requestId,
+    ownerId: timeline.ownerId,
+    provider: timeline.provider,
+    protocol: timeline.protocol,
+    transport: timeline.transport,
+    model: timeline.model,
+    authorizationScope: cache.servingAccountId,
+    tools: cache.tools ? { ...cache.tools } : null,
+    instructions: cache.instructions ? { ...cache.instructions } : null,
+    layout: cache.layout ? structuredClone(cache.layout) : null,
+    native: { sessionId: timeline.nativeCorrelation.sessionId, threadId: timeline.nativeCorrelation.threadId },
+    startedAt: timeline.startedAt,
+    finalizedAt: timeline.finalizedAt,
+    inputTokens: cache.inputTokens,
+    cacheReadTokens: cache.cacheReadTokens,
+    cacheWriteTokens: cache.cacheWriteTokens,
+    reuse: cache.reuse,
+    outcome: timeline.outcome,
+    finalStatus: timeline.finalStatus,
+  };
+}
+
+export const formatStartupCacheEvidenceLine = (record: StartupCacheEvidenceRecord): string =>
+  `${STARTUP_CACHE_EVIDENCE_SCHEMA} ${JSON.stringify(record)}`;
+
+const finiteOrNull = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+const parseFingerprint = (value: unknown): GatewayCacheFingerprint | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const bytes = finiteOrNull(v.bytes), hashedBytes = finiteOrNull(v.hashedBytes);
+  return typeof v.sha256 === 'string' && /^[a-f0-9]{64}$/.test(v.sha256) && bytes !== null && hashedBytes !== null
+    ? { sha256: v.sha256, bytes, hashedBytes }
+    : null;
+};
+const TRANSPORTS: readonly GatewayTelemetryTransport[] = ['bearer-http', 'oauth-http', 'cli-exec', 'local-http', 'unknown'];
+
+/**
+ * Parse one journal line back into assessor input. The line carries no provider eligibility
+ * source, so availableAt/expiresAt stay null and the assessor reports `timingUnknown` rather
+ * than inventing a cache window. Returns null for anything that is not a well-formed record.
+ */
+export function parseStartupCacheEvidenceLine(line: string): StartupCacheEvidence | null {
+  const at = line.indexOf(`${STARTUP_CACHE_EVIDENCE_SCHEMA} {`);
+  if (at < 0) return null;
+  let raw: unknown;
+  try { raw = JSON.parse(line.slice(at + STARTUP_CACHE_EVIDENCE_SCHEMA.length + 1)); } catch { return null; }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const startedAt = finiteOrNull(r.startedAt);
+  if (r.schema !== STARTUP_CACHE_EVIDENCE_SCHEMA || startedAt === null) return null;
+  return {
+    authorizationScope: typeof r.authorizationScope === 'string' ? r.authorizationScope : null,
+    model: typeof r.model === 'string' ? r.model : null,
+    transport: TRANSPORTS.includes(r.transport as GatewayTelemetryTransport)
+      ? (r.transport as GatewayTelemetryTransport) : 'unknown',
+    tools: parseFingerprint(r.tools),
+    instructions: parseFingerprint(r.instructions),
+    startedAt,
+    availableAt: null,
+    expiresAt: null,
+    cacheReadTokens: finiteOrNull(r.cacheReadTokens),
+    cacheWriteTokens: finiteOrNull(r.cacheWriteTokens),
+  };
+}
+
+/**
+ * A journal row that can be sized into an R-10 startup cohort. `layout` is the content-free section
+ * hash/breakpoint summary; rows journaled before it existed carry none and are reported `unkeyed`.
+ */
+export interface StartupPrefixRow {
+  ownerId: string;
+  authorizationScope: string | null;
+  model: string | null;
+  transport: GatewayTelemetryTransport;
+  tools: GatewayCacheFingerprint | null;
+  layout: GatewayCacheLayout | null;
+  startedAt: number;
+  inputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  outcome: string;
+}
+
+/** A real startup request: the full tool set is present and the conversation has barely begun. */
+export const STARTUP_MAX_MESSAGES = 3;
+/** R-10 is specified for a ten-agent cohort. */
+export const STARTUP_COHORT_MIN_OWNERS = 10;
+
+const isLayoutShape = (value: unknown): value is GatewayCacheLayout => {
+  if (!isRecord(value) || !isRecord(value.tools) || !isRecord(value.system) || !isRecord(value.messages)) return false;
+  return finiteOrNull(value.tools.count) !== null && finiteOrNull(value.messages.count) !== null &&
+    Array.isArray(value.system.blocks) && Array.isArray(value.markers) &&
+    value.system.blocks.every((block) => isRecord(block) && typeof block.sha16 === 'string');
+};
+
+/** Parse one journal line into a cohort row; null for anything that is not a well-formed record. */
+export function parseStartupPrefixRowLine(line: string): StartupPrefixRow | null {
+  const evidence = parseStartupCacheEvidenceLine(line);
+  if (!evidence) return null;
+  let raw: Record<string, unknown>;
+  try { raw = JSON.parse(line.slice(line.indexOf(`${STARTUP_CACHE_EVIDENCE_SCHEMA} {`) + STARTUP_CACHE_EVIDENCE_SCHEMA.length + 1)); }
+  catch { return null; }
+  if (typeof raw.ownerId !== 'string' || !raw.ownerId) return null;
+  return {
+    ownerId: raw.ownerId, authorizationScope: evidence.authorizationScope, model: evidence.model,
+    transport: evidence.transport, tools: evidence.tools, layout: isLayoutShape(raw.layout) ? raw.layout : null,
+    startedAt: evidence.startedAt, inputTokens: finiteOrNull(raw.inputTokens),
+    cacheReadTokens: evidence.cacheReadTokens, cacheWriteTokens: evidence.cacheWriteTokens,
+    outcome: typeof raw.outcome === 'string' ? raw.outcome : 'unknown',
+  };
+}
+
+/**
+ * Size R-10 startup cohorts from the durable journal. Measured 2026-10-01 (plan
+ * cache-efficiency-and-accounting-2026-09-23, D-077): the whole-`instructions` hash is the WRONG cohort
+ * key, because the last system block (and the first user message) are per-owner while the stable prefix is
+ * shared; and "first row seen for an owner" is NOT a startup (13 of 16 were mid-conversation sessions first
+ * seen after a gateway restart). A cohort therefore keys on (scope, model, transport, tools hash,
+ * system blocks up to the last breakpointed one) and counts only requests with the full tool set and
+ * messages <= STARTUP_MAX_MESSAGES. Diagnosis only: it never returns a promised read/write count, and
+ * `cohort-present` means a cohort of the specified size EXISTS, not that sharing was verified.
+ */
+export function assessStartupPrefixCohorts(rows: readonly StartupPrefixRow[], minOwners = STARTUP_COHORT_MIN_OWNERS) {
+  const groups = new Map<string, StartupPrefixRow[]>();
+  let startups = 0, unkeyed = 0;
+  for (const row of rows) {
+    const layout = row.layout;
+    if (!layout || row.outcome !== 'ok' || layout.tools.count <= 0 || layout.messages.count > STARTUP_MAX_MESSAGES) continue;
+    startups++;
+    const lastSystemMarker = layout.markers.reduce((last, m) => m.section === 'system' ? Math.max(last, m.index) : last, -1);
+    const full = row.tools && row.tools.bytes === row.tools.hashedBytes && row.tools.bytes > 0;
+    if (!full || !row.authorizationScope || !row.model || row.transport === 'unknown' ||
+      lastSystemMarker < 0 || lastSystemMarker >= layout.system.blocks.length) { unkeyed++; continue; }
+    const key = JSON.stringify([row.authorizationScope, row.model, row.transport, row.tools!.sha256, row.tools!.bytes,
+      layout.system.blocks.slice(0, lastSystemMarker + 1).map((block) => block.sha16)]);
+    (groups.get(key) ?? groups.set(key, []).get(key)!).push(row);
+  }
+  const sum = (items: readonly StartupPrefixRow[], pick: (row: StartupPrefixRow) => number | null) =>
+    items.reduce((total, row) => total + (pick(row) ?? 0), 0);
+  const cohorts = [...groups.values()].map((members) => {
+    const ordered = [...members].sort((a, b) => a.startedAt - b.startedAt);
+    const later = ordered.slice(1);
+    const laterTotal = sum(later, (r) => r.inputTokens) + sum(later, (r) => r.cacheReadTokens) + sum(later, (r) => r.cacheWriteTokens);
+    return {
+      owners: new Set(members.map((row) => row.ownerId)).size, requests: members.length,
+      firstStartedAt: ordered[0].startedAt, lastStartedAt: ordered[ordered.length - 1].startedAt,
+      readTokens: sum(members, (r) => r.cacheReadTokens), writeTokens: sum(members, (r) => r.cacheWriteTokens),
+      /** Share of the NON-first starters' prompt tokens served from cache; null when there is no later starter. */
+      laterStarterReadFraction: later.length && laterTotal > 0 ? sum(later, (r) => r.cacheReadTokens) / laterTotal : null,
+    };
+  }).sort((a, b) => b.owners - a.owners || b.requests - a.requests);
+  const largestCohortOwners = cohorts[0]?.owners ?? 0;
+  return {
+    rows: rows.length, startups, unkeyed, cohortCount: cohorts.length, largestCohortOwners, minOwners,
+    cohorts: cohorts.slice(0, 5),
+    verdict: largestCohortOwners >= minOwners ? 'cohort-present' as const : 'cohort-too-small' as const,
+    sharingVerified: false as const,
   };
 }
 
@@ -667,11 +1048,16 @@ export class GatewayRequestSpan {
     try {
       if (body.byteLength > 2_097_152) { this.cache.shape = 'oversized'; return; }
       const parsed = JSON.parse(Buffer.from(body).toString('utf8')) as {
-        tools?: unknown; system?: unknown; instructions?: unknown; input?: unknown };
+        tools?: unknown; system?: unknown; instructions?: unknown; input?: unknown; messages?: unknown };
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { this.cache.shape = 'invalid'; return; }
       const prefix = codexInputPrefix(parsed.input);
       this.cache.tools = fingerprintParts([parsed.tools, ...prefix.tools]);
       this.cache.instructions = fingerprintParts([parsed.system, parsed.instructions, ...prefix.instructions]);
+      // Layout is startup evidence only: skip it for every non-first request so steady-state
+      // traffic does not pay the per-block hashing (D-077). Anthropic-shaped bodies only.
+      if (this.ownerId !== null && this.previousObservedRequestGapMs === null && this.protocol === 'anthropic-messages') {
+        this.cache.layout = anthropicCacheLayout(parsed);
+      }
       this.cache.shape = 'observed';
     } catch { this.cache.shape = 'invalid'; }
     finally { this.cacheObservationMs += Math.max(0, this.now() - started); }
@@ -816,11 +1202,19 @@ export class GatewayRequestTelemetry {
   private readonly sampleCapacity: number;
   private readonly recentCapacity: number;
   private readonly now: () => number;
+  private readonly onStartupEvidence: ((line: string) => void) | undefined;
 
-  constructor(opts: { sampleCapacity?: number; recentCapacity?: number; now?: () => number } = {}) {
+  constructor(opts: {
+    sampleCapacity?: number;
+    recentCapacity?: number;
+    now?: () => number;
+    /** Durable sink for first-request-per-owner startup evidence (the gateway journal). Never throws into the request path. */
+    onStartupEvidence?: (line: string) => void;
+  } = {}) {
     this.sampleCapacity = Math.max(1, Math.floor(opts.sampleCapacity ?? 4096));
     this.recentCapacity = Math.max(1, Math.floor(opts.recentCapacity ?? 256));
     this.now = opts.now ?? Date.now;
+    this.onStartupEvidence = opts.onStartupEvidence;
     this.stageSamples = Object.fromEntries(
       GATEWAY_REQUEST_STAGE_NAMES.map((stage) => [stage, new BoundedSamples(this.sampleCapacity)]),
     ) as Record<GatewayRequestStageName, BoundedSamples>;
@@ -877,6 +1271,14 @@ export class GatewayRequestTelemetry {
     this.recent.push(timeline);
     if (this.recent.length > this.recentCapacity) {
       this.recent.splice(0, this.recent.length - this.recentCapacity);
+    }
+    if (this.onStartupEvidence) {
+      try {
+        const record = startupCacheEvidenceRecord(timeline);
+        if (record) this.onStartupEvidence(formatStartupCacheEvidenceLine(record));
+      } catch {
+        // Durable evidence capture is best-effort and must never fail a completed request.
+      }
     }
   }
 

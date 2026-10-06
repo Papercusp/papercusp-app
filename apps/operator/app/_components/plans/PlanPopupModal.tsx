@@ -31,6 +31,7 @@ import { useConfirmDialog } from "@/app/harness/useConfirmDialog";
 import { usePopupMaximize } from "@/app/_components/chat/use-popup-maximize";
 import PlanSessionsTab from "./PlanSessionsTab";
 import PlanProvenanceBadge from "./PlanProvenanceBadge";
+import { markInteractionPhase, PERF_INTERACTIONS } from "../perf/perf-marks";
 // PlanDetail's chrome (pc-plans__*) is global CSS; importing it here makes the
 // popup self-sufficient wherever the sidebar mounts (InboxPane precedent).
 import "@/app/admin/plans/plans.css";
@@ -62,6 +63,9 @@ export default function PlanPopupModal({
   ownerIdentity?: AuthorIdentity | null;
   onClose: () => void;
 }) {
+  if (planSlug !== null) {
+    markInteractionPhase(PERF_INTERACTIONS.planPopupOpen, "popup-render-started");
+  }
   const [view, setView] = useQueryState(
     "ppv",
     parseAsStringEnum<PlanPopupView>([...POPUP_VIEWS]).withDefault("plan"),

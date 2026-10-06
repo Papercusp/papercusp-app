@@ -25,10 +25,11 @@
  * Never throws — losing a dump is better than losing the snapshot.
  */
 
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess, type ChildProcessByStdio } from 'node:child_process';
 import { mkdir, readdir, stat, statfs, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createWriteStream, type Dirent } from 'node:fs';
+import type { Readable } from 'node:stream';
 import { appendFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 
@@ -111,6 +112,9 @@ export const HOT_SNAPSHOT_EXCLUDED_TABLE_DATA: readonly string[] = [
   // the schema but omitting its bytea data prevents a transient request-body
   // backlog from making the per-workspace restore dump exceed its watchdog.
   'harness_shared.gateway_payload_blobs',
+  // The same spool's body chunks (D-017, migration 1314): content-defined pieces of
+  // those request bodies, kept only while a manifest row above references them.
+  'harness_shared.gateway_payload_chunks',
   // Session-transcript archive blobs (~3 GB TOAST) + their parent metadata rows
   // (excluded together so a restore sees a clean absence, not dangling refs).
   // This pair dominated the dump — one 279s-mean COPY per snapshot, ~65% of the
@@ -123,6 +127,10 @@ export const HOT_SNAPSHOT_EXCLUDED_TABLE_DATA: readonly string[] = [
 
 const MIN_RESTORABLE_DUMP_BYTES = 10_000;
 const PG_DUMP_TIMEOUT_MS = 15 * 60_000;
+const GUARD_LOCK_WAIT_TIMEOUT_SEC = PG_DUMP_TIMEOUT_MS / 1000;
+// Let the guard's own flock timeout report and exit before this backstop fires.
+const GUARD_READINESS_TIMEOUT_MS = PG_DUMP_TIMEOUT_MS + 5_000;
+const GUARD_READY_SIGNAL = 'KOPIA_BACKUP_GUARD_READY\n';
 // Keep the database-side cancellation ahead of the Node watchdog. Killing the
 // client alone can leave pg_dump's backend holding its transaction lock until
 // PostgreSQL notices the broken connection (EI-21363741549000811).
@@ -155,6 +163,40 @@ export function resolveKopiaBackupGuard(): string | null {
   if (process.env.KOPIA_BACKUP_GUARD_ACTIVE === '1') return null;
   return process.env.KOPIA_BACKUP_GUARD_BIN?.trim()
     || (process.platform === 'linux' ? DEFAULT_BACKUP_GUARD_PATH : null);
+}
+
+const GUARD_LOG_LINE_PREFIX = 'KOPIA_BACKUP_GUARD ';
+const MAX_PENDING_GUARD_LOG_CHARS = 8_192;
+
+/**
+ * Re-emit the guard's own decision lines from the captured stderr stream.
+ *
+ * The wait-mode guard writes its `KOPIA_BACKUP_GUARD ... label=workspace-db-dump`
+ * lines to stderr so they cannot corrupt the SQL dump on stdout, and this hook
+ * captures that stderr only to quote it on failure. That left every waiting /
+ * started / finished line for this producer out of the journal, so a hot sweep
+ * preempted by a deploy- or migration-triggered dump could not be attributed
+ * to its caller (WI-10004871: two of fourteen preemptions on 2026-10-01 had no
+ * identifiable waiter). Forwarding to the host process's stderr lands them in
+ * the journal of whichever unit ran the hook. pg_dump's own stderr is not
+ * forwarded: it is already quoted in the failure result.
+ */
+export function createGuardLogForwarder(
+  write: (line: string) => void = (line) => { process.stderr.write(`${line}\n`); },
+): (chunk: Buffer | string) => void {
+  let pending = '';
+  return (chunk) => {
+    pending += chunk.toString();
+    let newline = pending.indexOf('\n');
+    while (newline !== -1) {
+      const line = pending.slice(0, newline);
+      pending = pending.slice(newline + 1);
+      if (line.startsWith(GUARD_LOG_LINE_PREFIX)) write(line);
+      newline = pending.indexOf('\n');
+    }
+    // A producer that never ends its line must not grow this buffer unbounded.
+    if (pending.length > MAX_PENDING_GUARD_LOG_CHARS) pending = '';
+  };
 }
 
 /**
@@ -535,15 +577,27 @@ async function dumpPg(opts: {
   const dumpArgs = guard
     ? ['--mode', 'wait', '--label', WORKSPACE_BACKUP_GUARD_LABEL, '--', 'pg_dump', ...pgDumpArgs]
     : pgDumpArgs;
+  if (guard) {
+    // Guard logs must not contaminate the SQL dump on stdout. FD 3 reports when
+    // the shared lock is acquired so the 900s dump watchdog starts at that point.
+    env.KOPIA_BACKUP_GUARD_LOG_STDERR = '1';
+    env.KOPIA_BACKUP_GUARD_READY_FD = '3';
+    env.KOPIA_BACKUP_GUARD_LOCK_WAIT_TIMEOUT_SEC = String(GUARD_LOCK_WAIT_TIMEOUT_SEC);
+  }
   return new Promise<PreSnapshotHookResult>((resolve) => {
     const dumpDetached = process.platform !== 'win32';
+    // Node only specializes child-process stream types for fds 0–2; fd 3 is
+    // the optional guard channel. Both branches guarantee stdin=ignore and
+    // stdout/stderr=pipe, so preserve those known stream types explicitly.
     const dump = spawn(dumpCommand, dumpArgs, {
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: guard
+        ? ['ignore', 'pipe', 'pipe', 'pipe']
+        : ['ignore', 'pipe', 'pipe'],
       // The watchdog owns this entire guard -> pg_dump tree. Without an
       // isolated group, ChildProcess.kill() reaches only the guard shell.
       detached: dumpDetached,
-    });
+    }) as ChildProcessByStdio<null, Readable, Readable>;
     const gz = spawn('gzip', gzipArgs(), { stdio: ['pipe', 'pipe', 'pipe'] });
     const out = createWriteStream(tmp);
 
@@ -551,20 +605,31 @@ async function dumpPg(opts: {
     gz.stdout.pipe(out);
     let stderr = '';
     dump.stderr.on('data', (d) => { stderr += d.toString(); });
+    if (guard) dump.stderr.on('data', createGuardLogForwarder());
     gz.stderr.on('data', (d) => { stderr += d.toString(); });
 
     const killDumpTree = () => terminateSpawnTree(dump, dumpDetached);
 
-    const t = setTimeout(() => {
-      stderr += `pg dump timed out after ${PG_DUMP_TIMEOUT_MS}ms\n`;
-      killDumpTree();
-      gz.kill('SIGKILL');
-    }, PG_DUMP_TIMEOUT_MS);
     let settled = false;
+    let dumpWatchdog: NodeJS.Timeout | undefined;
+    let guardReadinessWatchdog: NodeJS.Timeout | undefined;
+    const armDumpWatchdog = () => {
+      if (settled || dumpWatchdog) return;
+      if (guardReadinessWatchdog) {
+        clearTimeout(guardReadinessWatchdog);
+        guardReadinessWatchdog = undefined;
+      }
+      dumpWatchdog = setTimeout(() => {
+        stderr += `pg dump timed out after ${PG_DUMP_TIMEOUT_MS}ms\n`;
+        killDumpTree();
+        gz.kill('SIGKILL');
+      }, PG_DUMP_TIMEOUT_MS);
+    };
     const finalize = async (ok: boolean) => {
       if (settled) return;
       settled = true;
-      clearTimeout(t);
+      if (dumpWatchdog) clearTimeout(dumpWatchdog);
+      if (guardReadinessWatchdog) clearTimeout(guardReadinessWatchdog);
       if (!out.destroyed) out.end();
       let result: PreSnapshotHookResult;
       if (ok) {
@@ -645,6 +710,35 @@ async function dumpPg(opts: {
       try { gz.kill('SIGKILL'); } catch { /* already gone */ }
       void finalize(false);
     });
+
+    if (!guard) {
+      armDumpWatchdog();
+    } else {
+      const readiness = dump.stdio[3] as NodeJS.ReadableStream | null;
+      if (!readiness) {
+        stderr += 'backup guard readiness channel unavailable\n';
+        killDumpTree();
+        try { gz.kill('SIGKILL'); } catch { /* already gone */ }
+        void finalize(false);
+      } else {
+        guardReadinessWatchdog = setTimeout(() => {
+          stderr += `backup guard lock readiness timed out after ${GUARD_READINESS_TIMEOUT_MS}ms\n`;
+          killDumpTree();
+          gz.kill('SIGKILL');
+        }, GUARD_READINESS_TIMEOUT_MS);
+        let readinessBuffer = '';
+        readiness.on('data', (d) => {
+          readinessBuffer = `${readinessBuffer}${d.toString()}`.slice(-GUARD_READY_SIGNAL.length);
+          if (readinessBuffer.includes(GUARD_READY_SIGNAL)) armDumpWatchdog();
+        });
+        readiness.on('error', (e) => {
+          stderr += `backup guard readiness pipe failed: ${e.message}\n`;
+          killDumpTree();
+          try { gz.kill('SIGKILL'); } catch { /* already gone */ }
+          void finalize(false);
+        });
+      }
+    }
 
     let dumpClosed = false;
     let gzipClosed = false;

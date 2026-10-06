@@ -167,8 +167,9 @@ export async function handler(
  * tunnel rewrote Host to localhost and stripped every forwarding header (D-010's
  * third case, which headers alone cannot tell apart from the desktop).
  *
- * WI-10004174: it serves ONLY the MCP resource and its OAuth sign-in
- * (external-ingress-paths.ts). Every other path is refused here, before the app sees it, so
+ * WI-10004174 / EI-24788399827381729: it serves the enumerated MCP/OAuth,
+ * signed-webhook and one-use pair/device-JWT surfaces (external-ingress-paths.ts).
+ * Every other path is refused here, before the app sees it, so
  * a tunnel does not expose the operator's `auth:'public'` routes.
  */
 export function externalIngressHandler(

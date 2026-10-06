@@ -27,6 +27,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { McpProxyHealth } from './types';
 import { isCheapRepeatingBeat } from './mcp-proxy-beats';
+import { MCP_PROXY_CRITICAL_CONTINUATION_WAIT_CRIT_MS } from './thresholds';
 
 /** The ledger path — MUST match apps/operator/lib/mcp-proxy/proxy.ts `failureLogPath()`.
  *  Resolved per-call (not cached) so the env override is honoured at runtime + in tests. */
@@ -52,6 +53,10 @@ export interface McpProxyFailureRecord {
   method?: string;
   /** Bounded JSON-RPC protocol methods recorded by the proxy; never args/tool names. */
   rpcMethods?: string[];
+  /** Proxy request identity; used to collapse periodic queue-wait samples per request. */
+  traceId?: string;
+  /** Current queue dwell in ms on `critical_continuation_queue_wait` records. */
+  waitedMs?: number;
   path?: string;
   elapsedMs?: number;
   // P-006 instance tags — which proxy instance wrote this record (forensic attribution
@@ -203,6 +208,9 @@ export function isSoftBeatFailure(
  *                                          sessions tool-dark for hours. See the field doc.
  *  - `shed_max_in_flight`                 → `shed`. Agent-facing 429, but admission control
  *                                          working; sustained nonzero = :3070 not draining.
+ *  - `critical_continuation_queue_wait`   → distinct request count once `waitedMs` reaches
+ *                                          the five-minute alarm floor; periodic samples are
+ *                                          deduplicated by traceId. Short queue dwell stays quiet.
  *  - `post_connect_retry` (P-005 intermediate retry marker) → neither hard nor a failure;
  *                                          it only appears in `byKind` (the terminal
  *                                          outcome is separately recorded recovered/error).
@@ -230,6 +238,9 @@ export function summarizeMcpProxyHealth(
   let nonInstance = 0;
   let handshakeStalls = 0;
   let shed = 0;
+  let criticalContinuationQueueMaxWaitMs = 0;
+  const sustainedCriticalContinuationTraces = new Set<string>();
+  let unattributedSustainedCriticalContinuation = false;
   let newestAt: number | null = null;
   for (const r of records) {
     const t = Date.parse(r.ts);
@@ -244,6 +255,18 @@ export function summarizeMcpProxyHealth(
     if (isNonInstanceRecord(r)) {
       nonInstance += 1;
       continue;
+    }
+    if (r.kind === 'critical_continuation_queue_wait' && typeof r.waitedMs === 'number' && Number.isFinite(r.waitedMs)) {
+      criticalContinuationQueueMaxWaitMs = Math.max(criticalContinuationQueueMaxWaitMs, r.waitedMs);
+      if (r.waitedMs >= MCP_PROXY_CRITICAL_CONTINUATION_WAIT_CRIT_MS) {
+        if (typeof r.traceId === 'string' && r.traceId.length > 0) {
+          sustainedCriticalContinuationTraces.add(r.traceId);
+        } else {
+          // Legacy rows without a trace identity contribute one bounded aggregate signal,
+          // rather than turning periodic samples from one request into many incidents.
+          unattributedSustainedCriticalContinuation = true;
+        }
+      }
     }
     if (isSoftBeatFailure(r)) {
       softBeatFailures += 1;
@@ -273,6 +296,10 @@ export function summarizeMcpProxyHealth(
   }
   return {
     windowMs, total, hardFailures, softBeatFailures, recovered, otherNon2xx, benign, nonInstance,
-    handshakeStalls, shed, byKind, newestAt,
+    handshakeStalls, shed,
+    criticalContinuationQueueStalls:
+      sustainedCriticalContinuationTraces.size + Number(unattributedSustainedCriticalContinuation),
+    criticalContinuationQueueMaxWaitMs,
+    byKind, newestAt,
   };
 }

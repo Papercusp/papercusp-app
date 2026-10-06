@@ -19,6 +19,7 @@ import { resolveCtxHarnessSlug } from './_ctx-opts';
 import { harnessArg, harnessScopedCtx } from '../_harness-scope';
 import { withPlanLock } from './with-plan-lock';
 import { evaluateSetContent, type SetContentValue } from './set-content';
+import type { TerminalPlanChildMutation } from './parser';
 import { planItemTextDriftForWrite } from '../../plan-items/text-drift-report';
 import type { ResolveIdentityCtx } from '../coordination/identity';
 import { planRevisionCapture, type PlanRevisionCtx } from './revisions';
@@ -129,6 +130,15 @@ type ChunkValue =
       currentStatus: string | null;
       proposedStatus: string | null;
       writer: 'plans:set-plan-status' | 'plans:set-frontmatter';
+      message: string;
+    }
+  | {
+      ok: false;
+      code: 'terminal_parent_child_mutation';
+      slug: string;
+      draftId: string;
+      parentStatus: string;
+      changes: TerminalPlanChildMutation[];
       message: string;
     };
 
@@ -311,6 +321,17 @@ function domainFailurePayload(v: SetContentValue, slug: string, draftId: string)
   if (v.code === 'item_status_regression') {
     return { ok: false, code: 'item_status_regression', slug, draftId, regressions: v.regressions };
   }
+  if (v.code === 'terminal_parent_child_mutation') {
+    return {
+      ok: false,
+      code: v.code,
+      slug,
+      draftId,
+      parentStatus: v.parentStatus,
+      changes: v.changes,
+      message: v.message,
+    };
+  }
   if (v.code === 'plan_status_change_requires_lifecycle_writer') {
     return {
       ok: false,
@@ -487,6 +508,9 @@ export default defineTool({
           bytes: draft.meta.bytes,
           chunks: draft.meta.chunks,
           contentHash: result.value.ok ? result.value.contentHash : undefined,
+          ...(result.value.ok && result.value.planDrainTransitionChanged
+            ? { planDrainTransitionChanged: true }
+            : {}),
           // Surfacing (EI-83 fix #2): present only when the commit removed
           // items/decisions, even an allowed shrink.
           ...(result.value.ok && result.value.warning ? { warning: result.value.warning } : {}),

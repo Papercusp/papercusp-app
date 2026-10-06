@@ -242,8 +242,8 @@ mod tests {
     fn every_form_of_the_connect_namespace_hands_off() {
         for cells in [
             &["--connect"][..],
-            &["--connect=owner-test"],
-            &["--connect", "owner-test"],
+            &["--connect=avi-test"],
+            &["--connect", "avi-test"],
             &["--connect=cloud/ws-1", "workbench"],
             &["--fleet=f", "--connect-list"],
             &["--connect-login"],

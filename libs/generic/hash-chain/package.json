@@ -1,0 +1,19 @@
+{
+  "name": "@papercusp/hash-chain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tamper-evident append-only hash chains: per-stream links where each entry carries the hash of the previous one, a verifier that recomputes the chain and reports the FIRST break (edited, deleted, inserted, reordered or truncated entries), and a stable, strictly-canonical JSONL export that round-trips byte-for-byte. Pure, zero-dependency beyond node:crypto, storage-agnostic — the caller supplies the rows and decides where links live.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@papercusp/test-config": "*",
+    "vitest": "^4.1.4"
+  }
+}

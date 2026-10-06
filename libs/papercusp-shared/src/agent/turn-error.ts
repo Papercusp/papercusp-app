@@ -226,7 +226,7 @@ const OVERLOAD_RE = /(\b529\b|overloaded|service unavailable|\b50[0234]\b)/i;
 // conversion error rather than an HTTP 401/403. Treat this exact signature as an auth
 // failure so the loop does not retry a credential that cannot be encoded.
 const MALFORMED_AUTH_HEADER_RE = /failed to convert header to a str for header name ['"]authorization['"]/i;
-const AUTH_RE = /(\b401\b|\b403\b|unauthorized|forbidden|invalid api key|authentication|failed to convert header to a str for header name ['"]authorization['"])/i;
+const AUTH_RE = /(\b401\b|\b403\b|\bunauthorized\b|\bforbidden\b|\binvalid api key\b|\bauthentication\b|failed to convert header to a str for header name ['"]authorization['"])/i;
 const IO_RE = /(ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|network|fetch failed)/i;
 const TIMEOUT_RE = /(\b408\b|timed? ?out|deadline exceeded)/i;
 // A prompt that exceeds the model window is a launch/prompt-sizing defect, not a

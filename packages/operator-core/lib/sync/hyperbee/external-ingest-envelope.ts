@@ -8,7 +8,7 @@
  *
  *   1. `harness_shared.trigger_runs.args` — LOCAL and never federated (no `sync/`
  *      module references that table), and the legitimate home of the private
- *      payload: `gmail:create-draft` / `slack:respond-in-thread` resolve recipient,
+ *      payload: `mail:reply { planRunId }` / `slack:respond-in-thread` resolve recipient,
  *      thread, reply headers and OAuth credential from it SERVER-SIDE by planRunId.
  *   2. the plan run's `inputs` (binding-engine launch-plan branch) — which lands
  *      inside `harness_shared.work_items.payload.plan_run.inputs.trigger` and IS

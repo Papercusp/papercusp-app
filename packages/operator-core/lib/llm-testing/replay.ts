@@ -84,8 +84,8 @@ export async function replayFixture(opts: FixtureReplayOpts): Promise<ReplayResu
     transportMode: 'http-sse',
   });
   if (telemetry) {
-    summary.toolInvocations = telemetry.toolInvocations as RunSummary['toolInvocations'];
-    summary.continueChainRows = telemetry.continueChainRows as RunSummary['continueChainRows'];
+    summary.toolInvocations = telemetry.toolInvocations;
+    summary.continueChainRows = telemetry.continueChainRows;
   }
   return evaluateRun(summary, opts.scenario, persona, opts.judgeModel);
 }

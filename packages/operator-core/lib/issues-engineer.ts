@@ -20,9 +20,11 @@
  */
 import { getOrgPg } from '@papercusp/db-org';
 import type { OrgSql } from './work-items';
-import { admittedWhereSql, type BornAdmission } from './work-items-admission';
+import { admittedWhereSql, selfHealOwnNodeOriginIfStranded, type BornAdmission } from './work-items-admission';
 import { assertScopeWellFormed, harnessScope, harnessOfScope } from './work-item-scope';
+import { harnessPreference, resolveIssuePhysicalSlug } from './work-items-physical-row';
 import { resolveWorkItemPot } from './pot-membership';
+import { hasActiveStrictHumanAsk } from './hold-registry';
 import { ANY_FAMILY_TERMINAL_STATES, ISSUE_TERMINAL_STATES } from './work-item-dispatch-states';
 import { neutralizeToolCallTags, sanitizePersistedText } from './text-safety';
 import {
@@ -44,6 +46,7 @@ import { type InjectEvent } from './agent-tools/coordination/fanout-delivery';
 import { coordScopeWorkspace } from './agent-tools/coordination/log';
 import { fanoutForObject } from './sync/hyperbee/fanout-projection';
 import { boundedOrgTxn } from './pg-bounded-txn';
+import { sealSharedTextInTxOrRefuse } from './personal-vault/shared-store-seal';
 import { boundedPgReadTxn } from './pg-read-query';
 import { getBuildInfo } from './build-info';
 import { createBugFreshnessEnvelope, isFreshnessTrackedKind } from './work-item-claim-freshness';
@@ -84,14 +87,17 @@ import { CLAIM_SUBJECT_BASELINE_KEY } from './claim-subject-baseline';
 import { AUTO_CLOSE_DEFAULT_MIN_TICKS, AUTO_CLOSE_ELIGIBLE_SOURCES } from './harness/improvements/auto-close-sources';
 import {
   agentReviewNormalExclusionSql,
+  createImplementationReadiness,
   agentReviewPendingAdmissionSql,
   isAgentReviewClaimAdmission,
+  verificationTaskConflict,
   type AgentReviewClaimAdmission,
 } from './harness/improvements/agent-review-policy';
 import {
   isLegacyFleetScopeDowngradeAdmission,
   type LegacyFleetScopeDowngradeAdmission,
 } from './work-item-fleet-scope-recovery';
+import { audienceWhereSql, type WorkAudienceFilter } from './work-nature/agent-work-predicate';
 
 /**
  * EI-217141: a fleet leader's explicit assignment is the one narrow exception to
@@ -1115,6 +1121,25 @@ export async function createIssue(input: CreateIssueInput): Promise<EngineerIssu
       linkedFixRefs: [],
     });
   }
+  // observation-candidate-acceptance-promotion D-009a (P-005): every issue-family
+  // writer funnels through this insert, so this is the producer-enrollment seam.
+  // A row that arrives without a verdict is enrolled `unknown` — never `ready` —
+  // because no acceptance evidence exists yet. Claim floors treat this source as
+  // the visible legacy exception until P-007 records the enforcement cutover.
+  if (
+    // Issue-family membership test (not a freshness check), written as a set
+    // lookup so the freshness kind-gate's no-bare-literal guard stays exact.
+    (['bug', 'change', 'task'] as const).includes(storageKind as 'bug' | 'change' | 'task') &&
+    inputPayload.lane !== 'observation' &&
+    !Object.prototype.hasOwnProperty.call(inputPayload, 'implementationReadiness')
+  ) {
+    inputPayload.implementationReadiness = createImplementationReadiness({
+      status: 'unknown',
+      source: 'creation-enrollment',
+      reason: 'no-acceptance-evidence-at-creation',
+      updatedAt: created,
+    });
+  }
   // unified-work-item-ledger P-001: a harness-attributable item must never be
   // silently filed operator-global via a missing/blank harness. operator stays
   // valid only as the EXPLICIT default; a malformed `harness:` (empty slug) throws.
@@ -1236,6 +1261,8 @@ export async function createIssue(input: CreateIssueInput): Promise<EngineerIssu
 
 export interface ListIssuesFilter {
   state?: IssueState;
+  /** D-041 (WI-10005358): see ListWorkItemsFilter.audience. Applied by issueShapeWhereSql. */
+  audience?: WorkAudienceFilter;
   /** Case-insensitive literal substring matched against title + body. */
   q?: string;
   scope?: string;
@@ -1320,6 +1347,22 @@ export interface ListIssuesFilter {
    * (measured: 59 rows, so the limit stops binding at all).
    */
   watchdogKeyed?: boolean;
+  /**
+   * WI-10005102: narrow a watchdog-keyed read to the rows a closing route can act on,
+   * in SQL. Honoured only together with {@link watchdogKeyed}.
+   *
+   * WHY. `watchdogKeyed` alone stopped being a set. Measured 2026-10-01 on the live box:
+   * 11,598 open watchdog-keyed rows (9,615 `repeated-tool-error`, ~1,300
+   * `tool-failure-signature`), so the auto-close sweep's capped read saw only the newest
+   * ~12 h again, which is the WI-4532 horizon one level down. Only 521 of those rows had
+   * any closing route. A row is selected when ANY route can close it:
+   *   - a source-level route (absence close, green-run resolution): the key's source
+   *     prefix is in `closableSources`;
+   *   - positive tool-failure repair: the payload carries
+   *     `toolFailureProbation.repairEvidence`;
+   * A closing route added to the sweep must be added here too, or its rows stay invisible.
+   */
+  watchdogCloseRoutes?: { closableSources: readonly string[] };
   /**
    * P-008 (db-performance-remediation-2026-07-26): omit `body` from the read for a
    * caller that never reads it. Default TRUE (unchanged behavior) — a reader opts OUT
@@ -1693,7 +1736,8 @@ export function issueShapeWhereSql(sql: OrgSql, aliased: boolean, filter: ListIs
         : filter.includeChildren === false
           ? sql`(${col('parent_id')} IS NULL OR ${col('parent_id')} = '')`
           : sql`TRUE`
-    }`;
+    }
+    AND ${audienceWhereSql(sql, filter.audience, aliased ? 'ei' : null)}`;
 }
 
 /**
@@ -1756,7 +1800,18 @@ export function issueMatchWhereSql(sql: OrgSql, aliased: boolean, filter: ListIs
     -- WI-4532: watchdog-keyed restriction (see ListIssuesFilter.watchdogKeyed). Must be
     -- applied HERE, not in JS after the read: a row read's ORDER BY/LIMIT would make a
     -- JS post-filter a recency window rather than a set.
-    AND ${filter.watchdogKeyed ? sql`${col('payload')}->>'watchdogKey' IS NOT NULL` : sql`TRUE`}`;
+    AND ${filter.watchdogKeyed ? sql`${col('payload')}->>'watchdogKey' IS NOT NULL` : sql`TRUE`}
+    -- WI-10005102: closing-route restriction (see ListIssuesFilter.watchdogCloseRoutes).
+    -- Same reason as the line above: in SQL, or the LIMIT makes it a recency window.
+    AND ${
+      filter.watchdogKeyed && filter.watchdogCloseRoutes
+        ? sql`(
+            split_part(${col('payload')}->>'watchdogKey', ':', 1)
+              = ANY(${filter.watchdogCloseRoutes.closableSources as string[]}::text[])
+            OR ${col('payload')}->'toolFailureProbation'->'repairEvidence' IS NOT NULL
+          )`
+        : sql`TRUE`
+    }`;
 }
 
 /**
@@ -1948,7 +2003,7 @@ export function issueAdmissibleWhereSql(sql: OrgSql, aliased: boolean) {
     ${base}
     AND ${admittedWhereSql(sql, aliased ? 'ei' : undefined)}
     AND ${watchdogRecoveryWindowExclusionSqlForIssueView(sql, c)}
-    AND ${agentReviewNormalExclusionSql(sql, aliased ? 'ei.payload' : 'payload')}
+    AND ${agentReviewNormalExclusionSql(sql, aliased ? 'ei.payload' : 'payload', 'engineer_issues')}
   )`;
 }
 
@@ -2574,17 +2629,32 @@ export async function countObservationsByKind(filter: ListIssuesFilter = {}): Pr
  * `(workspace_id = ambient) DESC, updated_at DESC` is exactly that composition, and a
  * miss is null either way (the ambient fallback re-read also missed).
  */
-export async function getIssue(id: string, opts: WorkItemReadOptions = {}): Promise<EngineerIssue | null> {
+export async function getIssue(
+  id: string,
+  opts: WorkItemReadOptions = {},
+  client?: ReturnType<typeof getOrgPg>['sql'],
+  /**
+   * WI-10006010: when the same id exists under more than one harness_slug, PREFER the row in
+   * this harness. A preference, never a filter (EI-19393623437103599: callers pass harness
+   * loosely, so filtering would turn a rare wrong row into a broad silent null). The order
+   * matches `resolveIssuePhysicalSlug`, so the row a caller reads is the row its write pins.
+   */
+  preferHarness?: string | null,
+): Promise<EngineerIssue | null> {
   const ambient = issuesScopeWorkspace();
-  const { sql } = getOrgPg();
+  const sql = client ?? getOrgPg().sql;
   const columns = projectWorkItemColumns(
     opts.includeBody === false ? ISSUE_COLS_BODYLESS : ISSUE_COLS,
     opts.payloadProjection,
   );
+  const want = harnessPreference(preferHarness);
+  const bare = want?.startsWith('harness:') ? want.slice('harness:'.length) : want;
   const rows = await sql<IssueRowDb[]>`
     SELECT ${sql.unsafe(columns)} FROM harness_shared.engineer_issues
      WHERE issue_id = ${id}
-     ORDER BY (workspace_id = ${ambient}) DESC, updated_at DESC NULLS LAST
+     ORDER BY (workspace_id = ${ambient}) DESC,
+              ${want ? sql`(base_harness_slug IN (${want}, ${bare}, ${`harness:${bare}`})) DESC,` : sql``}
+              updated_at DESC NULLS LAST, base_harness_slug ASC
      LIMIT 1`;
   return rows[0] ? toIssue(rows[0]) : null;
 }
@@ -2644,6 +2714,22 @@ export async function resolveIssueWorkspace(id: string, fallback?: string, clien
      ORDER BY (workspace_id = ${ambient}) DESC, updated_at DESC NULLS LAST
      LIMIT 1`;
   return rows[0]?.workspace_id ?? ambient;
+}
+
+/**
+ * WI-10006515: heal an own-node issue row stranded at origin='remote', resolving its workspace by
+ * id. `origin` records how a row ARRIVED, not who wrote it (WI-10003565), and every write through
+ * the engineer_issues view is a silent no-op while origin='remote' — so a write path that would
+ * otherwise route an own-node row to "peer reconciliation" (a peer that is THIS node) heals first.
+ * The identity check lives in selfHealOwnNodeOriginIfStranded's WHERE clause: a true peer's row is
+ * never touched. Fail-closed: any read or write failure answers false and the refusal stands.
+ */
+export async function healOwnNodeIssueOrigin(id: string, harness?: string | null): Promise<boolean> {
+  try {
+    return await selfHealOwnNodeOriginIfStranded(await resolveIssueWorkspace(id), id, harness ?? null);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2793,10 +2879,14 @@ export function bodyShrinkTripped(existingBody: string | undefined | null, newBo
 export async function updateIssue(
   id: string,
   patch: UpdateIssuePatch,
+  opts: { workspaceId?: string; harnessSlug?: string | null } = {},
 ): Promise<EngineerIssue | null | ShrinkGuardTripped> {
   const { sql } = getOrgPg();
+  const workspaceId = opts.workspaceId ?? await resolveIssueWorkspace(id);
+  const physicalSlug = await resolveIssuePhysicalSlug(sql, workspaceId, id, opts.harnessSlug);
+  if (physicalSlug === null) return null;
   if (patch.body !== undefined && !patch.confirmShrink) {
-    const existing = await getIssue(id);
+    const existing = await getIssueInWorkspace(workspaceId, id, { baseHarnessSlug: physicalSlug });
     const tripped = existing ? bodyShrinkTripped(existing.body, patch.body) : null;
     if (tripped) return tripped;
   }
@@ -2811,7 +2901,9 @@ export async function updateIssue(
       parent_id = ${patch.parent !== undefined ? patch.parent : sql`parent_id`},
       origin = 'local',
       updated_at = now()
-    WHERE workspace_id = ${issuesScopeWorkspace()} AND issue_id = ${id}
+    WHERE workspace_id = ${workspaceId}
+      AND issue_id = ${id}
+      AND base_harness_slug = ${physicalSlug}
     RETURNING ${sql.unsafe(ISSUE_COLS)}`;
   if (!rows[0]) return null;
   const issue = toIssue(rows[0]);
@@ -2833,6 +2925,8 @@ export async function claimIssue(
   id: string,
   assignee: string,
   opts: {
+    /** Server-derived dispatch actor; persist with the claim so reconciliation sees it. */
+    assignedBy?: string;
     /**
      * EI-1545: an explicit, ALREADY-RESOLVED issue-scope workspace — pass the SAME
      * value the caller used for its own pre-claim family/existence check (e.g.
@@ -2958,6 +3052,11 @@ export async function claimIssue(
   if (!priorRows[0] || !operationClaims.matchOperationWorkerClaim(operationClaimRead, {
     id, harness: priorRows[0].harness_slug, payload: priorRows[0].payload,
   }).allowed) return null;
+  // P-007 / D-021: a verification task is never held by its own reporter or implementer.
+  // claimWorkItem checks this too, but this is the bottom issue writer and some callers
+  // (the improvement-runner dispatcher) reach it directly. payload.verification is
+  // written once when the task is created, so this pre-read is as good as the UPDATE's.
+  if (verificationTaskConflict(priorRows[0].payload, assignee)) return null;
   // A holder's subject must be captured in the SAME atomic UPDATE as the claim.
   // The watchdog coalescer intentionally refreshes an open issue's visible
   // title/body and watchdogKey; a follow-up completion must not silently treat
@@ -3016,7 +3115,8 @@ export async function claimIssue(
         WHEN ${sameHolderPredicate} THEN ${stampedClaimSubjectPayload}
         ELSE ${stampedNewClaimPayload}
       END,
-      assignee = ${assignee}, assigned_at = now(), origin = 'local', updated_at = now()
+      assignee = ${assignee}, assigned_by = COALESCE(${opts.assignedBy ?? null}, assigned_by),
+      assigned_at = now(), origin = 'local', updated_at = now()
      WHERE workspace_id = ${ws} AND issue_id = ${id}
        AND ${operationClaims.operationWorkerClaimWhereSql(sql, operationClaimRead, {
          payload: 'target.payload', id: 'target.issue_id', harness: 'target.scope',
@@ -3100,6 +3200,23 @@ export async function claimIssue(
              )`
            : admissionFloor
        }
+       -- P-007 / D-016 (observation-candidate-acceptance-promotion): a by-id or
+       -- leader-dispatched NEW holder passes the same acceptance floor as
+       -- self-selection, so pending, rejected, stale-approved, unreviewed or
+       -- metadata-missing intake cannot be taken by naming it. Exempt: a same-holder
+       -- re-claim, the reviewer admission for a pending review, self-filed fallout
+       -- (the creator taking its own filing), the submitter's own revision interval,
+       -- and a terminal row (the WI-5826 reopen escape hatch below).
+       AND (
+         ${sameHolderPredicate}
+         ${agentReviewAdmission || selfFiledFalloutAdmission ? sql`OR TRUE` : sql``}
+         OR target.state = ANY(${ISSUE_TERMINAL_STATES as string[]}::text[])
+         OR (
+           COALESCE(target.payload, '{}'::jsonb) -> 'agentReview' ->> 'status' = 'revision-requested'
+           AND COALESCE(target.payload, '{}'::jsonb) -> 'agentReview' ->> 'submittedBy' = ${assignee}
+         )
+         OR ${agentReviewNormalExclusionSql(sql, 'target.payload', 'engineer_issues')}
+       )
        -- WI-5826 NOTE — deliberately NO terminal-state floor here. Claiming an
        -- already-completed row BY ID is an INTENTIONAL, tested escape hatch (EI-8972:
        -- "a completed row is STILL directly claimable by id — the floor only gates
@@ -3358,6 +3475,13 @@ export async function setIssueState(
     secondTerminalCloseHandledByUnified?: boolean;
     /** Legacy terminal spelling supplied by the unified writer; commit with status. */
     terminalReason?: string | null;
+    /**
+     * WI-10006010: the physical `harness_slug` of the ONE row this write may touch, already
+     * pinned by the caller (the unified writer pins it once and shares it with the origin
+     * heals). Omitted: pinned here to the row `getIssue` would read. Every statement below is
+     * scoped to it, so a sibling row sharing this feature_id is never written.
+     */
+    harnessSlug?: string | null;
   } = {},
 ): Promise<EngineerIssue | null> {
   const isTerminal = ISSUE_TERMINAL_STATUSES.has(state);
@@ -3455,6 +3579,16 @@ export async function setIssueState(
   let terminalWriteSucceeded = false;
   let terminalWriteWasAttested = false;
   const rows = await boundedOrgTxn(async (tx) => {
+    // WI-10006010: physical identity is (workspace_id, harness_slug, feature_id). Pin ONE row
+    // and scope every statement below to it; keyed on feature_id alone, a close of one row
+    // rewrote every slug twin (3 done/committed twins flipped to dropped on 2026-10-03).
+    // A null/blank harness hint means "use the normal read preference", not "remove the
+    // physical-row predicate". Always resolve one slug so reopen and completion updates
+    // cannot fan out to same-id twins.
+    const slug = await resolveIssuePhysicalSlug(tx, ws, id, opts.harnessSlug);
+    const onBaseRow = () => (slug ? tx`AND harness_slug = ${slug}` : tx``);
+    const onAliasedRow = () => (slug ? tx`AND wi.harness_slug = ${slug}` : tx``);
+    const onViewRow = () => (slug ? tx`AND base_harness_slug = ${slug}` : tx``);
     // Lock the canonical row before any state or completion side effect. A
     // reassignment then waits and observes this write, or wins first and makes
     // the old worker's effect predicate fail.
@@ -3476,9 +3610,21 @@ export async function setIssueState(
          WHERE workspace_id = ${ws} AND feature_id = ${id}
            AND item_kind IN ('bug', 'change', 'task')
            AND origin <> 'remote'
+           ${onBaseRow()}
         FOR UPDATE`;
     const priorRow = prior[0];
     if (!priorRow) return [] as IssueRowDb[];
+    // D-029 (plan unified-bug-pipeline-and-honest-queue-2026-10-05): the bottom issue writer
+    // refuses a needs-human park without an answerable owner ask, read off the LOCKED row, so a
+    // caller that skips setWorkItemState (resolve-core did) cannot write the hold-with-no-clearer
+    // shape. Same predicate as the census and the canonical writer.
+    if (state === 'needs-human' && priorRow.status !== 'needs-human' && !hasActiveStrictHumanAsk(priorRow.payload)) {
+      throw new Error(
+        `work_item '${id}' → 'needs-human' rejected — the item carries no answerable owner ask. Record it first with ` +
+          `work_items:set_blocker { id: '${id}', kind: 'human', capability, ref, summary, nextVerb, defaultIfUnanswered }: ` +
+          'defaultIfUnanswered says what happens if the owner never answers.',
+      );
+    }
     if (opts.acceptedProgramAttempt) {
       const payload = priorRow.payload && typeof priorRow.payload === 'object' &&
         !Array.isArray(priorRow.payload) ? priorRow.payload as Record<string, unknown> : {};
@@ -3503,7 +3649,7 @@ export async function setIssueState(
     const currentEffect = operationClaims && opts.acceptedProgramAttempt
       ? tx`EXISTS (
           SELECT 1 FROM harness_shared.work_items AS wi
-           WHERE wi.workspace_id = ${ws} AND wi.feature_id = ${id}
+           WHERE wi.workspace_id = ${ws} AND wi.feature_id = ${id} ${onAliasedRow()}
              AND ${operationClaims.programRootEffectWhereSql(tx, opts.acceptedProgramAttempt, {
                payload: 'wi.payload', id: 'wi.feature_id', harness: 'wi.harness_slug',
                status: 'wi.status', updated: 'wi.updated_ts',
@@ -3512,7 +3658,7 @@ export async function setIssueState(
       : operationClaims && operationEffectRead
       ? tx`EXISTS (
           SELECT 1 FROM harness_shared.work_items AS wi
-           WHERE wi.workspace_id = ${ws} AND wi.feature_id = ${id}
+           WHERE wi.workspace_id = ${ws} AND wi.feature_id = ${id} ${onAliasedRow()}
              AND ${operationClaims.operationWorkerEffectWhereSql(tx, operationEffectRead, {
                payload: 'wi.payload', id: 'wi.feature_id', harness: 'wi.harness_slug', holder: 'wi.taken_by',
              })}
@@ -3573,13 +3719,15 @@ export async function setIssueState(
                  updated_ts = (extract(epoch FROM now()) * 1000)::bigint
            WHERE workspace_id = ${ws} AND feature_id = ${id}
              AND item_kind IN ('bug', 'change', 'task')
-             AND origin <> 'remote'`;
+             AND origin <> 'remote'
+             ${onBaseRow()}`;
         if (!upgrade) {
           terminalWriteWasAttested = true;
           return await tx<IssueRowDb[]>`
             SELECT ${tx.unsafe(ISSUE_COLS)}
               FROM harness_shared.engineer_issues
              WHERE workspace_id = ${ws} AND issue_id = ${id} AND origin <> 'remote'
+               ${onViewRow()}
              ORDER BY updated_at DESC NULLS LAST`;
         }
       }
@@ -3684,6 +3832,7 @@ export async function setIssueState(
          WHERE workspace_id = ${ws} AND feature_id = ${id}
            AND item_kind IN ('bug', 'change', 'task')
            AND origin <> 'remote'
+           ${onBaseRow()}
            AND ${currentEffect}
         RETURNING feature_id`;
       if (updated.length === 0) return [] as IssueRowDb[];
@@ -3695,6 +3844,7 @@ export async function setIssueState(
         SELECT ${tx.unsafe(ISSUE_COLS)}
           FROM harness_shared.engineer_issues
          WHERE workspace_id = ${ws} AND issue_id = ${id} AND origin <> 'remote'
+           ${onViewRow()}
          ORDER BY updated_at DESC NULLS LAST`;
     }
     if (state === 'needs-human') {
@@ -3707,12 +3857,14 @@ export async function setIssueState(
            SET state = ${state}, assignee = NULL, assigned_at = NULL, last_progress_at = NULL,
                origin = 'local', updated_at = now()
          WHERE workspace_id = ${ws} AND issue_id = ${id}
+           ${onViewRow()}
            AND ${currentEffect}
         RETURNING ${tx.unsafe(ISSUE_COLS)}`;
     }
     return await tx<IssueRowDb[]>`
       UPDATE harness_shared.engineer_issues SET state = ${state}, origin = 'local', updated_at = now()
        WHERE workspace_id = ${ws} AND issue_id = ${id}
+         ${onViewRow()}
          AND ${currentEffect}
       RETURNING ${tx.unsafe(ISSUE_COLS)}`;
   });
@@ -3827,10 +3979,12 @@ export function planItemSourceFromPayloadPatch(
 export async function mergeIssuePayload(
   id: string,
   patch: Record<string, unknown>,
-  opts: { unset?: readonly string[] } = {},
+  opts: { unset?: readonly string[]; harnessSlug?: string | null } = {},
 ): Promise<EngineerIssue | null> {
   const { sql } = getOrgPg();
   const ws = await resolveIssueWorkspace(id);
+  const physicalSlug = await resolveIssuePhysicalSlug(sql, ws, id, opts.harnessSlug);
+  if (physicalSlug === null) return null;
   // The claim-subject baseline is server-owned identity, not caller payload.
   // Coalescing and other bookkeeping legitimately merge arbitrary top-level
   // keys, but must never forge, replace, or remove the baseline that protects
@@ -3876,6 +4030,7 @@ export async function mergeIssuePayload(
            origin = 'local',
            updated_ts = ${Date.now()}
      WHERE workspace_id = ${ws}
+       AND harness_slug = ${physicalSlug}
        AND feature_id = ${id}
        AND item_kind = ANY (ARRAY['bug', 'change', 'task'])
     RETURNING 1 AS ok`;
@@ -3901,6 +4056,7 @@ export async function mergeIssuePayload(
                source_plan_item_ids
           FROM harness_shared.work_items
          WHERE workspace_id = ${ws}
+           AND harness_slug = ${physicalSlug}
            AND feature_id = ${id}
            AND item_kind = ANY (ARRAY['bug', 'change', 'task'])
          FOR UPDATE`;
@@ -3939,7 +4095,7 @@ export async function mergeIssuePayload(
     rows = await updatePayload(sql as OrgSql);
   }
   if (!rows[0]) return null;
-  return getIssueInWorkspace(ws, id);
+  return getIssueInWorkspace(ws, id, { baseHarnessSlug: physicalSlug });
 }
 
 /** Threadable.addPost — comment on the issue (creates the thread on first post). */
@@ -3947,7 +4103,8 @@ export async function commentIssue(
   id: string,
   body: string,
   authorId?: string,
-  opts: { workspaceId?: string; harness?: string | null } = {},
+  /** `writerOwnerId`: see commentWorkItem — the agent whose own text `body` is (P-012 / D-006). */
+  opts: { workspaceId?: string; harness?: string | null; writerOwnerId?: string | null } = {},
 ): Promise<ThreadPostRow | null> {
   const issue = await getIssue(id);
   if (!issue) return null;
@@ -3964,6 +4121,16 @@ export async function commentIssue(
       getSql: () => tx,
       getWorkspaceId: () => opts.workspaceId?.trim() || coordScopeWorkspace(),
     });
+    // P-012 / D-006: seal in THIS transaction (see commentWorkItem).
+    const stored = opts.writerOwnerId?.trim()
+      ? await sealSharedTextInTxOrRefuse(tx, {
+          workspaceId: opts.workspaceId?.trim() || coordScopeWorkspace(),
+          writerOwnerId: opts.writerOwnerId,
+          store: 'work-item-comment',
+          text: body,
+          context: { workItemId: id },
+        })
+      : null;
     const thread = await txThreads.getOrCreateThread(issueRef(id), {
       thread_id: threadId(id),
       title: issue.title,
@@ -3971,7 +4138,7 @@ export async function commentIssue(
       created_ts: issue.createdAt,
       harness_slug: opts.harness ?? undefined,
     });
-    return txThreads.addPost({ thread_id: thread.thread_id, author_id: authorId, body, created_ts: created });
+    return txThreads.addPost({ thread_id: thread.thread_id, author_id: authorId, body: stored?.text ?? body, created_ts: created });
   });
   // Fan-out is best-effort + deadline-bounded (fanoutForObject) — it runs AFTER the
   // durable write commits and can never hang or roll back the caller's comment.

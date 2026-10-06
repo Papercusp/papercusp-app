@@ -271,7 +271,7 @@ export interface FrontierFeature {
  *      tie-break by plan slug; within a group by (order ASC NULLS LAST, id).
  *   4. fill greedily up to `slots`: a higher-priority plan monopolizes the
  *      harness until its ready features can't fill the cap, then the next plan
- *      fills the gap (owner's strict-priority spec) — the blocked_by frontier
+ *      fills the gap (avi's strict-priority spec) — the blocked_by frontier
  *      naturally lets a lower plan fill when a higher plan's features are all
  *      blocked. `slots <= 0` (cap full, or over the cost cap) → start nothing.
  * Also returns `stuck`: work remains but nothing is ready (all remaining are

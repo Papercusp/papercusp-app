@@ -21,6 +21,9 @@
  */
 import { defineTool, type RouteContext } from '@papercusp/agent-mcp';
 import { getOrgPg } from '@papercusp/db-org';
+import { unsealRowsForOwner } from '../../../personal-vault/shared-store-seal';
+import { activeWorkspaceId } from '../../../workspace-registry';
+import { projectChatFailureTranscript } from '../../../chat-model-failure';
 
 async function readBody(req: Request): Promise<Record<string, unknown>> {
   try {
@@ -77,7 +80,10 @@ async function dispatch(req: Request, ctx: RouteContext): Promise<Response> {
           FROM harness_shared.agent_chats_consolidated
          WHERE id = ${id}
          LIMIT 1`;
-      return Response.json({ chat: rows[0] ?? null });
+      const row = rows[0];
+      return Response.json({
+        chat: row ? { ...row, transcript: projectChatFailureTranscript(row.transcript) } : null,
+      });
     }
 
     // ── deliberation threads — coord:thread / deliberate / vote posts, attached
@@ -107,7 +113,13 @@ async function dispatch(req: Request, ctx: RouteContext): Promise<Response> {
              ORDER BY created_at ASC NULLS LAST
              LIMIT 1000`,
       ]);
-      return Response.json({ thread: thread[0] ?? null, posts });
+      // WI-10005548 / D-006: the owner's Conversations view shows a sealed post's text.
+      const ownerPosts = await unsealRowsForOwner([...posts], {
+        workspaceId: activeWorkspaceId(),
+        textOf: (post) => post.body,
+        withText: (post, body) => ({ ...post, body }),
+      });
+      return Response.json({ thread: thread[0] ?? null, posts: ownerPosts });
     }
 
   } catch (e) {

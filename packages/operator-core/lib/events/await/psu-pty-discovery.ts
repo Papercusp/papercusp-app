@@ -23,13 +23,13 @@ import { join } from 'node:path';
 import {
   readFileSync,
   existsSync,
-  readdirSync,
-  unlinkSync,
   statSync,
   openSync,
   readSync,
   closeSync,
   appendFileSync,
+  renameSync,
+  promises as fsp,
 } from 'node:fs';
 import net from 'node:net';
 import { managedSetInterval } from '@papercusp/scheduled-registry';
@@ -48,7 +48,17 @@ export interface PsuPtyHost {
   ownerId: string;
   advSessionId: string | null;
   pid: number;
-  ptyPid: number;
+  /** The hosted CLI's pid. `null` while the host has PARKED its child
+   *  (psu-process-free-parking-2026-10-06): the CLI was stopped to free memory
+   *  and the host never advertises a dead, recyclable pid. */
+  ptyPid: number | null;
+  /** psu-process-free-parking-2026-10-06: the host stopped its idle CLI and
+   *  will resume the same conversation on the next keystroke or control-socket
+   *  delivery. The host, socket and session stay live — a parked host is
+   *  WAKEABLE, never dead. Absent on hosts that predate parking. */
+  parked?: boolean;
+  /** Epoch ms the current park began; null/absent when not parked. */
+  parkedAt?: number | null;
   /** Authenticated interactive tab-shell pid captured inside the visible console.
    *  Additive and absent/null for headless or pre-EI-24399199756155153 hosts.
    *  Consumers must revalidate its console birth identity immediately before use. */
@@ -259,6 +269,10 @@ export function readHostEventTail(
   } catch {
     return [];
   }
+  return parseHostEventTail(text);
+}
+
+function parseHostEventTail(text: string): PtyHostEvent[] {
   const out: PtyHostEvent[] = [];
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
@@ -270,6 +284,42 @@ export function readHostEventTail(
     }
   }
   return out;
+}
+
+/**
+ * {@link readHostEventTail} without blocking the event loop (WI-10004559).
+ *
+ * The psu-pty directory is shared by every psu host on the box and holds thousands of
+ * ledgers. When the ext4 journal stalls, a host creating or renaming a file there holds
+ * the directory's inode lock, and any thread that opens or stats a path in it waits in
+ * D-state behind that lock. A synchronous read on the operator's main thread therefore
+ * freezes the whole process, and the event-loop sentinel kills it 20s later, dropping
+ * every in-flight MCP request. Periodic sweeps must use this variant: the wait lands on
+ * a libuv worker thread and the event loop keeps serving.
+ *
+ * Same contract as the sync form: a missing or unreadable ledger yields `[]`.
+ */
+export async function readHostEventTailAsync(
+  ownerId: string,
+  dir: string = PSU_PTY_DIR,
+  maxBytes: number = RESPAWN_SCAN_TAIL_BYTES,
+): Promise<PtyHostEvent[]> {
+  let text: string;
+  try {
+    const fh = await fsp.open(join(dir, `${sanitizeKey(ownerId)}.events.jsonl`), 'r');
+    try {
+      const { size } = await fh.stat();
+      const start = Math.max(0, size - maxBytes);
+      const buf = Buffer.alloc(size - start);
+      await fh.read(buf, 0, buf.length, start);
+      text = buf.toString('utf8');
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return [];
+  }
+  return parseHostEventTail(text);
 }
 
 /**
@@ -306,28 +356,65 @@ export function latestRespawnNativeSession(
   try {
     const startedAt = hostStartedAt(ownerId, dir);
     if (startedAt == null && !opts.allowWithoutHost) return null;
-    // Scan backwards: the newest respawn wins.
-    const events = readHostEventTail(ownerId, dir, RESPAWN_SCAN_TAIL_BYTES);
-    for (let i = events.length - 1; i >= 0; i--) {
-      const ev = events[i] as { kind?: unknown; mode?: unknown; nativeId?: unknown; ts?: unknown };
-      // Drill respawns rotate the native id exactly like a real one.
-      if (ev.kind !== 'respawned' && ev.kind !== 'carry-drill-respawned') continue;
-      // With no discovery file, the ONLY trustworthy producer is the Claude
-      // recovery hook: it writes owner-scoped mode=self-relaunch after deriving
-      // the new coord identity and native id together. A carry/drill row without
-      // current-host metadata could belong to an older host incarnation, which
-      // is exactly what the normal startedAt fence prevents us from trusting.
-      if (startedAt == null && ev.mode !== 'self-relaunch') return null;
-      // A respawn from a PREVIOUS host (and everything before it) is history.
-      const ts = typeof ev.ts === 'string' ? Date.parse(ev.ts) : NaN;
-      if (!Number.isFinite(ts) || (startedAt != null && ts < startedAt)) return null;
-      const nativeId = typeof ev.nativeId === 'string' && ev.nativeId ? ev.nativeId : null;
-      return nativeId ? { nativeId, atMs: ts } : null;
-    }
-    return null;
+    return pickLatestRespawn(readHostEventTail(ownerId, dir, RESPAWN_SCAN_TAIL_BYTES), startedAt);
   } catch {
     return null;
   }
+}
+
+/**
+ * {@link latestRespawnNativeSession} without blocking the event loop (WI-10005220).
+ *
+ * The sync form stats and reads two files in the shared psu-pty directory. While the
+ * ext4 journal is slow, each of those can wait in D-state behind another host's
+ * create/rename there (the WI-10004559 mechanism), and on bg-host's main thread that
+ * froze the whole process for 0.6-2.0 s per call (measured 2026-10-02: six such stalls,
+ * 6.3 s of a 30 s profile, all in this read via resolveSessionRefReconciled). Any
+ * caller that runs per owner or on a sweep must use this form; both share
+ * {@link pickLatestRespawn}, so they cannot disagree on the answer.
+ */
+export async function latestRespawnNativeSessionAsync(
+  ownerId: string,
+  dir: string = PSU_PTY_DIR,
+  opts: LatestRespawnNativeIdOptions = {},
+): Promise<LatestRespawnNativeSession | null> {
+  try {
+    const startedAt = await hostStartedAtAsync(ownerId, dir);
+    if (startedAt == null && !opts.allowWithoutHost) return null;
+    return pickLatestRespawn(
+      await readHostEventTailAsync(ownerId, dir, RESPAWN_SCAN_TAIL_BYTES),
+      startedAt,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** The rung-3 decision over an already-read event tail, shared by the sync and async
+ *  readers. `startedAt` is the CURRENT host's start (null = no discovery file, which
+ *  the caller only lets through for `allowWithoutHost`). */
+function pickLatestRespawn(
+  events: PtyHostEvent[],
+  startedAt: number | null,
+): LatestRespawnNativeSession | null {
+  // Scan backwards: the newest respawn wins.
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i] as { kind?: unknown; mode?: unknown; nativeId?: unknown; ts?: unknown };
+    // Drill respawns rotate the native id exactly like a real one.
+    if (ev.kind !== 'respawned' && ev.kind !== 'carry-drill-respawned') continue;
+    // With no discovery file, the ONLY trustworthy producer is the Claude
+    // recovery hook: it writes owner-scoped mode=self-relaunch after deriving
+    // the new coord identity and native id together. A carry/drill row without
+    // current-host metadata could belong to an older host incarnation, which
+    // is exactly what the normal startedAt fence prevents us from trusting.
+    if (startedAt == null && ev.mode !== 'self-relaunch') return null;
+    // A respawn from a PREVIOUS host (and everything before it) is history.
+    const ts = typeof ev.ts === 'string' ? Date.parse(ev.ts) : NaN;
+    if (!Number.isFinite(ts) || (startedAt != null && ts < startedAt)) return null;
+    const nativeId = typeof ev.nativeId === 'string' && ev.nativeId ? ev.nativeId : null;
+    return nativeId ? { nativeId, atMs: ts } : null;
+  }
+  return null;
 }
 
 /** WI-5075 compatibility wrapper: return only the native id while the
@@ -355,17 +442,34 @@ export function latestRespawnNativeId(
  */
 export function hostStartedAt(ownerId: string, dir: string = PSU_PTY_DIR): number | null {
   try {
-    const meta = JSON.parse(
-      readFileSync(join(dir, `${sanitizeKey(ownerId)}.json`), 'utf8'),
-    ) as { ownerId?: unknown; startedAt?: unknown };
-    // EI-151: the same cross-owner misroute guard findLiveHost applies.
-    if (typeof meta.ownerId === 'string' && meta.ownerId !== ownerId) return null;
-    return typeof meta.startedAt === 'number' && Number.isFinite(meta.startedAt)
-      ? meta.startedAt
-      : null;
+    return parseHostStartedAt(ownerId, readFileSync(join(dir, `${sanitizeKey(ownerId)}.json`), 'utf8'));
   } catch {
     return null;
   }
+}
+
+/** {@link hostStartedAt} off the event loop (WI-10005220) — same contract, same parse. */
+export async function hostStartedAtAsync(
+  ownerId: string,
+  dir: string = PSU_PTY_DIR,
+): Promise<number | null> {
+  try {
+    return parseHostStartedAt(
+      ownerId,
+      await fsp.readFile(join(dir, `${sanitizeKey(ownerId)}.json`), 'utf8'),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function parseHostStartedAt(ownerId: string, raw: string): number | null {
+  const meta = JSON.parse(raw) as { ownerId?: unknown; startedAt?: unknown };
+  // EI-151: the same cross-owner misroute guard findLiveHost applies.
+  if (typeof meta.ownerId === 'string' && meta.ownerId !== ownerId) return null;
+  return typeof meta.startedAt === 'number' && Number.isFinite(meta.startedAt)
+    ? meta.startedAt
+    : null;
 }
 
 function pidAlive(pid: number): boolean {
@@ -391,7 +495,7 @@ const defaultReadCmdline: ReadPidCmdline = (pid) => {
   }
 };
 
-/** The verify-identity seam findLiveHost/listLiveHosts accept (default `pidIsPsuHost`).
+/** The verify-identity seam findLiveHost/listLiveHostsAsync accept (default `pidIsPsuHost`).
  *  A test writing `process.pid` as a live-host stand-in injects `() => true`. Local type
  *  (not exported): callers pass an inline `{ verifyIdentity: () => … }`. */
 type VerifyPidIdentity = (pid: number) => boolean;
@@ -537,34 +641,51 @@ export function selfCompactionAvailability(
   return { available: true, reason: null, host };
 }
 
+async function pathExistsAsync(p: string): Promise<boolean> {
+  try {
+    await fsp.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * EVERY live psu-pty host on this box (the fleet's interactive sessions), not
  * just one owner's. Same self-validation as findLiveHost (recorded ownerId
- * present, socket exists, pid alive) so a crashed host's leftover file is
- * skipped. Consumers: desktop-window-liveness's ancestry-based on-desktop
- * detection (WI-1586) — the live host pid is the one session handle that cannot
- * rot, unlike the launch-recorded adv_sessions window_id/pid. Best-effort: a
- * missing dir or unreadable file yields fewer hosts, never a throw.
+ * present, socket exists, pid alive, psu-host identity — WI-2339 defect #2) so a
+ * crashed host's leftover file or a recycled pid is skipped. Consumers include
+ * desktop-window-liveness's ancestry-based on-desktop detection (WI-1586) — the
+ * live host pid is the one session handle that cannot rot. Best-effort: a missing
+ * dir or unreadable file yields fewer hosts, never a throw.
+ *
+ * ASYNC ONLY, by design (WI-10004559, WI-10004587). The directory scan, the per-host
+ * meta read and the socket check all touch the shared psu-pty directory (~3.5k
+ * entries), which holds the calling thread in D-state (wchan iterate_dir) for 20s+
+ * during an ext4 journal stall. On the operator main thread that froze every MCP
+ * request on the worker and got it SIGKILLed by the event-loop sentinel (#1155).
+ * The synchronous `listLiveHosts` was deleted so that a new caller cannot reach for
+ * it; `psu-pty-dir-async-sweeps.test.ts` guards against its return.
  */
-export function listLiveHosts(
+export async function listLiveHostsAsync(
   dir: string = PSU_PTY_DIR,
   opts: { verifyIdentity?: VerifyPidIdentity } = {},
-): PsuPtyHost[] {
+): Promise<PsuPtyHost[]> {
   startJanitor();
   const verify = opts.verifyIdentity ?? pidIsPsuHost;
   let files: string[];
   try {
-    files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    files = (await fsp.readdir(dir)).filter((f) => f.endsWith('.json'));
   } catch {
-    return []; // no discovery dir yet → no live interactive sessions
+    return [];
   }
   const out: PsuPtyHost[] = [];
   for (const f of files) {
     try {
-      const h = JSON.parse(readFileSync(join(dir, f), 'utf8')) as PsuPtyHost;
-      // WI-2339 defect #2: same process-identity gate as findLiveHost — a recycled
-      // pid held by an unrelated process must not count as a live interactive host.
-      if (h && h.ownerId && h.sock && existsSync(h.sock) && h.pid && pidAlive(h.pid) && verify(h.pid)) out.push(h);
+      const h = JSON.parse(await fsp.readFile(join(dir, f), 'utf8')) as PsuPtyHost;
+      if (h && h.ownerId && h.sock && h.pid && (await pathExistsAsync(h.sock)) && pidAlive(h.pid) && verify(h.pid)) {
+        out.push(h);
+      }
     } catch {
       /* unreadable / partial write — skip this host */
     }
@@ -572,12 +693,45 @@ export function listLiveHosts(
   return out;
 }
 
-function safeUnlink(p: string): void {
+async function safeUnlinkAsync(p: string): Promise<void> {
   try {
-    if (existsSync(p)) unlinkSync(p);
+    await fsp.unlink(p);
   } catch {
-    /* best-effort — a concurrent host cleaning up the same file races harmlessly */
+    /* best-effort — already gone, or a concurrent host cleaned it up */
   }
+}
+
+/** Age past which a `<target>.<pid>.tmp` staging file is treated as abandoned. The
+ *  host renames its staging file within the same synchronous call that wrote it,
+ *  so an hour is several orders of magnitude of margin. */
+export const ABANDONED_TEMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** The host's atomic-write staging name: `<target>.<pid>.tmp` (psu-pty-host.mjs
+ *  writeMeta and the events-ledger trim). */
+const ATOMIC_STAGING_RE = /\.\d+\.tmp$/;
+
+/** Unlink staging files in `entries` older than `maxAgeMs`. Reuses the caller's
+ *  directory listing so the janitor iterates the directory once. Returns the count. */
+async function pruneAbandonedTempFilesAsync(
+  dir: string,
+  entries: readonly string[],
+  nowMs: number,
+  maxAgeMs: number,
+): Promise<number> {
+  let removed = 0;
+  for (const f of entries) {
+    if (!ATOMIC_STAGING_RE.test(f)) continue;
+    const p = join(dir, f);
+    try {
+      const st = await fsp.stat(p);
+      if (!st.isFile() || nowMs - st.mtimeMs < maxAgeMs) continue;
+      await fsp.unlink(p);
+      removed += 1;
+    } catch {
+      /* raced with its writer or another sweep — skip */
+    }
+  }
+  return removed;
 }
 
 /**
@@ -585,40 +739,61 @@ function safeUnlink(p: string): void {
  * (WI-2510). `pruneDead()` in psu-pty-host.mjs runs ONLY opportunistically — when a NEW
  * host boots on the box, scanning every file — so on a box with no new psu launches for
  * hours, a dead host's `~/.papercusp/psu-pty/<owner>.json` (+ orphaned socket) lingers
- * indefinitely (a slow disk leak; `listLiveHosts` also pays a per-file /proc read as they
+ * indefinitely (a slow disk leak; `listLiveHostsAsync` also pays a per-file /proc read as they
  * accumulate). WI-2339 fix B already closed the correctness risk (a stale file can no
  * longer masquerade as a live host, via `pidIsPsuHost`'s cmdline cross-check), so this is
- * pure hygiene — it reuses the EXACT SAME liveness test `findLiveHost`/`listLiveHosts` apply
+ * pure hygiene — it reuses the EXACT SAME liveness test `findLiveHost`/`listLiveHostsAsync` apply
  * (pid alive + socket exists + `pidIsPsuHost` identity), so it only ever removes a file that
  * already reads as "no live host" to every consumer; a corrupt/unreadable file is pruned too
  * (it can never resolve to a live host either). Returns the count removed, for tests/logging.
+ *
+ * ASYNC ONLY (WI-10004559, WI-10004587): the standing janitor runs it on the operator
+ * main thread, and a synchronous scan of the psu-pty directory blocks that thread in
+ * D-state during a journal stall. The synchronous `pruneDeadDiscoveryFiles` was deleted.
+ *
+ * It also reaps ABANDONED atomic-write staging files (WI-10004784), counted in the
+ * same return value. The host writes `<owner>.json` and trims `<owner>.events.jsonl`
+ * through `<target>.<pid>.tmp` + rename(2). A host that dies between the write and
+ * the rename leaves the staging file behind, and no other sweep removes one: the
+ * `.json` glob above cannot match it, and the events-ingest routine only globs
+ * `.events.jsonl`. Measured 2026-10-01: 35 of them, the oldest from 2026-08-20.
+ * A live writer renames its staging file within the same synchronous call, so one
+ * older than {@link ABANDONED_TEMP_MAX_AGE_MS} has no writer left. The ledgers
+ * themselves are NOT this janitor's: the ingest routine deletes each one 14 days after
+ * its last write, once its rows are in Postgres.
  */
-export function pruneDeadDiscoveryFiles(
+export async function pruneDeadDiscoveryFilesAsync(
   dir: string = PSU_PTY_DIR,
-  opts: { verifyIdentity?: VerifyPidIdentity } = {},
-): number {
+  opts: { verifyIdentity?: VerifyPidIdentity; nowMs?: number; tempMaxAgeMs?: number } = {},
+): Promise<number> {
   const verify = opts.verifyIdentity ?? pidIsPsuHost;
-  let files: string[];
+  let entries: string[];
   try {
-    files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    entries = await fsp.readdir(dir);
   } catch {
     return 0; // no discovery dir yet — nothing to prune
   }
-  let pruned = 0;
+  const files = entries.filter((f) => f.endsWith('.json'));
+  let pruned = await pruneAbandonedTempFilesAsync(
+    dir,
+    entries,
+    opts.nowMs ?? Date.now(),
+    opts.tempMaxAgeMs ?? ABANDONED_TEMP_MAX_AGE_MS,
+  );
   for (const f of files) {
     const metaPath = join(dir, f);
     let h: PsuPtyHost | null = null;
     try {
-      h = JSON.parse(readFileSync(metaPath, 'utf8')) as PsuPtyHost;
+      h = JSON.parse(await fsp.readFile(metaPath, 'utf8')) as PsuPtyHost;
     } catch {
-      safeUnlink(metaPath); // corrupt/partial write — can never resolve to a live host
+      await safeUnlinkAsync(metaPath); // corrupt/partial write — can never resolve to a live host
       pruned += 1;
       continue;
     }
-    const alive = !!(h && h.sock && existsSync(h.sock) && h.pid && pidAlive(h.pid) && verify(h.pid));
+    const alive = !!(h && h.sock && h.pid && (await pathExistsAsync(h.sock)) && pidAlive(h.pid) && verify(h.pid));
     if (alive) continue;
-    safeUnlink(metaPath);
-    if (h?.sock) safeUnlink(h.sock);
+    await safeUnlinkAsync(metaPath);
+    if (h?.sock) await safeUnlinkAsync(h.sock);
     pruned += 1;
   }
   return pruned;
@@ -631,7 +806,7 @@ const _janitorGlobals = globalThis as JanitorGlobals;
 
 /**
  * Arm the standing sweep once (WI-2510), idempotently. Started LAZILY on first real use
- * (`findLiveHost` / `listLiveHosts`) rather than at module-import time — mirrors
+ * (`findLiveHost` / `listLiveHostsAsync`) rather than at module-import time — mirrors
  * `pty-bridge.ts`'s `startReaper()` pattern — so importing this module in isolation (e.g. a
  * unit test exercising `sanitizeKey`/`pidIsPsuHost`) never arms a real background timer;
  * only the operator's actual runtime use of the discovery path (wake delivery, desktop
@@ -644,7 +819,8 @@ function startJanitor(): void {
     'psu-pty-discovery-janitor',
     JANITOR_INTERVAL_MS,
     () => {
-      pruneDeadDiscoveryFiles();
+      // Async (WI-10004559): this runs on the operator's main thread.
+      void pruneDeadDiscoveryFilesAsync().catch(() => {});
     },
     { category: 'global-sweep' },
   );
@@ -697,7 +873,7 @@ export interface InjectHostResult {
  * verdict. Prefer it wherever booking a durable delivery record; `injectIntoHost` remains the
  * boolean-returning wrapper for the ~100 call sites that only branch on success.
  */
-/** Append-only sender-side audit log. `.jsonl`, so `pruneDeadDiscoveryFiles`
+/** Append-only sender-side audit log. `.jsonl`, so `pruneDeadDiscoveryFilesAsync`
  *  (which globs `.json` and unlinks anything that fails to parse as a discovery
  *  record) can never reap it.
  *
@@ -758,33 +934,75 @@ export function sockOwnerIdFromPath(sock: string): string | null {
  * The ownerId the HOST ITSELF recorded for this socket — the authoritative binding,
  * read from the discovery records rather than inferred from a filename.
  *
- * Only consulted when the cheap path check disagrees, because it costs a directory
- * scan. A socket path is allowed to be non-canonical (a caller passes whatever
- * `host.sock` the meta file holds), so a filename disagreement is a REASON TO LOOK,
- * never a verdict on its own.
+ * Only consulted when the cheap path check disagrees. A socket path is allowed to be
+ * non-canonical (a caller passes whatever `host.sock` the meta file holds), so a
+ * filename disagreement is a REASON TO LOOK, never a verdict on its own.
+ *
+ * WI-10004698: this reads at most TWO named records, never the directory. It used to
+ * readdirSync all of ~/.papercusp/psu-pty (~3,500 entries) on the operator main
+ * thread, and during an ext4 journal stall that scan sits in D-state at wchan
+ * iterate_dir for 10-24s, freezing every in-flight MCP request (owner directive
+ * #1155, WI-10004587). The two candidates are the only records a real binding can
+ * live under: the envelope owner's own record (a correctly-bound delivery on a
+ * rebound, non-canonical socket) and the record named by the socket filename (a
+ * misroute onto another owner's canonical socket). A socket recorded under a THIRD
+ * owner whose name matches neither is reported indeterminate, which the caller
+ * already counts and audits; it is not accused.
  */
-function recordedOwnerIdForSock(sock: string): string | null {
-  try {
-    for (const f of readdirSync(PSU_PTY_DIR)) {
-      if (!f.endsWith('.json')) continue;
-      try {
-        const h = JSON.parse(readFileSync(join(PSU_PTY_DIR, f), 'utf8')) as Partial<PsuPtyHost>;
-        if (h && h.sock === sock && typeof h.ownerId === 'string' && h.ownerId.length > 0) {
-          return h.ownerId;
-        }
-      } catch {
-        /* a corrupt/partial record is not evidence either way */
+function recordedOwnerIdForSock(sock: string, envelopeOwnerId: string | undefined): string | null {
+  const candidates = new Set<string>();
+  if (typeof envelopeOwnerId === 'string' && envelopeOwnerId.length > 0) {
+    candidates.add(sanitizeKey(envelopeOwnerId));
+  }
+  const fromPath = sockOwnerIdFromPath(sock);
+  if (fromPath != null) candidates.add(fromPath);
+  for (const key of candidates) {
+    try {
+      const h = JSON.parse(readFileSync(join(PSU_PTY_DIR, `${key}.json`), 'utf8')) as Partial<PsuPtyHost>;
+      if (h && h.sock === sock && typeof h.ownerId === 'string' && h.ownerId.length > 0) {
+        return h.ownerId;
       }
+    } catch {
+      /* missing, corrupt or partial record: not evidence either way */
     }
-  } catch {
-    /* no discovery dir — indeterminate */
   }
   return null;
 }
 
+/** Size cap for the sender inject audit log, in bytes.
+ *
+ *  WI-10004854: the log was append-only with no cap (1.6 MB / 10.5k rows in a
+ *  month, ~57 KB/day). When it reaches the cap it is renamed to `<path>.1`,
+ *  replacing the previous `.1`, so the log never holds more than about twice the cap. 4 MiB
+ *  keeps about two months of rows in each generation at the measured rate. Override
+ *  with PAPERCUSP_PSU_PTY_INJECT_AUDIT_MAX_BYTES; a non-numeric or non-positive
+ *  value keeps the default. */
+const INJECT_AUDIT_MAX_BYTES_DEFAULT = 4 * 1024 * 1024;
+
+function injectAuditMaxBytes(): number {
+  const raw = Number(process.env.PAPERCUSP_PSU_PTY_INJECT_AUDIT_MAX_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : INJECT_AUDIT_MAX_BYTES_DEFAULT;
+}
+
+/** Rotate `path` to `path.1` once it has reached the cap. A missing file is the
+ *  normal first-write case, not an error. Exported for the rotation test. */
+export function rotateInjectAuditIfFull(path: string, maxBytes: number = injectAuditMaxBytes()): boolean {
+  let size: number;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return false;
+  }
+  if (size < maxBytes) return false;
+  renameSync(path, `${path}.1`);
+  return true;
+}
+
 function appendInjectAudit(row: Record<string, unknown>): void {
   try {
-    appendFileSync(injectAuditPath(), `${JSON.stringify({ ts: new Date().toISOString(), ...row })}\n`);
+    const path = injectAuditPath();
+    rotateInjectAuditIfFull(path);
+    appendFileSync(path, `${JSON.stringify({ ts: new Date().toISOString(), ...row })}\n`);
   } catch {
     /* A diagnostic must never be able to fail a delivery. */
   }
@@ -831,7 +1049,7 @@ export function auditInjectOwnerBinding(
       // whatever `sock` the discovery record holds. Consult the authoritative
       // binding the host wrote before accusing anyone of a misroute — a detector
       // that cries wolf on a rebound socket is one people learn to ignore.
-      const recorded = recordedOwnerIdForSock(sock);
+      const recorded = recordedOwnerIdForSock(sock, msg.ownerId);
       if (recorded === null) {
         // NOT an accusation — the verdict stays `indeterminate`, because an absence of
         // evidence is not a misroute. But it is not NOTHING either: the two cheap

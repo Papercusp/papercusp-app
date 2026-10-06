@@ -31,7 +31,7 @@ export default defineTool({
   capability: 'activity:report',
   guidance: {
     when:
-      'From a turn-end / pre-tool-use / notification hook the moment it observes a structured ask (AskUserQuestion/ExitPlanMode mirror), a permission-wait, or that ask being answered. Almost never called by hand.',
+      'From a turn-end / pre-tool-use / notification hook the moment it observes a structured ask (AskUserQuestion/ExitPlanMode mirror), a permission-wait, or that ask being answered. Almost never called by hand — EXCEPT kind:"suppressed_ask": call it yourself when you decide NOT to re-send an owner ask ("do not ask a 4th time") instead of burying that in a checkpoint. Pass question + decideBy (ISO) + defaultIfUnanswered; it stays on the owner feed after you end.',
     notWhen:
       'To READ pending gates use `sessions:list-pending-gates`. For a genuine owner-facing escalation card, `coord:escalate` remains the preferred ask (D-001) — this tool is the blocked-SESSION signal, not the card itself.',
     seeAlso: ['sessions:list-pending-gates (read the open gates)', 'journal:record-turn (the sibling turn-end ingest)'],
@@ -41,13 +41,23 @@ export default defineTool({
   args: z.object({
     sessionId: z.string().min(1).max(256).describe('The native client session/thread id.'),
     client: z.enum(['claude', 'omp', 'codex']).default('claude'),
-    kind: z.enum(['ask', 'permission_wait', 'cleared']),
+    kind: z.enum(['ask', 'permission_wait', 'suppressed_ask', 'cleared']),
     refId: z
       .string()
       .min(1)
       .max(256)
       .describe('Correlation id you generate for ask/permission_wait; repeat the SAME value on the matching cleared event.'),
     question: z.string().max(2000).optional(),
+    decideBy: z
+      .string()
+      .max(64)
+      .optional()
+      .describe("ISO-8601 deadline for the owner's answer. REQUIRED for kind 'suppressed_ask'."),
+    defaultIfUnanswered: z
+      .string()
+      .max(500)
+      .optional()
+      .describe("What you WILL do if the owner never answers. REQUIRED for kind 'suppressed_ask'."),
     options: z.array(optionSpec).max(20).optional(),
     text: z.string().max(4000).optional().describe('Free-text context (e.g. the parsed question-shaped turn-final text).'),
     ownerId: z.string().max(256).optional().describe("The asking agent's coord ownerId, when known — tags the gate."),
@@ -75,6 +85,42 @@ export default defineTool({
     }
 
     const question = args.question ?? args.text ?? null;
+
+    // A SUPPRESSED ask is the agent's own declaration that it owes the owner a decision it will
+    // not re-send ("DO NOT ask a 4th time"). With no tool_use to wait on it would otherwise be
+    // invisible, so admission demands the three things that make it actionable from ONE
+    // plans:attention read: what is being decided, the default, and the deadline. Refused via the
+    // handler return (a structured, retryable result), not a new refusal-contract key.
+    let decideBy: Date | null = null;
+    if (args.kind === 'suppressed_ask') {
+      const missing = [
+        !question && 'question',
+        !args.decideBy && 'decideBy',
+        !args.defaultIfUnanswered && 'defaultIfUnanswered',
+      ].filter((m): m is string => typeof m === 'string');
+      if (missing.length > 0) {
+        return {
+          data: {
+            ok: false,
+            gateId: null,
+            state: 'refused',
+            reason: `suppressed_ask requires ${missing.join(', ')}: state the decision, the default you will proceed under, and the ISO deadline.`,
+          },
+        };
+      }
+      decideBy = new Date(args.decideBy as string);
+      if (Number.isNaN(decideBy.getTime())) {
+        return {
+          data: {
+            ok: false,
+            gateId: null,
+            state: 'refused',
+            reason: `decideBy "${args.decideBy}" is not a parseable ISO-8601 datetime.`,
+          },
+        };
+      }
+    }
+
     const { id, outcome } = await openOrTouchGate({
       workspaceId,
       sessionId: args.sessionId,
@@ -84,8 +130,10 @@ export default defineTool({
       ownerId,
       question,
       options: args.options ?? null,
-      source: 'hook',
+      source: args.kind === 'suppressed_ask' ? 'agent' : 'hook',
       harnessSlug: args.harness ?? null,
+      decideBy,
+      defaultIfUnanswered: args.kind === 'suppressed_ask' ? args.defaultIfUnanswered : undefined,
     });
     return { data: { ok: true, gateId: id || null, state: outcome === 'opened' ? 'opened' : 'already_open' } };
   },

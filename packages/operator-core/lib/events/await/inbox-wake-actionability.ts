@@ -100,8 +100,15 @@ export function classifyInboxWakeMessage(env: unknown): InboxWakeActionability {
   if (expects === 'action' || expects === 'answer' || env.expectsReply === true) {
     return { actionable: true, class: 'directed-ask', reason: `directed ask (expects ${expects ?? 'reply'}) always wakes` };
   }
+  // coord:send persists explicit wake intent as boolean true on the message
+  // envelope (`extra.wake = true`), even when the caller used the canonical
+  // 'required'/'optimistic' mode. Keep recognizing the string form for older
+  // envelopes and classify the persisted wire form as an explicit action too.
   if (env.wake === 'required') {
     return { actionable: true, class: 'required-wake', reason: "sender required the wake (wake:'required')" };
+  }
+  if (env.wake === true) {
+    return { actionable: true, class: 'actionable', reason: 'sender requested a wake (persisted wake:true)' };
   }
   const kind = typeof env.kind === 'string' ? env.kind : null;
   // A bare lifecycle receipt carries no ask and no free text (coord:ack takes only msg_id).

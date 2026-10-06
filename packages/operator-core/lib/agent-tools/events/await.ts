@@ -13,6 +13,15 @@ import { z } from 'zod';
 import { dataConditionSchema } from '@papercusp/rules';
 import { defineTool, SU_ROLES } from '@papercusp/agent-mcp';
 import { resolveConcreteHarnessSlug } from '../_harness-scope';
+import {
+  gitSyncAwaitScope,
+  gitSyncInstallGlobalKind,
+  gitSyncScopePayloadFilter,
+  gitSyncScopeRequiredResult,
+  gitSyncShaSuffixProblem,
+  gitSyncShaSuffixRefusal,
+  type GitSyncAwaitScope,
+} from './git-sync-await-scope';
 import { resolveAgentIdentity } from '../coordination/identity';
 import { getMessageById } from '../coordination/messages';
 import { readGateRefs } from '../coordination/ref-hydrate';
@@ -559,6 +568,11 @@ export default defineTool({
     // One concrete SHA's proven egress and one durable task's first terminal
     // transition cannot become untrue or recur, so a late exact-key registrant must
     // consume the latch. Patterns and bare streams remain ordinary edge waits.
+    // EI-24719187042784648: git-sync emits only full-sha suffixed keys, so a short sha or a
+    // non-sha suffix (`git-sync:committed:papercusp`) names a key that can never fire. Refuse
+    // before any latch probe or registration rather than parking the caller until timeout.
+    const gitSyncShaProblem = !patternAwait ? gitSyncShaSuffixProblem(eventKey) : null;
+    if (gitSyncShaProblem) return gitSyncShaSuffixRefusal(eventKey, gitSyncShaProblem, 'events:await');
     const gitSyncEgressTarget = !patternAwait ? /^git-sync:egressed:([^:]+)$/.exec(eventKey) : null;
     const taskTerminalTarget = !patternAwait ? /^task:terminal:([^:]+)$/.exec(eventKey) : null;
     const monotonicLatchTarget = gitSyncEgressTarget ?? taskTerminalTarget;
@@ -1153,6 +1167,27 @@ export default defineTool({
       }
     }
 
+    // ── EI-24719187042784648: the same registration-time narrowing for git-sync's GLOBAL
+    // commit/egress keys (bare, or the `:*` glob over the sha segment). git-sync-action emits
+    // them once per git-sync INSTALL — every harness, and every separately-synced submodule
+    // install such as papercusp/libs/generic/search — so an unscoped one-shot wait is consumed
+    // by whichever install commits first. Measured 2026-09-30 20:14Z: an su waiting for the
+    // papercusp superproject commit was woken by a libs/generic/search submodule commit.
+    // Unlike the gate keys, the emitter stamps `payload.installSlug` with the install slug, so
+    // the caller's concrete harness IS the right scope (the git-sync:await sugar resolves it
+    // the same way, through the same helper). No resolvable harness ⇒ REFUSE, matching the
+    // sugar, instead of registering a wait that any install can consume.
+    let autoScopedGitSync: GitSyncAwaitScope | null = null;
+    const gitSyncKind = eventKey ? gitSyncInstallGlobalKind(eventKey) : null;
+    if (gitSyncKind && effectivePayloadFilter == null) {
+      const scope = gitSyncAwaitScope(null, ctx);
+      if (!scope) return gitSyncScopeRequiredResult(eventKey, 'events:await');
+      // Captured before registration so a commit event from an earlier cycle, delayed in
+      // the fire-and-forget emit queue, cannot satisfy this new wait (see git-sync:await).
+      effectivePayloadFilter = gitSyncScopePayloadFilter(scope, gitSyncKind, Date.now());
+      autoScopedGitSync = scope;
+    }
+
     // ── EI-14225: retire the CALLER'S OWN prior pending registration(s) on this
     // EXACT key before adding a new one. events:await is one-shot by construction
     // (the caller only ever wants ONE outstanding wait per key) — the canonical
@@ -1658,6 +1693,14 @@ export default defineTool({
                   unscoped_claimable_await: true,
                   unscoped_claimable_advice:
                     'EI-13846: no payload_filter was passed, and you have no claim spec that narrows over the claimable payload (id/kind/title/plan/tags/goal), so this await is UNSCOPED — it will wake you on EVERY hive-wide work-item:claimable emission, which fires constantly on a large board. If you are fleet-scoped, confirm scheduler:get_claim_spec narrows on one of those fields; otherwise pass an explicit payload_filter or expect frequent guaranteed-miss wakes.',
+                }
+              : {}),
+            ...(autoScopedGitSync
+              ? {
+                  auto_scoped_payload_filter: true,
+                  payload_filter: effectivePayloadFilter,
+                  payload_filter_source: { source: 'harness' as const, ...autoScopedGitSync },
+                  auto_scoped_payload_filter_advice: `EI-24719187042784648: "${eventKey}" fires once per git-sync install (every harness, and every separately-synced submodule install), so this wait was narrowed to installSlug "${autoScopedGitSync.installSlug}". To wait for one specific commit, await git-sync:${gitSyncKind}:<full sha> instead.`,
                 }
               : {}),
             ...(autoScopedPipeline

@@ -50,3 +50,38 @@ export function planMallocArenaReexec(input: {
     env,
   };
 }
+
+/**
+ * Set to `self` by a launcher that preloads jemalloc for the HOST PROCESS ONLY
+ * (apps/operator/scripts/systemd/papercup-bg-host.service.d/41-jemalloc.conf).
+ *
+ * bg-host's resident memory was glibc keeping freed native memory: one
+ * malloc_trim(0) took VmRSS 12.1 -> 3.6 GB (WI-10005291 comment 1155216), with
+ * MALLOC_ARENA_MAX=2 already set. jemalloc returns freed pages on a decay timer.
+ * Unlike the embed sidecar, bg-host spawns many children (git, agent CLIs, the
+ * spawner sidecar), and every one would inherit LD_PRELOAD. ld.so reads
+ * LD_PRELOAD at exec and jemalloc reads MALLOC_CONF at its first malloc, so the
+ * host can drop both from its own environment once it is running: it keeps
+ * jemalloc, and its children start on their normal allocator.
+ */
+export const ALLOCATOR_PRELOAD_SCOPE_ENV = 'PAPERCUSP_ALLOCATOR_PRELOAD_SCOPE';
+
+const JEMALLOC_PRELOAD_RE = /(?:^|\/)libjemalloc\.so(?:\.\d+)*$/;
+
+/**
+ * The environment edits that make a self-only preload stay self-only, or null
+ * when the launcher did not ask for it. A value of `undefined` means delete the
+ * key. Other LD_PRELOAD entries (ld.so accepts `:` or whitespace separators) are
+ * kept, because only the jemalloc entry is ours to remove.
+ */
+export function planSelfOnlyPreloadScrub(env: NodeJS.ProcessEnv): Record<string, string | undefined> | null {
+  if (env[ALLOCATOR_PRELOAD_SCOPE_ENV] !== 'self') return null;
+  const kept = (env.LD_PRELOAD ?? '')
+    .split(/[:\s]+/)
+    .filter((entry) => entry !== '' && !JEMALLOC_PRELOAD_RE.test(entry));
+  return {
+    LD_PRELOAD: kept.length > 0 ? kept.join(':') : undefined,
+    MALLOC_CONF: undefined,
+    [ALLOCATOR_PRELOAD_SCOPE_ENV]: undefined,
+  };
+}

@@ -43,27 +43,21 @@ const ENGINEER_ISSUES_CHUNK_PARENT = {
   key: ['base_harness_slug', 'issue_id'],
 } as const;
 import { OWNER_CANDIDATE_TURN_VERDICTS } from '../../turn-provenance/turn-ref';
-import {
-  proseProfilePredicateSql,
-  resolveProseProfileIdSelection,
-} from '../../search/prose-vector-dims';
+import { restrictedTurnSql } from '../../personal-vault/transcript-exclusion';
+import { PROSE_EMBEDDING_SPACE } from '../../search/prose-vector-dims';
 
 /** Exact stored-space predicate for every vector source below. No extra read:
  * provenance comes from the query embedder through the engine policy. Unknown
  * or unaccepted identity becomes SQL FALSE, so the vector leg fails closed and
- * the engine can still return lexical results. */
+ * the engine can still return lexical results. The rule lives in
+ * @papercusp/search's embedding space (shared-vector-search-libraries P-001);
+ * the name stays because the parity census counts its call sites. */
 function proseProfileSql(
   p: Pick<SearchSourceParams, 'sql' | 'embeddingProfile'>,
   profileColumn: string,
   modeColumn: string,
 ) {
-  const selection = p.embeddingProfile
-    ? resolveProseProfileIdSelection(
-        p.embeddingProfile.profileId,
-        p.embeddingProfile.legacyMode,
-      )
-    : null;
-  return proseProfilePredicateSql(p.sql, selection, profileColumn, modeColumn);
+  return PROSE_EMBEDDING_SPACE.sourceFilterSql(p, profileColumn, modeColumn);
 }
 
 /**
@@ -912,7 +906,45 @@ const sessionTurnFilterSql = (p: SearchSourceParams) => {
     sourceKind: f.sourceKind ?? null,
     since: f.since ?? null,
     until: f.until ?? null,
+    readerIds: f.readerIds ?? null,
   };
+};
+
+/**
+ * D-006 / P-013 (personal-data-reader-set-labels): a turn an agent recorded
+ * inside one of its disclosure windows is excluded from matching, so it never
+ * competes for a result slot and the result size reveals nothing about its text
+ * (personal-vault/transcript-exclusion.ts). `filters.readerIds` names the caller's
+ * identities, whose OWN restricted turns stay visible to it. FAIL CLOSED
+ * (WI-10005570): a caller that names no reader (search:semantic, search:fulltext,
+ * any future surface) is treated as nobody, so every restricted turn is excluded.
+ */
+const sessionTurnReaderSql = (p: SearchSourceParams, qualifier: string) => {
+  const readerIds = p.filters?.readerIds ?? [];
+  const sql = p.sql as unknown as Parameters<typeof restrictedTurnSql>[0];
+  return p.sql`NOT ${restrictedTurnSql(sql, qualifier, readerIds) as never}`;
+};
+
+/**
+ * The session_turn source's scope predicate over the alias `st`: workspace,
+ * harness and the filter bag, without the reader rule. Shared with the
+ * query-independent withheld count in sessions:search so the count and the
+ * search cover the same rows.
+ */
+export const sessionTurnScopeSql = (p: Pick<SearchSourceParams, 'sql' | 'workspaceId' | 'scopeFilter' | 'filters'>) => {
+  const f = sessionTurnFilterSql(p as SearchSourceParams);
+  return p.sql`
+          (st.workspace_id = ${p.workspaceId} OR st.workspace_id = 'default')
+      AND (${p.scopeFilter ?? null}::text IS NULL OR st.harness_slug = ${p.scopeFilter ?? null})
+      AND (${f.owners}::text[] IS NULL OR st.owner = ANY(${f.owners}::text[]))
+      AND (${f.speaker}::text IS NULL OR st.speaker = ${f.speaker})
+      AND (${f.turnOrigin}::text IS NULL OR st.turn_origin_verdict = ${f.turnOrigin})
+      AND (${f.ownerOnly}::boolean IS NULL OR NOT ${f.ownerOnly} OR st.turn_origin_verdict IN ('owner-typed', 'owner-dialog'))
+      AND (${f.ownerCandidates}::boolean IS NULL OR NOT ${f.ownerCandidates} OR st.turn_origin_verdict = ANY(${f.ownerCandidateVerdicts}::text[]))
+      AND (${f.sessionId}::text IS NULL OR st.session_id = ${f.sessionId})
+      AND (${f.sourceKind}::text IS NULL OR st.source_kind = ${f.sourceKind})
+      AND (${f.since}::timestamptz IS NULL OR COALESCE(st.ts, st.ingested_at) >= ${f.since}::timestamptz)
+      AND (${f.until}::timestamptz IS NULL OR COALESCE(st.ts, st.ingested_at) < ${f.until}::timestamptz)`;
 };
 
 /**
@@ -979,7 +1011,8 @@ const sessionTurn: SearchSource = {
       AND (${f.sessionId}::text IS NULL OR session_id = ${f.sessionId})
       AND (${f.sourceKind}::text IS NULL OR source_kind = ${f.sourceKind})
       AND (${f.since}::timestamptz IS NULL OR COALESCE(ts, ingested_at) >= ${f.since}::timestamptz)
-      AND (${f.until}::timestamptz IS NULL OR COALESCE(ts, ingested_at) < ${f.until}::timestamptz)`;
+      AND (${f.until}::timestamptz IS NULL OR COALESCE(ts, ingested_at) < ${f.until}::timestamptz)
+      AND ${sessionTurnReaderSql(p, 'session_turns')}`;
     // EI-24045346484356708: the coverage-graded branch never admitted literal
     // rows (its match is the anchor alone), so the fill stays 'and'-mode only.
     const literalToken =
@@ -992,6 +1025,15 @@ const sessionTurn: SearchSource = {
     // `SET LOCAL` pattern.
     const rows = (await p.sql.begin(async (tx) => {
       await tx.unsafe(`SET LOCAL statement_timeout = ${LEXICAL_COVERAGE_STATEMENT_TIMEOUT_MS}`);
+      // R2 live proof: correlated transcript terms can be underestimated 25x.
+      // Setup cost 100 still selected a serial rank/sort over 88k matches.
+      // Full-query current/profile/current controls selected two workers at
+      // setup cost 0 and tuple cost 0.01 (~0.4s versus ~0.9–1.1s), preserving
+      // all top-20 rank values. Keep these costs transaction-local and cap
+      // workers below the host's default 8; the literal fill disables workers.
+      await tx.unsafe('SET LOCAL max_parallel_workers_per_gather = 2');
+      await tx.unsafe('SET LOCAL parallel_setup_cost = 0');
+      await tx.unsafe('SET LOCAL parallel_tuple_cost = 0.01');
       // PRIMARY — index-served only (`lex.match` carries no substring arm).
       const primary = (await tx`
       ${lex.with}
@@ -1102,17 +1144,8 @@ const sessionTurn: SearchSource = {
     // them inside BOTH legs before each leg's LIMIT, exactly as the two
     // hand-written legs did.
     const parentFilter = p.sql`
-          (st.workspace_id = ${p.workspaceId} OR st.workspace_id = 'default')
-      AND (${p.scopeFilter}::text IS NULL OR st.harness_slug = ${p.scopeFilter})
-      AND (${f.owners}::text[] IS NULL OR st.owner = ANY(${f.owners}::text[]))
-      AND (${f.speaker}::text IS NULL OR st.speaker = ${f.speaker})
-      AND (${f.turnOrigin}::text IS NULL OR st.turn_origin_verdict = ${f.turnOrigin})
-      AND (${f.ownerOnly}::boolean IS NULL OR NOT ${f.ownerOnly} OR st.turn_origin_verdict IN ('owner-typed', 'owner-dialog'))
-      AND (${f.ownerCandidates}::boolean IS NULL OR NOT ${f.ownerCandidates} OR st.turn_origin_verdict = ANY(${f.ownerCandidateVerdicts}::text[]))
-      AND (${f.sessionId}::text IS NULL OR st.session_id = ${f.sessionId})
-      AND (${f.sourceKind}::text IS NULL OR st.source_kind = ${f.sourceKind})
-      AND (${f.since}::timestamptz IS NULL OR COALESCE(st.ts, st.ingested_at) >= ${f.since}::timestamptz)
-      AND (${f.until}::timestamptz IS NULL OR COALESCE(st.ts, st.ingested_at) < ${f.until}::timestamptz)`;
+          ${sessionTurnScopeSql(p)}
+      AND ${sessionTurnReaderSql(p, 'st')}`;
     // WI-37603. The outer tag is the TRANSACTION handle (iterative scan on);
     // the nested `p.sql` fragments stay on the outer handle, which is safe
     // because a postgres.js fragment is a lazy builder — only the outer query

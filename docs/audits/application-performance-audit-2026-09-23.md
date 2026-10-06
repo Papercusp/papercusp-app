@@ -1,6 +1,6 @@
 # Papercusp performance audit — 23 September 2026
 
-Audit: **WI-10002792**. Draft plan: **papercusp-log-performance-remediation-2026-09-23** (nine items, not activated). Requested by owner; conducted directly in this session. This is an assessment and fix proposal, not implementation or deployment.
+Audit: **WI-10002792**. Draft plan: **papercusp-log-performance-remediation-2026-09-23** (nine items, not activated). Requested by Avi; conducted directly in this session. This is an assessment and fix proposal, not implementation or deployment.
 
 ## Verdict
 

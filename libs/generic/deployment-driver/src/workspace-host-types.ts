@@ -372,6 +372,12 @@ export type WorkspaceHostPlanRequest =
       host: WorkspaceHostRef;
       image: WorkspaceHostImageRef;
       rollbackImage?: WorkspaceHostImageRef;
+      /**
+       * The host's recorded desired spec. A provider whose upgrade launches a REPLACEMENT instance
+       * (AWS: a new EC2 instance id) rebuilds its launch settings from this; a provider that
+       * re-reads the live instance (GCP's recreateInput) ignores it.
+       */
+      desired?: WorkspaceHostDesiredSpec;
     })
   | (WorkspaceHostOperationBase & {
       action: "destroy";
@@ -495,6 +501,14 @@ export interface WorkspaceHostHealthCheck {
   /** `true` = measured, passing · `false` = measured, failing · `null` = NOT MEASURED. */
   ok: boolean | null;
   detail?: string;
+  /**
+   * AMBER: a measured, PASSING check that is about to stop passing (for example an agent login
+   * whose access token expires soon and cannot renew itself). Only meaningful with `ok: true`.
+   * It deliberately does NOT change the resolved status: a caller polling for `healthy` must not
+   * break because a deadline is approaching. A surface that wants amber reads this flag; when
+   * the deadline passes, the producer reports `ok: false` and the status goes `degraded`.
+   */
+  warn?: boolean;
 }
 /**
  * `unknown` = the host is reachable and nothing measured has failed, but at least one

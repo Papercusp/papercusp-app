@@ -11,11 +11,13 @@
  * registration) can treat WASM and daemon plugins uniformly.
  */
 
-export { startDaemonPlugin } from './supervisor';
+export { startDaemonPlugin, providerSandboxWorks, DaemonSandboxUnavailableError } from './supervisor';
 export type {
   DaemonPluginHandle,
   StartDaemonOptions,
   DaemonRestartPolicy,
 } from './supervisor';
-export { buildBwrapArgs } from './bwrap-args';
-export { JsonRpcBridge } from './jsonrpc-bridge';
+export { buildBwrapArgs, buildProviderBwrapArgs, PROVIDER_SYSTEM_RO_DIRS } from './bwrap-args';
+export type { ProviderBwrapOptions } from './bwrap-args';
+export { JsonRpcBridge, JsonRpcHandlerError } from './jsonrpc-bridge';
+export type { JsonRpcRequestHandler } from './jsonrpc-bridge';

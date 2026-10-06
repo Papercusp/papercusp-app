@@ -125,6 +125,31 @@ export function makeDigestEntry(ownerId: string, kind: CascadeEventKind, at: str
 }
 
 /**
+ * WI-10005360: did the min-ANSWERS refill round (WI-39861) launch NOTHING?
+ *
+ * The ONE-round guard bounds how many answering sessions a refill may LAUNCH. A
+ * pick refused before launch (cooldown, ownership, transcript preflight, a walled
+ * backend) is recorded as `dispatch_failed` under the expert's own owner id and
+ * costs no session. Treating it as a spent round ended a live consult as
+ * `refill-spent` while five launchable experts stayed untried (conv-muqlw2ay).
+ *
+ * True only when the stamp names at least one added owner AND every added owner's
+ * digest outcomes are exclusively `dispatch_failed`. Anything else is a spent
+ * round, conservatively: an empty/unreadable `added` list (legacy stamps), an
+ * owner with no digest record at all (e.g. a fork launched and posted under its
+ * own identity), or any launched outcome (answer/decline/expired/...).
+ */
+export function refillRoundLaunchedNothing(refill: unknown, digest: CascadeDigestEntry[]): boolean {
+  const added = (refill as { added?: unknown } | null | undefined)?.added;
+  if (!Array.isArray(added) || added.length === 0) return false;
+  return added.every((ownerId) => {
+    if (typeof ownerId !== 'string') return false;
+    const outcomes = digest.filter((e) => e.ownerId === ownerId);
+    return outcomes.length > 0 && outcomes.every((e) => e.kind === 'dispatch_failed');
+  });
+}
+
+/**
  * Everything a wake-copy writer is entitled to know about the advance it is
  * announcing. Deliberately data-only: the copy seam decides WORDS, never who is
  * woken, when, or under what CAS guard.
@@ -299,7 +324,9 @@ export interface AdvanceCascadeResult {
    * D-002/D-004 retired the revival-specific reasons: liveness is no longer a
    * filter on the refill (dispatch forks a dead expert's transcript exactly as
    * it forks a live one), so the only two ways to run out are a pool with no
-   * untried candidate left, and the ONE bounded refill round already spent. */
+   * untried candidate left, and the ONE bounded refill round already spent —
+   * where "spent" means it LAUNCHED an answering session (WI-10005360); a round
+   * refused entirely before launch extends rather than ending `refill-spent`. */
   underFilled?: {
     answers: number;
     min: number;
@@ -386,6 +413,8 @@ export async function advanceCascade(
   const digest = [...digestFromRow(params.digest), params.event].slice(-CASCADE_DIGEST_MAX_ENTRIES);
   const nextIdx = params.cascadeCursor + 1;
   const next = nextIdx < selected.length ? selected[nextIdx] : null;
+  const clearFailedAnsweringOwner = params.event.kind === 'dispatch_failed';
+  const failedAnsweringCursor = String(params.cascadeCursor);
   // EI-24351703367365896: a refused dispatch cannot leave an unstaffed slot
   // awaiting a fresh TTL. Reuse this same finite menu/refill walk, guarded by
   // the slot we just wrote. A concurrent reply/expiry refresh wins the CAS.
@@ -483,7 +512,15 @@ export async function advanceCascade(
       // expert is dispatchable on exactly the same terms as a live one. This is
       // what retired the separate revival leg — its reserve-then-spawn dance
       // existed only because a dead candidate could not be woken.
-      const add: CascadeSelectionEntry[] = !sel.refill
+      //
+      // WI-10005360: the round is SPENT once it launched an answering session,
+      // not once it was attempted. A round whose every pick was refused before
+      // launch (only `dispatch_failed` on record) extends to the next untried
+      // candidate(s) instead of closing `refill-spent` with launchable experts
+      // left. Still finite: each extension moves its picks into `tried`, and the
+      // snapshot pool is static.
+      const refillSpent = Boolean(sel.refill) && !refillRoundLaunchedNothing(sel.refill, digest);
+      const add: CascadeSelectionEntry[] = !refillSpent
         ? untried.slice(0, needed).map((c) => entryOf(c, { refill: true }))
         : [];
       const rawSelected = Array.isArray(sel.selected) ? (sel.selected as unknown[]) : [];
@@ -497,15 +534,28 @@ export async function advanceCascade(
             // The refill stamp guards the ONE round (WI-39861) — stamped
             // whenever that round ran, even when it found nothing (the
             // snapshot pool is static, so a later re-scan cannot do better).
-            ...(!sel.refill
+            // A continuation (WI-10005360 — the stamped round launched nothing)
+            // keeps the original stamp and APPENDS its picks, so `added` stays
+            // the full record that refillRoundLaunchedNothing judges next time.
+            refill: !sel.refill
               ? {
-                  refill: {
-                    at: params.nowIso,
-                    added: add.map((a) => a.ownerId),
-                    reason: `cascade exhausted with ${answers} answer(s) < min ${min}`,
-                  },
+                  at: params.nowIso,
+                  added: add.map((a) => a.ownerId),
+                  reason: `cascade exhausted with ${answers} answer(s) < min ${min}`,
                 }
-              : {}),
+              : {
+                  ...(sel.refill as Record<string, unknown>),
+                  added: [
+                    ...(Array.isArray((sel.refill as { added?: unknown }).added)
+                      ? ((sel.refill as { added: unknown[] }).added)
+                      : []),
+                    ...add.map((a) => a.ownerId),
+                  ],
+                  continued: {
+                    at: params.nowIso,
+                    reason: 'every earlier refill pick was refused before launch (WI-10005360)',
+                  },
+                },
           },
         };
         // Cursor lands on the FIRST refill entry: in the selectionFromRouting
@@ -524,7 +574,11 @@ export async function advanceCascade(
                  expires_at = ${expiresAt}::timestamptz,
                  wakes_used = wakes_used + ${willAttempt ? 1 : 0},
                  cascade_digest = ${sql.json(digest as never)},
-                 routing = ${sql.json(updatedSnap as never)},
+                 routing = CASE
+                   WHEN ${clearFailedAnsweringOwner}::boolean
+                     THEN ${sql.json(updatedSnap as never)} #- ARRAY['selection', 'selected', ${failedAnsweringCursor}, 'answeringOwnerId']
+                   ELSE ${sql.json(updatedSnap as never)}
+                 END,
                  updated_at = ${params.nowIso}::timestamptz
            WHERE workspace_id = ${params.workspaceId} AND conversation_id = ${params.conversationId}
              AND cascade_cursor = ${params.cascadeCursor} AND closed_at IS NULL
@@ -545,17 +599,13 @@ export async function advanceCascade(
             digest,
             extension: 'min-answers refill',
           });
-          let announcedOwner: string | undefined;
           const r = await dispatch({
             responder: first.ownerId,
             conversationId: params.conversationId,
             summary: copy.summary,
             body: copy.body,
             ...(first.evidence ? { evidence: first.evidence } : {}),
-            onAnsweringOwner: async (owner) => {
-              await stampAnsweringOwner(sql, params, cursorIdx, owner);
-              announcedOwner = owner;
-            },
+            onAnsweringOwner: (owner) => stampAnsweringOwner(sql, params, cursorIdx, owner),
           });
           woke = r.woke;
           // Backstop for a dispatcher that does not call the hook. Stamped on
@@ -564,7 +614,11 @@ export async function advanceCascade(
           // keyboard, and without the stamp its first reply is refused
           // not_a_participant. stampAnsweringOwner no-ops on absent.
           await stampAnsweringOwner(sql, params, cursorIdx, r.answeringOwnerId);
-          if (woke === 0 && !r.answeringOwnerId && !announcedOwner) {
+          // The callback reserves participant identity before spawn so a fast
+          // first reply is accepted. It does not prove launch: only the
+          // dispatch result can distinguish that reservation from a failed
+          // spawn. A failed slot is cleared by the next CAS below.
+          if (woke === 0 && !r.answeringOwnerId) {
             const result = await skipUndispatched(first.ownerId, cursorIdx, updatedSnap, expiresAt);
             return { ...result, ...(sel.refill ? {} : { refilled: true }) };
           }
@@ -590,7 +644,7 @@ export async function advanceCascade(
       const underFilled = {
         answers,
         min,
-        reason: (sel.refill ? 'refill-spent' : 'no-untried-candidate') as NonNullable<
+        reason: (refillSpent ? 'refill-spent' : 'no-untried-candidate') as NonNullable<
           AdvanceCascadeResult['underFilled']
         >['reason'],
       };
@@ -601,7 +655,11 @@ export async function advanceCascade(
       const wroteTerminal = ((await sql`
             UPDATE harness_shared.consult_state
                SET cascade_digest = ${sql.json(digest as never)},
-                   routing = ${sql.json(terminalSnap as never)},
+                   routing = CASE
+                     WHEN ${clearFailedAnsweringOwner}::boolean
+                       THEN ${sql.json(terminalSnap as never)} #- ARRAY['selection', 'selected', ${failedAnsweringCursor}, 'answeringOwnerId']
+                     ELSE ${sql.json(terminalSnap as never)}
+                   END,
                    updated_at = ${params.nowIso}::timestamptz
              WHERE workspace_id = ${params.workspaceId} AND conversation_id = ${params.conversationId}
                AND cascade_cursor = ${params.cascadeCursor} AND closed_at IS NULL
@@ -645,6 +703,14 @@ export async function advanceCascade(
            expires_at = ${expiresAt}::timestamptz,
            wakes_used = wakes_used + ${willAttempt ? 1 : 0},
            cascade_digest = ${sql.json(digest as never)},
+           routing = CASE
+             WHEN ${clearFailedAnsweringOwner}::boolean THEN
+               (CASE WHEN jsonb_typeof(routing) = 'string'
+                 THEN (routing #>> '{}')::jsonb
+                 ELSE routing
+               END) #- ARRAY['selection', 'selected', ${failedAnsweringCursor}, 'answeringOwnerId']
+             ELSE routing
+           END,
            updated_at = ${params.nowIso}::timestamptz
      WHERE workspace_id = ${params.workspaceId} AND conversation_id = ${params.conversationId}
        AND cascade_cursor = ${params.cascadeCursor} AND closed_at IS NULL
@@ -664,22 +730,18 @@ export async function advanceCascade(
       next,
       digest,
     });
-    let announcedOwner: string | undefined;
     const r = await dispatch({
       responder: next.ownerId,
       conversationId: params.conversationId,
       summary: copy.summary,
       body: copy.body,
       ...(next.evidence ? { evidence: next.evidence } : {}),
-      onAnsweringOwner: async (owner) => {
-        await stampAnsweringOwner(sql, params, nextIdx, owner);
-        announcedOwner = owner;
-      },
+      onAnsweringOwner: (owner) => stampAnsweringOwner(sql, params, nextIdx, owner),
     });
     woke = r.woke;
     // Backstop, on the answering identity and never on `woke` — as above.
     await stampAnsweringOwner(sql, params, nextIdx, r.answeringOwnerId);
-    if (woke === 0 && !r.answeringOwnerId && !announcedOwner) {
+    if (woke === 0 && !r.answeringOwnerId) {
       return skipUndispatched(next.ownerId, nextIdx, params.routing, expiresAt);
     }
   }

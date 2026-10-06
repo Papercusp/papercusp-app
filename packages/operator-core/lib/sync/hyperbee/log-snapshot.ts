@@ -130,6 +130,20 @@ export interface SnapshotPayload {
    * compaction excludes nothing). `conflictingSnapshotExclusion` is the consumer.
    */
   excludeTables?: string[];
+  /**
+   * WI-10005425 — `true` ⇒ this set summarizes the prefix `[0, coversUpTo)` of the
+   * log that CARRIES it. ABSENT ⇒ unknown (and on a filtered set, assumed not).
+   *
+   * Stamped by `produceLogSnapshot` (the own-log producer) and only on a FILTERED
+   * set, so an unfiltered set stays byte-identical. Needed because `excludeTables`
+   * alone cannot say where a set lives: the seed producer
+   * (`produceFilteredSnapshotIntoLog`) writes a filtered set summarizing ANOTHER log,
+   * while the release cut (`boot.ts`) writes a filtered set summarizing the live own
+   * log it is appended to. `author_pubkey` cannot tell them apart either; both stamp
+   * the carrier's key. Read-merge's skip eligibility (`isSkipEligibleSnapshot`) is the
+   * consumer: without the marker every reader re-applied each release-cut set in full.
+   */
+  ownPrefix?: true;
 }
 
 /**
@@ -526,6 +540,8 @@ export function buildSnapshotChunkOp(opts: {
   ts: number;
   schema_version: number;
   excludeTables?: readonly string[];
+  /** The set summarizes the carrying log's own prefix; see `SnapshotPayload.ownPrefix`. */
+  ownPrefix?: boolean;
 }): PeerLogOp {
   const payload: SnapshotPayload = {
     coversUpTo: opts.coversUpTo,
@@ -537,6 +553,9 @@ export function buildSnapshotChunkOp(opts: {
   // what it was before this field existed. Sorted for a stable serialization.
   if (opts.excludeTables && opts.excludeTables.length > 0) {
     payload.excludeTables = [...opts.excludeTables].sort();
+    // Only a filtered set needs the marker: an unfiltered one is already skip-eligible,
+    // and leaving it unmarked keeps its bytes unchanged.
+    if (opts.ownPrefix) payload.ownPrefix = true;
   }
   return {
     type: 'put',
@@ -566,6 +585,8 @@ export function buildSnapshotOps(opts: {
   maxChunkBytes?: number;
   /** Recorded on every chunk; see `SnapshotPayload.excludeTables`. */
   excludeTables?: readonly string[];
+  /** Recorded on every chunk of a filtered set; see `SnapshotPayload.ownPrefix`. */
+  ownPrefix?: boolean;
 }): PeerLogOp[] {
   // EI-1688: pass `now` (= the snapshot ts) so old tombstones GC out at production.
   const rows = buildSnapshotRows(opts.ops, { now: opts.ts });
@@ -589,6 +610,8 @@ export function buildSnapshotOpsFromRows(opts: {
   maxChunkBytes?: number;
   /** Recorded on every chunk; see `SnapshotPayload.excludeTables`. */
   excludeTables?: readonly string[];
+  /** Recorded on every chunk of a filtered set; see `SnapshotPayload.ownPrefix`. */
+  ownPrefix?: boolean;
 }): PeerLogOp[] {
   const chunks = chunkSnapshotRows(opts.rows, opts.maxChunkBytes ?? SNAPSHOT_MAX_CHUNK_BYTES);
   const chunkCount = chunks.length;
@@ -602,6 +625,7 @@ export function buildSnapshotOpsFromRows(opts: {
       ts: opts.ts,
       schema_version: opts.schema_version,
       excludeTables: opts.excludeTables,
+      ...(opts.ownPrefix ? { ownPrefix: true } : {}),
     }),
   );
 }
@@ -738,6 +762,8 @@ export const FILTERED_SNAPSHOT_SCAN_STALL_MS = 30_000;
 const FILTERED_SNAPSHOT_SCAN_PHASE = 'filtered-source-scan';
 
 interface FoldLogRangeOptions {
+  onSourceBlock?: (index: number, op: PeerLogOp) => void;
+  requireComplete?: boolean;
   phase?: string;
   coreKey?: string;
   onProgress?: SnapshotFoldProgressCallback;
@@ -1307,9 +1333,11 @@ async function foldLogRangeInto(
       for (let offset = 0; offset < window.length; offset++) {
         const op = window[offset];
         if (!op) {
+          if (opts.requireComplete) throw new Error('[snapshot] bound source span has a missing block');
           sawHole = true;
           continue;
         }
+        opts.onSourceBlock?.(start + offset, op);
         if (opts.skipSnapshotOps && !sawHole && isSnapshotOp(op)) {
           skippedSnapshotOps += 1;
           continue;
@@ -1566,6 +1594,8 @@ export async function produceLogSnapshot(
       schema_version: opts.schemaVersion,
       maxChunkBytes: opts.maxChunkBytes,
       excludeTables: [...ownExcluded],
+      // WI-10005425: this set is appended to `ownLog` and summarizes its prefix.
+      ownPrefix: true,
     });
     if (opts.shouldAbort?.()) {
       throw new SnapshotAbortedError(
@@ -1686,6 +1716,8 @@ export interface SnapshotFoldWorkerLike {
     schema_version: number;
     maxChunkBytes?: number;
     excludeTables: readonly string[];
+    /** See `SnapshotPayload.ownPrefix`. */
+    ownPrefix?: boolean;
   }): Promise<{
     blocks: Uint8Array[];
     rowCount: number;
@@ -1909,6 +1941,8 @@ async function produceLogSnapshotOffloaded(
         schema_version: opts.schemaVersion,
         maxChunkBytes: opts.maxChunkBytes,
         excludeTables,
+        // WI-10005425: byte-identical to the inline path, which marks its own-log set too.
+        ownPrefix: true,
       });
       if (opts.shouldAbort?.()) {
         throw new SnapshotAbortedError(
@@ -2100,6 +2134,58 @@ async function foldLogRangeViaWorker(
  * The target is expected to be fresh (length 0), but the target's own length is used
  * rather than a hardcoded 0 so appending to a non-empty synthetic core stays correct.
  */
+export interface FilteredSnapshotFoldOptions {
+  now?: number;
+  excludeTables?: Iterable<string>;
+  transformValue?: SnapshotValueTransform;
+  onProgress?: SnapshotFoldProgressCallback;
+  onStall?: SnapshotFoldStallCallback;
+  stallMs?: number;
+  seekReadBudgetMs?: number;
+  /** null explicitly binds a from-zero fold; omission retains ordinary discovery. */
+  priorSnapshotHint?: { coversUpTo: number; chunkCount: number } | null;
+  onSourceBlock?: (index: number, op: PeerLogOp) => void;
+  requireComplete?: boolean;
+}
+
+/** D-174: census and seed production share selection validation and this exact fold.
+ * The caller locates the original set with findLatestCompleteSnapshotDetailed.
+ * A conflicting exclusion still binds a from-zero fold, never a thinner seed. */
+export async function foldFilteredSnapshotRows(
+  sourceLog: Pick<OwnLog, 'get' | 'length'>,
+  opts: FilteredSnapshotFoldOptions,
+): Promise<{ rows: SnapshotRow[]; excluded: Set<string>; seedIndex: number; coversUpTo: number; chunkCount: number }> {
+  const excluded = new Set(opts.excludeTables ?? []);
+  const folder = new SnapshotRowFolder({ excludeTables: excluded, transformValue: opts.transformValue });
+  const prior = opts.priorSnapshotHint === null ? null : await findLatestProducerSnapshot(sourceLog, {
+    readBudgetMs: opts.seekReadBudgetMs ?? PRODUCER_SNAPSHOT_SEEK_READ_BUDGET_MS,
+    describe: 'filtered source scan',
+    ...(opts.priorSnapshotHint ? { hint: opts.priorSnapshotHint } : {}),
+  });
+  let seedIndex = 0;
+  let chunkCount = 0;
+  let from = 0;
+  if (prior && !conflictingSnapshotExclusion(prior, excluded)) {
+    seedIndex = prior.coversUpTo;
+    chunkCount = prior.chunkCount;
+    for (const [offset, chunk] of prior.chunks.entries()) {
+      opts.onSourceBlock?.(seedIndex + offset, chunk);
+      folder.add(chunk, chunk.value, seedIndex + offset);
+    }
+    from = seedIndex + chunkCount;
+  }
+  await foldLogRangeInto(sourceLog, folder, from, sourceLog.length, {
+    phase: FILTERED_SNAPSHOT_SCAN_PHASE,
+    coreKey: (sourceLog as Partial<Pick<OwnLog, 'keyHex'>>).keyHex,
+    onProgress: opts.onProgress,
+    onStall: opts.onStall ?? (stall => console.error(`[snapshot] ${formatSnapshotFoldStall(stall)}`)),
+    stallMs: opts.stallMs ?? FILTERED_SNAPSHOT_SCAN_STALL_MS,
+    onSourceBlock: opts.onSourceBlock,
+    requireComplete: opts.requireComplete,
+  });
+  return { rows: folder.finish({ now: opts.now }), excluded, seedIndex, coversUpTo: seedIndex, chunkCount };
+}
+
 export async function produceFilteredSnapshotIntoLog(
   sourceLog: Pick<OwnLog, 'get' | 'length'>,
   targetLog: OwnLog,
@@ -2125,7 +2211,10 @@ export async function produceFilteredSnapshotIntoLog(
      * scans `PRODUCER_SNAPSHOT_SCAN_LOOKBACK` blocks of the tail, and the proportional
      * cadence leaves the last set far outside that window, so the cut would fold from 0.
      */
-    priorSnapshotHint?: { coversUpTo: number; chunkCount: number };
+    priorSnapshotHint?: { coversUpTo: number; chunkCount: number } | null;
+    onSourceBlock?: FilteredSnapshotFoldOptions['onSourceBlock'];
+    requireComplete?: boolean;
+    onFoldedRows?: (fold: Awaited<ReturnType<typeof foldFilteredSnapshotRows>>) => void;
   },
 ): Promise<ProduceSnapshotResult> {
   // An EMPTY SOURCE means there is nothing to seed — mirror `produceLogSnapshot`'s
@@ -2147,19 +2236,6 @@ export async function produceFilteredSnapshotIntoLog(
   // provenance). A one-shot iterator would be drained by the first, leaving the other
   // two silently empty — a seek that looks safe and a snapshot that under-reports what
   // it dropped, while the folder itself filtered correctly.
-  const excluded = new Set(opts.excludeTables ?? []);
-  const folder = new SnapshotRowFolder({
-    excludeTables: excluded,
-    transformValue: opts.transformValue,
-  });
-  const reportStall =
-    opts.onStall ??
-    ((stall: SnapshotFoldStall) => {
-      console.error(
-        `[snapshot] filtered source scan stalled in ${formatSnapshotFoldStall(stall)}; ` +
-          `the scan remains live and will not be aborted by this diagnostic`,
-      );
-    });
   // ── SEED FROM THE PRIOR SNAPSHOT, LIKE `produceLogSnapshot` ALREADY DOES ─────────
   //
   // This fold used to start at a HARDCODED 0 while its sibling (:940) sought the latest
@@ -2180,39 +2256,9 @@ export async function produceFilteredSnapshotIntoLog(
   // a COMPLETE head snapshot over the same data via the seeking path in 435,920ms (7.3
   // min, 1045 chunks, 1,416,626 rows) — and then folded from 0 anyway, ignoring it. Same
   // box, same data, same fold primitive: 7.3 minutes with the seek, ~7 hours without.
-  const priorSnapshot = await findLatestProducerSnapshot(sourceLog, {
-    readBudgetMs: opts.seekReadBudgetMs ?? PRODUCER_SNAPSHOT_SEEK_READ_BUDGET_MS,
-    describe: 'filtered source scan',
-    ...(opts.priorSnapshotHint ? { hint: opts.priorSnapshotHint } : {}),
-  });
-  let foldFrom = 0;
-  if (priorSnapshot) {
-    // The guard that makes this safe to ship rather than merely fast. See
-    // `conflictingSnapshotExclusion`: seeding from a snapshot that dropped a table THIS
-    // seed keeps would ship a silently THINNER seed, which is strictly worse than a slow
-    // one. Falling back to the full fold is always correct.
-    const conflict = conflictingSnapshotExclusion(priorSnapshot, excluded);
-    if (conflict) {
-      console.error(
-        `[snapshot] filtered source scan: prior snapshot at ${priorSnapshot.coversUpTo} ` +
-          `excluded table '${conflict}' which this seed keeps; folding the full source ` +
-          `instead of seeding (correct, but O(history))`,
-      );
-    } else {
-      for (const chunk of priorSnapshot.chunks) folder.add(chunk);
-      foldFrom = priorSnapshot.coversUpTo + priorSnapshot.chunkCount;
-    }
-  }
-
-  await foldLogRangeInto(sourceLog, folder, foldFrom, sourceLog.length, {
-    phase: FILTERED_SNAPSHOT_SCAN_PHASE,
-    coreKey: (sourceLog as Partial<Pick<OwnLog, 'keyHex'>>).keyHex,
-    onProgress: opts.onProgress,
-    onStall: reportStall,
-    stallMs: opts.stallMs ?? FILTERED_SNAPSHOT_SCAN_STALL_MS,
-  });
-
-  const rows = folder.finish({ now: opts.now });
+  const fold = await foldFilteredSnapshotRows(sourceLog, opts);
+  opts.onFoldedRows?.(fold);
+  const { rows, excluded } = fold;
   // The TARGET's append position — see the dual-purpose note above.
   const coversUpTo = targetLog.length;
   const snapshotOps = buildSnapshotOpsFromRows({

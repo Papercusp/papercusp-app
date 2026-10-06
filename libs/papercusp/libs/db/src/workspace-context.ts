@@ -264,7 +264,7 @@ export function harnessQuery<T>(slug: string, fn: (q: Sql) => Promise<T>): Promi
  * the handle offers it (direct mode); otherwise it is already transaction-scoped
  * (pooled mode) and `fn`'s statements share that transaction for free. Same
  * `'begin' in sql ? sql.begin(fn) : fn(sql)` idiom already used in
- * conversations-store.ts / slack-flagship.ts / gmail-flagship.ts /
+ * conversations-store.ts / slack-flagship.ts /
  * learning-governor/store.ts / modes/store.ts / plan-dependency-admission-transaction.ts.
  */
 export function harnessTransaction<T>(slug: string, fn: (tx: TransactionSql) => Promise<T>): Promise<T> {
@@ -273,7 +273,7 @@ export function harnessTransaction<T>(slug: string, fn: (tx: TransactionSql) => 
     // ALREADY a TransactionSql (withHarnessSchema opened the transaction) —
     // the exact mismatch this function exists to paper over at runtime. Cast
     // to the honest union so 'begin' in s narrows properly in BOTH branches
-    // (mirrors conversations-store.ts / gmail-flagship.ts / slack-flagship.ts,
+    // (mirrors conversations-store.ts / slack-flagship.ts,
     // whose getSql() is typed Sql | TransactionSql to begin with).
     const s = sql as unknown as Sql | TransactionSql;
     return ('begin' in s ? s.begin(fn) : fn(s)) as Promise<T>;

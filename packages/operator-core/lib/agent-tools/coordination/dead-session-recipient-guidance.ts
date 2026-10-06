@@ -47,17 +47,19 @@
  */
 
 /**
- * The two ownerId shapes this fleet actually issues, measured against
- * `harness_shared.adv_sessions` 2026-08-09: `su-<uuid>` (the psu/su form, and
- * any other role prefix using a uuid) and `s-<epoch>-<hex>` (the spawned form).
+ * OwnerId shapes this runtime issues for sessions: a role-prefixed UUID
+ * (`su-<uuid>` or another role), `s-<epoch>-<hex>`, and fleet respawn IDs.
+ * Respawn IDs use `su-respawn-` plus a 16-hex recovery token, a 32-hex
+ * idempotent SHA-256 prefix, or a UUID for an unkeyed replacement. That
+ * two-part prefix cannot be matched by the generic role-prefixed UUID shape.
  *
- * Deliberately shape-based rather than prefix-based: binding to the literal
- * `su-` would go quiet for every other role's sessions, which are exactly as
- * mortal. A shape that means "this names one session instance" is the property.
+ * Deliberately shape-based rather than tied to one role prefix: a shape that
+ * means "this names one session instance" is the property that matters.
  */
 const SESSION_ID_SHAPES: readonly RegExp[] = [
   /^[a-z][a-z0-9]*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
   /^s-\d{10,}-[0-9a-f]{6,}$/i,
+  /^su-respawn-(?:[0-9a-f]{16}|[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i,
 ];
 
 export function isSessionShapedOwnerId(id: string): boolean {

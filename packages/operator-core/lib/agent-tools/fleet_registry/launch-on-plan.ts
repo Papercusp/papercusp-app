@@ -44,7 +44,7 @@ import { defineTool, SU_ROLES, fuzzyEnumAsync } from '@papercusp/agent-mcp';
 import { assembleRolePrompt } from '@papercusp/orchestrator/role-prompt';
 import { buildConsoleEnvelope } from '../../console-launcher';
 import { spawnConsole, spawnHeadless } from '../../console-spawn';
-import { spawnGovernedAgentProcess } from '../../resource-governor/spawn-execution';
+import { spawnGovernedAgentProcess, type GoalProcessAdmission } from '../../resource-governor/spawn-execution';
 import type { AdmissionContext } from '../../resource-governor/admission';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { papercuspPathForWorkspace } from '../../papercusp-root';
@@ -110,6 +110,7 @@ import {
   claimableStatesForKinds as exactPlanClaimableStatesForKinds,
 } from '../plans/plan-admission-preflight';
 import { fleetRoleFor, json, recolorCallerTerminal, resolveFleetCaller } from './_shared';
+import { fleetLaunchAbortCompletionReceipt } from './launch-abort-completion';
 import { extractWorkItemIds, TERMINAL_WORK_ITEM_STATES } from '../work_items/mirror-guard';
 import { itemMatchesRawClaimSpec } from '../../scheduler/fleet-scope-admission';
 import { reseedLeaderCompactionLimit } from './take-leadership-core';
@@ -143,6 +144,7 @@ import { localModelIdsAsync } from '../../inference-gateway/local-model-ids-cach
 import { buildCapacityReport, buildFleetSizingAdvisory } from '../../fleet/capacity-dispatch';
 import { listFacts } from '../../agent-facts/store';
 import { getModes, getModeSubject } from '../../modes/store';
+import { stampPlanGoalProvenance } from '../../modes/goal-context';
 import { modeInstructionsFactKey } from '../mode/set';
 import {
   composeModelSpec,
@@ -1881,6 +1883,9 @@ export default defineTool({
   requirePrincipal: false,
   skipWorkspaceTx: true,
   agentRoles: [...SU_ROLES, 'cup'],
+  // WI-10005670: a launch that returns just past the dispatch deadline has already persisted
+  // its transaction and opened members — report it as that launch, never a retryable timeout.
+  abortCompletionReceipt: fleetLaunchAbortCompletionReceipt,
   args: z.object({
     name: z
       .string()
@@ -1941,7 +1946,7 @@ export default defineTool({
       .boolean()
       .optional()
       .describe(
-        "Launch the members HEADLESS — background su sessions with NO desktop window (default false = visible terminals). Same su members (NOT cups), same leader-led contract, they register presence + count toward the fleet, auto-start on the plan, and stay injectable for warm loop:arm wakes; they just have no window and log to a file you can tail. EI-9748 FIXED (2026-07-11, live): on a systemd-managed Linux host (the normal case), each headless member is spawned via `systemd-run --user --scope`, which places it in a transient scope that is a SIBLING of the operator API's own service in the systemd --user cgroup tree — NOT a descendant — so `systemctl --user restart` of papercup-dev-api/papercup-staging-api (KillMode=control-group) cannot reap it; a headless member now survives those restarts just like a visible one. RESIDUAL CAVEAT: on a host with no `systemd-run` on PATH (macOS, a bare/non-systemd container), the spawn falls back to a plain detached child that DOES still share the operator process's cgroup and CAN be silently SIGTERM-killed by a restart of that service — a killed member's log says so. Headless is safe to prefer by default on Linux dev hosts; on a non-systemd host, prefer visible for anything that must survive hours unattended, or check on the fleet more often. Orthogonal to `carry`.",
+        "Launch the members HEADLESS — background su sessions with NO desktop window (default false = visible terminals). Same su members (NOT cups), same leader-led contract, they register presence + count toward the fleet, auto-start on the plan, and stay injectable for warm loop:arm wakes; they just have no window and log to a file you can tail. EI-9748 FIXED (2026-07-11, live): on a systemd-managed Linux host (the normal case), each headless member is spawned via `systemd-run --user --scope`, which places it in a transient scope that is a SIBLING of the operator API's own service in the systemd --user cgroup tree — NOT a descendant — so `systemctl --user restart` of papercusp-dev-api/papercusp-staging-api (KillMode=control-group) cannot reap it; a headless member now survives those restarts just like a visible one. RESIDUAL CAVEAT: on a host with no `systemd-run` on PATH (macOS, a bare/non-systemd container), the spawn falls back to a plain detached child that DOES still share the operator process's cgroup and CAN be silently SIGTERM-killed by a restart of that service — a killed member's log says so. Headless is safe to prefer by default on Linux dev hosts; on a non-systemd host, prefer visible for anything that must survive hours unattended, or check on the fleet more often. Orthogonal to `carry`.",
       ),
     leader: z
       .enum(['caller', 'spawn'])
@@ -2621,9 +2626,20 @@ export default defineTool({
       }
       if (!placementAuthority.allowed) {
         const ownerTitle = placementAuthority.ownerGoalTitle ? ` (\`${placementAuthority.ownerGoalTitle}\`)` : '';
+        // WI-10004524: name the owner's measured state so a steward can tell a LIVE
+        // owner from one whose edge merely survived — a refusal that says only
+        // "owns that pot" reads identically for both.
+        const ownerState = placementAuthority.ownerState;
+        const ownerEvidence = ownerState
+          ? ` Owner state: disposition=${ownerState.disposition ?? 'none'}${ownerState.standing ? ' (standing goal)' : ''}, ` +
+            `non-terminal worklist plans=${ownerState.liveWorklistPlans ?? 'unread'}, holder liveness=${ownerState.holderLiveness}. ` +
+            'An owner edge reads as vacant automatically once the owner has no non-terminal worklist plan AND either declared ' +
+            'handoff|killed|achieved or lost every holder; this one has not met that bar.'
+          : '';
         return err(
           `goal_placement_sovereignty_refusal: GOAL \`${goalSettings.goalId}\` cannot launch into harness ` +
-            `\`${planHarnessSlug}\` because active goal \`${placementAuthority.ownerGoalId}\`${ownerTitle} owns that pot. ` +
+            `\`${planHarnessSlug}\` because active goal \`${placementAuthority.ownerGoalId}\`${ownerTitle} owns that pot.` +
+            `${ownerEvidence} ` +
             "Route the finding/work to that goal's holder or drain leader instead. NO fleet was created and NO terminals were opened.",
         );
       }
@@ -2753,10 +2769,19 @@ export default defineTool({
           obligation: placement,
           boundary: 'fleet:launch-on-plan',
           phase: 'operation',
+          // WI-10004401: `fleetSlug` is fleetSlugFromName(args.name), which clamps to
+          // 60 chars, while the provider authors its recovery `name` from the raw
+          // `<harness>-<plan>-plan-fleet` string (69 chars for a long plan slug).
+          // Comparing the clamped slug to the raw name could never match, so no
+          // caller could satisfy this required boundary. Hand the comparator the
+          // caller's RAW name and normalize BOTH sides with the tool's own slug
+          // derivation — a different fleet still refuses, the same fleet admits.
+          normalizeArg: (key, value) =>
+            key === 'name' && typeof value === 'string' ? fleetSlugFromName(value) : value,
           operation: {
             tool: 'fleet:launch-on-plan',
             args: {
-              name: fleetSlug,
+              name: args.name,
               plan: planSlug,
               harness: planHarnessSlug,
               leader: args.leader,
@@ -2965,6 +2990,23 @@ export default defineTool({
     // Leaderless is the only state that is TRUE at this point, so it is the one to write.
     const wantsSpawnedLeader = args.leader === 'spawn';
     const spawnedLeaderOwnerId = wantsSpawnedLeader ? `su-${randomUUID()}` : null;
+    // A GOAL holder stewards the portfolio and DELEGATES execution; it is never a participant in
+    // a fleet it launches. resolveGoalFleetLeadership() already enforces that on the ARGUMENT
+    // (it forces leader:'spawn' for every holder and REFUSES leader:'caller'), but the argument
+    // alone did not keep the holder out of the fleet when the spawn was ignored because an
+    // existing fleet still had a live leader — see the join site below (WI-10005698).
+    const callerIsPortfolioSteward = goalHolderSubject != null;
+    // Deferred caller-enrollment writes. Set only when the caller genuinely joins, and applied
+    // after the live-member deficit guard so that a suppressed no-op mutates nothing. It RETURNS
+    // its outcomes instead of assigning the outer leaderControl/leaderReseed from inside the
+    // closure: TypeScript does not re-widen a variable from an assignment it cannot prove runs,
+    // so closure-mutation would narrow both to `null` at their later read sites.
+    let applyCallerFleetMembership:
+      | (() => Promise<{
+          leaderControl: LeaderControlOutcome | null;
+          leaderReseed: Awaited<ReturnType<typeof reseedLeaderCompactionLimit>>;
+        }>)
+      | null = null;
     // Set when 'spawn' was asked for but the fleet already has a confirmed-live leader:
     // installing a second one is a coup, so preserve the historical ignored/top-up path.
     let leaderSpawnSkipped: string | null = null;
@@ -3042,32 +3084,54 @@ export default defineTool({
       // label, no leader compaction re-seed, no window recolor. The caller is the delegator,
       // not a participant — labelling it here is exactly the "you are leading a fleet you
       // asked not to lead" state this mode exists to prevent. Skipped only when a leader was
-      // actually spawned; the ignored case above falls through to the normal join.
-      if ((wantsSpawnedLeader && created) || delegatedSpawnRetry || delegatedSpawnReplacement) {
+      // actually spawned, which left two holes that WI-10005698 (from EI-24837081637498361)
+      // closes — one about WHO is excluded, one about WHEN the exclusion is decided:
+      //   1. WHO: a GOAL holder topping up an EXISTING fleet whose leader is live reports
+      //      leaderSpawnIgnored, and used to fall through to the ordinary join — enrolling the
+      //      portfolio steward into the very fleet it paid a delegation to stay out of, and
+      //      flipping its mission to execute-fleet-plan-only. The steward exclusion is
+      //      unconditional; it is never contingent on a leader actually being spawned.
+      //   2. WHEN: enrolling here is a MUTATION performed before the live-member deficit guard
+      //      below has decided whether this call opens anything at all. A suppressed no-op must
+      //      not move the caller's membership or mission — the same rule that already defers the
+      //      claim-spec write past that guard. So the writes are CAPTURED here and applied at
+      //      that same boundary; callerMembership reports enrolled:false until they actually
+      //      run, which keeps the reported shape honest on every early return in between.
+      if (
+        (wantsSpawnedLeader && created) ||
+        delegatedSpawnRetry ||
+        delegatedSpawnReplacement ||
+        callerIsPortfolioSteward
+      ) {
         leaderRole = 'delegator';
       } else {
-        await setPresenceFleet(workspaceId, ownerId, fleetSlug, leaderRole);
-        if (leaderRole === 'leader') {
-          leaderControl = await ensureFleetLeaderControl({
-            workspaceId,
-            ownerId,
-            fleetSlug,
-            harnessSlug: harness,
-            planSlug,
-            carry: args.carry ?? 'warm',
-          });
-        }
-        // P-009 (incl. via launch): now that presence marks the caller this fleet's leader, lift a
-        // stuck 300k member-cap seed to the leader default (400k on [1m]). Auto-only (no explicit
-        // leader contextSize/limit arg on this door), and precise — it no-ops unless the caller was
-        // exactly at the member cap (an established leader stays put). Best-effort inside the helper.
-        if (leaderRole === 'leader') leaderReseed = await reseedLeaderCompactionLimit(ownerId);
-        // Recolor the caller's live window to the fleet's bound scheme — every other
-        // membership entry point (fleet:create / fleet:join / fleet:take-leadership)
-        // does this; a leader whose window keeps its old color while the members open
-        // in the fleet scheme is the bug, not a variant. Best-effort: a no-op for
-        // non-psu-hosted callers, never throws.
-        await recolorCallerTerminal(ownerId, record);
+        applyCallerFleetMembership = async () => {
+          let joinedLeaderControl: LeaderControlOutcome | null = null;
+          let joinedLeaderReseed: Awaited<ReturnType<typeof reseedLeaderCompactionLimit>> = null;
+          await setPresenceFleet(workspaceId, ownerId, fleetSlug, leaderRole);
+          if (leaderRole === 'leader') {
+            joinedLeaderControl = await ensureFleetLeaderControl({
+              workspaceId,
+              ownerId,
+              fleetSlug,
+              harnessSlug: harness,
+              planSlug,
+              carry: args.carry ?? 'warm',
+            });
+          }
+          // P-009 (incl. via launch): now that presence marks the caller this fleet's leader, lift a
+          // stuck 300k member-cap seed to the leader default (400k on [1m]). Auto-only (no explicit
+          // leader contextSize/limit arg on this door), and precise — it no-ops unless the caller was
+          // exactly at the member cap (an established leader stays put). Best-effort inside the helper.
+          if (leaderRole === 'leader') joinedLeaderReseed = await reseedLeaderCompactionLimit(ownerId);
+          // Recolor the caller's live window to the fleet's bound scheme — every other
+          // membership entry point (fleet:create / fleet:join / fleet:take-leadership)
+          // does this; a leader whose window keeps its old color while the members open
+          // in the fleet scheme is the bug, not a variant. Best-effort: a no-op for
+          // non-psu-hosted callers, never throws.
+          await recolorCallerTerminal(ownerId, record);
+          return { leaderControl: joinedLeaderControl, leaderReseed: joinedLeaderReseed };
+        };
       }
     } catch (e: any) {
       return err(`Failed to create/join fleet \`${fleetSlug}\`: ${e?.message ?? e}`);
@@ -3075,12 +3139,25 @@ export default defineTool({
     // True only when this call must actually open a leader terminal (asked for, and the
     // fleet was newly created rather than joined).
     const spawningLeader = wantsSpawnedLeader && (freshFleetCreated || delegatedSpawnReplacement);
+    // Deliberately NARROW: this predicate drives the DELEGATION narrative downstream (the
+    // goal↔leader coupling edge, and the "this fleet is led by a launched agent, not by you"
+    // brief), and both of those need a spawned or recorded leader they can name. Being a
+    // portfolio steward is a SEPARATE reason the caller stays out of the fleet, so it gets its
+    // own term below rather than widening this one and silently changing those two messages.
     const callerExcludedFromFleet = spawningLeader || delegatedSpawnRetry;
-    const callerMembership = {
-      enrolled: !callerExcludedFromFleet,
-      role: callerExcludedFromFleet ? 'delegator' : leaderRole,
-      reason: callerExcludedFromFleet ? 'leader-spawn-caller-excluded' : null,
-    } as const;
+    const callerStaysOutsideFleet = callerExcludedFromFleet || callerIsPortfolioSteward;
+    // enrolled:false until the deferred writes captured above actually run, which happens only
+    // once the live-member deficit guard admits a real wave. Every early return between here and
+    // there therefore reports the truth: this call joined the caller to nothing.
+    let callerMembership: { enrolled: boolean; role: string; reason: string | null } = {
+      enrolled: false,
+      role: callerStaysOutsideFleet ? 'delegator' : leaderRole,
+      reason: callerStaysOutsideFleet
+        ? callerExcludedFromFleet
+          ? 'leader-spawn-caller-excluded'
+          : 'goal-holder-portfolio-steward'
+        : 'launch-suppressed-before-enrollment',
+    };
 
     // LIVE-MEMBER deficit guard: a fleet that already has enough LIVE members gets NO new wave,
     // regardless of timing. The rate window alone cannot stop a doom-looping leader that re-fires
@@ -3162,6 +3239,21 @@ export default defineTool({
         relaunchSuppressed: true,
         message: lines.join('\n'),
       });
+    }
+
+    // WI-10005698: a real launch wave is admitted, so the caller's OWN membership may now be
+    // written. This sits at the same boundary as the claim-spec write below, for the same
+    // reason: every return above this line opened nothing, and a call that opens nothing must
+    // leave the caller's fleet label, leader control, compaction seed and window colour alone.
+    if (applyCallerFleetMembership) {
+      try {
+        const joined = await applyCallerFleetMembership();
+        leaderControl = joined.leaderControl;
+        leaderReseed = joined.leaderReseed;
+      } catch (e: any) {
+        return err(`Failed to join fleet \`${fleetSlug}\`: ${e?.message ?? e}`);
+      }
+      callerMembership = { enrolled: true, role: leaderRole, reason: null };
     }
 
     // #4 (fleet-launch-plan-scoped-claim-spec, 2026-07-08) + EI-7671 + EI-10409: set the
@@ -4406,7 +4498,36 @@ export default defineTool({
       requested: requestedGoalProfile,
     });
     if (goalLaunch.refusal) {
-      return err(goalLaunch.refusal.message);
+      // This policy gate runs after the atomic relaunch slot is claimed, because
+      // its count must be the post-capacity-clamp openCount. A refusal opens no
+      // leader or member, so retaining that slot would make the next call look
+      // like a successful launch and suppress a legitimate retry for 5 minutes.
+      let launchGuardReleaseError: string | null = null;
+      try {
+        await releaseFleetLaunchSlot({ workspaceId, fleetSlug, at: slot.at });
+      } catch (error) {
+        launchGuardReleaseError = error instanceof Error ? error.message : String(error);
+      }
+      const failure = launchGuardReleaseError
+        ? `${goalLaunch.refusal.message} Launch guard release failed: ${launchGuardReleaseError}`
+        : goalLaunch.refusal.message;
+      return json({
+        ok: false,
+        fleet: fleetSlug,
+        leaderRole,
+        callerMembership,
+        plan: planSlug,
+        harness,
+        requested: count,
+        liveMembers,
+        requestedOpenCount,
+        opened: [],
+        failed: [{ error: failure, code: launchGuardReleaseError ? 500 : 403 }],
+        launchGuardReleased: launchGuardReleaseError === null,
+        message: launchGuardReleaseError
+          ? `GOAL launch was refused before spawning, but the relaunch guard could not be released: ${launchGuardReleaseError}. ${goalLaunch.refusal.message}`
+          : `GOAL launch was refused before spawning; no members were opened and the relaunch guard was released. ${goalLaunch.refusal.message}`,
+      });
     }
 
     const launchFallbackDefaults: FleetMemberDefaults = {
@@ -4552,9 +4673,14 @@ export default defineTool({
     // FleetHeadcountConfig cannot represent their heterogeneous boot settings.
     // Keep this write AFTER command composition: an invalid effective model/effort
     // pair must not leave a governor recipe for a launch that never reached spawn.
+    // R-8 (feature-drain-delivery-readiness-and-outcome-accounting-2026-10-01): a
+    // pure claim-spec drain fleet (claimKinds, no plan) gets the same default
+    // target. Requiring a plan here left every plan-less drain fleet with a NULL
+    // target, so nothing recorded what headcount it was launched to hold. The
+    // claim scope itself stays in the claim-spec store, which top-ups read.
     if (
       freshFleetCreated &&
-      Boolean(planSlug) &&
+      (Boolean(planSlug) || Boolean(args.claimKinds?.length)) &&
       launchFleetType !== 'paired' &&
       memberSpecs.length === 0 &&
       !(args.perMemberLaunchContext && args.perMemberLaunchContext.length > 0)
@@ -4584,7 +4710,7 @@ export default defineTool({
       const modelSpec = composeModelSpec(fleetDefaults.model, fleetDefaults.effort) ?? null;
       const split = splitModelSpec(modelSpec);
       const config = normalizePersistedFleetLaunchConfig({
-        plan: planSlug!,
+        ...(planSlug ? { plan: planSlug } : {}),
         harness,
         agent: (fleetDefaults.agent ?? effAgent) as FleetHeadcountConfig['agent'],
         ...(split.model ? { model: split.model } : {}),
@@ -4719,6 +4845,10 @@ export default defineTool({
       command: string;
     }> = [];
     const failed: Array<{ ownerId?: string; error: string; code: number }> = [];
+    const goalAdmissionWarnings: string[] = [];
+    const finalGoalAdmissions: Array<{
+      ownerId: string; receiptId: string | null; admission: GoalProcessAdmission | null; outcome: 'opened' | 'failed';
+    }> = [];
     let persistedLaunchRevision = priorLaunchTransaction
       ? {
           transactionId: priorLaunchTransaction.transactionId,
@@ -4899,6 +5029,10 @@ export default defineTool({
         memberLaunchCommand({
           ...leaderDefaults,
           fleetSlug,
+          // WI-10004449: boot AS the leader. The registry names this agent only after
+          // its process opens (setFleetLeader below), so without the explicit role its
+          // bootstrap saw no leader and composed a MEMBER kickoff + mission for it.
+          fleetRole: 'leader',
           harness,
           plan: planSlug ?? undefined,
           // The pre-pin. This is what makes the fleet row written above name a REAL agent.
@@ -4941,6 +5075,11 @@ export default defineTool({
               });
         },
       );
+      goalAdmissionWarnings.push(...(leaderResult.goalAdmissionDegraded ?? []).map((reason) => `⚠ ${reason}`));
+      finalGoalAdmissions.push({
+        ownerId: spawnedLeaderOwnerId, receiptId: leaderResult.admissionContext?.receiptId ?? null,
+        admission: leaderResult.goalAdmission ?? null, outcome: leaderResult.status === 'ok' ? 'opened' : 'failed',
+      });
       if (leaderResult.status !== 'ok') {
         // Nothing else has opened yet, so release the launch slot — an immediate, legitimate
         // retry must not be suppressed for the whole 5-minute window by a launch that
@@ -4954,11 +5093,10 @@ export default defineTool({
           ? `Fleet \`${fleetSlug}\` still records its prior absent leader ` +
             `\`${delegatedSpawnReplacementExpectedLeader ?? 'none'}\`; that value was not cleared or replaced.`
           : `Fleet \`${fleetSlug}\` now exists and is LEADERLESS — no leader was recorded, because none launched.`;
-        return err(
-          `leader:'spawn' — the LEADER failed to open (${leaderResult.error}), so NO members were ` +
+        const message = `leader:'spawn' — the LEADER failed to open (${leaderResult.error}), so NO members were ` +
             `opened (deliberately: an unled fleet is worse than none). ${registryTruth} ` +
-            `Recover by re-running this same leader:'spawn' call or taking leadership explicitly.`,
-        );
+            `Recover by re-running this same leader:'spawn' call or taking leadership explicitly.`;
+        return { ...json({ ok: false, error: leaderResult.error, finalGoalAdmissions, message }), isError: true };
       }
       leaderAdmissionContext = leaderResult.admissionContext;
       // The leader is OPEN — only now does the registry learn who leads. Before this line the
@@ -5134,6 +5272,11 @@ export default defineTool({
             waveResults.forEach((result, offset) => {
               const i = indices[offset];
               const memberOwnerId = requestedMemberIds[i];
+              goalAdmissionWarnings.push(...(result.goalAdmissionDegraded ?? []).map((reason) => `⚠ ${reason}`));
+              finalGoalAdmissions.push({
+                ownerId: memberOwnerId, receiptId: result.admissionContext?.receiptId ?? null,
+                admission: result.goalAdmission ?? null, outcome: result.status === 'ok' ? 'opened' : 'failed',
+              });
               if (result.status === 'ok') {
                 openedThisWave.push(memberOwnerId);
                 launchTransaction.openedMemberIds.push(memberOwnerId);
@@ -5378,6 +5521,7 @@ export default defineTool({
           requestedOpenCount,
           launchEvidence,
           completionPending: true,
+          finalGoalAdmissions,
           completionHandle,
           launchTransaction,
           opened,
@@ -5396,7 +5540,7 @@ export default defineTool({
       );
     }
     const completionError = responseRace.value;
-    const lines: string[] = [];
+    const lines: string[] = [...goalAdmissionWarnings];
     if (ignoredRoleNote) lines.push(ignoredRoleNote);
     if (leaderSpawnRecoveryWarning) lines.push(`⚠ ${leaderSpawnRecoveryWarning}`);
     if (sizingAdvisory) lines.push(sizingAdvisory.message);
@@ -5664,11 +5808,47 @@ export default defineTool({
       if (briefReadError) lines.push(briefReadError);
     }
 
+    // WI-10004545: a plan fleet launched (or topped up) by a GOAL agent attributes the
+    // PLAN to that goal. plans:new and plans:launch already do; this door did not, so a
+    // goal could run a plan fleet for days while `harness_plans.goal_id` stayed NULL and the
+    // goal portfolio / drain-fleet fence never saw the plan (rem-dream-recombination and
+    // session-transcript-exact-fuzzy-search, measured 2026-10-01). Same rule as the other
+    // two doors: the goal comes from the LAUNCHER's resolved identity, never an argument,
+    // and the write is `WHERE goal_id IS NULL` so the first attribution wins and a launch
+    // can never re-parent a plan another goal already owns. Only after a verified launch —
+    // a refused or zero-member launch attributes nothing — and best-effort: the fleet
+    // already exists, so a stamp failure is RECORDED on the result, never raised.
+    let planGoalAttribution: { goalId: string | null; error: string | null } | null = null;
+    if (
+      goalSettings.goalId &&
+      planSlug &&
+      planRow &&
+      (launchTransaction.verifiedMemberIds.length > 0 || spawnedLeader?.registered === true)
+    ) {
+      try {
+        planGoalAttribution = {
+          goalId: await stampPlanGoalProvenance({
+            workspaceId: planRow.workspaceId,
+            harnessSlug: planRow.harnessSlug,
+            planSlug,
+            ownerId,
+          }),
+          error: null,
+        };
+      } catch (e) {
+        planGoalAttribution = { goalId: null, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+
     stampLaunchOutcome(ctx, fleetSlug, launchTransaction);
     return json(
       {
         ok: launchTransaction.verifiedMemberIds.length > 0 || spawnedLeader?.registered === true,
         fleet: fleetSlug,
+        // WI-10004545: which goal the launching agent attributed the plan to (null = not a
+        // goal launch / nothing attributed); `error` is set when the best-effort stamp threw.
+        planGoalAttribution,
+        finalGoalAdmissions,
         leaderRole,
         callerMembership,
         // Machine-readable fact about the ACTUAL registered leader, never inferred from

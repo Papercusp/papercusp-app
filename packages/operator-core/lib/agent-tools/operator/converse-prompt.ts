@@ -24,6 +24,7 @@ import {
   renderToolsCatalog,
   type Role,
 } from '../../prompt-assembly';
+import { readServingGeneration } from '../../serving-generation';
 import { buildMemoryContextBlock, lastUserContext } from '../../memory/injection';
 import { activeWorkspaceId } from '../../workspace-registry';
 import { loadHarnessRegistry } from '../../harness-registry';
@@ -263,7 +264,8 @@ export async function buildOperatorPrompt(
   // invisible to a voice user, so the tool declares modality:['text']
   // and gets dropped from the voice catalog automatically (replaces
   // the manual NOTE in the trigger sections below).
-  const catalog = renderToolsCatalog(role, operatorToolNames, modality, toClaudeName);
+  const servingGeneration = await readServingGeneration();
+  const catalog = renderToolsCatalog(role, operatorToolNames, modality, toClaudeName, servingGeneration);
   if (catalog) systemSections.push(catalog);
 
   // Tool-calling contract (voice-persona P-005/P-009). The brain runs on
@@ -343,8 +345,9 @@ export async function buildOperatorPrompt(
       return await getMemoryBlockBounded(
         activeWorkspaceId(),
         memScopeKey,
-        () =>
+        (deadline) =>
           buildMemoryContextBlock({
+            deadline,
             userId: sessionUser?.id ?? null,
             workspaceId: activeWorkspaceId(),
             harnessSlugs,

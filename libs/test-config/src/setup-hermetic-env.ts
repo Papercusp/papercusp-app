@@ -72,6 +72,12 @@
  *    genuinely wants the request-only-host branch still sets the var itself, in its own
  *    beforeEach/test body, which runs after this module-level scrub and so still wins.
  *
+ *  - PAPERCUSP_SPAWNER_SIDECAR / PAPERCUSP_SPAWNER_SIDECAR_MODE — per-host rollout
+ *    controls. Inherited `=1` enables managed sidecar processes during tests, which can
+ *    start systemd scopes and leave delayed lifecycle callbacks after the triggering test.
+ *    The rollout is opt-in in production, so tests that exercise it set these vars
+ *    explicitly after this scrub.
+ *
  *  - PORT — the operator's own listen port, and the ONLY entry here that is not
  *    PAPERCUSP_-prefixed. Every su/psu agent shell on this box carries `PORT` (3070 for
  *    the release operator, 3055 for dev). Under `isolate: true` a value a test set never
@@ -87,6 +93,19 @@
  *    as PAPERCUSP_BACKGROUND_WORKERS above; they keep working unchanged, because a test
  *    that sets PORT does so in its own beforeEach/test body, after this module-level scrub.
  *
+ *  - PAPERCUSP_OPERATOR_URL / PAPERCUSP_OPERATOR_URL_PROVENANCE — the operator pin every
+ *    psu-launched shell exports (the launcher writes the pair together). psu-launcher's
+ *    resolveOperatorTarget reads it from the AMBIENT env and warns through console.warn when
+ *    the pin is :3170 and the staging proxy (:9171) answers (EI-24402391758483336), or when
+ *    the pin is :3070 and the main proxy (:9071) answers (WI-1457). vitest-fail-on-console
+ *    turns that warn into a red. Measured 2026-09-30 (WI-10004341): a scoped test:affected
+ *    run from an su shell pinned to :3170 redded 7 operator-core files (bee-tool-boundary,
+ *    launch-su, role-principal-caps, set-status.bulk, barrel-boot, action-registered,
+ *    stop-fanout-installed) that pass through testing:run, whose operator-spawned env carries
+ *    no :3170 pin. The verdict depended on the invoking shell and on whether a proxy unit was
+ *    up. Tests that exercise the pin set it themselves or pass an explicit env object, after
+ *    this module-level scrub.
+ *
  *  - PAPERCUSP_VOICE_IPC_DIR (redirected, not scrubbed) — the voice-socket state root
  *    (sockets/ + voice-ipc.json). Without a redirect, any test that (transitively)
  *    starts the local voice socket reaps the REAL ~/.papercusp/sockets — an orphaned
@@ -101,10 +120,10 @@
  * Keep this list to PROVEN leak classes — broad env wipes hide real bugs.
  */
 import { rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createHermeticDir, sweepStaleTestScratch } from './hermetic-tmpdir.js';
+import { createHermeticDir, stateDirNeedsRedirect, sweepStaleTestScratch } from './hermetic-tmpdir.js';
 
 // WI-38869: at least 17 OTHER test files each mint their own scratch dir directly
 // at the /tmp/pcv TOP LEVEL (mkdtempSync(join(tmpdir(), '<own-prefix>-'))) with no
@@ -181,8 +200,40 @@ if (!process.env.PAPERCUSP_VOICE_IPC_DIR) {
     }
   });
 }
+// WI-10004854: the managed-pty state root (discovery `.json`, control `.sock`,
+// per-owner `.events.jsonl`, sender-inject-audit.jsonl). Same rule as the voice-ipc
+// redirect above. Before this, only apps/operator's integration config redirected it
+// (vitest-shims/psu-pty-temp-dir.ts). Tests in other configs still wrote into the
+// live ~/.papercusp/psu-pty: unit tests in psu-pty-discovery.test.ts, and runs that
+// escaped the shim. Measured 2026-10-01: 193 itest `.events.jsonl` files plus 2
+// test sockets there, from 9 runs between 2026-08-23 and 2026-10-01, the last after the
+// shim existed. That debris inflates the ~3.5k-entry
+// directory the operator scans, and the ingest routine reads its rows as fleet
+// evidence. An inherited value that IS the live dir is
+// redirected too: it means the runner's own environment leaked in, which is the
+// same pollution class as PAPERCUSP_WORKSPACE_ID below. A test that needs a
+// specific dir sets it in its own body, after this file runs.
+if (stateDirNeedsRedirect(process.env.PAPERCUSP_PSU_PTY_DIR, join(homedir(), '.papercusp', 'psu-pty'))) {
+  // Leave room for fixture owner IDs within Linux's 107-byte socket path.
+  const psuPtyHermeticDir = createHermeticDir(join(tmpdir(), 'pc-pty'));
+  process.env.PAPERCUSP_PSU_PTY_DIR = psuPtyHermeticDir;
+  process.on('exit', () => {
+    try {
+      rmSync(psuPtyHermeticDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort — never let cleanup fail the process */
+    }
+  });
+}
 delete process.env.PAPERCUSP_BACKGROUND_WORKERS;
 delete process.env.PAPERCUSP_HONO_PORT;
+delete process.env.PAPERCUSP_SPAWNER_SIDECAR;
+delete process.env.PAPERCUSP_SPAWNER_SIDECAR_MODE;
+// EI-25164235306950609: a fixture host shares the test runner's pc scope.
+// Inheriting the parent agent's headless flag falsely authorizes sweeping that
+// scope on teardown, killing sibling workers and esbuild. Headless fixtures
+// that own a session set this explicitly after setup.
+delete process.env.PAPERCUSP_PSU_HEADLESS;
 delete process.env.PORT;
 // Spawned operator sessions carry the live listener bind into child tests. A
 // fleet runner commonly uses `0.0.0.0`, but unit tests have no remote-admin
@@ -191,11 +242,20 @@ delete process.env.PORT;
 // loopback-default path; tests that exercise remote binding pass an explicit
 // env object or set the variable locally.
 delete process.env.PAPERCUSP_BIND_HOST;
+// WI-10004341: the psu operator pin (see the header list). Scrubbed as a pair; the
+// launcher writes both.
+delete process.env.PAPERCUSP_OPERATOR_URL;
+delete process.env.PAPERCUSP_OPERATOR_URL_PROVENANCE;
 delete process.env.PAPERCUSP_WORKSPACE_ID;
 delete process.env.PAPERCUSP_POT_HOME_SLUG;
 delete process.env.PAPERCUSP_INTEGRATION_ROOT;
 delete process.env.PAPERCUSP_RELEASE_ROOT;
 delete process.env.PAPERCUSP_CHECKPOINT_ROOT;
+// EI-25165052071544976: release-shell fixtures must select their private
+// generation store. The host service's override otherwise publishes and walks
+// the live shared store, while assertions expect the fixture-local directory.
+// Tests of the override set it explicitly after this setup, as other env seams do.
+delete process.env.PAPERCUSP_DEPENDENCY_GENERATION_ROOT;
 delete process.env.PAPERCUSP_INTEGRATION_BRANCH;
 delete process.env.PAPERCUSP_RELEASE_REF;
 

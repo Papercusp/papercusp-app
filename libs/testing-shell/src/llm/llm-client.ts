@@ -33,6 +33,10 @@ export interface LlmCallOpts {
   system?: string;
   messages: Array<{ role: 'user' | 'assistant'; content: string }>;
   maxTokens?: number;
+  /** Require the host to enforce maxTokens on the selected transport. A host
+   * must refuse before inference when it cannot enforce the limit. This bounds
+   * output tokens only; it does not establish a complete USD spend bound. */
+  requireOutputTokenLimit?: boolean;
   temperature?: number;
   responseFormat?: 'text' | 'json';
   /**
@@ -105,17 +109,33 @@ export interface LlmCallOpts {
   ownerId?: string;
 }
 
+/** Execution receipt from the host that issued the call. A module subset is
+ * retained separately from a complete transport pin. Unknown remote code
+ * remains unresolved even when a request and its usage completed. */
+export interface LlmExecutionReceipt {
+  model: string;
+  codeHash: string | null;
+  loadedCode?: Readonly<Record<string, string | null>>;
+  unresolved?: readonly string[];
+}
+
 export interface LlmCallResult {
   text: string;
   json?: unknown;
   inputTokens: number;
   outputTokens: number;
+  /** Reported total, or the known subtotal when usage is incomplete. */
   costUsd: number;
+  /** A terminal response does not establish total spend when usage is missing. */
+  costUsdMeasurementMissing?: boolean;
+  /** Usage frames whose spend could not be measured by the transport. */
+  unreportedFrames?: number;
   /** Provider terminal reason when available (`end_turn`, `max_tokens`, …). */
   stopReason?: string | null;
   /** Gateway account that actually served the request, when exposed by the
    * transport's `x-papercusp-routed-account` response header. */
   servedAccount?: string;
+  execution?: LlmExecutionReceipt;
   raw: unknown;
 }
 

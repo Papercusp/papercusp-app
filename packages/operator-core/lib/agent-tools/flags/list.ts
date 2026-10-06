@@ -33,16 +33,7 @@ export default defineTool({
     const fakeReq = new Request('http://localhost/agent-tool');
     const payload = await getAllFlags(resolveDistinctId(fakeReq));
     return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(
-            { keys: ALL_FLAG_KEYS, ...payload },
-            null,
-            2,
-          ),
-        },
-      ],
+      data: { keys: ALL_FLAG_KEYS, ...payload },
     };
   },
 });

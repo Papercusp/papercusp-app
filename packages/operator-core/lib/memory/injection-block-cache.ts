@@ -32,6 +32,7 @@
 
 import { getOrSetBounded, type Cache } from '@papercusp/cache';
 import { getOperatorCache } from '../cache/instance';
+import { createMemoryWorkDeadline, type MemoryWorkDeadline } from './op-deadline';
 
 /** Always serve-stale + revalidate: the block is query-dependent, so a cached
  *  build is by definition one turn behind — never "fresh". */
@@ -44,6 +45,19 @@ export const MEMORY_BLOCK_COLD_DEADLINE_MS = 2_000;
 
 /** Invalidation tag — bump via the cache ECA for an eager refresh. */
 export const MEMORY_BLOCK_CACHE_TAG = 'memory-inject-block';
+/** Base-table tag the generic cache-ECA bumps after a canonical memory write. */
+export const MEMORY_CANONICAL_CACHE_TAG = 'memory_canonical';
+
+/** What a block build can ask about the call that started it. */
+export interface MemoryBlockBuildContext {
+  /**
+   * True while the caller still waits on this build: a cold miss, until the
+   * caller's wait cap. False once the caller has been answered, which is from the
+   * start for a stale-while-revalidate rebuild. A client wall bounds a step only
+   * while this is true; after that nobody is left for it to protect.
+   */
+  readonly callerWaiting: () => boolean;
+}
 
 export interface MemoryBlockBoundedOpts {
   /** Override the cold-miss wait cap (sentinel_scan turns have no human waiting). */
@@ -69,27 +83,44 @@ export type MemoryBlockBoundedResult =
 export async function getMemoryBlockBoundedResult(
   workspaceId: string,
   scopeKey: string,
-  build: () => Promise<string | null>,
+  build: (deadline: MemoryWorkDeadline, ctx: MemoryBlockBuildContext) => Promise<string | null>,
   opts: MemoryBlockBoundedOpts = {},
 ): Promise<MemoryBlockBoundedResult> {
   const cache = opts.cache ?? getOperatorCache();
   const deadlineMs = opts.deadlineMs ?? MEMORY_BLOCK_COLD_DEADLINE_MS;
+  // Flips once this call has returned: after a stale serve (the build is then a
+  // background revalidate) or after the caller's wait cap. Read lazily, at the
+  // moment a build step sizes a wait, never captured at build start: a stale hit
+  // can start the revalidate before this call has returned.
+  let callerAnswered = false;
+  const ctx: MemoryBlockBuildContext = { callerWaiting: () => !callerAnswered };
 
   const res = await getOrSetBounded<string | null>(
     cache,
     workspaceId,
     `memory-inject-block:${scopeKey}`,
-    build,
+    async () => {
+      // Created only for an actual single-flight build, never for a cache hit
+      // or a coalesced waiter. SWR and the caller's wait retain their semantics.
+      const deadline = createMemoryWorkDeadline(deadlineMs);
+      try { return await build(deadline, ctx); }
+      finally { deadline.close(); }
+    },
     {
       deadlineMs,
       softTtlMs: opts.softTtlMs ?? MEMORY_BLOCK_SOFT_TTL_MS,
       hardTtlMs: opts.hardTtlMs ?? MEMORY_BLOCK_HARD_TTL_MS,
-      tags: [MEMORY_BLOCK_CACHE_TAG],
+      // The memory-write path publishes a synthetic memory_canonical.changed
+      // event through sync-sse. The generic cache-ECA bumps this base-table tag
+      // in every listening process, so the next prompt cannot serve a superseded
+      // block from its process-local SWR cache.
+      tags: [MEMORY_BLOCK_CACHE_TAG, MEMORY_CANONICAL_CACHE_TAG],
       // A null block (no hits / degraded store) is a completed build — cache it
       // so a quiet or degraded store isn't re-probed on the blocking path.
       cacheEmpty: true,
     },
   );
+  callerAnswered = true;
   if (res.ok) return { status: 'ready', block: res.value };
   if (res.reason === 'deadline') {
     // The single-flight build keeps running and will serve the NEXT turn;
@@ -116,7 +147,7 @@ export async function getMemoryBlockBoundedResult(
 export async function getMemoryBlockBounded(
   workspaceId: string,
   scopeKey: string,
-  build: () => Promise<string | null>,
+  build: (deadline: MemoryWorkDeadline, ctx: MemoryBlockBuildContext) => Promise<string | null>,
   opts: MemoryBlockBoundedOpts = {},
 ): Promise<string | null> {
   return (await getMemoryBlockBoundedResult(workspaceId, scopeKey, build, opts)).block;

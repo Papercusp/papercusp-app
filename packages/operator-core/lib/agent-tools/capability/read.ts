@@ -48,7 +48,9 @@ const BYTE_WINDOW_EXCLUSIVITY =
 const CONTENT_INDEX_EXCLUSIVITY =
   'Mutually exclusive with line windows (offset, limit, tail), byte windows (byte_offset, byte_limit), and evidence_class.';
 const EVIDENCE_CLASS_EXCLUSIVITY =
-  'Mutually exclusive with content_indexes, line windows (offset, limit, tail), and byte windows (byte_offset, byte_limit).';
+  'Text or Markdown scratch spills do not support evidence selection; read them with line or byte windows. Mutually exclusive with content_indexes, line windows (offset, limit, tail), and byte windows (byte_offset, byte_limit).';
+const SCRATCH_LINE_WINDOW_SIZE_NOTE =
+  'Scratch-reference line windows can be refused when selected text exceeds the response-size limit; reduce limit/tail or use byte_offset+byte_limit for exact large text.';
 
 const CAPABILITY_READ_SEE_ALSO = [
   'capability:edit (exact-string edit)',
@@ -183,6 +185,14 @@ export function doorSafePageBytes(
   return Math.min(requestedBytes, fits);
 }
 
+/** Scratch references are returned unchanged by tools:invoke, so an oversized
+ * line view would spill into another scratch reference and repeat the same read.
+ * Leave the same envelope slack used by byte pages before allowing a text window. */
+function scratchLineWindowExceedsDoor(text: string): boolean {
+  const budgetBytes = computeTurnDoors(0).resultEach * CHARS_PER_TOKEN_ESTIMATE;
+  return Buffer.byteLength(text, 'utf8') > budgetBytes - DOOR_MARGIN_CHARS;
+}
+
 const readPathArgs = {
   file_path: z.string().min(1).optional().describe('Absolute path, ~/-relative, or relative to the project dir.'),
   uri: z.string().min(1).optional().describe('A papercusp://scratch URI alias for file_path, as emitted by result-door cursors.'),
@@ -190,14 +200,20 @@ const readPathArgs = {
 
 const lineWindowArgs = z.object({
   ...readPathArgs,
-  offset: z.number().int().nonnegative().optional().describe(`1-based line to start from. ${LINE_WINDOW_EXCLUSIVITY}`),
-  limit: z.number().int().positive().optional().describe(`Max lines to read (default ${DEFAULT_LIMIT}). ${LINE_WINDOW_EXCLUSIVITY}`),
+  offset: z.number().int().nonnegative().optional().describe(
+    `1-based line to start from. ${SCRATCH_LINE_WINDOW_SIZE_NOTE} ${LINE_WINDOW_EXCLUSIVITY}`,
+  ),
+  limit: z.number().int().positive().optional().describe(
+    `Max lines to read (default ${DEFAULT_LIMIT}). ${SCRATCH_LINE_WINDOW_SIZE_NOTE} ${LINE_WINDOW_EXCLUSIVITY}`,
+  ),
   tail: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe(`Read the LAST N lines instead of reading forward — the \`tail -n N\` equivalent. Ignores offset. ${LINE_WINDOW_EXCLUSIVITY}`),
+    .describe(
+      `Read the LAST N lines instead of reading forward — the \`tail -n N\` equivalent. Ignores offset. ${SCRATCH_LINE_WINDOW_SIZE_NOTE} ${LINE_WINDOW_EXCLUSIVITY}`,
+    ),
   raw: z
     .boolean()
     .optional()
@@ -257,7 +273,7 @@ const evidenceClassArgs = z.object({
   byte_limit: z.never().optional().describe(`Only valid for byte windows. ${BYTE_WINDOW_EXCLUSIVITY}`),
   content_indexes: z.never().optional().describe(`Only valid for content-index selection. ${CONTENT_INDEX_EXCLUSIVITY}`),
   evidence_class: z.enum(OUTPUT_EVIDENCE_CLASSES).describe(
-    `For a stable result-door reference, resolve only the JSON values indexed for this evidence class. ${EVIDENCE_CLASS_EXCLUSIVITY}`,
+    `For a stable result-door reference with a JSON MCP content envelope, resolve only the values indexed for this evidence class. ${EVIDENCE_CLASS_EXCLUSIVITY}`,
   ),
 });
 
@@ -691,7 +707,12 @@ export default defineTool({
       if (selectors.length === 0) return err('evidence_class_not_found', `scratch reference has no ${args.evidence_class} evidence.`);
       let decoded: unknown;
       try { decoded = JSON.parse(bytes.toString('utf8')); }
-      catch { return err('evidence_not_selectable', 'scratch reference payload is not JSON.'); }
+      catch {
+        return err(
+          'evidence_not_selectable',
+          'scratch reference payload is not JSON. Use line or byte windows for text or Markdown spills.',
+        );
+      }
       const row = decoded && typeof decoded === 'object' ? decoded as Record<string, unknown> : null;
       const content = row?.content;
       if (!Array.isArray(content)) return err('evidence_not_selectable', 'scratch reference payload has no MCP content array.');
@@ -823,6 +844,12 @@ export default defineTool({
       const endOffset = startOffset + selected.length;
       const hasSourceNewline = text[endOffset] === '\n';
       const rawBody = text.slice(startOffset, endOffset + (hasSourceNewline ? 1 : 0));
+      if (reference && scratchLineWindowExceedsDoor(rawBody)) {
+        return err(
+          'scratch_line_window_too_large',
+          'This scratch-reference line window is too large for one result. Use a smaller offset/limit/tail window, or byte_offset+byte_limit when a single line is too large.',
+        );
+      }
       return {
         content: [{
           type: 'text' as const,
@@ -848,9 +875,16 @@ export default defineTool({
       ? `\n\n… [${allLines.length - (start + slice.length)} more lines — re-read with offset=${start + slice.length + 1}]`
       : '';
     const head = `${abs} (${allLines.length} lines${start > 0 || more ? `, showing ${start + 1}–${start + slice.length}` : ''})\n`;
+    const displayText = slice.length === 0 ? `${head}(empty)` : head + numbered + footer;
+    if (reference && scratchLineWindowExceedsDoor(displayText)) {
+      return err(
+        'scratch_line_window_too_large',
+        'This scratch-reference line window is too large for one result. Use a smaller offset/limit/tail window, or byte_offset+byte_limit when a single line is too large.',
+      );
+    }
 
     return {
-      content: [{ type: 'text' as const, text: slice.length === 0 ? `${head}(empty)` : head + numbered + footer }],
+      content: [{ type: 'text' as const, text: displayText }],
       // EI-22044192752243601: same silent-primitive-fallback bug as the raw branch
       // above — the ordinary cat -n view is human/model-readable text, not JSON, so
       // a code:run script reading `.content`/`.text` off it got `undefined` with no

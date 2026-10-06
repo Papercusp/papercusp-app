@@ -32,6 +32,8 @@ import {
 } from '../../../events/await/predicate-watch';
 import {
   GOAL_OWNER_REPORT_FIELD,
+  GOAL_OWNER_REPORT_HEADING_LIST,
+  describeGoalOwnerReportTruthViolations,
   parseGoalOwnerReport,
   stampGoalOwnerReport,
   type GoalOwnerReportStamp,
@@ -365,7 +367,7 @@ export default defineTool({
                   duplicate: parsedGoalOwnerReport.duplicate,
                   message:
                     `GOAL owner report for ${goalId} is incomplete; nothing was escalated. ` +
-                    'Provide exactly one non-empty section headed MOVED, COST, OWNER-WALLED, and KILLED. ' +
+                    `Provide exactly one non-empty section headed each of ${GOAL_OWNER_REPORT_HEADING_LIST}. ` +
                     'Use explicit `none` or `unknown (<source/provenance>)` when that is the factual value.',
                 }),
               },
@@ -373,7 +375,32 @@ export default defineTool({
             isError: true,
           };
         }
-        goalOwnerReport = stampGoalOwnerReport(goalId, parsedGoalOwnerReport);
+        // P-005: the same measured-state truth check as coord:send (one shared reader).
+        const truth = await import('../../../goal-owner-report-truth')
+          .then(({ readGoalOwnerReportTruth }) => readGoalOwnerReportTruth(reportWorkspaceId!, goalId!, parsedGoalOwnerReport.fields))
+          .catch(() => null);
+        if (truth && truth.violations.length) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  ok: false,
+                  error: 'goal-owner-report-untruthful',
+                  goalId,
+                  violations: truth.violations,
+                  message: describeGoalOwnerReportTruthViolations(goalId, truth.violations),
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        goalOwnerReport = stampGoalOwnerReport(
+          goalId,
+          parsedGoalOwnerReport,
+          truth ? { citedRefStates: truth.citedRefStates, summary: truth.summary } : undefined,
+        );
       }
     }
     // A caller-supplied conditionKey becomes the dedup subjectSignature, so the SAME

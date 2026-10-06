@@ -435,7 +435,7 @@ export function projectedAutomatedProofRequired(input: {
  * The candidate is built by spreading the pre-amendment trace, so without this it carried the
  * OLD `automatedProofRequired`: a dry run that gave a manual (`instrumentKey:'none'`) BAR a tests
  * check still predicted "manual, no automated proof owed", and the proof floor the apply would
- * raise was invisible until the next gate probe. Measured 2026-09-23 (owner #302): a 14-criterion
+ * raise was invisible until the next gate probe. Measured 2026-09-23 (Avi #302): a 14-criterion
  * amendment on consult-expert-routing-2026-09-22 would have flipped 13 manual BARs to automated.
  *
  * A BAR whose hash is unchanged keeps its projected verdict (its clauses keep their revision,
@@ -469,7 +469,7 @@ export function predictAmendedBarProofFloor(
       const plane = (criterion.evidencePlane ?? before?.evidencePlane ?? 'tree') as AcceptanceEvidencePlane;
       const layers = criterion.requiredTestLayers ?? [];
       const clause: ProjectedClauseProofObligation = {
-        behaviorClass: acceptanceBarBehaviorClass(plane, layers),
+        behaviorClass: before?.mutationRequired === true ? 'happy-path' : acceptanceBarBehaviorClass(plane, layers, criterion.check),
         requiredTestLayers: layers,
         mutationRequired: before?.mutationRequired === true,
       };
@@ -1262,9 +1262,18 @@ export function projectAcceptanceBarContractSnapshot(
       const keys = new Set<string>();
       for (const row of rows) {
         const executed = row.testRunId !== null || row.coverageEvidenceRef !== null;
-        keys.add(
-          `${row.specId}\x00${row.evidenceKind}\x00${row.evidenceRef}\x00${executed ? 'executed' : 'unexecuted'}`,
-        );
+        // A path locates the evidence but does not identify its content. Operational
+        // artifact hashes and repo-files source/test measurements are bound on this row.
+        // Keep execution normalized to a boolean: rerunning unchanged content must not
+        // repeatedly stale a non-pass grade just because testRunId changed.
+        keys.add(JSON.stringify([
+          row.specId,
+          row.evidenceKind,
+          row.evidenceRef,
+          executed ? 'executed' : 'unexecuted',
+          row.fingerprints.sourceFingerprint,
+          row.fingerprints.testFingerprint ?? null,
+        ]));
       }
       return [...keys].sort().join('\x01');
     };
@@ -1803,7 +1812,11 @@ async function defaultReadPlanItems(
 async function defaultReadClauses(
   plan: AcceptanceBarSubjectPlanSource,
 ): Promise<BoundedAcceptanceBarRows<SpecClauseRevision>> {
+  // Scope to the subject row's OWN workspace, like every other reader here. Without it the
+  // operator-home harness resolves to PAPERCUSP_WORKSPACE_ID and a plan stored elsewhere
+  // reads zero clauses, so every BAR reports bar_snapshot_mapping_missing (WI-10005140).
   const rows = await listSpecClauses({
+    workspaceId: plan.workspaceId,
     harnessSlug: plan.harnessSlug,
     planSlug: plan.planSlug,
     limit: MAX_BAR_PROJECTION_EDGES + 1,

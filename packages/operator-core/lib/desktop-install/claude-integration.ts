@@ -19,6 +19,7 @@
  *     `${VAR:-default}` in an mcp url at launch, so we write
  *       ${PAPERCUSP_OPERATOR_URL:-<fallback>}/api/mcp?superuser=1
  *         &client=${PAPERCUSP_SID:-<agentId>}
+ *         &native_session=${CLAUDE_CODE_SESSION_ID:-}
  *         &workspace=${PAPERCUSP_WORKSPACE:-}
  *         &profile=${PAPERCUSP_PROFILE:-<profileDefault>}
  *         &tools=${PAPERCUSP_TOOLS:-}      (su-context-size-variants: CORE spine when trimmed)
@@ -158,6 +159,7 @@ export function buildClaudeMcpEntry(
     url:
       `\${PAPERCUSP_OPERATOR_URL:-${operatorUrlFallback}}/api/mcp?superuser=1` +
       `&client=\${PAPERCUSP_SID:-${agentId}}` +
+      `&native_session=\${CLAUDE_CODE_SESSION_ID:-}` +
       `&workspace=\${PAPERCUSP_WORKSPACE:-}` +
       // orient-recall-quality follow-up (2026-07-12, recall drill 2): the initialize-time
       // memory prelude derives its recall query from ?harness= — without this param EVERY

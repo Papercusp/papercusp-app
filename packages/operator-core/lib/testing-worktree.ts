@@ -51,6 +51,9 @@ export function captureWorktreeSnapshot(cwd?: string): WorktreeGitSnapshot {
         cwd: root,
         encoding: 'utf8',
         timeout: 2_000,
+        // These snapshots only observe the shared tree. Prevent Git's optional
+        // index refresh from competing with git-sync's index writer.
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
         stdio: ['ignore', 'pipe', 'ignore'],
       });
       if (output == null) return null;

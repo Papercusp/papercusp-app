@@ -20,6 +20,21 @@ export function buildGovernedProcessDemand(options?: {}): {
     diskBytes: number;
     fileDescriptors: number;
 };
+/**
+ * The pids of one process tree, root first, and how they were found.  WI-10004924: the scan reads
+ * /proc/<pid>/status for every pid on the host (~9.5k here, ~310 ms CPU per call) to find a few
+ * descendants, and the 250 ms sampler re-ran it back to back, burning ~0.5 core per test run.  The
+ * walk reads only the tree (0.3 ms on a 6-pid tree).  The scan stays as the fallback when the
+ * kernel lacks per-task children files or the tree outgrows the walk.  `method: 'scan'` forces it.
+ */
+export function resolveGovernedProcessTree(rootPid: any, { method, pidCap, readChildren }?: {
+    method?: string | undefined;
+    pidCap?: number | undefined;
+    readChildren?: typeof procChildPids | undefined;
+}): {
+    pids: any[];
+    method: string;
+};
 /** Fail-soft aggregate resource snapshot for one child process tree. */
 export function readGovernedProcessResourceSnapshot(pid: any): {
     cpuMicros: number | null;
@@ -83,9 +98,43 @@ export function isRetryableAdmissionFailure(error: any, maxDepth?: number): bool
  * immediately regardless of how retryable the error looks.
  */
 export function runGovernedTestProcess(options: any, run: any): Promise<any>;
+/** Execute a finite byte-input diagnostic under the existing process lifecycle.
+ * The child starts only after admission, receives its typed context, and keeps
+ * the receipt until execFile has observed exit and pipe EOF. Output and input
+ * stay in memory; callers persist only their own redacted diagnostics.
+ * @param {string} executable
+ * @param {string[]} args
+ * @param {Uint8Array} input
+ * @param {{ timeoutMs: number, maxBuffer: number, namespace: string, workspaceId?: string, owner?: string, env?: NodeJS.ProcessEnv, executionApi?: any }} options
+ * @returns {Promise<{status: number|null, signal: NodeJS.Signals|null, stdout: string, stderr: string, error?: {code: string}, actualDemand: any}>}
+ */
+export function selectGovernedByteProcessFailure(execError: any, inputError: any, inputByteLength: any, exitCode: any): Promise<{
+    status: number | null;
+    signal: NodeJS.Signals | null;
+    stdout: string;
+    stderr: string;
+    error?: {
+        code: string;
+    };
+    actualDemand: any;
+}>;
+export function executeGovernedByteProcess(executable: any, args: any, input: any, options: any): Promise<any>;
 export const GOVERNED_TEST_PROCESS_DEFAULT_MEMORY_BYTES: number;
 export const GOVERNED_TEST_PROCESS_DEFAULT_DISK_BYTES: number;
 export const GOVERNED_TEST_PROCESS_DEFAULT_FILE_DESCRIPTORS: 16;
 export const GOVERNED_TEST_PROCESS_SAMPLE_INTERVAL_MS: 250;
+/**
+ * Above this many pids the per-pid children walk stops paying for itself (measured 2026-10-01:
+ * 390-620 ms on 1,600-3,850-pid churning trees, more than the host-wide scan), so the walk
+ * hands over to the scan.  Test trees are a handful of pids.
+ */
+export const GOVERNED_PROCESS_TREE_WALK_PID_CAP: 512;
 /** Emitted on every retry so fleet-wide DB contention stays VISIBLE. */
 export const GOVERNED_ADMISSION_RETRY_MARKER: "GOVERNED_ADMISSION_RETRY";
+/**
+ * Children of one pid from its threads' `/proc/<pid>/task/<tid>/children` files.  Returns
+ * null when the kernel lacks CONFIG_PROC_CHILDREN, so the caller falls back to the scan;
+ * an exited pid reads as childless, exactly as the scan would see it.
+ */
+declare function procChildPids(pid: any): number[] | null;
+export {};

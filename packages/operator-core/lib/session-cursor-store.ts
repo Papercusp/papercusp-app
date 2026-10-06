@@ -127,7 +127,7 @@ export async function recentSessionCursors(filter: {
       ${filter.ownerId ? sql`AND owner_id = ${filter.ownerId}` : sql``}
       ${filter.excludeSessionId ? sql`AND session_id <> ${filter.excludeSessionId}` : sql``}
       ${sinceIso ? sql`AND updated_at > ${sinceIso}::timestamptz` : sql``}
-    ORDER BY updated_at DESC
+    ORDER BY session_cursor.updated_at DESC
     LIMIT ${limit}
   `;
   return rows;
@@ -152,7 +152,7 @@ export async function cursorsByOwner(ownerIds: string[]): Promise<Map<string, Se
            updated_at::text AS updated_at
     FROM harness_shared.session_cursor
     WHERE owner_id = ANY(${ids})
-    ORDER BY owner_id, updated_at DESC
+    ORDER BY owner_id, session_cursor.updated_at DESC
   `;
   for (const r of rows) {
     if (r.owner_id) out.set(r.owner_id, r);

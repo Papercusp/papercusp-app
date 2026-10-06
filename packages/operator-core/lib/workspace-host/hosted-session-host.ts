@@ -41,6 +41,8 @@ import {
 } from '../desktop/hosted-desktop-channel';
 import { OperatorHttpChannel, type OperatorHttpFetch } from './hosted-operator-http';
 import { AppKeyMintChannel, createAppHttpChannel } from './hosted-app-relay';
+import { hostedPsuPtySpawnSpec, parseHostedPsuCustomerArgv } from './hosted-psu-session';
+import { ByocSealedChannel, isByocSealedPacket } from './byoc-sealed-channel';
 
 export const HOSTED_HOST_MAX_MESSAGE_BYTES = 1024 * 1024;
 export const HOSTED_HOST_MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -96,7 +98,23 @@ export type HostedHostTabRole = 'controller' | 'observer';
  * What a channel carries. `observer`/`controller` says WHO the viewer is; this
  * says WHAT they attached to.
  */
-export type HostedHostChannelKind = 'pty' | 'desktop' | 'operator-http';
+export type HostedHostChannelKind = 'pty' | 'psu' | 'desktop' | 'operator-http';
+
+/**
+ * What a terminal session's one process is: the customer's shell, or psu started by the host
+ * service (D-002, `hosted-psu-session.ts`). Fixed when the session starts.
+ */
+export type HostedHostTerminalProgram = 'shell' | 'psu';
+
+/** Every kind a `relay.open` can ask for, including the two app planes (P-007, P-325). */
+export type HostedHostOpenKind = HostedHostChannelKind | 'app-http' | 'app-key-mint';
+
+/**
+ * The channels a relay-linked local install serves (EAA P-008, D-031 #7): outside apps only.
+ * pty, desktop and operator-http would hand the portal a terminal, the screen, or
+ * loopback-trusted access to a home computer, so they are refused.
+ */
+export const LOCAL_RELAY_CHANNEL_KINDS: ReadonlySet<HostedHostOpenKind> = new Set(['app-http', 'app-key-mint']);
 
 export interface HostedHostRelayOpen {
   type: 'relay.open';
@@ -118,6 +136,16 @@ export interface HostedHostRelayOpen {
   kind?: HostedHostChannelKind;
   /** Required when `kind === 'desktop'`; ignored otherwise. */
   desktopSessionId?: string;
+  /**
+   * `kind === 'psu'` only: the customer's psu arguments. Checked against the D-002 allowlist
+   * (`parseHostedPsuCustomerArgv`); one refused argument refuses the open. Ignored on a resume,
+   * where psu is already running.
+   */
+  argv?: string[];
+  /** `kind === 'app-http'` only: the portal relay's usage this month (P-328). Counts only. */
+  relayUsage?: unknown;
+  /** Content on this channel is Noise-sealed end to end; relay.open remains control metadata. */
+  sealed?: true;
 }
 
 export interface HostedHostRelayMessage {
@@ -166,6 +194,8 @@ export interface HostedHostPtyFactoryInput {
   workspaceRoot: string;
   cols: number;
   rows: number;
+  /** Absent means the customer's shell. Present means psu with these checked arguments. */
+  psu?: { argv: readonly string[] };
 }
 
 /** One live byte pipe to the sandbox's loopback KasmVNC websocket. */
@@ -212,6 +242,17 @@ export interface HostedDesktopRosterEntry {
   displayNumber?: number;
   geometry?: string;
   lastActiveAt?: string;
+  /** Plan agent-multi-desktops-grid P-006: who the desktop belongs to, so the grid
+   *  can label each tile. `owner` is the agent's ownerId for an agent desktop and
+   *  the pot slug for a pot desktop; the workspace desktop has none. */
+  scope?: 'pot' | 'agent' | 'workspace';
+  owner?: string;
+  /** The agent-chosen name of an agent desktop. */
+  name?: string;
+  /** The work-item the owning agent is on RIGHT NOW (D-009): read from its live
+   *  claim at roster time, never stored on the desktop row. */
+  workItemId?: string;
+  workItemIntent?: string;
 }
 
 export interface HostedDesktopBackend {
@@ -279,12 +320,36 @@ export interface HostedWorkspaceHostOptions {
    * own loopback operator; overridable only so tests need no listening server.
    */
   operatorHttp?: { origin?: string; fetch?: OperatorHttpFetch };
+  /**
+   * P-328 (D-030 #4): the portal sends this month's relay usage on an `app-http` `relay.open`.
+   * The raw field is passed through unparsed; the receiver validates it and may raise an alert.
+   */
+  onRelayUsage?: (relayUsage: unknown) => void;
+  /**
+   * WI-10004257: the portal's `membership.report` frame — the addresses in this machine's
+   * organization whose membership is no longer active. Sent outside any channel, after `bound`
+   * and whenever it changes. Called only for a frame naming THIS binding's organization; the raw
+   * frame is passed through and the receiver validates it.
+   */
+  onMembershipReport?: (report: unknown) => void;
+  /**
+   * The channel kinds this adapter serves; any other `relay.open` is closed with
+   * `channel_kind_not_allowed`. Absent means every kind (a Papercusp-hosted machine).
+   * A relay-linked local install passes {@link LOCAL_RELAY_CHANNEL_KINDS} (D-031 #7).
+   */
+  allowedChannelKinds?: ReadonlySet<HostedHostOpenKind>;
+  /** Independently provisioned endpoint keys. The relay never receives either secret. */
+  byocSealedChannel?: {
+    localKeyPair: { publicKey: Buffer; secretKey: Buffer };
+    expectedRemotePublicKey: Buffer;
+  };
 }
 
 type HostSession = {
   key: string;
   userId: string;
   hostedSessionId: string;
+  program: HostedHostTerminalProgram;
   channels: Set<string>;
   pty: HostedHostPty;
   idleTimer: ReturnType<typeof setTimeout> | null;
@@ -700,7 +765,9 @@ export function hostedWorkspacePtySpawnSpec(input: HostedHostPtyFactoryInput) {
 }
 
 function defaultPty(input: HostedHostPtyFactoryInput): HostedHostPty {
-  const handle = spawnPty(hostedWorkspacePtySpawnSpec(input));
+  const handle = spawnPty(
+    input.psu ? hostedPsuPtySpawnSpec({ ...input, argv: input.psu.argv }) : hostedWorkspacePtySpawnSpec(input),
+  );
   return ptyHandleAdapter(handle, input.scope);
 }
 
@@ -755,6 +822,7 @@ function ptyHandleAdapter(handle: PtyHandle, scope: PtyAccessScope): HostedHostP
 export class HostedWorkspaceHostSessionAdapter {
   private readonly sessions = new Map<string, HostSession>();
   private readonly channels = new Map<string, Channel>();
+  private readonly sealedChannels = new Map<string, ByocSealedChannel>();
   private readonly desktopChannels = new Map<string, DesktopChannel>();
   /**
    * Only channels whose dial SUCCEEDED. Kept separate from `desktopChannels` (which
@@ -789,6 +857,25 @@ export class HostedWorkspaceHostSessionAdapter {
     else if (type === 'relay') await this.relay(message);
     else if (type === 'relay.close')
       this.detach(string(message.channelId, 256), string(message.reason, 256) ?? 'remote_closed');
+    else if (type === 'membership.report') this.membershipReport(message);
+  }
+
+  /**
+   * A membership report applies only to the organization this connector is bound to. A frame
+   * naming another organization is dropped: the binding, not the frame, is the authority on which
+   * organization this machine belongs to.
+   */
+  private membershipReport(message: Record<string, unknown>): void {
+    if (!this.options.onMembershipReport) return;
+    if (message.organizationId !== this.options.binding.organizationId) {
+      this.warn('dropped a membership report for another organization');
+      return;
+    }
+    try {
+      this.options.onMembershipReport(message);
+    } catch (err) {
+      this.warn(`membership report failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   close(reason = 'connector_closed'): void {
@@ -803,6 +890,8 @@ export class HostedWorkspaceHostSessionAdapter {
     this.desktopHeartbeat?.stop();
     this.desktopHeartbeat = null;
     this.channels.clear();
+    for (const sealed of this.sealedChannels.values()) sealed.close();
+    this.sealedChannels.clear();
   }
 
   /**
@@ -839,6 +928,8 @@ export class HostedWorkspaceHostSessionAdapter {
     this.desktopHeartbeat?.stop();
     this.desktopHeartbeat = null;
     this.channels.clear();
+    for (const sealed of this.sealedChannels.values()) sealed.close();
+    this.sealedChannels.clear();
     return handoff;
   }
 
@@ -866,6 +957,19 @@ export class HostedWorkspaceHostSessionAdapter {
   }
 
   private async open(message: Record<string, unknown>): Promise<void> {
+    const allowed = this.options.allowedChannelKinds;
+    if (allowed) {
+      // Absent kind is 'pty' on the wire; an unknown kind is refused further down anyway.
+      const requested = message.kind === undefined ? 'pty' : message.kind;
+      if (typeof requested !== 'string' || !allowed.has(requested as HostedHostOpenKind)) {
+        const refusedChannelId = string(message.channelId, 256);
+        if (refusedChannelId) {
+          this.options.send({ type: 'relay.close', channelId: refusedChannelId, reason: 'channel_kind_not_allowed' });
+        }
+        this.warn(`refused a ${typeof requested === 'string' ? requested.slice(0, 32) : 'malformed'} channel: not served by this install`);
+        return;
+      }
+    }
     if (message.kind === 'app-http') {
       // P-007: an outside app's call relayed by the portal. There is no ticket user to
       // bind; the forwarded `Authorization` (app keys only) is the credential, and the
@@ -876,6 +980,7 @@ export class HostedWorkspaceHostSessionAdapter {
         this.options.send({ type: 'relay.close', channelId: appChannelId, reason: 'channel_already_open' });
         return;
       }
+      if (message.sealed === true && !this.openSealedChannel(appChannelId)) return;
       const identity = { userId: 'app-relay', hostedSessionId: appChannelId };
       const http = createAppHttpChannel({
         send: (payload) => this.send(appChannelId, payload),
@@ -886,6 +991,13 @@ export class HostedWorkspaceHostSessionAdapter {
       this.channels.set(appChannelId, { kind: 'operator-http', ...identity, http, plane: 'app' });
       this.send(appChannelId, { type: 'http.ready' });
       this.audit('app_http_attached', identity, appChannelId);
+      if (message.relayUsage !== undefined && this.options.onRelayUsage) {
+        try {
+          this.options.onRelayUsage(message.relayUsage);
+        } catch (err) {
+          this.options.onWarning?.(`relay usage report failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       return;
     }
     if (message.kind === 'app-key-mint') {
@@ -924,13 +1036,27 @@ export class HostedWorkspaceHostSessionAdapter {
     const kind: HostedHostChannelKind | null =
       message.kind === undefined || message.kind === 'pty'
         ? 'pty'
-        : message.kind === 'desktop' || message.kind === 'operator-http'
+        : message.kind === 'psu' || message.kind === 'desktop' || message.kind === 'operator-http'
           ? message.kind
           : null;
-    if (!channelId || !userId || !hostedSessionId || audience !== 'workspace-operator' || !role || !kind) return;
+    if (!channelId || !userId || !hostedSessionId || audience !== 'workspace-operator' || !role) return;
+    if (!kind) {
+      // Say so, rather than dropping the open: a client asking for a kind this host lacks
+      // (D-002's 'psu' on a later kind) can then fall back instead of waiting.
+      this.options.send({ type: 'relay.close', channelId, reason: 'channel_kind_unknown' });
+      return;
+    }
     if (this.channels.has(channelId)) {
       this.options.send({ type: 'relay.close', channelId, reason: 'channel_already_open' });
       return;
+    }
+    const sealed = message.sealed === true;
+    if (this.options.binding.hosting === 'byoc' && !sealed) {
+      this.options.send({ type: 'relay.close', channelId, reason: 'byoc_plaintext_relay_refused' });
+      return;
+    }
+    if (sealed) {
+      if (!this.openSealedChannel(channelId)) return;
     }
 
     if (kind === 'operator-http') {
@@ -955,9 +1081,26 @@ export class HostedWorkspaceHostSessionAdapter {
       return;
     }
 
+    const program: HostedHostTerminalProgram = kind === 'psu' ? 'psu' : 'shell';
     const key = sessionKey(userId, hostedSessionId);
     let session = this.sessions.get(key);
     const resumed = Boolean(session);
+    if (session && session.program !== program) {
+      // A session's process is fixed at start: a psu attach must never land in a shell, and a
+      // shell attach must never land in psu.
+      this.options.send({ type: 'relay.close', channelId, reason: 'session_program_mismatch' });
+      return;
+    }
+    let psuArgv: string[] | undefined;
+    if (!session && program === 'psu') {
+      const parsed = parseHostedPsuCustomerArgv(message.argv);
+      if (!parsed.ok) {
+        this.options.send({ type: 'relay.close', channelId, reason: 'psu_argv_refused' });
+        this.audit('psu_argv_refused', { userId, hostedSessionId }, channelId, parsed.reason);
+        return;
+      }
+      psuArgv = parsed.argv;
+    }
     if (!session) {
       const scope: PtyAccessScope = {
         tenantId: this.options.binding.organizationId,
@@ -972,11 +1115,13 @@ export class HostedWorkspaceHostSessionAdapter {
         workspaceRoot: this.options.workspaceRoot,
         cols: 120,
         rows: 32,
+        ...(psuArgv ? { psu: { argv: psuArgv } } : {}),
       });
       session = {
         key,
         userId,
         hostedSessionId,
+        program,
         channels: new Set(),
         pty,
         idleTimer: null,
@@ -988,7 +1133,7 @@ export class HostedWorkspaceHostSessionAdapter {
       };
       this.wire(session);
       this.sessions.set(key, session);
-      this.audit('pty_started', session);
+      this.audit('pty_started', session, undefined, program === 'psu' ? `psu ${psuArgv!.join(' ')}`.trimEnd() : undefined);
     }
 
     if (session.idleTimer) {
@@ -1013,6 +1158,7 @@ export class HostedWorkspaceHostSessionAdapter {
       type: 'pty.ready',
       resumed,
       role,
+      program,
       limits: {
         maxFileBytes: this.files.maxFileBytes,
         maxUploadChunkBytes: HOSTED_HOST_MAX_UPLOAD_CHUNK_BYTES,
@@ -1131,6 +1277,35 @@ export class HostedWorkspaceHostSessionAdapter {
     if (!channel) return;
     const payload = object(message.payload);
     if (!payload) return;
+    const sealed = this.sealedChannels.get(channelId);
+    if (sealed) {
+      if (isByocSealedPacket(payload)) sealed.receive(payload);
+      return;
+    }
+    await this.acceptPayload(channelId, payload);
+  }
+
+  private openSealedChannel(channelId: string): boolean {
+    const keys = this.options.byocSealedChannel;
+    if (!keys) {
+      this.options.send({ type: 'relay.close', channelId, reason: 'sealed_channel_unavailable' });
+      return false;
+    }
+    const channel = new ByocSealedChannel({
+      initiator: false,
+      localKeyPair: keys.localKeyPair,
+      expectedRemotePublicKey: keys.expectedRemotePublicKey,
+      sendPacket: (packet) => this.options.send({ type: 'relay', channelId, payload: packet }),
+      onFrame: (frame) => { void this.acceptPayload(channelId, frame); },
+      onError: () => this.detach(channelId, 'sealed_channel_failed'),
+    });
+    this.sealedChannels.set(channelId, channel);
+    return true;
+  }
+
+  private async acceptPayload(channelId: string, payload: Record<string, unknown>): Promise<void> {
+    const channel = this.channels.get(channelId);
+    if (!channel) return;
     const type = string(payload.type, 64);
     if (!type) return;
 
@@ -1606,6 +1781,11 @@ export class HostedWorkspaceHostSessionAdapter {
 
   private detach(channelId: string | null, reason: string): void {
     if (!channelId) return;
+    const sealed = this.sealedChannels.get(channelId);
+    if (sealed) {
+      this.sealedChannels.delete(channelId);
+      sealed.close();
+    }
     const channel = this.channels.get(channelId);
     if (!channel) return;
     this.channels.delete(channelId);
@@ -1683,6 +1863,11 @@ export class HostedWorkspaceHostSessionAdapter {
   }
 
   private send(channelId: string, payload: unknown): void {
+    const sealed = this.sealedChannels.get(channelId);
+    if (sealed && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      void sealed.send(payload as Record<string, unknown>).catch(() => this.detach(channelId, 'sealed_channel_failed'));
+      return;
+    }
     this.options.send({ type: 'relay', channelId, payload });
   }
 

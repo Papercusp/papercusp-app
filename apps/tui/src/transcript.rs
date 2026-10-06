@@ -180,6 +180,7 @@ pub fn parse_transcript_line(line: &str) -> Option<ChatMessage> {
         provenance: None,
         tools: Vec::new(),
         streaming: false,
+        worked_for: None,
     })
 }
 

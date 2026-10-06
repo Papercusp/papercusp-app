@@ -43,7 +43,7 @@ import {
 import { newTaskId } from './task-manager/types';
 import type { TaskRow } from './task-manager/types';
 import type { TaskReleaseJournal } from './task-manager/store';
-import { readCutStatus, cutUnitFor, PLATFORMS } from './release-cut-launch';
+import { readCutStatus, cutUnitForTask, PLATFORMS } from './release-cut-launch';
 import type { Channel, CutStatus, Platform } from './release-cut-launch';
 
 /** `launched_by` for every manual cut operation — the discovery key. Distinct from the
@@ -191,7 +191,9 @@ export async function beginCutOperation(
   const operationId = input.operationId ?? (deps.newOperationId ?? randomUUID)();
   const { identity } = input;
   const seed = buildCutJournalSeed(operationId, identity, input.credential);
-  const unit = cutUnitFor(identity.platform ?? undefined);
+  // A distinct task unit makes this cut a first-class, killable task. The stable
+  // logical flock in release-cut-launch still serializes the whole-cut/platform slot.
+  const unit = cutUnitForTask(taskId);
 
   await register(
     {
@@ -207,14 +209,13 @@ export async function beginCutOperation(
         version: identity.version,
         platform: identity.platform,
         sourceSha: identity.sourceSha,
-        // The transient unit this operation's sentinels live under. Discovery needs it to
-        // know which /tmp trio to read, and it is per-platform, so it cannot be re-derived
-        // from the task row alone once the platform field is gone.
+        // The task-scoped transient service this operation owns. Discovery needs its
+        // exact unit; the per-platform sentinels remain shared logical-slot state.
         cutUnit: unit,
         release: seed,
       },
     },
-    { workspaceId: input.workspaceId, taskId },
+    { workspaceId: input.workspaceId, taskId, reserveScope: true, unitKind: 'service' },
   );
 
   return { taskId, operationId, identity, seed, unit };
@@ -374,7 +375,7 @@ export async function discoverCutOperations(
       taskId: task.taskId,
       operationId: journal.operationId,
       identity,
-      unit: cutUnitFor(identity.platform ?? undefined),
+      unit: cutUnitForTask(task.taskId),
       taskState: task.state,
       currentStage: journal.currentStage,
       receiptCount: journal.receipts.length,

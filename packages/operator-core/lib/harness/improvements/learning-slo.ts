@@ -1103,12 +1103,14 @@ export function recallPoolSignalsFromHealth(
         (starved.length > RECALL_POOL_BODY_SAMPLES
           ? `\n  … and ${starved.length - RECALL_POOL_BODY_SAMPLES} more.`
           : '') +
-        `\n\nA pool at or near 1.0 is the unmigrated-scope signature: it is being queried under a ` +
-        `scope key nothing writes to, so it contributes nothing to the injected block while its ` +
-        `sibling pools fill the space. This is invisible to the blended memory-zero-hit SLO by ` +
-        `construction — that detector aggregates the whole table, and a surface whose other pools ` +
-        `answer normally reports a healthy zero-hit rate throughout. Check the scope keys above ` +
-        `against what the writers actually key on before assuming the pool is merely empty.`,
+        `\n\nA near-total zero-hit rate is a signal, not proof of a scope-key mismatch. A key with no ` +
+        `active corpus can cause it, but narrow queries against a small corpus can also return ` +
+        `nothing when the scope is valid. Use the listed scopes, empty-scope rate and active-corpus ` +
+        `count to establish what was queried; inspect per-pool retrieval evidence before choosing ` +
+        `a caller, scope-key, corpus or relevance fix. A pool-specific zero-hit rate can be ` +
+        `invisible to the blended memory-zero-hit SLO when sibling pools return hits: that detector ` +
+        `aggregates the whole table, and a surface whose other pools answer normally can look ` +
+        `healthy.`,
       severity: 'major',
       kind: 'bug',
       findingClass: 'learning-slo:recall-degradation',

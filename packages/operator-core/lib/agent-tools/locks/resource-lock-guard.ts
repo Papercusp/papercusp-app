@@ -128,6 +128,17 @@ export async function guardResource<T>(
     lockId = r.lock_id;
     fenceSeq = r.fence_seq;
   } else {
+    // The lower-level acquisition API preserves a draining reservation so
+    // its caller can keep waiting. This guard returns without running a body,
+    // so no caller can use that reservation: release it before refusing.
+    const releaseDeclinedReservation = async (reservationId: string) => {
+      const released = await inWorkspaceTxn(cd, ownerId, tx =>
+        tryReleaseResource(tx, { coordinationDomain: cd, owner: ownerId, lockId: reservationId }),
+      );
+      await broadcastResourceBackUp({
+        source: coordIdentity, resource, waiters: released.waiters[resource] ?? [],
+      }).catch(() => {});
+    };
     const r = await acquireResourceExclusiveWithWait({
       coordinationDomain: cd,
       owner: ownerId,
@@ -146,11 +157,13 @@ export async function guardResource<T>(
     if (r.ok) {
       if (r.status !== 'held') {
         // maxDrainSec was 0 and shared holders remain — not effective.
+        await releaseDeclinedReservation(r.lock_id);
         return { acquired: false, reason: 'draining', holders: r.holders };
       }
       lockId = r.lock_id;
       fenceSeq = r.fence_seq;
     } else {
+      if (r.reason === 'drain_timeout') await releaseDeclinedReservation(r.lock_id);
       return { acquired: false, reason: r.reason, holders: r.holders };
     }
   }

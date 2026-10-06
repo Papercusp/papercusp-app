@@ -27,6 +27,7 @@ import {
   type LearningOutcome,
   type LearningSpend,
 } from './types';
+import { createHash } from 'node:crypto';
 
 export const LEARNING_PRODUCERS = ['scout', 'gym', 'calibration', 'transfer', 'regret', 'red-queen'] as const;
 export type LearningProducer = (typeof LEARNING_PRODUCERS)[number];
@@ -58,11 +59,23 @@ const verdictMap: Record<ProducerVerdict, LearningDecision['verdict']> = {
   inconclusive: 'inconclusive',
 };
 
+/** Freeze the detached JSON receipt, including evidence and inherited decisions. */
+function freezeReceipt<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) freezeReceipt(child);
+  }
+  return value;
+}
+
 /** Build the one common contract from any producer's already-recorded output. */
 export function buildProducerLifecycleContract(
   producer: LearningProducer,
   input: ProducerLifecycleInput,
 ): LifecycleAdapterResult {
+  // Validate and retain the same snapshot; caller mutation cannot change the
+  // evidence behind an already-computed verdict, and callers stay writable.
+  input = structuredClone(input);
   const decision: LearningDecision = {
     verdict: verdictMap[input.verdict],
     authority: input.authority,
@@ -80,22 +93,115 @@ export function buildProducerLifecycleContract(
     ...(input.activation ? { activation: input.activation } : {}),
     outcomes: input.outcomes ?? [],
   };
-  return { producer, contract, validation: validateLearningContract(contract) };
+  return freezeReceipt({ producer, contract, validation: validateLearningContract(contract) });
 }
 
-/** The six producer-specific entry points all share the same contract builder. */
-export const adaptScoutOutput = (input: ProducerLifecycleInput): LifecycleAdapterResult =>
-  buildProducerLifecycleContract('scout', input);
-export const adaptGymOutput = (input: ProducerLifecycleInput): LifecycleAdapterResult =>
-  buildProducerLifecycleContract('gym', input);
-export const adaptCalibrationOutput = (input: ProducerLifecycleInput): LifecycleAdapterResult =>
-  buildProducerLifecycleContract('calibration', input);
-export const adaptTransferOutput = (input: ProducerLifecycleInput): LifecycleAdapterResult =>
-  buildProducerLifecycleContract('transfer', input);
-export const adaptRegretOutput = (input: ProducerLifecycleInput): LifecycleAdapterResult =>
-  buildProducerLifecycleContract('regret', input);
-export const adaptRedQueenOutput = (input: ProducerLifecycleInput): LifecycleAdapterResult =>
-  buildProducerLifecycleContract('red-queen', input);
+/** Discovery and domain verdicts are observations until the complete contract exists. */
+export interface ProducerObservationInput {
+  stage: 'observation';
+  workspaceId: string;
+  sourceRef: string;
+  recordedAt: string;
+  /** The actual persisted row, including its original verdict/provenance. */
+  source: Record<string, unknown>;
+  /** Actual producer evaluation, including partial/unknown pins. It remains
+   * evidence on an observation and never implies contract acceptance. */
+  evaluation?: unknown;
+  /** Supplied only by a producer's evaluated decision path. */
+  contract?: LearningContract;
+}
+
+export interface ProducerLifecycleObservation {
+  receiptVersion: '1';
+  stage: 'observation' | 'decision';
+  producer: LearningProducer;
+  workspaceId: string;
+  sourceRef: string;
+  sourceHash: string;
+  source: Record<string, unknown>;
+  recordedAt: string;
+  contract: LearningContract | null;
+  promotionAllowed: boolean;
+  validation?: ReturnType<typeof validateLearningContract>;
+  /** Immutable evaluated decisions survive subsequent native observations. */
+  decisions?: readonly { contract: LearningContract; sourceHash: string; recordedAt: string }[];
+  /** Added on read; an unadapted later source update is visibly stale. */
+  sourceCurrent?: boolean;
+  /** Missing full-contract sections; no synthetic pins, actors or zero-dollar spend. */
+  missing: readonly string[];
+  evaluation?: unknown;
+  evaluationSourceHash?: string;
+  evaluationCurrent?: boolean;
+}
+
+function canonical(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, canonical(item)]));
+  }
+  return value;
+}
+
+function adaptProducerObservation(producer: LearningProducer, input: ProducerObservationInput): ProducerLifecycleObservation {
+  input = structuredClone(input);
+  if (!input.workspaceId.trim() || !input.sourceRef.trim() || !Number.isFinite(Date.parse(input.recordedAt))) {
+    throw new Error('producer observation requires workspace, source identity and a valid recording time');
+  }
+  // Exclude our receipt to avoid recursively hashing a previous snapshot.
+  const { learning_lifecycle: previousValue, ...fields } = input.source;
+  const source = canonical(fields) as Record<string, unknown>;
+  const sourceHash = createHash('sha256').update(JSON.stringify(source)).digest('hex');
+  const decodedPrevious = typeof previousValue === 'string' ? JSON.parse(previousValue) : previousValue;
+  const previous = decodedPrevious && typeof decodedPrevious === 'object'
+    ? decodedPrevious as Partial<ProducerLifecycleObservation> : undefined;
+  const evaluation = input.evaluation === undefined ? previous?.evaluation : input.evaluation;
+  const evaluationSourceHash = input.evaluation === undefined ? previous?.evaluationSourceHash : sourceHash;
+  const contract = input.contract ?? null;
+  const validation = contract ? validateLearningContract(contract) : undefined;
+  const bound = input.sourceRef === `${producer}:${contract?.candidate.id}` &&
+    contract?.candidate.potScope.workspaceId === input.workspaceId &&
+    contract.evidence.some((item) => item.artifactRefs.includes(input.sourceRef));
+  const decisions = [...(previous?.decisions ?? [])];
+  if (contract) {
+    const prior = decisions.find((item) => item.contract.experiment.batteryId === contract.experiment.batteryId);
+    if (prior && JSON.stringify(canonical(prior.contract)) !== JSON.stringify(canonical(contract))) {
+      throw new Error(`producer common decision is immutable: ${contract.experiment.batteryId}`);
+    }
+    if (!prior) decisions.push({ contract, sourceHash, recordedAt: input.recordedAt });
+  }
+  return freezeReceipt({
+    receiptVersion: '1', stage: contract ? 'decision' : 'observation', producer,
+    workspaceId: input.workspaceId, sourceRef: input.sourceRef,
+    sourceHash,
+    source, recordedAt: input.recordedAt, contract,
+    promotionAllowed: !!(validation?.ok && bound && contract?.decision.verdict === 'accepted' &&
+      contract.spend.unsettledUsd === 0 && contract.spend.settledAt),
+    ...(validation ? { validation } : {}),
+    ...(decisions.length ? { decisions } : {}),
+    missing: contract ? [] : ['candidate', 'experiment', 'evidence', 'spend', 'decision'],
+    ...(evaluation === undefined ? {} : { evaluation, evaluationSourceHash, evaluationCurrent: evaluationSourceHash === sourceHash }),
+  });
+}
+
+interface ProducerAdapter {
+  (input: ProducerLifecycleInput): LifecycleAdapterResult;
+  (input: ProducerObservationInput): ProducerLifecycleObservation;
+}
+
+function producerAdapter(producer: LearningProducer): ProducerAdapter {
+  return ((input: ProducerLifecycleInput | ProducerObservationInput) =>
+    'stage' in input ? adaptProducerObservation(producer, input) : buildProducerLifecycleContract(producer, input)) as ProducerAdapter;
+}
+
+/** All production writers and complete-contract callers share these entry points. */
+export const adaptScoutOutput = producerAdapter('scout');
+export const adaptGymOutput = producerAdapter('gym');
+export const adaptCalibrationOutput = producerAdapter('calibration');
+export const adaptTransferOutput = producerAdapter('transfer');
+export const adaptRegretOutput = producerAdapter('regret');
+export const adaptRedQueenOutput = producerAdapter('red-queen');
 
 export interface LifecycleParityInput {
   producer: LearningProducer;
@@ -147,4 +253,3 @@ export function canRetireLegacyWriter(input: { parity: LifecycleParityResult; re
 export function contractArtifactRefs(contract: LearningContract): string[] {
   return [...new Set(contract.evidence.flatMap((evidence) => evidence.artifactRefs))].sort();
 }
-

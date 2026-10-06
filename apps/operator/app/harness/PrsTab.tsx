@@ -8,19 +8,20 @@
  * P-043c: filter chips — all, mine, awaiting-me, approved, merged.
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useQueryState, parseAsStringLiteral, parseAsBoolean, parseAsInteger } from 'nuqs';
+import React, { useCallback, useMemo, useState } from 'react';
+import { useQueryState, parseAsString, parseAsStringLiteral, parseAsBoolean, parseAsInteger } from 'nuqs';
 import { toast } from 'sonner';
 import { GitPullRequest, RefreshCw, Settings, Bot, Lock } from 'lucide-react';
 import { useSyncQuery } from '@papercusp/sync';
 import { groupByHive, type HiveGroupProject } from '../adv/harnesses/harness-pot-groups';
 import { computeAutoStatus, type PrAutoStatus } from '@papercusp/operator-core/lib/pr-host/pr-row-data';
 import { PrRow, type PrRowData } from './PrRow';
-import { PrReviewerSettings } from './PrReviewerSettings';
+import { PrReviewerSettings, type PrReviewerSettingsResponse } from './PrReviewerSettings';
+import { PrDetails } from './PrDetails';
 import { useHarnessClaimStatus } from '../adv/harnesses/useHarnessClaimStatus';
 import { useLexicon } from '@/lib/useLexicon';
 
-const PR_FILTERS = ['all', 'mine', 'awaiting-me', 'approved', 'merged'] as const;
+const PR_FILTERS = ['all', 'open', 'mine', 'awaiting-me', 'approved', 'merged', 'closed'] as const;
 type PrFilter = (typeof PR_FILTERS)[number];
 
 /** hive-pr-rollup P-006: list one harness's PRs, or the whole hive's. */
@@ -53,15 +54,7 @@ interface ReviewGate {
   autoModeEditable: boolean;
 }
 
-async function fetchReviewGate(harnessSlug: string): Promise<ReviewGate | null> {
-  const r = await fetch(`/api/harness/${encodeURIComponent(harnessSlug)}/pr-reviewer-settings`);
-  if (!r.ok) return null;
-  const j = (await r.json().catch(() => null)) as {
-    settings?: { pr_reviewer_role_enabled?: boolean; auto_review?: boolean; auto_merge?: boolean };
-    trustList?: Array<{ trusted_github_user_id: number }>;
-    viewer?: { github_user_id: number } | null;
-    autoModeEditable?: boolean;
-  } | null;
+function reviewGate(j: PrReviewerSettingsResponse | undefined): ReviewGate | null {
   if (!j) return null;
   return {
     viewerGithubId: j.viewer?.github_user_id,
@@ -129,14 +122,7 @@ export function shouldShowAutoStatus(
   return rowBelongsToViewedHarness(row, viewedSlug) && row.state === 'open';
 }
 
-async function fetchPrs(harnessSlug: string, scope: 'harness' | 'hive'): Promise<PrsResponse> {
-  const qs = scope === 'hive' ? '?scope=hive' : '';
-  const r = await fetch(`/api/harness/${encodeURIComponent(harnessSlug)}/prs${qs}`);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json() as Promise<PrsResponse>;
-}
-
-async function postApprove(harnessSlug: string, prNumber: number, merge: boolean): Promise<void> {
+async function postApprove(harnessSlug: string, prNumber: number, merge: boolean): Promise<{ action?: string; detail?: string }> {
   const r = await fetch(`/api/harness/${encodeURIComponent(harnessSlug)}/prs/${prNumber}/review`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -146,6 +132,7 @@ async function postApprove(harnessSlug: string, prNumber: number, merge: boolean
     const body = (await r.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `HTTP ${r.status}`);
   }
+  return r.json();
 }
 
 export function PrsTab({
@@ -174,49 +161,36 @@ export function PrsTab({
   // PR-3 §5: the focused PR + whether its agent-report panel is expanded are
   // user-meaningful, deep-linkable, agent-driveable → nuqs (AGENTS.md rule).
   const [selectedPr, setSelectedPr] = useQueryState('prs_selected', parseAsInteger);
+  const [selectedMember, setSelectedMember] = useQueryState('prs_member', parseAsString);
   const [reportOpen, setReportOpen] = useQueryState(
     'prs_report',
     parseAsBoolean.withDefault(false),
   );
   const toggleReport = useCallback(
-    (n: number) => {
-      if (selectedPr === n && reportOpen) {
+    (n: number, member: string) => {
+      if (selectedPr === n && (selectedMember ?? harnessSlug) === member && reportOpen) {
         void setReportOpen(false);
       } else {
         void setSelectedPr(n);
+        void setSelectedMember(member);
         void setReportOpen(true);
       }
     },
-    [selectedPr, reportOpen, setSelectedPr, setReportOpen],
+    [selectedPr, selectedMember, harnessSlug, reportOpen, setSelectedPr, setSelectedMember, setReportOpen],
   );
-  const [prs, setPrs] = useState<PrRowData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [pollingFailed, setPollingFailed] = useState(false);
-  const [noRemote, setNoRemote] = useState(false);
-  const [memberErrors, setMemberErrors] = useState<
-    Record<string, { pollingFailedAt?: string; noRemote?: boolean }>
-  >({});
-
-  // P-007: the live dock mounts <PrsTab harnessSlug/> with NO viewer props, so
-  // the review gate (Approve buttons) was permanently off. Resolve it from the
-  // pr-reviewer-settings route — which also applies the D-002 hive-home role
-  // inheritance server-side. Props, when supplied, override. Keyed on
-  // primitives only (slug + settings-modal close) — see the render-loop note
-  // on `load` below. Failure degrades to read-only.
-  const [fetchedGate, setFetchedGate] = useState<ReviewGate | null>(null);
-  useEffect(() => {
-    if (settingsOpen) return; // refresh on close, after possible saves
-    let cancelled = false;
-    fetchReviewGate(harnessSlug)
-      .then((g) => {
-        if (!cancelled && g) setFetchedGate(g);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [harnessSlug, settingsOpen]);
+  const prsQuery = useSyncQuery<PrsResponse>({ queryName: 'harnessPrs.byHarness', args: { harnessSlug, scope } });
+  const payload = prsQuery.data?.[0];
+  const prs = payload?.prs ?? [];
+  const loading = prsQuery.loading;
+  const error = prsQuery.error?.message;
+  const pollingFailed = !!payload?.pollingFailedAt;
+  const noRemote = !!payload?.noRemote;
+  const memberErrors = payload?.memberErrors ?? {};
+  const gateQuery = useSyncQuery<PrReviewerSettingsResponse>({
+    queryName: 'prReviewerSettings.byHarness', args: { harnessSlug },
+  });
+  // Never reuse permissions from a failed settings read.
+  const fetchedGate = gateQuery.error ? null : reviewGate(gateQuery.data?.[0]);
 
   const effViewerGithubId = viewerGithubId ?? fetchedGate?.viewerGithubId;
   const effTrustedAuthorIds = trustedAuthorIds ?? fetchedGate?.trustedAuthorIds ?? EMPTY_ID_SET;
@@ -248,14 +222,13 @@ export function PrsTab({
     try {
       await postAutoMode(harnessSlug, next);
       toast.success(next ? 'Auto-apply agent recommendations: ON' : 'Auto-apply: OFF');
-      const g = await fetchReviewGate(harnessSlug);
-      if (g) setFetchedGate(g);
+      gateQuery.invalidate();
     } catch (e) {
       toast.error(`Couldn't change auto-mode: ${String(e)}`);
     } finally {
       setSavingAuto(false);
     }
-  }, [effAutoModeEditable, savingAuto, autoModeOn, harnessSlug]);
+  }, [effAutoModeEditable, savingAuto, autoModeOn, harnessSlug, gateQuery.invalidate]);
 
   // Whether this slug resolves into a hive with other members — gates the
   // scope toggle. Rides the audited sync path (harnessProjects.lite, EI-206)
@@ -271,38 +244,15 @@ export function PrsTab({
     return !!group && group.members.length > 1;
   }, [liteQuery.data, harnessSlug]);
 
-  // Fetch RAW prs only — keyed solely on harnessSlug + scope (both primitive
-  // strings). The per-row `trusted` / `reviewerRoleEnabled` enrichment is
-  // intentionally NOT done here: folding it into `load` made `load` depend on
-  // `trustedAuthorIds`, whose default value (`new Set()`) is a fresh reference
-  // every render, so `useEffect([load])` re-fired on every render — an
-  // infinite reload loop that stormed /api/harness/<slug>/prs (observed: 194
-  // requests from a single mount) and wedged the webview connection pool,
-  // leaving the panel stuck on "Loading…". Enrichment now lives in the
-  // `displayed` memo below, off the fetch path.
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const resp = await fetchPrs(harnessSlug, scope);
-      setPrs(resp.prs);
-      setPollingFailed(!!resp.pollingFailedAt);
-      setNoRemote(!!resp.noRemote);
-      setMemberErrors(resp.memberErrors ?? {});
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [harnessSlug, scope]);
-
-  useEffect(() => { void load(); }, [load]);
+  const load = prsQuery.invalidate;
 
   const handleApprove = useCallback(async (prNumber: number, merge: boolean, targetSlug?: string) => {
     try {
       // Hive scope: the row's review must land on the MEMBER that owns the PR.
-      await postApprove(targetSlug ?? harnessSlug, prNumber, merge);
-      toast.success(merge ? `Approved + merged PR #${prNumber}` : `Approved PR #${prNumber}`);
+      const result = await postApprove(targetSlug ?? harnessSlug, prNumber, merge);
+      if (result.action === 'merged') toast.success(`Merged PR #${prNumber}`);
+      else if (!merge) toast.success(`Approved PR #${prNumber}`);
+      else toast(result.detail ?? `Review submitted for PR #${prNumber}; refresh to see the merge result.`);
       void load();
     } catch (e) {
       toast.error(`Action failed: ${String(e)}`);
@@ -318,6 +268,7 @@ export function PrsTab({
       prs
         .filter((pr) => {
           if (filter === 'all') return pr.state !== 'gone';
+          if (filter === 'open' || filter === 'closed') return pr.state === filter;
           if (filter === 'mine') return pr.author_github_id === effViewerGithubId && pr.state === 'open';
           if (filter === 'awaiting-me') return pr.review_decision === 'none' && pr.state === 'open';
           if (filter === 'approved') return pr.review_decision === 'approved';
@@ -424,10 +375,10 @@ export function PrsTab({
       </div>
 
       <div className="pc-adv-prs__list">
-        {loading ? (
+        {error ? (
+          <div role="alert" className="pc-adv-prs__msg pc-adv-prs__msg--err">{error}</div>
+        ) : loading ? (
           <div className="pc-adv-prs__msg">Loading…</div>
-        ) : error ? (
-          <div className="pc-adv-prs__msg pc-adv-prs__msg--err">{error}</div>
         ) : displayed.length === 0 ? (
           <div className="pc-adv-prs__msg">
             {noRemote
@@ -452,13 +403,17 @@ export function PrsTab({
                   autoMerge: effAutoMerge,
                 })
               : undefined;
+            const member = pr.member_slug ?? harnessSlug;
+            const expanded = selectedPr === pr.number && (selectedMember ?? harnessSlug) === member && reportOpen;
             return (
               <PrRow
                 key={`${pr.member_slug ?? harnessSlug}:${pr.remote}#${pr.number}`}
                 pr={pr}
                 autoStatus={autoStatus}
-                expanded={selectedPr === pr.number && reportOpen}
-                onToggleExpand={() => toggleReport(pr.number)}
+                expanded={expanded}
+                showDetails
+                details={expanded ? <PrDetails harnessSlug={member} number={pr.number} onChanged={load} /> : undefined}
+                onToggleExpand={() => toggleReport(pr.number, member)}
                 onApprove={(n) => void handleApprove(n, false, pr.member_slug)}
                 onApproveAndMerge={(n) => void handleApprove(n, true, pr.member_slug)}
               />

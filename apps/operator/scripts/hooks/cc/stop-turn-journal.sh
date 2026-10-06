@@ -35,6 +35,13 @@ if [ -z "${PAPERCUSP_SID:-}" ] || [ ! -s "$TOKEN_PATH" ]; then
   exit 0
 fi
 
+# WI-10004863: a CLI nested inside another agent inherits its PAPERCUSP_SID; journaling
+# its turns would file the nested transcript under the su's owner (and its prompt as an
+# owner-typed turn). Skip on POSITIVE nested evidence only — helper failure = journal as before.
+if python3 "$(dirname "$0")/pc_nested_cli.py" >/dev/null 2>&1; then
+  exit 0
+fi
+
 INPUT=$(cat)
 AGENT="${PAPERCUSP_AGENT:-}"
 

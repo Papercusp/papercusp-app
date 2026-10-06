@@ -78,6 +78,9 @@ export const DEFECT_SOURCES: readonly string[] = [
   // WI-918476. A concrete, patchable divergence: either a migration is missing
   // (add one) or the live database carries an object nothing ships (drop it).
   'schema-object-drift',
+  // WI-10004651. A concrete divergence with one patchable repair: a new migration
+  // re-applying the edit the live database never ran.
+  'migration-content-drift',
   'repeated-tool-error',
   'insight-staleness',
   'service-down',

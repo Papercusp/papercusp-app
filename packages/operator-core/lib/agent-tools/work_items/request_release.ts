@@ -181,7 +181,7 @@ export default defineTool({
         `Deadline: ${deadlineIso} (${args.deadlineSec}s from now). ${consequenceLine}. ` +
         `Respond by releasing (work_items:release) or declining (work_items:decline_release_request) before the deadline.`,
       ident.ownerId,
-      { harness },
+      { harness, writerOwnerId: ident.ownerId },
     ).catch(() => {});
 
     await sendMessage(ident, {

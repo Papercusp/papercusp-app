@@ -272,7 +272,7 @@ export function admissibleWorkersForMemory(input: {
  * mutex every scheduler invocation acquires.
  */
 export interface AdmissionNoticeInfo {
-  kind: 'queued' | 'granted';
+  kind: 'queued' | 'granted' | 'yielded';
   /** Present on `queued`: how long this acquisition has been waiting so far. */
   elapsedMs?: number;
   /** Present on `granted`: how long this acquisition ended up queued. */
@@ -344,8 +344,8 @@ export function readTaskDeadlineEpochMs(
 export const TASK_DEADLINE_REFUSAL_MARKER: 'TASK_DEADLINE_REFUSAL';
 
 /**
- * `knownEstimateMs`/`knownTasks` are a LOWER BOUND over tasks with duration history;
- * `unknownTasks` is reported beside them so the sum is never read as a total.
+ * `knownEstimateMs` is a history-based lane-aware wall projection, not summed work
+ * or a guaranteed lower bound. Unknown tasks contribute zero and are reported separately.
  */
 export function formatTaskDeadlineRefusal(input: {
   remainingMs: number;

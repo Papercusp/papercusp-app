@@ -1,6 +1,6 @@
 # Bug queue growth, drain throughput, and admission audit
 
-Prepared for owner. Audit record: **WI-10001252**.
+Prepared for Avi. Audit record: **WI-10001252**.
 
 Frozen inventory: **September 13, 2026, 8:55:51 p.m. America/New_York**
 (`2026-09-14T00:55:51.702418Z`). Supporting reads were made during the same

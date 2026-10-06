@@ -163,6 +163,50 @@ fi
 
 kill -TERM "$fake_vm_pid" 2>/dev/null; wait "$fake_vm_pid" 2>/dev/null
 
+# ── 4. keep lease (WI-10006429): a long deliberate run can pin ONE instance ──
+echo "4. keep_lease_state"
+KEEP_DIR="$(mktemp -d)"; MAX_KEEP_SECS=3600
+NOW=1800000000
+keep_lease_state lease-none "$NOW" >/dev/null; rc=$?
+[ "$rc" -eq 1 ] && ok "no lease file -> rc 1 (normal age rule)" || bad "missing lease: expected rc 1, got $rc"
+echo $(( NOW + 600 )) > "$KEEP_DIR/lease-ok"
+out=$(keep_lease_state lease-ok "$NOW"); rc=$?
+[ "$rc" -eq 0 ] && [ "$out" = "$(( NOW + 600 ))" ] && ok "future lease within max -> rc 0, prints until" \
+  || bad "valid lease: expected rc 0 + $(( NOW + 600 )), got rc $rc out '$out'"
+echo $(( NOW - 1 )) > "$KEEP_DIR/lease-expired"
+keep_lease_state lease-expired "$NOW" >/dev/null; rc=$?
+[ "$rc" -eq 1 ] && ok "expired lease -> rc 1 (reapable)" || bad "expired lease: expected rc 1, got $rc"
+echo $(( NOW + 3601 )) > "$KEEP_DIR/lease-far"
+keep_lease_state lease-far "$NOW" >/dev/null; rc=$?
+[ "$rc" -eq 2 ] && ok "lease beyond MAX_KEEP_SECS -> rc 2 (ignored)" || bad "far lease: expected rc 2, got $rc"
+echo "soon" > "$KEEP_DIR/lease-junk"
+keep_lease_state lease-junk "$NOW" >/dev/null; rc=$?
+[ "$rc" -eq 2 ] && ok "non-numeric lease -> rc 2 (ignored)" || bad "junk lease: expected rc 2, got $rc"
+keep_lease_state "../lease-ok" "$NOW" >/dev/null; rc=$?
+[ "$rc" -eq 2 ] && ok "path-traversal instance name -> rc 2" || bad "traversal name: expected rc 2, got $rc"
+# end-to-end: an over-age fake VM with a valid lease is SKIPPED, not reaped (DRY_RUN).
+fake_name="reaper-keep-selftest-$$"
+exec -a qemu-system-x86_64 bash -c 'trap "exit 0" TERM; while true; do sleep 1; done' selftest-arg0 -name "papercusp-testvm-$fake_name" &
+kp=$!; PIDS+=("$kp")
+for _ in 1 2 3 4 5; do [ -r "/proc/$kp/cmdline" ] && break; sleep 0.2; done
+echo $(( $(date +%s) + 600 )) > "$KEEP_DIR/$fake_name"
+kept_log=$(MAX_AGE_SECS=0 DRY_RUN=1 main 2>&1)
+if echo "$kept_log" | grep -q "SKIP $fake_name .*keep lease"; then
+  ok "over-age VM with a valid lease is skipped by main()"
+  if echo "$kept_log" | grep -q "would reap $fake_name"; then bad "leased VM was ALSO marked for reaping"; fi
+elif ! echo "$kept_log" | grep -q "$fake_name"; then
+  echo "  - (skipped e2e: fake qemu not visible to the census here: $(echo "$kept_log" | tail -1))"
+else
+  bad "leased VM not skipped: $(echo "$kept_log" | grep "$fake_name" | head -2)"
+fi
+rm -f "$KEEP_DIR/$fake_name"
+unreaped_log=$(MAX_AGE_SECS=0 DRY_RUN=1 main 2>&1)
+if echo "$unreaped_log" | grep -q "$fake_name"; then
+  echo "$unreaped_log" | grep -q "would reap $fake_name" && ok "same VM WITHOUT a lease is a reap candidate (control)" \
+    || bad "control: unleased over-age VM not marked for reaping"
+fi
+rm -rf "$KEEP_DIR"
+
 # ── result ───────────────────────────────────────────────────────────────
 echo
 if [ "$FAILS" -eq 0 ]; then

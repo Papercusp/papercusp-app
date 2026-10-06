@@ -1,0 +1,36 @@
+# CLI fallbacks must retain the current native incarnation of an owner
+URL: /internal/docs/agent-insights/mcp-cli-retained-owner-native-incarnation
+
+A retained owner can have multiple session rows. Dropping the actual Codex native session can make a fallback select a stale predecessor and deny a valid leader for hours.
+
+## Measured failure
+
+During the October3 non-P2P fleet restoration, the same owner had multiple Codex incarnations. Owner-only ptool fleet:status requests selected an older reactivated session row and failed stale-artifact/receipt-missing. Holding owner, endpoint and payload constant and forwarding the actual CODEX\_SESSION\_ID as native\_session made the request succeed. This was a transport identity defect, not evidence that the current leader lacked authority. WI-10005821 records the distinguishing test and 172 passing framework tests.
+
+## Existing mechanism
+
+The superuser MCP transport accepts x-papercusp-native-session or native\_session, verifies that the native ID belongs to the supplied owner, and threads the verified advSessionId into current kernel launch-record selection. The native Codex MCP configuration already sends this binding. The maintained ptool and scripts/mcp-call.mjs fallbacks now preserve CODEX\_SESSION\_ID automatically when their client is this process's PAPERCUSP\_SID. ptool preserves an explicit native\_session URL; neither helper attaches this native session to another client identity. No authority or role gate is weakened.
+
+## Diagnose the actual request
+
+Use the maintained CLI under the current session environment. If the native wrapper and a CLI both fail, that alone does not distinguish missing binding from a real identity failure: compare their actual native binding and the serving runtime. Older deployed runtimes may not yet honor the verified advSessionId; current staging does. A native ID must come from the actual current session and pass the operator's binding verifier. Do not fabricate a receipt or rewrite activation.applied/prepared merely to silence the refusal. The audit found an earlier raw activation update that changed one row but still left loop:status denied; it did not fix the request's selected incarnation.
+
+## Preserve temporal meaning
+
+An initial turn\_context or launch record describes the model selected at that time. It cannot establish the current model after an owner model switch. The audited leader was unnecessarily replaced because historical Luna metadata was treated as current despite Avi switching this session to Sol; leadership was reclaimed and the unnecessary session was stood down. Current owner steering and fresh inference/session evidence govern recovery.
+
+## Related evidence
+
+WI-10005827 contains the exact retained census in comment 1156911: 45 unique epochs, 663 indexed text turns, and 345 unique quoted text-turn references. These counts describe the stored text census; tool parts are excerpts and do not establish exhaustive byte-for-byte coverage. Critical raw launch/state actions and completion receipts were checked separately. Ordinary ptool and mcp-call reads on current staging preserve the native session automatically.
+
+## Qualify queue counts
+
+A bug-labelled row is a report. A committed completion is a queue disposition. Neither alone proves a distinct defect was fixed. Reuse the canonical claim-spec compiler and workItemIntakeStageSql; record population, time window, parent/child treatment, acceptance stage and unknowns. countsAsBugWork requires qualifying executable acceptance. A false value means the acceptance proof is absent or nonqualifying; it does not prove no real defect exists. Fleet status completionStats is harness-scoped completion integrity, not a fleet-specific count of unique defects.
+
+## Check wake continuity
+
+A delivered wake can carry a checkpoint older than a later successful write. Compare readAt, checkpoint timestamps and hashes before following its next action. loop.active does not guarantee another wake: inspect rewake.rewakeGuaranteed. In the audited continuation an active bounded loop had exhausted maxDurationSec; renewing the authorized work loop restored a verified wake. Preserve a current checkpoint and the chosen fleet route rather than returning to an obsolete member pull lane.
+
+## Preserve identity through admission replay
+
+The later audit found a second seam: work-item-admission-authority.ts serialized authenticated recovery context without the host-verified advSessionId. The direct current-incarnation request succeeded, while its rebuilt admission context selected an older launch specification and failed receipt-missing. WI-10005893 owns the source repair and regressions. This is separate from a foreign-native-session rejection. Preserve and revalidate the original authenticated incarnation while reading current policy; do not replay grants or applied-state stamps, fabricate receipts, or relax owner/workspace/credential/confinement checks.

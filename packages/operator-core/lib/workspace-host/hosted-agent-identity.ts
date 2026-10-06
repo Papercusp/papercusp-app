@@ -30,6 +30,9 @@ import {
 import {
   DEFAULT_WORKSPACE_HOST_WORKSPACE_USER,
   WORKSPACE_HOST_CUSTOMER_AGENT_TOOLCHAIN_BIN,
+  WORKSPACE_HOST_TSC_SERVICE_SOCKET_UNIT_FILE,
+  WORKSPACE_HOST_TSC_SERVICE_UNIT_FILE,
+  WORKSPACE_HOST_TSC_SERVICE_UNIT_TEMPLATE,
 } from '@papercusp/deployment-driver';
 import { setHostedAgentIdentityPsuSpec } from './hosted-agent-identity-psu-env';
 import { HOSTED_WORKSPACE_ACCOUNT_HOME, hostedWorkspaceSshArgs } from './hosted-session-host';
@@ -80,6 +83,65 @@ function hostedIdentitySshArgs(tty: boolean): string[] {
 const HOSTED_IDENTITY = `${DEFAULT_WORKSPACE_HOST_WORKSPACE_USER}@127.0.0.1`;
 const HOSTED_SPAWN_ROOT = posix.join(HOSTED_WORKSPACE_ACCOUNT_HOME, '.papercusp', 'agent-spawns');
 
+/**
+ * Plan agent-capacity-and-cost-gcp-2026-09-30 D-031 ruling 2c: the FIXED env that activates
+ * heavy-job admission for a hosted agent (scripts/heavy-admission.cjs routes tsc/vitest/tsgo through
+ * pc-heavy), plus pc-heavy's hosted profile. Operator-set, never customer-controlled, and only when
+ * the published toolchain carries both files (the bootstrap copies them from the release when it
+ * has them); undefined otherwise, so an older host keeps today's behaviour.
+ *
+ * Profile: the dev-tower typecheck cgroup guard off (it would re-exec outside the agent's cgroup or
+ * refuse pointing at Papercusp tools), no release-gate reserve or gate refusal (no gate runs on a
+ * customer host), no cross-agent coalescing of identical commands, and a pool dir under the
+ * customer's home so the D-030 job-peak ledger survives reboots.
+ *
+ * Memory reserve per admitted job is pinned to 4 GiB (D-033). Unpinned, pc-heavy reserves 14 GiB
+ * on a fresh host and then the ledger max (~10 GiB, set entirely by typechecks); on a spot
+ * e2-standard-16 that held 24 agents where 4 GiB held 32 with no OOM. A per-class reserve
+ * (typecheck vs everything else) replaces this pin once built.
+ */
+export function hostedHeavyAdmissionEnv(
+  toolchainBin: string,
+  exists: (path: string) => boolean = existsSync,
+): Record<string, string> | undefined {
+  const dir = posix.join(posix.dirname(toolchainBin), 'lib', 'heavy-admission');
+  const preload = posix.join(dir, 'heavy-admission.cjs');
+  const script = posix.join(dir, 'pc-heavy.sh');
+  if (!exists(preload) || !exists(script)) return undefined;
+  return {
+    NODE_OPTIONS: `--require=${preload}`,
+    PC_HEAVY_ADMISSION_SCRIPT: script,
+    // The chat path forwards request env that differs from the operator's; a forwarded
+    // PC_HEAVY_BYPASS=1 would silently switch admission off for the whole agent session.
+    PC_HEAVY_BYPASS: '',
+    PC_HEAVY_DIR: posix.join(HOSTED_WORKSPACE_ACCOUNT_HOME, '.local', 'state', 'pc-heavy'),
+    PC_HEAVY_TYPECHECK_GUARD: '0',
+    PC_HEAVY_GATE_RESERVE: '0',
+    PC_HEAVY_ALLOW_DURING_GATE: '1',
+    PC_HEAVY_COALESCE: '0',
+    PC_HEAVY_MEM_PER_SLOT_GIB: '4',
+  };
+}
+
+/**
+ * WI-10005362: route hosted agents' scoped `lint:tsc --files` to the shared typecheck service, one
+ * systemd user-unit instance per checkout (the checkout's scripts/lib/tsc-service.mjs starts it).
+ * Set only when the host bootstrap installed the template units, which it skips on hosts under
+ * 24 GiB; undefined otherwise, so the agent keeps today's full compile.
+ */
+export function hostedTscServiceEnv(
+  exists: (path: string) => boolean = existsSync,
+): Record<string, string> | undefined {
+  if (!exists(WORKSPACE_HOST_TSC_SERVICE_SOCKET_UNIT_FILE) || !exists(WORKSPACE_HOST_TSC_SERVICE_UNIT_FILE)) return undefined;
+  return { PAPERCUSP_TSC_SERVICE_UNIT_TEMPLATE: WORKSPACE_HOST_TSC_SERVICE_UNIT_TEMPLATE };
+}
+
+/** Every operator-fixed env a hosted agent runs with; undefined when there is none. */
+function hostedFixedEnv(toolchainBin: string, exists: (path: string) => boolean): Record<string, string> | undefined {
+  const env = { ...hostedHeavyAdmissionEnv(toolchainBin, exists), ...hostedTscServiceEnv(exists) };
+  return Object.keys(env).length > 0 ? env : undefined;
+}
+
 /** The customer's PATH: its toolchain first; the operator's PATH is never forwarded. */
 function hostedRemotePath(toolchainBin: string): string[] {
   return [toolchainBin, posix.join(HOSTED_WORKSPACE_ACCOUNT_HOME, '.local', 'bin'), '/usr/local/bin', '/usr/bin', '/bin'];
@@ -104,7 +166,9 @@ export function hostedCustomerAgentIdentitySpec(options: HostedCustomerAgentIden
   const stateRoots = [join(localHome, '.papercusp')];
   const papercuspHome = (options.baseEnv ?? process.env).PAPERCUSP_HOME?.trim();
   if (papercuspHome && !stateRoots.includes(papercuspHome)) stateRoots.push(papercuspHome);
+  const fixedEnv = hostedFixedEnv(toolchainBin, options.exists ?? existsSync);
   return {
+    ...(fixedEnv ? { fixedEnv } : {}),
     v: 1,
     identity: HOSTED_IDENTITY,
     stageTransport: { command: '/usr/bin/ssh', args: hostedIdentitySshArgs(false) },
@@ -138,7 +202,9 @@ export function hostedCustomerAgentSpawnTransform(
   const toolchainBin = options.toolchainBin ?? WORKSPACE_HOST_CUSTOMER_AGENT_TOOLCHAIN_BIN;
   const exists = options.exists ?? existsSync;
   const nodePath = posix.join(toolchainBin, 'node');
+  const fixedEnv = hostedFixedEnv(toolchainBin, exists);
   const inner = buildLoopbackIdentitySpawn({
+    ...(fixedEnv ? { fixedEnv } : {}),
     transportCommand: '/usr/bin/ssh',
     transportArgs: hostedIdentitySshArgs(false),
     identity: HOSTED_IDENTITY,

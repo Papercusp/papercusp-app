@@ -29,7 +29,7 @@
  * mergeTier1) are unit-tested; fetchPresenceTier1 is the IO seam.
  */
 import { getOrgPg } from '@papercusp/db-org';
-import { getAllWakeModeOverrides, getDefaultWakeMode, type WakeMode } from './wake-mode';
+import { getDefaultWakeMode, getWakeModeOverridesFor, type WakeMode } from './wake-mode';
 import { planItemRef } from '../../issue-blocks-merge';
 import { ISSUE_TERMINAL_STATUSES } from '../../work-item-blocking';
 import { TERMINAL_STATUSES as FEATURE_TERMINAL_STATUSES } from '../../dbos/frontier-readiness';
@@ -295,7 +295,9 @@ export async function fetchPresenceTier1(
          AND fired_at IS NULL AND cancelled_at IS NULL
          AND (expires_ts IS NULL OR expires_ts > now())
        ORDER BY subscriber_id, created_at DESC`,
-    getAllWakeModeOverrides(),
+    // Owner-scoped like its siblings (WI-10005228): a PK probe for this roster's
+    // owners, not every override ever written.
+    getWakeModeOverridesFor(ownerIds),
     getDefaultWakeMode(),
     // P-011: freshest assistant-authored part per owner. workspace_id='default' is the
     // CORPUS namespace literal, deliberately not a tenant id (session-ingest.ts hardcodes

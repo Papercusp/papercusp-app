@@ -22,17 +22,23 @@ import {
 export const AZURE_COMPUTE_GALLERY_RELEASE_CONTRACT_VERSION = 'papercusp-azure-compute-gallery-release-v1';
 export const AZURE_COMPUTE_GALLERY_VERSION_MANIFEST_SCHEMA_VERSION = 1;
 
-/** Common host prerequisites plus the Azure Linux Agent transport. */
+/**
+ * Common host prerequisites plus the Azure Linux Agent transport, named by the RPM the
+ * CentOS Stream 10 bootc image installs (the Azure VHD is rendered from that same image by
+ * bake-cloud-images.sh). The Ubuntu-era names never existed there: ufw maps to nftables,
+ * unattended-upgrades to dnf-automatic, and the Debian `walinuxagent` package is the RPM
+ * `WALinuxAgent` (WI-10005618, the Azure twin of WI-10005605).
+ */
 export const AZURE_COMPUTE_GALLERY_REQUIRED_GUEST_TOOLS = [
   'acl',
   'ca-certificates',
   'curl',
+  'dnf-automatic',
   'jq',
   'minisign',
+  'nftables',
   'openssh-server',
-  'ufw',
-  'unattended-upgrades',
-  'walinuxagent',
+  'WALinuxAgent',
 ] as const;
 
 export type AzureComputeGalleryStorageAccountType = 'Standard_LRS' | 'Standard_ZRS' | 'Premium_LRS';

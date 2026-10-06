@@ -84,9 +84,104 @@ export interface LoopTransitionSnapshot {
  * an unavailable read must never be reported as evidence that no transition exists.
  */
 export type LatestLoopTransitionRead =
-  | { status: 'found'; transition: LoopTransitionSnapshot }
+  | { status: 'found'; transition: LoopTransitionSnapshot; cycle: LoopCycle }
   | { status: 'none' }
   | { status: 'unknown' };
+
+/**
+ * One loop cycle, derived from the newest transition rows (EI-24709926664545964).
+ *
+ * WHY: `loop:status` renders `cadenceRatio` / `effectiveIntervalSec` (the WHOLE period — the
+ * member's turn PLUS the re-arm delay — divided by `intervalSec`) and a bare `parked`
+ * transition whose `next_fire_at` is infinity. Two independent agents read a 330s `parked`
+ * span as "the loop re-fires 7.7x slower than armed"; it was the member's own TURN in flight,
+ * and the measured post-settle delay was 31s (intervalSec + <=30s reconcile tick). The ledger
+ * could answer that, but nothing split the two numbers, so the misreading was the default.
+ * This separates them: `turnSec` (parked -> rearmed) vs `postSettleDelaySec` (rearmed -> next
+ * parked).
+ */
+export interface LoopCycleTurn {
+  parkedAt: string;
+  settledAt: string;
+  /** parked -> rearmed: how long the member's own turn ran. NOT a re-arm delay. */
+  turnSec: number;
+  /** The `actor` that closed the park, e.g. 'reconcile-loop-routines'. */
+  settledBy: string;
+  /** `detail.via` of the settling re-arm (e.g. 'lifecycle'), when the writer recorded one. */
+  settledVia: string | null;
+  /** rearmed -> the next_fire_at it wrote: the delay the re-arm SCHEDULED. */
+  scheduledDelaySec: number | null;
+  /** rearmed -> next parked: the delay actually observed before the next fire claimed. null until it does. */
+  postSettleDelaySec: number | null;
+}
+
+export interface LoopCycle {
+  /**
+   * `turn-in-flight` — the newest row is a park: the member is mid-turn and `next_fire_at` is
+   * infinity by design. `settled` — the newest row is a re-arm. `other` — disarm/revive/empty.
+   */
+  phase: 'turn-in-flight' | 'settled' | 'other';
+  /** Seconds since the newest park, only while `phase === 'turn-in-flight'`. */
+  turnInFlightSec: number | null;
+  /** The newest COMPLETED turn (a park closed by a real re-arm), or null if the window holds none. */
+  lastTurn: LoopCycleTurn | null;
+  basis: string;
+}
+
+export const LOOP_CYCLE_BASIS =
+  "turnSec = parked->rearmed: the member's own turn (next_fire_at is infinity while parked), NOT a re-arm delay. " +
+  'postSettleDelaySec = rearmed->next parked: what the re-arm actually cost (~intervalSec + <=30s reconcile tick). ' +
+  'loop.cadenceRatio / effectiveIntervalSec include the turn by construction.';
+
+/** How many of the newest transitions are read to derive `cycle`. A normal cycle writes 2-3 rows. */
+export const CYCLE_WINDOW_ROWS = 8;
+
+function wholeSecondsBetween(fromMs: number, toMs: number): number | null {
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return null;
+  const sec = Math.round((toMs - fromMs) / 1000);
+  return sec >= 0 ? sec : null;
+}
+
+/**
+ * Pure: derive the cycle view from the newest transitions (NEWEST FIRST, as the read returns them).
+ *
+ * A "turn" is a `parked` row immediately closed by a `rearmed` row. A re-arm by
+ * 'await-suppression' is NOT a turn — it restores the schedule of a fire that was suppressed
+ * before any turn ran — and a re-arm whose predecessor is not a park (the reachability sweep
+ * re-arming an already-settled loop) did not settle anything, so neither is reported as one.
+ */
+export function deriveLoopCycle(newestFirst: readonly LoopTransitionSnapshot[], nowMs: number): LoopCycle {
+  const newest = newestFirst[0];
+  const phase: LoopCycle['phase'] =
+    newest?.event === 'parked' ? 'turn-in-flight' : newest?.event === 'rearmed' ? 'settled' : 'other';
+  const turnInFlightSec =
+    phase === 'turn-in-flight' && newest ? wholeSecondsBetween(Date.parse(newest.at), nowMs) : null;
+
+  const asc = [...newestFirst].reverse();
+  let lastTurn: LoopCycleTurn | null = null;
+  for (let i = asc.length - 1; i >= 1; i--) {
+    const settle = asc[i];
+    const park = asc[i - 1];
+    if (settle.event !== 'rearmed' || settle.actor === 'await-suppression' || park.event !== 'parked') continue;
+    const turnSec = wholeSecondsBetween(Date.parse(park.at), Date.parse(settle.at));
+    if (turnSec === null) continue;
+    const nextPark = asc.slice(i + 1).find((r) => r.event === 'parked');
+    const via = settle.detail?.via;
+    lastTurn = {
+      parkedAt: park.at,
+      settledAt: settle.at,
+      turnSec,
+      settledBy: settle.actor,
+      settledVia: typeof via === 'string' ? via : null,
+      scheduledDelaySec: settle.newNextFireAt
+        ? wholeSecondsBetween(Date.parse(settle.at), Date.parse(settle.newNextFireAt))
+        : null,
+      postSettleDelaySec: nextPark ? wholeSecondsBetween(Date.parse(settle.at), Date.parse(nextPark.at)) : null,
+    };
+    break;
+  }
+  return { phase, turnInFlightSec, lastTurn, basis: LOOP_CYCLE_BASIS };
+}
 
 function transitionTimestamp(value: Date | string | null | undefined): string | null {
   if (value == null) return null;
@@ -106,13 +201,16 @@ export async function readLatestLoopTransition(
     routineName: string;
     targetOwnerId: string;
   },
-  opts: { sql?: Sql } = {},
+  opts: { sql?: Sql; nowMs?: number } = {},
 ): Promise<LatestLoopTransitionRead> {
   if (!input.workspaceId || !input.installSlug || !input.routineName || !input.targetOwnerId) {
     return { status: 'unknown' };
   }
   const sql = opts.sql ?? getOrgPg().sql;
   try {
+    // The newest CYCLE_WINDOW_ROWS rows, newest first: row 0 is the latest transition (the
+    // long-standing `transition` field); the rest feed `deriveLoopCycle` so one read answers
+    // "how long was the turn" and "how long did the re-arm take" separately.
     const rows = await sql<
       Array<{
         at: Date | string | null;
@@ -131,33 +229,42 @@ export async function readLatestLoopTransition(
            WHERE workspace_id = r.workspace_id
              AND routine_id = r.id
            ORDER BY at DESC
-           LIMIT 1
+           LIMIT ${CYCLE_WINDOW_ROWS}
         ) t ON TRUE
        WHERE r.workspace_id = ${input.workspaceId}
          AND r.install_slug = ${input.installSlug}
          AND r.name = ${input.routineName}
          AND r.target_owner_id = ${input.targetOwnerId}
-       LIMIT 1
+       ORDER BY t.at DESC
+       LIMIT ${CYCLE_WINDOW_ROWS}
     `;
-    const row = rows[0];
-    if (!row) return { status: 'none' };
-    const at = transitionTimestamp(row.at);
-    if (!at || !row.event || !row.actor) return { status: 'unknown' };
-    const interval = row.interval_sec == null ? NaN : Number(row.interval_sec);
-    const detail =
-      row.detail && typeof row.detail === 'object' && !Array.isArray(row.detail)
-        ? (row.detail as Record<string, unknown>)
-        : null;
-    return {
-      status: 'found',
-      transition: {
+    if (rows.length === 0) return { status: 'none' };
+    const snapshots: LoopTransitionSnapshot[] = [];
+    for (const row of rows) {
+      const at = transitionTimestamp(row.at);
+      // The newest row is the contract (`found` needs it well-formed); an older malformed row
+      // only narrows the cycle window, it must not turn a good latest read into `unknown`.
+      if (!at || !row.event || !row.actor) {
+        if (snapshots.length === 0) return { status: 'unknown' };
+        break;
+      }
+      const interval = row.interval_sec == null ? NaN : Number(row.interval_sec);
+      snapshots.push({
         at,
         event: row.event,
         actor: row.actor,
         newNextFireAt: transitionTimestamp(row.new_next_fire_at),
         intervalSec: Number.isFinite(interval) ? interval : null,
-        detail,
-      },
+        detail:
+          row.detail && typeof row.detail === 'object' && !Array.isArray(row.detail)
+            ? (row.detail as Record<string, unknown>)
+            : null,
+      });
+    }
+    return {
+      status: 'found',
+      transition: snapshots[0],
+      cycle: deriveLoopCycle(snapshots, opts.nowMs ?? Date.now()),
     };
   } catch {
     return { status: 'unknown' };

@@ -29,6 +29,7 @@
  * channel carries exactly one request.
  */
 import type { Sql } from 'postgres';
+import type { RelayUsageReport } from '../connected-apps/alert-sweep';
 import { isAppKeyShaped, parseAppKey } from '../connected-apps/key';
 import { isRelayableTokenAnswer, relayedBasic, relayedTokenFields } from '../connected-apps/mcp-oauth';
 import { publicOriginOf } from '../connected-apps/mcp-oauth-discovery';
@@ -36,6 +37,7 @@ import { publicOriginOf } from '../connected-apps/mcp-oauth-discovery';
 import { portalResourceMetadataUrl } from '../connected-apps/portal-mcp-oauth';
 import { EXTERNAL_INGRESS_MARKER_HEADER } from '../auth/forwarded-request-trust';
 import { isHostedConnectorLive } from '../endpoint-route/hosted-workspace-connector';
+import { WEBHOOK_PATH_RE, WEBHOOK_SOURCE_ID_PATTERN, isWebhookPath } from '../external-triggers/webhook-path';
 import {
   HOSTED_OPERATOR_HTTP_MAX_REQUEST_BODY_BYTES,
   OperatorHttpChannel,
@@ -56,6 +58,8 @@ export const APP_HTTP_ROUTE_ALLOWLIST: ReadonlyArray<OperatorHttpRoute> = [
   { method: 'POST', pattern: /^\/api\/mcp$/, surface: 'app MCP request' },
   { method: 'GET', pattern: /^\/api\/mcp$/, surface: 'app MCP stream' },
   { method: 'DELETE', pattern: /^\/api\/mcp$/, surface: 'app MCP session end' },
+  // P-017 (D-032 #4): a signed webhook. The machine route checks the HMAC signature itself.
+  { method: 'POST', pattern: WEBHOOK_PATH_RE, surface: 'signed webhook delivery' },
 ];
 
 export function decideAppHttpRoute(method: unknown, path: unknown): OperatorHttpRouteDecision {
@@ -76,6 +80,11 @@ const APP_FORWARDED_REQUEST_HEADERS = new Set([
   'last-event-id',
   'mcp-session-id',
   'mcp-protocol-version',
+  // P-017: the signed-webhook headers (lib/external-triggers/webhook.ts). The signature covers the
+  // raw body, which the channel carries byte-for-byte, so it verifies on the machine unchanged.
+  'papercusp-signature',
+  'papercusp-event',
+  'papercusp-delivery',
 ]);
 export const APP_HTTP_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
   'content-type',
@@ -429,7 +438,7 @@ export class AppRelayRateLimiter {
 // ─── Portal side: the relay ─────────────────────────────────────────────────
 
 export interface AppRelayConnector {
-  binding: AppRelayWorkspace & { hostId: string; generation: number };
+  binding: AppRelayWorkspace & { hostId: string; generation: number; hosting?: 'byoc' | 'papercusp' };
   /** The last proof of life the broker saw from this connector socket. */
   lastSeenAt: Date;
 }
@@ -452,7 +461,18 @@ export interface AppRelayPort {
     connector: AppRelayConnector,
     handlers: { onFrame: (payload: Record<string, unknown>) => void; onClose: (reason: string) => void },
     kind?: AppRelayChannelKind,
+    open?: AppRelayOpenOptions,
   ): AppRelayChannel | null;
+}
+
+/**
+ * Extra fields the portal sends on an `app-http` channel's `relay.open` (P-328, D-030 #4): the
+ * workspace's relay usage this month, so the machine can raise the relay-limit alert. Counts only.
+ */
+export interface AppRelayOpenOptions {
+  relayUsage?: RelayUsageReport;
+  /** The outside app owns the peer key and exchanges only Noise packets. */
+  sealed?: boolean;
 }
 
 export interface HostedAppRelayAuditEvent {
@@ -464,6 +484,8 @@ export interface HostedAppRelayAuditEvent {
 
 export interface HostedAppRelayDependencies {
   port: AppRelayPort;
+  /** Server-side hosting lookup for a workspace whose connector is offline. */
+  resolveCustomerWorkspaceHosting?: (customerWorkspaceId: string) => Promise<'byoc' | 'papercusp' | null>;
   usage: HostedAppRelayUsageStore;
   rate: AppRelayRateLimiter;
   limits?: AppRelayLimits;
@@ -473,8 +495,10 @@ export interface HostedAppRelayDependencies {
   onAudit?: (event: HostedAppRelayAuditEvent) => void;
 }
 
-/** `/api/workspaces/<id>/(agent-tools/… | mcp)`. */
-const APP_RELAY_PATH = /^\/api\/workspaces\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/(agent-tools\/[^?#]+|mcp)$/;
+/** `/api/workspaces/<id>/(agent-tools/… | mcp | hooks/<source id>)`. */
+const APP_RELAY_PATH = new RegExp(
+  `^/api/workspaces/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(agent-tools/[^?#]+|mcp|hooks/${WEBHOOK_SOURCE_ID_PATTERN})$`,
+);
 
 export function parseAppRelayPath(pathname: string): { customerWorkspaceId: string; machinePath: string } | null {
   const match = APP_RELAY_PATH.exec(pathname);
@@ -516,9 +540,29 @@ export async function handleHostedAppRelay(request: Request, deps: HostedAppRela
   const audit = (action: HostedAppRelayAuditEvent['action'], detail: string) =>
     deps.onAudit?.({ action, customerWorkspaceId: target.customerWorkspaceId, detail });
 
+  // Classify from the broker's server-authenticated connector before inspecting
+  // an app key or reading a body. The vendor portal cannot terminate BYOC content.
+  const connector = deps.port.appConnector(target.customerWorkspaceId);
+  const hosting = connector?.binding.hosting ?? await deps.resolveCustomerWorkspaceHosting?.(target.customerWorkspaceId).catch(() => null);
+  if (hosting === 'byoc') {
+    audit('app_relay_refused', 'byoc_plaintext_relay_refused');
+    return refuse(403, 'byoc_plaintext_relay_refused', {}, {
+      alternatives: ['customer_controlled_ingress', 'sealed_channel'],
+    });
+  }
+
+  // P-017 (D-032 #4): a signed webhook carries no app key. The MACHINE checks its HMAC
+  // signature, so the portal skips the key check here, and admits only POST. Every other
+  // portal rule below (offline refusal, rate and bandwidth limits) still applies.
+  const webhook = isWebhookPath(target.machinePath);
+  if (webhook && request.method.toUpperCase() !== 'POST') {
+    audit('app_relay_refused', 'method_not_allowed');
+    return refuse(405, 'method_not_allowed', { allow: 'POST' });
+  }
+
   // D-005: app routes take a limited key and nothing else. Read from Authorization
   // alone, so an owner or admin ticket, a JWT or a cookie session is never accepted.
-  if (!readAppKeyBearer(request.headers.get('authorization'))) {
+  if (!webhook && !readAppKeyBearer(request.headers.get('authorization'))) {
     audit('app_relay_refused', 'app_key_required');
     // P-325: an MCP client that has no key yet learns from this header where the portal's
     // authorization server for THIS workspace is (RFC 9728 §5.1), and gets one by OAuth.
@@ -531,7 +575,6 @@ export async function handleHostedAppRelay(request: Request, deps: HostedAppRela
 
   // D-008: an offline machine is refused at once. Nothing is queued, held or stored.
   const now = deps.now?.() ?? new Date();
-  const connector = deps.port.appConnector(target.customerWorkspaceId);
   if (!connector || !isHostedConnectorLive({ state: 'active', transport: 'websocket', heartbeatAt: connector.lastSeenAt }, now)) {
     audit('app_relay_refused', 'workspace_offline');
     return refuse(503, 'workspace_offline', { 'retry-after': '30' });
@@ -545,7 +588,8 @@ export async function handleHostedAppRelay(request: Request, deps: HostedAppRela
     return refuse(429, 'rate_limited', { 'retry-after': '60' }, { limit: 'requests_per_minute' });
   }
   const month = appRelayMonth(now);
-  if ((await deps.usage.monthBytes(workspace, month)) >= limits.monthlyBandwidthBytes) {
+  const monthBytes = await deps.usage.monthBytes(workspace, month);
+  if (monthBytes >= limits.monthlyBandwidthBytes) {
     audit('app_relay_refused', 'rate_limited monthly_bandwidth');
     return refuse(429, 'rate_limited', { 'retry-after': String(secondsUntilNextMonth(now)) }, { limit: 'monthly_bandwidth' });
   }
@@ -574,6 +618,7 @@ export async function handleHostedAppRelay(request: Request, deps: HostedAppRela
     body,
     signal: request.signal,
     audit,
+    relayUsage: { month, bytes: monthBytes, limitBytes: limits.monthlyBandwidthBytes },
   });
 }
 
@@ -582,6 +627,7 @@ function relay(input: {
   connector: AppRelayConnector;
   workspace: AppRelayWorkspace;
   month: string;
+  relayUsage: RelayUsageReport;
   method: string;
   path: string;
   headers: Record<string, string>;
@@ -677,7 +723,7 @@ function relay(input: {
         }
         finish(reason);
       },
-    });
+    }, 'app-http', { relayUsage: input.relayUsage });
 
     if (!channel) {
       input.audit('app_relay_refused', 'workspace_offline');

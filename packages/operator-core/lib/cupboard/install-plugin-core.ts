@@ -17,7 +17,9 @@
  */
 import { promises as fs, existsSync } from 'node:fs';
 import { join, resolve, sep, dirname } from 'node:path';
-import type { PluginTriggerPack } from '@papercusp/plugin-sdk';
+import type { PluginTriggerPack, ProviderDescriptor } from '@papercusp/plugin-sdk';
+import type { TriggerPackInstallation } from './trigger-pack-materialize';
+import { validateProviderDeclaration } from '@papercusp/plugin-sdk';
 import { isCompilableSchema } from '../json-schema-validation';
 import { canonicalJson } from '../authority/authority-rpc-envelope';
 
@@ -37,6 +39,15 @@ export interface InstallPluginCoreInput {
    * surface. Used by capability-provider chaining so consent applies to exactly
    * the complete transitive set the caller reviewed. */
   expectedReview?: InstallPluginManifestReview;
+  /**
+   * Installer-local trigger-pack configuration (P-012, D-013): which local data
+   * source each external binding binds to, and the pack input values. Used only
+   * when the package carries a trigger pack and `harness` is given.
+   */
+  triggerPackConfig?: {
+    sourceMappings?: Record<string, string>;
+    inputs?: Record<string, unknown>;
+  };
 }
 
 export interface InstalledPluginManifest {
@@ -48,7 +59,27 @@ export interface InstalledPluginManifest {
   configSchema?: Record<string, unknown>;
   oauth?: Array<{ provider: string; scopes?: string[]; fieldName: string }>;
   triggerPack?: PluginTriggerPack;
+  /** Integration provider descriptor (generalized-integrations D-006). */
+  provider?: ProviderDescriptor;
+  runtime?: { kind?: string; [k: string]: unknown };
   [k: string]: unknown;
+}
+
+/**
+ * What a third-party integration provider asks the owner to consent to
+ * (generalized-integrations P-001): the datatypes it produces, the capability
+ * subset it serves, the OAuth scopes it requests, and every host it may reach
+ * through `host.fetch`. Sorted so the review is a stable consent subject.
+ */
+export interface InstalledProviderReceipt {
+  id: string;
+  contractVersion: number;
+  runtime: 'daemon';
+  datatypes: string[];
+  capabilities: string[];
+  oauthScopes: string[];
+  egressHosts: string[];
+  credentialGroup?: string;
 }
 
 export interface InstalledTriggerPackReceipt {
@@ -56,6 +87,8 @@ export interface InstalledTriggerPackReceipt {
   bindingCount: number;
   edgeCount: number;
   sourceKinds: string[];
+  /** Portable sources' datatypes, bound to installer-local sources at materialization. */
+  datatypes: string[];
   planTargets: Array<{ id: string; path: string; slug: string }>;
   /** Installation never crosses the autonomy-gated trigger arm boundary. */
   armed: false;
@@ -74,6 +107,13 @@ export interface InstallPluginCoreResult {
   granted: string[];
   /** Descriptor made discoverable by the post-copy host invalidation. */
   triggerPack?: InstalledTriggerPackReceipt;
+  /**
+   * The materialized pack in `harness` (P-012): installation id, owned plan and
+   * disarmed binding ids, and unmet source/input requirements.
+   */
+  triggerPackInstallation?: TriggerPackInstallation;
+  /** Integration provider the owner consented to (registered on host discovery). */
+  provider?: InstalledProviderReceipt;
   /** Stable install-review material derived before any destination write. */
   review: InstallPluginManifestReview;
   /**
@@ -110,6 +150,7 @@ export interface InstallPluginManifestReview {
   capabilities: string[];
   dependencies: InstallPluginDeclaredDependencies;
   triggerPack?: InstalledTriggerPackReceipt;
+  provider?: InstalledProviderReceipt;
 }
 
 /** A manifest-declared event dependency (plugin-SDK `ManifestEventDependency`, D-003). */
@@ -139,9 +180,43 @@ function normalizedEvents(value: unknown): ManifestEventDep[] {
   return [...byFamily.values()].sort((a, b) => a.family.localeCompare(b.family));
 }
 
+/**
+ * Validate and summarize a provider declaration before anything is copied.
+ * Cupboard-installed providers are third-party code: they must run as a
+ * sandboxed `daemon` (D-002/D-006); in-process `js` providers are reserved for
+ * first-party plugins that ship in the source tree.
+ */
+function inspectProviderForInstall(manifest: InstalledPluginManifest): InstalledProviderReceipt | undefined {
+  if (manifest.provider === undefined) return undefined;
+  const issues = validateProviderDeclaration(manifest);
+  if (issues.length > 0) {
+    throw new InstallPluginError(`provider declaration invalid: ${issues.join('; ')}`, 422, 'provider_invalid');
+  }
+  const provider = manifest.provider;
+  const runtime = typeof manifest.runtime?.kind === 'string' ? manifest.runtime.kind : 'js';
+  if (runtime !== 'daemon') {
+    throw new InstallPluginError(
+      `Cupboard-installed provider "${provider.id}" must run as a sandboxed daemon (runtime.kind "daemon"), not "${runtime}"`,
+      422,
+      'provider_runtime_not_sandboxed',
+    );
+  }
+  return {
+    id: provider.id,
+    contractVersion: provider.contractVersion,
+    runtime: 'daemon',
+    datatypes: normalizedStrings(provider.datatypes),
+    capabilities: normalizedStrings(provider.capabilities),
+    oauthScopes: normalizedStrings(provider.oauth?.scopes),
+    egressHosts: normalizedStrings(provider.egressHosts),
+    ...(provider.oauth?.credentialGroup ? { credentialGroup: provider.oauth.credentialGroup } : {}),
+  };
+}
+
 function manifestReview(
   manifest: InstalledPluginManifest,
   triggerPack: InstalledTriggerPackReceipt | undefined,
+  provider: InstalledProviderReceipt | undefined,
   dependencies: {
     tools?: string[];
     packs?: string[];
@@ -161,6 +236,7 @@ function manifestReview(
       events: normalizedEvents(dependencies?.events),
     },
     ...(triggerPack ? { triggerPack } : {}),
+    ...(provider ? { provider } : {}),
   };
 }
 
@@ -204,12 +280,31 @@ export interface InstallPluginCoreDeps {
     installable: { tools: string[]; packs: string[]; plugins: string[]; events?: ManifestEventDep[] };
     messages: string[];
   }>;
+  /**
+   * Materialize a trigger pack into `harnessSlug` (P-012, D-013). Optional: when
+   * absent, a trigger pack installs as manifest data only. Refusals carry a
+   * stable `code` and happen before any write.
+   */
+  materializeTriggerPack?: (args: {
+    manifest: InstalledPluginManifest & { triggerPack: PluginTriggerPack };
+    pluginDir: string;
+    harnessSlug: string;
+    sourceMappings?: Record<string, string>;
+    inputs?: Record<string, unknown>;
+  }) => Promise<TriggerPackInstallation>;
 }
 
 const GITHUB_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9_.-]{0,38}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}?(?:\.git)?\/?$/;
 
 export class InstallPluginError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(
+    message: string,
+    readonly status: number,
+    /** Stable machine code for refusals a caller is expected to branch on. */
+    readonly code?: string,
+    /** Structured refusal payload (e.g. the review a consent re-call must pin). */
+    readonly data?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = 'InstallPluginError';
   }
@@ -332,7 +427,9 @@ async function inspectTriggerPackForInstall(
     bindingCount: manifest.triggerPack.bindings.length,
     edgeCount: manifest.triggerPack.edges.length,
     sourceKinds: [...new Set(manifest.triggerPack.bindings.flatMap((binding) =>
-      binding.source.kind === 'external' ? [binding.source.sourceKind] : []))].sort(),
+      binding.source.kind === 'external' && binding.source.sourceKind ? [binding.source.sourceKind] : []))].sort(),
+    datatypes: [...new Set(manifest.triggerPack.bindings.flatMap((binding) =>
+      binding.source.kind === 'external' && binding.source.datatype ? [binding.source.datatype] : []))].sort(),
     planTargets,
     armed: false,
   };
@@ -393,6 +490,7 @@ export async function installPluginFromCupboardCore(
     await deps.cloneRepo(url, cloneDir);
     const { dir: pluginDir, manifest } = await locatePlugin(cloneDir, input.listingRef);
     const triggerPack = await inspectTriggerPackForInstall(manifest, pluginDir);
+    const provider = inspectProviderForInstall(manifest);
 
     // manifest.name is UNTRUSTED (from the cloned repo) and becomes a directory we
     // `rm -rf` + `cp` into — so it must be a safe single-segment slug, never a path.
@@ -443,12 +541,48 @@ export async function installPluginFromCupboardCore(
       }
     }
 
-    const review = manifestReview(manifest, triggerPack, declaredDeps);
+    const review = manifestReview(manifest, triggerPack, provider, declaredDeps);
     if (input.expectedReview && canonicalJson(input.expectedReview) !== canonicalJson(review)) {
       throw new InstallPluginError(
         `plugin review changed after consent for ${manifest.name}@${manifest.version}; review the current package closure before installing`,
         409,
+        'plugin_review_changed',
+        { review },
       );
+    }
+    // A provider reaches accounts and the network on the owner's behalf, so it
+    // never installs on an implicit yes: consent is a second call that pins the
+    // exact review returned here (datatypes, capabilities, scopes, egress).
+    if (provider && !(input.acceptCapabilities && input.expectedReview)) {
+      throw new InstallPluginError(
+        `provider "${provider.id}" requires consent: re-call with acceptCapabilities:true and expectedReview set to the returned review`,
+        409,
+        'provider_install_consent_required',
+        { review },
+      );
+    }
+
+    // Trigger-pack materialization (P-012, D-013 §6): with a target harness the
+    // pack becomes its plans and DISARMED bindings. Every refusal happens in the
+    // materializer's write-free preflight, so it runs before the bytes are
+    // replaced: an unsupported pack refuses the whole install cleanly.
+    let triggerPackInstallation: TriggerPackInstallation | undefined;
+    if (triggerPack && input.harness && deps.materializeTriggerPack) {
+      try {
+        triggerPackInstallation = await deps.materializeTriggerPack({
+          manifest: manifest as InstalledPluginManifest & { triggerPack: PluginTriggerPack },
+          pluginDir,
+          harnessSlug: input.harness,
+          sourceMappings: input.triggerPackConfig?.sourceMappings,
+          inputs: input.triggerPackConfig?.inputs,
+        });
+      } catch (error) {
+        const code = (error as { name?: unknown; code?: unknown })?.code;
+        if ((error as { name?: unknown })?.name === 'TriggerPackMaterializeError' && typeof code === 'string') {
+          throw new InstallPluginError((error as Error).message, 422, code);
+        }
+        throw error;
+      }
     }
 
     const target = join(deps.globalPluginsDir(), manifest.name);
@@ -488,6 +622,8 @@ export async function installPluginFromCupboardCore(
       granted,
       review,
       ...(triggerPack ? { triggerPack } : {}),
+      ...(triggerPackInstallation ? { triggerPackInstallation } : {}),
+      ...(provider ? { provider } : {}),
       ...(installableDependencies ? { installableDependencies } : {}),
     };
   } finally {

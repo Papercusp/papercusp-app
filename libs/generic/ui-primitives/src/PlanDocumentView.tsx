@@ -12,6 +12,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from 'react';
+import { pinModuleState } from '@papercusp/module-singleton';
 
 /** Minimal plan-item shape needed by the shared read surface. */
 export interface PlanDocumentItem {
@@ -529,6 +530,69 @@ function loadVditorCss(): Promise<unknown> {
   return vditorCssPromise;
 }
 
+function planDocumentPreviewOptions(assetBaseUrl: string, theme: PlanDocumentTheme) {
+  return {
+    cdn: assetBaseUrl,
+    transform: neutralizePlanDocumentPlantuml,
+    mode: theme,
+    theme: { current: theme },
+    math: { engine: 'KaTeX' },
+    anchor: 1,
+    lang: 'en_US',
+  };
+}
+
+interface PreparedPlanDocument {
+  markdown: string;
+  assetBaseUrl: string;
+  promise: Promise<boolean>;
+  html?: string;
+}
+
+// Retain only the most recently requested document, never rendered DOM. Pin it
+// so a host's barrel import and the document's own module share preparation.
+const documentPreparation = pinModuleState('@papercusp/ui-primitives.plan-document-preparation-v1', () => ({
+  current: null as PreparedPlanDocument | null,
+}));
+
+/** Prepare an already frontmatter-normalized body before opening its document.
+ * Public md2html uses the same option merge/compiler as preview. The compiled
+ * HTML is independent of theme; preview still applies the current theme and all
+ * its normal adapters to the actual mounted root. Failures are best-effort. */
+export function preparePlanDocument(value: string, assetBaseUrl = '/vditor'): Promise<boolean> {
+  const markdown = expandPlanDocumentWikiLinks(value);
+  const previous = documentPreparation.current;
+  if (previous?.markdown === markdown && previous.assetBaseUrl === assetBaseUrl) {
+    return previous.promise;
+  }
+  // Bound retained source/output as well as cardinality. Oversized documents
+  // keep the ordinary preview path rather than a second long-lived copy.
+  if (markdown.length > 512 * 1024) {
+    documentPreparation.current = null;
+    return Promise.resolve(false);
+  }
+  const entry: PreparedPlanDocument = { markdown, assetBaseUrl, promise: Promise.resolve(false) };
+  documentPreparation.current = entry;
+  entry.promise = (async () => {
+    try {
+      await loadVditorCss();
+      const Vditor = (await import('vditor')).default;
+      const html = await Vditor.md2html(markdown, planDocumentPreviewOptions(assetBaseUrl, 'dark') as never);
+      if (documentPreparation.current !== entry) return false;
+      if (html.length > 2 * 1024 * 1024) {
+        documentPreparation.current = null;
+        return false;
+      }
+      entry.html = html;
+      return true;
+    } catch {
+      if (documentPreparation.current === entry) documentPreparation.current = null;
+      return false;
+    }
+  })();
+  return entry.promise;
+}
+
 /**
  * Foreground and background for the raw-text fallback, ALWAYS returned as a
  * pair from one theme decision.
@@ -611,18 +675,21 @@ export function PlanDocumentView({
       const Vditor = (await import("vditor")).default;
       if (cancelled || !previewRef.current) return;
       reportPhase('renderer-ready');
+      const markdown = expandPlanDocumentWikiLinks(body);
+      const prepared = documentPreparation.current;
+      const html = prepared?.markdown === markdown && prepared.assetBaseUrl === assetBaseUrl
+        ? prepared.html
+        : undefined;
+      const options = planDocumentPreviewOptions(assetBaseUrl, resolvedTheme);
       await Vditor.preview(
         previewRef.current,
-        expandPlanDocumentWikiLinks(body),
-        {
-          cdn: assetBaseUrl,
-          transform: neutralizePlanDocumentPlantuml,
-          mode: resolvedTheme,
-          theme: { current: resolvedTheme },
-          math: { engine: "KaTeX" },
-          anchor: 1,
-          lang: "en_US",
-        } as never,
+        html === undefined ? markdown : '',
+        // The public transform seam substitutes compiler output only. Keep
+        // Vditor's DOM insertion, code/math/diagram adapters, theme and outline.
+        (html === undefined ? options : {
+          ...options,
+          transform: () => neutralizePlanDocumentPlantuml(html),
+        }) as never,
       );
       if (cancelled || !previewRef.current) return;
 

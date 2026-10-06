@@ -29,6 +29,7 @@ import {
   type FrozenRepairEditMarker,
   type FrozenRepairMarkerLeg,
 } from './frozen-repair-edit-marker';
+import type { GateVerdictTarget } from './gate-verdict-target';
 import { renderAdmitCommand } from './repair-manifest';
 
 /**
@@ -69,6 +70,8 @@ export interface GateRedClaimEvidence {
 export interface GateRedClaimProbe {
   /** Injected for tests; omitted means "read the real marker". */
   marker?: FrozenRepairEditMarker | null;
+  /** Exact workspace/install scope for the live marker read. */
+  target?: GateVerdictTarget | null;
   containment?: (paths: string[], judgedSha: string) => PathContainment[];
 }
 
@@ -112,7 +115,7 @@ export function gateRedCompletionClaimWarning(
     const declared = evidence?.filesChanged?.filter((f) => typeof f === 'string' && f.trim());
     if (!declared?.length) return undefined;
 
-    const marker = 'marker' in probe ? probe.marker : readFrozenRepairMarker();
+    const marker = 'marker' in probe ? probe.marker : readFrozenRepairMarker(probe.target);
     // No frozen queue ⇒ the candidate is cut at tip ⇒ an ordinary commit IS the judged
     // lineage, so the claim is unremarkable. Silence, not a guess.
     if (!marker) return undefined;
@@ -209,6 +212,8 @@ export interface GateRedClaimVerdictOptions {
   administrativeSettlement?: boolean;
   /** Injected for tests; omitted means "read the real marker". */
   marker?: FrozenRepairEditMarker | null;
+  /** Exact workspace/install scope for the live marker read. */
+  target?: GateVerdictTarget | null;
 }
 
 const legStatusByPath = (legs: readonly FrozenRepairMarkerLeg[]): Map<string, FrozenRepairMarkerLeg['status']> => {
@@ -235,7 +240,7 @@ export function gateRedCompletionClaimVerdict(
     const administrativeSettlement = opts.administrativeSettlement === true;
     if (!prosaicClaim && !conditionItem) return { refuse: false, reason: 'no-claim' };
 
-    const marker = 'marker' in opts ? opts.marker : readFrozenRepairMarker();
+    const marker = 'marker' in opts ? opts.marker : readFrozenRepairMarker(opts.target);
     if (!marker) return { refuse: false, reason: 'no-frozen-queue' };
 
     const candidate = marker.candidate;

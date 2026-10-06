@@ -10,11 +10,10 @@
   no new server route, no new build step: `npm run build` here picks it up
   exactly like any other `public/` static asset.
 
-  Reuses Pagefind's own default UI widget (pagefind-ui.js/css, already built +
-  served alongside every doc page since `pagefind: true` in astro.config.mjs) —
-  no custom search code. `bundlePath` is set explicitly (relative to THIS
-  page's own URL) rather than relying on PagefindUI's root-relative default,
-  since this page and the pagefind assets are siblings under /internal/docs/.
+  Reuses the palette's Pagefind layout/CSS, with filesystem keyword retrieval
+  through the existing docs mount. Release privacy pruning removes search shards.
+  Queries use /internal/docs/search.json against the sanitized packaged source;
+  no database overlay or private Pagefind index can refill the release corpus.
 
   Opened by the Rust CmdOrCtrl+K global shortcut (src-tauri/src/docs_search.rs)
   in a small, focused WebviewWindow — Escape closes it (native, no JS needed:
@@ -94,6 +93,8 @@
 
       /* Search box — TRANSLUCENT frosted glass over the gradient. */
       .pagefind-ui__search-input {
+        width: 100%;
+        padding: 14px;
         background: rgba(3, 8, 16, 0.45) !important;
         -webkit-backdrop-filter: blur(14px) saturate(160%);
         backdrop-filter: blur(14px) saturate(160%);
@@ -145,6 +146,10 @@
       }
       .pagefind-ui__message {
         color: var(--frost-text-muted);
+      }
+      .pagefind-ui__results {
+        padding: 0;
+        list-style: none;
       }
 
       /* Frost scrollbar (docs site). */
@@ -334,7 +339,12 @@
     </style>
   </head>
   <body>
-    <div id="search"></div>
+    <div id="search" class="pagefind-ui">
+      <input id="docs-query" class="pagefind-ui__search-input" type="search"
+        aria-label="Search docs" placeholder="Search docs" maxlength="200" autocomplete="off" />
+      <p id="search-status" class="pagefind-ui__message" role="status" aria-live="polite"></p>
+      <ul id="search-results" class="pagefind-ui__results"></ul>
+    </div>
     <div id="askbar">
       <button id="ask-btn" type="button" aria-label="Chat with an agent about the docs">
         <span class="ask-btn__icon" aria-hidden="true">💬</span>
@@ -353,26 +363,65 @@
       <div id="ask-body"></div>
       <div id="ask-cites"></div>
     </div>
-    <script src="./pagefind/pagefind-ui.js"></script>
     <script>
-      window.addEventListener('DOMContentLoaded', () => {
-        new PagefindUI({
-          element: '#search',
-          // ABSOLUTE bundlePath — Pagefind loads its engine via
-          // `import(`${bundlePath}pagefind.js`)`. A relative `pagefind/` becomes a
-          // BARE module specifier ("pagefind/pagefind.js") the browser refuses to
-          // resolve → the search silently never runs (WI-2648 shipped this way).
-          // The palette is always served at /internal/docs/search-palette.html with
-          // the index sibling at /internal/docs/pagefind/, in dev AND the packaged
-          // Server, so this absolute path is stable across every host.
-          bundlePath: '/internal/docs/pagefind/',
-          showSubResults: true,
-          showImages: false,
-          autofocus: true,
-          // Results carry an ABSOLUTE /internal/docs/... URL already (Astro's
-          // `base: '/internal/docs'` bakes it into every crawled page), so no
-          // rewriting is needed here — the anchors just work when clicked.
-        });
+      const input = document.getElementById('docs-query');
+      const results = document.getElementById('search-results');
+      const status = document.getElementById('search-status');
+      let searchTimer;
+      let searchRequest;
+      let searchGeneration = 0;
+      input.focus();
+      input.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        if (searchRequest) searchRequest.abort();
+        const generation = ++searchGeneration;
+        const query = input.value.trim();
+        results.replaceChildren();
+        status.textContent = query ? 'Searching…' : '';
+        if (!query) return;
+        searchTimer = setTimeout(async () => {
+          const request = new AbortController();
+          searchRequest = request;
+          try {
+            const response = await fetch(`/internal/docs/search.json?q=${encodeURIComponent(query)}`, {
+              signal: request.signal,
+            });
+            if (!response.ok) throw new Error('Search unavailable');
+            const data = await response.json();
+            if (generation !== searchGeneration) return;
+            for (const hit of data.hits) {
+              const url = new URL(hit.url, location.origin);
+              if (url.origin !== location.origin || !url.pathname.startsWith('/internal/docs/')) continue;
+              const item = document.createElement('li');
+              item.className = 'pagefind-ui__result';
+              const link = document.createElement('a');
+              link.className = 'pagefind-ui__result-link';
+              link.href = url.href;
+              link.textContent = hit.title;
+              const excerpt = document.createElement('p');
+              excerpt.className = 'pagefind-ui__result-excerpt';
+              excerpt.textContent = hit.excerpt;
+              item.append(link, excerpt);
+              results.appendChild(item);
+            }
+            status.textContent = data.hitCount ? `${data.hitCount} results` : 'No results found.';
+          } catch (error) {
+            if (generation === searchGeneration && error.name !== 'AbortError') {
+              status.textContent = 'Docs search is unavailable. Try again.';
+            }
+          }
+        }, 120);
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.ctrlKey || event.metaKey) return;
+        const first = results.querySelector('a');
+        if (first && event.key === 'ArrowDown') {
+          event.preventDefault();
+          first.focus();
+        } else if (first && event.key === 'Enter') {
+          event.preventDefault();
+          first.click();
+        }
       });
 
       // ---- "Ask a question" mode (WI-2844) --------------------------------

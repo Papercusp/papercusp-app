@@ -159,7 +159,11 @@ import { lookupWorkItem } from './_lookup';
 import { deriveRepoPathsFromText } from './_derive-paths';
 import { unresolvedRefsInBody, unresolvedRefsWarning } from './unresolved-refs';
 import { unresolvedPlanDecisionRefs } from '../coordination/decision-ref-advisory';
-import { carryRowTextSchema, CARRY_ROW_ID_SCHEMA } from '../_carry-row-id';
+import {
+  carryRowTextSchema,
+  CARRY_ROW_ID_SCHEMA,
+  CARRY_ROW_REPLACES_SCHEMA,
+} from '../_carry-row-id';
 import { detectPauseDeclaration, pauseNotEnforcedWarning } from '../../carry-note-pause-declaration';
 import { runBulk, bulkContent } from '../_bulk';
 import { resolveConcreteWorkspaceId } from '../../workspace-registry';
@@ -168,6 +172,7 @@ import {
   expandCurrentTurnSentinel,
   hasCurrentTurnSentinel,
   markUnverifiedOwnerAttribution,
+  normalizeUnverifiedOwnerAttributionMarkers,
   ownerAttributionEnforcement,
   retainedDirectiveMatches,
   retainedProvenanceText,
@@ -183,11 +188,13 @@ import {
   coerceCarryRowShape,
   type CarryArgRepair,
   evidenceFirst,
-  lintRelativeScratchPaths,
+  FALSIFIER_MISSING_NOTE,
+  checksMissingFalsifier,
   RELATIVE_SCRATCH_ADVISORY,
   normalizeCheckEntries,
   normalizeFlattenedContinuityProbeRow,
   patchExistingCheckEntries,
+  resolveCarryRowRefs,
   renderCheckLine,
   renderCarryNote,
   sanitizeCarryRowId,
@@ -199,6 +206,7 @@ import {
   CHECKPOINT_BODY_CAP_CHARS,
   type WorkItemSubject,
 } from '../../carry-note';
+import { filterTrackedRelativeScratchPaths } from '../checkpoint-relative-scratch';
 import { detectScopeOverreach } from '../../carry-note-probe-scope';
 import { describeUnreadRun } from '../../carry-note-unread-run';
 import { uncoveredAbsencePremises } from '../../premises-claim-port';
@@ -207,6 +215,7 @@ import {
   evaluateFrozenLineageCarryText,
   frozenLineageCarryViolationPayload,
 } from '../../release/frozen-lineage-execution-policy';
+import { resolveHomeGateVerdictTarget } from '../../release/gate-verdict-target';
 import { LIMITS } from '../limits';
 
 /**
@@ -273,16 +282,22 @@ async function unresolvedProsePathsInCheckpoint(
 /** Count the rows an additive checks write needs before normalization applies its cap. */
 function appendChecksOverflowCount(
   priorNote: string | null,
-  suppliedChecks: ReadonlyArray<{ id?: string; claim: string }> | undefined,
+  suppliedChecks: ReadonlyArray<{ id?: string; claim: string; replaces?: string }> | undefined,
 ): number {
   if (suppliedChecks === undefined) return 0;
-  const priorChecks = splitCarryNoteChecks(priorNote).checks;
+  const refs = resolveCarryRowRefs({
+    priorWalls: [],
+    priorChecks: splitCarryNoteChecks(priorNote).checks,
+    checks: suppliedChecks,
+  });
+  const priorChecks = refs.priorChecks;
+  const resolvedChecks = refs.checks ?? [];
   // A legacy note may exceed today's cap. Updating only rows that already exist
   // is an in-place patch, not an overflowing union, so preserve the full legacy
   // evidence instead of refusing the refresh or normalizing away its tail.
-  if (suppliedChecks.length > 0 && patchExistingCheckEntries(suppliedChecks, priorChecks) !== null) return 0;
+  if (resolvedChecks.length > 0 && patchExistingCheckEntries(resolvedChecks, priorChecks) !== null) return 0;
   const unionKeys = new Set(
-    [...suppliedChecks, ...priorChecks]
+    [...resolvedChecks, ...priorChecks]
       .filter((row) => (row.claim ?? '').trim().length > 0)
       .map((row) => carryRowKey(row)),
   );
@@ -335,6 +350,7 @@ type AppendChecksOverflowRow = {
   id?: string;
   claim: string;
   recheck?: string;
+  falsifier?: string;
   verified?: string;
   observed?: string;
   contested?: string;
@@ -435,6 +451,14 @@ function fitChecksForAppendBody(
         repairs,
       );
     }
+    if (typeof out.falsifier === 'string') {
+      out.falsifier = truncateCarryField(
+        out.falsifier,
+        CARRY_ROW_SOFT_CAPS.falsifier,
+        `carriedChecks[${i}].falsifier`,
+        repairs,
+      );
+    }
     if (typeof out.verified === 'string') {
       out.verified = truncateCarryField(
         out.verified,
@@ -497,7 +521,10 @@ function appendChecksOverflowRows(
   suppliedChecks: ReadonlyArray<{
     id?: string;
     claim: string;
+    replaces?: string;
     recheck?: string;
+    falsifier?: string;
+    sampleAdequate?: boolean;
     verified?: string;
     observed?: string;
     contested?: string;
@@ -505,19 +532,26 @@ function appendChecksOverflowRows(
   }>,
 ): AppendChecksOverflowRow[] {
   if (suppliedChecks.length === 0) return [];
-  const priorChecks = splitCarryNoteChecks(priorNote).checks;
+  const refs = resolveCarryRowRefs({
+    priorWalls: [],
+    priorChecks: splitCarryNoteChecks(priorNote).checks,
+    checks: suppliedChecks,
+  });
+  const priorChecks = refs.priorChecks;
+  const resolvedChecks = refs.checks ?? [];
 
   // An all-existing keyed refresh is patched in place and deliberately preserves
   // over-cap legacy rows, so it cannot produce an additive-cap eviction.
-  if (patchExistingCheckEntries(suppliedChecks, priorChecks) !== null) return [];
+  if (patchExistingCheckEntries(resolvedChecks, priorChecks) !== null) return [];
 
-  const merged = normalizeCheckEntries([...suppliedChecks, ...priorChecks], priorChecks);
+  const merged = normalizeCheckEntries([...resolvedChecks, ...priorChecks], priorChecks);
   const keptKeys = new Set(merged.map((row) => carryRowKey(row)));
   const evicted = priorChecks.filter((row) => row.claim.trim().length > 0 && !keptKeys.has(carryRowKey(row)));
 
   return evicted.slice(0, CARRY_NOTE_MAX_CHECKS * CARRY_CAP_HARD_MULTIPLE).map((row) => {
     const id = sanitizeCarryRowId(row.id);
     const recheck = row.recheck?.trim();
+    const falsifier = row.falsifier?.trim();
     const verified = row.verified?.trim();
     const observed = row.observed?.trim();
     const contested = row.contested?.trim();
@@ -525,6 +559,7 @@ function appendChecksOverflowRows(
       ...(id ? { id } : {}),
       claim: row.claim.trim(),
       ...(recheck ? { recheck } : {}),
+      ...(falsifier ? { falsifier } : {}),
       ...(verified ? { verified } : {}),
       ...(observed ? { observed } : {}),
       ...(contested ? { contested } : {}),
@@ -592,7 +627,11 @@ class FrozenCarryCheckpointError extends Error {
 function frozenWorkItemCarryViolation(text: string | null | undefined): FrozenCarryViolationPayload | null {
   if (!text?.trim()) return null;
   return frozenLineageCarryViolationPayload(
-    evaluateFrozenLineageCarryText({ surface: 'work-item-checkpoint', text }),
+    evaluateFrozenLineageCarryText({
+      surface: 'work-item-checkpoint',
+      text,
+      target: resolveHomeGateVerdictTarget(),
+    }),
   );
 }
 
@@ -681,6 +720,19 @@ const checkpointBodySchema = checkpointBodySpec().meta({ id: 'work-items-checkpo
  * aliases `id` and a disagreement is rejected rather than redirecting the write.
  */
 const rootCarryAliasField = z.string().max(CHECKPOINT_CAP).nullish();
+
+/**
+ * WI-10005640: `items[]` entries take the SAME carry vocabulary as the single
+ * shorthand. Measured 2026-10-02: ~40 `items.N: Unrecognized keys: "did","left",
+ * "insight","next"` refusals/48h across ~15 owners — the natural batch shape is
+ * the loop carry-note shape, and rejecting it at the entry level made callers
+ * discover the `checkpoint:{…}` nesting by failing. Folded per entry with the SAME
+ * `checkpointFromRootAliases` as the root (explicit `checkpoint` wins). One
+ * `$defs` id keeps the published argSchema (PINNED shrink-only) from growing 7×.
+ */
+// No `.describe`: compact delivery INLINES $refs (schema-ref-inline.ts), so a description
+// here is paid 7x there (+558 B measured). The entry's `checkpoint` description documents it.
+const itemCarryAliasField = rootCarryAliasField.meta({ id: 'work-items-checkpoint-carry-alias-v1' });
 
 function checkpointFromRootAliases(args: {
   checkpoint?: string | null;
@@ -773,7 +825,11 @@ function retireIdsSpec() {
         "whenever your view of the carried set may be an excerpt (e.g. a post-compaction carry document) rather " +
         'than the full stored list — call work_items:get first for the complete set, or send `rowsMode:"replace"` ' +
         'with neither `confirmRetire` nor `retireIds` to see the full drop list in a refusal before committing to one.',
-    );
+    )
+    .meta({
+      'x-papercusp-call-constraint':
+        "Requires effective `rowsMode:'replace'`; an `items[]` entry overrides the root setting, and omitted `rowsMode` defaults to `'merge'`.",
+    });
 }
 
 /** EI-9036: join an addendum onto the prior checkpoint text, bounded to CHECKPOINT_CAP.
@@ -876,6 +932,10 @@ function checksSpec() {
             // the other, which is also what made coerceCarryRowShape's key -> id
             // repair inert here.
             id: CARRY_ROW_ID_SCHEMA,
+            // P-025: re-word an id-less carried check as a one-row keyed update at the
+            // cap. Shared with loop:checkpoint so both carry surfaces accept the same
+            // [#id] or exact-claim reference and preserve the target's evidence/age.
+            replaces: CARRY_ROW_REPLACES_SCHEMA,
             claim: carryRowTextSchema(CARRY_ROW_SOFT_CAPS.claim, 'The claim about external state, stated concretely.', {
               min: 1,
             }),
@@ -891,6 +951,17 @@ function checksSpec() {
               CARRY_ROW_SOFT_CAPS.recheck,
               'The concrete probe that would falsify the claim.',
             ).optional(),
+            // EI-23771449112267271: same contract as loop:checkpoint's `falsifier` /
+            // `sampleAdequate` (and facts:assert `falsifier`). Persisted / write-time only
+            // respectively; the SHARED normalizer in ../../carry-note owns both semantics.
+            falsifier: carryRowTextSchema(
+              CARRY_ROW_SOFT_CAPS.falsifier,
+              'Result that would mean this claim is FALSE (as facts:assert `falsifier`). A probe says how to look; this says what refutes it.',
+            ).optional(),
+            sampleAdequate: z
+              .boolean()
+              .optional()
+              .describe('`false` = probed, but the sample could not discriminate the claim from its negation; renders ? not ✓.'),
             verified: carryRowTextSchema(
               CARRY_ROW_SOFT_CAPS.verified,
               'The EVIDENCE STRING (what you actually observed). For compatibility, boolean `true`/`false` ' +
@@ -991,6 +1062,8 @@ function checksSpec() {
         "row whose claim text matches a stored one inherits that row's recheck/verified/contested/sinceMs when " +
         'you omit them, so re-sending a claim never loses its evidence. Supplying `verified` clears an inherited ' +
         '`contested` and vice versa — they are two renderings of ONE evidence slot, not independent fields — and ' +
+        'under merge, use `replaces` with the carried row id or exact old claim to re-word an id-less row at the cap ' +
+        'without treating it as a new addition. Unmatched refs are reported and treated as additions. ' +
         'evidence that contradicts itself (for example "STILL RUNNING") is auto-downgraded to ⚠ CONTESTED rather ' +
         'than rendering as ✓ VERIFIED. Rows dropped come back as `checksDropped`; additive-cap refusals also include the exact stored rows as `checksDroppedRows` with sanitized ids. A bare string row is accepted as shorthand for `{ claim: <that string> }`.',
     );
@@ -1047,6 +1120,10 @@ const itemSpec = z.object({
   checkpoint: checkpointBodySchema.describe(
     'compressed in-flight state; null or clear:true ⇒ clear; omission requires `checks`, `dependsOn`, `learned`, or `learnedLevel` as a metadata-only patch; blank string requires confirmClear:true; accepts the structured { did, left, insight, next } carry-note shape and loop aliases',
   ),
+  did: itemCarryAliasField,
+  left: itemCarryAliasField,
+  insight: itemCarryAliasField,
+  next: itemCarryAliasField,
   clear: looseBoolean().describe(
     'explicitly clear the checkpoint body. Equivalent to checkpoint:null and rejected with a non-blank checkpoint.',
   ),
@@ -1059,16 +1136,11 @@ const itemSpec = z.object({
     .optional()
     .describe('per-item harness (else the batch `harness` default / ctx / item lookup)'),
   append: looseBoolean().describe(
-      'EI-9036: append `checkpoint` onto the EXISTING stored checkpoint (joined with a `---` separator) instead ' +
-      'of replacing it. By default supplied `checks` are UNIONED onto the carried set rather than replacing it ' +
-      '(EI-19944669306930709); explicit `rowsMode:\'replace\'` still replaces the check rows while append controls ' +
-      'only the body. Reads the current checkpoint first via the same path a ' +
-      'future pickup uses. A missing `checkpoint` is allowed with `checks` as an additive, body-preserving patch. ' +
-      'Otherwise append requires a non-blank `checkpoint` (append + clear is contradictory — rejected, not silently ' +
-      'treated as a clear). Bounded to the 32000-char cap: the superseded tail of the prior content is trimmed first if the join would ' +
-      `overflow it, preserving the oldest baseline and newest addendum whenever they fit. A body-bearing checks union that exceeds the ${CARRY_NOTE_MAX_CHECKS}-row cap still stores the body and carried ` +
-      'rows, and reports supplied rows that did not fit; an unconfirmed checks-only overflow refuses, while `confirmRetire:true` permits and reports the cap eviction. Retire stale rows with a ' +
-      'plain replace first or omit `checks`.',
+      'EI-9036: append `checkpoint` onto the EXISTING stored checkpoint (joined with `---`) instead of replacing it; ' +
+      'supplied `checks` are UNIONED onto the carried set (EI-19944669306930709; `rowsMode:\'replace\'` replaces check rows only). ' +
+      'No `checkpoint` + `checks` = additive body-preserving patch; otherwise a non-blank `checkpoint` is required ' +
+      '(append + clear is rejected). Bounded to the 32000-char cap (superseded prior tail is trimmed first). ' +
+      `Checks beyond the ${CARRY_NOTE_MAX_CHECKS}-row cap are reported; an unconfirmed checks-only overflow refuses, \`confirmRetire:true\` permits it.`,
   ),
   confirmShrink: looseBoolean().describe(
     'EI-18140632570924965: a plain replace (no append) that would shrink a substantial prior checkpoint by ' +
@@ -1085,15 +1157,11 @@ const itemSpec = z.object({
   learned: learnedSpec(),
   learnedLevel: learnedLevelSpec(),
   unchanged: looseBoolean().describe(
-    'P-007/R-06: ATTEST that the stored checkpoint is still current instead of rewriting it. Refreshes the ' +
-      'checkpoint\'s freshness — clearing the flush gate\'s stale-checkpoint tripwire — while leaving the body ' +
-      'byte-identical, so a parked or blocked agent stops paying a prose rewrite for state that has not moved. ' +
-      'REQUIRES `contentHash` (the hash this tool returned on the write you are attesting to; work_items:get ' +
-      'also carries it). Mutually exclusive with checkpoint/clear/append/checks/dependsOn — an attestation writes ' +
-      'no text by construction. It is BOUNDED and cannot conceal changed state: it refuses if the hash does not ' +
-      'match what is stored (attestation_hash_mismatch), if the work-item row itself moved after the body was ' +
-      'written (attestation_state_changed), or once the chain/age budget is spent (attestation_exhausted) — at ' +
-      'which point a real checkpoint is required. A genuine write resets the budget.',
+    'P-007/R-06: ATTEST the stored checkpoint is still current instead of rewriting it (refreshes freshness, ' +
+      'body byte-identical). REQUIRES `contentHash` (from a prior write\'s result or work_items:get); mutually ' +
+      'exclusive with checkpoint/clear/append/checks/dependsOn. BOUNDED: refuses with attestation_hash_mismatch, ' +
+      'attestation_state_changed (item row moved after the body) or attestation_exhausted (chain/age budget spent) ' +
+      '— then write a real checkpoint; a genuine write resets the budget.',
   ),
   contentHash: contentHashSpec().describe(
       'The stored checkpoint hash you are attesting to (the `contentHash` a prior write returned). Required with ' +
@@ -1274,7 +1342,8 @@ export default defineTool({
           (value) => value === undefined,
         ),
       {
-        message: 'loop carry aliases apply only to the single shorthand; put checkpoint on each items[] entry',
+        message:
+          'root-level loop carry aliases apply only to the single shorthand; with items[] put checkpoint (or did/left/insight/next) on each entry',
         path: ['items'],
       },
     ),
@@ -1290,7 +1359,8 @@ export default defineTool({
     const c = ctx as { harnessSlug?: string | null; workspaceId?: string | null; spawnId?: string | null };
     const inlineCheckpoint = checkpointFromRootAliases(args);
     const items = args.items?.length
-      ? args.items
+      ? // WI-10005640: fold each entry's own carry aliases (explicit `checkpoint` wins).
+        args.items.map((entry) => ({ ...entry, checkpoint: checkpointFromRootAliases(entry) }))
       : [
           {
             id: (args.id ?? args.workItem) as string,
@@ -1794,6 +1864,13 @@ export default defineTool({
           out.claim = truncateCarryField(out.claim, CARRY_ROW_SOFT_CAPS.claim, `checks[${i}].claim`, repairs);
           if (typeof out.recheck === 'string')
             out.recheck = truncateCarryField(out.recheck, CARRY_ROW_SOFT_CAPS.recheck, `checks[${i}].recheck`, repairs);
+          if (typeof out.falsifier === 'string')
+            out.falsifier = truncateCarryField(
+              out.falsifier,
+              CARRY_ROW_SOFT_CAPS.falsifier,
+              `checks[${i}].falsifier`,
+              repairs,
+            );
           if (typeof out.verified === 'string')
             out.verified = truncateCarryField(
               out.verified,
@@ -1920,13 +1997,25 @@ export default defineTool({
         // captures what went missing so the loss is VISIBLE in the result rather than
         // inferable only by diffing a count you would have to have recorded beforehand.
         let droppedCheckClaims: string[] = [];
+        let unmatchedCheckRefs: string[] = [];
         let suppliedChecksNotRetained: AppendChecksOverflowRow[] = [];
         let preserveCarriedChecksOnOverflow = false;
         const checksTransform =
           suppliedChecks !== undefined || !isClear || isDependencyOnlyPatch || isLearnedMetadataPatch
             ? (priorNote: string | null, incoming: string | null | undefined) => {
                 const priorSplit = splitCarryNoteChecks(priorNote);
-                const prior = priorSplit.checks;
+                const originalPrior = priorSplit.checks;
+                // P-025: resolve a one-row reword against the authoritative locked
+                // prior before capacity checks/upsert. The resolver promotes an
+                // id-less target to a stable id so its evidence and age survive.
+                const resolvedRefs = resolveCarryRowRefs({
+                  priorWalls: [],
+                  priorChecks: originalPrior,
+                  checks: suppliedChecks,
+                });
+                const prior = resolvedRefs.priorChecks;
+                const resolvedSuppliedChecks = resolvedRefs.checks;
+                unmatchedCheckRefs = resolvedRefs.unmatched;
                 // `incoming` may carry its OWN rendered `## Checks` — append mode folds
                 // the whole prior note in, section and all — so strip it before
                 // re-attaching or the note ends up with two Checks sections.
@@ -1946,13 +2035,14 @@ export default defineTool({
                   : shouldAppendRefresh
                     ? joinCheckpointNewestFirst(incomingBody, priorSplit.body)
                     : incomingBody;
+                body = normalizeUnverifiedOwnerAttributionMarkers(body) ?? body;
                 if (ownerEnforcement.unverified) body = markUnverifiedOwnerAttribution(body) ?? body;
                 if (shouldAppendRefresh) autoAppendedRefresh = true;
                 const patchedExistingChecks =
                   (additiveChecks || (preservePriorOnShrink && rowsMode !== 'replace')) &&
-                  suppliedChecks !== undefined &&
-                  suppliedChecks.length > 0
-                    ? patchExistingCheckEntries(suppliedChecks, prior, Date.now())
+                  resolvedSuppliedChecks !== undefined &&
+                  resolvedSuppliedChecks.length > 0
+                    ? patchExistingCheckEntries(resolvedSuppliedChecks, prior, Date.now())
                     : null;
                 // EI-19944669306930709: under `append: true` the supplied rows are
                 // UNIONED onto the carried set instead of replacing it. `append` is an
@@ -1994,19 +2084,19 @@ export default defineTool({
                 // `checksNotRetained` while the stale carried rows were kept as `checks`.
                 const checksAdditiveOnThisWrite = additiveChecks || (preservePriorOnShrink && rowsMode !== 'replace');
                 const effectiveChecks =
-                  suppliedChecks === undefined
+                  resolvedSuppliedChecks === undefined
                     ? undefined
-                    : checksAdditiveOnThisWrite
-                      ? [...suppliedChecks, ...orderCarriedForUnion(suppliedChecks, prior)]
-                      : suppliedChecks;
+                      : checksAdditiveOnThisWrite
+                      ? [...resolvedSuppliedChecks, ...orderCarriedForUnion(resolvedSuppliedChecks, prior)]
+                      : resolvedSuppliedChecks;
                 // An empty additive list is a true no-op, including for legacy notes
                 // that exceed today's cap. Do not run the carried rows back through
                 // normalizeCheckEntries, or the recovery would succeed only after
                 // silently evicting the very rows it promised to preserve.
                 const preserveEmptyAdditiveChecks = additiveChecks && suppliedChecks?.length === 0;
                 const preservedOverflow =
-                  preserveCarriedChecksOnOverflow && suppliedChecks !== undefined
-                    ? mergeChecksPreservingCarried(prior, suppliedChecks)
+                  preserveCarriedChecksOnOverflow && resolvedSuppliedChecks !== undefined
+                    ? mergeChecksPreservingCarried(prior, resolvedSuppliedChecks)
                     : null;
                 if (preservedOverflow) suppliedChecksNotRetained = preservedOverflow.notRetained;
                 let merged = preservedOverflow
@@ -2049,9 +2139,10 @@ export default defineTool({
                 // rewording as a lost predecessor, even though the row was replaced
                 // in place and retained its slot/evidence.
                 const keptCheckKeys = new Set(merged.map((c) => carryRowKey(c)));
-                const droppedRows = prior.filter(
-                  (c) => c.claim.trim().length > 0 && !keptCheckKeys.has(carryRowKey(c)),
-                );
+                const droppedRows = originalPrior.filter((c, i) => {
+                  const resolvedPrior = prior[i] ?? c;
+                  return c.claim.trim().length > 0 && !keptCheckKeys.has(carryRowKey(resolvedPrior));
+                });
                 droppedCheckClaims = droppedRows.map((c) => c.claim.trim());
                 // EI-21923095696933477: retireIds is a STRONGER, opt-in check — the
                 // caller names exactly which rows they intend to retire, so an
@@ -2277,6 +2368,12 @@ export default defineTool({
                 // body-shrink retry set `preservePriorOnShrink` — see the matching
                 // note on `checksAdditiveOnThisWrite` above.
                 if (!(additiveChecks || (preservePriorOnShrink && rowsMode !== 'replace'))) return null;
+                const refs = resolveCarryRowRefs({
+                  priorWalls: [],
+                  priorChecks: splitCarryNoteChecks(_priorNote).checks,
+                  checks: suppliedChecks,
+                });
+                unmatchedCheckRefs = refs.unmatched;
                 const overflowCount = appendChecksOverflowCount(_priorNote, suppliedChecks);
                 if (overflowCount === 0) return null;
                 /**
@@ -2407,6 +2504,8 @@ export default defineTool({
             ...(typeof (joinAddendumStored ?? checkpointToStore) === 'string'
               ? { latestUpdate: (joinAddendumStored ?? checkpointToStore)! } : {}),
             ...(item ? { workItem: item as WorkItemSubject } : {}),
+            // P-012 / D-006: a writer holding a restricted disclosure stores a sealed stub.
+            writerOwnerId: ident.ownerId,
             ...(checksTransform ? { transform: checksTransform } : {}),
             guard: composeGuards(
               appendBaseGuard,
@@ -2455,6 +2554,7 @@ export default defineTool({
                 ...(typeof checkpointToStore === 'string' ? { latestUpdate: checkpointToStore } : {}),
                 ...(item ? { workItem: item as WorkItemSubject } : {}),
                 ...(checksTransform ? { transform: checksTransform } : {}),
+                writerOwnerId: ident.ownerId,
                 guard: composeGuards(bodyPreservationGuard, overflowGuard),
                 ...depsOpt,
               },
@@ -2534,6 +2634,15 @@ export default defineTool({
                     row.claim.length > 300 ? `${row.claim.slice(0, 300)}…` : row.claim,
                   ),
                   checksDroppedRows: appendChecksOverflowDiagnostics,
+              }
+              : {}),
+            ...(unmatchedCheckRefs.length > 0
+              ? {
+                  unmatchedRowRefs: unmatchedCheckRefs,
+                  unmatchedRowRefsNote:
+                    'These `replaces` refs named no carried check row (match is by [#id] or EXACT claim text). ' +
+                    'An unmatched row was treated as a new addition and was not written because this additive ' +
+                    'write would exceed the checks cap.',
                 }
               : {}),
             ...(errorCode === 'append_body_overflow' && appendBodyOverflowDetails
@@ -2780,10 +2889,13 @@ export default defineTool({
            * STORED note, like its siblings, so it reports what a successor is actually
            * re-injected with. Advisory + fail-open.
            */
-          ...(() => {
+          ...await (async () => {
             try {
               if (stored === null) return {};
-              const refs = lintRelativeScratchPaths(splitCarryNoteChecks(stored).body);
+              const refs = await filterTrackedRelativeScratchPaths(splitCarryNoteChecks(stored).body, {
+                workspaceId,
+                harness,
+              });
               return refs.length > 0
                 ? { scratchPathLint: { flagged: true as const, note: RELATIVE_SCRATCH_ADVISORY, refs } }
                 : {};
@@ -2816,6 +2928,22 @@ export default defineTool({
                       claims,
                     },
                   }
+                : {};
+            } catch {
+              return {};
+            }
+          })(),
+          /**
+           * EI-23771449112267271: warn-only — a ✓ row WRITTEN IN THIS CALL with no falsifier
+           * (same contract as facts:assert `recheckMissing` and loop:checkpoint's
+           * `falsifierMissing`). Scoped to the SUPPLIED rows so legacy carried rows never nag;
+           * `sampleAdequate:false` rows are already downgraded to ? and are skipped by the helper.
+           */
+          ...(() => {
+            try {
+              const missing = checksMissingFalsifier(suppliedChecks ?? []);
+              return missing.length > 0
+                ? { falsifierMissing: { flagged: true as const, note: FALSIFIER_MISSING_NOTE, rows: missing } }
                 : {};
             } catch {
               return {};
@@ -2902,6 +3030,14 @@ export default defineTool({
                         `the stored rows untouched.`,
               }
             : {}),
+          ...(unmatchedCheckRefs.length > 0
+            ? {
+                unmatchedRowRefs: unmatchedCheckRefs,
+                unmatchedRowRefsNote:
+                  'These `replaces` refs named no carried check row (match is by [#id] or EXACT claim text). ' +
+                  'An unmatched row was treated as a new addition.',
+              }
+            : {}),
           ...(suppliedChecksNotRetained.length > 0
             ? {
                 checksNotRetained: suppliedChecksNotRetained.map((row) =>
@@ -2913,6 +3049,7 @@ export default defineTool({
                     ...(id ? { id } : {}),
                     claim: row.claim.trim(),
                     ...(row.recheck?.trim() ? { recheck: row.recheck.trim() } : {}),
+                    ...(row.falsifier?.trim() ? { falsifier: row.falsifier.trim() } : {}),
                     ...(row.verified?.trim() ? { verified: row.verified.trim() } : {}),
                     ...(row.contested?.trim() ? { contested: row.contested.trim() } : {}),
                   };

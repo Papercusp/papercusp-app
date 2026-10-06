@@ -52,7 +52,7 @@
  * liveness-parity.test.ts (P-001).
  */
 
-import { probeProcessLiveness, getPresence } from './presence';
+import { probeProcessLiveness, getPresence, listPresence } from './presence';
 import {
   fetchWakeability,
   deriveSessionState,
@@ -74,7 +74,7 @@ import {
   type SelfWakeSignals,
   type SelfWakeSource,
 } from './presence-selfwake';
-import { RECORDED_SESSION_SOURCE } from './recorded-sessions';
+import { RECORDED_ENDED_SESSION_SOURCE, RECORDED_SESSION_SOURCE } from './recorded-sessions';
 import { endedRecordedOwnerIds, recordedLiveOwnerIds } from '../../adv-sessions';
 import { findLiveHost } from '../../events/await/psu-pty-discovery';
 
@@ -189,6 +189,10 @@ export interface ResolveSessionStatesOpts {
    *  coord_presence row (one point-read per hydrated subject — for the small-N
    *  bare-id callers like the send-miss path, never for whole rosters). */
   hydratePerId?: boolean;
+  /** Fill the same fields as `hydratePerId` with one owner-filtered list read.
+   *  Use for candidate pools or rosters; the result preserves per-id semantics
+   *  while avoiding one `coord_presence` query per subject. */
+  hydrateBatch?: boolean;
   /** P-005: consult the box-local psu-pty host registry — `parked` + known
    *  non-cup role + no live host ⇒ `ended`. See the header for why opt-in. */
   psuHostAuthority?: boolean;
@@ -236,6 +240,22 @@ export interface ResolveSessionStatesOpts {
      */
     agentRole?: string | null;
   } | null>;
+  /** Batched counterpart to `getPresenceFn`, injectable for PG-free tests. */
+  listPresenceFn?: typeof listPresence;
+}
+
+/** WI-10005725: true only when `host` (a `findLiveHost` result) names a live psu
+ *  host under a CONCRETE pid that differs from the recorded one, i.e. positive
+ *  evidence that the dead recorded pid belongs to a predecessor incarnation. */
+function liveHostSupersedesRecordedPid(
+  host: unknown,
+  recordedPid: number | null | undefined,
+): boolean {
+  if (host == null || typeof host !== 'object') return false;
+  const hostPid = (host as { pid?: unknown }).pid;
+  return (
+    typeof hostPid === 'number' && Number.isInteger(hostPid) && hostPid > 0 && hostPid !== recordedPid
+  );
 }
 
 /** PURE: one subject's verdict from already-fetched signals — the single place
@@ -300,7 +320,26 @@ export function deriveVerdict(
   // EPERM — returns `null`, which leaves `recorded` untouched. The generosity
   // the goal-holder predicate depends on is preserved for genuine ambiguity;
   // only a KNOWN-dead process loses it.
-  const pidConfirmedDead = probePidFn({ host: subject.host, pid: subject.pid }) === false;
+  //
+  // WI-10005725: `subject.pid` is the RECORDED liveness pid (the supervisor
+  // beat's launcher pid, carried on the presence row), not necessarily the
+  // CURRENT incarnation's. A session relaunched under a REUSED ownerId
+  // (fleet:respawn-member, a goal-holder respawn, a successor launch) keeps the
+  // predecessor's pid until its own beat lands, and a beat that never lands
+  // leaves it there. That ESRCH describes the predecessor, yet it outranks
+  // `liveTurn` in deriveSessionState, so a working successor read `ended`
+  // (measured: a respawned fleet leader at lastActiveSecAgo 6). A dead recorded
+  // pid therefore ends the session only when no identity-verified psu host for
+  // this owner is alive under a DIFFERENT concrete pid. `findLiveHost` already
+  // checks owner identity, socket, pid-alive and the psu-host cmdline, so such
+  // a host is positive evidence of a current incarnation. A witness with no
+  // concrete pid, or the same pid, is not: the probe stays authoritative and
+  // EI-21572355077403526's killed-holder trap stays closed. The host lookup
+  // runs only on this rare dead-pid path.
+  const recordedPidDead = probePidFn({ host: subject.host, pid: subject.pid }) === false;
+  const pidConfirmedDead =
+    recordedPidDead &&
+    !liveHostSupersedesRecordedPid(psuHost?.findHostFn(subject.ownerId), subject.pid);
   const recordedLiveOnly =
     !w.wakeable &&
     !w.liveTurn &&
@@ -309,13 +348,16 @@ export function deriveVerdict(
       recordedLive.has(subject.ownerId) ||
       (psuHostLive && psuHost?.positive === true));
   let sessionState: SessionState;
-  if (recordedLiveOnly) {
-    sessionState = 'recorded';
-  } else if (recordedEnded.has(subject.ownerId)) {
+  if (
+    recordedEnded.has(subject.ownerId) ||
+    subject.source === RECORDED_ENDED_SESSION_SOURCE
+  ) {
     // A warm heartbeat and a lingering wake-await can outlive the process.
     // Positive session-log death evidence settles that ambiguity immediately;
     // claims still held remain suspect until their cleanup is reconciled.
     sessionState = subject.claimsHeld ? 'suspect' : 'ended';
+  } else if (recordedLiveOnly) {
+    sessionState = 'recorded';
   } else {
     sessionState = deriveSessionState({
       stale: !!stale,
@@ -476,7 +518,34 @@ export async function resolveSessionStates(
   const findHostFn = opts.findHostFn ?? findLiveHost;
 
   let hydrated: readonly LivenessSubject[] = subjects;
-  if (opts.hydratePerId) {
+  if (opts.hydrateBatch) {
+    const needsHydration = subjects.filter((s) => s.heartbeatAt == null && s.stale == null);
+    if (needsHydration.length > 0) {
+      try {
+        const rows = await (opts.listPresenceFn ?? listPresence)({
+          ownerIds: needsHydration.map((s) => s.ownerId),
+        });
+        const byOwner = new Map(rows.map((row) => [row.ownerId, row]));
+        hydrated = subjects.map((s) => {
+          if (s.heartbeatAt != null || s.stale != null) return s;
+          const p = byOwner.get(s.ownerId);
+          if (!p) return s;
+          return {
+            ...s,
+            heartbeatAt: p.heartbeatAt,
+            stale: p.stale,
+            host: s.host ?? p.host,
+            pid: s.pid ?? p.pid,
+            source: s.source ?? p.source,
+            agentRole: s.agentRole ?? p.agentRole,
+          };
+        });
+      } catch {
+        // Match the per-id path: best-effort hydration must never block a verdict.
+        hydrated = subjects;
+      }
+    }
+  } else if (opts.hydratePerId) {
     const getPresenceFn = opts.getPresenceFn ?? getPresence;
     hydrated = await Promise.all(
       subjects.map(async (s) => {

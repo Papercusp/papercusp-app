@@ -69,6 +69,32 @@ function workspaceContended(error: unknown) {
   });
 }
 
+/**
+ * EI-24431892879107061: resolve the `wait.max_drain_sec` | `wait.max_sec` alias
+ * pair ONCE, here, so every downstream site sees one value (same discipline as
+ * work_items:list's sourcePlanSlug|plan pair). An empty `wait: {}` stays
+ * rejected — before the alias, `max_drain_sec` was required, and silently
+ * treating `{}` as "no wait" would change a refusal into a different behavior.
+ */
+export function resolveWaitSec(
+  wait: { max_drain_sec?: number; max_sec?: number } | undefined,
+): number {
+  if (wait === undefined) return 0;
+  const { max_drain_sec: drain, max_sec: sec } = wait;
+  if (drain !== undefined && sec !== undefined && drain !== sec) {
+    throw new Error(
+      '`wait.max_drain_sec` and `wait.max_sec` are the SAME cap (alias-group:max_drain_sec|max_sec) — pass only one. You passed both with different values, so which one wins would be ambiguous.',
+    );
+  }
+  const resolved = drain ?? sec;
+  if (resolved === undefined) {
+    throw new Error(
+      '`wait` needs `max_drain_sec` (alias: `max_sec`) — e.g. wait:{max_drain_sec:0} for an immediate refusal, or up to the lock-config cap to wait for shared holders to drain.',
+    );
+  }
+  return resolved;
+}
+
 export default defineTool({
   name: 'locks:acquire_resource',
   description:
@@ -93,8 +119,32 @@ export default defineTool({
     mode: z.enum(['shared', 'exclusive']),
     reason: hardText(LIMITS.ANNOTATION).optional(),
     ttl_sec: z.number().int().positive().max(MAX_TTL_SEC).optional(),
+    // EI-24431892879107061: the sibling `locks:acquire` spells its bounded wait
+    // `wait.max_sec`; callers carry that spelling over (142 invalid-input vs 4389
+    // ok since 09-27, each a wasted round-trip). Declare the sibling spelling as
+    // a schema-visible alias (alias-group:max_drain_sec|max_sec) rather than
+    // teaching callers via rejection — the two names mean the SAME cap here.
     wait: z
-      .object({ max_drain_sec: z.number().int().nonnegative().max(MAX_WAIT_SEC) })
+      .object({
+        max_drain_sec: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(MAX_WAIT_SEC)
+          .optional()
+          .describe(
+            'Max seconds an exclusive request waits for shared holders to drain. Alias: `max_sec` (alias-group:max_drain_sec|max_sec). Pass exactly one of the two.',
+          ),
+        max_sec: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(MAX_WAIT_SEC)
+          .optional()
+          .describe(
+            "Alias for `max_drain_sec` (alias-group:max_drain_sec|max_sec) — the SAME wait cap; locks:acquire spells it wait.max_sec. Passing both with different values is rejected.",
+          ),
+      })
       .optional(),
   }),
   async handler(args, ctx) {
@@ -190,7 +240,7 @@ export default defineTool({
     }
 
     // exclusive
-    const maxWaitSec = args.wait?.max_drain_sec ?? 0;
+    const maxWaitSec = resolveWaitSec(args.wait);
     const coordId = resolveAgentIdentity(ctx);
     let r: Awaited<ReturnType<typeof acquireResourceExclusiveWithWait>>;
     try {

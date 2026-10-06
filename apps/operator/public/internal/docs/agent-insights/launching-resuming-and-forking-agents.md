@@ -34,6 +34,32 @@ All three sit on ONE shared core (`agent-launch-core.ts`) — command constructi
 fleet/launched-by/account injection, resume resolution. There is deliberately no
 second spawn path to drift out of sync.
 
+## Keep in-place resume and successor settings separate
+
+Use an in-place `resume` to continue the same session and transcript:
+
+```js
+{ resume: { agentId: 'su-…' }, brief: 'Continue the recovery.' }
+```
+
+The target's saved launch profile and loop carry are kept. Leave `carry` out because
+the schema rejects it for in-place resume/fork. Usually omit `account` and `model` as
+well; an intentional account/model override is supported only when it fits any saved
+fleet launch profile.
+
+Use `successor` to start a fresh context while retaining the predecessor's coord
+identity and durable carry/claims, especially when recovery needs new runtime settings:
+
+```js
+{
+  successor: { agentId: 'su-…' },
+  brief: 'Continue from the saved recovery state.',
+  account: 'auto',
+  model: 'sonnet',
+  carry: 'cold'
+}
+```
+
 ## Trap 1: a scripted resume that does not pin an account stops on the login picker
 
 This is the owner-visible bug that motivated the whole thing — *"why is it asking

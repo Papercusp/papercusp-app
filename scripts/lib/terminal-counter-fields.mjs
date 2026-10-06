@@ -75,6 +75,28 @@ export function formatTerminalCounterFields(counters = {}) {
   return { text, undercount };
 }
 
+/**
+ * A later shard can exhaust admission after earlier shards have settled. Keep
+ * their observations on the refusal line, while retaining a refused verdict
+ * and distinguishing unfinished tasks from the planned population.
+ * @param {{ tasks?: number, completedTasks?: number, failed?: number,
+ *   quarantinedFailed?: number, timedOutTasks?: number, undeterminedTasks?: number,
+ *   observedNonzeroExits?: number, observedAdmissionErrors?: number }} counters
+ * @returns {string}
+ */
+export function formatRefusalCounterFields(counters = {}) {
+  const tasks = toCount(counters.tasks);
+  const completedTasks = Math.min(tasks, toCount(counters.completedTasks));
+  const undeterminedTasks = Math.max(
+    toCount(counters.undeterminedTasks), tasks - completedTasks,
+  );
+  return `tasks=${tasks} failed=${toCount(counters.failed)}` +
+    ` quarantinedFailed=${toCount(counters.quarantinedFailed)}` +
+    ` timedOutTasks=${toCount(counters.timedOutTasks)}` +
+    ` undeterminedTasks=${undeterminedTasks} completedTasks=${completedTasks}` +
+    formatTerminalCounterFields(counters).text;
+}
+
 function toCount(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.trunc(value)

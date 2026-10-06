@@ -56,6 +56,25 @@ export function describeCoordEventLogConformance(
       expect(lines.map((l) => l.msg_id)).toEqual(['p1']);
     });
 
+    it('bounded cursor timestamp filters retain boundary rows only when a composite tie-break is pending', async () => {
+      const boundary = '2026-01-01T00:00:00.000Z';
+      await log.appendLine('messages', 'cursor-test', envelope({ msg_id: 'line-before', kind: 'message', from: 'A', ts: '2025-12-31T23:59:00.000Z' }));
+      await log.appendLine('messages', 'cursor-test', envelope({ msg_id: 'line-at', kind: 'message', from: 'A', ts: boundary }));
+      await log.appendLine('messages', 'cursor-test', envelope({ msg_id: 'line-after', kind: 'message', from: 'A', ts: '2026-01-01T00:01:00.000Z' }));
+      const strictLines = await log.readLinesBoundedCursor('messages', { limit: 10, beforeTs: boundary });
+      expect(strictLines.rows.map((r) => r.envelope.msg_id)).toEqual(['line-before']);
+      const tiedLines = await log.readLinesBoundedCursor('messages', { limit: 10, beforeTs: boundary, beforeMsgId: 'line-at' });
+      expect(tiedLines.rows.map((r) => r.envelope.msg_id).sort()).toEqual(['line-at', 'line-before']);
+
+      await log.putEvent('handoffs', 'event-before', envelope({ msg_id: 'event-before', kind: 'handoff', from: 'A', ts: '2025-12-31T23:59:00.000Z' }));
+      await log.putEvent('handoffs', 'event-at', envelope({ msg_id: 'event-at', kind: 'handoff', from: 'A', ts: boundary }));
+      await log.putEvent('handoffs', 'event-after', envelope({ msg_id: 'event-after', kind: 'handoff', from: 'A', ts: '2026-01-01T00:01:00.000Z' }));
+      const strictEvents = await log.readEventsBoundedCursor('handoffs', { limit: 10, beforeTs: boundary });
+      expect(strictEvents.rows.map((r) => r.envelope.msg_id)).toEqual(['event-before']);
+      const tiedEvents = await log.readEventsBoundedCursor('handoffs', { limit: 10, beforeTs: boundary, beforeMsgId: 'event-at' });
+      expect(tiedEvents.rows.map((r) => r.envelope.msg_id).sort()).toEqual(['event-at', 'event-before']);
+    });
+
     it('handoffs: putEvent + getEvent + readEvents', async () => {
       await log.putEvent('handoffs', 'h1', envelope({ msg_id: 'h1', kind: 'handoff', from: 'A' }));
       expect((await log.getEvent('handoffs', 'h1'))?.msg_id).toBe('h1');

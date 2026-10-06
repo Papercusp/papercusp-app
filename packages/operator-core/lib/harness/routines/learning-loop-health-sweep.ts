@@ -104,7 +104,10 @@ export async function learningLoopHealthSweep(): Promise<LearningLoopHealthEscal
       );
       return results;
     }
-    const rows = await readLearningLoopHealth(sql, workspaceId);
+    // This sweep runs in the bg-host process; the pull-only health surfaces deliberately
+    // omit process start so they continue to expose overdue routines without startup masking.
+    const processStartedAtMs = Date.now() - process.uptime() * 1_000;
+    const rows = await readLearningLoopHealth(sql, workspaceId, { processStartedAtMs });
     const needing = selectLearningLoopsNeedingEscalation(rows);
     for (const loop of needing) {
       const status: LearningLoopStatus | 'collision' = loop.collision ? 'collision' : loop.status;

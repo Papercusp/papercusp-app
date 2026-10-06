@@ -18,6 +18,7 @@ import type {
   TreasuryRole,
 } from '@papercusp/operator-core/lib/p2p/treasury-controls.ts';
 import type { RevenueShare } from '@papercusp/operator-core/lib/p2p/revenue-settlement.ts';
+import { witnessAfterAppend } from './ledger-chain-store.ts';
 
 interface TreasurySafeDeploymentRow {
   chain_id: number;
@@ -82,39 +83,55 @@ export async function recordSafeDeployment(
   // colliding: re-running the deployment recorder after a roles-module upgrade
   // is a legitimate operator action, and refusing it would leave the stored
   // record describing a module that is no longer the one enforcing the bounds.
-  await db
-    .prepare(
-      `INSERT INTO treasury_safe_deployments
-         (chain_id, safe_address, roles_module_address, roles_version, deployment_tx_hash,
-          network, owners, threshold, automation_signer, deployed_at_ms, recorded_at_ms, recorded_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (chain_id, safe_address) DO UPDATE SET
-         roles_module_address = excluded.roles_module_address,
-         roles_version = excluded.roles_version,
-         deployment_tx_hash = excluded.deployment_tx_hash,
-         network = excluded.network,
-         owners = excluded.owners,
-         threshold = excluded.threshold,
-         automation_signer = excluded.automation_signer,
-         deployed_at_ms = excluded.deployed_at_ms,
-         recorded_at_ms = excluded.recorded_at_ms,
-         recorded_by = excluded.recorded_by`,
-    )
-    .bind(
-      deployment.chainId,
-      deployment.safeAddress,
-      deployment.rolesModuleAddress,
-      deployment.rolesVersion,
-      deployment.deploymentTxHash,
-      deployment.network,
-      JSON.stringify([...input.owners]),
-      input.threshold,
-      input.automationSigner,
-      deployment.deployedAtMs,
-      input.nowMs,
-      input.recordedBy,
-    )
-    .run();
+  //
+  // Because the registry overwrites, it cannot be hash-chained. Every record is
+  // therefore ALSO appended to treasury_safe_deployment_records (mig 037) in the
+  // same batch, and that log is the chained `treasury.safe-deployment-records`
+  // stream: the values a re-record overwrites stay in tamper-evident history.
+  const values = [
+    deployment.chainId,
+    deployment.safeAddress,
+    deployment.rolesModuleAddress,
+    deployment.rolesVersion,
+    deployment.deploymentTxHash,
+    deployment.network,
+    JSON.stringify([...input.owners]),
+    input.threshold,
+    input.automationSigner,
+    deployment.deployedAtMs,
+    input.nowMs,
+    input.recordedBy,
+  ] as const;
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO treasury_safe_deployments
+           (chain_id, safe_address, roles_module_address, roles_version, deployment_tx_hash,
+            network, owners, threshold, automation_signer, deployed_at_ms, recorded_at_ms, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (chain_id, safe_address) DO UPDATE SET
+           roles_module_address = excluded.roles_module_address,
+           roles_version = excluded.roles_version,
+           deployment_tx_hash = excluded.deployment_tx_hash,
+           network = excluded.network,
+           owners = excluded.owners,
+           threshold = excluded.threshold,
+           automation_signer = excluded.automation_signer,
+           deployed_at_ms = excluded.deployed_at_ms,
+           recorded_at_ms = excluded.recorded_at_ms,
+           recorded_by = excluded.recorded_by`,
+      )
+      .bind(...values),
+    db
+      .prepare(
+        `INSERT INTO treasury_safe_deployment_records
+           (record_id, chain_id, safe_address, roles_module_address, roles_version, deployment_tx_hash,
+            network, owners, threshold, automation_signer, deployed_at_ms, recorded_at_ms, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(crypto.randomUUID(), ...values),
+  ]);
+  await witnessAfterAppend(db, 'treasury.safe-deployment-records', input.nowMs);
   const stored = await getSafeDeployment(db, deployment.chainId, deployment.safeAddress);
   if (!stored) throw new Error('treasury Safe deployment did not persist');
   return stored;
@@ -288,6 +305,7 @@ export async function recordTreasuryTransfer(
       input.nowMs,
     )
     .run();
+  await witnessAfterAppend(db, 'treasury.transfers', input.nowMs);
   const stored = await getTreasuryTransferForShare(db, input.receiptHash, input.share);
   if (!stored) throw new Error('treasury transfer did not persist');
   return stored.transferId === input.transferId

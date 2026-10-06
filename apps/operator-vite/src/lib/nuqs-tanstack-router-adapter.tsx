@@ -158,11 +158,28 @@ export function composedSearchToObject(nuqsSearch: URLSearchParams): Record<stri
   return grouped;
 }
 
+/**
+ * The watched slice of TanStack's parsed search. Parsed search values are JSON,
+ * and structural sharing requires a JSON-validatable selection: a
+ * `Record<string, unknown>` validates to `never` wherever the route tree is not
+ * registered (apps/operator compiles this file through its importers). Bounded
+ * rather than recursive: TanStack's ValidateJSON cannot instantiate a recursive
+ * JSON type (TS2589). The read side treats every value as unknown either way.
+ */
+type SearchScalar = null | boolean | number | string;
+type SearchJson = SearchScalar | SearchScalar[] | { [key: string]: SearchScalar | SearchScalar[] };
+
 function useNuqsTanstackRouterAdapter(watchKeys: string[]) {
   const search = useLocation({
-    select: (state) =>
+    // The projection allocates an object on every location update. Keep its
+    // identity when watched values did not change so opening a popup does not
+    // re-render every unrelated query-state consumer in the desktop shell.
+    structuralSharing: true,
+    select: (state): Record<string, SearchJson> =>
       Object.fromEntries(
-        Object.entries(state.search).filter(([key]) => watchKeys.includes(key)),
+        Object.entries(state.search as Record<string, SearchJson>).filter(([key]) =>
+          watchKeys.includes(key),
+        ),
       ),
   });
   const router = useRouter();

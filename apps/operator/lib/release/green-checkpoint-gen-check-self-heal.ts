@@ -24,6 +24,7 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ADMISSION_GIT_DATE,
   admitPathsOntoRepairHead,
   realAdmissionGit,
   type AdmissionGitRunner,
@@ -344,15 +345,43 @@ export function makeRealGenCheckHealIo(input: RealGenCheckHealIoInput): GenCheck
     async buildSourceCommit(repairHead, paths) {
       if (!SHA_RE.test(repairHead)) throw new Error(`repairHead is not a full sha: ${repairHead}`);
       const scratch = mkdtempSync(join(tmpdir(), "papercusp-gen-check-heal-"));
-      try {
-        const indexEnv = { GIT_INDEX_FILE: join(scratch, "index") };
-        gitOk(["read-tree", repairHead], input.integrationRoot, indexEnv);
-        for (const p of paths) {
-          const abs = join(input.checkpointRoot, p);
+      // Fixed dates make every heal commit a pure function of tree, parent and message, so a
+      // submodule commit can be published (gate-pin tag) before the gate builds it again.
+      const identity = {
+        GIT_AUTHOR_NAME: "papercusp-gate",
+        GIT_AUTHOR_EMAIL: "gate@papercusp.invalid",
+        GIT_AUTHOR_DATE: ADMISSION_GIT_DATE,
+        GIT_COMMITTER_NAME: "papercusp-gate",
+        GIT_COMMITTER_EMAIL: "gate@papercusp.invalid",
+        GIT_COMMITTER_DATE: ADMISSION_GIT_DATE,
+      };
+      let indexes = 0;
+      const commitTree = (repo: string, tree: string, parent: string, title: string, staged: readonly string[]): string => {
+        const message = `${title} ${parent.slice(0, 12)}\n\npaths:\n` + staged.map((p) => `- ${p}`).join("\n") + "\n";
+        const commit = gitOk(["commit-tree", tree, "-p", parent, "-m", message], repo, identity).trim();
+        if (!SHA_RE.test(commit)) throw new Error(`commit-tree in ${repo} produced no sha`);
+        return commit;
+      };
+      // `repo` is the integration-side repository whose object store receives the commit;
+      // `checkout` is the matching verification-tree directory the writer ran in.
+      const stageTree = (repo: string, checkout: string, base: string, staged: readonly string[]): string => {
+        const indexEnv = { GIT_INDEX_FILE: join(scratch, `index-${indexes++}`) };
+        gitOk(["read-tree", base], repo, indexEnv);
+        for (const p of staged) {
+          const abs = join(checkout, p);
           // A writer may DELETE a stale artifact; that is a removal in the source commit.
           const exists = existsSync(abs);
           if (!exists) {
-            gitOk(["update-index", "--force-remove", "--", p], input.integrationRoot, indexEnv);
+            gitOk(["update-index", "--force-remove", "--", p], repo, indexEnv);
+            continue;
+          }
+          // git status reports a writer delta INSIDE a submodule as the gitlink path itself,
+          // and hash-object cannot hash a directory. Commit the submodule's own delta on its
+          // pin and stage that commit as the gitlink.
+          const pin = /^160000 commit ([0-9a-f]{40})\t/.exec(gitOk(["ls-tree", base, "--", p], repo))?.[1];
+          if (pin) {
+            const sub = submoduleCommit(join(repo, p), abs, pin);
+            gitOk(["update-index", "--add", "--replace", "--cacheinfo", `160000,${sub},${p}`], repo, indexEnv);
             continue;
           }
           // The only consumer is the 100755-vs-100644 cacheinfo mode below, which git
@@ -361,33 +390,100 @@ export function makeRealGenCheckHealIo(input: RealGenCheckHealIoInput): GenCheck
           // per artifact). `lint:resource-governor-enforcement` requires every start to
           // route through Governor.admit; the cheapest compliance is not to start.
           const isExec = (statSync(abs).mode & 0o111) !== 0;
-          const blob = gitOk(["hash-object", "-w", "--path", p, "--", abs], input.integrationRoot).trim();
+          const blob = gitOk(["hash-object", "-w", "--path", p, "--", abs], repo).trim();
           if (!SHA_RE.test(blob)) throw new Error(`hash-object ${p} produced no sha`);
           gitOk(
             ["update-index", "--add", "--replace", "--cacheinfo", `${isExec ? "100755" : "100644"},${blob},${p}`],
-            input.integrationRoot,
+            repo,
             indexEnv,
           );
         }
-        const tree = gitOk(["write-tree"], input.integrationRoot, indexEnv).trim();
-        if (!SHA_RE.test(tree)) throw new Error("write-tree produced no sha");
-        const message =
-          `gen:*:check self-heal source on ${repairHead.slice(0, 12)}\n\npaths:\n` +
-          paths.map((p) => `- ${p}`).join("\n") +
-          "\n";
-        const identity = {
-          GIT_AUTHOR_NAME: "papercusp-gate",
-          GIT_AUTHOR_EMAIL: "gate@papercusp.invalid",
-          GIT_COMMITTER_NAME: "papercusp-gate",
-          GIT_COMMITTER_EMAIL: "gate@papercusp.invalid",
-        };
-        const commit = gitOk(["commit-tree", tree, "-p", repairHead, "-m", message], input.integrationRoot, identity).trim();
-        if (!SHA_RE.test(commit)) throw new Error("commit-tree produced no sha");
+        const tree = gitOk(["write-tree"], repo, indexEnv).trim();
+        if (!SHA_RE.test(tree)) throw new Error(`write-tree in ${repo} produced no sha`);
+        return tree;
+      };
+      const submoduleCommit = (repo: string, checkout: string, pin: string): string => {
+        // Only the writer's delta may ride on the pin; a moved submodule HEAD is not one.
+        const head = gitOk(["rev-parse", "HEAD"], checkout).trim();
+        if (head !== pin) {
+          throw new Error(`submodule ${checkout} is at ${head.slice(0, 12)}, not its pin ${pin.slice(0, 12)}`);
+        }
+        const inner = parsePorcelainZ(
+          gitOk(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], checkout),
+        ).sort();
+        if (inner.length === 0) throw new Error(`submodule ${checkout} reported dirty but has no changed paths`);
+        const commit = commitTree(repo, stageTree(repo, checkout, pin, inner), pin, "gen:*:check self-heal submodule source on", inner);
+        // The verification checkout clones each submodule from this repository, and gc
+        // would prune an unreferenced commit before the lineage is promoted. Promotion
+        // publishes it by this ref (publishGenHealGitlinks).
+        gitOk(["update-ref", genHealRef(commit), commit], repo);
         return commit;
+      };
+      try {
+        const tree = stageTree(input.integrationRoot, input.checkpointRoot, repairHead, paths);
+        return commitTree(input.integrationRoot, tree, repairHead, "gen:*:check self-heal source on", paths);
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }
     },
     admit: admitPathsOntoRepairHead,
   };
+}
+
+/** The local ref that marks (and keeps from gc) a heal-built submodule commit. */
+export function genHealRef(sha: string): string {
+  return `refs/papercusp/gen-heal/${sha}`;
+}
+
+/** The tag promotion publishes on the submodule's origin for a heal-built commit. */
+export function genHealPinTag(sha: string): string {
+  return `refs/tags/gate-pin/${sha}`;
+}
+
+/**
+ * Promotion pushes the superproject with a plain `git push`, which never checks that a
+ * gitlink's commit exists on the submodule's origin. A heal-built submodule commit exists
+ * only in the integration tree, so a promoted main pinning one would not resolve for a
+ * fresh clone. Push a gate-pin tag for every gitlink in `candidateSha` that carries a
+ * gen-heal ref (recursing into heal-built commits for nested submodules). Throws on any
+ * failed publication, which holds promotion before main moves.
+ */
+export async function publishGenHealGitlinks(input: {
+  integrationRoot: string;
+  candidateSha: string;
+  /** Runs `git <argv>` in `cwd` without throwing on a non-zero exit. */
+  git?: (argv: string[], cwd: string) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+}): Promise<{ path: string; sha: string }[]> {
+  const git =
+    input.git ??
+    (async (argv: string[], cwd: string) => {
+      const r = realAdmissionGit(argv, { cwd });
+      return { code: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    });
+  const published: { path: string; sha: string }[] = [];
+  const visit = async (repo: string, commit: string, prefix: string): Promise<void> => {
+    const listed = await git(["ls-tree", "-r", "-z", commit], repo);
+    if (listed.code !== 0) {
+      throw new Error(`git ls-tree -r ${commit.slice(0, 12)} (cwd ${repo}) exited ${listed.code}: ${listed.stderr.trim().slice(-300)}`);
+    }
+    for (const record of listed.stdout.split("\0")) {
+      const m = /^160000 commit ([0-9a-f]{40})\t(.+)$/.exec(record);
+      if (!m) continue;
+      const [, sha, path] = m as unknown as [string, string, string];
+      // An uninitialized or absent submodule cannot hold the ref, so it is skipped here too.
+      const subRepo = join(repo, path);
+      if ((await git(["rev-parse", "--verify", "--quiet", genHealRef(sha)], subRepo)).code !== 0) continue;
+      const pushed = await git(["push", "origin", `${sha}:${genHealPinTag(sha)}`], subRepo);
+      if (pushed.code !== 0) {
+        throw new Error(
+          `gate-pin publication for ${prefix}${path}@${sha.slice(0, 12)} failed (exit ${pushed.code}): ` +
+            pushed.stderr.trim().slice(-300),
+        );
+      }
+      published.push({ path: `${prefix}${path}`, sha });
+      await visit(subRepo, sha, `${prefix}${path}/`);
+    }
+  };
+  await visit(input.integrationRoot, input.candidateSha, "");
+  return published;
 }

@@ -3,6 +3,9 @@ import { LruCache } from './l1';
 import type { CacheEntry, CacheOutcome, CacheReadReason, CacheStats, Clock, GenerationStore, GetOrSetOptions } from './types';
 
 const SEP = '\0';
+// Expired cold keys can retain large results far below the LRU capacity. Reclaim
+// them during ordinary reads with constant bounded work, without a timer or GC.
+const HARD_EXPIRY_CHECKS_PER_READ = 64;
 
 export interface CacheConfig {
   /** Bumpable-generation store. Default: in-memory. The host injects a NOTIFY-fed/PG store. */
@@ -97,6 +100,10 @@ export class Cache {
     const now = this.clock();
     const existing = this.l1.get(fk) as CacheEntry<V> | undefined;
     const state = existing ? this.freshness(workspaceId, existing, now) : 'absent';
+    // Capture this request's reason before pruning so hard-TTL telemetry stays
+    // exact. Soft-expired values remain available for stale-while-revalidate;
+    // in-flight builds live separately and keep their existing single-flight.
+    this.l1.prune(entry => now >= entry.hardExpiresAt, HARD_EXPIRY_CHECKS_PER_READ);
     if (existing) {
       if (state === 'fresh') {
         this.stats.hits++;

@@ -78,7 +78,8 @@ export interface BgHostJournalMetrics {
  *  reported CLEAN while bg-host had in fact restarted 9 times and peaked at 23.8GB.
  *  Keeping the fetch filter and the parse patterns in one place is what stops the
  *  two from drifting apart again. */
-export const BG_HOST_RESTART_PATTERN = 'Started papercup-bg-host\\.service';
+// Accept pre-rename journal input as well as current unit records.
+export const BG_HOST_RESTART_PATTERN = 'Started papercu(?:sp|p)-bg-host\\.service';
 export const BG_HOST_OOM_PATTERN = 'OOM killer|FatalProcessOutOfMemory|ReportOOMFailure|Out of memory';
 export const BG_HOST_MEMORY_PEAK_PATTERN = 'memory peak';
 /** systemd writes exactly ONE `Failed with result '<oom-kill|signal|exit-code|
@@ -262,7 +263,7 @@ export function parseBgHostGlobalJournal(text: string): number {
   const oomRe = new RegExp(BG_HOST_OOM_PATTERN, 'i');
   return text
     .split('\n')
-    .filter((line) => /papercup-bg-host|bg-host/i.test(line))
+    .filter((line) => /bg-host/i.test(line))
     .filter((line) => oomRe.test(line)).length;
 }
 
@@ -494,7 +495,7 @@ export async function readBgHostJournalUncached(windowHours: number): Promise<Bg
         [
           ...base,
           '-u',
-          'papercup-bg-host.service',
+          'papercusp-bg-host.service',
           '--grep',
           [BG_HOST_RESTART_PATTERN, BG_HOST_OOM_PATTERN, BG_HOST_MEMORY_PEAK_PATTERN, BG_HOST_FAILURE_PATTERN].join(
             '|',
@@ -509,7 +510,7 @@ export async function readBgHostJournalUncached(windowHours: number): Promise<Bg
       // for records that cannot appear in it (2026-07-19).
       execFileAsync(
         'journalctl',
-        [...base, '-u', 'papercup-bg-host.service', '--grep', BG_HOST_OOM_PATTERN],
+        [...base, '-u', 'papercusp-bg-host.service', '--grep', BG_HOST_OOM_PATTERN],
         { maxBuffer, timeout: JOURNALCTL_TIMEOUT_MS },
       ),
     ]);
@@ -817,6 +818,8 @@ export async function readPotSoakReport(
     sql<PipelineAggRow[]>`
       SELECT count(*) FILTER (
                WHERE kind = 'green_checkpoint'
+                 -- Deliberately NOT a 'skipped-%' prefix: 'skipped-misconfigured' (a gate that
+                 -- can never promote, WI-10006317) must count as an unsuccessful gate fire.
                  AND status NOT IN ('skipped-disabled', 'skipped-locked')
              )::int AS green_total,
              count(*) FILTER (

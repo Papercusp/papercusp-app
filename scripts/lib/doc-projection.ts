@@ -18,6 +18,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { homedir, hostname, userInfo } from 'node:os';
+// The ONE generic-account list, pinned equal to the release gate's (WI-10004233).
+import { GENERIC_ACCOUNTS, isGenericHost } from './identity-leak-patterns.mjs';
+import { loadOwnerIdentityEnv } from '../../apps/operator/lib/release/owner-identity-env';
 
 /** Repo root: scripts/lib/doc-projection.ts → ../../ */
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -96,24 +99,49 @@ function yamlScalar(s: string): string {
  * audit greps for, and a scrubber that cleans a DIFFERENT set than the auditor checks
  * is a false-green waiting to happen.
  */
-function identityLiterals(): Array<{ key: string; value: string; placeholder: string }> {
-  const out: Array<{ key: string; value: string; placeholder: string }> = [];
-  const push = (key: string, value: string | undefined, placeholder: string, skip: string[] = []) => {
+type IdentityLit = { key: string; value: string; placeholder: string; caseInsensitive?: boolean };
+function identityLiterals(): IdentityLit[] {
+  const out: IdentityLit[] = [];
+  const push = (
+    key: string,
+    value: string | undefined,
+    placeholder: string,
+    skip: string[] = [],
+    caseInsensitive = false,
+  ) => {
     const v = (value ?? '').trim();
-    if (v && !skip.includes(v)) out.push({ key, value: v, placeholder });
+    if (v && !skip.includes(v)) out.push({ key, value: v, placeholder, caseInsensitive });
   };
   try {
-    push('build-user-name', userInfo().username, '<build-user>', ['root', 'runner', 'build', 'ubuntu']);
+    push('build-user-name', userInfo().username, '<build-user>', [...GENERIC_ACCOUNTS]);
   } catch {
     /* no passwd entry — nothing to scrub */
   }
   push('build-home-path', homedir(), '$HOME', ['/root', '/', '/home']);
   const host = hostname();
-  if (host && !/^(runner|ci-|localhost)/.test(host)) push('build-hostname', host, '<build-host>');
+  if (host && !isGenericHost(host)) push('build-hostname', host, '<build-host>');
+  // The owner's ASSERTED identity (release-identity.env, loaded exactly as the release cut
+  // loads it; an exported variable wins over the file). Explicit values REPLACE the git
+  // guess for their class, as `audit-release-bundle.py:identity_literals()` does. Without
+  // this the scrub only knew `git config user.name`, which on this box is the git-sync
+  // bot (EI-20583328178472869), so the owner's name reached the generated plans and
+  // insights indexes while the auditor kept hunting for it (WI-10004366).
+  const ownerEnv: NodeJS.ProcessEnv = { ...process.env };
+  loadOwnerIdentityEnv({ env: ownerEnv });
+  const explicit = {
+    'build-git-name': explicitOwnerValues(ownerEnv.PAPERCUSP_RELEASE_OWNER_NAME),
+    'build-git-email': explicitOwnerValues(ownerEnv.PAPERCUSP_RELEASE_OWNER_EMAIL),
+  };
   for (const [key, cfg, placeholder] of [
     ['build-git-email', 'user.email', '<owner-email>'],
     ['build-git-name', 'user.name', 'the owner'],
   ] as const) {
+    if (explicit[key].length > 0) {
+      // Case-INSENSITIVE, like the release gate (EI-20589264759185712): a plan slug carries
+      // the name lower-cased. literalPattern() still keeps a SHORT name case-sensitive.
+      explicit[key].forEach((v, i) => push(i === 0 ? key : `${key}-${i + 1}`, v, placeholder, [], true));
+      continue;
+    }
     try {
       push(key, execFileSync('git', ['config', '--get', cfg], { encoding: 'utf8', timeout: 5000 }), placeholder);
     } catch {
@@ -123,14 +151,22 @@ function identityLiterals(): Array<{ key: string; value: string; placeholder: st
   return out;
 }
 
+/** Mirrors `audit-release-bundle.py:explicit_owner_values` — ONE rule: split on comma or
+ *  semicolon only (never whitespace: "Jane Doe" is one name), trim, de-dup in order. */
+export function explicitOwnerValues(raw: string | undefined): string[] {
+  return [...new Set((raw ?? '').split(/[,;]/).map((v) => v.trim()).filter(Boolean))];
+}
+
 /** Mirrors `audit-release-bundle.py:needs_word_boundary` — a short git user.name
  *  must match as a whole word or it rewrites half the corpus (e.g. a name that is
- *  also a common substring would hit "<name>.owner", "<name>cenna"). */
-function literalPattern(lit: string): RegExp {
+ *  also a common substring would hit "<name>.avi", "<name>cenna"). */
+function literalPattern(lit: string, caseInsensitive = false): RegExp {
   const esc = lit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const short = lit.length < 6 && /^[a-z0-9]+$/i.test(lit);
   // Case-SENSITIVE, like the audit: a word-boundary match hits "Jane Doe", not "video.jane".
-  return new RegExp(short ? `\\b${esc}\\b` : esc, 'g');
+  // A SHORT literal stays case-sensitive even when the caller asks otherwise: a 3-letter
+  // first name folded to lower case hits file extensions and ordinary words.
+  return new RegExp(short ? `\\b${esc}\\b` : esc, caseInsensitive && !short ? 'gi' : 'g');
 }
 
 /**
@@ -156,8 +192,8 @@ export function scrubBuildIdentity(content: string): string {
   // (`<user>` ⊂ `/home/<user>`), so scrubbing it first would leave
   // `/home/<build-user>` instead of `$HOME` — the PII is gone either way, but the
   // more specific literal must win or the output is quietly wrong.
-  for (const { value, placeholder } of identityLiterals().sort((a, b) => b.value.length - a.value.length)) {
-    out = out.replace(literalPattern(value), placeholder);
+  for (const { value, placeholder, caseInsensitive } of identityLiterals().sort((a, b) => b.value.length - a.value.length)) {
+    out = out.replace(literalPattern(value, caseInsensitive), placeholder);
   }
   return out;
 }

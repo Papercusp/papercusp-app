@@ -14,6 +14,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import type { CloudCredentialRef } from '@papercusp/deployment-driver';
+import { pinModuleState } from '@papercusp/module-singleton';
 import { describeFetchError } from '../loopback-fetch';
 
 const requireCjs = createRequire(import.meta.url);
@@ -47,7 +48,11 @@ export const GCP_WORKSPACE_HOST_REQUIRED_SERVICES = [
   'oslogin.googleapis.com',
 ] as const;
 
-/** Project-scoped permissions exercised by the first isolated-host vertical slice. */
+/**
+ * Project-scoped permissions the customer's workspace-host role must hold. Every call the GCP
+ * provider makes is pinned to this list by test through GCP_WORKSPACE_HOST_CALL_PERMISSIONS
+ * (gcp-provider.ts), so add a permission there first, never only here.
+ */
 export const GCP_WORKSPACE_HOST_REQUIRED_PERMISSIONS = [
   'resourcemanager.projects.get',
   'serviceusage.services.get',
@@ -60,6 +65,10 @@ export const GCP_WORKSPACE_HOST_REQUIRED_PERMISSIONS = [
   'compute.networks.get',
   'compute.networks.list',
   'compute.networks.delete',
+  // Checked on the network by subnetworks/firewalls/routers insert, firewalls delete, and the
+  // router PATCH that adds or removes the NAT. Its absence failed the first live hosted BYOC
+  // provision at create-subnetwork (WI-10005297).
+  'compute.networks.updatePolicy',
   'compute.subnetworks.create',
   'compute.subnetworks.get',
   'compute.subnetworks.list',
@@ -98,12 +107,20 @@ export const GCP_WORKSPACE_HOST_REQUIRED_PERMISSIONS = [
   'compute.instances.list',
   'compute.instances.start',
   'compute.instances.stop',
+  'compute.instances.reset',
   'compute.instances.delete',
   'compute.instances.setLabels',
   'compute.instances.setMetadata',
   'compute.instances.setServiceAccount',
   'compute.instances.setTags',
+  // Checked on a spot insert (scheduling block), WI-10005210.
+  'compute.instances.setScheduling',
   'compute.instances.osLogin',
+  // disks.createSnapshot needs snapshots.create and, for the labels it sets, snapshots.setLabels;
+  // restoring a disk from a snapshot needs snapshots.useReadOnly.
+  'compute.snapshots.create',
+  'compute.snapshots.setLabels',
+  'compute.snapshots.useReadOnly',
   'compute.snapshots.get',
   'compute.snapshots.list',
   'compute.snapshots.delete',
@@ -408,6 +425,9 @@ export interface GcpWorkspaceHostAuthResolverDeps extends Pick<
   /** Injectable delay for the bounded gcloud-exec retry below (EI-22191286944372582);
    *  tests pass a no-op so the retry schedule costs nothing in CI. */
   sleep?: (ms: number) => Promise<void>;
+  /** Reuse window for the gcloud active-user resolution. Defaults to the process-wide memo
+   *  when `exec` is the real gcloud, and to no memo when `exec` is injected (WI-10005446). */
+  activeUserAuthMemo?: GcloudActiveUserAuthMemo;
 }
 
 /**
@@ -532,13 +552,70 @@ export async function acquireGcpGcloudActiveUserAuth(
 }
 
 /** Resolve the selected non-secret connection reference to a token supplier. */
+/**
+ * How long one gcloud active-user resolution (account, access token, project) is reused.
+ * Each resolution forks three gcloud CLIs at about 0.7 CPU-s each. bg-host re-resolved 5 times
+ * in one 229 s window, though not in a later 15-min one: the load is bursty, tied to GCP
+ * operations (measured 2026-10-02, WI-10005446). gcloud refreshes a user token that
+ * expires within 300 s before printing it (_CREDENTIALS_EXPIRY_WINDOW in
+ * googlecloudsdk/core/credentials/store.py), so a token reused for at most 180 s still has
+ * about 120 s of validity at its last use. The clock starts when the resolution starts.
+ */
+export const GCLOUD_ACTIVE_USER_AUTH_TTL_MS = 180_000;
+
+export interface GcloudActiveUserAuthMemo {
+  /** A resolution younger than the TTL, else the result of `resolve`. Concurrent callers
+   *  share one in-flight run; a failure is never stored. Each caller gets its own copy. */
+  get(resolve: () => Promise<GcpResolvedAuth>): Promise<GcpResolvedAuth>;
+}
+
+export function createGcloudActiveUserAuthMemo(
+  options: { ttlMs?: number; now?: () => number } = {},
+): GcloudActiveUserAuthMemo {
+  const ttlMs = options.ttlMs ?? GCLOUD_ACTIVE_USER_AUTH_TTL_MS;
+  const now = options.now ?? Date.now;
+  let entry: { auth: GcpResolvedAuth; startedAtMs: number } | undefined;
+  let inflight: Promise<GcpResolvedAuth> | undefined;
+  return {
+    get(resolve) {
+      if (entry && now() - entry.startedAtMs < ttlMs) return Promise.resolve({ ...entry.auth });
+      if (!inflight) {
+        const startedAtMs = now();
+        inflight = resolve().then(
+          (auth) => {
+            entry = { auth, startedAtMs };
+            inflight = undefined;
+            return auth;
+          },
+          (error: unknown) => {
+            inflight = undefined;
+            throw error;
+          },
+        );
+      }
+      return inflight.then((auth) => ({ ...auth }));
+    },
+  };
+}
+
+// One memo per process rather than per acquirer closure, so it holds however often callers
+// compose a provider. gcloud's active account and project are process-wide state too.
+const sharedGcloudActiveUserAuth = pinModuleState(
+  '@papercusp/operator-core.gcp-preflight.gcloud-active-user-auth',
+  () => ({ memo: createGcloudActiveUserAuthMemo() }),
+);
+
 export function createGcpWorkspaceHostAcquireAuth(
   credentialRef: string,
   deps: GcpWorkspaceHostAuthResolverDeps = {},
 ): () => Promise<GcpResolvedAuth> {
   const ref = credentialRef.trim();
   if (ref === GCP_GCLOUD_ACTIVE_USER_CREDENTIAL_REF) {
-    return () => acquireGcpGcloudActiveUserAuth(deps);
+    // An injected exec is a caller-specific runner (or a test): it neither reads nor fills
+    // the process-wide memo unless it brings its own.
+    const memo = deps.activeUserAuthMemo ?? (deps.exec ? undefined : sharedGcloudActiveUserAuth.memo);
+    if (!memo) return () => acquireGcpGcloudActiveUserAuth(deps);
+    return () => memo.get(() => acquireGcpGcloudActiveUserAuth(deps));
   }
   if (!ref.startsWith('adc://')) throw new Error('gcp_workspace_host_cloud_credential_ref_unsupported');
 
@@ -616,6 +693,13 @@ const GCP_RATE_LIMIT_REASONS: ReadonlySet<string> = new Set([
   'rateLimitExceeded',
   'userRateLimitExceeded',
   'rateLimitExceededByUser',
+  // A dependency still being created ("The resource '…/networks/x' is not ready"), answered
+  // as HTTP 400. Measured P-318 r62b 2026-10-01: create-network's first wait was uncertain,
+  // reconcile adopted the network while Google was still creating it, and the subnetwork
+  // insert drew this 400. The status-only classifier called it `terminal` and halted the
+  // whole provision. Google lists `resourceNotReady` as a condition to retry with backoff,
+  // and it clears once the parent finishes.
+  'resourceNotReady',
 ]);
 
 /**

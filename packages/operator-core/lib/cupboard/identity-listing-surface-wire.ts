@@ -9,7 +9,13 @@
  * shape.
  */
 
-export const IDENTITY_LISTING_SURFACE_SCHEMA_VERSION = 1 as const;
+/**
+ * 2 added `burnKnobs` (agent-economy-flywheel P-015). A listing published under 1
+ * does not declare them, so install reports it as `schema-version` and refuses it
+ * until the publisher republishes; the storefront says the same rather than
+ * previewing a surface that describes less than what installs.
+ */
+export const IDENTITY_LISTING_SURFACE_SCHEMA_VERSION = 2 as const;
 /** The worker stores the canonical JSON in one bounded TEXT column (migration 035). */
 export const IDENTITY_LISTING_SURFACE_MAX_CHARS = 16_000;
 
@@ -50,6 +56,13 @@ export interface IdentityListingSurface {
   }[];
   readonly classContracts: readonly { readonly ref: string; readonly contractHash: string }[];
   readonly grants: { readonly requires: readonly string[]; readonly optional: readonly string[] };
+  /**
+   * What sets this identity's spend, sorted by path: root and inherited-layer
+   * knobs, model/effort/cadence declarations in roles and triggers, and
+   * `promptBytes` (exact UTF-8 prompt bytes, not tokens or a predicted bill).
+   * The same paths the release diff compares on upgrade (releaseBurnKnobs).
+   */
+  readonly burnKnobs: readonly { readonly path: string; readonly value: unknown }[];
   /** Exactly the signed manifest's `permissions` (identityPermissionLines). */
   readonly permissions: readonly string[];
   /** 'content-only' installs with no administrator consent (D-034). */

@@ -41,6 +41,8 @@ export interface ResolvedAccount {
   /** Per-account egress IP POOL (rotating list) — gateway-per-account-egress-ip-pool-2026-06-30.
    *  When set, the gateway rotates this account's upstream across these IPs. Absent ⇒ singular `egress`. */
   egressPool?: AccountEgress[];
+  /** Metered spend policy carried into the live pool (anthropic-credits-gateway-2026-09-30 P-008). */
+  meteredPolicy?: 'overflow' | 'never';
 }
 
 /**
@@ -202,6 +204,7 @@ export async function resolveAccountPool(ws?: string, provider: AccountProvider 
     credentialRef: a.credentialRef,
     egress: a.egress,
     egressPool: a.egressPool,
+    ...(a.meteredPolicy ? { meteredPolicy: a.meteredPolicy } : {}),
     source: 'pool' as const,
   }));
   if (all.length === 0 && provider === 'claude') {

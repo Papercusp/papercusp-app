@@ -15,6 +15,7 @@ documents:
   - "packages/operator-core/lib/agent-tools/blueprint/*-operation.ts"
 plans:
   - "blueprint-backed-work-item-execution-2026-09-23"
+  - "external-app-access-to-workspaces-2026-09-29"
 ---
 
 A **blueprint operation** is a typed, durable unit of work that a harness blueprint
@@ -206,6 +207,29 @@ await client.signal(handle, { channel: 'note', payload: { text: 'hi' }, requestK
 Here `invoke(toolName, args)` must return the tool's decoded structured result and
 throw on a refusal.
 
+## Calling from outside apps
+
+The seven tools are also reachable from apps that run somewhere else: another server, a CI
+job, a laptop on another network, or a chat product such as Claude.ai or ChatGPT. Such an app
+never uses an owner sign-in; it uses a limited **app key** (`pcapp_…`) whose scope lists the
+operations it may call (`blueprint:*`), and every call is attributed to that app.
+
+- **Through the Papercusp portal** (a hosted workspace, or your own computer linked through the
+  opt-in relay): the HTTP projection is at
+  `https://<portal>/api/workspaces/<workspaceId>/agent-tools/blueprint/<verb>` and MCP at
+  `…/<workspaceId>/mcp`.
+- **Through your own tunnel**: only MCP is served, at `https://<your-tunnel>/api/mcp`.
+  Plain-HTTP tool routes answer `404 not_served_on_external_ingress` there.
+- **From a provider event**: a signed webhook (`triggers:create-webhook`) starts whatever
+  operation its armed trigger binding names; see [External-event triggers](#external-event-triggers).
+
+The handle, request-key idempotency, results and refusals are the same as for a local caller,
+plus the app-access refusals (`403 remote_access_off`, `spend_cap_reached`, the relay's
+`429` and `503`). The [External-app quickstart](/internal/docs/harness/external-app-quickstart)
+has curl, MCP-client and TypeScript examples; the
+[Remote access guide](/internal/docs/harness/remote-access-guide) covers keys, tunnels, the relay
+and alerts from the owner's side.
+
 ## Plan-target operations
 
 An operation may instead target a declared plan template. Submission then starts one
@@ -221,6 +245,18 @@ The declaration below is the one the P-013 fork/join benchmark submits end to en
 submit, promotion of the template's items, claim and complete of each item,
 `plans:publish-outputs`, settlement, and a `ready` result. Its `contentHash` is the hash
 of that suite's `p013-fork-join` template, and the docs suite fails if the two drift.
+
+**The template must be startable before any operation can fire it.** A template you
+create with `plans:new` is an ordinary plan under the acceptance-BAR contract, so a
+submit runs the same start gate as `plans:start`. Before you pin it, give it
+`## Requirements` bars, the Design `### Bar-to-work map for this plan`, and an activation
+audit (`plans:audit { phase: "activation" }`), which seeds its BAR set and rubric. Until
+then every submit is refused with
+`not-startable: acceptance BAR contract is not ready for start`, and no run is created.
+An armed plan schedule hits the same gate. Only the run instances a template mints
+(`<template>@run-N`) are exempt. The benchmark's `p013-fork-join` template is a
+pre-contract test fixture seeded directly in the database; no public door creates one
+like it.
 
 ```json runnable=plan-target
 {
@@ -415,17 +451,17 @@ cold p95 at most 1.75x + 500 ms, and throughput at 8 concurrent callers at least
 
 | Metric | Callers | Control | Candidate | Limit | Result |
 |---|---|---|---|---|---|
-| warm p50 | 1 | 479 ms | 468 ms | 566 ms | pass |
-| warm p95 | 1 | 562 ms | 553 ms | 727 ms | pass |
-| warm p99 | 1 | 1365 ms | 679 ms | 2097 ms | pass |
-| cold p95 | 1 | 3088 ms | 3190 ms | 5903 ms | pass |
-| warm p50 | 8 | 2346 ms | 2185 ms | 2712 ms | pass |
-| warm p95 | 8 | 3106 ms | 3156 ms | 3907 ms | pass |
-| warm p99 | 8 | 3723 ms | 3575 ms | 5634 ms | pass |
-| cold p95 | 8 | 2834 ms | 2880 ms | 5460 ms | pass |
-| throughput | 8 | 3.21/s | 3.20/s | 2.57/s | pass |
+| warm p50 | 1 | 275 ms | 275 ms | 331 ms | pass |
+| warm p95 | 1 | 601 ms | 573 ms | 777 ms | pass |
+| warm p99 | 1 | 1194 ms | 1102 ms | 1842 ms | pass |
+| cold p95 | 1 | 4047 ms | 5146 ms | 7582 ms | pass |
+| warm p50 | 8 | 652 ms | 594 ms | 765 ms | pass |
+| warm p95 | 8 | 940 ms | 876 ms | 1200 ms | pass |
+| warm p99 | 8 | 1080 ms | 1082 ms | 1669 ms | pass |
+| cold p95 | 8 | 4571 ms | 4714 ms | 8500 ms | pass |
+| throughput | 8 | 10.47/s | 10.50/s | 8.37/s | pass |
 
-Evidence: `docs/evidence/p013-workload-a-2026-09-28.json`.
+Evidence: `docs/evidence/p013-workload-a-2026-10-01.json`.
 
 Not proven by this workload:
 
@@ -436,40 +472,40 @@ Not proven by this workload:
 
 | Metric | Callers | Control | Candidate | Limit | Result |
 |---|---|---|---|---|---|
-| warm p50 | 1 | 2001 ms | 2006 ms | 2316 ms | pass |
-| warm p95 | 1 | 2650 ms | 2459 ms | 3337 ms | pass |
-| warm p99 | 1 | 4862 ms | 3547 ms | 7343 ms | pass |
-| cold p95 | 1 | 6526 ms | 7566 ms | 11920 ms | pass |
-| warm p50 | 8 | 12549 ms | 11381 ms | 14447 ms | pass |
-| warm p95 | 8 | 14814 ms | 13357 ms | 18543 ms | pass |
-| warm p99 | 8 | 15684 ms | 14863 ms | 23576 ms | pass |
-| cold p95 | 8 | 15888 ms | 11388 ms | 28304 ms | pass |
-| throughput | 8 | 0.63/s | 0.68/s | 0.51/s | pass |
+| warm p50 | 1 | 927 ms | 886 ms | 1137 ms | pass |
+| warm p95 | 1 | 1984 ms | 1517 ms | 2530 ms | pass |
+| warm p99 | 1 | 3342 ms | 3581 ms | 5113 ms | pass |
+| cold p95 | 1 | 6757 ms | 8613 ms | 12324 ms | pass |
+| warm p50 | 8 | 4190 ms | 3838 ms | 5052 ms | pass |
+| warm p95 | 8 | 5506 ms | 5075 ms | 6933 ms | pass |
+| warm p99 | 8 | 5822 ms | 6614 ms | 8834 ms | pass |
+| cold p95 | 8 | 5551 ms | 8906 ms | 10215 ms | pass |
+| throughput | 8 | 1.84/s | 1.99/s | 1.47/s | pass |
 
-Evidence: `docs/evidence/p013-workload-b-2026-09-28.json`.
+Evidence: `docs/evidence/p013-workload-b-snap-2026-10-02.json`.
 
 Not proven by this workload:
 
 - Actual-model latency: this matrix uses a deterministic fixture worker only.
 - Absolute latency on an idle box: the box was shared with fleet work throughout; only the paired candidate/control ratio is graded.
 
-### C. Four-step conditional program — FAIL 6/9
+### C. Four-step conditional program — FAIL 2/9
 
 | Metric | Callers | Control | Candidate | Limit | Result |
 |---|---|---|---|---|---|
-| warm p50 | 1 | 46 ms | 47 ms | 80 ms | pass |
-| warm p95 | 1 | 52 ms | 95 ms | 115 ms | pass |
-| warm p99 | 1 | 54 ms | 101 ms | 182 ms | pass |
-| cold p95 | 1 | 83 ms | 233 ms | 646 ms | pass |
-| warm p50 | 8 | 46 ms | 93 ms | 80 ms | fail |
-| warm p95 | 8 | 54 ms | 122 ms | 118 ms | fail |
-| warm p99 | 8 | 59 ms | 148 ms | 188 ms | pass |
-| cold p95 | 8 | 82 ms | 274 ms | 643 ms | pass |
-| throughput | 8 | 149.94/s | 72.93/s | 119.95/s | fail |
+| warm p50 | 1 | 46 ms | 92 ms | 80 ms | fail |
+| warm p95 | 1 | 54 ms | 104 ms | 117 ms | pass |
+| warm p99 | 1 | 62 ms | 231 ms | 192 ms | fail |
+| cold p95 | 1 | 131 ms | 1137 ms | 730 ms | fail |
+| warm p50 | 8 | 46 ms | 105 ms | 80 ms | fail |
+| warm p95 | 8 | 63 ms | 166 ms | 128 ms | fail |
+| warm p99 | 8 | 82 ms | 235 ms | 223 ms | fail |
+| cold p95 | 8 | 107 ms | 491 ms | 687 ms | pass |
+| throughput | 8 | 141.43/s | 57.38/s | 113.15/s | fail |
 
-Evidence: `docs/evidence/p013-workload-c-final-2026-09-29.json`.
+Evidence: `docs/evidence/p013-workload-c-snap-2026-10-02.json`.
 
-This workload does not meet its budget: warm p50 at 8 callers, warm p95 at 8 callers, throughput at 8 callers fail. It stays graded against the same control and limits as the other workloads (plan decision D-036). The remaining cost is in the canonical work-item write path, and it is tracked as WI-10003818.
+This workload does not meet its budget: warm p50, warm p99 and cold p95 at 1 caller, and warm p50, warm p95, warm p99 and throughput at 8 callers fail. This grade is the snapshot-runner re-measure that replaces the 2026-09-29 result (plan decisions D-051 and D-059). It stays graded against the same control and limits as the other workloads (plan decision D-036). The 2026-09-29 analysis placed the 8-caller cost in the canonical work-item write path. The 1-caller misses first appear in this re-measure and are not yet attributed. Both are tracked as WI-10003818.
 
 Not proven by this workload:
 
@@ -481,17 +517,17 @@ Not proven by this workload:
 
 | Metric | Callers | Control | Candidate | Limit | Result |
 |---|---|---|---|---|---|
-| warm p50 | 1 | 78 ms | 110 ms | 166 ms | pass |
-| warm p95 | 1 | 89 ms | 131 ms | 255 ms | pass |
-| warm p99 | 1 | 103 ms | 151 ms | 431 ms | pass |
-| cold p95 | 1 | 236 ms | 318 ms | 1589 ms | pass |
-| warm p50 | 8 | 197 ms | 176 ms | 346 ms | pass |
-| warm p95 | 8 | 244 ms | 253 ms | 527 ms | pass |
-| warm p99 | 8 | 318 ms | 335 ms | 914 ms | pass |
-| cold p95 | 8 | 278 ms | 297 ms | 1694 ms | pass |
-| throughput | 8 | 39.49/s | 42.71/s | 25.67/s | pass |
+| warm p50 | 1 | 97 ms | 115 ms | 196 ms | pass |
+| warm p95 | 1 | 144 ms | 181 ms | 352 ms | pass |
+| warm p99 | 1 | 232 ms | 218 ms | 723 ms | pass |
+| cold p95 | 1 | 383 ms | 399 ms | 1958 ms | pass |
+| warm p50 | 8 | 292 ms | 241 ms | 488 ms | pass |
+| warm p95 | 8 | 442 ms | 372 ms | 874 ms | pass |
+| warm p99 | 8 | 493 ms | 503 ms | 1309 ms | pass |
+| cold p95 | 8 | 332 ms | 481 ms | 1829 ms | pass |
+| throughput | 8 | 24.36/s | 29.92/s | 15.84/s | pass |
 
-Evidence: `docs/evidence/p013-workload-d-2026-09-28.json`.
+Evidence: `docs/evidence/p013-workload-d-snap-2026-10-02.json`.
 
 Not proven by this workload:
 

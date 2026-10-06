@@ -15,19 +15,21 @@ is measuring the wrong object.
 
 WHY IT MUST SCAN CONTENT, NOT JUST PATHS
 ----------------------------------------
-The mac Server bundle leaked the owner's home path in the CONTENT of 7 files and
-an email in 1 — with nothing in the filenames and no credentials anywhere. A
-path-only scan passes that bundle. Absolute build paths get baked into vendored
+The mac Server bundle leaked the owner's home path in the CONTENT of 7 files —
+with nothing in the filenames and no credentials anywhere. A path-only scan
+passes that bundle. Absolute build paths get baked into vendored
 trees constantly (.bin shims, sourcemaps, .package-lock.json, compile caches), so
 node_modules is exactly where machine identity hides — it is scanned, not skipped.
 
 WHY IDENTITY IS A SET OF LITERALS
 ---------------------------------
-"Personal information" here means THIS BUILD BOX: its unix user, its home path,
-its hostname, its git identity. Those are literal strings, resolved at run time,
-so a build on anyone's machine scrubs THAT machine. Deliberately NOT a generic
-email/name regex: that matches a maintainer address in every vendor package.json,
-and a gate that cries wolf on every build is a gate someone switches off.
+"Build identity" here means THIS BUILD BOX: its unix user, its home path and its
+hostname. Those are literal strings, resolved at run time, so a build on anyone's
+machine scrubs THAT machine. D-112 deliberately excludes owner names and email
+addresses from this policy: full release history legitimately carries authorship,
+and treating authorship as a build-host leak made the required seeded release
+impossible. Credential patterns and the retained cross-box denylist remain separate
+fail-closed checks below.
 
 PERFORMANCE — why this shells out instead of using Python's tarfile
 -------------------------------------------------------------------
@@ -49,6 +51,7 @@ unscannable bundle is not a clean one). Never prints a secret VALUE.
 Usage:  audit-release-bundle.py <path/to/source.tar.zst>
         audit-release-bundle.py --scan-dir <assembled-tree>...
         audit-release-bundle.py --scan-artifact <finished-installer>...
+        audit-release-bundle.py --scan-artifact --require-source-archive <finished-server-installer>...
         audit-release-bundle.py --scan-artifact --licenses <finished-installer>...
                                   (also runs scripts/check-licenses.mjs --installer-tree
                                   on the expanded trees — WI-10003906 / P-017)
@@ -91,7 +94,29 @@ from datetime import datetime, timezone
 # form catches X at ANY depth (packages/operator-core/.papercusp), which the
 # top-level allowlist cannot — the junk is nested INSIDE apps/ and packages/,
 # and some of it is git-TRACKED (a .gitignore anchoring bug, fixed by su-a1a71).
+def _tar_globs_except_leaf(directory, retained):
+    """GNU tar globs for every descendant except one exact admitted leaf."""
+    globs = []
+    for index, character in enumerate(retained):
+        prefix = retained[:index]
+        if prefix:
+            globs.append(directory + prefix)
+        globs.append(directory + prefix + "[!" + character + "]*")
+    globs.append(directory + retained + "?*")
+    return globs
+
+
 FORBIDDEN_PATH = [
+    # D-150 V3 / D-164: prune every SSH2 fixture except the exact certificate
+    # admitted by tarball provenance. Keep the certificate's identity/key scan
+    # mandatory; this path rule alone never admits its bytes. Other vendor
+    # private-key fixtures remain forbidden at both producers.
+    ("vendored-private-key-fixtures",
+     re.compile(r"(^|/)node_modules/(?:ssh2/test/fixtures/(?!https_cert\.pem$).+"
+                r"|style-dictionary/examples/advanced/create-react-native-app/"
+                r"android/app/debug\.keystore)$"),
+     _tar_globs_except_leaf("node_modules/ssh2/test/fixtures/", "https_cert.pem")
+     + ["node_modules/style-dictionary/examples/advanced/create-react-native-app/android/app/debug.keystore"]),
     ("agent-transcripts", re.compile(r"(^|/)pi-sessions/|(^|/)sessions/.*\.jsonl$"),
      ["pi-sessions"]),
     # `.papercusp` AND its siblings (`.papercusp-tmp`, `.papercusp-workspaces`): a
@@ -183,7 +208,7 @@ FORBIDDEN_PATH = [
     # code imports a *.test.* / __tests__/ module (verified across apps+libs+
     # packages). They are pure bulk in source.tar.zst, and a handful embed identity
     # literals AS TEST DATA (D-004: carry-surface-provenance-stamp.test.ts asserts
-    # on `[owner:owner]` linting; bash-resource-gate/coord-hook assert the
+    # on `[owner:Avi]` linting; bash-resource-gate/coord-hook assert the
     # `loginctl terminate-user <user>` literal) that MUST NOT be scrubbed — doing so
     # rewrites the assertion and reds the green gate. So the correct handling is
     # EXCLUDE-from-ship, not redact: the tests keep their literals in the tree (green
@@ -502,6 +527,49 @@ KNOWN_SENSITIVE_IDENTITIES = {
 AUTHORISED_PRODUCT_STRINGS = ("papercusp-cupboard.ownerhandle.workers.dev",)
 
 
+# Whole FILES, byte-for-byte public upstream package content, that happen to contain a
+# denylisted identity literal (WI-10005961, 2026-10-03). Keyed by the SHA-256 of the
+# ENTIRE file; the value records where the bytes come from, so the entry can be
+# re-verified against the package without trusting this comment.
+#
+#   • cracklib-dicts-2.9.11-8.el10.x86_64 /usr/share/cracklib/pw_dict.pwd — the packed
+#     cracklib password dictionary. Its word list includes 'maclogin', a common given
+#     name, which is also KNOWN_SENSITIVE_IDENTITIES['known-sensitive:mac-vm-login']. Every
+#     EL10 system ships these bytes, so they disclose nothing about any box or credential.
+#     The bootc workspace-host image inherits them unmodified from
+#     quay.io/centos-bootc/centos-bootc:stream10@sha256:f1f9f8029edbd7de0cb4e1520befebe0dbd5dbd173ff5722f0f95a80087cb3fd,
+#     both at that path and as the hardlinked base-commit object under
+#     sysroot/ostree/repo/objects/ (one inode). MEASURED: the digest below equals the one
+#     the RPM itself records (`rpm -q --dump cracklib-dicts`; `rpm -V` flags mtime only).
+#     No later layer can remove it: the base layer and the base commit's ostree object
+#     carry it onto the disk whatever the image deletes. stream9's cracklib-dicts-2.9.6
+#     word list lacks the word, which is why the scan only started failing on stream10.
+#
+# This is an ACCEPTANCE of exact bytes, not an exclude. A file passes only if its whole
+# content hashes to an entry here: change one byte (add a real leak beside the word) and
+# it fails again. Never applied to archive members, whose bytes this pass cannot
+# re-read, and unreadable files keep failing. The default stays "fix the SOURCE"; an
+# entry belongs here only for third-party bytes we do not author and cannot rebuild,
+# with the package and digest measured as above. A newer package version is a new
+# digest and fails closed until someone measures it the same way.
+PUBLIC_UPSTREAM_FILE_SHA256 = {
+    "5026c59d7b64cf0bb993075efb9ac2df8d284cd5ce8c09b5e750fd9ef16fc481":
+        "cracklib-dicts-2.9.11-8.el10.x86_64 /usr/share/cracklib/pw_dict.pwd",
+}
+
+
+def _file_sha256(path):
+    """SHA-256 of a whole file, or None when it cannot be read (fails CLOSED)."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
 def _count_occurrences(path, needle):
     """Exact byte-count of `needle` in `path`.
 
@@ -543,7 +611,7 @@ def _count_literal(path, lit):
 
 # ── STAGING SCRUB (WI-4419 durable; desktop-v0-0-12-release-tri-platform#D-004).
 # Dev-infra and agent-authored SOURCE keep re-introducing this box's identity into
-# must-ship files — [owner:owner] provenance comments in prod .ts/.sql, dev systemd
+# must-ship files — [owner:Avi] provenance comments in prod .ts/.sql, dev systemd
 # ExecStart=/home/<user> paths, test fixtures hardcoding the build username. Those
 # files cannot be pruned (they ship / run), and a per-file source edit is a
 # treadmill that reds the next cut the moment a new tag lands. So bin/stage-source-
@@ -559,8 +627,6 @@ REDACTION_BY_KEY = {
     "build-user-name": "builduser",
     "build-home-path": "/home/builduser",
     "build-hostname": "buildhost",
-    "build-git-email": "owner@example.invalid",
-    "build-git-name": "owner",
     "known-sensitive:mac-vm-user": "macuser",
     "known-sensitive:mac-vm-login": "maclogin",
     "known-sensitive:linux-build-user": "builduser",
@@ -594,173 +660,9 @@ def _drop_placeholders(lits):
 KNOWN_SENSITIVE_IDENTITIES = _drop_placeholders(KNOWN_SENSITIVE_IDENTITIES)
 
 
-# ── The owner's NAME when git can no longer supply it ────────────────────────
-# DELIBERATELY the same variable the TS site gate reads
-# (apps/operator/lib/release/release-content-scrub.ts, OWNER_NAME_ENV): two gates
-# guarding one release must not need two different answers to the same question.
-# Read at run time and never stored — writing the owner's name into a source file
-# so we can search for it would BE the leak, committed to git forever.
-OWNER_NAME_ENV = "PAPERCUSP_RELEASE_OWNER_NAME"
-
-# The owner's EMAIL, same contract as the name. Needed because — unlike the TS scrub,
-# which catches any address by SHAPE via IDENTITY_PATTERNS — this audit has no shape rule
-# for email: `build-git-email` is its ONLY email detection. So dropping an automation
-# address below without offering this would silently zero out the email class entirely.
-OWNER_EMAIL_ENV = "PAPERCUSP_RELEASE_OWNER_EMAIL"
-
-# Git identities belonging to AUTOMATION rather than to a person. Mirrors
-# AUTOMATION_NAME_RE in release-content-scrub.ts — keep the two in step.
-AUTOMATION_NAME_RE = re.compile(
-    r"(^|[-_ ])(agent|bot|ci|runner|automation|service|actions|daemon|noreply)([-_ ]|$)|\[bot\]",
-    re.I,
-)
-
-
-def looks_like_automation_identity(value):
-    """True when a git identity is a machine's, not a person's."""
-    return bool(AUTOMATION_NAME_RE.search(value.strip()))
-
-
-# An ADDRESS needs its own test, and finding that out cost a wrong fix: AUTOMATION_NAME_RE
-# anchors on [-_ ] boundaries, but in a `<user>@users.noreply.github.com` form the
-# separators are DOTS, so `noreply` never matched and the address sailed through unchanged.
-# (The first attempt at this fix shipped that regex, and the scan still exited 1.)
-#
-# Deliberately NOT solved by adding `.`/`@` to that name regex: widening it would start
-# eating real people (`alice.service@…` would match `service` between a dot and an at-sign)
-# and a false DROP on the email class is a silent loss of coverage — the failure direction
-# this whole item is about. So: a targeted test for the actual conventions automation
-# addresses use, leaving human-name matching untouched.
-AUTOMATION_EMAIL_RE = re.compile(
-    r"(^|[-_.+])(no-?reply|bot|ci|build|actions|automation|daemon|jenkins|dependabot|renovate)([-_.+]|@)"
-    r"|\bnoreply\b"
-    r"|users\.noreply\.github\.com$"
-    r"|\[bot\]",
-    re.I,
-)
-
-
-def looks_like_automation_email(value):
-    """True when an address belongs to automation rather than to the human owner.
-
-    A bot's public noreply address is not a private identity: it is in every commit on the
-    public repo by construction, so redacting it protects nobody while guaranteeing a
-    permanent false positive wherever the project legitimately hardcodes it.
-    """
-    return bool(AUTOMATION_EMAIL_RE.search(value.strip()))
-
-
-def explicit_owner_values(env_var):
-    """The owner literals ASSERTED for this run, parsed from one env var. ONE rule.
-
-    SEPARATOR IS COMMA/SEMICOLON ONLY — deliberately NOT whitespace. A first draft split on
-    \\s too and tore "Jane Doe" into "Jane" + "Doe", which is wrong twice: it never hunts
-    the full name, and it injects a bare surname as its own low-entropy literal that then
-    matches innocent words across the bundle. Names contain spaces; addresses do not, so
-    nothing is lost by dropping whitespace as a separator.
-    """
-    raw = os.environ.get(env_var, "")
-    return list(dict.fromkeys(v.strip() for v in re.split(r"[,;]", raw) if v.strip()))
-
-
-def has_owner_name_literal(lits):
-    """Can this literal set actually detect the owner's NAME?
-
-    The name is the one identity class with NO SHAPE to fall back on. A home path or
-    an email is still caught structurally even when no literal knows it; a bare first
-    name is only ever a literal. So when this is false the scan cannot see the name at
-    all, and a CLEAN verdict degrades to "I looked for nothing" while still reading as
-    proof. Callers that SHIP must fail closed on false.
-
-    ⚠ REQUIRES THE **EXPLICIT** VALUE, and deliberately ignores anything git supplied.
-    An earlier version of this fix accepted a git-derived name so long as it did not match
-    looks_like_automation_identity(). That is a DENYLIST, and a denylist fails OPEN for
-    every identity nobody thought of — which stopped being hypothetical within the hour:
-    this box's user.name changed from one automation identity to a differently-spelled one
-    ("…-agent" → "…-buildbox"), the pattern list did not carry the new token, the bot read
-    as a person, and this function returned True again while the scan hunted a machine's
-    name. The same defect, one level up, with the fix already in place.
-
-    git config names the COMMITTER. On an automated box that is by construction not the
-    owner, and no pattern list can reliably separate the two. So the gate stops guessing:
-    the owner identity must be ASSERTED by whoever runs the release. The heuristic is still
-    worth keeping — it stops a bot's name being hunted uselessly and keeps redaction honest
-    — but it is a convenience, never the thing a CLEAN verdict is allowed to rest on.
-    """
-    return bool(explicit_owner_values(OWNER_NAME_ENV))
-
-
-def _owner_values(lits, base):
-    """Every non-empty literal for one owner class — `base`, `base-2`, `base-3`, ...
-
-    The owner side is PLURAL because a person is: measured on this repo's own history,
-    three distinct non-automation addresses match the owner's name pattern. A single-value
-    argument would let one invocation hunt one of them and still print an unqualified
-    CLEAN — certifying the class while leaving the rest unhunted, which is the very shape
-    of defect this file is being hardened against. The alternative (re-run the audit once
-    per address) is an unenforceable process convention, and the next person will not know
-    to follow it. Put it in the data model instead.
-    """
-    out = []
-    for k, v in lits.items():
-        if k == base or k.startswith(base + "-"):
-            v = str(v).strip()
-            if v:
-                out.append(v)
-    return out
-
-
 def redaction_key(key):
-    """REDACTION_BY_KEY lookup key, with the plural `-2`, `-3` suffix normalised off.
-
-    All of one owner's addresses share a single placeholder ON PURPOSE — they are one
-    identity, and the fallback's warning about distinct identities collapsing to the same
-    token does not apply within a class.
-    """
+    """Return the stable redaction key for a literal emitted by this gate."""
     return re.sub(r"-\d+$", "", key)
-
-
-def identity_coverage_gaps(lits):
-    """Identity classes a CLEAN verdict from this run does NOT cover.
-
-    A pass must never claim more than it checked. The NAME class is fail-closed at both
-    entry points, so reaching CLEAN proves the name was hunted. The EMAIL class is not:
-    this audit has no shape-based email rule (unlike the TS scrub's IDENTITY_PATTERNS),
-    so if no email literal resolves, email coverage is simply ZERO and every downstream
-    reader still sees an unqualified "✓ CLEAN".
-
-    That silence is the exact mechanism of EI-20583328178472869 — the verdict outliving
-    the evidence it was based on. This file already argues the case for coverage of FILES
-    ("a scan that inspects nothing is indistinguishable from a scan that found nothing");
-    it had simply never applied it to the CLASSES. Call it out IN the verdict.
-
-    Returns a list of human-readable gaps; empty means the verdict is unqualified.
-    """
-    gaps = []
-    # Counts ASSERTED addresses only, for the same reason has_owner_name_literal does: a
-    # git-derived address identifies the committer, and on this box that has twice been an
-    # automation. Counting it would inflate the coverage claim with a value nobody vouched.
-    emails = explicit_owner_values(OWNER_EMAIL_ENV)
-    if not emails:
-        gaps.append(
-            f"EMAIL not covered — no owner-email literal resolved "
-            f"(git user.email is unset or an automation address). "
-            f"Set {OWNER_EMAIL_ENV} to hunt it (accepts a comma-separated list)."
-        )
-    else:
-        # State the COUNT, not just "covered". A person can have several addresses, and
-        # "email: covered" over one of three reads as a full pass to anyone downstream.
-        gaps.append(
-            f"EMAIL covered for {len(emails)} address(es) — a CLEAN result says nothing "
-            f"about any owner address NOT supplied via {OWNER_EMAIL_ENV}."
-        )
-    return gaps
-
-
-def print_coverage_gaps(gaps, indent="    "):
-    """Print coverage caveats beside a CLEAN verdict, or nothing when there are none."""
-    for g in gaps:
-        print(f"{indent}⚠ PARTIAL COVERAGE: {g}")
 
 
 #: Unix logins that identify NOBODY, so the build box's login is not hunted when it is
@@ -808,79 +710,18 @@ def identity_literals():
     neutral_host = os.environ.get("PAPERCUSP_SEED_BUILD_HOSTNAME") or "papercusp-build"
     if host and host != neutral_host and not host.startswith(("runner", "ci-", "localhost")):
         lits["build-hostname"] = host
-    for key, cfg in (("build-git-email", "user.email"), ("build-git-name", "user.name")):
-        try:
-            v = subprocess.run(["git", "config", "--get", cfg], capture_output=True,
-                               text=True, timeout=5).stdout.strip()
-            if not v:
-                continue
-            # EI-20583328178472869: `user.name` became the git-sync bot, so this gate
-            # spent every build hunting a bot's name — useless — while the owner's real
-            # name went unhunted and the bundle still printed CLEAN. Recording the bot
-            # would ALSO leave has_owner_name_literal() true, so the blindness would stay
-            # invisible. Dropping it makes the gap loud, and main() fails closed on it.
-            if key == "build-git-name" and looks_like_automation_identity(v):
-                continue
-            # The EMAIL class, same rule, and it fails the OPPOSITE way — which is how it
-            # was found. This box's user.email is the git-sync bot's noreply address, and
-            # that exact string is ALSO a hardcoded public constant in the project's own
-            # source (run-git-sync.ts's committer identity), which vite bundles into
-            # apps/operator-vite/dist. So the "private box identity" oracle collided with a
-            # deliberate public constant and the gate could never pass: a permanent FALSE
-            # POSITIVE, where the name class was a permanent FALSE NEGATIVE. One cause —
-            # the box's git identity repointed at shared automation — two opposite failures.
-            #
-            # Redacting a bot's public noreply address protects nobody: it is in every
-            # commit on the public repo by construction. Do NOT "fix" this by allowlisting
-            # the address or by excluding the dist directory it happened to surface in —
-            # the constant lives in SOURCE and will reappear in any other build output.
-            if key == "build-git-email" and looks_like_automation_email(v):
-                continue
-            lits[key] = v
-        except Exception:
-            pass
-    # Explicit answers outrank whatever the box guesses (CI, a container, or a box whose
-    # git identity an automation has taken over). Read at run time, never stored.
-    # BOTH accept a LIST. A person has more than one address, and often more than one
-    # spelling of their name; a single-value argument silently covers the first and
-    # certifies the class anyway.
-    #
-    for env_var, base in ((OWNER_NAME_ENV, "build-git-name"), (OWNER_EMAIL_ENV, "build-git-email")):
-        values = explicit_owner_values(env_var)
-        if not values:
-            continue
-        # Explicit answers REPLACE the box's guess for that class rather than adding to it
-        # — otherwise a stale git identity would linger beside the supplied truth.
-        for k in [k for k in lits if k == base or k.startswith(base + "-")]:
-            del lits[k]
-        for i, v in enumerate(dict.fromkeys(values)):  # de-dup, order preserved
-            lits[base if i == 0 else f"{base}-{i + 1}"] = v.strip()
     return _drop_placeholders(lits)
 
 
 def owner_preflight():
-    """Fail before expensive staging when the owner name is not asserted.
+    """Compatibility surface retained for producers that still call this early gate.
 
-    The archive audit already refuses to certify a bundle without this literal,
-    but that check runs only after tar/zstd have spent minutes producing the
-    candidate. Keep this as a cheap entrypoint over the same resolver and
-    predicate used by the final audit so the producer can fail before it starts
-    archive work without creating a second identity policy.
+    D-112 makes the release identity policy machine-only. Owner name/email are legitimate
+    release content, so their absence is no longer a reason to refuse staging. Keep the
+    command successful rather than deleting it out from under older producer scripts.
     """
-    lits = identity_literals()
-    if has_owner_name_literal(lits):
-        count = len(explicit_owner_values(OWNER_NAME_ENV))
-        print(f"==> owner-name preflight: {count} explicit owner-name literal(s) resolved")
-        return 0
-
-    print(
-        "✗ REFUSING TO STAGE — no owner-name literal resolved, so the release "
-        "audit cannot detect the owner's name.\n"
-        "  Cause: `git config user.name` is unset or belongs to automation.\n"
-        f"  Fix:   export {OWNER_NAME_ENV}='<the owner's name>' for this build.",
-        file=sys.stderr,
-    )
-    return 2
+    print("==> owner-identity compatibility preflight: not required (D-112 machine-only policy)")
+    return 0
 
 
 #: Literals matched on word boundaries REGARDLESS of length — populated by
@@ -893,13 +734,9 @@ _WORD_BOUNDED_LITERALS = set()
 def needs_word_boundary(lit):
     """A SHORT literal must match as a whole word or it matches half the bundle.
 
-    The owner's git user.name here is literally "owner" — the exact thing they asked
-    us to keep out of a public build ("my name is owner on this machine"). An earlier
-    cut of this gate skipped any literal under 4 chars, which silently made the
-    owner's own example the ONE identity it could not catch. Substring-matching
-    "owner" instead would fire on every .owner/owner/Avicenna in vendored code and get
-    the gate switched off, so short literals match on a word boundary:
-    \\bAvi\\b hits "owner Weiss", not "video.owner".
+    A short personal build login or retained cross-box alias must still be caught,
+    while ordinary longer words that merely contain it must stay clean. Short
+    alphanumeric literals therefore match on a word boundary.
     """
     return len(lit) < 6 and lit.isalnum()
 
@@ -925,10 +762,8 @@ def case_fold_ere(pat):
 def lit_ere(lit):
     """The ERE this identity literal is searched with (GNU grep supports \\b).
 
-    CASE-INSENSITIVE — and it must be, which cost us a shipped leak to learn
-    (EI-20589264759185712). The owner's name reached the PUBLISHED 0.0.17 Linux
-    deb in lowercase, inside a SQL comment ("Surfaced for owner:"), while this gate
-    read the bundle CLEAN: it was hunting \\bAvi\\b, and `owner` is not `owner`.
+    CASE-INSENSITIVE — and it must be, because build-user, home and host values can
+    be re-cased by generated text while still identifying the same machine.
 
     Because this ONE rule feeds all three legs — the gate's own scan, the
     --source-leakers set (WHICH files the stager scrubs) and the --identity-literals
@@ -937,12 +772,12 @@ def lit_ere(lit):
     redacted it, so the gate found nothing to fail on. Three independent-looking
     proofs, one blind spot.
 
-    The 'it would cry wolf on vendored .owner/owner' worry that justified case-sensitivity
+    The 'it would cry wolf on vendored .avi/AVI' worry that justified case-sensitivity
     is handled by a DIFFERENT mechanism that already exists: is_low_entropy() scopes
-    a bare first name to OUR source via is_vendor(), so node_modules is out of scope
+    a short literal to OUR source via is_vendor(), so node_modules is out of scope
     before case ever matters. Measured over the real non-vendor corpus at the time of
     the fix: 69 files gained, 54 of them carrying genuine identity (test fixtures with
-    `username: 'owner'`, `--account owner-owner`, the box hostname `owner-dev`), and the
+    `username: 'avi'`, `--account avi-storewolf`, the box hostname `avi-dev`), and the
     only non-identity hits were prose ABOUT this tradeoff and this gate's own tests.
     """
     body = case_fold_ere(re.escape(lit))
@@ -977,8 +812,8 @@ def is_low_entropy(lit):
 
     Same set as needs_word_boundary — a bare first name. \\bAvi\\b is necessary but
     not sufficient: node_modules/natural ships an English POS lexicon in which
-    "owner" is a dictionary entry, and @huggingface/transformers' README credits a
-    DIFFERENT REAL PERSON named owner. Both are word-boundary hits and neither is
+    "Avi" is a dictionary entry, and @huggingface/transformers' README credits a
+    DIFFERENT REAL PERSON named Avi. Both are word-boundary hits and neither is
     our owner.
     """
     return needs_word_boundary(lit)
@@ -1004,7 +839,7 @@ def is_vendor(name):
         n.startswith("node_modules/")
         or "/node_modules/" in n
         # Vditor is copied into the built SPA outside node_modules. Its checked-in
-        # distribution contains the owner media-extension token, which is upstream
+        # distribution contains the AVI media-extension token, which is upstream
         # vocabulary rather than this box owner's name. Keep high-entropy hunting
         # enabled there; only the bare-name pass inherits vendor scoping.
         or "/spa/vditor/" in "/" + n
@@ -1021,12 +856,12 @@ def semantic_path_for_low_entropy(name):
 
     A three-letter owner name has too little entropy to convict inside an opaque
     content hash.  The real 2026-08-20 collision was
-    ``dist/assets/factor-aVI-w_hC.js``: ``owner`` is a whole ERE word because the
+    ``dist/assets/factor-aVI-w_hC.js``: ``aVI`` is a whole ERE word because the
     hash contains punctuation, but it is not a semantic filename component.
 
     Scope this narrowly to generated ``dist/assets`` names with the measured
     eight-character fingerprint shape.  The semantic stem remains searchable, so
-    ``dist/assets/owner-abcdefgh.js`` still fails while the hash-only collision does
+    ``dist/assets/Avi-abcdefgh.js`` still fails while the hash-only collision does
     not.  Paths outside that generated-asset shape remain byte-for-byte unchanged.
     """
     normalized = name.replace("\\", "/")
@@ -1060,14 +895,14 @@ _MEDIA_EXTENSION_NEIGHBOURS = (b'"mp4"', b'"webm"', b'"mov"', b'"wmv"')
 def low_entropy_match_is_benign(name, data, match):
     """True only for a proven non-identity use of a short owner-name token.
 
-    A case-folded ``owner`` correctly catches authored ``owner`` identity, but also
-    collides with the owner media format and with an opaque eight-character Vite
+    A case-folded ``Avi`` correctly catches authored ``avi`` identity, but also
+    collides with the AVI media format and with an opaque eight-character Vite
     fingerprint. Classify OCCURRENCES, never whole generated files: the same JS
     file can carry a harmless codec token and a real authored identity.
 
     ``data`` is bytes so this helper is shared by tar streaming, assembled-tree
     scans, and the copy-point scrubber. Every exception below is structural and
-    narrow; ordinary ``@owner`` / prose / identifiers remain release-blocking.
+    narrow; ordinary ``@avi`` / prose / identifiers remain release-blocking.
     """
     if is_vendor(name):
         return True
@@ -1088,12 +923,12 @@ def low_entropy_match_is_benign(name, data, match):
 
     # EI-21026798895920806: Apple's generated CodeResources is XML text, but its
     # <data> bodies are opaque SHA-1/SHA-256 digests. A random digest ending
-    # `/owner=` tripped the three-letter owner-name gate on all four 0.0.18 mac
+    # `/AVI=` tripped the three-letter owner-name gate on all four 0.0.18 mac
     # artifacts. Accept the OCCURRENCE only when all of these structural facts
     # hold: the file is exactly a code-signature resource manifest, the match is
     # wholly inside a syntactically valid base64 <data> element, and decoding
     # yields one of the two digest widths CodeResources records. An authored
-    # <string>owner</string>, key/path, or malformed/variable-width blob remains a
+    # <string>Avi</string>, key/path, or malformed/variable-width blob remains a
     # release-blocking hit.
     normalized_name = name.replace("\\", "/")
     if normalized_name.endswith("/_CodeSignature/CodeResources"):
@@ -1109,7 +944,7 @@ def low_entropy_match_is_benign(name, data, match):
             if len(decoded) in (20, 32):
                 return True
 
-    if token != b"owner":
+    if token != b"avi":
         return False
 
     # FFmpeg/AviSynth source-name regex embedded in the Markdown editor bundle.
@@ -1117,8 +952,8 @@ def low_entropy_match_is_benign(name, data, match):
     if prefix.startswith(b"/avi(?:file)?source"):
         return True
 
-    # Quoted owner in an actual media-extension table. Requiring two neighbouring
-    # video formats avoids treating an arbitrary identity string "owner" as safe.
+    # Quoted AVI in an actual media-extension table. Requiring two neighbouring
+    # video formats avoids treating an arbitrary identity string "avi" as safe.
     quoted = (
         start > 0 and end < len(data)
         and data[start - 1:start] in (b'"', b"'")
@@ -1253,9 +1088,9 @@ def phase_b_content(bundle, lits):
       • BROAD  — credentials + high-entropy identity, over the WHOLE bundle.
                  A hit in node_modules is real: only a build on this box could
                  have put it there.
-      • NARROW — low-entropy identity (a bare first name), over OUR TEXT SOURCE
-                 ONLY. Vendored dictionaries and binary/compressed bytes are full
-                 of chance three-letter matches that are not our owner.
+      • NARROW — low-entropy machine/cross-box aliases, over OUR TEXT SOURCE ONLY.
+                 Vendored dictionaries and binary/compressed bytes are full of
+                 chance short-token matches that are not machine identity.
     """
     rev = {v: k for k, v in lits.items()}
     benign = " ".join(f"-e {q(b)}" for b in BENIGN_ERE)
@@ -1389,7 +1224,7 @@ def phase_c_attribute(bundle, lits, wanted, per_rule=8):
     """Only on a failing build: name the offending files. Slow, and that is fine.
 
     Attribution MUST convict with the same regex phase B convicted with (lit_ere)
-    — never a raw substring. It used to search for the bare bytes `owner`, and the
+    — never a raw substring. It used to search for the bare bytes `Avi`, and the
     result was a gate that was RIGHT and USELESS at the same time: the verdict
     counted 10 real `\\bAvi\\b` hits, but the file list blamed 40 innocent vendor
     files (`AVIF` in sharp's image code, `KAviBO` inside a base64 sourcemap) and
@@ -1514,13 +1349,14 @@ def _rule_rx(name):
     sys.exit(2)
 
 
-#: FORBIDDEN_PATH rules the sidecar prune applies. Both are LEAK CLASSES that the
+#: FORBIDDEN_PATH rules the sidecar prune applies. These are LEAK CLASSES that the
 #: tar-exclude path already strips from source.tar.zst but which reach the sidecar
 #: by a different route, so both must be re-applied here.
 SIDECAR_PRUNE_RULES = (
     "internal-build-infra-docs",
     "pagefind-search-index",
     "papercusp-state-dir",
+    "vendored-private-key-fixtures",
 )
 
 
@@ -2203,8 +2039,20 @@ def _iter_archives(dirs):
         for dirpath, _dirnames, filenames in os.walk(root):
             for fn in filenames:
                 low = fn.lower()
-                if low.endswith(ARCHIVE_SUFFIXES):
-                    yield os.path.join(dirpath, fn)
+                if not low.endswith(ARCHIVE_SUFFIXES):
+                    continue
+                full = os.path.join(dirpath, fn)
+                # A SYMLINKED archive is never expanded (WI-10005667). Opening it resolves
+                # an absolute target against the HOST root, not the scanned tree: on a
+                # container rootfs (usr/share/man/man1/man.1.gz -> /etc/alternatives/...)
+                # the link dangled and failed the gate, and a target that happened to
+                # exist on the host would have been read as image content. Nothing is
+                # lost: the link's target STRING is scanned by the symlink-target phase
+                # (WI-39462), and a target that ships is a regular file this walk reaches
+                # in its own right, the same rule grep -r applies to a symlinked file.
+                if os.path.islink(full):
+                    continue
+                yield full
 
 
 #: An expanded archive is treated as an OS ROOTFS when it has `usr/` plus at least
@@ -2343,6 +2191,28 @@ def _expand_archive(path, dest):
     os.makedirs(dest, exist_ok=True)
     low = path.lower()
     try:
+        # dpkg names its plaintext alternatives state after the managed link,
+        # including a manpage's .gz suffix. Recursive artifact readers encounter
+        # these files inside runtime images. Materialize their actual text for
+        # the SAME content scanner, rather than skipping it or feeding it to
+        # gzip. Real gzip and opaque/corrupt inputs keep the normal refusal.
+        normalized = os.path.abspath(path).replace(os.sep, "/")
+        if low.endswith(".gz") and "/var/lib/dpkg/alternatives/" in normalized:
+            with open(path, "rb") as handle:
+                prefix = handle.read(2)
+                if prefix != b"\x1f\x8b":
+                    handle.seek(0)
+                    data = handle.read(4 * 1024 * 1024 + 1)
+                    if len(data) > 4 * 1024 * 1024:
+                        return False
+                    text = data.decode("utf-8")
+                    if (not text.startswith(("auto\n", "manual\n"))
+                            or any(ord(char) < 32 and char not in "\n\r\t" for char in text)
+                            or "\x7f" in text):
+                        return False
+                    with open(os.path.join(dest, "payload"), "wb") as output:
+                        output.write(data)
+                    return True
         if low.endswith(".zip") or low.endswith(".jar") or low.endswith(".asar"):
             with zipfile.ZipFile(path) as zf:
                 zf.extractall(dest)  # noqa: S202 — scanned then discarded, never executed
@@ -2569,8 +2439,8 @@ def scrub_text(paths):
 
     High- and low-entropy literals are rewritten with the SAME case-folded regex the
     gate hunts. Low-entropy occurrences first pass through
-    low_entropy_match_is_benign(), shared with every scan path, so owner media tokens
-    and opaque Vite fingerprints survive while authored ``owner`` identity does not.
+    low_entropy_match_is_benign(), shared with every scan path, so AVI media tokens
+    and opaque Vite fingerprints survive while authored ``avi`` identity does not.
     Explicit file arguments are accepted for stage-source-tree's already-proven text
     leakers; directory walks remain suffix-scoped and prune node_modules.
     """
@@ -2816,31 +2686,6 @@ def scan_dir(dirs):
 
     lits = identity_literals()
 
-    # ── THE QUERY SET MUST BE PROVEN TOO, NOT JUST THE CORPUS ──────────────────
-    # This function already refuses to call CLEAN on a missing directory, on 0 files,
-    # and on bytes nobody read — three hard-won guards, all asserting that the scan
-    # READ everything. None of them asserts that it KNEW WHAT TO LOOK FOR.
-    #
-    # That is the gap EI-20583328178472869 fell through: git `user.name` became the
-    # git-sync bot, so the owner's bare first name silently left `low` below, and this
-    # backstop then read every byte, matched nothing, and reported CLEAN — passing all
-    # three coverage guards on the way. Full corpus coverage, empty query.
-    #
-    # The name is the ONLY literal with no shape to fall back on (a home path or an
-    # address is still caught structurally), so its absence cannot be recovered
-    # downstream. Same principle as grep_l's "a scan that inspects nothing is
-    # indistinguishable from a scan that found nothing" — applied to the NEEDLES.
-    #
-    # NOTE this runs BEFORE the KNOWN_SENSITIVE_IDENTITIES merge on purpose: that
-    # denylist carries a github handle and VM logins but NO name entry, so merging
-    # first would make a blind scan look equipped.
-    if not has_owner_name_literal(lits):
-        print("\n    ✗ REFUSING TO CERTIFY — no owner-name literal resolved, so this\n"
-              "      backstop cannot hunt the owner's name and CLEAN would be meaningless.\n"
-              f"      Fix: export {OWNER_NAME_ENV}='<the owner's name>' for this build.\n",
-              file=sys.stderr)
-        return 2
-
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
     high = sorted({v for v in lits.values() if not is_low_entropy(v)})
     low = sorted({v for v in lits.values() if is_low_entropy(v)})
@@ -2909,7 +2754,7 @@ def scan_dir(dirs):
         compressed bytes it matches CONSTANTLY by chance, and such a hit carries no
         information. Measured on the 0.0.14 AppDir: 9 of 16 "leaks" were noise —
         glibc's own `libm.so.6` matched; the GitHub CLI matched a Go symbol in
-        `mimetype/internal/magic` naming the owner VIDEO FORMAT; and the seed's git
+        `mimetype/internal/magic` naming the AVI VIDEO FORMAT; and the seed's git
         bundles matched random bytes inside zlib-compressed packfile data while
         containing ZERO plaintext author lines. That noise very nearly cost days of
         work removing a real feature to fix nothing.
@@ -3050,10 +2895,11 @@ def scan_dir(dirs):
     #     if that is possible" resolves to "not yet" rather than "never".
     # Accepts ONLY those two literals, ONLY under a seed corestore path, and
     # NEVER inside an archive member (which we cannot re-read to prove the
-    # negative). Every other identity literal still hard-fails there — a home
-    # path, git email or git name in the seed is a real leak and is NOT covered
-    # by the owner's ruling. Measured on the 0.0.14 seed those three are at ZERO,
-    # so this keeps genuine power instead of blanket-excluding the directory,
+    # negative). Every other retained identity literal still hard-fails there —
+    # a home path, a different machine account/hostname, or a retained cross-box
+    # identifier is NOT covered by the acceptance. Owner name/email are legitimate
+    # release history under D-112 and are not in this literal set at all. This keeps
+    # genuine power instead of blanket-excluding the directory,
     # which is what the "never add an exclude" rule below exists to prevent.
     seed_ok = {lits[k] for k in ("build-hostname", "build-user-name") if k in lits}
     accepted = []
@@ -3105,14 +2951,16 @@ def scan_dir(dirs):
                 if n < 0:
                     unexplained.append(f"{lit} (unreadable)")
                     continue
-                covered = 0
+                # Not `covered`: that name holds the scan's file count, which the
+                # CLEAN line below reports (WI-10005961).
+                accounted = 0
                 for ok_str in AUTHORISED_PRODUCT_STRINGS:
                     if lit in ok_str:
                         c = _count_occurrences(f, ok_str)
                         if c > 0:
-                            covered += c * ok_str.count(lit)
-                if covered != n:
-                    unexplained.append(f"{lit} x{n - covered} unaccounted")
+                            accounted += c * ok_str.count(lit)
+                if accounted != n:
+                    unexplained.append(f"{lit} x{n - accounted} unaccounted")
             if unexplained:
                 kept.add(f)
             else:
@@ -3125,6 +2973,27 @@ def scan_dir(dirs):
             print(f"        {os.path.basename(f)}")
         print("      Every occurrence was counted and matched to an authorised string;\n"
               "      one unaccounted occurrence would still have FAILED the file.")
+
+    # ── Public upstream package files, by whole-file digest (WI-10005961) ──────
+    # See PUBLIC_UPSTREAM_FILE_SHA256 for WHY each entry ships. Exact bytes only:
+    # never an archive member ("!"), and an unreadable file keeps failing.
+    public_upstream = []
+    if files:
+        kept = set()
+        for f in sorted(files):
+            digest = None if "!" in f else _file_sha256(f)
+            if digest is not None and digest in PUBLIC_UPSTREAM_FILE_SHA256:
+                public_upstream.append((f, PUBLIC_UPSTREAM_FILE_SHA256[digest]))
+            else:
+                kept.add(f)
+        files = kept
+    if public_upstream:
+        print(f"\n    ⚠ ACCEPTED {len(public_upstream)} file(s) that are byte-exact public "
+              f"upstream package content (WI-10005961):")
+        for f, origin in public_upstream[:10]:
+            print(f"        {f}  [{origin}]")
+        print("      Whole-file SHA-256 matched a measured upstream digest; one changed byte\n"
+              "      would still have FAILED the file.")
 
     # Symlink-target findings are reported SEPARATELY and are deliberately NOT run
     # through the seed / authorised-product-string acceptance passes above: both
@@ -3160,7 +3029,6 @@ def scan_dir(dirs):
         print("    ✓ CLEAN — no sensitive/build-box identity or credential in the assembled bundle "
               f"({covered:,} file(s), {len(links):,} link target(s), "
               f"{len(archives)} archive(s) expanded and scanned)")
-        print_coverage_gaps(identity_coverage_gaps(lits))
         return 0
     if files:
         print(f"\n    ✗ ASSEMBLED BUNDLE CARRIES SENSITIVE IDENTITY — MUST NOT SHIP "
@@ -3607,6 +3475,36 @@ def _windows_server_runtime_violations(expanded):
     return []
 
 
+def _finished_sidecar_payload_violations(root, require_source_archive):
+    """Reject transient sidecar staging files in shipped containers.
+
+    A source archive is written as sidecar/source.tar.zst.tmp.* and atomically
+    renamed only after its audit succeeds. Packaging can race that writer unless
+    it holds the shared sidecar read lock; this finished-artifact check is the
+    independent fail-closed guard against ever publishing the temp member.
+    """
+    sidecars = []
+    for directory, dirnames, _filenames in os.walk(root):
+        if os.path.basename(directory).lower() == "sidecar":
+            sidecars.append(directory)
+
+    if not sidecars:
+        return (["required sidecar/source.tar.zst is missing (no sidecar payload found)"]
+                if require_source_archive else [])
+
+    violations = []
+    for sidecar in sidecars:
+        for directory, dirnames, filenames in os.walk(sidecar):
+            for name in sorted([*dirnames, *filenames]):
+                if ".tmp." in name.lower():
+                    member = os.path.relpath(os.path.join(directory, name), root)
+                    violations.append(f"temporary sidecar member: {member}")
+        if require_source_archive and not os.path.isfile(os.path.join(sidecar, "source.tar.zst")):
+            member = os.path.relpath(os.path.join(sidecar, "source.tar.zst"), root)
+            violations.append(f"required sidecar/source.tar.zst is missing: {member}")
+    return violations
+
+
 def scan_artifact(paths):
     """Identity-scan FINISHED installer artifacts — the bytes we actually publish.
 
@@ -3633,13 +3531,14 @@ def scan_artifact(paths):
     archive pass and acceptances — so there is no second scanner to drift.
     """
     require_windows_runtime = "--require-windows-server-runtime" in paths
+    require_source_archive = "--require-source-archive" in paths
     want_licenses = "--licenses" in paths
     # Absolute from here on: expanders run their tools with cwd=<scratch dir> (the
     # AppImage runtime MUST, it writes a fixed squashfs-root/), so a caller-relative
     # path resolved there is ENOENT — a manual `--scan-artifact bundle/appimage/X`
     # crashed with a traceback instead of a verdict (R-15, 2026-09-30).
     paths = [os.path.abspath(path) for path in paths
-             if path not in ("--require-windows-server-runtime", "--licenses")]
+             if path not in ("--require-windows-server-runtime", "--require-source-archive", "--licenses")]
     if not paths:
         print("AUDIT ERROR: --scan-artifact needs at least one artifact", file=sys.stderr)
         return 2
@@ -3670,6 +3569,7 @@ def scan_artifact(paths):
     with tempfile.TemporaryDirectory(prefix="papercusp-audit-artifact-") as tmp:
         dests = []
         uninspectable = []
+        sidecar_violations = []
         runtime_violations = []
         for idx, art in enumerate(paths):
             dest = os.path.join(tmp, f"art{idx}")
@@ -3694,6 +3594,10 @@ def scan_artifact(paths):
                     (art, violation)
                     for violation in _windows_server_runtime_violations(dest)
                 )
+            sidecar_violations.extend(
+                (art, violation)
+                for violation in _finished_sidecar_payload_violations(dest, require_source_archive)
+            )
             dests.append(dest)
 
         if uninspectable:
@@ -3706,6 +3610,12 @@ def scan_artifact(paths):
             print("  Either teach _expand_installer its format, or stop shipping it.",
                   file=sys.stderr)
             return 2
+
+        if sidecar_violations:
+            print("\n    ✗ INVALID PACKAGED SIDECAR — refusing to certify this artifact\n", file=sys.stderr)
+            for artifact, violation in sidecar_violations:
+                print(f"        {os.path.basename(artifact)}: {violation}", file=sys.stderr)
+            return 1
 
         if runtime_violations:
             for artifact, violation in runtime_violations:
@@ -3736,7 +3646,8 @@ def license_scan_trees(dests):
     kopia, a container rootfs, AI model weights). The policy lives in ONE place —
     scripts/check-licenses.mjs in the superproject — so this only hands it the trees
     this function's caller already expanded. Exit codes pass through: 1 = a denied or
-    unreviewed payload, 2 = not measured. Both stop the release.
+    unreviewed payload, 2 = not measured. The caller currently treats both as
+    REPORT-ONLY (owner ruling, plan D-002); they do not stop the release.
     """
     repo = os.environ.get("PAPERCUSP_REPO_ROOT") or os.path.realpath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
@@ -4061,7 +3972,7 @@ def source_leakers(argv):
     known-sensitive identity literal, for the stager to redact-overlay at tar time.
 
     Same scoping the gate convicts with, so the stager scrubs exactly the set that
-    would otherwise red the cut: low-entropy literals (a bare first name) are hunted
+    would otherwise red the cut: low-entropy machine/cross-box aliases are hunted
     in OUR source only; high-entropy literals everywhere EXCEPT node_modules — a
     vendored high-entropy hit is a delete-exclude class (build caches, handled by
     --tar-excludes), never something we rewrite inside a third-party package. Paths
@@ -4175,30 +4086,6 @@ def main():
     print(f"==> auditing {os.path.basename(bundle)}")
     print(f"    identity of this build box: {', '.join(sorted(lits)) or '(none resolved)'}")
 
-    # FAIL CLOSED when the owner's NAME cannot be resolved (EI-20583328178472869).
-    #
-    # This audit's whole value is that a CLEAN verdict is EVIDENCE. Without a name
-    # literal it cannot hunt the one identity class with no shape to fall back on, so
-    # "✓ CLEAN" degrades to "I looked for nothing" while still reading as proof to the
-    # human and to the publish script's `|| exit`. That is strictly worse than no gate:
-    # it turns an unverified bundle into an apparently-verified one.
-    #
-    # The KNOWN_SENSITIVE_IDENTITIES denylist below does NOT cover this: it carries the
-    # owner's github handle and some VM logins, but no name entry — so with git blind,
-    # nothing whatsoever hunts the bare first name that `needs_word_boundary` exists for.
-    #
-    # Exit 2 (cannot check), never 1 (found leaks): a caller must be able to tell a blind
-    # gate from a clean one.
-    if not has_owner_name_literal(lits):
-        print(
-            "    ✗ REFUSING TO CERTIFY — no owner-name literal resolved, so this scan\n"
-            "      cannot detect the owner's name in the bundle and a CLEAN verdict would\n"
-            "      be meaningless.\n"
-            f"      Cause: `git config user.name` is unset or belongs to an automation.\n"
-            f"      Fix:   export {OWNER_NAME_ENV}='<the owner's name>' for this build.",
-            file=sys.stderr,
-        )
-        return 2
     # Cross-box blind-spot backstop (WI-4419): hunt the KNOWN leaked identities on
     # EVERY build, not just the ones belonging to the box running this scan.
     lits.update(KNOWN_SENSITIVE_IDENTITIES)
@@ -4213,7 +4100,6 @@ def main():
 
     if not path_hits and not content_hits:
         print("    ✓ CLEAN — no forbidden paths, no build-box identity, no credentials")
-        print_coverage_gaps(identity_coverage_gaps(lits))
         return 0
 
     print(f"\n    ✗ THIS BUNDLE MUST NOT SHIP\n")

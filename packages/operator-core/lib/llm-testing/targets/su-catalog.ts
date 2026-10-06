@@ -814,12 +814,17 @@ export const SU_CATALOG: ReadonlyArray<SuCatalogEntry> = [
 
 /**
  * Anthropic tool-name constraint is `^[a-zA-Z0-9_-]{1,64}$` — colons are
- * illegal. Map the canonical colon form to an API-safe `__` form for the
- * request, and keep the reverse map so a model `tool_use` is recorded +
- * dispatched under its canonical name (what the asserts match on).
+ * illegal, and so are the dots in plugin names (`gitnexus.context`). Map EVERY
+ * illegal character to `__` for the request, and keep the reverse map so a
+ * model `tool_use` is recorded + dispatched under its canonical name (what the
+ * asserts match on). Mapping only `:` let a dotted name reach the API, which
+ * refused the whole request (400 `tools.N.custom.name`) and turned every
+ * scenario on that catalog into an inconclusive run.
  */
+export const ANTHROPIC_TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
 export function sanitizeToolName(canonical: string): string {
-  return canonical.replace(/:/g, '__');
+  return canonical.replace(/[^a-zA-Z0-9_-]/g, '__');
 }
 
 export interface BuiltCatalog {
@@ -835,6 +840,16 @@ export function buildCatalog(entries: ReadonlyArray<SuCatalogEntry> = SU_CATALOG
   const canonicalBySanitized = new Map<string, string>();
   for (const e of entries) {
     const sanitized = sanitizeToolName(e.name);
+    // Fail at construction, not as an API 400 mid-battery: an over-long name,
+    // or two canonical names that sanitize to the same wire name (which would
+    // silently dispatch one tool's calls as the other's), is a catalog bug.
+    if (!ANTHROPIC_TOOL_NAME_RE.test(sanitized)) {
+      throw new Error(`buildCatalog: tool "${e.name}" sanitizes to "${sanitized}", which violates ${ANTHROPIC_TOOL_NAME_RE}`);
+    }
+    const prior = canonicalBySanitized.get(sanitized);
+    if (prior !== undefined) {
+      throw new Error(`buildCatalog: tools "${prior}" and "${e.name}" both sanitize to "${sanitized}"`);
+    }
     canonicalBySanitized.set(sanitized, e.name);
     // Anthropic requires input_schema.type === 'object'.
     const schema =

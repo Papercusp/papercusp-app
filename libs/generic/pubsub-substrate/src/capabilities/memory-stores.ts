@@ -194,6 +194,11 @@ export class InMemoryThreadStore implements ThreadableStore {
       .map((p) => ({ ...p }));
   }
 
+  async getPostById(postId: number): Promise<ThreadPostRow | null> {
+    const post = this.posts.find((candidate) => candidate.id === postId);
+    return post ? { ...post } : null;
+  }
+
   async getThreadByParent(parent: ObjectRef): Promise<ThreadRow | null> {
     const id = this.byParent.get(`${parent.kind}:${parent.ref}`);
     return id ? { ...this.threads.get(id)! } : null;

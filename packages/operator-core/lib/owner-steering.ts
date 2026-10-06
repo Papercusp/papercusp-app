@@ -62,6 +62,7 @@ import type { Sql } from 'postgres';
 import { DEFAULT_MODEL_TIERS, type ModelTier } from './agent-config-constants';
 import type { FederatedPrimingConfig } from './scout/federated-priming';
 import { specModelId } from './fleet/model-tiers';
+import { unpricedCodexModel } from './llm-testing/codex-model-pricing';
 import { listHiveSettings, setHiveSetting, deleteHiveSetting } from './hive-settings-store';
 
 /** The `hive_settings` keys the steering controls occupy (C-1). */
@@ -582,6 +583,17 @@ export function steeringModelSpecDrift(
   const menu = committedTiers.length > 0 ? committedTiers : DEFAULT_MODEL_TIERS;
   const knownIds = new Set(menu.map((t) => modelIdKey(t.spec)));
   return pinned.filter((spec) => !knownIds.has(modelIdKey(spec)));
+}
+
+/**
+ * Each PINNED Codex spec (from `modelTiers` / `modelOverrides`) that has no
+ * `@papercusp/model-pricing` entry (WI-10004526). Such a model's usage is recorded
+ * unpriced, and `llmCall` refuses it outright — the WI-10004502 Scout outage
+ * (`gpt-5.4`). Advisory only, like the drift nudge above: it never rewrites the
+ * override, it makes the gap visible wherever steering is read. Pure.
+ */
+export function steeringUnpricedModelSpecs(s: OwnerSteering): string[] {
+  return steeringPinnedModelSpecs(s).filter((spec) => unpricedCodexModel(spec) !== null);
 }
 
 // ─── Throttle-knob accessors (P-006) ────────────────────────────────────────

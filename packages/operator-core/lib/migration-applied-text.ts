@@ -19,8 +19,8 @@
  * `8ff1ba2ee1caf89a…`.
  *
  * Note git's own blob id cannot be used for the match — it is SHA-1 over
- * `blob <len>\0<content>`, a different digest of different bytes — so each
- * candidate is re-hashed with sha256 over the raw blob.
+ * `blob <len>\0<content>`, a different digest — so each candidate's UTF-8 SQL
+ * text is re-hashed with sha256, matching the migration runner's text hash.
  *
  * ── Cost — measure it, do not assume it ───────────────────────────────────
  * This is bounded (at most `maxCommits` revisions of one path, stopping at the
@@ -29,9 +29,10 @@
  *
  * The assumption was "it runs only for files whose raw hashes already differ,
  * which is ~one". Measured on this tree 2026-08-03: **68** files carry
- * byte-level drift, because a long-lived dev DB accumulates every edit ever
- * made to an already-applied migration. Classifying all of them costs
- * **8.5–10s** — one `git log` plus up to N `git show` subprocesses per file.
+ * byte-level drift, because a long-lived dev DB accumulates edits to
+ * already-applied migrations. The original per-file `git log` plus repeated
+ * `git show` path cost **8.5–10s**. The current caller batches files by history
+ * depth and keeps a bounded cache of successful content-addressed results.
  *
  * That is why `checkMigrationDrift` gates this behind `classifyContent`
  * (default OFF). Boot, system-health and the watchdog all call it and none of
@@ -44,8 +45,9 @@
  * is today's behavior (report the drift), never "no difference found".
  */
 
-import { execFileSync } from 'node:child_process';
+import * as path from 'node:path';
 import { createHash } from 'node:crypto';
+import { runGitBatch, type GitBatchCommand } from './git-batch';
 
 /** The applied text, recovered from the git blob whose sha256 matches. */
 export interface AppliedMigrationTextOk {
@@ -63,22 +65,93 @@ export interface AppliedMigrationTextFail {
 
 export type AppliedMigrationTextResult = AppliedMigrationTextOk | AppliedMigrationTextFail;
 
+export interface AppliedMigrationTextRequest {
+  filename: string;
+  recordedSha256: string;
+}
+
 /** Revisions of a single migration file to walk before giving up. */
 const DEFAULT_MAX_COMMITS = 200;
 const DEFAULT_TIMEOUT_MS = 10_000;
 /** A migration file is text and small; this is headroom, not a target. */
 const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+/** Keep positive content-addressed recoveries useful without retaining an unbounded corpus. */
+const MAX_CACHE_BYTES = 8 * 1024 * 1024;
+
+interface CachedAppliedText {
+  text: string;
+  commit: string;
+  /** Zero-based position in `git log`; smaller maxCommits values must still miss. */
+  commitIndex: number;
+  estimatedBytes: number;
+}
+
+interface PendingRecovery {
+  key: string;
+  filename: string;
+  recordedSha256: string;
+  resultIndexes: number[];
+  resolved: boolean;
+}
+
+interface FileRecovery {
+  filename: string;
+  requests: PendingRecovery[];
+  commits: string[];
+  failure: string | null;
+}
+
+const recoveredTextCache = new Map<string, CachedAppliedText>();
+let recoveredTextCacheBytes = 0;
+
+function cacheKey(sqlDir: string, filename: string, recordedSha256: string): string {
+  return JSON.stringify([path.resolve(sqlDir), filename, recordedSha256]);
+}
+
+function getCachedAppliedText(key: string, maxCommits: number): AppliedMigrationTextOk | undefined {
+  const cached = recoveredTextCache.get(key);
+  if (!cached || cached.commitIndex >= maxCommits) return undefined;
+
+  // Map insertion order is the LRU order.
+  recoveredTextCache.delete(key);
+  recoveredTextCache.set(key, cached);
+  return { ok: true, text: cached.text, commit: cached.commit };
+}
+
+function cacheAppliedText(key: string, value: Omit<CachedAppliedText, 'estimatedBytes'>): void {
+  const estimatedBytes = value.text.length * 2 + key.length * 2 + value.commit.length * 2;
+  if (estimatedBytes > MAX_CACHE_BYTES) return;
+
+  const existing = recoveredTextCache.get(key);
+  if (existing) {
+    recoveredTextCacheBytes -= existing.estimatedBytes;
+    recoveredTextCache.delete(key);
+  }
+  const cached = { ...value, estimatedBytes };
+  recoveredTextCache.set(key, cached);
+  recoveredTextCacheBytes += estimatedBytes;
+
+  while (recoveredTextCacheBytes > MAX_CACHE_BYTES) {
+    const oldestKey = recoveredTextCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    const oldest = recoveredTextCache.get(oldestKey);
+    recoveredTextCache.delete(oldestKey);
+    if (oldest) recoveredTextCacheBytes -= oldest.estimatedBytes;
+  }
+}
 
 export interface RecoverAppliedTextOptions {
   maxCommits?: number;
   timeoutMs?: number;
+  /** Optional whole-recovery budget, used by the bounded drift classifier. */
+  budgetMs?: number;
 }
 
 /**
  * A migration filename must be a bare `*.sql` leaf. Rejecting anything else
  * keeps a path traversal, a directory component, or a leading `-` (which git
- * could read as a flag) out of the argv below. `execFileSync` already runs
- * without a shell, so this is defence in depth rather than the only guard.
+ * could read as a flag) out of the argv below. `runGitBatch` passes every
+ * value through argv, so this is defence in depth rather than the only guard.
  */
 function isSafeMigrationFilename(filename: string): boolean {
   return (
@@ -100,69 +173,170 @@ function isSafeMigrationFilename(filename: string): boolean {
  * `libs/papercusp` SUBMODULE, and `git -C <sqlDir>` correctly resolves that
  * submodule's own repository rather than the superproject.
  */
-export function recoverAppliedMigrationText(
+export async function recoverAppliedMigrationTexts(
+  sqlDir: string,
+  requests: readonly AppliedMigrationTextRequest[],
+  opts: RecoverAppliedTextOptions = {},
+): Promise<AppliedMigrationTextResult[]> {
+  if (requests.length === 0) return [];
+  const maxCommits = opts.maxCommits ?? DEFAULT_MAX_COMMITS;
+  const timeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const results: Array<AppliedMigrationTextResult | undefined> = Array(requests.length);
+  const pendingByKey = new Map<string, PendingRecovery>();
+  const batchStartedAt = Date.now();
+
+  for (const [resultIndex, request] of requests.entries()) {
+    if (!isSafeMigrationFilename(request.filename)) {
+      results[resultIndex] = {
+        ok: false,
+        reason: `unsafe migration filename: ${JSON.stringify(request.filename)}`,
+      };
+      continue;
+    }
+
+    const recordedSha256 = request.recordedSha256.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(recordedSha256)) {
+      results[resultIndex] = { ok: false, reason: 'recorded sha256 is not a 64-hex digest' };
+      continue;
+    }
+
+    const key = cacheKey(sqlDir, request.filename, recordedSha256);
+    const cached = getCachedAppliedText(key, maxCommits);
+    if (cached) {
+      results[resultIndex] = cached;
+      continue;
+    }
+
+    let pending = pendingByKey.get(key);
+    if (!pending) {
+      pending = {
+        key,
+        filename: request.filename,
+        recordedSha256,
+        resultIndexes: [],
+        resolved: false,
+      };
+      pendingByKey.set(key, pending);
+    }
+    pending.resultIndexes.push(resultIndex);
+  }
+
+  if (pendingByKey.size > 0) {
+    const filesByName = new Map<string, FileRecovery>();
+    for (const pending of pendingByKey.values()) {
+      let file = filesByName.get(pending.filename);
+      if (!file) {
+        file = { filename: pending.filename, requests: [], commits: [], failure: null };
+        filesByName.set(pending.filename, file);
+      }
+      file.requests.push(pending);
+    }
+    const files = [...filesByName.values()];
+
+    const runBatch = async (commands: readonly GitBatchCommand[]) => {
+      if (commands.length === 0) return [];
+      const remaining =
+        opts.budgetMs === undefined ? timeout : opts.budgetMs - (Date.now() - batchStartedAt);
+      if (remaining <= 0) return commands.map(() => null);
+      try {
+        return await runGitBatch(commands, {
+          timeoutMs: Math.min(timeout, remaining),
+          maxBuffer: MAX_BUFFER_BYTES,
+          label: 'migration-applied-text',
+        });
+      } catch {
+        // An incomplete batch is unknown, never an empty history or a match.
+        return commands.map(() => null);
+      }
+    };
+
+    const logCommands: GitBatchCommand[] = files.map((file) => ({
+      repo: sqlDir,
+      args: ['log', `--max-count=${maxCommits}`, '--pretty=%H', '--', `./${file.filename}`],
+    }));
+    const logResults = await runBatch(logCommands);
+    files.forEach((file, i) => {
+      const log = logResults[i];
+      if (!log) {
+        file.failure = 'git log batch did not complete before its timeout or recovery budget';
+      } else if (log.code !== 0) {
+        file.failure = `git log failed: ${log.stderr.trim() || `exit status ${log.code}`}`;
+      } else {
+        file.commits = log.stdout
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (file.commits.length === 0) file.failure = 'the file has no git history in this tree';
+      }
+    });
+
+    for (let commitIndex = 0; commitIndex < maxCommits; commitIndex += 1) {
+      const activeFiles = files.filter(
+        (file) =>
+          !file.failure &&
+          commitIndex < file.commits.length &&
+          file.requests.some((pending) => !pending.resolved),
+      );
+      if (activeFiles.length === 0) break;
+
+      // Walk the same history depth for all files in one helper, so one node-host
+      // fork handles each layer rather than one fork per migration.
+      const showCommands: GitBatchCommand[] = activeFiles.map((file) => ({
+        repo: sqlDir,
+        args: ['show', `${file.commits[commitIndex]}:./${file.filename}`],
+      }));
+      const showResults = await runBatch(showCommands);
+      activeFiles.forEach((file, i) => {
+        const show = showResults[i];
+        const unresolved = file.requests.filter((pending) => !pending.resolved);
+        if (!show) {
+          file.failure = 'git show batch did not complete before its timeout or recovery budget';
+          return;
+        }
+        if (show.code !== 0) {
+          // A migration may not exist at an intervening revision (for example,
+          // a rename); just as before, keep walking older commits.
+          return;
+        }
+
+        const blob = show.stdout;
+        const digest = createHash('sha256').update(blob, 'utf8').digest('hex');
+        for (const pending of unresolved) {
+          if (pending.recordedSha256 !== digest) continue;
+          const commit = file.commits[commitIndex]!;
+          const recovered = { ok: true as const, text: blob, commit };
+          cacheAppliedText(pending.key, { ...recovered, commitIndex });
+          pending.resolved = true;
+          for (const resultIndex of pending.resultIndexes) results[resultIndex] = recovered;
+        }
+      });
+    }
+
+    for (const file of files) {
+      for (const pending of file.requests) {
+        if (pending.resolved) continue;
+        const failure: AppliedMigrationTextFail = file.failure
+          ? { ok: false, reason: file.failure }
+          : {
+              ok: false,
+              reason:
+                `no blob in the last ${file.commits.length} commit(s) touching the file hashes to the recorded ` +
+                `sha256 — the applied bytes were likely never committed (edited within the git-sync window)`,
+            };
+        for (const resultIndex of pending.resultIndexes) results[resultIndex] = failure;
+      }
+    }
+  }
+
+  return results.map((result) => result ?? { ok: false, reason: 'migration history batch omitted a result' });
+}
+
+export async function recoverAppliedMigrationText(
   sqlDir: string,
   filename: string,
   recordedSha256: string,
   opts: RecoverAppliedTextOptions = {},
-): AppliedMigrationTextResult {
-  if (!isSafeMigrationFilename(filename)) {
-    return { ok: false, reason: `unsafe migration filename: ${JSON.stringify(filename)}` };
-  }
-  const recorded = recordedSha256.trim().toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(recorded)) {
-    return { ok: false, reason: 'recorded sha256 is not a 64-hex digest' };
-  }
-
-  const maxCommits = opts.maxCommits ?? DEFAULT_MAX_COMMITS;
-  const timeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
-  const git = (args: string[]): Buffer =>
-    execFileSync('git', ['-C', sqlDir, ...args], {
-      encoding: 'buffer',
-      timeout,
-      maxBuffer: MAX_BUFFER_BYTES,
-      // Inherit nothing, and never let git prompt for credentials.
-      stdio: ['ignore', 'pipe', 'ignore'],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    });
-
-  let commits: string[];
-  try {
-    commits = git(['log', `--max-count=${maxCommits}`, '--pretty=%H', '--', `./${filename}`])
-      .toString('utf8')
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-  } catch (err) {
-    // No repo (packaged install), git absent, timeout, or an unreadable tree.
-    return { ok: false, reason: `git log failed: ${(err as Error)?.message ?? 'unknown error'}` };
-  }
-
-  if (commits.length === 0) {
-    return { ok: false, reason: 'the file has no git history in this tree' };
-  }
-
-  for (const commit of commits) {
-    let blob: Buffer;
-    try {
-      blob = git(['show', `${commit}:./${filename}`]);
-    } catch {
-      // The path did not exist at that revision (a rename, or the commit that
-      // deleted it) — not an error, just not a candidate.
-      continue;
-    }
-    // Hash the raw bytes: the runner hashes the utf8 TEXT, and hashing the utf8
-    // bytes of that same text yields the identical digest.
-    if (createHash('sha256').update(blob).digest('hex') === recorded) {
-      return { ok: true, text: blob.toString('utf8'), commit };
-    }
-  }
-
-  return {
-    ok: false,
-    reason:
-      `no blob in the last ${commits.length} commit(s) touching the file hashes to the recorded ` +
-      `sha256 — the applied bytes were likely never committed (edited within the git-sync window)`,
-  };
+): Promise<AppliedMigrationTextResult> {
+  const [result] = await recoverAppliedMigrationTexts(sqlDir, [{ filename, recordedSha256 }], opts);
+  return result ?? { ok: false, reason: 'migration history batch omitted a result' };
 }

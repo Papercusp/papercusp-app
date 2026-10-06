@@ -50,6 +50,8 @@ export interface SidecarEmbedBatchOpts {
   model: string;
   kind: GemmaEmbedKind;
   texts: string[];
+  /** Evaluate inference directly rather than the sidecar's cache. */
+  bypassCache?: boolean;
   timeoutMs?: number;
   /** Optional caller lifetime. Aborting it closes the HTTP request immediately
    *  instead of leaving stale work in the shared sidecar FIFO until the
@@ -63,6 +65,7 @@ export interface SidecarEmbedResponse {
   dims: number;
   runtime: string;
   modelRev: string;
+  cache?: { hits: number; coalesced: number; inferred: number };
 }
 
 export const DEFAULT_SIDECAR_TIMEOUT_MS = 15_000;
@@ -171,7 +174,8 @@ export async function sidecarEmbedBatch(url: string, opts: SidecarEmbedBatchOpts
     const res = await fetchFn(`${url.replace(/\/$/, '')}/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: opts.model, kind: opts.kind, texts }),
+      body: JSON.stringify({ model: opts.model, kind: opts.kind, texts,
+        ...(opts.bypassCache === undefined ? {} : { bypassCache: opts.bypassCache }) }),
       signal: ctl.signal,
     });
     if (!res.ok) {
@@ -199,11 +203,12 @@ export interface SidecarFirstEmbedderOpts {
   /** Asymmetric task side — the sidecar owns the actual prompt text (D-004). */
   kind: GemmaEmbedKind;
   /** Lazy builder for the in-process embedder — used ONLY when no sidecar is
-   *  configured (url null), where it is the sole engine. When a url is set it
-   *  is never built: the sidecar is required (WI-4021, D-003 retired). */
+   *  configured (url null AND no ensure hook), where it is the sole engine.
+   *  When a url or an ensure hook is set it is never built: the sidecar is
+   *  required (WI-4021, D-003 retired). */
   fallback: () => EmbedFn | Promise<EmbedFn>;
   /** Sidecar base URL; defaults to resolveEmbedSidecarUrl(). null/absent ⇒
-   *  pure in-process. */
+   *  pure in-process, unless `ensure` is set (see there). */
   url?: string | null;
   /** TOTAL budget per embed across every attempt (default 15s). */
   timeoutMs?: number;
@@ -219,6 +224,61 @@ export interface SidecarFirstEmbedderOpts {
    *  refusing a bad request (deterministic 4xx) — distinct from 'down' so
    *  the log never claims the sidecar is unavailable when it isn't. */
   onTransition?: (state: 'down' | 'up' | 'rejected', detail: string) => void;
+  /** Re-establish the sidecar before each attempt. A sidecar this process
+   *  spawned may have exited after an idle period, and this hook re-launches
+   *  it on demand. It should be cheap when the sidecar is already running.
+   *  It runs inside the same total budget. If the budget runs out first, the
+   *  attempt fails and the ensure keeps running, so a later call finds the
+   *  sidecar warming or ready. Leave unset for a sidecar another process owns.
+   *  It may resolve to the sidecar's current base URL; the client then sends
+   *  this and later attempts there (see nextSidecarUrl).
+   *  With `url` null, the ensure hook is the ONLY source of the address: a
+   *  sidecar this process is configured to spawn that is not up yet (its first
+   *  start timed out). The client stays sidecar-only and fails the attempt
+   *  until an ensure reports a URL. It never loads the model in-process, which
+   *  would keep a second copy in this process for good (WI-10005932). */
+  ensure?: () => Promise<unknown>;
+}
+
+/** P-530: an ensure hook may resolve to the sidecar's CURRENT base URL. A
+ *  sidecar this process spawns on an ephemeral port comes back on a different
+ *  port after an idle exit, so the client must follow it. Anything that is not
+ *  a non-empty string keeps the URL it already has. */
+export function nextSidecarUrl(current: string, ensured: unknown): string;
+export function nextSidecarUrl(current: string | null, ensured: unknown): string | null;
+export function nextSidecarUrl(current: string | null, ensured: unknown): string | null {
+  return typeof ensured === 'string' && ensured.trim() ? ensured.trim().replace(/\/$/, '') : current;
+}
+
+/** Settle `work` within `ms`, or reject with `sidecar_ensure_timeout`. A late
+ *  settle of `work` is ignored. `Promise.race` subscribes to it, so a late
+ *  rejection is never an unhandled rejection. */
+export async function settleSidecarEnsureWithin<T>(
+  work: Promise<T>,
+  ms: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`sidecar_ensure_timeout: sidecar not ready within ${Math.max(0, Math.round(ms))}ms`)),
+          Math.max(0, ms),
+        );
+        if (signal) {
+          onAbort = () => reject(signal.reason ?? new Error('aborted'));
+          if (signal.aborted) onAbort();
+          else signal.addEventListener('abort', onAbort, { once: true });
+        }
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -239,7 +299,7 @@ export function buildSidecarFirstEmbedder(opts: SidecarFirstEmbedderOpts): Embed
     ((state: 'down' | 'up' | 'rejected', detail: string) =>
       console.warn(`[sidecar-embedder] ${opts.model}:${opts.kind} sidecar ${state}: ${detail}`));
 
-  if (!url) {
+  if (!url && !opts.ensure) {
     // No sidecar configured: the plain in-process embedder is the sole engine
     // (desktop installs, tests, bench rigs) with zero per-call overhead. A
     // failed build is not memoized — the next embed retries it.
@@ -264,6 +324,11 @@ export function buildSidecarFirstEmbedder(opts: SidecarFirstEmbedderOpts): Embed
   }
 
   let wasDown = false;
+  // P-530: shared by every call of this embedder, so once an ensure reports a
+  // new address (a re-launched sidecar on a fresh ephemeral port) later calls
+  // start there too.
+  // WI-10005932: null until an ensure reports where a spawned sidecar listens.
+  let currentUrl: string | null = url || null;
 
   return async (text: string, signal?: AbortSignal): Promise<number[]> => {
     const deadline = now() + timeoutMs;
@@ -272,11 +337,18 @@ export function buildSidecarFirstEmbedder(opts: SidecarFirstEmbedderOpts): Embed
       const remaining = deadline - now();
       if (remaining <= 0) break;
       try {
-        const res = await sidecarEmbedBatch(url, {
+        let left = remaining;
+        if (opts.ensure) {
+          currentUrl = nextSidecarUrl(currentUrl, await settleSidecarEnsureWithin(opts.ensure(), remaining, signal));
+          left = deadline - now();
+          if (left <= 0) throw new Error('sidecar_ensure_timeout: budget spent re-establishing the sidecar');
+        }
+        if (currentUrl === null) throw new Error('sidecar_not_ready: no sidecar address reported yet');
+        const res = await sidecarEmbedBatch(currentUrl, {
           model: opts.model,
           kind: opts.kind,
           texts: [text],
-          timeoutMs: remaining,
+          timeoutMs: left,
           signal,
           fetchFn: opts.fetchFn,
         });
@@ -319,12 +391,12 @@ export function buildSidecarFirstEmbedder(opts: SidecarFirstEmbedderOpts): Embed
     throw isNonRetryableSidecarError(lastErr)
       ? new Error(
           `sidecar_rejected_request: ${lastErr instanceof Error ? lastErr.message : String(lastErr)} ` +
-            `(${url}, ${opts.model}:${opts.kind}) — the sidecar rejected this request (non-retryable); ` +
+            `(${currentUrl}, ${opts.model}:${opts.kind}) — the sidecar rejected this request (non-retryable); ` +
             'check payload shape/size — this is not a downtime issue',
         )
       : new Error(
           `sidecar_required_unavailable: ${lastErr instanceof Error ? lastErr.message : String(lastErr)} ` +
-            `(${url}, ${opts.model}:${opts.kind}, budget ${timeoutMs}ms) — embedding requires the sidecar; ` +
+            `(${currentUrl}, ${opts.model}:${opts.kind}, budget ${timeoutMs}ms) — embedding requires the sidecar; ` +
             'writes are parked in the memory write journal and auto-recover when it returns',
         );
   };

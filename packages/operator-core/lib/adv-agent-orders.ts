@@ -33,6 +33,7 @@
  * as a legitimate empty. `carry.neverWritten` separates the third case.
  */
 import { activeWorkspaceId } from './workspace-registry';
+import { unsealRowsForOwner } from './personal-vault/shared-store-seal';
 import { buildControlAnchorState } from './agent-tools/coordination/control-anchor';
 import { buildInstructionPrecedenceTrace } from './instruction-lint';
 import { buildCarryBrief, detectTerminalCitedRefs } from './carry-brief';
@@ -433,6 +434,14 @@ export async function getAgentOrders(owner: string): Promise<AgentOrders> {
   let carry: AgentOrdersCarry | null = null;
   if (carryBrief) {
     const citedRefs = carryBrief.citedRefs ?? [];
+    // WI-10005548 / D-006: a checkpoint a restricted agent wrote is stored as a
+    // sealed stub. This panel is the owner's, and the owner is always a permitted
+    // reader, so it shows the text. (The agent's own brief keeps the stub.)
+    const heldItems = await unsealRowsForOwner(carryBrief.heldItems ?? [], {
+      workspaceId,
+      textOf: (h) => h.checkpoint,
+      withText: (h, checkpoint) => ({ ...h, checkpoint }),
+    });
     carry = {
       mode: (controlState?.carry as 'warm' | 'cold' | undefined) ?? null,
       generation: null,
@@ -443,7 +452,7 @@ export async function getAgentOrders(owner: string): Promise<AgentOrders> {
       // We read successfully and there is no note — that is a FINDING about the
       // agent (it never checkpointed its loop), not a gap in our data.
       neverWritten: !carryBrief.loop?.carryNote,
-      heldItems: (carryBrief.heldItems ?? []).map((h) => ({
+      heldItems: heldItems.map((h) => ({
         id: h.id,
         title: h.title ?? null,
         checkpoint: h.checkpoint ?? null,

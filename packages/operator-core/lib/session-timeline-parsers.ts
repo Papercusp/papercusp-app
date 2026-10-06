@@ -119,6 +119,10 @@ export function createCodexTimelineParser(): TimelineLineParser {
       const pt = typeof p.type === 'string' ? p.type : '';
 
       if (rec.type === 'event_msg') {
+        if ((pt === 'task_complete' || pt === 'turn_completed') && typeof p.turn_id === 'string' && p.turn_id && ts && Number.isFinite(Date.parse(ts))) {
+          return [{ kind: 'result', outcome: p.error || p.is_error === true || p.status === 'failed' ? 'failed' : 'succeeded', text: typeof p.last_agent_message === 'string' ? p.last_agent_message : '', ts }];
+        }
+        if (pt === 'turn_aborted') return [{ kind: 'result', outcome: 'failed', text: 'The agent turn was interrupted.', ts }];
         if (pt === 'user_message' && typeof p.message === 'string') {
           return visibleMessage('user', p.message, ts);
         }
@@ -278,6 +282,8 @@ export function createOmpTimelineParser(): TimelineLineParser {
         const status = typeof errorStatus === 'number' ? ` (${errorStatus})` : '';
         out.push({ kind: 'status', text: `[error]${status} ${errorMessage}`, ts });
       }
+      if (role === 'assistant' && stopReason === 'stop' && ts && Number.isFinite(Date.parse(ts))) out.push({ kind: 'result', outcome: 'succeeded', text: '', ts });
+      if (role === 'assistant' && stopReason === 'error') out.push({ kind: 'result', outcome: 'failed', text: '', ts });
       return out;
     },
     flush(): AgentTimelineEntry[] {

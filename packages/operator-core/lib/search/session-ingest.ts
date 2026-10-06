@@ -44,7 +44,7 @@
 
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { open, readdir, stat } from 'node:fs/promises';
+import { open, readFile, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, basename } from 'node:path';
 import type { Sql } from 'postgres';
@@ -100,7 +100,8 @@ const MAX_COUNT_BACKFILL_BYTES_PER_TICK = 50 * 1024 * 1024;
 const MAX_PART_BACKFILL_FILES_PER_TICK = 25;
 const MAX_PART_BACKFILL_BYTES_PER_TICK = 50 * 1024 * 1024;
 /** Per-turn text cap (chars). */
-const TEXT_CAP = 8000;
+export const SESSION_TURN_TEXT_CAP = 8000;
+const TEXT_CAP = SESSION_TURN_TEXT_CAP;
 /** Skip micro-turns ("ok", "y") — noise for recall. */
 const MIN_TEXT_LEN = 3;
 /**
@@ -231,7 +232,39 @@ export interface IngestStats {
   /** First few error messages of the sweep — diagnosis without log spam. */
   errorSample?: string[];
   durationMs: number;
+  /** Exclusive wall-time buckets, including await/scheduling time, not CPU time.
+   * `other` covers sweep bookkeeping outside the measured operations. */
+  phaseMs?: Record<'setup' | 'history' | 'discovery' | 'state' | 'metadata' | 'decode' | 'writes' | 'metadataBackfill' | 'chats' | 'other', number>;
+  /** One receipt per nonempty adapter/repair operation, not per file or row.
+   * Wall spans include database and scheduling waits; they do not measure CPU.
+   * Counts/spans and input hashes identify the operation without retaining
+   * session IDs, owner IDs or SQL. */
+  metadataBackfills?: Array<{
+    sourceKind: SourceKind;
+    operation: 'sessionOwners' | 'partOwners' | 'codexAdvSessions';
+    requested: number;
+    /** Owner repair: SHA-256 of JSON.stringify([sessionIds, owners]) in the
+     * exact UNNEST parameter order. Captured before execution, even on failure;
+     * a fingerprint supports comparison but cannot reconstruct the values. */
+    inputSha256?: string;
+    updated?: number;
+    startedAtMs: number;
+    durationMs: number;
+    status: 'completed' | 'failed';
+  }>;
   skipped?: string;
+}
+
+/** Keep slow, empty sweeps observable as well as useful or failed sweeps. */
+export function sessionIngestLogLine(stats: IngestStats): string | null {
+  const parts = stats.partsInserted ?? 0;
+  if (stats.skipped || (stats.turnsInserted === 0 && parts === 0 && stats.errors === 0 && stats.durationMs < 5000)) {
+    return null;
+  }
+  return `[session-ingest] +${stats.turnsInserted} turn(s) +${parts} part(s) from ${stats.filesIngested} file(s) ` +
+    `+ ${stats.chatsIngested} chat turn(s) (${stats.filesScanned} scanned, ${stats.errors} error(s), ${stats.durationMs}ms)` +
+    (stats.phaseMs ? ` phases=${JSON.stringify(stats.phaseMs)}` : '') +
+    (stats.metadataBackfills?.length ? ` metadataBackfills=${JSON.stringify(stats.metadataBackfills)}` : '');
 }
 
 /** Injected boilerplate prefixes that would pollute recall — not real speech. */
@@ -252,14 +285,19 @@ const BOILERPLATE_PREFIXES = [
  *  bound locally for use inside this file's own parseClaudeLine, below. */
 export { CLAUDE_OWNER_DIALOG_RESULT_PREFIXES };
 
-/** Exported for the archive fall-through reader (session-archive-read.ts,
- *  P-009): archived bytes are VERBATIM, so anything surfaced to agents must
- *  pass the SAME cap+redaction the index applies at ingest. */
-export function cleanTurnText(raw: string): string | null {
+/** Exported for the archive reader (session-archive-read.ts, P-009): archived
+ *  bytes are VERBATIM, so anything surfaced to agents must retain the same
+ *  secret redaction as the index, with an opt-in to recover past its cap. */
+export interface TurnTextParseOptions {
+  /** Return all parsed turn text while retaining the normal secret redaction. */
+  fullSource?: boolean;
+}
+
+export function cleanTurnText(raw: string, options: TurnTextParseOptions = {}): string | null {
   const t = raw.trim();
   if (t.length < MIN_TEXT_LEN) return null;
   for (const p of BOILERPLATE_PREFIXES) if (t.startsWith(p)) return null;
-  return redactSelfIdentifyingSecrets(t.slice(0, TEXT_CAP));
+  return redactSelfIdentifyingSecrets(options.fullSource ? t : t.slice(0, TEXT_CAP));
 }
 
 /**
@@ -315,7 +353,10 @@ export function promptOriginHash(raw: string): string {
  * human-authored prompt variant belongs in the recall index: other queued
  * commands are client plumbing and must keep the existing skip behavior.
  */
-function parseClaudeQueuedCommand(obj: Record<string, unknown>): ParsedTurn | null {
+function parseClaudeQueuedCommand(
+  obj: Record<string, unknown>,
+  options: TurnTextParseOptions = {},
+): ParsedTurn | null {
   if (obj.type !== 'attachment') return null;
   const attachment = obj.attachment as {
     type?: unknown;
@@ -333,7 +374,7 @@ function parseClaudeQueuedCommand(obj: Record<string, unknown>): ParsedTurn | nu
   ) {
     return null;
   }
-  const text = cleanTurnText(attachment.prompt);
+  const text = cleanTurnText(attachment.prompt, options);
   if (!text) return null;
   return {
     ts: parseTs(attachment.timestamp) ?? parseTs(obj.timestamp),
@@ -356,14 +397,14 @@ function parseClaudeQueuedCommand(obj: Record<string, unknown>): ParsedTurn | nu
 
 /** Claude Code line → turn. Lines include normal user/assistant messages and
  * the narrowly gated human `attachment.type='queued_command'` prompt shape. */
-export function parseClaudeLine(line: string): ParsedTurn | null {
+export function parseClaudeLine(line: string, options: TurnTextParseOptions = {}): ParsedTurn | null {
   let obj: Record<string, unknown>;
   try {
     obj = JSON.parse(line) as Record<string, unknown>;
   } catch {
     return null;
   }
-  const queuedCommand = parseClaudeQueuedCommand(obj);
+  const queuedCommand = parseClaudeQueuedCommand(obj, options);
   if (queuedCommand) return queuedCommand;
   if (obj.type !== 'user' && obj.type !== 'assistant') return null;
   const message = obj.message as { role?: string; content?: unknown; stop_reason?: unknown } | undefined;
@@ -387,7 +428,7 @@ export function parseClaudeLine(line: string): ParsedTurn | null {
       break;
     }
   }
-  const text = cleanTurnText(rawText);
+  const text = cleanTurnText(rawText, options);
   if (!text) return null;
   const messageId = typeof obj.uuid === 'string' ? obj.uuid : null;
   const parentMessageId = typeof obj.parentUuid === 'string' ? obj.parentUuid : null;
@@ -519,7 +560,7 @@ export function parseClaudeParts(line: string): ParsedPart[] {
 }
 
 /** OMP line → turn. Lines: {type:'message', timestamp, message:{role, content:[{type:'text',text}]}}. */
-export function parseOmpLine(line: string): ParsedTurn | null {
+export function parseOmpLine(line: string, options: TurnTextParseOptions = {}): ParsedTurn | null {
   let obj: Record<string, unknown>;
   try {
     obj = JSON.parse(line) as Record<string, unknown>;
@@ -536,7 +577,8 @@ export function parseOmpLine(line: string): ParsedTurn | null {
   if (!message) return null;
   const speaker = message.role === 'user' ? 'user' : message.role === 'assistant' ? 'assistant' : null;
   if (!speaker) return null;
-  const text = cleanTurnText(textFromContent(message.content));
+  const rawText = textFromContent(message.content);
+  const text = cleanTurnText(rawText, options);
   if (!text) return null;
   const messageId = typeof obj.id === 'string' ? obj.id : null;
   const parentMessageId = typeof obj.parentId === 'string' ? obj.parentId : null;
@@ -559,11 +601,12 @@ export function parseOmpLine(line: string): ParsedTurn | null {
     messageId,
     parentMessageId,
     responseDisposition,
+    promptHash: speaker === 'user' ? promptOriginHash(rawText) : null,
   };
 }
 
 /** Codex rollout line → turn. Lines: {timestamp, type:'response_item', payload:{type:'message', role, content:[{type:'input_text'|'output_text', text}]}}. */
-export function parseCodexLine(line: string): ParsedTurn | null {
+export function parseCodexLine(line: string, options: TurnTextParseOptions = {}): ParsedTurn | null {
   let obj: Record<string, unknown>;
   try {
     obj = JSON.parse(line) as Record<string, unknown>;
@@ -577,13 +620,13 @@ export function parseCodexLine(line: string): ParsedTurn | null {
     typeof obj.text === 'string' &&
     (typeof obj.ts === 'number' || typeof obj.ts === 'string')
   ) {
-    const text = cleanTurnText(obj.text);
+    const text = cleanTurnText(obj.text, options);
     if (!text) return null;
     const rawTs = obj.ts;
     const ts = typeof rawTs === 'number' && rawTs < 10_000_000_000
       ? new Date(rawTs * 1000)
       : parseTs(rawTs);
-    return { ts, speaker: 'user', text, sessionId: obj.session_id };
+    return { ts, speaker: 'user', text, sessionId: obj.session_id, promptHash: promptOriginHash(obj.text) };
   }
   if (obj.type !== 'response_item') return null;
   const payload = obj.payload as {
@@ -597,7 +640,8 @@ export function parseCodexLine(line: string): ParsedTurn | null {
   if (!payload || payload.type !== 'message') return null;
   const speaker = payload.role === 'user' ? 'user' : payload.role === 'assistant' ? 'assistant' : null;
   if (!speaker) return null; // 'developer'/'system' = injected instructions, skip
-  const text = cleanTurnText(textFromContent(payload.content));
+  const rawText = textFromContent(payload.content);
+  const text = cleanTurnText(rawText, options);
   if (!text) return null;
   const metadata =
     payload.internal_chat_message_metadata_passthrough != null &&
@@ -623,6 +667,8 @@ export function parseCodexLine(line: string): ParsedTurn | null {
     messageId: typeof payload.id === 'string' ? payload.id : null,
     parentMessageId: null,
     responseDisposition,
+    // Correlate the hook's original prompt, before display cleanup/truncation.
+    promptHash: speaker === 'user' ? promptOriginHash(rawText) : null,
   };
 }
 
@@ -1197,6 +1243,11 @@ interface TurnRow {
  */
 export const UNENROLLED_ORIGIN_VERDICT = 'unenrolled-origin';
 
+/** Durable identity of a successful exact hook-receipt correlation. Unlike
+ * the old owner-typed text residual, this survives receipt expiry and lets
+ * the classifier backfill preserve positive evidence without guessing. */
+export const HOOK_AUTHENTICATED_PROMPT_ORIGIN = 'hook-authenticated-prompt';
+
 /**
  * Source kinds whose `speaker='user'` rows may arrive without an enrollment
  * envelope, and whose uncorrelated `owner-typed` residual is therefore
@@ -1257,7 +1308,7 @@ export function correlatePromptOriginStamps(rows: TurnRow[], stamps: PromptOrigi
     }
     if (best < 0) continue;
     used.add(best);
-    row.turn_origin = null;
+    row.turn_origin = HOOK_AUTHENTICATED_PROMPT_ORIGIN;
     row.turn_origin_verdict = 'owner-typed';
     matched += 1;
   }
@@ -1286,6 +1337,54 @@ async function listCandidateFiles(
     }
   }
   return out;
+}
+
+/** A managed fork can leave a seed copy with the source session's native id in
+ * the fork owner's directory, including after the original file is archived.
+ * Resolve path owners from psu's first-write-wins birth index before decoding
+ * or repairing indexed turns. An absent index preserves the path fallback. */
+async function indexedClaudeOwnersForCandidates(
+  adapter: FileAdapter,
+  candidates: ReadonlyArray<{ path: string }>,
+): Promise<Map<string, string>> {
+  const sessionIds = new Set<string>();
+  for (const candidate of candidates) {
+    const { sessionId, owner } = adapter.meta(candidate.path);
+    if (owner) sessionIds.add(sessionId);
+  }
+  const resolved = new Map<string, string>();
+  const ids = [...sessionIds];
+  for (let start = 0; start < ids.length; start += 32) {
+    await Promise.all(ids.slice(start, start + 32).map(async (sessionId) => {
+      const indexed = await indexedClaudeOwner(sessionId);
+      if (indexed) resolved.set(sessionId, indexed);
+    }));
+  }
+  return resolved;
+}
+
+const indexedClaudeOwnerCache = pinModuleState<Map<string, { owner: string | null; at: number }>>(
+  '@papercusp/operator-core.indexedClaudeOwners', () => new Map(),
+);
+
+async function indexedClaudeOwner(sessionId: string): Promise<string | null> {
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sessionId)) return null;
+  const cached = indexedClaudeOwnerCache.get(sessionId);
+  if (cached && (cached.owner || Date.now() - cached.at < 60_000)) return cached.owner;
+  let owner: string | null = null;
+  try {
+    const indexed = JSON.parse(await readFile(
+      join(HOME, '.papercusp', 'psu-session-owners', sessionId), 'utf8',
+    )) as { ownerId?: unknown };
+    owner = typeof indexed.ownerId === 'string' && indexed.ownerId ? indexed.ownerId : null;
+  } catch { /* older/untracked sessions have no birth index */ }
+  indexedClaudeOwnerCache.delete(sessionId);
+  indexedClaudeOwnerCache.set(sessionId, { owner, at: Date.now() });
+  if (indexedClaudeOwnerCache.size > 20_000) {
+    const oldest = indexedClaudeOwnerCache.keys().next().value;
+    if (oldest) indexedClaudeOwnerCache.delete(oldest);
+  }
+  return owner;
 }
 
 /** Read complete lines from `filePath` starting at `offset`, bounded. Returns
@@ -1542,11 +1641,12 @@ export function stampTurnProvenance(row: TurnRow): void {
   row.turn_origin_verdict = verdict;
 }
 
-async function insertTurns(sql: Sql, rows: TurnRow[]): Promise<number> {
+export async function insertTurns(sql: Sql, rows: TurnRow[]): Promise<number> {
   if (!rows.length) return 0;
   for (const row of rows) stampTurnProvenance(row);
   const candidates = rows.filter((row) => row.prompt_hash && row.ts && row.turn_origin_verdict === UNENROLLED_ORIGIN_VERDICT);
   if (candidates.length) {
+    const sourceKinds = [...new Set(candidates.map((row) => row.source_kind))];
     const sessionIds = [...new Set(candidates.map((row) => row.session_id))];
     const promptHashes = [...new Set(candidates.map((row) => row.prompt_hash!))];
     const times = candidates.map((row) => Date.parse(row.ts!)).filter(Number.isFinite);
@@ -1557,7 +1657,7 @@ async function insertTurns(sql: Sql, rows: TurnRow[]): Promise<number> {
         SELECT source_kind, session_id, prompt_hash, submitted_at
           FROM harness_shared.session_prompt_origin_stamps
          WHERE workspace_id = ${activeWorkspaceId()}
-           AND source_kind = 'claude'
+           AND source_kind = ANY(${sql.array(sourceKinds)}::text[])
            AND session_id = ANY(${sql.array(sessionIds)}::text[])
            AND prompt_hash = ANY(${sql.array(promptHashes)}::text[])
            AND submitted_at BETWEEN ${from} AND ${to}
@@ -1732,11 +1832,13 @@ async function backfillSessionOwners(
   sql: Sql,
   sourceKind: SourceKind,
   ownersBySession: Map<string, string>,
-): Promise<void> {
-  if (!ownersBySession.size) return;
+  onInput: (inputSha256: string) => void,
+): Promise<number> {
+  if (!ownersBySession.size) return 0;
   const sessionIds = [...ownersBySession.keys()];
   const owners = sessionIds.map((sessionId) => ownersBySession.get(sessionId)!);
-  await sql`
+  onInput(createHash('sha256').update(JSON.stringify([sessionIds, owners])).digest('hex'));
+  const repaired = await sql`
     UPDATE harness_shared.session_turns AS turns
        SET owner = resolved.owner
       FROM UNNEST(${sql.array(sessionIds)}::text[], ${sql.array(owners)}::text[])
@@ -1746,6 +1848,32 @@ async function backfillSessionOwners(
        AND turns.session_id = resolved.session_id
        AND turns.owner IS DISTINCT FROM resolved.owner
   `;
+  return repaired.count ?? 0;
+}
+
+/** Repair faithful-part owner stamps only for Claude ids whose candidate path
+ * conflicts with the launcher's birth index. Most sessions never enter this
+ * UPDATE, preserving the existing no-op cost for ordinary sweeps. */
+async function backfillClaudePartOwners(
+  sql: Sql,
+  ownersBySession: Map<string, string>,
+  onInput: (inputSha256: string) => void,
+): Promise<number> {
+  if (!ownersBySession.size) return 0;
+  const sessionIds = [...ownersBySession.keys()];
+  const owners = sessionIds.map((sessionId) => ownersBySession.get(sessionId)!);
+  onInput(createHash('sha256').update(JSON.stringify([sessionIds, owners])).digest('hex'));
+  const repaired = await sql`
+    UPDATE harness_shared.session_turn_parts AS parts
+       SET owner = resolved.owner
+      FROM UNNEST(${sql.array(sessionIds)}::text[], ${sql.array(owners)}::text[])
+           AS resolved(session_id, owner)
+     WHERE parts.workspace_id = 'default'
+       AND parts.source_kind = 'claude'
+       AND parts.session_id = resolved.session_id
+       AND parts.owner IS DISTINCT FROM resolved.owner
+  `;
+  return repaired.count ?? 0;
 }
 
 /**
@@ -1884,10 +2012,13 @@ export async function backfillTurnProvenanceOnce(
       turn_idx: number;
       speaker: string;
       head: string | null;
+      turn_origin: string | null;
+      turn_origin_verdict: string | null;
     }>
   >`
     SELECT workspace_id, source_kind, session_id, turn_idx, speaker,
-           left(text, ${CLASSIFY_HEAD_CHARS}) AS head
+           left(text, ${CLASSIFY_HEAD_CHARS}) AS head,
+           turn_origin, turn_origin_verdict
       FROM harness_shared.session_turns
      WHERE turn_origin_classifier_version IS NULL
         OR turn_origin_classifier_version < ${MACHINE_SURFACE_CATALOGUE_VERSION}
@@ -1928,6 +2059,20 @@ export async function backfillTurnProvenanceOnce(
       text: r.head ?? '',
     } as TurnRow;
     stampTurnProvenance(staged);
+
+    // Only the insert-time exact hook correlation writes this identity.
+    // Preserve that positive evidence after ephemeral receipt expiry, but
+    // let every current machine/envelope/speaker verdict win. Untagged old
+    // owner-typed residuals still downgrade, so this cannot retroactively
+    // authenticate historical rows from clean text alone.
+    if (
+      staged.turn_origin_verdict === UNENROLLED_ORIGIN_VERDICT &&
+      r.turn_origin_verdict === 'owner-typed' &&
+      r.turn_origin === HOOK_AUTHENTICATED_PROMPT_ORIGIN
+    ) {
+      staged.turn_origin = HOOK_AUTHENTICATED_PROMPT_ORIGIN;
+      staged.turn_origin_verdict = 'owner-typed';
+    }
 
     wsIds.push(r.workspace_id);
     kinds.push(r.source_kind);
@@ -2225,6 +2370,9 @@ async function backfillFileParts(
 ): Promise<boolean> {
   if (budget.files <= 0 || budget.bytes <= 0 || !adapter.parseParts) return false;
   const meta = adapter.meta(row.file_path);
+  const owner = adapter.sourceKind === 'claude'
+    ? await indexedClaudeOwner(meta.sessionId) ?? meta.owner
+    : meta.owner;
   let sourceSize: number;
   try {
     const source = await stat(row.file_path);
@@ -2270,7 +2418,7 @@ async function backfillFileParts(
     await insertParts(sql, partRowsFrom(result.parts, {
       sourceKind: adapter.sourceKind,
       sessionId: row.session_id ?? meta.sessionId,
-      owner: meta.owner,
+      owner,
       partCount,
     }));
 
@@ -2471,12 +2619,15 @@ export async function ingestFileNow(
   const { sql } = getOrgPg();
   let inserted = 0;
   const meta = adapter.meta(filePath);
+  const owner = opts.owner ?? (adapter.sourceKind === 'claude'
+    ? await indexedClaudeOwner(meta.sessionId) ?? meta.owner
+    : meta.owner);
   if (adapter.sourceKind === 'codex') {
     // Run this even when the file has no new bytes: read-time freshness is
     // also the repair path for a paused session whose process interval still
     // overlaps the caller's query window.
     try {
-      const codexMeta = codexAdvSessionMetadata(filePath, opts.sessionId);
+      const codexMeta = codexAdvSessionMetadata(filePath, opts.sessionId?.trim() || meta.sessionId);
       if (codexMeta) await backfillCodexAdvSessions(sql, new Map([[codexMeta.advSessionId, codexMeta]]));
     } catch (err) {
       process.stderr.write(`[session-ingest] codex adv metadata backfill skipped: ${(err as Error).message}\n`);
@@ -2498,7 +2649,7 @@ export async function ingestFileNow(
       session_id: t.sessionId ?? opts.sessionId ?? meta.sessionId,
       turn_idx: st.turn_count + i,
       ts: t.ts ? t.ts.toISOString() : null,
-      owner: opts.owner ?? meta.owner,
+      owner,
       harness_slug: null,
       cwd: t.cwd ?? null,
       speaker: t.speaker,
@@ -2512,7 +2663,7 @@ export async function ingestFileNow(
       await insertParts(sql, partRowsFrom(parts, {
         sourceKind: adapter.sourceKind,
         sessionId: opts.sessionId ?? meta.sessionId,
-        owner: opts.owner ?? meta.owner,
+        owner,
         partCount: st.part_count,
       }));
     } catch (err) {
@@ -2710,18 +2861,59 @@ export function getLastSessionIngestStats(): IngestStats | null {
 
 /** One bounded ingest sweep across every adapter. Never throws. */
 export async function runSessionIngestOnce(): Promise<IngestStats> {
-  const started = Date.now();
+  const started = performance.now();
   const stats: IngestStats = {
     filesScanned: 0, filesIngested: 0, turnsInserted: 0, chatsIngested: 0, countBackfillFiles: 0,
     partsBackfillFiles: 0,
     errors: 0, durationMs: 0,
   };
   if (__sweep.running) return { ...stats, skipped: 'already_running' };
+  const phaseMs: NonNullable<IngestStats['phaseMs']> = {
+    setup: 0, history: 0, discovery: 0, state: 0, metadata: 0,
+    decode: 0, writes: 0, metadataBackfill: 0, chats: 0, other: 0,
+  };
+  // Measure at existing operation boundaries: no new timer or per-file async hop.
+  // finally retains the cost of failed work without changing its error contract.
+  async function measure<T>(phase: keyof typeof phaseMs, work: () => Promise<T>): Promise<T> {
+    const began = performance.now();
+    try { return await work(); }
+    finally { phaseMs[phase] += performance.now() - began; }
+  }
+  async function measureMetadataBackfill(
+    sourceKind: SourceKind,
+    operation: NonNullable<IngestStats['metadataBackfills']>[number]['operation'],
+    requested: number,
+    work: (receipt: NonNullable<IngestStats['metadataBackfills']>[number]) => Promise<number>,
+  ): Promise<void> {
+    if (!requested) return;
+    const startedAtMs = Date.now();
+    const began = performance.now();
+    const receipt: NonNullable<IngestStats['metadataBackfills']>[number] = {
+      sourceKind, operation, requested, startedAtMs, durationMs: 0, status: 'failed',
+    };
+    try {
+      receipt.updated = await measure('metadataBackfill', () => work(receipt));
+      receipt.status = 'completed';
+    } catch (err) {
+      // Metadata repair must not discard successful tail/offset progress or
+      // prevent the other repair. Report it and retry the still-needed repair
+      // on the next ordinary sweep, including unchanged transcripts.
+      stats.errors += 1;
+      if ((stats.errorSample ??= []).length < 3) {
+        const label = operation === 'sessionOwners' ? 'owner backfill'
+          : operation === 'partOwners' ? 'part owner backfill' : 'adv metadata';
+        stats.errorSample.push(`${sourceKind} ${label}: ${(err as Error).message.slice(0, 200)}`);
+      }
+    } finally {
+      receipt.durationMs = Math.round((performance.now() - began) * 10) / 10;
+      (stats.metadataBackfills ??= []).push(receipt);
+    }
+  }
   __sweep.running = true;
   try {
     let enabled = true;
     try {
-      enabled = await getFlag(FLAGS.SESSION_SEARCH, 'system:session-ingest');
+      enabled = await measure('setup', () => getFlag(FLAGS.SESSION_SEARCH, 'system:session-ingest'));
     } catch {
       /* fail-open: flag default is ON */
     }
@@ -2729,13 +2921,13 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
 
     const { sql } = getOrgPg();
     try {
-      stats.partsBackfillFiles = await backfillHistoricalParts(sql);
+      stats.partsBackfillFiles = await measure('history', () => backfillHistoricalParts(sql));
     } catch (err) {
       stats.errors += 1;
       console.warn(`[session-ingest] historical parts backfill skipped (non-fatal): ${(err as Error).message}`);
     }
     try {
-      stats.countBackfillFiles = await backfillHistoricalCounts(sql);
+      stats.countBackfillFiles = await measure('history', () => backfillHistoricalCounts(sql));
     } catch (err) {
       stats.errors += 1;
       console.warn(`[session-ingest] historical count backfill skipped (non-fatal): ${(err as Error).message}`);
@@ -2760,7 +2952,7 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
     // sweep, never the ingest (same contract as writeUsageRollup).
     let substitutionRows: SubstitutionRow[] = [];
     try {
-      substitutionRows = await getSubstitutionRows(activeWorkspaceId());
+      substitutionRows = await measure('setup', () => getSubstitutionRows(activeWorkspaceId()));
     } catch (err) {
       stats.errors += 1;
       console.warn(`[session-ingest] substitution registry read failed (buckets skipped): ${(err as Error).message}`);
@@ -2770,7 +2962,7 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
       if (budget.turns <= 0) break;
       let candidates: Array<{ path: string; size: number; mtimeMs: number }> = [];
       try {
-        candidates = await listCandidateFiles(adapter, sinceMs);
+        candidates = await measure('discovery', () => listCandidateFiles(adapter, sinceMs));
       } catch (err) {
         stats.errors += 1;
         console.warn(`[session-ingest] ${adapter.sourceKind} enumerate failed: ${(err as Error).message}`);
@@ -2781,7 +2973,7 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
       // Bulk-load this adapter's ingest state ONCE — a per-file SELECT at ~23k
       // candidate files was minutes of serial round-trips (perf anti-pattern
       // A1: per-item queries in a loop; observed live 2026-07-05).
-      const stateRows = await sql<Array<{
+      const stateRows = await measure('state', () => sql<Array<{
         file_path: string; byte_offset: string | number; turn_count: number; part_count: number | null;
         prompt_count: number; response_count: number; tool_call_count: number; last_inference_id: string | null;
         counts_backfill_offset: string | number; counts_backfill_last_inference_id: string | null;
@@ -2791,7 +2983,7 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
                counts_backfill_offset, counts_backfill_last_inference_id, counts_backfilled_at
           FROM harness_shared.session_ingest_state
          WHERE source_kind = ${adapter.sourceKind}
-      `;
+      `);
       const stateMap = new Map<string, IngestState>(
         stateRows.map((r) => [r.file_path, {
           byte_offset: Number(r.byte_offset),
@@ -2808,6 +3000,22 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
       );
       let filesThisAdapter = 0;
       const ownerBackfill = new Map<string, string>();
+      const indexedClaudeOwners = adapter.sourceKind === 'claude'
+        ? await measure('state', () => indexedClaudeOwnersForCandidates(adapter, candidates))
+        : new Map<string, string>();
+      const conflictingClaudePartOwners = new Map<string, string>();
+      if (adapter.sourceKind === 'claude') {
+        for (const candidate of candidates) {
+          const { sessionId, owner } = adapter.meta(candidate.path);
+          const indexed = indexedClaudeOwners.get(sessionId);
+          // The turn budget can stop the ingest loop before it visits every
+          // candidate. Build the repair map from the complete discovery set so
+          // a partial sweep cannot revert owners repaired by a full sweep.
+          const selected = indexed ?? owner;
+          if (selected) ownerBackfill.set(sessionId, selected);
+          if (owner && indexed && owner !== indexed) conflictingClaudePartOwners.set(sessionId, indexed);
+        }
+      }
       const codexMetadataBackfill = new Map<number, CodexAdvSessionMetadata>();
       let ompOwnersByAdvSession = new Map<number, string>();
       if (adapter.sourceKind === 'omp') {
@@ -2815,7 +3023,7 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
           .map((candidate) => adapter.meta(candidate.path).advSessionId)
           .filter((id): id is number => id != null);
         try {
-          ompOwnersByAdvSession = await loadOmpSessionOwners(sql, managedIds);
+          ompOwnersByAdvSession = await measure('state', () => loadOmpSessionOwners(sql, managedIds));
         } catch (err) {
           stats.errors += 1;
           if ((stats.errorSample ??= []).length < 3) {
@@ -2827,31 +3035,38 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
         if (budget.turns <= 0 || filesThisAdapter >= MAX_FILES_PER_TICK) break;
         stats.filesScanned += 1;
         try {
+          const metadataStarted = performance.now();
           const st = stateMap.get(cand.path) ?? { ...EMPTY_STATE };
           const meta = adapter.meta(cand.path);
-          const owner = meta.owner ?? (
+          const owner = indexedClaudeOwners.get(meta.sessionId) ?? meta.owner ?? (
             adapter.sourceKind === 'omp' && meta.advSessionId != null
               ? ompOwnersByAdvSession.get(meta.advSessionId) ?? null
               : null
           );
-          if (owner) ownerBackfill.set(meta.sessionId, owner);
+          if (owner && adapter.sourceKind !== 'claude') ownerBackfill.set(meta.sessionId, owner);
           // Collect metadata BEFORE the byte-offset short circuit. A paused
           // session commonly has no late transcript turn, but its already
           // indexed rollout still carries the native id/config needed to repair
           // the adv row used by interval-overlap readers.
           if (adapter.sourceKind === 'codex') {
-            const codexMeta = codexAdvSessionMetadata(cand.path);
-            if (codexMeta && !codexMetadataBackfill.has(codexMeta.advSessionId)) {
-              codexMetadataBackfill.set(codexMeta.advSessionId, codexMeta);
+            const home = codexAdvSessionHome(cand.path);
+            // Candidates are newest first; only the first valid rollout's
+            // config can contribute to this adv row. Avoid reading configs
+            // whose metadata would be discarded. This map lasts one sweep,
+            // so later sweeps and single-file repairs still read fresh config.
+            if (home && !codexMetadataBackfill.has(home.advSessionId)) {
+              const codexMeta = codexAdvSessionMetadata(cand.path, meta.sessionId);
+              if (codexMeta) codexMetadataBackfill.set(home.advSessionId, codexMeta);
             }
           }
+          phaseMs.metadata += performance.now() - metadataStarted;
           if (cand.size <= st.byte_offset) continue; // nothing new
           filesThisAdapter += 1;
           const { turns, parts, newOffset, promptCount, responseCount, toolCallCount, lastInferenceId, usage } =
-            await readNewLines(
+            await measure('decode', () => readNewLines(
               cand.path, st.byte_offset, adapter.parseLine, adapter.classifyLine, st.last_inference_id, adapter.usageOf,
               substitutionRows, adapter.parseParts,
-            );
+            ));
           if (newOffset === st.byte_offset) continue;
           const rows: TurnRow[] = turns.map((t, i) => ({
             workspace_id: 'default',
@@ -2866,23 +3081,23 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
             text: t.text,
             prompt_hash: t.promptHash ?? null,
           }));
-          stats.turnsInserted += await insertTurns(sql, rows);
+          stats.turnsInserted += await measure('writes', () => insertTurns(sql, rows));
           // P-001 faithful parts — best-effort by contract (see insertParts):
           // a parts failure costs the render pane its fidelity for this window,
           // never the recall index and never the offset.
           try {
-            stats.partsInserted = (stats.partsInserted ?? 0) + await insertParts(sql, partRowsFrom(parts, {
+            stats.partsInserted = (stats.partsInserted ?? 0) + await measure('writes', () => insertParts(sql, partRowsFrom(parts, {
               sourceKind: adapter.sourceKind,
               sessionId: meta.sessionId,
               owner,
               partCount: st.part_count,
-            }));
+            })));
           } catch (err) {
             if ((stats.errorSample ??= []).length < 3) {
               stats.errorSample.push(`parts ${meta.sessionId}: ${(err as Error).message.slice(0, 160)}`);
             }
           }
-          await writeState(sql, adapter.sourceKind, cand.path, {
+          await measure('writes', () => writeState(sql, adapter.sourceKind, cand.path, {
             byte_offset: newOffset,
             turn_count: st.turn_count + turns.length,
             part_count: st.part_count + parts.length,
@@ -2895,11 +3110,11 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
             counts_backfilled_at: new Date().toISOString(),
             sessionId: meta.sessionId,
             mtimeMs: cand.mtimeMs,
-          });
+          }));
           // P-002 — deliberately AFTER writeState and independently caught: the
           // substitution metric must never fail, retry, or wedge an ingest.
           try {
-            await writeUsageRollup(sql, adapter.sourceKind, meta.sessionId, usage);
+            await measure('writes', () => writeUsageRollup(sql, adapter.sourceKind, meta.sessionId, usage));
           } catch (err) {
             if ((stats.errorSample ??= []).length < 3) {
               stats.errorSample.push(`usage-rollup ${meta.sessionId}: ${(err as Error).message.slice(0, 160)}`);
@@ -2916,37 +3131,43 @@ export async function runSessionIngestOnce(): Promise<IngestStats> {
           // turn_count on a transient failure would restart turn_idx at 0 and
           // silently drop every subsequent turn to ON CONFLICT DO NOTHING.
           try {
-            await sql`
+            await measure('writes', () => sql`
               UPDATE harness_shared.session_ingest_state
                  SET last_error = ${(err as Error).message.slice(0, 300)}, updated_at = now()
                WHERE source_kind = ${adapter.sourceKind} AND file_path = ${cand.path}
-            `;
+            `);
           } catch { /* bookkeeping best-effort */ }
         }
       }
-      await backfillSessionOwners(sql, adapter.sourceKind, ownerBackfill);
+      await measureMetadataBackfill(adapter.sourceKind, 'sessionOwners', ownerBackfill.size,
+        (receipt) => backfillSessionOwners(sql, adapter.sourceKind, ownerBackfill,
+          (inputSha256) => { receipt.inputSha256 = inputSha256; }));
+      if (adapter.sourceKind === 'claude') {
+        await measureMetadataBackfill(adapter.sourceKind, 'partOwners', conflictingClaudePartOwners.size,
+          (receipt) => backfillClaudePartOwners(sql, conflictingClaudePartOwners,
+            (inputSha256) => { receipt.inputSha256 = inputSha256; }));
+      }
       if (adapter.sourceKind === 'codex') {
-        try {
-          await backfillCodexAdvSessions(sql, codexMetadataBackfill);
-        } catch (err) {
-          stats.errors += 1;
-          if ((stats.errorSample ??= []).length < 3) {
-            stats.errorSample.push(`codex adv metadata: ${(err as Error).message.slice(0, 200)}`);
-          }
-        }
+        await measureMetadataBackfill(adapter.sourceKind, 'codexAdvSessions', codexMetadataBackfill.size,
+          () => backfillCodexAdvSessions(sql, codexMetadataBackfill));
       }
     }
 
     if (budget.turns > 0) {
       try {
-        stats.chatsIngested = await syncAgentChats(sql, budget);
+        stats.chatsIngested = await measure('chats', () => syncAgentChats(sql, budget));
       } catch (err) {
         stats.errors += 1;
         console.warn(`[session-ingest] agent_chat sync failed: ${(err as Error).message}`);
       }
     }
 
-    stats.durationMs = Date.now() - started;
+    const durationMs = performance.now() - started;
+    phaseMs.other = Math.max(0, durationMs - Object.values(phaseMs).reduce((sum, ms) => sum + ms, 0));
+    stats.phaseMs = Object.fromEntries(
+      Object.entries(phaseMs).map(([phase, ms]) => [phase, Math.round(ms * 10) / 10]),
+    ) as typeof phaseMs;
+    stats.durationMs = Math.round(durationMs);
     __sweep.last = stats;
     return stats;
   } finally {

@@ -21,7 +21,6 @@
  * Part of papercusp-systems-abstraction-2026-05-29 (P-021).
  */
 
-import { operatorMemoryStoreDir } from './memory-store-dir';
 import {
   configureMemory,
   registerMemoryBackend,
@@ -37,8 +36,13 @@ import {
 } from '@papercusp/memory';
 import { readCredentials } from '../credentials';
 import { loadVoicePrefs } from '../voice-prefs';
-import { buildSidecarAwareEmbedder } from './embed-sidecar-wiring';
-import { embedAdmission, headersToRecord, EmbedBudgetExhaustedError } from './embed-admission';
+import {
+  buildDeferredSidecarAwareEmbedder,
+  hasLocalEmbedEngineOverride,
+} from './embed-sidecar-wiring';
+import { buildEmbedderForMode as buildEmbedderForModeShared } from './worker-embedder';
+import { buildOpenAiEmbedderCore, resolveOpenAiKey } from './openai-embedder';
+import type { OpenAiEmbedderOpts } from './openai-embedder';
 import { clearEmbedExhaustionAlertIfActive, maybeEscalateEmbedExhaustion } from './embed-exhaustion-alert';
 import { getHarnessAdminUrl } from '../embedded-pg-discovery';
 import { buildLearningInstructions } from './learning';
@@ -48,46 +52,9 @@ import {
 } from './backend-selection';
 import { getSessionExtractionLlm } from './session-extraction-llm';
 
-/* NOTE: there is deliberately NO shared EMBEDDER_DIM constant here any more.
- * One number standing for "the width every mode emits" was true only by
- * coincidence, and it silently became a LIE the moment two modes differed
- * (D-005). Each branch below now reports its OWN declared targetDims — the
- * shape the harrier branch already used. */
-const OPENAI_EMBEDDER_MODEL = 'text-embedding-3-small';
-const TRANSFORMERS_PACKAGE = '@huggingface/transformers';
+export { resolveOpenAiKey };
 
-// ── Embedder retry budget (watchdog-embed-resilience-and-dedup-2026-06-17 P-001) ──
-// A sustained org-wide TPM 429 on text-embedding-3-small (1M TPM) hard-failed
-// memory:remember/search FLEET-WIDE on 2026-06-17. We ride SHORT spikes out on the
-// SAME embedder (no fallback) with a header-aware, JITTERED, budget-capped retry.
-//
-// ⚠ DEADLINE COUPLING (mem0-timeout-fix-2026-06-24): the budget MUST stay UNDER the
-// memory-tool deadline (`memoryToolTimeoutMs`, op-deadline.ts — default 10_000ms).
-// HISTORY: this budget was once ~50s ("just under the 60s transport cap"), but B1
-// (infra-fail-fast-build-integrity-2026-06-19) later bounded every memory backend
-// call at 10s WITHOUT re-coupling this budget — so a throttled embed rode its own 50s
-// retry well past the 10s deadline and surfaced as `memory_timeout` (an opaque hang +
-// the agent's "mem0 timed out, retrying…" narration) instead of a fast, clean
-// degraded envelope. Keep `EMBED_TOTAL_BUDGET_MS` < the deadline so a 429/slow embed
-// FAILS FAST and CLEAN. A guard test (configure.test.ts) asserts this invariant.
-// SAFE for a multi-fact memory:remember because mem0 embeds facts in PARALLEL
-// (Promise.all, mem0-client.ts embedBatch) — a call's embed phase is bounded by the
-// SLOWEST single embed, not the sum.
-// THUNDERING HERD: full jitter on the exponential path AND a widened jitter on the
-// reset-header path (EMBED_RESET_JITTER_MS) so many clients waiting on the SAME reset
-// window don't all re-fire at the exact same moment.
-export const EMBED_MAX_ATTEMPTS = 12; // 1 try + 11 retries (the WALL-CLOCK budget stops it first)
-// Overall wall-clock budget for ONE embed call (all attempts + backoff sleeps + the
-// actual fetch time). Must be < memoryToolTimeoutMs (10_000) with headroom for the PG
-// op + overhead so the embed gives up BEFORE the outer deadline fires. Env-tunable.
-export const EMBED_TOTAL_BUDGET_MS = Number(process.env.PAPERCUSP_EMBED_TOTAL_BUDGET_MS) || 7_000;
-// Per-attempt fetch abort: a single OpenAI embed RTT is ~200ms; a call exceeding this
-// is a network/connection STALL, so abort it (a hung fetch must not eat the budget).
-export const EMBED_FETCH_TIMEOUT_MS = Number(process.env.PAPERCUSP_EMBED_FETCH_TIMEOUT_MS) || 5_000;
-const EMBED_MAX_TOTAL_WAIT_MS = EMBED_TOTAL_BUDGET_MS; // cumulative-backoff budget (≤ wall budget)
-const EMBED_BACKOFF_BASE_MS = 500;
-const EMBED_BACKOFF_CAP_MS = 3_000; // per-attempt ceiling (exponential / no-hint path)
-const EMBED_RESET_JITTER_MS = 2_500; // spread post-reset retries across this window (anti-herd)
+const TRANSFORMERS_PACKAGE = '@huggingface/transformers';
 
 // ── Single-key exhaustion fallback (EI-3381) ─────────────────────────────────────────────────
 // The org's shared OpenAI embed key/quota can be drained by load OUTSIDE this process (another
@@ -172,254 +139,36 @@ export function __resetOpenAiEmbedCooldownForTest(): void {
 // with a TypeError that a bare catch turned into `false` — see that module's
 // header for what that cost {@link localAvailable} and the mem0 client.
 
-/** Resolve the OpenAI key: operator credentials first, env fallback.
- *  Exported as a seam for the `resolveEmbedder` cascade tests (GAP 4). */
-export async function resolveOpenAiKey(): Promise<string> {
-  let key = process.env.OPENAI_API_KEY ?? '';
-  try {
-    const creds = await readCredentials();
-    if (creds.openai_api_key) key = creds.openai_api_key;
-  } catch {
-    /* PG creds unavailable — fall back to env */
-  }
-  return key;
-}
+export {
+  EMBED_FETCH_TIMEOUT_MS,
+  EMBED_MAX_ATTEMPTS,
+  EMBED_TOTAL_BUDGET_MS,
+  nextEmbedBackoffMs,
+  parseOpenAiDurationMs,
+  retryDelayFromHeaders,
+} from './openai-embedder';
+export type { OpenAiEmbedderOpts };
 
-/** Tunable seams for the embedder retry loop (watchdog-embed-resilience-and-dedup
- *  -2026-06-17 P-001). Production passes none (defaults); tests inject a no-op
- *  `sleep` + deterministic `rand` to assert attempt counts without real delays. */
-export interface OpenAiEmbedderOpts {
-  maxAttempts?: number;
-  maxTotalWaitMs?: number;
-  baseMs?: number;
-  capMs?: number;
-  sleep?: (ms: number) => Promise<void>;
-  rand?: () => number;
-}
-
-const realSleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
-
-/** "2m59.56s" / "1.5s" / "6ms" / "150" (bare = seconds) → ms; null if unparseable.
- *  OpenAI's `x-ratelimit-reset-tokens`/`-requests` use the compact-duration form;
- *  `Retry-After` uses bare integer seconds. */
-export function parseOpenAiDurationMs(v: string | null | undefined): number | null {
-  if (!v) return null;
-  const s = v.trim();
-  if (s === '') return null;
-  if (/^\d+(\.\d+)?$/.test(s)) return Math.round(Number(s) * 1000); // bare seconds
-  const re = /(\d+(?:\.\d+)?)\s*(ms|s|m|h)/g;
-  let total = 0;
-  let matched = false;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(s)) !== null) {
-    matched = true;
-    const n = Number(m[1]);
-    total += m[2] === 'ms' ? n : m[2] === 's' ? n * 1000 : m[2] === 'm' ? n * 60_000 : n * 3_600_000;
-  }
-  return matched ? Math.round(total) : null;
-}
-
-/** The server's own "try again in N" hint from a 429/5xx response, in ms, or null.
- *  Prefers `Retry-After` (HTTP secs or an HTTP-date), then OpenAI's
- *  `x-ratelimit-reset-tokens`/`-requests` reset windows. */
-export function retryDelayFromHeaders(headers: Headers): number | null {
-  const retryAfter = headers.get('retry-after');
-  if (retryAfter) {
-    const secs = Number(retryAfter);
-    if (Number.isFinite(secs)) return Math.max(0, Math.round(secs * 1000));
-    const dateMs = Date.parse(retryAfter);
-    if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
-  }
-  return (
-    parseOpenAiDurationMs(headers.get('x-ratelimit-reset-tokens')) ??
-    parseOpenAiDurationMs(headers.get('x-ratelimit-reset-requests'))
-  );
-}
-
-/** Next backoff wait (ms) for `attempt` (0-based), honoring a server hint when
- *  present, with FULL jitter, clamped to the per-attempt cap AND the remaining
- *  total-wait budget. Returns null when the budget is spent → stop retrying. */
-export function nextEmbedBackoffMs(
-  attempt: number,
-  serverHintMs: number | null,
-  waitedMs: number,
-  opts: Pick<OpenAiEmbedderOpts, 'maxTotalWaitMs' | 'baseMs' | 'capMs' | 'rand'> = {},
-): number | null {
-  const maxTotal = opts.maxTotalWaitMs ?? EMBED_MAX_TOTAL_WAIT_MS;
-  const base = opts.baseMs ?? EMBED_BACKOFF_BASE_MS;
-  const cap = opts.capMs ?? EMBED_BACKOFF_CAP_MS;
-  const rand = opts.rand ?? Math.random;
-  const remaining = maxTotal - waitedMs;
-  if (remaining <= 0) return null;
-  let wait: number;
-  if (serverHintMs != null && serverHintMs > 0) {
-    // FAIL-FAST (mem0-timeout-fix-2026-06-24): when the server's reset window is LONGER
-    // than our remaining budget, the reset will NOT arrive before we have to give up — so
-    // sleeping the whole budget just to fail anyway is pure latency. Give up NOW (clean,
-    // fast degraded envelope) rather than burning the budget on a doomed wait. This is the
-    // case that hit memory:* during the org-wide 1M-TPM drain (reset ~15m ≫ 7s budget).
-    if (serverHintMs > remaining) return null;
-    // Otherwise honor the server's reset window + a WIDENED jitter so many clients waiting
-    // on the SAME reset don't all re-fire at once (anti-thundering-herd).
-    wait = serverHintMs + Math.floor(rand() * EMBED_RESET_JITTER_MS);
-  } else {
-    // Full jitter over an exponential window, with a small floor.
-    const window = Math.min(cap, base * 2 ** attempt);
-    wait = Math.max(base, Math.floor(rand() * window));
-  }
-  return Math.min(wait, remaining);
-}
-
-/** OpenAI text-embedding-3-small, reduced to 768 dims via the API's
- * `dimensions` parameter (was 384 — raised to track the prose column width so
- * this mode stays PROSE-ELIGIBLE alongside gemma; see `EMBEDDER_DIM_SPECS.openai`).
- * The reduction is server-side trained MRL + renormalization, not a hand-rolled
- * prefix, so any width is genuinely supported here.
- *
- * Resilient: a TRANSIENT failure (429 rate-limit, 5xx, network/fetch error) is
- * retried with HEADER-AWARE, jittered exponential backoff before giving up. A
- * burst of writes (knowledge-pack seeding fires concurrent batches) — or a
- * sustained org-wide TPM saturation (text-embedding-3-small, 1M TPM, which
- * hard-failed memory:remember/search FLEET-WIDE on 2026-06-17) — no longer fails
- * the moment OpenAI rate-limits. We ride it out on the SAME embedder (no
- * fallback): up to `maxAttempts` (8) across a capped ~30s budget, honoring the
- * server's own Retry-After / x-ratelimit-reset-tokens hint when present, with
- * full jitter to de-sync the post-unjam herd. A NON-retryable client error (401
- * bad/expired key, 400, 403) still fails fast — retrying won't help, fix the key.
- * (watchdog-embed-resilience-and-dedup-2026-06-17 P-001.)
- *
- * One 429 is NOT transient: `insufficient_quota` (the OpenAI account is out of credit
- * / hit its billing cap) fails identically on every retry regardless of load, so it is
- * classified as a HARD stop (fail fast, distinct `openai_embed_quota_exhausted` tag, no
- * shared-bucket penalty) rather than a rate-limit. (mem0-embed-insufficient-quota-classification.) */
 export function buildOpenAiEmbedder(apiKey: string, opts: OpenAiEmbedderOpts = {}): EmbedFn {
-  const maxAttempts = opts.maxAttempts ?? EMBED_MAX_ATTEMPTS;
-  const sleep = opts.sleep ?? realSleep;
-  const totalBudgetMs = opts.maxTotalWaitMs ?? EMBED_TOTAL_BUDGET_MS;
-  return async (text: string): Promise<number[]> => {
-    let lastErr: Error | null = null;
-    let waitedMs = 0;
-    const adm = embedAdmission();
-    // Wall-clock deadline for the WHOLE embed (fetch time + backoff sleeps), so a stalled
-    // fetch or a long retry chain can't overshoot the memory-tool deadline (B1, 10s) and
-    // surface as `memory_timeout` (mem0-timeout-fix-2026-06-24). The per-attempt fetch is
-    // additionally aborted at EMBED_FETCH_TIMEOUT_MS (or the remaining budget, whichever is
-    // smaller) so one hung connection never eats the budget.
-    const embedDeadlineAt = Date.now() + totalBudgetMs;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const remainingBudgetMs = embedDeadlineAt - Date.now();
-      if (remainingBudgetMs <= 0) break; // budget spent → surface the failure now
-      let serverHintMs: number | null = null;
-      // MEMORY lane of the shared embed-TPM admission governor
-      // (watchdog-and-exposed-systems-improvement-2026-06-18 P-002). Production recall must
-      // succeed, so this lane PASSES THROUGH on a denial (acquire never returns null here) — it
-      // only PACES against the shared window + feeds it headers/429s so the high-volume bench
-      // path yields to memory rather than starving it. The retry loop below is the 429 backstop.
-      let slot;
-      try {
-        slot = await adm.acquire(text, 'memory');
-      } catch (e) {
-        // EI-7596: our OWN daily spend cap (embed-admission's EmbedBudgetExhaustedError) tripped.
-        // This is a SUSTAINED-exhaustion shape identical in kind to insufficient_quota — it will
-        // fail IDENTICALLY on every embed until the UTC day rolls over, no retry helps — but unlike
-        // insufficient_quota the local (BGE-ONNX) embedder is fully able to serve the request (it
-        // costs nothing against the OpenAI budget the cap protects). Before this fix, the cap threw
-        // HERE, before the retry loop's own markOpenAiEmbedFailure() calls (hard-billing-stop /
-        // retry-budget-exhausted, below) were ever reached, so the EI-3381 local-fallback cooldown
-        // never engaged and EVERY memory:remember/update hard-failed for the rest of the day even
-        // though a working local embedder was available (EI-7596: reported blocking memory writes
-        // fleet-wide during a heavy-load day). Mark the cooldown now so the NEXT resolveEmbedder()
-        // call (a fresh memory:remember/search) routes to local instead of re-hitting this same cap.
-        if (e instanceof EmbedBudgetExhaustedError) markOpenAiEmbedFailure();
-        throw e;
-      }
-      try {
-        const r = await fetch('https://api.openai.com/v1/embeddings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-          body: JSON.stringify({
-            model: OPENAI_EMBEDDER_MODEL,
-            input: text,
-            dimensions: EMBEDDER_DIM_SPECS.openai.targetDims,
-          }),
-          // Abort a STALLED connection so it can't consume the whole embed budget; bound by
-          // the remaining wall-clock budget so the abort never pushes past the deadline.
-          signal: AbortSignal.timeout(Math.max(1, Math.min(EMBED_FETCH_TIMEOUT_MS, remainingBudgetMs))),
-        });
-        adm.recordResponse(headersToRecord(r.headers)); // learn the live limit / pause on remaining=0
-        if (r.ok) {
-          clearEmbedExhaustionAlertIfActive('openai_billing');
-          const j = (await r.json()) as { data: Array<{ embedding: number[] }> };
-          return j.data[0].embedding;
-        }
-        const body = await r.text().catch(() => '');
-        // INSUFFICIENT_QUOTA (mem0-embed-insufficient-quota-classification): OpenAI returns
-        // HTTP 429 for TWO unrelated conditions — a transient `rate_limit_exceeded` (retry and
-        // it clears) AND a hard `insufficient_quota` (the account is out of credit / hit its
-        // billing cap). The latter is NOT load-related: it fails IDENTICALLY on every embed,
-        // one request or a thousand, until billing is fixed — so lumping it in with rate-limits
-        // (retry the budget, penalize the shared bucket, narrate "rate-limited, retrying") both
-        // wastes the budget and MISDIAGNOSES the cause (this exact conflation sent a multi-hour
-        // investigation down the throughput path when the real fix was "add OpenAI credit").
-        // Treat it like a 401/403: fail FAST (one attempt), do NOT penalize the shared admission
-        // bucket (there is no reset window to wait for), and tag it DISTINCTLY so the memory
-        // tools narrate "OpenAI quota exhausted — check billing" instead of "rate-limited".
-        if (r.status === 429 && /insufficient_quota/.test(body)) {
-          // EI-3381 / WI-3615: a hard billing stop fails identically forever until fixed —
-          // latch the STICKY local-preference (not just the 60s cooldown) so the NEXT
-          // resolveEmbedder() call (a fresh memory:remember/search) doesn't keep re-trying a
-          // key we just learned is dead, indefinitely, every 60s.
-          markOpenAiEmbedFailure(Date.now(), { hard: true });
-          maybeEscalateEmbedExhaustion('openai_billing');
-          throw new Error(`openai_embed_quota_exhausted: ${body}`);
-        }
-        const err = new Error(`openai_embed_failed_${r.status}: ${body}`);
-        // 429 (rate limit) + 5xx are transient → retry; other 4xx (401/400/403)
-        // are a config/auth problem → fail fast (no point retrying a bad key).
-        if (r.status !== 429 && r.status < 500) throw err;
-        serverHintMs = retryDelayFromHeaders(r.headers);
-        if (r.status === 429) adm.penalize({ retryAfterMs: serverHintMs ?? undefined }); // back the whole bucket off
-        lastErr = err;
-      } catch (e) {
-        // A non-retryable failure propagates immediately: a 4xx that isn't 429 (bad/expired
-        // key, malformed request — thrown above) OR a 429 that is actually a hard
-        // `insufficient_quota` billing stop (openai_embed_quota_exhausted). A bare
-        // network/fetch error is transient → retry until attempts/budget run out.
-        if (
-          e instanceof Error &&
-          (/^openai_embed_failed_4(?!29)/.test(e.message) || /^openai_embed_quota_exhausted/.test(e.message))
-        ) {
-          throw e;
-        }
-        lastErr = e instanceof Error ? e : new Error(String(e));
-      } finally {
-        slot?.release();
-      }
-      if (attempt >= maxAttempts - 1) break; // out of attempts — surface the failure now
-      let waitMs = nextEmbedBackoffMs(attempt, serverHintMs, waitedMs, opts);
-      if (waitMs == null) break; // backoff budget spent / reset won't arrive in time
-      // Clamp to the remaining WALL-CLOCK budget (fetch time already consumed counts) so the
-      // sleep can't push the total embed past the memory-tool deadline.
-      waitMs = Math.min(waitMs, embedDeadlineAt - Date.now());
-      if (waitMs <= 0) break;
-      waitedMs += waitMs;
-      await sleep(waitMs);
-    }
-    // EI-3381: the retry budget is spent (attempts exhausted, or the server's reset window
-    // is longer than we can wait — the exact sustained org-wide TPM-drain shape this ticket
-    // reports) — a SUSTAINED exhaustion, not a short spike. Prefer local for a cooldown.
-    markOpenAiEmbedFailure();
-    // EI-7475: this is the OTHER sustained-exhaustion shape (retry budget exhausted rather
-    // than a hard insufficient_quota) — escalate here too, not just on the hard-billing branch
-    // above, so a fleet riding out a long reset window still tells the owner.
-    maybeEscalateEmbedExhaustion('openai_billing');
-    throw lastErr ?? new Error('openai_embed_failed: retries exhausted');
-  };
+  return buildOpenAiEmbedderCore(apiKey, opts, {
+    markFailure: (now, failure) => markOpenAiEmbedFailure(now, failure),
+    clearAlert: () => {
+      clearEmbedExhaustionAlertIfActive('openai_billing');
+    },
+    maybeEscalate: () => {
+      maybeEscalateEmbedExhaustion('openai_billing');
+    },
+  });
 }
 
 /** Is the local transformers package installed?
  *  Exported as a seam for the `resolveEmbedder` cascade tests (GAP 4). */
 export async function localAvailable(): Promise<boolean> {
+  // A local-engine override (test fixtures only) serves every local leg itself,
+  // so the engine IS available — and probing by import would dlopen the
+  // onnxruntime native binding for nothing (EI-24688584300743328: measured in
+  // every P-013 cold child with the deterministic embedder installed).
+  if (hasLocalEmbedEngineOverride()) return true;
   try {
     await dynamicImport(TRANSFORMERS_PACKAGE);
     return true;
@@ -497,29 +246,7 @@ export async function readEmbedderPreference(): Promise<EmbedderPreference> {
  * credentials/packages aren't available (the re-embed pass surfaces it).
  */
 async function buildEmbedderForMode(mode: 'openai' | 'local' | 'gemma' | 'harrier'): Promise<EmbedFn> {
-  if (mode === 'openai') {
-    const key = await resolveOpenAiKey();
-    if (!key) throw new Error('openai_api_key not configured');
-    return buildOpenAiEmbedder(key);
-  }
-  if (mode === 'gemma') {
-    // EmbeddingGemma-300m @ NATIVE 768 (no MRL truncation at all — D-005
-    // removed it; the former 384 cut was untrained and cost ~19-21% prose MRR).
-    // Storage / the re-embed pass use the
-    // document prompt (search's query embedder uses the query prompt).
-    // Sidecar-first (P-004): shared warm model when the host runs the embed
-    // sidecar; bit-identical in-process fallback otherwise (D-002/D-003).
-    return buildSidecarAwareEmbedder('gemma', 'document');
-  }
-  if (mode === 'harrier') {
-    // harrier-oss-0.6b @ native-1024 (P-014) — selectable, never in the
-    // 'auto' tail; documents embed raw (only queries carry the instruct
-    // prefix), same sidecar-first seam.
-    return buildSidecarAwareEmbedder('harrier', 'document');
-  }
-  // local — BGE-small, worker-thread isolated, inline fallback; sidecar-first
-  // under the same P-004 seam.
-  return buildSidecarAwareEmbedder('local', 'document');
+  return buildEmbedderForModeShared(mode, (key) => buildOpenAiEmbedder(key));
 }
 
 /**
@@ -640,10 +367,19 @@ async function resolveEmbedder(): Promise<ResolvedEmbedder> {
     buildOpenAi: buildOpenAiEmbedder,
     // Sidecar-first local legs (P-004) — shared warm model when available,
     // bit-identical in-process fallback otherwise.
-    buildLocal: () => buildSidecarAwareEmbedder('local', 'document'),
+    //
+    // DEFERRED (P-532f, extends D-050): resolving the memory embedder must not
+    // start the embed sidecar. Maintenance callers resolve it only to learn the
+    // active mode — activeVecTable() on the canonical-memory leg of EVERY
+    // embed-backfill tick, plus the scout/dream/semantic legs — and the eager
+    // builder ensured (spawned) the ~2 GB sidecar on each of those, so a drained
+    // Server's sidecar came back every tick with nothing to embed. The cascade
+    // above picks the mode without building, so deferring changes no choice; the
+    // first real embed still pays the spawn.
+    buildLocal: async () => buildDeferredSidecarAwareEmbedder('local', 'document'),
     // Storage/mem0 embed with the document prompt (search uses the query prompt).
-    buildGemma: () => buildSidecarAwareEmbedder('gemma', 'document'),
-    buildHarrier: () => buildSidecarAwareEmbedder('harrier', 'document'),
+    buildGemma: async () => buildDeferredSidecarAwareEmbedder('gemma', 'document'),
+    buildHarrier: async () => buildDeferredSidecarAwareEmbedder('harrier', 'document'),
     isOpenAiRecentlyExhausted: isOpenAiEmbedInCooldown,
   });
 }
@@ -696,11 +432,17 @@ registerMemoryBackend('hybrid-pg', () => {
 configureMemory({
   getAdminUrl: getHarnessAdminUrl,
   // The operator's memory tables live in the harness_shared schema
-  // (migration 081); the embedded-pg database is `papercusp`; the SQLite
-  // event-history log persists in the operator's state directory.
+  // (migration 081); the embedded-pg database is `papercusp`.
   schema: 'harness_shared',
   defaultDbName: 'papercusp',
-  localStoreDir: operatorMemoryStoreDir,
+  // mem0's SQLite event history stays IN MEMORY per process (WI-10003284).
+  // It used to persist to ~/.papercusp/mem0-history.db, one file shared by
+  // every request worker, the background host and staging. better-sqlite3
+  // writes it synchronously, so each memory add waited on the other
+  // processes' locks and fsyncs ON THE EVENT LOOP: one INSERT blocked a :3070
+  // worker for 32.8 s, timing out everything else it was serving. Nothing in
+  // the operator reads that history back.
+  localStoreDir: null,
   // The swappable-store selector (generalize-memory-backend-swappable
   // D-004): which MemoryBackend getMemoryBackend() serves. A LIVE thunk
   // (mem0-revive-or-retire / Brief 30) reading the persisted operator

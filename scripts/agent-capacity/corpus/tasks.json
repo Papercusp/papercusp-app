@@ -1,0 +1,43 @@
+{
+  "$comment": "Workload corpus for plan agent-capacity-and-cost-gcp-2026-09-30 (P-002). Two pinned open-source repos (a TypeScript web app and a Python service) and an everyday task set in three profiles. record-session.ts runs each task once per CLI through the recording proxy; the P-003 load driver replays the recordings. Profiles: light = read/explain or a one-spot edit; typical = a small change plus a targeted test run; heavy = a full typecheck/test run or a multi-file refactor.",
+  "version": 1,
+  "suffix": "Work autonomously in this repository; do not ask questions. When you are done, reply with a short summary of what you did.",
+  "timeoutSec": { "light": 300, "typical": 900, "heavy": 1800 },
+  "repos": {
+    "excalidraw": {
+      "url": "https://github.com/excalidraw/excalidraw.git",
+      "sha": "35e854ecf7a1ace3467922965ce07ec1a6f0ea54",
+      "kind": "typescript-web-app",
+      "setup": ["npx -y yarn@1.22.22 install --frozen-lockfile --non-interactive"]
+    },
+    "mealie": {
+      "url": "https://github.com/mealie-recipes/mealie.git",
+      "sha": "7e03d041d7571e8b2a918140fcf9237f2d7a903d",
+      "kind": "python-service",
+      "systemPackages": ["libldap2-dev", "libsasl2-dev"],
+      "setup": ["uv sync --frozen"]
+    }
+  },
+  "tasks": [
+    { "id": "exc-light-1", "repo": "excalidraw", "profile": "light", "prompt": "Explain how undo/redo history is implemented in this codebase and name the main files involved. Do not change any files." },
+    { "id": "exc-light-2", "repo": "excalidraw", "profile": "light", "prompt": "Find where the default stroke width and stroke color for newly drawn elements are defined, and tell me their values. Do not change any files." },
+    { "id": "exc-light-3", "repo": "excalidraw", "profile": "light", "prompt": "Pick one exported function in packages/math that has no doc comment and add a concise JSDoc comment describing its parameters and return value." },
+    { "id": "exc-light-4", "repo": "excalidraw", "profile": "light", "prompt": "List the keyboard shortcuts the editor defines for zooming, with the file where each is registered. Do not change any files." },
+    { "id": "exc-typical-1", "repo": "excalidraw", "profile": "typical", "prompt": "Add unit tests for one of the small numeric helpers in packages/math (for example a clamp or rounding helper) covering edge cases, then run just that test file with vitest and make sure it passes." },
+    { "id": "exc-typical-2", "repo": "excalidraw", "profile": "typical", "prompt": "Add a pure utility function formatFileSize(bytes: number): string to packages/common (B, KB, MB, GB with one decimal place), export it, add a vitest test file for it, and run that test file until it passes." },
+    { "id": "exc-typical-3", "repo": "excalidraw", "profile": "typical", "prompt": "Run the vitest tests for packages/math only. If anything fails, investigate and fix it; then summarize the results." },
+    { "id": "exc-typical-4", "repo": "excalidraw", "profile": "typical", "prompt": "Find a TODO comment in packages/excalidraw that describes a small, self-contained change, implement it, and run the tests closest to that code." },
+    { "id": "exc-heavy-1", "repo": "excalidraw", "profile": "heavy", "prompt": "Run the TypeScript typecheck for the whole repository (yarn test:typecheck) and then the full vitest suite (yarn test:app --watch=false). Fix any failures you can, re-run to confirm, and report what passed and failed." },
+    { "id": "exc-heavy-2", "repo": "excalidraw", "profile": "heavy", "prompt": "Refactor: move the color palette constants used by the color picker into their own module inside packages/common, update every import across the repository, then run the typecheck and the tests that cover the color picker and fix anything that breaks." },
+    { "id": "mea-light-1", "repo": "mealie", "profile": "light", "prompt": "Explain how user authentication works in this API (login, token creation and validation) and name the main files. Do not change any files." },
+    { "id": "mea-light-2", "repo": "mealie", "profile": "light", "prompt": "List the API routes that deal with recipe comments, with their HTTP methods and what each one does. Do not change any files." },
+    { "id": "mea-light-3", "repo": "mealie", "profile": "light", "prompt": "Pick one small function under mealie/core that is missing type hints and add accurate type hints to it." },
+    { "id": "mea-light-4", "repo": "mealie", "profile": "light", "prompt": "Pick one service class under mealie/services with a missing or thin docstring and write a clear docstring for it." },
+    { "id": "mea-typical-1", "repo": "mealie", "profile": "typical", "prompt": "Find the string/slug helper functions in mealie, add unit tests for their edge cases under tests/unit_tests, and run just those tests with uv run pytest until they pass." },
+    { "id": "mea-typical-2", "repo": "mealie", "profile": "typical", "prompt": "Make recipe creation reject names longer than 500 characters with a clear validation error, add a unit test for it, and run the relevant tests with uv run pytest." },
+    { "id": "mea-typical-3", "repo": "mealie", "profile": "typical", "prompt": "Run the unit tests in tests/unit_tests with uv run pytest. If anything fails, investigate one failure and fix it if it is small; then summarize the results." },
+    { "id": "mea-typical-4", "repo": "mealie", "profile": "typical", "prompt": "Find a TODO comment in mealie/ that describes a small, self-contained change, implement it, add or update a test, and run it." },
+    { "id": "mea-heavy-1", "repo": "mealie", "profile": "heavy", "prompt": "Run the whole test suite with uv run pytest, then the linters configured in pyproject.toml (ruff, and mypy if configured). Fix any failures you can, re-run to confirm, and report what passed and failed." },
+    { "id": "mea-heavy-2", "repo": "mealie", "profile": "heavy", "prompt": "Refactor: find pagination logic that is repeated across several route modules, extract it into one shared helper, update every call site, and run the full test suite to confirm nothing broke." }
+  ]
+}

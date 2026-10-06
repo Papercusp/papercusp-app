@@ -691,6 +691,41 @@ pub enum PickerAxis {
     Effort,
     Account,
     Mode,
+    /// D-026 (P-027 G-6): the approvals mode of the RUNNING conversation.
+    Approvals,
+}
+
+/// D-026: the three engine-neutral approvals modes, in Shift+Tab order, with
+/// the one-line description each row and toast shows. There is deliberately no
+/// full-access mode (D-026 "Ruled out").
+pub const APPROVALS_MODES: [(&str, &str); 3] = [
+    ("ask", "ask before edits and commands"),
+    ("auto-edit", "make edits without asking, ask before other commands"),
+    ("read-only", "look and plan, change nothing"),
+];
+
+/// The /approvals picker rows. `current` is the mode the engine reports now
+/// and `pending` the one already picked for the next message; both are marked
+/// so the owner can see what a pick would change.
+pub fn approvals_options(current: Option<&str>, pending: Option<&str>) -> Vec<PickerOption> {
+    APPROVALS_MODES
+        .iter()
+        .map(|(mode, about)| {
+            let mark = if pending == Some(*mode) {
+                " (next message)"
+            } else if current == Some(*mode) {
+                " (current)"
+            } else {
+                ""
+            };
+            PickerOption {
+                id: mode.to_string(),
+                label: format!("{mode}{mark}"),
+                hint: Some(about.to_string()),
+                disabled: false,
+            }
+        })
+        .collect()
 }
 
 /// The open picker overlay. Pure state — navigation and the disabled-row rule
@@ -719,6 +754,7 @@ impl SessionPicker {
             PickerAxis::Effort => " Effort — Enter select · Esc close ",
             PickerAxis::Account => " Account route — Enter select · Esc close ",
             PickerAxis::Mode => " Launch mode — Enter select · Esc close ",
+            PickerAxis::Approvals => " Approvals — Enter select · Esc close ",
         }
     }
 

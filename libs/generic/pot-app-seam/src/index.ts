@@ -1,9 +1,16 @@
 /**
  * @papercusp/pot-app-seam
  *
- * A Tier-B host seam for agentic apps: deterministic app code can bootstrap
- * required pots, enqueue requests to the judgment plane, and ingest judged
- * outputs without importing a concrete operator, database, or queue.
+ * The one typed seam between deterministic app code and the judgment plane.
+ * An app bootstraps the pots it needs, submits agent work as DECLARED blueprint
+ * operations (the public `blueprint:*` contract), follows each durable handle
+ * through status/result/events/cancel, and lets judged output into its own
+ * state ONLY through the app's parse gate. The package is framework-agnostic and
+ * imports no Papercusp operator internals; the host supplies the adapters.
+ *
+ * There is deliberately no direct plan-run or work-item enqueue here: an app
+ * that needs multi-step agent work declares an operation whose target is a plan
+ * template, and the operator owns instantiation, dispatch and settlement.
  */
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -44,30 +51,19 @@ export interface AppExecutionTarget {
   readonly agentName: string;
 }
 
+/**
+ * The legacy plan-run request shape. Kept ONLY as the input of
+ * {@link operationDraftFromPlanRun}, the migration bridge for an app moving a
+ * former plan launch onto a declared operation. The seam cannot launch it.
+ */
 export interface PlanRunDraft<TInput extends JsonObject = JsonObject> {
-  /** Installed app-owned plan template. The host instantiates this template. */
   readonly templateSlug: string;
   readonly input: TInput;
-  /** Immutable source/event identity retained on the canonical plan run. */
+  /** Immutable source/event identity retained on the operation input. */
   readonly provenance: JsonObject;
   readonly execution: AppExecutionTarget;
-  /** Stable replay key. Hosts must return the existing run for a replay. */
+  /** Stable replay key; becomes the operation request key. */
   readonly dedupeKey?: string;
-}
-
-export interface LaunchedPlanRun {
-  readonly runId: string;
-  readonly planSlug: string;
-  readonly workItemIds: readonly string[];
-  readonly assignedAgentName: string;
-  readonly dedupeKey?: string;
-  /** A run is not launched successfully unless its actionable frontier was dispatched. */
-  readonly dispatch: {
-    readonly status: 'delivered' | 'retryable-failure';
-    readonly assignedWorkItemIds: readonly string[];
-    readonly wakeAcknowledged: boolean;
-    readonly reason?: string;
-  };
 }
 
 export type BlueprintOperationTarget =
@@ -109,6 +105,52 @@ export type BlueprintOperationResult<TOutput = unknown> =
       readonly acceptanceEvidenceRef?: string;
     };
 
+/**
+ * One canonical lifecycle event (`blueprint:events`). `kind` is one of
+ * work-item | plan-run | cancel | signal | wait | resume; the remaining fields
+ * depend on it. Events are observational: an app decides from `result`, never
+ * from an event that merely says a work item reached a state.
+ */
+export interface BlueprintOperationEvent {
+  readonly kind: string;
+  readonly cursor: string;
+  readonly at: string;
+  readonly [field: string]: unknown;
+}
+
+export interface BlueprintOperationEventsPage {
+  readonly status: BlueprintOperationStatus;
+  readonly events: readonly BlueprintOperationEvent[];
+  /** Pass back as `cursor` to resume after the last event of this page. */
+  readonly cursor: string;
+  readonly hasMore: boolean;
+}
+
+export interface BlueprintOperationEventsOptions {
+  readonly cursor?: string;
+  readonly limit?: number;
+}
+
+export interface BlueprintOperationCancelInput {
+  /** Idempotency key for the cancel itself; a replay returns the same receipt. */
+  readonly requestKey: string;
+  readonly reason: string;
+}
+
+/**
+ * A durably accepted cancel. Acceptance is not settlement: `handled` is always
+ * false at return and `effected` may still be false — read status/result for
+ * the terminal `cancelled` outcome.
+ */
+export interface BlueprintOperationCancelReceipt {
+  readonly eventId: string;
+  readonly replayed: boolean;
+  readonly accepted: true;
+  readonly wakeQueued: boolean;
+  readonly handled: false;
+  readonly effected: boolean;
+}
+
 export interface BlueprintOperationDraft<TInput extends JsonObject = JsonObject> {
   readonly harnessSlug: string;
   readonly operationId: string;
@@ -118,6 +160,9 @@ export interface BlueprintOperationDraft<TInput extends JsonObject = JsonObject>
   readonly title?: string;
   readonly summary?: string;
 }
+
+/** The app's own parse gate: the ONLY route by which judged output enters app state. */
+export type OperationOutputParser<TOutput> = (output: unknown) => TOutput | Promise<TOutput>;
 
 export interface IngestEvent {
   readonly id: string;
@@ -142,41 +187,90 @@ export interface StartIngestLoopInput<TParsed> {
   readonly signal?: AbortSignal;
 }
 
-export interface PotAppSeamHost {
-  readBootstrapMarker(marker: string): Promise<string | null> | string | null;
-  writeBootstrapMarker(marker: string, fingerprint: string): Promise<void> | void;
-  ensurePot(spec: PotSpec): Promise<BootstrapPotResult> | BootstrapPotResult;
-  /**
-   * Instantiate through the canonical plan-run/promote/dispatch path. Implementations
-   * must never translate this call into a bare work_items:create.
-   */
-  launchPlanRun(draft: PlanRunDraft): Promise<LaunchedPlanRun> | LaunchedPlanRun;
-  /** Adapter for the public blueprint:submit tool/HTTP contract. */
+/** Host adapters for the public `blueprint:*` operation lifecycle. */
+export interface BlueprintOperationHost {
+  /** blueprint:submit — same request key + same input replays one handle. */
   submitBlueprintOperation(
     draft: BlueprintOperationDraft,
   ): Promise<BlueprintOperationHandle> | BlueprintOperationHandle;
-  /** Adapter for blueprint:status. */
+  /** blueprint:status */
   readBlueprintOperationStatus(
     handle: BlueprintOperationHandle,
   ): Promise<BlueprintOperationStatus> | BlueprintOperationStatus;
-  /** Adapter for blueprint:result. Only state=ready may carry output. */
+  /** blueprint:result — only state=ready may carry output. */
   readBlueprintOperationResult(
     handle: BlueprintOperationHandle,
   ): Promise<BlueprintOperationResult> | BlueprintOperationResult;
+  /** blueprint:events */
+  readBlueprintOperationEvents(
+    handle: BlueprintOperationHandle,
+    options: BlueprintOperationEventsOptions,
+  ): Promise<BlueprintOperationEventsPage> | BlueprintOperationEventsPage;
+  /** blueprint:cancel */
+  cancelBlueprintOperation(
+    handle: BlueprintOperationHandle,
+    input: BlueprintOperationCancelInput,
+  ): Promise<BlueprintOperationCancelReceipt> | BlueprintOperationCancelReceipt;
+}
+
+export interface PotAppSeamHost extends BlueprintOperationHost {
+  readBootstrapMarker(marker: string): Promise<string | null> | string | null;
+  writeBootstrapMarker(marker: string, fingerprint: string): Promise<void> | void;
+  ensurePot(spec: PotSpec): Promise<BootstrapPotResult> | BootstrapPotResult;
 }
 
 export interface PotAppSeam {
   bootstrapPots(input: BootstrapPotsInput): Promise<BootstrapPotsResult>;
-  /** Compatibility-only direct plan launch. New reusable task bindings submit operations. */
-  launchPlanRuns(runs: readonly PlanRunDraft[]): Promise<readonly LaunchedPlanRun[]>;
   submitOperations(
     operations: readonly BlueprintOperationDraft[],
   ): Promise<readonly BlueprintOperationHandle[]>;
   operationStatus(handle: BlueprintOperationHandle): Promise<BlueprintOperationStatus>;
-  operationResult<TOutput = unknown>(
+  /**
+   * Read the result. A `ready` output is returned ONLY after it passes `parse`
+   * (the app's existing parse gate); a parse failure throws and nothing of the
+   * unparsed output reaches the caller.
+   */
+  operationResult<TOutput>(
     handle: BlueprintOperationHandle,
+    parse: OperationOutputParser<TOutput>,
   ): Promise<BlueprintOperationResult<TOutput>>;
+  operationEvents(
+    handle: BlueprintOperationHandle,
+    options?: BlueprintOperationEventsOptions,
+  ): Promise<BlueprintOperationEventsPage>;
+  cancelOperation(
+    handle: BlueprintOperationHandle,
+    input: BlueprintOperationCancelInput,
+  ): Promise<BlueprintOperationCancelReceipt>;
   startIngestLoop<TParsed>(input: StartIngestLoopInput<TParsed>): IngestSubscription;
+}
+
+/** The public tool names the operator projects for the operation lifecycle. */
+export const BLUEPRINT_OPERATION_TOOL_NAMES = {
+  submit: 'blueprint:submit',
+  status: 'blueprint:status',
+  result: 'blueprint:result',
+  events: 'blueprint:events',
+  cancel: 'blueprint:cancel',
+  signal: 'blueprint:signal',
+  resume: 'blueprint:resume',
+} as const;
+
+/** The operator's request-key bound (`blueprint:submit` / `blueprint:cancel`). */
+export const MAX_REQUEST_KEY_LENGTH = 200;
+
+/** Raised when a ready output fails the app's parse gate. */
+export class OperationOutputRejectedError extends Error {
+  constructor(
+    readonly handle: BlueprintOperationHandle,
+    readonly parseError: unknown,
+  ) {
+    super(
+      `blueprint operation ${handle.harnessSlug}#${handle.operationId} (receipt ${handle.receiptId}) ` +
+        `output rejected by the app parse gate: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+    );
+    this.name = 'OperationOutputRejectedError';
+  }
 }
 
 function assertNonEmpty(value: string, label: string): void {
@@ -217,22 +311,38 @@ function sameOperationHandle(left: BlueprintOperationHandle, right: BlueprintOpe
 }
 
 /**
- * Compatibility bridge for an app migrating one legacy launchPlanRuns caller.
- * The operation declaration must target the same plan template; the template
- * remains the owner of its DAG and stable-agent execution contract.
+ * Derive a request key from the DOMAIN identity of the thing the operation acts
+ * on (e.g. mailbox + thread, calendar + event instance) — never from a clock or
+ * a random id, so a re-delivered trigger or a double click replays the same
+ * durable operation instead of creating a second one. Parts are
+ * percent-encoded, so a `:` inside a part cannot collide with the separator.
+ */
+export function deriveRequestKey(operationId: string, ...domainParts: readonly string[]): string {
+  assertNonEmpty(operationId, 'operationId');
+  if (domainParts.length === 0) throw new Error('deriveRequestKey requires at least one domain part');
+  domainParts.forEach((part, i) => assertNonEmpty(part, `domain part ${i}`));
+  const key = [operationId, ...domainParts].map((part) => encodeURIComponent(part)).join(':');
+  if (key.length > MAX_REQUEST_KEY_LENGTH) {
+    throw new Error(`request key is ${key.length} chars; the operator bound is ${MAX_REQUEST_KEY_LENGTH}`);
+  }
+  return key;
+}
+
+/**
+ * Migration bridge for an app moving one former plan launch onto a declared
+ * operation. The operation must target the same plan template; the template
+ * remains the owner of its DAG and execution contract.
  */
 export function operationDraftFromPlanRun<TInput extends JsonObject>(
   draft: PlanRunDraft<TInput>,
   operationId: string,
 ): BlueprintOperationDraft<JsonObject> {
-  assertNonEmpty(operationId, "operationId");
+  assertNonEmpty(operationId, 'operationId');
   if (!draft.dedupeKey?.trim()) {
-    throw new Error(
-      "legacy plan run migration requires dedupeKey so replay identity is preserved",
-    );
+    throw new Error('legacy plan run migration requires dedupeKey so replay identity is preserved');
   }
-  if (Object.prototype.hasOwnProperty.call(draft.input, "provenance")) {
-    throw new Error("legacy plan input uses reserved provenance field");
+  if (Object.prototype.hasOwnProperty.call(draft.input, 'provenance')) {
+    throw new Error('legacy plan input uses reserved provenance field');
   }
   return {
     harnessSlug: draft.execution.appHarnessSlug,
@@ -242,7 +352,73 @@ export function operationDraftFromPlanRun<TInput extends JsonObject>(
   };
 }
 
+/** Calls one public tool by name. Must THROW on a refusal (an MCP isError / non-200). */
+export type BlueprintToolInvoke = (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+
+function asRecord(value: unknown, what: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${what} returned a non-object result`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireFields(value: unknown, what: string, fields: readonly string[]): Record<string, unknown> {
+  const record = asRecord(value, what);
+  const missing = fields.filter((f) => !(f in record));
+  if (missing.length > 0) throw new Error(`${what} result is missing ${missing.join(', ')}`);
+  return record;
+}
+
+/**
+ * Host adapter over any transport that can call the projected public tools
+ * (MCP JSON-RPC, the HTTP agent-tools route, an in-process dispatcher). It
+ * performs shape checks only; contract enforcement stays in the operator.
+ */
+export function blueprintOperationHostFromInvoker(invoke: BlueprintToolInvoke): BlueprintOperationHost {
+  const T = BLUEPRINT_OPERATION_TOOL_NAMES;
+  const statusFields = ['handle', 'phase', 'outcome', 'items', 'planRun', 'cancellationRequested', 'wait'];
+  return {
+    async submitBlueprintOperation(draft) {
+      const out = requireFields(await invoke(T.submit, {
+        harness: draft.harnessSlug,
+        operationId: draft.operationId,
+        requestKey: draft.requestKey,
+        input: draft.input,
+        ...(draft.title === undefined ? {} : { title: draft.title }),
+        ...(draft.summary === undefined ? {} : { summary: draft.summary }),
+      }), T.submit, ['handle']);
+      return requireFields(out.handle, T.submit, ['workspaceId', 'harnessSlug', 'receiptId', 'operationId',
+        'specificationRevision', 'target']) as unknown as BlueprintOperationHandle;
+    },
+    async readBlueprintOperationStatus(handle) {
+      return requireFields(await invoke(T.status, { handle }), T.status, statusFields) as unknown as
+        BlueprintOperationStatus;
+    },
+    async readBlueprintOperationResult(handle) {
+      return requireFields(await invoke(T.result, { handle }), T.result, ['state', 'status']) as unknown as
+        BlueprintOperationResult;
+    },
+    async readBlueprintOperationEvents(handle, options) {
+      return requireFields(await invoke(T.events, {
+        handle,
+        ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+        ...(options.limit === undefined ? {} : { limit: options.limit }),
+      }), T.events, ['status', 'events', 'cursor', 'hasMore']) as unknown as BlueprintOperationEventsPage;
+    },
+    async cancelBlueprintOperation(handle, input) {
+      return requireFields(await invoke(T.cancel, { handle, requestKey: input.requestKey, reason: input.reason }),
+        T.cancel, ['eventId', 'replayed', 'accepted', 'wakeQueued', 'handled', 'effected']) as unknown as
+        BlueprintOperationCancelReceipt;
+    },
+  };
+}
+
 export function createPotAppSeam(host: PotAppSeamHost): PotAppSeam {
+  const checkHandle = (returned: BlueprintOperationHandle, asked: BlueprintOperationHandle, what: string) => {
+    if (!sameOperationHandle(returned, asked)) {
+      throw new Error(`blueprint operation ${what} returned a different durable handle`);
+    }
+  };
   return {
     async bootstrapPots(input) {
       if (input.pots.length === 0) throw new Error('bootstrapPots requires at least one pot');
@@ -261,35 +437,15 @@ export function createPotAppSeam(host: PotAppSeamHost): PotAppSeam {
       return { marker, fingerprint, skipped: false, pots };
     },
 
-    async launchPlanRuns(runs) {
-      if (runs.length === 0) return [];
-      const out: LaunchedPlanRun[] = [];
-      for (const run of runs) {
-        assertNonEmpty(run.templateSlug, 'plan template slug');
-        assertNonEmpty(run.execution.appHarnessSlug, 'execution.appHarnessSlug');
-        assertNonEmpty(run.execution.agentName, 'execution.agentName');
-        const launched = await host.launchPlanRun(run);
-        if (launched.assignedAgentName !== run.execution.agentName) {
-          throw new Error(
-            `plan run ${launched.runId} assigned ${launched.assignedAgentName}, expected ${run.execution.agentName}`,
-          );
-        }
-        if (launched.dispatch.status !== 'delivered' || !launched.dispatch.wakeAcknowledged) {
-          throw new Error(
-            `plan run ${launched.runId} dispatch failed retryably: ${launched.dispatch.reason ?? 'target did not acknowledge wake'}`,
-          );
-        }
-        out.push(launched);
-      }
-      return out;
-    },
-
     async submitOperations(operations) {
       const out: BlueprintOperationHandle[] = [];
       for (const operation of operations) {
         assertNonEmpty(operation.harnessSlug, 'operation.harnessSlug');
         assertNonEmpty(operation.operationId, 'operation.operationId');
         assertNonEmpty(operation.requestKey, 'operation.requestKey');
+        if (operation.requestKey.length > MAX_REQUEST_KEY_LENGTH) {
+          throw new Error(`operation.requestKey exceeds ${MAX_REQUEST_KEY_LENGTH} chars`);
+        }
         const handle = await host.submitBlueprintOperation(operation);
         if (handle.harnessSlug !== operation.harnessSlug || handle.operationId !== operation.operationId) {
           throw new Error(
@@ -304,21 +460,47 @@ export function createPotAppSeam(host: PotAppSeamHost): PotAppSeam {
 
     async operationStatus(handle) {
       const status = await host.readBlueprintOperationStatus(handle);
-      if (!sameOperationHandle(status.handle, handle)) {
-        throw new Error('blueprint operation status returned a different durable handle');
-      }
+      checkHandle(status.handle, handle, 'status');
       return status;
     },
 
-    async operationResult<TOutput>(handle: BlueprintOperationHandle) {
+    async operationResult<TOutput>(handle: BlueprintOperationHandle, parse: OperationOutputParser<TOutput>) {
+      if (typeof parse !== 'function') throw new Error('operationResult requires the app parse gate');
       const result = await host.readBlueprintOperationResult(handle);
-      if (!sameOperationHandle(result.status.handle, handle)) {
-        throw new Error('blueprint operation result returned a different durable handle');
+      checkHandle(result.status.handle, handle, 'result');
+      if (result.state !== 'ready') {
+        if (Object.prototype.hasOwnProperty.call(result, 'output')) {
+          throw new Error(`blueprint operation ${result.state} result must not carry output`);
+        }
+        return result;
       }
-      if (result.state !== 'ready' && Object.prototype.hasOwnProperty.call(result, 'output')) {
-        throw new Error(`blueprint operation ${result.state} result must not carry output`);
+      let output: TOutput;
+      try {
+        output = await parse(result.output);
+      } catch (error) {
+        throw new OperationOutputRejectedError(handle, error);
       }
-      return result as BlueprintOperationResult<TOutput>;
+      return { ...result, output };
+    },
+
+    async operationEvents(handle, options = {}) {
+      if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100)) {
+        throw new Error('operationEvents limit must be an integer 1..100');
+      }
+      const page = await host.readBlueprintOperationEvents(handle, options);
+      checkHandle(page.status.handle, handle, 'events');
+      return page;
+    },
+
+    async cancelOperation(handle, input) {
+      assertNonEmpty(input.requestKey, 'cancel.requestKey');
+      assertNonEmpty(input.reason, 'cancel.reason');
+      if (input.requestKey.length > MAX_REQUEST_KEY_LENGTH) {
+        throw new Error(`cancel.requestKey exceeds ${MAX_REQUEST_KEY_LENGTH} chars`);
+      }
+      const receipt = await host.cancelBlueprintOperation(handle, input);
+      if (receipt.accepted !== true) throw new Error('blueprint operation cancel was not accepted');
+      return receipt;
     },
 
     startIngestLoop(input) {

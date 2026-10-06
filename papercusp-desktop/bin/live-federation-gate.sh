@@ -138,7 +138,9 @@
 # coalescing: this gate owns its own singleton + freshness semantics and must
 # never replay another invocation's cached stdout as a new gate verdict.
 if [ "${PC_HEAVY_BYPASS:-0}" != 1 ]; then
-  __gate_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  # PAPERCUSP_REPO_ROOT: the systemd unit runs this file from a papercusp-script-snapshot.sh
+  # copy under $TMPDIR, where BASH_SOURCE/../.. is not the checkout (WI-10006358).
+  __gate_repo_root="${PAPERCUSP_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
   # EI-21412456902012315: keep the run cooperatively yieldable, but give its first real
   # federation leg one bounded protected region. The child publishes pc-heavy's existing
   # after-ready marker only AFTER selftests/build/repack, immediately before content-matrix,
@@ -238,7 +240,9 @@ _gate_mint_snapshot_dir() {
 }
 
 if [ -z "${GATE_SELF_SNAPSHOT:-}" ]; then
-  DESKTOP_DIR_FOR_SNAPSHOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  # An inherited DESKTOP_DIR wins: the systemd unit pins it because it runs this file from
+  # a papercusp-script-snapshot.sh copy, whose BASH_SOURCE/.. is not the checkout (WI-10006358).
+  DESKTOP_DIR_FOR_SNAPSHOT="${DESKTOP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
   __snap_dir="$(_gate_mint_snapshot_dir)"
   cp -- "${BASH_SOURCE[0]}" "$__snap_dir/live-federation-gate.sh"
   chmod +x "$__snap_dir/live-federation-gate.sh"

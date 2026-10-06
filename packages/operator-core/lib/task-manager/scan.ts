@@ -107,7 +107,8 @@ const nodeAsyncCgroupFs: AsyncCgroupFs = {
  * against an in-memory CgroupFs; only the IO changes. Prefetch both cgroup
  * passes and procfs facts with bounded concurrency, including the terminal
  * window's application pid set. A failed read stays null/unknown as in the
- * synchronous reconciler. Production reconciliation keeps its own scan path.
+ * synchronous reconciler. `reconcileTick` uses this scan by default too
+ * (jev-memory-timeouts-to-zero-2026-10-01 P-004).
  */
 export async function scanProcessesAsync(opts: ScanOptions = {}): Promise<ScanResult> {
   if (opts.fs && opts.fs !== nodeCgroupFs && !opts.asyncFs) return scanProcesses(opts);
@@ -251,6 +252,20 @@ export interface ScanResult {
   /** The FOREIGN pass hit its cap — the courtesy view is partial. Carries NO
    *  implication for ledger correctness and must never degrade the verdict. */
   foreignTruncated: boolean;
+  /**
+   * User-manager processes the FOREIGN pass read but did NOT list because their
+   * cmdline misses `foreignSignature`: pid → kernel identity. Never displayed
+   * (the signature still keeps an unrelated owner/peer process out of the pane),
+   * but the reconciler needs it (WI-10005782). An enrolled UNCONFINED task stays
+   * in its spawner's cgroup, outside our slice, and its argv need not name the
+   * repo. A wake executor's `claude -p --resume <id>` turn runs in the
+   * operator's own service cgroup with no repo path in argv. Without this map,
+   * such a row read "gone from the kernel" one grace period after spawn while the
+   * process kept running: 405 of 406 resume-headless rows over three days, none
+   * of them shorter than the grace period. Keyed by pid so a match needs the
+   * row's pid AND its start time.
+   */
+  unlistedIdentityByPid: Map<number, string>;
 }
 
 /**
@@ -277,6 +292,7 @@ export function scanProcesses(opts: ScanOptions = {}): ScanResult {
   const ownedRootExists = fs.isDir(ownedRootAbs);
 
   const processes: ScannedProcess[] = [];
+  const unlistedIdentityByPid = new Map<number, string>();
   const seen = new Set<number>();
   let ownedCount = 0;
   let foreignCount = 0;
@@ -380,14 +396,29 @@ export function scanProcesses(opts: ScanOptions = {}): ScanResult {
         if (seen.has(pid) || pid === selfPid) continue;
         if (!windowConfirmedDead) {
           const cmdline = parseProcCmdline(fs.readFile(`/proc/${pid}/cmdline`));
-          if (!cmdline || !sig.test(cmdline)) continue;
+          if (!cmdline || !sig.test(cmdline)) {
+            // Not listed, but still a fact about the kernel: keep its identity so
+            // an enrolled unconfined row with a repo-less argv is not misread as
+            // gone (WI-10005782). Visibility is unchanged — this map is never shown.
+            const identity = readProcFacts(pid, bootId, uptimeSec, scanNowMs, fs).identity;
+            if (identity) unlistedIdentityByPid.set(pid, identity);
+            continue;
+          }
         }
         push(pid, node.absDir, false);
       }
     }
   }
 
-  return { processes, ownedRootAbs, ownedRootExists, userManagerRoot, ownedTruncated, foreignTruncated };
+  return {
+    processes,
+    ownedRootAbs,
+    ownedRootExists,
+    userManagerRoot,
+    ownedTruncated,
+    foreignTruncated,
+    unlistedIdentityByPid,
+  };
 }
 
 /**

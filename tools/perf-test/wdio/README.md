@@ -70,10 +70,22 @@ publisher stores these as `run_id` and `workspace_id`. A named profile leaves
 `git_sha` empty because the WDIO checkout HEAD may differ from every component
 under test; unnamed runs retain that checkout correlation. Record the shell,
 SPA and API hashes alongside the run log for exact reproduction.
+Each launcher allocates a fresh `results/measures-<uuid>.jsonl` before preflight
+and logs its exact path. Spec workers inherit that collection through the
+internal `PAPERCUSP_PERF_MEASURES_PATH` environment value; a new launcher replaces
+any inherited value. Concurrent runs, including runs sharing a profile name,
+cannot reset or publish each other's measures. Failed publishes retain their
+own file for recovery. The former shared `results/measures.jsonl` is never read
+or cleared by this runner.
 On Linux, a named run using a private `PAPERCUSP_HOME` must also set
 `PAPERCUSP_DEV_API_TARGET` to the target port (for example, `3170`). The runner
 checks the private IPC PID and socket before measuring and again before
 publishing; an API restart makes that sample invalid and prevents a receipt.
+The receipt publisher reads `PAPERCUSP_HOME/superuser-token`, with
+`~/.papercusp/superuser-token` as the unscoped fallback, matching the operator.
+A private fixture home must contain the credential of its selected API; keep
+that injected credential outside the repository. A missing scoped credential
+does not fall back to a different operator's credential.
 
 ## Architecture vs the in-process `/tests` page
 

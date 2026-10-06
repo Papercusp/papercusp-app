@@ -12,10 +12,12 @@
     "resources": [
       "sidecar/**/*",
       "resources/*",
-      "seed/**/*"
+      "seed/**/*",
+      "doc-vector-seed/**/*"
     ],
     "linux": {
       "deb": {
+        "depends": ["bubblewrap"],
         "files": {
           "/usr/lib/systemd/user/papercusp-server.service": "systemd/papercusp-server.service"
         }

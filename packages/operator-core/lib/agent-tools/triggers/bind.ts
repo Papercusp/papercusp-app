@@ -80,7 +80,13 @@ export default defineTool({
       input: z
         .record(z.string(), z.unknown())
         .optional()
-        .describe('literal operation input overlaid on the redacted event routing envelope'),
+        .describe('literal operation or plan input overlaid on the redacted event routing envelope'),
+      datatype: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('queue only canonical events of this catalog datatype (portable binding)'),
       eventPattern: z.string().min(5).max(500).optional().describe('ext:<source>:<event> key or anchored glob'),
       filter: dataConditionSchema.optional().describe('payload condition using the shared rules vocabulary'),
       stormPolicy: z
@@ -92,6 +98,13 @@ export default defineTool({
             .positive()
             .max(31 * 24 * 60 * 60)
             .optional(),
+          maxAgeSeconds: z
+            .number()
+            .int()
+            .positive()
+            .max(31 * 24 * 60 * 60)
+            .optional()
+            .describe('drop a queued run never dispatched within this many seconds (default 86400)'),
         })
         .optional(),
     })
@@ -114,6 +127,7 @@ export default defineTool({
           'eventPattern',
           'filter',
           'stormPolicy',
+          'datatype',
         ] as const) {
           if (value[field] !== undefined) {
             context.addIssue({
@@ -142,6 +156,7 @@ export default defineTool({
       await invalidateTriggers(workspaceId);
       return data({ ok: true, migration });
     }
+    const planTarget = Boolean(args.harness || args.plan);
     const binding = await createExternalTriggerBinding(sql, workspaceId, {
       sourceId: args.sourceId!,
       planHarnessSlug: args.harness ?? null,
@@ -151,7 +166,8 @@ export default defineTool({
       workItemKind: args.workItemKind ?? null,
       operationHarnessSlug: args.operationHarnessSlug ?? null,
       operationId: args.operationId ?? null,
-      operationInput: args.input,
+      ...(planTarget ? { planInput: args.input } : { operationInput: args.input }),
+      datatypeId: args.datatype ?? null,
       eventPattern: args.eventPattern!,
       eventFilter: args.filter as Record<string, unknown> | undefined,
       stormPolicy: args.stormPolicy,

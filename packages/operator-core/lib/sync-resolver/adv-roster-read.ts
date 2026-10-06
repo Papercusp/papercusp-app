@@ -116,6 +116,7 @@ async function readAdvRosterUncached(opts: ReadAdvRosterOptions = {}) {
     dedupeEndedAgainstActive,
     pendingLaunchesToRosterEntries,
     startingLaunchesToRosterEntries,
+    readStartingLaunchLogHints,
     dedupeStartingAgainstActive,
   } = await import('../adv-roster');
   const { listEndedAdvSessions, listPendingWorkbenchLaunches, listStartingTerminalLaunches } =
@@ -145,6 +146,15 @@ async function readAdvRosterUncached(opts: ReadAdvRosterOptions = {}) {
     ),
   ]);
 
+  // EI-24748208098755918: the starting tier's log diagnostics are read here,
+  // asynchronously, instead of with readSync inside the mapper (a profiled
+  // 790 ms event-loop stall). Same shared deadline; a lapse costs only the
+  // hint text, never the starting cards themselves.
+  const startingHints = await withinBudget(
+    readStartingLaunchLogHints(startingRows),
+    'roster starting hints',
+  ).catch(() => undefined);
+
   const host = os.hostname();
   return {
     active,
@@ -154,7 +164,7 @@ async function readAdvRosterUncached(opts: ReadAdvRosterOptions = {}) {
     // WI-6376: terminal-spawned launches inside their boot window, minus any
     // that already came online (presence wins — see the dedupe's doc).
     starting: dedupeStartingAgainstActive(
-      startingLaunchesToRosterEntries(startingRows, host),
+      startingLaunchesToRosterEntries(startingRows, host, startingHints),
       active,
     ),
     // Omitted entirely when every leg succeeded, so a healthy roster stays

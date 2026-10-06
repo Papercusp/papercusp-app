@@ -58,11 +58,10 @@
  * pre-Windows-support behavior, never over-kill.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
 import { getOrgPg } from '@papercusp/db-org';
-import { listLiveHosts } from './events/await/psu-pty-discovery';
+import { execFileViaSidecar } from './fleet/git-via-sidecar';
+import { listLiveHostsAsync } from './events/await/psu-pty-discovery';
 import {
   listWindowsByTitle,
   parseSessionIdFromWindowTitle,
@@ -71,7 +70,6 @@ import {
   type WindowsDesktopWindow,
 } from './windows-desktop-windows';
 
-const execFileAsync = promisify(execFile);
 
 /** One currently-open window (only the fields we match sessions on). */
 export interface OpenWindow {
@@ -124,20 +122,51 @@ export interface ListOpenWindowsDeps {
   ttlMs?: number;
 }
 
-/** ASYNC + non-blocking by design: this runs on the single :3070 operator event
- *  loop (the D-007 chokepoint) via the presence read path, so it must NEVER use a
- *  blocking spawnSync — a hung X server would freeze the whole operator. execFile
- *  kills the child at WMCTRL_TIMEOUT_MS and rejects → caught → null. */
-async function defaultRunWmctrl(): Promise<string | null> {
+/** Per-site override for the X11 probes' sidecar route (`0` forces a local fork). */
+export const X11_PROBE_SIDECAR_VAR = 'PAPERCUSP_X11_PROBE_SPAWN_SIDECAR';
+
+/**
+ * Run one short X11 probe (`wmctrl` / `xprop`) and return stdout, or null on any
+ * failure (no binary, no DISPLAY, non-zero exit, timeout).
+ *
+ * Forked by the spawner sidecar wherever this host has one (EI-24748208098755918).
+ * An async `execFile` does not block on the CHILD, but the fork itself is still
+ * synchronous on the caller's event loop, and its cost scales with the parent's
+ * RSS. A :3070 cluster worker (pid 2330483, 22:51Z, 2026-10-01) spent 49.7 ms of
+ * main thread in `defaultRunWmctrl` in one saturation profile; these probes sit
+ * on the presence read path every few seconds. The caller's display env is passed
+ * explicitly so the sidecar queries the SAME X display the operator would.
+ */
+async function runX11Probe(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+  subsystem: string,
+): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync('wmctrl', ['-lp'], {
-      timeout: WMCTRL_TIMEOUT_MS,
-      encoding: 'utf8',
+    const env: NodeJS.ProcessEnv = {};
+    for (const key of ['DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY'] as const) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
+    const { stdout } = await execFileViaSidecar(command, args, {
+      timeoutMs,
+      subsystem,
+      sidecarVar: X11_PROBE_SIDECAR_VAR,
+      ...(Object.keys(env).length > 0 ? { env } : {}),
     });
     return typeof stdout === 'string' ? stdout : null;
   } catch {
-    return null; // no wmctrl / no DISPLAY / spawn error / timeout → no windows
+    return null;
   }
+}
+
+/** ASYNC + non-blocking by design: this runs on the single :3070 operator event
+ *  loop (the D-007 chokepoint) via the presence read path, so it must NEVER use a
+ *  blocking spawnSync — a hung X server would freeze the whole operator. The probe
+ *  is killed at WMCTRL_TIMEOUT_MS → null. */
+async function defaultRunWmctrl(): Promise<string | null> {
+  // no wmctrl / no DISPLAY / spawn error / timeout → null → no windows
+  return runX11Probe('wmctrl', ['-lp'], WMCTRL_TIMEOUT_MS, 'desktop-window-liveness:wmctrl');
 }
 
 /** Windows leg (P-019): enumerate via the Lane 1 shared helper instead of
@@ -364,8 +393,8 @@ let onDesktopCache: { at: number; sets: OnDesktopSets } | null = null;
 export interface GatherOnDesktopDeps {
   /** Open-window enumerator. Default: listOpenWindows() (wmctrl). */
   listWindows?: () => Promise<OpenWindow[]>;
-  /** Live interactive psu hosts (ownerId + host pid). Default: listLiveHosts(). */
-  listHosts?: () => Array<{ ownerId: string; pid: number }>;
+  /** Live interactive psu hosts (ownerId + host pid). Default: listLiveHostsAsync() (WI-10004587). */
+  listHosts?: () => Array<{ ownerId: string; pid: number }> | Promise<Array<{ ownerId: string; pid: number }>>;
   /** /proc stat reader for the ancestry walk. Default: real /proc. */
   readStat?: (pid: number) => Promise<string | null>;
   /** Is this the Windows desktop host? Default: isWindowsDesktopHost(). Injected
@@ -444,7 +473,7 @@ export async function gatherOnDesktopSessions(
       if (winPids.size > 0) {
         let hosts: Array<{ ownerId: string; pid: number }> = [];
         try {
-          hosts = (opts.deps?.listHosts ?? listLiveHosts)();
+          hosts = await (opts.deps?.listHosts ?? listLiveHostsAsync)();
         } catch {
           hosts = [];
         }
@@ -506,15 +535,13 @@ export interface ActiveWindowDeps {
 }
 
 async function defaultRunXprop(): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync('xprop', ['-root', '_NET_ACTIVE_WINDOW'], {
-      timeout: XPROP_TIMEOUT_MS,
-      encoding: 'utf8',
-    });
-    return typeof stdout === 'string' ? stdout : null;
-  } catch {
-    return null; // no xprop / no DISPLAY / timeout → focus unknown
-  }
+  // no xprop / no DISPLAY / timeout → null → focus unknown
+  return runX11Probe(
+    'xprop',
+    ['-root', '_NET_ACTIVE_WINDOW'],
+    XPROP_TIMEOUT_MS,
+    'desktop-window-liveness:xprop',
+  );
 }
 
 /** The currently-FOCUSED window id (numeric), or null when unknown. Short-TTL cached. */

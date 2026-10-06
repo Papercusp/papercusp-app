@@ -7,7 +7,7 @@
  * The deprecated bare LGPL ids (`LGPL-2.1`, `LGPL-2.1+`) that older packages still declare
  * map to their current `-only` / `-or-later` forms, so they classify as weak-copyleft.
  */
-export function tierOfId(id: any): 0 | 2 | 1;
+export function tierOfId(id: any): 0 | 1 | 2;
 /**
  * Evaluate an SPDX license expression. Returns { tier, ids } where `ids` are the license
  * ids that decided the verdict's worst branch. Legacy separators are accepted because real
@@ -165,7 +165,7 @@ export function collectThirdPartyNotices(root: any, { ecosystems }?: {
     undetermined: string[];
     rowsByEco: {};
 };
-export function main(argv?: string[], root?: string): 2 | 0 | 1;
+export function main(argv?: string[], root?: string): 0 | 1 | 2;
 export const ROOT: string;
 export const EXCEPTIONS_PATH: string;
 export const TIER: Readonly<{

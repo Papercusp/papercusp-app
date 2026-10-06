@@ -68,30 +68,25 @@ export interface PotSpend {
   samples: number;
 }
 
-/** Provenance marker for the only spend snapshot goals:update may persist. */
-export const GOAL_SPEND_SNAPSHOT_SOURCE = 'goal-pots-rollup' as const;
-
-/** Provenance marker for the PLATFORM spend-rollup tick's snapshot
- *  (goal-mode-design-intent-hardening-2026-08-16 P-005 / D-003).
+/**
+ * Provenance marker for `goals.metadata.spentCents` — the ONE goal spend figure
+ * the launch gate, the breach check and every readout share
+ * (work-on-everything-stewardship-remediation-2026-08-30 P-003, D-011).
  *
- *  ⚠ CURRENTLY WRITTEN BY NOTHING. Readers still accept it (sync-resolver/goals.ts),
- *  but no code path persists it: measured 2026-09-05, the only writers of
- *  `spentCentsSource` are operator-core lib/goals/spend-rollup.ts and goals:update,
- *  and BOTH write GOAL_SPEND_SNAPSHOT_SOURCE.
+ * The value it marks is the goal's LINEAGE spend — `agent_usage_samples` whose
+ * `goal_id` was stamped at INSERT — over the goal's budget window (its lifetime
+ * when no window is declared), written only by operator-core's spend-rollup
+ * tick. It is NOT this module's `goalSpend()`: that pot leg is an INNER JOIN on
+ * goal_pots, so a pot-less goal whose fleets really spend read as unmeasurable
+ * forever, and a shared pot billed its whole harness to every goal it served.
+ * The pot leg survives as a diagnostic only.
  *
- *  ⚠ AND ITS ORIGINAL RATIONALE NO LONGER HOLDS — do not restore it. This comment
- *  used to say the tick's value is "a SUPERSET of the pots rollup (it adds the goal
- *  subject/descendant SESSION leg)". It is not: `writeGoalSpendSnapshot` persists
- *  `spentCents: rollup.potCents` — the POT leg alone — and keeps the session leg in
- *  the separately-labelled diagnostic breakdown, which is exactly why writing it
- *  under the pots marker does NOT break goals:update's exact-match verification.
- *
- *  That stale sentence mattered: `goals.metadata.spentCents` is the number the
- *  budget ceiling refuses launches on, and a reader who came here to learn what it
- *  measures was told it included spend it does not include — the misreading
- *  spend-attribution…-2026-09-04 exists to eliminate, sitting in the field's own
- *  documentation. Corrected under that plan's P-004. */
-export const GOAL_SPEND_TICK_SOURCE = 'goal-spend-tick' as const;
+ * The previous markers (`goal-pots-rollup`, and `goal-spend-tick`, which nothing
+ * ever wrote) are gone on purpose rather than accepted as aliases: they marked a
+ * lifetime pot figure, and a reader that granted them this marker's standing
+ * would judge a weekly budget against a lifetime number again.
+ */
+export const GOAL_SPEND_SNAPSHOT_SOURCE = 'goal-lineage-rollup' as const;
 
 export interface GoalSpend {
   goalId: string;

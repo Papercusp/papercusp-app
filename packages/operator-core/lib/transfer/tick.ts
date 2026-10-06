@@ -35,6 +35,7 @@ import {
   type LessonDistillerLlm,
   type TranscriptRefLister,
   type TransferLesson,
+  type TransferReplayEvidence,
   type TransferReplayPort,
   type TransferTranscriptSource,
 } from './types';
@@ -49,7 +50,8 @@ export interface TransferStorePort {
     transition: GateTransition;
     batteryId: string;
     delta: number;
-  }): Promise<unknown>;
+    evaluation?: TransferReplayEvidence;
+  }): Promise<TransferLesson | null>;
   markError(q: { workspaceId: string; id: string }): Promise<void>;
   setMemoryId(q: { workspaceId: string; id: string; memoryId: string | null }): Promise<void>;
 }
@@ -224,26 +226,34 @@ async function testLeg(
 
     const verdict = transferVerdict(outcome, opts);
     const transition = applyTransferVerdict(lesson, verdict, opts);
-    await deps.store.recordOutcome({
+    const persisted = await deps.store.recordOutcome({
       workspaceId,
       id: lesson.id,
       transition,
       batteryId: outcome.batteryId,
       delta: outcome.withComposite - outcome.baselineComposite,
+      ...(outcome.evaluation === undefined ? {} : { evaluation: outcome.evaluation }),
     });
-    if (verdict === 'passed') result.passed += 1;
-    else if (transition.tier === 'retired') result.retired += 1;
+    // The writer's common-contract decision is authoritative, including a
+    // refusal or a vanished source row. Never mirror the proposed transition.
+    if (!persisted || persisted.status === 'error') {
+      result.errors += 1;
+      deps.log(`transfer promotion inconclusive for ${lesson.id}: no persisted accepted common decision`);
+      continue;
+    }
+    if (persisted.status === 'passed') result.passed += 1;
+    else if (persisted.tier === 'retired') result.retired += 1;
     else result.failed += 1;
 
     // Mirror the tier onto the memory entry (best-effort — transfer_lessons
     // stays authoritative; a backend that can't patch metadata logs and moves on).
     if (deps.memory && lesson.memoryId) {
       try {
-        if (transition.forgetMemory) {
+        if (persisted.tier === 'retired') {
           await deps.memory.forget(lesson.memoryId);
           await deps.store.setMemoryId({ workspaceId, id: lesson.id, memoryId: null });
-        } else if (transition.tier !== 'retired') {
-          await setMemoryTier(deps.memory, lesson.memoryId, transition.tier);
+        } else {
+          await setMemoryTier(deps.memory, lesson.memoryId, persisted.tier);
         }
       } catch (e) {
         deps.log(`memory tier mirror failed for ${lesson.id}: ${e instanceof Error ? e.message : e}`);

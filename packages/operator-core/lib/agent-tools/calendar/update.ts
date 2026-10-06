@@ -5,7 +5,9 @@ import { getSessionUserOrDefault } from '../../auth';
 import { authorizePersonalAccess } from '../../personal-vault/authorization';
 import { updateCalendarEvent } from '../../capability-verbs/calendar';
 import { AddresseeRefused } from '../../capability-verbs/addressing';
+import { DisclosureRefused, disclosureRefusalData } from '../../personal-vault/disclosure-ledger';
 import { addresseeArg, toProvenance } from '../_addressee-arg';
+import { disclosureSubject } from '../_disclosure-subject';
 import type { PapercuspUnifiedToolContext } from '../_tool-context';
 
 export default defineTool({
@@ -34,6 +36,7 @@ export default defineTool({
       location: z.string().trim().max(1_024).optional(),
       timeZone: z.string().trim().max(64).optional(),
       calendarId: z.string().trim().max(256).optional(),
+      sourceId: z.string().uuid().optional(),
     })
     .strict(),
   async handler(args, ctx: PapercuspUnifiedToolContext) {
@@ -57,9 +60,12 @@ export default defineTool({
         location: args.location,
         timeZone: args.timeZone ?? null,
         calendarId: args.calendarId,
+        sourceId: args.sourceId ?? null,
+        agentOwnerId: disclosureSubject(ctx),
       });
       return { data: { ok: true, ...result } };
     } catch (error) {
+      if (error instanceof DisclosureRefused) return { data: disclosureRefusalData(error) };
       if (error instanceof AddresseeRefused) {
         return { data: { ok: false, refused: true, code: error.code, address: error.address, detail: error.message } };
       }

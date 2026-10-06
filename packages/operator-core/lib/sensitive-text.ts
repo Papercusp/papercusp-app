@@ -12,7 +12,10 @@ const SELF_IDENTIFYING_SECRET_RE =
 
 const KEY_DIRECTED_SECRET_RE = new RegExp(
   [
-    String.raw`((?:(?:secret|token|password|passwd|pwd|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|bearer|credential)s?|(?:[A-Za-z_][A-Za-z0-9_-]*_)?(?:access[_-]?key(?:[_-]?id)?|secret[_-]?access[_-]?key|database[_-]?url))["'\s]*[:=]\s*["']?)([^\s"',;&)}\]]{8,})`,
+    // Search for the credential suffix itself. Arbitrary prefixes (AWS_, etc.)
+    // stay untouched outside the match; greedily consuming them retries the
+    // entire suffix at every character of a non-secret identifier, quadratically.
+    String.raw`((?:(?:secret|token|password|passwd|pwd|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth[_-]?token|bearer|credential)s?|(?:access[_-]?key(?:[_-]?id)?|secret[_-]?access[_-]?key|database[_-]?url))["'\s]*[:=]\s*["']?)([^\s"',;&)}\]]{8,})`,
     String.raw`((?:authorization|proxy-authorization)["'\s]*[:=]\s*["']?(?:bearer|basic|token)\s+)([^\s"',;&)}\]]{8,})`,
     String.raw`(-----BEGIN [A-Z ]*PRIVATE KEY-----)([\s\S]*?)(?=-----END)`,
   ].join('|'),

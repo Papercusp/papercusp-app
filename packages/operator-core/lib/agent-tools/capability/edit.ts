@@ -10,8 +10,38 @@ import { isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { defineTool, AGENT_ROLES } from '@papercusp/agent-mcp';
 import { fileLockedResult, guardFileLock } from '../locks/file-lock-guard';
+import { recordEditAttribution } from '../../edit-attribution';
 import { resolveCapabilityBaseDir } from './base-dir';
+import { refuseRestrictedRuntimeWrite } from './write';
 import { occurrences, spliceLiteral, squashWhitespace } from './text-splice';
+
+function frozenRepairCaptureWarning(result: {
+  content?: ReadonlyArray<unknown>;
+  isError?: boolean;
+  structuredContent?: unknown;
+}): string | undefined {
+  if (result.isError) return 'release:repair-queue returned an error';
+
+  const bodies: unknown[] = [];
+  if (result.structuredContent !== undefined) bodies.push(result.structuredContent);
+  for (const item of result.content ?? []) {
+    if (!item || typeof item !== 'object') continue;
+    const text = (item as { text?: unknown }).text;
+    if (typeof text !== 'string') continue;
+    try {
+      bodies.push(JSON.parse(text));
+    } catch {
+      // The dispatcher can return non-JSON text for transport-level details.
+    }
+  }
+
+  const body = bodies.find(
+    (candidate): candidate is Record<string, unknown> =>
+      !!candidate && typeof candidate === 'object' && 'recorded' in candidate,
+  );
+  if (!body || body.recorded !== false || body.verdict === 'no-frozen-queue') return undefined;
+  return `release:repair-queue did not record the hunk (${String(body.reason ?? body.verdict ?? 'unknown')})`;
+}
 
 export default defineTool({
   name: 'capability:edit',
@@ -40,10 +70,13 @@ export default defineTool({
     if (args.old_string === args.new_string) return err('no_op', 'old_string and new_string are identical.');
     const baseDir = resolveCapabilityBaseDir(ctx);
     const abs = isAbsolute(args.file_path) ? args.file_path : resolve(baseDir, args.file_path);
+    // WI-10005589 / D-012 (BAR R-11): same runtime-file refusal as capability:write.
+    const runtimeRefusal = await refuseRestrictedRuntimeWrite(ctx, abs);
+    if (runtimeRefusal) return runtimeRefusal;
 
     // Lock the path we are ACTUALLY going to edit (`abs`), never the raw argument —
     // see the same note in write.ts (EI-20881501070735530).
-    const outcome = await guardFileLock(ctx, [abs], { intent: 'capability:edit' }, async () => {
+    const outcome = await guardFileLock(ctx, [abs], { intent: 'capability:edit' }, async (lock) => {
       let raw: string;
       try {
         raw = readFileSync(abs, 'utf8');
@@ -72,8 +105,70 @@ export default defineTool({
       } catch (e: unknown) {
         return err('write_failed', e instanceof Error ? e.message : String(e));
       }
+      const editedAtMs = Date.now();
+
+      // The lock guard serializes the mutation but does not use locks:acquire's
+      // grant handler, which is the ordinary edit-attribution writer. Capture
+      // this successful write directly so nested dispatches retain the child
+      // dispatcher id and the exact normalized file key.
+      if (
+        (ctx.codeMode || ctx.indirectDispatch)
+        && lock.coordinated
+        && lock.coordinationDomain
+        && lock.ownerId
+        && lock.paths.length > 0
+      ) {
+        void recordEditAttribution({
+          repoRoot: lock.coordinationDomain,
+          files: lock.paths,
+          agentId: lock.ownerId,
+          intent: 'capability:edit',
+          workspaceId: ctx.workspaceId,
+          dispatchCallId: ctx.dispatchCallId,
+        });
+      }
+
+      let hunkCaptureWarning: string | undefined;
+      if ((ctx.codeMode || ctx.indirectDispatch) && lock.coordinated && lock.paths.length > 0) {
+        if (!ctx.dispatchCallId) {
+          hunkCaptureWarning = 'missing dispatcher call id';
+        } else if (!ctx.dispatchTool) {
+          hunkCaptureWarning = 'nested dispatcher is unavailable';
+        } else {
+          try {
+            const capture = await ctx.dispatchTool('release:repair-queue', {
+              op: 'record-edit',
+              path: lock.paths[0],
+              hunk: {
+                kind: 'edit',
+                old: args.old_string,
+                new: args.new_string,
+                ...(args.replace_all === true ? { replaceAll: true } : {}),
+              },
+              toolUseId: ctx.dispatchCallId,
+              editIndex: 0,
+              atMs: editedAtMs,
+            });
+            hunkCaptureWarning = frozenRepairCaptureWarning(capture);
+          } catch (e: unknown) {
+            hunkCaptureWarning = e instanceof Error ? e.message : String(e);
+          }
+        }
+        if (hunkCaptureWarning) {
+          ctx.log(`[capability:edit] frozen repair hunk capture failed for ${lock.paths[0]}: ${hunkCaptureWarning}`);
+        }
+      }
+
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, path: abs, replacements: args.replace_all ? count : 1 }) }],
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: true,
+            path: abs,
+            replacements: args.replace_all ? count : 1,
+            ...(hunkCaptureWarning ? { frozenHunkCaptureWarning: hunkCaptureWarning } : {}),
+          }),
+        }],
       };
     });
 

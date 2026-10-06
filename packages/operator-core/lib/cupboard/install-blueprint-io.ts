@@ -23,6 +23,26 @@ import { getOrgPg } from '@papercusp/db-org';
 import { parse as parseYaml } from 'yaml';
 import { INSTALLED_BLUEPRINTS_DIR, operatorResolveExtends } from '../blueprint/installed-blueprints';
 import { blueprintInstallJournal } from './blueprint-install-journal';
+import type { InstallBlueprintCoreDeps as CoreDeps } from './install-blueprint-core';
+
+/** D-042: the D-027 §1 check the standalone rule install runs, for an identity's
+ * bundled async rules, read inside the workspace's own transaction. */
+function asyncRuleInstallChecker(workspaceId: string): NonNullable<CoreDeps['checkAsyncRules']> {
+  return async ({ rules, claimingKeys }) => {
+    const [{ withWorkspace }, { checkAsyncRuleInstall }] = await Promise.all([
+      import('@papercusp/db-org'),
+      import('../agent-identities/identity-async-rules'),
+    ]);
+    return withWorkspace(workspaceId, async (tx) => {
+      const refusals: Array<{ rule: string; error: string }> = [];
+      for (const rule of rules) {
+        const check = await checkAsyncRuleInstall(tx, workspaceId, rule, { claimingKeys });
+        if (!check.ok) refusals.push({ rule: rule.id, error: check.error });
+      }
+      return refusals;
+    });
+  };
+}
 import {
   getPotCapabilityProviderBinding,
   listActiveCapabilityProviderCandidates,
@@ -299,11 +319,13 @@ function makeInstallCoreDeps(
               : installed;
           },
         }),
-      // P-014 / D-034: bindings are journaled resources of the pot's install.
-      blueprintInstallJournal: ({ blueprintId, bindings }) => blueprintInstallJournal(
+      // P-014 / D-034: bindings are journaled resources of the pot's install;
+      // D-042: so are the event keys the release bundles.
+      blueprintInstallJournal: ({ blueprintId, bindings, eventKeys }) => blueprintInstallJournal(
         { sql: getOrgPg().sql, workspaceId: capabilityScope.workspaceId, blueprintId },
-        { operation: 'install', potSlug: capabilityScope.potSlug, bindings },
+        { operation: 'install', potSlug: capabilityScope.potSlug, bindings, eventKeys },
       ),
+      checkAsyncRules: asyncRuleInstallChecker(capabilityScope.workspaceId),
     } : {}),
   };
 }

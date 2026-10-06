@@ -71,6 +71,8 @@ import { withInlinedSchemaRefs } from '../schema-ref-inline';
 export const DISCOVERY_RESULT_MAX_BYTES = 5_000;
 /** Keep plugin readiness below the MCP transport deadline while preserving the base catalog. */
 export const PLUGIN_HOST_READINESS_TIMEOUT_MS = 5_000;
+/** The optional harness-registry read must not let catalog discovery hang on a DB pool wait. */
+export const DISCOVERY_HIVE_SCOPE_TIMEOUT_MS = 5_000;
 const DISCOVERY_DESCRIPTION_MAX_CHARS = 320;
 const DISCOVERY_SCHEMA_MAX_CHARS = 2_200;
 const COMPACT_NESTED_DESCRIPTION_MAX_CHARS = 180;
@@ -273,7 +275,7 @@ function nestedObjectProperties(
 
   for (const candidate of candidates) {
     if (!candidate.items || typeof candidate.items !== 'object' || Array.isArray(candidate.items)) continue;
-    const item = objectProperties(candidate.items as JsonSchemaNode);
+    const item = mergedNestedObjectProperties(candidate.items as JsonSchemaNode);
     if (item) return item;
   }
   return null;
@@ -320,6 +322,7 @@ function nestedObjectFieldHint(node: JsonSchemaNode, depth: number, includeNeste
 
   let body = '';
   let expandedNestedPath = false;
+  let nestedPathRequired = false;
   if (includeNestedPath) {
     for (const [name, raw] of fields) {
       const child = raw as JsonSchemaNode;
@@ -328,6 +331,7 @@ function nestedObjectFieldHint(node: JsonSchemaNode, depth: number, includeNeste
       if (rendered.length <= NESTED_OBJECT_HINT_MAX_CHARS) {
         body = rendered;
         expandedNestedPath = true;
+        nestedPathRequired = nested.required.has(name);
         break;
       }
     }
@@ -336,30 +340,67 @@ function nestedObjectFieldHint(node: JsonSchemaNode, depth: number, includeNeste
       if (name && raw && typeof raw === 'object' && !Array.isArray(raw)) {
         const shape = schemaType(raw as JsonSchemaNode);
         body = `${name}${nested.required.has(name) ? '' : '?'}${shape ? `:${shape}` : ''}`;
+        nestedPathRequired = nested.required.has(name);
       }
     }
   }
 
-  // Keep required shallow fields ahead of optional ones so a long run of
-  // optional metadata cannot evict a required primitive from the bounded hint.
-  // An expanded structural child already consumes most of its parent's
-  // fallback budget. Keep that established path intact (notably
-  // completion.verification.coverage); direct siblings are needed here only
-  // when the wide child itself had to degrade to a shallow type.
-  if (!expandedNestedPath || !includeNestedPath) {
-    const directCandidates = directFields
-      .map(([name, raw], index) => {
-        const child = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as JsonSchemaNode) : {};
-        const shape = schemaShape(child, depth, false, false);
-        return {
-          index,
-          required: nested.required.has(name),
-          rendered: `${name}${nested.required.has(name) ? '' : '?'}${shape ? `:${shape}` : ''}`,
-        };
-      })
-      .sort((a, b) => Number(b.required) - Number(a.required) || a.index - b.index);
-    for (const candidate of directCandidates) {
-      const next = body ? `${body},${candidate.rendered}` : candidate.rendered;
+  // Keep required shallow fields even when an expanded structural child is
+  // selected. Otherwise a bounded hint can retain that optional child while
+  // hiding required siblings such as testing:run.recoverEvidence.originRunId.
+  // Optional direct details are considered only when there is no expanded
+  // nested path, preserving the established high-value paths such as
+  // completion.verification.coverage.
+  const includeOptionalDirectFields = !expandedNestedPath || !includeNestedPath;
+  const directCandidates = directFields
+    .map(([name, raw]) => {
+      const child = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as JsonSchemaNode) : {};
+      const shape = schemaShape(child, depth, false, false);
+      return {
+        name,
+        child,
+        required: nested.required.has(name),
+        rendered: `${name}${nested.required.has(name) ? '' : '?'}${shape ? `:${shape}` : ''}`,
+      };
+    })
+    .sort((a, b) => Number(b.required) - Number(a.required));
+  const requiredCandidates = directCandidates.filter((candidate) => candidate.required);
+  const optionalCandidates = directCandidates.filter((candidate) => !candidate.required);
+  const join = (base: string, entries: string[]) => [base, ...entries].filter(Boolean).join(',');
+  const renderRequired = (candidate: (typeof requiredCandidates)[number], mode: 'full' | 'type' | 'name') => {
+    if (mode === 'full') return candidate.rendered;
+    const type = mode === 'type' ? schemaType(candidate.child) : '';
+    return `${candidate.name}${type ? `:${type}` : ''}`;
+  };
+
+  // Preserve every required key before spending the small nested-hint
+  // budget on optional metadata or long patterns. Required fields first use
+  // their full shape; under pressure, reduce them to type-only and then
+  // name-only forms so a long UUID pattern cannot evict a sibling required
+  // field such as testing:run.recoverEvidence.originRunId.
+  let requiredMode: 'full' | 'type' | 'name' = 'full';
+  let requiredEntries = requiredCandidates.map((candidate) => renderRequired(candidate, requiredMode));
+  // An optional nested path must not force required fields down to names only.
+  // Drop that path first, then simplify required fields only if their own full
+  // constraints still exceed the bounded hint.
+  if (join(body, requiredEntries).length > NESTED_OBJECT_HINT_MAX_CHARS && body && !nestedPathRequired) {
+    body = '';
+  }
+  if (join(body, requiredEntries).length > NESTED_OBJECT_HINT_MAX_CHARS) {
+    requiredMode = 'type';
+    requiredEntries = requiredCandidates.map((candidate) => renderRequired(candidate, requiredMode));
+  }
+  if (join(body, requiredEntries).length > NESTED_OBJECT_HINT_MAX_CHARS) {
+    requiredMode = 'name';
+    requiredEntries = requiredCandidates.map((candidate) => renderRequired(candidate, requiredMode));
+  }
+  body = join(body, requiredEntries);
+
+  // Optional details remain useful when there is room, but never displace
+  // any required direct field from the bounded hint.
+  if (includeOptionalDirectFields) {
+    for (const candidate of optionalCandidates) {
+      const next = join(body, [candidate.rendered]);
       if (next.length <= NESTED_OBJECT_HINT_MAX_CHARS) body = next;
     }
   }
@@ -372,6 +413,11 @@ function nestedFieldNames(node: JsonSchemaNode, depth: number, includeDescriptio
   const nested = nestedObjectProperties(node);
   const properties = Object.entries(nested?.properties ?? {});
   if (!nested) return '';
+  const isWorkItemsGetResultRow =
+    properties.some(([name]) => name === 'checkpoint') &&
+    properties.some(([name]) => name === 'checkpointChecks') &&
+    properties.some(([name]) => name === 'checkpointAgeMs') &&
+    properties.some(([name]) => name === 'workItem');
   // `work_items:complete.specAdequacy.current` is a bounded array of evidence
   // tuples. The first seven identity fields are the structural join key; the
   // four optional dimension fingerprints are still available from the full
@@ -400,6 +446,16 @@ function nestedFieldNames(node: JsonSchemaNode, depth: number, includeDescriptio
   // fields are contract-bearing, so reserve their names/shapes before optional
   // evidence metadata while retaining source order for everything else.
   const contractPriority = (name: string): number => {
+    // `improvements:capture.observation.subject` is a typed discriminator + ref
+    // used to bind a captured observation to its subject. It was late in this
+    // wide object and disappeared behind the compact segment's tail marker,
+    // leaving callers to discover its required object shape from invalid_args.
+    const isObservationCapture =
+      properties.some(([field]) => field === 'linkTo') &&
+      properties.some(([field]) => field === 'sourceHive') &&
+      properties.some(([field]) => field === 'subject') &&
+      properties.some(([field]) => field === 'confidence');
+    if (isObservationCapture && name === 'subject') return 110;
     if (name === 'rootCauseVerification') return 100;
     // plans:set-specs has a wide clause shape; its required discriminator was
     // elided behind optional fields in both `spec` and `items` discovery.
@@ -408,11 +464,12 @@ function nestedFieldNames(node: JsonSchemaNode, depth: number, includeDescriptio
     // rerunRecipe.current.supplied is a required decision input. A wide
     // selection object must not push that shape behind the segment tail.
     if (name === 'current' && nested.required.has(name)) return 85;
-    // A bounded read envelope's thread window is the only discoverable path
-    // to recent comments. Keep its nested total/posts contract ahead of a
-    // wide diagnostic sibling such as checkpointChecks, whose full shape can
-    // otherwise consume the segment before threadWindow is rendered.
-    if (name === 'threadWindow') return 80;
+    // work_items:get's bounded result row must expose its resumable checkpoint
+    // and recent-comment window together. Let the larger item-identity object
+    // render after those paths so it can degrade to its outer name when needed.
+    if (isWorkItemsGetResultRow && name === 'checkpoint') return 90;
+    if (isWorkItemsGetResultRow && name === 'threadWindow') return 80;
+    if (isWorkItemsGetResultRow && name === 'workItem') return 70;
     return 0;
   };
   const orderedProperties = properties
@@ -434,6 +491,13 @@ function nestedFieldNames(node: JsonSchemaNode, depth: number, includeDescriptio
     includeNestedFields = true,
   ): string => {
     const child = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as JsonSchemaNode) : {};
+    // Keep the canonical workItem key visible in the bounded result row after
+    // checkpoint and threadWindow.posts. Its full child schema can consume the
+    // remaining segment and cause the enclosing field itself to be elided.
+    const includeChildFields =
+      includeNestedFields &&
+      name !== 'rootCauseVerification' &&
+      !(isWorkItemsGetResultRow && name === 'workItem');
     // rootCauseVerification publishes its conditional required-field contract
     // through x-papercusp-call-constraint. Rendering its now-wide v2 object in
     // full would consume this entire bounded segment and evict the equally
@@ -443,7 +507,7 @@ function nestedFieldNames(node: JsonSchemaNode, depth: number, includeDescriptio
       child,
       depth,
       withDescription,
-      includeNestedFields && name !== 'rootCauseVerification',
+      includeChildFields,
     );
     const description = withDescription ? nestedDescription(child, depth) : '';
     return `${name}${nested.required.has(name) ? '' : '?'}${shape ? `:${shape}` : ''}${description}`;
@@ -499,9 +563,22 @@ function nestedFieldNames(node: JsonSchemaNode, depth: number, includeDescriptio
           raw && typeof raw === 'object' && !Array.isArray(raw)
             ? nestedObjectFieldHint(raw as JsonSchemaNode, depth, false)
             : '';
+        const compactChild =
+          raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as JsonSchemaNode) : {};
+        // A required primitive can still be dropped here when the child list
+        // itself stays under the segment cap but its long constraints (for
+        // example a UUID pattern) do not fit after earlier required siblings.
+        // The parent-level nestedObjectFieldHint cannot help in that case,
+        // because this loop is already rendering the child's direct fields.
+        // Keep the required key and its broad type once its full shape cannot
+        // fit; optional metadata and long patterns remain expendable.
+        const compactRequired = nested.required.has(name) && !hasRequiredArrayItemFields(raw)
+          ? `${name}${schemaType(compactChild) ? `:${schemaType(compactChild)}${schemaBound(compactChild)}` : ''}`
+          : '';
         const fallbackCandidates = [
           hintedFallback,
           directHint ? `${fallback}${directHint}` : fallback,
+          compactRequired,
           fallback,
         ];
         const selectedFallback = fallbackCandidates.find((candidate) => {
@@ -630,7 +707,7 @@ function compactContractSynopsis(description: string): string | null {
     : `${candidate.slice(0, COMPACT_TOP_LEVEL_DESCRIPTION_MAX_CHARS - 1)}…`;
 }
 
-function compactTopLevelDescription(node: JsonSchemaNode): { text: string; priority: number } | null {
+function compactTopLevelDescription(node: JsonSchemaNode, fieldName: string): { text: string; priority: number } | null {
   if (typeof node.description !== 'string') return null;
   const description = node.description.replace(/\s+/g, ' ').trim();
   if (!description) return null;
@@ -642,8 +719,41 @@ function compactTopLevelDescription(node: JsonSchemaNode): { text: string; prior
       : `${projected.slice(0, COMPACT_TOP_LEVEL_DESCRIPTION_MAX_CHARS - 1)}…`;
   return {
     text: ` ${bounded}`,
-    priority: COMPACT_CONTRACT_DESCRIPTION_PATTERN.test(description) ? 100 : 10,
+    // Keep plans:audit's phase restriction visible even when its newly
+    // expanded itemProvenance union pushes the compact projection over budget.
+    // The activation-wide constraint is useful, but this field-level rule is
+    // the clearest guard against sending auditedSha on an activation call.
+    priority: fieldName === 'auditedSha' && /completion phase only/i.test(description)
+      ? 200
+      : COMPACT_CONTRACT_DESCRIPTION_PATTERN.test(description)
+        ? 100
+        : 10,
   };
+}
+
+/**
+ * Nested object unions are compacted to a merged field vocabulary so callers
+ * can see every callable field. Preserve the branch boundary too: without it,
+ * `binding` can appear to accept test-run fields and manual-measurement fields
+ * together even though the validator accepts either shape, not both.
+ */
+const NESTED_UNION_HINT_MAX_CHARS = 320;
+
+function nestedObjectUnionHint(node: JsonSchemaNode, depth: number): string {
+  // This hint repairs a union that is itself a top-level argument object
+  // (binding?: ...). Recursive hints multiply across broad contracts and can
+  // evict required nested paths from the bounded discovery result.
+  if (depth !== 0) return '';
+  const branches = schemaNodes(node);
+  const objectBranches = branches.filter(
+    (branch) => branch.properties && typeof branch.properties === 'object' && !Array.isArray(branch.properties),
+  );
+  if (objectBranches.length < 2 || objectBranches.length !== branches.length) return '';
+
+  const requiredKeys = unionRequiredKeyHint(objectBranches);
+  if (!requiredKeys.includes('|')) return '';
+  const hint = `(one-of:${requiredKeys})`;
+  return hint.length <= NESTED_UNION_HINT_MAX_CHARS ? hint : '';
 }
 
 function schemaShape(
@@ -663,8 +773,9 @@ function schemaShape(
     [node, ...schemaNodes(node)]
       .map((candidate) => arrayItemConstraintText(candidate))
       .find((text): text is string => text.length > 0) ?? '';
+  const unionHint = nestedObjectUnionHint(node, depth);
   const nested = includeNestedFields ? nestedFieldNames(node, depth + 1, includeNestedDescriptions) : '';
-  return `${type}${bound}${pattern}${itemConstraint}${nested}`;
+  return `${type}${bound}${pattern}${itemConstraint}${unionHint}${nested}`;
 }
 
 type TopLevelSchemaProjection = {
@@ -727,22 +838,23 @@ function topLevelSchemaProjection(root: JsonSchemaNode): TopLevelSchemaProjectio
     if (entry.presentIn === branches.length && entry.requiredInAll) required.add(name);
   }
   const entries = [...merged].map(([name, entry]) => [name, entry.raw] as [string, unknown]);
-  // `work_items:complete` has a wide nested `completion` record followed by
-  // shallow controls (`validateOnly` and `assumptions`) in both union branches,
-  // plus the structured `specAdequacy.current` evidence selector in the
-  // shorthand branch. Keep all of these contract-bearing fields ahead of the
-  // wide record in the bounded projection so adding validator-owned annotations
-  // cannot evict callable top-level fields or the current-evidence tuple shape.
-  // Limit this ordering rule to the recognizable completion envelope; generic
-  // root unions retain their source order.
+  // Prefer the canonical completion envelope to its many legacy shorthand
+  // aliases. Validator-owned constraints consume part of the root budget, so
+  // merely moving controls just before completion still lets preceding legacy
+  // fields evict completion.verification.coverage at the final text cutoff.
+  // Keep identity, shallow controls, the current-evidence selector and the
+  // canonical record together before expendable aliases. Generic root unions
+  // retain their source order.
   const completionIndex = entries.findIndex(([name]) => name === 'completion');
   const completionControls = new Set(['specAdequacy', 'validateOnly', 'assumptions']);
   if (completionIndex >= 0 && entries.some(([name]) => completionControls.has(name))) {
-    const controls = entries.filter(([name]) => completionControls.has(name));
-    const withoutControls = entries.filter(([name]) => !completionControls.has(name));
-    const adjustedCompletionIndex = withoutControls.findIndex(([name]) => name === 'completion');
-    withoutControls.splice(adjustedCompletionIndex, 0, ...controls);
-    return { entries: withoutControls, required, unionHint, conditionalHint };
+    const canonicalFields = new Set([
+      'id', 'workItem', 'harness', 'state', 'recordOnly', 'validateOnly',
+      'assumptions', 'specAdequacy', 'completion',
+    ]);
+    const canonical = entries.filter(([name]) => canonicalFields.has(name));
+    const aliases = entries.filter(([name]) => !canonicalFields.has(name));
+    return { entries: [...canonical, ...aliases], required, unionHint, conditionalHint };
   }
   return { entries, required, unionHint, conditionalHint };
 }
@@ -789,7 +901,7 @@ export function compactSchemaForResult(inputSchema: unknown): string | null {
     return {
       index,
       base: `${name}${projection.required.has(name) ? '' : '?'}${shape ? `:${shape}` : ''}`,
-      description: compactTopLevelDescription(node),
+      description: compactTopLevelDescription(node, name),
     };
   });
   if (parts.length === 0) return null;
@@ -963,6 +1075,7 @@ export async function filterCorpusForConfirmedHiveScope(
   corpus: ToolDiscoveryEntry[],
   scope: DiscoveryScopeContext,
   resolveHiveHome: HiveHomeResolver,
+  timeoutMs = DISCOVERY_HIVE_SCOPE_TIMEOUT_MS,
 ): Promise<ToolDiscoveryEntry[]> {
   const workspaceId = typeof scope.workspaceId === 'string' ? scope.workspaceId.trim() : '';
   const harnessSlug = typeof scope.harnessSlug === 'string' ? scope.harnessSlug.trim() : '';
@@ -977,12 +1090,16 @@ export async function filterCorpusForConfirmedHiveScope(
     return corpus;
   }
 
-  let hiveHome: string | null;
-  try {
-    hiveHome = await resolveHiveHome(workspaceId, harnessSlug);
-  } catch {
-    return corpus;
-  }
+  const resolution = await withBoundedTimeout(
+    () => resolveHiveHome(workspaceId, harnessSlug),
+    {
+      fallback: null,
+      timeoutMs,
+      label: 'tools:find hive scope resolution',
+    },
+  );
+  const hiveHome = resolution.value;
+  if (resolution.degraded) return corpus;
   if (!hiveHome) return corpus;
 
   return corpus.filter((entry) => !entry.tool.startsWith('cross_harness:'));
@@ -1280,18 +1397,26 @@ export default defineTool({
       via: h.via,
     }));
 
+    const hasToolsInvokeHit = projectedHits.some((hit) => hit.tool === 'tools:invoke');
     const activatedHowToCall =
       'activated:true means the SERVER surface grew and requested a client tool-list refresh; ' +
       'it does NOT guarantee your client has materialized a direct-call wrapper in this same turn. ' +
-      'Call tools:invoke {name:"<exact tool name from hits>", args:{...}} now — it works immediately ' +
-      'on every client via server-side dispatch. After the client refreshes (often next turn), the ' +
-      'direct wrapper may also be available.';
-    const inactiveHowToCall =
-      'activated:false — these tools are NOT on your live tool surface, so a direct call will ' +
-      'fail with unknown/not-found. Call them with ' +
-      'tools:invoke {name:"<exact tool name from hits>", args:{...}} — server-side dispatch under ' +
-      "the tool's real (colon-form) name; works on every client, needs no load step. " +
-      'Do NOT try ToolSearch on the colon name — it only resolves the client-mangled id.';
+      (hasToolsInvokeHit
+        ? 'The tools:invoke hit is the dispatcher itself; do NOT pass name:"tools:invoke" through it. ' +
+          'Call tools:invoke directly with the name + args of a different target tool. '
+        : 'Call tools:invoke {name:"<exact tool name from hits>", args:{...}} now — it works immediately ' +
+          'on every client via server-side dispatch. ') +
+      'After the client refreshes (often next turn), the direct wrapper may also be available.';
+    const inactiveHowToCall = hasToolsInvokeHit
+      ? 'activated:false — direct calls to other hits may fail with unknown/not-found. The ' +
+        'tools:invoke hit is the dispatcher itself; do NOT pass name:"tools:invoke" through it. ' +
+        'Call tools:invoke directly with the name + args of a different target tool. ' +
+        'Do NOT try ToolSearch on the colon name — it only resolves the client-mangled id.'
+      : 'activated:false — these tools are NOT on your live tool surface, so a direct call will ' +
+        'fail with unknown/not-found. Call them with ' +
+        'tools:invoke {name:"<exact tool name from hits>", args:{...}} — server-side dispatch under ' +
+        "the tool's real (colon-form) name; works on every client, needs no load step. " +
+        'Do NOT try ToolSearch on the colon name — it only resolves the client-mangled id.';
 
     // Bound the candidate names before activating them. Otherwise a large schema
     // can cause the response to omit a matched tool while still adding that

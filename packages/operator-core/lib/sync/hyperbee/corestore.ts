@@ -17,13 +17,28 @@
 import Corestore from 'corestore';
 import { mkdir, open, readFile, rename, unlink, type FileHandle } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
 import { join } from 'node:path';
 import { readProcessIdentity } from '../../process-identity';
+import { processMonotonicClock } from '../../process-monotonic-clock';
 import { forgetStore, registerStoreMachine } from './remote-core-host';
 import { healRelocatedDeviceFileAndLog } from './device-file-heal';
 
 const stores = new Map<string, Promise<Corestore>>();
 const storeLocks = new Map<string, HarnessStoreLock>();
+
+/** Observational only: subscribe through Node's existing diagnostic transport.
+ * A timeout needs the last started stage, not just a later boot_fail message. */
+export const CORESTORE_OPEN_CHANNEL = 'papercusp.corestore.open';
+export interface CorestoreOpenObservation {
+  workspaceRoot: string;
+  harnessSlug: string;
+  stage: 'directory' | 'lock' | 'device-heal' | 'native-ready' | 'ready';
+  outcome: 'started' | 'succeeded' | 'failed';
+  atMs: number;
+  elapsedMs: number;
+}
+const corestoreOpenChannel = channel(CORESTORE_OPEN_CHANNEL);
 
 interface HarnessStoreLock {
   release(): Promise<void>;
@@ -263,8 +278,21 @@ export async function getHarnessStore(opts: HarnessStoreOpts): Promise<Corestore
   if (cached) return cached;
 
   const path = storagePath(opts);
+  const startedAt = processMonotonicClock.now();
+  let stage: CorestoreOpenObservation['stage'] = 'directory';
+  const observe = (next: CorestoreOpenObservation['stage'], outcome: CorestoreOpenObservation['outcome'] = 'started') => {
+    stage = next;
+    if (!corestoreOpenChannel.hasSubscribers) return;
+    const atMs = processMonotonicClock.now();
+    corestoreOpenChannel.publish({
+      workspaceRoot: opts.workspaceRoot, harnessSlug: opts.harnessSlug,
+      stage, outcome, atMs, elapsedMs: atMs - startedAt,
+    } satisfies CorestoreOpenObservation);
+  };
   const pending = (async () => {
+    observe('directory');
     await mkdir(path, { recursive: true });
+    observe('lock');
     const lock = await acquireHarnessStoreLock(opts);
     storeLocks.set(key, lock);
     try {
@@ -272,9 +300,12 @@ export async function getHarnessStore(opts: HarnessStoreOpts): Promise<Corestore
       // device-file xattr but changes inode, which bricks every later open with
       // "Invalid device file, was modified". No-op unless that exact fault is
       // present. Must run while we hold the lock and before the open.
+      observe('device-heal');
       await healRelocatedDeviceFileAndLog(path, cacheKey(opts));
       const store = new Corestore(path, { cache: resolveCacheBlocks() });
+      observe('native-ready');
       await store.ready();
+      observe('ready', 'succeeded');
       // WI-5673: declare which MACHINE this store belongs to so remote peer
       // logs are opened in exactly ONE store per machine. Sibling harnesses in
       // the same Hive admit the same keys, and a Protomux carries at most one
@@ -290,6 +321,9 @@ export async function getHarnessStore(opts: HarnessStoreOpts): Promise<Corestore
     }
   })();
   stores.set(key, pending);
+  // Keep the failed stage visible even when directory creation or lock
+  // acquisition fails before the native-open try/catch is reached.
+  void pending.catch(() => { observe(stage, 'failed'); });
   // EI-20584279536840151: evict a REJECTED open so the next caller genuinely
   // retries. Without this the rejected promise stays cached and every later
   // `getHarnessStore` re-returns the SAME rejection, so the substrate can never

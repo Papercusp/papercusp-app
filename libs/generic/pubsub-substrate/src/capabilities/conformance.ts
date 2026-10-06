@@ -255,6 +255,31 @@ export function describeThreadableStoreConformance(
       const afterFirst = await store.listPosts(t1.thread_id, { afterId: p1.id });
       expect(afterFirst.map((p) => p.body)).toEqual(['two']);
     });
+
+    it('reads posts by id for conversation and work-item parent threads', async () => {
+      if (skip) return;
+      const store = makeStore();
+      const posts = await Promise.all([
+        { kind: 'conversation' as const, ref: uid() },
+        { kind: 'issue' as const, ref: uid() },
+      ].map(async (parent) => {
+        const thread = await store.getOrCreateThread(parent, {
+          thread_id: uid(),
+          created_ts: '2026-01-01T00:00:00.000Z',
+        });
+        return store.addPost({
+          thread_id: thread.thread_id,
+          author_id: 'reader-test',
+          body: `${parent.kind} evidence`,
+          created_ts: '2026-01-01T01:00:00.000Z',
+        });
+      }));
+
+      for (const post of posts) {
+        await expect(store.getPostById(post.id)).resolves.toEqual(post);
+      }
+      await expect(store.getPostById(Math.max(...posts.map((post) => post.id)) + 1)).resolves.toBeNull();
+    });
   });
 }
 

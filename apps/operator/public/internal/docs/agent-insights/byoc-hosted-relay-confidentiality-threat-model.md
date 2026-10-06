@@ -1,0 +1,70 @@
+# BYOC hosted-relay confidentiality threat model
+URL: /internal/docs/agent-insights/byoc-hosted-relay-confidentiality-threat-model
+
+Security promise, actors, trust anchors, browser boundary, key custody, recovery, rotation, revocation, and residual limits for BYOC and Papercusp-hosted workspace relays.
+
+## Security promise by hosting kind
+
+### `byoc`: strong confidentiality promise
+
+For a customer-account workspace, Papercusp must not be able to read customer content merely because traffic traverses Papercusp's hosted control plane. PTY input/output and snapshots, file paths and bytes, chat/session HTTP bodies, app-tool arguments/results and desktop framebuffer/input data are customer content. They travel either through customer-controlled ingress (the default) or through an end-to-end sealed channel whose endpoint identity is pinned through the customer's cloud account.
+
+The hosted control plane may see only the allowlisted control metadata in `hosted-relay-confidentiality-registry.ts`: tenant/workspace/host identifiers, binding generation, channel/session identifiers, role, inner frame `type`, desktop-ready action, lifecycle/refusal codes, byte-count-independent stream boundaries, and the per-frame audit event. It must not persist, log, index, emit as telemetry, or expose customer content in plaintext. The per-frame audit row and network-observable sizes/timing remain accepted metadata side channels.
+
+This promise is about the vendor-hosted relay and control plane. It does not claim that GCP, AWS, or Azure leak content today, and it does not hide content from the customer-controlled workspace VM or customer-authorized endpoints.
+
+### `papercusp`: deliberately weaker promise
+
+A Papercusp-hosted VM is operated by the vendor. An active vendor can change that VM or the software delivered to it, so relay encryption cannot make workspace content cryptographically unreadable to that operator. The promise is therefore limited: the control-plane service does not store, log, index, or emit workspace content as telemetry; content relays are sealed against network attackers and unrelated control-plane components; and access is constrained by the normal tenant/workspace/host authorization model.
+
+A stronger active-vendor promise for vendor-operated hosts requires confidential computing with independently attested workloads and is outside this plan.
+
+## Actors and adversary capabilities
+
+| Actor                         | Assumed control                                                                                        | Security consequence                                                                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Customer                      | Customer cloud account, BYOC VM/disk, cloud identity channel, installed desktop app, recovery material | Trust anchor for the strong `byoc` promise                                                                                                            |
+| Vendor operator               | Hosted control plane, relay infrastructure, production deployment and vendor-hosted VMs                | Must not learn BYOC content from relay/control-plane handling; remains able to observe allowed metadata                                               |
+| Active vendor adversary       | Can alter hosted services and vendor-served browser JavaScript                                         | Cannot substitute a BYOC host key pinned through the customer's cloud channel; can deny service and can compromise a vendor-operated `papercusp` host |
+| Network attacker              | Can observe, replay, delay, drop, reorder, or modify relay traffic                                     | Noise authentication and secret-stream integrity/confidentiality reject modification and conceal sealed content; availability is not promised         |
+| Compromised browser           | Controls a portal session and any vendor-served JavaScript in it                                       | Must not receive BYOC content keys or open a BYOC content session; portal access is control-plane-only                                                |
+| Compromised customer endpoint | Controls an authorized desktop app or customer VM                                                      | Can read content available to that endpoint; containment relies on key revocation and workspace/customer recovery                                     |
+
+## Transport and trust anchors
+
+Customer-controlled ingress is the default path: the signed, customer-installed desktop app and `psu` connect through IAP or an SSM local forward in the customer's cloud account. The hosted relay is an opt-in fallback and refuses plaintext BYOC content on every relay plane.
+
+The fallback sealed channel reuses `@hyperswarm/secret-stream` (Noise XX with libsodium secret-stream framing); Papercusp does not define a new cryptographic protocol. The workspace host owns a static keypair generated on the customer VM. Its public key is published through a customer-controlled cloud channel, such as GCP guest attributes or an AWS SSM parameter, and the installed client pins that key independently of the vendor relay. A substituted key is refused.
+
+The relay keeps the inner frame `type` in clear so it can route, apply controller/observer fencing, and enforce generation/revocation. `desktop.ready.action` is likewise clear (or may be derived from broker role). Content-bearing fields remain inside the sealed payload.
+
+## Browser-code delivery boundary
+
+Vendor-served JavaScript is not a trusted BYOC content endpoint. A browser portal may initiate control-plane operations and display allowlisted metadata, but it cannot receive the client private key, authorize a new content key by itself, or open PTY, file, operator-HTTP, app-HTTP, or desktop content streams for a BYOC workspace.
+
+The sealed-channel client lives in the signed customer-installed desktop application. A vendor that changes portal JavaScript may deny service or request an operation, but cannot make the independently pinned host accept a substituted endpoint or disclose content to the portal.
+
+## Key custody and authorization
+
+* The workspace-host static private key remains on the customer-controlled VM and is never sent through the vendor control plane.
+* Client private keys and recovery material are customer-held in the installed client or customer-selected secure storage; they are not stored in browser storage, logs, telemetry, work items, or relay audit rows.
+* Host authorization binds a client public key to the tenant, workspace, host and permitted relay scope. D-143 controller/observer role, binding generation, and revocation checks apply outside the sealed payload and cannot be bypassed by a valid Noise session.
+* Merely possessing a relay channel id or a stale key is insufficient. A stale generation, revoked client, wrong host key, wrong workspace binding, or substituted endpoint fails closed.
+
+## Recovery, rotation, and revocation
+
+Recovery is an explicit customer action using customer-held recovery material or a fresh authorization delivered through the customer's cloud account. The vendor control plane cannot silently recover or escrow BYOC content keys.
+
+Host-key rotation publishes the new public key through the customer-controlled cloud channel before clients accept it. Client-key rotation authorizes a new public key on the customer host and then revokes the old one. Rotation is not complete until old-key reconnects and stale-generation resumes fail.
+
+Revocation removes the client authorization on the host and increments or invalidates the relevant binding generation. Existing connections are closed; reconnect requires a currently authorized key and generation. Loss of all customer-held recovery material can make content access unrecoverable; the vendor cannot restore a key it never held.
+
+## Residual limits and non-promises
+
+* Confidentiality does not provide availability. The vendor or a network attacker can block, delay, throttle, reorder, or terminate relay traffic.
+* The relay observes allowlisted metadata, including identities, frame type, session/channel lifecycle, approximate traffic volume, timing, and the per-frame audit cadence.
+* Endpoint compromise defeats confidentiality for content legitimately visible at that endpoint.
+* Customer-controlled ingress still relies on the customer's cloud IAM, host hardening, local-forward configuration, and provider security.
+* Noise authenticates the keys presented; independent key distribution and customer verification are what prevent vendor substitution.
+* A vendor-operated `papercusp` VM cannot receive the strong active-vendor guarantee without independently attested confidential computing.
+* This design does not claim protection against malicious customer code running inside the customer VM, nor does it change the customer-local agent loop, billing, provider control planes, or legal/pentest obligations.

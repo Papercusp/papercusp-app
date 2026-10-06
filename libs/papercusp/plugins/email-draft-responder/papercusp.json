@@ -72,7 +72,7 @@
             "trigger": {
               "type": "object",
               "additionalProperties": true,
-              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey", "payload"],
+              "required": ["key", "source", "event", "sourceId", "externalId", "dedupeKey"],
               "properties": {
                 "key": { "const": "ext:gmail:message.received" },
                 "source": { "const": "gmail" },
